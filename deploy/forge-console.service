@@ -1,0 +1,101 @@
+# Forge console — unité systemd EXEMPLE (déploiement natif, sans Docker).
+# =============================================================================
+#
+# Usage AUTORISÉ uniquement. Cette unité fait tourner le binaire `forge-console`
+# en service durci. Forge reste INERTE par défaut (in_scope vide = tout refusé) :
+# le durcissement systemd ci-dessous N'AFFAIBLIT AUCUN garde-fou applicatif, il
+# RENFORCE l'isolation du process (least-privilege, cohérent avec l'ethos sûreté).
+#
+# Installation :
+#   1) Compiler la console        : (depuis GUATX/forge/console) cargo build --release
+#      puis installer le binaire   : install -m0755 target/release/forge-console /usr/local/bin/
+#   2) Installer le package python : copier forge/forge/ sous /opt/forge/forge (FORGE_PKG_DIR)
+#                                     + forge/console/web sous /opt/forge/console/web
+#   3) Créer l'utilisateur système : useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
+#   4) Créer l'env-file SECRET     : /etc/forge/forge-console.env  (chmod 0600, root:forge)
+#      contenant AU MOINS les hashes argon2id (jamais en clair, jamais committé) :
+#        FORGE_CONSOLE_PASS_HASH=...        (forge-console hashpw <pw>)
+#        FORGE_CONSOLE_OPERATOR_HASH=...    (forge-console hashpw-operator <pw>)
+#        FORGE_CONSOLE_TOKEN=...            (bearer d'ingestion ; sinon généré au boot)
+#        # FORGE_BROWSER_URL / MSF_RPC_* / BURP_API_* selon les services pilotés
+#   5) Données persistées          : /var/lib/forge/{db,ledger,scope}  (owner forge)
+#      Remplir /var/lib/forge/scope/scope.json AVEC AUTORISATION (sinon INERTE).
+#   6) systemctl daemon-reload && systemctl enable --now forge-console
+#
+# Copier ce fichier vers /etc/systemd/system/forge-console.service avant enable.
+
+[Unit]
+Description=Forge red-team console (ROE fail-closed + ledger tamper-evident)
+Documentation=https://guatx.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=forge
+Group=forge
+
+# --- Environnement -----------------------------------------------------------
+# Bind loopback par défaut : exposer via reverse-proxy (auth + Host-allowlist) seulement.
+Environment=FORGE_CONSOLE_ADDR=127.0.0.1:7100
+Environment=FORGE_CONSOLE_DB=/var/lib/forge/db/forge-console.db
+Environment=FORGE_CONSOLE_LEDGER=/var/lib/forge/ledger/engagement.jsonl
+Environment=FORGE_CONSOLE_SCOPE=/var/lib/forge/scope/scope.json
+Environment=FORGE_CONSOLE_WEB=/opt/forge/console/web
+Environment=FORGE_PKG_DIR=/opt/forge
+Environment=FORGE_PYTHON=/usr/bin/python3
+Environment=FORGE_RUN_TIMEOUT=900
+Environment=PYTHONPATH=/opt/forge
+Environment=PYTHONUNBUFFERED=1
+# Secrets (hashes argon2id, token, URLs des services pilotés) — fichier 0600 hors VCS.
+EnvironmentFile=/etc/forge/forge-console.env
+
+ExecStart=/usr/local/bin/forge-console
+WorkingDirectory=/opt/forge
+
+# Redémarrage résilient sans flapping.
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+
+# --- Durcissement (least-privilege, cohérent avec la sûreté Forge) -----------
+# Aucune élévation de privilège possible depuis le service.
+NoNewPrivileges=yes
+# FS en lecture seule sauf les chemins d'état explicitement autorisés ci-dessous.
+ProtectSystem=strict
+ProtectHome=yes
+# Seuls ces répertoires sont inscriptibles (DB + ledger + scope actif).
+ReadWritePaths=/var/lib/forge
+# /tmp et /var/tmp privés au service (pas de fuite/partage inter-process).
+PrivateTmp=yes
+# Masque /proc des autres process + /sys, infos kernel, horloge, etc.
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Pas de périphériques (la console ne pilote aucun device local).
+PrivateDevices=yes
+# Familles d'adresses minimales : la console PARLE réseau (API + outils sortants).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Capabilities : aucune (bind d'un port haut >1024, pas besoin de NET_BIND_SERVICE).
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Filtre d'appels système : jeu standard de services + interdiction explicite des
+# familles dangereuses. @resources est requis : la console règle des limites/timeouts
+# sur les process offensifs qu'elle spawne (setrlimit/setsid).
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete @debug @mount @reboot @swap @raw-io @cpu-emulation
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

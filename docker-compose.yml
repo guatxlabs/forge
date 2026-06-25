@@ -1,0 +1,108 @@
+# Forge — orchestration de déploiement (usage AUTORISÉ uniquement).
+# =============================================================================
+#
+# Lancer DEPUIS le dossier parent `GUATX/` pour que le contexte de build inclue le
+# crate sibling `core/` (guatx-core), dont dépend la console :
+#
+#     docker compose -f forge/docker-compose.yml up -d --build
+#
+# Le `context: .` ci-dessous est résolu relativement à CE fichier compose, donc
+# `forge/` ; on remonte d'un cran (`..`) pour englober `core/` ET `forge/`.
+#
+# Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le scope/ROE,
+# le ledger et la DB sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret
+# n'est en clair ici : les hashes/tokens viennent de `forge/.env` (gitignored).
+
+name: forge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Console red-team : binaire Rust + python `forge` spawné, UI web + API sur :7100.
+  # ---------------------------------------------------------------------------
+  forge-console:
+    build:
+      # Contexte = parent de forge/ (= GUATX/), pour inclure forge/ ET core/.
+      context: ..
+      dockerfile: forge/Dockerfile
+      args:
+        # Pins repropagés au Dockerfile (cohérence build reproductible).
+        HTTPX_VERSION: "1.6.9"
+        NUCLEI_VERSION: "3.3.7"
+        SUBFINDER_VERSION: "2.6.7"
+    image: forge-console:0.0.1
+    container_name: forge-console
+    restart: unless-stopped
+    # Secrets & overrides d'env : token bearer, hashes argon2id viewer/opérateur,
+    # URLs des services pilotés. Fichier gitignored (cf. .gitignore : *.env).
+    # Créer forge/.env à partir des variables documentées dans le Dockerfile.
+    env_file:
+      - .env
+    environment:
+      # Bind interne au conteneur (réseau Docker isolé). NE PAS exposer publiquement
+      # sans reverse-proxy + auth + Host-allowlist (FORGE_CONSOLE_HOST).
+      FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
+      FORGE_CONSOLE_DB: "/data/db/forge-console.db"
+      FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
+      FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
+      FORGE_PKG_DIR: "/opt/forge"
+      FORGE_PYTHON: "python3"
+      FORGE_RUN_TIMEOUT: "900"
+      # Service d'accès/évasion (interne au réseau compose). Décommenter le service
+      # browser-automation ci-dessous, ou pointer un service externe existant.
+      FORGE_BROWSER_URL: "http://browser-automation:8080"
+      # Connecteurs opérateur (laisser vide = inerte à fire-time) :
+      #   MSF_RPC_HOST / MSF_RPC_PORT / MSF_RPC_USER / MSF_RPC_PASS / MSF_RPC_SSL / MSF_RPC_TOKEN
+      #   BURP_API_URL / BURP_API_KEY
+    ports:
+      # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
+      - "127.0.0.1:7100:7100"
+    volumes:
+      # Persistance hors cycle de vie du conteneur.
+      - forge-db:/data/db
+      - forge-ledger:/data/ledger
+      # Scope/ROE ACTIF monté en lecture seule depuis l'hôte (autorisation d'engagement).
+      # Remplir ./scope.json AVEC AUTORISATION ; vide/absent = INERTE (fail-closed).
+      - ./scope.json:/data/scope/scope.json:ro
+    networks:
+      - forge-net
+    # Le service browser-automation est un service EXTERNE optionnel ; on ne bloque pas
+    # le boot de la console dessus (le connecteur sonde à fire-time et reste inerte sinon).
+    depends_on:
+      - browser-automation
+    healthcheck:
+      # Sonde TCP du port API via python3 stdlib (présent dans l'image).
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(s.connect_ex(('127.0.0.1',7100)))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # browser-automation — couche ACCÈS/ÉVASION (Camoufox + Xvfb, port 8080).
+  # ---------------------------------------------------------------------------
+  # Référencé ici pour documenter l'intégration. L'image vit dans le repo
+  # YesWeHack/toolkit/browser-automation (build local `browser-automation-browser`).
+  # Adapter `image:` au tag réellement construit sur ta machine, ou remplacer par
+  # `build: { context: ../../YesWeHack/toolkit/browser-automation }` si présent.
+  browser-automation:
+    image: browser-automation-browser:latest
+    container_name: forge-browser
+    restart: unless-stopped
+    # Service interne uniquement : pas de port publié, joignable via le réseau compose
+    # à http://browser-automation:8080 (cf. FORGE_BROWSER_URL ci-dessus).
+    expose:
+      - "8080"
+    networks:
+      - forge-net
+
+networks:
+  forge-net:
+    driver: bridge
+
+volumes:
+  forge-db:
+  forge-ledger:

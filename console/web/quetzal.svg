@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="125 75 210 410">
+  <defs>
+    <linearGradient id="tailGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00d4aa"/>
+      <stop offset="50%" stop-color="#00b894"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a2332"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Plumes de queue (signature du quetzal) -->
+  <g filter="url(#glow)">
+    <path d="M 230 290 C 210 340, 180 390, 140 460 C 135 470, 145 472, 150 462 C 185 400, 215 350, 240 300" fill="url(#tailGrad)" opacity="0.9"/>
+    <path d="M 240 295 C 225 350, 205 400, 175 465 C 170 476, 182 477, 186 467 C 210 410, 230 355, 248 305" fill="url(#tailGrad)" opacity="0.8"/>
+    <path d="M 250 292 C 242 350, 230 410, 215 468 C 212 480, 224 480, 226 469 C 238 415, 250 358, 258 302" fill="url(#tailGrad)" opacity="0.7"/>
+    <path d="M 258 288 C 255 330, 250 370, 255 420 C 256 430, 264 428, 263 418 C 260 375, 262 335, 265 295" fill="url(#tailGrad)" opacity="0.5"/>
+  </g>
+
+  <!-- Corps -->
+  <ellipse cx="270" cy="230" rx="55" ry="72" fill="url(#bodyGrad)" stroke="#00d4aa" stroke-width="1.5" opacity="0.95"/>
+
+  <!-- Poitrine rouge -->
+  <ellipse cx="268" cy="252" rx="32" ry="35" fill="#dc2626" opacity="0.85"/>
+  <ellipse cx="268" cy="250" rx="26" ry="28" fill="#ef4444" opacity="0.6"/>
+
+  <!-- Huppe -->
+  <g filter="url(#glow)">
+    <path d="M 250 168 C 240 140, 220 120, 235 105 C 248 92, 258 100, 255 115 C 252 125, 250 135, 255 155" fill="#00d4aa" opacity="0.9"/>
+    <path d="M 260 162 C 255 130, 250 108, 268 95 C 280 86, 290 98, 282 112 C 275 124, 268 140, 265 158" fill="#00d4aa" opacity="0.85"/>
+    <path d="M 270 165 C 270 138, 275 115, 295 108 C 308 103, 312 118, 302 128 C 293 137, 280 148, 275 162" fill="#00b894" opacity="0.75"/>
+    <path d="M 278 170 C 282 148, 292 130, 310 128 C 322 126, 320 140, 312 146 C 302 152, 288 160, 282 168" fill="#00b894" opacity="0.6"/>
+  </g>
+
+  <!-- Tête -->
+  <circle cx="275" cy="185" r="30" fill="url(#bodyGrad)" stroke="#00d4aa" stroke-width="1"/>
+
+  <!-- Œil -->
+  <circle cx="285" cy="180" r="8" fill="#0a0e17" stroke="#00d4aa" stroke-width="1"/>
+  <circle cx="287" cy="178" r="4" fill="#00d4aa" filter="url(#glow)"/>
+  <circle cx="289" cy="177" r="1.5" fill="#ffffff"/>
+
+  <!-- Bec -->
+  <path d="M 302 188 L 325 185 L 305 195 Z" fill="#f59e0b" stroke="#d97706" stroke-width="0.5"/>
+
+  <!-- Aile -->
+  <path d="M 225 210 C 215 225, 215 260, 230 280 C 240 270, 238 245, 235 225 Z" fill="#00d4aa" opacity="0.3"/>
+  <path d="M 230 215 C 222 230, 222 258, 234 275 C 242 265, 240 243, 238 228 Z" fill="#00d4aa" opacity="0.2"/>
+</svg>

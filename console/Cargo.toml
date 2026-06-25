@@ -1,0 +1,30 @@
+[package]
+name = "forge-console"
+version = "0.0.1"
+edition = "2021"
+description = "Forge console — store findings/run-records + API + le point de jonction de la boucle purple (ingest ATT&CK). Fork de la colonne Plume."
+
+[[bin]]
+name = "forge-console"
+path = "src/main.rs"
+
+[dependencies]
+guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe
+axum = "0.7"
+tower-http = { version = "0.5", features = ["fs"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
+libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign
+futures-util = { version = "0.3", default-features = false }   # stream::unfold -> SSE sans tokio-stream
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+base64 = "0.22"
+getrandom = "0.2"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifié, jamais d'entropie tous-zeros
+subtle = "2"        # comparaison à temps constant du bearer/token (anti timing-oracle)
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
