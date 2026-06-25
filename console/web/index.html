@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Forge — console</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#070b13">
+<link rel="stylesheet" href="/style.css">
+<style>
+/* Lancement C2 — styles locaux (réutilisent les variables de thème) */
+.lc-lbl{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+.lc-modblock{display:flex;flex-direction:column;gap:8px}
+.lc-modlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.lc-modopt{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);font-size:13px;cursor:pointer}
+.lc-modopt input{flex:0 0 auto}
+.lc-modopt .lc-modname{font-family:var(--font-mono);font-size:12px}
+.lc-modopt.disabled{opacity:.55;cursor:not-allowed}
+.lc-modopt.disabled input{cursor:not-allowed}
+.lc-modopt .lc-clionly{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--sev3);white-space:nowrap}
+/* module a fort impact debloque par l'opt-in : liseré danger, mention « fort impact » */
+.lc-modopt.hi-armed{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));background:color-mix(in srgb,var(--sev4) 7%,var(--card))}
+.lc-modopt.hi-armed .lc-clionly{color:var(--sev4)}
+/* ZONE DANGER — opt-in fort impact (defaut OFF, visuellement distincte) */
+.lc-danger{display:flex;flex-direction:column;gap:9px;margin:6px 0 2px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--sev4) 42%,var(--bd));border-radius:11px;background:color-mix(in srgb,var(--sev4) 8%,transparent)}
+.lc-danger-head{display:flex;align-items:center;gap:9px}
+.lc-danger-head .lc-dot{flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--sev4);box-shadow:0 0 0 4px color-mix(in srgb,var(--sev4) 22%,transparent)}
+.lc-danger-head label{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;cursor:pointer;margin:0}
+.lc-danger-head .lc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--sev4);border:1px solid color-mix(in srgb,var(--sev4) 40%,transparent);border-radius:6px;padding:2px 7px}
+.lc-danger-body{display:none;flex-direction:column;gap:9px}
+.lc-danger.on .lc-danger-body{display:flex}
+.lc-danger.on{border-color:color-mix(in srgb,var(--sev4) 70%,var(--bd));background:color-mix(in srgb,var(--sev4) 13%,transparent)}
+.lc-danger-reqs{font-size:12px;font-family:var(--font-mono);color:var(--mut)}
+.lc-danger-reqs .req{display:inline-flex;align-items:center;gap:4px;margin-right:12px;white-space:nowrap}
+.lc-danger-reqs .req.ok{color:var(--ok)}
+.lc-danger-reqs .req.miss{color:var(--sev4)}
+/* recap double-confirmation (modale) */
+.lc-hiconf{display:flex;flex-direction:column;gap:10px}
+.lc-hiconf dl{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:0;font-size:13px}
+.lc-hiconf dt{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.lc-hiconf dd{margin:0;font-family:var(--font-mono);font-size:12px;word-break:break-word}
+.lc-hiconf .lc-hichips{display:flex;flex-wrap:wrap;gap:6px}
+.lc-hiconf .lc-hichips .badge{font-size:11px}
+.lc-warn{font-size:12px;padding:9px 11px;border-radius:10px;background:color-mix(in srgb,var(--sev2) 12%,transparent);border:1px solid color-mix(in srgb,var(--sev2) 34%,transparent);color:var(--fg)}
+.lc-warn.bad{background:color-mix(in srgb,var(--sev4) 12%,transparent);border-color:color-mix(in srgb,var(--sev4) 38%,transparent)}
+.lc-log{font-family:var(--font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--card2);border:1px solid var(--bd);border-radius:10px;padding:12px;max-height:420px;overflow:auto;margin:0}
+.lc-log .lcl{display:block}
+.lc-log .lcl-stderr{color:var(--sev3)}
+.lc-log .lcl-system{color:var(--acc);font-style:italic}
+.lc-log .lcl-status{color:var(--mut);border-top:1px dashed var(--bd);margin-top:4px;padding-top:4px}
+.roecount.errors{border-color:color-mix(in srgb,var(--sev4) 35%,var(--bd))} .roecount.errors .rcn{color:var(--sev4)}
+/* params specifiques par module (revele quand le module est coche) */
+.lc-modopt.has-params{flex-direction:column;align-items:stretch}
+.lc-modopt .lc-modtop{display:flex;align-items:center;gap:8px}
+.lc-modparams{display:none;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--bd)}
+.lc-modopt.params-open .lc-modparams{display:flex}
+.lc-modparams .lc-pf{display:flex;flex-direction:column;gap:3px}
+.lc-modparams .lc-pf>span{font-size:10px;font-family:var(--font-mono);color:var(--mut)}
+.lc-modparams input,.lc-modparams select{background:var(--card2);border:1px solid var(--bd);border-radius:7px;color:var(--fg);padding:5px 8px;font-size:12px;font-family:var(--font-mono)}
+/* scope-check : champ cible -> badge in/out scope + mode/flags (lecture pure) */
+.lc-scope{display:flex;flex-direction:column;gap:8px;margin:0 0 14px;padding:11px 13px;border:1px solid var(--bd);border-radius:10px;background:var(--card2)}
+.lc-scope-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.lc-scope-row input{flex:1 1 220px;background:var(--card);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:7px 10px;font-size:13px;font-family:var(--font-mono)}
+.lc-scope-out{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+.lc-scope-flags{font-family:var(--font-mono);font-size:11px;color:var(--mut)}
+.badge.inscope{background:color-mix(in srgb,var(--ok) 16%,transparent);border:1px solid color-mix(in srgb,var(--ok) 40%,transparent);color:var(--fg)}
+.badge.outscope{background:color-mix(in srgb,var(--sev4) 14%,transparent);border:1px solid color-mix(in srgb,var(--sev4) 42%,transparent);color:var(--fg)}
+/* dry-plan : verdicts par action + cases d'approbation RECON */
+.lc-plantbl{width:100%;border-collapse:collapse;font-size:12px}
+.lc-plantbl th,.lc-plantbl td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--bd);vertical-align:top}
+.lc-plantbl th{color:var(--mut);font-weight:600;font-size:11px}
+.lc-plantbl td.lc-pline{font-family:var(--font-mono);font-size:11px;color:var(--mut);word-break:break-word}
+.lc-plantbl td.lc-papprove{white-space:nowrap}
+.lc-planhint{font-size:12px;color:var(--mut);margin:0 0 8px}
+.lc-planout{font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--card2);border:1px solid var(--bd);border-radius:9px;padding:9px 11px;max-height:200px;overflow:auto;margin:8px 0 0;color:var(--mut)}
+.lc-planactions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.lc-report{font-family:var(--font-mono);font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+</style>
+</head>
+<body>
+<header>
+  <button id="navtoggle" class="navtoggle" type="button" aria-label="Menu"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+  <h1><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span>Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></h1>
+  <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
+  <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
+  <div class="hdr-tools">
+    <select id="campaign" class="k-theme" aria-label="Campagne" title="Filtrer par campagne">
+      <option value="">Toutes campagnes</option>
+    </select>
+    <select id="refresh" aria-label="Rafraîchissement auto" title="Rafraîchissement auto">
+      <option value="0" selected> Off</option>
+      <option value="10">10 s</option>
+      <option value="30">30 s</option>
+      <option value="60">60 s</option>
+    </select>
+    <button id="reload" class="k-theme" type="button" aria-label="Rafraîchir" title="Rafraîchir maintenant"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+    <button id="theme" class="k-theme" type="button" aria-label="Changer de thème" title="Thème clair / sombre"></button>
+  </div>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="nav" aria-label="Navigation">
+    <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
+    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement C2</span></a>
+    <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
+    <a href="#findings"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Findings</span></a>
+    <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
+    <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
+    <a href="#campaigns"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/></svg> <span>Campagnes</span></a>
+    <a href="#roe"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg> <span>ROE / Garde-fou</span></a>
+    <a href="#ledger"><svg class="ic" viewBox="0 0 24 24"><path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1M16 3h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-1"/></svg> <span>Ledger</span></a>
+    <a href="#dashboards"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg> <span>Dashboards</span></a>
+  </nav>
+<main>
+  <!-- VUE D'ENSEMBLE -->
+  <section id="ov-summary" class="card span2" aria-labelledby="ovh">
+    <h2 id="ovh">Boucle purple — état</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+  <section id="ov-sev" class="card" aria-labelledby="ovsh">
+    <h2 id="ovsh">Findings par sévérité</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+  <section id="ov-modules" class="card" aria-labelledby="ovmh">
+    <h2 id="ovmh">Capacités</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- LANCEMENT C2 -->
+  <section id="lc-form" class="card span2" aria-labelledby="lch">
+    <div class="panelhead">
+      <h2 id="lch">Lancement de campagne <span class="muted">— C2-light gouverné &amp; audité</span></h2>
+      <span class="qbar"><span id="lc-c2state" class="badge mut" title="État du rôle opérateur C2 côté serveur">—</span></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Lancement <b>non-exploit / non-destructif</b> par défaut : les modules <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> restent <b>grisés</b> tant que l'opt-in gouverné « fort impact » (zone danger ci-dessous) n'est pas activé — il exige <b>armer + raison + secret opérateur</b> et une <b>double-confirmation</b>. Les cibles doivent appartenir au scope serveur : <b>hors-scope = VETO dur</b>, jamais élargi via le web. Chaque lancement est journalisé au ledger (<code>console.run.start</code>).</p>
+    <!-- SCOPE-CHECK : décision de scope LECTURE pure (POST /api/scope-check) — aucune action, juste de la transparence -->
+    <div class="lc-scope" aria-label="Vérification de scope">
+      <span class="lc-lbl" style="margin:0">Vérifier le scope d'une cible <span class="muted">— lecture pure, ne lance rien</span></span>
+      <div class="lc-scope-row">
+        <input id="lc-scopetarget" placeholder="ex: api.example.com ou 10.0.0.0/8" spellcheck="false" autocomplete="off">
+        <button id="lc-scopecheck" type="button">Vérifier</button>
+        <button id="lc-scopeadd" type="button" class="k-theme" title="Ajouter cette cible aux cibles du lancement" hidden>+ Cibles</button>
+      </div>
+      <div id="lc-scoperes" class="lc-scope-out" hidden></div>
+    </div>
+    <form id="lc-runform" class="ruleform" autocomplete="off">
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:1 1 220px"><span class="lc-lbl">Campagne</span>
+          <input id="lc-campaign" placeholder="ex: purple-2026-06" required pattern="[A-Za-z0-9._][A-Za-z0-9._-]{0,63}" title="^[A-Za-z0-9._-]{1,64}$, pas de '-' en tête">
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Mode</span>
+          <select id="lc-mode" title="propose = simule/propose ; auto = exécute les actions FIRE">
+            <option value="propose" selected>propose (simulation)</option>
+            <option value="auto">auto (exécute les FIRE)</option>
+          </select>
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Budget (optionnel)</span>
+          <input id="lc-budget" type="number" min="0" step="1" placeholder="∞" style="width:110px">
+        </label>
+      </div>
+      <label><span class="lc-lbl">Cibles (une par ligne — hostname ou IP/CIDR, ⊆ scope serveur)</span>
+        <textarea id="lc-targets" rows="3" spellcheck="false" placeholder="guatx.com&#10;192.0.2.0/24"></textarea>
+      </label>
+      <div class="lc-modblock">
+        <div class="rf-row" style="justify-content:space-between">
+          <span class="lc-lbl" style="margin:0">Modules (optionnel — vide = le planner choisit)</span>
+          <span id="lc-modhint" class="muted" style="margin:0">chargement…</span>
+        </div>
+        <div id="lc-modlist" class="lc-modlist"></div>
+      </div>
+      <div class="rf-row" style="gap:14px;align-items:center">
+        <label style="flex:0 0 auto"><input id="lc-exhaustive" type="checkbox"> exhaustif (ne défère rien)</label>
+        <label style="flex:0 0 auto"><input id="lc-arm" type="checkbox"> armer (<code>--arm</code>)</label>
+      </div>
+      <div id="lc-armwarn" class="lc-warn" hidden>Armer (<code>--arm</code>) journalise l'intention de tirer les actions FIRE. Seul, l'arm <b>n'autorise PAS</b> l'exploit/le destructif : il faut activer l'opt-in <b>« fort impact »</b> de la zone danger ci-dessous (armer + raison + secret opérateur). Le scope serveur reste dur : hors-scope = VETO, quelle que soit l'autorisation.</div>
+      <label><span class="lc-lbl">Raison <span class="muted">(audit — tronquée à 200 car. ; OBLIGATOIRE si opt-in fort impact activé)</span></span>
+        <input id="lc-reason" maxlength="200" placeholder="justification de l'engagement (audit)">
+      </label>
+      <label><span class="lc-lbl">Secret opérateur <span class="muted">(en-tête X-Forge-Operator — mémoire de session uniquement, jamais persisté)</span></span>
+        <input id="lc-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur C2 (requis pour lancer)">
+      </label>
+      <!-- ZONE DANGER : opt-in gouverné des modules à fort impact (exploit/destructif). DEFAUT OFF. -->
+      <div id="lc-danger" class="lc-danger">
+        <div class="lc-danger-head">
+          <span class="lc-dot" aria-hidden="true"></span>
+          <label for="lc-allowhi"><input id="lc-allowhi" type="checkbox"> Autoriser les modules à fort impact (<span class="badge expl">exploit</span> / <span class="badge destr">destructif</span>)</label>
+          <span class="lc-dtag">zone danger</span>
+        </div>
+        <div class="lc-danger-body">
+          <div class="lc-warn bad" style="margin:0">Action à <b>fort impact</b>, <b>scope-bornée</b> et <b>auditée</b>. L'opt-in n'est honoré que si <b>armer</b> est coché, une <b>raison</b> est renseignée et le <b>secret opérateur</b> est fourni. Le garde-fou de périmètre reste dur : toute cible <b>hors-scope est vétoée</b> côté serveur, sans exception. Chaque lancement à fort impact est journalisé au ledger.</div>
+          <div id="lc-hireqs" class="lc-danger-reqs" aria-live="polite"></div>
+        </div>
+      </div>
+      <div id="lc-err" class="lc-warn bad" hidden></div>
+      <div class="rf-actions">
+        <button id="lc-dryplan" type="button" class="k-theme" title="Aperçu de gouvernance INERTE (POST /api/plan) — rien ne tire ni ne persiste">Dry-plan (aperçu)</button>
+        <button id="lc-submit" type="submit">Lancer la campagne</button>
+        <button id="lc-clearop" type="button" title="Oublier le secret opérateur de la session">Oublier le secret</button>
+        <span id="lc-formstat" class="muted" style="margin:0"></span>
+      </div>
+    </form>
+  </section>
+
+  <!-- LANCEMENT C2 : dry-plan (aperçu de gouvernance INERTE) + approbation granulaire RECON -->
+  <section id="lc-plan" class="card span2" aria-labelledby="lcph" hidden>
+    <div class="panelhead">
+      <h2 id="lcph">Dry-plan <span id="lc-plancount" class="badge mut">—</span></h2>
+      <span class="qbar"><span class="muted">aperçu INERTE — <code>mode propose</code>, exploit/destructif forcés false : <b>rien ne tire ni ne persiste</b></span></span>
+    </div>
+    <p class="lc-planhint">Chaque action proposée par le moteur porte son verdict garde-fou : <span class="badge v-FIRE">FIRE</span> / <span class="badge v-DRY_RUN">DRY_RUN</span> / <span class="badge v-VETO">VETO</span> / <span class="badge mut">SKIP</span>. Coche les actions <b>RECON / non-exploit</b> à approuver puis relance en <code>propose&rarr;auto</code> ; l'exploit reste bloqué côté serveur dans cette passe.</p>
+    <div id="lc-planresult"><div class="muted">Lance un dry-plan depuis le formulaire ci-dessus.</div></div>
+    <div class="lc-planactions">
+      <button id="lc-approve" type="button" title="Relancer les actions approuvées en mode auto (RECON/non-exploit uniquement)" disabled>Approuver &amp; lancer (auto)</button>
+      <button id="lc-approve-all" type="button" class="k-theme" title="Cocher toutes les actions approuvables" hidden>Tout cocher</button>
+      <span id="lc-approvestat" class="muted" style="margin:0"></span>
+    </div>
+  </section>
+
+  <!-- LANCEMENT C2 : log live + détail du run courant -->
+  <section id="lc-live" class="card span2" aria-labelledby="lclh">
+    <div class="panelhead">
+      <h2 id="lclh">Run en cours <span id="lc-livebadge" class="badge mut">aucun</span></h2>
+      <span class="qbar">
+        <span id="lc-transport" class="badge mut" title="Transport du flux de logs">—</span>
+        <button id="lc-cancel" class="k-theme" type="button" title="Annuler le run en cours (opérateur)" hidden>Annuler</button>
+      </span>
+    </div>
+    <div id="lc-counts" class="roecounters" hidden></div>
+    <div id="lc-gaps" class="muted" style="margin:0 0 8px" hidden></div>
+    <pre id="lc-log" class="lc-log" aria-live="polite">Aucun run actif. Lance une campagne ci-dessus pour suivre les logs en direct.</pre>
+  </section>
+
+  <!-- LANCEMENT C2 : liste des runs -->
+  <section id="lc-runs" class="card span2" aria-labelledby="lcrh">
+    <div class="panelhead">
+      <h2 id="lcrh">Runs <span id="lc-runcount" class="badge"></span></h2>
+      <span class="qbar">
+        <select id="lc-runstatus" aria-label="Filtre statut run">
+          <option value="">Tous statuts</option>
+          <option value="running">running</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+          <option value="timeout">timeout</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+        <button id="lc-runreload" class="k-theme" type="button" title="Rafraîchir la liste des runs">Rafraîchir</button>
+      </span>
+    </div>
+    <div id="lc-runresult"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- CAPACITÉS / MODULES -->
+  <section id="modules" class="card span2" aria-labelledby="modh">
+    <div class="panelhead">
+      <h2 id="modh">Capacités &amp; Modules <span id="mod-count" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="modfilt"><input id="mod-avail" type="checkbox"> disponibles seulement</label>
+        <button id="mod-refresh" class="k-theme" type="button" title="Re-spawn forge.cli modules --json et re-seed le registre (gate opérateur : en-tête X-Forge-Operator requis)">Rafraîchir modules</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Catalogue des modules du moteur (lecture <code>/api/modules</code>). Le badge <span class="badge webyes">web</span> indique un module autorisé en cadre web ; <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> portent un risque accru (gatés par les ROE au lancement).</p>
+    <div id="mod-grid" class="modgrid"></div>
+  </section>
+
+  <!-- FINDINGS -->
+  <section id="findings" class="card span2" aria-labelledby="fh">
+    <div class="panelhead">
+      <h2 id="fh">Findings <span id="f-count" class="badge"></span></h2>
+      <span class="qbar">
+        <select id="f-sev" aria-label="Filtre sévérité">
+          <option value="">Toutes sévérités</option>
+          <option value="CRITICAL">CRITICAL</option>
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+          <option value="INFO">INFO</option>
+        </select>
+        <select id="f-status" aria-label="Filtre statut">
+          <option value="">Tous statuts</option>
+        </select>
+        <input id="f-target" type="search" aria-label="Filtre cible" placeholder="cible…">
+      </span>
+    </div>
+    <div id="f-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- EXPLORE -->
+  <section id="explore" class="card span2" aria-labelledby="exh">
+    <h2 id="exh">Requête (<code>soql</code>)</h2>
+    <div class="qbar">
+      <textarea id="sql" rows="3" aria-label="Requête soql" spellcheck="false"
+        placeholder="soql:  search severity=HIGH | stats count by mitre | sort -count | head 20"></textarea>
+      <button id="run" type="button">Exécuter</button>
+      <button id="qback" type="button" title="Revenir à la requête précédente (drilldown)" hidden>← Retour</button>
+      <select id="viz" aria-label="Visualisation"><option value="table">Table</option><option value="bar">Barres</option><option value="line">Courbe</option><option value="stat">Stat</option></select>
+      <select id="qsize" aria-label="Lignes par page" title="Lignes par page (pagination)">
+        <option value="50">50/page</option>
+        <option value="100">100/page</option>
+        <option value="200" selected>200/page</option>
+        <option value="500">500/page</option>
+        <option value="1000">1000/page</option>
+      </select>
+      <button id="save-panel" type="button" title="Enregistrer la requête comme panneau">Panneau</button>
+    </div>
+    <div class="srchbody facetbar"><aside id="facets" class="fields" aria-label="Facettes"></aside></div>
+    <div id="qstats" class="muted" role="status" aria-live="polite"></div>
+    <div id="qresult" class="qresult"></div>
+  </section>
+
+  <!-- COUVERTURE ATT&CK -->
+  <section id="coverage" class="card span2" aria-labelledby="covh">
+    <div class="panelhead">
+      <h2 id="covh">Couverture ATT&amp;CK <span class="muted">— run-records (côté offensif)</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Par technique MITRE : nombre de runs tentés et combien ont <b>tiré</b> (déclenché un résultat). Une technique à 0 tiré = couverte mais sans détection côté cible.</p>
+    <div id="cov-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- CAMPAGNES -->
+  <section id="campaigns" class="card span2" aria-labelledby="cmh">
+    <div class="panelhead">
+      <h2 id="cmh">Campagnes <span id="cm-count" class="badge"></span></h2>
+      <span class="qbar"><input id="cm-filter" type="search" aria-label="Filtre campagne" placeholder="filtrer…"></span>
+    </div>
+    <div id="cm-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ROE / GARDE-FOU -->
+  <section id="roe" class="card span2" aria-labelledby="roeh">
+    <div class="panelhead">
+      <h2 id="roeh">ROE — décisions du garde-fou <span id="roe-count" class="badge"></span></h2>
+      <span class="qbar">
+        <select id="roe-verdict" aria-label="Filtre verdict">
+          <option value="">Tous verdicts</option>
+          <option value="FIRE">FIRE</option>
+          <option value="DRY_RUN">DRY_RUN</option>
+          <option value="VETO">VETO</option>
+        </select>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Chaque action proposée par le moteur passe le garde-fou : <span class="badge v-FIRE">FIRE</span> (exécutée), <span class="badge v-DRY_RUN">DRY_RUN</span> (simulée), <span class="badge v-VETO">VETO</span> (bloquée). La transparence anti-masquage : on voit pourquoi (raisons).</p>
+    <div id="roe-counters" class="roecounters"></div>
+    <div id="roe-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- LEDGER -->
+  <section id="ledger" class="card span2" aria-labelledby="lgh">
+    <div class="panelhead">
+      <h2 id="lgh">Ledger d'engagement <span id="lg-verify" class="badge"></span></h2>
+      <span class="qbar"><span id="lg-path" class="muted"></span></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Journal append-only chaîné par SHA-256. La console <b>recalcule la chaîne</b> de hash (intégrité <b>hash-only</b>) mais ne vérifie <b>pas la signature</b> (<code>sig_checked: false</code> — pas de clé côté console). Pour vérifier la signature cryptographique : lancer <code>forge ledger verify --pubkey &lt;clé&gt;</code> en CLI.</p>
+    <div id="lg-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- DASHBOARDS / VUES -->
+  <section id="dashboards" class="span2" aria-labelledby="dash-h">
+    <h2 id="dash-h" class="sronly">Dashboards</h2>
+    <div class="viewbar card">
+      <div class="viewbar-l">
+        <span class="lvl">Vue</span>
+        <select id="view" aria-label="Vue (collection de dashboards)" title="Vue = collection de dashboards (filtre local d'affichage)">
+          <option value="">Tous les dashboards</option>
+        </select>
+        <button id="view-rename" type="button" class="picon" title="Renommer la vue"></button>
+        <button id="view-new" type="button" title="Créer une vue (collection de dashboards)">+ Vue</button>
+        <button id="view-del" type="button" class="picon" title="Supprimer la vue (les dashboards sont conservés)"></button>
+      </div>
+      <div class="viewbar-r">
+        <span class="muted">dashboards de panneaux soql — glisser pour réordonner, coin pour redimensionner</span>
+        <button id="dash-edit" type="button" title="Mode édition : déplacer / redimensionner / assigner les panneaux">Édition</button>
+        <button id="dash-new" type="button" title="Créer un dashboard">+ Dashboard</button>
+      </div>
+    </div>
+    <div id="dashview" class="dashview"></div>
+  </section>
+</main>
+</div>
+<footer><span id="status">connexion…</span> — maj <span id="updated">-</span></footer>
+<script src="/app.js"></script>
+</body>
+</html>

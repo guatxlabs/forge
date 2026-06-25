@@ -1,0 +1,18 @@
+[project]
+name = "forge"
+version = "0.0.1"
+description = "Forge — moteur red-team gated par ROE (sûreté d'abord). Antithèse offensive du SOC blue-team Plume (GuatX)."
+requires-python = ">=3.9"
+dependencies = []   # coeur pur-stdlib (comme secpipe). Les modules réels (P2) ajouteront des deps optionnelles.
+
+[project.scripts]
+# `pip install -e .` met l'exécutable `forge` sur le PATH -> `forge <commande>`
+# (équivalent à `python3 -m forge.cli <commande>`). Voir README (Install).
+forge = "forge.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["forge", "forge.modules"]

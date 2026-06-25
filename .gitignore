@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Forge — .gitignore (sûreté d'abord : aucun secret, aucune clé, aucun ledger,
+# aucune donnée d'engagement ne doit JAMAIS être suivie par git).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- Secrets & autorisation d'engagement (NE JAMAIS COMMITTER) ---------------
+# Le scope réel contient les cibles autorisées par contrat -> hors VCS.
+# scope.example.json (gabarit sans cible réelle) reste suivi (voir !exclusions).
+scope.json
+targets.json
+actions.json
+*.env
+.env
+
+# --- Clés de signature du ledger (Ed25519 / repli HMAC) ----------------------
+*.key
+*.ed25519
+*.pem
+*.pub
+
+# --- Ledger d'engagement & état (tamper-evident, append-time) ----------------
+# Le ledger journalise des actions sur des cibles réelles -> jamais public.
+*.jsonl
+engagements/
+
+# --- Bases de la console (rusqlite + WAL/SHM) --------------------------------
+*.db
+*.db-wal
+*.db-shm
+forge-console.db
+forge-console-*.db
+
+# --- Rapports générés (contiennent cibles/findings réels) --------------------
+*.report.md
+rapport.md
+report.md
+
+# --- Build Rust de la console (binaire + artefacts cargo) --------------------
+console/target/
+target/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Artefacts temporaires / OS ----------------------------------------------
+forge-demo-*/
+/tmp/
+*.tmp
+*.log
+*.swp
+.DS_Store
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exclusions explicites : ces fichiers DOIVENT rester suivis (gabarits, tests,
+# sources) même si une règle ci-dessus les attraperait.
+# ─────────────────────────────────────────────────────────────────────────────
+!scope.example.json
+!.gitignore
+!console/.gitignore

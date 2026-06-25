@@ -1,0 +1,12 @@
+{
+  "_comment": "Modèle de scope/ROE Forge. COPIER vers scope.json et remplir AVEC AUTORISATION. Aucune cible réelle ici. in_scope vide = INERTE (tout est refusé).",
+  "mode": "grey",
+  "in_scope": [],
+  "out_scope": [],
+  "rate": 5,
+  "allow_exploit": false,
+  "allow_destructive": false,
+  "known_creds": [],
+  "idor_targets": [],
+  "notes": "Engagement autorisé uniquement. Renseigner in_scope (globs hostname ou CIDR). Passer allow_exploit/allow_destructive à true seulement si le ROE écrit l'autorise."
+}

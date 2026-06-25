@@ -1,0 +1,120 @@
+# Forge — CI (usage AUTORISÉ uniquement, aucun I/O réseau offensif en CI).
+# =============================================================================
+#
+# Jobs :
+#   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
+#   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
+#
+# Le crate `console/` dépend du sibling `core/` (guatx-core) via `path = "../../core"`.
+# La CI reproduit l'arborescence relative attendue : on checkout `forge` SOUS un dossier
+# `forge/`, et `core` SOUS un dossier `core/` frère, pour que `../../core` résolve.
+# Adapter `repository:`/`ref:` du checkout `core` quand le repo public existera (cf.
+# console/Cargo.toml : "passer à une dép git quand le repo public existe").
+#
+# Toutes les versions (actions, toolchain Rust, Python) sont PINNÉES pour la
+# reproductibilité.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Annule les runs obsolètes sur une même ref (économie de runners).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python — tests du cœur Forge (stdlib only, aucune dépendance à installer).
+  # ---------------------------------------------------------------------------
+  python:
+    name: python (unittest)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests (stdlib, zéro dépendance)
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  # ---------------------------------------------------------------------------
+  # Console — tests + build release du crate Rust (avec le sibling core/).
+  # ---------------------------------------------------------------------------
+  console:
+    name: console (cargo test + build --release)
+    runs-on: ubuntu-24.04
+    steps:
+      # forge sous ./forge pour reconstituer la disposition relative attendue
+      # par `path = "../../core"` (console/ -> ../../core).
+      - name: Checkout forge
+        uses: actions/checkout@v4
+        with:
+          path: forge
+
+      # Le crate sibling guatx-core. Tant qu'il n'est pas un repo public séparé,
+      # remplacer ce checkout par une copie monorepo (ou un git dep dans Cargo.toml).
+      - name: Checkout core (guatx-core)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/core
+          ref: main
+          path: core
+        # N'échoue pas le job si le repo core n'existe pas encore : on tente un repli
+        # monorepo (core déjà présent à côté de forge dans le même checkout).
+        continue-on-error: true
+
+      - name: Repli monorepo — localiser core/ si le checkout dédié a échoué
+        run: |
+          if [ ! -f core/Cargo.toml ]; then
+            if [ -f forge/../core/Cargo.toml ]; then
+              echo "core/ absent en checkout dédié mais présent en monorepo — OK."
+            else
+              echo "::error::crate guatx-core introuvable (core/Cargo.toml) — ajuster le checkout core."
+              exit 1
+            fi
+          fi
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+
+      - name: Cache cargo (registry + target)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            forge/console/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('forge/console/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo test (console)
+        working-directory: forge/console
+        run: cargo test --locked --verbose
+
+      - name: cargo build --release (console)
+        working-directory: forge/console
+        run: cargo build --release --locked --verbose
+
+      - name: Upload artefact (binaire console)
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-console
+          path: forge/console/target/release/forge-console
+          if-no-files-found: error
+          retention-days: 7

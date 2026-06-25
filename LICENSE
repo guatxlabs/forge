@@ -1,0 +1,49 @@
+Forge — Licence d'Usage Autorisé (Authorized-Use License)
+Copyright (c) 2026 GuatX (guatx.com). Tous droits réservés.
+
+PRÉAMBULE
+Forge est un moteur red-team. Sa raison d'être est d'IMPOSER et de PROUVER
+l'autorisation d'une action offensive (gate ROE fail-closed + ledger
+tamper-evident). Cette licence est volontairement restrictive : l'outil ne doit
+servir QUE dans un cadre explicitement autorisé.
+
+1. CONCESSION
+Permission est accordée, gratuitement, à toute personne obtenant une copie de ce
+logiciel et des fichiers de documentation associés (le « Logiciel »), d'utiliser,
+copier, modifier et fusionner des copies du Logiciel, SOUS RÉSERVE des conditions
+ci-dessous.
+
+2. USAGE AUTORISÉ UNIQUEMENT (condition essentielle)
+Le Logiciel ne peut être utilisé QUE contre des systèmes, réseaux, comptes ou
+données pour lesquels l'utilisateur détient une AUTORISATION ÉCRITE, EXPLICITE et
+PRÉALABLE. Cadres acceptables, à titre indicatif et non limitatif :
+  - un programme de bug bounty pour les seuls actifs déclarés in-scope ;
+  - une mission de test d'intrusion sous contrat signé (avec ROE) ;
+  - un environnement de CTF / laboratoire conçu pour l'exercice ;
+  - une infrastructure dont l'utilisateur est lui-même propriétaire.
+
+3. INTERDICTION HORS-SCOPE (condition essentielle)
+Toute utilisation contre une cible hors du périmètre autorisé est STRICTEMENT
+INTERDITE et met fin immédiatement et automatiquement à la présente licence.
+Sont notamment prohibés, sans autorisation : l'accès non autorisé, l'exfiltration
+de données d'autrui, l'altération ou la destruction de systèmes ou de données, et
+toute action enfreignant une loi applicable. Contourner un WAF/CAPTCHA/contrôle
+d'accès n'autorise rien : ce n'est qu'un moyen d'accès, jamais une permission.
+
+4. CONSERVATION DE LA MENTION
+Les mentions de copyright et la présente licence doivent figurer dans toutes les
+copies ou parties substantielles du Logiciel. Les garde-fous de sûreté (gate ROE,
+scope-guard, ledger) ne doivent pas être retirés ni neutralisés dans le but de
+contourner les conditions 2 et 3.
+
+5. ABSENCE DE GARANTIE
+LE LOGICIEL EST FOURNI « EN L'ÉTAT », SANS GARANTIE D'AUCUNE SORTE, EXPRESSE OU
+IMPLICITE, Y COMPRIS MAIS SANS S'Y LIMITER LES GARANTIES DE QUALITÉ MARCHANDE,
+D'ADÉQUATION À UN USAGE PARTICULIER ET D'ABSENCE DE CONTREFAÇON.
+
+6. LIMITATION DE RESPONSABILITÉ
+EN AUCUN CAS LES AUTEURS OU TITULAIRES DU DROIT D'AUTEUR NE POURRONT ÊTRE TENUS
+RESPONSABLES D'UNE QUELCONQUE RÉCLAMATION, DOMMAGE OU AUTRE RESPONSABILITÉ, QUE CE
+SOIT DANS LE CADRE D'UN CONTRAT, D'UN DÉLIT OU AUTREMENT, DÉCOULANT DU LOGICIEL OU
+DE SON UTILISATION. L'UTILISATEUR EST SEUL RESPONSABLE DE S'ASSURER QU'IL DISPOSE
+DE L'AUTORISATION REQUISE ET DU RESPECT DES LOIS APPLICABLES.
