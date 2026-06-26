@@ -221,5 +221,11 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 > hors-host (clé privée sur un signeur distant / co-signataire / transparency log) est la dernière
 > étape — l'architecture asymétrique le permet déjà (seule la clé publique circule). Documenté, pas caché.
 
+## Documentation
+
+- [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
+- [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis Plume pour câbler la boucle purple (le moat).
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — empreinte mesurée et matrice de déploiement (Docker / k8s / host / venv).
+
 ## Licence
 Usage autorisé / éthique uniquement.
