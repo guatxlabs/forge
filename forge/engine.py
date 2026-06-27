@@ -13,12 +13,15 @@ from . import purple
 
 
 class Engine:
-    def __init__(self, scope, ledger=None, mode="propose", memory=None, graph=None):
+    def __init__(self, scope, ledger=None, mode="propose", memory=None, graph=None,
+                 campaign=None, run_id=None):
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
         self.graph = graph if graph is not None else EngagementGraph()
         self.roe = Roe(scope, ledger=ledger, mode=mode)
+        self.campaign_id = campaign  # boucle purple : corrèle les run-records à la campagne…
+        self.run_id = run_id         # …et au run (console). None tant que non fournis (additif).
         self.findings = []
         self.results = []          # [{action, verdict, reasons, output}]
         self.run_records = []      # boucle purple : un record ATT&CK par action tirée
@@ -74,12 +77,16 @@ class Engine:
                 self.graph.add_finding(f)            # enrichit le world-model
                 if self.ledger:
                     self.ledger.append("finding", f.to_dict())
-            # run-record purple : la technique a été exécutée (mitre du finding, sinon du module,
-            # sinon des params). Fallback module pour qu'une action tirée SANS finding ait quand même
-            # son ATT&CK dans le record (sinon trou de couverture purple sur les tirs « rien trouvé »).
-            mitre = action.params.get("mitre") or (new[0].mitre if new else "") or getattr(module, "mitre", "") or ""
+            # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
+            #   1. params.mitre (posé par le scope/console)   2. mitre du 1er finding émis
+            #   3. mitre déclaré par le module                4. fallback par-kind (DEFAULT_MITRE_BY_KIND)
+            # Le repli par-kind garantit un record NON VIDE même pour un tir SANS finding sur un module
+            # à mitre='' (sinon trou de couverture purple sur les tirs « rien trouvé »).
+            mitre = (action.params.get("mitre") or (new[0].mitre if new else "")
+                     or getattr(module, "mitre", "") or purple.mitre_for_kind(action.kind) or "")
             rr = purple.run_record(action.target, action.kind, mitre, fired=True,
-                                   detail=f"{len(new)} finding(s)")
+                                   detail=f"{len(new)} finding(s)",
+                                   run_id=self.run_id, campaign=self.campaign_id)
             self.run_records.append(rr)
             if self.ledger:
                 self.ledger.append("purple.runrecord", rr)

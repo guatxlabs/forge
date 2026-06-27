@@ -35,8 +35,11 @@ services:
     # Secrets & overrides d'env : token bearer, hashes argon2id viewer/opérateur,
     # URLs des services pilotés. Fichier gitignored (cf. .gitignore : *.env).
     # Créer forge/.env à partir des variables documentées dans le Dockerfile.
+    # `required: false` = absence tolérée (boot sans secrets => token généré au boot,
+    # rôles non provisionnés => C2 fermé ; cohérent avec l'inertie par défaut).
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       # Bind interne au conteneur (réseau Docker isolé). NE PAS exposer publiquement
       # sans reverse-proxy + auth + Host-allowlist (FORGE_CONSOLE_HOST).
