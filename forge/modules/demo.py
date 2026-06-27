@@ -16,7 +16,7 @@ class DemoFingerprint(Module):
     kind = "demo.fingerprint"
     exploit = False
     destructive = False
-    mitre = ""
+    mitre = "T1595"          # Active Scanning — la démo illustre une reconnaissance (badge purple non vide)
     description = ("Module de démonstration — illustre le pipeline (plan→ROE→dry/fire→"
                   "finding→ledger) sans aucun I/O réseau.")
 

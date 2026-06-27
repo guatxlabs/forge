@@ -302,6 +302,13 @@ struct App {
     python: Arc<String>,            // interpréteur python (FORGE_PYTHON, défaut python3)
     scope_in: Arc<Vec<String>>,      // in_scope autorisé (recopié dans le scope du run, fail-closed)
     scope_mode: Arc<String>,         // mode du scope (white|grey|black) recopié tel quel
+    // PURPLE (défensif) : URL de la colonne BLEUE Plume (SOC) + credential pour interroger
+    // GET {plume_url}/api/coverage/detections. Vide => couverture purple en FAIL-OPEN LISIBLE
+    // (plume_reachable:false). plume_token = base64 d'un `user:pass` envoyé en `Authorization: Basic`
+    // (la route détections de Plume exige Basic/SSO ; les Bearer d'agent n'y sont PAS acceptés). Vide
+    // => aucun en-tête d'auth (cas SOC_PUBLIC_DEMO=1 côté Plume).
+    plume_url: Arc<String>,
+    plume_token: Arc<String>,
     run_timeout_secs: u64,           // watchdog (FORGE_RUN_TIMEOUT, défaut 1800s)
     run_state: Arc<AsyncMutex<RunState>>,
     events: broadcast::Sender<RunEvent>, // bus SSE lock-free (clone du Sender)
@@ -1319,6 +1326,376 @@ async fn coverage(State(app): State<App>, Query(q): Query<HashMap<String, String
 }
 
 // ===========================================================================================
+// PURPLE-TEAM (DÉFENSIF) — mesure de la couverture de DÉTECTION du SOC.
+//
+// Objectif blue-team : pour chaque technique ATT&CK TIRÉE en red-team autorisée par Forge
+// (runrecord.fired=1), vérifier si la colonne BLEUE Plume l'a DÉTECTÉE (une alerte taguée du
+// même `mitre`). On expose les TROUS de détection (missed) + le délai moyen de détection (MTTD).
+//
+// Source RED  : table `runrecord` (fired=1) de CETTE console — la technique + l'horodatage du tir.
+// Source BLUE : GET {PLUME_URL}/api/coverage/detections -> [{mitre, count, first_ts}] (epoch s).
+// Jointure    : sur le champ `mitre` commun (ex T1190/T1046/T1110).
+//   detected = techniques tirées présentes côté Plume ; missed = tirées ABSENTES de Plume.
+//   MTTD/tech = first_ts(détection) - ts(tir red) en secondes (>=0 ; négatif tronqué à 0 — une
+//   détection antérieure au tir vient d'un run précédent, on ne « gagne » pas de temps négatif).
+//
+// FAIL-OPEN LISIBLE (NON négociable) : si Plume est injoignable / PLUME_URL absent / réponse
+// illisible, on renvoie `plume_reachable:false` et on NE FABRIQUE JAMAIS de detected/missed/MTTD
+// (listes vides, agrégats nuls). Un SOC muet ne doit pas se traduire en « tout détecté » NI en
+// « tout raté » — l'opérateur voit explicitement que la mesure n'a pas pu être faite.
+// LECTURE pure : aucun spawn, aucune écriture ; gardée par auth_guard comme le reste de l'API.
+// ===========================================================================================
+
+/// Parse un horodatage de tir red-team en epoch secondes (i64). Forge émet de l'ISO-8601 UTC
+/// (`2026-06-26T12:00:00+00:00` / `...Z`) ; on tolère aussi un epoch déjà nu (défensif). Renvoie
+/// `None` si illisible -> le MTTD de cette technique est marqué indisponible (jamais inventé).
+fn parse_fire_ts(ts: &str) -> Option<i64> {
+    let s = ts.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 1) epoch nu déjà fourni (ex "1719403200") — tolérance, pas le cas nominal.
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(n);
+    }
+    // 2) ISO-8601 : YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]. On lit la partie civile UTC et applique
+    //    l'offset éventuel. Pas de chrono : conversion calendaire jours-depuis-epoch à la main
+    //    (algorithme « days_from_civil », valable pour le calendrier grégorien proleptique).
+    let (date_part, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
+    let mut d = date_part.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // sépare l'heure de l'offset/zone (Z, +hh:mm, -hh:mm). On coupe au 1er marqueur d'offset.
+    let mut offset_secs: i64 = 0;
+    let time_str: &str = {
+        let r = rest.trim_end();
+        if let Some(stripped) = r.strip_suffix('Z').or_else(|| r.strip_suffix('z')) {
+            stripped
+        } else {
+            // l'offset commence au 1er '+'/'-' rencontré dans `rest` (HH:MM:SS n'en contient pas) ;
+            // le 'T' a déjà été retiré en amont, donc tout signe ici borne le décalage de fuseau.
+            if let Some(pos) = r.find(['+', '-']) {
+                let (t, off) = r.split_at(pos);
+                let sign = if off.starts_with('-') { -1 } else { 1 };
+                let off = &off[1..];
+                let mut op = off.split(':');
+                let oh: i64 = op.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let om: i64 = op.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                offset_secs = sign * (oh * 3600 + om * 60);
+                t
+            } else {
+                r
+            }
+        }
+    };
+    // heure civile (on coupe une éventuelle fraction de seconde).
+    let time_core = time_str.split('.').next().unwrap_or(time_str);
+    let mut t = time_core.split(':');
+    let hh: i64 = t.next()?.parse().ok()?;
+    let mm: i64 = t.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let ss: i64 = t.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
+        return None;
+    }
+    // days_from_civil (Howard Hinnant) : jours depuis 1970-01-01 pour une date grégorienne.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1; // [0,365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146097 + doe - 719468;
+    let epoch_utc = days * 86400 + hh * 3600 + mm * 60 + ss;
+    // l'horodatage civil était exprimé dans le fuseau `offset_secs` -> on revient à l'UTC.
+    Some(epoch_utc - offset_secs)
+}
+
+/// GET HTTP/1.1 minimal et BLOQUANT (lancé via spawn_blocking) — pas de dépendance HTTP lourde.
+/// Ne gère QUE `http://host[:port]/path` (Plume bind en HTTP clair, derrière Traefik/forward-auth
+/// en prod ; pour TLS, mettre PLUME_URL=http://service-cluster-interne). `basic_b64` non vide =>
+/// en-tête `Authorization: Basic <basic_b64>`. Renvoie le corps (string) en cas de 200, sinon Err.
+/// Timeout dur (connect + lecture) pour ne jamais bloquer le handler axum.
+fn http_get_blocking(url: &str, basic_b64: &str, timeout: Duration) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let rest = url.strip_prefix("http://").ok_or_else(|| "PLUME_URL doit commencer par http:// (TLS non géré côté console — utiliser un endpoint interne)".to_string())?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let host = authority.split(':').next().unwrap_or(authority);
+    let port: u16 = authority.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(80);
+    // résolution + connexion avec timeout (évite un blocage si Plume est down).
+    use std::net::ToSocketAddrs;
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("résolution {host}:{port} échouée: {e}"))?
+        .next()
+        .ok_or_else(|| format!("aucune adresse pour {host}:{port}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connexion {addr} échouée: {e}"))?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    let mut req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-console-purple\r\nAccept: application/json\r\nConnection: close\r\n"
+    );
+    if !basic_b64.is_empty() {
+        req.push_str(&format!("Authorization: Basic {basic_b64}\r\n"));
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).map_err(|e| format!("écriture requête échouée: {e}"))?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|e| format!("lecture réponse échouée: {e}"))?;
+    let text = String::from_utf8_lossy(&raw);
+    // sépare l'en-tête du corps (CRLFCRLF). Vérifie un statut 200.
+    let split = text.find("\r\n\r\n").ok_or_else(|| "réponse HTTP malformée (pas d'en-tête/corps)".to_string())?;
+    let head = &text[..split];
+    let status_line = head.lines().next().unwrap_or("");
+    if !status_line.contains(" 200") {
+        return Err(format!("statut HTTP inattendu: {status_line}"));
+    }
+    let body = &text[split + 4..];
+    // gère un éventuel Transfer-Encoding: chunked (Plume/axum peut chunker) — décode best-effort.
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        Ok(dechunk(body))
+    } else {
+        Ok(body.to_string())
+    }
+}
+
+/// Décode un corps HTTP `chunked` (best-effort) : tailles hex par ligne, terminé par un chunk 0.
+fn dechunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(nl) = rest.find("\r\n") {
+        let size_line = &rest[..nl];
+        // la taille peut porter des extensions après ';' — on ne garde que l'hex.
+        let hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = match usize::from_str_radix(hex, 16) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if size == 0 {
+            break;
+        }
+        let start = nl + 2;
+        let end = start + size;
+        if end > rest.len() {
+            out.push_str(&rest[start..]);
+            break;
+        }
+        out.push_str(&rest[start..end]);
+        // saute le CRLF de fin de chunk.
+        rest = if end + 2 <= rest.len() { &rest[end + 2..] } else { "" };
+    }
+    out
+}
+
+/// Corrélation PURE (testable, sans I/O) red-team(tiré) × blue-team(détecté).
+///
+/// - `fired` : techniques tirées par Forge -> (mitre, ts_epoch_du_tir Option). Une technique peut
+///   apparaître plusieurs fois (plusieurs tirs) ; on prend le tir le PLUS RÉCENT pour le MTTD (le SOC
+///   doit détecter le tir courant), et on compte les tirs.
+/// - `detections` : map mitre -> (count_alertes, first_ts_epoch) renvoyée par Plume.
+///
+/// Renvoie l'objet JSON exposé par /api/purple/coverage (hors champ plume_reachable, ajouté par
+/// le handler). detected/missed sont des intersections/différences STRICTES sur `mitre`.
+fn compute_purple_coverage(
+    fired: &[(String, Option<i64>)],
+    detections: &std::collections::HashMap<String, (i64, i64)>,
+) -> Value {
+    // agrège les tirs par technique : nb de tirs + horodatage du tir le plus récent (pour MTTD).
+    let mut fired_by: std::collections::BTreeMap<String, (i64, Option<i64>)> = std::collections::BTreeMap::new();
+    for (mitre, ts) in fired {
+        if mitre.is_empty() {
+            continue;
+        }
+        let e = fired_by.entry(mitre.clone()).or_insert((0, None));
+        e.0 += 1;
+        if let Some(t) = ts {
+            // on garde le tir le PLUS RÉCENT (max) -> MTTD calculé contre le dernier tir.
+            e.1 = Some(e.1.map_or(*t, |cur: i64| cur.max(*t)));
+        }
+    }
+
+    let mut detected: Vec<Value> = Vec::new();
+    let mut missed: Vec<Value> = Vec::new();
+    let mut mttd_samples: Vec<i64> = Vec::new();
+
+    for (mitre, (fires, last_fire_ts)) in &fired_by {
+        match detections.get(mitre) {
+            Some((count, first_ts)) => {
+                // MTTD = première détection - dernier tir. Indisponible si le ts du tir est illisible.
+                // Tronqué à 0 si négatif (détection antérieure = run précédent ; pas de gain négatif).
+                let mttd = last_fire_ts.map(|ft| (*first_ts - ft).max(0));
+                if let Some(m) = mttd {
+                    mttd_samples.push(m);
+                }
+                detected.push(json!({
+                    "mitre": mitre,
+                    "fires": fires,
+                    "alert_count": count,
+                    "first_detection_ts": first_ts,
+                    "fire_ts": last_fire_ts,
+                    "mttd_secs": mttd,
+                }));
+            }
+            None => {
+                missed.push(json!({
+                    "mitre": mitre,
+                    "fires": fires,
+                    "fire_ts": last_fire_ts,
+                }));
+            }
+        }
+    }
+
+    let n_fired = fired_by.len() as i64;
+    let n_detected = detected.len() as i64;
+    let n_missed = missed.len() as i64;
+    let detection_rate = if n_fired > 0 { n_detected as f64 / n_fired as f64 } else { 0.0 };
+    let mttd_avg = if !mttd_samples.is_empty() {
+        Some(mttd_samples.iter().sum::<i64>() as f64 / mttd_samples.len() as f64)
+    } else {
+        None
+    };
+    let mttd_max = mttd_samples.iter().copied().max();
+
+    json!({
+        "techniques_fired": n_fired,
+        "techniques_detected": n_detected,
+        "techniques_missed": n_missed,
+        "detection_rate": detection_rate,   // [0,1] — part des techniques tirées détectées par le SOC
+        "mttd_avg_secs": mttd_avg,           // null si aucun échantillon mesurable
+        "mttd_max_secs": mttd_max,           // null si aucun échantillon mesurable
+        "detected": detected,                // techniques tirées ET détectées (avec MTTD)
+        "missed": missed,                    // TROUS de détection : tirées mais jamais alertées
+    })
+}
+
+/// Construit l'objet de FAIL-OPEN LISIBLE (plume_reachable:false) : compte les techniques tirées
+/// (pour information) mais NE FABRIQUE PAS de detected/missed/MTTD. Réutilisé par tous les chemins
+/// où la mesure n'a pas pu se faire (Plume absent/injoignable/illisible, lecture DB échouée).
+fn purple_fail_open(plume_url: &str, fired: &[(String, Option<i64>)], reason: &str) -> Value {
+    let n_fired = fired
+        .iter()
+        .filter(|(m, _)| !m.is_empty())
+        .map(|(m, _)| m.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as i64;
+    json!({
+        "plume_reachable": false,
+        "plume_url": plume_url,
+        "error": reason,
+        "techniques_fired": n_fired,
+        "techniques_detected": 0,
+        "techniques_missed": 0,
+        "detection_rate": 0.0,
+        "mttd_avg_secs": Value::Null,
+        "mttd_max_secs": Value::Null,
+        "detected": [],
+        "missed": [],
+    })
+}
+
+/// Lit les techniques tirées (runrecord.fired=1, mitre non vide) + horodatage du tir, filtrées par
+/// une clause WHERE additionnelle (campaign ou run_id) déjà validée par l'appelant (param lié).
+fn read_fired_techniques(app: &App, extra_cond: Option<(&str, &str)>) -> Vec<(String, Option<i64>)> {
+    let db = app.db();
+    let (sql, args): (String, Vec<String>) = match extra_cond {
+        Some((col, val)) => (
+            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>'' AND {col}=?"),
+            vec![val.to_string()],
+        ),
+        None => (
+            "SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''".to_string(),
+            vec![],
+        ),
+    };
+    let mut stmt = match db.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+        let mitre: String = r.get::<_, Option<String>>(0)?.unwrap_or_default();
+        let ts_raw: String = r.get::<_, Option<String>>(1)?.unwrap_or_default();
+        Ok((mitre, parse_fire_ts(&ts_raw)))
+    })
+    .map(|it| it.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Interroge Plume et corrèle avec les techniques `fired` -> objet purple coverage complet.
+/// FAIL-OPEN LISIBLE à chaque étape qui peut échouer (URL absente, HTTP KO, JSON invalide) :
+/// `plume_reachable:false` + raison, JAMAIS de detected/missed/MTTD inventés. Réutilisé par
+/// l'endpoint /api/purple/coverage ET la section purple du rapport de run.
+async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> Value {
+    // FAIL-OPEN LISIBLE : Plume non configuré -> on n'invente RIEN.
+    if app.plume_url.is_empty() {
+        return purple_fail_open("", &fired, "PLUME_URL non configuré (couverture de détection indisponible)");
+    }
+    // côté BLUE : interroge Plume. `since` = plus ancien tir red (borne la fenêtre côté Plume) ;
+    // 0 si aucun tir horodaté lisible (on prend tout). Requête bloquante isolée dans spawn_blocking.
+    let since = fired.iter().filter_map(|(_, t)| *t).min().unwrap_or(0);
+    let url = format!("{}/api/coverage/detections?since={}", app.plume_url.as_str(), since);
+    let token = app.plume_token.as_str().to_string();
+    let timeout = Duration::from_secs(8);
+    let fetched = tokio::task::spawn_blocking(move || http_get_blocking(&url, &token, timeout))
+        .await
+        .unwrap_or_else(|e| Err(format!("tâche HTTP interrompue: {e}")));
+    let body = match fetched {
+        Ok(b) => b,
+        Err(e) => return purple_fail_open(app.plume_url.as_str(), &fired, &format!("Plume injoignable: {e}")),
+    };
+    // parse la réponse Plume {detections:[{mitre,count,first_ts}]}. Réponse illisible -> fail-open.
+    let parsed: Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => return purple_fail_open(app.plume_url.as_str(), &fired, &format!("réponse Plume illisible (JSON invalide): {e}")),
+    };
+    let mut detections: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    if let Some(arr) = parsed.get("detections").and_then(|v| v.as_array()) {
+        for d in arr {
+            let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("");
+            if mitre.is_empty() {
+                continue;
+            }
+            let count = d.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+            let first_ts = d.get("first_ts").and_then(|v| v.as_i64()).unwrap_or(0);
+            detections.insert(mitre.to_string(), (count, first_ts));
+        }
+    }
+    // corrélation pure -> réponse purple. plume_reachable:true (la mesure a bien eu lieu).
+    let mut cov = compute_purple_coverage(&fired, &detections);
+    if let Value::Object(ref mut m) = cov {
+        m.insert("plume_reachable".into(), json!(true));
+        m.insert("plume_url".into(), json!(app.plume_url.as_str()));
+    }
+    cov
+}
+
+/// GET /api/purple/coverage[?campaign=X] — couverture de DÉTECTION (purple-team défensif).
+/// Joint runrecord[fired=1] (techniques tirées en red-team Forge) avec les détections du SOC Plume
+/// (GET {PLUME_URL}/api/coverage/detections). Réponse :
+///   {
+///     "plume_reachable": bool,         // false => FAIL-OPEN lisible (mesure impossible, rien d'inventé)
+///     "plume_url": "...",              // pour traçabilité (vide si non configuré)
+///     "techniques_fired|detected|missed": i64,
+///     "detection_rate": f64,           // [0,1]
+///     "mttd_avg_secs"|"mttd_max_secs": f64|i64|null,
+///     "detected": [ {mitre, fires, alert_count, first_detection_ts, fire_ts, mttd_secs} ],
+///     "missed":   [ {mitre, fires, fire_ts} ],
+///     ("error": "...")                 // présent UNIQUEMENT si plume_reachable=false (raison lisible)
+///   }
+/// Si plume_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
+async fn purple_coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // côté RED : techniques tirées (fired=1) + horodatage du tir, filtrées par campaign optionnelle.
+    let fired = read_fired_techniques(&app, q.get("campaign").map(|c| ("campaign", c.as_str())));
+    (StatusCode::OK, Json(fetch_purple_coverage(&app, fired).await))
+}
+
+// ===========================================================================================
 // Endpoints de PARITÉ LECTURE / GOUVERNANCE (viewer, aucun spawn armé).
 //
 // Ces routes exposent la décision de scope, un plan « à blanc » (dry-plan, rien ne tire), le
@@ -1581,20 +1958,33 @@ async fn modules_refresh(State(app): State<App>, headers: HeaderMap) -> impl Int
 /// `forge.report.build_report` (synthèse, findings, transparence ROE). LECTURE (viewer).
 /// 404 si le run_id est inconnu de run_job.
 async fn run_report(State(app): State<App>, Path(id): Path<String>) -> Response {
-    let db = app.db();
-    // le run doit exister (sinon 404, comme run_detail).
-    let job = match db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), [&id], run_job_json) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
+    // le run doit exister (sinon 404, comme run_detail). Le verrou DB est confiné dans ce bloc :
+    // AUCUN MutexGuard rusqlite (!Send) ne doit survivre à l'await réseau plus bas.
+    let (job, fired) = {
+        let db = app.db();
+        let job = match db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), [&id], run_job_json) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
+        };
+        // PURPLE : techniques TIRÉES par CE run (red) — lues avant de relâcher le verrou.
+        drop(db);
+        let fired = read_fired_techniques(&app, Some(("run_id", &id)));
+        (job, fired)
     };
-    let md = render_run_report_md(&db, &id, &job);
+    // I/O réseau Plume HORS verrou DB. Fail-open lisible si Plume injoignable.
+    let purple = fetch_purple_coverage(&app, fired).await;
+    let md = {
+        let db = app.db();
+        render_run_report_md(&db, &id, &job, Some(&purple))
+    };
     (StatusCode::OK, [("content-type", "text/markdown; charset=utf-8")], md).into_response()
 }
 
 /// Rend le markdown du rapport d'un run depuis les données console (miroir de build_report Python) :
-/// synthèse par sévérité, findings détaillés, et section transparence ROE (FIRE/DRY_RUN/VETO/erreurs).
+/// synthèse par sévérité, findings détaillés, section transparence ROE (FIRE/DRY_RUN/VETO/erreurs),
+/// et section PURPLE (couverture de détection SOC : detected/missed/MTTD) quand `purple` est fourni.
 /// Les compteurs proviennent de run_job ; le détail des findings/verdicts des tables finding/roe_decision.
-fn render_run_report_md(db: &Connection, run_id: &str, job: &Value) -> String {
+fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>) -> String {
     const SEVERITIES: &[&str] = &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
     let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
     let mut out: Vec<String> = vec![
@@ -1743,7 +2133,71 @@ fn render_run_report_md(db: &Connection, run_id: &str, job: &Value) -> String {
         }
     }
 
+    // --- PURPLE : couverture de DÉTECTION (red tiré vs blue détecté). Optionnelle : présente
+    // seulement si l'appelant a fourni la mesure (le rapport API la joint ; le test la passe None).
+    if let Some(p) = purple {
+        render_purple_section(&mut out, p);
+    }
+
     out.join("\n")
+}
+
+/// Section markdown « Couverture détection (purple) » du rapport : detected / missed / MTTD.
+/// FAIL-OPEN LISIBLE : si `plume_reachable=false`, on l'indique explicitement et on n'affiche
+/// AUCUN détecté/raté (cohérent avec l'endpoint — un SOC muet n'est jamais « tout détecté »).
+fn render_purple_section(out: &mut Vec<String>, p: &Value) {
+    out.push("## Couverture détection (purple)".into());
+    out.push(String::new());
+    let reachable = p.get("plume_reachable").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !reachable {
+        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("colonne bleue (Plume) injoignable");
+        out.push(format!("_Mesure indisponible (fail-open) : {why}. Aucune couverture inventée._"));
+        out.push(String::new());
+        return;
+    }
+    let fired = p.get("techniques_fired").and_then(|v| v.as_i64()).unwrap_or(0);
+    let detected = p.get("techniques_detected").and_then(|v| v.as_i64()).unwrap_or(0);
+    let missed = p.get("techniques_missed").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rate = p.get("detection_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mttd_avg = p.get("mttd_avg_secs").and_then(|v| v.as_f64());
+    let mttd_max = p.get("mttd_max_secs").and_then(|v| v.as_i64());
+    out.push(format!("- **Techniques tirées (red)** : {fired}"));
+    out.push(format!("- **Détectées par le SOC (blue)** : {detected}  ·  **Taux de détection** : {:.0}%", rate * 100.0));
+    out.push(format!("- **Trous de détection (missed)** : {missed}"));
+    out.push(format!(
+        "- **MTTD moyen** : {}  ·  **MTTD max** : {}",
+        mttd_avg.map(|m| format!("{m:.0}s")).unwrap_or_else(|| "—".into()),
+        mttd_max.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
+    ));
+    out.push(String::new());
+    // détail des trous de détection (priorité blue-team : ce que le SOC n'a PAS vu).
+    if let Some(arr) = p.get("missed").and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            out.push("**Techniques NON détectées (trous SOC)**".into());
+            for m in arr {
+                let mitre = m.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+                let fires = m.get("fires").and_then(|v| v.as_i64()).unwrap_or(0);
+                out.push(format!("- `{mitre}` (tirée {fires}×) — aucune alerte SOC"));
+            }
+            out.push(String::new());
+        }
+    }
+    // détail des détections (avec MTTD par technique).
+    if let Some(arr) = p.get("detected").and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            out.push("**Techniques détectées (avec MTTD)**".into());
+            for d in arr {
+                let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+                let alert_count = d.get("alert_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                let mttd = d.get("mttd_secs").and_then(|v| v.as_i64());
+                out.push(format!(
+                    "- `{mitre}` — {alert_count} alerte(s), MTTD {}",
+                    mttd.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
+                ));
+            }
+            out.push(String::new());
+        }
+    }
 }
 
 // ===========================================================================================
@@ -2933,6 +3387,11 @@ async fn main() {
     // scope serveur autorisé : pré-filtre fail-closed des cibles lançables depuis le web.
     // Source : FORGE_CONSOLE_SCOPE (chemin d'un scope.json) ; sinon scope.json relatif au pkg_dir.
     let (scope_in, scope_mode) = load_server_scope(&pkg_dir);
+    // PURPLE (mesure de couverture de détection) : colonne BLEUE Plume (SOC). PLUME_URL vide =>
+    // /api/purple/coverage répond en FAIL-OPEN LISIBLE (plume_reachable:false). On normalise l'URL
+    // (retrait du '/' final) pour concaténer proprement le chemin.
+    let plume_url = std::env::var("PLUME_URL").unwrap_or_default().trim_end_matches('/').to_string();
+    let plume_token = std::env::var("PLUME_TOKEN").unwrap_or_default();
     let mut allowed = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
     if let Ok(h) = std::env::var("FORGE_CONSOLE_HOST") {
         if !h.is_empty() {
@@ -2971,6 +3430,13 @@ async fn main() {
         println!("[forge-console] C2 armé — rôle opérateur via en-tête X-Forge-Operator ; cibles ⊆ scope serveur ({} entrée(s)) ; exploit/destructif possibles UNIQUEMENT via opt-in haut-impact gouverné (allow_high_impact + arm + reason, journalisé au ledger) ; scope-guard moteur inchangé (hors-scope = VETO) ; watchdog={run_timeout_secs}s", scope_in.len());
     }
 
+    if plume_url.is_empty() {
+        println!("[forge-console] PURPLE OFF — PLUME_URL absent : /api/purple/coverage répondra en fail-open lisible (plume_reachable:false). Pose PLUME_URL (+ PLUME_TOKEN base64 user:pass) pour mesurer la couverture de détection SOC.");
+    } else {
+        println!("[forge-console] PURPLE armé — couverture de détection via GET {plume_url}/api/coverage/detections (auth {}) ; LECTURE seule, joint runrecord[fired] (red) vs détections Plume (blue).",
+            if plume_token.is_empty() { "anonyme (SOC_PUBLIC_DEMO)" } else { "Basic" });
+    }
+
     let (events, _) = broadcast::channel::<RunEvent>(1024);
     let app = App {
         db: Arc::new(Mutex::new(conn)),
@@ -2986,6 +3452,8 @@ async fn main() {
         python: Arc::new(python),
         scope_in: Arc::new(scope_in),
         scope_mode: Arc::new(scope_mode),
+        plume_url: Arc::new(plume_url),
+        plume_token: Arc::new(plume_token),
         run_timeout_secs,
         run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
         events,
@@ -3002,6 +3470,7 @@ async fn main() {
         .route("/api/findings/:id", get(finding_detail))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
+        .route("/api/purple/coverage", get(purple_coverage))
         .route("/api/modules", get(modules))
         .route("/api/modules/refresh", post(modules_refresh))
         .route("/api/campaigns", get(campaigns))
@@ -3065,6 +3534,8 @@ mod tests {
             python: Arc::new("python3".into()),
             scope_in: Arc::new(vec![]),
             scope_mode: Arc::new("grey".into()),
+            plume_url: Arc::new(String::new()),
+            plume_token: Arc::new(String::new()),
             run_timeout_secs: 1800,
             run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
             events,
@@ -3274,7 +3745,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         let db = app.db();
         let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
-        let md = render_run_report_md(&db, "run-1", &job);
+        let md = render_run_report_md(&db, "run-1", &job, None);
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
         assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu");
@@ -3283,6 +3754,147 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(md.contains("**Simulées (DRY_RUN)** : 2"), "compteur dry_run depuis run_job");
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// [purple] parse_fire_ts : l'ISO-8601 UTC émis par Forge -> epoch s correct (ancrage connu),
+    /// offsets honorés (Z, +02:00, -05:00), fractions ignorées, epoch nu toléré, illisible -> None.
+    #[test]
+    fn parse_fire_ts_iso_to_epoch() {
+        // 2026-06-26T00:00:00Z == 1782432000 (UTC). Vérifié par days_from_civil.
+        assert_eq!(parse_fire_ts("2026-06-26T00:00:00+00:00"), Some(1782432000));
+        assert_eq!(parse_fire_ts("2026-06-26T00:00:00Z"), Some(1782432000));
+        // offset +02:00 -> le même instant UTC est 2h plus tôt -> epoch - 7200.
+        assert_eq!(parse_fire_ts("2026-06-26T02:00:00+02:00"), Some(1782432000));
+        // offset -05:00 -> 5h plus tard en UTC.
+        assert_eq!(parse_fire_ts("2026-06-25T19:00:00-05:00"), Some(1782432000));
+        // fraction de seconde ignorée.
+        assert_eq!(parse_fire_ts("2026-06-26T00:00:00.512Z"), Some(1782432000));
+        // epoch nu toléré (défensif).
+        assert_eq!(parse_fire_ts("1782432000"), Some(1782432000));
+        // illisible -> None (MTTD marqué indisponible, jamais inventé).
+        assert_eq!(parse_fire_ts(""), None);
+        assert_eq!(parse_fire_ts("pas-une-date"), None);
+        // l'epoch Unix (référence) doit retomber sur 0.
+        assert_eq!(parse_fire_ts("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    /// [purple] compute_purple_coverage : detected = intersection sur mitre, missed = techniques
+    /// tirées absentes des détections, MTTD = first_detection - dernier tir (tronqué >=0), agrégats.
+    #[test]
+    fn compute_purple_coverage_detected_missed_mttd() {
+        // T1110 tiré 2× (dernier tir @1000), détecté @1042 (MTTD=42) ; T1190 tiré @2000 détecté @1990
+        // (détection ANTÉRIEURE -> MTTD tronqué à 0) ; T1046 tiré @3000 jamais détecté (missed).
+        let fired = vec![
+            ("T1110".to_string(), Some(500)),
+            ("T1110".to_string(), Some(1000)),
+            ("T1190".to_string(), Some(2000)),
+            ("T1046".to_string(), Some(3000)),
+            ("".to_string(), Some(9)), // mitre vide ignoré
+        ];
+        let mut det = std::collections::HashMap::new();
+        det.insert("T1110".to_string(), (3i64, 1042i64));
+        det.insert("T1190".to_string(), (1i64, 1990i64));
+        let cov = compute_purple_coverage(&fired, &det);
+        assert_eq!(cov["techniques_fired"], json!(3), "3 techniques distinctes tirées (mitre vide exclu)");
+        assert_eq!(cov["techniques_detected"], json!(2), "T1110 + T1190 détectées");
+        assert_eq!(cov["techniques_missed"], json!(1), "T1046 = trou de détection");
+        // taux 2/3.
+        let rate = cov["detection_rate"].as_f64().unwrap();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9, "taux de détection = 2/3");
+        // MTTD : T1110 = 1042-1000 = 42 ; T1190 = max(1990-2000,0) = 0 -> moyenne 21, max 42.
+        assert_eq!(cov["mttd_avg_secs"].as_f64().unwrap(), 21.0);
+        assert_eq!(cov["mttd_max_secs"], json!(42));
+        // missed contient bien T1046.
+        let missed = cov["missed"].as_array().unwrap();
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0]["mitre"], json!("T1046"));
+        assert_eq!(missed[0]["fires"], json!(1));
+        // detected T1110 porte fires=2 (dernier tir retenu pour le MTTD) et mttd_secs=42.
+        let detected = cov["detected"].as_array().unwrap();
+        let t1110 = detected.iter().find(|d| d["mitre"] == json!("T1110")).unwrap();
+        assert_eq!(t1110["fires"], json!(2));
+        assert_eq!(t1110["mttd_secs"], json!(42));
+        assert_eq!(t1110["alert_count"], json!(3));
+    }
+
+    /// [purple FAIL-OPEN] aucune détection (SOC muet, map vide) NE produit PAS « tout détecté » :
+    /// toutes les techniques tirées tombent en missed, taux 0, aucun MTTD inventé (null).
+    #[test]
+    fn compute_purple_coverage_empty_detections_all_missed() {
+        let fired = vec![("T1110".to_string(), Some(1000)), ("T1046".to_string(), Some(2000))];
+        let det = std::collections::HashMap::new();
+        let cov = compute_purple_coverage(&fired, &det);
+        assert_eq!(cov["techniques_detected"], json!(0), "rien détecté");
+        assert_eq!(cov["techniques_missed"], json!(2), "tout en trou de détection");
+        assert_eq!(cov["detection_rate"], json!(0.0));
+        assert_eq!(cov["mttd_avg_secs"], Value::Null, "aucun MTTD inventé");
+        assert_eq!(cov["mttd_max_secs"], Value::Null);
+        assert!(cov["detected"].as_array().unwrap().is_empty());
+    }
+
+    /// [purple FAIL-OPEN LISIBLE] purple_fail_open : plume_reachable=false, raison présente,
+    /// detected/missed VIDES et compteurs/MTTD nuls — un SOC injoignable n'est ni « tout détecté »
+    /// ni « tout raté ». techniques_fired reste informatif (distinctes, mitre vide exclu).
+    #[test]
+    fn purple_fail_open_invents_nothing() {
+        let fired = vec![
+            ("T1110".to_string(), Some(1000)),
+            ("T1110".to_string(), Some(1100)),
+            ("T1046".to_string(), Some(2000)),
+            ("".to_string(), None),
+        ];
+        let v = purple_fail_open("http://plume:7000", &fired, "Plume injoignable: timeout");
+        assert_eq!(v["plume_reachable"], json!(false));
+        assert_eq!(v["plume_url"], json!("http://plume:7000"));
+        assert_eq!(v["error"], json!("Plume injoignable: timeout"));
+        assert_eq!(v["techniques_fired"], json!(2), "T1110+T1046 distinctes, mitre vide exclu");
+        assert_eq!(v["techniques_detected"], json!(0));
+        assert_eq!(v["techniques_missed"], json!(0), "rien classé missed quand la mesure est impossible");
+        assert_eq!(v["detection_rate"], json!(0.0));
+        assert_eq!(v["mttd_avg_secs"], Value::Null);
+        assert!(v["detected"].as_array().unwrap().is_empty());
+        assert!(v["missed"].as_array().unwrap().is_empty());
+    }
+
+    /// [purple report] render_purple_section : la section markdown reflète detected/missed/MTTD
+    /// quand plume_reachable=true, et affiche le fail-open lisible (sans couverture inventée) sinon.
+    #[test]
+    fn render_purple_section_reachable_and_fail_open() {
+        // cas joignable : section avec compteurs + trous.
+        let cov = json!({
+            "plume_reachable": true,
+            "techniques_fired": 2, "techniques_detected": 1, "techniques_missed": 1,
+            "detection_rate": 0.5, "mttd_avg_secs": 42.0, "mttd_max_secs": 42,
+            "detected": [{"mitre": "T1110", "alert_count": 3, "mttd_secs": 42}],
+            "missed": [{"mitre": "T1046", "fires": 1}],
+        });
+        let mut out: Vec<String> = Vec::new();
+        render_purple_section(&mut out, &cov);
+        let md = out.join("\n");
+        assert!(md.contains("## Couverture détection (purple)"));
+        assert!(md.contains("**Techniques tirées (red)** : 2"));
+        assert!(md.contains("**Taux de détection** : 50%"));
+        assert!(md.contains("`T1046` (tirée 1×) — aucune alerte SOC"), "trou de détection listé");
+        assert!(md.contains("`T1110` — 3 alerte(s), MTTD 42s"), "détection avec MTTD listée");
+
+        // cas fail-open : la section l'indique explicitement, sans détecté/raté.
+        let fo = purple_fail_open("", &[("T1110".to_string(), Some(1))], "PLUME_URL non configuré");
+        let mut out2: Vec<String> = Vec::new();
+        render_purple_section(&mut out2, &fo);
+        let md2 = out2.join("\n");
+        assert!(md2.contains("## Couverture détection (purple)"));
+        assert!(md2.contains("Mesure indisponible (fail-open)"), "fail-open lisible dans le rapport");
+        assert!(md2.contains("PLUME_URL non configuré"));
+        assert!(!md2.contains("aucune alerte SOC"), "aucun trou inventé en fail-open");
+    }
+
+    /// [purple http] http_get_blocking : rejette une URL non-http:// (TLS non géré) avec un message
+    /// lisible — garantit que la console ne tente pas un handshake qu'elle ne sait pas faire.
+    #[test]
+    fn http_get_blocking_rejects_non_http() {
+        let e = http_get_blocking("https://plume:7000/api/coverage/detections", "", Duration::from_millis(50));
+        assert!(e.is_err(), "https non géré -> Err");
+        assert!(e.unwrap_err().contains("http://"), "message lisible mentionnant http://");
     }
 
     /// [parité lecture] validate_host : /api/scope-check rejette les cibles malformées (métacaractères,
