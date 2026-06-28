@@ -1,5 +1,10 @@
 # Forge — Plan & Roadmap
 
+> ✅ MISE À JOUR 2026-06-28 — **Étape 2** (P1 vendable : reporting + comptes) & **Étape 3**
+> (crédibilité offensive) ainsi que le **blocker #6** (comptes utilisateurs / attribution
+> individuelle) sont **LIVRÉS dans `f3495d6`**. Seul reste ouvert ⏳ le **blocker #5**
+> (vrai finding terrain réel). Le reste de ce plan est conservé pour l'historique et le contexte.
+
 ## Positionnement
 
 Forge = couche d'orchestration red-team **GOUVERNÉE** + mesure **PURPLE**, companion de
