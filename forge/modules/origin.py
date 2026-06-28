@@ -115,6 +115,10 @@ class OriginFind(Module):
                        else "IP hors-CDN (origine non confirmée)"),
                 severity=("HIGH" if verified else "INFO"),
                 category="origin-exposure", mitre="T1590.005",
+                fix=("Restreindre l'accès à l'IP d'origine au seul CDN/WAF : allowlist des plages IP du "
+                     "fournisseur (ex: Cloudflare) au niveau pare-feu/groupe de sécurité et refuser tout "
+                     "trafic direct, afin de rendre l'origine non joignable hors du CDN (et de fermer le "
+                     "contournement de WAF)."),
                 status=("vulnerable" if verified else "tested"),
                 tool="subfinder+httpx",
                 evidence=(f"{s} -> {ip} ; host-header check={verified} ; "

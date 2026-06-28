@@ -85,6 +85,9 @@ class _MsfRpcStub(BaseHTTPRequestHandler):
     CALLS = []                                              # [(method, args...)]
     FAIL_AUTH = False
     EXEC_RESULT = {"job_id": 42, "uuid": "deadbeef", "result": "success"}
+    # session.list renvoie cette map. {} = aucune session (exploit lancé mais pas de shell).
+    # Pour simuler une compromission RÉELLE, on y met une session corrélée à l'uuid du job.
+    SESSIONS = {}
 
     def log_message(self, *a):
         pass
@@ -100,6 +103,8 @@ class _MsfRpcStub(BaseHTTPRequestHandler):
                     else {"result": "success", "token": "TEMP-TOKEN-123"})
         elif method == "module.execute":
             resp = dict(_MsfRpcStub.EXEC_RESULT)
+        elif method == "session.list":
+            resp = {str(k): dict(v) for k, v in _MsfRpcStub.SESSIONS.items()}
         else:
             resp = {"error": True, "error_message": f"unknown {method}"}
         payload = mp_pack(resp)
@@ -176,6 +181,7 @@ class TestMsfAgainstStub(unittest.TestCase):
         _MsfRpcStub.CALLS.clear()
         _MsfRpcStub.FAIL_AUTH = False
         _MsfRpcStub.EXEC_RESULT = {"job_id": 42, "uuid": "deadbeef", "result": "success"}
+        _MsfRpcStub.SESSIONS = {}                           # par défaut : aucune session ouverte
         # pointe la config vers le stub local (HTTP, pas SSL)
         os.environ["MSF_RPC_HOST"] = "127.0.0.1"
         os.environ["MSF_RPC_PORT"] = str(self.port)
@@ -199,31 +205,73 @@ class TestMsfAgainstStub(unittest.TestCase):
         os.environ["MSF_RPC_PORT"] = "1"                   # port mort -> connect refusé
         self.assertFalse(mods.get("msf.module").available)
 
-    def test_exploit_module_login_then_execute_and_maps_vulnerable(self):
+    def test_exploit_with_session_maps_vulnerable_with_proof(self):
+        # COMPROMISSION RÉELLE : le poll session.list voit une NOUVELLE session corrélée à l'uuid
+        # du job -> PREUVE -> vulnerable, avec le session-id dans l'evidence.
+        _MsfRpcStub.SESSIONS = {"3": {"type": "meterpreter", "exploit_uuid": "deadbeef",
+                                      "session_host": "10.0.0.5"}}
         f = MsfModule().fire(self._action(
             msf_module="exploit/multi/http/example", msf_type="exploit",
-            msf_options={"RHOSTS": "app.test"}))
+            msf_options={"RHOSTS": "app.test"}, max_polls=3, poll_interval=0))
         self.assertEqual(len(f), 1)
         fin = f[0]
-        # transport : auth.login PUIS module.execute (avec le token retourné)
+        # transport : auth.login -> session.list (snapshot pré-tir) -> module.execute -> session.list (poll)
         methods = [c[0] for c in _MsfRpcStub.CALLS]
-        self.assertEqual(methods, ["auth.login", "module.execute"])
-        self.assertEqual(_MsfRpcStub.CALLS[1][1], "TEMP-TOKEN-123")   # token réinjecté
-        self.assertEqual(_MsfRpcStub.CALLS[1][2], "exploit")          # type
-        self.assertEqual(_MsfRpcStub.CALLS[1][3], "exploit/multi/http/example")
-        # mapping : exploit lancé -> vulnerable, sévérité HIGH, tool msfrpcd:{name}
+        self.assertEqual(methods[0], "auth.login")
+        self.assertIn("module.execute", methods)
+        self.assertIn("session.list", methods)
+        self.assertLess(methods.index("session.list"), methods.index("module.execute"))  # snapshot d'abord
+        # le token retourné est réinjecté dans module.execute
+        exec_call = next(c for c in _MsfRpcStub.CALLS if c[0] == "module.execute")
+        self.assertEqual(exec_call[1], "TEMP-TOKEN-123")
+        self.assertEqual(exec_call[2], "exploit")
+        self.assertEqual(exec_call[3], "exploit/multi/http/example")
+        # mapping : session obtenue -> vulnerable, sévérité HIGH, session-id en evidence
         self.assertEqual(fin.status, "vulnerable")
         self.assertEqual(fin.severity, "HIGH")
         self.assertIn("exploit/multi/http/example", fin.tool)
         self.assertEqual(fin.mitre, "T1210")
-        self.assertIn("job_id=42", fin.evidence)
+        self.assertIn("session 3", fin.title)
+        self.assertIn("session 3", fin.evidence)
+        self.assertIn("10.0.0.5", fin.evidence)
+
+    def test_exploit_without_session_is_reported_by_tool_not_vulnerable(self):
+        # FIX FAUX-POSITIF : job lancé (job_id rendu) MAIS aucune session dans le budget de poll
+        # -> PAS de preuve de shell -> reported_by_tool, JAMAIS vulnerable.
+        _MsfRpcStub.SESSIONS = {}                            # aucune session n'apparaît
+        f = MsfModule().fire(self._action(
+            msf_module="exploit/multi/http/example", msf_type="exploit",
+            msf_options={"RHOSTS": "app.test"}, max_polls=2, poll_interval=0))[0]
+        self.assertEqual(f.status, "reported_by_tool")      # surtout PAS "vulnerable"
+        self.assertNotEqual(f.status, "vulnerable")
+        self.assertIn("sans session", f.title)
+        self.assertIn("job_id=42", f.evidence)
+        # le poll a bien interrogé session.list (au moins une fois après module.execute)
+        methods = [c[0] for c in _MsfRpcStub.CALLS]
+        self.assertGreaterEqual(methods.count("session.list"), 2)  # snapshot + >=1 poll
+
+    def test_exploit_session_uncorrelated_preexisting_is_ignored(self):
+        # Une session PRÉ-EXISTANTE (présente avant le tir, non corrélée à l'uuid) ne doit PAS
+        # être prise pour une preuve : sinon faux positif par session d'une autre campagne.
+        _MsfRpcStub.SESSIONS = {"1": {"type": "shell", "exploit_uuid": "OTHER-JOB",
+                                      "session_host": "192.168.0.9"}}
+        f = MsfModule().fire(self._action(
+            msf_module="exploit/multi/http/example", msf_type="exploit",
+            msf_options={"RHOSTS": "app.test"}, max_polls=2, poll_interval=0))[0]
+        # la session 1 existe AVANT module.execute (snapshot la capture) et n'est pas corrélée
+        # à l'uuid "deadbeef" -> aucune session nouvelle -> reported_by_tool.
+        self.assertEqual(f.status, "reported_by_tool")
 
     def test_auxiliary_module_is_reported_by_tool_not_vulnerable(self):
-        # auxiliary lancé -> reported_by_tool (l'OUTIL a tourné, pas de promotion en vulnerable)
+        # auxiliary lancé -> reported_by_tool (l'OUTIL a tourné, pas de promotion en vulnerable).
+        # Même si des sessions traînent, un auxiliary n'ouvre pas de session -> AUCUN poll.
+        _MsfRpcStub.SESSIONS = {"9": {"type": "shell", "exploit_uuid": "deadbeef"}}
         f = MsfModule().fire(self._action(
             msf_module="auxiliary/scanner/http/title", msf_type="auxiliary"))[0]
         self.assertEqual(f.status, "reported_by_tool")
         self.assertEqual(f.severity, "LOW")
+        methods = [c[0] for c in _MsfRpcStub.CALLS]
+        self.assertNotIn("session.list", methods)           # pas de poll pour un non-exploit
 
     def test_token_skips_login(self):
         os.environ["MSF_RPC_TOKEN"] = "PERM-TOKEN"

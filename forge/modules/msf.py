@@ -10,6 +10,18 @@ auto-contenu (sous-ensemble : nil/bool/int/str/bin/array/map) pour rester PUR-ST
 dépendance dure, comme le reste du cœur Forge. `available` sonde le service À FIRE-TIME (TTL
 court), JAMAIS au catalogue : lister les modules ne doit pas marteler le réseau.
 
+Oracle À PREUVE (anti-faux-positif structurel) : `module.execute` est FIRE-AND-FORGET — il rend un
+`job_id`/`uuid` dès que le job DÉMARRE, AVANT de savoir si l'exploit a réussi. Promouvoir en
+`vulnerable` sur ce seul signal = faux positif systématique (« job lancé » ≠ « cible compromise »).
+Donc, pour un module de type 'exploit', on PRÉLÈVE les sessions AVANT le tir (`session.list`), puis
+on POLLE `session.list` après `module.execute` (budget BORNÉ : max_polls × poll_interval) à la
+recherche d'une session NOUVELLE — corrélée par `exploit_uuid == uuid` du job quand disponible,
+sinon toute session apparue qui n'existait pas dans le snapshot pré-tir. La PREUVE = une session
+réellement ouverte ; on n'émet `vulnerable` QU'À CETTE CONDITION et on expose le SESSION-ID dans
+l'evidence du Finding. Sans session dans le budget -> `reported_by_tool` (l'outil a tiré, aucune
+preuve de shell). auxiliary/scanner/post n'ouvrent pas de session -> jamais de poll, jamais de
+`vulnerable` (au mieux `reported_by_tool`).
+
 Gouvernance (héritée automatiquement de l'engine/ROE autour de fire(), NON contournée ici) :
   - Un module MSF de type 'exploit' -> ce connecteur déclare `exploit=True` POUR CETTE ACTION
     (via _exploit_for) => l'engine exige allow_exploit (opt-in fort-impact) avant de tirer.
@@ -24,6 +36,7 @@ permanent). action.params peut surcharger (host/port/user/pass/ssl/token).
 import os
 import socket
 import struct
+import time
 import urllib.error
 import urllib.request
 
@@ -256,7 +269,13 @@ class MsfModule(Module):
     web_allowed = False                               # lancé via opérateur/opt-in, PAS surface web recon
     mitre = "T1210"                                   # Exploitation of Remote Services
     description = ("Pilote msfrpcd (RPC msgpack) : lance le module Metasploit choisi par "
-                  "l'opérateur et mappe son résultat en Finding(s). Aucun payload généré par Forge.")
+                  "l'opérateur, POLLE session.list (budget borné) et ne promeut en vulnerable "
+                  "QU'avec une session réellement obtenue (PREUVE) — sinon reported_by_tool.")
+
+    # Budget de poll BORNÉ après un exploit : max_polls × poll_interval (surchargés par params).
+    # Défauts modestes (un module à 1 session ouvre vite ; on ne martèle pas msfrpcd).
+    _POLL_INTERVAL = 1.0
+    _MAX_POLLS = 15                                    # ~15s par défaut
 
     @property
     def available(self):
@@ -308,6 +327,9 @@ class MsfModule(Module):
 
         try:
             token = self._login(cfg)
+            # Snapshot des sessions AVANT le tir (seulement pour un exploit : on corrèle une
+            # session NOUVELLE après coup). session.list ne lève pas le test hors-exploit.
+            pre_sessions = self._session_ids(cfg, token) if is_exploit else set()
             res = _rpc_call(cfg, "module.execute", token, mtype, name, opts)
         except (urllib.error.URLError, OSError, RuntimeError, ValueError) as e:
             return [self.finding(
@@ -315,10 +337,54 @@ class MsfModule(Module):
                 category="msf", status="tested", tool="msfrpcd",
                 evidence=str(e)[:500], poc=self.dry(action))]
 
-        return self._map_result(action, name, mtype, is_exploit, opts, res)
+        return self._map_result(action, cfg, token, name, mtype, is_exploit, opts, res, pre_sessions)
 
-    def _map_result(self, action, name, mtype, is_exploit, opts, res):
-        """Mappe la réponse module.execute (job_id / uuid / error) en Finding(s)."""
+    @staticmethod
+    def _session_ids(cfg, token):
+        """Ensemble des session-ids ACTUELS (session.list -> map {id: info}). Vide si erreur/aucune."""
+        try:
+            res = _rpc_call(cfg, "session.list", token, timeout=10)
+        except (urllib.error.URLError, OSError, ValueError):
+            return set()
+        if isinstance(res, dict) and not res.get("error"):
+            return {str(k) for k in res.keys()}
+        return set()
+
+    def _session_table(self, cfg, token):
+        """La map complète des sessions (session.list). {} si erreur/aucune session."""
+        try:
+            res = _rpc_call(cfg, "session.list", token, timeout=10)
+        except (urllib.error.URLError, OSError, ValueError):
+            return {}
+        return res if (isinstance(res, dict) and not res.get("error")) else {}
+
+    def _poll_for_session(self, action, cfg, token, uuid, pre_sessions):
+        """Poll BORNÉ de session.list : renvoie (session_id, info) d'une session NOUVELLE, ou
+        (None, None) si rien dans le budget. Corrélation : exploit_uuid == uuid du job si présent,
+        sinon premier id absent du snapshot pré-tir."""
+        p = action.params or {}
+        max_polls = int(p.get("max_polls") or self._MAX_POLLS)
+        interval = float(p.get("poll_interval") or self._POLL_INTERVAL)
+        for _ in range(max(1, max_polls)):
+            table = self._session_table(cfg, token)
+            # 1) corrélation forte par exploit_uuid (la session porte l'uuid du job qui l'a ouverte).
+            if uuid:
+                for sid, info in table.items():
+                    if isinstance(info, dict) and str(info.get("exploit_uuid") or "") == str(uuid):
+                        return str(sid), info
+            # 2) à défaut, toute session apparue qui n'existait pas avant le tir.
+            for sid in table:
+                if str(sid) not in pre_sessions:
+                    return str(sid), table[sid]
+            time.sleep(interval)
+        return None, None
+
+    def _map_result(self, action, cfg, token, name, mtype, is_exploit, opts, res, pre_sessions):
+        """Mappe module.execute (job_id/uuid/error) en Finding(s).
+
+        Pour un exploit lancé : on POLLE session.list ; `vulnerable` UNIQUEMENT si une session
+        réelle est obtenue (PREUVE, session-id dans l'evidence). Sinon `reported_by_tool`.
+        auxiliary/scanner/post lancé : `reported_by_tool` (l'outil a tourné), jamais `vulnerable`."""
         sev = _SEV_BY_TYPE.get(mtype, "INFO")
         if isinstance(res, dict) and res.get("error"):
             return [self.finding(
@@ -331,17 +397,42 @@ class MsfModule(Module):
         job_id = res.get("job_id") if isinstance(res, dict) else None
         uuid = res.get("uuid") if isinstance(res, dict) else None
         launched = isinstance(res, dict) and (res.get("result") == "success" or job_id is not None or uuid)
-        # exploit lancé -> vulnerable (preuve = job actif côté MSF) ; auxiliary/scanner/post lancé
-        # -> reported_by_tool (l'OUTIL a tourné, la preuve d'impact reste à confirmer côté MSF).
-        status = ("vulnerable" if (launched and is_exploit)
-                  else "reported_by_tool" if launched else "tested")
-        title = (f"MSF exploit lancé: {name} (job {job_id})" if is_exploit and launched
-                 else f"MSF {mtype} lancé: {name}" if launched
-                 else f"MSF {name} — réponse inattendue")
+
+        if not launched:
+            return [self.finding(
+                target=action.target, title=f"MSF {name} — réponse inattendue",
+                severity="INFO", category="msf", mitre=self.mitre, status="tested",
+                tool=f"msfrpcd:{name}",
+                evidence=f"type={mtype} exploit={is_exploit} job_id={job_id} uuid={uuid} options={opts} raw={str(res)[:400]}",
+                poc=self.dry(action))]
+
+        # Exploit lancé -> POLL pour une session : la PREUVE de compromission.
+        if is_exploit:
+            sid, sinfo = self._poll_for_session(action, cfg, token, uuid, pre_sessions)
+            if sid is not None:
+                stype = (sinfo.get("type") if isinstance(sinfo, dict) else None) or "?"
+                shost = (sinfo.get("session_host") or sinfo.get("target_host")
+                         if isinstance(sinfo, dict) else None) or action.target
+                return [self.finding(
+                    target=action.target, title=f"MSF exploit RÉUSSI: {name} (session {sid})",
+                    severity=sev, category="msf", mitre=self.mitre, status="vulnerable",
+                    tool=f"msfrpcd:{name}",
+                    evidence=(f"PREUVE: session {sid} ouverte (type={stype} host={shost} "
+                              f"exploit_uuid={uuid}) via job_id={job_id} options={opts}"),
+                    poc=self.dry(action))]
+            # Lancé mais AUCUNE session dans le budget -> pas de preuve -> reported_by_tool.
+            return [self.finding(
+                target=action.target, title=f"MSF exploit lancé (sans session): {name} (job {job_id})",
+                severity=sev, category="msf", mitre=self.mitre, status="reported_by_tool",
+                tool=f"msfrpcd:{name}",
+                evidence=(f"job lancé sans session obtenue dans le budget de poll "
+                          f"(job_id={job_id} uuid={uuid} options={opts}) — PAS de preuve de shell"),
+                poc=self.dry(action))]
+
+        # auxiliary/scanner/post lancé -> l'outil a tourné, pas de session attendue.
         return [self.finding(
-            target=action.target, title=title,
-            severity=(sev if launched else "INFO"),
-            category="msf", mitre=self.mitre, status=status,
+            target=action.target, title=f"MSF {mtype} lancé: {name}",
+            severity=sev, category="msf", mitre=self.mitre, status="reported_by_tool",
             tool=f"msfrpcd:{name}",
             evidence=f"type={mtype} exploit={is_exploit} job_id={job_id} uuid={uuid} options={opts} raw={str(res)[:400]}",
             poc=self.dry(action))]

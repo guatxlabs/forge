@@ -309,8 +309,10 @@ class TestIdorCurlPoc(unittest.TestCase):
 
     def test_idor_fire_poc_uses_b_headers(self):
         # fire() doit produire un PoC rejouable avec les en-têtes du compte B (l'attaquant).
+        # _fetch durci -> 3-uple (status, body, content_type).
         orig_fetch = IdorDifferential._fetch
-        IdorDifferential._fetch = staticmethod(lambda url, headers, timeout=15: (200, "body"))
+        IdorDifferential._fetch = staticmethod(
+            lambda url, headers, timeout=15, method="GET", body=None: (200, "body", "text/plain"))
         self.addCleanup(lambda: setattr(IdorDifferential, "_fetch", staticmethod(orig_fetch)))
         action = Action("access_control.idor", "https://app.test", params={
             "accounts": [{"headers": {"Authorization": "A"}},

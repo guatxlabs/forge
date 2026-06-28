@@ -225,22 +225,26 @@ class TestToolFailedHelper(unittest.TestCase):
 
 
 class TestIdorOracleDifferential(unittest.TestCase):
-    """Oracle différentiel access_control.idor : monkeypatch _fetch (zéro réseau)."""
+    """Oracle différentiel access_control.idor DURCI : monkeypatch _fetch (zéro réseau).
 
-    def _run_with_fetch(self, fetch_map):
+    Le _fetch durci renvoie un 3-uple (status, body, content_type) ; l'oracle compare le HASH du
+    corps NORMALISÉ (CSRF/nonce/horodatages retirés) + content-type, pas un préfixe brut.
+    """
+
+    def _run_with_fetch(self, fetch_map, params=None, target="https://app.test/obj/1"):
         mod = IdorDifferential()
-        # fetch_map: (url, role) -> (status, body) ; role = 'A'|'B'|'anon'
-        def fake_fetch(url, headers, timeout=15):
+        # fetch_map: (url, role) -> (status, body, content_type) ; role = 'A'|'B'|'anon'
+        def fake_fetch(url, headers, timeout=15, method="GET", body=None):
             role = (headers or {}).get("X-Role", "anon")
             return fetch_map[(url, role)]
         orig = IdorDifferential._fetch
         IdorDifferential._fetch = staticmethod(fake_fetch)
         try:
-            action = Action("access_control.idor", "https://app.test/obj/1",
-                            params={"accounts": [{"headers": {"X-Role": "A"}},
-                                                 {"headers": {"X-Role": "B"}}],
-                                    "urls": ["https://app.test/obj/1"]})
-            return mod.fire(action)
+            base = {"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
+                    "urls": ["https://app.test/obj/1"]}
+            if params:
+                base.update(params)
+            return mod.fire(Action("access_control.idor", target, params=base))
         finally:
             IdorDifferential._fetch = orig
 
@@ -248,24 +252,37 @@ class TestIdorOracleDifferential(unittest.TestCase):
         u = "https://app.test/obj/1"
         same = "X" * 600                                         # corps identique A et B
         findings = self._run_with_fetch({
-            (u, "A"): (200, same),
-            (u, "B"): (200, same),
-            (u, "anon"): (401, ""),
+            (u, "A"): (200, same, "application/json"),
+            (u, "B"): (200, same, "application/json"),
+            (u, "anon"): (401, "", ""),
         })
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "HIGH")
         self.assertEqual(findings[0].status, "vulnerable")
-        self.assertIn("IDOR PROBABLE", findings[0].title)
+        self.assertIn("IDOR CONFIRMÉ", findings[0].title)
+
+    def test_vulnerable_despite_volatile_csrf_token_differs(self):
+        # FAUX NÉGATIF corrigé : même objet, mais le token CSRF diffère entre A et B -> doit rester vuln
+        # (l'ancien oracle comparait corps[:500] bruts et aurait raté ça).
+        u = "https://app.test/obj/1"
+        a = '{"csrf_token":"AAAAAAAAAAAA","balance":4200,"owner":"alice"}'
+        b = '{"csrf_token":"ZZZZZZZZZZZZ","balance":4200,"owner":"alice"}'
+        findings = self._run_with_fetch({
+            (u, "A"): (200, a, "application/json"),
+            (u, "B"): (200, b, "application/json"),
+            (u, "anon"): (403, "", ""),
+        })
+        self.assertEqual(findings[0].status, "vulnerable")      # normalisation neutralise le token volatil
 
     def test_not_vulnerable_when_b_refused(self):
         u = "https://app.test/obj/1"
         findings = self._run_with_fetch({
-            (u, "A"): (200, "X" * 600),
-            (u, "B"): (403, ""),                                 # B correctement refusé
-            (u, "anon"): (401, ""),
+            (u, "A"): (200, "X" * 600, "application/json"),
+            (u, "B"): (403, "", ""),                             # B correctement refusé
+            (u, "anon"): (401, "", ""),
         })
         self.assertEqual(findings[0].severity, "INFO")
-        self.assertEqual(findings[0].status, "not_vulnerable")
+        self.assertEqual(findings[0].status, "tested")          # pas de preuve -> tested (jamais not_vulnerable agressif)
         self.assertIn("non confirmé", findings[0].title)
 
     def test_not_vulnerable_when_anon_also_allowed(self):
@@ -273,11 +290,116 @@ class TestIdorOracleDifferential(unittest.TestCase):
         u = "https://app.test/obj/1"
         same = "X" * 600
         findings = self._run_with_fetch({
-            (u, "A"): (200, same),
-            (u, "B"): (200, same),
-            (u, "anon"): (200, same),
+            (u, "A"): (200, same, "application/json"),
+            (u, "B"): (200, same, "application/json"),
+            (u, "anon"): (200, same, "application/json"),
         })
-        self.assertEqual(findings[0].status, "not_vulnerable")
+        self.assertEqual(findings[0].status, "tested")
+
+    def test_not_vulnerable_when_content_type_differs(self):
+        # FAUX POSITIF corrigé : B reçoit une page d'erreur HTML 200 (corps coïncidentellement court)
+        # tandis que A reçoit du JSON -> content-type divergent -> pas le même objet -> tested.
+        u = "https://app.test/obj/1"
+        findings = self._run_with_fetch({
+            (u, "A"): (200, '{"owner":"alice","secret":"s"}', "application/json"),
+            (u, "B"): (200, "<html>error</html>", "text/html"),
+            (u, "anon"): (401, "", ""),
+        })
+        self.assertEqual(findings[0].status, "tested")
+
+    def test_empty_body_is_not_proof(self):
+        # un 200 sans corps des deux côtés ne prouve PAS une lecture -> tested
+        u = "https://app.test/obj/1"
+        findings = self._run_with_fetch({
+            (u, "A"): (200, "", "application/json"),
+            (u, "B"): (200, "", "application/json"),
+            (u, "anon"): (401, "", ""),
+        })
+        self.assertEqual(findings[0].status, "tested")
+
+    def test_enum_ids_expands_targets(self):
+        # url_template + enum_ids -> plusieurs cibles testées ; chacune émet un finding.
+        t = "https://app.test/obj/{id}"
+        same = '{"owner":"alice","data":"x"}'
+        fetch_map = {}
+        for i in (1, 2, 3):
+            url = t.replace("{id}", str(i))
+            fetch_map[(url, "A")] = (200, same, "application/json")
+            fetch_map[(url, "B")] = (200, same, "application/json")
+            fetch_map[(url, "anon")] = (401, "", "")
+        findings = self._run_with_fetch(
+            fetch_map,
+            params={"urls": [], "url_template": t, "enum_ids": [1, 2, 3]})
+        self.assertEqual(len(findings), 3)
+        self.assertTrue(all(f.status == "vulnerable" for f in findings))
+
+    def test_write_method_effect_oracle(self):
+        # méthode write : B fait un PUT accepté ET l'objet de A change entre avant/après -> CRITICAL vuln.
+        u = "https://app.test/obj/1"
+        before = '{"owner":"alice","note":"original"}'
+        after = '{"owner":"alice","note":"pwned-by-B"}'
+        seq = {"A": [before, after]}     # GET A renvoie before puis after
+        def fake_fetch(url, headers, timeout=15, method="GET", body=None):
+            role = (headers or {}).get("X-Role", "anon")
+            if method == "GET" and role == "A":
+                return (200, seq["A"].pop(0), "application/json")
+            if method == "PUT" and role == "B":
+                return (200, "", "application/json")             # write accepté
+            return (None, "", "")
+        orig = IdorDifferential._fetch
+        IdorDifferential._fetch = staticmethod(fake_fetch)
+        try:
+            findings = IdorDifferential().fire(Action(
+                "access_control.idor", u, destructive=True,    # write -> autorisé destructif par le ROE
+                params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
+                        "urls": [u], "method": "PUT", "body": '{"note":"pwned-by-B"}'}))
+        finally:
+            IdorDifferential._fetch = orig
+        self.assertEqual(findings[0].severity, "CRITICAL")
+        self.assertEqual(findings[0].status, "vulnerable")
+        self.assertIn("write CONFIRMÉ", findings[0].title)
+
+    def test_write_method_not_mutated_is_tested(self):
+        # write accepté mais l'objet de A NE change PAS -> pas de preuve d'effet -> tested.
+        u = "https://app.test/obj/1"
+        same = '{"owner":"alice","note":"original"}'
+        def fake_fetch(url, headers, timeout=15, method="GET", body=None):
+            role = (headers or {}).get("X-Role", "anon")
+            if method == "GET" and role == "A":
+                return (200, same, "application/json")
+            if method == "DELETE" and role == "B":
+                return (403, "", "")                             # write refusé
+            return (None, "", "")
+        orig = IdorDifferential._fetch
+        IdorDifferential._fetch = staticmethod(fake_fetch)
+        try:
+            findings = IdorDifferential().fire(Action(
+                "access_control.idor", u, destructive=True,    # write -> autorisé destructif par le ROE
+                params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
+                        "urls": [u], "method": "DELETE"}))
+        finally:
+            IdorDifferential._fetch = orig
+        self.assertEqual(findings[0].status, "tested")
+
+    def test_write_method_fail_closed_without_destructive(self):
+        # FAIL-CLOSED : méthode write SANS action.destructive -> aucune requête write émise.
+        u = "https://app.test/obj/1"
+        calls = {"n": 0}
+        def fake_fetch(url, headers, timeout=15, method="GET", body=None):
+            calls["n"] += 1                              # ne doit JAMAIS être appelé (guard avant réseau)
+            return (200, "x", "application/json")
+        orig = IdorDifferential._fetch
+        IdorDifferential._fetch = staticmethod(fake_fetch)
+        try:
+            findings = IdorDifferential().fire(Action(
+                "access_control.idor", u,                # destructive=False (défaut)
+                params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
+                        "urls": [u], "method": "PUT"}))
+        finally:
+            IdorDifferential._fetch = orig
+        self.assertEqual(calls["n"], 0)                  # aucune requête (fail-closed)
+        self.assertEqual(findings[0].status, "tested")
+        self.assertIn("capacité destructive non autorisée", findings[0].title)
 
     def test_missing_config_is_info_skip(self):
         mod = IdorDifferential()
@@ -285,6 +407,13 @@ class TestIdorOracleDifferential(unittest.TestCase):
                                    params={"accounts": [{"headers": {}}], "urls": []}))
         self.assertEqual(findings[0].severity, "INFO")
         self.assertIn("non testé", findings[0].title)
+
+    def test_normalize_body_neutralizes_volatiles(self):
+        from forge.modules.web import _normalize_body, _body_hash
+        a = 'csrf_token: "abc123"  ts=1700000000  id=550e8400-e29b-41d4-a716-446655440000  DATA'
+        b = 'csrf_token: "zzz999"  ts=1799999999  id=11111111-2222-3333-4444-555555555555  DATA'
+        self.assertEqual(_normalize_body(a), _normalize_body(b))
+        self.assertEqual(_body_hash(a), _body_hash(b))
 
 
 if __name__ == "__main__":
