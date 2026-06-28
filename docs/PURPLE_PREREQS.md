@@ -8,7 +8,7 @@ La console Forge `/api/purple/coverage` lit les run-records tirés (par `mitre`)
 ## Checklist Plume (à faire avant le « go »)
 
 1. **Migration v39 déployée** : colonnes `alert.mitre` + `rule.mitre`
-   (TEXT NOT NULL DEFAULT '') + `idx_alert_mitre`. Codé dans `soc/`, idempotent au boot →
+   (TEXT NOT NULL DEFAULT '') + `idx_alert_mitre`. Codé dans `plume/`, idempotent au boot →
    déployer le nouveau binaire en prod.
 
 2. **Endpoint exposé** : `GET /api/coverage/detections?since=<epoch>` →

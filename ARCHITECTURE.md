@@ -1,6 +1,6 @@
 # Forge — Architecture
 
-Forge est l'**antithèse offensive** du SOC blue-team **Plume** (`../soc`). Décision de design
+Forge est l'**antithèse offensive** du SOC blue-team **Plume** (`../plume`). Décision de design
 (cf. analyse de réutilisation) : **cœur partagé, produits séparés, modules autonomes** — surtout
 pas un all-in-one qui fusionnerait l'arsenal rouge dans le binaire bleu (cela casserait l'invariant
 « le SOC ne doit jamais être un trou de sécu » : exec-on-demand interdit, read-only, localhost-only).
@@ -11,11 +11,11 @@ pas un all-in-one qui fusionnerait l'arsenal rouge dans le binaire bleu (cela ca
 GUATX/
   core/           guatx-core (lib Rust) — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur soql ;
                   à étendre (auth/host-guard, query-exec). RIEN d'offensif n'y descend.
-  soc/            Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
+  plume/          Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
   forge/          Forge (rouge, PRIVÉ) : moteur Python (gate ROE, ledger, modules, évasion...) +
     console/      forge-console (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
 ```
-**Frontière public/privé** (décidée) : `core/` **public neutre** + `soc/` **public** (bleu) +
+**Frontière public/privé** (décidée) : `core/` **public neutre** + `plume/` **public** (bleu) +
 `forge/` **privé** (rouge). Comme Plume (public) doit pouvoir dépendre de `core`, **`core` DOIT être
 public** — c'est ce qui force le découpage. Discipline : aucun élément offensif (module, évasion CF/WAF,
 logique ROE) ne descend dans `core` ; il reste dans le Forge privé, qui dépend du cœur public.
@@ -35,7 +35,7 @@ schema.py   Finding (+ mitre, status) · Target · Campaign
 engine.py   boucle : plan → roe.decide → (dry|fire|veto) → ledger → findings · coverage()
 report.py   markdown + section « anti-masquage » (tiré/simulé/vétoé/jamais tenté)
 modules/    registry.py (contrat dry/fire) + demo.py (no-op, illustre le contrat)
-cli.py      forge scope-check | plan | run | ledger verify | modules | demo
+cli.py      forge scope-check | plan | run | campaign | ledger verify | modules | doctor | demo
 ```
 
 **Invariant central** : un module n'est appelé en `fire()` **que** sur un verdict `FIRE`. En
@@ -43,7 +43,7 @@ cli.py      forge scope-check | plan | run | ledger verify | modules | demo
 
 ### D'où vient quoi (réutilisation, pas réécriture)
 - `Scope` ← `secpipe/scope.py` (appartenance fail-closed + exploit/destructif default-deny),
-  **enrichi** du modèle d'armement de `soc/collectors/respond.sh` (opt-in → dry-run défaut →
+  **enrichi** du modèle d'armement de `plume/collectors/respond.sh` (opt-in → dry-run défaut →
   armement global → approbation par action → allowlist). Polarité inversée : allowlist **in-scope**
   (fail-closed), pas deny-list d'IP.
 - `ledger.py` ← le ledger hash-chain + checkpoints Ed25519 de Plume, **corrigé** sur ses deux
@@ -67,7 +67,7 @@ sous-jacent manque, zéro effet de bord en dry-run.
 
 ## La boucle purple (interface Plume ↔ Forge)
 
-Le cahier de Plume (`../soc/CAHIER-DES-CHARGES.md`) spécifie **déjà** le BAS / la couverture
+Le cahier de Plume (`../plume/CAHIER-DES-CHARGES.md`) spécifie **déjà** le BAS / la couverture
 MITRE ATT&CK (Phase P10) — Forge en est la **moitié exécutante** :
 
 ```
