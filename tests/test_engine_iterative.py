@@ -224,6 +224,29 @@ class TestIterativeCampaign(unittest.TestCase):
         seen = [(r["kind"], r["target"]) for r in eng.results]
         self.assertEqual(len(seen), len(set(seen)), f"action rejouée entre vagues: {seen}")
 
+    def test_final_gaps_host_matching_is_delimited_not_prefix(self):
+        # ANTI-FAUX-NÉGATIF de couverture : une action sur `app.testing` (autre host qui PARTAGE
+        # un préfixe avec `app.test`) ne doit PAS être rattachée à `app.test` — sinon une classe
+        # « jamais tentée » sur app.test serait masquée comme « tentée ». Un startswith naïf cassait
+        # ça ; on exige host exact OU délimiteur franc (host:port / host/path).
+        eng = Engine(scope(in_scope=("app.test", "app.testing")))
+        eng.results = [
+            # une seule classe access_control tentée, et seulement sur app.testing
+            {"action": "x", "target": "app.testing", "kind": "access_control.idor",
+             "verdict": FIRE, "reasons": [], "output": None},
+            # une action sur host:port d'app.test -> DOIT compter pour app.test (délimiteur ':')
+            {"action": "y", "target": "app.test:8080", "kind": "auth.takeover",
+             "verdict": FIRE, "reasons": [], "output": None},
+        ]
+        gaps = eng._final_gaps(Planner(), ["app.test", "app.testing"])
+        # app.test : auth tenté (via host:port), access_control PAS tenté (l'idor était sur app.testing)
+        self.assertIn("app.test", gaps)
+        self.assertIn("access_control", gaps["app.test"])     # lacune RÉELLE, non masquée
+        self.assertNotIn("auth", gaps["app.test"])            # auth tenté via app.test:8080
+        # app.testing : access_control tenté (sur lui-même), pas faussement crédité à app.test
+        self.assertIn("app.testing", gaps)
+        self.assertNotIn("access_control", gaps["app.testing"])
+
     def test_skipped_budget_accumulated_across_waves(self):
         # budget serré -> des non-qualifiantes sont déférées ; elles restent VISIBLES (defer != delete)
         # et ne sont JAMAIS perdues même sur une campagne multi-vagues.

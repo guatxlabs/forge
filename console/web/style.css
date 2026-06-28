@@ -208,7 +208,7 @@ tr.rowdetail>td{background:var(--card2);padding:10px 14px;white-space:normal;max
 .barfill{background:linear-gradient(90deg,var(--acc),color-mix(in srgb,var(--acc) 60%,var(--b2)));height:100%;min-width:2px}
 .barval{text-align:right;font-family:var(--font-mono);color:var(--mut)}
 .linechart,.tlsvg{width:100%;height:auto;display:block}
-.linechart{max-height:240px} .tlsvg{max-height:130px}
+.linechart{max-height:240px}
 
 /* dashboards / panneaux */
 .panelhead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
@@ -369,15 +369,95 @@ body.role-viewer #dash-new,body.role-viewer #dash-del,body.role-viewer #save-pan
 body.role-viewer #rule-new,body.role-viewer #notif-new,body.role-viewer #pb-new,
 body.role-viewer #act-new,body.role-viewer #mode-toggle{display:none!important}
 
-/* responsive */
+/* ===================================================================================
+   RESPONSIVE — mobile / tablette / desktop. Breakpoints : 1024 (tablette large),
+   760 (sidebar -> burger), 560 (1 colonne), 420 (téléphone étroit).
+   Principes : grilles -> 1 colonne, tables scrollables (overflow-x déjà sur .qresult),
+   formulaires empilés, sidebar repliable, cibles tactiles >= 40px.
+   =================================================================================== */
+
+/* Tablette large : on resserre la grille de cartes pour éviter une 3e colonne tassée */
+@media(max-width:1024px){
+  main{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+  .dashgrid>.panel{flex-basis:calc(50% - 7px)}
+}
+
+/* <= 760px : la sidebar passe en barre d'icônes horizontale (burger replie tout) */
 @media(max-width:760px){
   .layout{flex-direction:column}
-  .sidebar{flex-direction:row;flex-wrap:wrap;min-width:0;height:auto;position:static;border-right:0;border-bottom:1px solid var(--bd)}
+  .sidebar{flex-direction:row;flex-wrap:wrap;justify-content:center;gap:4px;min-width:0;height:auto;position:static;border-right:0;border-bottom:1px solid var(--bd)}
+  .sidebar a{padding:10px 12px;font-size:0}      /* libellé masqué : icône seule, mais cible >= 40px */
   .sidebar a span{display:none}
+  .sidebar a .ic{width:20px;height:20px}
+  .layout.collapsed .sidebar{display:none}        /* le burger replie complètement la barre sur étroit */
   main{grid-template-columns:1fr;padding:14px}
   .span2{grid-column:span 1}
+  /* en-tête : autorise le retour à la ligne plutôt que de déborder */
+  header{flex-wrap:wrap;gap:10px;padding:10px 14px}
+  header h1{font-size:16px}
+  .posture{order:3}
+  .hdr-tools{flex-wrap:wrap;gap:6px}
+  /* grilles de cartes -> 1 colonne */
+  .srchbody{grid-template-columns:1fr}
+  .intgrid{grid-template-columns:1fr}
+  .facetbar .fields{gap:12px}
+  /* Lancement C2 : les lignes inline (mode/budget) s'empilent et prennent toute la largeur */
+  .rf-row{gap:10px}
+  #lc-runform .rf-row>label{flex:1 1 100%!important}
+  #lc-runform #lc-budget{width:100%!important}
+  .lc-scope-row{flex-direction:column;align-items:stretch}
+  .lc-scope-row input,.lc-scope-row button{width:100%}
+  .lc-modlist{grid-template-columns:1fr}
+  /* récap double-confirmation : la grille dt/dd s'empile */
+  .lc-hiconf dl{grid-template-columns:1fr;gap:2px 0}
+  .lc-hiconf dt{margin-top:6px}
+  /* matrice ATT&CK purple : tuiles plus petites pour tenir 2/colonne sur tablette étroite */
+  .pc-matrix{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+  /* tables denses (events/cases/alertes) -> empilage lisible au lieu d'un débordement */
+  .logline{grid-template-columns:1fr;gap:2px;padding:8px 0}
+  .alert{grid-template-columns:auto 1fr;gap:8px 10px}
+  .alert time{grid-column:1/-1}
+  .caseview .caseitem{grid-template-columns:1fr;gap:3px}
+  /* barres de viz : libellé plus court pour laisser la place à la barre */
+  .barrow{grid-template-columns:96px 1fr 48px;gap:8px}
+  /* viewbar dashboards : les deux groupes s'empilent */
+  .viewbar{align-items:stretch}
+  .viewbar-l,.viewbar-r{justify-content:flex-start}
 }
-@media(max-width:700px){.srchbody{grid-template-columns:1fr}.intgrid{grid-template-columns:1fr}}
+
+/* <= 560px : téléphone — 1 colonne stricte, modules/dashtiles pleine largeur */
+@media(max-width:560px){
+  main{padding:12px;gap:12px}
+  .card{padding:14px}
+  .modgrid{grid-template-columns:1fr}
+  .roecounters{gap:8px}
+  .roecount{flex-basis:calc(50% - 4px)}
+  .pc-matrix{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
+  .pc-band{gap:8px}.pc-band .pc-sep{display:none}
+  /* requête Explore : bouton Exécuter pleine largeur sous le textarea */
+  #sql{min-width:0;flex-basis:100%}
+  #run{flex:1 1 100%;padding:10px 0}
+  .qbar>button,.qbar>select{flex:1 1 auto}
+}
+
+/* <= 420px : très étroit — on réduit encore les paddings et la barre d'icônes */
+@media(max-width:420px){
+  html{font-size:14px}
+  header{padding:9px 12px}
+  .roecount{flex-basis:100%}
+  .barrow{grid-template-columns:72px 1fr 40px;gap:6px}
+  .modal{padding:16px}
+}
+
+/* Cibles tactiles : sur pointeur grossier (doigt), on garantit >= 40px de hauteur de touche
+   pour les contrôles interactifs, sans alourdir le rendu souris. */
+@media(hover:none) and (pointer:coarse){
+  .sidebar a,.k-theme,.hdr-tools select,.hdr-tools button,
+  .panelhead button,.rf-actions button,.viewbar button,
+  .evpager button,.modal-act button,#run,#lc-submit{min-height:40px}
+  .evpager button{min-width:40px}
+  .qtable th,.qtable td{padding-top:9px;padding-bottom:9px}
+}
 /* aide a la saisie (completion soql/champs) */
 .achint{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px;min-height:0}
 .acchip{font-family:var(--font-mono);font-size:11px;padding:3px 9px;border-radius:var(--pill);background:var(--acc-bg);color:var(--acc);border:1px solid color-mix(in srgb,var(--acc) 28%,transparent);cursor:pointer}

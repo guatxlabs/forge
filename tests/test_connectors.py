@@ -314,6 +314,24 @@ class TestMsfAgainstStub(unittest.TestCase):
         self.assertEqual(r["verdict"], "VETO")
         self.assertEqual(_MsfRpcStub.CALLS, [])            # aucun appel RPC parti
 
+    def test_poll_budget_bounded_no_wasted_final_sleep(self):
+        # BUDGET BORNÉ : sans session, le poll sonde max_polls fois mais ne dort PAS après la
+        # dernière sonde (gaspillage d'un `interval` pour rien). On compte les sleeps : exactement
+        # max_polls-1, et chaque sleep utilise l'intervalle demandé. Réactivité + temps borné.
+        _MsfRpcStub.SESSIONS = {}                            # aucune session n'apparaît jamais
+        sleeps = []
+        orig_sleep = msfmod.time.sleep
+        msfmod.time.sleep = lambda s: sleeps.append(s)       # capture sans dormir réellement
+        try:
+            f = MsfModule().fire(self._action(
+                msf_module="exploit/multi/http/example", msf_type="exploit",
+                msf_options={"RHOSTS": "app.test"}, max_polls=4, poll_interval=0.5))[0]
+        finally:
+            msfmod.time.sleep = orig_sleep
+        self.assertEqual(f.status, "reported_by_tool")       # pas de session -> jamais vulnerable
+        self.assertEqual(len(sleeps), 3)                     # max_polls-1, pas de sleep final gaspillé
+        self.assertTrue(all(s == 0.5 for s in sleeps))       # l'intervalle demandé est respecté
+
 
 # =============================================================================================
 # Burp connector contre le stub REST

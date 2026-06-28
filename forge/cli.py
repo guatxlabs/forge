@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .roe import Scope, Roe, Action, VETO, DRY_RUN, FIRE
+from .roe import Scope, Roe, Action
 from .ledger import Ledger
 from .engine import Engine
 from .report import build_report
@@ -185,8 +185,12 @@ def cmd_modules(args):
     rows = []
     for k in mods.kinds():
         m = mods.get(k)
+        # web_allowed : un module sans déclaration explicite est dérivé comme la console
+        # (recon/scan pur = web ; exploit ou destructif => hors plancher web par défaut).
+        web_allowed = bool(getattr(m, "web_allowed", not (m.exploit or m.destructive)))
         rows.append({"kind": k, "cls": k.split(".")[-1],
                      "exploit": bool(m.exploit), "destructive": bool(m.destructive),
+                     "web_allowed": web_allowed,
                      "available": bool(getattr(m, "available", True)),
                      "mitre": getattr(m, "mitre", "") or "",
                      "descr": getattr(m, "description", "") or ""})

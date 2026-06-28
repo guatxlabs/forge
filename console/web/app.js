@@ -17,7 +17,6 @@ const fmtTs = t => {                                   // ts Forge = chaîne SQL
 // sévérités Forge = chaînes (CRITICAL/HIGH/MEDIUM/LOW/INFO). On les normalise pour les classes CSS.
 const SEVKEY = s => { const u = String(s || '').toUpperCase(); return ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'].includes(u) ? u : 'INFO'; };
 const SEVRANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0 };
-const bool = v => v === true ? ic('check', 'ok') : (v === false ? ic('x', 'bad') : '-');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // --- icônes SVG inline (zéro caractère non-ASCII dans l'UI ; héritent la couleur via currentColor) ---
 const ICONS = {
@@ -57,9 +56,26 @@ const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="no
 // =====================================================================================
 //  TOKEN (écritures panels : Bearer = l'« ingest token » affiché au démarrage du daemon)
 // =====================================================================================
+// Le token est lu de façon SYNCHRONE (authHeaders() est appelé dans des handlers non-async).
+// S'il manque, on ne bloque pas avec un prompt() natif : on ouvre une modale in-app (asynchrone,
+// dé-bouncée pour n'apparaître qu'une fois) qui mémorise le token puis invite à relancer l'action.
+let _tokenAsking = false;
+function promptToken() {
+  if (_tokenAsking) return;
+  _tokenAsking = true;
+  modal({
+    title: 'Token console',
+    message: 'Colle l’« ingest token » affiché au démarrage du daemon (requis pour les écritures : panneaux, dashboards).',
+    fields: [{ name: 'token', label: 'Token', type: 'password', required: true, placeholder: 'Bearer token' }],
+    okText: 'Enregistrer',
+  }).then(r => {
+    _tokenAsking = false;
+    if (r && r.token) { localStorage.setItem('forge_token', String(r.token).trim()); toast('Token enregistré — relance l’action.', 'ok'); }
+  });
+}
 function token() {
-  let t = localStorage.getItem('forge_token');
-  if (!t) { t = prompt('Token console (l\'« ingest token » affiché au démarrage du daemon) :'); if (t) { t = t.trim(); localStorage.setItem('forge_token', t); } }
+  const t = localStorage.getItem('forge_token');
+  if (!t) promptToken();
   return t || '';
 }
 function authHeaders(extra = {}) { return { Authorization: 'Bearer ' + token(), ...extra }; }
@@ -537,24 +553,6 @@ function lineEl(cols, rows, query, drill) {
       else drillTime(xs[hi], span);
     });
   }
-  return svg;
-}
-function timelineEl(items) {  // items : [{ts}] — barres par bucket horaire (utilisé pour les events bruts)
-  const NS = 'http://www.w3.org/2000/svg', mk = t => document.createElementNS(NS, t);
-  const span = 3600, map = new Map();
-  items.forEach(r => { const b = Math.floor(r.ts / span) * span; map.set(b, (map.get(b) || 0) + 1); });
-  const buckets = [...map.entries()].sort((a, b) => a[0] - b[0]);
-  const W = 900, H = 110, pad = 26, n = buckets.length, max = Math.max(1, ...buckets.map(b => b[1]));
-  const svg = mk('svg'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'tlsvg');
-  const bw = (W - 2 * pad) / Math.max(1, n);
-  buckets.forEach(([b, c], i) => {
-    const h = (c / max) * (H - 2 * pad), x = pad + i * bw, y = H - pad - h;
-    const rect = mk('rect'); rect.setAttribute('x', x + 1); rect.setAttribute('y', y); rect.setAttribute('width', Math.max(1, bw - 2)); rect.setAttribute('height', h); rect.setAttribute('fill', CSSV('--acc', '#2dd4bf'));
-    svg.appendChild(rect);
-  });
-  const ax = mk('path'); ax.setAttribute('d', `M${pad},${H - pad} L${W - pad},${H - pad}`); ax.setAttribute('stroke', CSSV('--bd', '#16202e')); ax.setAttribute('fill', 'none'); svg.appendChild(ax);
-  attachTip(svg, W, vx => { const i = Math.floor((vx - pad) / bw); return (i >= 0 && i < buckets.length) ? `${fmtMaybeTime(buckets[i][0])} : ${buckets[i][1]}` : ''; });
-  if (n > 1) { const t0 = buckets[0][0], t1 = buckets[n - 1][0] + span; attachZoom(svg, W, vx => t0 + Math.max(0, Math.min(1, (vx - pad) / (W - 2 * pad))) * (t1 - t0)); }
   return svg;
 }
 

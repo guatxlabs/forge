@@ -363,9 +363,9 @@ class MsfModule(Module):
         (None, None) si rien dans le budget. Corrélation : exploit_uuid == uuid du job si présent,
         sinon premier id absent du snapshot pré-tir."""
         p = action.params or {}
-        max_polls = int(p.get("max_polls") or self._MAX_POLLS)
+        max_polls = max(1, int(p.get("max_polls") or self._MAX_POLLS))
         interval = float(p.get("poll_interval") or self._POLL_INTERVAL)
-        for _ in range(max(1, max_polls)):
+        for i in range(max_polls):
             table = self._session_table(cfg, token)
             # 1) corrélation forte par exploit_uuid (la session porte l'uuid du job qui l'a ouverte).
             if uuid:
@@ -376,7 +376,10 @@ class MsfModule(Module):
             for sid in table:
                 if str(sid) not in pre_sessions:
                     return str(sid), table[sid]
-            time.sleep(interval)
+            # budget BORNÉ : on ne dort PAS après la dernière sonde (sinon on gaspille `interval`
+            # secondes pour rien) — le poll reste réactif et son temps total est ≤ (max_polls-1)*interval.
+            if i < max_polls - 1:
+                time.sleep(interval)
         return None, None
 
     def _map_result(self, action, cfg, token, name, mtype, is_exploit, opts, res, pre_sessions):
