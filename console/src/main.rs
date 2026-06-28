@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS ledger_entry(
 CREATE TABLE IF NOT EXISTS run_log(
   id INTEGER PRIMARY KEY, run_id TEXT, ts TEXT, stream TEXT, line TEXT);
 CREATE INDEX IF NOT EXISTS idx_run_log_run ON run_log(run_id, id);
+-- COMPTES UTILISATEURS (#6) : identités individuelles + attribution. `role` ∈ {viewer|operator|admin}
+-- (contrainte applicative, pas SQL — voir validate_role). `pass_hash` = argon2id (jamais en clair).
+-- `disabled` = 1 désactive le compte (login refusé, fail-closed). UNIQUE(login) anti-doublon.
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY, login TEXT UNIQUE NOT NULL, role TEXT NOT NULL,
+  pass_hash TEXT NOT NULL, disabled INTEGER DEFAULT 0, created TEXT DEFAULT '');
+-- SESSIONS COURTES : on stocke le SHA-256 du token (jamais le token en clair — fuite DB inoffensive),
+-- l'user_id propriétaire, l'horodatage de création et d'expiration (epoch s). Index pour le purge/lookup.
+CREATE TABLE IF NOT EXISTS session(
+  token_sha TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -76,6 +87,13 @@ fn migrate(db: &Connection) {
         // run_id corrèle finding/runrecord avec le run_job qui les a produits (boucle purple).
         "ALTER TABLE finding ADD COLUMN run_id TEXT DEFAULT ''",
         "ALTER TABLE finding ADD COLUMN fix TEXT DEFAULT ''",
+        // taxonomie client séparée (LOT REPORTING) : CWE dédié + CVSS de base (vecteur + score),
+        // distincts de `category` (fourre-tout historique) et `mitre` (ATT&CK). Le moteur Python
+        // (schema.Finding.to_dict) émet déjà ces champs ; l'ingest les capte si présents, sinon le
+        // rapport dérive le CWE depuis `category` (rétro-compat). Additifs/error-ignored.
+        "ALTER TABLE finding ADD COLUMN cwe TEXT DEFAULT ''",
+        "ALTER TABLE finding ADD COLUMN cvss_vector TEXT DEFAULT ''",
+        "ALTER TABLE finding ADD COLUMN cvss_score REAL DEFAULT 0",
         "ALTER TABLE runrecord ADD COLUMN run_id TEXT DEFAULT ''",
         // panel étendu : description, largeur de colonne, horodatage de mise à jour.
         "ALTER TABLE panel ADD COLUMN descr TEXT DEFAULT ''",
@@ -368,6 +386,57 @@ fn gs(v: &Value, k: &str) -> String {
     v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// Extrait un identifiant CWE canonique ('CWE-639') d'une chaîne arbitraire ('cwe_639', 'CWE 639',
+/// 'access_control.CWE-862'), ou '' si absent. Miroir Rust de `schema.extract_cwe` (rétro-compat :
+/// permet de dériver le CWE depuis `category` quand le moteur ne fournit pas le champ `cwe` dédié).
+fn extract_cwe(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    if let Some(pos) = lower.find("cwe") {
+        let rest = &lower[pos + 3..];
+        // saute un éventuel séparateur (espace, '_', '-') puis lit les chiffres.
+        let digits: String = rest
+            .trim_start_matches(|c: char| c == ' ' || c == '_' || c == '-')
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return format!("CWE-{digits}");
+        }
+    }
+    String::new()
+}
+
+/// (vecteur, score) CVSS 3.1 de BASE pour une sévérité — repère grossier de priorisation, PAS un
+/// calcul CVSS complet par finding. Miroir de `schema.CVSS_BASE_BY_SEVERITY`. ('', 0.0) si inconnue
+/// (ex INFO) — fail-open : le rapport affiche alors '—' au lieu d'inventer un score.
+fn cvss_base_for_severity(severity: &str) -> (&'static str, f64) {
+    match severity.to_ascii_uppercase().as_str() {
+        "CRITICAL" => ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8),
+        "HIGH" => ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", 7.5),
+        "MEDIUM" => ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N", 5.3),
+        "LOW" => ("CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N", 3.1),
+        _ => ("", 0.0),
+    }
+}
+
+/// Échappement HTML minimal (texte -> contenu/attribut sûr) — empêche toute injection dans le
+/// rapport HTML branded (les findings/notes proviennent du moteur ; on ne fait JAMAIS confiance au
+/// contenu). Échappe & < > " '. Suffisant pour du texte inséré dans des nœuds/attributs HTML.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // --- auth opérateur (argon2) + RBAC, repris du modèle auth_guard/host_guard de Plume ---
 
 fn verify_pw(pw: &str, hash: &str) -> bool {
@@ -413,11 +482,13 @@ fn check_basic(app: &App, b64: &str) -> bool {
 // pass_hash/token : l'authz C2 est totalement découplée de l'auth viewer. Sous-commande pour le
 // hash : `forge-console hashpw-operator <mot de passe>`.
 
-/// Vrai seulement si un opérateur est configuré ET que l'en-tête `X-Forge-Operator` correspond.
-/// Vide => toujours faux (fail-closed). Aucune dépendance au viewer (pass_hash/token).
-fn check_operator(app: &App, headers: &HeaderMap) -> bool {
+/// Preuve opérateur par HASH ENV (rétro-compat) : vrai seulement si `operator_hash` est configuré ET
+/// que l'en-tête `X-Forge-Operator` correspond. Vide => toujours faux (fail-closed). Aucune
+/// dépendance au viewer (pass_hash/token). C'est le repli 'bootstrap' quand aucun compte individuel
+/// n'est en session.
+fn check_operator_env(app: &App, headers: &HeaderMap) -> bool {
     if app.operator_hash.is_empty() {
-        return false; // FAIL-CLOSED : rôle opérateur non provisionné -> tout C2 refusé
+        return false; // FAIL-CLOSED : rôle opérateur non provisionné via env -> repli C2 refusé
     }
     let supplied = headers
         .get("x-forge-operator")
@@ -429,15 +500,251 @@ fn check_operator(app: &App, headers: &HeaderMap) -> bool {
     verify_pw(supplied, &app.operator_hash)
 }
 
+/// Authz C2 (run/cancel) — FAIL-CLOSED. Vrai si :
+///   1) une SESSION valide porte un rôle operator|admin (compte individuel) ; OU
+///   2) RÉTRO-COMPAT : la preuve par hash env (X-Forge-Operator) matche (compte 'bootstrap'/admin).
+/// Un viewer (session role=viewer) ne passe JAMAIS. Sans session ni hash env -> refusé.
+fn check_operator(app: &App, headers: &HeaderMap) -> bool {
+    // 1) compte individuel en session (operator/admin) — l'identité réelle prime.
+    if let Some(id) = resolve_session_identity(app, headers) {
+        if id.is_operator {
+            return true;
+        }
+        // session présente mais rôle viewer -> NE PAS retomber sur le hash env (un viewer authentifié
+        // ne doit pas escalader via un secret partagé). Fail-closed pour ce porteur.
+        return false;
+    }
+    // 2) repli rétro-compat : preuve opérateur par hash env.
+    check_operator_env(app, headers)
+}
+
 /// Réponse standard d'un refus C2 (403). Distingue « non provisionné » (501-like message) de
 /// « mauvaise preuve » sans fuir lequel — message stable, code 403 dans les deux cas (fail-closed).
 fn operator_denied(app: &App) -> (StatusCode, Json<Value>) {
+    // Message stable et non-fuiteur. On ne distingue plus que le cas « aucune voie operator possible »
+    // (ni hash env, ni — par construction — session valide ici) du cas « preuve invalide/insuffisante ».
     let why = if app.operator_hash.is_empty() {
-        "rôle opérateur non provisionné (FORGE_CONSOLE_OPERATOR_HASH absent) — C2 fermé"
+        "rôle opérateur non provisionné (aucune session operator|admin valide, FORGE_CONSOLE_OPERATOR_HASH absent) — C2 fermé"
     } else {
-        "preuve opérateur invalide ou absente (en-tête X-Forge-Operator requis)"
+        "preuve opérateur invalide ou absente (session operator|admin via POST /api/login, ou en-tête X-Forge-Operator)"
     };
     (StatusCode::FORBIDDEN, Json(json!({"error": "operator_required", "why": why})))
+}
+
+// =====================================================================================
+// COMPTES UTILISATEURS (#6) — identités individuelles + attribution.
+//
+// Avant : les 3 rôles (viewer/operator/admin) étaient des MOTS DE PASSE PARTAGÉS (hash via env) —
+// impossible de savoir QUI a armé un exploit. On ajoute des comptes individuels (table `users`) +
+// des sessions courtes (table `session`), tout en PRÉSERVANT la rétro-compat : si aucune session
+// n'est présente, on retombe sur les hash via env (FORGE_CONSOLE_PASS_HASH/OPERATOR_HASH) en tant
+// que compte 'bootstrap' (la console live tourne déjà comme ça — elle ne doit pas casser).
+//
+// FAIL-CLOSED : `operator` reste fail-closed (un viewer n'arme rien). L'attribution propage l'identité
+// (login) au lieu du littéral 'operator' dans run_job.started_by, run_cancel et le ledger ('actor').
+
+/// Durée de vie d'une session (secondes) — sessions COURTES. Override par FORGE_CONSOLE_SESSION_TTL.
+fn session_ttl_secs() -> i64 {
+    std::env::var("FORGE_CONSOLE_SESSION_TTL")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(3600) // 1 h par défaut
+}
+
+/// Epoch s courant (UTC). Sans dépendance chrono — SystemTime depuis l'UNIX_EPOCH.
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Rôles valides — contrainte APPLICATIVE (la table stocke un TEXT libre). `viewer` lit, `operator`
+/// arme le C2, `admin` = superset (peut aussi armer). Tout autre rôle est refusé à la création.
+fn validate_role(r: &str) -> Result<String, String> {
+    match r {
+        "viewer" | "operator" | "admin" => Ok(r.to_string()),
+        _ => Err("rôle invalide (attendu: viewer|operator|admin)".into()),
+    }
+}
+
+/// Validation stricte d'un login : `[A-Za-z0-9._-]{1,64}`, non vide, pas de `-` en tête (parité avec
+/// validate_campaign — anti confusion avec un flag CLI et entrées hostiles).
+fn validate_login(s: &str) -> Result<String, String> {
+    if s.is_empty() || s.len() > 64 {
+        return Err("login vide ou > 64 caractères".into());
+    }
+    if s.starts_with('-') {
+        return Err("login ne peut pas commencer par '-'".into());
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        return Err("login : seuls [A-Za-z0-9._-] sont autorisés".into());
+    }
+    Ok(s.to_string())
+}
+
+/// Identité résolue d'un appelant : login affiché en attribution + rôle effectif. `is_operator`
+/// = peut armer le C2 (operator|admin OU bootstrap env-hash). `via_session` distingue un compte
+/// individuel (true) du repli bootstrap par hash env (false).
+#[derive(Clone, Debug)]
+struct Identity {
+    login: String,
+    role: String,
+    is_operator: bool,
+    via_session: bool,
+}
+
+/// Extrait le token de session du porteur : en-tête `Authorization: Bearer <t>` (priorité) OU cookie
+/// `forge_session=<t>`. Renvoie le token EN CLAIR (à hasher avant lookup), vide si absent.
+fn session_token_from_headers(headers: &HeaderMap) -> String {
+    if let Some(authz) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(tok) = authz.strip_prefix("Bearer ") {
+            let t = tok.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    // cookie forge_session=...
+    if let Some(cookie) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for part in cookie.split(';') {
+            let p = part.trim();
+            if let Some(val) = p.strip_prefix("forge_session=") {
+                if !val.is_empty() {
+                    return val.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Résout l'identité depuis une session VALIDE (non expirée, compte non désactivé). None si pas de
+/// session présentée, session inconnue/expirée, ou compte désactivé (fail-closed). Purge en passant
+/// la session expirée (best-effort). Lecture du compte au moment du lookup => un rôle changé/désactivé
+/// prend effet immédiatement même sur une session déjà émise.
+fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
+    let tok = session_token_from_headers(headers);
+    if tok.is_empty() {
+        return None;
+    }
+    let token_sha = sha_hex(&tok);
+    let db = app.db();
+    let row = db.query_row(
+        "SELECT s.expires, u.login, u.role, u.disabled
+           FROM session s JOIN users u ON u.id = s.user_id
+          WHERE s.token_sha = ?",
+        [&token_sha],
+        |r| Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        )),
+    );
+    match row {
+        Ok((expires, login, role, disabled)) => {
+            if disabled != 0 {
+                return None; // compte désactivé -> fail-closed
+            }
+            if now_epoch() >= expires {
+                // session expirée -> purge best-effort et refus
+                let _ = db.execute("DELETE FROM session WHERE token_sha=?", [&token_sha]);
+                return None;
+            }
+            let is_operator = role == "operator" || role == "admin";
+            Some(Identity { login, role, is_operator, via_session: true })
+        }
+        Err(_) => None,
+    }
+}
+
+/// Identité effective d'un appelant pour l'ATTRIBUTION et l'AUTHZ C2 :
+///   1) session valide (compte individuel) -> identité réelle (login/role) ;
+///   2) SINON repli RÉTRO-COMPAT : preuve opérateur par hash env (X-Forge-Operator) -> compte
+///      'bootstrap' (role=admin, is_operator=true) ; preuve viewer Basic -> 'bootstrap' viewer.
+/// None => aucune identité (anonyme dev-open ou pas de preuve). via_session=false sur les replis env.
+fn resolve_identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
+    if let Some(id) = resolve_session_identity(app, headers) {
+        return Some(id);
+    }
+    // Repli bootstrap (rétro-compat) : l'en-tête opérateur env-hash agit comme un compte admin.
+    if !app.operator_hash.is_empty() && check_operator_env(app, headers) {
+        return Some(Identity {
+            login: "bootstrap".into(),
+            role: "admin".into(),
+            is_operator: true,
+            via_session: false,
+        });
+    }
+    None
+}
+
+/// Login d'attribution : identité résolue si présente, sinon le littéral historique 'operator'
+/// (ce qui préserve EXACTEMENT le comportement existant quand seul le hash env est en jeu mais qu'on
+/// n'a pas matché ci-dessus — cas dev-open). N'altère aucun garde-fou.
+fn attribution_login(app: &App, headers: &HeaderMap) -> String {
+    resolve_identity(app, headers).map(|i| i.login).unwrap_or_else(|| "operator".into())
+}
+
+/// GET /api/whoami — identité effective de l'appelant (pour l'UI : afficher l'utilisateur connecté,
+/// activer/masquer les actions C2 selon le rôle). Résout la session (compte individuel) ou le repli
+/// bootstrap env-hash. `authenticated:false` si aucune identité (dev-open anonyme).
+async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
+    match resolve_identity(&app, &headers) {
+        Some(id) => Json(json!({
+            "authenticated": true,
+            "login": id.login,
+            "role": id.role,
+            "is_operator": id.is_operator,
+            "via_session": id.via_session, // false => repli bootstrap (hash env), true => compte individuel
+        })),
+        None => Json(json!({"authenticated": false, "login": Value::Null, "role": Value::Null, "is_operator": false, "via_session": false})),
+    }
+}
+
+/// Génère un token de session opaque (256 bits hex via CSPRNG OS). Le Result de getrandom est propagé
+/// (panic) : un échec d'entropie produirait un token PRÉVISIBLE -> usurpation de session.
+fn gen_session_token() -> String {
+    let mut b = [0u8; 32];
+    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer une session faible");
+    hex(&b)
+}
+
+/// Crée une session pour `user_id` (token EN CLAIR renvoyé à l'appelant, SHA-256 persisté). Retourne
+/// (token_clair, expires_epoch). Purge en passant les sessions expirées de l'utilisateur (best-effort).
+fn create_session(app: &App, user_id: i64) -> (String, i64) {
+    let token = gen_session_token();
+    let token_sha = sha_hex(&token);
+    let now = now_epoch();
+    let expires = now + session_ttl_secs();
+    let db = app.db();
+    let _ = db.execute("DELETE FROM session WHERE user_id=? AND expires<=?", rusqlite::params![user_id, now]);
+    let _ = db.execute(
+        "INSERT OR REPLACE INTO session(token_sha,user_id,created,expires) VALUES(?,?,?,?)",
+        rusqlite::params![token_sha, user_id, now, expires],
+    );
+    (token, expires)
+}
+
+/// Provisionne un compte dans la table `users` (argon2id). Idempotent vis-à-vis du login : si le login
+/// existe déjà, MET À JOUR rôle + hash + réactive (disabled=0). Renvoie le rôle validé ou une erreur.
+/// Utilisé par la sous-commande CLI `useradd`. Validation login/role stricte (fail-closed).
+fn upsert_user(db: &Connection, login: &str, role: &str, pass_hash: &str) -> Result<String, String> {
+    let login = validate_login(login)?;
+    let role = validate_role(role)?;
+    if pass_hash.is_empty() {
+        return Err("hash de mot de passe vide".into());
+    }
+    db.execute(
+        "INSERT INTO users(login,role,pass_hash,disabled,created)
+         VALUES(?,?,?,0,datetime('now'))
+         ON CONFLICT(login) DO UPDATE SET role=excluded.role, pass_hash=excluded.pass_hash, disabled=0",
+        rusqlite::params![login, role, pass_hash],
+    )
+    .map_err(|e| format!("écriture users échouée: {e}"))?;
+    Ok(role)
 }
 
 /// Validation stricte d'un nom de campagne : `[A-Za-z0-9._-]{1,64}`, jamais vide, pas de `-` en
@@ -525,6 +832,11 @@ async fn auth_guard(State(app): State<App>, req: Request, next: Next) -> Respons
     if app.pass_hash.is_empty() {
         return next.run(req).await;
     }
+    // Session individuelle (cookie forge_session ou Bearer <session>) -> accès lecture (tout rôle).
+    // Vérifié AVANT le Bearer ingest-token : un token de session valide identifie un compte réel.
+    if resolve_session_identity(&app, req.headers()).is_some() {
+        return next.run(req).await;
+    }
     let authz = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
     if let Some(b64) = authz.strip_prefix("Basic ") {
         if check_basic(&app, b64.trim()) {
@@ -569,12 +881,25 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
     let (mut nf, mut nr, mut nd) = (0i64, 0i64, 0i64);
     if let Some(arr) = body.get("findings").and_then(|v| v.as_array()) {
         for f in arr {
+            // CWE séparé : on prend `cwe` si fourni par le moteur, sinon on le dérive de `category`
+            // (rétro-compat avec les anciens modules qui ne posaient que `category="CWE-639"`).
+            let cwe = {
+                let c = gs(f, "cwe");
+                if c.is_empty() { extract_cwe(&gs(f, "category")) } else { c }
+            };
+            // CVSS de base : vecteur fourni, sinon dérivé de la sévérité (repère de priorisation).
+            let (mut cvss_vec, mut cvss_score) = (gs(f, "cvss_vector"), f.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+            if cvss_vec.is_empty() && cvss_score == 0.0 {
+                let (v, s) = cvss_base_for_severity(&gs(f, "severity"));
+                cvss_vec = v.to_string();
+                cvss_score = s;
+            }
             if let Ok(n) = db.execute(
-                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
-                    gs(f,"fix"), run_id],
+                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score],
             ) {
                 nf += n as i64;
             }
@@ -625,6 +950,52 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
         );
     }
     (StatusCode::OK, Json(json!({"findings_ingested": nf, "runrecords_ingested": nr, "roe_decisions_ingested": nd})))
+}
+
+/// POST /api/login {login,password} -> pose une session COURTE (cookie + bearer renvoyés).
+/// Vérifie le couple contre la table `users` (argon2id), refuse un compte désactivé. Réponse 200 :
+///   {"token": <bearer>, "login", "role", "expires"} + en-tête Set-Cookie `forge_session=<token>`
+///   (HttpOnly, SameSite=Strict, Path=/, Max-Age=TTL). Le client peut ensuite s'authentifier soit par
+///   le cookie (UI), soit par `Authorization: Bearer <token>` (CLI/API). 401 sur identifiants invalides.
+/// NB : route NON gardée par auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
+/// elle est sous host_guard comme tout le reste. Échec d'identifiant -> message générique (anti-énum).
+async fn login(State(app): State<App>, Json(body): Json<Value>) -> Response {
+    let login_in = body.get("login").and_then(|v| v.as_str()).unwrap_or("");
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if login_in.is_empty() || password.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "login et password requis"}))).into_response();
+    }
+    // lookup compte. On vérifie TOUJOURS le hash (même si compte introuvable : timing uniforme via un
+    // hash factice) pour limiter l'oracle d'énumération de login.
+    let (user_id, role, pass_hash, disabled): (i64, String, String, i64) = {
+        let db = app.db();
+        db.query_row(
+            "SELECT id, role, pass_hash, disabled FROM users WHERE login=?",
+            [login_in],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap_or((-1, String::new(), String::new(), 1))
+    };
+    // hash de référence : réel si compte trouvé, sinon un hash jetable (verify_pw échouera mais consomme
+    // un temps comparable — pas de court-circuit révélateur de l'existence du login).
+    let reference = if pass_hash.is_empty() {
+        "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string()
+    } else {
+        pass_hash.clone()
+    };
+    let ok = verify_pw(password, &reference) && user_id >= 0 && disabled == 0;
+    if !ok {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
+    }
+    let (token, expires) = create_session(&app, user_id);
+    let ttl = session_ttl_secs();
+    let cookie = format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}");
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(json!({"token": token, "login": login_in, "role": role, "expires": expires})),
+    )
+        .into_response()
 }
 
 #[allow(dead_code)] // helper générique conservé (colonnes texte) ; les handlers typés le court-circuitent.
@@ -1957,7 +2328,9 @@ async fn modules_refresh(State(app): State<App>, headers: HeaderMap) -> impl Int
 /// données stockées côté console (run_job + findings + roe_decision pour le run_id). Miroir Rust de
 /// `forge.report.build_report` (synthèse, findings, transparence ROE). LECTURE (viewer).
 /// 404 si le run_id est inconnu de run_job.
-async fn run_report(State(app): State<App>, Path(id): Path<String>) -> Response {
+async fn run_report(State(app): State<App>, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    // format : md (DÉFAUT — rétro-compat), html (livrable client brandé), pdf (si outil dispo).
+    let format = q.get("format").map(|s| s.as_str()).unwrap_or("md");
     // le run doit exister (sinon 404, comme run_detail). Le verrou DB est confiné dans ce bloc :
     // AUCUN MutexGuard rusqlite (!Send) ne doit survivre à l'await réseau plus bas.
     let (job, fired) = {
@@ -1973,18 +2346,352 @@ async fn run_report(State(app): State<App>, Path(id): Path<String>) -> Response 
     };
     // I/O réseau Plume HORS verrou DB. Fail-open lisible si Plume injoignable.
     let purple = fetch_purple_coverage(&app, fired).await;
-    let md = {
-        let db = app.db();
-        render_run_report_md(&db, &id, &job, Some(&purple))
+    // annexe chaîne-de-custody : intégrité du ledger + attribution (started_by résolu du run).
+    let started_by = job.get("started_by").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let custody = build_ledger_custody(&app, &started_by);
+
+    match format {
+        "html" => {
+            let html = {
+                let db = app.db();
+                render_run_report_html(&db, &id, &job, Some(&purple), &custody)
+            };
+            ([("content-type", "text/html; charset=utf-8")], Html(html)).into_response()
+        }
+        "pdf" => {
+            // PDF : depuis le HTML brandé, via un outil système SI présent (pas de dep lourde ajoutée).
+            let html = {
+                let db = app.db();
+                render_run_report_html(&db, &id, &job, Some(&purple), &custody)
+            };
+            match render_pdf_from_html(&html).await {
+                Some(bytes) => (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "application/pdf".to_string()),
+                        ("content-disposition", format!("inline; filename=\"forge-report-{id}.pdf\"")),
+                    ],
+                    bytes,
+                ).into_response(),
+                None => (
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(json!({
+                        "error": "pdf_unavailable",
+                        "why": "aucun moteur PDF (wkhtmltopdf/weasyprint) détecté sur l'hôte",
+                        "hint": "ouvrez ?format=html puis « Imprimer » → « Enregistrer au format PDF » (CSS @media print fourni), ou installez wkhtmltopdf/weasyprint pour activer ?format=pdf"
+                    })),
+                ).into_response(),
+            }
+        }
+        _ => {
+            // md (défaut) — rétro-compat stricte : même contenu qu'avant + annexe custody.
+            let md = {
+                let db = app.db();
+                render_run_report_md(&db, &id, &job, Some(&purple), Some(&custody))
+            };
+            (StatusCode::OK, [("content-type", "text/markdown; charset=utf-8")], md).into_response()
+        }
+    }
+}
+
+/// Génère un PDF depuis le HTML brandé en s'appuyant sur un outil SYSTÈME s'il est présent
+/// (wkhtmltopdf ou weasyprint) — AUCUNE dépendance lourde n'est ajoutée au binaire. Retourne None si
+/// aucun moteur n'est installé (l'appelant documente alors l'impression navigateur). Le HTML est passé
+/// par STDIN (wkhtmltopdf `- -`) ou par un fichier temporaire (weasyprint) ; sortie sur stdout/fichier.
+async fn render_pdf_from_html(html: &str) -> Option<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+    // 1) wkhtmltopdf : lit le HTML sur stdin (`-`), écrit le PDF sur stdout (`-`). Préféré (rendu CSS).
+    if which_in_path("wkhtmltopdf") {
+        let mut child = tokio::process::Command::new("wkhtmltopdf")
+            .args(["--quiet", "--print-media-type", "-", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(html.as_bytes()).await;
+            drop(stdin); // EOF -> wkhtmltopdf termine sa lecture
+        }
+        let out = child.wait_with_output().await.ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            return Some(out.stdout);
+        }
+        return None;
+    }
+    // 2) weasyprint : HTML d'entrée par fichier temp, PDF en sortie sur stdout (`-`).
+    if which_in_path("weasyprint") {
+        let dir = std::env::temp_dir().join(format!("forge-report-{}", gen_token()));
+        let _ = std::fs::create_dir_all(&dir);
+        let in_path = dir.join("report.html");
+        if std::fs::write(&in_path, html).is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        }
+        let out = tokio::process::Command::new("weasyprint")
+            .arg(&in_path)
+            .arg("-") // stdout
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await
+            .ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = out?;
+        if out.status.success() && !out.stdout.is_empty() {
+            return Some(out.stdout);
+        }
+        return None;
+    }
+    None
+}
+
+/// Vrai si `bin` est trouvable dans le PATH (lookup pur, sans shell). Sert à n'exposer ?format=pdf
+/// que lorsqu'un moteur PDF est réellement installé (sinon on documente l'impression navigateur).
+fn which_in_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let p = dir.join(bin);
+                std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Un finding tel que rendu dans le rapport (md ou html). CWE / CVSS sont des champs DÉDIÉS,
+/// séparés de `category` (fourre-tout) et `mitre` (ATT&CK).
+struct FindingRow {
+    title: String,
+    target: String,
+    severity: String,
+    category: String,
+    cwe: String,
+    cvss_vector: String,
+    cvss_score: f64,
+    mitre: String,
+    status: String,
+    tool: String,
+    evidence: String,
+    poc: String,
+    fix: String,
+}
+
+impl FindingRow {
+    /// Affichage CVSS compact « score (vecteur) ». Vide si ni score ni vecteur (ex INFO).
+    fn cvss_display(&self) -> String {
+        if self.cvss_score <= 0.0 && self.cvss_vector.is_empty() {
+            return String::new();
+        }
+        if self.cvss_vector.is_empty() {
+            return format!("{:.1}", self.cvss_score);
+        }
+        format!("{:.1} ({})", self.cvss_score, self.cvss_vector)
+    }
+}
+
+/// Lit les findings d'un run dans l'ordre d'affichage (récents d'abord), avec CWE/CVSS séparés.
+/// Rétro-compat : si la colonne `cwe` est vide (base ancienne / finding ingéré avant ce lot), on
+/// dérive le CWE depuis `category` ; idem CVSS dérivé de la sévérité si absent. Lecture only.
+fn read_finding_rows(db: &Connection, run_id: &str) -> Vec<FindingRow> {
+    let mut stmt = match db.prepare(
+        "SELECT title,target,severity,category,mitre,status,tool,evidence,poc,fix,cwe,cvss_vector,cvss_score \
+         FROM finding WHERE run_id=? ORDER BY id DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
     };
-    (StatusCode::OK, [("content-type", "text/markdown; charset=utf-8")], md).into_response()
+    stmt.query_map([run_id], |r| {
+        let category = r.get::<_, Option<String>>(3)?.unwrap_or_default();
+        let severity = r.get::<_, Option<String>>(2)?.unwrap_or_default();
+        let mut cwe = r.get::<_, Option<String>>(10)?.unwrap_or_default();
+        if cwe.is_empty() {
+            cwe = extract_cwe(&category);
+        }
+        let mut cvss_vector = r.get::<_, Option<String>>(11)?.unwrap_or_default();
+        let mut cvss_score = r.get::<_, Option<f64>>(12)?.unwrap_or(0.0);
+        if cvss_vector.is_empty() && cvss_score <= 0.0 {
+            let (v, s) = cvss_base_for_severity(&severity);
+            cvss_vector = v.to_string();
+            cvss_score = s;
+        }
+        Ok(FindingRow {
+            title: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            target: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            severity,
+            category,
+            cwe,
+            cvss_vector,
+            cvss_score,
+            mitre: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            status: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            tool: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            evidence: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            poc: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            fix: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        })
+    })
+    .map(|it| it.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Notes d'engagement d'une campagne (table `campaign.notes`) — contexte client (cadre, ROE, objet
+/// de la mission) à brancher dans l'executive summary. '' si la campagne n'a pas de métadonnées.
+fn campaign_notes(db: &Connection, name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    db.query_row(
+        "SELECT notes FROM campaign WHERE name=? ORDER BY id DESC LIMIT 1",
+        [name],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// Annexe chaîne-de-custody : recalcule la chaîne SHA-256 du ledger (sans la clé) et retourne les
+/// métadonnées d'audit (head, nb entrées, algo, validité, attribution actor du lot comptes). NE
+/// vérifie PAS la signature (la console n'a pas la clé) — la vérif externe se fait via
+/// `forge ledger verify --pubkey`. La clé publique éventuelle est lue via FORGE_CONSOLE_LEDGER_PUBKEY
+/// (informative, jamais un secret).
+struct LedgerCustody {
+    path: String,
+    entries: usize,
+    head: String,
+    alg: String,
+    chain_ok: bool,
+    why: String,
+    pubkey: String,           // clé publique Ed25519 (hex) si exposée par l'opérateur, sinon ''
+    actor: String,            // attribution = login source de vérité (started_by résolu) du run
+    high_impact: bool,        // run armé haut-impact (opt-in honoré)
+}
+
+/// Re-vérifie la chaîne du ledger console (même algo que /api/ledger/verify) et assemble l'annexe
+/// chaîne-de-custody pour le rapport. `started_by` = attribution du lot comptes (login résolu).
+fn build_ledger_custody(app: &App, started_by: &str) -> LedgerCustody {
+    const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    let path = app.ledger_path.as_str().to_string();
+    let pubkey = std::env::var("FORGE_CONSOLE_LEDGER_PUBKEY").unwrap_or_default();
+    // attribution : `<login>` ou `<login>+high_impact` -> on sépare le login et le flag.
+    let (actor, high_impact) = match started_by.strip_suffix("+high_impact") {
+        Some(login) => (login.to_string(), true),
+        None => (started_by.to_string(), false),
+    };
+    let entries = read_ledger_lines(&path);
+    if entries.is_empty() {
+        let exists = std::path::Path::new(&path).exists();
+        return LedgerCustody {
+            path, entries: 0, head: String::new(), alg: String::new(),
+            chain_ok: exists, why: if exists { String::new() } else { "ledger absent".into() },
+            pubkey, actor, high_impact,
+        };
+    }
+    let mut prev = GENESIS.to_string();
+    let mut head = GENESIS.to_string();
+    let mut alg = String::new();
+    let mut chain_ok = true;
+    let mut why = String::new();
+    for rec in &entries {
+        let seq = rec.get("seq").cloned().unwrap_or(Value::Null);
+        let ts = rec.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = rec.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let detail = rec.get("detail").cloned().unwrap_or(Value::Null);
+        let stored_prev = rec.get("prev").and_then(|v| v.as_str()).unwrap_or("");
+        let stored_hash = rec.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+        alg = rec.get("alg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if stored_prev != prev {
+            chain_ok = false;
+            why = "chaînage rompu (prev)".into();
+            break;
+        }
+        let seq_str = match &seq { Value::Number(num) => num.to_string(), Value::Null => String::new(), other => other.to_string() };
+        let preimage = format!("{prev}|{seq_str}|{ts}|{kind}|{}", canon_json(&detail));
+        if sha_hex(&preimage) != stored_hash {
+            chain_ok = false;
+            why = "hash recalculé != hash stocké (entrée altérée)".into();
+            break;
+        }
+        prev = stored_hash.to_string();
+        head = stored_hash.to_string();
+    }
+    LedgerCustody {
+        path, entries: entries.len(), head, alg, chain_ok, why, pubkey, actor, high_impact,
+    }
+}
+
+const REPORT_SEVERITIES: &[&str] = &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
+
+/// Phrase EN PROSE des comptes par sévérité (résumé exécutif). « Aucun finding » si rien.
+fn prose_counts(by_sev: &HashMap<String, i64>) -> String {
+    let total: i64 = by_sev.values().sum();
+    if total == 0 {
+        return "Aucun finding n'a été retenu sur cet engagement.".into();
+    }
+    // ordre décroissant de gravité, en ne citant que les sévérités présentes.
+    let parts: Vec<String> = REPORT_SEVERITIES.iter().rev()
+        .filter_map(|s| {
+            let n = by_sev.get(*s).copied().unwrap_or(0);
+            if n > 0 { Some(format!("{n} {}", sev_word(s, n))) } else { None }
+        })
+        .collect();
+    format!(
+        "L'évaluation a retenu {total} finding{} : {}.",
+        if total > 1 { "s" } else { "" },
+        parts.join(", "),
+    )
+}
+
+/// Libellé de sévérité en français accordé au nombre (pour la prose).
+fn sev_word(sev: &str, n: i64) -> String {
+    let base = match sev {
+        "CRITICAL" => "critique",
+        "HIGH" => "élevé",
+        "MEDIUM" => "moyen",
+        "LOW" => "faible",
+        _ => "informatif",
+    };
+    if n > 1 { format!("{base}s") } else { base.to_string() }
+}
+
+/// Phrase top-risques : cite les titres des findings les plus graves (CRITICAL puis HIGH), max 3.
+fn prose_top_risks(rows: &[FindingRow]) -> String {
+    let mut ranked: Vec<&FindingRow> = rows.iter()
+        .filter(|f| matches!(f.severity.to_ascii_uppercase().as_str(), "CRITICAL" | "HIGH"))
+        .collect();
+    ranked.sort_by_key(|f| match f.severity.to_ascii_uppercase().as_str() { "CRITICAL" => 0, _ => 1 });
+    if ranked.is_empty() {
+        return "Aucun risque haut ou critique n'a été identifié sur le périmètre testé.".into();
+    }
+    let top: Vec<String> = ranked.iter().take(3)
+        .map(|f| format!("« {} » sur `{}`", f.title, f.target))
+        .collect();
+    format!("Les risques prioritaires à traiter sont : {}.", top.join(" ; "))
+}
+
+/// Phrase posture : lecture synthétique du niveau de risque résiduel.
+fn prose_posture(by_sev: &HashMap<String, i64>) -> String {
+    let crit = by_sev.get("CRITICAL").copied().unwrap_or(0);
+    let high = by_sev.get("HIGH").copied().unwrap_or(0);
+    let med = by_sev.get("MEDIUM").copied().unwrap_or(0);
+    if crit > 0 {
+        "Posture : EXPOSÉE — au moins une vulnérabilité critique permet un impact direct ; remédiation immédiate recommandée.".into()
+    } else if high > 0 {
+        "Posture : À RENFORCER — des vulnérabilités élevées sont exploitables ; planifier une remédiation rapide.".into()
+    } else if med > 0 {
+        "Posture : ACCEPTABLE SOUS RÉSERVE — risques modérés à corriger dans le cycle de durcissement courant.".into()
+    } else {
+        "Posture : SOLIDE — aucun risque élevé ou critique sur le périmètre testé ; maintenir la surveillance.".into()
+    }
 }
 
 /// Rend le markdown du rapport d'un run depuis les données console (miroir de build_report Python) :
 /// synthèse par sévérité, findings détaillés, section transparence ROE (FIRE/DRY_RUN/VETO/erreurs),
-/// et section PURPLE (couverture de détection SOC : detected/missed/MTTD) quand `purple` est fourni.
+/// section PURPLE (couverture de détection SOC) quand `purple` est fourni, et annexe chaîne-de-custody
+/// (head du ledger, nb entrées, algo, clé publique, attribution actor) quand `custody` est fourni.
 /// Les compteurs proviennent de run_job ; le détail des findings/verdicts des tables finding/roe_decision.
-fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>) -> String {
+fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>, custody: Option<&LedgerCustody>) -> String {
     const SEVERITIES: &[&str] = &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
     let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
     let mut out: Vec<String> = vec![
@@ -2007,33 +2714,37 @@ fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Opti
 
     // --- synthèse findings par sévérité (sur les findings de CE run) ---
     let mut by_sev: HashMap<String, i64> = HashMap::new();
-    let finding_rows: Vec<(String, String, String, String, String, String, String, String, String, String)> = {
-        let mut stmt = match db.prepare(
-            "SELECT title,target,severity,category,mitre,status,tool,evidence,poc,fix FROM finding WHERE run_id=? ORDER BY id DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return out.join("\n"),
-        };
-        stmt.query_map([run_id], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-            ))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
-    };
-    for (_, _, sev, _, _, _, _, _, _, _) in &finding_rows {
-        *by_sev.entry(sev.clone()).or_insert(0) += 1;
+    let finding_rows = read_finding_rows(db, run_id);
+    for f in &finding_rows {
+        *by_sev.entry(f.severity.clone()).or_insert(0) += 1;
     }
+
+    // --- Executive summary (prose) : scope, fenêtre temporelle, comptes par sévérité, top risques,
+    //     posture. Contexte d'engagement = Campaign.notes si renseigné. ---
+    out.push("## Résumé exécutif".into());
+    out.push(String::new());
+    let notes = campaign_notes(db, campaign);
+    if !notes.is_empty() {
+        out.push(format!("**Contexte d'engagement.** {notes}"));
+        out.push(String::new());
+    }
+    let targets_list: Vec<String> = job.get("targets").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let scope_phrase = if targets_list.is_empty() { "le périmètre planifié".to_string() } else { format!("le périmètre {}", targets_list.join(", ")) };
+    let started = job.get("started").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .or_else(|| job.get("ts").and_then(|v| v.as_str())).unwrap_or("(début non daté)");
+    let finished = job.get("finished").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("(en cours / non daté)");
+    out.push(format!(
+        "Cet engagement a couvert {scope_phrase}, sur la fenêtre du {started} au {finished}, \
+         en mode `{}`.",
+        job.get("mode").and_then(|v| v.as_str()).unwrap_or("propose"),
+    ));
+    out.push(prose_counts(&by_sev));
+    out.push(prose_top_risks(&finding_rows));
+    out.push(prose_posture(&by_sev));
+    out.push(String::new());
+
     out.push("## Synthèse".into());
     out.push(String::new());
     out.push("| Sévérité | # |".into());
@@ -2053,18 +2764,22 @@ fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Opti
     fn dash(s: &str) -> &str {
         if s.is_empty() { "—" } else { s }
     }
-    for (title, target, sev, cat, mitre, status, tool, evidence, poc, fix) in &finding_rows {
-        out.push(format!("### [{sev}] {title} — `{target}`"));
-        out.push(format!("- **Catégorie** : {}  ·  **ATT&CK** : {}  ·  **Statut** : {}", dash(cat), dash(mitre), dash(status)));
-        out.push(format!("- **Outil** : {}", dash(tool)));
-        if !evidence.is_empty() {
-            out.push(format!("- **Evidence** : {evidence}"));
+    for f in &finding_rows {
+        out.push(format!("### [{}] {} — `{}`", f.severity, f.title, f.target));
+        // CWE et CVSS SÉPARÉS (distincts de la catégorie/ATT&CK).
+        out.push(format!(
+            "- **CWE** : {}  ·  **CVSS** : {}  ·  **ATT&CK** : {}",
+            dash(&f.cwe), dash(&f.cvss_display()), dash(&f.mitre),
+        ));
+        out.push(format!("- **Catégorie** : {}  ·  **Statut** : {}  ·  **Outil** : {}", dash(&f.category), dash(&f.status), dash(&f.tool)));
+        if !f.evidence.is_empty() {
+            out.push(format!("- **Evidence** : {}", f.evidence));
         }
-        if !poc.is_empty() {
-            out.push(format!("- **PoC** : {poc}"));
+        if !f.poc.is_empty() {
+            out.push(format!("- **PoC** : {}", f.poc));
         }
-        if !fix.is_empty() {
-            out.push(format!("- **Remediation** : {fix}"));
+        if !f.fix.is_empty() {
+            out.push(format!("- **Remediation** : {}", f.fix));
         }
         out.push(String::new());
     }
@@ -2139,8 +2854,434 @@ fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Opti
         render_purple_section(&mut out, p);
     }
 
+    // --- ANNEXE chaîne-de-custody : preuve d'intégrité de l'audit (ledger SHA-256) + attribution. ---
+    if let Some(c) = custody {
+        out.push("## Annexe — chaîne de custody".into());
+        out.push(String::new());
+        out.push(format!("- **Ledger** : `{}`", c.path));
+        out.push(format!("- **Entrées** : {}", c.entries));
+        out.push(format!("- **Algorithme** : {}", if c.alg.is_empty() { "—" } else { &c.alg }));
+        out.push(format!("- **Head (dernier hash)** : `{}`", if c.head.is_empty() { "—" } else { &c.head }));
+        let integrity = if c.chain_ok { "VALIDE (chaîne SHA-256 recalculée, chaînage cohérent)".to_string() }
+            else { format!("ROMPUE — {}", if c.why.is_empty() { "intégrité non vérifiée".into() } else { c.why.clone() }) };
+        out.push(format!("- **Intégrité** : {integrity}"));
+        if !c.pubkey.is_empty() {
+            out.push(format!("- **Clé publique (Ed25519)** : `{}`", c.pubkey));
+        }
+        // attribution du lot comptes : login source de vérité (started_by résolu).
+        out.push(format!(
+            "- **Attribution (acteur)** : `{}`{}",
+            if c.actor.is_empty() { "—" } else { &c.actor },
+            if c.high_impact { "  ·  opt-in HAUT-IMPACT honoré (run armé)" } else { "" },
+        ));
+        out.push(String::new());
+        out.push("Vérification externe par un tiers, sans aucun secret (clé publique seule) :".into());
+        out.push(String::new());
+        let pk = if c.pubkey.is_empty() { "<clé_publique_hex>" } else { &c.pubkey };
+        out.push(format!("```\nforge ledger verify --ledger {} --pubkey {pk}\n```", c.path));
+        out.push(String::new());
+    }
+
     out.join("\n")
 }
+
+/// Classe CSS de badge sévérité (couleurs Aurora) pour le rapport HTML.
+fn sev_css_class(sev: &str) -> &'static str {
+    match sev.to_ascii_uppercase().as_str() {
+        "CRITICAL" => "sev-crit",
+        "HIGH" => "sev-high",
+        "MEDIUM" => "sev-med",
+        "LOW" => "sev-low",
+        _ => "sev-info",
+    }
+}
+
+/// LIVRABLE CLIENT — rapport d'engagement HTML BRANDÉ (thème Aurora GuatX/Forge + quetzal).
+/// Document AUTONOME (CSS inlined, imprimable, `@media print`) : page de garde, sommaire, résumé
+/// exécutif EN PROSE (scope, fenêtre, comptes par sévérité, top risques, posture, contexte
+/// Campaign.notes), findings détaillés avec evidence/PoC/FIX + CWE/CVSS SÉPARÉS, transparence ROE,
+/// couverture purple, et annexe chaîne-de-custody (head ledger, nb entrées, algo, clé publique,
+/// commande `forge ledger verify --pubkey`, attribution actor). Tout texte dynamique est échappé HTML.
+fn render_run_report_html(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>, custody: &LedgerCustody) -> String {
+    let e = html_escape; // alias court
+    let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = job.get("mode").and_then(|v| v.as_str()).unwrap_or("—");
+    let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("—");
+    let started = job.get("started").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .or_else(|| job.get("ts").and_then(|v| v.as_str())).unwrap_or("—");
+    let finished = job.get("finished").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("—");
+    let started_by = job.get("started_by").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("—");
+    let targets_list: Vec<String> = job.get("targets").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let finding_rows = read_finding_rows(db, run_id);
+    let mut by_sev: HashMap<String, i64> = HashMap::new();
+    for f in &finding_rows {
+        *by_sev.entry(f.severity.clone()).or_insert(0) += 1;
+    }
+    let notes = campaign_notes(db, campaign);
+
+    let mut h = String::with_capacity(16_384);
+    h.push_str("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\">");
+    h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    h.push_str(&format!("<title>Forge — rapport d'engagement {}</title>", e(run_id)));
+    h.push_str(REPORT_CSS);
+    h.push_str("</head><body>");
+
+    // ----- barre d'actions (écran seulement) : impression / PDF -----
+    h.push_str("<div class=\"toolbar noprint\">");
+    h.push_str("<button type=\"button\" onclick=\"window.print()\">Imprimer / Enregistrer en PDF</button>");
+    h.push_str(&format!("<a class=\"btn\" href=\"?format=pdf\">Télécharger PDF</a>"));
+    h.push_str(&format!("<a class=\"btn\" href=\"?format=md\">Markdown</a>"));
+    h.push_str("</div>");
+
+    // ----- PAGE DE GARDE (quetzal + branding) -----
+    h.push_str("<section class=\"cover\">");
+    h.push_str(&format!("<img class=\"qz\" src=\"/quetzal.svg\" alt=\"\">"));
+    h.push_str("<div class=\"brand\">Guat<span class=\"x\">X</span> <span class=\"sub\">Forge</span></div>");
+    h.push_str("<h1 class=\"cover-title\">Rapport d'engagement de sécurité</h1>");
+    h.push_str(&format!("<div class=\"cover-camp\">{}</div>", e(if campaign.is_empty() { "(campagne sans nom)" } else { campaign })));
+    h.push_str("<dl class=\"cover-meta\">");
+    let cover_meta = [
+        ("Run", run_id),
+        ("Mode", mode),
+        ("Statut", status),
+        ("Fenêtre", &format!("{} → {}", started, finished)),
+        ("Opérateur", started_by),
+    ];
+    for (k, v) in cover_meta {
+        h.push_str(&format!("<dt>{}</dt><dd>{}</dd>", e(k), e(v)));
+    }
+    h.push_str("</dl>");
+    h.push_str("<div class=\"cover-foot\">Document confidentiel — diffusion restreinte au commanditaire</div>");
+    h.push_str("</section>");
+
+    // ----- SOMMAIRE -----
+    h.push_str("<nav class=\"toc\"><h2>Sommaire</h2><ol>");
+    let mut toc = vec![
+        ("exec", "Résumé exécutif"),
+        ("synth", "Synthèse par sévérité"),
+        ("findings", "Findings détaillés"),
+        ("roe", "Couverture & transparence (ROE)"),
+    ];
+    if purple.map(|p| p.get("plume_reachable").and_then(|v| v.as_bool()).unwrap_or(false) || p.get("error").is_some()).unwrap_or(false) {
+        toc.push(("purple", "Couverture détection (purple)"));
+    }
+    toc.push(("custody", "Annexe — chaîne de custody"));
+    for (anchor, label) in &toc {
+        h.push_str(&format!("<li><a href=\"#{}\">{}</a></li>", anchor, e(label)));
+    }
+    h.push_str("</ol></nav>");
+
+    // ----- RÉSUMÉ EXÉCUTIF (prose) -----
+    h.push_str("<section id=\"exec\" class=\"sec\"><h2>Résumé exécutif</h2>");
+    if !notes.is_empty() {
+        h.push_str(&format!("<p class=\"context\"><strong>Contexte d'engagement.</strong> {}</p>", e(&notes)));
+    }
+    let scope_phrase = if targets_list.is_empty() { "le périmètre planifié".to_string() }
+        else { format!("le périmètre {}", e(&targets_list.join(", "))) };
+    h.push_str(&format!(
+        "<p>Cet engagement a couvert {scope_phrase}, sur la fenêtre du <strong>{}</strong> au <strong>{}</strong>, en mode <code>{}</code>.</p>",
+        e(started), e(finished), e(mode),
+    ));
+    h.push_str(&format!("<p>{}</p>", e(&prose_counts(&by_sev))));
+    h.push_str(&format!("<p>{}</p>", e(&prose_top_risks(&finding_rows))));
+    let posture = prose_posture(&by_sev);
+    let posture_cls = if posture.contains("EXPOSÉE") { "posture-bad" } else if posture.contains("RENFORCER") { "posture-warn" } else if posture.contains("ACCEPTABLE") { "posture-mid" } else { "posture-good" };
+    h.push_str(&format!("<p class=\"posture {}\">{}</p>", posture_cls, e(&posture)));
+    h.push_str("</section>");
+
+    // ----- SYNTHÈSE par sévérité (cartes chiffrées) -----
+    h.push_str("<section id=\"synth\" class=\"sec\"><h2>Synthèse par sévérité</h2><div class=\"sevgrid\">");
+    for s in REPORT_SEVERITIES.iter().rev() {
+        let n = by_sev.get(*s).copied().unwrap_or(0);
+        h.push_str(&format!(
+            "<div class=\"sevcard {}\"><div class=\"n\">{}</div><div class=\"l\">{}</div></div>",
+            sev_css_class(s), n, e(s),
+        ));
+    }
+    h.push_str("</div></section>");
+
+    // ----- FINDINGS détaillés -----
+    h.push_str("<section id=\"findings\" class=\"sec\"><h2>Findings détaillés</h2>");
+    if finding_rows.is_empty() {
+        h.push_str("<p class=\"muted\">Aucun finding retenu.</p>");
+    }
+    for f in &finding_rows {
+        h.push_str("<article class=\"finding\">");
+        h.push_str(&format!(
+            "<h3><span class=\"sevbadge {}\">{}</span> {} <span class=\"tgt\">{}</span></h3>",
+            sev_css_class(&f.severity), e(&f.severity), e(&f.title), e(&f.target),
+        ));
+        // taxonomie : CWE / CVSS / ATT&CK SÉPARÉS.
+        h.push_str("<div class=\"taxo\">");
+        h.push_str(&format!("<span class=\"chip\"><b>CWE</b> {}</span>", e(dash_or(&f.cwe))));
+        h.push_str(&format!("<span class=\"chip\"><b>CVSS</b> {}</span>", e(dash_or(&f.cvss_display()))));
+        h.push_str(&format!("<span class=\"chip\"><b>ATT&amp;CK</b> {}</span>", e(dash_or(&f.mitre))));
+        h.push_str(&format!("<span class=\"chip\"><b>Catégorie</b> {}</span>", e(dash_or(&f.category))));
+        h.push_str(&format!("<span class=\"chip\"><b>Statut</b> {}</span>", e(dash_or(&f.status))));
+        h.push_str(&format!("<span class=\"chip\"><b>Outil</b> {}</span>", e(dash_or(&f.tool))));
+        h.push_str("</div>");
+        if !f.evidence.is_empty() {
+            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">Evidence</div><pre>{}</pre></div>", e(&f.evidence)));
+        }
+        if !f.poc.is_empty() {
+            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">PoC</div><pre>{}</pre></div>", e(&f.poc)));
+        }
+        // FIX (maintenant rempli) — mis en avant comme remédiation.
+        if !f.fix.is_empty() {
+            h.push_str(&format!("<div class=\"fld fix\"><div class=\"k\">Remédiation</div><div class=\"v\">{}</div></div>", e(&f.fix)));
+        }
+        h.push_str("</article>");
+    }
+    h.push_str("</section>");
+
+    // ----- TRANSPARENCE ROE (anti-masquage) -----
+    h.push_str("<section id=\"roe\" class=\"sec\"><h2>Couverture &amp; transparence (ROE / anti-masquage)</h2>");
+    let geti = |k: &str| job.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    h.push_str("<div class=\"roegrid\">");
+    for (lab, k) in [("Tirées (FIRE)", "fired"), ("Simulées (DRY_RUN)", "dry_run"), ("Refusées (VETO)", "vetoed"), ("Erreurs / skips", "errors")] {
+        h.push_str(&format!("<div class=\"roebox\"><div class=\"n\">{}</div><div class=\"l\">{}</div></div>", geti(k), e(lab)));
+    }
+    h.push_str("</div>");
+    // détail des verdicts non-FIRE.
+    let verdicts = read_nonfire_verdicts(db, run_id);
+    if !verdicts.is_empty() {
+        h.push_str("<table class=\"vtab\"><thead><tr><th>Verdict</th><th>Kind</th><th>Cible</th><th>Raisons</th></tr></thead><tbody>");
+        for (verdict, kind, target, reasons) in &verdicts {
+            h.push_str(&format!(
+                "<tr><td><span class=\"vbadge\">{}</span></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+                e(verdict), e(kind), e(target), e(reasons),
+            ));
+        }
+        h.push_str("</tbody></table>");
+    }
+    // classes jamais tentées + déférées budget.
+    if let Some(gaps) = job.get("coverage_gaps").and_then(|g| g.as_object()).filter(|g| !g.is_empty()) {
+        h.push_str("<h3>Classes jamais tentées</h3><ul>");
+        for (tgt, miss) in gaps {
+            let list = miss.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| miss.to_string());
+            h.push_str(&format!("<li><code>{}</code> : {}</li>", e(tgt), e(&list)));
+        }
+        h.push_str("</ul>");
+    }
+    if let Some(skipped) = job.get("skipped_budget").and_then(|s| s.as_array()).filter(|s| !s.is_empty()) {
+        h.push_str("<h3>Déférées (budget)</h3><ul>");
+        for a in skipped {
+            h.push_str(&format!("<li>{}</li>", e(&cell_string(a))));
+        }
+        h.push_str("</ul>");
+    }
+    h.push_str("</section>");
+
+    // ----- COUVERTURE PURPLE (si mesurée / fail-open lisible) -----
+    if let Some(p) = purple {
+        render_purple_section_html(&mut h, p);
+    }
+
+    // ----- ANNEXE chaîne-de-custody -----
+    h.push_str("<section id=\"custody\" class=\"sec\"><h2>Annexe — chaîne de custody</h2>");
+    h.push_str("<p class=\"muted\">Preuve d'intégrité de l'audit : chaîne de hachage SHA-256 du ledger d'engagement (chaque acte chaîné au précédent). L'attribution ci-dessous est la source de vérité du lot comptes (login résolu).</p>");
+    h.push_str("<dl class=\"custody\">");
+    let integrity = if custody.chain_ok { "VALIDE (chaîne SHA-256 recalculée, chaînage cohérent)".to_string() }
+        else { format!("ROMPUE — {}", if custody.why.is_empty() { "intégrité non vérifiée".into() } else { custody.why.clone() }) };
+    let actor_disp = if custody.actor.is_empty() { "—".to_string() }
+        else if custody.high_impact { format!("{} (opt-in HAUT-IMPACT honoré — run armé)", custody.actor) }
+        else { custody.actor.clone() };
+    let mut custody_rows = vec![
+        ("Ledger", custody.path.clone()),
+        ("Entrées", custody.entries.to_string()),
+        ("Algorithme", if custody.alg.is_empty() { "—".into() } else { custody.alg.clone() }),
+        ("Head (dernier hash)", if custody.head.is_empty() { "—".into() } else { custody.head.clone() }),
+        ("Intégrité", integrity),
+        ("Attribution (acteur)", actor_disp),
+    ];
+    if !custody.pubkey.is_empty() {
+        custody_rows.push(("Clé publique (Ed25519)", custody.pubkey.clone()));
+    }
+    for (k, v) in &custody_rows {
+        h.push_str(&format!("<dt>{}</dt><dd><code>{}</code></dd>", e(k), e(v)));
+    }
+    h.push_str("</dl>");
+    let pk = if custody.pubkey.is_empty() { "<clé_publique_hex>".to_string() } else { custody.pubkey.clone() };
+    h.push_str("<p class=\"muted\">Vérification externe par un tiers, sans aucun secret (clé publique seule) :</p>");
+    h.push_str(&format!("<pre class=\"cmd\">forge ledger verify --ledger {} --pubkey {}</pre>", e(&custody.path), e(&pk)));
+    h.push_str("</section>");
+
+    h.push_str("</body></html>");
+    h
+}
+
+/// '—' si vide, sinon la chaîne telle quelle (pour l'affichage des champs taxonomie).
+fn dash_or(s: &str) -> &str {
+    if s.is_empty() { "—" } else { s }
+}
+
+/// Lit les verdicts non-FIRE (DRY_RUN/VETO) d'un run, raisons aplaties en une chaîne lisible.
+fn read_nonfire_verdicts(db: &Connection, run_id: &str) -> Vec<(String, String, String, String)> {
+    let mut stmt = match db.prepare(
+        "SELECT verdict,kind,target,reasons FROM roe_decision WHERE run_id=? AND verdict<>'FIRE' ORDER BY id",
+    ) { Ok(s) => s, Err(_) => return vec![] };
+    stmt.query_map([run_id], |r| {
+        let reasons_raw = r.get::<_, Option<String>>(3)?.unwrap_or_default();
+        let reasons = serde_json::from_str::<Value>(&reasons_raw).ok()
+            .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>().join(" ; ")))
+            .unwrap_or(reasons_raw);
+        Ok((
+            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            reasons,
+        ))
+    })
+    .map(|it| it.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Section HTML « Couverture détection (purple) » — miroir HTML de render_purple_section.
+/// FAIL-OPEN LISIBLE : si Plume injoignable, on l'indique et on n'invente aucune couverture.
+fn render_purple_section_html(h: &mut String, p: &Value) {
+    let e = html_escape;
+    h.push_str("<section id=\"purple\" class=\"sec\"><h2>Couverture détection (purple)</h2>");
+    let reachable = p.get("plume_reachable").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !reachable {
+        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("colonne bleue (Plume) injoignable");
+        h.push_str(&format!("<p class=\"muted\">Mesure indisponible (fail-open) : {}. Aucune couverture inventée.</p></section>", e(why)));
+        return;
+    }
+    let fired = p.get("techniques_fired").and_then(|v| v.as_i64()).unwrap_or(0);
+    let detected = p.get("techniques_detected").and_then(|v| v.as_i64()).unwrap_or(0);
+    let missed = p.get("techniques_missed").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rate = p.get("detection_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mttd_avg = p.get("mttd_avg_secs").and_then(|v| v.as_f64());
+    let mttd_max = p.get("mttd_max_secs").and_then(|v| v.as_i64());
+    h.push_str("<ul class=\"plist\">");
+    h.push_str(&format!("<li><b>Techniques tirées (red)</b> : {}</li>", fired));
+    h.push_str(&format!("<li><b>Détectées par le SOC (blue)</b> : {} · <b>Taux</b> : {:.0}%</li>", detected, rate * 100.0));
+    h.push_str(&format!("<li><b>Trous de détection</b> : {}</li>", missed));
+    h.push_str(&format!(
+        "<li><b>MTTD moyen</b> : {} · <b>MTTD max</b> : {}</li>",
+        mttd_avg.map(|m| format!("{m:.0}s")).unwrap_or_else(|| "—".into()),
+        mttd_max.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
+    ));
+    h.push_str("</ul>");
+    if let Some(arr) = p.get("missed").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        h.push_str("<h3>Techniques NON détectées (trous SOC)</h3><ul>");
+        for m in arr {
+            let mitre = m.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+            let fires = m.get("fires").and_then(|v| v.as_i64()).unwrap_or(0);
+            h.push_str(&format!("<li><code>{}</code> (tirée {}×) — aucune alerte SOC</li>", e(mitre), fires));
+        }
+        h.push_str("</ul>");
+    }
+    if let Some(arr) = p.get("detected").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        h.push_str("<h3>Techniques détectées (avec MTTD)</h3><ul>");
+        for d in arr {
+            let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+            let alert_count = d.get("alert_count").and_then(|v| v.as_i64()).unwrap_or(0);
+            let mttd = d.get("mttd_secs").and_then(|v| v.as_i64());
+            h.push_str(&format!(
+                "<li><code>{}</code> — {} alerte(s), MTTD {}</li>",
+                e(mitre), alert_count, mttd.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
+            ));
+        }
+        h.push_str("</ul>");
+    }
+    h.push_str("</section>");
+}
+
+/// CSS du rapport HTML brandé — thème Aurora (palette GuatX/Forge), inliné pour un document AUTONOME.
+/// `@media print` : page de garde isolée, sauts de page propres, masquage de la barre d'actions,
+/// couleurs forcées (print-color-adjust) pour que les badges/posture restent lisibles en PDF.
+const REPORT_CSS: &str = "<style>\n\
+:root{--bg:#070b13;--card:#0c1422;--card2:#0a111d;--bd:#16202e;--hd:#eaf2fb;--fg:#cdd9e6;--mut:#8aa0b4;\
+--acc:#2dd4bf;--acc-ink:#04201c;--acc-bg:#2dd4bf1a;--b1:#7ce8c3;--b2:#ffd9a3;--b3:#ffb3ab;\
+--crit:#ff6b6b;--high:#ffa94d;--med:#ffd43b;--low:#74c0fc;--info:#8aa0b4;\
+--sans:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;--mono:'JetBrains Mono',ui-monospace,monospace}\n\
+*{box-sizing:border-box}\n\
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;font-size:14px;\
+max-width:920px;margin:0 auto;padding:0 28px 64px}\n\
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.16;filter:blur(48px);\
+background:radial-gradient(42vw 42vw at 6% -8%,var(--b1),transparent 62%),\
+radial-gradient(38vw 38vw at 102% 10%,var(--b2),transparent 62%),\
+radial-gradient(36vw 36vw at 44% 116%,var(--b3),transparent 62%)}\n\
+h1,h2,h3{color:var(--hd);font-weight:700;line-height:1.25}\n\
+h2{font-size:20px;margin:32px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--bd)}\n\
+h3{font-size:15px;margin:18px 0 8px}\n\
+code{font-family:var(--mono);font-size:.92em;background:var(--card2);border:1px solid var(--bd);border-radius:5px;padding:1px 5px;color:var(--acc)}\n\
+pre{font-family:var(--mono);font-size:12px;background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg)}\n\
+.muted{color:var(--mut)}\n\
+.toolbar{display:flex;gap:10px;padding:16px 0;position:sticky;top:0;z-index:9}\n\
+.toolbar button,.toolbar .btn{font-family:var(--sans);font-size:13px;background:var(--acc);color:var(--acc-ink);\
+border:0;border-radius:9px;padding:8px 16px;cursor:pointer;font-weight:700;text-decoration:none}\n\
+.toolbar .btn{background:var(--card);color:var(--fg);border:1px solid var(--bd);font-weight:500}\n\
+.cover{min-height:88vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px 0}\n\
+.cover .qz{width:128px;height:128px;filter:drop-shadow(0 6px 24px rgba(45,212,191,.25))}\n\
+.cover .brand{font-size:34px;font-weight:800;letter-spacing:-.02em;margin-top:14px;color:var(--hd)}\n\
+.cover .brand .x{color:var(--acc)}\n\
+.cover .brand .sub{font-size:18px;font-weight:600;color:var(--mut);margin-left:6px}\n\
+.cover-title{font-size:30px;margin:24px 0 6px}\n\
+.cover-camp{font-size:18px;color:var(--acc);font-weight:600;margin-bottom:26px}\n\
+.cover-meta{display:grid;grid-template-columns:auto auto;gap:5px 18px;font-size:14px;margin:0 auto;text-align:left}\n\
+.cover-meta dt{color:var(--mut);font-weight:600}.cover-meta dd{margin:0;color:var(--fg);font-family:var(--mono);font-size:13px}\n\
+.cover-foot{margin-top:34px;font-size:12px;color:var(--mut);letter-spacing:.04em;text-transform:uppercase}\n\
+.toc{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 22px;margin:28px 0}\n\
+.toc h2{border:0;margin:0 0 6px;font-size:16px}\n\
+.toc ol{margin:0;padding-left:20px}.toc a{color:var(--fg);text-decoration:none}.toc a:hover{color:var(--acc)}\n\
+.sec{margin-top:8px}\n\
+.context{background:var(--acc-bg);border-left:3px solid var(--acc);border-radius:0 8px 8px 0;padding:10px 14px}\n\
+.posture{font-weight:700;border-radius:8px;padding:11px 14px;margin-top:14px}\n\
+.posture-bad{background:rgba(255,107,107,.14);border:1px solid var(--crit);color:var(--crit)}\n\
+.posture-warn{background:rgba(255,169,77,.14);border:1px solid var(--high);color:var(--high)}\n\
+.posture-mid{background:rgba(255,212,59,.12);border:1px solid var(--med);color:var(--med)}\n\
+.posture-good{background:var(--acc-bg);border:1px solid var(--acc);color:var(--acc)}\n\
+.sevgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}\n\
+.sevcard{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px 8px;text-align:center}\n\
+.sevcard .n{font-size:26px;font-weight:800;line-height:1}.sevcard .l{font-size:11px;color:var(--mut);margin-top:5px;text-transform:uppercase;letter-spacing:.05em}\n\
+.sevcard.sev-crit{border-color:var(--crit)}.sevcard.sev-crit .n{color:var(--crit)}\n\
+.sevcard.sev-high{border-color:var(--high)}.sevcard.sev-high .n{color:var(--high)}\n\
+.sevcard.sev-med{border-color:var(--med)}.sevcard.sev-med .n{color:var(--med)}\n\
+.sevcard.sev-low{border-color:var(--low)}.sevcard.sev-low .n{color:var(--low)}\n\
+.finding{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px 18px;margin:14px 0;break-inside:avoid}\n\
+.finding h3{margin:0 0 10px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}\n\
+.finding .tgt{font-family:var(--mono);font-size:12px;color:var(--mut);font-weight:500}\n\
+.sevbadge{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.04em;padding:3px 9px;border-radius:20px;text-transform:uppercase}\n\
+.sevbadge.sev-crit{background:var(--crit);color:#1a0606}.sevbadge.sev-high{background:var(--high);color:#241201}\n\
+.sevbadge.sev-med{background:var(--med);color:#241f01}.sevbadge.sev-low{background:var(--low);color:#031424}.sevbadge.sev-info{background:var(--info);color:#06101a}\n\
+.taxo{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}\n\
+.chip{font-size:12px;background:var(--card2);border:1px solid var(--bd);border-radius:7px;padding:3px 9px;color:var(--fg)}\n\
+.chip b{color:var(--mut);font-weight:600;margin-right:4px;font-size:11px;text-transform:uppercase;letter-spacing:.03em}\n\
+.fld{margin:9px 0}.fld .k{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-bottom:3px}\n\
+.fld.fix .v{background:var(--acc-bg);border:1px solid color-mix(in srgb,var(--acc) 30%,transparent);border-radius:8px;padding:9px 12px;color:var(--hd)}\n\
+.roegrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}\n\
+.roebox{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;text-align:center}\n\
+.roebox .n{font-size:22px;font-weight:800;color:var(--hd)}.roebox .l{font-size:11px;color:var(--mut);margin-top:4px}\n\
+.vtab,.custody dl{width:100%}\n\
+.vtab{border-collapse:collapse;font-size:13px;margin:8px 0}\n\
+.vtab th,.vtab td{border:1px solid var(--bd);padding:6px 10px;text-align:left;vertical-align:top}\n\
+.vtab th{background:var(--card2);color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}\n\
+.vbadge{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--high)}\n\
+.plist{margin:6px 0;padding-left:20px}.plist b{color:var(--mut);font-weight:600}\n\
+dl.custody{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px}\n\
+dl.custody dt{color:var(--mut);font-weight:600}dl.custody dd{margin:0;word-break:break-all}\n\
+pre.cmd{border-color:var(--acc);color:var(--acc)}\n\
+@media print{\n\
+@page{margin:16mm}\n\
+:root,body{background:#fff!important;color:#1a2330!important}\n\
+*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}\n\
+body{max-width:none;padding:0}body::before{display:none}\n\
+.noprint,.toolbar{display:none!important}\n\
+.cover{min-height:auto;page-break-after:always;padding:18mm 0}\n\
+.cover .brand,.cover-title,h1,h2,h3{color:#0c1a16!important}\n\
+.toc{page-break-after:always}\n\
+.sec,.finding{break-inside:avoid}\n\
+h2{page-break-after:avoid}\n\
+.finding,.sevcard,.roebox,.toc,.context,.posture,pre,.vtab th{background:#f6f8f7!important}\n\
+code,.chip{background:#eef2f0!important;color:#0a6b56!important}\n\
+.posture-good,pre.cmd{color:#0a6b56!important}\n\
+}\n\
+</style>";
 
 /// Section markdown « Couverture détection (purple) » du rapport : detected / missed / MTTD.
 /// FAIL-OPEN LISIBLE : si `plume_reachable=false`, on l'indique explicitement et on n'affiche
@@ -2531,10 +3672,12 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
     // seul). N'altère aucun garde-fou — lecture du registre uniquement.
     let hi_modules: Vec<String> = if high_impact { high_impact_modules(&app, &requested_modules) } else { vec![] };
 
-    // run_job 'running' + provenance opérateur. Le started_by est volontairement non-PII (rôle) ;
-    // on y encode aussi l'autorisation haut-impact ("operator+high_impact") pour que tout run armé
-    // soit traçable depuis run_job sans nouvelle colonne (audit renforcé). `reason` est déjà persisté.
-    let started_by = if high_impact { "operator+high_impact" } else { "operator" };
+    // run_job 'running' + provenance opérateur. ATTRIBUTION : on résout l'IDENTITÉ individuelle depuis
+    // la session (login réel) si présente ; sinon repli rétro-compat sur 'operator' (compte bootstrap
+    // env-hash ou dev-open). Le started_by encode `<login>` et, pour un run armé, `<login>+high_impact`
+    // -> tout run haut-impact reste traçable au COMPTE qui l'a déclenché, sans nouvelle colonne.
+    let actor = attribution_login(&app, &headers);
+    let started_by = if high_impact { format!("{actor}+high_impact") } else { actor.clone() };
     {
         let db = app.db();
         let _ = db.execute(
@@ -2554,7 +3697,7 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
     // traçable et non-répudiable dans la chaîne du ledger.
     if high_impact {
         append_console_ledger(&app, "console.run.high_impact_authorized", json!({
-            "run_id": run_id, "campaign": campaign, "by": "operator",
+            "run_id": run_id, "campaign": campaign, "actor": actor, "by": "operator",
             "arm": arm, "reason": reason,
             "exploit_modules_authorized": hi_modules,
             "requested_modules": requested_modules,
@@ -2563,7 +3706,7 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
         }));
     }
     append_console_ledger(&app, "console.run.start", json!({
-        "run_id": run_id, "campaign": campaign, "mode": mode, "by": "operator",
+        "run_id": run_id, "campaign": campaign, "mode": mode, "actor": actor, "by": "operator",
         "targets": body.get("targets").cloned().unwrap_or(json!([])), "modules": requested_modules,
         "module_params": Value::Object(module_params.clone()),
         "reason": reason, "arm_requested": arm,
@@ -2984,8 +4127,9 @@ async fn run_cancel(State(app): State<App>, headers: HeaderMap, Path(id): Path<S
         let db = app.db();
         let _ = db.execute("UPDATE run_job SET status='cancelled' WHERE run_id=? AND status='running'", [&id]);
     }
-    push_run_log(&app, &id, "system", "cancel demandé par l'opérateur — kill group");
-    append_console_ledger(&app, "console.run.cancel", json!({"run_id": id, "by": "operator"}));
+    let actor = attribution_login(&app, &headers);
+    push_run_log(&app, &id, "system", &format!("cancel demandé par '{actor}' — kill group"));
+    append_console_ledger(&app, "console.run.cancel", json!({"run_id": id, "actor": actor, "by": "operator"}));
     kill_group(pgid);
     (StatusCode::OK, Json(json!({"run_id": id, "status": "cancelling"})))
 }
@@ -3208,6 +4352,73 @@ fn print_objects(cols: &[&str], rows: &[Value], as_json: bool) {
     print_table(&columns, &table);
 }
 
+/// `forge-console useradd <login> <role> [--pass <pw>]` — provisionne un compte individuel.
+/// Le mot de passe est lu sur STDIN (recommandé : pas de fuite argv) ; `--pass` le fournit en argv
+/// (scripting). Calcule le hash argon2id et l'écrit dans `users` (upsert par login). Ouvre la base en
+/// ÉCRITURE (mêmes PRAGMA que le boot) et garantit le schéma (execute_batch) avant l'insertion — la
+/// sous-commande peut donc créer le 1er compte sur une base neuve. Codes : 0 OK, 2 erreur d'usage/IO.
+fn run_useradd_cli(args: &[String]) -> i32 {
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let (login, role) = match (positional.first(), positional.get(1)) {
+        (Some(l), Some(r)) => (l.as_str(), r.as_str()),
+        _ => {
+            eprintln!("usage: forge-console useradd <login> <role> [--pass <password>]   (role: viewer|operator|admin)");
+            return 2;
+        }
+    };
+    if let Err(e) = validate_login(login) {
+        eprintln!("[forge-console] useradd: login invalide: {e}");
+        return 2;
+    }
+    if let Err(e) = validate_role(role) {
+        eprintln!("[forge-console] useradd: {e}");
+        return 2;
+    }
+    // mot de passe : --pass (argv, scripting) sinon lecture sur STDIN (pas de fuite via ps).
+    let pw = match cli_opt(args, "pass") {
+        Some(p) => p,
+        None => {
+            eprintln!("[forge-console] useradd: entre le mot de passe (STDIN) :");
+            use std::io::Read;
+            let mut s = String::new();
+            if std::io::stdin().read_to_string(&mut s).is_err() {
+                eprintln!("[forge-console] useradd: lecture STDIN impossible");
+                return 2;
+            }
+            s.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+    if pw.is_empty() {
+        eprintln!("[forge-console] useradd: mot de passe vide refusé");
+        return 2;
+    }
+    let db_path = cli_db_path();
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[forge-console] useradd: ouverture de '{db_path}' impossible: {e}");
+            return 2;
+        }
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    // garantit le schéma (table users incluse) — permet de créer le 1er compte sur une base neuve.
+    if conn.execute_batch(SCHEMA).is_err() {
+        eprintln!("[forge-console] useradd: initialisation du schéma impossible");
+        return 2;
+    }
+    let hash = hash_pw(&pw);
+    match upsert_user(&conn, login, role, &hash) {
+        Ok(role) => {
+            println!("[forge-console] compte '{login}' (role={role}) provisionné dans {db_path}");
+            0
+        }
+        Err(e) => {
+            eprintln!("[forge-console] useradd: {e}");
+            2
+        }
+    }
+}
+
 /// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/SOQL).
 fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
@@ -3355,6 +4566,13 @@ async fn main() {
         Some(cmd @ ("findings" | "roe" | "coverage" | "query")) => {
             std::process::exit(run_read_cli(cmd, &args[2..]));
         }
+        // Provisioning d'un COMPTE INDIVIDUEL : forge-console useradd <login> <role> [--pass <pw>]
+        //   role ∈ {viewer|operator|admin}. Le mot de passe est lu sur STDIN par défaut (jamais en
+        //   argv -> pas de fuite via ps/cmdline) ; `--pass <pw>` est toléré pour le scripting. Le hash
+        //   argon2id est calculé ici et stocké dans `users` (idempotent par login : upsert + réactive).
+        Some("useradd") => {
+            std::process::exit(run_useradd_cli(&args[2..]));
+        }
         _ => {}
     }
 
@@ -3465,6 +4683,7 @@ async fn main() {
     // fallback pour toute route non-API non matchée — l'index `/` reste rendu par include_str!.
     let protected = Router::new()
         .route("/", get(index))
+        .route("/api/whoami", get(whoami))
         .route("/api/ingest", post(ingest))
         .route("/api/findings", get(findings))
         .route("/api/findings/:id", get(finding_detail))
@@ -3498,6 +4717,9 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
+        // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
+        // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
+        .route("/api/login", post(login))
         .merge(protected)
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app);
@@ -3570,6 +4792,134 @@ mod tests {
         assert_ne!(h1, h2, "même mdp -> hash identiques = sel constant/tous-zeros (régression)");
         assert!(verify_pw("hunter2", &h1), "hash doit se vérifier");
         assert!(!verify_pw("wrong", &h1), "mauvais mdp doit échouer");
+    }
+
+    /// Construit un HeaderMap avec un Authorization: Bearer <tok> (utilisé pour simuler une session).
+    fn bearer_headers(tok: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        h
+    }
+
+    /// Construit un HeaderMap avec un X-Forge-Operator (repli bootstrap env-hash).
+    fn operator_headers(pw: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forge-operator", pw.parse().unwrap());
+        h
+    }
+
+    /// [#6 comptes] validate_login / validate_role : grammaire stricte, rôles fermés (fail-closed).
+    #[test]
+    fn user_login_and_role_validation() {
+        assert!(validate_login("alice").is_ok());
+        assert!(validate_login("a.b_c-1").is_ok());
+        assert!(validate_login("").is_err(), "login vide refusé");
+        assert!(validate_login("-x").is_err(), "login débutant par '-' refusé (anti-flag)");
+        assert!(validate_login("a b").is_err(), "espace refusé");
+        assert!(validate_login("évil").is_err(), "non-ASCII refusé");
+        assert!(validate_role("viewer").is_ok());
+        assert!(validate_role("operator").is_ok());
+        assert!(validate_role("admin").is_ok());
+        assert!(validate_role("root").is_err(), "rôle inconnu refusé");
+        assert!(validate_role("").is_err());
+    }
+
+    /// [#6 comptes] upsert_user -> session -> resolve_session_identity : un compte individuel en
+    /// session est résolu (login/rôle réels), is_operator suit le rôle.
+    #[test]
+    fn session_resolves_individual_identity() {
+        let path = tmp_path("forge-test-users-resolve");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "carol", "operator", &hash_pw("pw")).unwrap();
+        }
+        let uid: i64 = { let db = app.db(); db.query_row("SELECT id FROM users WHERE login='carol'", [], |r| r.get(0)).unwrap() };
+        let (tok, _exp) = create_session(&app, uid);
+        let id = resolve_session_identity(&app, &bearer_headers(&tok)).expect("session valide -> identité");
+        assert_eq!(id.login, "carol");
+        assert_eq!(id.role, "operator");
+        assert!(id.is_operator, "operator -> is_operator");
+        assert!(id.via_session, "via_session=true pour un compte individuel");
+        // token inconnu -> pas d'identité.
+        assert!(resolve_session_identity(&app, &bearer_headers("deadbeef")).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [#6 comptes] disabled / expiration : un compte désactivé et une session expirée sont refusés
+    /// (fail-closed), et la session expirée est purgée.
+    #[test]
+    fn session_disabled_and_expired_are_rejected() {
+        let path = tmp_path("forge-test-users-disabled");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "dave", "viewer", &hash_pw("pw")).unwrap();
+        }
+        let uid: i64 = { let db = app.db(); db.query_row("SELECT id FROM users WHERE login='dave'", [], |r| r.get(0)).unwrap() };
+        let (tok, _) = create_session(&app, uid);
+        // désactivation -> refus immédiat même session valide.
+        { let db = app.db(); db.execute("UPDATE users SET disabled=1 WHERE id=?", [uid]).unwrap(); }
+        assert!(resolve_session_identity(&app, &bearer_headers(&tok)).is_none(), "compte désactivé refusé");
+        // réactive + force une session expirée -> refus + purge.
+        { let db = app.db(); db.execute("UPDATE users SET disabled=0 WHERE id=?", [uid]).unwrap(); }
+        let token_sha = sha_hex(&tok);
+        { let db = app.db(); db.execute("UPDATE session SET expires=1 WHERE token_sha=?", [&token_sha]).unwrap(); }
+        assert!(resolve_session_identity(&app, &bearer_headers(&tok)).is_none(), "session expirée refusée");
+        let purged: i64 = { let db = app.db(); db.query_row("SELECT COUNT(*) FROM session WHERE token_sha=?", [&token_sha], |r| r.get(0)).unwrap() };
+        assert_eq!(purged, 0, "session expirée purgée");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [#6 RÉTRO-COMPAT] check_operator : repli bootstrap par hash env quand AUCUNE session n'est
+    /// présentée — la console live (hash via env) continue de fonctionner.
+    #[test]
+    fn check_operator_falls_back_to_env_hash() {
+        let path = tmp_path("forge-test-op-env");
+        let mut app = test_app(&path);
+        app.operator_hash = Arc::new(hash_pw("s3cr3t"));
+        assert!(check_operator(&app, &operator_headers("s3cr3t")), "bonne preuve env -> opérateur");
+        assert!(!check_operator(&app, &operator_headers("wrong")), "mauvaise preuve env -> refus");
+        assert!(!check_operator(&app, &HeaderMap::new()), "aucune preuve -> refus (fail-closed)");
+        // attribution sans session -> 'bootstrap' (compte env-hash).
+        assert_eq!(attribution_login(&app, &operator_headers("s3cr3t")), "bootstrap");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [#6 sécurité] check_operator : une session VIEWER ne passe JAMAIS le C2, même si un hash env
+    /// opérateur est présent (un viewer authentifié ne doit pas escalader via le secret partagé).
+    /// Une session OPERATOR passe, et l'attribution porte le login individuel.
+    #[test]
+    fn session_viewer_cannot_arm_operator_can() {
+        let path = tmp_path("forge-test-op-session");
+        let mut app = test_app(&path);
+        app.operator_hash = Arc::new(hash_pw("s3cr3t")); // hash env présent (ne doit pas sauver le viewer)
+        {
+            let db = app.db();
+            upsert_user(&db, "viewy", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oppy", "operator", &hash_pw("pw")).unwrap();
+        }
+        let (vid, oid): (i64, i64) = {
+            let db = app.db();
+            (db.query_row("SELECT id FROM users WHERE login='viewy'", [], |r| r.get(0)).unwrap(),
+             db.query_row("SELECT id FROM users WHERE login='oppy'", [], |r| r.get(0)).unwrap())
+        };
+        let (vtok, _) = create_session(&app, vid);
+        let (otok, _) = create_session(&app, oid);
+        assert!(!check_operator(&app, &bearer_headers(&vtok)), "session viewer NE PASSE PAS le C2");
+        assert!(check_operator(&app, &bearer_headers(&otok)), "session operator passe le C2");
+        assert_eq!(attribution_login(&app, &bearer_headers(&otok)), "oppy", "attribution = login individuel");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [#6 RÉTRO-COMPAT] attribution_login : sans aucune identité (dev-open, ni session ni hash env),
+    /// retombe sur le littéral historique 'operator' (comportement existant préservé).
+    #[test]
+    fn attribution_defaults_to_operator_when_no_identity() {
+        let path = tmp_path("forge-test-attr-default");
+        let app = test_app(&path); // operator_hash vide
+        assert_eq!(attribution_login(&app, &HeaderMap::new()), "operator");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// [LOW sec] ct_eq_str : égalité correcte, inégalité correcte (la propriété temps-constant n'est
@@ -3745,13 +5095,107 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         let db = app.db();
         let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
-        let md = render_run_report_md(&db, "run-1", &job, None);
+        let md = render_run_report_md(&db, "run-1", &job, None, None);
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
         assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu");
         assert!(md.contains("**Refusées (VETO"), "section transparence ROE présente");
         assert!(md.contains("`VETO` `exploit.rce` → `api.example.com` : capacité non autorisée"), "verdict VETO détaillé avec raison");
         assert!(md.contains("**Simulées (DRY_RUN)** : 2"), "compteur dry_run depuis run_job");
+        // [LOT REPORTING] CWE/CVSS séparés : le finding n'a pas de colonne cwe/cvss -> dérivés
+        // (CWE depuis category vide => '—' ; CVSS depuis sévérité HIGH).
+        assert!(md.contains("## Résumé exécutif"), "executive summary présent");
+        assert!(md.contains("Posture :"), "phrase posture présente");
+        assert!(md.contains("**CWE**") && md.contains("**CVSS**"), "CWE et CVSS rendus séparément");
+        assert!(md.contains("7.5"), "CVSS de base dérivé de la sévérité HIGH");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [LOT REPORTING] extract_cwe : extrait un CWE canonique de formes variées, '' si absent.
+    #[test]
+    fn extract_cwe_variants() {
+        assert_eq!(extract_cwe("CWE-639"), "CWE-639");
+        assert_eq!(extract_cwe("cwe_862"), "CWE-862");
+        assert_eq!(extract_cwe("CWE 918"), "CWE-918");
+        assert_eq!(extract_cwe("access_control.CWE-284 (idor)"), "CWE-284");
+        assert_eq!(extract_cwe("access_control"), "", "pas de CWE -> vide");
+        assert_eq!(extract_cwe(""), "");
+    }
+
+    /// [LOT REPORTING] cvss_base_for_severity : (vecteur,score) par bande ; INFO/inconnu -> ('',0).
+    #[test]
+    fn cvss_base_by_severity() {
+        assert_eq!(cvss_base_for_severity("CRITICAL").1, 9.8);
+        assert_eq!(cvss_base_for_severity("high").1, 7.5, "casse insensible");
+        assert_eq!(cvss_base_for_severity("MEDIUM").1, 5.3);
+        assert_eq!(cvss_base_for_severity("LOW").1, 3.1);
+        assert_eq!(cvss_base_for_severity("INFO"), ("", 0.0), "INFO -> pas de CVSS inventé");
+        assert!(cvss_base_for_severity("CRITICAL").0.starts_with("CVSS:3.1/"));
+    }
+
+    /// [LOT REPORTING] html_escape : neutralise les métacaractères HTML (anti-injection rapport).
+    #[test]
+    fn html_escape_neutralizes() {
+        assert_eq!(html_escape("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(html_escape("a&b \"q\" 'x'"), "a&amp;b &quot;q&quot; &#39;x&#39;");
+        assert_eq!(html_escape("texte normal"), "texte normal");
+    }
+
+    /// [LOT REPORTING] render_run_report_html : document brandé autonome — page de garde GuatX/Forge
+    /// + quetzal, sommaire, résumé exécutif EN PROSE (Campaign.notes), findings avec CWE/CVSS SÉPARÉS
+    /// + FIX, CSS print, annexe chaîne-de-custody (head ledger, attribution, commande verify --pubkey).
+    /// Le contenu hostile est échappé (anti-injection).
+    #[test]
+    fn run_report_html_branded_deliverable() {
+        let path = tmp_path("forge-test-html");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            migrate(&db);
+            db.execute("INSERT INTO campaign(name,started,notes) VALUES('c','t','Pentest grey-box autorisé du périmètre client.')", []).unwrap();
+            // finding AVEC cwe/cvss explicites + un titre hostile (doit être échappé).
+            db.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,cwe,cvss_vector,cvss_score,mitre,status,evidence,poc,fix,tool,run_id)
+                 VALUES('t','c','api.example.com','<b>IDOR</b>','HIGH','access_control','CWE-639','CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N',8.1,'T1190','confirmé','dump user 42','curl -H ...','Contrôle ownership serveur','idor','run-1')",
+                [],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,started_by,targets,started,finished)
+                 VALUES('run-1','c',datetime('now'),'done','propose',1,0,0,0,'alice+high_impact','[\"api.example.com\"]','2026-06-01T10:00:00Z','2026-06-01T12:00:00Z')",
+                [],
+            ).unwrap();
+        }
+        // ledger non vide -> annexe custody avec head + intégrité VALIDE.
+        append_console_ledger(&app, "console.run.start", json!({"run_id":"run-1","actor":"alice","by":"operator"}));
+        let db = app.db();
+        let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
+        drop(db);
+        let custody = build_ledger_custody(&app, "alice+high_impact");
+        let db = app.db();
+        let html = render_run_report_html(&db, "run-1", &job, None, &custody);
+        // structure & branding
+        assert!(html.starts_with("<!doctype html>"), "document HTML autonome");
+        assert!(html.contains("Guat<span class=\"x\">X</span>"), "branding GuatX");
+        assert!(html.contains("/quetzal.svg"), "quetzal sur la page de garde");
+        assert!(html.contains("@media print"), "CSS print fourni");
+        assert!(html.contains("class=\"toc\""), "sommaire présent");
+        // executive summary en prose + contexte Campaign.notes
+        assert!(html.contains("Résumé exécutif"), "section résumé exécutif");
+        assert!(html.contains("Pentest grey-box autorisé"), "Campaign.notes branchées dans le contexte");
+        assert!(html.contains("posture"), "posture rendue");
+        // CWE/CVSS SÉPARÉS + FIX
+        assert!(html.contains("CWE</b> CWE-639"), "CWE rendu séparément");
+        assert!(html.contains("8.1"), "CVSS score rendu");
+        assert!(html.contains("Remédiation") && html.contains("Contrôle ownership serveur"), "FIX rendu");
+        // anti-injection : le titre hostile est échappé, pas exécutable
+        assert!(html.contains("&lt;b&gt;IDOR&lt;/b&gt;"), "titre hostile échappé");
+        assert!(!html.contains("<b>IDOR</b>"), "pas de balise hostile brute");
+        // annexe chaîne-de-custody
+        assert!(html.contains("Annexe — chaîne de custody"), "annexe custody");
+        assert!(html.contains("forge ledger verify --ledger") && html.contains("--pubkey"), "commande de vérif externe");
+        assert!(html.contains("VALIDE"), "intégrité de la chaîne recalculée");
+        assert!(html.contains("alice") && html.contains("HAUT-IMPACT"), "attribution actor + opt-in haut-impact");
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

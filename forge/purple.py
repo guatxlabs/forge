@@ -20,6 +20,9 @@ DEFAULT_MITRE_BY_KIND = {
     "recon.nmap": "T1046",              # Network Service Discovery
     "web.nuclei": "T1595.002",          # Active Scanning: Vulnerability Scanning
     "access_control.idor": "T1190",     # Exploit Public-Facing Application
+    "ssrf.callback": "T1190",           # Exploit Public-Facing Application (SSRF, CWE-918)
+    "auth.takeover": "T1212",           # Exploitation for Credential Access (ATO, CWE-287/640)
+    "cors.credentials": "T1539",        # Steal Web Session Cookie (CORS permissive, CWE-942)
     "origin.find": "T1590.005",         # Gather Victim Network Info: IP Addresses
 }
 

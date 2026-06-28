@@ -28,6 +28,7 @@ class Engine:
         self.skipped_budget = []   # actions déférées par le planner (defer != delete)
         self.coverage_gaps = {}    # classes jamais tentées, par cible
         self.dups = 0              # findings ignorés car déjà en mémoire
+        self.waves = 0             # nb de vagues plan->observe->replan exécutées (campagne itérative)
 
     # --- armement délégué (gestes journalisés) ---
     def arm(self, reason="armed by operator"):
@@ -100,26 +101,12 @@ class Engine:
     def run(self, actions):
         return [self.execute(a) for a in actions]
 
-    def campaign(self, targets, brain, planner, modules=None, module_params=None):
-        """recon-state -> cerveau propose -> planner ordonne (coverage-safe) -> run gaté.
+    def _prepare(self, actions, modules, global_params, attrs_by_host):
+        """Filtre (sélection modules) + injection de params/scope sur une VAGUE d'actions.
 
-        `targets` = list[Target]. `modules` (list[str] | None) RESTREINT le plan aux kinds
-        demandés (sélection UI/console) : si fourni non vide, seules les actions dont le `kind`
-        figure dans `modules` sont planifiées. None/vide => comportement inchangé (plan complet
-        du cerveau). Le filtre RESTREINT seulement : il n'ajoute jamais de capacité (la gate ROE
-        reste seule juge ; un kind demandé mais exploit/destructif sera quand même vétoé).
-
-        `module_params` ({kind: {param: val}} | None) = params globaux (issus du scope) mappés
-        dans `action.params`. Les params PAR-CIBLE de `target.attrs.module_params[kind]` sont
-        aussi mappés (et l'emportent sur les globaux). Les modules les lisent via params.get(...).
-
-        Trace skipped_budget + coverage_gaps pour le rapport (anti-masquage). Rien ne tire
-        sans verdict FIRE de la gate.
-        """
-        for t in targets:                            # amorce le world-model avec les cibles
-            self.graph.add_host(t.host, kind=t.kind, **(t.attrs or {}))
-        actions = brain.propose(targets)
-
+        Extrait de la boucle pour être appliqué identiquement à chaque vague (1re proposition ET
+        re-propositions chaînées). N'AJOUTE aucune capacité : restreint + pré-remplit (setdefault).
+        Retourne la liste filtrée+enrichie (les Actions sont mutées en place via leurs params)."""
         # (1) RESTRICTION par sélection de modules (UI/console) : ne garder que les kinds demandés.
         wanted = {m for m in (modules or []) if m}
         if wanted:
@@ -128,8 +115,6 @@ class Engine:
         # (2) params par-module -> action.params (la console les écrit dans scope ET target.attrs).
         #     Priorité : params spécifiques à la cible (target.attrs) > params globaux (scope).
         #     setdefault : on n'écrase jamais un param déjà posé par le cerveau.
-        global_params = module_params or {}
-        attrs_by_host = {t.host: (t.attrs or {}).get("module_params", {}) or {} for t in targets}
         for a in actions:
             for src in (global_params, attrs_by_host.get(a.target, {})):
                 for k, v in (src.get(a.kind, {}) or {}).items():
@@ -149,11 +134,84 @@ class Engine:
             if a.kind == "origin.find":
                 a.params.setdefault("in_scope", self.scope.in_scope)
                 a.params.setdefault("out_scope", self.scope.out_scope)
+        return actions
+
+    def campaign(self, targets, brain, planner, modules=None, module_params=None, max_waves=4):
+        """ITÉRATIF : plan -> observe -> replan, jusqu'à un critère d'arrêt.
+
+        Boucle (chaque vague) : `brain.propose(self.graph)` lit le world-model -> planner ordonne
+        (coverage-safe) -> run gaté -> les findings enrichissent le graphe (fait dans execute()) ->
+        re-propose à partir du graphe enrichi (chaînage : CDN->origin->nuclei/idor, fingerprint->oracles).
+
+        Critères d'ARRÊT (le premier atteint) :
+          1. plus de NOUVELLE action (toutes les actions proposées ont déjà été exécutées) -> point fixe ;
+          2. `max_waves` vagues atteint (garde-fou anti-boucle) ;
+          3. planner sans budget restant pour de nouvelles actions non-qualifiantes (implicite via order()).
+        Le ROE/gouvernance reste appliqué À CHAQUE VAGUE (rien ne tire sans verdict FIRE).
+
+        `targets` = list[Target]. `modules` / `module_params` : voir _prepare() (restriction +
+        injection, inchangés, appliqués à chaque vague). `max_waves` borne le nombre d'itérations.
+
+        Idempotence/dedup : on suit les ids d'actions DÉJÀ PLANIFIÉES (executed_ids) ; une action
+        re-proposée à l'identique (id stable kind:target) n'est jamais rejouée -> point fixe garanti.
+        skipped_budget et coverage_gaps sont ACCUMULÉS sur l'ensemble des vagues (anti-masquage).
+        """
+        for t in targets:                            # amorce le world-model avec les cibles
+            self.graph.add_host(t.host, kind=t.kind, **(t.attrs or {}))
+
+        global_params = module_params or {}
+        attrs_by_host = {t.host: (t.attrs or {}).get("module_params", {}) or {} for t in targets}
         hosts = [t.host for t in targets]
-        ordered, self.skipped_budget = planner.order(actions)
-        self.coverage_gaps = planner.coverage_gaps(actions, hosts)
-        self.run(ordered)
+
+        executed_ids = set()                         # ids d'actions déjà planifiées (dedup inter-vagues)
+        skipped_by_id = {}                           # accumule les déférées (par id, pas de doublon)
+        waves = 0
+        while waves < max_waves:
+            # le cerveau lit l'ÉTAT (graphe enrichi par la vague précédente), pas juste les cibles.
+            proposed = brain.propose(self.graph)
+            proposed = self._prepare(proposed, modules, global_params, attrs_by_host)
+            # NOUVELLES actions seulement (idempotence : on ne rejoue pas une action déjà planifiée).
+            fresh = [a for a in proposed if a.id not in executed_ids]
+            if not fresh:                            # critère d'arrêt 1 : point fixe (rien de neuf)
+                break
+            for a in fresh:
+                executed_ids.add(a.id)
+
+            ordered, skipped = planner.order(fresh)
+            for a in skipped:                        # defer != delete : accumulé, jamais jeté
+                skipped_by_id[a.id] = a
+            self.run(ordered)
+            waves += 1
+
+        self.skipped_budget = list(skipped_by_id.values())
+        # une classe n'est une lacune QUE si elle n'a JAMAIS été tentée sur AUCUNE vague :
+        # recalcul final à partir de tous les kinds réellement exécutés (results), par host.
+        self.coverage_gaps = self._final_gaps(planner, hosts)
+        self.waves = waves
         return self.coverage()
+
+    def _final_gaps(self, planner, hosts):
+        """Lacunes APRÈS toutes les vagues : classe de la checklist jamais tentée sur le host.
+
+        Dérive des `results` (kinds réellement planifiés, toutes vagues confondues) -> reflète le
+        chaînage (une classe tentée en vague 2 n'est plus une lacune). cls = suffixe du kind, comme
+        la dataclass Action (`access_control.idor` -> `idor`... mais on garde la classe d'action si
+        connue). On reconstruit la classe par la même règle que Action.__post_init__."""
+        attempted = {h: set() for h in hosts}
+        for r in self.results:
+            cls = r["kind"].split(".")[-1]
+            # repli sur le préfixe pour les kinds composés (access_control.idor -> access_control)
+            prefix = r["kind"].split(".")[0]
+            for h in hosts:
+                if r["target"] == h or str(r["target"]).startswith(str(h)):
+                    attempted[h].add(cls)
+                    attempted[h].add(prefix)
+        out = {}
+        for h in hosts:
+            missing = [c for c in planner.checklist if c not in attempted[h]]
+            if missing:
+                out[h] = missing
+        return out
 
     # --- transparence (anti-masquage, repris de secpipe) ---
     def coverage(self):
