@@ -6,7 +6,7 @@ Chaque action est tracée (results) avec son verdict pour le rapport anti-masqua
 Bridge secpipe (optionnel) : si secpipe est importable, on pourra brancher son planner
 coverage-safe + graph (P2). v0 fonctionne sans, en mode liste-d'actions explicite.
 """
-from .roe import Roe, Action, VETO, DRY_RUN, FIRE
+from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
 from . import modules as mods
 from . import purple
@@ -202,8 +202,13 @@ class Engine:
             cls = r["kind"].split(".")[-1]
             # repli sur le préfixe pour les kinds composés (access_control.idor -> access_control)
             prefix = r["kind"].split(".")[0]
+            tgt = str(r["target"])
             for h in hosts:
-                if r["target"] == h or str(r["target"]).startswith(str(h)):
+                # rattacher une action au host si la cible EST le host, ou en dérive par un
+                # délimiteur franc (host:port, host/path). Un simple startswith rattacherait à tort
+                # `app.test` à `app.testing`/`app.test.evil` -> faux « tenté » masquant une lacune.
+                hs = str(h)
+                if tgt == hs or tgt.startswith(hs + ":") or tgt.startswith(hs + "/"):
                     attempted[h].add(cls)
                     attempted[h].add(prefix)
         out = {}

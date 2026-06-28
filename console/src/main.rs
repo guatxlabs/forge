@@ -395,7 +395,7 @@ fn extract_cwe(text: &str) -> String {
         let rest = &lower[pos + 3..];
         // saute un éventuel séparateur (espace, '_', '-') puis lit les chiffres.
         let digits: String = rest
-            .trim_start_matches(|c: char| c == ' ' || c == '_' || c == '-')
+            .trim_start_matches([' ', '_', '-'])
             .chars()
             .take_while(|c| c.is_ascii_digit())
             .collect();
@@ -503,6 +503,7 @@ fn check_operator_env(app: &App, headers: &HeaderMap) -> bool {
 /// Authz C2 (run/cancel) — FAIL-CLOSED. Vrai si :
 ///   1) une SESSION valide porte un rôle operator|admin (compte individuel) ; OU
 ///   2) RÉTRO-COMPAT : la preuve par hash env (X-Forge-Operator) matche (compte 'bootstrap'/admin).
+///
 /// Un viewer (session role=viewer) ne passe JAMAIS. Sans session ni hash env -> refusé.
 fn check_operator(app: &App, headers: &HeaderMap) -> bool {
     // 1) compte individuel en session (operator/admin) — l'identité réelle prime.
@@ -664,6 +665,7 @@ fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option<Identity> 
 ///   1) session valide (compte individuel) -> identité réelle (login/role) ;
 ///   2) SINON repli RÉTRO-COMPAT : preuve opérateur par hash env (X-Forge-Operator) -> compte
 ///      'bootstrap' (role=admin, is_operator=true) ; preuve viewer Basic -> 'bootstrap' viewer.
+///
 /// None => aucune identité (anonyme dev-open ou pas de preuve). via_session=false sur les replis env.
 fn resolve_identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
     if let Some(id) = resolve_session_identity(app, headers) {
@@ -2932,13 +2934,13 @@ fn render_run_report_html(db: &Connection, run_id: &str, job: &Value, purple: Op
     // ----- barre d'actions (écran seulement) : impression / PDF -----
     h.push_str("<div class=\"toolbar noprint\">");
     h.push_str("<button type=\"button\" onclick=\"window.print()\">Imprimer / Enregistrer en PDF</button>");
-    h.push_str(&format!("<a class=\"btn\" href=\"?format=pdf\">Télécharger PDF</a>"));
-    h.push_str(&format!("<a class=\"btn\" href=\"?format=md\">Markdown</a>"));
+    h.push_str("<a class=\"btn\" href=\"?format=pdf\">Télécharger PDF</a>");
+    h.push_str("<a class=\"btn\" href=\"?format=md\">Markdown</a>");
     h.push_str("</div>");
 
     // ----- PAGE DE GARDE (quetzal + branding) -----
     h.push_str("<section class=\"cover\">");
-    h.push_str(&format!("<img class=\"qz\" src=\"/quetzal.svg\" alt=\"\">"));
+    h.push_str("<img class=\"qz\" src=\"/quetzal.svg\" alt=\"\">");
     h.push_str("<div class=\"brand\">Guat<span class=\"x\">X</span> <span class=\"sub\">Forge</span></div>");
     h.push_str("<h1 class=\"cover-title\">Rapport d'engagement de sécurité</h1>");
     h.push_str(&format!("<div class=\"cover-camp\">{}</div>", e(if campaign.is_empty() { "(campagne sans nom)" } else { campaign })));
@@ -3470,8 +3472,8 @@ fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
 /// Auth : X-Forge-Operator (FAIL-CLOSED). Renvoie 202 {run_id, status:"running", high_impact:bool}.
 /// Opt-in haut-impact GOUVERNÉ : `allow_high_impact=true` n'est honoré qu'avec operator + `arm=true`
 /// + `reason` non vide (sinon 400 'high_impact_requires_arm_and_reason'). Honoré => le plancher
-/// exploit est levé (validate_modules) et le scope du run écrit allow_exploit/destructive=true ;
-/// l'autorisation est journalisée au ledger. Hors opt-in : comportement actuel inchangé.
+///   exploit est levé (validate_modules) et le scope du run écrit allow_exploit/destructive=true ;
+///   l'autorisation est journalisée au ledger. Hors opt-in : comportement actuel inchangé.
 async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
     // (1) rôle opérateur fail-closed
     if !check_operator(&app, &headers) {
