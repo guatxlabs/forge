@@ -48,7 +48,7 @@ faire confiance. »
 
 ### Pilier (b) — Boucle PURPLE même-vendeur
 
-Forge (rouge) et **Plume** (bleu, le SOC `../soc`) sont du **même éditeur** et se corrèlent par
+Forge (rouge) et **Plume** (bleu, le SOC `../plume`) sont du **même éditeur** et se corrèlent par
 champ **MITRE ATT&CK**. « Purple » n'est pas un 3ᵉ produit : c'est la boucle.
 
 ```
