@@ -28,7 +28,10 @@ SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 # pour la priorisation, mais ce statut empêche le sur-classement en `vulnerable` (pas de preuve
 # différentielle/manuelle). La promotion en `vulnerable` reste réservée aux oracles de Forge (IDOR,
 # origine vérifiée) qui apportent une preuve d'exploitabilité.
-STATUSES = ["tested", "reported_by_tool", "vulnerable", "not_vulnerable", "submitted", "accepted", "informative", "invalid"]
+# `skipped` : le module n'a PAS pu s'exécuter (source/outil optionnel ou réseau indisponible) et
+# se neutralise proprement en émettant un finding INFO explicite plutôt qu'en plantant — discipline
+# de dégradation gracieuse (offline-safe) des modules de cartographie de surface passifs.
+STATUSES = ["tested", "reported_by_tool", "vulnerable", "not_vulnerable", "submitted", "accepted", "informative", "invalid", "skipped"]
 
 # ---------------------------------------------------------------------------
 # Remédiation par défaut — mapping clé (catégorie/CWE/technique normalisée) -> conseil de fix.

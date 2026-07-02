@@ -104,6 +104,13 @@ class Scope:
         # params par-module GLOBAUX (clé additive : ignorée par le ROE/Scope, consommée par l'engine).
         # Exposée ici pour que la CLI n'ait pas à re-lire/re-parser le scope.json une 2e fois.
         self.module_params = data.get("module_params") or {}
+        # SESSION (SECRET) — matériel d'authentification OPTIONNEL (cookies / en-têtes / bearer) que les
+        # modules recon/oracle attachent UNIQUEMENT aux requêtes vers des hôtes IN-SCOPE (scope-guard ;
+        # cf. forge/session.py). SECRET : jamais journalisé dans le ledger, jamais dans un finding/
+        # rapport, jamais placé dans action.params ni dans le graphe d'engagement. `session` = défaut
+        # global ; `sessions` = map hôte -> matériel par-hôte. Additifs : absents => aucun changement.
+        self.session = data.get("session")             # défaut global (dict) | None
+        self.sessions = data.get("sessions") or {}     # map hôte -> matériel de session (par-hôte)
         self.notes = data.get("notes", "")
 
     @classmethod

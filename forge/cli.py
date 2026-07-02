@@ -276,6 +276,22 @@ _DOCTOR_HINTS = {
                       "msfrpcd -U msf -P <pass> ; config via MSF_RPC_HOST/PORT/USER/PASS/SSL ou MSF_RPC_TOKEN"),
     "burp.scan":     ("REST API Burp Suite Pro/Enterprise (défaut http://127.0.0.1:1337)",
                       "activer la REST API Burp ; config via BURP_API_URL et BURP_API_KEY"),
+    "recon.subdomains": ("aucune — urllib stdlib (crt.sh CT) ; passive DNS optionnel via params",
+                      "rien à installer ; source injoignable -> finding status=skipped (offline-safe)"),
+    "recon.dns":     ("aucune requise — socket stdlib (A/AAAA) ; dnspython/dig optionnels (tous types)",
+                      "pip install dnspython OU apt install dnsutils pour CNAME/MX/TXT/NS (sinon A/AAAA seul)"),
+    "recon.js_endpoints": ("aucune — urllib stdlib (fetch page + JS in-scope, extraction regex)",
+                      "rien à installer ; page injoignable -> finding status=skipped (offline-safe)"),
+    "recon.urls":    ("aucune — urllib stdlib (Wayback CDX) ; CommonCrawl optionnel via params",
+                      "rien à installer ; archive injoignable -> finding status=skipped (offline-safe)"),
+    "recon.tech":    ("aucune requise — urllib stdlib (headers/cookies/meta) ; httpx optionnel (tech-detect)",
+                      "rien à installer ; httpx (binaire/docker) enrichit le fingerprint s'il est présent"),
+    "recon.content": ("binaire ffuf (local) — la wordlist locale n'est pas montable en docker",
+                      "installer ffuf (go install github.com/ffuf/ffuf/v2@latest) ; absent -> finding status=skipped"),
+    "recon.secrets": ("binaire trufflehog OU gitleaks (local) — scan d'un dossier d'assets local",
+                      "installer trufflehog ou gitleaks ; absent/réseau KO -> finding status=skipped (offline-safe)"),
+    "recon.waf":     ("aucune requise — urllib stdlib (en-têtes/cookies/Server) ; wafw00f optionnel",
+                      "rien à installer ; wafw00f (binaire local) enrichit le fingerprint s'il est présent"),
 }
 
 

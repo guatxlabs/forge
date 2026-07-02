@@ -111,9 +111,33 @@ class HeuristicBrain(Brain):
                 _action("origin.find", host, value=0.5, confidence=0.4, cost=2,
                         desc="IP d'origine derrière CDN/WAF"),
             ]
+        # ÉVASION (accès derrière CDN/WAF/anti-bot) : pour une cible WEB explicitement marquée PROTÉGÉE
+        # (attrs.protected/waf/cdn, posé par le scope/console ou un fingerprint), proposer les enablers
+        # d'accès. Ils DÉGRADENT proprement (module `available=False` si le service browser est absent
+        # -> SKIP) et restent gatés par le ROE. Rend evasion.* SÉLECTIONNABLE par le planner / --modules.
+        if is_web and self._is_protected(attrs):
+            cands += self._evasion_actions(host, chained_from="")
         if kind in ("host", "service"):
             cands += [_action("recon.nmap", host, value=0.3, confidence=0.7, cost=2, desc="nmap -sV")]
         return cands
+
+    @staticmethod
+    def _is_protected(attrs):
+        """Cible « protégée » (derrière CDN/WAF/anti-bot) : marqueur explicite dans les attrs du nœud
+        (`protected`/`waf`/`cdn`, posé par le scope/console ou un fingerprint recon.waf chaîné)."""
+        return any(attrs.get(k) for k in ("protected", "waf", "cdn"))
+
+    @staticmethod
+    def _evasion_actions(host, chained_from=""):
+        """Enablers d'évasion (accès derrière CDN/WAF) pour un host PROTÉGÉ. Non-exploit (xhr/turnstile)
+        -> proposés d'office ; le module `available` (santé du service browser) et le ROE font le reste."""
+        suffix = f" (chaîné depuis {chained_from})" if chained_from else ""
+        return [
+            _action("evasion.xhr", host, value=0.4, confidence=0.4, cost=1,
+                    desc=f"observation requêtes via browser (accès derrière CDN/WAF){suffix}"),
+            _action("evasion.turnstile", host, value=0.4, confidence=0.3, cost=1,
+                    desc=f"franchir le Turnstile interactif (enabler d'accès){suffix}"),
+        ]
 
     def _chained_actions(self, graph, host):
         """CHAÎNAGE : lit les findings du graphe pour ce host et propose des actions DÉRIVÉES sur de
@@ -157,4 +181,11 @@ class HeuristicBrain(Brain):
             if "http" in name and port:
                 out.append(_action("recon.httpx", f"{host}:{port}", value=0.4, confidence=0.6, cost=1,
                                     desc=f"fingerprint service {port} (chaîné depuis nmap)"))
+
+        # (c) WAF/CDN identifié (finding recon.waf) -> la cible est PROTÉGÉE : proposer les enablers
+        # d'évasion (accès derrière CDN/WAF) sur ce host. Chaîné depuis le fingerprint, planner-selectable.
+        for f in findings:
+            if "waf/cdn identifié" in str(f.get("title", "")).lower():
+                out += self._evasion_actions(host, chained_from="recon.waf")
+                break
         return out
