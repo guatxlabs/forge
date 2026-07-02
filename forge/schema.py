@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
+from . import techniques
+
 SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 # machine d'état d'un finding (reprend la logique FAISS du toolkit YWH).
 # `reported_by_tool` : un outil tiers (ex: nuclei) a signalé un hit sur sa propre sévérité
@@ -34,65 +36,11 @@ STATUSES = ["tested", "reported_by_tool", "vulnerable", "not_vulnerable", "submi
 # partir de sa `category`/`cwe`. Un `fix` explicite du module PRIME toujours (jamais écrasé).
 # Les clés sont normalisées (minuscule, sans espaces autour) ; on tente plusieurs formes (CWE brut,
 # label de catégorie type 'origin-exposure', etc.) pour maximiser la couverture sans casser la compat.
+#
+# SOURCE DE VÉRITÉ : forge/techniques.py. Ce dict est DÉRIVÉ de la table unique (toute clé y portant
+# une `remediation`) — plus de recopie/dérive entre schema, planner, brain et les modules.
 # ---------------------------------------------------------------------------
-DEFAULT_FIXES = {
-    # --- Access control / IDOR / BOLA (CWE-639, CWE-284, CWE-862) ---
-    "cwe-639": ("Contrôle d'ownership côté serveur : vérifier que l'utilisateur authentifié possède "
-                "bien la ressource (objet lié au compte) avant tout accès ; ne jamais se fier à un "
-                "identifiant fourni par le client. Préférer des identifiants non énumérables (UUID)."),
-    "cwe-284": ("Appliquer un contrôle d'accès systématique côté serveur (deny-by-default) sur chaque "
-                "endpoint et chaque objet ; centraliser l'autorisation, ne pas la dériver du client."),
-    "cwe-862": ("Ajouter une vérification d'autorisation manquante sur l'endpoint : exiger une session "
-                "valide ET vérifier les droits sur la ressource ciblée avant de répondre."),
-    "idor": ("Contrôle d'ownership côté serveur avant tout accès à la ressource ; identifiants non "
-             "énumérables (UUID) et autorisation centralisée deny-by-default."),
-    "access_control": ("Contrôle d'accès deny-by-default côté serveur sur chaque endpoint/objet ; "
-                        "ne jamais dériver l'autorisation d'un identifiant fourni par le client."),
-    "bola": ("Vérifier l'ownership de l'objet côté serveur (Broken Object Level Authorization) avant "
-             "de servir ou muter la ressource."),
-    # --- SSRF (CWE-918) ---
-    "cwe-918": ("Allowlist stricte des hôtes/schemas autorisés côté serveur ; bloquer les IP internes "
-                "(RFC1918, loopback, link-local) et les endpoints de métadonnées cloud (169.254.169.254) ; "
-                "résoudre puis re-valider l'IP (anti-DNS-rebinding), désactiver les redirections."),
-    "ssrf": ("Allowlist d'hôtes/schemas, blocage des IP internes et des métadonnées cloud "
-             "(169.254.169.254), re-validation post-résolution DNS, pas de suivi de redirection."),
-    # --- Auth / ATO (CWE-287, CWE-640) ---
-    "cwe-287": ("Renforcer l'authentification : invalider les sessions après reset, tokens de reset "
-                "à usage unique liés à l'utilisateur et à durée de vie courte, MFA sur les actions "
-                "sensibles ; ne jamais accepter un état d'auth dérivable côté client."),
-    "cwe-640": ("Sécuriser le flux de réinitialisation : token aléatoire imprévisible (CSPRNG), à usage "
-                "unique, lié au compte et expirant rapidement ; ne pas divulguer la validité du compte."),
-    "auth": ("Authentification serveur robuste : sessions invalidées au reset, tokens à usage unique, "
-             "MFA sur actions sensibles ; aucun état d'auth dérivable côté client."),
-    "ato": ("Bloquer la prise de contrôle de compte : tokens de reset à usage unique liés au compte, "
-            "rotation de session, MFA, et détection des anomalies de connexion."),
-    # --- CORS (CWE-942, CWE-346) ---
-    "cwe-942": ("Ne JAMAIS combiner Access-Control-Allow-Origin: * (ou reflet d'origine arbitraire) avec "
-                "Access-Control-Allow-Credentials: true. Refléter uniquement des origines d'une allowlist "
-                "stricte et n'autoriser les credentials que pour ces origines de confiance."),
-    "cwe-346": ("Valider strictement l'origine (allowlist exacte, pas de reflet d'Origin arbitraire) "
-                "avant d'autoriser une lecture cross-origin authentifiée."),
-    "cors": ("Allowlist d'origines stricte ; ne pas refléter une Origin arbitraire avec "
-             "Access-Control-Allow-Credentials: true (combinaison non exploitable mais à proscrire)."),
-    # --- Exposition d'origine derrière CDN/WAF ---
-    "origin-exposure": ("Restreindre l'accès à l'IP d'origine au seul CDN/WAF : allowlist des plages IP "
-                        "du fournisseur (Cloudflare) au niveau pare-feu/groupe de sécurité, refuser tout "
-                        "trafic direct ; rendre l'origine non joignable hors du CDN."),
-    # --- Injections classiques (replis utiles si des modules les émettent plus tard) ---
-    "cwe-89": ("Requêtes paramétrées / ORM avec liaison des variables ; jamais de concaténation de "
-               "données utilisateur dans une requête SQL ; principe du moindre privilège sur le compte DB."),
-    "sqli": ("Requêtes paramétrées (prepared statements), validation/échappement, moindre privilège DB."),
-    "cwe-79": ("Échapper/encoder la sortie selon le contexte (HTML/attribut/JS/URL) ; CSP stricte ; "
-               "préférer des frameworks qui encodent par défaut ; valider les entrées en allowlist."),
-    "xss": ("Encodage contextuel de la sortie, CSP stricte, frameworks auto-échappants, validation "
-            "d'entrée en allowlist."),
-    "cwe-78": ("Éviter l'exécution de commandes shell avec des données utilisateur ; utiliser des APIs "
-               "natives ; si inévitable, allowlist d'arguments et exécution sans shell (execve)."),
-    "cwe-352": ("Jeton anti-CSRF par requête mutante + cookies SameSite=Lax/Strict ; vérifier l'en-tête "
-                "Origin/Referer sur les actions sensibles."),
-    "csrf": ("Token anti-CSRF par requête mutante, cookies SameSite, vérification Origin/Referer."),
-    "cwe-918-blind": ("Allowlist + blocage métadonnées/IP internes (voir CWE-918)."),
-}
+DEFAULT_FIXES = techniques.remediation_map()
 
 # ---------------------------------------------------------------------------
 # CVSS de base par sévérité — repère grossier de priorisation (PAS un calcul CVSS complet par finding).

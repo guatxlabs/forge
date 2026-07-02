@@ -35,6 +35,18 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
+// Version produit — SOURCE DE VÉRITÉ UNIQUE : le fichier `VERSION` à la racine du repo, lu à la
+// COMPILATION (`include_str!`). Le même fichier alimente le moteur Python (forge/__init__.py) et
+// est vérifié en dérive par la CI (`make check-version`). `CARGO_MANIFEST_DIR` = `console/`, donc
+// `../VERSION` = la racine. Un `\n` de fin est possible -> trim au point d'usage (forge_version()).
+const FORGE_VERSION_RAW: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../VERSION"));
+
+/// Version nettoyée (sans espaces/newline de fin), réutilisable partout (CLI `--version`,
+/// JSON `/health`, pied de page de l'UI web). Reste `&'static` (sous-tranche de la const).
+fn forge_version() -> &'static str {
+    FORGE_VERSION_RAW.trim()
+}
+
 // SCHEMA de base (idempotent — execute_batch). Les ajouts de colonnes sur les tables existantes
 // passent par `migrate()` (ALTER error-ignored) pour ne pas casser une base déjà peuplée.
 const SCHEMA: &str = "
@@ -4421,6 +4433,194 @@ fn run_useradd_cli(args: &[String]) -> i32 {
     }
 }
 
+// ===========================================================================================
+// `forge-console seed-demo` — amorce la base SQLite avec l'ENGAGEMENT DE RÉFÉRENCE fourni
+// (examples/reference-engagement/), pour qu'une console fraîche affiche IMMÉDIATEMENT des
+// Findings / Coverage / Purple / Runs peuplés, HORS-LIGNE et sans réseau. Voie d'ingestion
+// LOCALE (écrit directement dans SQLite, PAS via /api/ingest) — réutilise la MÊME dérivation
+// CWE/CVSS que le handler ingest pour un résultat identique. Idempotent : purge d'abord les
+// lignes de la campagne démo, puis réinsère (rejouer `seed-demo` ne duplique rien et ne touche
+// AUCUNE autre campagne). Données 100 % synthétiques (TLD .example réservé) — jamais une cible réelle.
+// ===========================================================================================
+
+/// Campagne par défaut de l'engagement de référence (surchargée via `--campaign`).
+const SEED_DEMO_CAMPAIGN: &str = "acme-lab";
+/// run_id fixe du run synthétique de la démo (idempotence : rejouer écrase au lieu de dupliquer).
+const SEED_DEMO_RUN_ID: &str = "seed-demo-acme-lab";
+
+/// Lit un fichier JSONL en `Vec<Value>` (ignore lignes vides / commentaires `#`). `required=false`
+/// -> fichier absent = liste vide (pas une erreur). Erreur lisible si une ligne n'est pas du JSON.
+fn read_jsonl(path: &std::path::Path, required: bool) -> Result<Vec<Value>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            if !required && e.kind() == std::io::ErrorKind::NotFound {
+                return Ok(vec![]);
+            }
+            return Err(format!("lecture de '{}' impossible: {e}", path.display()));
+        }
+    };
+    let mut out = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(v) => out.push(v),
+            Err(e) => return Err(format!("{}:{}: JSON invalide: {e}", path.display(), i + 1)),
+        }
+    }
+    Ok(out)
+}
+
+/// Résout le dossier de l'engagement de référence indépendamment du cwd (make lance depuis la
+/// racine ; un humain peut lancer depuis console/). Ordre : `--dir` explicite, cwd/examples,
+/// FORGE_PKG_DIR, ../examples, puis relatif au binaire (target/release -> racine du repo).
+/// Le 1er candidat contenant `findings.jsonl` gagne ; sinon on renvoie le chemin par défaut tel quel
+/// (l'appelant émettra une erreur de lecture lisible).
+fn resolve_seed_dir(explicit: Option<&str>) -> std::path::PathBuf {
+    let rel = std::path::Path::new("examples").join("reference-engagement");
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = explicit {
+        candidates.push(std::path::PathBuf::from(d));
+    }
+    candidates.push(rel.clone());
+    if let Ok(pkg) = std::env::var("FORGE_PKG_DIR") {
+        candidates.push(std::path::PathBuf::from(pkg).join(&rel));
+    }
+    candidates.push(std::path::Path::new("..").join(&rel));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // target/release/forge-console -> release -> target -> console -> racine du repo
+            candidates.push(dir.join("..").join("..").join("..").join(&rel));
+        }
+    }
+    for c in &candidates {
+        if c.join("findings.jsonl").is_file() {
+            return c.clone();
+        }
+    }
+    // repli : 1er candidat (défaut) — l'appelant échouera proprement à la lecture.
+    candidates.into_iter().next().unwrap_or(rel)
+}
+
+/// `forge-console seed-demo [--dir <path>] [--campaign <name>]` — amorce la base avec l'engagement
+/// de référence fourni. Codes : 0 OK, 2 erreur (dossier/JSON/IO). Écrit directement dans SQLite.
+fn run_seed_demo_cli(args: &[String]) -> i32 {
+    let campaign = cli_opt(args, "campaign").unwrap_or_else(|| SEED_DEMO_CAMPAIGN.to_string());
+    let dir = resolve_seed_dir(cli_opt(args, "dir").as_deref());
+    let findings = match read_jsonl(&dir.join("findings.jsonl"), true) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+    };
+    let runrecords = match read_jsonl(&dir.join("runrecords.jsonl"), true) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+    };
+    let roe = match read_jsonl(&dir.join("roe_decisions.jsonl"), false) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+    };
+
+    let db_path = cli_db_path();
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("[forge-console] seed-demo: ouverture de '{db_path}' impossible: {e}"); return 2; }
+    };
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if conn.execute_batch(SCHEMA).is_err() {
+        eprintln!("[forge-console] seed-demo: initialisation du schéma impossible");
+        return 2;
+    }
+    migrate(&conn); // colonnes additives (run_id, cwe/cvss, run_job C2) — requises par les INSERT ci-dessous
+
+    // IDEMPOTENCE : purge UNIQUEMENT la campagne démo (+ son run) avant de réinsérer. N'affecte
+    // aucune autre campagne réelle stockée dans la même base.
+    let _ = conn.execute("DELETE FROM finding WHERE campaign=?", rusqlite::params![campaign]);
+    let _ = conn.execute("DELETE FROM runrecord WHERE campaign=?", rusqlite::params![campaign]);
+    let _ = conn.execute("DELETE FROM roe_decision WHERE campaign=?", rusqlite::params![campaign]);
+    let _ = conn.execute("DELETE FROM run_job WHERE run_id=?", rusqlite::params![SEED_DEMO_RUN_ID]);
+
+    // --- findings : MÊME dérivation CWE/CVSS que le handler /api/ingest (résultat identique) ---
+    let mut nf = 0i64;
+    for f in &findings {
+        let cwe = {
+            let c = gs(f, "cwe");
+            if c.is_empty() { extract_cwe(&gs(f, "category")) } else { c }
+        };
+        let (mut cvss_vec, mut cvss_score) =
+            (gs(f, "cvss_vector"), f.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        if cvss_vec.is_empty() && cvss_score == 0.0 {
+            let (v, s) = cvss_base_for_severity(&gs(f, "severity"));
+            cvss_vec = v.to_string();
+            cvss_score = s;
+        }
+        if let Ok(n) = conn.execute(
+            "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
+                gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
+                gs(f,"fix"), SEED_DEMO_RUN_ID, cwe, cvss_vec, cvss_score],
+        ) { nf += n as i64; }
+    }
+
+    // --- run-records (fires ATT&CK) : alimentent /api/coverage ET la corrélation purple ---
+    let (mut nr, mut fired_cnt) = (0i64, 0i64);
+    let mut targets: Vec<String> = Vec::new();
+    let mut modules: Vec<String> = Vec::new();
+    for rr in &runrecords {
+        let fired = if rr.get("fired").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+        let (tgt, kind) = (gs(rr, "target"), gs(rr, "kind"));
+        if !tgt.is_empty() && !targets.contains(&tgt) { targets.push(tgt.clone()); }
+        if !kind.is_empty() && !modules.contains(&kind) { modules.push(kind.clone()); }
+        if let Ok(n) = conn.execute(
+            "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id) VALUES(?,?,?,?,?,?,?,?)",
+            rusqlite::params![gs(rr,"ts"), campaign, tgt, kind, gs(rr,"mitre"), fired, gs(rr,"detail"), SEED_DEMO_RUN_ID],
+        ) { nr += n as i64; fired_cnt += fired as i64; }
+    }
+
+    // --- décisions ROE (transparence anti-masquage : FIRE / VETO / DRY_RUN) -> /api/roe ---
+    let (mut nd, mut vetoed_cnt, mut dry_run_cnt) = (0i64, 0i64, 0i64);
+    for d in &roe {
+        let verdict = gs(d, "verdict");
+        match verdict.as_str() {
+            "VETO" => vetoed_cnt += 1,
+            "DRY_RUN" => dry_run_cnt += 1,
+            _ => {}
+        }
+        let ex = if d.get("exploit").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+        let de = if d.get("destructive").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+        let reasons = d.get("reasons").map(|r| r.to_string()).unwrap_or_else(|| "[]".into());
+        if let Ok(n) = conn.execute(
+            "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons)
+             VALUES(?,?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![gs(d,"ts"), campaign, SEED_DEMO_RUN_ID, gs(d,"action_id"), gs(d,"target"),
+                gs(d,"kind"), verdict, ex, de, reasons],
+        ) { nd += n as i64; }
+    }
+
+    // --- un run_job récapitulatif : alimente l'onglet Runs (compteurs cohérents avec ci-dessus) ---
+    let targets_json = serde_json::to_string(&targets).unwrap_or_else(|_| "[]".into());
+    let modules_json = serde_json::to_string(&modules).unwrap_or_else(|_| "[]".into());
+    // lacune de couverture volontaire (defer != delete) : classe jamais tentée + action déférée budget.
+    let coverage_gaps = "{\"shop.lab.example\":[\"injection.sqli\"]}";
+    let skipped_budget = "[{\"kind\":\"web.xss\",\"target\":\"shop.lab.example\",\"cls\":\"xss\"}]";
+    let _ = conn.execute(
+        "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps,started_by,reason,targets,modules,started,finished,exit_code)
+         VALUES(?,?,datetime('now'),'done','grey',?,?,?,0,?,?,'seed-demo','bundled reference engagement (synthetic lab — examples/reference-engagement)',?,?,datetime('now'),datetime('now'),0)",
+        rusqlite::params![SEED_DEMO_RUN_ID, campaign, fired_cnt, dry_run_cnt, vetoed_cnt,
+            skipped_budget, coverage_gaps, targets_json, modules_json],
+    );
+
+    println!("[forge-console] seed-demo : engagement de référence chargé depuis {}", dir.display());
+    println!("[forge-console] base={db_path}  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
+    println!("[forge-console] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
+    println!("[forge-console] Findings / Coverage / Runs peuplés. Pour l'onglet Purple : lance tools/mock_plume.py + PLUME_URL (voir `make demo-purple`).");
+    0
+}
+
 /// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/SOQL).
 fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
@@ -4551,6 +4751,11 @@ async fn main() {
     //   forge-console hashpw-operator <password>  -> hash du rôle OPÉRATEUR C2 (FORGE_CONSOLE_OPERATOR_HASH)
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        // --version / -V : imprime la version unique (fichier VERSION, include_str! à la compile).
+        Some("--version") | Some("-V") => {
+            println!("forge-console {}", forge_version());
+            return;
+        }
         Some("hashpw") | Some("hashpw-operator") => {
             match args.get(2) {
                 Some(pw) if !pw.is_empty() => {
@@ -4574,6 +4779,13 @@ async fn main() {
         //   argon2id est calculé ici et stocké dans `users` (idempotent par login : upsert + réactive).
         Some("useradd") => {
             std::process::exit(run_useradd_cli(&args[2..]));
+        }
+        // AMORÇAGE DÉMO : forge-console seed-demo [--dir <path>] [--campaign <name>]
+        //   Charge l'engagement de référence synthétique (examples/reference-engagement/) DIRECTEMENT
+        //   dans la base SQLite (hors-ligne, sans réseau, sans /api/ingest) pour qu'une console fraîche
+        //   affiche immédiatement Findings/Coverage/Purple/Runs. Idempotent (purge la campagne démo).
+        Some("seed-demo") => {
+            std::process::exit(run_seed_demo_cli(&args[2..]));
         }
         _ => {}
     }
@@ -4718,7 +4930,9 @@ async fn main() {
         .fallback_service(ServeDir::new(&web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     let router = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        // /health : sonde ouverte (hors auth_guard). JSON {status, version} — `version` provient
+        // du fichier VERSION (source unique). `forge doctor --purple` ne teste que le code HTTP 200.
+        .route("/health", get(|| async { Json(json!({"status": "ok", "version": forge_version()})) }))
         // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
         // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
         .route("/api/login", post(login))
@@ -5147,6 +5361,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     /// [LOT REPORTING] render_run_report_html : document brandé autonome — page de garde GuatX/Forge
     /// + quetzal, sommaire, résumé exécutif EN PROSE (Campaign.notes), findings avec CWE/CVSS SÉPARÉS
     /// + FIX, CSS print, annexe chaîne-de-custody (head ledger, attribution, commande verify --pubkey).
+    ///
     /// Le contenu hostile est échappé (anti-injection).
     #[test]
     fn run_report_html_branded_deliverable() {
@@ -5397,11 +5612,11 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     #[test]
     fn high_impact_gate_requires_all_conditions() {
         // défaut : opt-in non demandé -> Ok(false), comportement actuel (plancher tient).
-        assert_eq!(high_impact_gate(false, true, true, "raison").unwrap(), false);
-        assert_eq!(high_impact_gate(false, false, false, "").unwrap(), false,
+        assert!(!high_impact_gate(false, true, true, "raison").unwrap());
+        assert!(!high_impact_gate(false, false, false, "").unwrap(),
             "opt-in absent prime : aucune erreur même sans arm/reason");
         // opt-in demandé + 3 conditions réunies -> Ok(true).
-        assert_eq!(high_impact_gate(true, true, true, "test autorisé par l'opérateur").unwrap(), true);
+        assert!(high_impact_gate(true, true, true, "test autorisé par l'opérateur").unwrap());
         // opt-in demandé mais une condition manque -> Err 400 explicite.
         for (op, arm, reason) in [
             (false, true, "r"),   // pas operator

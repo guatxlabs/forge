@@ -46,6 +46,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Garde-fou source-de-vérité-unique : échoue si VERSION, pyproject.toml et Cargo.toml
+      # divergent (cf. scripts/check_version.py / `make check-version`). Placé AVANT les tests
+      # pour fail-fast sur une dérive de version.
+      - name: Version drift check (VERSION == pyproject == Cargo.toml)
+        run: make check-version
+
       - name: Unit tests (stdlib, zéro dépendance)
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 

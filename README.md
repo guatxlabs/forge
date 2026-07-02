@@ -50,7 +50,7 @@ forge demo                                  # ou: python3 -m forge.cli demo
 
 # suite complète (stdlib, zéro réseau) : Python unittest + cargo test de la console
 make test                                   # = python3 -m unittest discover -s tests -t . + (cd console && cargo test)
-python3 -m unittest discover -s tests -t .  # Python seul (150 tests)
+python3 -m unittest discover -s tests -t .  # Python seul (232 tests)
 
 # vérifier l'appartenance d'une cible
 forge scope-check app.exemple.test --scope scope.json
@@ -70,6 +70,23 @@ forge ledger verify --ledger engagements/e1.jsonl
 
 Copier `scope.example.json` → `scope.json` et renseigner `in_scope` **avec autorisation écrite**.
 `scope.json`, `*.key`, `*.jsonl` sont gitignorés (secrets / état d'engagement).
+
+### Démo instantanée — console peuplée en 1 commande (hors-ligne)
+
+Un **engagement de référence synthétique** est fourni dans
+[`examples/reference-engagement/`](examples/reference-engagement/) (hôtes `.example` réservés, IP de
+doc — **aucune cible réelle, aucun SOC réel**). Il peuple immédiatement les onglets
+Findings / Coverage / Purple / Runs :
+
+```sh
+make demo          # amorce la base démo + lance la console peuplée  -> http://127.0.0.1:7100
+make demo-purple   # idem + stub mock-Plume (DEMO FIXTURE) -> matrice détecté/raté/MTTD (7 tirés, 4 détectés, 3 ratés)
+```
+
+`make demo` lance `forge-console seed-demo --dir examples/reference-engagement`, qui **ingère les
+fixtures directement dans SQLite** (idempotent, sans réseau, ne touche que la campagne démo
+`acme-lab`). Le write-up commercial correspondant :
+[`examples/reference-engagement/REFERENCE_ENGAGEMENT.md`](examples/reference-engagement/REFERENCE_ENGAGEMENT.md).
 
 ## Console Rust (`console/` — le store + la boucle purple)
 
@@ -122,7 +139,7 @@ FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) ./console/target/release/forge-conso
 #    -> http://127.0.0.1:7100   (UI opérateur dark + API)
 
 # 3) peupler le catalogue de modules côté UI
-forge modules --json                       # liste les 11 modules (kind, mitre, dispo)
+forge modules --json                       # liste les 14 modules (kind, mitre, dispo)
 
 # 4) ingérer une campagne de démonstration (zéro réseau, finding synthétique)
 FORGE_CONSOLE_URL=http://127.0.0.1:7100 FORGE_CONSOLE_TOKEN=$FORGE_CONSOLE_TOKEN \
@@ -169,7 +186,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 - **Boucle purple** : chaque finding porte un champ `mitre` (ATT&CK) = clé de jointure pour que
   Plume valide la détection (BAS). Voir [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État (v0.0.1 — 150 tests passent, zéro réseau) — **P1 + P2 complets**
+## État (v0.0.1 — 232 tests passent, zéro réseau) — **P1 + P2 complets**
 
 | Couche | État |
 |---|---|
@@ -195,12 +212,14 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Cœur partagé `guatx-core`** (crate Rust **public neutre** en `GUATX/core/` ; console en dépend) | ✅ 6 tests Rust, déplacé hors du privé, console rebâtie |
 | Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
 
-**11 modules** (table générée depuis `forge modules --json`) :
+**14 modules** (table générée depuis `forge modules --json`) :
 
 | kind | exploit | ATT&CK | description |
 |---|:---:|---|---|
-| `access_control.idor` | ✅ | T1190 | Oracle différentiel IDOR/BOLA sur 2 comptes (CWE-639). |
+| `access_control.idor` | ✅ | T1190 | Oracle différentiel IDOR/BOLA à PREUVE sur 2 comptes (CWE-639). |
+| `auth.takeover` | ✅ | T1212 | Oracle ATO/auth-bypass à PREUVE (whoami = identité victime, CWE-287/640). |
 | `burp.scan` | — | T1595.002 | Pilote la REST API de Burp Suite : scan in-scope → issues → Findings. |
+| `cors.credentials` | ✅ | T1539 | Oracle CORS-credentials à PREUVE (ACAO reflète l'origine + ACAC=true, CWE-942). |
 | `demo.fingerprint` | — | — | Démonstration du pipeline (plan→ROE→dry/fire→finding→ledger), zéro I/O. |
 | `evasion.idor_intercept` | ✅ | T1190 | Arme l'interception IDOR en vol (browser intercept-modify, CWE-639). |
 | `evasion.turnstile` | — | T1556 | Franchit le Turnstile interactif (vision-click-os) — enabler d'accès. |
@@ -209,6 +228,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | `origin.find` | — | T1590.005 | IP d'origine derrière CDN/WAF (subfinder→DNS→drop-CF→vérif Host). |
 | `recon.httpx` | — | T1595 | Fingerprint HTTP (status, titre, techno). |
 | `recon.nmap` | — | T1046 | Découverte des services exposés (nmap -sV, top 1000). |
+| `ssrf.callback` | ✅ | T1190 | Oracle SSRF à PREUVE (callback unique reçu côté collecteur, CWE-918). |
 | `web.nuclei` | — | T1595.002 | Scan de vulnérabilités par templates nuclei (medium/high/critical). |
 
 > Aucun module ne tire **rien** sans verdict `FIRE` (in-scope + armé + approuvé + capacité

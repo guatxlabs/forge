@@ -2552,7 +2552,126 @@ if ($('#refresh')) $('#refresh').addEventListener('change', applyAutoRefresh);
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
-// boot : charge le contexte transverse (campagnes -> sélecteur, statuts -> filtre) puis route la vue.
-loadCampaigns();
-loadStatuses();
-route();
+// version produit (source unique : fichier VERSION -> exposé par /health JSON) affichée au pied de page.
+// Best-effort, jamais bloquant : /health est ouvert (hors auth), donc fetch nu sans en-tête.
+async function loadVersion() {
+  try {
+    const j = await (await fetch('/health', { headers: { accept: 'application/json' } })).json();
+    const el = $('#version');
+    if (el && j && j.version) el.textContent = ' — forge v' + j.version;
+  } catch (e) { /* pied de page informatif : ignorer toute erreur */ }
+}
+
+// =====================================================================================
+//  AUTHENTIFICATION — portail de connexion (gate du shell) + badge whoami + déconnexion
+//  Le boot sonde GET /api/whoami (route derrière auth_guard) :
+//    - 401                        -> session requise et absente        -> vue de login.
+//    - 200 {authenticated:true}   -> session valide                    -> shell + badge (login/rôle).
+//    - 200 {authenticated:false}  -> mode dev-open (aucun hash serveur) -> shell sans badge.
+//  Toutes les requêtes suivantes (findings, query, SSE /events, …) s'authentifient par le cookie
+//  forge_session (HttpOnly, SameSite=Strict) posé par POST /api/login — jamais par un token en JS.
+//  On NE stocke PAS le bearer renvoyé par /login : l'UI s'appuie exclusivement sur le cookie.
+// =====================================================================================
+let WHOAMI = null;
+const ROLE_CLASSES = ['role-admin', 'role-operator', 'role-editor', 'role-viewer'];
+function renderWhoami(w) {
+  WHOAMI = w || null;
+  const box = $('#whoami');
+  if (!box) return;
+  const authed = !!(w && w.authenticated);
+  box.hidden = !authed;
+  if (!authed) return;
+  const roleEl = $('#whoami-role');
+  if (roleEl) {
+    const role = String(w.role || 'viewer');
+    roleEl.textContent = role;
+    roleEl.classList.remove(...ROLE_CLASSES);
+    if (ROLE_CLASSES.includes('role-' + role)) roleEl.classList.add('role-' + role);
+    roleEl.title = (w.is_operator ? 'Opérateur C2' : 'Lecture') + ' — rôle « ' + role + ' »' + (w.via_session ? '' : ' (repli bootstrap)');
+  }
+  const userEl = $('#whoami-user');
+  if (userEl) userEl.textContent = w.login || '';
+}
+function showLogin() {
+  document.body.classList.add('gated');
+  const v = $('#login-view'); if (v) v.hidden = false;
+  const u = $('#login-user'); if (u) setTimeout(() => { try { u.focus(); } catch (e) {} }, 40);
+}
+function showApp() {
+  document.body.classList.remove('gated');
+  const v = $('#login-view'); if (v) v.hidden = true;
+}
+function loginErr(msg) { const e = $('#login-err'); if (e) { e.textContent = msg; e.hidden = false; } }
+// POST /api/login {login,password} : succès -> le serveur pose le cookie de session (Set-Cookie). On
+// efface le mot de passe et on (re)démarre le shell gaté. Message générique sur 401 (anti-énumération).
+if ($('#login-form')) $('#login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const errEl = $('#login-err'); if (errEl) errEl.hidden = true;
+  const user = (($('#login-user') && $('#login-user').value) || '').trim();
+  const pass = ($('#login-pass') && $('#login-pass').value) || '';
+  if (!user || !pass) { loginErr('Identifiant et mot de passe requis.'); return; }
+  const btn = $('#login-submit'); if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ login: user, password: pass }),
+    });
+    if (r.status === 401) {
+      loginErr('Identifiants invalides.');
+      const p = $('#login-pass'); if (p) { p.value = ''; try { p.focus(); } catch (e) {} }
+      return;
+    }
+    if (!r.ok) {
+      let why = 'HTTP ' + r.status;
+      try { const j = await r.json(); if (j && typeof j.why === 'string') why = j.why; else if (j && typeof j.error === 'string') why = j.error; } catch (e) {}
+      loginErr('Échec de connexion : ' + why);
+      return;
+    }
+    const p = $('#login-pass'); if (p) p.value = '';
+    showApp();
+    toast('Connecté.', 'ok');
+    await bootApp();
+  } catch (err) {
+    loginErr('Erreur réseau : ' + String((err && err.message) || err));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+// Déconnexion : POST /api/logout s'il existe (forward-compat), sinon effacement de la session côté
+// client. NB : le cookie forge_session est HttpOnly (sa révocation DURE est côté serveur) ; ici on
+// coupe les flux, on oublie les secrets de session en mémoire et on ramène l'UI au portail.
+async function doLogout() {
+  try { await fetch('/api/logout', { method: 'POST', headers: { Accept: 'application/json' } }); } catch (e) { /* endpoint absent : sans effet */ }
+  try { document.cookie = 'forge_session=; Path=/; Max-Age=0; SameSite=Strict'; } catch (e) {}
+  OPERATOR_SECRET = '';
+  const opField = $('#lc-operator'); if (opField) opField.value = '';
+  try { lcStopLive(); } catch (e) {}
+  renderWhoami(null);
+  showLogin();
+  const pass = $('#login-pass'); if (pass) pass.value = '';
+  toast('Déconnecté.', 'ok');
+}
+if ($('#logout')) $('#logout').addEventListener('click', async () => {
+  if (await confirmModal('Se déconnecter de la console ?', { title: 'Déconnexion', okText: 'Déconnexion', cancelText: 'Rester', danger: false })) doLogout();
+});
+
+// boot gaté : sonde whoami, montre le portail sur 401 (ou erreur réseau, fail-closed lisible), sinon
+// charge le contexte transverse (campagnes -> sélecteur, statuts -> filtre) puis route la vue.
+async function bootApp() {
+  let w = null;
+  try {
+    const r = await fetch('/api/whoami', { headers: { Accept: 'application/json' } });
+    if (r.status === 401) { renderWhoami(null); showLogin(); return; }
+    if (r.ok) w = await r.json().catch(() => null);
+  } catch (e) {
+    renderWhoami(null); showLogin(); return;
+  }
+  renderWhoami(w);
+  showApp();
+  loadCampaigns();
+  loadStatuses();
+  route();
+}
+loadVersion();
+bootApp();

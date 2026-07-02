@@ -8,23 +8,18 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import techniques
+
 
 # Fallback ATT&CK par `kind` — DERNIER recours quand une action tirée n'a produit AUCUN mitre
 # (ni finding taggé, ni params.mitre, ni module.mitre). Le vrai mitre PRIME toujours : ce mapping
 # ne sert qu'à garantir un run-record NON VIDE pour chaque tir, sinon Plume ne peut pas corréler
 # « technique T tirée -> détectée ? » sur les tirs « rien trouvé » (trou de couverture purple).
 # Le mitre réel (finding/params/module) reste la source de vérité ; ceci n'élargit aucune capacité.
-DEFAULT_MITRE_BY_KIND = {
-    "demo.fingerprint": "T1595",        # Active Scanning (démo no-op, reconnaissance)
-    "recon.httpx": "T1595",             # Active Scanning
-    "recon.nmap": "T1046",              # Network Service Discovery
-    "web.nuclei": "T1595.002",          # Active Scanning: Vulnerability Scanning
-    "access_control.idor": "T1190",     # Exploit Public-Facing Application
-    "ssrf.callback": "T1190",           # Exploit Public-Facing Application (SSRF, CWE-918)
-    "auth.takeover": "T1212",           # Exploitation for Credential Access (ATO, CWE-287/640)
-    "cors.credentials": "T1539",        # Steal Web Session Cookie (CORS permissive, CWE-942)
-    "origin.find": "T1590.005",         # Gather Victim Network Info: IP Addresses
-}
+#
+# SOURCE DE VÉRITÉ : forge/techniques.py — DÉRIVÉ du sous-ensemble curé PURPLE_FALLBACK_KINDS
+# (plus de recopie kind->mitre entre purple et les modules).
+DEFAULT_MITRE_BY_KIND = techniques.mitre_by_kind()
 
 
 def mitre_for_kind(kind):

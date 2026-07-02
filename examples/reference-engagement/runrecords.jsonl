@@ -1,0 +1,8 @@
+{"ts":"2026-06-26T12:00:00+00:00","target":"shop.lab.example","kind":"recon.httpx","mitre":"T1595","fired":true,"detail":"HTTP probe + tech fingerprint (Active Scanning)","source":"forge"}
+{"ts":"2026-06-26T12:01:00+00:00","target":"lab.example","kind":"origin.find","mitre":"T1590.005","fired":true,"detail":"origin IP correlation via passive DNS/cert (Gather Victim Network Info: IP Addresses)","source":"forge"}
+{"ts":"2026-06-26T12:03:00+00:00","target":"shop.lab.example","kind":"recon.nmap","mitre":"T1046","fired":true,"detail":"top-1000 TCP service discovery (Network Service Discovery)","source":"forge"}
+{"ts":"2026-06-26T12:07:00+00:00","target":"shop.lab.example","kind":"web.nuclei","mitre":"T1595.002","fired":true,"detail":"template scan: headers/tech/known-CVEs (Vulnerability Scanning)","source":"forge"}
+{"ts":"2026-06-26T12:12:00+00:00","target":"api.lab.example","kind":"access_control.idor","mitre":"T1190","fired":true,"detail":"cross-tenant object reference test (Exploit Public-Facing Application)","source":"forge"}
+{"ts":"2026-06-26T12:15:00+00:00","target":"api.lab.example","kind":"ssrf.callback","mitre":"T1190","fired":true,"detail":"image-proxy out-of-band callback (Exploit Public-Facing Application, SSRF)","source":"forge"}
+{"ts":"2026-06-26T12:18:00+00:00","target":"shop.lab.example","kind":"cors.credentials","mitre":"T1539","fired":true,"detail":"credentialed CORS reflection test (Steal Web Session Cookie)","source":"forge"}
+{"ts":"2026-06-26T12:20:00+00:00","target":"shop.lab.example","kind":"auth.takeover","mitre":"T1212","fired":true,"detail":"password-reset token predictability test (Exploitation for Credential Access)","source":"forge"}

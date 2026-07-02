@@ -7,8 +7,10 @@ Commandes :
                  [--ledger L] [--report R]
   ledger verify --ledger L [--pubkey HEX]  recalcule la chaîne et vérifie l'intégrité
                                            (--pubkey -> vérif externe par clé publique seule)
+  ledger pubkey --ledger L            imprime la clé publique Ed25519 brute (hex) du ledger
+  ledger keygen --ledger L [--force]  crée/rotationne DÉLIBÉRÉMENT la paire Ed25519 du ledger
   modules                             liste les modules enregistrés
-  doctor                              diagnostic : modules opérationnels + outil/service attendu
+  doctor [--purple]                   diagnostic : modules opérationnels (ou préflight boucle purple)
   demo                                démonstration bout-en-bout, sans aucune cible réelle
 
 Sûreté : par défaut INERTE. `run` simule (DRY_RUN) tant que --arm ET --approve ne sont pas
@@ -16,10 +18,15 @@ posés. VETO (hors scope / capacité non autorisée) ne peut jamais être tiré.
 """
 import argparse
 import json
+import os
+import re
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+from . import __version__
 from .roe import Scope, Roe, Action
 from .ledger import Ledger
 from .engine import Engine
@@ -29,6 +36,8 @@ from .brain import HeuristicBrain
 from .planner import Planner
 from .memory import Memory
 from . import purple
+from . import signing
+from . import console_client
 from . import modules as mods
 
 
@@ -180,6 +189,43 @@ def cmd_ledger_verify(args):
     return 1
 
 
+def cmd_ledger_pubkey(args):
+    """Imprime la clé publique Ed25519 BRUTE (hex) qui signe ce ledger, alg en 2e ligne.
+    Résout la clé EXACTEMENT comme le chemin `ledger verify` (Ledger(path) -> make_signer :
+    lit `<path>.ed25519` s'il existe, sinon auto-gen). Le hex imprimé est directement réutilisable
+    en vérif externe : `forge ledger verify --ledger L --pubkey <hex>`."""
+    led = Ledger(args.ledger)
+    hexkey = signing.signer_pubkey_hex(led.signer)
+    if hexkey:
+        print(hexkey)                                  # ligne 1 : clé publique brute (64 hex)
+        print(f"# alg={led.signer.alg}")               # ligne 2 : algorithme (ed25519)
+        return 0
+    # repli HMAC (cryptography absent) : pas de clé publique asymétrique de non-répudiation.
+    print(f"# pas de clé publique Ed25519 — ledger signé en {led.signer.alg} "
+          f"(installer 'cryptography' pour la non-répudiation asymétrique)")
+    print(f"# public_id={led.signer.public_id()}")
+    return 1
+
+
+def cmd_ledger_keygen(args):
+    """Crée/rotationne DÉLIBÉRÉMENT la paire Ed25519 du ledger (<path>.ed25519, 0600), au lieu de
+    l'auto-gen paresseux. Sûreté : refuse d'écraser une clé existante sans --force (une rotation
+    invalide les signatures ed25519 déjà écrites -> `verify` casserait). Imprime la clé publique."""
+    if not signing._HAVE_ED:
+        print("# 'cryptography' absent — impossible de générer une clé Ed25519 (repli HMAC seul)")
+        return 1
+    kp = Path(str(args.ledger) + ".ed25519")
+    if kp.exists() and not args.force:
+        print(f"# clé déjà présente : {kp}")
+        print("# --force requis pour ROTATION (invalide les signatures ed25519 déjà écrites)")
+        return 1
+    rotated = kp.exists()
+    signer = signing.generate_ed25519_keypair(args.ledger)
+    print(signing.signer_pubkey_hex(signer))
+    print(f"# alg=ed25519 — clé {'ROTATIONNÉE' if rotated else 'créée'} dans {kp} (0600)")
+    return 0
+
+
 def cmd_modules(args):
     mods  # noqa (déjà importé -> enregistré)
     rows = []
@@ -233,10 +279,158 @@ _DOCTOR_HINTS = {
 }
 
 
+# Une « technique » ATT&CK : Txxxx éventuellement suivie d'un sous-technique .yyy (ex T1190, T1059.001).
+_TECHNIQUE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+# Marqueurs de la checklist purple (aligné sur le style "OK ✅"/"INDISPONIBLE ⛔" de doctor).
+_PURPLE_MARK = {"ok": "OK ✅", "fail": "FAIL ❌", "na": "N/A ➖", "info": "INFO ℹ️"}
+
+
+def _purple_get(url, basic_b64=None, timeout=8.0):
+    """GET en LECTURE SEULE, tolérant aux pannes (ne lève JAMAIS). Retourne (status, body, err) :
+      - (200, "<body>", None)              réponse OK ;
+      - (<code>, "<body>", None)           réponse HTTP reçue (même 401/500) -> service JOIGNABLE ;
+      - (None, "", "<repr err>")           injoignable (DNS, refus de connexion, timeout...).
+    `basic_b64` (base64 de user:pass) -> en-tête `Authorization: Basic ...` (comme la console Rust)."""
+    headers = {}
+    if basic_b64:
+        headers["Authorization"] = "Basic " + basic_b64
+    req = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace"), None
+    except urllib.error.HTTPError as e:                # service joignable mais réponse d'erreur HTTP
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:                              # noqa: BLE001
+            body = ""
+        return e.code, body, None
+    except Exception as e:                             # noqa: BLE001 — injoignable (URLError, timeout, ...)
+        return None, "", repr(e)
+
+
+def _parse_detections(body):
+    """Extrait la liste de détections de la réponse Plume. Tolère `{"detections":[...]}` (forme
+    nominale, cf. console Rust) et un tableau nu `[...]`. Retourne None si le JSON est illisible."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        arr = data.get("detections", [])
+        return list(arr) if isinstance(arr, list) else None
+    if isinstance(data, list):
+        return data
+    return None
+
+
+def _count_mitre_tagged(detections):
+    """Nombre de détections portant un champ technique de forme Txxxx (`mitre` ou `technique`)."""
+    n = 0
+    for d in detections:
+        if not isinstance(d, dict):
+            continue
+        val = d.get("mitre") or d.get("technique") or ""
+        if isinstance(val, str) and _TECHNIQUE_RE.search(val):
+            n += 1
+    return n
+
+
+def cmd_doctor_purple(args):
+    """Préflight de la boucle purple (LECTURE SEULE, ne tire rien, ne touche ni scope ni ledger) :
+    GET console `/health` + GET Plume `/api/coverage/detections?since=0` (Basic auth). Imprime une
+    checklist claire (console/plume joignables, auth OK, nb détections, tag MITRE) et DÉGRADE
+    GRACIEUSEMENT si une dépendance est injoignable (ligne FAIL/N/A, jamais de crash). Sortie non
+    nulle si un contrôle CRITIQUE échoue (console/plume joignables + auth), 0 si tout est vert."""
+    console_url = console_client.base_url()            # respecte FORGE_CONSOLE_URL (défaut 127.0.0.1:7100)
+    plume_url = os.environ.get("PLUME_URL", "").rstrip("/")
+    plume_token = os.environ.get("PLUME_TOKEN", "")    # base64 de user:pass -> Authorization: Basic
+    timeout = getattr(args, "timeout", None) or 8.0
+
+    lines = []                                         # (state, label, detail)
+    critical_ok = True
+
+    # --- 1) console joignable (GET /health, non authentifié) ---
+    st, body, err = _purple_get(console_url + "/health", timeout=timeout)
+    if st == 200:
+        lines.append(("ok", "console-reachable", f"{console_url}/health -> 200 {body.strip()[:16]}"))
+    elif st is not None:
+        lines.append(("fail", "console-reachable", f"{console_url}/health -> HTTP {st}"))
+        critical_ok = False
+    else:
+        lines.append(("fail", "console-reachable", f"{console_url}/health injoignable ({err})"))
+        critical_ok = False
+
+    # --- 2) plume joignable + 3) auth-ok + 4) détections + 5) tag MITRE ---
+    if not plume_url:
+        lines.append(("fail", "plume-reachable", "PLUME_URL non configuré"))
+        for lbl in ("auth-ok", "detections-returned", "mitre-tagged"):
+            lines.append(("na", lbl, "PLUME_URL non configuré"))
+        critical_ok = False
+    else:
+        purl = plume_url + "/api/coverage/detections?since=0"
+        st, body, err = _purple_get(purl, basic_b64=(plume_token or None), timeout=timeout)
+        if st is None:                                 # injoignable -> le reste est N/A (pas mesurable)
+            lines.append(("fail", "plume-reachable", f"{purl} injoignable ({err})"))
+            for lbl in ("auth-ok", "detections-returned", "mitre-tagged"):
+                lines.append(("na", lbl, "Plume injoignable"))
+            critical_ok = False
+        else:
+            lines.append(("ok", "plume-reachable", f"{purl} -> HTTP {st}"))
+            if st in (401, 403):
+                lines.append(("fail", "auth-ok", f"HTTP {st} — vérifier PLUME_TOKEN (base64 user:pass)"))
+                for lbl in ("detections-returned", "mitre-tagged"):
+                    lines.append(("na", lbl, "auth échouée"))
+                critical_ok = False
+            elif st != 200:
+                lines.append(("fail", "auth-ok", f"HTTP {st} inattendu"))
+                for lbl in ("detections-returned", "mitre-tagged"):
+                    lines.append(("na", lbl, f"HTTP {st}"))
+                critical_ok = False
+            else:
+                lines.append(("ok", "auth-ok", "HTTP 200 (Basic accepté)"))
+                dets = _parse_detections(body)
+                if dets is None:
+                    lines.append(("fail", "detections-returned", "réponse JSON illisible"))
+                    lines.append(("na", "mitre-tagged", "réponse illisible"))
+                    critical_ok = False
+                else:
+                    n = len(dets)
+                    # 0 détection = état valide (SOC frais) : informatif, pas un échec critique.
+                    lines.append(("ok" if n else "info", "detections-returned", f"{n} règle(s)"))
+                    if n == 0:
+                        lines.append(("na", "mitre-tagged", "aucune détection à inspecter"))
+                    else:
+                        tagged = _count_mitre_tagged(dets)
+                        if tagged:
+                            lines.append(("ok", "mitre-tagged",
+                                          f"champ technique Txxxx présent ({tagged}/{n})"))
+                        else:
+                            lines.append(("info", "mitre-tagged",
+                                          "aucun champ technique Txxxx détecté"))
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": critical_ok,
+                          "checks": [{"check": lbl, "state": state, "detail": detail}
+                                     for state, lbl, detail in lines]}))
+        return 0 if critical_ok else 1
+
+    verdict = "PRÊTE ✅" if critical_ok else "INCOMPLÈTE ⛔"
+    print(f"=== forge doctor --purple — boucle purple {verdict} ===\n")
+    for state, lbl, detail in lines:
+        print(f"  [{_PURPLE_MARK.get(state, state):8}] {lbl:20} {detail}")
+    print("\nNote : lecture seule — aucun tir, ni scope ni ledger touchés. Critiques = console/Plume "
+          "joignables + auth. Détections/MITRE sont informatifs (0 détection = SOC frais, pas un échec).")
+    return 0 if critical_ok else 1
+
+
 def cmd_doctor(args):
     """Diagnostic : pour chaque module, dit s'il est OPÉRATIONNEL (sonde `.available`) et
     rappelle l'outil/service attendu + l'astuce d'install/config. Ne tire RIEN, ne touche pas
-    le scope ni le ledger : sondes en lecture seule (which/docker, TCP connect, GET /health)."""
+    le scope ni le ledger : sondes en lecture seule (which/docker, TCP connect, GET /health).
+
+    `--purple` : bascule vers le préflight de la boucle purple (console /health + Plume détections)."""
+    if getattr(args, "purple", False):
+        return cmd_doctor_purple(args)
     mods  # noqa (déjà importé -> modules enregistrés)
     rows = []
     for k in mods.kinds():
@@ -297,6 +491,9 @@ def cmd_demo(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="forge", description="Forge — moteur red-team gated par ROE (sûreté d'abord).")
+    # --version : source de vérité unique (fichier VERSION à la racine, via forge.__version__).
+    # L'action `version` sort AVANT la vérif du sous-parseur requis -> `forge --version` seul marche.
+    p.add_argument("--version", action="version", version=f"forge {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sc = sub.add_parser("scope-check"); sc.add_argument("target"); sc.add_argument("--scope", required=True); sc.set_defaults(fn=cmd_scope_check)
@@ -322,8 +519,16 @@ def build_parser():
     lvv = lvs.add_parser("verify"); lvv.add_argument("--ledger", required=True)
     lvv.add_argument("--pubkey", help="clé publique Ed25519 (hex) -> vérification externe sans secret (verify_external)")
     lvv.set_defaults(fn=cmd_ledger_verify)
+    lvp = lvs.add_parser("pubkey"); lvp.add_argument("--ledger", required=True)
+    lvp.set_defaults(fn=cmd_ledger_pubkey)
+    lvk = lvs.add_parser("keygen"); lvk.add_argument("--ledger", required=True)
+    lvk.add_argument("--force", action="store_true", help="ROTATION : écrase une clé existante (invalide les signatures déjà écrites)")
+    lvk.set_defaults(fn=cmd_ledger_keygen)
     md = sub.add_parser("modules"); md.add_argument("--json", action="store_true"); md.set_defaults(fn=cmd_modules)
-    dc = sub.add_parser("doctor"); dc.add_argument("--json", action="store_true"); dc.set_defaults(fn=cmd_doctor)
+    dc = sub.add_parser("doctor"); dc.add_argument("--json", action="store_true")
+    dc.add_argument("--purple", action="store_true", help="préflight boucle purple : console /health + Plume /api/coverage/detections (lecture seule)")
+    dc.add_argument("--timeout", type=float, default=8.0, help="timeout (s) des sondes HTTP du préflight --purple")
+    dc.set_defaults(fn=cmd_doctor)
     dm = sub.add_parser("demo"); dm.set_defaults(fn=cmd_demo)
     return p
 

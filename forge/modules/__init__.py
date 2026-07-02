@@ -1,7 +1,8 @@
 """Modules Forge. Importer ce package enregistre les modules livrés."""
 from . import demo     # noqa: F401  (demo.fingerprint — no-op)
 from . import recon    # noqa: F401  (recon.httpx, recon.nmap)
-from . import web      # noqa: F401  (web.nuclei, access_control.idor)
+from . import web      # noqa: F401  (web.nuclei)
+from . import access_control  # noqa: F401  (access_control.idor — IDOR/BOLA 2-comptes, CWE-639)
 from . import ssrf     # noqa: F401  (ssrf.callback — SSRF callback-vérifié, CWE-918)
 from . import auth     # noqa: F401  (auth.takeover — ATO/auth-bypass à preuve, CWE-287/640)
 from . import cors     # noqa: F401  (cors.credentials — CORS-credentials à preuve, CWE-942)

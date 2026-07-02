@@ -115,6 +115,11 @@
   <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
   <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
   <div class="hdr-tools">
+    <div id="whoami" class="whoami" role="status" aria-live="polite" hidden>
+      <span id="whoami-role" class="badge" title="Rôle effectif de la session">-</span>
+      <span id="whoami-user" class="whoami-user" title="Compte connecté"></span>
+      <button id="logout" class="k-theme" type="button" aria-label="Se déconnecter" title="Se déconnecter"><svg class="ic" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg><span>Déconnexion</span></button>
+    </div>
     <select id="campaign" class="k-theme" aria-label="Campagne" title="Filtrer par campagne">
       <option value="">Toutes campagnes</option>
     </select>
@@ -417,7 +422,22 @@
   </section>
 </main>
 </div>
-<footer><span id="status">connexion…</span> — maj <span id="updated">-</span></footer>
+<!-- PORTAIL DE CONNEXION — gate du shell : affiché quand /api/whoami répond 401 (session requise et
+     absente). POST /api/login pose le cookie forge_session (HttpOnly, SameSite=Strict) qui authentifie
+     ensuite TOUTES les requêtes (y compris le flux SSE). Masqué en mode dev-open et une fois connecté. -->
+<div id="login-view" class="login-view" hidden>
+  <form id="login-form" class="login-card" autocomplete="on" aria-labelledby="login-title">
+    <div class="login-brand"><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span class="login-wordmark">Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></div>
+    <h2 id="login-title">Console C2 — connexion</h2>
+    <p class="login-lead">Authentifiez-vous pour accéder à la console d'engagement gouvernée.</p>
+    <label class="login-f"><span>Identifiant</span><input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required placeholder="ex: operator"></label>
+    <label class="login-f"><span>Mot de passe</span><input id="login-pass" name="password" type="password" autocomplete="current-password" required placeholder="mot de passe du compte"></label>
+    <div id="login-err" class="login-err" role="alert" hidden></div>
+    <button id="login-submit" type="submit" class="login-btn">Se connecter</button>
+    <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Comptes provisionnés côté serveur (<code>forge-console useradd</code>).</p>
+  </form>
+</div>
+<footer><span id="status">connexion…</span> — maj <span id="updated">-</span><span id="version" class="muted" title="version Forge (fichier VERSION, exposé par /health)"></span></footer>
 <script src="/app.js"></script>
 </body>
 </html>

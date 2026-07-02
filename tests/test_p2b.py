@@ -17,7 +17,7 @@ from forge.schema import Finding                          # noqa: E402
 from forge import modules as mods                         # noqa: E402
 from forge import browser_client as bc                    # noqa: E402
 from forge.modules.registry import Module                 # noqa: E402
-from forge.modules.web import IdorDifferential            # noqa: E402
+from forge.modules.access_control import IdorDifferential  # noqa: E402
 
 # pointe le client browser vers un port mort -> available() == False (connection refused, instantané)
 os.environ["FORGE_BROWSER_URL"] = "http://127.0.0.1:1"
@@ -409,7 +409,7 @@ class TestIdorOracleDifferential(unittest.TestCase):
         self.assertIn("non testé", findings[0].title)
 
     def test_normalize_body_neutralizes_volatiles(self):
-        from forge.modules.web import _normalize_body, _body_hash
+        from forge.modules.access_control import _normalize_body, _body_hash
         a = 'csrf_token: "abc123"  ts=1700000000  id=550e8400-e29b-41d4-a716-446655440000  DATA'
         b = 'csrf_token: "zzz999"  ts=1799999999  id=11111111-2222-3333-4444-555555555555  DATA'
         self.assertEqual(_normalize_body(a), _normalize_body(b))

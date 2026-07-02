@@ -15,40 +15,38 @@ Mécanique générique (data-driven, aucune cible en dur) :
 
 exploit=True (prend le contrôle du compte d'autrui) -> exige allow_exploit. destructive selon le flux
 (un reset de mot de passe MUTE le compte victime) : exposé via params.destructive (défaut True pour le
-reset). web_allowed via le ROE.
+reset). web_allowed via le ROE. Bâti sur la base `Oracle` (Finding + HTTP + curl partagés).
 """
-import urllib.error
 import urllib.parse
-import urllib.request
 
-from .registry import register, Module
+from .oracle import Oracle
+from .registry import register
+from .. import techniques
 
 
 @register("auth.takeover")
-class AuthTakeover(Module):
+class AuthTakeover(Oracle):
     kind = "auth.takeover"
     exploit = True                       # obtient la session/identité d'autrui -> allow_exploit
     destructive = True                   # un reset/forge de credential MUTE le compte victime -> allow_destructive
     web_allowed = True
     available = True                     # urllib stdlib
-    mitre = "T1212"                      # Exploitation for Credential Access (CWE-287/CWE-640)
+    mitre = techniques.mitre_for("auth.takeover")   # source de vérité : forge/techniques.py (T1212)
+    cwe = "CWE-287"                      # category + cwe des findings (via Oracle.proof/skip)
+    tool = "forge/modules/auth.py:auth.takeover"
+    fix = ("Renforcer l'authentification et le flux de reset : tokens de réinitialisation aléatoires "
+           "(CSPRNG), à usage unique, liés au compte et à durée de vie courte ; invalider/relancer "
+           "toutes les sessions après un reset ; MFA sur les actions sensibles ; ne jamais dériver "
+           "l'identité d'un état contrôlable côté client (CWE-287/640).")
     description = ("Oracle ATO/auth-bypass à PREUVE : après le flux de bypass, le whoami renvoie-t-il "
                   "l'identité de la VICTIME ? Sinon tested (pas de takeover théorique). CWE-287/640.")
 
     @staticmethod
     def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        body = data.encode("utf-8") if isinstance(data, str) else data
-        req = urllib.request.Request(url, headers=headers or {}, method=method, data=body)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, r.read(200000).decode("utf-8", "replace"), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            try:
-                return e.code, "", dict(e.headers)
-            except Exception:            # noqa: BLE001
-                return e.code, "", {}
-        except Exception:                # noqa: BLE001
-            return None, "", {}
+        """(status, body, headers_dict) — adosse le câblage urllib partagé (Oracle._http).
+        Seam monkeypatché par les tests."""
+        st, body, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
+        return st, body, (dict(h) if h is not None else {})
 
     def dry(self, action):
         p = action.params
@@ -65,9 +63,8 @@ class AuthTakeover(Module):
         victim = p.get("victim_marker")
         sess = dict(p.get("attacker_session_headers", {}))
         if not whoami or not victim:
-            return [self.finding(
-                target=action.target, title="ATO non testé — config manquante", severity="INFO",
-                category="CWE-287", status="tested", tool="forge/modules/auth.py:auth.takeover",
+            return [self.skip(
+                target=action.target, title="ATO non testé — config manquante",
                 evidence=("Requiert params.whoami_url (endpoint profil/session) et params.victim_marker "
                           "(identifiant unique de la victime attendu dans le whoami). "
                           "Optionnel : params.bypass (étape de bypass), params.attacker_marker."),
@@ -87,27 +84,12 @@ class AuthTakeover(Module):
         # de l'attaquant (sinon on regarde juste sa propre session : faux positif classique).
         is_victim = (ws in (200, 206) and victim in (wbody or "")
                      and (attacker is None or attacker not in (wbody or "")))
-        return [self.finding(
-            target=whoami,
+        return [self.proof(
+            target=whoami, proven=is_victim,
             title=("ATO CONFIRMÉ — la session attaquant lit l'identité de la VICTIME"
                    if is_victim else "ATO non confirmé — whoami ne renvoie pas l'identité victime"),
             severity=("CRITICAL" if is_victim else "INFO"),
-            category="CWE-287", cwe="CWE-287", mitre="T1212",
-            fix=("Renforcer l'authentification et le flux de reset : tokens de réinitialisation aléatoires "
-                 "(CSPRNG), à usage unique, liés au compte et à durée de vie courte ; invalider/relancer "
-                 "toutes les sessions après un reset ; MFA sur les actions sensibles ; ne jamais dériver "
-                 "l'identité d'un état contrôlable côté client (CWE-287/640)."),
-            status=("vulnerable" if is_victim else "tested"),
-            tool="forge/modules/auth.py:auth.takeover",
             evidence=(f"whoami HTTP {ws} ; victim_marker_présent={victim in (wbody or '')} ; "
                       f"attacker_marker_absent={attacker is None or attacker not in (wbody or '')} "
                       f"(extrait={(wbody or '')[:120]!r})"),
             poc=self._curl(whoami, sess))]
-
-    @staticmethod
-    def _curl(url, headers):
-        parts = ["curl", "-sS"]
-        for k, v in (headers or {}).items():
-            parts += ["-H", f"'{k}: {v}'"]
-        parts.append(f"'{url}'")
-        return " ".join(parts)

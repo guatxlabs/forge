@@ -65,3 +65,12 @@ forge-demo-*/
 !scope.example.json
 !.gitignore
 !console/.gitignore
+
+# --- Reference-engagement demo fixtures (SYNTHETIC — shipped project artifacts) ---
+# This folder is a self-contained, offline-demoable reference dataset. Every host uses
+# the RFC 2606 reserved `.example` TLD and every IP is in an RFC 5737 documentation range;
+# there is NO real target, credential or ledger data here. Re-include the whole folder so a
+# fresh install is demoable, despite the broad scope.json / targets.json / *.jsonl rules above.
+# Runtime *.jsonl / *.db / scope.json / targets.json ELSEWHERE stay ignored.
+!examples/reference-engagement/
+!examples/reference-engagement/**

@@ -71,6 +71,12 @@ class Ed25519Signer(Signer):
     def public_id(self):
         return "ed25519:" + self._pub_hex
 
+    @property
+    def pubkey_hex(self):
+        """Clé publique Ed25519 BRUTE (hex, 64 chars) — sans le préfixe `ed25519:` de public_id().
+        C'est exactement ce qu'attend `verify_external`/`ledger verify --pubkey` (non-répudiation)."""
+        return self._pub_hex
+
 
 def _load_or_make_secret(path) -> bytes:
     env = os.environ.get("FORGE_LEDGER_KEY")
@@ -106,6 +112,30 @@ def make_signer(base_path, prefer_ed25519=True) -> Signer:
                 pass
         return Ed25519Signer(priv)
     return HmacSigner(_load_or_make_secret(base + ".key"))
+
+
+def generate_ed25519_keypair(base_path) -> "Ed25519Signer":
+    """Crée (ou ROTATIONNE si déjà présente) DÉLIBÉRÉMENT une clé privée Ed25519 dans
+    `<base>.ed25519` (0600) et retourne le signeur. À l'inverse de `make_signer` (auto-gen paresseux
+    au premier usage), c'est une action opérateur EXPLICITE. Lève `RuntimeError` si `cryptography`
+    est absent (pas d'asymétrique disponible → seul le repli HMAC existe)."""
+    if not _HAVE_ED:
+        raise RuntimeError("cryptography absent — Ed25519 indisponible (repli HMAC uniquement)")
+    kp = Path(str(base_path) + ".ed25519")
+    priv = Ed25519PrivateKey.generate()
+    kp.parent.mkdir(parents=True, exist_ok=True)
+    kp.write_bytes(priv.private_bytes_raw())
+    try:
+        os.chmod(kp, 0o600)
+    except OSError:
+        pass
+    return Ed25519Signer(priv)
+
+
+def signer_pubkey_hex(signer):
+    """Clé publique Ed25519 BRUTE (hex, 64 chars) d'un signeur, ou None si l'algo n'est pas
+    asymétrique (repli HMAC = pas de clé publique de non-répudiation). Sert `ledger pubkey`."""
+    return getattr(signer, "pubkey_hex", None)
 
 
 def ephemeral_signer() -> Signer:

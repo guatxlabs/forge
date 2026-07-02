@@ -1,0 +1,5 @@
+[
+  {"host": "shop.lab.example", "kind": "app", "attrs": {"service": "https", "role": "storefront", "note": "DEMO FIXTURE — synthetic lab host"}},
+  {"host": "api.lab.example", "kind": "service", "attrs": {"service": "https", "role": "backend-api", "note": "DEMO FIXTURE — synthetic lab host"}},
+  {"host": "lab.example", "kind": "host", "attrs": {"service": "dns", "role": "apex", "note": "DEMO FIXTURE — synthetic lab host"}}
+]
