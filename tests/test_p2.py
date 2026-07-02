@@ -218,6 +218,36 @@ class TestReport(unittest.TestCase):
         self.assertNotIn("Classes jamais tentées", md)
         self.assertIn("Synthèse", md)                        # le squelette reste là
 
+    def test_report_parity_header_techniques_and_console_pointer(self):
+        # PARITÉ CONSOLE : un run armé/approuvé qui tire une technique doit exposer, dans le rapport CLI,
+        # (a) l'en-tête d'engagement (périmètre scope), (b) la section « Techniques ATT&CK exercées »
+        # avec le MITRE tiré, (c) le pointeur vers le rapport console /api/runs/<id>/report.
+        eng = Engine(scope(), run_id="run-xyz")
+        eng.arm()
+        a = Action("demo.fingerprint", "app.test", params={"mitre": "T1190"})
+        eng.approve(a.id)
+        eng.execute(a)
+        md = report.build_report(eng)
+        # (a) en-tête d'engagement — périmètre dérivé du scope
+        self.assertIn("## Engagement", md)
+        self.assertIn("In-scope", md)
+        self.assertIn("app.test", md)
+        self.assertIn("**Run** : run-xyz", md)               # run_id reflété dans l'en-tête
+        # (b) techniques ATT&CK exercées — le MITRE réellement tiré est listé
+        self.assertIn("Techniques ATT&CK exercées", md)
+        self.assertIn("T1190", md)
+        # (c) pointeur console — matrice détecté/raté + MTTD + annexe custody vivent côté console
+        self.assertIn("/api/runs/run-xyz/report", md)
+        self.assertIn("MTTD", md)
+        self.assertIn("détecté / raté", md)
+
+    def test_report_parity_degrades_without_run_or_ledger(self):
+        # sans run_id ni tir : en-tête présent (scope), techniques en placeholder, pointeur générique.
+        md = report.build_report(Engine(scope()))
+        self.assertIn("## Engagement", md)
+        self.assertIn("Aucune technique ATT&CK tirée", md)   # placeholder, pas de crash
+        self.assertIn("/api/runs/<run-id>/report", md)       # pointeur générique quand run_id absent
+
 
 class TestPurple(unittest.TestCase):
     def test_runrecord_emitted_on_fire(self):
