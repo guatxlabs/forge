@@ -59,6 +59,12 @@ EXPECTED_KINDS = {
     "recon.httpx", "recon.nmap", "ssrf.callback", "web.nuclei",
     "recon.subdomains", "recon.dns", "recon.js_endpoints", "recon.urls", "recon.tech",
     "recon.content", "recon.secrets", "recon.waf",
+    # oracles d'injection server-side à preuve bénigne (injection.py)
+    "ssti.eval", "path.traversal", "sqli.probe",
+    # oracles client-side / flux de requête à preuve minimale (clientflow.py)
+    "xss.reflected", "redirect.open", "csrf.state_change",
+    # oracles token/API à preuve compte-opérateur (tokenapi.py)
+    "jwt.weakness", "graphql.access",
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {

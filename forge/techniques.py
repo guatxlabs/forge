@@ -157,6 +157,43 @@ TECHNIQUES = {t.key: t for t in [
        attck_tactic="Credential Access", phase="exploit", capability="exploit", proof_required=True),
     _t("cors.credentials",    cls="access_control", cwe="CWE-942", mitre="T1539", exploit=True,
        attck_tactic="Credential Access", phase="exploit", capability="exploit", proof_required=True),
+    # ORACLES d'INJECTION server-side à PREUVE BÉNIGNE (slice injection.py) — VÉRIFICATION, pas
+    # weaponization : marqueur arithmétique (SSTI), canari bénin (traversal), différentiel booléen /
+    # version SGBD (SQLi). exploit=False/destructive=False (sondes bénignes non destructives) ->
+    # capability="active", phase="access". `proof_required` : promotion `vulnerable` sur preuve concrète
+    # seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/
+    # mitre_by_kind() restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par le module.
+    _t("ssti.eval",           cwe="CWE-1336", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    _t("path.traversal",      cwe="CWE-22",   mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    _t("sqli.probe",          cls="sqli", cwe="CWE-89", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # ORACLES CLIENT-SIDE / FLUX DE REQUÊTE à PREUVE MINIMALE (slice clientflow.py) — VÉRIFICATION,
+    # pas weaponization : marqueur bénin réfléchi en contexte JS-exécutable (XSS reflected), cible de
+    # redirection attaquant-contrôlée ET chaînable (open redirect), action critique sans anti-CSRF ni
+    # SameSite (CSRF). exploit=False/destructive=False (sondes bénignes non destructives) ->
+    # capability="active", phase="access". `proof_required` : promotion `vulnerable` seulement sur
+    # preuve concrète ET impactante (contexte exécutable / chaîne sensible / action critique). Aucune
+    # `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind() restent
+    # INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par chaque module.
+    _t("xss.reflected",       cwe="CWE-79",  mitre="T1059",
+       attck_tactic="Execution", phase="access", capability="active", proof_required=True),
+    _t("redirect.open",       cwe="CWE-601", mitre="T1204.001",
+       attck_tactic="Execution", phase="access", capability="active", proof_required=True),
+    _t("csrf.state_change",   cwe="CWE-352", mitre="T1204",
+       attck_tactic="Execution", phase="access", capability="active", proof_required=True),
+    # ORACLES TOKEN/API à PREUVE COMPTE-OPÉRATEUR (slice tokenapi.py) — VÉRIFICATION scope-locked, pas
+    # weaponization : jetons forgés acceptés POUR le compte de l'opérateur (jwt.weakness, signature
+    # contournable), objet d'un SECOND compte détenu lu cross-compte (graphql.access, BOLA). Jamais un
+    # tiers. exploit=False/destructive=False (sondes bénignes non destructives) -> capability="active",
+    # phase="access". `proof_required` : promotion `vulnerable` sur preuve concrète compte-opérateur
+    # seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/
+    # mitre_by_kind() restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par le module.
+    _t("jwt.weakness",        cwe="CWE-347", mitre="T1606",
+       attck_tactic="Credential Access", phase="access", capability="active", proof_required=True),
+    _t("graphql.access",      cwe="CWE-639", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
     _t("web.nuclei",          mitre="T1595.002",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
     _t("origin.find",         mitre="T1590.005",
