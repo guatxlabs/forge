@@ -192,15 +192,30 @@ class HeuristicBrain(Brain):
 
     @staticmethod
     def _evasion_actions(host, chained_from=""):
-        """Enablers d'évasion (accès derrière CDN/WAF) pour un host PROTÉGÉ. Non-exploit (xhr/turnstile)
-        -> proposés d'office ; le module `available` (santé du service browser) et le ROE font le reste."""
+        """Enablers d'évasion (accès derrière CDN/WAF) pour un host PROTÉGÉ. Non-exploit (xhr/turnstile/
+        discover) -> proposés d'office ; le module `available` (santé du service browser) et le ROE font
+        le reste. `evasion.discover` DÉBLOQUE la chaîne discovery->oracle derrière WAF : il franchit le
+        challenge puis émet des endpoints in-scope (DISCOVERY_ENDPOINT_MARKER) que le cerveau chaîne
+        vers les oracles (edge e) — là où la recon HTTP challengée n'aurait rien découvert."""
         suffix = f" (chaîné depuis {chained_from})" if chained_from else ""
         return [
             _action("evasion.xhr", host, value=0.4, confidence=0.4, cost=1,
                     desc=f"observation requêtes via browser (accès derrière CDN/WAF){suffix}"),
             _action("evasion.turnstile", host, value=0.4, confidence=0.3, cost=1,
                     desc=f"franchir le Turnstile interactif (enabler d'accès){suffix}"),
+            HeuristicBrain._evasion_discover_action(host, chained_from=chained_from),
         ]
+
+    @staticmethod
+    def _evasion_discover_action(host, chained_from=""):
+        """UNE action `evasion.discover` (voie backed-browser) pour un host. Isolée de `_evasion_actions`
+        (tout le panel d'évasion sur un host explicitement PROTÉGÉ) car l'edge (f) « challenge-gaté » ne
+        veut proposer QUE la découverte : la recon plain-HTTP a été bloquée par un challenge (0 endpoint +
+        signature), on franchit le challenge et ré-alimente la chaîne discovery->oracle, rien de plus.
+        Id STABLE (kind:target) partagé avec `_evasion_actions` -> dédupliqué (jamais deux discover)."""
+        suffix = f" (chaîné depuis {chained_from})" if chained_from else ""
+        return _action("evasion.discover", host, value=0.5, confidence=0.4, cost=1,
+                       desc=f"découverte d'endpoints backed-browser derrière WAF (-> oracles){suffix}")
 
     def _chained_actions(self, graph, host):
         """CHAÎNAGE : lit les findings du graphe pour ce host et propose des actions DÉRIVÉES sur de
@@ -251,6 +266,20 @@ class HeuristicBrain(Brain):
             if "waf/cdn identifié" in str(f.get("title", "")).lower():
                 out += self._evasion_actions(host, chained_from="recon.waf")
                 break
+
+        # (f) HOST CHALLENGE-GATÉ : la recon plain-HTTP (recon.js_endpoints / recon.content) a observé une
+        # signature de challenge/WAF managé ET n'a extrait AUCUN endpoint (DISCOVERY_CHALLENGE_MARKER).
+        # Sans cet edge, la chaîne discovery->oracle serait affamée (0 endpoint = 0 oracle derrière le WAF).
+        # On AUTO-PROPOSE la SEULE `evasion.discover` pour ce host in-scope : elle franchit le challenge
+        # (browser gouverné) et émet des endpoints (DISCOVERY_ENDPOINT_MARKER) que l'edge (e) chaîne vers
+        # les oracles. Scope : le host porte déjà le finding (donc in-scope ; un endpoint découvert HORS
+        # périmètre est écarté par le module puis re-gaté par le ROE avant tout oracle). BORNÉ + ANTI-BOUCLE :
+        # id stable (kind:target) -> reproposé sans jamais re-tirer ; et `evasion.discover` n'émet JAMAIS le
+        # marqueur de challenge (seuls recon.js_endpoints/recon.content le posent) -> sa sortie ne peut pas
+        # se re-déclencher (pas d'evasion->evasion). Garde `_is_endpoint` : jamais sur une URL à chemin.
+        if not self._is_endpoint(host) and any(
+                techniques.DISCOVERY_CHALLENGE_MARKER in str(f.get("title", "")) for f in findings):
+            out.append(self._evasion_discover_action(host, chained_from="recon.challenge"))
 
         # (d) SOUS-DOMAINE découvert (recon.subdomains) -> fingerprint techno/WAF sur le NOUVEL hôte
         # in-scope. Les oracles web sont déjà semés par les actions de base (l'hôte est un nœud du

@@ -12,7 +12,7 @@ from . import injection  # noqa: F401  (ssti.eval, path.traversal, sqli.probe �
 from . import clientflow  # noqa: F401  (xss.reflected, redirect.open, csrf.state_change — flux client à preuve)
 from . import tokenapi  # noqa: F401  (jwt.weakness, graphql.access — oracles token/API à preuve compte-opérateur)
 from . import origin   # noqa: F401  (origin.find — IP d'origine derrière CDN)
-from . import evasion  # noqa: F401  (evasion.xhr, evasion.turnstile, evasion.idor_intercept)
+from . import evasion  # noqa: F401  (evasion.xhr, evasion.turnstile, evasion.idor_intercept, evasion.discover)
 from . import msf       # noqa: F401  (msf.module — connecteur msfrpcd, opérateur opt-in)
 from . import burp      # noqa: F401  (burp.scan — connecteur REST API Burp Suite)
 from .registry import REGISTRY, register, get, kinds, Module  # noqa: F401

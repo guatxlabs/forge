@@ -20,6 +20,10 @@ _SCOPE_INJECT_KINDS = frozenset({
     # modules ACTIFS de reachability/discovery (recon_active.py) : ils requêtent/dérivent des assets
     # à runtime -> re-validation fail-closed contre le périmètre injecté (cf. recon_active).
     "recon.content", "recon.secrets", "recon.waf",
+    # DÉCOUVERTE backed-browser (evasion.discover) : navigue derrière le WAF et EXTRAIT des endpoints
+    # à runtime -> mêmes garanties que recon.js_endpoints : le périmètre injecté sert à RE-VALIDER
+    # fail-closed chaque endpoint découvert avant émission (le scope-guard du module en dépend).
+    "evasion.discover",
 })
 
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour

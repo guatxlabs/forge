@@ -450,6 +450,19 @@ class JsEndpoints(PassiveSurface):
                 (inscope_urls if self._host_in_scope(action, _host_only(u)) else ext_urls).add(u)
         sorted_paths = sorted(paths)
         if not (sorted_paths or inscope_urls or ext_urls):
+            # AUCUN endpoint extrait : soit page « nue » (rien à découvrir), soit recon CHALLENGÉE par un
+            # WAF/challenge managé (403 / interstitiel Cloudflare « Just a moment »…). Dans le 2e cas on
+            # émet le MARQUEUR DE CHALLENGE partagé (techniques.DISCOVERY_CHALLENGE_MARKER) : le cerveau
+            # le détecte (edge f) pour AUTO-PROPOSER la découverte backed-browser evasion.discover, qui
+            # franchit le challenge et ré-alimente la chaîne discovery->oracle (là où la recon HTTP n'a
+            # rien pu voir). C'est LA réponse au trou « WAF -> 0 endpoint -> 0 oracle ».
+            if techniques.looks_like_challenge(st, html):
+                return [self._finding(
+                    page, f"recon.js_endpoints — {techniques.DISCOVERY_CHALLENGE_MARKER}",
+                    (f"HTTP {st} et aucun endpoint extrait : signature de challenge/WAF managé observée "
+                     f"(découverte plain-HTTP bloquée). Bascule sur la découverte backed-browser "
+                     f"(evasion.discover) recommandée pour franchir le challenge et cartographier la surface."),
+                    self.dry(action))]
             return [self._finding(page, "recon.js_endpoints — aucun endpoint extrait",
                                   "Aucune route/URL d'API détectée dans le JS de la page.", self.dry(action))]
         evidence = (f"routes/paths ({len(paths)}) : {', '.join(sorted_paths[:60]) or '—'} || "
