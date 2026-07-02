@@ -19,23 +19,26 @@
   --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
   --font-mono:'JetBrains Mono',ui-monospace,'Cascadia Mono',Consolas,monospace;
   /* theme sombre (defaut) */
-  --bg:#070b13; --card:#0c1422; --card2:#0a111d; --bd:#16202e;
-  --hd:#eaf2fb; --fg:#cdd9e6; --mut:#8aa0b4;
-  --acc:#2dd4bf; --acc-ink:#04201c; --acc-bg:#2dd4bf1a; --acc-soft:rgba(45,212,191,.16);
-  --ok:#34d399; --bad:#f87171; --warn:#fbbf24; --hi:#fbbf24;
-  --sev1:#60a5fa; --sev2:#fbbf24; --sev3:#fb923c; --sev4:#f87171;
-  --b1:#7ce8c3; --b2:#ffd9a3; --b3:#ffb3ab; --aurora:.16;  /* fond aurora = guatx.com (variant-k), 2 thèmes */
+  --bg:#0d0a08; --card:#181210; --card2:#120d0b; --bd:#2a1d16;
+  --hd:#f7ede6; --fg:#e2d6cc; --mut:#a8968a;
+  --acc:#f97316; --acc-ink:#2a1200; --acc-bg:#f973161a; --acc-soft:rgba(249,115,22,.16);
+  --ok:#46b586; --bad:#ff5a5a; --warn:#fbbf24; --hi:#fbbf24;
+  --sev1:#fcd34d; --sev2:#fb923c; --sev3:#ff5a3c; --sev4:#ff2740;
+  --b1:#ff6a2c; --b2:#e11d2f; --b3:#ffab3d; --aurora:.18;  /* fond aurora = guatx.com (variant-k), 2 thèmes */
+  --strike:#e11d2f; --strike-ink:#ffe9ec; --strike-bg:#e11d2f1f; --strike-soft:rgba(225,29,47,.20);
+  --ember:var(--acc); /* alias offensif : chauffe ambre "blade heat" pour la chrome offensive */
   --radius:10px; --pill:6px; /* "pill" = chips/badges rectangulaires (pro, ex-999px) */
-  --shadow:0 6px 18px #00000033;
+  --shadow:0 6px 18px #00000038;
 }
 html[data-theme="light"]{
-  --bg:#f7f5f0; --card:#ffffff; --card2:#fbfaf6; --bd:#e4e1da;
-  --hd:#1f2a26; --fg:#2c3a34; --mut:#5d6b65;
-  --acc:#047857; --acc-ink:#ecfff8; --acc-bg:#04785714; --acc-soft:rgba(4,120,87,.12);
-  --ok:#047857; --bad:#c0392b; --warn:#b7791f; --hi:#047857;
-  --sev1:#2563eb; --sev2:#b7791f; --sev3:#c2410c; --sev4:#c0392b;
-  --b1:#7ce8c3; --b2:#ffd9a3; --b3:#ffb3ab; --aurora:.18;
-  --shadow:0 6px 18px #4a5f5518;
+  --bg:#f8f4ee; --card:#ffffff; --card2:#fbf6ef; --bd:#e7ddd0;
+  --hd:#2a1c14; --fg:#3a2a20; --mut:#6e5a4d;
+  --acc:#c2410c; --acc-ink:#fff4ec; --acc-bg:#c2410c14; --acc-soft:rgba(194,65,12,.12);
+  --ok:#1a7f37; --bad:#c01818; --warn:#a16207; --hi:#c2410c;
+  --sev1:#b45309; --sev2:#ea580c; --sev3:#dc2626; --sev4:#9f1239;
+  --b1:#ff8c42; --b2:#ff5a5a; --b3:#ffc061; --aurora:.14;
+  --strike:#be123c; --strike-ink:#fff0f2; --strike-bg:#be123c14; --strike-soft:rgba(190,18,60,.14);
+  --shadow:0 6px 18px #4a2f1f1a;
 }
 
 *{box-sizing:border-box}
