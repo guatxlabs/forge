@@ -242,6 +242,14 @@ TECHNIQUES = {t.key: t for t in [
        attck_tactic="Defense Evasion", phase="access", capability="active"),
     _t("evasion.idor_intercept", cls="evasion", mitre="T1190", exploit=True,
        attck_tactic="Defense Evasion", phase="exploit", capability="exploit"),
+    # DÉCOUVERTE BACKED-BROWSER derrière WAF/challenge managé : pilote le browser-automation pour
+    # franchir le challenge, PUIS extrait les endpoints du rendu (DOM/JS/XHR) — cartographie active,
+    # navigate/lecture SEULE (exploit=False, non destructif). C'est le jumeau browser de
+    # recon.js_endpoints : il émet le MÊME DISCOVERY_ENDPOINT_MARKER (T1594) pour que le cerveau
+    # chaîne les oracles — d'où phase=recon/capability=active (reconnaissance active) même s'il vit
+    # dans la famille évasion (cls="evasion", proposé sur les cibles PROTÉGÉES par le brain).
+    _t("evasion.discover",       cls="evasion", mitre="T1594",
+       attck_tactic="Reconnaissance", phase="recon", capability="active"),
 
     # (2) JETONS de classe QUALIFIANTS (plancher planner). Certains portent aussi une remédiation.
     #     Ce sont des ALIAS de classe (pas des kinds de module) : pas de phase/capability.
@@ -336,6 +344,42 @@ PURPLE_FALLBACK_KINDS = (
 DISCOVERY_SUBDOMAIN_MARKER = "Sous-domaine in-scope"       # recon.subdomains : nouvel hôte in-scope
 DISCOVERY_ENDPOINT_MARKER = "Endpoint in-scope"            # recon.js_endpoints : endpoint référencé JS
 DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL d'archive in-scope
+# Marqueur de titre : la découverte plain-HTTP a été BLOQUÉE par un challenge/WAF managé — signature
+# de challenge/403 observée ET aucun endpoint extrait. Émis par recon.js_endpoints / recon.content
+# (les émetteurs de découverte HTTP) quand la recon curl est challengée (le trou historique :
+# « WAF -> recon challengée -> 0 endpoint -> 0 oracle »). Le cerveau (brain, edge (f)) le détecte pour
+# AUTO-PROPOSER la voie backed-browser `evasion.discover` sur ce host in-scope, qui franchit le
+# challenge et ré-alimente la chaîne discovery->oracle. Constante partagée émetteur/détecteur (zéro
+# dérive), distincte des DISCOVERY_*_MARKER par-hôte/endpoint (elle marque un host CHALLENGE-GATÉ, pas
+# une cible DÉCOUVERTE) — donc ignorée par le fan-out bound `_discovery_marker`.
+DISCOVERY_CHALLENGE_MARKER = "découverte HTTP challengée (WAF/challenge managé)"
+
+# --- Détection de challenge/WAF managé sur une réponse HTTP (pur, stdlib, jamais de réseau) ---------
+# Codes de statut typiques d'un blocage/challenge managé (Cloudflare & co) et sous-chaînes d'interstitiel
+# de challenge dans le corps HTML. Sert aux modules de découverte HTTP à SIGNALER « recon bloquée par un
+# challenge » (0 endpoint + signature) pour que le cerveau bascule sur la voie backed-browser. Volontairement
+# CONSERVATEUR (sous-chaînes non ambiguës) pour éviter les faux positifs.
+CHALLENGE_STATUS_CODES = frozenset({403, 429, 503})
+CHALLENGE_BODY_SIGNATURES = (
+    "just a moment", "checking your browser", "attention required", "cf-chl", "__cf_chl",
+    "cf-mitigated", "cf_chl_opt", "/cdn-cgi/challenge-platform", "turnstile", "captcha-delivery",
+    "datadome", "please enable javascript and cookies", "please stand by, while we are checking",
+    "ddos protection by", "incapsula incident id", "this request was blocked",
+)
+
+
+def looks_like_challenge(status, body=""):
+    """True si une réponse HTTP porte une SIGNATURE de challenge/WAF managé : code de blocage
+    (403/429/503) OU interstitiel de challenge dans le corps HTML (Cloudflare « Just a moment »,
+    DataDome, Turnstile…). Pur, ne lève jamais ; conservateur (sous-chaînes non ambiguës). Sert de
+    signal « recon plain-HTTP bloquée » pour basculer sur la découverte backed-browser."""
+    try:
+        if status in CHALLENGE_STATUS_CODES:
+            return True
+        low = (body or "").lower()
+        return any(sig in low for sig in CHALLENGE_BODY_SIGNATURES)
+    except Exception:                                        # noqa: BLE001 (entrée hostile)
+        return False
 
 
 # --- Vues dérivées HISTORIQUES (byte-à-byte identiques — itèrent le noyau hérité TECHNIQUES) -------

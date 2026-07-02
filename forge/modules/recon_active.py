@@ -76,6 +76,18 @@ class ContentDiscovery(PassiveSurface):
     # codes de statut « intéressants » (route existante/protégée) — pas 404/400.
     MATCH_CODES = "200,201,202,203,204,301,302,307,308,401,403,405,500"
     MAX_ROUTES = 300                                         # borne le nombre de findings par-route
+    # seuil de « challenge en nappe » : nb MIN de chemins distincts tous en code de blocage pour conclure
+    # à un challenge/WAF (≠ une route protégée isolée qui, elle, est une découverte légitime).
+    BLANKET_CHALLENGE_MIN = 3
+
+    @classmethod
+    def _looks_blanket_challenged(cls, results):
+        """True si ffuf n'a vu QUE des codes de blocage (techniques.CHALLENGE_STATUS_CODES) sur au moins
+        BLANKET_CHALLENGE_MIN chemins distincts : signature d'un WAF/challenge managé qui bloque tout.
+        Distingué d'une route protégée isolée (1-2 x 403) qui reste une découverte légitime. Pur."""
+        codes = [r.get("status") for r in (results or []) if r.get("status") is not None]
+        return (len(codes) >= cls.BLANKET_CHALLENGE_MIN
+                and all(c in techniques.CHALLENGE_STATUS_CODES for c in codes))
 
     @staticmethod
     def _tool_available():
@@ -158,6 +170,18 @@ class ContentDiscovery(PassiveSurface):
             return [self._skipped(target, "recon.content non concluant — ffuf a échoué",
                                   (f"rc={rc} ; " + ((err or out) or "").strip()[:300]) or f"rc={rc}",
                                   self.dry(action))]
+        # CHALLENGE managé : ffuf n'a observé QUE des codes de BLOCAGE (403/429/503) sur >=3 chemins
+        # candidats distincts -> ce n'est pas de la découverte de routes, c'est un WAF/challenge qui
+        # bloque tout (≠ une route protégée isolée). On émet le MARQUEUR DE CHALLENGE partagé au lieu de
+        # lister des « routes » fantômes : le cerveau (edge f) auto-propose alors la voie backed-browser
+        # evasion.discover. Réutilise les statuts que ffuf a DÉJÀ renvoyés — aucun appel réseau de plus.
+        if self._looks_blanket_challenged(results):
+            return [self._finding(
+                target, f"recon.content — {techniques.DISCOVERY_CHALLENGE_MARKER}",
+                (f"ffuf n'a observé que des réponses de blocage (challenge/WAF managé) sur "
+                 f"{len(results)} chemin(s) candidat(s) : découverte de routes plain-HTTP bloquée. "
+                 f"Bascule sur la découverte backed-browser (evasion.discover) recommandée."),
+                self.dry(action))]
         if not kept:
             return [self._finding(target, "recon.content — aucune route découverte",
                                   f"ffuf: {n_paths} chemin(s) testé(s), aucune route sur code(s) {self.MATCH_CODES}.",
