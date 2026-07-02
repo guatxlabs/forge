@@ -50,11 +50,15 @@ def _patch(cls, fn):
     return lambda: setattr(cls, "_fetch", orig)
 
 
-# Ensemble de kinds attendu — pinné LITTÉRALEMENT (identique avant/après le refactor).
+# Ensemble de kinds attendu — pinné LITTÉRALEMENT. Additif : les 5 modules PASSIFS de cartographie
+# de surface (recon_surface.py) + les 3 modules ACTIFS de reachability (recon_active.py) sont des
+# kinds LIVRÉS au même titre que recon.httpx/recon.nmap.
 EXPECTED_KINDS = {
     "access_control.idor", "auth.takeover", "burp.scan", "cors.credentials", "demo.fingerprint",
     "evasion.idor_intercept", "evasion.turnstile", "evasion.xhr", "msf.module", "origin.find",
     "recon.httpx", "recon.nmap", "ssrf.callback", "web.nuclei",
+    "recon.subdomains", "recon.dns", "recon.js_endpoints", "recon.urls", "recon.tech",
+    "recon.content", "recon.secrets", "recon.waf",
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {

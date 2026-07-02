@@ -10,6 +10,21 @@ from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
 from . import modules as mods
 from . import purple
+from . import session
+
+# Kinds dont le module DÉCOUVRE/RÉSOUT des hôtes à runtime (au-delà de la cible gatée par le ROE) :
+# l'engine leur injecte le périmètre (in_scope/out_scope) dans action.params pour que chaque hôte
+# dérivé soit re-validé fail-closed AVANT émission/connexion (cf. _prepare + modules recon_surface/origin).
+_SCOPE_INJECT_KINDS = frozenset({
+    "origin.find", "recon.subdomains", "recon.dns", "recon.js_endpoints", "recon.urls", "recon.tech",
+    # modules ACTIFS de reachability/discovery (recon_active.py) : ils requêtent/dérivent des assets
+    # à runtime -> re-validation fail-closed contre le périmètre injecté (cf. recon_active).
+    "recon.content", "recon.secrets", "recon.waf",
+})
+
+# Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour
+# que le module borne son trafic (ex: ffuf -rate). Additif (setdefault) : n'écrase jamais un param posé.
+_RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"})
 
 
 class Engine:
@@ -20,6 +35,10 @@ class Engine:
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
         self.graph = graph if graph is not None else EngagementGraph()
         self.roe = Roe(scope, ledger=ledger, mode=mode)
+        # SESSION GOUVERNÉE (SECRET) : store d'authentification dérivé du scope (`session` défaut global
+        # + `sessions` par-hôte). Lié autour de chaque fire() (execute) ; les modules recon/oracle y
+        # puisent le matériel à attacher AUX SEULES requêtes in-scope. Store inerte si rien de configuré.
+        self.sessions = session.SessionStore.from_scope(scope)
         self.campaign_id = campaign  # boucle purple : corrèle les run-records à la campagne…
         self.run_id = run_id         # …et au run (console). None tant que non fournis (additif).
         self.findings = []
@@ -67,7 +86,12 @@ class Engine:
         elif decision.verdict == DRY_RUN:
             output = module.dry(action)              # AUCUN effet de bord
         else:                                        # FIRE
-            raw = module.fire(action) or []
+            # SESSION GOUVERNÉE : lie le store (scope-guardé) le temps du fire — les modules recon/oracle
+            # attachent le matériel d'auth SECRET aux requêtes IN-SCOPE via les chokepoints HTTP partagés.
+            # Rien de secret ne transite par les findings ni le ledger (le matériel n'est que dans la
+            # requête sortante). Le contexte est restauré en sortie même en cas d'exception.
+            with session.using(self.sessions):
+                raw = module.fire(action) or []
             new = []
             for f in raw:
                 if self.memory is not None and not self.memory.store(f):
@@ -127,13 +151,16 @@ class Engine:
                 a.params.setdefault("urls", self.scope.idor_targets)
                 a.params.setdefault("mitre", "T1190")
 
-        # injecte le périmètre dans les actions origin.find : la cible (domaine) est gatée par le ROE,
-        # mais origin.find résout des sous-domaines vers des IP à runtime -> chaque IP DOIT être
-        # re-validée fail-closed contre le scope avant connexion (miroir de l'injection IDOR ci-dessus).
+        # injecte le périmètre dans les actions qui DÉCOUVRENT/RÉSOLVENT des hôtes à runtime : la
+        # cible (domaine) est gatée par le ROE, mais ces modules produisent de NOUVEAUX hôtes (IP
+        # d'origine, sous-domaines, URLs historiques, endpoints JS) qui DOIVENT être re-validés
+        # fail-closed contre le scope avant d'être émis/connectés (miroir de l'injection IDOR ci-dessus).
         for a in actions:
-            if a.kind == "origin.find":
+            if a.kind in _SCOPE_INJECT_KINDS:
                 a.params.setdefault("in_scope", self.scope.in_scope)
                 a.params.setdefault("out_scope", self.scope.out_scope)
+            if a.kind in _RATE_LIMITED_KINDS:                # débit ROE -> borne le trafic actif du module
+                a.params.setdefault("rate", self.scope.rate)
         return actions
 
     def campaign(self, targets, brain, planner, modules=None, module_params=None, max_waves=4):
@@ -157,7 +184,14 @@ class Engine:
         skipped_budget et coverage_gaps sont ACCUMULÉS sur l'ensemble des vagues (anti-masquage).
         """
         for t in targets:                            # amorce le world-model avec les cibles
-            self.graph.add_host(t.host, kind=t.kind, **(t.attrs or {}))
+            # SESSION par-cible (SECRET) : matériel d'auth déclaré dans targets.json[].attrs.session.
+            # RETIRÉ des attrs poussés au graphe (le secret ne doit JAMAIS entrer dans le world-model,
+            # que le brain/rapport peuvent surfacer) et versé dans le store scope-guardé pour ce host.
+            attrs = dict(t.attrs or {})
+            tsess = attrs.pop("session", None)
+            self.graph.add_host(t.host, kind=t.kind, **attrs)
+            if tsess:
+                self.sessions.add_host_session(t.host, tsess)
 
         global_params = module_params or {}
         attrs_by_host = {t.host: (t.attrs or {}).get("module_params", {}) or {} for t in targets}

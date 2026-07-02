@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 
 from .registry import Module
+from .. import session as _session
 
 
 class Oracle(Module):
@@ -62,9 +63,20 @@ class Oracle(Module):
         - succès        : (r.status, corps décodé tronqué à maxlen, r.headers) ;
         - HTTPError     : (e.code, "", e.headers | None) — corps vide, en-têtes si disponibles ;
         - erreur transport (réseau hostile) : (None, "", None) — on ne crashe jamais.
-        Chaque oracle en dérive sa propre forme (content-type, dict d'en-têtes…) dans son `_fetch`."""
+        Chaque oracle en dérive sa propre forme (content-type, dict d'en-têtes…) dans son `_fetch`.
+
+        SESSION GOUVERNÉE : si un `SessionStore` est lié (par le moteur autour de fire()), le matériel
+        d'authentification SECRET applicable à `url` — et UNIQUEMENT si `url` est IN-SCOPE (scope-guard
+        du store) — est fusionné SOUS les en-têtes de l'appelant dans la requête sortante. Il n'est
+        JAMAIS renvoyé ni exposé : l'appelant bâtit ses PoC depuis SES propres en-têtes (`_curl`), pas
+        depuis la requête. Sans store lié (dev/test/offline) -> aucune modification (byte-à-byte)."""
+        req_headers = dict(headers or {})
+        store = _session.current()
+        if store is not None:                        # scope-guard PAR-URL : {} si url hors-scope
+            for k, v in store.headers_for(url).items():
+                req_headers.setdefault(k, v)         # les en-têtes explicites de l'appelant priment
         payload = data.encode("utf-8") if isinstance(data, str) else data
-        req = urllib.request.Request(url, headers=headers or {}, method=method, data=payload)
+        req = urllib.request.Request(url, headers=req_headers, method=method, data=payload)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
