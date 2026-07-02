@@ -328,6 +328,15 @@ PURPLE_FALLBACK_KINDS = (
     "ssrf.callback", "auth.takeover", "cors.credentials", "origin.find",
 )
 
+# --- Marqueurs de titre des findings de DÉCOUVERTE par-hôte/par-endpoint (SOURCE UNIQUE) -----------
+# Les modules de recon PASSIVE (recon_surface.py) émettent, par hôte/endpoint in-scope découvert, un
+# finding informatif dont le TITRE porte l'un de ces marqueurs. Le cerveau (brain._chained_actions)
+# les détecte pour CHAÎNER la vérification (discovery -> verification) sur la cible découverte, en
+# restant scope-locked. Constantes partagées entre l'émetteur et le détecteur = zéro dérive possible.
+DISCOVERY_SUBDOMAIN_MARKER = "Sous-domaine in-scope"       # recon.subdomains : nouvel hôte in-scope
+DISCOVERY_ENDPOINT_MARKER = "Endpoint in-scope"            # recon.js_endpoints : endpoint référencé JS
+DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL d'archive in-scope
+
 
 # --- Vues dérivées HISTORIQUES (byte-à-byte identiques — itèrent le noyau hérité TECHNIQUES) -------
 def remediation_map():
@@ -392,3 +401,19 @@ def cwe_for(kind):
     """CWE canonique d'un kind ("" si inconnu)."""
     t = CATALOG.get(kind)
     return t.cwe if t else ""
+
+
+def mitre_for_cwe(cwe):
+    """ATT&CK id de la PREMIÈRE technique du catalogue dont le CWE canonique == `cwe` ("" si aucune).
+
+    Résolveur INVERSE (CWE -> ATT&CK) : un outil tiers (Burp/nuclei) signale une classe de vuln par
+    son CWE (ex "CWE-89") sans porter d'ATT&CK. On rattache ce CWE à la tactique/technique ATT&CK de
+    la table (source de vérité) pour que le finding rejoigne la boucle purple. Pur, ne lève jamais ;
+    ignore les entrées sans mitre ; casse-insensible sur l'identifiant CWE."""
+    if not cwe:
+        return ""
+    target = str(cwe).strip().upper()
+    for t in CATALOG.values():
+        if t.cwe and t.mitre and t.cwe.upper() == target:
+            return t.mitre
+    return ""

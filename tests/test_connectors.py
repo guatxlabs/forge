@@ -12,6 +12,7 @@ On exerce le VRAI fire() des deux modules contre ces stubs et on prouve :
   - les flags de contrat (exploit/destructive/web_allowed) sont corrects ;
   - available() SONDE le service (down quand port mort, up quand le stub répond) — PAS figé.
 """
+import json
 import os
 import sys
 import threading
@@ -88,6 +89,10 @@ class _MsfRpcStub(BaseHTTPRequestHandler):
     # session.list renvoie cette map. {} = aucune session (exploit lancé mais pas de shell).
     # Pour simuler une compromission RÉELLE, on y met une session corrélée à l'uuid du job.
     SESSIONS = {}
+    # module.results(uuid) renvoie ceci — le canal de PREUVE des auxiliary/scanner (CheckCode).
+    # {} par défaut = aucun résultat (inconcluant -> reported_by_tool). Pour simuler une CONFIRMATION,
+    # y mettre {"status":"completed","result":{"code":"vulnerable","message":"…"}}.
+    RESULTS = {}
 
     def log_message(self, *a):
         pass
@@ -105,6 +110,8 @@ class _MsfRpcStub(BaseHTTPRequestHandler):
             resp = dict(_MsfRpcStub.EXEC_RESULT)
         elif method == "session.list":
             resp = {str(k): dict(v) for k, v in _MsfRpcStub.SESSIONS.items()}
+        elif method == "module.results":
+            resp = dict(_MsfRpcStub.RESULTS)               # canal CheckCode des scanners/auxiliary
         else:
             resp = {"error": True, "error_message": f"unknown {method}"}
         payload = mp_pack(resp)
@@ -122,7 +129,8 @@ class _BurpStub(BaseHTTPRequestHandler):
     ISSUES = [{"name": "SQL injection", "severity": "high", "confidence": "certain",
                "origin": "https://app.test", "path": "/q"},
               {"name": "Cacheable HTTPS response", "severity": "info", "origin": "https://app.test"}]
-    LAST_SCAN_BODY = {}
+    LAST_SCAN_BODY = None                                   # dernier corps JSON POST /v0.1/scan (parsé)
+    POSTS = []                                              # chemins POST reçus (prouve « aucun I/O »)
 
     def log_message(self, *a):
         pass
@@ -150,8 +158,14 @@ class _BurpStub(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b""
         if parsed.path.endswith("/v0.1/scan"):             # lancement -> Location avec id
+            import json
+            _BurpStub.POSTS.append(parsed.path)
+            try:
+                _BurpStub.LAST_SCAN_BODY = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                _BurpStub.LAST_SCAN_BODY = None
             return self._send(201, b'{"scan_id": 7}',
                               extra_headers={"Location": parsed.path + "/7"})
         return self._send(404, b'{"error":"not found"}')
@@ -182,6 +196,7 @@ class TestMsfAgainstStub(unittest.TestCase):
         _MsfRpcStub.FAIL_AUTH = False
         _MsfRpcStub.EXEC_RESULT = {"job_id": 42, "uuid": "deadbeef", "result": "success"}
         _MsfRpcStub.SESSIONS = {}                           # par défaut : aucune session ouverte
+        _MsfRpcStub.RESULTS = {}                            # par défaut : aucun résultat (inconcluant)
         # pointe la config vers le stub local (HTTP, pas SSL)
         os.environ["MSF_RPC_HOST"] = "127.0.0.1"
         os.environ["MSF_RPC_PORT"] = str(self.port)
@@ -334,6 +349,184 @@ class TestMsfAgainstStub(unittest.TestCase):
 
 
 # =============================================================================================
+# Metasploit connector — GOUVERNANCE EN PROFONDEUR (scope-guard sur l'hôte, plancher exploit opt-in,
+# confirmation scanner CheckCode -> preuve, dégradation gracieuse). On lie un SessionStore (comme le
+# fait l'engine autour de fire()) et on exerce le VRAI fire().
+# =============================================================================================
+class TestMsfGovernedScope(unittest.TestCase):
+    SECRET = "msf-governed-session-secret"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv, cls.port = _start(_MsfRpcStub)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown(); cls.srv.server_close()
+
+    def setUp(self):
+        _MsfRpcStub.CALLS.clear()
+        _MsfRpcStub.FAIL_AUTH = False
+        _MsfRpcStub.EXEC_RESULT = {"job_id": 42, "uuid": "deadbeef", "result": "success"}
+        _MsfRpcStub.SESSIONS = {}
+        _MsfRpcStub.RESULTS = {}
+        os.environ["MSF_RPC_HOST"] = "127.0.0.1"
+        os.environ["MSF_RPC_PORT"] = str(self.port)
+        os.environ["MSF_RPC_SSL"] = "false"
+        os.environ["MSF_RPC_USER"] = "msf"
+        os.environ["MSF_RPC_PASS"] = "pw"
+        os.environ.pop("MSF_RPC_TOKEN", None)
+
+    def tearDown(self):
+        for k in ("MSF_RPC_HOST", "MSF_RPC_PORT", "MSF_RPC_SSL", "MSF_RPC_USER", "MSF_RPC_PASS"):
+            os.environ.pop(k, None)
+
+    # --- helpers ---------------------------------------------------------------------------------
+    def _store(self, in_scope=("app.test",), allow_exploit=False, session=None):
+        scope = Scope({"mode": "grey", "in_scope": list(in_scope),
+                       "allow_exploit": allow_exploit, "session": session})
+        from forge import session as sessmod
+        return sessmod, sessmod.SessionStore.from_scope(scope)
+
+    def _action(self, target="app.test", **params):
+        params.setdefault("poll_interval", 0)
+        params.setdefault("max_polls", 3)
+        return Action("msf.module", target, params=params)
+
+    # --- (a) SCOPE-GUARD : hôte cible hors scope -> REFUS, AUCUN I/O vers msfrpcd -----------------
+    def test_scope_refusal_no_io_to_msfrpcd(self):
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="evil.test", msf_module="auxiliary/scanner/http/title",
+                msf_type="auxiliary"))
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("hors scope", f[0].title)
+        self.assertEqual(_MsfRpcStub.CALLS, [])              # zéro appel RPC (ni login, ni execute)
+
+    def test_scope_refusal_via_rhosts_out_of_scope(self):
+        # Défense en profondeur : la cible est in-scope mais un RHOSTS chaîné/découvert est hors-scope.
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="exploit/multi/http/x", msf_type="exploit",
+                msf_options={"RHOSTS": "10.9.9.9"}))
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("hors scope", f[0].title)
+        self.assertIn("10.9.9.9", f[0].evidence)
+        self.assertEqual(_MsfRpcStub.CALLS, [])
+
+    # --- (b) PLANCHER EXPLOIT : exploit-type REFUSÉ sans opt-in, AUCUNE session ouverte -----------
+    def test_exploit_refused_without_optin_no_session_opened(self):
+        # une session « prête » côté MSF : on prouve qu'elle n'est JAMAIS sollicitée (pas de poll).
+        _MsfRpcStub.SESSIONS = {"3": {"type": "meterpreter", "exploit_uuid": "deadbeef"}}
+        sessmod, store = self._store(in_scope=("app.test",), allow_exploit=False)
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="exploit/multi/http/x", msf_type="exploit",
+                msf_options={"RHOSTS": "app.test"}))
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")             # refusé, jamais vulnerable
+        self.assertNotEqual(f[0].status, "vulnerable")
+        self.assertIn("opt-in", f[0].title)
+        self.assertEqual(_MsfRpcStub.CALLS, [])              # aucun I/O : ni login, ni execute, ni session.list
+
+    def test_exploit_allowed_with_optin_maps_vulnerable_with_proof(self):
+        # Plancher INCHANGÉ : avec l'opt-in armé ET l'hôte in-scope, l'exploit tire et la PREUVE
+        # (session ouverte corrélée à l'uuid) promeut en vulnerable.
+        _MsfRpcStub.SESSIONS = {"3": {"type": "meterpreter", "exploit_uuid": "deadbeef",
+                                      "session_host": "app.test"}}
+        sessmod, store = self._store(in_scope=("app.test",), allow_exploit=True)
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="exploit/multi/http/x", msf_type="exploit",
+                msf_options={"RHOSTS": "app.test"}))[0]
+        self.assertEqual(f.status, "vulnerable")
+        self.assertEqual(f.severity, "HIGH")
+        self.assertIn("session 3", f.evidence)
+        methods = [c[0] for c in _MsfRpcStub.CALLS]
+        self.assertIn("module.execute", methods)             # l'opt-in armé -> le tir a bien eu lieu
+
+    # --- (c) AUXILIARY autorisé (pas d'opt-in requis) + mappé en finding À PREUVE (CheckCode) -----
+    def test_auxiliary_allowed_and_mapped_to_proof_finding(self):
+        # scanner qui CONFIRME la condition (CheckCode vulnerable) -> vulnerable, cwe/mitre via
+        # forge/techniques.py, remédiation auto-déduite. Session gouvernée présente -> ne doit PAS fuiter.
+        _MsfRpcStub.RESULTS = {"status": "completed",
+                               "result": {"code": "vulnerable", "message": "target confirmed"}}
+        sessmod, store = self._store(in_scope=("app.test",), allow_exploit=False,
+                                     session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="auxiliary/scanner/http/sqli",
+                msf_type="auxiliary", check=True, cwe="CWE-89",
+                msf_options={"RHOSTS": "app.test", "PASSWORD": self.SECRET}))
+        self.assertEqual(len(f), 1)
+        fin = f[0]
+        # PREUVE scanner -> vulnerable (jamais reported_by_tool ni tested pour une CheckCode confirmée)
+        self.assertEqual(fin.status, "vulnerable")
+        self.assertEqual(fin.severity, "MEDIUM")             # condition prouvée sans shell -> MEDIUM
+        # mapping proof-oriented via techniques.py : CWE-89 -> T1190 + remédiation auto
+        self.assertEqual(fin.cwe, "CWE-89")
+        self.assertEqual(fin.mitre, "T1190")
+        self.assertTrue(fin.fix)
+        self.assertIn("CheckCode=vulnerable", fin.evidence)
+        # l'outil a bien tourné (execute) PUIS confirmé (module.results) ; jamais de session pour un aux
+        methods = [c[0] for c in _MsfRpcStub.CALLS]
+        self.assertIn("module.execute", methods)
+        self.assertIn("module.results", methods)
+        self.assertNotIn("session.list", methods)
+        # SECRET : ni le cookie de session gouvernée ni le mot de passe MSF ne fuitent dans le finding
+        blob = " ".join([fin.title, fin.evidence, fin.poc, fin.tool, str(fin.cwe)])
+        self.assertNotIn(self.SECRET, blob)
+        self.assertIn("<redacted>", fin.evidence)            # l'option PASSWORD a été rédigée
+
+    def test_scanner_safe_maps_not_vulnerable(self):
+        # CheckCode `safe` -> not_vulnerable (l'outil a vérifié, condition absente) — jamais vulnerable.
+        _MsfRpcStub.RESULTS = {"status": "completed", "result": {"code": "safe"}}
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="auxiliary/scanner/http/x",
+                msf_type="auxiliary", check=True))[0]
+        self.assertEqual(f.status, "not_vulnerable")
+        self.assertNotEqual(f.status, "vulnerable")
+
+    def test_auxiliary_without_check_stays_reported_by_tool(self):
+        # Sans l'opt-in `check`, un résultat MÊME confirmable n'est PAS sollicité : reported_by_tool,
+        # et module.results n'est jamais appelé (aucune sur-classification implicite).
+        _MsfRpcStub.RESULTS = {"status": "completed", "result": {"code": "vulnerable"}}
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="auxiliary/scanner/http/x",
+                msf_type="auxiliary"))[0]
+        self.assertEqual(f.status, "reported_by_tool")
+        self.assertNotIn("module.results", [c[0] for c in _MsfRpcStub.CALLS])
+
+    def test_scanner_check_inconclusive_is_reported_by_tool(self):
+        # CheckCode non concluante (detected/unknown) -> reported_by_tool (aucune preuve).
+        _MsfRpcStub.RESULTS = {"status": "completed", "result": {"code": "detected"}}
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="auxiliary/scanner/http/x",
+                msf_type="auxiliary", check=True))[0]
+        self.assertEqual(f.status, "reported_by_tool")
+
+    # --- (d) DÉGRADATION GRACIEUSE : msfrpcd injoignable -> status=skipped (offline-safe) ---------
+    def test_graceful_skip_when_msfrpcd_absent(self):
+        os.environ["MSF_RPC_PORT"] = "1"                     # port mort -> msfrpcd injoignable
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            f = MsfModule().fire(self._action(
+                target="app.test", msf_module="auxiliary/scanner/http/x", msf_type="auxiliary"))
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("injoignable", f[0].title)
+
+
+# =============================================================================================
 # Burp connector contre le stub REST
 # =============================================================================================
 class TestBurpAgainstStub(unittest.TestCase):
@@ -350,6 +543,8 @@ class TestBurpAgainstStub(unittest.TestCase):
                              "origin": "https://app.test", "path": "/q"},
                             {"name": "Cacheable HTTPS response", "severity": "info",
                              "origin": "https://app.test"}]
+        _BurpStub.LAST_SCAN_BODY = None
+        _BurpStub.POSTS = []
         os.environ["BURP_API_URL"] = f"http://127.0.0.1:{self.port}"
         os.environ.pop("BURP_API_KEY", None)
 
@@ -378,7 +573,11 @@ class TestBurpAgainstStub(unittest.TestCase):
         # politique anti-sur-classement (comme nuclei) : HIGH/MEDIUM/CRIT -> reported_by_tool
         self.assertEqual(sqli.status, "reported_by_tool")
         self.assertIn("burp-rest:scan/7", sqli.tool)
-        self.assertEqual(sqli.mitre, "T1595.002")
+        # severity/cwe/mitre mapping via forge/techniques.py : "SQL injection" -> CWE-89 -> T1190,
+        # + remédiation par défaut auto-déduite du CWE (Finding.__post_init__).
+        self.assertEqual(sqli.cwe, "CWE-89")
+        self.assertEqual(sqli.mitre, "T1190")
+        self.assertTrue(sqli.fix)
         # une issue 'info' reste 'tested'
         info = next(x for x in f if "Cacheable" in x.title)
         self.assertEqual(info.severity, "INFO")
@@ -404,6 +603,174 @@ class TestBurpAgainstStub(unittest.TestCase):
         r = eng.execute(a)
         self.assertEqual(r["verdict"], "FIRE")
         self.assertTrue(any("Burp:" in fnd.title for fnd in eng.findings))
+
+
+# =============================================================================================
+# Burp connector — SCAN AUTHENTIFIÉ GOUVERNÉ (session secrète, scope-guard, non-destructif, skip).
+# On lie un SessionStore (comme le fait l'engine autour de fire()) et on exerce le vrai fire().
+# =============================================================================================
+class TestBurpGovernedSession(unittest.TestCase):
+    SECRET = "s3cr3t-session-value"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv, cls.port = _start(_BurpStub)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown(); cls.srv.server_close()
+
+    def setUp(self):
+        _BurpStub.ISSUES = [{"name": "SQL injection", "severity": "high", "confidence": "certain",
+                             "origin": "https://app.test", "path": "/q"}]
+        _BurpStub.LAST_SCAN_BODY = None
+        _BurpStub.POSTS = []
+        os.environ["BURP_API_URL"] = f"http://127.0.0.1:{self.port}"
+        os.environ.pop("BURP_API_KEY", None)
+
+    def tearDown(self):
+        os.environ.pop("BURP_API_URL", None)
+
+    # --- helpers ---------------------------------------------------------------------------------
+    def _store(self, in_scope=("app.test",), session=None, allow_exploit=False):
+        scope = Scope({"mode": "grey", "in_scope": list(in_scope),
+                       "allow_exploit": allow_exploit, "session": session})
+        from forge import session as sessmod
+        return sessmod, sessmod.SessionStore.from_scope(scope)
+
+    def _action(self, target="https://app.test/", **params):
+        params.setdefault("urls", [target])
+        params.setdefault("poll_interval", 0)
+        params.setdefault("max_polls", 2)
+        return Action("burp.scan", target, params=params)
+
+    # --- (a) authenticated-scan request shape ----------------------------------------------------
+    def test_authenticated_scan_request_shape(self):
+        # La session gouvernée (cookies) est injectée dans le CORPS sortant vers le Burp de l'opérateur
+        # (request_headers) -> scan authentifié ; scope include, crawl+audit config présents.
+        sessmod, store = self._store(session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            f = BurpScan().fire(self._action(scan_configs=["Crawl and Audit - Lightweight"]))
+        body = _BurpStub.LAST_SCAN_BODY
+        self.assertIsNotNone(body)
+        self.assertEqual(body["urls"], ["https://app.test/"])
+        self.assertEqual(body["scope"]["include"], [{"rule": "https://app.test/"}])
+        # crawl+audit configuration via params
+        self.assertEqual(body["scan_configurations"],
+                         [{"name": "Crawl and Audit - Lightweight", "type": "NamedConfiguration"}])
+        # authentifié : l'en-tête Cookie de session part BIEN vers Burp (dans la requête, pas ailleurs)
+        hdrs = {h["name"]: h["value"] for h in body["request_headers"]}
+        self.assertIn("Cookie", hdrs)
+        self.assertIn(self.SECRET, hdrs["Cookie"])
+        # mapping conservateur inchangé : une issue reste reported_by_tool (jamais vulnerable)
+        self.assertTrue(all(x.status in ("reported_by_tool", "tested") for x in f))
+        self.assertFalse(any(x.status == "vulnerable" for x in f))
+
+    # --- (b) session redaction : le secret ne fuit dans AUCUN finding (evidence/poc/title) --------
+    def test_session_material_never_leaks_into_findings(self):
+        # Burp REJOUE une requête contenant notre Cookie de session dans le détail de l'issue.
+        _BurpStub.ISSUES = [{
+            "name": "SQL injection", "severity": "high", "confidence": "firm",
+            "origin": "https://app.test", "path": "/q",
+            "request": f"GET /q HTTP/1.1\r\nHost: app.test\r\nCookie: SESSION={self.SECRET}\r\n\r\n",
+            "evidence_detail": self.SECRET}]
+        sessmod, store = self._store(session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            f = BurpScan().fire(self._action())
+        # Le secret est parti dans le CORPS vers Burp (authentifié)…
+        self.assertIn(self.SECRET, json.dumps(_BurpStub.LAST_SCAN_BODY))
+        # …mais N'APPARAÎT dans AUCUN champ lisible/loggable d'AUCUN finding (rédaction).
+        for x in f:
+            blob = " ".join([x.title, x.evidence, x.poc, x.tool, x.category, str(x.cwe)])
+            self.assertNotIn(self.SECRET, blob)
+        # la rédaction a bien opéré sur l'evidence de l'issue (marqueur présent)
+        self.assertTrue(any("<redacted-session>" in x.evidence for x in f))
+
+    def test_dry_does_not_expose_session(self):
+        sessmod, store = self._store(session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            s = BurpScan().dry(self._action())
+        self.assertNotIn(self.SECRET, s)
+        self.assertIn("authenticated=yes", s)              # posture exposée sans la valeur
+        self.assertEqual(_BurpStub.POSTS, [])              # dry() ne touche pas le réseau
+
+    # --- (c) scope refusal : URL hors scope -> AUCUN I/O vers Burp, status=skipped ----------------
+    def test_scope_refusal_no_io_to_burp(self):
+        sessmod, store = self._store(in_scope=("app.test",),
+                                     session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            f = BurpScan().fire(self._action(target="https://evil.test/",
+                                             urls=["https://evil.test/"]))
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("hors scope", f[0].title)
+        self.assertEqual(_BurpStub.POSTS, [])              # rien n'a été soumis à Burp
+        self.assertIsNone(_BurpStub.LAST_SCAN_BODY)
+        # le secret ne peut pas non plus fuiter dans le finding de refus
+        self.assertNotIn(self.SECRET, " ".join([f[0].evidence, f[0].poc]))
+
+    def test_out_of_scope_urls_filtered_only_in_scope_sent(self):
+        # Un mélange : seule l'URL in-scope est soumise à Burp (scope-guard de défense en profondeur).
+        sessmod, store = self._store(in_scope=("app.test",))
+        with sessmod.using(store):
+            BurpScan().fire(self._action(target="https://app.test/",
+                                         urls=["https://app.test/", "https://evil.test/x"]))
+        body = _BurpStub.LAST_SCAN_BODY
+        self.assertEqual(body["urls"], ["https://app.test/"])
+        self.assertEqual(body["scope"]["include"], [{"rule": "https://app.test/"}])
+
+    # --- non-destructif : audit intrusif SUPPRIMÉ sans opt-in exploit, ACTIVÉ avec ---------------
+    def test_intrusive_audit_suppressed_without_exploit_optin(self):
+        sessmod, store = self._store(allow_exploit=False)
+        with sessmod.using(store):
+            f = BurpScan().fire(self._action(intrusive=True,
+                                             scan_configs=["Audit checks - all"]))
+        body = _BurpStub.LAST_SCAN_BODY
+        # aucune config intrusive ne part vers Burp (non-destructif par défaut)
+        self.assertNotIn("scan_configurations", body)
+        self.assertTrue(any("intrusive_suppressed=governance" in x.evidence for x in f))
+        # et JAMAIS d'élévation exploit/destructif d'un finding
+        self.assertFalse(any(x.status == "vulnerable" for x in f))
+
+    def test_intrusive_audit_enabled_with_exploit_optin(self):
+        sessmod, store = self._store(allow_exploit=True)
+        with sessmod.using(store):
+            BurpScan().fire(self._action(intrusive=True))
+        names = [c["name"] for c in _BurpStub.LAST_SCAN_BODY["scan_configurations"]]
+        self.assertIn("Audit checks - all", names)         # opt-in armé -> audit actif autorisé
+
+    # --- (d) graceful skip when Burp REST is unreachable -----------------------------------------
+    def test_graceful_skip_when_burp_absent(self):
+        os.environ["BURP_API_URL"] = "http://127.0.0.1:1"  # port mort -> transport injoignable
+        f = BurpScan().fire(self._action())
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("injoignable", f[0].title)
+
+    def test_graceful_skip_offline_safe_with_session_no_leak(self):
+        # même hors-ligne, avec une session configurée, aucun secret ne peut fuiter dans le skip.
+        os.environ["BURP_API_URL"] = "http://127.0.0.1:1"
+        sessmod, store = self._store(session={"cookies": {"SESSION": self.SECRET}})
+        with sessmod.using(store):
+            f = BurpScan().fire(self._action())
+        self.assertEqual(f[0].status, "skipped")
+        self.assertNotIn(self.SECRET, " ".join([f[0].evidence, f[0].poc]))
+
+
+# =============================================================================================
+# techniques.mitre_for_cwe — résolveur inverse CWE -> ATT&CK (le mapping des issues Burp en dépend).
+# =============================================================================================
+class TestCweToMitre(unittest.TestCase):
+    def test_known_cwe_resolves_to_table_mitre(self):
+        from forge import techniques
+        self.assertEqual(techniques.mitre_for_cwe("CWE-89"), "T1190")     # SQLi (sqli.probe)
+        self.assertEqual(techniques.mitre_for_cwe("CWE-79"), "T1059")     # XSS (xss.reflected)
+        self.assertEqual(techniques.mitre_for_cwe("cwe-918"), "T1190")    # SSRF, casse-insensible
+
+    def test_unknown_or_empty_cwe_returns_empty(self):
+        from forge import techniques
+        self.assertEqual(techniques.mitre_for_cwe(""), "")
+        self.assertEqual(techniques.mitre_for_cwe("CWE-99999"), "")
 
 
 if __name__ == "__main__":

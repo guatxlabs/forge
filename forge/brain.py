@@ -52,10 +52,20 @@ class HeuristicBrain(Brain):
     planner protège les classes qualifiantes même si le cerveau les sous-note.
 
     Deux niveaux :
-      1. base (par host)   : recon + scan + oracles qualifiants selon le type/fingerprint.
-      2. chaîne (findings) : ré-propose des actions DÉRIVÉES des findings de la vague précédente
-         (origine hors-CDN -> nuclei sur l'IP ; fingerprint techno -> oracles ciblés). Idempotent :
-         l'id d'action est stable (kind:target), donc une chaîne déjà jouée n'est jamais reproposée."""
+      1. base (par host)   : recon + scan + oracles qualifiants + SEEDS de découverte selon le type.
+      2. chaîne (findings) : ré-propose des actions DÉRIVÉES des findings de la vague précédente. La
+         campagne S'AUTO-ALIMENTE, scope-locked (chaque cible dérivée est re-gatée par le ROE) :
+           - origine hors-CDN -> tout le panel d'oracles sur l'IP (bypass WAF) ;
+           - sous-domaine découvert (recon.subdomains) -> fingerprint techno/WAF + oracles ;
+           - endpoint découvert (recon.js_endpoints / recon.urls) -> oracles CIBLÉS (IDOR/XSS/SQLi) ;
+           - fingerprint techno -> oracles ; WAF identifié -> enablers d'évasion.
+         Idempotent : l'id d'action est stable (kind:target), une chaîne déjà jouée n'est jamais
+         reproposée. BORNÉ : le fan-out des cibles DÉRIVÉES est plafonné (MAX_CHAIN_TARGETS) et la
+         profondeur par engine.max_waves — garde-fous anti-runaway."""
+
+    # Fan-out bound (anti-runaway) : nb MAX de cibles DÉRIVÉES par découverte (sous-domaines/endpoints)
+    # chaînées par proposition. La profondeur est bornée séparément par engine.max_waves.
+    MAX_CHAIN_TARGETS = 32
 
     def propose(self, graph_state):
         graph = _as_graph(graph_state)
@@ -66,17 +76,32 @@ class HeuristicBrain(Brain):
                 seen.add(a.id)
                 out.append(a)
 
-        # --- niveau 1 : actions de base par host (recon + oracles qualifiants) ---
-        for host in graph.hosts():
+        hosts = graph.hosts()
+        # cibles DÉRIVÉES par une découverte antérieure (sous-domaine/endpoint/URL historique) : elles
+        # arrivent en volume (jusqu'à MAX_HOSTS/MAX_ENDPOINTS par module) -> FAN-OUT BOUND déterministe
+        # (tri stable + tête) pour éviter le runaway. Le reste (cibles initiales, origines IP, host:port)
+        # n'est pas plafonné (peu nombreux, à haute valeur).
+        derived = sorted(h for h in hosts if self._discovery_marker(graph, h))
+        derived_set = set(derived)
+        kept_derived = set(derived[:self.MAX_CHAIN_TARGETS])
+        process = [h for h in hosts if h not in derived_set or h in kept_derived]
+
+        # --- niveau 1 : actions de base par host (recon + oracles + seeds de découverte) ---
+        for host in process:
+            if self._is_endpoint(host):
+                continue                                  # endpoints -> vérification via edge C seulement
             attrs = self._host_attrs(graph, host)
             svc = str(attrs.get("service", "")).lower()
             kind = attrs.get("kind", "host")
             is_web = kind in ("url", "app") or "http" in svc or (kind == "host" and not svc)
-            for a in self._base_actions(host, kind, svc, is_web, attrs):
+            # NE PAS re-semer la découverte sur une cible DÉJÀ dérivée d'une découverte (borne la
+            # profondeur : racine -> sous-domaines, mais un sous-domaine ne relance pas l'énumération).
+            seed = host not in kept_derived
+            for a in self._base_actions(host, kind, svc, is_web, attrs, seed_discovery=seed):
                 add(a)
 
         # --- niveau 2 : CHAÎNAGE — actions dérivées des findings déjà au graphe ---
-        for host in graph.hosts():
+        for host in process:
             for a in self._chained_actions(graph, host):
                 add(a)
 
@@ -84,11 +109,36 @@ class HeuristicBrain(Brain):
 
     # --- helpers ---
     @staticmethod
+    def _is_endpoint(target):
+        """True si `target` désigne un ENDPOINT (chemin/query), pas un hôte nu. Un endpoint est vérifié
+        par le chaînage d'oracles CIBLÉS (edge C), jamais par les actions de base (qui sèmeraient
+        recon/nmap/origin sur une URL). Robuste : hôte nu / host:port / IP -> False ; URL à chemin -> True."""
+        s = str(target)
+        if "://" in s:
+            s = s.split("://", 1)[1]
+        if "?" in s or "#" in s:
+            return True
+        _, _, path = s.partition("/")
+        return bool(path.strip("/"))
+
+    def _discovery_marker(self, graph, host):
+        """Marqueur ('' sinon) attestant que `host` a été DÉCOUVERT par une vague précédente (sous-domaine,
+        endpoint, URL historique). Détecté via le TITRE des findings (constantes techniques.DISCOVERY_*,
+        partagées avec les émetteurs recon). Sert au fan-out bound et à ne pas re-semer la découverte."""
+        markers = (techniques.DISCOVERY_SUBDOMAIN_MARKER, techniques.DISCOVERY_ENDPOINT_MARKER,
+                   techniques.DISCOVERY_HISTORICAL_URL_MARKER)
+        for f in graph.findings_for(host):
+            title = str(f.get("title", ""))
+            for m in markers:
+                if m in title:
+                    return m
+        return ""
+    @staticmethod
     def _host_attrs(graph, host):
         """Attrs structurels du nœud host (kind/service/fingerprint...) tels que posés par l'engine."""
         return dict(graph.nodes.get(("host", str(host)), {}) or {})
 
-    def _base_actions(self, host, kind, svc, is_web, attrs):
+    def _base_actions(self, host, kind, svc, is_web, attrs, seed_discovery=True):
         # cls/exploit dérivés de la table unique via _action() (plus d'affectation par-kind ici).
         cands = []
         if is_web:
@@ -111,6 +161,19 @@ class HeuristicBrain(Brain):
                 _action("origin.find", host, value=0.5, confidence=0.4, cost=2,
                         desc="IP d'origine derrière CDN/WAF"),
             ]
+            # SEEDS DE DÉCOUVERTE (passifs, in-scope-locked) — c'est ce qui rend la campagne
+            # AUTO-ALIMENTÉE : leurs findings (hôtes/endpoints in-scope) reviennent au graphe comme
+            # cibles de vérification aux vagues suivantes (edges (d)/(e)). NON re-semés sur une cible
+            # déjà dérivée d'une découverte (seed_discovery=False) pour borner la profondeur.
+            if seed_discovery:
+                cands += [
+                    _action("recon.subdomains", host, value=0.3, confidence=0.5, cost=1,
+                            desc="énumération passive de sous-domaines (amorce la chaîne)"),
+                    _action("recon.js_endpoints", host, value=0.3, confidence=0.5, cost=1,
+                            desc="endpoints référencés dans le JS (cartographie -> oracles)"),
+                    _action("recon.urls", host, value=0.3, confidence=0.5, cost=1,
+                            desc="URLs historiques passives (cartographie -> oracles)"),
+                ]
         # ÉVASION (accès derrière CDN/WAF/anti-bot) : pour une cible WEB explicitement marquée PROTÉGÉE
         # (attrs.protected/waf/cdn, posé par le scope/console ou un fingerprint), proposer les enablers
         # d'accès. Ils DÉGRADENT proprement (module `available=False` si le service browser est absent
@@ -188,4 +251,54 @@ class HeuristicBrain(Brain):
             if "waf/cdn identifié" in str(f.get("title", "")).lower():
                 out += self._evasion_actions(host, chained_from="recon.waf")
                 break
+
+        # (d) SOUS-DOMAINE découvert (recon.subdomains) -> fingerprint techno/WAF sur le NOUVEL hôte
+        # in-scope. Les oracles web sont déjà semés par les actions de base (l'hôte est un nœud du
+        # graphe) ; on AJOUTE ici recon.tech + recon.waf demandés par le chaînage discovery->verif.
+        # (Le fingerprint WAF peut lui-même déclencher l'évasion via l'edge (c) à la vague suivante.)
+        if any(techniques.DISCOVERY_SUBDOMAIN_MARKER in str(f.get("title", "")) for f in findings):
+            out += [
+                _action("recon.tech", host, value=0.4, confidence=0.6, cost=1,
+                        desc="fingerprint techno (chaîné depuis recon.subdomains)"),
+                _action("recon.waf", host, value=0.4, confidence=0.6, cost=1,
+                        desc="fingerprint WAF/CDN (chaîné depuis recon.subdomains)"),
+            ]
+
+        # (e) ENDPOINT découvert (recon.js_endpoints / recon.urls) -> oracles de vérification CIBLÉS sur
+        # l'endpoint in-scope. L'endpoint N'EST PAS semé par les actions de base (edge exclusif) : le
+        # chaînage est la SEULE source d'actions dessus. La session gouvernée est portée par l'engine
+        # (le SessionStore fait hériter à l'endpoint dérivé la session in-scope de sa source).
+        if any((techniques.DISCOVERY_ENDPOINT_MARKER in str(f.get("title", ""))
+                or techniques.DISCOVERY_HISTORICAL_URL_MARKER in str(f.get("title", "")))
+               for f in findings):
+            out += self._endpoint_oracles(host)
         return out
+
+    def _endpoint_oracles(self, endpoint):
+        """Oracles de vérification CIBLÉS sur un endpoint in-scope découvert (IDOR/access-control, SQLi,
+        XSS reflected). Si l'endpoint porte un paramètre de query, il est passé aux oracles à injection
+        (`param`) pour une sonde RÉELLE ; sinon ils dégradent proprement en `tested` (jamais de faux
+        positif). IDOR reçoit urls=[endpoint] (les comptes/creds sont injectés par l'engine depuis le
+        scope). access_control.idor reste exploit=True (dérivé de la table) -> gaté par le ROE : il ne
+        TIRE que si l'opt-in exploit est armé, sinon DRY_RUN (le plancher exploit reste OFF par défaut)."""
+        param = self._first_query_param(endpoint)
+        inj = {"param": param} if param else {}
+        return [
+            _action("access_control.idor", endpoint, value=0.8, confidence=0.3, cost=2,
+                    params={"urls": [endpoint]}, desc="IDOR sur endpoint découvert (chaîné)"),
+            _action("sqli.probe", endpoint, value=0.7, confidence=0.3, cost=2,
+                    params=dict(inj), desc="SQLi à preuve sur endpoint découvert (chaîné)"),
+            _action("xss.reflected", endpoint, value=0.6, confidence=0.3, cost=1,
+                    params=dict(inj), desc="XSS reflected à preuve sur endpoint découvert (chaîné)"),
+        ]
+
+    @staticmethod
+    def _first_query_param(url):
+        """Nom du 1er paramètre de query d'une URL ('' si aucun) — point d'injection pour les oracles
+        SQLi/XSS chaînés sur un endpoint découvert. Pur, ne lève jamais."""
+        from urllib.parse import urlsplit, parse_qsl
+        try:
+            pairs = parse_qsl(urlsplit(str(url)).query)
+            return pairs[0][0] if pairs else ""
+        except Exception:            # noqa: BLE001
+            return ""

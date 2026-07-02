@@ -166,6 +166,27 @@ class PassiveSurface(Module):
         """Dégradation gracieuse : source/outil/réseau indisponible -> INFO `status='skipped'`."""
         return self._finding(target, title, evidence, poc, status="skipped")
 
+    # borne PARTAGÉE du nombre de findings PAR-ENDPOINT émis (fan-out) — le chaînage relira ces cibles.
+    MAX_ENDPOINTS = 25
+
+    def _endpoint_findings(self, action, urls, marker):
+        """Findings informatifs PAR-ENDPOINT in-scope (dédupliqués, RE-VALIDÉS fail-closed, bornés à
+        MAX_ENDPOINTS) : chaque endpoint devient une cible du graphe que le cerveau CHAÎNE vers les
+        oracles de vérification (edge C). Le TITRE porte `marker` (partagé avec le détecteur du cerveau,
+        techniques.DISCOVERY_*). Cartographie de surface seule — aucun endpoint n'est appelé ici, et un
+        endpoint dont l'hôte sortirait du périmètre est ÉCARTÉ (jamais émis)."""
+        out = []
+        for u in list(dict.fromkeys(urls)):                  # dédup en préservant l'ordre
+            if len(out) >= self.MAX_ENDPOINTS:
+                break
+            if not self._host_in_scope(action, _host_only(u)):   # défense en profondeur (fail-closed)
+                continue
+            out.append(self._finding(
+                u, f"{marker} : {u}",
+                "Endpoint in-scope référencé (cartographie de surface — jamais appelé ici).",
+                f"# endpoint in-scope à vérifier : {u}"))
+        return out
+
     def dry(self, action):
         raise NotImplementedError
 
@@ -227,8 +248,10 @@ class SubdomainEnum(PassiveSurface):
              f"Exemples : {', '.join(in_scope_hosts[:40]) or '—'}"),
             self.dry(action))]
         for h in in_scope_hosts[:self.MAX_HOSTS]:           # un finding informatif par hôte (enrichit le graphe)
+            # TITRE-marqueur partagé (techniques.DISCOVERY_SUBDOMAIN_MARKER) : le cerveau le détecte pour
+            # CHAÎNER la vérification (recon.tech/recon.waf + oracles) sur ce nouvel hôte in-scope.
             findings.append(self._finding(
-                h, f"Sous-domaine in-scope : {h}",
+                h, f"{techniques.DISCOVERY_SUBDOMAIN_MARKER} : {h}",
                 f"Découvert via source(s) passive(s) {', '.join(tried)} ; racine {domain}.",
                 f"# hôte passif in-scope ; vérifier : dig +short {h}"))
         return findings
@@ -432,9 +455,14 @@ class JsEndpoints(PassiveSurface):
         evidence = (f"routes/paths ({len(paths)}) : {', '.join(sorted_paths[:60]) or '—'} || "
                     f"URLs in-scope ({len(inscope_urls)}) : {', '.join(sorted(inscope_urls)[:20]) or '—'} || "
                     f"URLs externes non appelées ({len(ext_urls)}) : {', '.join(sorted(ext_urls)[:10]) or '—'}")
-        return [self._finding(
+        summary = self._finding(
             page, f"Endpoints extraits du JS : {len(paths) + len(inscope_urls)} in-scope",
-            evidence, self.dry(action))]
+            evidence, self.dry(action))
+        # cibles CHAÎNABLES (edge C) : URLs absolues in-scope + chemins relatifs rattachés à la racine de
+        # la page. Émises comme findings par-endpoint que le cerveau vérifie via les oracles.
+        base = self._url(page).rstrip("/")
+        endpoints = sorted(inscope_urls) + [base + p for p in sorted_paths]
+        return [summary] + self._endpoint_findings(action, endpoints, techniques.DISCOVERY_ENDPOINT_MARKER)
 
 
 # =================================================================================================
@@ -483,11 +511,14 @@ class HistoricalUrls(PassiveSurface):
                                   self.dry(action))]
         in_scope_urls = sorted(u for u in found if self._host_in_scope(action, _host_only(u)))
         filtered = len(found) - len(in_scope_urls)
-        return [self._finding(
+        summary = self._finding(
             domain, f"URLs historiques (passif) : {len(in_scope_urls)} in-scope",
             (f"{len(in_scope_urls)} URL(s) in-scope via {', '.join(tried)} "
              f"({filtered} hors périmètre écartée(s)). Exemples : {', '.join(in_scope_urls[:40]) or '—'}"),
-            self.dry(action))]
+            self.dry(action))
+        # cibles CHAÎNABLES (edge C) : chaque URL historique in-scope émise comme finding par-endpoint
+        # (bornée) que le cerveau vérifie via les oracles.
+        return [summary] + self._endpoint_findings(action, in_scope_urls, techniques.DISCOVERY_HISTORICAL_URL_MARKER)
 
     @staticmethod
     def _parse(body):
