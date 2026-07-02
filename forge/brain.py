@@ -17,6 +17,16 @@ sur findings). La priorité réelle est garantie par le planner coverage-safe, p
 """
 from .roe import Action
 from .graph import EngagementGraph
+from . import techniques
+
+
+def _action(kind, target, **kw):
+    """Action dont `cls` (classe planner) et `exploit` sont DÉRIVÉS de la table unique
+    (forge/techniques.py) — plus d'affectation par-kind recopiée dans le cerveau. Un override
+    explicite reste possible (setdefault) ; `cls=""` laisse l'Action dériver le suffixe du kind."""
+    kw.setdefault("cls", techniques.action_class(kind))
+    kw.setdefault("exploit", techniques.action_exploit(kind))
+    return Action(kind, target, **kw)
 
 
 def _as_graph(graph_state):
@@ -79,29 +89,30 @@ class HeuristicBrain(Brain):
         return dict(graph.nodes.get(("host", str(host)), {}) or {})
 
     def _base_actions(self, host, kind, svc, is_web, attrs):
+        # cls/exploit dérivés de la table unique via _action() (plus d'affectation par-kind ici).
         cands = []
         if is_web:
             cands += [
-                Action("recon.httpx", host, value=0.3, confidence=0.7, cost=1, desc="fingerprint HTTP"),
-                Action("web.nuclei", host, value=0.4, confidence=0.6, cost=2, desc="scan nuclei (medium+)"),
+                _action("recon.httpx", host, value=0.3, confidence=0.7, cost=1, desc="fingerprint HTTP"),
+                _action("web.nuclei", host, value=0.4, confidence=0.6, cost=2, desc="scan nuclei (medium+)"),
                 # classes qualifiantes : sous-notées mais le planner les plancher-protège
-                Action("access_control.idor", host, cls="access_control", exploit=True,
-                       value=0.8, confidence=0.3, cost=2, desc="IDOR/BOLA 2-comptes (diff oracle)"),
+                _action("access_control.idor", host,
+                        value=0.8, confidence=0.3, cost=2, desc="IDOR/BOLA 2-comptes (diff oracle)"),
                 # oracles à PREUVE (self-contained, calqués sur access_control.idor) : proposés sur
                 # toute cible web (le planner les plancher-protège, le ROE les gate, les modules ne
                 # tirent qu'avec leur config — sinon finding INFO `tested`, jamais de faux positif).
-                Action("ssrf.callback", host, cls="ssrf", exploit=True,
-                       value=0.7, confidence=0.3, cost=2, desc="SSRF callback-vérifié (CWE-918)"),
-                Action("auth.takeover", host, cls="auth", exploit=True,
-                       value=0.8, confidence=0.2, cost=3, desc="ATO/auth-bypass à preuve (CWE-287/640)"),
-                Action("cors.credentials", host, cls="access_control", exploit=True,
-                       value=0.6, confidence=0.3, cost=1, desc="CORS-credentials à preuve (CWE-942)"),
+                _action("ssrf.callback", host,
+                        value=0.7, confidence=0.3, cost=2, desc="SSRF callback-vérifié (CWE-918)"),
+                _action("auth.takeover", host,
+                        value=0.8, confidence=0.2, cost=3, desc="ATO/auth-bypass à preuve (CWE-287/640)"),
+                _action("cors.credentials", host,
+                        value=0.6, confidence=0.3, cost=1, desc="CORS-credentials à preuve (CWE-942)"),
                 # origine derrière CDN : découverte (non-exploit), amorce le chaînage vers l'IP.
-                Action("origin.find", host, value=0.5, confidence=0.4, cost=2,
-                       desc="IP d'origine derrière CDN/WAF"),
+                _action("origin.find", host, value=0.5, confidence=0.4, cost=2,
+                        desc="IP d'origine derrière CDN/WAF"),
             ]
         if kind in ("host", "service"):
-            cands += [Action("recon.nmap", host, value=0.3, confidence=0.7, cost=2, desc="nmap -sV")]
+            cands += [_action("recon.nmap", host, value=0.3, confidence=0.7, cost=2, desc="nmap -sV")]
         return cands
 
     def _chained_actions(self, graph, host):
@@ -127,20 +138,16 @@ class HeuristicBrain(Brain):
             ip = f.get("target")
             if origin_found and ip and ip != host:
                 out += [
-                    Action("web.nuclei", ip, value=0.6, confidence=0.6, cost=2,
-                           desc=f"nuclei sur origine {ip} (bypass WAF, chaîné depuis origin.find)"),
-                    Action("access_control.idor", ip, cls="access_control", exploit=True,
-                           value=0.8, confidence=0.4, cost=2,
-                           desc=f"IDOR sur origine {ip} (bypass WAF, chaîné)"),
-                    Action("ssrf.callback", ip, cls="ssrf", exploit=True,
-                           value=0.7, confidence=0.4, cost=2,
-                           desc=f"SSRF sur origine {ip} (bypass WAF, chaîné)"),
-                    Action("auth.takeover", ip, cls="auth", exploit=True,
-                           value=0.8, confidence=0.3, cost=3,
-                           desc=f"ATO sur origine {ip} (bypass WAF, chaîné)"),
-                    Action("cors.credentials", ip, cls="access_control", exploit=True,
-                           value=0.6, confidence=0.4, cost=1,
-                           desc=f"CORS sur origine {ip} (bypass WAF, chaîné)"),
+                    _action("web.nuclei", ip, value=0.6, confidence=0.6, cost=2,
+                            desc=f"nuclei sur origine {ip} (bypass WAF, chaîné depuis origin.find)"),
+                    _action("access_control.idor", ip, value=0.8, confidence=0.4, cost=2,
+                            desc=f"IDOR sur origine {ip} (bypass WAF, chaîné)"),
+                    _action("ssrf.callback", ip, value=0.7, confidence=0.4, cost=2,
+                            desc=f"SSRF sur origine {ip} (bypass WAF, chaîné)"),
+                    _action("auth.takeover", ip, value=0.8, confidence=0.3, cost=3,
+                            desc=f"ATO sur origine {ip} (bypass WAF, chaîné)"),
+                    _action("cors.credentials", ip, value=0.6, confidence=0.4, cost=1,
+                            desc=f"CORS sur origine {ip} (bypass WAF, chaîné)"),
                 ]
 
         # (b) service HTTP exposé (nmap) -> fingerprint host:port (nouvelle cible -> oracles ensuite)
@@ -148,6 +155,6 @@ class HeuristicBrain(Brain):
             name = str(s.get("name", "")).lower()
             port = s.get("port")
             if "http" in name and port:
-                out.append(Action("recon.httpx", f"{host}:{port}", value=0.4, confidence=0.6, cost=1,
-                                   desc=f"fingerprint service {port} (chaîné depuis nmap)"))
+                out.append(_action("recon.httpx", f"{host}:{port}", value=0.4, confidence=0.6, cost=1,
+                                    desc=f"fingerprint service {port} (chaîné depuis nmap)"))
         return out

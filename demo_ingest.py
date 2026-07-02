@@ -28,7 +28,7 @@ def main():
           f"Run-records={len(engine.run_records)}")
 
     token = os.environ.get("FORGE_CONSOLE_TOKEN", "")
-    url = os.environ.get("FORGE_CONSOLE_URL", "http://127.0.0.1:7101")
+    url = os.environ.get("FORGE_CONSOLE_URL", "http://127.0.0.1:7100")
     st, resp = console_client.ingest("demo-guatx", engine.findings, engine.run_records,
                                      url=url, token=token)
     print(f"Console <- ingest (HTTP {st}): {resp}")

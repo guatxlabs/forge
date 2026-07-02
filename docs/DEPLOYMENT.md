@@ -63,6 +63,25 @@ Les outils **ORCHESTRÉS** (jamais embarqués, tous **OPTIONNELS**, auto-neutral
 
 - `deps=[]` → la partie Python tient en venv **sans aucune dépendance pip**.
 
+## Rapports & export PDF
+
+Le rapport d'engagement est servi par la console : `GET /api/report/:id?format=md` (**défaut**,
+rétro-compat) et `?format=html` (livrable client brandé, avec CSS `@media print` + couleurs forcées
+`print-color-adjust`).
+
+- **Voie PDF par défaut (aucune dépendance)** : ouvrir `?format=html` puis **« Imprimer » →
+  « Enregistrer au format PDF »** dans le navigateur. La feuille de style d'impression est fournie,
+  donc badges/posture restent lisibles. C'est le chemin recommandé — **zéro binaire externe**.
+- **`?format=pdf` (OPTIONNEL)** : rendu PDF côté serveur, activé **seulement si** un moteur PDF est
+  présent sur le PATH de l'hôte. Forge en **détecte** un (`wkhtmltopdf` ou **`weasyprint`**) et le
+  pilote ; aucun moteur n'est embarqué dans le binaire. Absent → la route renvoie un JSON
+  `pdf_unavailable` qui renvoie vers l'impression navigateur. Moteur recommandé : **`weasyprint`**
+  (**pip-installable**, pur Python — n'ajoute **ni Go ni Ruby**, la composition ci-dessus reste
+  vraie). `wkhtmltopdf` (binaire C++) est aussi supporté si déjà présent.
+
+> Le moteur PDF est un outil **orchestré optionnel** (comme nmap/nuclei/Burp) : non embarqué,
+> auto-neutralisé si absent. La claim « ZÉRO Go/Ruby/… dans le code Forge » n'est pas affectée.
+
 ## Contrainte d'archi
 
 - **STATEFUL single-replica + PVC RWO** (pas scale-out).

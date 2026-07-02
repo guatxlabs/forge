@@ -1,0 +1,12 @@
+{
+  "_comment": "DEMO FIXTURE — synthetic own-lab engagement. Hosts use the RFC 2606 reserved '.example' TLD and RFC 5737 doc IP ranges; nothing here is a real target. Ships with Forge so a fresh install is demoable offline. See README.md in this folder.",
+  "mode": "grey",
+  "in_scope": ["shop.lab.example", "api.lab.example", "lab.example"],
+  "out_scope": ["corp.internal.example", "*.prod.example"],
+  "rate": 5,
+  "allow_exploit": false,
+  "allow_destructive": false,
+  "known_creds": [],
+  "idor_targets": [],
+  "notes": "Authorized synthetic lab (ACME Retail lab). Non-exploit / non-destructive: findings were obtained by read-only verification (IDOR read of another test tenant, OOB SSRF callback, credentialed CORS read). allow_exploit/allow_destructive stay false — high-impact modules DRY_RUN or VETO. This scope drives the bundled `make demo` / `make demo-purple`."
+}

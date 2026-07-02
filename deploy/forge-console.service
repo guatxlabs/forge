@@ -49,6 +49,10 @@ Environment=PYTHONPATH=/opt/forge
 Environment=PYTHONUNBUFFERED=1
 # Secrets (hashes argon2id, token, URLs des services pilotés) — fichier 0600 hors VCS.
 EnvironmentFile=/etc/forge/forge-console.env
+# Boucle purple (mesure de couverture de détection Plume — laisser commenté = OFF/fail-open lisible) :
+# cf. docs/PURPLE_PREREQS.md
+#Environment=PLUME_URL=http://plume-internal:PORT   # bascule ON la boucle purple (http:// interne uniquement)
+#Environment=PLUME_TOKEN=BASE64_USER_COLON_PASS     # SECRET — Basic auth vers Plume (préférer l'EnvironmentFile 0600)
 
 ExecStart=/usr/local/bin/forge-console
 WorkingDirectory=/opt/forge

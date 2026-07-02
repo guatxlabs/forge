@@ -13,7 +13,8 @@ from forge import runner, schema                           # noqa: E402
 from forge.modules import web as webmod                    # noqa: E402
 from forge.modules import origin as originmod              # noqa: E402
 from forge.modules import evasion as evasionmod            # noqa: E402
-from forge.modules.web import NucleiScan, IdorDifferential # noqa: E402
+from forge.modules.web import NucleiScan                   # noqa: E402
+from forge.modules.access_control import IdorDifferential  # noqa: E402
 from forge.modules.origin import OriginFind                # noqa: E402
 
 

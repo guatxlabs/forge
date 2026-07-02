@@ -21,7 +21,7 @@ from forge.roe import Action                                   # noqa: E402
 from forge.modules.ssrf import SsrfCallback                    # noqa: E402
 from forge.modules.auth import AuthTakeover                    # noqa: E402
 from forge.modules.cors import CorsCredentials                 # noqa: E402
-from forge.modules.web import IdorDifferential                 # noqa: E402
+from forge.modules.access_control import IdorDifferential      # noqa: E402
 
 
 def _patch(cls, fn):

@@ -10,14 +10,23 @@ Garanties anti-masquage :
   - `exhaustive=True` : désactive l'ordonnancement -> couverture maximale.
 
 Self-test en __main__ : une action qualifiante sous-notée reste planifiée. Zéro dépendance.
+
+SOURCE DE VÉRITÉ : QUALIFYING et DEFAULT_CHECKLIST sont DÉRIVÉS de forge/techniques.py (la table
+unique) — plus de recopie de la taxonomie entre planner, brain, schema et les modules.
 """
+try:                                            # import package normal
+    from . import techniques
+except ImportError:                             # exécution directe (python3 forge/planner.py — self-test)
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from forge import techniques
+
 FLOOR = 0.5
-QUALIFYING = {
-    "idor", "bola", "access_control", "auth", "auth_bypass", "ato",
-    "rce", "sqli", "ssrf", "business_logic", "biz", "privesc",
-}
+# classes qualifiantes (plancher anti-starvation) = jetons `qualifying=True` de la table unique.
+QUALIFYING = techniques.qualifying_classes()
 # checklist par défaut = ce qu'on veut couvrir sur une cible web (ordre = priorité hacktivity)
-DEFAULT_CHECKLIST = ["access_control", "auth", "ato", "ssrf", "sqli", "rce", "business_logic"]
+DEFAULT_CHECKLIST = list(techniques.DEFAULT_CHECKLIST)
 
 
 class Planner:

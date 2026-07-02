@@ -12,6 +12,16 @@
 # Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le scope/ROE,
 # le ledger et la DB sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret
 # n'est en clair ici : les hashes/tokens viennent de `forge/.env` (gitignored).
+#
+# ⚠️ PRÉ-ÉTAPE OBLIGATOIRE avant `up` : créer le fichier scope.json (bind-mount d'un FICHIER) —
+#   sinon Docker crée un RÉPERTOIRE vide ./scope.json à sa place, que la console ne peut pas lire.
+#
+#       cp scope.example.json scope.json    # depuis forge/, puis éditer AVEC AUTORISATION
+#
+#   scope.example.json (in_scope vide = INERTE) est committé ; scope.json reste gitignored.
+#   Filet de sécurité : l'entrypoint ci-dessous ÉCHOUE BRUYAMMENT si le chemin monté est un
+#   répertoire, et bascule sur le scope.example.json embarqué (INERTE) si scope.json manque/vide.
+# Env (secrets, connecteurs, boucle purple) : cf. `.env.example` à la racine + Dockerfile.
 
 name: forge
 
@@ -32,6 +42,27 @@ services:
     image: forge-console:0.0.1
     container_name: forge-console
     restart: unless-stopped
+    # Garde scope fail-loud : conserve tini en PID1 (reaping), puis lance forge-console APRÈS avoir
+    # vérifié le scope monté. ÉCHOUE BRUYAMMENT si Docker a créé un répertoire à la place du fichier
+    # scope.json (pré-étape oubliée) ; sinon bascule sur le scope.example.json embarqué (INERTE) quand
+    # scope.json manque ou est vide. Aucun `$` dans le script (pas d'interpolation compose).
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /bin/sh
+      - -c
+      - |
+        if [ -d /data/scope/scope.json ]; then
+          echo "[forge-console] FATAL: /data/scope/scope.json est un REPERTOIRE, pas un fichier." >&2
+          echo "[forge-console] Docker le cree ainsi quand ./scope.json est absent sur l'hote." >&2
+          echo "[forge-console] Pre-etape: 'cp scope.example.json scope.json' dans forge/ (editer AVEC AUTORISATION) avant 'docker compose up'." >&2
+          exit 1
+        fi
+        if [ ! -s /data/scope/scope.json ]; then
+          echo "[forge-console] WARN: /data/scope/scope.json absent/vide -> repli sur scope.example.json embarque (INERTE: in_scope vide = tout refuse)." >&2
+          export FORGE_CONSOLE_SCOPE=/opt/forge/scope.example.json
+        fi
+        exec forge-console
     # Secrets & overrides d'env : token bearer, hashes argon2id viewer/opérateur,
     # URLs des services pilotés. Fichier gitignored (cf. .gitignore : *.env).
     # Créer forge/.env à partir des variables documentées dans le Dockerfile.
@@ -56,6 +87,10 @@ services:
       # Connecteurs opérateur (laisser vide = inerte à fire-time) :
       #   MSF_RPC_HOST / MSF_RPC_PORT / MSF_RPC_USER / MSF_RPC_PASS / MSF_RPC_SSL / MSF_RPC_TOKEN
       #   BURP_API_URL / BURP_API_KEY
+      # Boucle purple (mesure de couverture de détection Plume — vide = OFF/fail-open lisible) :
+      #   cf. docs/PURPLE_PREREQS.md
+      #   PLUME_URL=http://plume-internal:PORT   # http:// uniquement (endpoint interne, pas de TLS console)
+      #   PLUME_TOKEN=<base64 user:pass>         # SECRET — Basic auth vers Plume
     ports:
       # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
       - "127.0.0.1:7100:7100"

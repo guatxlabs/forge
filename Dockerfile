@@ -143,6 +143,10 @@ ENV FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
 #   FORGE_BROWSER_URL=http://browser-automation:8080
 #   MSF_RPC_HOST / MSF_RPC_PORT (55553) / MSF_RPC_USER / MSF_RPC_PASS / MSF_RPC_SSL / MSF_RPC_TOKEN
 #   BURP_API_URL=http://burp:1337  /  BURP_API_KEY
+# Boucle purple (mesure de couverture de détection Plume — laisser vide = OFF/fail-open lisible) :
+# cf. docs/PURPLE_PREREQS.md
+#   PLUME_URL=http://plume-internal:PORT     bascule ON la boucle purple (http:// interne uniquement)
+#   PLUME_TOKEN=<base64 user:pass>           SECRET — Basic auth vers Plume
 
 # bind 127.0.0.1 dans le binaire par défaut ; ici on bind 0.0.0.0 DANS le conteneur (réseau isolé).
 # ⚠️ N'expose JAMAIS 7100 sur une interface publique sans reverse-proxy + auth + Host-allowlist.
