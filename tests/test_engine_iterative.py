@@ -152,6 +152,8 @@ class TestIterativeCampaign(unittest.TestCase):
             "origin.find": origin_find,
             "recon.httpx": [], "web.nuclei": nuclei_only_on_ip, "access_control.idor": [],
             "ssrf.callback": [], "auth.takeover": [], "cors.credentials": [], "recon.nmap": [],
+            # seeds de découverte semés d'office par le cerveau (auto-alimentation) -> stub inerte (zéro réseau)
+            "recon.subdomains": [], "recon.js_endpoints": [], "recon.urls": [],
         }
         # le 2e tour cible l'IP -> nuclei sur l'IP doit FIRER -> l'IP doit être in-scope.
         sc = scope(in_scope=("app.test", ip), exploit=True)
@@ -216,7 +218,8 @@ class TestIterativeCampaign(unittest.TestCase):
         stubs = {"origin.find": [Finding(target=ip, title="Origine exposée derrière CDN (VÉRIFIÉE) — bypass WAF",
                                          status="vulnerable", severity="HIGH", category="origin-exposure")],
                  "recon.httpx": [], "web.nuclei": [], "access_control.idor": [],
-                 "ssrf.callback": [], "auth.takeover": [], "cors.credentials": [], "recon.nmap": []}
+                 "ssrf.callback": [], "auth.takeover": [], "cors.credentials": [], "recon.nmap": [],
+                 "recon.subdomains": [], "recon.js_endpoints": [], "recon.urls": []}
         with _swap_registry(stubs):
             eng = _armed_auto(scope(in_scope=("app.test", ip), exploit=True))
             eng.campaign([Target("app.test", "url")], HeuristicBrain(), Planner(), max_waves=5)

@@ -142,6 +142,30 @@ class SessionStore:
                 return sess
         return self._default
 
+    def inherit(self, src, dst):
+        """Porte la session gouvernée À TRAVERS la CHAÎNE de découverte : fait hériter à l'hôte DÉRIVÉ
+        `dst` (origine IP, sous-domaine, endpoint résolu à runtime depuis `src`) la session PAR-HÔTE de
+        `src`, pour que les oracles chaînés sur `dst` soient authentifiés. Retourne True si un héritage
+        a été posé.
+
+        GARDE-FOUS (fail-closed, SECRET) :
+          - SCOPE-GUARD : no-op si `dst` est hors-scope (le matériel ne peut PHYSIQUEMENT pas partir hors
+            du périmètre déclaré — is_in_scope fait foi, comme session_for) ;
+          - n'ÉCRASE JAMAIS une session déjà configurée pour `dst` (l'explicite prime) ;
+          - n'hérite QUE d'une session PAR-HÔTE de `src` (pas du défaut global, qui couvre déjà tout
+            in-scope via _match) ni d'une session vide -> évite d'aliaser inutilement ;
+          - SECRET : ne journalise/retourne aucun matériel ; l'aliasing reste interne au store."""
+        if self.scope is None or not self.scope.is_in_scope(dst):
+            return False
+        dh = Scope._host(dst)
+        if not dh or dh in self._per_host:               # déjà une session explicite pour dst -> ne pas écraser
+            return False
+        s = self._match(Scope._host(src))
+        if s is None or s is self._default or s.is_empty():
+            return False                                 # rien à hériter (pas de session par-hôte de src)
+        self._per_host[dh] = s
+        return True
+
     def session_for(self, url):
         """La `Session` à attacher pour `url`, ou None. SCOPE-GUARD DUR : hors-scope -> None (le
         matériel secret ne peut physiquement pas partir vers un hôte non autorisé par le ROE)."""

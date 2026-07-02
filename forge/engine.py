@@ -100,6 +100,15 @@ class Engine:
                 new.append(f)
                 self.findings.append(f)
                 self.graph.add_finding(f)            # enrichit le world-model
+                # SESSION À TRAVERS LA CHAÎNE : un module de découverte a dérivé un NOUVEL hôte/endpoint
+                # in-scope (origine IP, sous-domaine, endpoint) depuis action.target. On fait HÉRITER à
+                # cette cible dérivée la session gouvernée de la source (SCOPE-GUARDÉE : no-op si la
+                # dérivée est hors-scope) pour que les oracles chaînés soient authentifiés. Le matériel
+                # reste SECRET : `inherit` ne journalise/retourne rien et n'entre ni dans le finding, ni
+                # dans le ledger, ni dans action.params, ni dans le graphe.
+                dst = getattr(f, "target", None)
+                if dst and dst != action.target:
+                    self.sessions.inherit(action.target, dst)
                 if self.ledger:
                     self.ledger.append("finding", f.to_dict())
             # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
@@ -144,9 +153,12 @@ class Engine:
                 for k, v in (src.get(a.kind, {}) or {}).items():
                     a.params.setdefault(k, v)
 
-        # injecte les creds/URLs du scope dans les actions IDOR (grey/white box)
+        # injecte les creds/URLs du scope dans les actions IDOR (grey/white box). setdefault PUR : une
+        # action IDOR CHAÎNÉE sur un endpoint découvert porte déjà `urls=[endpoint]` (edge C) -> on ne
+        # l'écrase pas, mais on lui injecte quand même les comptes/mitre du scope (sinon l'oracle
+        # skiperait faute de creds). Une action IDOR de base (sans urls) reçoit urls=idor_targets.
         for a in actions:
-            if a.cls in ("access_control", "idor", "bola") and not a.params.get("urls"):
+            if a.cls in ("access_control", "idor", "bola"):
                 a.params.setdefault("accounts", self.scope.known_creds)
                 a.params.setdefault("urls", self.scope.idor_targets)
                 a.params.setdefault("mitre", "T1190")
