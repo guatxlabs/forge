@@ -22,6 +22,18 @@ import urllib.request
 
 from .registry import Module
 from .. import session as _session
+from ..roe import Scope
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Handler qui NE SUIT PAS les redirections : `redirect_request` -> None fait remonter la 3xx
+    telle quelle (HTTPError avec le header Location intact). Indispensable à l'oracle open-redirect
+    (lire la cible de redirection SANS émettre de requête vers l'hôte attaquant hors-scope) et,
+    plus généralement, garde-fou de SÛRETÉ : une redirection vers un hôte hors périmètre ne doit
+    JAMAIS être suivie automatiquement (le scope-guard resterait aveugle à l'I/O sortante)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401,N802
+        return None
 
 
 class Oracle(Module):
@@ -57,13 +69,20 @@ class Oracle(Module):
 
     # --- câblage HTTP partagé (les `_fetch` concrets adaptent la forme du tuple retourné) ---
     @staticmethod
-    def _http(url, *, headers=None, timeout=15, method="GET", data=None, maxlen=200000):
+    def _http(url, *, headers=None, timeout=15, method="GET", data=None, maxlen=200000,
+              follow_redirects=True):
         """Requête urllib partagée -> (status, body, resp_headers).
 
         - succès        : (r.status, corps décodé tronqué à maxlen, r.headers) ;
         - HTTPError     : (e.code, "", e.headers | None) — corps vide, en-têtes si disponibles ;
         - erreur transport (réseau hostile) : (None, "", None) — on ne crashe jamais.
         Chaque oracle en dérive sa propre forme (content-type, dict d'en-têtes…) dans son `_fetch`.
+
+        `follow_redirects` (défaut True — inchangé pour tous les oracles existants) : à False, on
+        installe le handler `_NoRedirect` (opener local, sans toucher l'état global `urlopen`) — une
+        3xx remonte alors comme HTTPError et son header `Location` est renvoyé tel quel. C'est requis
+        par l'oracle open-redirect (lire la cible SANS suivre la redirection vers un hôte attaquant
+        potentiellement hors-scope — garde-fou de sûreté : pas d'I/O implicite hors périmètre).
 
         SESSION GOUVERNÉE : si un `SessionStore` est lié (par le moteur autour de fire()), le matériel
         d'authentification SECRET applicable à `url` — et UNIQUEMENT si `url` est IN-SCOPE (scope-guard
@@ -77,8 +96,11 @@ class Oracle(Module):
                 req_headers.setdefault(k, v)         # les en-têtes explicites de l'appelant priment
         payload = data.encode("utf-8") if isinstance(data, str) else data
         req = urllib.request.Request(url, headers=req_headers, method=method, data=payload)
+        # opener local no-follow (n'altère PAS le seam global `urllib.request.urlopen`, que les tests
+        # monkeypatchent pour le chemin follow_redirects=True) ; sinon on garde `urlopen` tel quel.
+        _open = urllib.request.urlopen if follow_redirects else urllib.request.build_opener(_NoRedirect).open
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _open(req, timeout=timeout) as r:
                 return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
         except urllib.error.HTTPError as e:
             try:
@@ -102,3 +124,48 @@ class Oracle(Module):
             parts += ["--data", f"'{data}'"]
         parts.append(f"'{url}'")
         return " ".join(parts)
+
+
+class ScopeGuardedOracle(Oracle):
+    """Base des oracles à VÉRIFICATION qui portent un SCOPE-GUARD NATIF fail-closed (défense en
+    profondeur : l'engine gate déjà en Couche 2, on re-valide localement AVANT tout réseau) + une
+    DÉGRADATION GRACIEUSE uniforme (`status='skipped'` quand le réseau/outil optionnel est absent,
+    pour que les tests offline passent). Ce mixin ne porte AUCUNE capacité élargie : exploit/
+    destructive restent déclarés par chaque module concret et gardés par le ROE.
+
+    Source UNIQUE du scope-guard des oracles d'injection/flux (`injection.py`, `clientflow.py`) :
+    une seule implémentation à auditer, jamais recopiée."""
+
+    @staticmethod
+    def _scope(action):
+        """(enforce, Scope) reconstruit depuis le périmètre injecté par l'engine (in_scope/out_scope
+        dans action.params). `enforce` distingue « périmètre fourni » (production) de « appelé sans
+        scope » (dev/test) — sans scope on n'élargit jamais le périmètre (permissif dev, gate ROE amont)."""
+        enforce = "in_scope" in action.params or "out_scope" in action.params
+        sc = Scope({"in_scope": action.params.get("in_scope", []),
+                    "out_scope": action.params.get("out_scope", [])})
+        return enforce, sc
+
+    def _in_scope(self, action, target):
+        """Appartenance PLATE (miroir exact de la gate ROE) pour la cible requêtée. Sans scope injecté
+        -> permissif (l'engine injecte TOUJOURS le périmètre en production, et gate en amont)."""
+        enforce, sc = self._scope(action)
+        return True if not enforce else sc.is_in_scope(target)
+
+    def _scope_refused(self, action):
+        """Refus fail-closed : cible hors périmètre -> Finding `skipped` INFO, AUCUNE requête émise.
+        Le matériel secret et le réseau ne peuvent physiquement pas quitter le périmètre déclaré."""
+        return self.degraded(
+            target=action.target,
+            title=f"{self.kind} non testé — cible hors périmètre (scope-guard fail-closed)",
+            evidence="La cible n'appartient pas au périmètre in-scope ; aucune requête émise (fail-closed).",
+            poc=self.dry(action))
+
+    def degraded(self, *, target, title, evidence, poc):
+        """Finding de DÉGRADATION GRACIEUSE (`status='skipped'`) : scope-refus, outil optionnel absent
+        ou réseau indisponible. Estampille kind/mitre/cwe/tool/fix comme un finding normal (INFO)."""
+        return self.finding(
+            target=target, title=title, severity="INFO",
+            category=self.cwe, cwe=self.cwe, mitre=self.mitre,
+            fix=self.fix, status="skipped", tool=self.tool,
+            evidence=evidence, poc=poc)
