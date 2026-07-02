@@ -44,13 +44,18 @@ Sans installation, tout est aussi accessible via `python3 -m forge.cli <commande
 
 ## Quickstart
 
+> 🚀 **Nouveau ?** Le parcours opérateur bout-en-bout **100 % hors-ligne** (seed + mock-Plume, aucun
+> service externe) est dans [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — install → scope →
+> campagne/`make demo` → console → matrice purple → rapport → vérif intégrité, avec un point de
+> contrôle « ce que tu dois voir » à chaque étape.
+
 ```sh
 # démonstration bout-en-bout — AUCUNE cible réelle, AUCUN I/O réseau
 forge demo                                  # ou: python3 -m forge.cli demo
 
 # suite complète (stdlib, zéro réseau) : Python unittest + cargo test de la console
 make test                                   # = python3 -m unittest discover -s tests -t . + (cd console && cargo test)
-python3 -m unittest discover -s tests -t .  # Python seul (232 tests)
+python3 -m unittest discover -s tests -t .  # Python seul (260 tests)
 
 # vérifier l'appartenance d'une cible
 forge scope-check app.exemple.test --scope scope.json
@@ -186,7 +191,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 - **Boucle purple** : chaque finding porte un champ `mitre` (ATT&CK) = clé de jointure pour que
   Plume valide la détection (BAS). Voir [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État (v0.0.1 — 232 tests passent, zéro réseau) — **P1 + P2 complets**
+## État (v0.0.1 — 260 tests passent, zéro réseau) — **P1 + P2 complets**
 
 | Couche | État |
 |---|---|
@@ -243,6 +248,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 
 ## Documentation
 
+- [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **démarrage bout-en-bout hors-ligne** (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
 - [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
 - [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis Plume pour câbler la boucle purple (le moat).
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — empreinte mesurée et matrice de déploiement (Docker / k8s / host / venv).

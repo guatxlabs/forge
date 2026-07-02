@@ -20,6 +20,7 @@ historique `forge/modules/web.py:access_control.idor` pour préserver une sortie
 import hashlib
 import re
 
+from .. import techniques
 from .oracle import Oracle
 from .registry import register
 
@@ -69,7 +70,7 @@ class IdorDifferential(Oracle):
     web_allowed = True                   # interaction web (réseau) -> gardée par le ROE
     available = True                     # urllib stdlib
     mitre = "T1190"                      # Exploit Public-Facing Application (CWE-639)
-    cwe = "CWE-639"                      # category + cwe des findings (via Oracle.proof/skip)
+    cwe = techniques.cwe_for("access_control.idor")   # source de vérité : forge/techniques.py (CWE-639)
     tool = "forge/modules/web.py:access_control.idor"  # chaîne historique — sortie byte-à-byte stable
     description = ("Oracle différentiel IDOR/BOLA à PREUVE sur 2 comptes : A possède l'objet, "
                   "B obtient-il le MÊME corps normalisé (anon refusé) ? Énumère aussi des IDs. CWE-639.")
