@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Engine Forge — la boucle de contrôle : plan -> gate ROE -> dry|fire -> ledger -> findings.
 
 Tout passe par la gate `Roe`. Un module n'est JAMAIS appelé en fire() sans verdict FIRE.

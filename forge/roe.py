@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """ROE / scope-guard fail-closed — le COEUR de sûreté de Forge.
 
 Hérite de la `Scope` de secpipe (appartenance fail-closed + exploit/destructif

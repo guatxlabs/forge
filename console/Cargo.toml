@@ -2,6 +2,7 @@
 name = "forge-console"
 version = "0.0.1"
 edition = "2021"
+license = "AGPL-3.0-only"
 description = "Forge console — store findings/run-records + API + le point de jonction de la boucle purple (ingest ATT&CK). Fork de la colonne Plume."
 
 [[bin]]
