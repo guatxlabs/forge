@@ -118,6 +118,18 @@ class Scope:
         # global ; `sessions` = map hôte -> matériel par-hôte. Additifs : absents => aucun changement.
         self.session = data.get("session")             # défaut global (dict) | None
         self.sessions = data.get("sessions") or {}     # map hôte -> matériel de session (par-hôte)
+        # SÉLECTION DE TECHNIQUES PAR-SCOPE (DÉRIVÉE de forge/techniques.py) — le levier « au scope
+        # retirer des tests automatiques ». Trois champs OPTIONNELS, additifs et fail-closed :
+        #   `profile`            : "bug_bounty" | "pentest" | "custom" (None => NON configuré).
+        #   `techniques_enabled` : itérable de kinds OU map {kind:bool} (toggle on/off) | None.
+        #   `categories_enabled` : itérable de vuln_class OU map {vuln_class:bool} (toggle) | None.
+        # Absents (les 3 None) => scope LEGACY : effective set = TOUTES les techniques (aucun filtrage,
+        # rétro-compat stricte). Présents => `effective_technique_kinds()` résout l'ensemble ACTIVÉ
+        # (profil ∪ activations − désactivations) que l'engine ENFORCE (planner/brain + tir), en plus
+        # du scope-guard. Une technique désactivée/hors-profil n'est JAMAIS ni planifiée ni tirée.
+        self.profile = data.get("profile")
+        self.techniques_enabled = data.get("techniques_enabled")
+        self.categories_enabled = data.get("categories_enabled")
         self.notes = data.get("notes", "")
 
     @classmethod
@@ -169,6 +181,28 @@ class Scope:
         if self._match(target, self.out_scope):               # out_scope l'emporte toujours
             return False
         return self._match(target, self.in_scope)
+
+    # --- SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed, en plus du scope-guard) ---
+    def technique_selection_configured(self):
+        """True si ce scope porte une SÉLECTION de techniques (profil et/ou toggles). Sinon (scope
+        LEGACY) l'effective set = toutes les techniques : aucun filtrage, rétro-compat stricte."""
+        return (self.profile is not None
+                or self.techniques_enabled is not None
+                or self.categories_enabled is not None)
+
+    def effective_technique_kinds(self):
+        """L'ENSEMBLE EFFECTIF de kinds-techniques ACTIVÉS pour ce scope (fail-closed). NON configuré
+        -> TOUTES les techniques (aucun filtrage : rétro-compat). Configuré -> RÉSOLU depuis la table
+        unique (profil bug_bounty par défaut) : profil ∪ activations − désactivations. C'est l'ensemble
+        que l'engine ENFORCE : une technique hors de cet ensemble n'est NI planifiée NI tirée, même si
+        son module est disponible et la cible in-scope. Import paresseux (roe reste stdlib au chargement)."""
+        from . import techniques                        # lazy : garde roe sans dépendance au load
+        if not self.technique_selection_configured():
+            return set(techniques.technique_kinds())
+        return techniques.resolve_enabled_kinds(
+            profile=self.profile or "bug_bounty",
+            techniques_enabled=self.techniques_enabled,
+            categories_enabled=self.categories_enabled)
 
 
 class Roe:

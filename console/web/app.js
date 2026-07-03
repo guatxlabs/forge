@@ -283,6 +283,11 @@ const HELP_TOPICS = [
     ['p', "Catalogue des capacités du moteur. Le badge « web » marque un module lançable en cadre web ; « exploit » / « destructif » portent un risque accru et sont gatés par les ROE au lancement."],
     ['p', "La disponibilité EFFECTIVE d'un module dépend de la sonde host ET de la gouvernance des connecteurs (Administration). Un connecteur désactivé est SKIP au tir, même si son binaire est présent."],
   ] },
+  { key: 'techniques', title: 'Techniques & Sélection', icon: 'flask', doc: 'docs/MODULES.md', view: 'techniques', blocks: [
+    ['p', "Catalogue des techniques du moteur GROUPÉ PAR CATÉGORIE (SQLi, IDOR, SSRF, XSS…), DÉRIVÉ du registre : un nouveau module apparaît automatiquement sous sa catégorie. Chaque technique porte les outils qui la couvrent et son éligibilité (BB = bug bounty, pentest = pentest-only)."],
+    ['p', "Sélection PAR-SCOPE : le profil (bug_bounty | pentest | custom) donne l'ensemble de base, puis les toggles par catégorie / par technique AJOUTENT ou RETIRENT (la désactivation prime — fail-closed). « Au scope, retirer un test automatique » : une technique décochée n'est NI planifiée NI tirée par le moteur, en plus du scope-guard."],
+    ['p', "Enregistrer la sélection est réservé aux comptes operator/admin et journalisé au ledger. La sélection s'applique aux prochains runs (scope.json profile/techniques_enabled/categories_enabled)."],
+  ] },
   { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
     ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée » ou « ratée » côté défense."],
@@ -1399,6 +1404,111 @@ function renderModules() {
   }));
 }
 if ($('#mod-avail')) $('#mod-avail').addEventListener('change', renderModules);
+
+// =====================================================================================
+//  Techniques & Sélection PAR-SCOPE — catalogue GROUPÉ PAR CATÉGORIE (lecture /api/techniques,
+//  DÉRIVÉ du registre) + panneau de sélection (profil + toggles catégorie/technique). La mutation
+//  (POST /api/techniques/selection) est operator/admin + ledgerisée. « Au scope retirer des tests
+//  automatiques » : le moteur ENFORCE l'ensemble effectif (profil ∪ activations − désactivations) —
+//  une technique décochée n'est NI planifiée NI tirée (fail-closed), en plus du scope-guard.
+// =====================================================================================
+let TQ = { profile: 'bug_bounty', rowByKind: {}, groups: {}, desired: {} };
+
+// Base d'un profil côté client — miroir COSMÉTIQUE de forge.techniques (prefill des cases au changement
+// de profil). Le MOTEUR reste autoritatif : le prefill se recorrige au rechargement après enregistrement.
+// bug_bounty = bb-eligible ∪ recon (infra) ; pentest = tout ; custom = rien.
+function tqBase(row, profile) {
+  if (profile === 'pentest') return true;
+  if (profile === 'custom') return false;
+  return !!row.bug_bounty_eligible || row.phase === 'recon';
+}
+
+async function loadTechniques() {
+  const host = $('#tq-groups'); if (!host) return;
+  let cat;
+  try { cat = await api('/techniques'); }
+  catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
+  if (cat && cat.error) {
+    host.innerHTML = '<div class="bad">catalogue indisponible : ' + esc(String(cat.why || cat.error)) + '</div>';
+    if ($('#tq-count')) $('#tq-count').textContent = '';
+    return;
+  }
+  TQ.groups = cat.groups || {};
+  TQ.profile = cat.profile || 'bug_bounty';
+  TQ.rowByKind = {}; TQ.desired = {};
+  let total = 0;
+  Object.values(TQ.groups).forEach(rows => (rows || []).forEach(r => {
+    TQ.rowByKind[r.kind] = r; TQ.desired[r.kind] = !!r.enabled_for_current_scope; total++;
+  }));
+  if ($('#tq-profile')) $('#tq-profile').value = TQ.profile;
+  if ($('#tq-count')) $('#tq-count').textContent = total + ' techniques';
+  renderTechniques();
+}
+
+function tqEnabledCount() { return Object.values(TQ.desired).filter(Boolean).length; }
+
+function renderTechniques() {
+  const host = $('#tq-groups'); if (!host) return;
+  const cats = Object.keys(TQ.groups).sort();
+  if (!cats.length) { host.innerHTML = '<div class="muted">aucune technique</div>'; return; }
+  host.replaceChildren(...cats.map(cat => {
+    const rows = (TQ.groups[cat] || []).slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
+    const on = rows.filter(r => TQ.desired[r.kind]).length;
+    const card = document.createElement('div'); card.className = 'tq-cat';
+    const head = document.createElement('div'); head.className = 'tq-cathead';
+    head.innerHTML = `<span class="tq-catname">${esc(cat)} <span class="badge tq-catcount">${on}/${rows.length}</span></span>`;
+    const acts = document.createElement('span'); acts.className = 'tq-catacts';
+    const bAll = document.createElement('button'); bAll.type = 'button'; bAll.className = 'k-theme'; bAll.textContent = 'Tout activer';
+    const bNone = document.createElement('button'); bNone.type = 'button'; bNone.className = 'k-theme'; bNone.textContent = 'Tout désactiver';
+    bAll.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = true; }); renderTechniques(); };
+    bNone.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = false; }); renderTechniques(); };
+    acts.append(bAll, bNone); head.appendChild(acts); card.appendChild(head);
+    const list = document.createElement('div'); list.className = 'tq-list';
+    rows.forEach(r => {
+      const lab = document.createElement('label'); lab.className = 'tq-item' + (TQ.desired[r.kind] ? '' : ' off');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!TQ.desired[r.kind];
+      cb.onchange = () => {
+        TQ.desired[r.kind] = cb.checked; lab.classList.toggle('off', !cb.checked);
+        const b = head.querySelector('.tq-catcount'); if (b) b.textContent = rows.filter(x => TQ.desired[x.kind]).length + '/' + rows.length;
+      };
+      const meta = document.createElement('span'); meta.className = 'tq-meta';
+      const badges = [];
+      if (r.bug_bounty_eligible) badges.push('<span class="badge webyes">BB</span>');
+      if (r.pentest_only) badges.push('<span class="badge expl">pentest</span>');
+      const tools = (r.tools || []).join(', ');
+      meta.innerHTML = `<span class="tq-kind">${esc(r.kind)}</span> ${badges.join('')}`
+        + (r.mitre ? ` <code class="tq-mitre">${esc(r.mitre)}</code>` : '')
+        + (tools ? `<span class="tq-tools" title="outils qui couvrent cette technique">${esc(tools)}</span>` : '');
+      lab.append(cb, meta); list.appendChild(lab);
+    });
+    card.appendChild(list);
+    return card;
+  }));
+}
+
+// changement de profil : re-prefill COSMÉTIQUE des cases à la base du profil (moteur autoritatif au save).
+if ($('#tq-profile')) $('#tq-profile').addEventListener('change', () => {
+  TQ.profile = $('#tq-profile').value;
+  Object.values(TQ.rowByKind).forEach(r => { TQ.desired[r.kind] = tqBase(r, TQ.profile); });
+  renderTechniques();
+});
+if ($('#tq-reload')) $('#tq-reload').addEventListener('click', loadTechniques);
+if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
+  // On envoie un profil + une map TECHNIQUE COMPLÈTE (kind -> désiré) : elle définit sans ambiguïté
+  // l'ensemble activé pour les kinds courants, tout en laissant un futur module hériter de la base du
+  // profil (kind absent de la map -> résolu par le profil). Le moteur ENFORCE ; ici on persiste l'intention.
+  const techniques = {}; Object.keys(TQ.desired).forEach(k => { techniques[k] = !!TQ.desired[k]; });
+  const body = { profile: TQ.profile, categories: {}, techniques };
+  const st = $('#tq-status');
+  try {
+    const r = await fetch('/api/techniques/selection', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    if (r.status === 403) { toast('Sélection réservée à un compte operator/admin', 'bad'); return; }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast('Sélection enregistrée (ledgerisée)', 'ok');
+    if (st) { st.hidden = false; st.textContent = 'Sélection persistée — appliquée aux prochains runs (' + tqEnabledCount() + ' techniques activées).'; }
+    loadTechniques();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+});
 
 const SEV_BADGE = s => `<span class="sevb sevb-${SEVKEY(s)}">${esc(String(s || '').toUpperCase() || 'INFO')}</span>`;
 let F_STATE = { offset: 0, limit: 200 };
@@ -3471,12 +3581,12 @@ function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAdminDetecti
 const VIEWS = {
   'ov-summary': 'overview', 'ov-sev': 'overview', 'ov-modules': 'overview',
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
-  modules: 'modules', findings: 'findings', explore: 'explore',
+  modules: 'modules', techniques: 'techniques', findings: 'findings', explore: 'explore',
   coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
   admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
 };
 const LOADERS = {
-  overview: loadOverview, launch: loadLaunch, modules: loadModules, findings: loadFindings,
+  overview: loadOverview, launch: loadLaunch, modules: loadModules, techniques: loadTechniques, findings: loadFindings,
   coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
   admin: loadAdmin,
 };

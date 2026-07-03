@@ -32,7 +32,7 @@ from .ledger import Ledger
 from .engine import Engine
 from .report import build_report
 from .schema import Target
-from .brain import HeuristicBrain
+from .brain import HeuristicBrain, AutoPentestBrain
 from .planner import Planner
 from .memory import Memory
 from . import purple
@@ -40,6 +40,7 @@ from . import signing
 from . import console_client
 from . import collectors
 from . import modules as mods
+from . import techniques
 
 
 def _load_actions(path):
@@ -135,7 +136,13 @@ def cmd_campaign(args):
     # params par-module globaux : exposés par Scope (plus de double-lecture du scope.json) ;
     # les params par-cible vivent dans targets.json[].attrs.module_params (chargés via _load_targets).
     module_params = scope.module_params
-    engine.campaign(targets, HeuristicBrain(), planner,
+    # --auto-pentest : MODE PENTEST AUTOMATISÉ — balaie TOUTES les techniques ACTIVÉES du scope à
+    # travers la surface découverte (recon -> chaînage -> oracles), gouverné à l'identique (scope-guard,
+    # plancher exploit, ledger). Sinon cerveau heuristique standard. L'ensemble balayé = l'effective set
+    # du scope (profil + toggles) -> respecte la sélection par-scope sans câblage par-technique.
+    brain = (AutoPentestBrain(scope.effective_technique_kinds())
+             if getattr(args, "auto_pentest", False) else HeuristicBrain())
+    engine.campaign(targets, brain, planner,
                     modules=modules, module_params=module_params)
     if ledger is not None:                 # scelle la fin de campagne : checkpoint (ancré si anchor configuré)
         ledger.checkpoint(note="forge campaign end")
@@ -235,12 +242,24 @@ def cmd_modules(args):
         # web_allowed : un module sans déclaration explicite est dérivé comme la console
         # (recon/scan pur = web ; exploit ou destructif => hors plancher web par défaut).
         web_allowed = bool(getattr(m, "web_allowed", not (m.exploit or m.destructive)))
+        # Taxonomie de consolidation DÉRIVÉE de forge/techniques.py (source unique) : la console/UI
+        # groupe le catalogue par `vuln_class` et filtre par profil SANS câblage par-technique — un
+        # nouveau module @register apparaît automatiquement classé. Champs ADDITIFS (rétro-compat :
+        # les consommateurs existants lisent champ par champ et ignorent ceux qu'ils ne connaissent pas).
+        t = techniques.technique_for(k)
         rows.append({"kind": k, "cls": k.split(".")[-1],
                      "exploit": bool(m.exploit), "destructive": bool(m.destructive),
                      "web_allowed": web_allowed,
                      "available": bool(getattr(m, "available", True)),
                      "mitre": getattr(m, "mitre", "") or "",
-                     "descr": getattr(m, "description", "") or ""})
+                     "descr": getattr(m, "description", "") or "",
+                     "vuln_class": (t.vuln_class if t else ""),
+                     "bug_bounty_eligible": bool(t.bug_bounty_eligible) if t else False,
+                     "pentest_only": bool(t.pentest_only) if t else False,
+                     "profiles": list(t.default_profiles) if t else [],
+                     "stage": (t.stage if t else ""),
+                     "tools": (list(t.tools) if t else []),
+                     "depends_on": (list(t.depends_on) if t else [])})
     if getattr(args, "json", False):
         print(json.dumps(rows))
         return 0
@@ -248,6 +267,72 @@ def cmd_modules(args):
     for r in rows:
         print(f"  {r['kind']:24} exploit={r['exploit']} destructive={r['destructive']} "
               f"available={r['available']}")
+    return 0
+
+
+def _load_technique_selection(args):
+    """Résout la SÉLECTION de techniques par-scope (profil + toggles) pour `forge techniques` :
+    `--selection` (env:NOM | @fichier | JSON littéral), sinon env `FORGE_TECHNIQUE_SELECTION`, sinon
+    vide (défaut profil bug_bounty). Tolère `techniques`/`techniques_enabled` et `categories`/
+    `categories_enabled` (alias). Ne lève jamais (JSON illisible -> sélection vide)."""
+    raw = getattr(args, "selection", None)
+    text = None
+    if raw:
+        if raw.startswith("env:"):
+            text = os.environ.get(raw[4:], "")
+        elif raw.startswith("@"):
+            try:
+                text = Path(raw[1:]).read_text(encoding="utf-8")
+            except OSError:
+                text = None
+        else:
+            text = raw
+    if text is None:
+        text = os.environ.get("FORGE_TECHNIQUE_SELECTION", "")
+    sel = {}
+    if text:
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                sel = data
+        except ValueError:
+            sel = {}
+    return {
+        "profile": sel.get("profile"),
+        "techniques": sel.get("techniques", sel.get("techniques_enabled")),
+        "categories": sel.get("categories", sel.get("categories_enabled")),
+    }
+
+
+def cmd_techniques(args):
+    """Catalogue des TECHNIQUES GROUPÉ par catégorie (vuln_class), DÉRIVÉ de la table unique — c'est la
+    vue « catalogue + sélection » consommée par `GET /api/techniques` et l'opérateur. Reflète l'état
+    ACTIVÉ (`enabled_for_current_scope`) pour une SÉLECTION par-scope (profil + toggles ; défaut profil
+    bug_bounty) résolue par `techniques.resolve_enabled_kinds` (SOURCE UNIQUE partagée avec l'enforcement).
+    Sortie JSON : {profile, profiles, selection, enabled:[...], groups:{catégorie:[{kind,tools,...}]}}."""
+    sel = _load_technique_selection(args)
+    profile = sel.get("profile") or "bug_bounty"
+    enabled = techniques.resolve_enabled_kinds(
+        profile=profile, techniques_enabled=sel.get("techniques"),
+        categories_enabled=sel.get("categories"))
+    groups = {}
+    for cat, kinds_ in techniques.by_vuln_class().items():
+        rows = []
+        for k in sorted(kinds_):
+            t = techniques.technique_for(k)
+            rows.append({
+                "kind": k, "vuln_class": cat, "tools": list(t.tools),
+                "bug_bounty_eligible": bool(t.bug_bounty_eligible),
+                "pentest_only": bool(t.pentest_only),
+                "mitre": t.mitre or "", "cwe": t.cwe or "",
+                "phase": t.phase or "", "stage": t.stage or "",
+                "enabled_for_current_scope": k in enabled,
+            })
+        groups[cat] = rows
+    out = {"profile": profile, "profiles": list(techniques.PROFILE_NAMES),
+           "selection": sel, "enabled": sorted(enabled),
+           "groups": {c: groups[c] for c in sorted(groups)}}
+    print(json.dumps(out))
     return 0
 
 
@@ -293,6 +378,21 @@ _DOCTOR_HINTS = {
                       "installer trufflehog ou gitleaks ; absent/réseau KO -> finding status=skipped (offline-safe)"),
     "recon.waf":     ("aucune requise — urllib stdlib (en-têtes/cookies/Server) ; wafw00f optionnel",
                       "rien à installer ; wafw00f (binaire local) enrichit le fingerprint s'il est présent"),
+    # LOT SCALE — nouvelles classes de vuln (self-describing) : toutes stdlib sauf xss.stored (browser).
+    "access_control.privesc": ("aucune — urllib stdlib ; exige allow_exploit (atteint une fonction admin-only)",
+                      "rien à installer ; fournir params.accounts (bas-priv + admin, comptes OPÉRATEUR) et params.admin_urls"),
+    "xxe.probe":     ("aucune — urllib stdlib ; mode OOB (collecteur opérateur) OU canari bénin in-band",
+                      "rien à installer ; fournir un collecteur (callback_base + callback_check_url) OU un canari bénin (canary_url + canary_marker)"),
+    "rfi.probe":     ("aucune — urllib stdlib ; ressource marqueur BÉNIGNE hébergée par l'opérateur",
+                      "rien à installer ; fournir params.marker_url (ressource bénigne) + params.marker + params.param"),
+    "ssrf.xspa":     ("aucune — urllib stdlib (différentiel de réponse/timing) ; scan de la cible in-scope",
+                      "rien à installer ; fournir params.param (SSRF-able) ; internal_host défaut = hôte cible / loopback"),
+    "xss.stored":    ("service browser-automation (défaut http://localhost:8080) — rendu DOM requis",
+                      "lancer toolkit/browser-automation (port 8080) ; absent -> finding status=skipped (offline-safe)"),
+    "rce.probe":     ("aucune — urllib stdlib ; PENTEST-ONLY, gardé par le plancher exploit/fort-impact",
+                      "rien à installer ; exige allow_exploit/allow_high_impact armé + params.param"),
+    "business_logic.scan": ("aucune — urllib stdlib ; PENTEST-ONLY, scaffold semi-automatisé",
+                      "rien à installer ; fournir params.probes[<check>] (sonde DEVIS non destructive) pour automatiser, sinon note manual-review"),
 }
 
 
@@ -664,6 +764,8 @@ def build_parser():
     cp.add_argument("--arm", action="store_true"); cp.add_argument("--approve", nargs="*")
     cp.add_argument("--mode", choices=["propose", "auto"], default="propose")
     cp.add_argument("--budget", type=float); cp.add_argument("--exhaustive", action="store_true")
+    cp.add_argument("--auto-pentest", dest="auto_pentest", action="store_true",
+                    help="mode pentest automatisé : balaie TOUTES les techniques ACTIVÉES du scope (profil+toggles) sur la surface découverte, gouverné à l'identique")
     cp.add_argument("--modules", help="liste de kinds (séparés par des virgules) restreignant le plan ; vide = plan complet du cerveau")
     cp.add_argument("--ledger"); cp.add_argument("--report"); cp.add_argument("--purple")
     cp.add_argument("--reason"); cp.add_argument("--memory")
@@ -680,6 +782,10 @@ def build_parser():
     lvk.add_argument("--force", action="store_true", help="ROTATION : écrase une clé existante (invalide les signatures déjà écrites)")
     lvk.set_defaults(fn=cmd_ledger_keygen)
     md = sub.add_parser("modules"); md.add_argument("--json", action="store_true"); md.set_defaults(fn=cmd_modules)
+    tq = sub.add_parser("techniques", help="catalogue des techniques groupé par catégorie + état activé pour une sélection par-scope (JSON)")
+    tq.add_argument("--json", action="store_true", help="sortie JSON (défaut : toujours JSON pour cette commande)")
+    tq.add_argument("--selection", help="sélection par-scope : env:NOM | @fichier | JSON littéral {profile,techniques,categories} ; sinon env FORGE_TECHNIQUE_SELECTION")
+    tq.set_defaults(fn=cmd_techniques)
     dc = sub.add_parser("doctor"); dc.add_argument("--json", action="store_true")
     dc.add_argument("--purple", action="store_true", help="préflight boucle purple : console /health + Plume /api/coverage/detections (lecture seule)")
     dc.add_argument("--timeout", type=float, default=8.0, help="timeout (s) des sondes HTTP du préflight --purple")

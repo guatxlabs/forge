@@ -3712,6 +3712,156 @@ async fn plan(State(app): State<App>, Json(body): Json<Value>) -> impl IntoRespo
     }
 }
 
+// =====================================================================================
+// SÉLECTION DE TECHNIQUES PAR-SCOPE (profil + toggles catégorie/technique) — « au scope retirer des
+// tests automatiques des techniques/outils ». La console persiste l'INTENTION (settings
+// `technique_selection`) ; le MOTEUR l'ENFORCE (forge.techniques.resolve_enabled_kinds — SOURCE UNIQUE :
+// profil ∪ activations − désactivations, DÉRIVÉ de la table, sans câblage par-technique). GET
+// /api/techniques rend le catalogue GROUPÉ PAR CATÉGORIE avec l'état activé du scope ; POST
+// /api/techniques/selection définit la sélection (opérateur/admin, ledgerisé).
+// =====================================================================================
+
+/// Sélection par défaut : profil bug_bounty (liste qualifiante) + aucun toggle. C'est le défaut
+/// documenté quand `settings.technique_selection` est absent/illisible (jamais de valeur inventée
+/// au-delà de ce défaut). Forme : {profile, categories:{cat:bool}, techniques:{kind:bool}}.
+fn default_technique_selection() -> Value {
+    json!({"profile": "bug_bounty", "categories": {}, "techniques": {}})
+}
+
+/// Lit la sélection persistée (`settings.technique_selection`). Fail-soft : absente/illisible/non-objet
+/// -> défaut. Ne verrouille que le mutex DB (ne pas appeler en tenant déjà `self.db()`).
+fn technique_selection_value(app: &App) -> Value {
+    let raw = { let db = app.db(); settings_get(&db, "technique_selection") };
+    match raw.as_deref().map(serde_json::from_str::<Value>) {
+        Some(Ok(v)) if v.is_object() => v,
+        _ => default_technique_selection(),
+    }
+}
+
+/// Valide/normalise une sélection POSTée : {profile?, categories?:{str:bool}, techniques?:{str:bool}}.
+/// `profile` ∈ {bug_bounty,pentest,custom} (défaut bug_bounty). Les clés de toggle sont des noms bien
+/// formés (grammaire [A-Za-z0-9._-], 1..64), les valeurs des booléens, la map bornée (≤256). Les clés
+/// INCONNUES du registre sont TOLÉRÉES : le résolveur moteur les ignore (catégorie inconnue -> vide,
+/// technique inconnue -> filtrée par ∩ technique_kinds) — jamais une capacité fabriquée. Fonction PURE.
+fn validate_technique_selection(body: &Value) -> Result<Value, String> {
+    if !body.is_object() {
+        return Err("corps attendu : objet {profile?, categories?, techniques?}".into());
+    }
+    let profile = match body.get("profile") {
+        None | Some(Value::Null) => "bug_bounty".to_string(),
+        Some(Value::String(s)) => {
+            if !matches!(s.as_str(), "bug_bounty" | "pentest" | "custom") {
+                return Err(format!("profile '{s}' invalide (bug_bounty|pentest|custom)"));
+            }
+            s.clone()
+        }
+        Some(_) => return Err("profile doit être une chaîne".into()),
+    };
+    fn toggles(body: &Value, key: &str) -> Result<Value, String> {
+        match body.get(key) {
+            None | Some(Value::Null) => Ok(Value::Object(serde_json::Map::new())),
+            Some(Value::Object(m)) => {
+                if m.len() > 256 {
+                    return Err(format!("{key} trop volumineux (>256 clés)"));
+                }
+                let mut o = serde_json::Map::new();
+                for (k, v) in m {
+                    if k.is_empty() || k.len() > 64
+                        || !k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                    {
+                        return Err(format!("{key} : clé '{k}' mal formée ([A-Za-z0-9._-], 1..64)"));
+                    }
+                    match v {
+                        Value::Bool(b) => { o.insert(k.clone(), Value::Bool(*b)); }
+                        _ => return Err(format!("{key} : la valeur de '{k}' doit être un booléen")),
+                    }
+                }
+                Ok(Value::Object(o))
+            }
+            Some(_) => Err(format!("{key} doit être un objet {{clé: bool}}")),
+        }
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("profile".into(), Value::String(profile));
+    out.insert("categories".into(), toggles(body, "categories")?);
+    out.insert("techniques".into(), toggles(body, "techniques")?);
+    Ok(Value::Object(out))
+}
+
+/// Spawne `forge.cli techniques --json`, sélection injectée par env `FORGE_TECHNIQUE_SELECTION` (jamais
+/// en argv — cohérent avec le passthrough sûr du reste). DÉRIVÉ du registre côté moteur (SOURCE UNIQUE :
+/// groupement par catégorie + `enabled_for_current_scope` via resolve_enabled_kinds). Renvoie le
+/// catalogue JSON parsé, ou une erreur lisible (moteur indisponible / JSON illisible).
+fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, String> {
+    let out = std::process::Command::new(app.python.as_str())
+        .args(["-m", "forge.cli", "techniques", "--json"])
+        .current_dir(app.pkg_dir.as_str())
+        .env("FORGE_TECHNIQUE_SELECTION", selection.to_string())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("spawn échoué: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "moteur techniques rc={:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(200).collect::<String>()
+        ));
+    }
+    serde_json::from_slice::<Value>(&out.stdout).map_err(|e| format!("JSON illisible: {e}"))
+}
+
+/// GET /api/techniques — LE catalogue des techniques GROUPÉ PAR CATÉGORIE (vuln_class), reflétant l'état
+/// ACTIVÉ pour la sélection par-scope PERSISTÉE (profil + toggles). Chaque entrée porte `kind`, `tools`,
+/// `bug_bounty_eligible`, `pentest_only`, `enabled_for_current_scope`. Lecture (viewer) — la sélection
+/// est visible de tous ; seule sa MUTATION est gouvernée (POST /api/techniques/selection). DÉRIVÉ du
+/// registre côté moteur : un nouveau module @register apparaît AUTOMATIQUEMENT sous sa catégorie.
+async fn techniques_catalog(State(app): State<App>) -> Response {
+    let sel = technique_selection_value(&app);
+    match spawn_techniques_catalog(&app, &sel) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        // fail-soft LISIBLE : le SPA affiche encore le sélecteur de profil même si le moteur est absent.
+        Err(e) => (StatusCode::OK, Json(json!({
+            "error": "techniques_unavailable", "why": e,
+            "profile": sel.get("profile").cloned().unwrap_or(json!("bug_bounty")),
+            "profiles": ["bug_bounty", "pentest", "custom"],
+            "selection": sel, "enabled": [], "groups": {},
+        }))).into_response(),
+    }
+}
+
+/// POST /api/techniques/selection — définit la SÉLECTION de techniques par-scope (profil + toggles
+/// catégorie/technique). OPÉRATEUR/ADMIN (check_operator, FAIL-CLOSED 403 sinon) + LEDGERISÉ
+/// (`console.techniques.selection.set`, attribué à l'acteur individuel). Persiste
+/// `settings.technique_selection` — l'intention est ensuite ENFORCÉE par le moteur à chaque run
+/// (scope.json profile/techniques_enabled/categories_enabled -> resolve_enabled_kinds) : une technique
+/// retirée n'est NI planifiée NI tirée (fail-closed), en plus du scope-guard.
+async fn technique_selection_set(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let sel = match validate_technique_selection(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_selection", "why": e}))).into_response(),
+    };
+    {
+        let db = app.db();
+        if let Err(e) = settings_set(&db, "technique_selection", &sel.to_string()) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
+        }
+    }
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.techniques.selection.set", json!({
+        "actor": actor, "by": "operator", "selection": sel,
+    }));
+    (StatusCode::OK, Json(json!({"ok": true, "selection": sel}))).into_response()
+}
+
 /// Extrait les couples action->verdict de la sortie texte du moteur en mode propose. Sortie :
 /// [{kind, target, verdict, line}], une entrée PAR ACTION réelle (pas par compteur de synthèse).
 ///
@@ -5048,6 +5198,11 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     };
     let budget = body.get("budget").and_then(|v| v.as_f64());
     let exhaustive = body.get("exhaustive").and_then(|v| v.as_bool()).unwrap_or(false);
+    // --auto-pentest : MODE PENTEST AUTOMATISÉ — balaie TOUTES les techniques ACTIVÉES du scope à
+    // travers la surface découverte (recon -> chaînage -> oracles), gouverné À L'IDENTIQUE d'un run
+    // normal (scope-guard, plancher exploit, ledger). Ne CHANGE aucun garde-fou : il ne fait qu'élargir
+    // le PLAN à l'ensemble effectif du scope (le moteur le re-filtre et le ROE le gate). Défaut : false.
+    let auto_pentest = body.get("auto_pentest").and_then(|v| v.as_bool()).unwrap_or(false);
     // `reason`, `arm` et `allow_high_impact`/`high_impact` ont été parsés/évalués plus haut (le gate
     // les exige avant validate_modules). `arm` reste journalisé ; sans opt-in haut-impact honoré il
     // est inerte côté capacité (le scope écrit ci-dessous force allow_*=false dans ce cas).
@@ -5090,6 +5245,20 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // modules choisis par le PLANNER (au-delà de `--modules`). C'est le complément indispensable au filtre
     // `--modules` ci-dessous : ensemble, ils garantissent qu'un connecteur désactivé ne tire jamais.
     let disabled_modules = operator_disabled_modules(&app);
+    // SÉLECTION DE TECHNIQUES PAR-SCOPE — l'intention persistée (profil + toggles catégorie/technique)
+    // est injectée dans le scope.json du run. Le moteur en RÉSOUT l'ensemble effectif
+    // (resolve_enabled_kinds) et l'ENFORCE : une technique hors-profil/désactivée n'est NI planifiée NI
+    // tirée (fail-closed), en plus de la gouvernance connecteur et du scope-guard. Défaut : profil
+    // bug_bounty (liste qualifiante). N'altère AUCUN garde-fou de capacité (allow_* restent dictés par
+    // l'opt-in haut-impact ci-dessus). Une entrée de run explicite `profile`/`categories_enabled`/
+    // `techniques_enabled` dans le corps override la sélection persistée (sinon : la persistée).
+    let selection = match body.get("technique_selection") {
+        Some(v) if v.is_object() => validate_technique_selection(v).unwrap_or_else(|_| technique_selection_value(&app)),
+        _ => technique_selection_value(&app),
+    };
+    let sel_profile = selection.get("profile").cloned().unwrap_or(json!("bug_bounty"));
+    let sel_categories = selection.get("categories").cloned().unwrap_or(json!({}));
+    let sel_techniques = selection.get("techniques").cloned().unwrap_or(json!({}));
     let scope_doc = json!({
         "_comment": scope_comment,
         "mode": app.scope_mode.as_str(),
@@ -5102,6 +5271,10 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         "idor_targets": [],
         "module_params": Value::Object(module_params.clone()),
         "disabled_modules": disabled_modules.clone(),
+        // sélection de techniques par-scope (enforcée par le moteur : profil ∪ activations − désactivations).
+        "profile": sel_profile.clone(),
+        "categories_enabled": sel_categories.clone(),
+        "techniques_enabled": sel_techniques.clone(),
         "notes": scope_notes
     });
     // Chaque cible porte les params par-module dans `attrs.module_params` (le moteur charge déjà
@@ -5139,6 +5312,9 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     ];
     if let Some(b) = budget { argv.push("--budget".into()); argv.push(format!("{b}")); }
     if exhaustive { argv.push("--exhaustive".into()); }
+    // --auto-pentest : balaie l'ensemble EFFECTIF de techniques du scope (profil + toggles). Gouverné à
+    // l'identique (le scope écrit force allow_* selon l'opt-in ; le ROE gate chaque action).
+    if auto_pentest { argv.push("--auto-pentest".into()); }
     // sélection de modules de l'UI -> --modules kind1,kind2 : RESTREINT le plan du moteur aux
     // kinds demandés (déjà validés : ⊆ kinds connus, web_allowed=1, ni exploit ni destructif).
     // Vide -> flag omis -> le moteur garde le plan complet du cerveau (comportement inchangé).
@@ -5229,6 +5405,9 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         "module_params": Value::Object(module_params.clone()),
         // gouvernance connecteur : connecteurs désactivés (skippés au tir, y compris plan planner).
         "disabled_modules": disabled_modules,
+        // sélection de techniques par-scope enforcée par le moteur + mode pentest automatisé.
+        "technique_selection": selection,
+        "auto_pentest": auto_pentest,
         "reason": reason, "arm_requested": arm,
         "high_impact": high_impact,
         "exploit_floor": if high_impact { "lifted via governed high-impact opt-in (allow_exploit=true allow_destructive=true)" } else { "forced allow_exploit=false allow_destructive=false" }
@@ -5241,7 +5420,7 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // superviseur : pompe stdout/stderr -> run_log + SSE ; watchdog timeout ; finalisation atomique.
     spawn_supervisor(app.clone(), child, run_id.clone(), run_dir);
 
-    (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": campaign, "mode": mode, "high_impact": high_impact})))
+    (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": campaign, "mode": mode, "high_impact": high_impact, "auto_pentest": auto_pentest})))
 }
 
 /// Valide une CHAÎNE issue des params par-module avant de l'écrire dans scope.json/targets.json.
@@ -8138,6 +8317,10 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/detection/source", get(detection_source_get).post(detection_source_set))
         .route("/api/modules", get(modules))
         .route("/api/modules/refresh", post(modules_refresh))
+        // SÉLECTION DE TECHNIQUES PAR-SCOPE — catalogue groupé par catégorie (lecture) + mutation
+        // gouvernée (opérateur/admin, ledgerisée) de la sélection (profil + toggles catégorie/technique).
+        .route("/api/techniques", get(techniques_catalog))
+        .route("/api/techniques/selection", post(technique_selection_set))
         // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
         // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
         // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
@@ -11314,6 +11497,153 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             .route("/api/modules", get(modules))
             .route("/api/modules/refresh", post(modules_refresh))
             .route("/api/modules/:kind", post(module_governance));
+    }
+
+    // =============================================================================================
+    // SÉLECTION DE TECHNIQUES PAR-SCOPE (profil + toggles catégorie/technique) — validation, persistance,
+    // catalogue groupé par catégorie (spawn moteur), endpoint gouverné (opérateur/admin) + ledgerisé.
+    // =============================================================================================
+
+    fn conn_info() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("127.0.0.1:5555".parse().unwrap())
+    }
+
+    /// Aplati {groups:{cat:[{kind,enabled_for_current_scope}]}} en une map kind -> activé.
+    fn flatten_enabled(body: &Value) -> std::collections::HashMap<String, bool> {
+        let mut m = std::collections::HashMap::new();
+        if let Some(groups) = body.get("groups").and_then(|g| g.as_object()) {
+            for rows in groups.values() {
+                for r in rows.as_array().into_iter().flatten() {
+                    if let (Some(k), Some(e)) = (
+                        r.get("kind").and_then(|v| v.as_str()),
+                        r.get("enabled_for_current_scope").and_then(|v| v.as_bool()),
+                    ) {
+                        m.insert(k.to_string(), e);
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    /// [sélection pure] validate_technique_selection : profils fermés, toggles typés bool + clés bien
+    /// formées, défauts, clés INCONNUES tolérées (le résolveur moteur les ignore — pas de capacité forgée).
+    #[test]
+    fn validate_technique_selection_grammar_and_defaults() {
+        // corps vide -> défaut profil bug_bounty + toggles vides.
+        let v = validate_technique_selection(&json!({})).unwrap();
+        assert_eq!(v["profile"], "bug_bounty");
+        assert_eq!(v["categories"], json!({}));
+        assert_eq!(v["techniques"], json!({}));
+        // profils FERMÉS.
+        for p in ["bug_bounty", "pentest", "custom"] {
+            assert_eq!(validate_technique_selection(&json!({"profile": p})).unwrap()["profile"], p);
+        }
+        assert!(validate_technique_selection(&json!({"profile": "root"})).is_err(), "profil inconnu refusé");
+        // toggles : bool requis, clé bien formée ; clé inconnue TOLÉRÉE (résolveur moteur l'ignore).
+        let v = validate_technique_selection(&json!({"categories": {"SQLi": false}, "techniques": {"rce.probe": true}})).unwrap();
+        assert_eq!(v["categories"]["SQLi"], false);
+        assert_eq!(v["techniques"]["rce.probe"], true);
+        assert!(validate_technique_selection(&json!({"categories": {"SQLi": "no"}})).is_err(), "valeur non-bool refusée");
+        assert!(validate_technique_selection(&json!({"categories": {"bad key": true}})).is_err(), "clé mal formée refusée");
+        assert!(validate_technique_selection(&json!({"techniques": []})).is_err(), "techniques doit être un objet");
+    }
+
+    /// [sélection persistance] technique_selection_value : défaut bug_bounty si absent ; round-trip après
+    /// settings_set ; valeur illisible -> défaut (fail-soft, jamais de valeur inventée).
+    #[test]
+    fn technique_selection_value_default_and_round_trip() {
+        let path = tmp_path("forge-test-techsel");
+        let app = test_app(&path);
+        assert_eq!(technique_selection_value(&app)["profile"], "bug_bounty", "absent -> défaut bug_bounty");
+        {
+            let db = app.db();
+            settings_set(&db, "technique_selection",
+                &json!({"profile":"pentest","categories":{"SQLi":false},"techniques":{}}).to_string()).unwrap();
+        }
+        let v = technique_selection_value(&app);
+        assert_eq!(v["profile"], "pentest");
+        assert_eq!(v["categories"]["SQLi"], false);
+        { let db = app.db(); settings_set(&db, "technique_selection", "pas du json").unwrap(); }
+        assert_eq!(technique_selection_value(&app)["profile"], "bug_bounty", "illisible -> défaut (fail-soft)");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [sélection endpoint] POST /api/techniques/selection : OPÉRATEUR/ADMIN-gated (viewer -> 403 SANS
+    /// mutation) + LEDGERISÉ (`console.techniques.selection.set` attribuée à l'acteur) + persisté.
+    #[tokio::test]
+    async fn technique_selection_endpoint_operator_gated_and_ledgered() {
+        let path = tmp_path("forge-test-techsel-ep");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+
+        // viewer -> 403 (fail-closed) ET aucune persistance.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&vtok),
+            Json(json!({"profile": "pentest"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
+        { let db = app.db(); assert!(settings_get(&db, "technique_selection").is_none(), "un refus ne persiste rien"); }
+
+        // operator -> 200 + persistance + ledger attribué.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"profile": "pentest", "categories": {"SQLi": false}}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "operator autorisé");
+        let stored = { let db = app.db(); settings_get(&db, "technique_selection").unwrap() };
+        let sv: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(sv["profile"], "pentest");
+        assert_eq!(sv["categories"]["SQLi"], false);
+        let entries = read_ledger_lines(&path);
+        let last = entries.last().unwrap();
+        assert_eq!(last["kind"], "console.techniques.selection.set", "mutation ledgerisée");
+        assert_eq!(last["detail"]["actor"], "oo", "attribuée à l'acteur opérateur");
+        assert_eq!(last["detail"]["selection"]["profile"], "pentest");
+
+        // profil invalide -> 400.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"profile": "root"}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "profil invalide -> 400");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [catalogue] GET /api/techniques : spawne le moteur, GROUPE par catégorie et reflète l'état activé
+    /// du scope. Défaut (bug_bounty) : rce.probe désactivé, sqli.probe activé. Une sélection persistée
+    /// (pentest) réactive rce.probe. DÉRIVÉ du registre (SOURCE UNIQUE) — nécessite python3 + forge (..).
+    #[tokio::test]
+    async fn techniques_catalog_groups_by_category_and_reflects_scope() {
+        let path = tmp_path("forge-test-techcat");
+        let app = test_app(&path);
+        // défaut (aucune sélection persistée -> bug_bounty).
+        let resp = techniques_catalog(State(app.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await;
+        assert!(body.get("error").is_none(), "catalogue indisponible (spawn moteur): {body:?}");
+        assert_eq!(body["profile"], "bug_bounty");
+        let groups = body["groups"].as_object().expect("groups objet");
+        assert!(groups.contains_key("SQLi") && groups.contains_key("IDOR"), "groupé par catégorie (SQLi/IDOR)");
+        let state = flatten_enabled(&body);
+        assert_eq!(state.get("rce.probe"), Some(&false), "rce.probe pentest-only -> désactivé en bug_bounty");
+        assert_eq!(state.get("sqli.probe"), Some(&true), "sqli.probe bug_bounty -> activé");
+        // chaque ligne porte tools + éligibilité.
+        let sqli = groups["SQLi"].as_array().unwrap().iter().find(|r| r["kind"] == "sqli.probe").unwrap();
+        assert!(sqli.get("tools").is_some() && sqli.get("bug_bounty_eligible").is_some(),
+            "chaque technique porte tools + éligibilité BB");
+
+        // sélection persistée pentest -> rce.probe activé (reflète le scope courant).
+        {
+            let db = app.db();
+            settings_set(&db, "technique_selection",
+                &json!({"profile":"pentest","categories":{},"techniques":{}}).to_string()).unwrap();
+        }
+        let resp = techniques_catalog(State(app.clone())).await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["profile"], "pentest");
+        assert_eq!(flatten_enabled(&body).get("rce.probe"), Some(&true), "pentest -> rce.probe activé");
+        let _ = std::fs::remove_file(&path);
     }
 
     // =============================================================================================
