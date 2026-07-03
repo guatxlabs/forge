@@ -208,6 +208,10 @@
          enabled=true) ET que le caller est platform-admin (applyTenancy le dé-masque). Le serveur reste
          l'autorité (routes gatées enterprise + platform-admin -> 403) — masquage = défense en profondeur. -->
     <a href="#tenants" id="nav-tenants" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg> <span>Tenants</span></a>
+    <!-- IDENTITY / SSO : lien affiché UNIQUEMENT quand l'identité ENTERPRISE est active (whoami.enterprise
+         sso|scim=true) ET que le caller est admin (applyIdentityUi le dé-masque). Le serveur reste
+         l'autorité (routes gatées flag + check_admin -> 404/403) — masquage = défense en profondeur. -->
+    <a href="#identity" id="nav-identity" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/><path d="M5 21a7 7 0 0 1 14 0"/></svg> <span>Identité / SSO</span></a>
   </nav>
 <main>
   <!-- VUE D'ENSEMBLE -->
@@ -648,6 +652,72 @@
     <div id="tenants-list"><div class="muted">chargement…</div></div>
   </section>
 
+  <!-- IDENTITY / SSO (ENTERPRISE, flag-gated) — vue affichée UNIQUEMENT quand whoami.enterprise.sso|scim est
+       vrai ET caller admin (applyIdentityUi). Configure : (1) le provider OIDC (issuer/client_id/secret
+       write-only/redirect allowlist), (2) le token SCIM (générer/roter — affiché UNE fois), (3) le mapping
+       groupe IdP -> {rôle, tenant/grant}. Le serveur reste l'autorité (routes flag+admin -> 404/403). En
+       community (flag OFF) : aucun lien, aucune vue, login LOCAL inchangé. -->
+  <section id="identity" class="card span2" aria-labelledby="id-h">
+    <div class="panelhead">
+      <h2 id="id-h">Identité / SSO <span class="badge" title="ENTERPRISE — SSO OIDC + SCIM + RBAC avancé">enterprise</span></h2>
+      <span class="qbar"><button id="identity-reload" class="k-theme" type="button" title="Rafraîchir la configuration identité">Rafraîchir</button></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Fédération d'identité <b>ENTERPRISE</b> : connexion <b>OIDC (SSO)</b>, provisioning <b>SCIM 2.0</b>, et <b>RBAC avancé</b> (mapping groupe IdP → rôle Forge + grant tenant). Une identité SSO/SCIM n'obtient <b>que</b> les droits que son mapping de groupe confère (<b>moindre privilège</b>, fail-closed) — <b>jamais super-admin via SSO</b>. Les secrets (<code>client_secret</code>, token SCIM) sont <b>write-only</b> : jamais réaffichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, comptes <b>locaux</b> inchangés.</p>
+
+    <!-- (1) PROVIDER OIDC -->
+    <div id="id-oidc-wrap" class="id-card" hidden>
+      <h3 class="id-h3">Fournisseur OIDC (SSO) <span id="id-oidc-secret-badge" class="badge"></span></h3>
+      <form id="id-oidc-form" class="id-form" autocomplete="off">
+        <label class="login-f"><span>Issuer (URL du provider)</span><input id="id-oidc-issuer" type="url" placeholder="http://idp.interne/realms/forge" required></label>
+        <label class="login-f"><span>client_id</span><input id="id-oidc-clientid" type="text" placeholder="forge-console" required></label>
+        <label class="login-f"><span>client_secret <span class="muted">(write-only — laisser vide pour conserver)</span></span><input id="id-oidc-secret" type="password" placeholder="•••••• (inchangé si vide)" autocomplete="new-password"></label>
+        <label class="login-f"><span>redirect_uri (callback console)</span><input id="id-oidc-redirect" type="url" placeholder="http://console.interne/api/sso/callback" required></label>
+        <label class="login-f"><span>Redirections post-login autorisées (allowlist, une par ligne)</span><textarea id="id-oidc-allow" rows="2" placeholder="/&#10;http://console.interne/"></textarea></label>
+        <div class="id-row">
+          <label class="login-f"><span>Provisioning</span><select id="id-oidc-prov"><option value="match">match (compte requis)</option><option value="auto">auto (créer le compte)</option></select></label>
+          <label class="login-f"><span>Claim identité</span><select id="id-oidc-claim"><option value="email">email</option><option value="sub">sub</option></select></label>
+          <label class="login-f"><span>Rôle par défaut (auto-provision)</span><select id="id-oidc-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+        </div>
+        <div id="id-oidc-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Enregistrer le provider OIDC</button>
+      </form>
+    </div>
+
+    <!-- (2) TOKEN SCIM -->
+    <div id="id-scim-wrap" class="id-card" hidden>
+      <h3 class="id-h3">Provisioning SCIM 2.0 <span id="id-scim-token-badge" class="badge"></span></h3>
+      <p class="muted" style="margin:0 0 8px">Endpoint SCIM : <code id="id-scim-endpoint">/scim/v2</code> — authentifié par un <b>bearer token</b> (haché au repos, comparé à temps constant). Le token brut n'est affiché <b>qu'une fois</b> à la génération : copiez-le dans l'IdP immédiatement.</p>
+      <div class="id-row">
+        <label class="login-f"><span>Rôle par défaut des comptes provisionnés</span><select id="id-scim-role"><option value="viewer">viewer</option><option value="operator">operator</option></select></label>
+      </div>
+      <div class="id-row">
+        <button id="id-scim-rotate" class="k-theme" type="button" title="Génère un nouveau token SCIM (affiché une seule fois)">Générer / Roter le token</button>
+        <button id="id-scim-revoke" class="k-theme" type="button" title="Révoque le token SCIM (l'IdP ne pourra plus provisionner)">Révoquer</button>
+        <button id="id-scim-save-role" class="k-theme" type="button" title="Enregistre le rôle par défaut SCIM">Enregistrer le rôle</button>
+      </div>
+      <div id="id-scim-token-once" class="id-token-once" hidden>
+        <span class="muted">Nouveau token (copiez-le maintenant, non réaffichable) :</span>
+        <code id="id-scim-token-val" class="id-token-val"></code>
+        <button id="id-scim-token-copy" class="k-theme" type="button">Copier</button>
+      </div>
+    </div>
+
+    <!-- (3) MAPPING GROUPE -> RÔLE / GRANT (RBAC avancé) -->
+    <div id="id-map-wrap" class="id-card" hidden>
+      <h3 class="id-h3">RBAC avancé — mapping groupe IdP → rôle / grant</h3>
+      <p class="muted" style="margin:0 0 8px">Un groupe IdP (claim <code>groups</code> côté SSO, ou nom de groupe SCIM) est mappé vers un rôle console (<code>viewer|operator|admin</code>) et, optionnellement, un <b>grant tenant</b> (E1). Moindre privilège : un groupe non mappé ne confère <b>rien</b> ; <b>jamais super-admin</b>. Côté SCIM le rôle est plafonné à <code>operator</code>.</p>
+      <div id="id-map-list"><div class="muted">chargement…</div></div>
+      <form id="id-map-form" class="id-form id-map-add" autocomplete="off">
+        <label class="login-f"><span>Groupe IdP</span><input id="id-map-group" type="text" placeholder="Forge-Operators" required></label>
+        <label class="login-f"><span>Rôle</span><select id="id-map-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+        <label class="login-f"><span>tenant_id <span class="muted">(optionnel)</span></span><input id="id-map-tenant" type="number" min="1" placeholder="—"></label>
+        <label class="login-f"><span>Rôle tenant <span class="muted">(optionnel)</span></span><select id="id-map-trole"><option value="">— (dérivé du rôle)</option><option value="tenant_viewer">tenant_viewer</option><option value="tenant_operator">tenant_operator</option><option value="tenant_admin">tenant_admin</option></select></label>
+        <div id="id-map-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Ajouter / Mettre à jour le mapping</button>
+      </form>
+    </div>
+  </section>
+
   <!-- ADMINISTRATION — connecteurs (gouvernance, réservé role=admin). Écriture via POST /api/modules/:kind
        (check_admin, 403 sinon), attribuée + ledgerisée. Désactiver un connecteur l'empêche RÉELLEMENT de
        tirer (scope.json disabled_modules + filtre --modules), y compris les modules choisis par le planner. -->
@@ -710,6 +780,13 @@
     <label class="login-f"><span>Mot de passe</span><input id="login-pass" name="password" type="password" autocomplete="current-password" required placeholder="mot de passe du compte"></label>
     <div id="login-err" class="login-err" role="alert" hidden></div>
     <button id="login-submit" type="submit" class="login-btn">Se connecter</button>
+    <!-- SSO (ENTERPRISE) : bouton affiché UNIQUEMENT quand GET /api/setup/state répond sso.enabled=true
+         (flag ON + provider OIDC configuré). Clique -> GET /api/sso/login (Authorization-Code + PKCE). En
+         community (flag OFF / non configuré) : caché => écran de login LOCAL byte-identique. -->
+    <div id="login-sso" hidden>
+      <div class="login-sso-sep"><span>ou</span></div>
+      <button id="login-sso-btn" type="button" class="login-btn login-sso-btn">Se connecter avec le SSO</button>
+    </div>
     <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Comptes provisionnés côté serveur (<code>forge-console useradd</code>).</p>
   </form>
 </div>

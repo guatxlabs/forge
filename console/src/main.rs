@@ -49,6 +49,24 @@ mod reports;
 // it (tenancy::enabled() false => single implicit tenant #1, byte-identical). Wired as its OWN module
 // (minimal main.rs delta) so the open core does not depend on it. See COMMUNITY_VS_ENTERPRISE.md.
 mod tenancy;
+// ENTERPRISE (separable, flag-gated) — OIDC SSO login. Community (default) build never engages it
+// (sso::enabled() false => LOCAL accounts only, byte-identical; every /api/sso/* route 404s). Wired as
+// its OWN module (minimal main.rs delta = this line + one route merge) so the open core does not depend
+// on it. Behind the runtime flag FORGE_ENTERPRISE_SSO / enterprise.sso. See COMMUNITY_VS_ENTERPRISE.md.
+mod sso;
+// ENTERPRISE (separable, flag-gated) — SCIM 2.0 provisioning (automated user/group provisioning from an
+// IdP: Okta/Azure AD). Community (default) build never engages it (scim::enabled() false => LOCAL accounts
+// only; every /scim/* + /api/scim/config route 404s). Wired as its OWN module (minimal main.rs delta =
+// this line + one route merge). Authenticated by a SCIM BEARER TOKEN (hashed at rest, constant-time), NOT
+// a session. Behind FORGE_ENTERPRISE_SCIM / enterprise.scim (or the SSO flag). See COMMUNITY_VS_ENTERPRISE.md.
+mod scim;
+// ENTERPRISE (separable, flag-gated) — advanced RBAC: the CONFIGURABLE IdP-group -> {role, tenant grant}
+// mapping consulted by BOTH the SSO login (`groups` claim) and SCIM group membership. Community (default)
+// build never engages it (rbac::enabled() = sso||scim, both OFF => role assignment stays admin-only,
+// byte-identical; every /api/rbac/* route 404s, the mapping table is never created). FAIL-CLOSED /
+// least-privilege: an SSO/SCIM identity gets ONLY what its group mapping confers, NEVER super-admin. Wired
+// as its OWN module (minimal main.rs delta = this line + one route merge). See COMMUNITY_VS_ENTERPRISE.md.
+mod rbac;
 
 // Version produit — SOURCE DE VÉRITÉ UNIQUE : le fichier `VERSION` à la racine du repo, lu à la
 // COMPILATION (`include_str!`). Le même fichier alimente le moteur Python (forge/__init__.py) et
@@ -1262,6 +1280,16 @@ fn attribution_login(app: &App, headers: &HeaderMap) -> String {
 /// activer/masquer les actions C2 selon le rôle). Résout la session (compte individuel) ou le repli
 /// bootstrap env-hash. `authenticated:false` si aucune identité (dev-open anonyme).
 async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
+    // ENTERPRISE flags for the SPA (additive; all false in the community default => byte-identical UI).
+    // Drives whether the enterprise views/nav render at all (server stays the authority via each module's
+    // own flag + admin gate). Exposing "engaged or not" is not a secret (the login page already reveals
+    // SSO availability). NEVER carries a client_secret / SCIM token.
+    let enterprise = json!({
+        "tenancy": tenancy::enabled(&app),
+        "sso": sso::enabled(&app),
+        "scim": scim::enabled(&app),
+        "rbac": rbac::enabled(&app),
+    });
     match resolve_identity(&app, &headers) {
         Some(id) => Json(json!({
             "authenticated": true,
@@ -1269,8 +1297,9 @@ async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse
             "role": id.role,
             "is_operator": id.is_operator,
             "via_session": id.via_session, // false => repli bootstrap (hash env), true => compte individuel
+            "enterprise": enterprise,
         })),
-        None => Json(json!({"authenticated": false, "login": Value::Null, "role": Value::Null, "is_operator": false, "via_session": false})),
+        None => Json(json!({"authenticated": false, "login": Value::Null, "role": Value::Null, "is_operator": false, "via_session": false, "enterprise": enterprise})),
     }
 }
 
@@ -1947,6 +1976,10 @@ async fn setup_state(State(app): State<App>) -> impl IntoResponse {
         "provisioned": provisioned,
         "needs_setup": !provisioned,
         "capabilities": { "sqlcipher": cfg!(feature = "encryption") },
+        // ENTERPRISE (flag-gated) — whether an interactive OIDC SSO login is offered. false in the
+        // community default (flag OFF or unconfigured) => the login screen shows NO SSO button, LOCAL
+        // login unchanged. Not a secret (only "SSO is available", like the button itself).
+        "sso": { "enabled": sso::login_available(&app) },
     }))
 }
 
@@ -9738,6 +9771,24 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // IMPORT DE DONNÉES (pré-provision) : migre un install existant vers cette base + ledger.
         // PUBLIC mais 409 une fois provisionné (comme /api/setup). UX primaire = CLI `migrate`.
         .route("/api/setup/migrate", post(setup_migrate))
+        // ENTERPRISE (separable, flag-gated) — OIDC SSO (console/src/sso.rs). Merged in the OUTER router
+        // (NOT `protected`) because /api/sso/login and /api/sso/callback must be reachable WITHOUT a prior
+        // session (that is the point of SSO) — they self-gate on the flag + config. The admin-only
+        // /api/sso/config routes enforce check_admin internally (fail-closed). Every route 404s while the
+        // flag is OFF => community build shows NO SSO surface and LOCAL login is byte-identical. Under
+        // host_guard like everything else.
+        .merge(sso::routes())
+        // ENTERPRISE (separable, flag-gated) — SCIM 2.0 provisioning (console/src/scim.rs). Merged in the
+        // OUTER router (NOT `protected`) because the IdP has NO session — /scim/v2/* authenticates with a
+        // SCIM BEARER TOKEN internally (hashed at rest, constant-time, fail-closed 401). The admin-only
+        // /api/scim/config route enforces check_admin internally. Every route 404s while the flag is OFF =>
+        // community build shows NO SCIM surface and LOCAL accounts are byte-identical. Under host_guard.
+        .merge(scim::routes())
+        // ENTERPRISE (separable, flag-gated) — advanced RBAC config (console/src/rbac.rs). The admin-only
+        // /api/rbac/group-map routes enforce check_admin internally (fail-closed). Every route 404s while
+        // BOTH the SSO and SCIM flags are OFF => community build shows NO advanced-RBAC surface and role
+        // assignment stays admin-only exactly as today. Under host_guard like everything else.
+        .merge(rbac::routes())
         .merge(protected)
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app)
