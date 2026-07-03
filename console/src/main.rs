@@ -14,7 +14,7 @@ use guatx_core::soql; // cœur partagé (extrait) — remplace l'ancien `mod soq
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
@@ -27,6 +27,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeDir;
@@ -451,6 +452,23 @@ impl App {
     fn auth_required(&self) -> bool {
         self.auth_required.load(Ordering::SeqCst)
     }
+
+    /// Vrai s'il existe AU MOINS un compte ADMIN activé (`role='admin' AND disabled=0`). Distinct de
+    /// any_enabled_user (qui compte TOUT rôle) : le wizard de 1er déploiement considère la console
+    /// « provisionnée » dès qu'un ADMIN peut administrer (pas un simple viewer). Requête légère
+    /// (`LIMIT 1`). Ne verrouille QUE le mutex DB (ne pas appeler en tenant déjà `self.db()`).
+    fn any_enabled_admin(&self) -> bool {
+        let db = self.db();
+        db.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", [], |_| Ok(())).is_ok()
+    }
+
+    /// La console est-elle déjà PROVISIONNÉE ? Vrai si un admin activé existe en base OU si un hash
+    /// d'amorçage env est posé (`FORGE_CONSOLE_PASS_HASH`). Pilote l'auto-désactivation du wizard de
+    /// 1er déploiement : `POST /api/setup` se ferme (409) dès que `provisioned()` est vrai. Ne pas
+    /// appeler en tenant déjà `self.db()` (any_enabled_admin reverrouille le mutex).
+    fn provisioned(&self) -> bool {
+        !self.pass_hash.is_empty() || self.any_enabled_admin()
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -598,23 +616,160 @@ fn check_operator_env(app: &App, headers: &HeaderMap) -> bool {
     verify_pw(supplied, &app.operator_hash)
 }
 
-/// Authz C2 (run/cancel) — FAIL-CLOSED. Vrai si :
-///   1) une SESSION valide porte un rôle operator|admin (compte individuel) ; OU
-///   2) RÉTRO-COMPAT : la preuve par hash env (X-Forge-Operator) matche (compte 'bootstrap'/admin).
-///
-/// Un viewer (session role=viewer) ne passe JAMAIS. Sans session ni hash env -> refusé.
-fn check_operator(app: &App, headers: &HeaderMap) -> bool {
-    // 1) compte individuel en session (operator/admin) — l'identité réelle prime.
-    if let Some(id) = resolve_session_identity(app, headers) {
-        if id.is_operator {
-            return true;
+/// Test d'APPARTENANCE d'une IP à un CIDR (ou à une IP exacte quand il n'y a pas de `/`). std-only
+/// (u32/u128 + masque de préfixe, aucune dépendance). Familles hétérogènes (v4 vs v6) -> false.
+/// Réseau/préfixe malformé ou hors borne -> false (fail-closed pour CETTE entrée). Fonction PURE.
+fn ip_in_cidr(ip: &IpAddr, cidr: &str) -> bool {
+    let cidr = cidr.trim();
+    let (net, prefix): (&str, Option<u32>) = match cidr.split_once('/') {
+        Some((n, p)) => match p.trim().parse::<u32>() {
+            Ok(v) => (n.trim(), Some(v)),
+            Err(_) => return false, // préfixe non numérique -> entrée rejetée (fail-closed)
+        },
+        None => (cidr, None), // pas de '/' -> comparaison d'IP exacte
+    };
+    let net_ip: IpAddr = match net.parse() {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    match (ip, net_ip) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let bits = prefix.unwrap_or(32);
+            if bits > 32 {
+                return false;
+            }
+            let mask: u32 = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+            (u32::from(*a) & mask) == (u32::from(b) & mask)
         }
-        // session présente mais rôle viewer -> NE PAS retomber sur le hash env (un viewer authentifié
-        // ne doit pas escalader via un secret partagé). Fail-closed pour ce porteur.
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let bits = prefix.unwrap_or(128);
+            if bits > 128 {
+                return false;
+            }
+            let mask: u128 = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
+            (u128::from(*a) & mask) == (u128::from(b) & mask)
+        }
+        _ => false, // v4 vs v6 : jamais dans le même réseau
+    }
+}
+
+/// IP client EFFECTIVE pour la politique opérateur source-CIDR. Par défaut = IP du pair TCP
+/// (ConnectInfo). On n'honore le DERNIER hop de `X-Forwarded-For` QUE si le pair TCP réel `peer` est
+/// LUI-MÊME un proxy de confiance, c.-à-d. tombe dans l'un des `trusted_proxy_cidrs`. Sinon (client
+/// direct qui court-circuite le vrai proxy, pair hors CIDR, ou pair inconnu) le XFF est INTÉGRALEMENT
+/// IGNORÉ et on retombe FAIL-CLOSED sur `peer` — sans quoi un client se connectant directement à
+/// l'origine pourrait forger `X-Forwarded-For: <IP-dans-l'allowlist>` et usurper la politique source.
+/// La liste `trusted_proxy_cidrs` vide => aucun proxy de confiance => XFF toujours ignoré.
+/// Fonction PURE (testable sans connexion réelle).
+fn effective_client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted_proxy_cidrs: &[String]) -> Option<IpAddr> {
+    if let Some(p) = peer {
+        // Le pair TCP DOIT être un proxy de confiance pour qu'on accorde foi au XFF qu'il a posé.
+        if !trusted_proxy_cidrs.is_empty() && trusted_proxy_cidrs.iter().any(|c| ip_in_cidr(&p, c)) {
+            if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+                if let Some(last) = xff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).last() {
+                    if let Ok(ip) = last.parse::<IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+            // pair = proxy de confiance mais aucun XFF exploitable -> repli sur le pair (le proxy).
+        }
+    }
+    // pair non-proxy (client direct), hors CIDR, ou inconnu -> XFF IGNORÉ, fail-closed sur le pair.
+    peer
+}
+
+/// Test de VALIDITÉ d'une entrée CIDR (ou IP exacte sans `/`) selon les mêmes critères que
+/// `ip_in_cidr` : IP v4/v6 parsable + préfixe numérique dans les bornes de la famille. Sert à
+/// distinguer un `trusted_proxy` réellement configuré (au moins un CIDR valide) d'une valeur héritée
+/// « truthy » non-CIDR (ex. "1", "true") qui NE doit PAS valoir « tout faire confiance ». Fonction PURE.
+fn cidr_is_valid(cidr: &str) -> bool {
+    let cidr = cidr.trim();
+    match cidr.split_once('/') {
+        Some((n, p)) => match p.trim().parse::<u32>() {
+            Ok(bits) => match n.trim().parse::<IpAddr>() {
+                Ok(IpAddr::V4(_)) => bits <= 32,
+                Ok(IpAddr::V6(_)) => bits <= 128,
+                Err(_) => false,
+            },
+            Err(_) => false,
+        },
+        None => cidr.parse::<IpAddr>().is_ok(),
+    }
+}
+
+/// Parse le réglage `settings.trusted_proxy` en une LISTE de CIDRs de proxies de confiance. Accepte
+/// (dans l'ordre) : (1) un tableau JSON de chaînes CIDR `["10.0.0.0/24","..."]` ; (2) une liste
+/// séparée par des virgules `10.0.0.0/24, 172.16.0.0/12` ; (3) un CIDR unique. Chaque entrée est
+/// VALIDÉE (`cidr_is_valid`) ; les entrées invalides sont écartées. RÉTRO-COMPAT / MIGRATION : une
+/// valeur héritée « truthy » non-CIDR (ex. "1", "true", "yes") ne produit AUCUN CIDR valide -> liste
+/// VIDE -> AUCUN proxy de confiance (repli fail-closed sur le pair). On ne conserve JAMAIS
+/// silencieusement l'ancien comportement « boolean = fais confiance à tout XFF ». Fonction PURE.
+fn parse_trusted_proxy_cidrs(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let candidates: Vec<String> = match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Array(arr)) => arr.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).collect(),
+        // pas un tableau JSON (chaîne "1", bool true, CSV, CIDR nu…) -> split CSV / valeur unique.
+        _ => raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+    };
+    candidates.into_iter().filter(|c| cidr_is_valid(c)).collect()
+}
+
+/// POLITIQUE OPÉRATEUR source-CIDR — OPT-IN, fail-closed UNIQUEMENT quand configurée. Lit
+/// `settings.operator_policy.source_cidrs` : si absent/vide -> AUCUNE restriction (true, défaut = none,
+/// zéro valeur codée en dur). Sinon l'IP client effective (cf. effective_client_ip) DOIT tomber dans
+/// l'un des CIDRs, faute de quoi l'action opérateur est refusée. Politique active + IP indéterminée
+/// (aucun pair, aucun XFF) -> refus (fail-closed). Ne restreint QUE le C2 opérateur (appelée depuis
+/// check_operator) — jamais l'admin ni le viewer.
+fn operator_source_allowed(app: &App, headers: &HeaderMap, peer: Option<IpAddr>) -> bool {
+    let (cidrs, trusted_proxy_cidrs) = {
+        let db = app.db();
+        let cidrs: Vec<String> = settings_get(&db, "operator_policy")
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("source_cidrs").and_then(|c| c.as_array()).cloned())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        // `trusted_proxy` = CIDR(s) des proxies de confiance (cf. parse_trusted_proxy_cidrs). Un XFF
+        // n'est honoré que si le pair TCP tombe dans l'un d'eux ; sinon repli fail-closed sur le pair.
+        let trusted_proxy_cidrs = settings_get(&db, "trusted_proxy")
+            .map(|s| parse_trusted_proxy_cidrs(&s))
+            .unwrap_or_default();
+        (cidrs, trusted_proxy_cidrs)
+    };
+    if cidrs.is_empty() {
+        return true; // aucune contrainte source configurée -> défaut = aucune restriction
+    }
+    match effective_client_ip(peer, headers, &trusted_proxy_cidrs) {
+        Some(ip) => cidrs.iter().any(|c| ip_in_cidr(&ip, c)),
+        None => false, // politique active mais IP client indéterminée -> fail-closed
+    }
+}
+
+/// Authz C2 (run/cancel) — FAIL-CLOSED. Vrai si :
+///   1) une SESSION valide porte un rôle operator|admin (compte individuel) OU la preuve par hash env
+///      (X-Forge-Operator) matche (compte 'bootstrap'/admin) — un viewer en session ne passe JAMAIS ;
+///   2) ET la politique source-CIDR (opt-in) l'autorise : si `settings.operator_policy.source_cidrs`
+///      est configuré, l'IP client (`peer`, ou dernier hop XFF UNIQUEMENT si le pair TCP est lui-même
+///      dans un CIDR de `settings.trusted_proxy`) doit être dans l'allowlist ; non configuré ->
+///      aucune restriction (défaut = none).
+///
+/// `peer` = IP du pair TCP (ConnectInfo) fournie par le handler ; None dans les tests/harness où elle
+/// est simulée. La contrainte source ne s'applique QU'AU C2 opérateur — jamais admin/viewer.
+fn check_operator(app: &App, headers: &HeaderMap, peer: Option<IpAddr>) -> bool {
+    // 1) AUTHN opérateur : l'identité réelle en session prime (viewer -> refus, pas de repli env),
+    //    sinon repli rétro-compat par hash env.
+    let authed = match resolve_session_identity(app, headers) {
+        Some(id) => id.is_operator,
+        None => check_operator_env(app, headers),
+    };
+    if !authed {
         return false;
     }
-    // 2) repli rétro-compat : preuve opérateur par hash env.
-    check_operator_env(app, headers)
+    // 2) contrainte source-CIDR (opt-in, fail-closed quand configurée).
+    operator_source_allowed(app, headers, peer)
 }
 
 /// Réponse standard d'un refus C2 (403). Distingue « non provisionné » (501-like message) de
@@ -1487,6 +1642,164 @@ async fn login(State(app): State<App>, Json(body): Json<Value>) -> Response {
         .into_response()
 }
 
+// =====================================================================================
+// WIZARD DE 1er DÉPLOIEMENT (self-deploy) — provisionner une install fraîche DEPUIS LE NAVIGATEUR.
+//
+// Deux routes PUBLIQUES (hors auth_guard, mais sous host_guard anti-rebinding) :
+//   - GET  /api/setup/state : sonde d'état (provisioned/needs_setup/capabilities) — le SPA l'appelle
+//     au boot pour décider s'il affiche le wizard.
+//   - POST /api/setup       : AUTO-DÉSACTIVANTE — provisionne le PREMIER admin puis se ferme (409).
+//
+// PRINCIPE : ZÉRO défaut codé en dur. Chaque champ optionnel (operator_policy/detection_source/
+// session_ttl) n'est persisté QUE s'il est fourni ; absent = rien stocké. La gate d'auth s'engage sur
+// l'état DB (recompute_auth_required) dès qu'un admin activé existe.
+// =====================================================================================
+
+/// GET /api/setup/state — PUBLIC. `provisioned` = un admin ACTIVÉ existe en base OU un hash d'amorçage
+/// env est posé (FORGE_CONSOLE_PASS_HASH). `needs_setup` = !provisioned. `capabilities.sqlcipher` =
+/// capacité de chiffrement AU REPOS compilée (`cfg!(feature="encryption")`) — false dans le build par
+/// défaut (l'implémentation arrive dans la tranche suivante ; le cfg est câblé dès maintenant). Aucun
+/// secret exposé (ni hash, ni token, ni détail de compte).
+async fn setup_state(State(app): State<App>) -> impl IntoResponse {
+    let provisioned = app.provisioned();
+    Json(json!({
+        "provisioned": provisioned,
+        "needs_setup": !provisioned,
+        "capabilities": { "sqlcipher": cfg!(feature = "encryption") },
+    }))
+}
+
+/// POST /api/setup — PUBLIC mais AUTO-DÉSACTIVANTE : 409 dès que `provisioned()` est vrai. Corps :
+///   {admin_login, admin_password, session_ttl?, operator_policy?, detection_source?}
+/// Valide le login (validate_login) et exige un mot de passe non vide (parité admin_create_user), hash
+/// argon2id (hash_pw), upsert du compte role="admin". `operator_policy`/`detection_source` sont stockés
+/// VERBATIM dans `settings` UNIQUEMENT s'ils sont fournis (objets JSON) — sinon rien (aucun défaut).
+/// `session_ttl` (entier positif) est persisté comme substrat de config s'il est fourni. Recalcule la
+/// gate d'auth (un admin activé existe désormais), ouvre une session (cookie forge_session) pour que le
+/// navigateur atterrisse connecté, et ledgerise `console.setup.provision` (attribution = le login admin ;
+/// JAMAIS le mot de passe ni le hash).
+async fn setup_provision(State(app): State<App>, Json(body): Json<Value>) -> Response {
+    // AUTO-DÉSACTIVANTE : une console déjà provisionnée ne peut plus être (re)provisionnée anonymement.
+    if app.provisioned() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "already_provisioned",
+                "why": "console déjà provisionnée (un admin activé ou un hash d'amorçage existe) — /api/setup est fermée"
+            })),
+        )
+            .into_response();
+    }
+    let login = match validate_login(&gs(&body, "admin_login")) {
+        Ok(l) => l,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_login", "why": e}))).into_response(),
+    };
+    let password = gs(&body, "admin_password");
+    if password.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_password", "why": "mot de passe vide refusé"}))).into_response();
+    }
+    // argon2id est coûteux -> hash HORS mutex DB (ne pas geler l'API pendant le KDF).
+    let hash = hash_pw(&password);
+    let op_set = body.get("operator_policy").map(|v| v.is_object()).unwrap_or(false);
+    let det_set = body.get("detection_source").map(|v| v.is_object()).unwrap_or(false);
+    let ttl_set = body.get("session_ttl").and_then(|v| v.as_i64()).map(|n| n > 0).unwrap_or(false);
+
+    let user_id: i64 = {
+        let db = app.db();
+        // course anti-TOCTOU : re-vérifier sous le mutex qu'aucun admin activé n'a surgi entre-temps.
+        if db.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", [], |_| Ok(())).is_ok() {
+            return (StatusCode::CONFLICT, Json(json!({"error": "already_provisioned", "why": "un admin a été provisionné entre-temps"}))).into_response();
+        }
+        if let Err(e) = upsert_user(&db, &login, "admin", &hash) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "provision_failed", "why": e}))).into_response();
+        }
+        // settings optionnels — VERBATIM, uniquement si l'appelant les fournit (objets JSON). Un `null`
+        // ou tout non-objet est ignoré silencieusement (aucun défaut inventé, cf. principe ZÉRO-défaut).
+        if let Some(v) = body.get("operator_policy").filter(|v| v.is_object()) {
+            let _ = settings_set(&db, "operator_policy", &v.to_string());
+        }
+        if let Some(v) = body.get("detection_source").filter(|v| v.is_object()) {
+            let _ = settings_set(&db, "detection_source", &v.to_string());
+        }
+        if let Some(ttl) = body.get("session_ttl").and_then(|v| v.as_i64()).filter(|&n| n > 0) {
+            let _ = settings_set(&db, "session_ttl", &ttl.to_string());
+        }
+        db.query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get::<_, i64>(0)).unwrap_or(-1)
+    };
+    if user_id < 0 {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "provision_failed", "why": "compte introuvable après création"}))).into_response();
+    }
+    // la gate d'auth s'engage : un admin activé existe désormais (état DB fait autorité).
+    app.recompute_auth_required();
+    // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin.
+    let (token, expires) = create_session(&app, user_id);
+    let ttl = session_ttl_secs();
+    let cookie = format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}");
+    // ledger : provision attribuée au nouvel admin. JAMAIS le mot de passe/hash (login + booléens seuls).
+    append_console_ledger(&app, "console.setup.provision", json!({
+        "actor": login,
+        "admin_login": login,
+        "operator_policy_set": op_set,
+        "detection_source_set": det_set,
+        "session_ttl_set": ttl_set,
+    }));
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(json!({"provisioned": true, "token": token, "login": login, "role": "admin", "expires": expires})),
+    )
+        .into_response()
+}
+
+/// POST /api/setup/migrate — PUBLIC mais PRÉ-PROVISION UNIQUEMENT (409 dès que `provisioned()`).
+/// Lance la MÊME migration que la sous-commande CLI depuis une source POINTÉE (chemins serveur), et
+/// renvoie le rapport (dont le résultat de vérification du ledger). VOIE MINIMALE : l'UX documentée
+/// primaire reste `forge-console migrate` dans un conteneur one-shot ; cet endpoint dépanne le wizard.
+/// Corps : {from:<dir|db>, to:<db>, ledger?:<path>, verify?:bool, encrypt?:bool, key_env?:<ENVVAR>}.
+/// Le chiffrement exige la feature `encryption` (400 clair sinon). ZÉRO défaut : `from`/`to` requis.
+async fn setup_migrate(State(app): State<App>, Json(body): Json<Value>) -> Response {
+    // AUTO-DÉSACTIVANTE : un import de données n'a de sens qu'AVANT le 1er provisioning (sinon on
+    // écraserait un install déjà en service). Une console provisionnée ferme la route (409).
+    if app.provisioned() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "already_provisioned",
+                "why": "console déjà provisionnée — /api/setup/migrate est fermée (import réservé au pré-déploiement)"
+            })),
+        )
+            .into_response();
+    }
+    let from = gs(&body, "from");
+    let to = gs(&body, "to");
+    if from.is_empty() || to.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "champs `from` et `to` requis"}))).into_response();
+    }
+    let encrypt = body.get("encrypt").and_then(|v| v.as_bool()).unwrap_or(false);
+    if encrypt && !cfg!(feature = "encryption") {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "encryption_unavailable",
+            "why": "chiffrement au repos non compilé (feature `encryption` absente) — recompiler avec --features encryption"
+        }))).into_response();
+    }
+    let opts = MigrateOpts {
+        from,
+        to,
+        ledger: body.get("ledger").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
+        verify: body.get("verify").and_then(|v| v.as_bool()).unwrap_or(false),
+        encrypt,
+        key_env: body.get("key_env").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
+        actor: "api:setup/migrate".to_string(),
+    };
+    // migration = I/O SQLite/FS bloquant -> hors du runtime async (spawn_blocking) pour ne pas geler
+    // l'exécuteur. `opts` (Strings/bools) est Send ; la Connection est créée DANS run_migration.
+    match tokio::task::spawn_blocking(move || run_migration(&opts)).await {
+        Ok(Ok(report)) => (StatusCode::OK, Json(report)).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": "migrate_failed", "why": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "migrate_panicked", "why": e.to_string()}))).into_response(),
+    }
+}
+
 #[allow(dead_code)] // helper générique conservé (colonnes texte) ; les handlers typés le court-circuitent.
 fn rows_to_json(db: &Connection, sql: &str, args: &[String], cols: &[&str]) -> Vec<Value> {
     let mut stmt = match db.prepare(sql) {
@@ -2149,20 +2462,35 @@ async fn ledger(State(app): State<App>, Query(q): Query<HashMap<String, String>>
     Json(json!({"total": total, "limit": limit, "offset": offset, "path": app.ledger_path.as_str(), "entries": page}))
 }
 
-/// GET /api/ledger/verify — recalcule la chaîne SHA-256 (prev|seq|ts|kind|canon(detail))
-/// et vérifie chaque hash + le chaînage `prev`. NE vérifie PAS les signatures (Ed25519/HMAC) :
-/// la console n'a pas la clé -> `sig_checked: false` (la vérif signature reste côté `forge ledger verify`).
-async fn ledger_verify(State(app): State<App>) -> impl IntoResponse {
+/// Résultat de la recomputation de la chaîne SHA-256 d'un ledger JSONL — PARTAGÉ par le handler
+/// GET /api/ledger/verify ET la migration (`migrate --verify`). NE vérifie PAS les signatures
+/// (Ed25519/HMAC) : la console n'a pas la clé privée -> seul le hash-chaining est recalculé.
+struct LedgerVerify {
+    ok: bool,
+    entries: usize,
+    broken: Value,        // seq de l'entrée rompue (ou Null)
+    why: Option<String>,
+    head: Option<String>, // hash de tête (Some UNIQUEMENT quand la chaîne est intègre)
+    alg: String,
+    exists: bool,         // le fichier ledger existe-t-il sur disque ?
+    empty: bool,          // 0 entrée exploitable (fichier absent OU toutes lignes malformées)
+}
+
+/// Recompute et vérifie la chaîne SHA-256 (prev|seq|ts|kind|canon(detail)) d'un ledger JSONL à `path`.
+/// S'arrête à la 1re rupture (prev désaligné ou hash recalculé != stocké). Fonction PURE (I/O lecture
+/// seule) : elle est la SEULE source de vérité de la vérif hash-chain, réutilisée par l'API et la
+/// migration pour ne jamais dupliquer la logique.
+fn verify_ledger_chain(path: &str) -> LedgerVerify {
     const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    let entries = read_ledger_lines(&app.ledger_path);
+    let entries = read_ledger_lines(path);
     if entries.is_empty() {
         // soit fichier absent/vide, soit toutes lignes malformées
-        let exists = std::path::Path::new(app.ledger_path.as_str()).exists();
-        return (StatusCode::OK, Json(json!({
-            "ok": exists, "entries": 0, "broken": Value::Null, "sig_checked": false,
-            "path": app.ledger_path.as_str(),
-            "why": if exists { Value::Null } else { json!("ledger absent") }
-        })));
+        let exists = std::path::Path::new(path).exists();
+        return LedgerVerify {
+            ok: exists, entries: 0, broken: Value::Null,
+            why: if exists { None } else { Some("ledger absent".to_string()) },
+            head: None, alg: String::new(), exists, empty: true,
+        };
     }
     let mut prev = GENESIS.to_string();
     let mut head = GENESIS.to_string();
@@ -2176,29 +2504,60 @@ async fn ledger_verify(State(app): State<App>) -> impl IntoResponse {
         let stored_hash = rec.get("hash").and_then(|v| v.as_str()).unwrap_or("");
         alg = rec.get("alg").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if stored_prev != prev {
-            return (StatusCode::OK, Json(json!({
-                "ok": false, "entries": n + 1, "broken": seq, "why": "chaînage rompu (prev)",
-                "sig_checked": false, "alg": alg, "path": app.ledger_path.as_str()
-            })));
+            return LedgerVerify {
+                ok: false, entries: n + 1, broken: seq,
+                why: Some("chaînage rompu (prev)".to_string()),
+                head: None, alg, exists: true, empty: false,
+            };
         }
         // seq sérialisé tel quel (entier sans guillemets) — cohérent avec le format Python f-string.
         let seq_str = match &seq { Value::Number(num) => num.to_string(), Value::Null => String::new(), other => other.to_string() };
         let preimage = format!("{prev}|{seq_str}|{ts}|{kind}|{}", canon_json(&detail));
         let recomputed = sha_hex(&preimage);
         if recomputed != stored_hash {
-            return (StatusCode::OK, Json(json!({
-                "ok": false, "entries": n + 1, "broken": seq,
-                "why": "hash recalculé != hash stocké (entrée altérée)",
-                "sig_checked": false, "alg": alg, "path": app.ledger_path.as_str()
-            })));
+            return LedgerVerify {
+                ok: false, entries: n + 1, broken: seq,
+                why: Some("hash recalculé != hash stocké (entrée altérée)".to_string()),
+                head: None, alg, exists: true, empty: false,
+            };
         }
         prev = stored_hash.to_string();
         head = stored_hash.to_string();
     }
-    (StatusCode::OK, Json(json!({
-        "ok": true, "entries": entries.len(), "broken": Value::Null, "head": head,
-        "alg": alg, "sig_checked": false, "path": app.ledger_path.as_str()
-    })))
+    LedgerVerify {
+        ok: true, entries: entries.len(), broken: Value::Null, why: None,
+        head: Some(head), alg, exists: true, empty: false,
+    }
+}
+
+/// Sérialise un `LedgerVerify` au format JSON HISTORIQUE de GET /api/ledger/verify (clés identiques
+/// par branche : vide / rompu / intègre — parité stricte avec le contrat SPA app.js qui lit
+/// alg/broken/why). `sig_checked` toujours false (la console ne détient pas la clé privée).
+fn ledger_verify_api_json(v: &LedgerVerify, path: &str) -> Value {
+    if v.empty {
+        return json!({
+            "ok": v.ok, "entries": 0, "broken": Value::Null, "sig_checked": false,
+            "path": path, "why": match &v.why { Some(w) => json!(w), None => Value::Null }
+        });
+    }
+    if v.ok {
+        return json!({
+            "ok": true, "entries": v.entries, "broken": Value::Null, "head": v.head,
+            "alg": v.alg, "sig_checked": false, "path": path
+        });
+    }
+    json!({
+        "ok": false, "entries": v.entries, "broken": v.broken, "why": v.why,
+        "sig_checked": false, "alg": v.alg, "path": path
+    })
+}
+
+/// GET /api/ledger/verify — recalcule la chaîne SHA-256 (prev|seq|ts|kind|canon(detail))
+/// et vérifie chaque hash + le chaînage `prev`. NE vérifie PAS les signatures (Ed25519/HMAC) :
+/// la console n'a pas la clé -> `sig_checked: false` (la vérif signature reste côté `forge ledger verify`).
+async fn ledger_verify(State(app): State<App>) -> impl IntoResponse {
+    let v = verify_ledger_chain(app.ledger_path.as_str());
+    (StatusCode::OK, Json(ledger_verify_api_json(&v, app.ledger_path.as_str())))
 }
 
 async fn coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
@@ -2822,8 +3181,8 @@ fn parse_plan_verdicts(stdout: &str) -> Vec<Value> {
 /// (registre vivant). LECTURE/gouvernance : ne lance aucune campagne, n'arme rien — il rafraîchit
 /// seulement le catalogue de capacités. Gaté par le rôle opérateur (fail-closed) car il modifie une
 /// table d'état serveur. Renvoie le catalogue rafraîchi (même forme que GET /api/modules).
-async fn modules_refresh(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
-    if !check_operator(&app, &headers) {
+async fn modules_refresh(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> impl IntoResponse {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
@@ -3986,9 +4345,9 @@ fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
 /// + `reason` non vide (sinon 400 'high_impact_requires_arm_and_reason'). Honoré => le plancher
 ///   exploit est levé (validate_modules) et le scope du run écrit allow_exploit/destructive=true ;
 ///   l'autorisation est journalisée au ledger. Hors opt-in : comportement actuel inchangé.
-async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
-    // (1) rôle opérateur fail-closed
-    if !check_operator(&app, &headers) {
+async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    // (1) rôle opérateur fail-closed (+ contrainte source-CIDR si configurée : cf. check_operator)
+    if !check_operator(&app, &headers, Some(peer.ip())) {
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
@@ -4646,8 +5005,8 @@ fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_id: String, 
 }
 
 /// POST /api/runs/:id/cancel — annule un run vivant (kill group). Opérateur fail-closed.
-async fn run_cancel(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> impl IntoResponse {
-    if !check_operator(&app, &headers) {
+async fn run_cancel(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Path(id): Path<String>) -> impl IntoResponse {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
@@ -5157,6 +5516,354 @@ fn run_seed_demo_cli(args: &[String]) -> i32 {
     0
 }
 
+// ===========================================================================================
+// MIGRATION DE DONNÉES — importe un install Forge EXISTANT (non-Docker) vers un install
+// Docker/autre. Trois volets couplés qui doivent voyager ENSEMBLE pour rester audités :
+//   1) la base SQLite (findings/runs/roe/users/settings) — copie COHÉRENTE via VACUUM INTO
+//      (source ouverte READ-ONLY, jamais mutée) ou export CHIFFRÉ (SQLCipher, feature opt-in) ;
+//   2) le ledger JSONL d'engagement (chaîne SHA-256 tamper-evident) ;
+//   3) la clé de signature sibling `.ed25519` (0600) — SANS elle, les entrées signées du ledger
+//      deviennent invérifiables (la chaîne perd sa non-répudiation). La clé DOIT suivre le ledger.
+// La cible reçoit ensuite SCHEMA + migrate() : une base plus ANCIENNE est upgradée EN PLACE.
+// ZÉRO défaut caché : chaque chemin est explicite (pas d'IP/host/clé codés en dur). La migration
+// est elle-même TRACÉE au ledger cible (kind `console.migrate`, chaîne SHA-256 continue).
+// ===========================================================================================
+
+/// Options d'une migration (partagées par la sous-commande CLI et POST /api/setup/migrate).
+struct MigrateOpts {
+    from: String,            // source : un DOSSIER (install) ou un FICHIER .db
+    to: String,              // base cible
+    ledger: Option<String>,  // ledger cible (défaut : sibling engagement.jsonl de `to`)
+    verify: bool,            // recompute la chaîne SHA-256 du ledger source, ABORT sur rupture
+    encrypt: bool,           // cible chiffrée SQLCipher (exige la feature `encryption`)
+    key_env: Option<String>, // nom de la variable d'ENV portant la clé (JAMAIS la clé en argv)
+    actor: String,           // attribution ledger ("cli:migrate" | "api:setup/migrate")
+}
+
+/// Résout (source_db, source_ledger) depuis `--from`. Un DOSSIER -> {dir}/forge-console.db +
+/// {dir}/engagement.jsonl (convention d'install). Un FICHIER -> le fichier .db + son sibling
+/// engagement.jsonl (même dossier). Aucune invention : si le ledger n'existe pas, la copie le note.
+fn resolve_migrate_source(from: &str) -> (String, String) {
+    let p = std::path::Path::new(from);
+    if p.is_dir() {
+        let db = p.join("forge-console.db");
+        let led = p.join("engagement.jsonl");
+        (db.to_string_lossy().into_owned(), led.to_string_lossy().into_owned())
+    } else {
+        let led = p.parent().unwrap_or_else(|| std::path::Path::new("."))
+            .join("engagement.jsonl");
+        (from.to_string(), led.to_string_lossy().into_owned())
+    }
+}
+
+/// Chemin ledger par défaut à côté d'une base : {dir(to)}/engagement.jsonl.
+fn default_sibling_ledger(to: &str) -> String {
+    std::path::Path::new(to)
+        .parent()
+        .map(|p| p.join("engagement.jsonl"))
+        .unwrap_or_else(|| std::path::PathBuf::from("engagement.jsonl"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Append UNE entrée au ledger JSONL à `path`, en (re)lisant le head depuis le disque (chaîne
+/// SHA-256, alg "sha256-console", sig ""). AUTONOME (pas d'App/cache) — pour la migration one-shot :
+/// une seule entrée, pas de contention. Miroir strict de append_console_ledger côté pré-image, donc
+/// /api/ledger/verify recompute la chaîne SANS rupture. Renvoie le hash de la nouvelle entrée.
+fn ledger_append_standalone(path: &str, kind: &str, detail: &Value) -> Result<String, String> {
+    let mut prev = "0".repeat(64);
+    let mut seq = 0i64;
+    if let Ok(s) = std::fs::read_to_string(path) {
+        for line in s.lines().filter(|l| !l.trim().is_empty()) {
+            if let Ok(rec) = serde_json::from_str::<Value>(line) {
+                if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { prev = h.to_string(); }
+                if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { seq = q; }
+            }
+        }
+    }
+    let seq = seq + 1;
+    let ts = format!("@{}", chrono_now_compact());
+    let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(detail));
+    let hash = sha_hex(&preimage);
+    let rec = json!({
+        "seq": seq, "ts": ts, "kind": kind, "detail": detail,
+        "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
+    });
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() { let _ = std::fs::create_dir_all(parent); }
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        .map_err(|e| format!("ouverture ledger cible '{path}' impossible: {e}"))?;
+    writeln!(f, "{}", canon_json(&rec)).map_err(|e| format!("écriture ledger cible échouée: {e}"))?;
+    Ok(hash)
+}
+
+/// plaintext -> plaintext : `VACUUM INTO` (copie COHÉRENTE, fonctionne sur une source READ-ONLY).
+/// La cible NE DOIT PAS préexister (VACUUM INTO refuse d'écraser) -> on retire cible + sidecars WAL/SHM
+/// d'abord. Renvoie `encrypted=false`.
+fn migrate_copy_plaintext(src: &Connection, target: &str) -> Result<bool, String> {
+    if std::path::Path::new(target).exists() {
+        std::fs::remove_file(target)
+            .map_err(|e| format!("cible '{target}' déjà présente et non supprimable: {e}"))?;
+    }
+    let _ = std::fs::remove_file(format!("{target}-wal"));
+    let _ = std::fs::remove_file(format!("{target}-shm"));
+    if let Some(parent) = std::path::Path::new(target).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("création du dossier cible échouée: {e}"))?;
+        }
+    }
+    // paramètre lié (le chemin cible n'est pas inliné dans le SQL).
+    src.execute("VACUUM INTO ?1", [target])
+        .map_err(|e| format!("VACUUM INTO '{target}' échoué: {e}"))?;
+    Ok(false)
+}
+
+/// Résout la clé de chiffrement depuis la variable d'ENV nommée par `--key-env`. JAMAIS la clé en argv
+/// (fuite via ps/historique). None si le nom est absent ou la variable vide. Gated : n'existe que dans
+/// le build chiffré (dans le build par défaut, aucun code ne la référence).
+#[cfg(feature = "encryption")]
+fn resolve_key(key_env: Option<&str>) -> Option<String> {
+    let name = key_env?;
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// plaintext -> CHIFFRÉ : attache une base cible chiffrée (PRAGMA KEY) et exporte via
+/// sqlcipher_export(). Compilé UNIQUEMENT avec la feature `encryption`.
+#[cfg(feature = "encryption")]
+fn migrate_copy_encrypted(src: &Connection, target: &str, key_env: Option<&str>) -> Result<bool, String> {
+    let key = resolve_key(key_env)
+        .ok_or_else(|| "clé de chiffrement absente (--key-env non résolu / variable d'ENV vide)".to_string())?;
+    if std::path::Path::new(target).exists() {
+        std::fs::remove_file(target).map_err(|e| format!("cible '{target}' non supprimable: {e}"))?;
+    }
+    let _ = std::fs::remove_file(format!("{target}-wal"));
+    let _ = std::fs::remove_file(format!("{target}-shm"));
+    if let Some(parent) = std::path::Path::new(target).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("création du dossier cible échouée: {e}"))?;
+        }
+    }
+    src.execute("ATTACH DATABASE ?1 AS encrypted KEY ?2", rusqlite::params![target, key])
+        .map_err(|e| format!("ATTACH de la cible chiffrée échoué: {e}"))?;
+    let export = src.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()));
+    let _ = src.execute("DETACH DATABASE encrypted", []);
+    export.map_err(|e| format!("sqlcipher_export('encrypted') échoué: {e}"))?;
+    Ok(true)
+}
+
+/// Build PAR DÉFAUT (sans `encryption`) : le chiffrement au repos n'est PAS compilé -> erreur CLAIRE
+/// (recompiler avec `--features encryption`). Aucune dépendance SQLCipher n'est tirée par ce chemin.
+#[cfg(not(feature = "encryption"))]
+fn migrate_copy_encrypted(_src: &Connection, _target: &str, _key_env: Option<&str>) -> Result<bool, String> {
+    Err("chiffrement au repos NON compilé dans ce build — recompiler avec `--features encryption` (SQLCipher)".to_string())
+}
+
+/// Copie le ledger JSONL source + sa clé de signature sibling `.ed25519` (et le repli HMAC `.key`)
+/// dans le dossier ledger CIBLE, en PRÉSERVANT le mode 0600 de la ou des clés (la clé DOIT voyager
+/// avec le ledger, sinon la chaîne signée devient invérifiable). Renvoie (ledger_copié, ed25519_copiée).
+/// Ledger source absent -> ne copie rien (Ok(false,false)) : un install neuf n'a pas d'engagement.
+fn copy_ledger_and_key(src_ledger: &str, target_ledger: &str) -> Result<(bool, bool), String> {
+    if !std::path::Path::new(src_ledger).exists() {
+        return Ok((false, false));
+    }
+    if std::path::Path::new(src_ledger) == std::path::Path::new(target_ledger) {
+        // source == cible (upgrade en place du même dossier) : rien à copier, la clé est déjà là.
+        let has_key = std::path::Path::new(&format!("{src_ledger}.ed25519")).exists();
+        return Ok((true, has_key));
+    }
+    if let Some(parent) = std::path::Path::new(target_ledger).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("création du dossier ledger cible échouée: {e}"))?;
+        }
+    }
+    std::fs::copy(src_ledger, target_ledger)
+        .map_err(|e| format!("copie du ledger '{src_ledger}' -> '{target_ledger}' échouée: {e}"))?;
+    let mut ed_copied = false;
+    // clé(s) de signature sibling : <ledger>.ed25519 (Ed25519, non-répudiation) + <ledger>.key (repli HMAC).
+    for ext in [".ed25519", ".key"] {
+        let src_key = format!("{src_ledger}{ext}");
+        if std::path::Path::new(&src_key).exists() {
+            let dst_key = format!("{target_ledger}{ext}");
+            std::fs::copy(&src_key, &dst_key)
+                .map_err(|e| format!("copie de la clé '{src_key}' -> '{dst_key}' échouée: {e}"))?;
+            // PRÉSERVE 0600 explicitement (secret de signature — jamais lisible par autrui).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dst_key, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| format!("chmod 0600 de '{dst_key}' échoué: {e}"))?;
+            }
+            if ext == ".ed25519" { ed_copied = true; }
+        }
+    }
+    Ok((true, ed_copied))
+}
+
+/// Exécute une migration complète. Étapes : (1) ouvre la source READ-ONLY (jamais mutée) ; (2) si
+/// `verify`, recompute la chaîne SHA-256 du ledger source et ABORT sur une rupture réelle ; (3) copie
+/// la base (VACUUM INTO plaintext | sqlcipher_export chiffré) ; (4) SCHEMA + migrate() sur la cible
+/// (upgrade en place) ; (5) copie ledger + clé `.ed25519` (0600) dans le dossier ledger cible ;
+/// (6) trace `console.migrate` au ledger cible (chaîne SHA-256 continue). Renvoie un rapport JSON.
+fn run_migration(opts: &MigrateOpts) -> Result<Value, String> {
+    let (src_db, src_ledger) = resolve_migrate_source(&opts.from);
+    if !std::path::Path::new(&src_db).exists() {
+        return Err(format!("base source introuvable: {src_db}"));
+    }
+    // (1) source en LECTURE SEULE — l'install existant n'est JAMAIS modifié par la migration.
+    let src = Connection::open_with_flags(
+        &src_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("ouverture read-only de '{src_db}' impossible: {e}"))?;
+    let _ = src.busy_timeout(std::time::Duration::from_secs(5));
+
+    // (2) --verify : recompute la chaîne du ledger source. ABORT AVANT toute écriture cible si une
+    // rupture RÉELLE est détectée (le fichier existe mais la chaîne est cassée). Un ledger ABSENT
+    // n'est pas une rupture (install neuf) -> on continue (rien à copier).
+    let verify_report = if opts.verify {
+        let v = verify_ledger_chain(&src_ledger);
+        if v.exists && !v.ok {
+            return Err(format!(
+                "ledger source rompu (seq={}) : {} — migration AVORTÉE (aucune écriture)",
+                v.broken, v.why.clone().unwrap_or_default()
+            ));
+        }
+        Some(ledger_verify_api_json(&v, &src_ledger))
+    } else {
+        None
+    };
+
+    // (3) copie de la base.
+    let encrypted = if opts.encrypt {
+        migrate_copy_encrypted(&src, &opts.to, opts.key_env.as_deref())?
+    } else {
+        migrate_copy_plaintext(&src, &opts.to)?
+    };
+    drop(src); // libère la connexion read-only avant d'ouvrir la cible en écriture.
+
+    // (4) SCHEMA + migrate() sur la cible : une base plus ANCIENNE est upgradée EN PLACE.
+    {
+        let dst = Connection::open(&opts.to)
+            .map_err(|e| format!("ouverture de la cible '{}' impossible: {e}", opts.to))?;
+        // cible chiffrée : PRAGMA key AVANT tout statement (sinon SQLCipher lit une base illisible).
+        #[cfg(feature = "encryption")]
+        if opts.encrypt {
+            if let Some(k) = resolve_key(opts.key_env.as_deref()) {
+                let _ = dst.pragma_update(None, "key", &k);
+            }
+        }
+        let _ = dst.busy_timeout(std::time::Duration::from_secs(5));
+        dst.execute_batch(SCHEMA).map_err(|e| format!("SCHEMA sur la cible échoué: {e}"))?;
+        migrate(&dst);
+    }
+
+    // (5) copie du ledger + de la clé de signature .ed25519 (0600) dans le dossier ledger cible.
+    let target_ledger = opts.ledger.clone().unwrap_or_else(|| default_sibling_ledger(&opts.to));
+    let (ledger_copied, key_copied) = copy_ledger_and_key(&src_ledger, &target_ledger)?;
+
+    // (6) trace la migration au ledger CIBLE (mutation ledgerisée, chaîne SHA-256 continue). JAMAIS
+    // la clé/le secret — seulement les chemins + booléens. Best-effort : une erreur d'écriture du
+    // ledger ne défait pas la copie DB déjà réalisée (la migration reste utilisable).
+    let detail = json!({
+        "actor": opts.actor, "from": opts.from, "source_db": src_db, "target_db": opts.to,
+        "encrypted": encrypted, "verified": opts.verify,
+        "ledger_copied": ledger_copied, "key_copied": key_copied,
+    });
+    let migrate_hash = ledger_append_standalone(&target_ledger, "console.migrate", &detail).ok();
+
+    Ok(json!({
+        "ok": true,
+        "source_db": src_db,
+        "target_db": opts.to,
+        "target_ledger": target_ledger,
+        "encrypted": encrypted,
+        "ledger_copied": ledger_copied,
+        "key_copied": key_copied,
+        "migrate_ledger_hash": migrate_hash,
+        "verify": verify_report,
+    }))
+}
+
+/// Applique la clé SQLCipher AU REPOS au BOOT si `FORGE_DB_KEY` est posé. `PRAGMA key` DOIT précéder
+/// toute autre requête sur la connexion (contrat SQLCipher). Compilé UNIQUEMENT avec `encryption` :
+/// dans le build par défaut, ce hook n'existe pas et la base reste en clair (inchangé).
+#[cfg(feature = "encryption")]
+fn apply_db_key_on_boot(conn: &Connection) {
+    if let Ok(key) = std::env::var("FORGE_DB_KEY") {
+        if !key.is_empty() {
+            // la clé est passée telle quelle -> SQLCipher en dérive la clé de chiffrement (KDF).
+            let _ = conn.pragma_update(None, "key", &key);
+        }
+    }
+}
+
+/// `forge-console migrate --from <dir|db> --to <db> [--ledger <path>] [--verify]
+///                        [--encrypt --key-env <ENVVAR>]`
+/// Migre un install Forge existant vers une base cible. UX PRIMAIRE (documentée) : lancée dans un
+/// conteneur one-shot au 1er déploiement Docker. Codes : 0 OK, 1 échec migration/vérif, 2 usage.
+fn run_migrate_cli(args: &[String]) -> i32 {
+    let from = match cli_opt(args, "from") {
+        Some(f) if !f.is_empty() => f,
+        _ => {
+            eprintln!("usage: forge-console migrate --from <dir|db> --to <db> [--ledger <path>] [--verify] [--encrypt --key-env <ENVVAR>]");
+            return 2;
+        }
+    };
+    let to = match cli_opt(args, "to") {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!("[forge-console] migrate: --to <db> requis");
+            return 2;
+        }
+    };
+    let encrypt = cli_flag(args, "encrypt");
+    let key_env = cli_opt(args, "key-env");
+    if encrypt && !cfg!(feature = "encryption") {
+        eprintln!("[forge-console] migrate: --encrypt demandé mais ce build n'inclut PAS le chiffrement au repos (recompiler avec `--features encryption`)");
+        return 2;
+    }
+    if encrypt && key_env.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+        eprintln!("[forge-console] migrate: --encrypt exige --key-env <ENVVAR> (nom de la variable d'ENV portant la clé)");
+        return 2;
+    }
+    let opts = MigrateOpts {
+        from,
+        to,
+        ledger: cli_opt(args, "ledger"),
+        verify: cli_flag(args, "verify"),
+        encrypt,
+        key_env,
+        actor: "cli:migrate".to_string(),
+    };
+    match run_migration(&opts) {
+        Ok(report) => {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into()));
+            if let Some(v) = report.get("verify").filter(|v| !v.is_null()) {
+                println!(
+                    "[forge-console] migrate: ledger source vérifié — ok={}, entries={}",
+                    v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                    v.get("entries").and_then(|x| x.as_u64()).unwrap_or(0)
+                );
+            }
+            println!(
+                "[forge-console] migrate: OK — {} -> {} (ledger cible: {})",
+                report.get("source_db").and_then(|x| x.as_str()).unwrap_or(""),
+                opts.to,
+                report.get("target_ledger").and_then(|x| x.as_str()).unwrap_or("")
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("[forge-console] migrate: {e}");
+            1
+        }
+    }
+}
+
 /// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/SOQL).
 fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
@@ -5280,6 +5987,78 @@ fn cli_query_rows(conn: &Connection, sql: &str, params: &[String], cols: &[&str]
     .unwrap_or_default()
 }
 
+/// Construit le routeur axum complet : routes PUBLIQUES (hors auth_guard : /health, /api/login, wizard
+/// de 1er déploiement /api/setup*) + routes PROTÉGÉES (derrière auth_guard) + fallback ServeDir, le
+/// tout sous host_guard (anti-rebinding). Extrait de main() pour être exercé TEL QUEL par les tests
+/// d'intégration (parité stricte du câblage : ce qui est gaté en prod l'est en test). `app` est déplacé
+/// dans le routeur (with_state) ; le ConnectInfo est branché au moment du `serve`, pas ici.
+fn build_router(app: App, web_dir: &str) -> Router {
+    // routes protégées par auth_guard ; ServeDir sert les assets statiques (style.css/app.js/quetzal.svg/
+    // favicon.svg/fonts/…) en fallback pour toute route non-API non matchée — l'index `/` reste rendu
+    // par include_str!.
+    let protected = Router::new()
+        .route("/", get(index))
+        .route("/api/whoami", get(whoami))
+        .route("/api/ingest", post(ingest))
+        .route("/api/findings", get(findings))
+        .route("/api/findings/:id", get(finding_detail))
+        .route("/api/runrecords", get(runrecords))
+        .route("/api/coverage", get(coverage))
+        .route("/api/purple/coverage", get(purple_coverage))
+        .route("/api/modules", get(modules))
+        .route("/api/modules/refresh", post(modules_refresh))
+        // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
+        // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
+        // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
+        .route("/api/modules/:kind", post(module_governance))
+        .route("/api/campaigns", get(campaigns))
+        .route("/api/roe", get(roe))
+        // --- ADMINISTRATION comptes (#4) : réservé admin (check_admin, fail-closed 403 sinon). Chaque
+        //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
+        //     recompute_auth_required après chaque mutation (gate DB-state) ; dernier admin protégé.
+        .route("/api/users", get(users_list).post(users_create))
+        .route("/api/users/:login", post(users_update).delete(users_delete))
+        // --- parité LECTURE / gouvernance ---
+        .route("/api/scope-check", post(scope_check))
+        .route("/api/plan", post(plan))
+        .route("/api/ledger", get(ledger))
+        .route("/api/ledger/verify", get(ledger_verify))
+        .route("/api/query", get(query).post(query_post))
+        .route("/api/dashboards", get(dashboards_list).post(dashboard_create))
+        .route("/api/dashboards/:id", post(dashboard_update).delete(dashboard_delete))
+        .route("/api/panels", get(panels_list).post(panel_create))
+        .route("/api/panels/:id", post(panel_update).delete(panel_delete))
+        .route("/api/panels/:id/data", get(panel_data))
+        // --- C2-light : lancement gouverné/audité (opérateur fail-closed sur run/cancel) ---
+        .route("/api/run", post(run_create))
+        .route("/api/runs", get(runs_list))
+        .route("/api/runs/:id", get(run_detail))
+        .route("/api/runs/:id/report", get(run_report))
+        .route("/api/runs/:id/cancel", post(run_cancel))
+        .route("/api/runs/:id/logs", get(run_logs))
+        .route("/api/runs/:id/events", get(run_sse))
+        .fallback_service(ServeDir::new(web_dir))
+        .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
+    Router::new()
+        // /health : sonde ouverte (hors auth_guard). JSON {status, version} — `version` provient
+        // du fichier VERSION (source unique). `forge doctor --purple` ne teste que le code HTTP 200.
+        .route("/health", get(|| async { Json(json!({"status": "ok", "version": forge_version()})) }))
+        // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
+        // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
+        .route("/api/login", post(login))
+        // WIZARD 1er DÉPLOIEMENT — PUBLIC (hors auth_guard) : sonde d'état + provision AUTO-DÉSACTIVANTE
+        // (409 une fois provisionné). Sous host_guard comme tout le reste. Le SPA sonde /api/setup/state
+        // au boot pour afficher le wizard sur un fresh install ; POST /api/setup crée le 1er admin.
+        .route("/api/setup/state", get(setup_state))
+        .route("/api/setup", post(setup_provision))
+        // IMPORT DE DONNÉES (pré-provision) : migre un install existant vers cette base + ledger.
+        // PUBLIC mais 409 une fois provisionné (comme /api/setup). UX primaire = CLI `migrate`.
+        .route("/api/setup/migrate", post(setup_migrate))
+        .merge(protected)
+        .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+        .with_state(app)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     // sous-commandes de provisioning de hash argon2id :
@@ -5323,11 +6102,23 @@ async fn main() {
         Some("seed-demo") => {
             std::process::exit(run_seed_demo_cli(&args[2..]));
         }
+        // MIGRATION DE DONNÉES : forge-console migrate --from <dir|db> --to <db> [--ledger <path>]
+        //   [--verify] [--encrypt --key-env <ENVVAR>]. Importe un install Forge existant (non-Docker)
+        //   vers une base cible (Docker/autre) : copie DB (VACUUM INTO / SQLCipher), ledger + clé
+        //   .ed25519 (0600), puis SCHEMA + migrate() sur la cible. UX primaire = conteneur one-shot.
+        Some("migrate") => {
+            std::process::exit(run_migrate_cli(&args[2..]));
+        }
         _ => {}
     }
 
     let db_path = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge-console.db".to_string());
     let conn = Connection::open(&db_path).expect("open db");
+    // CHIFFREMENT AU REPOS (opt-in, feature `encryption`) : si FORGE_DB_KEY est posé, `PRAGMA key`
+    // DOIT précéder TOUTE autre requête (sinon SQLCipher lit une base illisible). Dans le build par
+    // défaut (feature off), ce hook n'est pas compilé -> base en clair, comportement inchangé.
+    #[cfg(feature = "encryption")]
+    apply_db_key_on_boot(&conn);
     // WAL : meilleure concurrence lecture/écriture (les /api lecture-seule via une 2e connexion
     // read-only ne bloquent plus les écritures) + reprise sur crash plus propre. busy_timeout évite
     // qu'une écriture concurrente échoue immédiatement sur SQLITE_BUSY. Best-effort (PRAGMA renvoie une
@@ -5412,6 +6203,20 @@ async fn main() {
             if plume_token.is_empty() { "anonyme (SOC_PUBLIC_DEMO)" } else { "Basic" });
     }
 
+    // [SÉCURITÉ XFF] Garde-fou/migration du réglage `trusted_proxy` : il doit désormais contenir le/les
+    // CIDR(s) du proxy amont (Traefik/cluster, egress Cloudflare…). Une valeur héritée « truthy » non-CIDR
+    // (ex. "1"/"true") ne produit AUCUN CIDR valide -> on n'accorde foi à AUCUN X-Forwarded-For (repli
+    // fail-closed sur le pair TCP). On alerte l'opérateur pour qu'il reconfigure explicitement.
+    match settings_get(&conn, "trusted_proxy") {
+        Some(raw) if !raw.trim().is_empty() && parse_trusted_proxy_cidrs(&raw).is_empty() => {
+            eprintln!("[forge-console] WARN trusted_proxy={raw:?} n'est PAS un CIDR valide — X-Forwarded-For sera IGNORÉ (repli fail-closed sur le pair TCP). Reconfigure `trusted_proxy` sur le(s) CIDR(s) du proxy amont réel (ex. le CIDR Traefik/cluster ou l'egress Cloudflare), sinon la politique opérateur source-CIDR verra l'IP du proxy et jamais celle du client.");
+        }
+        Some(raw) if !raw.trim().is_empty() => {
+            println!("[forge-console] trusted_proxy: X-Forwarded-For honoré UNIQUEMENT si le pair TCP appartient à {:?}", parse_trusted_proxy_cidrs(&raw));
+        }
+        _ => {}
+    }
+
     let (events, _) = broadcast::channel::<RunEvent>(1024);
     let app = App {
         db: Arc::new(Mutex::new(conn)),
@@ -5439,67 +6244,17 @@ async fn main() {
     // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
     app.recompute_auth_required();
 
-    // routes protégées par auth_guard ; /health reste ouvert ; host_guard sur tout.
-    // ServeDir sert les assets statiques (style.css/app.js/quetzal.svg/favicon.svg/fonts/…) en
-    // fallback pour toute route non-API non matchée — l'index `/` reste rendu par include_str!.
-    let protected = Router::new()
-        .route("/", get(index))
-        .route("/api/whoami", get(whoami))
-        .route("/api/ingest", post(ingest))
-        .route("/api/findings", get(findings))
-        .route("/api/findings/:id", get(finding_detail))
-        .route("/api/runrecords", get(runrecords))
-        .route("/api/coverage", get(coverage))
-        .route("/api/purple/coverage", get(purple_coverage))
-        .route("/api/modules", get(modules))
-        .route("/api/modules/refresh", post(modules_refresh))
-        // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
-        // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
-        // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
-        .route("/api/modules/:kind", post(module_governance))
-        .route("/api/campaigns", get(campaigns))
-        .route("/api/roe", get(roe))
-        // --- ADMINISTRATION comptes (#4) : réservé admin (check_admin, fail-closed 403 sinon). Chaque
-        //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
-        //     recompute_auth_required après chaque mutation (gate DB-state) ; dernier admin protégé.
-        .route("/api/users", get(users_list).post(users_create))
-        .route("/api/users/:login", post(users_update).delete(users_delete))
-        // --- parité LECTURE / gouvernance ---
-        .route("/api/scope-check", post(scope_check))
-        .route("/api/plan", post(plan))
-        .route("/api/ledger", get(ledger))
-        .route("/api/ledger/verify", get(ledger_verify))
-        .route("/api/query", get(query).post(query_post))
-        .route("/api/dashboards", get(dashboards_list).post(dashboard_create))
-        .route("/api/dashboards/:id", post(dashboard_update).delete(dashboard_delete))
-        .route("/api/panels", get(panels_list).post(panel_create))
-        .route("/api/panels/:id", post(panel_update).delete(panel_delete))
-        .route("/api/panels/:id/data", get(panel_data))
-        // --- C2-light : lancement gouverné/audité (opérateur fail-closed sur run/cancel) ---
-        .route("/api/run", post(run_create))
-        .route("/api/runs", get(runs_list))
-        .route("/api/runs/:id", get(run_detail))
-        .route("/api/runs/:id/report", get(run_report))
-        .route("/api/runs/:id/cancel", post(run_cancel))
-        .route("/api/runs/:id/logs", get(run_logs))
-        .route("/api/runs/:id/events", get(run_sse))
-        .fallback_service(ServeDir::new(&web_dir))
-        .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
-    let router = Router::new()
-        // /health : sonde ouverte (hors auth_guard). JSON {status, version} — `version` provient
-        // du fichier VERSION (source unique). `forge doctor --purple` ne teste que le code HTTP 200.
-        .route("/health", get(|| async { Json(json!({"status": "ok", "version": forge_version()})) }))
-        // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
-        // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
-        .route("/api/login", post(login))
-        .merge(protected)
-        .layer(middleware::from_fn_with_state(app.clone(), host_guard))
-        .with_state(app);
+    // Câblage du routeur extrait dans build_router (parité stricte prod/test : ce qui est gaté ici
+    // l'est aussi dans les tests d'intégration). ConnectInfo est branché au serve pour que les
+    // handlers C2 (run/cancel/refresh) reçoivent l'IP du pair (contrainte source-CIDR opérateur).
+    let router = build_router(app, &web_dir);
 
     let addr = std::env::var("FORGE_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:7100".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     println!("[forge-console] http://{addr}");
-    axum::serve(listener, router).await.expect("serve");
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .expect("serve");
 }
 
 // =====================================================================================
@@ -5651,9 +6406,9 @@ mod tests {
         let path = tmp_path("forge-test-op-env");
         let mut app = test_app(&path);
         app.operator_hash = Arc::new(hash_pw("s3cr3t"));
-        assert!(check_operator(&app, &operator_headers("s3cr3t")), "bonne preuve env -> opérateur");
-        assert!(!check_operator(&app, &operator_headers("wrong")), "mauvaise preuve env -> refus");
-        assert!(!check_operator(&app, &HeaderMap::new()), "aucune preuve -> refus (fail-closed)");
+        assert!(check_operator(&app, &operator_headers("s3cr3t"), None), "bonne preuve env -> opérateur");
+        assert!(!check_operator(&app, &operator_headers("wrong"), None), "mauvaise preuve env -> refus");
+        assert!(!check_operator(&app, &HeaderMap::new(), None), "aucune preuve -> refus (fail-closed)");
         // attribution sans session -> 'bootstrap' (compte env-hash).
         assert_eq!(attribution_login(&app, &operator_headers("s3cr3t")), "bootstrap");
         let _ = std::fs::remove_file(&path);
@@ -5679,8 +6434,8 @@ mod tests {
         };
         let (vtok, _) = create_session(&app, vid);
         let (otok, _) = create_session(&app, oid);
-        assert!(!check_operator(&app, &bearer_headers(&vtok)), "session viewer NE PASSE PAS le C2");
-        assert!(check_operator(&app, &bearer_headers(&otok)), "session operator passe le C2");
+        assert!(!check_operator(&app, &bearer_headers(&vtok), None), "session viewer NE PASSE PAS le C2");
+        assert!(check_operator(&app, &bearer_headers(&otok), None), "session operator passe le C2");
         assert_eq!(attribution_login(&app, &bearer_headers(&otok)), "oppy", "attribution = login individuel");
         let _ = std::fs::remove_file(&path);
     }
@@ -5970,6 +6725,339 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // WIZARD 1er DÉPLOIEMENT + politique opérateur source-CIDR
+    // ---------------------------------------------------------------------------------------------
+
+    /// Client HTTP brut minimal (aucune dép externe) : envoie `req` et lit toute la réponse jusqu'à EOF
+    /// (le serveur ferme la connexion sur `Connection: close`). Suffisant pour tester le câblage réel.
+    async fn http_raw(addr: SocketAddr, req: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        s.write_all(req.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.expect("read");
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+    fn get_req(path: &str, extra: &str) -> String {
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\r\n")
+    }
+    fn post_req(path: &str, body: &str, extra: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
+            body.len()
+        )
+    }
+    fn parse_status(resp: &str) -> u16 {
+        resp.lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0)
+    }
+    fn body_of(resp: &str) -> &str {
+        resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+    }
+    fn cookie_token(resp: &str) -> Option<String> {
+        let head = resp.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(resp);
+        let idx = head.find("forge_session=")?;
+        let rest = &head[idx + "forge_session=".len()..];
+        let end = rest.find(';').unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
+
+    /// [SETUP wizard] Flux END-TO-END sur le VRAI routeur (build_router) : fresh -> needs_setup ;
+    /// POST /api/setup crée l'admin, pose le cookie, bascule provisioned ; 2e POST -> 409 ;
+    /// detection_source + operator_policy atterrissent dans settings ; /api/setup* restent joignables
+    /// SANS auth tandis qu'une route protégée (/api/whoami) passe à 401 une fois la gate engagée.
+    #[tokio::test]
+    async fn setup_wizard_live_end_to_end() {
+        let ledger = tmp_path("forge-test-setup-ledger");
+        let app = test_app(&ledger);
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // 1) fresh install -> needs_setup:true, sqlcipher:false (build par défaut), joignable SANS auth.
+        let r = http_raw(addr, &get_req("/api/setup/state", "")).await;
+        assert_eq!(parse_status(&r), 200, "setup/state public: {r}");
+        assert!(body_of(&r).contains("\"needs_setup\":true"), "fresh -> needs_setup:true : {}", body_of(&r));
+        assert!(body_of(&r).contains("\"provisioned\":false"));
+        assert!(body_of(&r).contains("\"sqlcipher\":false"), "build par défaut -> sqlcipher:false");
+
+        // 2) POST /api/setup SANS auth -> 200 + cookie posé + settings persistés.
+        let setup_body = json!({
+            "admin_login": "root",
+            "admin_password": "hunter2pw",
+            "session_ttl": 1800,
+            "operator_policy": {"require_reason": true, "source_cidrs": ["10.0.0.0/24"], "high_impact_approval": false},
+            "detection_source": {"kind": "plume", "endpoint": "http://soc.local:8080", "auth_type": "basic"}
+        })
+        .to_string();
+        let r = http_raw(addr, &post_req("/api/setup", &setup_body, "")).await;
+        assert_eq!(parse_status(&r), 200, "provision -> 200 : {r}");
+        assert!(body_of(&r).contains("\"provisioned\":true"));
+        let tok = cookie_token(&r).expect("cookie forge_session posé par le provisioning");
+        assert!(!tok.is_empty());
+
+        // 3) l'état bascule : provisioned:true / needs_setup:false.
+        let r = http_raw(addr, &get_req("/api/setup/state", "")).await;
+        assert!(body_of(&r).contains("\"needs_setup\":false"), "après provision -> needs_setup:false");
+        assert!(body_of(&r).contains("\"provisioned\":true"));
+
+        // 4) SECONDE provision -> 409 (route auto-désactivante).
+        let r = http_raw(addr, &post_req("/api/setup", &setup_body, "")).await;
+        assert_eq!(parse_status(&r), 409, "2e provision -> 409 : {r}");
+
+        // 5) detection_source + operator_policy (+ session_ttl) atterrissent VERBATIM dans settings.
+        {
+            let db = app.db();
+            assert!(settings_get(&db, "operator_policy").unwrap().contains("10.0.0.0/24"), "operator_policy stocké");
+            assert!(settings_get(&db, "detection_source").unwrap().contains("plume"), "detection_source stocké");
+            assert_eq!(settings_get(&db, "session_ttl").as_deref(), Some("1800"), "session_ttl stocké");
+        }
+        assert!(app.any_enabled_admin(), "un admin activé existe après provision");
+
+        // 6) la gate d'auth est désormais engagée : /api/whoami SANS auth -> 401 ; AVEC session -> 200.
+        let r = http_raw(addr, &get_req("/api/whoami", "")).await;
+        assert_eq!(parse_status(&r), 401, "route protégée sans auth, gate engagée -> 401 : {r}");
+        let r = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={tok}\r\n"))).await;
+        assert_eq!(parse_status(&r), 200, "route protégée avec session -> 200 : {r}");
+        assert!(body_of(&r).contains("\"login\":\"root\""), "session = nouvel admin root : {}", body_of(&r));
+
+        // 7) /api/setup/state RESTE joignable sans auth même gate engagée (hors auth_guard).
+        let r = http_raw(addr, &get_req("/api/setup/state", "")).await;
+        assert_eq!(parse_status(&r), 200, "setup/state toujours public une fois provisionné");
+
+        // ledger : entrée de provision attribuée à root, JAMAIS le mot de passe/hash.
+        let last = read_ledger_lines(&ledger).pop().expect("ledger provision");
+        assert_eq!(last["kind"], "console.setup.provision");
+        assert_eq!(last["detail"]["actor"], "root");
+        assert_eq!(last["detail"]["operator_policy_set"], true);
+        assert_eq!(last["detail"]["detection_source_set"], true);
+        let ser = canon_json(&last).to_lowercase();
+        assert!(!ser.contains("hunter2pw"), "le mot de passe ne DOIT jamais entrer dans le ledger");
+        assert!(!ser.contains("argon2"), "le hash ne DOIT jamais entrer dans le ledger");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [SETUP migrate] POST /api/setup/migrate : PUBLIC en pré-provision (exécute la migration + rend
+    /// le rapport verify), puis AUTO-DÉSACTIVANTE (409) dès qu'un admin activé existe. Chemin plaintext
+    /// (aucun sqlcipher requis).
+    #[tokio::test]
+    async fn setup_migrate_public_pre_provision_then_409_once_provisioned() {
+        // source sur disque : base ANCIENNE + ledger intact.
+        let src_dir = tmp_dir("forge-mig-http-src");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
+
+        let led = tmp_path("forge-test-setup-migrate-ledger");
+        let app = test_app(&led);
+        let to = tmp_path("forge-mig-http-to.db");
+        let target_ledger = tmp_path("forge-mig-http-to.jsonl");
+        let body = json!({"from": src_dir, "to": to, "ledger": target_ledger, "verify": true});
+
+        // 1) PRÉ-PROVISION : route publique -> exécute la migration -> 200 + cible écrite.
+        let r = setup_migrate(State(app.clone()), Json(body.clone())).await;
+        assert_eq!(r.status(), StatusCode::OK, "pré-provision -> 200");
+        assert!(std::path::Path::new(&to).exists(), "migration exécutée (cible écrite)");
+
+        // 2) provisionne un admin -> la route se ferme (409), sans relancer de migration.
+        {
+            let db = app.db();
+            upsert_user(&db, "root", "admin", &hash_pw("pw123456")).unwrap();
+        }
+        app.recompute_auth_required();
+        assert!(app.provisioned(), "un admin activé -> provisionné");
+        let r = setup_migrate(State(app.clone()), Json(body)).await;
+        assert_eq!(r.status(), StatusCode::CONFLICT, "une fois provisionné -> 409");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&led);
+        let _ = std::fs::remove_file(&to);
+        let _ = std::fs::remove_file(&target_ledger);
+        let _ = std::fs::remove_file(format!("{target_ledger}.ed25519"));
+    }
+
+    /// [SETUP wizard] Validation d'entrée + auto-désactivation par HASH ENV : login invalide -> 400,
+    /// mot de passe vide -> 400 ; une install avec un hash d'amorçage env est déjà provisionnée -> 409
+    /// (pas de nouvelle provision anonyme), même sans compte en base.
+    #[tokio::test]
+    async fn setup_provision_validates_and_self_disables_on_env_hash() {
+        let path = tmp_path("forge-test-setup-validate");
+        // login invalide -> 400
+        {
+            let app = test_app(&path);
+            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "-bad", "admin_password": "x"}))).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "login invalide -> 400");
+            // mot de passe vide -> 400
+            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "ok", "admin_password": ""}))).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "mot de passe vide -> 400");
+            assert!(!app.any_enabled_admin(), "aucun refus 400 ne provisionne quoi que ce soit");
+        }
+        // hash env d'amorçage posé -> provisioned d'emblée -> 409.
+        {
+            let mut app = test_app(&path);
+            app.pass_hash = Arc::new(hash_pw("bootstrap"));
+            app.recompute_auth_required();
+            assert!(app.provisioned(), "hash env -> déjà provisionné");
+            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "root", "admin_password": "x"}))).await;
+            assert_eq!(r.status(), StatusCode::CONFLICT, "hash env d'amorçage -> /api/setup fermée (409)");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [OPÉRATEUR source-CIDR] ip_in_cidr : appartenance v4/v6, IP exacte, /0, familles hétérogènes,
+    /// et rejet fail-closed des entrées malformées (préfixe non numérique / hors borne, réseau invalide).
+    #[test]
+    fn ip_in_cidr_membership_and_fail_closed() {
+        let v4 = "10.0.0.5".parse::<IpAddr>().unwrap();
+        assert!(ip_in_cidr(&v4, "10.0.0.0/24"));
+        assert!(ip_in_cidr(&v4, "10.0.0.0/8"));
+        assert!(!ip_in_cidr(&v4, "10.0.1.0/24"));
+        assert!(ip_in_cidr(&v4, "10.0.0.5"), "sans '/' -> comparaison exacte");
+        assert!(!ip_in_cidr(&v4, "10.0.0.6"));
+        assert!(ip_in_cidr(&v4, "0.0.0.0/0"), "/0 -> tout l'espace v4");
+        assert!(!ip_in_cidr(&v4, "garbage"), "réseau invalide -> false");
+        assert!(!ip_in_cidr(&v4, "10.0.0.0/33"), "préfixe hors borne -> false");
+        assert!(!ip_in_cidr(&v4, "10.0.0.0/x"), "préfixe non numérique -> false");
+        let v6 = "2001:db8::5".parse::<IpAddr>().unwrap();
+        assert!(ip_in_cidr(&v6, "2001:db8::/32"));
+        assert!(!ip_in_cidr(&v6, "2001:dead::/32"));
+        assert!(!ip_in_cidr(&v4, "2001:db8::/32"), "v4 vs réseau v6 -> false");
+        assert!(!ip_in_cidr(&v6, "10.0.0.0/8"), "v6 vs réseau v4 -> false");
+    }
+
+    /// [OPÉRATEUR source-CIDR] check_operator : la contrainte source ne s'applique QUE si configurée.
+    /// Non configurée -> toute IP passe (défaut = none). Configurée -> hors-allowlist REFUSÉ, dans
+    /// l'allowlist AUTORISÉ, IP indéterminée REFUSÉE (fail-closed). trusted_proxy (CIDR du proxy) ->
+    /// honore le dernier hop XFF UNIQUEMENT si le pair TCP EST ce proxy ; un client direct (pair hors
+    /// CIDR) qui forge un XFF est IGNORÉ (repli sur le pair) ; valeur héritée "1" -> aucun proxy de
+    /// confiance. Un viewer ne passe jamais.
+    #[tokio::test]
+    async fn operator_source_cidr_enforced_only_when_configured() {
+        let path = tmp_path("forge-test-op-cidr");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "op", "operator", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+        }
+        let (otok, _) = create_session(&app, uid_of(&app, "op"));
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let h = bearer_headers(&otok);
+        let ip_ok = "10.0.0.5".parse::<IpAddr>().unwrap();
+        let ip_bad = "192.168.1.9".parse::<IpAddr>().unwrap();
+
+        // (a) AUCUNE politique -> toute IP passe (défaut = none), y compris IP indéterminée.
+        assert!(check_operator(&app, &h, Some(ip_ok)));
+        assert!(check_operator(&app, &h, Some(ip_bad)), "sans politique, IP hors 'futur allowlist' passe");
+        assert!(check_operator(&app, &h, None), "sans politique, IP indéterminée passe");
+
+        // (b) politique source_cidrs configurée -> restriction fail-closed.
+        {
+            let db = app.db();
+            settings_set(&db, "operator_policy", "{\"source_cidrs\":[\"10.0.0.0/24\"]}").unwrap();
+        }
+        assert!(check_operator(&app, &h, Some(ip_ok)), "IP dans le CIDR -> autorisée");
+        assert!(!check_operator(&app, &h, Some(ip_bad)), "IP hors CIDR -> refusée (fail-closed)");
+        assert!(!check_operator(&app, &h, None), "politique active + IP indéterminée -> refus");
+
+        // (c) AUCUN trusted_proxy configuré -> X-Forwarded-For IGNORÉ (on prend le pair). Pair hors
+        //     CIDR -> refus, même si le XFF prétend une IP autorisée.
+        let mut hx = bearer_headers(&otok);
+        hx.insert("x-forwarded-for", "10.0.0.5".parse().unwrap());
+        assert!(!check_operator(&app, &hx, Some(ip_bad)), "sans trusted_proxy -> XFF ignoré, pair hors CIDR -> refus");
+
+        // (d) [RÉTRO-COMPAT] valeur héritée "1" (truthy non-CIDR) -> traitée comme AUCUN proxy de
+        //     confiance -> XFF ignoré, repli fail-closed sur le pair. Ne vaut JAMAIS « fais confiance à
+        //     tout XFF » (ce qui rouvrirait le contournement).
+        {
+            let db = app.db();
+            settings_set(&db, "trusted_proxy", "1").unwrap();
+        }
+        let mut hlegacy = bearer_headers(&otok);
+        hlegacy.insert("x-forwarded-for", "203.0.113.7, 10.0.0.5".parse().unwrap());
+        assert!(!check_operator(&app, &hlegacy, Some(ip_bad)),
+            "trusted_proxy='1' (héritée) -> aucun proxy de confiance -> XFF ignoré, pair hors CIDR -> refus");
+
+        // On configure désormais trusted_proxy = le CIDR RÉEL du proxy amont.
+        {
+            let db = app.db();
+            settings_set(&db, "trusted_proxy", "172.16.0.0/12").unwrap();
+        }
+        let proxy_ip = "172.16.0.9".parse::<IpAddr>().unwrap(); // pair ∈ trusted_proxy CIDR
+
+        // (e) [RÉGRESSION anti-contournement] client DIRECT (pair hors trusted_proxy CIDR) qui FORGE un
+        //     X-Forwarded-For revendiquant une IP de l'allowlist -> XFF IGNORÉ (le pair n'est pas le
+        //     proxy) -> repli sur le pair (ip_bad) -> REFUSÉ. Fermeture du bypass XFF spoofé.
+        let mut hspoof = bearer_headers(&otok);
+        hspoof.insert("x-forwarded-for", "10.0.0.5".parse().unwrap());
+        assert!(!check_operator(&app, &hspoof, Some(ip_bad)),
+            "client direct + XFF spoofé prétendant une IP autorisée -> XFF ignoré, repli sur pair -> REFUSÉ (bypass fermé)");
+
+        // (f) requête RÉELLEMENT relayée : le pair TCP EST le proxy de confiance (∈ CIDR) et le dernier
+        //     hop XFF est dans l'allowlist opérateur -> honoré -> AUTORISÉ (le pair-proxy n'est PAS dans
+        //     l'allowlist, ce qui prouve que c'est bien le XFF qui décide).
+        let mut hp = bearer_headers(&otok);
+        hp.insert("x-forwarded-for", "203.0.113.7, 10.0.0.5".parse().unwrap());
+        assert!(check_operator(&app, &hp, Some(proxy_ip)),
+            "pair = proxy de confiance + dernier hop XFF dans le CIDR -> autorisé");
+
+        // (f-bis) même proxy de confiance mais dernier hop XFF hors allowlist -> refusé (fail-closed sur
+        //     l'IP réelle du client telle que déclarée par le proxy).
+        let mut hp2 = bearer_headers(&otok);
+        hp2.insert("x-forwarded-for", "203.0.113.7, 192.168.1.9".parse().unwrap());
+        assert!(!check_operator(&app, &hp2, Some(proxy_ip)),
+            "pair = proxy de confiance mais dernier hop XFF hors CIDR -> refusé");
+
+        // (g) un viewer ne passe JAMAIS, quelle que soit l'IP/politique.
+        assert!(!check_operator(&app, &bearer_headers(&vtok), Some(ip_ok)), "viewer refusé indépendamment de la politique source");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [SÉCURITÉ XFF] parse_trusted_proxy_cidrs : tableau JSON / CSV / CIDR unique -> liste ; valeurs
+    /// héritées truthy non-CIDR ("1"/"true"), vide, ou déchet -> liste VIDE (aucun proxy de confiance).
+    /// effective_client_ip : XFF honoré SEULEMENT si le pair ∈ un trusted_proxy CIDR ; sinon IGNORÉ
+    /// (repli fail-closed sur le pair, ou None si pair inconnu).
+    #[test]
+    fn trusted_proxy_cidr_parse_and_effective_ip_fail_closed() {
+        // parse : formats acceptés
+        assert_eq!(parse_trusted_proxy_cidrs("10.0.0.0/24"), vec!["10.0.0.0/24".to_string()]);
+        assert_eq!(parse_trusted_proxy_cidrs("[\"10.0.0.0/24\",\"172.16.0.0/12\"]"),
+                   vec!["10.0.0.0/24".to_string(), "172.16.0.0/12".to_string()]);
+        assert_eq!(parse_trusted_proxy_cidrs("10.0.0.0/24, 172.16.0.0/12"),
+                   vec!["10.0.0.0/24".to_string(), "172.16.0.0/12".to_string()]);
+        assert_eq!(parse_trusted_proxy_cidrs("203.0.113.4"), vec!["203.0.113.4".to_string()], "IP nue -> match exact");
+        // parse : héritées / invalides -> vide (fail-closed, jamais « trust all »)
+        assert!(parse_trusted_proxy_cidrs("1").is_empty(), "'1' hérité -> aucun proxy de confiance");
+        assert!(parse_trusted_proxy_cidrs("true").is_empty(), "'true' hérité -> aucun proxy de confiance");
+        assert!(parse_trusted_proxy_cidrs("").is_empty());
+        assert!(parse_trusted_proxy_cidrs("garbage").is_empty());
+        assert!(parse_trusted_proxy_cidrs("10.0.0.0/33").is_empty(), "préfixe hors borne -> écarté");
+
+        let cidrs = vec!["172.16.0.0/12".to_string()];
+        let proxy = "172.16.0.9".parse::<IpAddr>().unwrap();
+        let direct = "192.168.1.9".parse::<IpAddr>().unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.7, 10.0.0.5".parse().unwrap());
+
+        // pair = proxy de confiance -> dernier hop XFF honoré
+        assert_eq!(effective_client_ip(Some(proxy), &h, &cidrs), Some("10.0.0.5".parse().unwrap()));
+        // pair = client direct (hors CIDR) -> XFF IGNORÉ, repli sur le pair
+        assert_eq!(effective_client_ip(Some(direct), &h, &cidrs), Some(direct));
+        // aucun trusted_proxy -> XFF ignoré, repli sur le pair
+        assert_eq!(effective_client_ip(Some(proxy), &h, &[]), Some(proxy));
+        // pair inconnu -> None (fail-closed), jamais l'XFF
+        assert_eq!(effective_client_ip(None, &h, &cidrs), None);
+    }
+
     /// [LOW sec] ct_eq_str : égalité correcte, inégalité correcte (la propriété temps-constant n'est
     /// pas mesurable en test unitaire, mais on garantit la correction fonctionnelle).
     #[test]
@@ -6041,6 +7129,237 @@ mod tests {
         let seqs: Vec<i64> = entries.iter().filter_map(|e| e.get("seq").and_then(|v| v.as_i64())).collect();
         assert_eq!(seqs, vec![1, 2, 3], "seq doit reprendre après reload (pas de doublon)");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // =========================================================================================
+    // MIGRATION DE DONNÉES — chemin PLAINTEXT (aucun sqlcipher requis : ces tests tournent dans la
+    // suite PAR DÉFAUT). Le chemin CHIFFRÉ est gardé derrière `#[cfg(feature="encryption")]` plus bas
+    // (skip quand non compilé) pour ne JAMAIS faire dépendre la suite par défaut de SQLCipher/openssl.
+    // =========================================================================================
+
+    /// Crée un dossier temporaire unique.
+    fn tmp_dir(name: &str) -> String {
+        let d = tmp_path(name);
+        std::fs::create_dir_all(&d).expect("mkdir tmp");
+        d
+    }
+
+    /// Sème une base SOURCE au schéma ANCIEN : `finding` SANS les colonnes additives (cwe/run_id/…),
+    /// et PAS de table settings/users. La migration doit l'upgrader EN PLACE (SCHEMA + migrate()).
+    fn seed_old_source_db(path: &str) {
+        let c = Connection::open(path).expect("open src db");
+        c.execute_batch(
+            "CREATE TABLE finding(id INTEGER PRIMARY KEY, ts TEXT, campaign TEXT, target TEXT, title TEXT,
+                severity TEXT, category TEXT, mitre TEXT, status TEXT, evidence TEXT, tool TEXT, poc TEXT);",
+        )
+        .expect("old schema");
+        c.execute(
+            "INSERT INTO finding(id,title,target,campaign) VALUES(1,'old-finding','h.example','c1')",
+            [],
+        )
+        .expect("insert old row");
+    }
+
+    /// [MIGRATION plaintext] copie COHÉRENTE (VACUUM INTO) + upgrade EN PLACE : la cible reçoit les
+    /// colonnes additives (cwe) et les tables neuves (settings) via SCHEMA+migrate(), la donnée
+    /// source survit, le ledger + la clé voyagent, et le ledger cible reste VÉRIFIABLE (chaîne
+    /// SHA-256 continue avec l'entrée `console.migrate`).
+    #[test]
+    fn migrate_plaintext_copies_and_upgrades_schema() {
+        let src_dir = tmp_dir("forge-mig-src");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        // ledger source (2 entrées chaînées) + clé de signature .ed25519.
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
+        ledger_append_standalone(&src_ledger, "action.recon", &json!({"a": 2})).unwrap();
+        std::fs::write(format!("{src_ledger}.ed25519"), b"fake-ed25519-key-32-bytes-xxxxxx").unwrap();
+
+        let to = tmp_path("forge-mig-to.db");
+        let target_ledger = tmp_path("forge-mig-to.jsonl");
+        let opts = MigrateOpts {
+            from: src_dir.clone(),
+            to: to.clone(),
+            ledger: Some(target_ledger.clone()),
+            verify: true,
+            encrypt: false,
+            key_env: None,
+            actor: "test".to_string(),
+        };
+        let report = run_migration(&opts).expect("migration doit réussir");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["encrypted"], false, "build par défaut -> copie en clair");
+        assert_eq!(report["verify"]["ok"], true, "ledger source intact -> verify ok");
+
+        // 1) schéma UPGRADÉ en place : colonne additive `cwe` présente, donnée source préservée.
+        let dst = Connection::open(&to).expect("open target");
+        let cwe: String = dst
+            .query_row("SELECT cwe FROM finding WHERE id=1", [], |r| r.get(0))
+            .expect("colonne cwe ajoutée par migrate()");
+        assert_eq!(cwe, "", "cwe = DEFAULT '' sur une ligne migrée");
+        let title: String = dst.query_row("SELECT title FROM finding WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "old-finding", "la donnée source survit à la copie");
+        // 2) table neuve `settings` créée par SCHEMA sur la cible (absente de la source ancienne).
+        let n: i64 = dst.query_row("SELECT count(*) FROM settings", [], |r| r.get(0)).expect("table settings créée");
+        assert_eq!(n, 0);
+
+        // 3) ledger + clé copiés ; ledger cible VÉRIFIABLE (2 source + 1 console.migrate = 3, intègre).
+        assert_eq!(report["ledger_copied"], true);
+        assert_eq!(report["key_copied"], true);
+        assert!(std::path::Path::new(&format!("{target_ledger}.ed25519")).exists(), "clé .ed25519 copiée");
+        let v = verify_ledger_chain(&target_ledger);
+        assert!(v.ok, "ledger cible doit rester intègre après l'append console.migrate");
+        assert_eq!(v.entries, 3, "2 entrées source + 1 entrée de migration");
+        let last = read_ledger_lines(&target_ledger).pop().unwrap();
+        assert_eq!(last["kind"], "console.migrate", "la migration est tracée au ledger cible");
+        assert_eq!(last["detail"]["encrypted"], false);
+
+        drop(dst);
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
+        let _ = std::fs::remove_file(&target_ledger);
+        let _ = std::fs::remove_file(format!("{target_ledger}.ed25519"));
+    }
+
+    /// [MIGRATION --verify] passe sur un ledger INTACT et ABORTE (aucune écriture cible) sur un ledger
+    /// ALTÉRÉ (une entrée tamperée casse le recompute de hash).
+    #[test]
+    fn migrate_verify_passes_intact_aborts_on_tamper() {
+        // --- cas INTACT : verify ok, migration réussit. ---
+        let src_dir = tmp_dir("forge-mig-verify-ok");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        for i in 0..4 {
+            ledger_append_standalone(&src_ledger, "console.test", &json!({"i": i, "msg": "événement"})).unwrap();
+        }
+        let to_ok = tmp_path("forge-mig-verify-ok-to.db");
+        let led_ok = tmp_path("forge-mig-verify-ok-to.jsonl");
+        let ok_opts = MigrateOpts {
+            from: src_dir.clone(), to: to_ok.clone(), ledger: Some(led_ok.clone()),
+            verify: true, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        let r = run_migration(&ok_opts).expect("ledger intact -> migration réussit");
+        assert_eq!(r["verify"]["ok"], true);
+        assert!(std::path::Path::new(&to_ok).exists(), "cible écrite quand le ledger est intact");
+
+        // --- cas ALTÉRÉ : on tampere une entrée -> verify échoue -> ABORT avant toute écriture. ---
+        let src_dir2 = tmp_dir("forge-mig-verify-tamper");
+        let src_db2 = format!("{src_dir2}/forge-console.db");
+        seed_old_source_db(&src_db2);
+        let src_ledger2 = format!("{src_dir2}/engagement.jsonl");
+        for i in 0..4 {
+            ledger_append_standalone(&src_ledger2, "console.test", &json!({"i": i, "msg": "événement"})).unwrap();
+        }
+        // altère le CONTENU d'une entrée sans recalculer son hash -> "hash recalculé != stocké".
+        let tampered = std::fs::read_to_string(&src_ledger2).unwrap().replacen("événement", "ALTÉRÉ", 1);
+        std::fs::write(&src_ledger2, tampered).unwrap();
+        // pré-condition : la vérif détecte bien la rupture.
+        let vchk = verify_ledger_chain(&src_ledger2);
+        assert!(!vchk.ok && vchk.exists, "le ledger tamperé doit être détecté comme rompu");
+
+        let to_bad = tmp_path("forge-mig-verify-tamper-to.db");
+        let bad_opts = MigrateOpts {
+            from: src_dir2.clone(), to: to_bad.clone(), ledger: Some(tmp_path("forge-mig-tamper-to.jsonl")),
+            verify: true, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        let err = run_migration(&bad_opts).expect_err("ledger rompu -> migration AVORTÉE");
+        assert!(err.contains("AVORTÉE"), "message d'abort explicite: {err}");
+        assert!(!std::path::Path::new(&to_bad).exists(), "AUCUNE écriture cible sur abort (verify avant copie)");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&src_dir2);
+        let _ = std::fs::remove_file(&to_ok);
+        let _ = std::fs::remove_file(&led_ok);
+        let _ = std::fs::remove_file(format!("{led_ok}.ed25519"));
+    }
+
+    /// [MIGRATION clé] la clé de signature `.ed25519` voyage AVEC le ledger, en mode 0600 FORCÉ
+    /// (même si la source est plus permissive) — sinon la chaîne signée devient invérifiable.
+    #[cfg(unix)]
+    #[test]
+    fn migrate_copies_ed25519_key_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let src_dir = tmp_dir("forge-mig-key");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
+        // clé source DÉLIBÉRÉMENT en 0644 -> prouve que la copie FORCE 0600 (pas un simple héritage).
+        let src_key = format!("{src_ledger}.ed25519");
+        std::fs::write(&src_key, b"raw-ed25519-private-key-32-bytes").unwrap();
+        std::fs::set_permissions(&src_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let to = tmp_path("forge-mig-key-to.db");
+        let target_ledger = tmp_path("forge-mig-key-to.jsonl");
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: to.clone(), ledger: Some(target_ledger.clone()),
+            verify: false, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        run_migration(&opts).expect("migration ok");
+
+        let dst_key = format!("{target_ledger}.ed25519");
+        assert!(std::path::Path::new(&dst_key).exists(), "clé .ed25519 copiée dans le dossier ledger cible");
+        let mode = std::fs::metadata(&dst_key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "la clé doit être 0600 (secret de signature)");
+        // contenu identique (la clé est le même secret).
+        assert_eq!(std::fs::read(&dst_key).unwrap(), b"raw-ed25519-private-key-32-bytes");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
+        let _ = std::fs::remove_file(&target_ledger);
+        let _ = std::fs::remove_file(&dst_key);
+    }
+
+    /// [MIGRATION chiffrement — build par défaut] `--encrypt` sans la feature `encryption` renvoie une
+    /// ERREUR CLAIRE (jamais un faux succès en clair). Ce test n'existe QUE dans le build par défaut.
+    #[cfg(not(feature = "encryption"))]
+    #[test]
+    fn migrate_encrypt_without_feature_errors_clearly() {
+        let src_dir = tmp_dir("forge-mig-noenc");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: tmp_path("forge-mig-noenc-to.db"), ledger: None,
+            verify: false, encrypt: true, key_env: Some("FORGE_TEST_KEY".to_string()), actor: "test".to_string(),
+        };
+        let err = run_migration(&opts).expect_err("encrypt sans feature -> erreur");
+        assert!(err.contains("NON compilé") || err.contains("features encryption"),
+            "message doit dire que le chiffrement n'est pas compilé: {err}");
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    /// [MIGRATION chiffrement — build chiffré] plaintext -> SQLCipher -> relecture avec la clé. GARDÉ
+    /// derrière `#[cfg(feature="encryption")]` : SKIP (non compilé) dans la suite par défaut, pour ne
+    /// PAS faire dépendre celle-ci de SQLCipher/openssl. Exécuté seulement via `--features encryption`.
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn migrate_encrypted_roundtrip_reads_back_with_key() {
+        let src_dir = tmp_dir("forge-mig-enc");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let to = tmp_path("forge-mig-enc-to.db");
+        std::env::set_var("FORGE_TEST_ENC_KEY", "correct horse battery staple");
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: to.clone(), ledger: Some(tmp_path("forge-mig-enc-to.jsonl")),
+            verify: false, encrypt: true, key_env: Some("FORGE_TEST_ENC_KEY".to_string()), actor: "test".to_string(),
+        };
+        let report = run_migration(&opts).expect("migration chiffrée doit réussir");
+        assert_eq!(report["encrypted"], true);
+
+        // relecture AVEC la bonne clé -> lisible ; la donnée source a survécu.
+        let dst = Connection::open(&to).unwrap();
+        dst.pragma_update(None, "key", "correct horse battery staple").unwrap();
+        let title: String = dst.query_row("SELECT title FROM finding WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "old-finding");
+
+        // relecture SANS clé -> illisible (preuve que la base est bien chiffrée au repos).
+        let bad = Connection::open(&to).unwrap();
+        assert!(bad.query_row("SELECT count(*) FROM finding", [], |r| r.get::<_, i64>(0)).is_err(),
+            "sans PRAGMA key, une base chiffrée est illisible");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
     }
 
     /// [parité lecture] host_in_server_scope : match exact, suffixe de domaine, wildcard `*.`, et

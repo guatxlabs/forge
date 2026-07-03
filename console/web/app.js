@@ -2828,12 +2828,14 @@ function renderWhoami(w) {
 }
 function showLogin() {
   document.body.classList.add('gated');
+  const sv = $('#setup-view'); if (sv) sv.hidden = true;
   const v = $('#login-view'); if (v) v.hidden = false;
   const u = $('#login-user'); if (u) setTimeout(() => { try { u.focus(); } catch (e) {} }, 40);
 }
 function showApp() {
   document.body.classList.remove('gated');
   const v = $('#login-view'); if (v) v.hidden = true;
+  const sv = $('#setup-view'); if (sv) sv.hidden = true;
 }
 function loginErr(msg) { const e = $('#login-err'); if (e) { e.textContent = msg; e.hidden = false; } }
 // POST /api/login {login,password} : succès -> le serveur pose le cookie de session (Set-Cookie). On
@@ -2890,9 +2892,151 @@ if ($('#logout')) $('#logout').addEventListener('click', async () => {
   if (await confirmModal('Se déconnecter de la console ?', { title: 'Déconnexion', okText: 'Déconnexion', cancelText: 'Rester', danger: false })) doLogout();
 });
 
-// boot gaté : sonde whoami, montre le portail sur 401 (ou erreur réseau, fail-closed lisible), sinon
-// charge le contexte transverse (campagnes -> sélecteur, statuts -> filtre) puis route la vue.
+// =====================================================================================
+//  WIZARD 1er DÉPLOIEMENT (self-deploy) — stepper de provisioning dans le skin Ember.
+//  bootApp() sonde /api/setup/state ; needs_setup:true -> showSetup(). Le POST /api/setup crée le 1er
+//  admin, pose le cookie de session (on atterrit connecté), puis on démarre le shell. ZÉRO défaut :
+//  seuls identifiant + mot de passe sont requis ; détection/politique opérateur sont optionnels.
+// =====================================================================================
+let SETUP_STEP = 1;
+const SETUP_MAX = 4;
+function showSetup(state) {
+  document.body.classList.add('gated');
+  const lv = $('#login-view'); if (lv) lv.hidden = true;
+  const sv = $('#setup-view'); if (sv) sv.hidden = false;
+  // capacité SQLCipher : la bascule de chiffrement au repos n'apparaît QUE si le build l'expose
+  // (capabilities.sqlcipher). Faux dans le build par défaut -> bascule masquée, note « indisponible ».
+  const sqlcipher = !!(state && state.capabilities && state.capabilities.sqlcipher);
+  const encWrap = $('#su-enc-wrap'); if (encWrap) encWrap.hidden = !sqlcipher;
+  const encUnavail = $('#su-enc-unavail'); if (encUnavail) encUnavail.hidden = sqlcipher;
+  setupGoto(1);
+  const f = $('#su-login'); if (f) setTimeout(() => { try { f.focus(); } catch (e) {} }, 40);
+}
+function setupErr(msg) { const e = $('#setup-err'); if (e) { e.textContent = msg || ''; e.hidden = !msg; } }
+function setupGoto(n) {
+  SETUP_STEP = Math.max(1, Math.min(SETUP_MAX, n));
+  setupErr('');
+  document.querySelectorAll('#setup-view .setup-panel').forEach(p => p.classList.toggle('is-active', Number(p.dataset.panel) === SETUP_STEP));
+  document.querySelectorAll('#setup-view .setup-step').forEach(s => {
+    const sn = Number(s.dataset.step);
+    s.classList.toggle('is-active', sn === SETUP_STEP);
+    s.classList.toggle('is-done', sn < SETUP_STEP);
+  });
+  const back = $('#su-back'); if (back) back.hidden = SETUP_STEP === 1;
+  const next = $('#su-next'); if (next) next.hidden = SETUP_STEP === SETUP_MAX;
+  const fin = $('#su-finish'); if (fin) fin.hidden = SETUP_STEP !== SETUP_MAX;
+}
+// validation de l'étape 1 (SEULE étape avec des champs requis). Miroir léger de validate_login côté
+// serveur (le serveur reste l'autorité) + confirmation du mot de passe.
+function setupValidateStep1() {
+  const login = (($('#su-login') && $('#su-login').value) || '').trim();
+  const pass = ($('#su-pass') && $('#su-pass').value) || '';
+  const pass2 = ($('#su-pass2') && $('#su-pass2').value) || '';
+  if (!login) return 'Identifiant administrateur requis.';
+  if (login.startsWith('-') || !/^[A-Za-z0-9._-]{1,64}$/.test(login)) return 'Identifiant : [A-Za-z0-9._-], 1 à 64 caractères, sans tiret initial.';
+  if (!pass) return 'Mot de passe requis.';
+  if (pass !== pass2) return 'Les mots de passe ne correspondent pas.';
+  return null;
+}
+// construit le corps de POST /api/setup. Les blocs optionnels ne sont inclus que s'ils sont renseignés
+// (aucune valeur par défaut envoyée quand l'utilisateur ne configure rien).
+function setupBuildPayload() {
+  const login = (($('#su-login') && $('#su-login').value) || '').trim();
+  const pass = ($('#su-pass') && $('#su-pass').value) || '';
+  const payload = { admin_login: login, admin_password: pass };
+  // détection (étape 3) : verbatim, UNIQUEMENT si un collecteur est choisi (kind != none/vide).
+  const kind = ($('#su-det-kind') && $('#su-det-kind').value) || 'none';
+  if (kind && kind !== 'none') {
+    const ds = { kind };
+    const ep = (($('#su-det-endpoint') && $('#su-det-endpoint').value) || '').trim();
+    const at = ($('#su-det-authtype') && $('#su-det-authtype').value) || '';
+    const sec = ($('#su-det-secret') && $('#su-det-secret').value) || '';
+    const mapRaw = (($('#su-det-mapping') && $('#su-det-mapping').value) || '').trim();
+    if (ep) ds.endpoint = ep;
+    if (at) ds.auth_type = at;
+    if (sec) ds.secret = sec;
+    if (mapRaw) { try { ds.mapping = JSON.parse(mapRaw); } catch (e) { ds.mapping = mapRaw; } }
+    payload.detection_source = ds;
+  }
+  // politique opérateur (étape 4) : booléens explicites (require_reason par défaut ON = comportement
+  // actuel) + allowlist CIDR source seulement si non vide (sinon aucune restriction — défaut = none).
+  const op = {
+    require_reason: !!($('#su-op-reason') && $('#su-op-reason').checked),
+    high_impact_approval: !!($('#su-op-approval') && $('#su-op-approval').checked),
+  };
+  const cidrs = (($('#su-op-cidrs') && $('#su-op-cidrs').value) || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (cidrs.length) op.source_cidrs = cidrs;
+  payload.operator_policy = op;
+  return payload;
+}
+async function setupSubmit() {
+  const e1 = setupValidateStep1();
+  if (e1) { setupGoto(1); setupErr(e1); return; }
+  // sanity légère sur les CIDR (pas d'espace interne) — le serveur reste l'autorité (fail-closed).
+  const badCidr = (($('#su-op-cidrs') && $('#su-op-cidrs').value) || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean).find(l => /\s/.test(l));
+  if (badCidr) { setupGoto(4); setupErr('CIDR invalide (espace interne) : ' + badCidr); return; }
+  const fin = $('#su-finish'); if (fin) fin.disabled = true;
+  setupErr('');
+  try {
+    const r = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(setupBuildPayload()),
+    });
+    if (r.status === 409) {
+      // provisionné entre-temps (course) -> basculer vers le portail de connexion.
+      toast('Console déjà provisionnée.', 'info');
+      const sv = $('#setup-view'); if (sv) sv.hidden = true;
+      renderWhoami(null); showLogin();
+      return;
+    }
+    if (!r.ok) {
+      let why = 'HTTP ' + r.status;
+      try { const j = await r.json(); if (j && typeof j.why === 'string') why = j.why; else if (j && typeof j.error === 'string') why = j.error; } catch (e) {}
+      setupErr('Échec du provisioning : ' + why);
+      return;
+    }
+    // succès : le serveur a posé le cookie de session (nouvel admin). Efface les secrets, démarre le shell.
+    ['#su-pass', '#su-pass2', '#su-det-secret'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+    const sv = $('#setup-view'); if (sv) sv.hidden = true;
+    showApp();
+    toast('Console provisionnée — bienvenue.', 'ok');
+    await bootApp();
+  } catch (err) {
+    setupErr('Erreur réseau : ' + String((err && err.message) || err));
+  } finally {
+    if (fin) fin.disabled = false;
+  }
+}
+if ($('#su-next')) $('#su-next').addEventListener('click', () => {
+  if (SETUP_STEP === 1) { const e = setupValidateStep1(); if (e) { setupErr(e); return; } }
+  setupGoto(SETUP_STEP + 1);
+});
+if ($('#su-back')) $('#su-back').addEventListener('click', () => setupGoto(SETUP_STEP - 1));
+// Entrée dans un champ soumet le form : avant la dernière étape on AVANCE (pas de provisioning
+// prématuré) ; à la dernière étape (bouton Provisionner) on soumet réellement.
+if ($('#setup-form')) $('#setup-form').addEventListener('submit', e => {
+  e.preventDefault();
+  if (SETUP_STEP < SETUP_MAX) {
+    if (SETUP_STEP === 1) { const err = setupValidateStep1(); if (err) { setupErr(err); return; } }
+    setupGoto(SETUP_STEP + 1);
+    return;
+  }
+  setupSubmit();
+});
+
+// boot gaté : sonde D'ABORD /api/setup/state (1er déploiement). needs_setup -> wizard de provisioning,
+// on s'arrête là. Sinon on retombe sur le flux normal : sonde whoami, portail sur 401 (ou erreur
+// réseau, fail-closed lisible), sinon charge le contexte transverse puis route la vue.
 async function bootApp() {
+  // 1er déploiement : une install fraîche (aucun admin activé ni hash d'amorçage) affiche le wizard.
+  try {
+    const sr = await fetch('/api/setup/state', { headers: { Accept: 'application/json' } });
+    if (sr.ok) {
+      const st = await sr.json().catch(() => null);
+      if (st && st.needs_setup) { showSetup(st); return; }
+    }
+  } catch (e) { /* sonde best-effort : en cas d'échec on poursuit sur le flux whoami habituel */ }
   let w = null;
   try {
     const r = await fetch('/api/whoami', { headers: { Accept: 'application/json' } });
