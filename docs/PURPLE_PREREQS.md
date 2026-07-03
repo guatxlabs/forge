@@ -1,5 +1,8 @@
 # Prérequis Plume pour la boucle purple Forge (le moat)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Sources de détection](DETECTION.md) ·
+> [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) · [MTTD](MTTD.md)
+
 > **Plume est UN préréglage (`kind=plume`), pas la seule option.** La source de détection est un **plugin
 > configurable** : CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, un fichier JSONL ou une
 > commande maison se câblent **sans code** (wizard / *Administration → Source de détection*). Le modèle

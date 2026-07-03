@@ -1,5 +1,8 @@
 # Migration de données — importer un install Forge existant
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Administration](ADMINISTRATION.md#6-migration-de-données) ·
+> [Installation](INSTALLATION.md) · [Sauvegarde & restauration](BACKUP.md)
+
 Ce runbook migre un install **Forge Console existant** (typiquement un déploiement
 `systemd`/bare-metal, non conteneurisé) vers un **install Docker** (ou toute autre cible),
 sans perdre ni corrompre l'audit.

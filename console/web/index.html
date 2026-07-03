@@ -88,6 +88,12 @@
 .pc-failopen .pc-fo-head .pc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;border:1px solid color-mix(in srgb,var(--sev3) 40%,transparent);border-radius:6px;padding:2px 7px}
 .pc-failopen .pc-fo-detail{font-size:12px;color:var(--mut)}
 .pc-failopen .pc-fo-detail code{font-family:var(--font-mono);color:var(--fg)}
+/* bandeau AUTONOME (standalone) : AUCUNE source de détection configurée — état NEUTRE (pas une panne) */
+.pc-standalone{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--bd);border-radius:11px;background:var(--card2)}
+.pc-standalone .pc-so-head{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:var(--fg)}
+.pc-standalone .pc-so-head .ic{color:var(--mut)}
+.pc-standalone .pc-so-head .pc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--bd);border-radius:6px;padding:2px 7px;color:var(--mut)}
+.pc-standalone .pc-so-detail{font-size:12px;color:var(--mut);line-height:1.5}
 /* matrice de tuiles : une par technique, couleur = état de détection */
 .pc-matrix{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:9px}
 .pc-tile{display:flex;flex-direction:column;gap:5px;padding:10px 11px;border:1px solid var(--bd);border-radius:10px;background:var(--card);cursor:pointer}
@@ -130,6 +136,7 @@
       <option value="60">60 s</option>
     </select>
     <button id="reload" class="k-theme" type="button" aria-label="Rafraîchir" title="Rafraîchir maintenant"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+    <button id="help" class="k-theme" type="button" aria-label="Aide" aria-haspopup="dialog" title="Aide — expliquer la vue courante (raccourci : ?)"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.4 2.4 0 0 1 4.4 1.3c0 1.6-2 1.9-2.4 3.3"/><path d="M12 17.2h.01"/></svg></button>
     <button id="theme" class="k-theme" type="button" aria-label="Changer de thème" title="Thème clair / sombre"></button>
   </div>
 </header>
@@ -358,10 +365,10 @@
   <!-- COUVERTURE DE DÉTECTION (PURPLE) — Forge red tirées vs Plume blue détectées -->
   <section id="purple-coverage" class="card span2" aria-labelledby="pch">
     <div class="panelhead">
-      <h2 id="pch">Détection purple <span class="muted">— techniques Forge tirées vs détectées par Plume (SOC)</span></h2>
-      <span class="qbar"><span id="pc-plume" class="badge mut" title="Cible Plume interrogée pour la corrélation de détection">—</span></span>
+      <h2 id="pch">Détection purple <span class="muted">— techniques Forge tirées vs détectées par la source de détection (SOC/IDS/pare-feu, optionnelle)</span></h2>
+      <span class="qbar"><span id="pc-plume" class="badge mut" title="Source de détection interrogée pour la corrélation (optionnelle — Forge fonctionne en autonome sans elle)">—</span></span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Mesure <b>défensive</b> : pour chaque technique ATT&amp;CK <b>tirée</b> en red-team (<code>runrecord</code>), a-t-elle été <b>détectée</b> par le SOC (Plume) ? <span class="badge ok">détecté</span> expose la couverture, <span class="badge destr">raté</span> expose un <b>trou de détection</b>. Le <abbr title="Mean Time To Detect">MTTD</abbr> mesure le délai tir&rarr;alerte. Lecture seule — si Plume est injoignable, la mesure est déclarée <b>impossible</b> (aucun « détecté » inventé).</p>
+    <p class="muted" style="margin:0 0 10px">Mesure <b>défensive</b> <b>optionnelle</b> : pour chaque technique ATT&amp;CK <b>tirée</b> en red-team (<code>runrecord</code>), a-t-elle été <b>détectée</b> par la source de détection (SOC/IDS/pare-feu — Plume, CrowdSec, FortiGate, Elastic, fichier…) ? <span class="badge ok">détecté</span> expose la couverture, <span class="badge destr">raté</span> expose un <b>trou de détection</b>. Le <abbr title="Mean Time To Detect">MTTD</abbr> mesure le délai tir&rarr;alerte. Lecture seule — <b>aucune source n'est requise</b> : sans source configurée, Forge tourne en <b>autonome</b> ; si une source est configurée mais injoignable, la mesure est déclarée <b>impossible</b> (aucun « détecté » inventé).</p>
     <div id="pc-result"><div class="muted">chargement…</div></div>
   </section>
 
@@ -521,9 +528,10 @@
 
     <!-- STEP 1 — compte admin (SEULS champs requis) -->
     <div class="setup-panel is-active" data-panel="1">
-      <label class="login-f"><span>Identifiant administrateur</span><input id="su-login" name="new-username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="ex: root"></label>
-      <label class="login-f"><span>Mot de passe</span><input id="su-pass" name="new-password" type="password" autocomplete="new-password" placeholder="mot de passe fort"></label>
-      <label class="login-f"><span>Confirmer le mot de passe</span><input id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" placeholder="ressaisir le mot de passe"></label>
+      <div class="setup-note muted">Ce premier compte a le rôle <b>admin</b> (administration complète). Vous atterrissez connecté après provisioning. Les rôles <code>operator</code> / <code>viewer</code> se créent ensuite dans Administration.</div>
+      <label class="login-f"><span>Identifiant administrateur</span><input id="su-login" name="new-username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="ex: root"><small class="fhint">Lettres, chiffres, <code>. _ -</code> — 1 à 64 caractères, sans tiret initial.</small></label>
+      <label class="login-f"><span>Mot de passe</span><input id="su-pass" name="new-password" type="password" autocomplete="new-password" placeholder="mot de passe fort"><small class="fhint">Haché en <code>argon2id</code> côté serveur (jamais stocké en clair). Choisissez une phrase de passe longue.</small></label>
+      <label class="login-f"><span>Confirmer le mot de passe</span><input id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" placeholder="ressaisir le mot de passe"><small class="fhint">Doit correspondre — protège contre une faute de frappe sur un mot de passe masqué.</small></label>
     </div>
 
     <!-- STEP 2 — chiffrement : hash de mot de passe fixe (argon2id) + chiffrement au repos si dispo -->
@@ -542,9 +550,13 @@
 
     <!-- STEP 4 — politique opérateur (C2). require_reason par défaut ON (parité comportement actuel) -->
     <div class="setup-panel" data-panel="4">
+      <div class="setup-note muted">Règles qui encadrent l'armement du C2 par un <code>operator</code>. Tout est modifiable plus tard ; ces valeurs sont des garde-fous, pas des blocages définitifs.</div>
       <label class="login-f setup-toggle"><span>Exiger une raison à l'armement</span><input id="su-op-reason" type="checkbox" checked></label>
+      <small class="fhint">Recommandé (ON) : chaque armement doit porter une justification, tracée au ledger pour l'audit.</small>
       <label class="login-f"><span>Allowlist CIDR source opérateur (une par ligne, optionnel)</span><textarea id="su-op-cidrs" rows="2" spellcheck="false" placeholder="ex:&#10;10.0.0.0/24&#10;192.168.1.5"></textarea></label>
+      <small class="fhint">Restreint l'armement aux IP sources listées (CIDR). Vide = aucune restriction d'origine réseau. N'affecte que l'opérateur, pas la lecture.</small>
       <label class="login-f setup-toggle"><span>Approbation requise pour le haut-impact</span><input id="su-op-approval" type="checkbox"></label>
+      <small class="fhint">Si activé, un lancement à <b>fort impact</b> (exploit / destructif) exige une étape d'approbation en plus de l'opt-in armer + raison + secret.</small>
     </div>
 
     <div id="setup-err" class="login-err" role="alert" hidden></div>

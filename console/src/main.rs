@@ -3351,6 +3351,12 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
     let cfg = app.detection_config();
     let disp = ds_endpoint(&cfg); // endpoint seul (jamais le secret) pour la traçabilité
     let kind = ds_kind(&cfg);
+    // AUTONOME (standalone) vs source configurée : une source EST configurée si `kind` n'est ni none/vide
+    // ni un kind http (plume/generic_http) sans endpoint (parité EXACTE avec le log de boot). Ce booléen
+    // permet au SPA de distinguer « aucune source configurée — Forge en autonome » (état NORMAL, attendu)
+    // de « source configurée mais INJOIGNABLE » (anomalie à signaler). Aucun des deux n'invente de métrique.
+    let http_kind = kind == "plume" || kind == "generic_http";
+    let source_configured = !(kind == "none" || kind.is_empty() || (http_kind && disp.is_empty()));
     // `since` = plus ancien tir red (borne la fenêtre côté source) ; 0 si aucun tir horodaté lisible.
     let since = fired.iter().filter_map(|(_, t)| *t).min().unwrap_or(0);
     match collect_detections(app, since).await {
@@ -3371,11 +3377,21 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
                 m.insert("plume_url".into(), json!(disp));
                 m.insert("source_url".into(), json!(disp));
                 m.insert("source_kind".into(), json!(kind));
+                m.insert("source_configured".into(), json!(true));
             }
             cov
         }
-        // fail-open lisible ; la raison est rédigée du secret (défense en profondeur).
-        Err(e) => purple_fail_open(&disp, &fired, &redact_secret(&e, &ds_secret(&cfg))),
+        // fail-open lisible ; la raison est rédigée du secret (défense en profondeur). On y JOINT le
+        // `kind` et `source_configured` pour que le SPA/rapport rende l'état AUTONOME (source absente,
+        // normal) distinctement d'une source configurée mais injoignable (anomalie).
+        Err(e) => {
+            let mut fo = purple_fail_open(&disp, &fired, &redact_secret(&e, &ds_secret(&cfg)));
+            if let Value::Object(ref mut m) = fo {
+                m.insert("source_kind".into(), json!(kind));
+                m.insert("source_configured".into(), json!(source_configured));
+            }
+            fo
+        }
     }
 }
 
@@ -3384,8 +3400,10 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
 /// avec les détections de la SOURCE configurée (kind=plume/generic_http/crowdsec/…). Réponse :
 ///   {
 ///     "source_reachable": bool,        // (miroir rétro-compat: plume_reachable) false => FAIL-OPEN lisible
+///     "source_configured": bool,       // false => AUCUNE source configurée (Forge AUTONOME/standalone) ;
+///                                       //   true + source_reachable:false => source posée mais injoignable
 ///     "source_url": "...",             // (miroir: plume_url) endpoint pour traçabilité — JAMAIS le secret
-///     "source_kind": "...",            // kind de la source (présent si reachable)
+///     "source_kind": "...",            // kind de la source (none en autonome)
 ///     "techniques_fired|detected|missed": i64,
 ///     "detection_rate": f64,           // [0,1]
 ///     "mttd_avg_secs"|"mttd_max_secs": f64|i64|null,
@@ -4617,7 +4635,13 @@ fn render_purple_section_html(h: &mut String, p: &Value) {
     h.push_str("<section id=\"purple\" class=\"sec\"><h2>Couverture détection (purple)</h2>");
     let reachable = p.get("plume_reachable").and_then(|v| v.as_bool()).unwrap_or(false);
     if !reachable {
-        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("colonne bleue (Plume) injoignable");
+        // AUTONOME (standalone) : aucune source configurée -> état NORMAL (Forge n'en DÉPEND pas), pas une panne.
+        if p.get("source_configured").and_then(|v| v.as_bool()) == Some(false) {
+            h.push_str("<p class=\"muted\">Aucune source de détection configurée — Forge fonctionne en autonome (standalone). \
+Connectez une source (Plume / CrowdSec / FortiGate / Elastic / fichier…) pour activer la boucle purple. Aucune couverture inventée.</p></section>");
+            return;
+        }
+        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("source de détection injoignable");
         h.push_str(&format!("<p class=\"muted\">Mesure indisponible (fail-open) : {}. Aucune couverture inventée.</p></section>", e(why)));
         return;
     }
@@ -4762,7 +4786,16 @@ fn render_purple_section(out: &mut Vec<String>, p: &Value) {
     out.push(String::new());
     let reachable = p.get("plume_reachable").and_then(|v| v.as_bool()).unwrap_or(false);
     if !reachable {
-        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("colonne bleue (Plume) injoignable");
+        // AUTONOME (standalone) : aucune source de détection configurée -> état NORMAL et attendu (Forge
+        // ne DÉPEND d'aucune source ; Plume/SIEM/IDS ne sont qu'un enrichissement optionnel), PAS une anomalie.
+        if p.get("source_configured").and_then(|v| v.as_bool()) == Some(false) {
+            out.push("_Aucune source de détection configurée — Forge fonctionne en autonome (standalone). \
+Connectez une source (Plume / CrowdSec / FortiGate / Elastic / fichier…) pour activer la boucle purple. \
+Aucune couverture n'est inventée._".into());
+            out.push(String::new());
+            return;
+        }
+        let why = p.get("error").and_then(|v| v.as_str()).unwrap_or("source de détection injoignable");
         out.push(format!("_Mesure indisponible (fail-open) : {why}. Aucune couverture inventée._"));
         out.push(String::new());
         return;
@@ -8029,6 +8062,54 @@ fn cli_query_rows(conn: &Connection, sql: &str, params: &[String], cols: &[&str]
     .unwrap_or_default()
 }
 
+/// Sous-commande LECTURE SEULE, NON INTERACTIVE et RAPIDE : `forge-console ledger verify [--ledger <path>]
+/// [--json]`. Recompute la chaîne SHA-256 (prev|seq|ts|kind|canon(detail)) du ledger JSONL et VÉRIFIE
+/// chaque hash + le chaînage `prev` — MÊME algorithme que GET /api/ledger/verify et `migrate --verify`
+/// (verify_ledger_chain, source de vérité unique). Ne démarre AUCUN serveur, n'ouvre AUCUNE base SQLite,
+/// ne lit AUCUN STDIN : pure lecture du fichier -> exit immédiat (jamais de blocage). La vérif de
+/// SIGNATURE (Ed25519/HMAC) reste côté `forge ledger verify --pubkey` (Python) : la console n'a pas la
+/// clé privée -> `sig_checked:false`. Chemin résolu : `--ledger` sinon $FORGE_CONSOLE_LEDGER sinon défaut
+/// `engagement.jsonl` (parité boot). Codes de sortie : 0 = chaîne intègre (ou fichier présent mais vide) ;
+/// 1 = rupture/altération détectée OU ledger absent ; 2 = erreur d'usage (sous-commande absente/inconnue).
+fn run_ledger_cli(args: &[String]) -> i32 {
+    // sous-commande positionnelle (verify). FAIL-CLOSED sur l'inconnu : on ne RETOMBE JAMAIS sur le
+    // démarrage serveur (c'était le bug — `ledger verify` bootait la console et pendait indéfiniment).
+    let sub = args.iter().find(|a| !a.starts_with("--")).map(|s| s.as_str());
+    match sub {
+        Some("verify") => {}
+        _ => {
+            eprintln!("usage: forge-console ledger verify [--ledger <path>] [--json]");
+            eprintln!("  Vérifie le hash-chaining SHA-256 du ledger JSONL (lecture seule, non interactive,");
+            eprintln!("  ne démarre pas le serveur). La vérif de signature (Ed25519/HMAC) reste côté");
+            eprintln!("  `forge ledger verify --pubkey`. Codes : 0=intègre, 1=rompu/absent, 2=usage.");
+            return 2;
+        }
+    }
+    let as_json = cli_flag(args, "json");
+    let path = cli_opt(args, "ledger")
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("FORGE_CONSOLE_LEDGER").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "engagement.jsonl".to_string());
+    let v = verify_ledger_chain(&path);
+    if as_json {
+        let out = ledger_verify_api_json(&v, &path);
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+    } else if v.empty {
+        // fichier absent OU 0 entrée exploitable : lisible, jamais un « OK » trompeur sur un ledger absent.
+        let why = v.why.clone().unwrap_or_else(|| "ledger vide (0 entrée)".to_string());
+        println!("ledger {} : {} — {}", path, if v.ok { "vide (présent, 0 entrée)" } else { "INVALIDE" }, why);
+    } else if v.ok {
+        let alg = if v.alg.is_empty() { "sha256" } else { v.alg.as_str() };
+        println!("ledger {} : OK — {} entrée(s), alg={}, head={}",
+            path, v.entries, alg, v.head.as_deref().unwrap_or(""));
+    } else {
+        let why = v.why.clone().unwrap_or_else(|| "chaîne rompue".to_string());
+        println!("ledger {} : INVALIDE — {} (entrée seq={}, après {} entrée(s) valides)",
+            path, why, v.broken, v.entries.saturating_sub(1));
+    }
+    if v.ok { 0 } else { 1 }
+}
+
 /// Construit le routeur axum complet : routes PUBLIQUES (hors auth_guard : /health, /api/login, wizard
 /// de 1er déploiement /api/setup*) + routes PROTÉGÉES (derrière auth_guard) + fallback ServeDir, le
 /// tout sous host_guard (anti-rebinding). Extrait de main() pour être exercé TEL QUEL par les tests
@@ -8180,6 +8261,13 @@ async fn main() {
         //   vide sans --force, place db/ledger/clé (.ed25519 = 0600). Restore tracé au ledger.
         Some("restore") => {
             std::process::exit(run_restore_cli(&args[2..]));
+        }
+        // VÉRIF LEDGER (lecture seule, NON INTERACTIVE, RAPIDE) : forge-console ledger verify
+        //   [--ledger <path>] [--json]. Recompute la chaîne SHA-256 du ledger JSONL et exit immédiat
+        //   (0 intègre / 1 rompu-absent / 2 usage). NE démarre PAS le serveur, n'ouvre PAS la base,
+        //   ne lit PAS STDIN. La vérif de signature reste côté `forge ledger verify --pubkey` (Python).
+        Some("ledger") => {
+            std::process::exit(run_ledger_cli(&args[2..]));
         }
         _ => {}
     }
@@ -9247,6 +9335,28 @@ mod tests {
         assert!(!ct_eq_str("deadbeef", "deadbee0"));
         assert!(!ct_eq_str("deadbeef", "deadbeeff")); // longueurs différentes
         assert!(!ct_eq_str("", "x"));
+    }
+
+    /// [WebUI] L'aide in-app est présente et accessible : bouton « ? » persistant (annoncé comme
+    /// dialog) + indices de champ inline sur le wizard config-heavy dans l'index compilé, et le front
+    /// définit le centre d'aide (openHelp + registre HELP_TOPICS + rubrique gouvernance/modèle de
+    /// sûreté) avec la modale role=dialog/aria-modal et les indices des formulaires config-heavy.
+    /// Garde-fou anti-régression : ces marqueurs ne doivent pas disparaître silencieusement.
+    #[test]
+    fn webui_help_affordance_and_registry_present() {
+        let index = include_str!("../web/index.html");
+        assert!(index.contains("id=\"help\""), "bouton d'aide manquant dans l'en-tête");
+        assert!(index.contains("aria-haspopup=\"dialog\""), "affordance d'aide non annoncée comme dialog");
+        assert!(index.contains("class=\"fhint\""), "indices de champ (.fhint) absents du wizard de 1er déploiement");
+
+        let app = include_str!("../web/app.js");
+        assert!(app.contains("function openHelp("), "openHelp() absent du front");
+        assert!(app.contains("HELP_TOPICS"), "registre d'aide HELP_TOPICS absent");
+        assert!(app.contains("'governance'"), "rubrique « Comment Forge fonctionne » (gouvernance) absente");
+        assert!(app.contains("'aria-modal'"), "la modale d'aide n'est pas marquée aria-modal");
+        assert!(app.contains("'dialog'"), "la modale d'aide n'a pas role=dialog");
+        assert!(app.contains("modal-fhint"), "indices de champ des modales (users/backup) absents");
+        assert!(app.contains("det-fhint"), "indices de champ de la source de détection absents");
     }
 
     /// [LOW sec] host_guard fail-closed : Host vide/absent REFUSÉ ; hors allowlist refusé ; in-allowlist
@@ -11204,5 +11314,153 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             .route("/api/modules", get(modules))
             .route("/api/modules/refresh", post(modules_refresh))
             .route("/api/modules/:kind", post(module_governance));
+    }
+
+    // =============================================================================================
+    // AUTONOMIE (STANDALONE) — Forge ne DÉPEND JAMAIS de Plume / d'une source de détection.
+    // Plume (et tout SIEM/IDS) n'est qu'un enrichissement OPTIONNEL de la boucle purple.
+    // =============================================================================================
+
+    /// [STANDALONE] Sans réglage `settings.detection_source` NI env PLUME_URL/PLUME_TOKEN, la source
+    /// résolue au boot est `{kind:none}` : la console démarre en AUTONOME, aucune dépendance Plume.
+    /// (Défense en profondeur : on RETIRE explicitement l'env legacy pour prouver l'absence de repli.)
+    #[test]
+    fn standalone_default_detection_source_is_none_without_plume_env() {
+        let _g = env_lock();
+        std::env::remove_var("PLUME_URL");
+        std::env::remove_var("PLUME_TOKEN");
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let v = resolve_detection_source(&conn);
+        assert_eq!(ds_kind(&v), "none", "aucune source ni env -> kind none (Forge autonome, pas de Plume requis)");
+        assert!(ds_endpoint(&v).is_empty(), "aucun endpoint inventé en autonome");
+        assert!(ds_secret(&v).is_empty(), "aucun secret en autonome");
+    }
+
+    /// [STANDALONE] fetch_purple_coverage sans source configurée (kind=none) : FAIL-OPEN LISIBLE et
+    /// EXPLICITEMENT AUTONOME — `source_reachable:false`, `source_configured:false`, `source_kind:"none"`,
+    /// AUCUNE métrique fabriquée (detected/missed vides, taux/MTTD nuls), et `techniques_fired` reste
+    /// informatif. C'est un état NORMAL (pas une erreur) : la boucle purple est simplement OFF.
+    #[tokio::test]
+    async fn fetch_purple_coverage_standalone_invents_nothing() {
+        let app = test_app(&tmp_path("standalone-cov-ledger"));
+        // cache par défaut = {kind:none} (test_app). On l'affirme pour la lisibilité du test.
+        set_detection_source(&app, json!({"kind": "none"}));
+        let fired = vec![
+            ("T1110".to_string(), Some(1000)),
+            ("T1110".to_string(), Some(1100)),
+            ("T1046".to_string(), Some(2000)),
+            ("".to_string(), None),
+        ];
+        let cov = fetch_purple_coverage(&app, fired).await;
+        assert_eq!(cov["source_reachable"], json!(false), "autonome -> non joignable (fail-open)");
+        assert_eq!(cov["plume_reachable"], json!(false), "miroir rétro-compat");
+        assert_eq!(cov["source_configured"], json!(false), "AUCUNE source configurée -> standalone");
+        assert_eq!(cov["source_kind"], json!("none"));
+        assert_eq!(cov["techniques_detected"], json!(0), "rien de détecté fabriqué");
+        assert_eq!(cov["techniques_missed"], json!(0), "rien classé raté quand la mesure est impossible");
+        assert_eq!(cov["detection_rate"], json!(0.0));
+        assert_eq!(cov["mttd_avg_secs"], Value::Null);
+        assert_eq!(cov["mttd_max_secs"], Value::Null);
+        assert!(cov["detected"].as_array().unwrap().is_empty());
+        assert!(cov["missed"].as_array().unwrap().is_empty());
+        assert_eq!(cov["techniques_fired"], json!(2), "info offensive conservée (T1110+T1046 distinctes)");
+        assert!(cov["error"].as_str().unwrap_or("").contains("non configurée"), "raison lisible");
+    }
+
+    /// [STANDALONE] Une source POSÉE mais INJOIGNABLE se distingue de l'autonome : `source_configured:true`
+    /// + `source_reachable:false`. Le SPA peut ainsi afficher une ANOMALIE (source injoignable) là, et un
+    /// état NEUTRE (autonome) quand aucune source n'est configurée — sans jamais bloquer l'UI.
+    #[tokio::test]
+    async fn fetch_purple_coverage_configured_but_unreachable_is_distinct() {
+        let app = test_app(&tmp_path("unreachable-cov-ledger"));
+        // endpoint bidon fermé -> injoignable, mais une source EST bien configurée.
+        set_detection_source(&app, json!({
+            "kind": "plume", "endpoint": "http://127.0.0.1:1", "auth": {"type": "basic", "secret": "dXNlcjpwYXNz"}
+        }));
+        let cov = fetch_purple_coverage(&app, vec![("T1110".to_string(), Some(1))]).await;
+        assert_eq!(cov["source_reachable"], json!(false), "endpoint fermé -> injoignable");
+        assert_eq!(cov["source_configured"], json!(true), "une source EST configurée (pas autonome)");
+        assert_eq!(cov["source_kind"], json!("plume"));
+        assert!(cov["detected"].as_array().unwrap().is_empty(), "aucune couverture inventée même configurée");
+    }
+
+    /// [STANDALONE bout-en-bout] Sur le VRAI routeur (build_router), SANS aucune source de détection :
+    /// /health répond 200 et /api/purple/coverage (+ alias /api/detection/coverage) répond 200 en état
+    /// AUTONOME (source_reachable:false, source_configured:false) — l'endpoint ne renvoie JAMAIS d'erreur
+    /// qui bloquerait l'UI. Prouve que la console BOOTE et sert la vue purple sans Plume.
+    #[tokio::test]
+    async fn standalone_boot_serves_health_and_coverage_without_plume() {
+        let app = test_app(&tmp_path("standalone-boot-ledger")); // détection par défaut = {kind:none}
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // /health : la console est up (aucun PLUME_URL requis pour démarrer).
+        let r = http_raw(addr, &get_req("/health", "")).await;
+        assert_eq!(parse_status(&r), 200, "/health up en autonome : {r}");
+        assert!(body_of(&r).contains("\"status\":\"ok\""));
+
+        // /api/purple/coverage : 200 + état AUTONOME lisible (jamais une 5xx/erreur bloquante).
+        let r = http_raw(addr, &get_req("/api/purple/coverage", "")).await;
+        assert_eq!(parse_status(&r), 200, "coverage 200 en autonome (pas d'erreur bloquante) : {r}");
+        let b = body_of(&r);
+        assert!(b.contains("\"source_reachable\":false"), "autonome -> source_reachable:false : {b}");
+        assert!(b.contains("\"source_configured\":false"), "autonome -> source_configured:false : {b}");
+        assert!(!b.contains("\"techniques_detected\":1"), "aucune détection fabriquée en autonome");
+
+        // alias canonique /api/detection/coverage : même contrat 200 autonome.
+        let r2 = http_raw(addr, &get_req("/api/detection/coverage", "")).await;
+        assert_eq!(parse_status(&r2), 200, "alias /api/detection/coverage 200 en autonome : {r2}");
+    }
+
+    // =============================================================================================
+    // LEDGER VERIFY CLI — lecture seule, NON INTERACTIVE, RAPIDE (ne démarre PAS le serveur).
+    // Régression : `forge-console ledger verify` retombait sur le boot serveur et PENDAIT.
+    // =============================================================================================
+
+    /// [ledger verify CLI] `run_ledger_cli(["verify","--ledger",path])` sur un ledger VALIDE renvoie 0,
+    /// sur un ledger ALTÉRÉ renvoie 1, sur un ledger ABSENT renvoie 1, et une sous-commande absente/
+    /// inconnue renvoie 2. Chaque appel se termine RAPIDEMENT (garde-fou anti-hang : < 10s, alors que
+    /// le bug bootait le serveur ad vitam). Aucune I/O réseau, aucune base ouverte, aucun STDIN lu.
+    #[test]
+    fn ledger_verify_cli_fast_valid_tampered_absent() {
+        use std::time::Instant;
+        let dir = tmp_dir("forge-ledger-verify-cli");
+        let path = format!("{dir}/engagement.jsonl");
+        // ledger VALIDE : 2 entrées chaînées (même algo que le boot -> verify_ledger_chain OK).
+        ledger_append_standalone(&path, "engagement.start", &json!({"marker": "ORIGINAL", "n": 1})).unwrap();
+        ledger_append_standalone(&path, "console.detection.test", &json!({"reachable": false})).unwrap();
+
+        // (1) VALIDE -> 0, et RAPIDE (pas de démarrage serveur : le test lui-même prouve l'absence de hang).
+        let t0 = Instant::now();
+        let code_ok = run_ledger_cli(&["verify".into(), "--ledger".into(), path.clone()]);
+        let elapsed = t0.elapsed();
+        assert_eq!(code_ok, 0, "ledger valide -> exit 0");
+        assert!(elapsed < Duration::from_secs(10), "ledger verify doit être quasi-instantané (anti-hang), pris {elapsed:?}");
+
+        // (1b) --json : sortie parsable, contrat historique (ok:true).
+        let code_json = run_ledger_cli(&["verify".into(), "--ledger".into(), path.clone(), "--json".into()]);
+        assert_eq!(code_json, 0, "verify --json ledger valide -> 0");
+
+        // (2) ALTÉRÉ : on modifie le detail de la 1re entrée SANS recalculer son hash -> chaîne rompue.
+        let tampered = std::fs::read_to_string(&path).unwrap().replace("ORIGINAL", "TAMPERED");
+        std::fs::write(&path, tampered).unwrap();
+        let code_bad = run_ledger_cli(&["verify".into(), "--ledger".into(), path.clone()]);
+        assert_eq!(code_bad, 1, "ledger altéré -> exit 1 (rupture détectée)");
+
+        // (3) ABSENT -> 1 (on ne peut pas vérifier un ledger manquant ; jamais un « OK » trompeur).
+        let missing = format!("{dir}/does-not-exist.jsonl");
+        assert_eq!(run_ledger_cli(&["verify".into(), "--ledger".into(), missing]), 1, "ledger absent -> exit 1");
+
+        // (4) sous-commande absente/inconnue -> 2 (usage), JAMAIS de repli sur le démarrage serveur.
+        assert_eq!(run_ledger_cli(&[]), 2, "aucune sous-commande -> exit 2 (usage)");
+        assert_eq!(run_ledger_cli(&["frobnicate".into()]), 2, "sous-commande inconnue -> exit 2 (usage)");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

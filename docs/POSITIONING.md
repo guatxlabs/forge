@@ -1,5 +1,7 @@
 # Forge — Positionnement (GTM)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.md) · [Pricing](PRICING.md) · [Plan](PLAN.md)
+
 > **Slogan**
 > *« Forge n'est pas un remplaçant de Metasploit — c'est la couche **gouvernance + preuve + mesure
 > purple** par-dessus les outils que vous avez déjà (il pilote MSF / Burp / nuclei). »*

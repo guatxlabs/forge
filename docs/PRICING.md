@@ -1,5 +1,7 @@
 # Forge — Pricing (PROPOSITION)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Positionnement](POSITIONING.md) · [Vue d'ensemble](OVERVIEW.md)
+
 > ⚠️ **Statut : PROPOSITION de travail, pas un engagement commercial.** Les montants ci-dessous sont
 > des ordres de grandeur pour cadrer la discussion GTM (cf. [`POSITIONING.md`](POSITIONING.md)). Aucun
 > tarif n'est ferme tant qu'un premier engagement de référence n'a pas validé la valeur de couverture

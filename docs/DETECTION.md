@@ -1,5 +1,8 @@
 # Source de détection — brancher N'IMPORTE QUELLE infra BLUE (sans code)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) ·
+> [Administration](ADMINISTRATION.md#2-source-de-détection) · [Prérequis Plume](PURPLE_PREREQS.md)
+
 La boucle **purple** de Forge corrèle les techniques ATT&CK **tirées** en red-team (run-records) aux
 techniques **détectées** par le SOC/IDS/pare-feu, par **égalité d'identifiant MITRE** — puis en déduit
 `detected` / `missed` / **MTTD**. La *corrélation* est infra-neutre et **ne change jamais**. Seule la
