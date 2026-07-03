@@ -8,6 +8,15 @@ description = "Forge console — store findings/run-records + API + le point de 
 name = "forge-console"
 path = "src/main.rs"
 
+[features]
+# `encryption` (SQLCipher au repos) — OPT-IN, OFF PAR DÉFAUT. Activée, elle bascule rusqlite sur
+# `bundled-sqlcipher` (amalgame SQLCipher compilé — exige un backend crypto système/openssl à la
+# compilation). Le build PAR DÉFAUT (sans cette feature) ne pull PAS SQLCipher : `cfg!(feature=
+# "encryption")` se lit `false`, tout le code PRAGMA-key/sqlcipher_export est gardé `#[cfg(feature=
+# "encryption")]`, et la suite reste verte sans sqlcipher/openssl. N'activer que pour un déploiement
+# chiffré au repos (`cargo build --features encryption`).
+encryption = ["rusqlite/bundled-sqlcipher"]
+
 [dependencies]
 guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe
 axum = "0.7"

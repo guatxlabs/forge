@@ -468,6 +468,78 @@
     <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Comptes provisionnés côté serveur (<code>forge-console useradd</code>).</p>
   </form>
 </div>
+<!-- WIZARD 1er DÉPLOIEMENT (self-deploy) — affiché quand GET /api/setup/state répond needs_setup:true
+     (aucun admin activé ni hash d'amorçage). Provisionne le 1er admin + la config initiale DEPUIS le
+     navigateur ; POST /api/setup pose le cookie de session (on atterrit connecté). ZÉRO valeur par
+     défaut : tout hors identifiant/mot de passe est optionnel. La route se ferme d'elle-même (409). -->
+<div id="setup-view" class="login-view setup-view" hidden>
+  <form id="setup-form" class="login-card setup-card" autocomplete="off" aria-labelledby="setup-title">
+    <div class="login-brand"><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span class="login-wordmark">Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></div>
+    <h2 id="setup-title">Premier déploiement — provisioning</h2>
+    <p class="login-lead">Provisionnez le premier administrateur et la configuration initiale de la console.</p>
+    <ol class="setup-steps" aria-hidden="true">
+      <li class="setup-step is-active" data-step="1"><span class="setup-step-n">1</span><span class="setup-step-l">Admin</span></li>
+      <li class="setup-step" data-step="2"><span class="setup-step-n">2</span><span class="setup-step-l">Chiffrement</span></li>
+      <li class="setup-step" data-step="3"><span class="setup-step-n">3</span><span class="setup-step-l">Détection</span></li>
+      <li class="setup-step" data-step="4"><span class="setup-step-n">4</span><span class="setup-step-l">Opérateur</span></li>
+    </ol>
+
+    <!-- STEP 1 — compte admin (SEULS champs requis) -->
+    <div class="setup-panel is-active" data-panel="1">
+      <label class="login-f"><span>Identifiant administrateur</span><input id="su-login" name="new-username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="ex: root"></label>
+      <label class="login-f"><span>Mot de passe</span><input id="su-pass" name="new-password" type="password" autocomplete="new-password" placeholder="mot de passe fort"></label>
+      <label class="login-f"><span>Confirmer le mot de passe</span><input id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" placeholder="ressaisir le mot de passe"></label>
+    </div>
+
+    <!-- STEP 2 — chiffrement : hash de mot de passe fixe (argon2id) + chiffrement au repos si dispo -->
+    <div class="setup-panel" data-panel="2">
+      <div class="setup-note">Hachage des mots de passe : <code>argon2id</code> (fixe, non configurable).</div>
+      <label class="login-f setup-toggle" id="su-enc-wrap" hidden><span>Chiffrer la base au repos (SQLCipher)</span><input id="su-enc" type="checkbox"></label>
+      <div class="setup-note muted" id="su-enc-unavail">Chiffrement de la base au repos indisponible dans ce build — l'implémentation SQLCipher arrive dans une prochaine version.</div>
+    </div>
+
+    <!-- STEP 3 — collecteur de détection (tout optionnel, stocké verbatim pour la boucle purple) -->
+    <div class="setup-panel" data-panel="3">
+      <label class="login-f"><span>Collecteur de détection</span>
+        <select id="su-det-kind">
+          <option value="none" selected>Aucun</option>
+          <option value="plume">Plume (SOC)</option>
+          <option value="crowdsec">CrowdSec</option>
+          <option value="generic_http">HTTP générique</option>
+          <option value="file_jsonl">Fichier JSONL</option>
+          <option value="exec">Commande (exec)</option>
+        </select>
+      </label>
+      <label class="login-f"><span>Endpoint</span><input id="su-det-endpoint" type="text" autocomplete="off" spellcheck="false" placeholder="ex: http://plume:8080/api/coverage/detections"></label>
+      <label class="login-f"><span>Type d'authentification</span>
+        <select id="su-det-authtype">
+          <option value="" selected>—</option>
+          <option value="none">Aucune</option>
+          <option value="basic">Basic</option>
+          <option value="bearer">Bearer</option>
+          <option value="header">En-tête personnalisé</option>
+        </select>
+      </label>
+      <label class="login-f"><span>Secret / token</span><input id="su-det-secret" type="password" autocomplete="new-password" placeholder="laisser vide si aucun"></label>
+      <label class="login-f"><span>Mapping (JSON, optionnel)</span><textarea id="su-det-mapping" rows="2" spellcheck="false" placeholder='ex: {"technique":"mitre","ts":"timestamp"}'></textarea></label>
+    </div>
+
+    <!-- STEP 4 — politique opérateur (C2). require_reason par défaut ON (parité comportement actuel) -->
+    <div class="setup-panel" data-panel="4">
+      <label class="login-f setup-toggle"><span>Exiger une raison à l'armement</span><input id="su-op-reason" type="checkbox" checked></label>
+      <label class="login-f"><span>Allowlist CIDR source opérateur (une par ligne, optionnel)</span><textarea id="su-op-cidrs" rows="2" spellcheck="false" placeholder="ex:&#10;10.0.0.0/24&#10;192.168.1.5"></textarea></label>
+      <label class="login-f setup-toggle"><span>Approbation requise pour le haut-impact</span><input id="su-op-approval" type="checkbox"></label>
+    </div>
+
+    <div id="setup-err" class="login-err" role="alert" hidden></div>
+    <div class="setup-actions">
+      <button type="button" id="su-back" class="setup-btn-ghost" hidden>Retour</button>
+      <button type="button" id="su-next" class="login-btn setup-btn">Continuer</button>
+      <button type="submit" id="su-finish" class="login-btn setup-btn" hidden>Provisionner</button>
+    </div>
+    <p class="login-hint muted">Seuls l'identifiant et le mot de passe sont requis ; tout le reste est optionnel et modifiable plus tard. Aucune valeur par défaut n'est imposée par le serveur.</p>
+  </form>
+</div>
 <footer><span id="status">connexion…</span> — maj <span id="updated">-</span><span id="version" class="muted" title="version Forge (fichier VERSION, exposé par /health)"></span></footer>
 <script src="/app.js"></script>
 </body>
