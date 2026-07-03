@@ -328,6 +328,11 @@ const HELP_TOPICS = [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
     ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée » ou « ratée » côté défense."],
   ] },
+  { key: 'reports', title: "Rapport d'engagement (livrable)", icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'reports', blocks: [
+    ['p', "Le LIVRABLE CLIENT agrégé de l'engagement ACTIF : page de garde brandée, résumé exécutif, findings détaillés (secrets rédigés), couverture ATT&CK et annexe chaîne-de-custody. Formats HTML / PDF / DOCX / CSV / JSON — l'aperçu HTML s'affiche dans la vue."],
+    ['p', "ISOLATION : le rapport ne reflète QUE l'engagement actif (jamais les données d'un autre). Chaque génération et chaque configuration de branding sont journalisées au ledger. Le branding (nom du commanditaire, logo, prestataire) est réservé au rôle admin ; PDF/DOCX dégradent proprement si le moteur d'impression ou python est absent sur l'hôte."],
+    ['p', "Depuis Findings, « Export CSV / JSON » télécharge les findings de l'engagement actif et « Rapport complet » ouvre cette vue."],
+  ] },
   { key: 'explore', title: 'Recherche & Explore (soql)', icon: 'search', doc: 'docs/CONCEPTS.md', view: 'explore', blocks: [
     ['p', "Requêteur soql (langage de recherche en pipeline) sur les données de l'engagement, ex : search severity=HIGH | stats count by mitre | sort -count | head 20."],
     ['p', "Choisissez une visualisation (table / barres / courbe / stat). Cliquez une valeur pour un drilldown ; « Panneau » enregistre la requête comme panneau réutilisable dans un dashboard."],
@@ -1848,6 +1853,165 @@ async function openFinding(id) {
   });
 }
 ['f-sev', 'f-status', 'f-target'].forEach(idp => { const el = $('#' + idp); if (el) el.addEventListener(idp === 'f-target' ? 'input' : 'change', () => loadFindings(0)); });
+// EXPORT depuis Findings : CSV / JSON de l'engagement ACTIF (secrets rédigés serveur) + accès au
+// rapport complet brandé (vue #reports). downloadReport() est défini plus bas (déclaration hoistée).
+if ($('#f-export-csv')) $('#f-export-csv').addEventListener('click', () => downloadReport('csv'));
+if ($('#f-export-json')) $('#f-export-json').addEventListener('click', () => downloadReport('json'));
+if ($('#f-report')) $('#f-report').addEventListener('click', () => { location.hash = 'reports'; });
+
+// =====================================================================================
+//  FINDINGS LIBRARY — modèles de findings réutilisables (livrable client type Ghostwriter).
+//  Les modèles sont GLOBAUX (réutilisables d'un engagement à l'autre) ; APPLIQUER un modèle crée UN
+//  finding dans l'engagement ACTIF UNIQUEMENT (isolation, cf. serveur). create/edit = operator,
+//  delete = admin, apply = operator — chaque action est ledgerisée côté serveur (fail-closed).
+//  UI 100 % native (aucune modale navigateur) : réutilise modal()/confirmModal()/toast().
+// =====================================================================================
+const FT_SEVS = ['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+let FT_TEMPLATES = [];
+
+async function loadFindingsLibrary() {
+  const host = $('#ftpl-list'); if (!host) return;
+  let d;
+  try { d = await api('/finding-templates'); }               // GLOBAL : le param ?engagement est inerte ici
+  catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
+  FT_TEMPLATES = (d && d.templates) || [];
+  if ($('#ftpl-count')) $('#ftpl-count').textContent = FT_TEMPLATES.length + ' modèle' + (FT_TEMPLATES.length > 1 ? 's' : '');
+  if (!FT_TEMPLATES.length) { host.innerHTML = '<div class="muted">aucun modèle — cliquez « Nouveau modèle » pour capitaliser un finding réutilisable</div>'; return; }
+  host.replaceChildren(...FT_TEMPLATES.map(renderTemplateCard));
+}
+
+// Extrait l'ensemble des placeholders {clef} présents dans les gabarits d'un modèle (titre/desc/reméd).
+function ftPlaceholders(tpl) {
+  const set = new Set();
+  const re = /\{([A-Za-z0-9_.-]+)\}/g;
+  [tpl.title_tmpl, tpl.description_tmpl, tpl.remediation_tmpl].forEach(t => {
+    const s = String(t || ''); let m; re.lastIndex = 0;
+    while ((m = re.exec(s)) !== null) set.add(m[1]);
+  });
+  return [...set];
+}
+
+function renderTemplateCard(tpl) {
+  const card = document.createElement('div'); card.className = 'wf-card';
+  const head = document.createElement('div'); head.className = 'wf-cardhead';
+  const title = document.createElement('span'); title.className = 'wf-name';
+  title.innerHTML = esc(tpl.name) + ' ' + SEV_BADGE(tpl.severity)
+    + (tpl.cwe ? ` <span class="badge">${esc(tpl.cwe)}</span>` : '')
+    + (tpl.vuln_class ? ` <span class="badge mut">${esc(tpl.vuln_class)}</span>` : '');
+  head.appendChild(title);
+  const acts = document.createElement('span'); acts.className = 'wf-cardacts';
+  const mk = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = label; b.onclick = fn; return b; };
+  acts.appendChild(mk('Appliquer', 'k-theme', () => applyTemplate(tpl)));
+  acts.appendChild(mk('Éditer', 'k-theme', () => openTemplateEditor(tpl)));
+  acts.appendChild(mk('Supprimer', 'k-theme danger', () => deleteTemplate(tpl)));
+  head.appendChild(acts); card.appendChild(head);
+  if (tpl.title_tmpl) { const p = document.createElement('p'); p.className = 'wf-desc'; p.textContent = tpl.title_tmpl; card.appendChild(p); }
+  const ph = ftPlaceholders(tpl);
+  if (ph.length) {
+    const chips = document.createElement('div'); chips.className = 'wf-steps';
+    ph.forEach(k => { const c = document.createElement('span'); c.className = 'wf-chip'; c.textContent = '{' + k + '}'; c.title = 'placeholder rempli à l\'application'; chips.appendChild(c); });
+    card.appendChild(chips);
+  }
+  return card;
+}
+
+// Éditeur de modèle (création si existing=null, édition sinon) — operator. Envoie TOUT le formulaire :
+// le serveur mappe `references` -> colonne refs et normalise la sévérité (fail-closed si hors ensemble).
+async function openTemplateEditor(existing) {
+  const editing = !!existing;
+  const vals = await modal({
+    title: editing ? ('Éditer le modèle « ' + existing.name + ' »') : 'Nouveau modèle de finding',
+    okText: editing ? 'Enregistrer' : 'Créer', wide: true,
+    fields: [
+      { name: 'name', label: 'Nom', value: editing ? existing.name : '', required: true, hint: 'libellé du modèle (ex: XSS reflété)' },
+      { name: 'severity', label: 'Sévérité', type: 'select', value: editing ? existing.severity : 'INFO', options: FT_SEVS.map(s => ({ value: s, label: s })) },
+      { name: 'vuln_class', label: 'Classe de vuln', value: editing ? existing.vuln_class : '', hint: 'ex: xss, sqli, idor — devient la catégorie du finding' },
+      { name: 'cwe', label: 'CWE', value: editing ? existing.cwe : '', hint: 'ex: CWE-79' },
+      { name: 'title_tmpl', label: 'Titre (gabarit)', value: editing ? existing.title_tmpl : '', hint: 'placeholders {target}/{param} remplis à l\'application' },
+      { name: 'description_tmpl', label: 'Description (gabarit)', type: 'textarea', value: editing ? existing.description_tmpl : '', placeholder: 'ex: Le paramètre {param} sur {target} est injectable…' },
+      { name: 'remediation_tmpl', label: 'Remédiation (gabarit)', type: 'textarea', value: editing ? existing.remediation_tmpl : '', placeholder: 'ex: Utiliser des requêtes paramétrées…' },
+      { name: 'references', label: 'Références', value: editing ? (existing.references || '') : '', hint: 'liens / notes (libre)' },
+    ],
+    validate: v => (FT_SEVS.includes(v.severity) ? null : 'Sévérité invalide.'),
+  });
+  if (!vals) return;
+  const path = editing ? '/api/finding-templates/' + existing.id : '/api/finding-templates';
+  try {
+    const r = await fetch(path, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(vals) });
+    if (r.status === 403) { toast('Création/édition réservée à un compte operator/admin', 'bad'); return; }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast(editing ? 'Modèle enregistré (ledgerisé)' : 'Modèle créé (ledgerisé)', 'ok');
+    loadFindingsLibrary();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// Suppression d'un modèle — ADMIN (le cookie de session admin autorise ; pas de prompt de token).
+async function deleteTemplate(tpl) {
+  const ok = await confirmModal('Supprimer le modèle « ' + tpl.name + ' » ? (ledgerisé, réservé admin — les findings déjà créés ne sont pas affectés)', { title: 'Supprimer le modèle', okText: 'Supprimer' });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/finding-templates/' + tpl.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json', Accept: 'application/json' } });
+    if (r.status === 403) { toast('Suppression réservée à un administrateur', 'bad'); return; }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast('Modèle supprimé (ledgerisé)', 'ok'); loadFindingsLibrary();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// Applique un modèle -> crée un finding dans l'engagement ACTIF. Un champ par placeholder + cible +
+// campagne. operator (fail-closed serveur). Le finding produit appartient à l'engagement actif (isolation).
+async function applyTemplate(tpl) {
+  const ph = ftPlaceholders(tpl);
+  const engName = activeEngagementName();
+  const fields = [
+    { name: '__target', label: 'Cible', value: '', hint: 'hôte/URL du finding (remplit aussi {target})' },
+    { name: '__campaign', label: 'Campagne (option)', value: '', hint: 'sous-label libre au sein de l\'engagement' },
+  ];
+  ph.filter(k => k !== 'target').forEach(k => fields.push({ name: 'ph_' + k, label: 'Paramètre {' + k + '}', value: '' }));
+  const vals = await modal({
+    title: 'Appliquer « ' + tpl.name + ' »',
+    message: 'Crée un finding dans l\'engagement ACTIF' + (engName ? ' : ' + engName : '') + '. Renseignez les placeholders ci-dessous.',
+    okText: 'Créer le finding', wide: true, fields,
+  });
+  if (!vals) return;
+  const params = {};
+  Object.keys(vals).forEach(k => { if (k.startsWith('ph_')) params[k.slice(3)] = vals[k]; });
+  if (vals.__target) params.target = vals.__target;
+  const body = { target: vals.__target || '', campaign: vals.__campaign || '', params };
+  const eng = activeEngagement(); if (eng != null) body.engagement_id = eng;    // isolation : engagement actif
+  try {
+    const r = await fetch(withEngagement('/api/finding-templates/' + tpl.id + '/apply'), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    if (r.status === 403) { toast('Application réservée à un compte operator/admin', 'bad'); return; }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409) { toast('Finding déjà présent (campagne/cible/titre identiques) — dédupliqué', 'info'); return; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast('Finding créé dans l\'engagement actif (ledgerisé)', 'ok');
+    location.hash = 'findings';
+    loadFindings(0);
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// Affordance « Depuis un modèle » dans la vue Findings : choisir un modèle puis l'appliquer.
+async function pickTemplateAndApply() {
+  let list = FT_TEMPLATES;
+  if (!list.length) {
+    try { const d = await api('/finding-templates'); list = (d && d.templates) || []; FT_TEMPLATES = list; }
+    catch (e) { toast('Chargement des modèles : ' + e.message, 'bad'); return; }
+  }
+  if (!list.length) { toast('Aucun modèle — créez-en un dans la Bibliothèque de findings', 'info'); location.hash = 'findings-library'; return; }
+  const vals = await modal({
+    title: 'Appliquer un modèle de finding',
+    message: 'Le modèle choisi sera appliqué à l\'engagement ACTIF.',
+    okText: 'Continuer',
+    fields: [{ name: 'id', label: 'Modèle', type: 'select', value: String(list[0].id), options: list.map(t => ({ value: String(t.id), label: t.name + ' [' + t.severity + ']' })) }],
+  });
+  if (!vals) return;
+  const tpl = list.find(t => String(t.id) === String(vals.id));
+  if (tpl) applyTemplate(tpl);
+}
+
+if ($('#ftpl-new')) $('#ftpl-new').addEventListener('click', () => openTemplateEditor(null));
+if ($('#ftpl-reload')) $('#ftpl-reload').addEventListener('click', () => loadFindingsLibrary());
+if ($('#f-from-tpl')) $('#f-from-tpl').addEventListener('click', () => pickTemplateAndApply());
 
 async function loadCoverage() {
   const host = $('#cov-result'); if (!host) return;
@@ -3381,6 +3545,135 @@ async function openRunReportHtml(runId, print) {
   setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
 }
 
+// =====================================================================================
+//  REPORTS — LIVRABLE CLIENT : rapport d'engagement AGRÉGÉ + branding admin + aperçu (vue #reports).
+//  Toujours l'engagement ACTIF (activeEngagement) : GET /api/engagements/:id/report?format=… — formats
+//  html|pdf|docx|csv|json, secrets rédigés côté serveur, ISOLÉ à l'engagement, chaque génération
+//  journalisée au ledger. Branding : GET (viewer+) / POST (admin) /api/report/branding[?engagement=:id].
+//  100 % natif : réutilise modal()/toast()/adminApi() + un iframe same-origin pour l'aperçu. Aucune
+//  modale navigateur. Le serveur reste l'autorité (viewer+ pour lire, admin pour brander, fail-closed).
+// =====================================================================================
+const REP_FMT = { html: 'HTML', pdf: 'PDF', docx: 'DOCX', csv: 'CSV', json: 'JSON' };
+
+// Engagement actif courant (id + objet), relu à CHAQUE appel : la vue suit le sélecteur d'en-tête.
+function repActive() {
+  const id = activeEngagement();
+  return { id, e: ENGAGEMENTS.find(x => x.id === id) };
+}
+
+// rend la vue #reports : badge/nom de l'engagement actif, bouton branding gaté admin, aperçu HTML.
+async function loadReports() {
+  const { id, e } = repActive();
+  const badge = $('#rep-eng'); if (badge) badge.textContent = e ? ('#' + id) : '';
+  const nm = $('#rep-engname');
+  if (nm) nm.textContent = e ? (e.name + ' · ' + e.mode + (e.status === 'archived' ? ' [archivé]' : '')) : '(aucun engagement actif)';
+  // Branding réservé admin (défense en profondeur — le serveur gate aussi en 403).
+  const bb = $('#rep-brand'); if (bb) bb.hidden = !isAdmin();
+  const noEng = (id == null);
+  ['rep-generate', 'rep-refresh'].forEach(bid => { const b = $('#' + bid); if (b) b.disabled = noEng; });
+  const host = $('#rep-preview'); if (!host) return;
+  if (noEng) { host.innerHTML = '<div class="muted">Aucun engagement actif — sélectionnez-en un dans l\'en-tête pour générer son rapport.</div>'; return; }
+  await previewReport();
+}
+
+// Aperçu HTML du rapport de l'engagement ACTIF dans un iframe SANDBOX same-origin. Le HTML provient de
+// notre endpoint authentifié (cookie same-origin) ; tout dynamique est échappé côté serveur. On injecte
+// une <base href> (URL canonique du rapport) pour résoudre /quetzal.svg. Sandbox SANS allow-scripts :
+// les éventuels handlers inline du document sont neutralisés (l'UI fournit ses propres contrôles).
+async function previewReport() {
+  const host = $('#rep-preview'); if (!host) return;
+  const { id } = repActive(); if (id == null) return;
+  const url = '/api/engagements/' + id + '/report?format=html';
+  host.innerHTML = '<div class="muted">chargement de l\'aperçu…</div>';
+  let r, html;
+  try { r = await fetch(url, { headers: { Accept: 'text/html' } }); html = await r.text().catch(() => ''); }
+  catch (err) { host.innerHTML = '<div class="bad">aperçu indisponible : ' + esc(err.message || err) + '</div>'; return; }
+  if (r.status === 401 || r.status === 403) { host.innerHTML = '<div class="muted">Session requise (viewer+) pour générer un rapport.</div>'; return; }
+  if (r.status === 404) { host.innerHTML = '<div class="muted">Engagement introuvable (supprimé ?).</div>'; return; }
+  if (!r.ok) { host.innerHTML = '<div class="bad">aperçu indisponible (HTTP ' + r.status + ').</div>'; return; }
+  const baseHref = new URL(url, location.href).href;
+  const withBase = html.replace(/<head>/i, '<head><base href="' + baseHref.replace(/"/g, '&quot;') + '">');
+  const blobUrl = URL.createObjectURL(new Blob([withBase], { type: 'text/html;charset=utf-8' }));
+  const frame = document.createElement('iframe');
+  frame.className = 'rep-frame'; frame.title = 'Aperçu du rapport d\'engagement';
+  frame.setAttribute('sandbox', 'allow-same-origin');
+  frame.src = blobUrl;
+  frame.addEventListener('load', () => setTimeout(() => URL.revokeObjectURL(blobUrl), 5000));
+  host.replaceChildren(frame);
+}
+
+// Génère + télécharge le rapport de l'engagement ACTIF au format choisi. Récupéré en blob (cookie auth),
+// déclenche un download natif (<a download>) ; le PDF s'ouvre inline (nouvelle fenêtre). Dégradations
+// 501 (pdf/docx indisponibles sur l'hôte) et 401/403/404 remontées en toast lisible.
+async function downloadReport(format) {
+  const { id } = repActive();
+  if (id == null) { toast('Aucun engagement actif.', 'bad'); return; }
+  const fmt = REP_FMT[format] ? format : 'html';
+  const url = '/api/engagements/' + id + '/report?format=' + fmt;
+  const btn = $('#rep-generate'); if (btn) btn.disabled = true;
+  let r;
+  try { r = await fetch(url, { headers: { Accept: '*/*' } }); }
+  catch (e) { if (btn) btn.disabled = false; toast('Erreur réseau : ' + (e.message || e), 'bad'); return; }
+  if (btn) btn.disabled = false;
+  if (r.status === 401 || r.status === 403) { toast('Session requise (viewer+) pour générer un rapport.', 'bad'); return; }
+  if (r.status === 404) { toast('Engagement introuvable.', 'bad'); return; }
+  if (r.status === 501) {
+    let j = null; try { j = await r.json(); } catch (e) {}
+    const hint = (j && (j.hint || j.why)) || (REP_FMT[fmt] + ' indisponible sur l\'hôte.');
+    toast(REP_FMT[fmt] + ' : ' + hint, 'bad', 6000);
+    return;
+  }
+  if (!r.ok) { toast('Rapport indisponible (HTTP ' + r.status + ').', 'bad'); return; }
+  let blob; try { blob = await r.blob(); } catch (e) { toast('Lecture du rapport : ' + (e.message || e), 'bad'); return; }
+  const objUrl = URL.createObjectURL(blob);
+  if (fmt === 'pdf') {
+    const w = window.open(objUrl, '_blank');
+    if (!w) toast('Pop-up bloquée — autorise les fenêtres pour ouvrir le PDF.', 'bad');
+    setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
+  } else {
+    const a = document.createElement('a'); a.href = objUrl; a.download = 'forge-engagement-' + id + '.' + fmt;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+  }
+  toast('Rapport ' + REP_FMT[fmt] + ' généré (ledgerisé).', 'ok');
+}
+
+// Configuration du BRANDING (ADMIN) : nom du commanditaire, logo (URL ou data-URI), vendor, mention de
+// confidentialité. Portée GLOBALE ou OVERRIDE de l'engagement actif (case à cocher). GET pré-remplit la
+// valeur effective ; POST via adminApi (403 si non-admin). Round-trip + rafraîchit l'aperçu. Ledgerisé.
+async function brandingModal() {
+  if (!isAdmin()) { toast('Configuration du branding réservée aux administrateurs.', 'bad'); return; }
+  const { id, e } = repActive();
+  let cur = null;
+  try { cur = await adminApi('/report/branding' + (id != null ? '?engagement=' + id : '')); }
+  catch (err) { toast(err.status === 403 ? 'Réservé aux administrateurs.' : ('Branding : ' + err.message), 'bad'); return; }
+  const eff = (cur && cur.effective) || {};
+  const vals = await modal({
+    title: 'Branding du rapport', okText: 'Enregistrer', wide: true,
+    message: 'Marque le livrable au commanditaire (aucun secret). Portée GLOBALE (tous les engagements) ou OVERRIDE de l\'engagement actif' + (e ? ' « ' + e.name + ' »' : '') + '. Réservé admin, journalisé au ledger.',
+    fields: [
+      { name: 'customer_name', label: 'Nom du commanditaire', type: 'text', value: eff.customer_name || '', placeholder: 'ACME Corp' },
+      { name: 'logo', label: 'Logo (URL ou data-URI, optionnel)', type: 'textarea', value: eff.logo || '', placeholder: 'data:image/png;base64,… ou /assets/logo.png', hint: 'Intégré tel quel dans la page de garde (document autonome). Vide = logo Forge par défaut.' },
+      { name: 'vendor', label: 'Prestataire (vendor)', type: 'text', value: eff.vendor || '', placeholder: 'GuatX Forge' },
+      { name: 'confidentiality', label: 'Mention de confidentialité', type: 'text', value: eff.confidentiality || '' },
+      { name: 'per_engagement', label: 'Appliquer à l\'engagement actif uniquement (override)' + (e ? ' — ' + e.name : ''), type: 'checkbox', value: false },
+    ],
+  });
+  if (!vals) return;
+  const body = {};
+  ['customer_name', 'logo', 'vendor', 'confidentiality'].forEach(k => { body[k] = String(vals[k] == null ? '' : vals[k]); });
+  const scope = (vals.per_engagement && id != null) ? ('?engagement=' + id) : '';
+  try {
+    await adminApi('/report/branding' + scope, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+    toast('Branding enregistré (ledgerisé).', 'ok');
+    await previewReport();
+  } catch (err) { toast(err.status === 403 ? 'Réservé aux administrateurs.' : ('Échec : ' + err.message), 'bad'); }
+}
+
+if ($('#rep-generate')) $('#rep-generate').addEventListener('click', () => downloadReport(($('#rep-format') && $('#rep-format').value) || 'html'));
+if ($('#rep-refresh')) $('#rep-refresh').addEventListener('click', previewReport);
+if ($('#rep-brand')) $('#rep-brand').addEventListener('click', brandingModal);
+
 // --- MODULES : rafraîchir le registre (POST /api/modules/refresh — gate opérateur fail-closed) ---
 async function refreshModules() {
   const btn = $('#mod-refresh');
@@ -4154,12 +4447,12 @@ const VIEWS = {
   engagements: 'engagements',
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
   import: 'import',
-  modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', explore: 'explore',
+  modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', 'findings-library': 'findings-library', reports: 'reports', explore: 'explore',
   coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
   admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
 };
 const LOADERS = {
-  overview: loadOverview, engagements: loadEngagements, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings,
+  overview: loadOverview, engagements: loadEngagements, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings, 'findings-library': loadFindingsLibrary, reports: loadReports,
   coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
   admin: loadAdmin,
 };

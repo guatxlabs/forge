@@ -173,6 +173,8 @@
     <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
     <a href="#workflows"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1"/><rect x="15" y="4" width="6" height="5" rx="1"/><rect x="9" y="15" width="6" height="5" rx="1"/><path d="M6 9v3h12V9M12 12v3"/></svg> <span>Workflows</span></a>
     <a href="#findings"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Findings</span></a>
+    <a href="#findings-library"><svg class="ic" viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4z"/><path d="M8 7h6M8 11h6"/></svg> <span>Bibliothèque de findings</span></a>
+    <a href="#reports"><svg class="ic" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg> <span>Rapport d'engagement</span></a>
     <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
     <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
     <a href="#purple-coverage"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> <span>Détection purple</span></a>
@@ -433,6 +435,10 @@
     <div class="panelhead">
       <h2 id="fh">Findings <span id="f-count" class="badge"></span></h2>
       <span class="qbar">
+        <button id="f-from-tpl" class="k-theme" type="button" title="Créer un finding dans l'engagement ACTIF à partir d'un modèle de la bibliothèque (placeholders remplis)">Depuis un modèle</button>
+        <button id="f-export-csv" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en CSV (secrets rédigés)">Export CSV</button>
+        <button id="f-export-json" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en JSON (secrets rédigés)">Export JSON</button>
+        <button id="f-report" class="k-theme" type="button" title="Ouvrir le rapport complet brandé de l'engagement actif">Rapport complet</button>
         <select id="f-sev" aria-label="Filtre sévérité">
           <option value="">Toutes sévérités</option>
           <option value="CRITICAL">CRITICAL</option>
@@ -448,6 +454,43 @@
       </span>
     </div>
     <div id="f-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- FINDINGS LIBRARY (modèles de findings réutilisables — livrable client type Ghostwriter) -->
+  <section id="findings-library" class="card span2" aria-labelledby="ftlh">
+    <div class="panelhead">
+      <h2 id="ftlh">Bibliothèque de findings <span id="ftpl-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="ftpl-new" class="k-theme" type="button" title="Créer un modèle de finding réutilisable (gabarits paramétrés {target}/{param})">Nouveau modèle</button>
+        <button id="ftpl-reload" class="k-theme" type="button" title="Recharger la bibliothèque">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Modèles de findings <b>réutilisables</b> (titre / description / remédiation / CWE / sévérité) à <b>gabarits paramétrés</b> : les placeholders <code>{target}</code>, <code>{param}</code>… sont remplis <b>à l'application</b>. La bibliothèque est <b>GLOBALE</b> — un modèle est réutilisable <i>d'un engagement à l'autre</i>. <b>Appliquer</b> un modèle crée un finding dans l'<b>engagement ACTIF uniquement</b> (isolation : le finding produit appartient à son engagement, jamais à un autre). Création/édition réservées <b>operator</b>, suppression <b>admin</b> ; chaque action est journalisée au ledger.</p>
+    <div id="ftpl-list"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- REPORTS — livrable client : rapport d'engagement AGRÉGÉ + branding (admin) + aperçu HTML.
+       Toujours l'engagement ACTIF (isolation). Génération/branding journalisés au ledger. -->
+  <section id="reports" class="card span2" aria-labelledby="reph">
+    <div class="panelhead">
+      <h2 id="reph">Rapport d'engagement <span id="rep-eng" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="rep-fmt">Format
+          <select id="rep-format" aria-label="Format du rapport">
+            <option value="html">HTML</option>
+            <option value="pdf">PDF</option>
+            <option value="docx">DOCX</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </label>
+        <button id="rep-generate" class="k-theme" type="button" title="Générer et télécharger le rapport de l'engagement actif au format choisi">Générer / Télécharger</button>
+        <button id="rep-refresh" class="k-theme" type="button" title="Rafraîchir l'aperçu HTML">Rafraîchir l'aperçu</button>
+        <button id="rep-brand" class="k-theme" type="button" hidden title="Configurer le branding (nom du commanditaire, logo) — réservé admin">Branding…</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Le <b>livrable client</b> agrégé de l'<b>engagement ACTIF uniquement</b> (<span id="rep-engname" class="mono"></span>) : résumé exécutif, findings détaillés (secrets rédigés), couverture ATT&amp;CK et annexe chaîne-de-custody. <b>Isolation</b> : le rapport ne reflète JAMAIS les données d'un autre engagement. La génération et la configuration du branding sont <b>journalisées au ledger</b>. PDF/DOCX dégradent proprement si le moteur d'impression / python est absent sur l'hôte.</p>
+    <div id="rep-preview" class="rep-preview"><div class="muted">chargement de l'aperçu…</div></div>
   </section>
 
   <!-- EXPLORE -->
