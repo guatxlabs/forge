@@ -955,6 +955,12 @@ async fn engagement_report(
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
+    // ENTERPRISE (flag-gated) fail-closed : le rapport d'un engagement d'un tenant NON accordé au caller
+    // est indisponible -> 404 (mêmes octets que « inconnu » : ni existence ni données divulguées).
+    // No-op en community (engagement_visible => true).
+    if crate::tenancy::enabled(&app) && !crate::tenancy::engagement_visible(&app, &headers, id) {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
+    }
 
     let data = build_report_data(&app, id).await;
 
@@ -1183,6 +1189,46 @@ mod tests {
         assert!(!whole.contains("B-finding"));
         assert!(!whole.contains("b.example.com"));
         assert_eq!(body["summary"]["total"], 1);
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ENTERPRISE (flag-gated) — ISOLATION TENANT : le rapport d'un engagement d'un tenant NON accordé au
+    /// caller est refusé (404, mêmes octets que « inconnu ») ; aucune donnée de l'autre tenant ne fuit.
+    /// Community (flag OFF) => no-op : le même rapport est servi normalement (byte-identique).
+    #[tokio::test]
+    async fn report_tenant_isolation_fail_closed() {
+        let led = tmp_ledger("tnc");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        seed_engagement(&app, 2, "eng-B");
+        seed_finding(&app, 2, "B-secret-finding", "b.example.com", "CRITICAL", "rien");
+        // engagement #2 -> tenant 2 ; alice (viewer) accordée UNIQUEMENT au tenant 1.
+        {
+            let db = app.db();
+            db.execute("UPDATE engagement SET tenant_id=2 WHERE id=2", []).unwrap();
+            upsert_user(&db, "alice", "viewer", &hash_pw("pw")).unwrap();
+            db.execute(
+                "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
+                 SELECT id,1,'tenant_viewer',datetime('now') FROM users WHERE login='alice'",
+                [],
+            ).unwrap();
+            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        }
+        let (atok, _) = create_session(&app, uid_of(&app, "alice"));
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "json".to_string());
+
+        // ENTERPRISE ON : rapport de B (tenant 2) par alice (tenant 1) -> 404 (fail-closed).
+        let r = engagement_report(State(app.clone()), bearer(&atok), Path(2), Query(q.clone())).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "rapport cross-tenant refusé (404)");
+        let body = to_json(r).await;
+        assert!(!serde_json::to_string(&body).unwrap().contains("B-secret-finding"), "aucune donnée de B ne fuit");
+
+        // COMMUNITY (flag OFF) : le MÊME appel est servi (no-op — comportement mono-tenant historique).
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        let r = engagement_report(State(app.clone()), bearer(&atok), Path(2), Query(q)).await;
+        assert_eq!(r.status(), StatusCode::OK, "community (flag OFF) : rapport servi (no-op)");
+
         let _ = std::fs::remove_file(&led);
     }
 

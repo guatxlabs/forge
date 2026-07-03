@@ -121,6 +121,17 @@
 .eng-new{padding:3px 6px;line-height:1}.eng-new .ic{width:15px;height:15px}
 .eng-bar.archived{border-color:color-mix(in srgb,var(--sev3) 50%,var(--bd));background:color-mix(in srgb,var(--sev3) 10%,transparent)}
 .eng-bar.archived .eng-ic{color:var(--sev3)}
+/* TENANT — sélecteur header (ENTERPRISE, flag-gated). Masqué par défaut (community) ; le SPA le dé-masque
+   uniquement quand /api/tenancy renvoie enabled=true. Posé AVANT #eng-bar : hiérarchie tenant → engagement. */
+.tenant-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--sev2,#a06) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--sev2,#a06) 10%,transparent);max-width:300px}
+.tenant-bar .tenant-ic{display:inline-flex;color:var(--sev2,#a06);flex:0 0 auto}
+.tenant-bar .tenant-ic .ic{width:15px;height:15px}
+.tenant-select{background:transparent;border:0;color:var(--fg);font-weight:650;font-size:13px;max-width:210px;padding:3px 2px;cursor:pointer}
+.tenant-select:focus{outline:none}
+/* vue #tenants — panneau de grants inline (sous la ligne du tenant) */
+.tn-grants-row>td{background:color-mix(in srgb,var(--acc) 5%,transparent);padding:4px 10px}
+.tn-grants{padding:6px 2px}
+.tn-grants-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}
 /* vue #engagements */
 .eg-active-row{background:color-mix(in srgb,var(--acc) 8%,transparent)}
 .eg-actions{display:flex;flex-wrap:wrap;gap:6px}
@@ -133,6 +144,14 @@
 <header>
   <button id="navtoggle" class="navtoggle" type="button" aria-label="Menu"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
   <h1><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span>Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></h1>
+  <!-- TENANT ACTIF (ENTERPRISE — multi-tenancy, flag-gated). Masqué par défaut (community = un seul tenant
+       implicite). Le SPA le dé-masque UNIQUEMENT si GET /api/tenancy renvoie enabled=true, et le peuple des
+       tenants ACCESSIBLES au caller (super-admin => tous). Sélectionner un tenant filtre le sélecteur
+       d'engagement ci-dessous (hiérarchie tenant → engagement). -->
+  <div id="tenant-bar" class="tenant-bar" role="group" aria-label="Tenant actif" hidden>
+    <span class="tenant-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg></span>
+    <select id="tenant" class="tenant-select" aria-label="Tenant actif" title="Tenant actif (espace multi-client — ENTERPRISE)"></select>
+  </div>
   <!-- ENGAGEMENT ACTIF : sélecteur + indicateur PROÉMINENT. L'opérateur sait toujours dans quel
        engagement (espace de travail isolé) il travaille. Change l'engagement -> recharge la vue et
        ajoute ?engagement=<id> à chaque requête. « + » ouvre la création (operator). -->
@@ -185,6 +204,10 @@
     <!-- ADMINISTRATION : lien affiché UNIQUEMENT quand whoami.role === 'admin' (renderWhoami le dé-masque).
          Le serveur reste l'autorité (routes gatées check_admin -> 403) ; ce masquage est de la défense en profondeur. -->
     <a href="#admin" id="nav-admin" hidden><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="M19 8v4M17 10h4"/></svg> <span>Administration</span></a>
+    <!-- TENANTS : lien affiché UNIQUEMENT quand la multi-tenancy ENTERPRISE est active (GET /api/tenancy
+         enabled=true) ET que le caller est platform-admin (applyTenancy le dé-masque). Le serveur reste
+         l'autorité (routes gatées enterprise + platform-admin -> 403) — masquage = défense en profondeur. -->
+    <a href="#tenants" id="nav-tenants" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg> <span>Tenants</span></a>
   </nav>
 <main>
   <!-- VUE D'ENSEMBLE -->
@@ -606,6 +629,23 @@
     </div>
     <p class="muted" style="margin:0 0 10px">Comptes individuels (<code>viewer</code> lecture · <code>operator</code> arme le C2 · <code>admin</code> administre). Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>. La désactivation, la rétrogradation et la réinitialisation de mot de passe <b>révoquent immédiatement</b> les sessions du compte. Le <b>dernier admin activé</b> ne peut être ni désactivé, ni rétrogradé, ni supprimé (garde-fou anti-verrouillage).</p>
     <div id="admin-users"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- TENANTS (ENTERPRISE — multi-tenancy, flag-gated). Vue rendue UNIQUEMENT quand la multi-tenancy est
+       active ET que le caller est platform-admin (loadTenants). Chaque tenant est un espace multi-client
+       ISOLÉ (ses engagements, findings, runs, ledger). CRUD + gestion des grants ; tout est ledgerisé
+       `console.tenant.*`. Garde-fous : dernier tenant actif non archivable, dernier tenant_admin non
+       retirable. Le serveur reste l'autorité (403 enterprise_disabled / platform_admin_required). -->
+  <section id="tenants" class="card span2" aria-labelledby="tn-h">
+    <div class="panelhead">
+      <h2 id="tn-h">Tenants <span class="badge" title="ENTERPRISE — multi-tenancy">enterprise</span> <span id="tenants-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="tenants-reload" class="k-theme" type="button" title="Rafraîchir la liste des tenants">Rafraîchir</button>
+        <button id="tenants-new" class="k-theme" type="button" title="Créer un nouveau tenant (espace multi-client isolé)">+ Tenant</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Un <b>tenant</b> est le sommet de la hiérarchie <b>TENANT → ENGAGEMENT → findings/runs</b> : un espace <b>multi-client isolé</b> (chaque tenant a ses engagements, son ledger tamper-evident, ses données). Un utilisateur d'un tenant ne voit <b>jamais</b> les données d'un autre (filtre fail-closed, deny-by-default). Réservé au <b>platform-admin</b> (admin console ou super-admin) ; chaque action est <b>ledgerisée</b>. Garde-fous : impossible d'archiver le <b>dernier tenant actif</b> ou de retirer le <b>dernier <code>tenant_admin</code></b> d'un tenant.</p>
+    <div id="tenants-list"><div class="muted">chargement…</div></div>
   </section>
 
   <!-- ADMINISTRATION — connecteurs (gouvernance, réservé role=admin). Écriture via POST /api/modules/:kind

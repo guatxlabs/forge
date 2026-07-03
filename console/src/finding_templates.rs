@@ -388,8 +388,9 @@ async fn ft_apply(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
-    // ENGAGEMENT ACTIF (isolation) : le finding créé appartient à CET engagement uniquement.
-    let engagement_id = match resolve_mutation_engagement_id(&app, &q, &body) {
+    // ENGAGEMENT ACTIF (isolation) : le finding créé appartient à CET engagement uniquement. ENTERPRISE
+    // (flag-gated) : l'engagement cible doit être d'un tenant accordé (fail-closed) — cf. resolve_mutation.
+    let engagement_id = match resolve_mutation_engagement_id(&app, &headers, &q, &body) {
         Ok(e) => e,
         Err(why) => return bad(why),
     };
