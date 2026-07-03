@@ -104,6 +104,13 @@ class Scope:
         # params par-module GLOBAUX (clé additive : ignorée par le ROE/Scope, consommée par l'engine).
         # Exposée ici pour que la CLI n'ait pas à re-lire/re-parser le scope.json une 2e fois.
         self.module_params = data.get("module_params") or {}
+        # GOUVERNANCE CONNECTEUR (console) : ensemble de kinds de modules DÉSACTIVÉS par l'opérateur via
+        # l'admin console (enabled=0 ou available_override=0). L'engine les SKIP EXACTEMENT comme un outil
+        # absent — MÊME si le binaire/service est présent (l'opérateur a "désinstallé" le connecteur ;
+        # cf. engine.execute). Couvre AUSSI les modules choisis par le planner, pas seulement `--modules`.
+        # Additif/fail-closed lisible : absent/illisible => aucun module désactivé (comportement inchangé) ;
+        # les entrées non-string sont ignorées (jamais une exception -> jamais un FIRE fabriqué).
+        self.disabled_modules = {m for m in (data.get("disabled_modules") or []) if isinstance(m, str)}
         # SESSION (SECRET) — matériel d'authentification OPTIONNEL (cookies / en-têtes / bearer) que les
         # modules recon/oracle attachent UNIQUEMENT aux requêtes vers des hôtes IN-SCOPE (scope-guard ;
         # cf. forge/session.py). SECRET : jamais journalisé dans le ledger, jamais dans un finding/

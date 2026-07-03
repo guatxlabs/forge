@@ -1177,9 +1177,14 @@ function renderModules() {
   const list = MODULES.filter(m => !onlyAvail || m.available).sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
   if (!list.length) { grid.innerHTML = '<div class="muted">aucun module' + (onlyAvail ? ' disponible' : '') + '</div>'; return; }
   grid.replaceChildren(...list.map(m => {
-    const card = document.createElement('div'); card.className = 'modcard' + (m.available ? '' : ' off');
+    // « effectif » = enabled ET (override ?? sonde) — grise la carte si le connecteur ne tirerait pas.
+    const effective = (m.effective_available === undefined) ? m.available : m.effective_available;
+    const card = document.createElement('div'); card.className = 'modcard' + (effective ? '' : ' off');
     const badges = [];
     badges.push(`<span class="badge ${m.available ? 'ok' : 'mut'}">${m.available ? 'dispo' : 'indispo'}</span>`);
+    if (m.enabled === false) badges.push('<span class="badge bad">désactivé</span>');
+    else if (m.available_override === true) badges.push('<span class="badge webyes">forcé dispo</span>');
+    else if (m.available_override === false) badges.push('<span class="badge bad">forcé indispo</span>');
     if (m.web_allowed) badges.push('<span class="badge webyes">web</span>');
     if (m.exploit) badges.push('<span class="badge expl">exploit</span>');
     if (m.destructive) badges.push('<span class="badge destr">destructif</span>');
@@ -1645,16 +1650,22 @@ function renderLaunchModules() {
   const hint = $('#lc-modhint');
   const hiOn = highImpactOptIn();
   const sorted = [...MODULES].sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
-  const webable = sorted.filter(m => m.web_allowed && !m.exploit && !m.destructive);
-  const blocked = sorted.filter(m => m.exploit || m.destructive || !m.web_allowed);
+  // connecteur DÉSACTIVÉ par l'admin (enabled=0 ou available_override=0) : jamais sélectionnable au
+  // lancement (le serveur refuse de toute façon — module_disabled 400 ; on l'expose ici sans surprise).
+  const connOff = m => (m.enabled === false) || (m.available_override === false);
+  const webable = sorted.filter(m => m.web_allowed && !m.exploit && !m.destructive && !connOff(m));
+  const blocked = sorted.filter(m => m.exploit || m.destructive || !m.web_allowed || connOff(m));
   if (hint) hint.textContent = `${webable.length} web · ${blocked.length} ${hiOn ? 'à gouverner' : 'bloqués'}`;
   if (!sorted.length) { host.innerHTML = '<div class="muted">aucun module exposé par le moteur</div>'; return; }
   host.replaceChildren();
   sorted.forEach(m => {
     const highImpact = !!(m.exploit || m.destructive);
+    // un connecteur DÉSACTIVÉ par l'admin n'est JAMAIS sélectionnable (au-dessus du plancher exploit :
+    // même l'opt-in fort-impact ne le débloque pas — le serveur le refuse via module_disabled).
+    const disabledByAdmin = connOff(m);
     // un module est sélectionnable s'il est web_allowed non-exploit/non-destructif, OU s'il est à
-    // fort impact ET que l'opt-in gouverné est activé. (non-web et non-exploit reste toujours bloqué.)
-    const allowed = (!!m.web_allowed && !highImpact) || (highImpact && hiOn);
+    // fort impact ET que l'opt-in gouverné est activé — et JAMAIS s'il est désactivé par l'admin.
+    const allowed = !disabledByAdmin && ((!!m.web_allowed && !highImpact) || (highImpact && hiOn));
     const armedHi = highImpact && allowed;   // module à fort impact débloqué par l'opt-in
     const specs = (allowed && MODULE_PARAMS[m.kind]) || null;
     const lab = document.createElement('label');
@@ -1667,14 +1678,18 @@ function renderLaunchModules() {
     const nm = document.createElement('span'); nm.className = 'lc-modname'; nm.textContent = m.kind;
     top.append(cb, nm);
     if (!allowed) {
-      const why = highImpact
-        ? 'CLI/opérateur — activer l\'opt-in ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/')
-        : 'CLI opérateur uniquement — non autorisé web';
+      const why = disabledByAdmin
+        ? 'désactivé (admin)'
+        : (highImpact
+          ? 'CLI/opérateur — activer l\'opt-in ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/')
+          : 'CLI opérateur uniquement — non autorisé web');
       const tag = document.createElement('span'); tag.className = 'lc-clionly'; tag.textContent = why;
       top.appendChild(tag);
-      lab.title = highImpact
-        ? 'Module à fort impact : active l\'opt-in « fort impact » (zone danger) pour le sélectionner.'
-        : 'Ce module ne peut pas être lancé depuis le web (non autorisé web).';
+      lab.title = disabledByAdmin
+        ? 'Connecteur désactivé par un administrateur (gouvernance) — non lançable (le serveur le refuse : module_disabled).'
+        : (highImpact
+          ? 'Module à fort impact : active l\'opt-in « fort impact » (zone danger) pour le sélectionner.'
+          : 'Ce module ne peut pas être lancé depuis le web (non autorisé web).');
     } else if (armedHi) {
       const tag = document.createElement('span'); tag.className = 'lc-clionly'; tag.textContent = 'fort impact — ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/');
       top.appendChild(tag);
@@ -2477,6 +2492,218 @@ async function refreshModules() {
 if ($('#mod-refresh')) $('#mod-refresh').addEventListener('click', refreshModules);
 
 // =====================================================================================
+//  ADMINISTRATION — comptes utilisateurs (vue #admin, réservée role=admin)
+//  Toutes les mutations passent par des routes gatées check_admin côté serveur (403 sinon), attribuées
+//  à l'admin en session et ledgerisées. L'UI n'apparaît que si whoami.role === 'admin' (défense en
+//  profondeur — le serveur reste l'autorité). Zéro alert/confirm/prompt natif : modales/toasts in-app.
+//    GET    /api/users                 -> { users: [{login,role,disabled,created}] }  (jamais pass_hash)
+//    POST   /api/users {login,role,password}
+//    POST   /api/users/:login {role?|password?|disabled?}   (purge sessions sur disable/downgrade/reset)
+//    DELETE /api/users/:login          (dernier admin activé protégé : 409)
+// =====================================================================================
+function isAdmin() { return !!(WHOAMI && String(WHOAMI.role) === 'admin'); }
+const ADMIN_ROLES = [
+  { value: 'viewer', label: 'viewer — lecture seule' },
+  { value: 'operator', label: 'operator — arme le C2' },
+  { value: 'admin', label: 'admin — administration' },
+];
+const LOGIN_RE = /^[A-Za-z0-9._-]{1,64}$/;
+function loginError(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return 'Login requis.';
+  if (s.startsWith('-')) return 'Le login ne peut pas commencer par « - ».';
+  if (!LOGIN_RE.test(s)) return 'Login invalide (1-64 caractères, [A-Za-z0-9._-] uniquement).';
+  return null;
+}
+// Appel API admin : renvoie le JSON parsé, lève une Error (avec .status) sur !ok. On ne remonte que le
+// champ contrôlé `why`/`error` du backend (jamais un corps brut non-fiable -> anti-XSS, cf. api()).
+async function adminApi(path, opts) {
+  const r = await fetch('/api' + path, Object.assign({ headers: { Accept: 'application/json' } }, opts || {}));
+  const body = await r.text().catch(() => '');
+  let j = null; try { j = body ? JSON.parse(body) : null; } catch (e) {}
+  if (!r.ok) {
+    const why = (j && (typeof j.why === 'string' && j.why || typeof j.error === 'string' && j.error)) || ('HTTP ' + r.status);
+    const err = new Error(why); err.status = r.status; throw err;
+  }
+  return j;
+}
+async function loadAdminUsers() {
+  const host = $('#admin-users'); if (!host) return;
+  if (!isAdmin()) { host.innerHTML = '<div class="muted">reserve aux administrateurs</div>'; if ($('#admin-count')) $('#admin-count').textContent = ''; return; }
+  host.innerHTML = '<div class="muted">chargement…</div>';
+  let data;
+  try { data = await adminApi('/users'); }
+  catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
+  const users = (data && data.users) || [];
+  if ($('#admin-count')) $('#admin-count').textContent = users.length + ' compte' + (users.length > 1 ? 's' : '');
+  if (!users.length) { host.innerHTML = '<div class="muted">aucun compte</div>'; return; }
+  const me = (WHOAMI && WHOAMI.login) || '';
+  const table = document.createElement('table'); table.className = 'qtable';
+  table.innerHTML = '<thead><tr><th>Login</th><th>Role</th><th>Etat</th><th>Cree</th><th>Actions</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  users.forEach(u => {
+    const tr = document.createElement('tr');
+    const roleCls = ROLE_CLASSES.includes('role-' + u.role) ? 'role-' + u.role : 'mut';
+    const state = u.disabled ? '<span class="badge bad">desactive</span>' : '<span class="badge ok">actif</span>';
+    const self = u.login === me ? ' <span class="badge mut" title="votre compte">vous</span>' : '';
+    tr.innerHTML =
+      `<td class="mono">${esc(u.login)}${self}</td>` +
+      `<td><span class="badge ${roleCls}">${esc(u.role)}</span></td>` +
+      `<td>${state}</td>` +
+      `<td class="mut">${esc(fmtTs(u.created))}</td>`;
+    const act = document.createElement('td'); act.className = 'admin-act';
+    const mk = (label, title, fn, danger) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'k-theme' + (danger ? ' danger' : ''); b.textContent = label; b.title = title; b.onclick = fn; return b; };
+    act.appendChild(mk('Role', 'Changer le role du compte', () => adminEditRole(u)));
+    act.appendChild(mk('Mot de passe', 'Reinitialiser le mot de passe (revoque les sessions)', () => adminResetPw(u)));
+    act.appendChild(mk(u.disabled ? 'Reactiver' : 'Desactiver', u.disabled ? 'Reactiver le compte' : 'Desactiver le compte (revoque les sessions)', () => adminToggleDisabled(u), !u.disabled));
+    act.appendChild(mk('Supprimer', 'Supprimer definitivement le compte', () => adminDeleteUser(u), true));
+    tr.appendChild(act);
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  host.replaceChildren(table);
+}
+async function adminCreateUser() {
+  const r = await modal({
+    title: 'Nouveau compte',
+    okText: 'Creer',
+    fields: [
+      { name: 'login', label: 'Login', required: true, placeholder: '[A-Za-z0-9._-]' },
+      { name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: 'viewer' },
+      { name: 'password', label: 'Mot de passe', type: 'password', required: true, placeholder: 'mot de passe du compte' },
+    ],
+    validate: v => loginError(v.login) || (!String(v.password || '') ? 'Mot de passe requis.' : null),
+  });
+  if (!r) return;
+  try {
+    await adminApi('/users', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ login: String(r.login).trim(), role: r.role, password: r.password }) });
+    toast('Compte « ' + String(r.login).trim() + ' » cree.', 'ok');
+    loadAdminUsers();
+  } catch (e) { toast('Creation refusee : ' + e.message, 'bad'); }
+}
+async function adminEditRole(u) {
+  const r = await modal({
+    title: 'Changer le role — ' + u.login,
+    okText: 'Appliquer',
+    fields: [{ name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: u.role }],
+  });
+  if (!r || r.role === u.role) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(u.login), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ role: r.role }) });
+    toast('Role de « ' + u.login + ' » -> ' + r.role + '.', 'ok');
+    loadAdminUsers();
+  } catch (e) { toast('Changement de role refuse : ' + e.message, 'bad'); }
+}
+async function adminResetPw(u) {
+  const r = await modal({
+    title: 'Reinitialiser le mot de passe — ' + u.login,
+    message: 'Les sessions actives de ce compte seront revoquees.',
+    okText: 'Reinitialiser',
+    fields: [{ name: 'password', label: 'Nouveau mot de passe', type: 'password', required: true, placeholder: 'nouveau mot de passe' }],
+  });
+  if (!r) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(u.login), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ password: r.password }) });
+    toast('Mot de passe de « ' + u.login + ' » reinitialise.', 'ok');
+    loadAdminUsers();
+  } catch (e) { toast('Reinitialisation refusee : ' + e.message, 'bad'); }
+}
+async function adminToggleDisabled(u) {
+  const disabling = !u.disabled;
+  const ok = await confirmModal(
+    (disabling ? 'Desactiver' : 'Reactiver') + ' le compte « ' + u.login + ' » ?' + (disabling ? ' Ses sessions actives seront revoquees.' : ''),
+    { title: disabling ? 'Desactiver le compte' : 'Reactiver le compte', okText: disabling ? 'Desactiver' : 'Reactiver', danger: disabling });
+  if (!ok) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(u.login), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ disabled: disabling }) });
+    toast('Compte « ' + u.login + ' » ' + (disabling ? 'desactive' : 'reactive') + '.', 'ok');
+    loadAdminUsers();
+  } catch (e) { toast('Operation refusee : ' + e.message, 'bad'); }
+}
+async function adminDeleteUser(u) {
+  const ok = await confirmModal('Supprimer definitivement le compte « ' + u.login + ' » ? Action irreversible.', { title: 'Supprimer le compte', okText: 'Supprimer', danger: true });
+  if (!ok) return;
+  try {
+    await adminApi('/users/' + encodeURIComponent(u.login), { method: 'DELETE', headers: { Accept: 'application/json' } });
+    toast('Compte « ' + u.login + ' » supprime.', 'ok');
+    loadAdminUsers();
+  } catch (e) { toast('Suppression refusee : ' + e.message, 'bad'); }
+}
+if ($('#admin-new')) $('#admin-new').addEventListener('click', adminCreateUser);
+if ($('#admin-reload')) $('#admin-reload').addEventListener('click', loadAdminUsers);
+
+// =====================================================================================
+//  ADMINISTRATION — connecteurs (gouvernance enabled / available_override / web_allowed)
+//  Contrepartie ECRITURE de GET /api/modules : POST /api/modules/:kind (check_admin, attribue + ledgerise).
+//  Desactiver un connecteur l'empeche REELLEMENT de tirer (scope.json disabled_modules + filtre --modules
+//  + refus validate_modules), y compris pour les modules choisis par le planner. Admin-only (le serveur
+//  reste l'autorite : les mutations sont 403 sans session admin).
+// =====================================================================================
+const OVR_OPTS = [
+  { value: '', label: 'auto (sonde host)' },
+  { value: 'true', label: 'forcer disponible' },
+  { value: 'false', label: 'forcer indisponible' },
+];
+async function loadAdminConnectors() {
+  const host = $('#admin-connectors-body'); if (!host) return;
+  if (!isAdmin()) { host.innerHTML = '<div class="muted">reserve aux administrateurs</div>'; if ($('#admin-conn-count')) $('#admin-conn-count').textContent = ''; return; }
+  host.innerHTML = '<div class="muted">chargement…</div>';
+  let mods;
+  try { mods = await api('/modules'); }
+  catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
+  const list = Array.isArray(mods) ? mods.slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind))) : [];
+  if ($('#admin-conn-count')) $('#admin-conn-count').textContent = list.length + ' connecteur' + (list.length > 1 ? 's' : '');
+  if (!list.length) { host.innerHTML = '<div class="muted">aucun connecteur</div>'; return; }
+  const table = document.createElement('table'); table.className = 'qtable';
+  table.innerHTML = '<thead><tr><th>Connecteur</th><th>Sonde host</th><th>Etat</th><th>Override dispo</th><th>Effectif</th><th>Web</th><th>Actions</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  list.forEach(m => {
+    const tr = document.createElement('tr');
+    const enabled = m.enabled !== false; // enabled absent (ancienne API) -> considere actif
+    const risk = m.exploit ? ' <span class="badge expl">exploit</span>' : (m.destructive ? ' <span class="badge destr">destructif</span>' : '');
+    const probed = m.available ? '<span class="badge ok">dispo</span>' : '<span class="badge mut">absente</span>';
+    const state = enabled ? '<span class="badge ok">actif</span>' : '<span class="badge bad">desactive</span>';
+    const eff = m.effective_available ? '<span class="badge ok">oui</span>' : '<span class="badge bad">non</span>';
+    const web = m.web_allowed ? '<span class="badge webyes">web</span>' : '<span class="badge mut">—</span>';
+    // structure des cellules (badges = markup STATIQUE derive de booleens ; texte = esc()). Les deux
+    // cellules interactives (override select, actions) sont des placeholders peuples en DOM ci-dessous.
+    tr.innerHTML =
+      `<td class="mono">${esc(m.kind)}${risk}${m.mitre ? ' <code>' + esc(m.mitre) + '</code>' : ''}</td>` +
+      `<td>${probed}</td>` +
+      `<td>${state}</td>` +
+      `<td class="conn-ovr"></td>` +
+      `<td>${eff}</td>` +
+      `<td>${web}</td>` +
+      `<td class="admin-act"></td>`;
+    // override select : auto (null) / forcer disponible (true) / forcer indisponible (false).
+    const sel = document.createElement('select'); sel.title = 'available_override : « auto » suit la sonde host ; « forcer » masque ou expose le connecteur independamment du binaire present';
+    const cur = (m.available_override === true) ? 'true' : (m.available_override === false ? 'false' : '');
+    OVR_OPTS.forEach(o => { const op = document.createElement('option'); op.value = o.value; op.textContent = o.label; if (o.value === cur) op.selected = true; sel.appendChild(op); });
+    sel.onchange = () => connectorSet(m.kind, { available_override: sel.value === '' ? null : (sel.value === 'true') });
+    tr.querySelector('.conn-ovr').appendChild(sel);
+    const act = tr.querySelector('.admin-act');
+    const mk = (label, title, fn, danger) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'k-theme' + (danger ? ' danger' : ''); b.textContent = label; b.title = title; b.onclick = fn; return b; };
+    act.appendChild(mk(enabled ? 'Desactiver' : 'Activer', enabled ? 'Desactiver le connecteur : SKIP au tir (y compris plan planner)' : 'Reactiver le connecteur', () => connectorSet(m.kind, { enabled: !enabled }), enabled));
+    act.appendChild(mk(m.web_allowed ? 'Retirer web' : 'Autoriser web', 'Basculer la lancabilite depuis le web (web_allowed)', () => connectorSet(m.kind, { web_allowed: !m.web_allowed })));
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb); host.replaceChildren(table);
+}
+// Applique un patch de gouvernance a un connecteur (POST /api/modules/:kind, admin + ledgerise), puis
+// recharge la table + la grille Capacites (source /api/modules) pour refleter l'effectif.
+async function connectorSet(kind, patch) {
+  try {
+    await adminApi('/modules/' + encodeURIComponent(kind), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(patch) });
+    toast('Connecteur « ' + kind + ' » mis a jour.', 'ok');
+    loadAdminConnectors();
+    if (typeof loadModules === 'function') loadModules(); // refleter l'effectif dans la vue Capacites
+  } catch (e) { toast('Mise a jour refusee : ' + e.message, 'bad'); }
+}
+if ($('#admin-conn-reload')) $('#admin-conn-reload').addEventListener('click', loadAdminConnectors);
+// Vue #admin : charge comptes ET connecteurs (deux tables gouvernees, meme role admin).
+function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); }
+
+// =====================================================================================
 //  Navigation (sidebar repliable + hash-routing) + chargement par vue
 // =====================================================================================
 const VIEWS = {
@@ -2484,10 +2711,12 @@ const VIEWS = {
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
   modules: 'modules', findings: 'findings', explore: 'explore',
   coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
+  admin: 'admin', 'admin-connectors': 'admin',
 };
 const LOADERS = {
   overview: loadOverview, launch: loadLaunch, modules: loadModules, findings: loadFindings,
   coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
+  admin: loadAdmin,
 };
 let loadedOnce = {};
 function showView(v) {
@@ -2502,7 +2731,7 @@ function showView(v) {
   const fn = LOADERS[v];
   if (fn) { try { fn(); } catch (e) { console.error(e); } loadedOnce[v] = true; }
 }
-function route() { let v = location.hash.slice(1) || 'overview'; if (!VIEWS_HAS(v)) v = 'overview'; showView(v); }
+function route() { let v = location.hash.slice(1) || 'overview'; if (!VIEWS_HAS(v)) v = 'overview'; if (v === 'admin' && !isAdmin()) v = 'overview'; showView(v); }
 function VIEWS_HAS(v) { return Object.values(VIEWS).includes(v); }
 window.addEventListener('hashchange', route);
 if ($('#navtoggle')) $('#navtoggle').onclick = () => { const l = document.querySelector('.layout'); if (l) l.classList.toggle('collapsed'); };
@@ -2591,6 +2820,11 @@ function renderWhoami(w) {
   }
   const userEl = $('#whoami-user');
   if (userEl) userEl.textContent = w.login || '';
+  // ADMIN : le lien de navigation n'apparaît que pour un admin (défense en profondeur — le serveur
+  // reste l'autorité via check_admin). Si un non-admin se trouve sur #admin, on le ré-oriente.
+  const adminLink = $('#nav-admin');
+  if (adminLink) adminLink.hidden = !(authed && String(w.role) === 'admin');
+  if (!isAdmin() && (location.hash.slice(1) === 'admin')) location.hash = 'overview';
 }
 function showLogin() {
   document.body.classList.add('gated');

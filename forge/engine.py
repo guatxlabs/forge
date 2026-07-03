@@ -72,6 +72,20 @@ class Engine:
                 self.ledger.append("engine.error", res)
             return res
 
+        # GOUVERNANCE CONNECTEUR (console) : un kind DÉSACTIVÉ par l'opérateur (scope.disabled_modules)
+        # est SKIP comme un outil absent — même si son binaire/service EST présent. C'est l'enforcement
+        # au tir de la gouvernance UI : disabling un connecteur empêche RÉELLEMENT le module de tirer,
+        # y compris quand c'est le planner (et non `--modules`) qui l'a choisi. Vérifié avant la sonde
+        # `available` pour porter la raison la plus spécifique dans le rapport anti-masquage.
+        disabled = getattr(self.scope, "disabled_modules", None) or set()
+        if action.kind in disabled:
+            res = {"action": action.id, "target": action.target, "kind": action.kind,
+                   "verdict": "SKIP",
+                   "reasons": ["module désactivé par la console (gouvernance connecteur)"],
+                   "output": None}
+            self.results.append(res)
+            return res
+
         if getattr(module, "available", True) is False:
             res = {"action": action.id, "target": action.target, "kind": action.kind,
                    "verdict": "SKIP", "reasons": ["module indisponible (outil sous-jacent absent)"],

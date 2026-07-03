@@ -27,6 +27,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeDir;
 
@@ -63,10 +64,17 @@ CREATE TABLE IF NOT EXISTS panel(
 CREATE TABLE IF NOT EXISTS dashboard(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, descr TEXT DEFAULT '', position INTEGER DEFAULT 0,
   created TEXT DEFAULT '', updated TEXT DEFAULT '');
+-- MODULE (connecteurs) : `available` = disponibilité SONDÉE au boot (host). `enabled` et
+-- `available_override` = INTENTION OPÉRATEUR gouvernée depuis l'admin console (jamais écrasée par un
+-- re-probe, cf. populate_modules) : `enabled=0` désinstalle opérationnellement le connecteur ;
+-- `available_override` (NULL=suivre la sonde, 0/1=forcer) surcharge la disponibilité host. Disponibilité
+-- EFFECTIVE = enabled AND (available_override ?? available). Un module désactivé (enabled=0 ou override=0)
+-- est SKIP au tir même si son binaire est présent (scope.json disabled_modules -> engine.execute).
 CREATE TABLE IF NOT EXISTS module(
   kind TEXT PRIMARY KEY, exploit INTEGER DEFAULT 0, destructive INTEGER DEFAULT 0,
   available INTEGER DEFAULT 1, mitre TEXT DEFAULT '', descr TEXT DEFAULT '',
-  web_allowed INTEGER DEFAULT 0);
+  web_allowed INTEGER DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+  available_override INTEGER DEFAULT NULL);
 CREATE TABLE IF NOT EXISTS roe_decision(
   id INTEGER PRIMARY KEY, ts TEXT, campaign TEXT, run_id TEXT, action_id TEXT, target TEXT,
   kind TEXT, verdict TEXT, exploit INTEGER DEFAULT 0, destructive INTEGER DEFAULT 0, reasons TEXT);
@@ -90,6 +98,12 @@ CREATE TABLE IF NOT EXISTS users(
 CREATE TABLE IF NOT EXISTS session(
   token_sha TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
+-- SETTINGS (KV) : configuration MUTABLE d'administration (politique opérateur, source de détection,
+-- params par défaut, état du wizard de 1er déploiement…). `updated` = horodatage de dernière écriture.
+-- Les mutations sont réservées à check_admin (attribution individuelle stricte) et ledgerisées par
+-- l'appelant. Substrat neutre : une clé absente = comportement par défaut (aucune valeur inventée).
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -125,10 +139,22 @@ fn migrate(db: &Connection) {
         "ALTER TABLE run_job ADD COLUMN started TEXT DEFAULT ''",
         "ALTER TABLE run_job ADD COLUMN finished TEXT DEFAULT ''",
         "ALTER TABLE run_job ADD COLUMN exit_code INTEGER DEFAULT NULL",
+        // GOUVERNANCE CONNECTEUR (#4) : intention opérateur persistée sur la table `module`, distincte
+        // de la disponibilité SONDÉE (`available`). `enabled` NOT NULL DEFAULT 1 (autorisé par SQLite car
+        // la colonne a un DEFAULT) ; `available_override` NULL = suivre la sonde. Ces deux colonnes ne
+        // sont JAMAIS réécrites par populate_modules (re-probe) — seul l'admin les mute (POST /api/modules/:kind).
+        "ALTER TABLE module ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE module ADD COLUMN available_override INTEGER DEFAULT NULL",
     ];
     for a in alters {
         let _ = db.execute(a, []); // error-ignored (colonne déjà présente)
     }
+    // SETTINGS (KV) : re-créée ici (idempotent, CREATE IF NOT EXISTS) en plus du SCHEMA, pour qu'une
+    // base ANTÉRIEURE à son introduction l'obtienne au 1er boot suivant la mise à jour. error-ignored.
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL)",
+        [],
+    );
 }
 
 /// Garantit l'existence du dashboard par défaut (id=1) — rétro-compat : la colonne `panel.dashboard_id`
@@ -152,6 +178,24 @@ fn ensure_default_dashboard(db: &Connection) {
 /// destructif, et n'est pas l'interception IDOR (qui tamper une requête en vol — réservé CLI/opérateur).
 fn module_web_allowed(kind: &str, exploit: bool, destructive: bool) -> bool {
     !exploit && !destructive && kind != "evasion.idor_intercept"
+}
+
+/// INTENTION OPÉRATEUR de désactiver un connecteur (gouvernance, indépendante de la sonde host) :
+/// vrai si `enabled=0` OU `available_override=Some(false)` (override explicite « indisponible »). Un
+/// simple binaire absent (probed=0, sans override) N'EST PAS une désactivation opérateur — le moteur
+/// le SKIP déjà via sa propre sonde. C'est CE set qu'on refuse dans validate_modules et qu'on injecte
+/// dans scope.json `disabled_modules` (pour que le moteur SKIP même un outil PRÉSENT que l'opérateur a
+/// désactivé). Fonction PURE (testable, aucun I/O).
+fn module_operator_disabled(enabled: bool, available_override: Option<bool>) -> bool {
+    !enabled || available_override == Some(false)
+}
+
+/// Disponibilité EFFECTIVE d'un connecteur = `enabled AND (available_override ?? probed_available)`.
+/// Exposée au front (badge « effectif ») et cohérente avec module_operator_disabled : effective=false
+/// dès que l'opérateur désactive (enabled=0 / override=0) OU que la sonde host est négative sans override.
+/// Fonction PURE (testable, aucun I/O).
+fn module_effectively_available(enabled: bool, available_override: Option<bool>, probed_available: bool) -> bool {
+    enabled && available_override.unwrap_or(probed_available)
 }
 
 /// Résout le répertoire des assets web statiques (style.css/app.js/fonts/…) de façon robuste,
@@ -258,17 +302,30 @@ fn populate_modules(db: &Connection) {
         let available = m.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
         let mitre = m.get("mitre").and_then(|v| v.as_str()).unwrap_or("");
         let descr = m.get("descr").or_else(|| m.get("desc")).and_then(|v| v.as_str()).unwrap_or("");
-        let web_allowed = module_web_allowed(kind, exploit, destructive);
-        let _ = db.execute(
-            "INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed)
-             VALUES(?,?,?,?,?,?,?)
-             ON CONFLICT(kind) DO UPDATE SET exploit=excluded.exploit, destructive=excluded.destructive,
-               available=excluded.available, mitre=excluded.mitre, descr=excluded.descr, web_allowed=excluded.web_allowed",
-            rusqlite::params![kind, exploit as i64, destructive as i64, available as i64, mitre, descr, web_allowed as i64],
-        );
+        upsert_probed_module(db, kind, exploit, destructive, available, mitre, descr);
         n += 1;
     }
     println!("[forge-console] modules: {n} enregistrés dans la table `module`");
+}
+
+/// UPSERT d'un module SONDÉ, avec NO-CLOBBER de l'intention opérateur. Sur conflit (module déjà connu),
+/// ne met à jour QUE les champs SONDÉS (exploit/destructive/available/mitre/descr) ; `web_allowed`
+/// (posé au 1er INSERT via module_web_allowed), `enabled` et `available_override` sont ABSENTS de la
+/// clause SET -> une ligne existante conserve son intention de gouvernance, tandis qu'un NOUVEAU module
+/// hérite de web_allowed dérivé et des DEFAULT `enabled=1` / `available_override=NULL`. Extrait de
+/// populate_modules pour être testé sans spawn Python (régression : un disable manuel survit au re-probe).
+/// Le plancher exploit reste garanti indépendamment de web_allowed (validate_modules teste
+/// exploit/destructive en propre, en amont).
+fn upsert_probed_module(db: &Connection, kind: &str, exploit: bool, destructive: bool,
+                        available: bool, mitre: &str, descr: &str) {
+    let web_allowed = module_web_allowed(kind, exploit, destructive);
+    let _ = db.execute(
+        "INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed)
+         VALUES(?,?,?,?,?,?,?)
+         ON CONFLICT(kind) DO UPDATE SET exploit=excluded.exploit, destructive=excluded.destructive,
+           available=excluded.available, mitre=excluded.mitre, descr=excluded.descr",
+        rusqlite::params![kind, exploit as i64, destructive as i64, available as i64, mitre, descr, web_allowed as i64],
+    );
 }
 
 fn parse_modules_json(s: &str) -> Option<Vec<Value>> {
@@ -325,6 +382,12 @@ struct App {
     token_raw: Arc<String>,          // token bearer EN CLAIR — passé au moteur spawné pour /api/ingest
     user: Arc<String>,
     pass_hash: Arc<String>,          // argon2id ; vide = auth OFF (dev localhost)
+    // GATE D'AUTH ENGAGÉE ? — cache recalculé au boot ET à chaque mutation de comptes (create/disable/
+    // role-change/delete) pour éviter une requête DB par requête HTTP. `true` dès qu'un hash env est
+    // posé (FORGE_CONSOLE_PASS_HASH) OU qu'au moins un compte activé existe en base : la gate s'engage
+    // sur l'ÉTAT DB, pas seulement sur l'env (ferme le trou dev-open « comptes en base, env vide »).
+    // FAIL-CLOSED : tant qu'un compte activé ou un hash existe, la gate reste engagée.
+    auth_required: Arc<AtomicBool>,
     operator_hash: Arc<String>,      // argon2id du rôle OPÉRATEUR (C2) ; vide => FAIL-CLOSED (403 sur tout C2)
     allowed_hosts: Arc<Vec<String>>, // anti-DNS-rebinding
     ledger_path: Arc<String>,        // JSONL du ledger d'engagement (FORGE_CONSOLE_LEDGER)
@@ -364,6 +427,29 @@ impl App {
     /// (une requête échouée renvoie une Err, pas un état mémoire corrompu). Fail-open contrôlé.
     fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Vrai s'il existe AU MOINS un compte ACTIVÉ (`disabled=0`) dans la table `users`. Requête légère
+    /// (`LIMIT 1`). Ne verrouille QUE le mutex DB : ne JAMAIS l'appeler en tenant déjà `self.db()`
+    /// (deadlock). Un échec de lecture -> false (l'engagement de la gate retombe alors sur `pass_hash`).
+    fn any_enabled_user(&self) -> bool {
+        let db = self.db();
+        db.query_row("SELECT 1 FROM users WHERE disabled=0 LIMIT 1", [], |_| Ok(())).is_ok()
+    }
+
+    /// Recalcule et met en cache `auth_required` : la gate d'auth s'engage si un hash d'env est posé
+    /// (`FORGE_CONSOLE_PASS_HASH` non vide) OU si au moins un compte activé existe en base. À appeler
+    /// au BOOT et après CHAQUE mutation de comptes pour que l'état DB pilote la gate sans requête par
+    /// requête. FAIL-CLOSED : on n'ouvre jamais la gate tant qu'un compte activé ou un hash existe.
+    /// Ne pas appeler en tenant `self.db()` (any_enabled_user reverrouille le mutex).
+    fn recompute_auth_required(&self) {
+        let required = !self.pass_hash.is_empty() || self.any_enabled_user();
+        self.auth_required.store(required, Ordering::SeqCst);
+    }
+
+    /// Lecture O(1) du cache : la gate d'auth est-elle engagée ? (voir recompute_auth_required).
+    fn auth_required(&self) -> bool {
+        self.auth_required.load(Ordering::SeqCst)
     }
 }
 
@@ -542,6 +628,59 @@ fn operator_denied(app: &App) -> (StatusCode, Json<Value>) {
         "preuve opérateur invalide ou absente (session operator|admin via POST /api/login, ou en-tête X-Forge-Operator)"
     };
     (StatusCode::FORBIDDEN, Json(json!({"error": "operator_required", "why": why})))
+}
+
+// --- rôle ADMIN (administration : setup, comptes, settings, gouvernance des connecteurs) ---
+//
+// Distinct de l'opérateur : administrer la console (créer/désactiver des comptes, muter la table
+// `settings`, gouverner les connecteurs) est une capacité de plus haut privilège que lancer un run.
+//
+// FAIL-CLOSED + ATTRIBUTION INDIVIDUELLE STRICTE : check_admin exige une SESSION valide portant le
+// rôle `admin` (resolve_session_identity). Contrairement à check_operator, il N'Y A PAS de repli par
+// hash env — une mutation d'administration DOIT être imputable à un compte individuel nommé (pas à un
+// secret partagé « bootstrap »). Sans session admin -> refus. Un viewer/operator ne passe JAMAIS.
+
+/// Authz ADMINISTRATION — FAIL-CLOSED. Vrai UNIQUEMENT si une session valide porte le rôle `admin`.
+/// Aucun repli env-hash (attribution individuelle obligatoire). Miroir de check_operator, plus strict.
+fn check_admin(app: &App, headers: &HeaderMap) -> bool {
+    match resolve_session_identity(app, headers) {
+        Some(id) => id.role == "admin",
+        None => false, // aucune session individuelle -> refus (pas de repli hash env pour l'admin)
+    }
+}
+
+/// Réponse standard d'un refus admin (403). Message stable et non-fuiteur (fail-closed).
+fn admin_denied() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "admin_required",
+            "why": "administration réservée à une session au rôle admin (POST /api/login) — pas de repli par secret partagé"
+        })),
+    )
+}
+
+// --- settings KV : configuration mutable d'administration (get/set avec horodatage) ---
+
+/// Lit une clé de configuration dans la table `settings`. None si absente ou erreur DB (fail-soft en
+/// LECTURE : une clé non provisionnée => valeur par défaut côté appelant, jamais de valeur inventée).
+#[allow(dead_code)] // substrat consommé par les routes settings/setup/detection à venir
+fn settings_get(db: &Connection, key: &str) -> Option<String> {
+    db.query_row("SELECT value FROM settings WHERE key=?", [key], |r| r.get::<_, String>(0)).ok()
+}
+
+/// Écrit (upsert) une clé de configuration avec l'horodatage `updated` courant. PRIMARY KEY sur `key`
+/// => une seule ligne par clé (pas de doublon). Renvoie une erreur si l'écriture DB échoue (l'appelant
+/// admin doit pouvoir la propager avant de ledgeriser). Mutations réservées à check_admin.
+#[allow(dead_code)] // substrat consommé par les routes settings/setup/detection à venir
+fn settings_set(db: &Connection, key: &str, value: &str) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+        rusqlite::params![key, value],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("écriture settings échouée: {e}"))
 }
 
 // =====================================================================================
@@ -761,6 +900,324 @@ fn upsert_user(db: &Connection, login: &str, role: &str, pass_hash: &str) -> Res
     Ok(role)
 }
 
+// =====================================================================================
+// ADMINISTRATION WEB DES COMPTES (#4) — CRUD réservé check_admin (session admin, fail-closed),
+// chaque mutation ATTRIBUÉE à l'admin acteur et LEDGERISÉE (append_console_ledger). Aucune route ne
+// renvoie jamais `pass_hash`. Après chaque mutation, `auth_required` est recalculé (la gate d'auth
+// s'engage/se désengage sur l'ÉTAT DB — cf. recompute_auth_required). Les mots de passe/hash n'entrent
+// JAMAIS dans le ledger (login/rôle/booléens seuls). Roles conservés tels quels : viewer|operator|admin.
+// =====================================================================================
+
+/// Rang de privilège d'un rôle (viewer < operator < admin). Sert à détecter une RÉTROGRADATION (rang
+/// décroissant) qui doit purger les sessions du compte pour un effet immédiat. Rôle inconnu -> 0.
+fn role_rank(r: &str) -> i32 {
+    match r {
+        "admin" => 3,
+        "operator" => 2,
+        "viewer" => 1,
+        _ => 0,
+    }
+}
+
+/// Nombre d'admins ACTIVÉS (`role='admin' AND disabled=0`). Substrat du garde-fou « dernier admin » :
+/// on n'autorise JAMAIS une opération qui laisserait 0 admin activé (verrouillage total de l'admin).
+/// À appeler EN TENANT DÉJÀ le guard `db` (pas de re-lock) pour que le check+mutation soient ATOMIQUES
+/// sous le même mutex (anti-TOCTOU). Échec de lecture -> 0 => l'opération est refusée (fail-closed).
+fn enabled_admin_count(db: &Connection) -> i64 {
+    db.query_row("SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0", [], |r| r.get(0)).unwrap_or(0)
+}
+
+/// Liste les comptes pour l'admin — `{login, role, disabled, created}`. Ne SÉLECTIONNE même pas
+/// `pass_hash` (fuite structurellement impossible). Ordre alphabétique. Lecture pure (aucun ledger).
+fn admin_list_users(app: &App) -> Vec<Value> {
+    let db = app.db();
+    let mut stmt = match db.prepare("SELECT login, role, disabled, created FROM users ORDER BY login") {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map([], |r| {
+        Ok(json!({
+            "login": r.get::<_, String>(0)?,
+            "role": r.get::<_, String>(1)?,
+            "disabled": r.get::<_, i64>(2)? != 0,
+            "created": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        }))
+    })
+    .map(|it| it.filter_map(|x| x.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Crée un compte individuel. Valide login/rôle (fail-closed), hash argon2id HORS mutex, refuse un login
+/// déjà pris (409 — l'édition sert à muter). Recalcule `auth_required` (1er compte activé -> gate) et
+/// ledgerise avec l'admin acteur (login/rôle seuls, JAMAIS le mot de passe). Retourne la vue publique.
+fn admin_create_user(app: &App, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
+    let login = validate_login(&gs(body, "login")).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let role = validate_role(&gs(body, "role")).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let password = gs(body, "password");
+    if password.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "mot de passe vide refusé".into()));
+    }
+    // argon2id est coûteux -> on hash AVANT de prendre le mutex DB (ne pas geler l'API pendant le KDF).
+    let hash = hash_pw(&password);
+    {
+        let db = app.db();
+        // création STRICTE : un login déjà présent -> 409 (passer par l'édition pour modifier).
+        if db.query_row("SELECT 1 FROM users WHERE login=?", [&login], |_| Ok(())).is_ok() {
+            return Err((StatusCode::CONFLICT, format!("le compte '{login}' existe déjà (utilisez l'édition)")));
+        }
+        upsert_user(&db, &login, &role, &hash).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    app.recompute_auth_required();
+    append_console_ledger(app, "console.admin.user.create", json!({"actor": actor, "login": login, "role": role}));
+    Ok(json!({"login": login, "role": role, "disabled": false}))
+}
+
+/// Modifie un compte : changement de rôle, réinitialisation de mot de passe, (dé)activation (champs tous
+/// optionnels). GARDE-FOU dernier admin (fail-closed, 409) : refuse toute opération qui retirerait le
+/// DERNIER admin activé (désactivation ou rétrogradation du seul admin). PURGE les sessions du compte
+/// quand l'effet doit être immédiat : désactivation, rétrogradation (rang décroissant) OU reset de mot
+/// de passe (une session volée ne survit pas au reset). Check dernier-admin + mutations + purge sous UN
+/// SEUL guard DB (atomique, anti-TOCTOU). Recalcule `auth_required`, ledgerise (jamais le mot de passe).
+fn admin_update_user(app: &App, actor: &str, target_login: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
+    let target_login = validate_login(target_login).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let new_role: Option<String> = if body.get("role").is_some() {
+        Some(validate_role(&gs(body, "role")).map_err(|e| (StatusCode::BAD_REQUEST, e))?)
+    } else {
+        None
+    };
+    let password = gs(body, "password");
+    let reset_pw = !password.is_empty();
+    let new_disabled: Option<bool> = body.get("disabled").and_then(|v| v.as_bool());
+    if new_role.is_none() && !reset_pw && new_disabled.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (role|password|disabled)".into()));
+    }
+    // hash HORS section critique (argon2id coûteux).
+    let new_hash: Option<String> = if reset_pw { Some(hash_pw(&password)) } else { None };
+
+    let (purge, eff_role, eff_disabled) = {
+        let db = app.db();
+        let (old_role, old_disabled_i): (String, i64) = db
+            .query_row("SELECT role, disabled FROM users WHERE login=?", [&target_login], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|_| (StatusCode::NOT_FOUND, format!("compte '{target_login}' introuvable")))?;
+        let old_disabled = old_disabled_i != 0;
+        let eff_role = new_role.clone().unwrap_or_else(|| old_role.clone());
+        let eff_disabled = new_disabled.unwrap_or(old_disabled);
+        // GARDE-FOU dernier admin : si le compte ÉTAIT un admin activé et ne l'est PLUS après l'op,
+        // refuser tant qu'il ne reste qu'un seul admin activé (fail-closed : jamais 0 admin -> lockout).
+        let was_enabled_admin = old_role == "admin" && !old_disabled;
+        let still_enabled_admin = eff_role == "admin" && !eff_disabled;
+        if was_enabled_admin && !still_enabled_admin && enabled_admin_count(&db) <= 1 {
+            return Err((
+                StatusCode::CONFLICT,
+                "impossible : dernier admin activé (désactivation/rétrogradation refusée, fail-closed)".into(),
+            ));
+        }
+        if let Some(r) = &new_role {
+            db.execute("UPDATE users SET role=? WHERE login=?", rusqlite::params![r, target_login])
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj rôle échouée: {e}")))?;
+        }
+        if let Some(h) = &new_hash {
+            db.execute("UPDATE users SET pass_hash=? WHERE login=?", rusqlite::params![h, target_login])
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj mot de passe échouée: {e}")))?;
+        }
+        if let Some(d) = new_disabled {
+            db.execute("UPDATE users SET disabled=? WHERE login=?", rusqlite::params![d as i64, target_login])
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj état échouée: {e}")))?;
+        }
+        let downgrade = new_role.as_ref().map(|r| role_rank(r) < role_rank(&old_role)).unwrap_or(false);
+        let disabling = new_disabled == Some(true);
+        let purge = disabling || downgrade || reset_pw;
+        if purge {
+            // effet IMMÉDIAT : révoque toutes les sessions actives du compte (même mutex que l'update).
+            let _ = db.execute(
+                "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
+                [&target_login],
+            );
+        }
+        (purge, eff_role, eff_disabled)
+    };
+    app.recompute_auth_required();
+    append_console_ledger(app, "console.admin.user.update", json!({
+        "actor": actor,
+        "login": target_login,
+        "role": new_role,
+        "disabled": new_disabled,
+        "password_reset": reset_pw,
+        "sessions_purged": purge,
+    }));
+    Ok(json!({
+        "login": target_login,
+        "role": eff_role,
+        "disabled": eff_disabled,
+        "sessions_purged": purge,
+        "password_reset": reset_pw,
+    }))
+}
+
+/// Supprime un compte. GARDE-FOU (fail-closed, 409) : refuse de supprimer le DERNIER admin activé
+/// (verrouillage total de l'administration). Purge d'abord ses sessions, puis la ligne `users`, sous
+/// UN SEUL guard DB (atomique). Recalcule `auth_required` et ledgerise l'action avec l'admin acteur.
+fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> Result<Value, (StatusCode, String)> {
+    let target_login = validate_login(target_login).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    {
+        let db = app.db();
+        let (role, disabled): (String, i64) = db
+            .query_row("SELECT role, disabled FROM users WHERE login=?", [&target_login], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|_| (StatusCode::NOT_FOUND, format!("compte '{target_login}' introuvable")))?;
+        if role == "admin" && disabled == 0 && enabled_admin_count(&db) <= 1 {
+            return Err((StatusCode::CONFLICT, "impossible de supprimer le dernier admin activé (fail-closed)".into()));
+        }
+        // révoque les sessions AVANT la suppression de la ligne (effet immédiat + pas d'orphelin).
+        let _ = db.execute(
+            "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
+            [&target_login],
+        );
+        db.execute("DELETE FROM users WHERE login=?", [&target_login])
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("suppression échouée: {e}")))?;
+    }
+    app.recompute_auth_required();
+    append_console_ledger(app, "console.admin.user.delete", json!({"actor": actor, "login": target_login}));
+    Ok(json!({"deleted": target_login}))
+}
+
+/// GOUVERNANCE CONNECTEUR (#4) — mute l'intention opérateur sur un module : `enabled` (install/uninstall
+/// opérationnel), `available_override` (NULL=suivre la sonde host, true/false=forcer), `web_allowed`.
+/// Chaque champ est OPTIONNEL (présence = mutation, absence = inchangé) ; `available_override` accepte
+/// aussi `null` (EFFACER l'override). Le connecteur doit exister dans le registre (404 sinon — l'admin ne
+/// crée pas de module fantôme). Mutation attribuée + ledgerisée (jamais de secret). Renvoie la vue à-jour
+/// (avec `effective_available`). L'enforcement au tir vit ailleurs (scope.json disabled_modules + filtre
+/// --modules + refus validate_modules) : ici on ne fait QUE persister l'intention.
+fn admin_set_module(app: &App, actor: &str, kind: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
+    // kind = clé de module bien formée (même grammaire que validate_campaign) — anti entrée hostile.
+    let kind = validate_campaign(kind).map_err(|e| (StatusCode::BAD_REQUEST, format!("kind invalide: {e}")))?;
+
+    // Trois champs optionnels, typés stricts. available_override distingue 3 états (inchangé/effacé/forcé).
+    #[derive(Clone, Copy)]
+    enum Ov { Unchanged, Clear, Set(bool) }
+    let enabled: Option<bool> = match body.get("enabled") {
+        None => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err((StatusCode::BAD_REQUEST, "enabled doit être un booléen".into())),
+    };
+    let web_allowed: Option<bool> = match body.get("web_allowed") {
+        None => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err((StatusCode::BAD_REQUEST, "web_allowed doit être un booléen".into())),
+    };
+    let ov: Ov = match body.get("available_override") {
+        None => Ov::Unchanged,
+        Some(Value::Null) => Ov::Clear,
+        Some(Value::Bool(b)) => Ov::Set(*b),
+        Some(_) => return Err((StatusCode::BAD_REQUEST, "available_override doit être un booléen ou null".into())),
+    };
+    if enabled.is_none() && web_allowed.is_none() && matches!(ov, Ov::Unchanged) {
+        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (enabled|available_override|web_allowed)".into()));
+    }
+
+    let view = {
+        let db = app.db();
+        // le connecteur doit exister (catalogue = source de vérité des kinds, peuplé au boot).
+        if db.query_row("SELECT 1 FROM module WHERE kind=?", [&kind], |_| Ok(())).is_err() {
+            return Err((StatusCode::NOT_FOUND, format!("connecteur '{kind}' inconnu du registre")));
+        }
+        if let Some(e) = enabled {
+            db.execute("UPDATE module SET enabled=? WHERE kind=?", rusqlite::params![e as i64, kind])
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj enabled échouée: {err}")))?;
+        }
+        if let Some(w) = web_allowed {
+            db.execute("UPDATE module SET web_allowed=? WHERE kind=?", rusqlite::params![w as i64, kind])
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj web_allowed échouée: {err}")))?;
+        }
+        match ov {
+            Ov::Unchanged => {}
+            Ov::Clear => {
+                db.execute("UPDATE module SET available_override=NULL WHERE kind=?", [&kind])
+                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj available_override échouée: {err}")))?;
+            }
+            Ov::Set(b) => {
+                db.execute("UPDATE module SET available_override=? WHERE kind=?", rusqlite::params![b as i64, kind])
+                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj available_override échouée: {err}")))?;
+            }
+        }
+        // vue à-jour (un seul row) pour la réponse ET le ledger (effective_available inclus).
+        modules_catalog(&db)
+            .into_iter()
+            .find(|m| m.get("kind").and_then(|v| v.as_str()) == Some(kind.as_str()))
+            .unwrap_or_else(|| json!({"kind": kind}))
+    };
+    // LEDGER : mutation d'administration attribuée à l'acteur (qui/quoi/quand). Aucun secret n'entre ici.
+    append_console_ledger(app, "console.admin.module.set", json!({
+        "actor": actor,
+        "kind": kind,
+        "enabled": enabled,
+        "available_override": match ov { Ov::Unchanged => Value::Null, Ov::Clear => Value::String("cleared".into()), Ov::Set(b) => Value::Bool(b) },
+        "web_allowed": web_allowed,
+        "effective_available": view.get("effective_available").cloned().unwrap_or(Value::Null),
+    }));
+    Ok(view)
+}
+
+/// GET /api/users — liste des comptes (admin, fail-closed 403 sinon). Jamais `pass_hash`.
+async fn users_list(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    (StatusCode::OK, Json(json!({"users": admin_list_users(&app)}))).into_response()
+}
+
+/// POST /api/users {login,role,password} — crée un compte (admin). Mutation attribuée + ledgerisée.
+async fn users_create(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    match admin_create_user(&app, &actor, &body) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((s, why)) => (s, Json(json!({"error": "user_create_failed", "why": why}))).into_response(),
+    }
+}
+
+/// POST /api/users/:login {role?,password?,disabled?} — modifie un compte (admin). Purge les sessions
+/// sur désactivation/rétrogradation/reset ; bloque le retrait du dernier admin activé (409).
+async fn users_update(State(app): State<App>, headers: HeaderMap, Path(login): Path<String>, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    match admin_update_user(&app, &actor, &login, &body) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((s, why)) => (s, Json(json!({"error": "user_update_failed", "why": why}))).into_response(),
+    }
+}
+
+/// DELETE /api/users/:login — supprime un compte (admin). Bloque la suppression du dernier admin (409).
+async fn users_delete(State(app): State<App>, headers: HeaderMap, Path(login): Path<String>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    match admin_delete_user(&app, &actor, &login) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((s, why)) => (s, Json(json!({"error": "user_delete_failed", "why": why}))).into_response(),
+    }
+}
+
+/// POST /api/modules/:kind {enabled?, available_override?, web_allowed?} — GOUVERNE un connecteur
+/// (install/uninstall opérationnel). Réservé admin (check_admin, fail-closed 403 sinon). Mutation
+/// attribuée à l'admin acteur + ledgerisée. Désactiver un connecteur l'empêche RÉELLEMENT de tirer
+/// (scope.json disabled_modules + filtre --modules + refus validate_modules), y compris pour les modules
+/// choisis par le planner. Cette route est la contrepartie « écriture » de GET /api/modules (lecture).
+async fn module_governance(State(app): State<App>, headers: HeaderMap, Path(kind): Path<String>, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    match admin_set_module(&app, &actor, &kind, &body) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((s, why)) => (s, Json(json!({"error": "module_set_failed", "why": why}))).into_response(),
+    }
+}
+
 /// Validation stricte d'un nom de campagne : `[A-Za-z0-9._-]{1,64}`, jamais vide, pas de `-` en
 /// tête (anti confusion avec un flag CLI). Renvoie la valeur validée ou une erreur.
 fn validate_campaign(s: &str) -> Result<String, String> {
@@ -840,27 +1297,45 @@ fn host_allowed(host_header: &str, allowed: &[String]) -> bool {
     !h.is_empty() && allowed.iter().any(|a| a == h)
 }
 
-/// RBAC : si un hash est configuré, exige Basic (opérateur=viewer) OU Bearer (agent/admin=token).
-/// Sans hash -> mode dev localhost ouvert (les ÉCRITURES restent gatées par leur propre check_token).
-async fn auth_guard(State(app): State<App>, req: Request, next: Next) -> Response {
-    if app.pass_hash.is_empty() {
-        return next.run(req).await;
+/// Décision PURE du auth_guard (testable sans middleware/HTTP) : la requête est-elle AUTORISÉE à
+/// passer ? `true` => on laisse passer ; `false` => le middleware répond 401 (login portal côté SPA).
+///
+/// La gate s'engage sur `auth_required` (cache : hash env posé OU compte activé en base — voir
+/// recompute_auth_required), et NON plus sur `pass_hash` seul : un fresh install avec des comptes en
+/// base mais sans hash env est désormais GATÉ (ferme le trou dev-open historique). Quand la gate est
+/// désengagée (dev-open : ni hash env, ni compte activé), tout passe (les ÉCRITURES restent gatées par
+/// leur propre check_token/check_operator). Quand elle est engagée, on accepte : (1) une session
+/// individuelle valide (cookie/Bearer <session>, tout rôle) ; (2) Basic viewer (pass_hash env) ;
+/// (3) Bearer = token d'ingest. Sinon refus (401). FAIL-CLOSED.
+fn auth_guard_allows(app: &App, headers: &HeaderMap) -> bool {
+    if !app.auth_required() {
+        return true; // dev-open : ni hash env ni compte activé -> gate désengagée
     }
     // Session individuelle (cookie forge_session ou Bearer <session>) -> accès lecture (tout rôle).
     // Vérifié AVANT le Bearer ingest-token : un token de session valide identifie un compte réel.
-    if resolve_session_identity(&app, req.headers()).is_some() {
-        return next.run(req).await;
+    if resolve_session_identity(app, headers).is_some() {
+        return true;
     }
-    let authz = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let authz = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
     if let Some(b64) = authz.strip_prefix("Basic ") {
-        if check_basic(&app, b64.trim()) {
-            return next.run(req).await;
+        if check_basic(app, b64.trim()) {
+            return true;
         }
     }
     if let Some(tok) = authz.strip_prefix("Bearer ") {
         if ct_eq_str(&sha_hex(tok.trim()), &app.token_sha) {
-            return next.run(req).await;
+            return true;
         }
+    }
+    false
+}
+
+/// RBAC (middleware) : la gate s'engage dès qu'un hash env est posé OU qu'un compte activé existe en
+/// base (auth_required). Engagée + sans preuve valide -> 401 (le SPA affiche alors le portail de
+/// login). Désengagée (dev-open) -> passe. Toute la décision vit dans auth_guard_allows (testable).
+async fn auth_guard(State(app): State<App>, req: Request, next: Next) -> Response {
+    if auth_guard_allows(&app, req.headers()) {
+        return next.run(req).await;
     }
     (
         StatusCode::UNAUTHORIZED,
@@ -1148,26 +1623,69 @@ async fn runrecords(State(app): State<App>, Query(q): Query<HashMap<String, Stri
     Json(Value::Array(out))
 }
 
+/// Catalogue des modules (lecture partagée par GET /api/modules et le read-back de refresh).
+/// Expose la disponibilité SONDÉE (`available`), l'INTENTION opérateur (`enabled`,
+/// `available_override`) ET la disponibilité EFFECTIVE dérivée (`effective_available`) pour piloter la
+/// table de gouvernance de l'admin. Lecture pure (aucun effet de bord).
+fn modules_catalog(db: &Connection) -> Vec<Value> {
+    let mut stmt = match db.prepare(
+        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override \
+         FROM module ORDER BY kind",
+    ) { Ok(s) => s, Err(_) => return vec![] };
+    stmt.query_map([], |r| {
+        let probed = r.get::<_, i64>(3)? != 0;
+        let enabled = r.get::<_, i64>(7)? != 0;
+        let override_bool: Option<bool> = r.get::<_, Option<i64>>(8)?.map(|v| v != 0);
+        Ok(json!({
+            "kind": r.get::<_, String>(0)?,
+            "exploit": r.get::<_, i64>(1)? != 0,
+            "destructive": r.get::<_, i64>(2)? != 0,
+            "available": probed,                 // disponibilité SONDÉE (host)
+            "mitre": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            "descr": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            "web_allowed": r.get::<_, i64>(6)? != 0,
+            "enabled": enabled,                  // intention opérateur : connecteur (dés)installé
+            "available_override": match override_bool { Some(b) => Value::Bool(b), None => Value::Null },
+            "effective_available": module_effectively_available(enabled, override_bool, probed),
+        }))
+    })
+    .map(|it| it.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// Ensemble des kinds DÉSACTIVÉS par l'opérateur (module_operator_disabled) — injecté tel quel dans le
+/// `scope.json` du run (`disabled_modules`) pour que le moteur les SKIP, y compris les modules choisis
+/// par le PLANNER (au-delà de `--modules`). N'inclut PAS les modules simplement absents de l'hôte (le
+/// moteur les SKIP déjà via sa propre sonde, avec la raison « outil absent »). Fail-closed lisible : sur
+/// erreur DB -> liste vide (aucune désactivation fabriquée ; l'enforcement retombe sur le filtre argv).
+fn operator_disabled_modules(app: &App) -> Vec<String> {
+    let db = app.db();
+    let mut stmt = match db.prepare("SELECT kind,enabled,available_override FROM module ORDER BY kind") {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map([], |r| {
+        let kind: String = r.get(0)?;
+        let enabled = r.get::<_, i64>(1)? != 0;
+        let ov: Option<bool> = r.get::<_, Option<i64>>(2)?.map(|v| v != 0);
+        Ok((kind, module_operator_disabled(enabled, ov)))
+    })
+    .map(|it| it.filter_map(|x| x.ok()).filter(|(_, dis)| *dis).map(|(k, _)| k).collect())
+    .unwrap_or_default()
+}
+
+/// Filtre une liste de kinds demandés vers le SOUS-ENSEMBLE non désactivé par l'opérateur. Défense en
+/// profondeur au spawn : la liste `--modules` passée au moteur EXCLUT tout connecteur désactivé (même si
+/// validate_modules l'a déjà refusé en amont, cette barrière garantit qu'un kind désactivé n'atteint
+/// JAMAIS l'argv). Testable seul.
+fn filter_enabled_modules(app: &App, requested: &[String]) -> Vec<String> {
+    let disabled = operator_disabled_modules(app);
+    requested.iter().filter(|m| !disabled.contains(m)).cloned().collect()
+}
+
 async fn modules(State(app): State<App>) -> impl IntoResponse {
     let db = app.db();
-    let mut stmt = match db.prepare(
-        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed FROM module ORDER BY kind",
-    ) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map([], |r| {
-            Ok(json!({
-                "kind": r.get::<_, String>(0)?,
-                "exploit": r.get::<_, i64>(1)? != 0,
-                "destructive": r.get::<_, i64>(2)? != 0,
-                "available": r.get::<_, i64>(3)? != 0,
-                "mitre": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "descr": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "web_allowed": r.get::<_, i64>(6)? != 0,
-            }))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-    Json(Value::Array(out))
+    Json(Value::Array(modules_catalog(&db)))
 }
 
 async fn campaigns(State(app): State<App>) -> impl IntoResponse {
@@ -2313,28 +2831,10 @@ async fn modules_refresh(State(app): State<App>, headers: HeaderMap) -> impl Int
         let db = app.db();
         populate_modules(&db); // re-spawn `forge.cli modules --json` + UPSERT dans `module`
     }
-    // relit le catalogue pour le renvoyer (transparence : l'opérateur voit l'état post-refresh).
+    // relit le catalogue pour le renvoyer (transparence : l'opérateur voit l'état post-refresh —
+    // l'intention `enabled`/`available_override` est PRÉSERVÉE par le re-probe, cf. populate_modules).
     let db = app.db();
-    let mut stmt = match db.prepare(
-        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed FROM module ORDER BY kind",
-    ) {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::OK, Json(json!({"refreshed": 0, "modules": []}))),
-    };
-    let mods: Vec<Value> = stmt
-        .query_map([], |r| {
-            Ok(json!({
-                "kind": r.get::<_, String>(0)?,
-                "exploit": r.get::<_, i64>(1)? != 0,
-                "destructive": r.get::<_, i64>(2)? != 0,
-                "available": r.get::<_, i64>(3)? != 0,
-                "mitre": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "descr": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "web_allowed": r.get::<_, i64>(6)? != 0,
-            }))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+    let mods = modules_catalog(&db);
     (StatusCode::OK, Json(json!({"refreshed": mods.len(), "modules": mods})))
 }
 
@@ -3594,6 +4094,12 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
     } else {
         "lancé via console C2-light (gouverné/audité) — non-exploit, non-destructif forcés"
     };
+    // GOUVERNANCE CONNECTEUR — ENFORCEMENT AU TIR : la liste des connecteurs DÉSACTIVÉS par l'opérateur
+    // (enabled=0 / available_override=0) est injectée dans le scope.json du run. Le moteur la lit
+    // (roe.Scope.disabled_modules) et SKIP ces kinds EXACTEMENT comme un outil absent — y compris les
+    // modules choisis par le PLANNER (au-delà de `--modules`). C'est le complément indispensable au filtre
+    // `--modules` ci-dessous : ensemble, ils garantissent qu'un connecteur désactivé ne tire jamais.
+    let disabled_modules = operator_disabled_modules(&app);
     let scope_doc = json!({
         "_comment": scope_comment,
         "mode": app.scope_mode.as_str(),
@@ -3605,6 +4111,7 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
         "known_creds": [],
         "idor_targets": [],
         "module_params": Value::Object(module_params.clone()),
+        "disabled_modules": disabled_modules.clone(),
         "notes": scope_notes
     });
     // Chaque cible porte les params par-module dans `attrs.module_params` (le moteur charge déjà
@@ -3647,9 +4154,16 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
     // Vide -> flag omis -> le moteur garde le plan complet du cerveau (comportement inchangé).
     // Les kinds passent la grammaire validate_modules (kind bien formé) : pas d'injection d'argv
     // (argv FIXE, aucun shell), et la gate ROE reste seule juge des capacités.
-    if !requested_modules.is_empty() {
+    // GOUVERNANCE CONNECTEUR — filtre au spawn : la liste passée EXCLUT tout connecteur désactivé par
+    // l'opérateur (défense en profondeur ; validate_modules l'a déjà refusé, mais un désactivé n'atteint
+    // JAMAIS l'argv). NB : on ne passe le flag que si la liste DEMANDÉE était non vide — une liste vidée
+    // par le filtre resterait vide et NE retombe PAS en « plan complet » (validate_modules ayant refusé
+    // toute demande contenant un désactivé, ce cas ne se présente pas ; le scope.json disabled_modules
+    // couvre de toute façon le plan complet du planner).
+    let spawn_modules = filter_enabled_modules(&app, &requested_modules);
+    if !spawn_modules.is_empty() {
         argv.push("--modules".into());
-        argv.push(requested_modules.join(","));
+        argv.push(spawn_modules.join(","));
     }
     if !reason.is_empty() { argv.push("--reason".into()); argv.push(reason.clone()); }
     // --arm : armement explicite. Sans opt-in haut-impact honoré il reste inerte côté capacité (le
@@ -3723,6 +4237,8 @@ async fn run_create(State(app): State<App>, headers: HeaderMap, Json(body): Json
         "run_id": run_id, "campaign": campaign, "mode": mode, "actor": actor, "by": "operator",
         "targets": body.get("targets").cloned().unwrap_or(json!([])), "modules": requested_modules,
         "module_params": Value::Object(module_params.clone()),
+        // gouvernance connecteur : connecteurs désactivés (skippés au tir, y compris plan planner).
+        "disabled_modules": disabled_modules,
         "reason": reason, "arm_requested": arm,
         "high_impact": high_impact,
         "exploit_floor": if high_impact { "lifted via governed high-impact opt-in (allow_exploit=true allow_destructive=true)" } else { "forced allow_exploit=false allow_destructive=false" }
@@ -3852,12 +4368,26 @@ fn validate_modules(app: &App, modules: &[String], allow_high_impact: bool) -> R
     let db = app.db();
     for m in modules {
         let row = db.query_row(
-            "SELECT exploit,destructive,web_allowed FROM module WHERE kind=?",
+            "SELECT exploit,destructive,web_allowed,enabled,available_override FROM module WHERE kind=?",
             [m],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+            |r| Ok((
+                r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)? != 0, r.get::<_, Option<i64>>(4)?.map(|v| v != 0),
+            )),
         );
         match row {
-            Ok((exploit, destructive, web_allowed)) => {
+            Ok((exploit, destructive, web_allowed, enabled, available_override)) => {
+                // GOUVERNANCE CONNECTEUR (fail-closed) : un module DÉSACTIVÉ par l'opérateur (enabled=0
+                // ou available_override=0) n'est JAMAIS lançable depuis le web — MÊME sous opt-in
+                // haut-impact. Désactiver un connecteur = le désinstaller opérationnellement, un cran
+                // AU-DESSUS du plancher exploit : vérifié AVANT le bypass high-impact. (Un binaire
+                // simplement absent, sans intention opérateur, reste accepté puis SKIP par le moteur.)
+                if module_operator_disabled(enabled, available_override) {
+                    return Err((StatusCode::BAD_REQUEST, Json(json!({
+                        "error": "module_disabled",
+                        "why": format!("module '{m}' désactivé (gouvernance connecteur) — non lançable, même armé")
+                    }))));
+                }
                 // Opt-in haut-impact honoré : on NE rejette PAS exploit/destructif. Le scope-guard du
                 // moteur reste seul juge des cibles (hors-scope = VETO), l'écriture allow_* ne touche
                 // que la capacité, jamais le périmètre.
@@ -3898,11 +4428,17 @@ fn high_impact_modules(app: &App, modules: &[String]) -> Vec<String> {
         .iter()
         .filter(|m| {
             db.query_row(
-                "SELECT exploit,destructive FROM module WHERE kind=?",
+                "SELECT exploit,destructive,enabled,available_override FROM module WHERE kind=?",
                 [m.as_str()],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                |r| Ok((
+                    r.get::<_, i64>(0)?, r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)? != 0, r.get::<_, Option<i64>>(3)?.map(|v| v != 0),
+                )),
             )
-            .map(|(e, d)| e != 0 || d != 0)
+            // haut-impact ET effectivement activable : un connecteur exploit/destructif DÉSACTIVÉ par
+            // l'opérateur ne sera pas tiré -> il ne doit pas figurer parmi les capacités « débloquées »
+            // dans l'audit (ledger/run_job). Consulte `enabled`/`available_override`.
+            .map(|(e, d, en, ov)| (e != 0 || d != 0) && !module_operator_disabled(en, ov))
             .unwrap_or(false)
         })
         .cloned()
@@ -4851,10 +5387,17 @@ async fn main() {
     }
     println!("[forge-console] db: {db_path}");
     println!("[forge-console] ledger: {ledger_path}");
-    if pass_hash.is_empty() {
-        println!("[forge-console] AUTH OFF (dev localhost) — défini FORGE_CONSOLE_PASS_HASH (forge-console hashpw '...') pour activer Basic auth");
+    // ÉTAT DB de la gate d'auth : un compte activé en base engage la gate MÊME sans hash env (ferme le
+    // trou dev-open historique). On le calcule ici sur `conn` (avant son déplacement dans App) pour un
+    // log fidèle ; App.recompute_auth_required() recalcule ensuite le cache faisant autorité.
+    let has_enabled_user: bool =
+        conn.query_row("SELECT 1 FROM users WHERE disabled=0 LIMIT 1", [], |_| Ok(())).is_ok();
+    if pass_hash.is_empty() && !has_enabled_user {
+        println!("[forge-console] AUTH OFF (dev localhost) — ni FORGE_CONSOLE_PASS_HASH ni compte activé en base. `forge-console useradd <login> admin` (ou pose le hash env) pour engager la gate.");
+    } else if pass_hash.is_empty() {
+        println!("[forge-console] auth ON (état DB) — gate engagée par au moins un compte activé (table users) ; connexion via POST /api/login (session individuelle) ; hash env absent");
     } else {
-        println!("[forge-console] auth ON — user={user}, lectures protégées (Basic), écritures par token");
+        println!("[forge-console] auth ON — user={user}, lectures protégées (Basic), écritures par token (comptes individuels via POST /api/login également acceptés)");
     }
     if operator_hash.is_empty() {
         println!("[forge-console] C2 FAIL-CLOSED — rôle opérateur NON provisionné (FORGE_CONSOLE_OPERATOR_HASH absent) : /api/run* renverra 403. `forge-console hashpw-operator '...'` pour l'activer.");
@@ -4877,6 +5420,7 @@ async fn main() {
         token_raw: Arc::new(token.clone()),
         user: Arc::new(user),
         pass_hash: Arc::new(pass_hash),
+        auth_required: Arc::new(AtomicBool::new(false)), // recalculé juste après (recompute_auth_required)
         operator_hash: Arc::new(operator_hash),
         allowed_hosts: Arc::new(allowed),
         ledger_path: Arc::new(ledger_path),
@@ -4891,6 +5435,9 @@ async fn main() {
         events,
         ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
     };
+    // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
+    // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
+    app.recompute_auth_required();
 
     // routes protégées par auth_guard ; /health reste ouvert ; host_guard sur tout.
     // ServeDir sert les assets statiques (style.css/app.js/quetzal.svg/favicon.svg/fonts/…) en
@@ -4906,8 +5453,17 @@ async fn main() {
         .route("/api/purple/coverage", get(purple_coverage))
         .route("/api/modules", get(modules))
         .route("/api/modules/refresh", post(modules_refresh))
+        // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
+        // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
+        // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
+        .route("/api/modules/:kind", post(module_governance))
         .route("/api/campaigns", get(campaigns))
         .route("/api/roe", get(roe))
+        // --- ADMINISTRATION comptes (#4) : réservé admin (check_admin, fail-closed 403 sinon). Chaque
+        //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
+        //     recompute_auth_required après chaque mutation (gate DB-state) ; dernier admin protégé.
+        .route("/api/users", get(users_list).post(users_create))
+        .route("/api/users/:login", post(users_update).delete(users_delete))
         // --- parité LECTURE / gouvernance ---
         .route("/api/scope-check", post(scope_check))
         .route("/api/plan", post(plan))
@@ -4965,6 +5521,7 @@ mod tests {
             token_raw: Arc::new("t".into()),
             user: Arc::new("forge".into()),
             pass_hash: Arc::new(String::new()),
+            auth_required: Arc::new(AtomicBool::new(false)),
             operator_hash: Arc::new(String::new()),
             allowed_hosts: Arc::new(vec!["localhost".into()]),
             ledger_path: Arc::new(ledger_path.to_string()),
@@ -5135,6 +5692,281 @@ mod tests {
         let path = tmp_path("forge-test-attr-default");
         let app = test_app(&path); // operator_hash vide
         assert_eq!(attribution_login(&app, &HeaderMap::new()), "operator");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [SEC gate DB-state] auth_guard s'engage sur l'ÉTAT DB, pas seulement sur le hash env. Fresh
+    /// install : hash env VIDE (pass_hash="") mais un compte ACTIVÉ présent -> gate engagée -> une
+    /// requête sans preuve est REFUSÉE (le middleware répond alors 401, le SPA montre le login).
+    /// Une session valide de ce compte passe. Ferme le trou dev-open « comptes en base, env vide ».
+    #[test]
+    fn auth_gate_engages_on_enabled_user_without_env_hash() {
+        let path = tmp_path("forge-test-auth-gate");
+        let app = test_app(&path); // pass_hash vide (dev), aucun compte au départ
+        // 1) sans hash env ni compte -> dev-open : la gate est désengagée, tout passe.
+        app.recompute_auth_required();
+        assert!(!app.auth_required(), "sans hash env ni compte activé -> dev-open (gate désengagée)");
+        assert!(auth_guard_allows(&app, &HeaderMap::new()), "dev-open : requête anonyme passe");
+        // 2) un compte ACTIVÉ est provisionné en base -> après recompute, la gate DOIT s'engager,
+        //    MÊME si le hash env reste vide (c'est exactement le trou historique qu'on ferme).
+        {
+            let db = app.db();
+            upsert_user(&db, "erin", "viewer", &hash_pw("pw")).unwrap();
+        }
+        app.recompute_auth_required();
+        assert!(app.auth_required(), "un compte activé engage la gate même sans hash env");
+        assert!(!auth_guard_allows(&app, &HeaderMap::new()),
+            "gate engagée : requête anonyme REFUSÉE -> le middleware renvoie 401");
+        // 3) une session valide de ce compte passe la gate ; un token inconnu ne passe pas.
+        let uid: i64 = { let db = app.db(); db.query_row("SELECT id FROM users WHERE login='erin'", [], |r| r.get(0)).unwrap() };
+        let (tok, _) = create_session(&app, uid);
+        assert!(auth_guard_allows(&app, &bearer_headers(&tok)), "session individuelle valide passe la gate");
+        assert!(!auth_guard_allows(&app, &bearer_headers("deadbeef")), "session inconnue -> refus (401)");
+        // 4) contrapositive de la règle : désactiver l'UNIQUE compte, hash env toujours vide -> plus
+        //    aucun compte activé -> la gate se désengage (règle « engage si hash OU compte activé »).
+        { let db = app.db(); db.execute("UPDATE users SET disabled=1 WHERE id=?", [uid]).unwrap(); }
+        app.recompute_auth_required();
+        assert!(!app.auth_required(), "dernier compte activé désactivé + hash env vide -> gate désengagée");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [SEC gate DB-state] un hash env posé engage la gate à lui seul (rétro-compat) : même sans aucun
+    /// compte en base, auth_required=true et une requête anonyme est refusée.
+    #[test]
+    fn auth_gate_engages_on_env_hash_alone() {
+        let path = tmp_path("forge-test-auth-gate-env");
+        let mut app = test_app(&path);
+        app.pass_hash = Arc::new(hash_pw("viewerpw")); // hash env posé, aucun compte en base
+        app.recompute_auth_required();
+        assert!(app.auth_required(), "hash env posé -> gate engagée même sans compte");
+        assert!(!auth_guard_allows(&app, &HeaderMap::new()), "gate engagée : anonyme refusé (401)");
+        // Basic viewer avec le bon mdp passe (rétro-compat viewer par hash env).
+        let mut h = HeaderMap::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode("forge:viewerpw");
+        h.insert("authorization", format!("Basic {b64}").parse().unwrap());
+        assert!(auth_guard_allows(&app, &h), "Basic viewer (hash env) passe la gate");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [SEC admin] check_admin : FAIL-CLOSED, session ADMIN uniquement. Un viewer et un operator sont
+    /// REFUSÉS ; un admin est autorisé. PAS de repli hash env (contrairement à operator) : une preuve
+    /// X-Forge-Operator seule ne confère JAMAIS l'admin (attribution individuelle obligatoire).
+    #[test]
+    fn check_admin_requires_admin_session_no_env_fallback() {
+        let path = tmp_path("forge-test-admin");
+        let mut app = test_app(&path);
+        app.operator_hash = Arc::new(hash_pw("s3cr3t")); // hash env opérateur présent -> ne doit PAS conférer l'admin
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "aa", "admin", &hash_pw("pw")).unwrap();
+        }
+        let sid = |login: &str, app: &App| -> i64 {
+            let db = app.db();
+            db.query_row("SELECT id FROM users WHERE login=?", [login], |r| r.get(0)).unwrap()
+        };
+        let (vtok, _) = create_session(&app, sid("vv", &app));
+        let (otok, _) = create_session(&app, sid("oo", &app));
+        let (atok, _) = create_session(&app, sid("aa", &app));
+        assert!(!check_admin(&app, &bearer_headers(&vtok)), "viewer refusé (fail-closed)");
+        assert!(!check_admin(&app, &bearer_headers(&otok)), "operator refusé (admin != operator)");
+        assert!(check_admin(&app, &bearer_headers(&atok)), "admin autorisé");
+        assert!(!check_admin(&app, &operator_headers("s3cr3t")), "hash env opérateur NE confère PAS l'admin (pas de repli)");
+        assert!(!check_admin(&app, &HeaderMap::new()), "aucune preuve -> refus (fail-closed)");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Récupère l'id d'un compte par login (helper de test).
+    fn uid_of(app: &App, login: &str) -> i64 {
+        let db = app.db();
+        db.query_row("SELECT id FROM users WHERE login=?", [login], |r| r.get(0)).unwrap()
+    }
+    /// Compte les sessions d'un user_id (helper de test).
+    fn session_count(app: &App, uid: i64) -> i64 {
+        let db = app.db();
+        db.query_row("SELECT COUNT(*) FROM session WHERE user_id=?", [uid], |r| r.get(0)).unwrap()
+    }
+
+    /// [ADMIN #4] admin_create_user + admin_list_users : création, vue publique SANS pass_hash, ledger
+    /// de création SANS mot de passe/hash, attribution à l'acteur, doublon de login -> 409.
+    #[test]
+    fn admin_create_lists_and_never_leaks_pass_hash() {
+        let path = tmp_path("forge-test-admin-create");
+        let app = test_app(&path);
+        let out = admin_create_user(&app, "aa", &json!({"login": "newbie", "role": "viewer", "password": "s3cretPW"}))
+            .expect("création OK");
+        assert_eq!(out["login"], "newbie");
+        assert_eq!(out["role"], "viewer");
+        assert_eq!(out["disabled"], false);
+        assert!(out.get("pass_hash").is_none(), "la réponse de création ne contient jamais pass_hash");
+        // liste : champs attendus, pass_hash structurellement absent.
+        let users = admin_list_users(&app);
+        let u = users.iter().find(|u| u["login"] == "newbie").expect("compte listé");
+        assert!(u.get("pass_hash").is_none(), "la liste ne renvoie JAMAIS pass_hash");
+        assert_eq!(u["role"], "viewer");
+        assert_eq!(u["disabled"], false);
+        // ledger : entrée create, attribuée, SANS le mot de passe ni le hash argon2.
+        let entries = read_ledger_lines(&path);
+        let last = entries.last().unwrap();
+        assert_eq!(last["kind"], "console.admin.user.create");
+        assert_eq!(last["detail"]["actor"], "aa");
+        assert_eq!(last["detail"]["login"], "newbie");
+        let ser = canon_json(last).to_lowercase();
+        assert!(!ser.contains("s3cretpw"), "le mot de passe ne DOIT jamais entrer dans le ledger");
+        assert!(!ser.contains("argon2"), "le hash ne DOIT jamais entrer dans le ledger");
+        // le compte est réellement provisionné avec un hash vérifiable (mais jamais exposé).
+        let ph: String = { let db = app.db(); db.query_row("SELECT pass_hash FROM users WHERE login='newbie'", [], |r| r.get(0)).unwrap() };
+        assert!(verify_pw("s3cretPW", &ph), "mot de passe créé vérifiable côté DB");
+        // doublon de login -> 409 (l'édition sert à modifier).
+        let dup = admin_create_user(&app, "aa", &json!({"login": "newbie", "role": "admin", "password": "x"}));
+        assert_eq!(dup.unwrap_err().0, StatusCode::CONFLICT, "login déjà pris -> 409");
+        // login/rôle invalides -> 400.
+        assert_eq!(admin_create_user(&app, "aa", &json!({"login": "-bad", "role": "viewer", "password": "x"})).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(admin_create_user(&app, "aa", &json!({"login": "ok", "role": "root", "password": "x"})).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(admin_create_user(&app, "aa", &json!({"login": "ok", "role": "viewer", "password": ""})).unwrap_err().0, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [ADMIN #4] admin_update_user : la DÉSACTIVATION purge les sessions du compte + ledgerise (actor,
+    /// sessions_purged). La RÉTROGRADATION purge aussi. Le RESET de mot de passe purge et n'expose rien.
+    #[test]
+    fn admin_update_disable_downgrade_reset_purge_sessions_and_ledger() {
+        let path = tmp_path("forge-test-admin-update");
+        let app = test_app(&path);
+        admin_create_user(&app, "boot", &json!({"login": "root", "role": "admin", "password": "pw"})).unwrap();
+        admin_create_user(&app, "root", &json!({"login": "bob", "role": "operator", "password": "pw"})).unwrap();
+        let bob = uid_of(&app, "bob");
+        let (btok, _) = create_session(&app, bob);
+        assert!(resolve_session_identity(&app, &bearer_headers(&btok)).is_some(), "session bob valide au départ");
+        // DÉSACTIVATION -> purge des sessions + ledger.
+        let out = admin_update_user(&app, "root", "bob", &json!({"disabled": true})).unwrap();
+        assert_eq!(out["disabled"], true);
+        assert_eq!(out["sessions_purged"], true);
+        assert_eq!(session_count(&app, bob), 0, "les sessions du compte désactivé sont purgées");
+        assert!(resolve_session_identity(&app, &bearer_headers(&btok)).is_none(), "session révoquée");
+        let last = read_ledger_lines(&path).pop().unwrap();
+        assert_eq!(last["kind"], "console.admin.user.update");
+        assert_eq!(last["detail"]["actor"], "root");
+        assert_eq!(last["detail"]["sessions_purged"], true);
+        // RÉTROGRADATION admin->viewer purge (créer un 2e admin d'abord pour ne pas heurter le garde-fou).
+        admin_create_user(&app, "root", &json!({"login": "admin2", "role": "admin", "password": "pw"})).unwrap();
+        let a2 = uid_of(&app, "admin2");
+        let (a2tok, _) = create_session(&app, a2);
+        let out = admin_update_user(&app, "root", "admin2", &json!({"role": "viewer"})).unwrap();
+        assert_eq!(out["role"], "viewer");
+        assert_eq!(out["sessions_purged"], true, "la rétrogradation purge les sessions");
+        assert!(resolve_session_identity(&app, &bearer_headers(&a2tok)).is_none(), "session purgée après rétrogradation");
+        // RESET de mot de passe : purge + nouveau mot de passe effectif + rien de sensible au ledger.
+        let root_id = uid_of(&app, "root");
+        let (rtok, _) = create_session(&app, root_id);
+        let out = admin_update_user(&app, "root", "root", &json!({"password": "brandNEW"})).unwrap();
+        assert_eq!(out["password_reset"], true);
+        assert_eq!(out["sessions_purged"], true, "un reset de mot de passe purge les sessions");
+        assert!(resolve_session_identity(&app, &bearer_headers(&rtok)).is_none(), "ancienne session invalidée par le reset");
+        let ph: String = { let db = app.db(); db.query_row("SELECT pass_hash FROM users WHERE login='root'", [], |r| r.get(0)).unwrap() };
+        assert!(verify_pw("brandNEW", &ph) && !verify_pw("pw", &ph), "nouveau mot de passe effectif, ancien invalidé");
+        let ser = canon_json(&read_ledger_lines(&path).pop().unwrap()).to_lowercase();
+        assert!(!ser.contains("brandnew"), "aucun mot de passe dans le ledger (reset)");
+        // corps vide -> 400 (aucun changement).
+        assert_eq!(admin_update_user(&app, "root", "root", &json!({})).unwrap_err().0, StatusCode::BAD_REQUEST);
+        // cible inexistante -> 404.
+        assert_eq!(admin_update_user(&app, "root", "ghost", &json!({"role": "viewer"})).unwrap_err().0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [ADMIN #4] garde-fou DERNIER ADMIN (fail-closed 409) : impossible de désactiver, rétrograder ou
+    /// supprimer le seul admin activé ; possible dès qu'il en existe un second. Un refus 409 NE
+    /// ledgerise PAS. La suppression réussie purge les sessions et ledgerise (actor).
+    #[test]
+    fn admin_last_admin_is_protected_on_disable_downgrade_delete() {
+        let path = tmp_path("forge-test-admin-last");
+        let app = test_app(&path);
+        admin_create_user(&app, "boot", &json!({"login": "root", "role": "admin", "password": "pw"})).unwrap();
+        let root_id = uid_of(&app, "root");
+        let (rtok, _) = create_session(&app, root_id);
+        // seul admin activé : désactivation / rétrogradation / suppression -> 409, SANS ledgeriser.
+        let before = read_ledger_lines(&path).len();
+        assert_eq!(admin_update_user(&app, "root", "root", &json!({"disabled": true})).unwrap_err().0, StatusCode::CONFLICT);
+        assert_eq!(admin_update_user(&app, "root", "root", &json!({"role": "viewer"})).unwrap_err().0, StatusCode::CONFLICT);
+        assert_eq!(admin_delete_user(&app, "root", "root").unwrap_err().0, StatusCode::CONFLICT);
+        assert_eq!(read_ledger_lines(&path).len(), before, "un refus 409 ne ledgerise pas");
+        assert!(resolve_session_identity(&app, &bearer_headers(&rtok)).is_some(), "root intact -> sa session survit");
+        // 2e admin -> la suppression du 1er devient possible (purge ses sessions + ledger delete).
+        admin_create_user(&app, "root", &json!({"login": "root2", "role": "admin", "password": "pw"})).unwrap();
+        let del = admin_delete_user(&app, "root2", "root").expect("avec 2 admins, suppression permise");
+        assert_eq!(del["deleted"], "root");
+        assert_eq!(session_count(&app, root_id), 0, "sessions du compte supprimé purgées");
+        let last = read_ledger_lines(&path).pop().unwrap();
+        assert_eq!(last["kind"], "console.admin.user.delete");
+        assert_eq!(last["detail"]["actor"], "root2");
+        assert_eq!(last["detail"]["login"], "root");
+        // il ne reste que root2 (seul admin) -> re-bloqué.
+        assert_eq!(admin_delete_user(&app, "root2", "root2").unwrap_err().0, StatusCode::CONFLICT);
+        // un NON-admin peut être supprimé même seul de son rôle ; inexistant -> 404.
+        admin_create_user(&app, "root2", &json!({"login": "viewy", "role": "viewer", "password": "pw"})).unwrap();
+        assert!(admin_delete_user(&app, "root2", "viewy").is_ok());
+        assert_eq!(admin_delete_user(&app, "root2", "ghost").unwrap_err().0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [ADMIN #4] gate des ROUTES : viewer et operator (et l'anonyme) reçoivent 403 sur /api/users
+    /// (list/create/update/delete) ; l'admin passe. Vérifie les handlers HTTP réels (check_admin).
+    #[tokio::test]
+    async fn users_routes_are_admin_only_403() {
+        let path = tmp_path("forge-test-users-403");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "aa", "admin", &hash_pw("pw")).unwrap();
+        }
+        app.recompute_auth_required();
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        let (atok, _) = create_session(&app, uid_of(&app, "aa"));
+        // GET : viewer/operator/anonyme -> 403 ; admin -> 200.
+        assert_eq!(users_list(State(app.clone()), bearer_headers(&vtok)).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(users_list(State(app.clone()), bearer_headers(&otok)).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(users_list(State(app.clone()), HeaderMap::new()).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(users_list(State(app.clone()), bearer_headers(&atok)).await.status(), StatusCode::OK);
+        // POST create : operator -> 403 (et le compte n'est PAS créé) ; admin -> 200.
+        let body = || Json(json!({"login": "mallory", "role": "viewer", "password": "pw"}));
+        assert_eq!(users_create(State(app.clone()), bearer_headers(&otok), body()).await.status(), StatusCode::FORBIDDEN);
+        assert!(!admin_list_users(&app).iter().any(|u| u["login"] == "mallory"), "un create refusé (403) ne provisionne rien");
+        assert_eq!(users_create(State(app.clone()), bearer_headers(&atok), body()).await.status(), StatusCode::OK);
+        // POST update + DELETE : viewer -> 403.
+        assert_eq!(
+            users_update(State(app.clone()), bearer_headers(&vtok), Path("mallory".into()), Json(json!({"role": "operator"}))).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            users_delete(State(app.clone()), bearer_headers(&vtok), Path("mallory".into())).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [SUBSTRAT settings] settings_get/settings_set : round-trip d'une clé, upsert (pas de doublon),
+    /// horodatage `updated` renseigné, clé absente -> None.
+    #[test]
+    fn settings_get_set_round_trip() {
+        let path = tmp_path("forge-test-settings");
+        let app = test_app(&path);
+        let db = app.db();
+        assert!(settings_get(&db, "operator_policy").is_none(), "clé absente -> None (aucune valeur inventée)");
+        settings_set(&db, "operator_policy", "{\"arm_required\":true}").unwrap();
+        assert_eq!(settings_get(&db, "operator_policy").as_deref(), Some("{\"arm_required\":true}"),
+            "la valeur écrite est relue à l'identique (round-trip)");
+        let updated: String = db.query_row("SELECT updated FROM settings WHERE key='operator_policy'", [], |r| r.get(0)).unwrap();
+        assert!(!updated.is_empty(), "horodatage `updated` renseigné à l'écriture");
+        // upsert : re-écrire la MÊME clé remplace la valeur sans créer de doublon (PRIMARY KEY).
+        settings_set(&db, "operator_policy", "{\"arm_required\":false}").unwrap();
+        assert_eq!(settings_get(&db, "operator_policy").as_deref(), Some("{\"arm_required\":false}"), "valeur mise à jour");
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM settings WHERE key='operator_policy'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "PRIMARY KEY -> une seule ligne par clé (upsert, pas d'insertion doublon)");
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -5663,5 +6495,198 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let hi = high_impact_modules(&app, &["recon.httpx".into(), "exploit.rce".into(), "inconnu".into()]);
         assert_eq!(hi, vec!["exploit.rce".to_string()], "seul l'exploit listé pour l'audit");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // =================================================================================================
+    // GOUVERNANCE CONNECTEUR (#4) — enabled / available_override : intention opérateur + enforcement.
+    // =================================================================================================
+
+    /// [connecteur] module_operator_disabled / module_effectively_available (fonctions PURES) :
+    /// désactivé ssi enabled=0 OU override=Some(false) ; un binaire simplement absent (probed=0, sans
+    /// override) N'EST PAS une désactivation opérateur. effective = enabled AND (override ?? probed).
+    #[test]
+    fn module_governance_pure_predicates() {
+        // enabled + rien -> suit la sonde.
+        assert!(!module_operator_disabled(true, None), "enabled sans override -> pas désactivé opérateur");
+        assert!(module_effectively_available(true, None, true), "enabled + sonde OK -> effectif");
+        assert!(!module_effectively_available(true, None, false), "enabled + sonde KO -> non effectif (sonde)");
+        // enabled=0 -> désactivé opérateur, jamais effectif (même sonde OK).
+        assert!(module_operator_disabled(false, None), "enabled=0 -> désactivé");
+        assert!(!module_effectively_available(false, None, true), "enabled=0 prime sur une sonde positive");
+        // override=Some(false) -> désactivé opérateur MÊME si la sonde est positive (binaire présent).
+        assert!(module_operator_disabled(true, Some(false)), "override=false -> désactivé opérateur");
+        assert!(!module_effectively_available(true, Some(false), true), "override=false masque un binaire présent");
+        // override=Some(true) -> PAS une désactivation ; effectif même sonde négative.
+        assert!(!module_operator_disabled(true, Some(true)), "override=true -> pas désactivé");
+        assert!(module_effectively_available(true, Some(true), false), "override=true force la disponibilité");
+    }
+
+    /// [connecteur --modules filter] filter_enabled_modules + operator_disabled_modules : un connecteur
+    /// DÉSACTIVÉ (enabled=0) OU masqué par override=0 est RETIRÉ de la liste `--modules` passée au moteur
+    /// au spawn, ET figure dans l'ensemble injecté au scope.json. Un binaire absent (probed=0, sans
+    /// override) N'est PAS considéré « désactivé opérateur » (le moteur le SKIP via sa propre sonde).
+    #[test]
+    fn module_governance_filter_and_disabled_set() {
+        let path = tmp_path("forge-test-modfilter");
+        let app = test_app(&path);
+        seed_modules(&app); // recon.httpx (enabled=1, dispo), exploit.rce (enabled=1, dispo)
+        {
+            let db = app.db();
+            // recon.disabled : présent (available=1) mais DÉSACTIVÉ par l'opérateur (enabled=0).
+            db.execute("INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed,enabled) \
+                        VALUES('recon.disabled',0,0,1,'','recon',1,0)", []).unwrap();
+            // recon.masked : ENABLED mais override=0 -> masqué malgré un binaire présent.
+            db.execute("INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override) \
+                        VALUES('recon.masked',0,0,1,'','recon',1,1,0)", []).unwrap();
+            // recon.absent : ENABLED, pas d'override, binaire ABSENT (available=0) -> PAS désactivé opérateur.
+            db.execute("INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed,enabled) \
+                        VALUES('recon.absent',0,0,0,'','recon',1,1)", []).unwrap();
+        }
+        let disabled = operator_disabled_modules(&app);
+        assert!(disabled.contains(&"recon.disabled".to_string()), "enabled=0 -> dans le set désactivé");
+        assert!(disabled.contains(&"recon.masked".to_string()), "override=0 -> dans le set désactivé");
+        assert!(!disabled.contains(&"recon.absent".to_string()), "binaire absent (sans override) -> PAS désactivé opérateur");
+        assert!(!disabled.contains(&"recon.httpx".to_string()), "connecteur actif -> hors set");
+        // filtre --modules : les désactivés SONT retirés, les actifs et l'absent (géré par la sonde) restent.
+        let filtered = filter_enabled_modules(&app,
+            &["recon.httpx".into(), "recon.disabled".into(), "recon.masked".into(), "recon.absent".into()]);
+        assert_eq!(filtered, vec!["recon.httpx".to_string(), "recon.absent".to_string()],
+            "le filtre spawn retire recon.disabled + recon.masked, conserve httpx + absent");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [connecteur validate] validate_modules CONSULTE enabled/override : un connecteur désactivé est
+    /// refusé (400 module_disabled) — MÊME sous opt-in haut-impact (désinstaller un connecteur est au
+    /// -dessus du plancher exploit). Un module actif reste accepté. Un binaire absent (sans override)
+    /// N'est PAS refusé (comportement inchangé : accepté puis SKIP par le moteur).
+    #[test]
+    fn validate_modules_rejects_operator_disabled() {
+        let path = tmp_path("forge-test-vmods-disabled");
+        let app = test_app(&path);
+        seed_modules(&app);
+        {
+            let db = app.db();
+            db.execute("UPDATE module SET enabled=0 WHERE kind='recon.httpx'", []).unwrap(); // désactive
+            db.execute("INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed,enabled) \
+                        VALUES('recon.absent',0,0,0,'','recon',1,1)", []).unwrap();           // absent mais actif
+        }
+        // désactivé -> 400 module_disabled (sans opt-in).
+        let err = validate_modules(&app, &["recon.httpx".into()], false).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1.0["error"], "module_disabled", "connecteur désactivé refusé");
+        // désactivé -> 400 module_disabled MÊME sous opt-in haut-impact (au-dessus du plancher exploit).
+        let err = validate_modules(&app, &["recon.httpx".into()], true).unwrap_err();
+        assert_eq!(err.1.0["error"], "module_disabled", "désactivé refusé même armé (gouvernance > plancher)");
+        // réactive -> OK ; binaire absent (actif) -> accepté (skip côté moteur, pas un refus web).
+        { let db = app.db(); db.execute("UPDATE module SET enabled=1 WHERE kind='recon.httpx'", []).unwrap(); }
+        assert!(validate_modules(&app, &["recon.httpx".into()], false).is_ok(), "réactivé -> accepté");
+        assert!(validate_modules(&app, &["recon.absent".into()], false).is_ok(),
+            "binaire absent sans intention opérateur -> accepté (SKIP moteur), pas 400");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [connecteur no-clobber] upsert_probed_module (chemin populate_modules) : un DISABLE manuel
+    /// (enabled=0 + available_override=0 + web_allowed=0) SURVIT à un re-probe qui met à jour les
+    /// champs sondés (exploit/available/mitre/descr). Régression : le refresh ne doit JAMAIS écraser
+    /// l'intention opérateur.
+    #[test]
+    fn refresh_does_not_clobber_manual_disable() {
+        let path = tmp_path("forge-test-noclobber");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            // 1er probe : module recon dispo.
+            upsert_probed_module(&db, "recon.httpx", false, false, true, "", "recon httpx");
+            // l'admin DÉSACTIVE le connecteur + masque + retire du web (intention opérateur).
+            db.execute("UPDATE module SET enabled=0, available_override=0, web_allowed=0 WHERE kind='recon.httpx'", []).unwrap();
+            // re-probe (nouvelle version : gagne une capacité exploit, sonde toujours dispo, descr changée).
+            upsert_probed_module(&db, "recon.httpx", true, false, true, "T1190", "recon httpx v2");
+            let (enabled, ov, web, exploit, descr): (i64, Option<i64>, i64, i64, String) = db.query_row(
+                "SELECT enabled, available_override, web_allowed, exploit, descr FROM module WHERE kind='recon.httpx'",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap();
+            // INTENTION OPÉRATEUR préservée :
+            assert_eq!(enabled, 0, "enabled=0 préservé au re-probe (no-clobber)");
+            assert_eq!(ov, Some(0), "available_override=0 préservé au re-probe");
+            assert_eq!(web, 0, "web_allowed préservé au re-probe (intention opérateur)");
+            // champs SONDÉS mis à jour :
+            assert_eq!(exploit, 1, "champ sondé exploit MIS À JOUR par le re-probe");
+            assert_eq!(descr, "recon httpx v2", "champ sondé descr MIS À JOUR par le re-probe");
+        }
+        // un NOUVEAU module hérite des DEFAULT enabled=1 / override=NULL.
+        {
+            let db = app.db();
+            upsert_probed_module(&db, "recon.new", false, false, true, "", "neuf");
+            let (enabled, ov): (i64, Option<i64>) = db.query_row(
+                "SELECT enabled, available_override FROM module WHERE kind='recon.new'", [],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(enabled, 1, "nouveau module -> enabled par défaut");
+            assert_eq!(ov, None, "nouveau module -> pas d'override par défaut (suit la sonde)");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [connecteur endpoint] module_governance : ADMIN-GATED (viewer -> 403 sans aucune mutation) +
+    /// LEDGERISÉ (une mutation admin écrit `console.admin.module.set` attribuée à l'acteur). Preuve que
+    /// l'endpoint est la contrepartie écriture gouvernée de GET /api/modules.
+    #[tokio::test]
+    async fn module_governance_endpoint_admin_gated_and_ledgered() {
+        let path = tmp_path("forge-test-modgov");
+        let app = test_app(&path);
+        seed_modules(&app);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "aa", "admin", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (atok, _) = create_session(&app, uid_of(&app, "aa"));
+
+        // viewer -> 403 (fail-closed) ET aucune mutation (le connecteur reste enabled=1).
+        let resp = module_governance(
+            State(app.clone()), bearer_headers(&vtok), Path("recon.httpx".into()),
+            Json(json!({"enabled": false}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "non-admin refusé (fail-closed)");
+        let en: i64 = { let db = app.db(); db.query_row("SELECT enabled FROM module WHERE kind='recon.httpx'", [], |r| r.get(0)).unwrap() };
+        assert_eq!(en, 1, "un refus 403 ne DOIT rien muter");
+
+        // admin -> 200 + mutation persistée + entrée ledger attribuée.
+        let resp = module_governance(
+            State(app.clone()), bearer_headers(&atok), Path("recon.httpx".into()),
+            Json(json!({"enabled": false, "available_override": true}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "admin autorisé");
+        let (en, ov): (i64, Option<i64>) = { let db = app.db(); db.query_row(
+            "SELECT enabled, available_override FROM module WHERE kind='recon.httpx'", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap() };
+        assert_eq!(en, 0, "admin a désactivé le connecteur");
+        assert_eq!(ov, Some(1), "admin a posé available_override=true");
+        let entries = read_ledger_lines(&path);
+        let last = entries.last().unwrap();
+        assert_eq!(last["kind"], "console.admin.module.set", "mutation ledgerisée");
+        assert_eq!(last["detail"]["actor"], "aa", "attribuée à l'admin acteur");
+        assert_eq!(last["detail"]["kind"], "recon.httpx");
+        assert_eq!(last["detail"]["enabled"], false);
+
+        // kind inconnu -> 404 (pas de module fantôme créé depuis l'admin).
+        let resp = module_governance(
+            State(app.clone()), bearer_headers(&atok), Path("recon.ghost".into()),
+            Json(json!({"enabled": false}))).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "connecteur inconnu -> 404");
+        // corps sans aucun champ -> 400 (aucun changement).
+        let resp = module_governance(
+            State(app.clone()), bearer_headers(&atok), Path("recon.httpx".into()),
+            Json(json!({}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "aucun changement -> 400");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [connecteur routeur] le param `/api/modules/:kind` coexiste avec le statique
+    /// `/api/modules/refresh` (matchit : le statique prime). Construire ce sous-routeur ne doit PAS
+    /// paniquer — garde-fou contre un conflit de routes introduit par la gouvernance connecteur.
+    #[test]
+    fn module_routes_do_not_conflict() {
+        let _r: Router<App> = Router::new()
+            .route("/api/modules", get(modules))
+            .route("/api/modules/refresh", post(modules_refresh))
+            .route("/api/modules/:kind", post(module_governance));
     }
 }

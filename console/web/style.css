@@ -580,7 +580,14 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 
 /* badges génériques (statut, web, exploit, destructif, verdict ROE) */
 .badge.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:color-mix(in srgb,var(--ok) 32%,transparent)}
+.badge.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent);border-color:color-mix(in srgb,var(--bad) 32%,transparent)}
 .badge.mut{color:var(--mut)}
+/* administration comptes : boutons d'action serrés + variante « danger » (desactiver/supprimer). */
+.admin-act{white-space:nowrap}
+.admin-act .k-theme{padding:4px 8px;font-size:11px;margin-right:5px}
+.admin-act .k-theme:last-child{margin-right:0}
+.k-theme.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 32%,var(--bd))}
+.k-theme.danger:hover{background:color-mix(in srgb,var(--bad) 12%,transparent);border-color:var(--bad);color:var(--bad)}
 .badge.webyes{color:var(--acc);background:var(--acc-bg);border-color:color-mix(in srgb,var(--acc) 30%,transparent)}
 .badge.expl{color:var(--sev3);background:color-mix(in srgb,var(--sev3) 14%,transparent);border-color:color-mix(in srgb,var(--sev3) 32%,transparent)}
 .badge.destr{color:var(--sev4);background:color-mix(in srgb,var(--sev4) 14%,transparent);border-color:color-mix(in srgb,var(--sev4) 35%,transparent)}
