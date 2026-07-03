@@ -54,7 +54,9 @@ gouverné** — poser `arm:true` + `reason` (non vide) **et** être opérateur. 
 du run. Voir [Architecture §3.3](ARCHITECTURE.md#33-le-run-flow--c2-light--gouverné).
 
 ### HTTP 409 « run_in_progress »
-Un seul run vit à la fois (FIFO). Attendre la fin ou `POST /api/runs/:id/cancel`.
+**FIFO PAR ENGAGEMENT** : au plus un run vivant *par engagement* (le corps du 409 porte
+l'`engagement_id` occupé). Attendre la fin de CE run ou `POST /api/runs/:id/cancel`. Un autre
+engagement peut, lui, lancer un run **en parallèle** sans 409 — la concurrence est inter-engagement.
 
 ### `forge scope-check` dit HORS SCOPE / rien ne tire (tout DRY_RUN ou VETO)
 Forge est **INERTE par défaut** : `in_scope` vide ⇒ tout est refusé (fail-closed). Renseigner

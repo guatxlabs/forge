@@ -106,6 +106,19 @@ CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
 -- l'appelant. Substrat neutre : une clé absente = comportement par défaut (aucune valeur inventée).
 CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
+-- ENGAGEMENT (objet de 1re classe — à la workspace Metasploit) : un espace de travail ISOLÉ. Chaque
+-- engagement porte SON scope (scope_json = in/out scope autoritatif), SON mode (white|grey|black),
+-- SON ledger (ledger_path : chaîne SHA-256 tamper-evident DÉDIÉE) et sa gouvernance (classification/
+-- retention_policy). ISOLATION FAIL-CLOSED : un run applique le scope-guard de SON engagement — il ne
+-- touche JAMAIS le scope, les findings ni le ledger d'un AUTRE engagement. La colonne `campaign`
+-- (finding/run_job) reste un sous-label LIBRE AU SEIN d'un engagement. finding/runrecord/roe_decision/
+-- run_job portent `engagement_id` (DEFAULT 1 = engagement #1, créé au boot depuis le scope serveur
+-- courant via ensure_default_engagement : migration rétro-compat ZÉRO-PERTE). `status` ∈ {active|
+-- archived}, `mode` ∈ {white|grey|black} (contraintes applicatives, pas SQL).
+CREATE TABLE IF NOT EXISTS engagement(
+  id INTEGER PRIMARY KEY, name TEXT, status TEXT DEFAULT 'active', mode TEXT DEFAULT 'grey',
+  scope_json TEXT NOT NULL DEFAULT '{}', ledger_path TEXT NOT NULL DEFAULT '',
+  classification TEXT, retention_policy TEXT, created TEXT DEFAULT '', updated TEXT DEFAULT '');
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -147,10 +160,30 @@ fn migrate(db: &Connection) {
         // sont JAMAIS réécrites par populate_modules (re-probe) — seul l'admin les mute (POST /api/modules/:kind).
         "ALTER TABLE module ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE module ADD COLUMN available_override INTEGER DEFAULT NULL",
+        // ENGAGEMENT (objet de 1re classe) : chaque ligne de données appartient à un engagement.
+        // DEFAULT 1 (engagement #1) => rétro-compat ZÉRO-PERTE : une base ANTÉRIEURE voit TOUTES ses
+        // lignes existantes rattachées à l'engagement par défaut (créé au boot depuis le scope serveur
+        // courant, ensure_default_engagement). NOT NULL autorisé par SQLite ici car la colonne a un
+        // DEFAULT constant (aucune ligne existante ne devient NULL). L'isolation applicative (un run
+        // n'écrit que dans SON engagement) est portée par run_create/ingest.
+        "ALTER TABLE finding ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE runrecord ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE roe_decision ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE run_job ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
     ];
     for a in alters {
         let _ = db.execute(a, []); // error-ignored (colonne déjà présente)
     }
+    // ENGAGEMENT (objet de 1re classe) : re-créée ici (idempotent, CREATE IF NOT EXISTS) en plus du
+    // SCHEMA, pour qu'une base ANTÉRIEURE à son introduction l'obtienne au 1er boot suivant la mise à
+    // jour (même discipline que `settings`). error-ignored.
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS engagement(
+           id INTEGER PRIMARY KEY, name TEXT, status TEXT DEFAULT 'active', mode TEXT DEFAULT 'grey',
+           scope_json TEXT NOT NULL DEFAULT '{}', ledger_path TEXT NOT NULL DEFAULT '',
+           classification TEXT, retention_policy TEXT, created TEXT DEFAULT '', updated TEXT DEFAULT '')",
+        [],
+    );
     // SETTINGS (KV) : re-créée ici (idempotent, CREATE IF NOT EXISTS) en plus du SCHEMA, pour qu'une
     // base ANTÉRIEURE à son introduction l'obtienne au 1er boot suivant la mise à jour. error-ignored.
     let _ = db.execute(
@@ -173,6 +206,82 @@ fn ensure_default_dashboard(db: &Connection) {
         "UPDATE panel SET dashboard_id=1
          WHERE dashboard_id IS NULL OR dashboard_id NOT IN (SELECT id FROM dashboard)",
         [],
+    );
+}
+
+/// ENGAGEMENT résolu (vue en mémoire d'une ligne `engagement`) : le scope in/out DÉCODÉ depuis
+/// `scope_json`, le `mode` effectif et le `ledger_path` DÉDIÉ. C'est CET objet (jamais les App globals)
+/// que le run flow consomme : scope-guard = `scope_in`/`scope_out` de l'engagement (fail-closed),
+/// journalisation dans `ledger_path` de l'engagement. Isolation : un run pour l'engagement A ne voit
+/// que le scope de A.
+#[derive(Clone, Debug)]
+struct Engagement {
+    id: i64,
+    mode: String,
+    scope_in: Vec<String>,
+    scope_out: Vec<String>,
+    ledger_path: String,
+}
+
+/// Extrait la liste de chaînes d'un champ tableau d'un scope_json (in_scope/out_scope). Absent/mal
+/// formé => vide (fail-closed pour in_scope : un engagement sans in_scope ne lance rien).
+fn scope_json_list(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Charge un engagement par id : décode `scope_json` (in/out scope) et le `mode` (le `mode` du
+/// scope_json prime sur la colonne `mode` s'il est présent — le scope reste la source autoritaire du
+/// périmètre). None si l'id n'existe pas. Pure lecture (aucune écriture).
+fn load_engagement(db: &Connection, id: i64) -> Option<Engagement> {
+    let (mode_col, scope_json, ledger_path): (String, String, String) = db
+        .query_row(
+            "SELECT mode, scope_json, ledger_path FROM engagement WHERE id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()?;
+    let v: Value = serde_json::from_str(&scope_json).unwrap_or_else(|_| json!({}));
+    let mode = v
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .map(String::from)
+        .unwrap_or(mode_col);
+    Some(Engagement {
+        id,
+        mode,
+        scope_in: scope_json_list(&v, "in_scope"),
+        scope_out: scope_json_list(&v, "out_scope"),
+        ledger_path,
+    })
+}
+
+/// MIGRATION ZÉRO-PERTE — garantit l'ENGAGEMENT #1 : si la table `engagement` est VIDE, crée
+/// l'engagement #1 depuis le scope serveur COURANT (in_scope + mode via load_server_scope) et le
+/// ledger COURANT (App.ledger_path). Les lignes finding/runrecord/roe_decision/run_job existantes
+/// gardent engagement_id=1 (DEFAULT de la colonne ajoutée par migrate) => rétro-compat totale. Le
+/// `campaign` free-text existant reste un sous-label AU SEIN de l'engagement #1. Idempotent : ne fait
+/// RIEN si un engagement existe déjà (n'écrase jamais un scope/ledger déjà provisionné).
+fn ensure_default_engagement(db: &Connection, scope_in: &[String], scope_mode: &str, ledger_path: &str) {
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 {
+        return; // déjà provisionné — ne jamais écraser
+    }
+    let scope_json = json!({
+        "_comment": "scope de l'engagement #1 — dérivé du scope serveur courant au 1er boot (migration zéro-perte)",
+        "mode": scope_mode,
+        "in_scope": scope_in,
+        "out_scope": []
+    })
+    .to_string();
+    let _ = db.execute(
+        "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+         VALUES(1,?,?,?,?,?,datetime('now'),datetime('now'))",
+        rusqlite::params!["Engagement par défaut", "active", scope_mode, scope_json, ledger_path],
     );
 }
 
@@ -363,14 +472,25 @@ struct RunEvent {
     payload: Value,
 }
 
-/// État partagé du run courant (C2-light : un seul run à la fois — FIFO).
-/// `current` est `Some` tant qu'un run est vivant ; protège la sérialisation FIFO via le verrou
-/// async dans /api/run (refus 409 si déjà occupé). Le `broadcast::Sender` SSE vit hors de ce verrou
-/// (clone lock-free dans App.events) pour que les pompes stdout puissent diffuser sans le prendre.
+/// État partagé des runs vivants (C2-light gouverné) — ISOLATION PAR ENGAGEMENT.
+/// `current` mappe `engagement_id -> RunHandle` du run VIVANT de CET engagement. Conséquences :
+///   - CONCURRENCE INTER-ENGAGEMENT : plusieurs engagements peuvent avoir un run vivant EN MÊME TEMPS
+///     (clés distinctes) — démarrer un run pour B pendant qu'un run de A est vivant ne renvoie JAMAIS
+///     409 (aucun 409 croisé) ;
+///   - FIFO PAR ENGAGEMENT : au plus UN run vivant par engagement — un 2e /api/run sur le MÊME
+///     engagement est refusé 409 (refus immédiat, pas de file), jamais sur un autre.
+///
+/// Le verrou async dans /api/run sérialise la réservation (check `contains_key` -> insert) : la clé
+/// étant l'engagement_id, un run n'inspecte ni ne retire JAMAIS le slot d'un autre engagement
+/// (isolation par construction). Le `broadcast::Sender` SSE vit hors de ce verrou (clone lock-free dans
+/// App.events) pour que les pompes stdout puissent diffuser sans le prendre.
 struct RunState {
-    current: Option<RunHandle>,
+    current: HashMap<i64, RunHandle>, // engagement_id -> run vivant DE CET engagement (au plus 1)
 }
 
+/// Slot d'un run vivant, rangé sous la clé `engagement_id` de `RunState.current`. `run_id` est
+/// GLOBAL-unique (traçable, sert de garde anti-course à la libération) ; `pgid` = groupe de process
+/// (setsid) pour cancel/watchdog (killpg de tout le sous-arbre).
 struct RunHandle {
     run_id: String,
     pgid: i32, // group de process (setsid) -> kill group pour cancel/watchdog
@@ -1553,6 +1673,15 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
     // run_id : corrèle ce lot de findings/run-records/décisions au run qui les a produits.
     let run_id = body.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let db = app.db();
+    // ENGAGEMENT propriétaire de ce lot : résolu depuis le run_job créé par run_create (engagement_id).
+    // run_id inconnu/absent (ingest hors run flow, ex. CLI directe) => engagement #1 (DEFAULT, rétro-
+    // compat). Chaque finding/runrecord/roe_decision est ainsi ESTAMPILLÉ de SON engagement — jamais
+    // celui d'un autre (isolation des données).
+    let engagement_id: i64 = if run_id.is_empty() {
+        1
+    } else {
+        db.query_row("SELECT engagement_id FROM run_job WHERE run_id=?", [&run_id], |r| r.get(0)).unwrap_or(1)
+    };
     let (mut nf, mut nr, mut nd) = (0i64, 0i64, 0i64);
     if let Some(arr) = body.get("findings").and_then(|v| v.as_array()) {
         for f in arr {
@@ -1570,11 +1699,11 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
                 cvss_score = s;
             }
             if let Ok(n) = db.execute(
-                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
-                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score],
+                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score, engagement_id],
             ) {
                 nf += n as i64;
             }
@@ -1584,8 +1713,8 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
         for rr in arr {
             let fired = if rr.get("fired").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
             if let Ok(n) = db.execute(
-                "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id) VALUES(?,?,?,?,?,?,?,?)",
-                rusqlite::params![gs(rr,"ts"), campaign, gs(rr,"target"), gs(rr,"kind"), gs(rr,"mitre"), fired, gs(rr,"detail"), run_id],
+                "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id,engagement_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                rusqlite::params![gs(rr,"ts"), campaign, gs(rr,"target"), gs(rr,"kind"), gs(rr,"mitre"), fired, gs(rr,"detail"), run_id, engagement_id],
             ) {
                 nr += n as i64;
             }
@@ -1598,10 +1727,10 @@ async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body): Json<Val
             let de = if d.get("destructive").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
             let reasons = d.get("reasons").map(|r| r.to_string()).unwrap_or_else(|| "[]".into());
             if let Ok(n) = db.execute(
-                "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons)
-                 VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 rusqlite::params![gs(d,"ts"), campaign, run_id, gs(d,"action_id"), gs(d,"target"),
-                    gs(d,"kind"), gs(d,"verdict"), ex, de, reasons],
+                    gs(d,"kind"), gs(d,"verdict"), ex, de, reasons, engagement_id],
             ) {
                 nd += n as i64;
             }
@@ -1891,15 +2020,19 @@ fn paginate(q: &HashMap<String, String>, default_limit: i64, max_limit: i64) -> 
 }
 
 async fn findings(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT (objet de 1re classe) : la vue ne montre QUE les findings de l'engagement actif
+    // (fail-closed : un engagement ne voit JAMAIS les findings d'un autre). `engagement_id` est un
+    // entier RÉSOLU (jamais du texte client) -> inliné sans risque d'injection.
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
-    let (mut conds, mut args): (Vec<&str>, Vec<String>) = (vec![], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?"); args.push(c.clone()); }
-    if let Some(s) = q.get("severity") { conds.push("severity=?"); args.push(s.clone()); }
-    if let Some(s) = q.get("status") { conds.push("status=?"); args.push(s.clone()); }
-    if let Some(t) = q.get("target") { conds.push("target=?"); args.push(t.clone()); }
-    if let Some(m) = q.get("mitre") { conds.push("mitre=?"); args.push(m.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?"); args.push(r.clone()); }
-    let where_ = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
+    if let Some(s) = q.get("severity") { conds.push("severity=?".into()); args.push(s.clone()); }
+    if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
+    if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
+    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); args.push(m.clone()); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
+    let where_ = format!(" WHERE {}", conds.join(" AND "));
     let total: i64 = db
         .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), rusqlite::params_from_iter(args.iter()), |r| r.get(0))
         .unwrap_or(0);
@@ -1933,10 +2066,13 @@ async fn findings(State(app): State<App>, Query(q): Query<HashMap<String, String
     Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows}))
 }
 
-async fn finding_detail(State(app): State<App>, Path(id): Path<i64>) -> impl IntoResponse {
+async fn finding_detail(State(app): State<App>, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ISOLATION : le détail n'est servi QUE si le finding appartient à l'engagement actif (un id d'un
+    // AUTRE engagement -> 404, jamais divulgué). engagement_id résolu (entier) inliné sans risque.
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
     let row = db.query_row(
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id FROM finding WHERE id=?",
+        &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id FROM finding WHERE id=? AND engagement_id={eid}"),
         [id],
         |r| {
             Ok(json!({
@@ -1964,14 +2100,16 @@ async fn finding_detail(State(app): State<App>, Path(id): Path<i64>) -> impl Int
 }
 
 async fn runrecords(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : les runrecords de la vue sont ceux de l'engagement actif UNIQUEMENT (isolation).
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
-    let (mut conds, mut args): (Vec<&str>, Vec<String>) = (vec![], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?"); args.push(c.clone()); }
-    if let Some(t) = q.get("target") { conds.push("target=?"); args.push(t.clone()); }
-    if let Some(m) = q.get("mitre") { conds.push("mitre=?"); args.push(m.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?"); args.push(r.clone()); }
-    if q.get("fired").map(|v| v == "1" || v == "true").unwrap_or(false) { conds.push("fired=1"); }
-    let where_ = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
+    if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
+    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); args.push(m.clone()); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
+    if q.get("fired").map(|v| v == "1" || v == "true").unwrap_or(false) { conds.push("fired=1".into()); }
+    let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 500, 2000);
     let sql = format!(
         "SELECT id,ts,campaign,target,kind,mitre,fired,detail,run_id FROM runrecord{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
@@ -2062,12 +2200,15 @@ async fn modules(State(app): State<App>) -> impl IntoResponse {
     Json(Value::Array(modules_catalog(&db)))
 }
 
-async fn campaigns(State(app): State<App>) -> impl IntoResponse {
+async fn campaigns(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : `campaign` est un sous-label LIBRE AU SEIN d'un engagement — on n'agrège donc QUE
+    // les campagnes de l'engagement actif (une même chaîne dans un autre engagement reste invisible ici).
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
     // Agrège depuis les findings (source réelle) + table campaign (métadonnées). Pas de JOIN strict :
     // on liste les campagnes vues côté findings + celles déclarées, avec leurs compteurs.
     let mut stmt = match db.prepare(
-        "SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' GROUP BY campaign ORDER BY last_ts DESC",
+        &format!("SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id={eid} GROUP BY campaign ORDER BY last_ts DESC"),
     ) { Ok(s) => s, Err(_) => return Json(json!([])) };
     let out: Vec<Value> = stmt
         .query_map([], |r| {
@@ -2083,12 +2224,14 @@ async fn campaigns(State(app): State<App>) -> impl IntoResponse {
 }
 
 async fn roe(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : les décisions du garde-fou sont celles de l'engagement actif UNIQUEMENT (isolation).
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
-    let (mut conds, mut args): (Vec<&str>, Vec<String>) = (vec![], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?"); args.push(c.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?"); args.push(r.clone()); }
-    if let Some(v) = q.get("verdict") { conds.push("verdict=?"); args.push(v.clone()); }
-    let where_ = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
+    if let Some(v) = q.get("verdict") { conds.push("verdict=?".into()); args.push(v.clone()); }
+    let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 500, 2000);
     let sql = format!(
         "SELECT id,ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons FROM roe_decision{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
@@ -2516,11 +2659,15 @@ fn read_ledger_lines(path: &str) -> Vec<Value> {
 
 /// GET /api/ledger — liste les entrées du ledger (depuis le JSONL disque), paginé (limit/offset).
 async fn ledger(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    let entries = read_ledger_lines(&app.ledger_path);
+    // ENGAGEMENT : chaque engagement porte SON ledger DÉDIÉ (fichier JSONL). La vue lit UNIQUEMENT le
+    // ledger de l'engagement actif — jamais celui d'un autre engagement (isolation tamper-evident).
+    let eid = resolve_view_engagement_id(&app, &q);
+    let path = engagement_ledger_path(&app, eid);
+    let entries = read_ledger_lines(&path);
     let total = entries.len();
     let (limit, offset) = paginate(&q, 200, 2000);
     let page: Vec<Value> = entries.into_iter().skip(offset as usize).take(limit as usize).collect();
-    Json(json!({"total": total, "limit": limit, "offset": offset, "path": app.ledger_path.as_str(), "entries": page}))
+    Json(json!({"total": total, "limit": limit, "offset": offset, "path": path, "engagement": eid, "entries": page}))
 }
 
 /// Résultat de la recomputation de la chaîne SHA-256 d'un ledger JSONL — PARTAGÉ par le handler
@@ -2616,25 +2763,30 @@ fn ledger_verify_api_json(v: &LedgerVerify, path: &str) -> Value {
 /// GET /api/ledger/verify — recalcule la chaîne SHA-256 (prev|seq|ts|kind|canon(detail))
 /// et vérifie chaque hash + le chaînage `prev`. NE vérifie PAS les signatures (Ed25519/HMAC) :
 /// la console n'a pas la clé -> `sig_checked: false` (la vérif signature reste côté `forge ledger verify`).
-async fn ledger_verify(State(app): State<App>) -> impl IntoResponse {
-    let v = verify_ledger_chain(app.ledger_path.as_str());
-    (StatusCode::OK, Json(ledger_verify_api_json(&v, app.ledger_path.as_str())))
+async fn ledger_verify(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : vérifie la chaîne du ledger DÉDIÉ de l'engagement actif (isolation).
+    let eid = resolve_view_engagement_id(&app, &q);
+    let path = engagement_ledger_path(&app, eid);
+    let v = verify_ledger_chain(&path);
+    (StatusCode::OK, Json(ledger_verify_api_json(&v, &path)))
 }
 
 async fn coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : couverture ATT&CK de l'engagement actif UNIQUEMENT (engagement_id résolu, inliné).
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
     // filtre campaign optionnel (param lié — pas d'inlining).
-    let (sql, args): (&str, Vec<String>) = match q.get("campaign") {
+    let (sql, args): (String, Vec<String>) = match q.get("campaign") {
         Some(c) => (
-            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND campaign=? GROUP BY mitre ORDER BY n DESC",
+            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} AND campaign=? GROUP BY mitre ORDER BY n DESC"),
             vec![c.clone()],
         ),
         None => (
-            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' GROUP BY mitre ORDER BY n DESC",
+            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} GROUP BY mitre ORDER BY n DESC"),
             vec![],
         ),
     };
-    let mut stmt = match db.prepare(sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
+    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
     let out: Vec<Value> = stmt
         .query_map(rusqlite::params_from_iter(args.iter()), |row| {
             Ok(json!({
@@ -3106,15 +3258,19 @@ fn purple_fail_open(url: &str, fired: &[(String, Option<i64>)], reason: &str) ->
 
 /// Lit les techniques tirées (runrecord.fired=1, mitre non vide) + horodatage du tir, filtrées par
 /// une clause WHERE additionnelle (campaign ou run_id) déjà validée par l'appelant (param lié).
-fn read_fired_techniques(app: &App, extra_cond: Option<(&str, &str)>) -> Vec<(String, Option<i64>)> {
+fn read_fired_techniques(app: &App, eid: Option<i64>, extra_cond: Option<(&str, &str)>) -> Vec<(String, Option<i64>)> {
     let db = app.db();
+    // ENGAGEMENT : `eid=Some(id)` restreint aux tirs de CET engagement (vue /purple/coverage). `None`
+    // = pas de filtre engagement (run_report : le `run_id` isole déjà les records d'un seul engagement).
+    // engagement_id est un entier RÉSOLU -> inliné sans risque d'injection.
+    let eng_clause = eid.map(|e| format!(" AND engagement_id={e}")).unwrap_or_default();
     let (sql, args): (String, Vec<String>) = match extra_cond {
         Some((col, val)) => (
-            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>'' AND {col}=?"),
+            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause} AND {col}=?"),
             vec![val.to_string()],
         ),
         None => (
-            "SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''".to_string(),
+            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause}"),
             vec![],
         ),
     };
@@ -3414,8 +3570,10 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
 ///   }
 /// Si source_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
 async fn purple_coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : la couverture de détection est calculée sur les tirs de l'engagement actif UNIQUEMENT.
+    let eid = resolve_view_engagement_id(&app, &q);
     // côté RED : techniques tirées (fired=1) + horodatage du tir, filtrées par campaign optionnelle.
-    let fired = read_fired_techniques(&app, q.get("campaign").map(|c| ("campaign", c.as_str())));
+    let fired = read_fired_techniques(&app, Some(eid), q.get("campaign").map(|c| ("campaign", c.as_str())));
     (StatusCode::OK, Json(fetch_purple_coverage(&app, fired).await))
 }
 
@@ -3729,14 +3887,30 @@ fn default_technique_selection() -> Value {
     json!({"profile": "bug_bounty", "categories": {}, "techniques": {}})
 }
 
-/// Lit la sélection persistée (`settings.technique_selection`). Fail-soft : absente/illisible/non-objet
-/// -> défaut. Ne verrouille que le mutex DB (ne pas appeler en tenant déjà `self.db()`).
-fn technique_selection_value(app: &App) -> Value {
-    let raw = { let db = app.db(); settings_get(&db, "technique_selection") };
+/// Clé `settings` de la sélection de techniques PAR ENGAGEMENT. Engagement #1 => clé LEGACY
+/// `technique_selection` (rétro-compat : une base existante garde SA sélection au 1er boot post-MAJ) ;
+/// autres engagements => clé suffixée `technique_selection:<id>`. Chaque engagement a donc SA sélection
+/// de techniques/profil ISOLÉE (un toggle sur A n'affecte JAMAIS B). Fonction PURE.
+fn technique_selection_key(eid: i64) -> String {
+    if eid == 1 { "technique_selection".to_string() } else { format!("technique_selection:{eid}") }
+}
+
+/// Lit la sélection persistée de l'engagement `eid` (`settings[technique_selection_key(eid)]`).
+/// Fail-soft : absente/illisible/non-objet -> défaut. Ne verrouille que le mutex DB.
+fn technique_selection_value_for(app: &App, eid: i64) -> Value {
+    let key = technique_selection_key(eid);
+    let raw = { let db = app.db(); settings_get(&db, &key) };
     match raw.as_deref().map(serde_json::from_str::<Value>) {
         Some(Ok(v)) if v.is_object() => v,
         _ => default_technique_selection(),
     }
+}
+
+/// Rétro-compat : sélection de l'engagement #1 (clé legacy). Conservée pour les appelants qui n'ont
+/// pas de contexte engagement (défaut mono-engagement) — dont les tests de round-trip de la clé legacy.
+#[allow(dead_code)]
+fn technique_selection_value(app: &App) -> Value {
+    technique_selection_value_for(app, 1)
 }
 
 /// Valide/normalise une sélection POSTée : {profile?, categories?:{str:bool}, techniques?:{str:bool}}.
@@ -3816,13 +3990,19 @@ fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, Strin
 /// `bug_bounty_eligible`, `pentest_only`, `enabled_for_current_scope`. Lecture (viewer) — la sélection
 /// est visible de tous ; seule sa MUTATION est gouvernée (POST /api/techniques/selection). DÉRIVÉ du
 /// registre côté moteur : un nouveau module @register apparaît AUTOMATIQUEMENT sous sa catégorie.
-async fn techniques_catalog(State(app): State<App>) -> Response {
-    let sel = technique_selection_value(&app);
+async fn techniques_catalog(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+    // ENGAGEMENT : catalogue résolu contre la sélection/profil de l'engagement actif (par-engagement).
+    let eid = resolve_view_engagement_id(&app, &q);
+    let sel = technique_selection_value_for(&app, eid);
     match spawn_techniques_catalog(&app, &sel) {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Ok(mut v) => {
+            if let Some(o) = v.as_object_mut() { o.insert("engagement_id".into(), json!(eid)); }
+            (StatusCode::OK, Json(v)).into_response()
+        }
         // fail-soft LISIBLE : le SPA affiche encore le sélecteur de profil même si le moteur est absent.
         Err(e) => (StatusCode::OK, Json(json!({
             "error": "techniques_unavailable", "why": e,
+            "engagement_id": eid,
             "profile": sel.get("profile").cloned().unwrap_or(json!("bug_bounty")),
             "profiles": ["bug_bounty", "pentest", "custom"],
             "selection": sel, "enabled": [], "groups": {},
@@ -3839,6 +4019,7 @@ async fn techniques_catalog(State(app): State<App>) -> Response {
 async fn technique_selection_set(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -3846,21 +4027,28 @@ async fn technique_selection_set(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
+    // ENGAGEMENT : la sélection est PAR-ENGAGEMENT (chaque engagement a SON profil/toggles). L'engagement
+    // cible vient de `?engagement=` (ou body.engagement_id), défaut = engagement actif. Un id EXPLICITE
+    // doit exister (fail-closed : on n'écrit jamais une sélection pour un engagement fantôme).
+    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+        Ok(e) => e,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
+    };
     let sel = match validate_technique_selection(&body) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_selection", "why": e}))).into_response(),
     };
     {
         let db = app.db();
-        if let Err(e) = settings_set(&db, "technique_selection", &sel.to_string()) {
+        if let Err(e) = settings_set(&db, &technique_selection_key(eid), &sel.to_string()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
         }
     }
     let actor = attribution_login(&app, &headers);
     append_console_ledger(&app, "console.techniques.selection.set", json!({
-        "actor": actor, "by": "operator", "selection": sel,
+        "actor": actor, "by": "operator", "engagement_id": eid, "selection": sel,
     }));
-    (StatusCode::OK, Json(json!({"ok": true, "selection": sel}))).into_response()
+    (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "selection": sel}))).into_response()
 }
 
 // =====================================================================================
@@ -3938,14 +4126,27 @@ fn validate_workflow_body(body: &Value, name_override: Option<&str>) -> Result<V
     Ok(json!({"name": name, "description": description, "builtin": false, "steps": steps}))
 }
 
-/// Lit la map des workflows UTILISATEUR persistée (`settings.workflows`). Fail-soft : absente/illisible/
-/// non-objet -> map vide (jamais de valeur inventée). Ne verrouille que le mutex DB.
-fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
-    let raw = { let db = app.db(); settings_get(&db, "workflows") };
+/// Clé `settings` des workflows UTILISATEUR PAR ENGAGEMENT. Engagement #1 => clé LEGACY `workflows`
+/// (rétro-compat) ; autres => `workflows:<id>`. Chaque engagement a donc SES propres workflows. PURE.
+fn workflows_key(eid: i64) -> String {
+    if eid == 1 { "workflows".to_string() } else { format!("workflows:{eid}") }
+}
+
+/// Lit la map des workflows UTILISATEUR de l'engagement `eid` (`settings[workflows_key(eid)]`).
+/// Fail-soft : absente/illisible/non-objet -> map vide (jamais de valeur inventée). Verrouille le mutex DB.
+fn workflows_user_map_for(app: &App, eid: i64) -> serde_json::Map<String, Value> {
+    let key = workflows_key(eid);
+    let raw = { let db = app.db(); settings_get(&db, &key) };
     match raw.as_deref().map(serde_json::from_str::<Value>) {
         Some(Ok(Value::Object(m))) => m,
         _ => serde_json::Map::new(),
     }
+}
+
+/// Rétro-compat : workflows de l'engagement #1 (clé legacy). Pour les appelants sans contexte engagement.
+#[allow(dead_code)]
+fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
+    workflows_user_map_for(app, 1)
 }
 
 /// Spawne `forge workflows --json` -> workflows INTÉGRÉS (DÉRIVÉS du registre côté moteur : SOURCE
@@ -3997,8 +4198,11 @@ fn workflow_view(wf: &Value) -> Value {
 /// la MUTATION est gouvernée (POST). Fail-soft : si le moteur est absent, `builtins:[]` + note d'erreur
 /// (le SPA affiche encore les workflows utilisateur et le builder). Le SPA croise chaque étape avec
 /// `GET /api/techniques` (enabled_for_current_scope) pour montrer ce qui est activé/autorisé au scope.
-async fn workflows_list(State(app): State<App>) -> Response {
-    let user_map = workflows_user_map(&app);
+async fn workflows_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+    // ENGAGEMENT : les workflows UTILISATEUR sont PAR-ENGAGEMENT (chaque engagement a SA bibliothèque).
+    // Les builtins (dérivés du registre moteur) sont communs. `?engagement=` -> défaut = engagement actif.
+    let eid = resolve_view_engagement_id(&app, &q);
+    let user_map = workflows_user_map_for(&app, eid);
     let mut user: Vec<Value> = Vec::new();
     let mut names: Vec<&String> = user_map.keys().collect();
     names.sort();
@@ -4010,10 +4214,10 @@ async fn workflows_list(State(app): State<App>) -> Response {
     match spawn_workflows_builtins(&app) {
         Ok(builtins) => {
             let bl: Vec<Value> = builtins.iter().map(workflow_view).collect();
-            (StatusCode::OK, Json(json!({"workflows": user, "builtins": bl}))).into_response()
+            (StatusCode::OK, Json(json!({"engagement_id": eid, "workflows": user, "builtins": bl}))).into_response()
         }
         Err(e) => (StatusCode::OK, Json(json!({
-            "workflows": user, "builtins": [],
+            "engagement_id": eid, "workflows": user, "builtins": [],
             "error": "builtins_unavailable", "why": e,
         }))).into_response(),
     }
@@ -4021,17 +4225,17 @@ async fn workflows_list(State(app): State<App>) -> Response {
 
 /// Persiste la map des workflows utilisateur + ledgerise la mutation (attribuée à l'acteur). Facteur
 /// commun de create/edit/delete. Retourne une Response 500 lisible si l'écriture settings échoue.
-fn workflows_persist(app: &App, map: &serde_json::Map<String, Value>, action: &str, name: &str,
+fn workflows_persist(app: &App, eid: i64, map: &serde_json::Map<String, Value>, action: &str, name: &str,
                      actor: &str, detail: Value) -> Result<(), Box<Response>> {
     {
         let db = app.db();
-        if let Err(e) = settings_set(&db, "workflows", &Value::Object(map.clone()).to_string()) {
+        if let Err(e) = settings_set(&db, &workflows_key(eid), &Value::Object(map.clone()).to_string()) {
             return Err(Box::new((StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({"error": "persist_failed", "why": e}))).into_response()));
         }
     }
     append_console_ledger(app, &format!("console.workflows.{action}"), json!({
-        "actor": actor, "by": "operator", "name": name, "detail": detail,
+        "actor": actor, "by": "operator", "engagement_id": eid, "name": name, "detail": detail,
     }));
     Ok(())
 }
@@ -4043,6 +4247,7 @@ fn workflows_persist(app: &App, map: &serde_json::Map<String, Value>, action: &s
 async fn workflow_create(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -4050,6 +4255,11 @@ async fn workflow_create(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
+    // ENGAGEMENT cible (par-engagement) : `?engagement=` (ou body.engagement_id), défaut = actif.
+    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+        Ok(e) => e,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
+    };
     let wf = match validate_workflow_body(&body, None) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_workflow", "why": e}))).into_response(),
@@ -4059,14 +4269,14 @@ async fn workflow_create(
         return (StatusCode::CONFLICT,
                 Json(json!({"error": "reserved_name", "why": format!("nom réservé (workflow intégré non modifiable) : {name}")}))).into_response();
     }
-    let mut map = workflows_user_map(&app);
+    let mut map = workflows_user_map_for(&app, eid);
     map.insert(name.clone(), wf.clone());
     let actor = attribution_login(&app, &headers);
-    if let Err(resp) = workflows_persist(&app, &map, "save", &name, &actor,
+    if let Err(resp) = workflows_persist(&app, eid, &map, "save", &name, &actor,
                                          json!({"step_count": wf["steps"].as_array().map(|a| a.len()).unwrap_or(0)})) {
         return *resp;
     }
-    (StatusCode::OK, Json(json!({"ok": true, "workflow": workflow_view(&wf)}))).into_response()
+    (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "workflow": workflow_view(&wf)}))).into_response()
 }
 
 /// POST /api/workflows/:name — ÉDITE (upsert) ou SUPPRIME (`{"delete": true}`) un workflow UTILISATEUR.
@@ -4076,6 +4286,7 @@ async fn workflow_create(
 async fn workflow_edit(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Path(name): Path<String>,
     Json(body): Json<Value>,
@@ -4087,6 +4298,11 @@ async fn workflow_edit(
     if !valid_workflow_token(&name) {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_name", "why": "nom de workflow mal formé"}))).into_response();
     }
+    // ENGAGEMENT cible (par-engagement) : `?engagement=` (ou body.engagement_id), défaut = actif.
+    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+        Ok(e) => e,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
+    };
     let actor = attribution_login(&app, &headers);
     let is_delete = body.get("delete").and_then(|v| v.as_bool()).unwrap_or(false);
     if is_delete {
@@ -4095,14 +4311,14 @@ async fn workflow_edit(
             return (StatusCode::CONFLICT,
                     Json(json!({"error": "builtin_protected", "why": format!("workflow intégré non supprimable : {name}")}))).into_response();
         }
-        let mut map = workflows_user_map(&app);
+        let mut map = workflows_user_map_for(&app, eid);
         if map.remove(&name).is_none() {
             return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": format!("workflow inconnu : {name}")}))).into_response();
         }
-        if let Err(resp) = workflows_persist(&app, &map, "delete", &name, &actor, json!({})) {
+        if let Err(resp) = workflows_persist(&app, eid, &map, "delete", &name, &actor, json!({})) {
             return *resp;
         }
-        return (StatusCode::OK, Json(json!({"ok": true, "deleted": name}))).into_response();
+        return (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "deleted": name}))).into_response();
     }
     // ÉDITION : refuse d'écraser un nom RÉSERVÉ (builtin).
     if workflow_name_is_builtin(&name) {
@@ -4113,13 +4329,13 @@ async fn workflow_edit(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_workflow", "why": e}))).into_response(),
     };
-    let mut map = workflows_user_map(&app);
+    let mut map = workflows_user_map_for(&app, eid);
     map.insert(name.clone(), wf.clone());
-    if let Err(resp) = workflows_persist(&app, &map, "save", &name, &actor,
+    if let Err(resp) = workflows_persist(&app, eid, &map, "save", &name, &actor,
                                          json!({"step_count": wf["steps"].as_array().map(|a| a.len()).unwrap_or(0)})) {
         return *resp;
     }
-    (StatusCode::OK, Json(json!({"ok": true, "workflow": workflow_view(&wf)}))).into_response()
+    (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "workflow": workflow_view(&wf)}))).into_response()
 }
 
 /// Extrait les couples action->verdict de la sortie texte du moteur en mode propose. Sortie :
@@ -4238,9 +4454,10 @@ async fn run_report(State(app): State<App>, Path(id): Path<String>, Query(q): Qu
             Ok(v) => v,
             Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
         };
-        // PURPLE : techniques TIRÉES par CE run (red) — lues avant de relâcher le verrou.
+        // PURPLE : techniques TIRÉES par CE run (red) — lues avant de relâcher le verrou. Le `run_id`
+        // isole déjà les records d'un seul engagement -> pas de filtre engagement additionnel (None).
         drop(db);
-        let fired = read_fired_techniques(&app, Some(("run_id", &id)));
+        let fired = read_fired_techniques(&app, None, Some(("run_id", &id)));
         (job, fired)
     };
     // I/O réseau Plume HORS verrou DB. Fail-open lisible si Plume injoignable.
@@ -5303,7 +5520,10 @@ fn kill_group(pgid: i32) {
 }
 
 /// Réconcilie les run_job 'running' au boot : un process spawné qui n'a pas survécu au reboot de la
-/// console est orphelin -> 'failed' (jamais laissé 'running' à tort). En PLUS :
+/// console est orphelin -> 'failed' (jamais laissé 'running' à tort). Opère sur la table (source de
+/// vérité) : il traite en une passe TOUS les runs orphelins, quel que soit leur engagement — la
+/// concurrence inter-engagement (plusieurs runs 'running' simultanés au crash) est gérée nativement,
+/// chacun restant rattaché à SON engagement_id en base. En PLUS :
 ///   - tue le GROUPE de process (killpg) de tout pgid enregistré et encore vivant (un moteur détaché
 ///     qui aurait survécu à un simple restart console deviendrait sinon incontrôlable -> on le coupe) ;
 ///   - purge les dirs temp `forge-run-*` (scope.json/targets.json) laissés par des runs interrompus.
@@ -5393,6 +5613,16 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         return (s, j);
     }
 
+    // (1b) ENGAGEMENT CIBLE — le run opère SUR un engagement (objet de 1re classe). `engagement_id`
+    // (corps) sélectionne l'engagement ; absent => l'engagement actif le plus ancien (rétro-compat :
+    // #1). C'est SON scope (in/out), SON mode et SON ledger qui gouvernent ce run — PAS les App globals
+    // (qui ne restent que les défauts de l'engagement #1). Fail-closed : engagement inconnu => 400.
+    let engagement_id = body.get("engagement_id").and_then(|v| v.as_i64());
+    let eng = match resolve_engagement(&app, engagement_id) {
+        Ok(e) => e,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))),
+    };
+
     // (2) validation stricte de l'entrée
     let campaign = match validate_campaign(body.get("campaign").and_then(|v| v.as_str()).unwrap_or("")) {
         Ok(c) => c,
@@ -5407,11 +5637,13 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         let host = t.as_str().unwrap_or("");
         match validate_host(host) {
             Ok(h) => {
-                // le scope du run est restreint AU scope serveur (in_scope) — fail-closed : une cible
-                // hors du scope serveur est refusée AVANT même le spawn (le moteur la vétoerait, mais
-                // on ne dépense pas de process pour ça et on n'élargit jamais le périmètre via le web).
-                if !host_in_server_scope(&app, &h) {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "out_of_scope", "why": format!("'{h}' hors du scope serveur autorisé")})));
+                // SCOPE-GUARD DE L'ENGAGEMENT (fail-closed) : le scope du run est restreint au scope
+                // de CET engagement (in_scope) — une cible hors du périmètre de l'engagement est refusée
+                // AVANT le spawn (le moteur la vétoerait, mais on ne dépense pas de process pour ça et on
+                // n'élargit jamais le périmètre). ISOLATION : un run pour l'engagement A valide contre le
+                // scope de A UNIQUEMENT — jamais les App globals ni le scope d'un autre engagement.
+                if !host_in_scope_list(&eng.scope_in, &h) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "out_of_scope", "why": format!("'{h}' hors du scope de l'engagement #{}", eng.id)})));
                 }
                 targets.push(h);
             }
@@ -5467,11 +5699,15 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // les exige avant validate_modules). `arm` reste journalisé ; sans opt-in haut-impact honoré il
     // est inerte côté capacité (le scope écrit ci-dessous force allow_*=false dans ce cas).
 
-    // (6) FIFO : un seul run vivant. Le verrou async sérialise les /api/run concurrents ; si un run
-    // est déjà enregistré comme courant -> 409 (refus immédiat, pas de file d'attente).
+    // (6) FIFO PAR ENGAGEMENT : au plus UN run vivant par engagement. Le verrou async sérialise la
+    // réservation (check -> insert) des /api/run concurrents ; si un run est déjà enregistré pour CET
+    // engagement -> 409 (refus immédiat, pas de file d'attente). ISOLATION/CONCURRENCE : la présence
+    // d'un run pour un AUTRE engagement (autre clé de la map) n'entrave PAS ce démarrage — deux
+    // engagements peuvent tourner en parallèle sans 409 croisé. La clé est l'engagement_id résolu (eng.id)
+    // : on ne consulte JAMAIS le slot d'un autre engagement.
     let mut state = app.run_state.lock().await;
-    if state.current.is_some() {
-        return (StatusCode::CONFLICT, Json(json!({"error": "run_in_progress", "why": "un run est déjà en cours (FIFO : un seul à la fois)"})));
+    if state.current.contains_key(&eng.id) {
+        return (StatusCode::CONFLICT, Json(json!({"error": "run_in_progress", "engagement_id": eng.id, "why": format!("un run est déjà en cours pour l'engagement #{} (FIFO par engagement : un seul à la fois par engagement)", eng.id)})));
     }
 
     // run_id : horodaté + suffixe aléatoire (traçable, unique).
@@ -5512,18 +5748,22 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // bug_bounty (liste qualifiante). N'altère AUCUN garde-fou de capacité (allow_* restent dictés par
     // l'opt-in haut-impact ci-dessus). Une entrée de run explicite `profile`/`categories_enabled`/
     // `techniques_enabled` dans le corps override la sélection persistée (sinon : la persistée).
+    // ENGAGEMENT : à défaut d'override explicite dans le corps, la sélection PERSISTÉE est celle de CET
+    // engagement (technique_selection_value_for(eng.id)) — chaque engagement a SON profil/toggles.
     let selection = match body.get("technique_selection") {
-        Some(v) if v.is_object() => validate_technique_selection(v).unwrap_or_else(|_| technique_selection_value(&app)),
-        _ => technique_selection_value(&app),
+        Some(v) if v.is_object() => validate_technique_selection(v).unwrap_or_else(|_| technique_selection_value_for(&app, eng.id)),
+        _ => technique_selection_value_for(&app, eng.id),
     };
     let sel_profile = selection.get("profile").cloned().unwrap_or(json!("bug_bounty"));
     let sel_categories = selection.get("categories").cloned().unwrap_or(json!({}));
     let sel_techniques = selection.get("techniques").cloned().unwrap_or(json!({}));
     let scope_doc = json!({
         "_comment": scope_comment,
-        "mode": app.scope_mode.as_str(),
+        // mode + out_scope viennent de L'ENGAGEMENT (pas des App globals) : le scope-guard du moteur
+        // applique le périmètre de CET engagement. in_scope = cibles validées ⊆ scope de l'engagement.
+        "mode": eng.mode,
         "in_scope": targets,
-        "out_scope": [],
+        "out_scope": eng.scope_out.clone(),
         "rate": 5,
         "allow_exploit": high_impact,
         "allow_destructive": high_impact,
@@ -5567,7 +5807,9 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         "--campaign".into(), campaign.clone(),
         "--mode".into(), mode.to_string(),
         "--run-id".into(), run_id.clone(),
-        "--ledger".into(), app.ledger_path.as_str().to_string(),
+        // --ledger : le ledger DÉDIÉ de l'engagement (chaîne SHA-256 tamper-evident propre à SON
+        // engagement). Le moteur y écrit ses actes ; jamais le ledger d'un autre engagement.
+        "--ledger".into(), eng.ledger_path.clone(),
         "--console".into(), console_url.clone(),
     ];
     if let Some(b) = budget { argv.push("--budget".into()); argv.push(format!("{b}")); }
@@ -5635,13 +5877,14 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     {
         let db = app.db();
         let _ = db.execute(
-            "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started)
-             VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'))
+            "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id)
+             VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'),?)
              ON CONFLICT(run_id) DO UPDATE SET status='running', pid=excluded.pid, started=excluded.started",
             rusqlite::params![
                 run_id, campaign, mode, pgid, started_by, reason,
                 serde_json::to_string(&body.get("targets").cloned().unwrap_or(json!([]))).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&requested_modules).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(&requested_modules).unwrap_or_else(|_| "[]".into()),
+                eng.id
             ],
         );
     }
@@ -5650,8 +5893,8 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // + liste des modules exploit/destructif débloqués), de sorte que tout lancement haut-impact soit
     // traçable et non-répudiable dans la chaîne du ledger.
     if high_impact {
-        append_console_ledger(&app, "console.run.high_impact_authorized", json!({
-            "run_id": run_id, "campaign": campaign, "actor": actor, "by": "operator",
+        append_run_ledger_path(&app, &eng.ledger_path, "console.run.high_impact_authorized", json!({
+            "run_id": run_id, "engagement_id": eng.id, "campaign": campaign, "actor": actor, "by": "operator",
             "arm": arm, "reason": reason,
             "exploit_modules_authorized": hi_modules,
             "requested_modules": requested_modules,
@@ -5659,8 +5902,8 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
             "note": "opt-in haut-impact GOUVERNÉ honoré (operator+arm+reason) ; scope-guard moteur inchangé (hors-scope = VETO)"
         }));
     }
-    append_console_ledger(&app, "console.run.start", json!({
-        "run_id": run_id, "campaign": campaign, "mode": mode, "actor": actor, "by": "operator",
+    append_run_ledger_path(&app, &eng.ledger_path, "console.run.start", json!({
+        "run_id": run_id, "engagement_id": eng.id, "campaign": campaign, "mode": mode, "actor": actor, "by": "operator",
         "targets": body.get("targets").cloned().unwrap_or(json!([])), "modules": requested_modules,
         "module_params": Value::Object(module_params.clone()),
         // gouvernance connecteur : connecteurs désactivés (skippés au tir, y compris plan planner).
@@ -5673,12 +5916,16 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         "exploit_floor": if high_impact { "lifted via governed high-impact opt-in (allow_exploit=true allow_destructive=true)" } else { "forced allow_exploit=false allow_destructive=false" }
     }));
 
-    state.current = Some(RunHandle { run_id: run_id.clone(), pgid });
+    // Réserve le slot SOUS LA CLÉ engagement_id : ce run est le run vivant de CET engagement. Un autre
+    // engagement garde son propre slot (ou aucun) — aucune interférence.
+    state.current.insert(eng.id, RunHandle { run_id: run_id.clone(), pgid });
     let _ = app.events.send(RunEvent { run_id: run_id.clone(), kind: "status".into(), payload: json!({"status": "running"}) });
     drop(state); // libère le verrou FIFO avant de détacher le superviseur
 
     // superviseur : pompe stdout/stderr -> run_log + SSE ; watchdog timeout ; finalisation atomique.
-    spawn_supervisor(app.clone(), child, run_id.clone(), run_dir);
+    // Reçoit l'engagement_id (clé du slot à libérer), le pgid (kill group du watchdog) et le ledger
+    // DÉDIÉ de l'engagement pour y journaliser la fin de run (isolation par engagement).
+    spawn_supervisor(app.clone(), child, run_id.clone(), eng.id, pgid, run_dir, eng.ledger_path.clone());
 
     (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": campaign, "mode": mode, "high_impact": high_impact, "auto_pentest": auto_pentest})))
 }
@@ -6073,15 +6320,434 @@ fn high_impact_gate(
 /// (sous-domaine d'une entrée listée). Conservateur : pas de glob côté console — le moteur Python
 /// applique le vrai matching ROE, ceci n'est qu'un pré-filtre fail-closed pour ne pas spawner hors scope.
 fn host_in_server_scope(app: &App, host: &str) -> bool {
+    host_in_scope_list(&app.scope_in, host)
+}
+
+/// Appartenance d'un host à une liste in_scope ARBITRAIRE (match exact, suffixe de domaine, wildcard
+/// `*.`). Fail-closed : liste VIDE => faux (rien n'est lançable). C'est la règle unique partagée par le
+/// pré-filtre /api/run (scope de l'ENGAGEMENT résolu — jamais les App globals) et host_in_server_scope
+/// (rétro-compat lecture). Fonction PURE (testable sans App).
+fn host_in_scope_list(scope_in: &[String], host: &str) -> bool {
     let h = host.to_ascii_lowercase();
-    if app.scope_in.is_empty() {
-        return false; // fail-closed : scope serveur vide => rien n'est lançable
+    if scope_in.is_empty() {
+        return false; // fail-closed : scope vide => rien n'est lançable
     }
-    app.scope_in.iter().any(|p| {
+    scope_in.iter().any(|p| {
         let p = p.to_ascii_lowercase();
         let p = p.strip_prefix("*.").unwrap_or(&p);
         h == p || h.ends_with(&format!(".{p}"))
     })
+}
+
+/// Résout l'engagement CIBLE d'un run. `requested` (corps/query `engagement_id`) => cet engagement
+/// précis (erreur si introuvable). Absent => l'engagement ACTIF le plus ancien (status='active'),
+/// sinon le plus ancien tout court (rétro-compat : engagement #1). C'est CET engagement (son scope,
+/// son mode, son ledger) que le run flow consomme — JAMAIS les App globals (qui restent seulement les
+/// défauts de l'engagement #1 pour la rétro-compat). Verrouille et libère son propre lock DB.
+fn resolve_engagement(app: &App, requested: Option<i64>) -> Result<Engagement, String> {
+    let db = app.db();
+    let id = match requested {
+        Some(id) => id,
+        None => db
+            .query_row(
+                "SELECT id FROM engagement WHERE status='active' ORDER BY id LIMIT 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .or_else(|_| {
+                db.query_row("SELECT id FROM engagement ORDER BY id LIMIT 1", [], |r| r.get::<_, i64>(0))
+            })
+            .map_err(|_| "aucun engagement provisionné".to_string())?,
+    };
+    load_engagement(&db, id).ok_or_else(|| format!("engagement {id} introuvable"))
+}
+
+// =====================================================================================
+// ENGAGEMENT — sélecteur d'engagement ACTIF (lecture) + CRUD gouverné (objet de 1re classe).
+//
+// « Engagement actif » : mécanisme le plus simple et sans état serveur — les endpoints LECTURE/écriture
+// acceptent `?engagement=<id>` ; à défaut, l'engagement ACTIF le plus récent. Le SPA persiste l'id côté
+// client (localStorage) et l'ajoute à CHAQUE requête. Les vues (findings/runrecords/roe/ledger/coverage/
+// runs) FILTRENT strictement sur cet id -> un engagement ne voit JAMAIS les données d'un autre.
+//
+// CRUD : create/edit = OPÉRATEUR (fail-closed) ; archive/delete = ADMIN (fail-closed). Chaque mutation
+// est ATTRIBUÉE + LEDGERISÉE (`console.engagement.*`). Chaque engagement reçoit SON ledger_path DÉDIÉ
+// (dérivé côté serveur — jamais un chemin fourni par le client : anti write-anywhere). GARDE-FOU
+// fail-closed : on ne peut ni archiver ni supprimer le DERNIER engagement actif (il faut toujours un
+// espace de travail actif) ; l'engagement par défaut #1 (ancre rétro-compat) n'est jamais supprimable.
+// =====================================================================================
+
+/// Résout l'engagement CIBLE d'une LECTURE (vue/liste) depuis le query `?engagement=<id>`. Présent et
+/// entier => cet id TEL QUEL (même s'il n'existe pas : la vue filtre dessus et renvoie du VIDE —
+/// fail-closed, un id inconnu ne montre JAMAIS les données d'un autre engagement). Absent/malformé =>
+/// engagement ACTIF le plus récent (status='active', ORDER BY id DESC), sinon le plus récent tout court,
+/// sinon 1 (rétro-compat mono-engagement). Verrouille et libère son propre lock DB (ne pas appeler en
+/// tenant déjà `app.db()`).
+fn resolve_view_engagement_id(app: &App, q: &HashMap<String, String>) -> i64 {
+    if let Some(id) = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok()) {
+        return id;
+    }
+    let db = app.db();
+    db.query_row("SELECT id FROM engagement WHERE status='active' ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, i64>(0))
+        .or_else(|_| db.query_row("SELECT id FROM engagement ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, i64>(0)))
+        .unwrap_or(1)
+}
+
+/// Résout l'engagement d'une MUTATION par-engagement (sélection de techniques / workflows). Priorité :
+/// query `?engagement=` > body `engagement_id` > défaut (resolve_view_engagement_id). Un id EXPLICITE
+/// doit EXISTER (fail-closed : on n'écrit jamais une config pour un engagement fantôme). Sans id explicite
+/// on retombe sur le défaut (jamais d'erreur) — rétro-compat mono-engagement.
+fn resolve_mutation_engagement_id(app: &App, q: &HashMap<String, String>, body: &Value) -> Result<i64, String> {
+    match q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok())
+        .or_else(|| body.get("engagement_id").and_then(|v| v.as_i64())) {
+        Some(id) => {
+            let exists = { let db = app.db(); db.query_row("SELECT 1 FROM engagement WHERE id=?", [id], |_| Ok(())).is_ok() };
+            if exists { Ok(id) } else { Err(format!("engagement {id} introuvable")) }
+        }
+        None => Ok(resolve_view_engagement_id(app, q)),
+    }
+}
+
+/// Résout le `ledger_path` DÉDIÉ d'un engagement (par id). Défaut : App.ledger_path (engagement #1 /
+/// rétro-compat) si l'id est inconnu ou son ledger vide. ISOLATION : la vue /api/ledger d'un engagement
+/// lit UNIQUEMENT le fichier ledger de CET engagement.
+fn engagement_ledger_path(app: &App, eid: i64) -> String {
+    let db = app.db();
+    db.query_row("SELECT ledger_path FROM engagement WHERE id=?", [eid], |r| r.get::<_, String>(0))
+        .ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| app.ledger_path.as_str().to_string())
+}
+
+/// Dérive le ledger_path DÉDIÉ d'un NOUVEL engagement (jamais fourni par le client — anti write-anywhere) :
+/// fichier `engagement-<id>.jsonl` FRÈRE du ledger console (App.ledger_path). Ledger console au chemin nu
+/// ou vide => chemin relatif `engagement-<id>.jsonl`.
+fn derive_engagement_ledger_path(app: &App, id: i64) -> String {
+    let base = app.ledger_path.as_str();
+    if base.is_empty() {
+        return format!("engagement-{id}.jsonl");
+    }
+    match std::path::Path::new(base).parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => dir.join(format!("engagement-{id}.jsonl")).to_string_lossy().into_owned(),
+        None => format!("engagement-{id}.jsonl"),
+    }
+}
+
+/// Nom d'engagement bien formé : 1..80 caractères imprimables (lettres/chiffres/espace + `.`_-/()#`),
+/// pas vide, pas de `-` en tête (anti confusion flag). Fonction PURE.
+fn valid_engagement_name(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.chars().count() <= 80 && !t.starts_with('-')
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '/' | '(' | ')' | '#'))
+}
+
+/// Entrée de scope (motif in/out) bien formée : 1..253 caractères d'un jeu host/CIDR/wildcard
+/// (`[A-Za-z0-9._*/:-]`), pas d'espace. Plus permissif que validate_host (autorise `*.` et CIDR) car
+/// c'est un MOTIF de périmètre, pas une cible ; le scope-guard du moteur (host_in_scope_list) reste juge.
+fn valid_scope_entry(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 253
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '/' | ':'))
+}
+
+/// Valide/canonicalise le scope d'un engagement depuis un objet `{mode?, in_scope?, out_scope?}`.
+/// mode ∈ {white,grey,black} (défaut grey). in_scope/out_scope = tableaux (≤256) de motifs bornés.
+/// Renvoie (scope_json canonique, mode). Fonction PURE (aucune I/O).
+fn validate_engagement_scope(v: &Value) -> Result<(String, String), String> {
+    if !v.is_object() {
+        return Err("scope_json attendu : objet {mode?, in_scope?, out_scope?}".into());
+    }
+    let mode = match v.get("mode") {
+        None | Some(Value::Null) => "grey".to_string(),
+        Some(Value::String(s)) => {
+            if !matches!(s.as_str(), "white" | "grey" | "black") {
+                return Err(format!("mode '{s}' invalide (white|grey|black)"));
+            }
+            s.clone()
+        }
+        Some(_) => return Err("mode doit être une chaîne".into()),
+    };
+    fn arr(v: &Value, key: &str) -> Result<Vec<String>, String> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(vec![]),
+            Some(Value::Array(a)) => {
+                if a.len() > 256 {
+                    return Err(format!("{key} trop volumineux (>256 entrées)"));
+                }
+                let mut out = Vec::new();
+                for (i, e) in a.iter().enumerate() {
+                    let s = e.as_str().ok_or_else(|| format!("{key}[{i}] : chaîne attendue"))?;
+                    let s = s.trim();
+                    if !valid_scope_entry(s) {
+                        return Err(format!("{key}[{i}] : entrée '{s}' mal formée (host/CIDR/wildcard)"));
+                    }
+                    out.push(s.to_string());
+                }
+                Ok(out)
+            }
+            Some(_) => Err(format!("{key} doit être un tableau de chaînes")),
+        }
+    }
+    let in_scope = arr(v, "in_scope")?;
+    let out_scope = arr(v, "out_scope")?;
+    let canonical = json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope}).to_string();
+    Ok((canonical, mode))
+}
+
+/// Liste des engagements + compteurs agrégés (findings/runs) — aucune donnée d'un autre engagement n'est
+/// exposée (juste id/nom/statut/mode/date + compteurs). Lecture pure. Ordre par id.
+fn engagement_list_json(app: &App) -> Vec<Value> {
+    let db = app.db();
+    let mut stmt = match db.prepare(
+        "SELECT e.id, e.name, e.status, e.mode, e.created,
+                (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
+                (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id)
+         FROM engagement e ORDER BY e.id",
+    ) { Ok(s) => s, Err(_) => return vec![] };
+    stmt.query_map([], |r| {
+        Ok(json!({
+            "id": r.get::<_, i64>(0)?,
+            "name": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            "status": r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".into()),
+            "mode": r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "grey".into()),
+            "created": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            "counts": {"findings": r.get::<_, i64>(5)?, "runs": r.get::<_, i64>(6)?},
+        }))
+    })
+    .map(|it| it.filter_map(|x| x.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// GET /api/engagements — liste + compteurs (viewer). Sert le sélecteur d'engagement du SPA.
+async fn engagements_list(State(app): State<App>) -> impl IntoResponse {
+    Json(json!({"engagements": engagement_list_json(&app)}))
+}
+
+/// POST /api/engagements {name, mode?, scope_json?} — CRÉE un engagement (OPÉRATEUR, fail-closed 403).
+/// Nouvel espace de travail ISOLÉ avec SON PROPRE ledger DÉDIÉ (dérivé serveur). Mutation ATTRIBUÉE +
+/// LEDGERISÉE (`console.engagement.create` — dans le ledger dédié du nouvel engagement ET le ledger console).
+async fn engagements_create(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if !valid_engagement_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_name", "why": "nom d'engagement invalide (1..80, pas de '-' en tête)"}))).into_response();
+    }
+    // scope_json : {mode?, in_scope?, out_scope?}. Absent -> scope VIDE (fail-closed : rien lançable tant
+    // qu'un in_scope n'est pas défini). mode explicite (body.mode) prime sur celui du scope si fourni.
+    let scope_v = body.get("scope_json").cloned().unwrap_or_else(|| json!({}));
+    let (scope_json, scope_mode) = match validate_engagement_scope(&scope_v) {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_scope", "why": e}))).into_response(),
+    };
+    let mode = match body.get("mode").and_then(|v| v.as_str()) {
+        Some(m) if matches!(m, "white" | "grey" | "black") => m.to_string(),
+        Some(m) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_mode", "why": format!("mode '{m}' invalide (white|grey|black)")}))).into_response(),
+        None => scope_mode,
+    };
+    let actor = attribution_login(&app, &headers);
+    // INSERT (ledger_path provisoire vide) -> last_insert_rowid -> dérive ledger DÉDIÉ -> UPDATE. Sous un
+    // seul guard DB (atomique). Un engagement démarre TOUJOURS actif.
+    let (id, ledger_path) = {
+        let db = app.db();
+        if let Err(e) = db.execute(
+            "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(?,?,?,?,'',datetime('now'),datetime('now'))",
+            rusqlite::params![name, "active", mode, scope_json],
+        ) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response();
+        }
+        let id = db.last_insert_rowid();
+        let lp = derive_engagement_ledger_path(&app, id);
+        let _ = db.execute("UPDATE engagement SET ledger_path=? WHERE id=?", rusqlite::params![lp, id]);
+        (id, lp)
+    };
+    // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
+    append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
+        "actor": actor, "engagement_id": id, "name": name, "mode": mode,
+    }));
+    if ledger_path != app.ledger_path.as_str() {
+        append_console_ledger(&app, "console.engagement.create", json!({
+            "actor": actor, "engagement_id": id, "name": name, "mode": mode,
+        }));
+    }
+    (StatusCode::OK, Json(json!({"ok": true, "engagement": {"id": id, "name": name, "status": "active", "mode": mode}}))).into_response()
+}
+
+/// ÉDITE un engagement (name/mode/scope/status). GARDE-FOU fail-closed : on ne peut pas ARCHIVER le
+/// DERNIER engagement actif. Check + mutations sous un seul guard DB (atomique). Ledgerise l'action
+/// EFFECTIVE (edit|archive|activate). Retourne la vue ou (code, message).
+fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
+    let cur_status: String = {
+        let db = app.db();
+        db.query_row("SELECT status FROM engagement WHERE id=?", [id], |r| r.get(0))
+            .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?
+    };
+    let new_name: Option<String> = match body.get("name") {
+        None => None,
+        Some(n) => {
+            let n = n.as_str().unwrap_or("").trim().to_string();
+            if !valid_engagement_name(&n) {
+                return Err((StatusCode::BAD_REQUEST, "nom d'engagement invalide (1..80, pas de '-' en tête)".into()));
+            }
+            Some(n)
+        }
+    };
+    let mut new_scope: Option<String> = None;
+    let mut new_mode: Option<String> = None;
+    if let Some(sv) = body.get("scope_json") {
+        let (sj, m) = validate_engagement_scope(sv).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        new_scope = Some(sj);
+        new_mode = Some(m);
+    }
+    if let Some(m) = body.get("mode").and_then(|v| v.as_str()) {
+        if !matches!(m, "white" | "grey" | "black") {
+            return Err((StatusCode::BAD_REQUEST, format!("mode '{m}' invalide (white|grey|black)")));
+        }
+        new_mode = Some(m.to_string());
+    }
+    let new_status: Option<String> = match body.get("status").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) if matches!(s, "active" | "archived") => Some(s.to_string()),
+        Some(s) => return Err((StatusCode::BAD_REQUEST, format!("status '{s}' invalide (active|archived)"))),
+    };
+    if new_name.is_none() && new_scope.is_none() && new_mode.is_none() && new_status.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (name|mode|scope_json|status)".into()));
+    }
+    let archiving = new_status.as_deref() == Some("archived") && cur_status == "active";
+    {
+        let db = app.db();
+        if archiving {
+            let active_count: i64 = db.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+            if active_count <= 1 {
+                return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (archivage refusé, fail-closed)".into()));
+            }
+        }
+        if let Some(n) = &new_name { let _ = db.execute("UPDATE engagement SET name=?, updated=datetime('now') WHERE id=?", rusqlite::params![n, id]); }
+        if let Some(s) = &new_scope { let _ = db.execute("UPDATE engagement SET scope_json=?, updated=datetime('now') WHERE id=?", rusqlite::params![s, id]); }
+        if let Some(m) = &new_mode { let _ = db.execute("UPDATE engagement SET mode=?, updated=datetime('now') WHERE id=?", rusqlite::params![m, id]); }
+        if let Some(s) = &new_status { let _ = db.execute("UPDATE engagement SET status=?, updated=datetime('now') WHERE id=?", rusqlite::params![s, id]); }
+    }
+    let action = if new_status.as_deref() == Some("archived") { "archive" }
+        else if new_status.as_deref() == Some("active") && cur_status == "archived" { "activate" }
+        else { "edit" };
+    append_console_ledger(app, &format!("console.engagement.{action}"), json!({
+        "actor": actor, "engagement_id": id,
+        "name": new_name, "mode": new_mode, "status": new_status, "scope_changed": new_scope.is_some(),
+    }));
+    Ok(json!({"ok": true, "engagement_id": id, "action": action}))
+}
+
+/// SUPPRIME un engagement + ses données possédées (findings/runrecords/roe/run_job) + sa config
+/// par-engagement (technique_selection/workflows). GARDE-FOUS fail-closed : #1 (défaut) non supprimable ;
+/// jamais le DERNIER engagement actif. Le fichier ledger DÉDIÉ RESTE sur disque (piste d'audit préservée),
+/// avec une entrée finale `console.engagement.delete`. Ledgerise aussi dans le ledger console.
+fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Value, (StatusCode, String)> {
+    if id == 1 {
+        return Err((StatusCode::CONFLICT, "engagement par défaut (#1) non supprimable — archivez-le".into()));
+    }
+    let (status, ledger, findings, runs): (String, String, i64, i64) = {
+        let db = app.db();
+        let (status, ledger): (String, String) = db
+            .query_row("SELECT status, ledger_path FROM engagement WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?;
+        let f: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", [id], |r| r.get(0)).unwrap_or(0);
+        let r: i64 = db.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", [id], |r| r.get(0)).unwrap_or(0);
+        (status, ledger, f, r)
+    };
+    if status == "active" {
+        let db = app.db();
+        let active_count: i64 = db.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+        if active_count <= 1 {
+            return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (suppression refusée, fail-closed)".into()));
+        }
+    }
+    // entrée FINALE dans le ledger DÉDIÉ (avant retrait de la ligne) — l'audit du fichier survit.
+    if !ledger.is_empty() && ledger != app.ledger_path.as_str() {
+        let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
+            &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
+    }
+    {
+        let db = app.db();
+        let _ = db.execute("DELETE FROM finding WHERE engagement_id=?", [id]);
+        let _ = db.execute("DELETE FROM runrecord WHERE engagement_id=?", [id]);
+        let _ = db.execute("DELETE FROM roe_decision WHERE engagement_id=?", [id]);
+        let _ = db.execute("DELETE FROM run_job WHERE engagement_id=?", [id]);
+        let _ = db.execute("DELETE FROM settings WHERE key=?", [technique_selection_key(id)]);
+        let _ = db.execute("DELETE FROM settings WHERE key=?", [workflows_key(id)]);
+        let _ = db.execute("DELETE FROM engagement WHERE id=?", [id]);
+    }
+    append_console_ledger(app, "console.engagement.delete", json!({
+        "actor": actor, "engagement_id": id, "findings": findings, "runs": runs,
+    }));
+    Ok(json!({"ok": true, "engagement_id": id, "deleted": {"findings": findings, "runs": runs}}))
+}
+
+/// POST /api/engagements/:id — ÉDITE (name/mode/scope/activate → OPÉRATEUR), ARCHIVE (status=archived →
+/// ADMIN) ou SUPPRIME (`{"delete":true}` → ADMIN). Rôle GATÉ selon l'opération (fail-closed). Chaque
+/// mutation attribuée + ledgerisée. Dernier engagement actif protégé (409).
+async fn engagements_update(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    let is_delete = body.get("delete").and_then(|v| v.as_bool()).unwrap_or(false);
+    let archiving = body.get("status").and_then(|v| v.as_str()) == Some("archived");
+    // GATE RÔLE : delete/archive => ADMIN (fail-closed) ; edit/activate => OPÉRATEUR (fail-closed).
+    if is_delete || archiving {
+        if !check_admin(&app, &headers) {
+            return admin_denied().into_response();
+        }
+    } else if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    let res = if is_delete {
+        engagement_do_delete(&app, id, &actor)
+    } else {
+        engagement_do_update(&app, id, &actor, &body)
+    };
+    match res {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((s, why)) => (s, Json(json!({"error": "engagement_update_failed", "why": why}))).into_response(),
+    }
+}
+
+/// Résout le `ledger_path` de l'engagement PROPRIÉTAIRE d'un run (via run_job.engagement_id ->
+/// engagement.ledger_path). Défaut : App.ledger_path (engagement #1 / rétro-compat). ISOLATION : tout
+/// acte console lié à un run (cancel, fin de run) est journalisé dans le ledger de SON engagement,
+/// jamais celui d'un autre.
+fn engagement_ledger_for_run(app: &App, run_id: &str) -> String {
+    let db = app.db();
+    db.query_row(
+        "SELECT e.ledger_path FROM run_job j JOIN engagement e ON e.id=j.engagement_id WHERE j.run_id=?",
+        [run_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| app.ledger_path.as_str().to_string())
+}
+
+/// Journalise un acte de run dans le ledger de SON engagement. Si l'engagement partage le ledger de la
+/// console (App.ledger_path = engagement #1), on passe par append_console_ledger (cache de head O(1),
+/// chaîne préservée). Sinon on écrit dans le ledger DÉDIÉ de l'engagement via ledger_append_standalone
+/// (relecture de head à la volée). Dans les DEUX cas la chaîne SHA-256 reste vérifiable
+/// (/api/ledger/verify) et un engagement ne touche JAMAIS le ledger d'un autre.
+fn append_run_ledger_path(app: &App, ledger_path: &str, kind: &str, detail: Value) {
+    if ledger_path == app.ledger_path.as_str() {
+        append_console_ledger(app, kind, detail);
+    } else {
+        let _ = ledger_append_standalone(ledger_path, kind, &detail);
+    }
 }
 
 /// Horodatage compact UTC pour les run_id, sans dépendance chrono : YYYYmmddHHMMSS dérivé du temps
@@ -6149,8 +6815,10 @@ fn append_console_ledger(app: &App, kind: &str, detail: Value) {
 
 /// Détache le superviseur du run : pompe stdout/stderr ligne à ligne vers run_log+SSE, applique le
 /// watchdog (FORGE_RUN_TIMEOUT) qui tue le GROUPE, puis finalise le run_job (status terminal) et
-/// libère le slot FIFO. Atomique : quel que soit le chemin de sortie, le run est marqué terminal.
-fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_id: String, run_dir: std::path::PathBuf) {
+/// libère le slot FIFO DE CET engagement. Atomique : quel que soit le chemin de sortie, le run est
+/// marqué terminal. `eid` = clé du slot à libérer (isolation : on ne touche QUE le slot de CET
+/// engagement) ; `pgid` = groupe de process pour le kill du watchdog (connu au spawn, pas relu).
+fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_id: String, eid: i64, pgid: i32, run_dir: std::path::PathBuf, ledger_path: String) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     tokio::spawn(async move {
         let stdout = child.stdout.take();
@@ -6184,12 +6852,9 @@ fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_id: String, 
             }
             Ok(Err(_)) => ("failed", None),
             Err(_) => {
-                // timeout : tuer le groupe, récupérer.
+                // timeout : tuer le GROUPE de CE run (pgid connu au spawn), récupérer. On n'inspecte
+                // pas le slot d'un autre engagement — le pgid ciblé est exclusivement celui de ce run.
                 push_run_log(&app, &run_id, "system", &format!("watchdog: timeout {}s — kill group", app.run_timeout_secs));
-                let pgid = {
-                    let st = app.run_state.lock().await;
-                    st.current.as_ref().filter(|h| h.run_id == run_id).map(|h| h.pgid).unwrap_or(-1)
-                };
                 kill_group(pgid);
                 let _ = child.wait().await;
                 ("timeout", None)
@@ -6217,15 +6882,17 @@ fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_id: String, 
             db.query_row("SELECT status FROM run_job WHERE run_id=?", [&run_id], |r| r.get::<_, String>(0))
                 .unwrap_or_else(|_| final_status.to_string())
         };
-        append_console_ledger(&app, "console.run.end", json!({
+        append_run_ledger_path(&app, &ledger_path, "console.run.end", json!({
             "run_id": run_id, "status": terminal, "exit_code": exit_code
         }));
 
-        // libère le slot FIFO + diffuse le statut terminal.
+        // libère le slot FIFO DE CET engagement + diffuse le statut terminal. ISOLATION + garde
+        // anti-course : on ne retire QUE le slot de `eid`, et seulement s'il porte TOUJOURS CE run_id
+        // (jamais celui d'un run/engagement voisin qui aurait pris la place entre-temps).
         {
             let mut st = app.run_state.lock().await;
-            if st.current.as_ref().map(|h| h.run_id == run_id).unwrap_or(false) {
-                st.current = None;
+            if st.current.get(&eid).map(|h| h.run_id == run_id).unwrap_or(false) {
+                st.current.remove(&eid);
             }
         }
         let _ = app.events.send(RunEvent { run_id: run_id.clone(), kind: "status".into(), payload: json!({"status": terminal, "exit_code": exit_code}) });
@@ -6240,12 +6907,12 @@ async fn run_cancel(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
+    // Recherche du run vivant par run_id (GLOBAL-unique) parmi TOUS les engagements : `current` est
+    // maintenant indexé par engagement_id, donc on balaie les valeurs. On ne cible que le pgid du run
+    // demandé ; les slots des autres engagements ne sont ni lus ni modifiés (le kill ne vise que ce run).
     let pgid = {
         let st = app.run_state.lock().await;
-        match &st.current {
-            Some(h) if h.run_id == id => h.pgid,
-            _ => -1,
-        }
+        st.current.values().find(|h| h.run_id == id).map(|h| h.pgid).unwrap_or(-1)
     };
     if pgid <= 1 {
         // run inconnu ou déjà terminé.
@@ -6268,7 +6935,9 @@ async fn run_cancel(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     }
     let actor = attribution_login(&app, &headers);
     push_run_log(&app, &id, "system", &format!("cancel demandé par '{actor}' — kill group"));
-    append_console_ledger(&app, "console.run.cancel", json!({"run_id": id, "actor": actor, "by": "operator"}));
+    // ledger de L'ENGAGEMENT propriétaire du run (isolation) — pas systématiquement App.ledger_path.
+    let cancel_ledger = engagement_ledger_for_run(&app, &id);
+    append_run_ledger_path(&app, &cancel_ledger, "console.run.cancel", json!({"run_id": id, "actor": actor, "by": "operator"}));
     kill_group(pgid);
     (StatusCode::OK, Json(json!({"run_id": id, "status": "cancelling"})))
 }
@@ -6301,11 +6970,13 @@ const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_run,vetoed,
 
 /// GET /api/runs — liste les runs (récents d'abord). Lecture (viewer) — pas besoin d'opérateur.
 async fn runs_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // ENGAGEMENT : liste des runs de l'engagement actif UNIQUEMENT (isolation).
+    let eid = resolve_view_engagement_id(&app, &q);
     let db = app.db();
-    let (mut conds, mut args): (Vec<&str>, Vec<String>) = (vec![], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?"); args.push(c.clone()); }
-    if let Some(s) = q.get("status") { conds.push("status=?"); args.push(s.clone()); }
-    let where_ = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
+    if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
+    let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 100, 1000);
     let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}");
     let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
@@ -8752,6 +9423,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
         .route("/api/modules/:kind", post(module_governance))
         .route("/api/campaigns", get(campaigns))
+        // ENGAGEMENT (objet de 1re classe) : liste + compteurs (viewer) ; create = OPÉRATEUR ; edit/
+        // archive/delete via POST :id (edit=OPÉRATEUR, archive/delete=ADMIN, cf. handler). Chaque mutation
+        // ledgerisée `console.engagement.*`. Les vues (findings/runrecords/roe/ledger/coverage/runs) filtrent
+        // sur l'engagement actif (`?engagement=`). Le segment `:id` (i64) ne collisionne pas avec la liste.
+        .route("/api/engagements", get(engagements_list).post(engagements_create))
+        .route("/api/engagements/:id", post(engagements_update))
         .route("/api/roe", get(roe))
         // --- ADMINISTRATION comptes (#4) : réservé admin (check_admin, fail-closed 403 sinon). Chaque
         //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
@@ -8932,6 +9609,10 @@ async fn main() {
 
     // ledger JSONL : chemin par défaut relatif au pkg dir Forge (où `forge campaign --ledger` écrit).
     let ledger_path = std::env::var("FORGE_CONSOLE_LEDGER").unwrap_or_else(|_| "engagement.jsonl".to_string());
+    // ENGAGEMENT #1 (migration ZÉRO-PERTE) : si la table `engagement` est vide, on la crée depuis le
+    // scope serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Les lignes existantes gardent
+    // engagement_id=1 (DEFAULT posé par migrate). Idempotent : ne réécrit jamais un engagement existant.
+    ensure_default_engagement(&conn, &scope_in, &scope_mode, &ledger_path);
     // racine des assets web statiques (style.css/app.js/fonts/…) servis en fallback.
     let web_dir = resolve_web_dir();
     println!("[forge-console] web assets: {web_dir}");
@@ -9004,7 +9685,7 @@ async fn main() {
         // cache provisoire (kind=none) ; rechargé depuis settings/env juste après (reload_detection_source).
         detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
         run_timeout_secs,
-        run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
+        run_state: Arc::new(AsyncMutex::new(RunState { current: HashMap::new() })),
         events,
         ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
     };
@@ -9088,7 +9769,7 @@ mod tests {
             scope_mode: Arc::new("grey".into()),
             detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
             run_timeout_secs: 1800,
-            run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
+            run_state: Arc::new(AsyncMutex::new(RunState { current: HashMap::new() })),
             events,
             ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
         }
@@ -10650,7 +11331,7 @@ mod tests {
             scope_mode: Arc::new("grey".into()),
             detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
             run_timeout_secs: 1800,
-            run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
+            run_state: Arc::new(AsyncMutex::new(RunState { current: HashMap::new() })),
             events,
             ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
         };
@@ -10984,6 +11665,501 @@ mod tests {
         assert!(!host_in_server_scope(&app, "evil.test"), "hors scope refusé");
         assert!(!host_in_server_scope(&app, "notexample.com"), "pas un vrai suffixe de domaine");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // =============================================================================================
+    // ENGAGEMENT (objet de 1re classe) — migration zéro-perte + isolation du run flow.
+    // =============================================================================================
+
+    /// Insère un engagement de test (scope_json dérivé de scope_in/mode, out_scope vide).
+    fn insert_test_engagement(app: &App, id: i64, scope_in: &[&str], mode: &str, ledger: &str) {
+        let db = app.db();
+        let scope_json = json!({"mode": mode, "in_scope": scope_in, "out_scope": []}).to_string();
+        db.execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(?,?,'active',?,?,?,datetime('now'),datetime('now'))",
+            rusqlite::params![id, format!("eng{id}"), mode, scope_json, ledger],
+        )
+        .unwrap();
+    }
+
+    /// Corps /api/run minimal (campaign + targets + engagement_id optionnel).
+    fn run_body(campaign: &str, engagement_id: Option<i64>, targets: &[&str]) -> Value {
+        let mut b = json!({"campaign": campaign, "targets": targets, "mode": "propose"});
+        if let Some(e) = engagement_id {
+            b["engagement_id"] = json!(e);
+        }
+        b
+    }
+
+    /// [ENGAGEMENT #1 — migration ZÉRO-PERTE] `migrate()` ajoute engagement_id NOT NULL DEFAULT 1 :
+    /// une ligne finding PRÉ-EXISTANTE (schéma ancien, sans la colonne) est rétro-rattachée à
+    /// l'engagement #1. `ensure_default_engagement` crée l'engagement #1 depuis le scope serveur COURANT
+    /// (in_scope + mode) + le ledger courant, et est IDEMPOTENT (n'écrase jamais un engagement existant).
+    #[test]
+    fn migrate_creates_engagement_one_and_backfills_engagement_id() {
+        let conn = Connection::open_in_memory().expect("mem db");
+        conn.execute_batch(SCHEMA).expect("schema"); // `finding` n'a PAS encore engagement_id
+        // ligne « ancienne » insérée AVANT l'ajout de la colonne (simule une base antérieure).
+        conn.execute(
+            "INSERT INTO finding(id,title,target,campaign) VALUES(1,'old-finding','h.example','c1')",
+            [],
+        )
+        .unwrap();
+        migrate(&conn); // ALTER ... ADD COLUMN engagement_id NOT NULL DEFAULT 1 -> backfill à 1
+        let eid: i64 = conn
+            .query_row("SELECT engagement_id FROM finding WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(eid, 1, "ligne existante rétro-rattachée à l'engagement #1 (DEFAULT)");
+
+        // table engagement vide -> ensure_default_engagement crée #1 depuis le scope/ledger COURANTS.
+        let n0: i64 = conn.query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
+        assert_eq!(n0, 0, "aucun engagement avant l'amorçage");
+        ensure_default_engagement(
+            &conn,
+            &["a.example.com".to_string(), "*.b.example.com".to_string()],
+            "grey",
+            "/tmp/eng1.jsonl",
+        );
+        let eng = load_engagement(&conn, 1).expect("engagement #1 créé");
+        assert_eq!(eng.id, 1);
+        assert_eq!(eng.mode, "grey");
+        assert_eq!(eng.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
+            "scope de l'engagement #1 = scope serveur courant");
+        assert_eq!(eng.ledger_path, "/tmp/eng1.jsonl", "ledger de l'engagement #1 = ledger courant");
+
+        // idempotent : un 2e appel (scope/ledger DIFFÉRENTS) ne réécrit PAS l'engagement #1.
+        ensure_default_engagement(&conn, &["changed.example".to_string()], "black", "/tmp/other.jsonl");
+        let eng2 = load_engagement(&conn, 1).unwrap();
+        assert_eq!(eng2.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
+            "idempotent : scope inchangé");
+        assert_eq!(eng2.ledger_path, "/tmp/eng1.jsonl", "idempotent : ledger inchangé");
+        let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
+        assert_eq!(cnt, 1, "idempotent : pas de doublon d'engagement");
+    }
+
+    /// [RUN FLOW — scope + ledger de L'ENGAGEMENT, pas les App globals] Un run créé pour l'engagement #2
+    /// est validé contre le scope de #2 (pas les App globals) et journalisé dans le ledger DÉDIÉ de #2 ;
+    /// le run_job porte engagement_id=2. Une cible qui n'est DANS les globals mais PAS dans #2 est
+    /// refusée (preuve que ce sont bien les données de l'engagement qui gouvernent, jamais les globals).
+    #[tokio::test]
+    async fn run_uses_engagement_scope_and_ledger_not_app_globals() {
+        let globals_ledger = tmp_path("forge-test-eng-globals");
+        // App globals : scope = global.example.com, ledger = globals_ledger. (défauts de l'engagement #1)
+        let mut app = test_app_scoped(&globals_ledger, vec!["global.example.com".into()]);
+        app.python = Arc::new("true".into()); // spawn no-op : prouve qu'on a PASSÉ la validation sans lancer le moteur
+        let eng2_ledger = tmp_path("forge-test-eng2-ledger");
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+        }
+        // engagement #1 (globals) + #2 (scope + ledger DISTINCTS des globals).
+        insert_test_engagement(&app, 1, &["global.example.com"], "grey", &globals_ledger);
+        insert_test_engagement(&app, 2, &["eng2.example.com"], "grey", &eng2_ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // (a) cible DANS les globals mais HORS du scope de #2 -> refusée (on n'utilise PAS les globals).
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("c2", Some(2), &["global.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "cible du scope GLOBAL refusée pour l'engagement #2");
+        let j = resp_json(resp).await;
+        assert_eq!(j["error"], "out_of_scope");
+
+        // (b) cible DANS le scope de #2 (mais PAS dans les globals) -> ACCEPTÉE (scope de l'engagement).
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("c2", Some(2), &["eng2.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED,
+            "cible du scope de l'engagement #2 acceptée (le run utilise le scope de #2, pas les globals)");
+
+        // run_job estampillé engagement_id=2.
+        let run_eid: i64 = {
+            let db = app.db();
+            db.query_row("SELECT engagement_id FROM run_job WHERE campaign='c2'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(run_eid, 2, "run_job porte l'engagement #2");
+
+        // ledger : console.run.start est dans le ledger DÉDIÉ de #2, JAMAIS dans les globals.
+        let eng2_entries = read_ledger_lines(&eng2_ledger);
+        assert!(eng2_entries.iter().any(|e| e["kind"] == "console.run.start"
+            && e["detail"]["engagement_id"] == 2),
+            "run.start journalisé dans le ledger de l'engagement #2");
+        let globals_entries = read_ledger_lines(&globals_ledger);
+        assert!(!globals_entries.iter().any(|e| e["kind"] == "console.run.start"),
+            "le ledger GLOBAL ne reçoit PAS le run d'un autre engagement (isolation)");
+
+        let _ = std::fs::remove_file(&globals_ledger);
+        let _ = std::fs::remove_file(&eng2_ledger);
+    }
+
+    /// [ISOLATION] Deux engagements aux scopes DISJOINTS restent isolés : un run pour A valide contre le
+    /// scope de A UNIQUEMENT (la cible de B est refusée), et réciproquement. Un run pour B accepte sa
+    /// propre cible et journalise dans SON ledger — jamais celui de A.
+    #[tokio::test]
+    async fn two_engagements_stay_isolated_run_validates_own_scope() {
+        let ledger_a = tmp_path("forge-test-engA-ledger");
+        let ledger_b = tmp_path("forge-test-engB-ledger");
+        // App globals volontairement PERMISSIFS (les 2 hosts) : prouve que la validation vient bien du
+        // scope de l'engagement (disjoint), pas des globals (qui accepteraient tout).
+        let mut app = test_app_scoped(&ledger_a, vec!["a.example.com".into(), "b.example.com".into()]);
+        app.python = Arc::new("true".into());
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+        }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger_a); // A
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", &ledger_b); // B
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // A ne valide QUE le scope de A : la cible de B est refusée pour l'engagement A.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cA", Some(1), &["b.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "A refuse la cible de B (isolation)");
+        // B ne valide QUE le scope de B : la cible de A est refusée pour l'engagement B.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cB", Some(2), &["a.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "B refuse la cible de A (isolation)");
+
+        // B accepte SA propre cible et journalise dans le ledger de B (jamais celui de A).
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cB", Some(2), &["b.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "B accepte sa propre cible");
+        let entries_b = read_ledger_lines(&ledger_b);
+        assert!(entries_b.iter().any(|e| e["kind"] == "console.run.start" && e["detail"]["engagement_id"] == 2),
+            "run de B journalisé dans le ledger de B");
+        let entries_a = read_ledger_lines(&ledger_a);
+        assert!(!entries_a.iter().any(|e| e["kind"] == "console.run.start"),
+            "le ledger de A ne reçoit JAMAIS le run de B (isolation ledger)");
+
+        let _ = std::fs::remove_file(&ledger_a);
+        let _ = std::fs::remove_file(&ledger_b);
+    }
+
+    /// [CONCURRENCE INTER-ENGAGEMENT + FIFO PAR ENGAGEMENT] Le slot de run n'est PLUS un FIFO
+    /// console-global : c'est une map `engagement_id -> RunHandle`. Ce test prouve, de façon
+    /// déterministe (slots posés à la main, sans dépendre de la durée d'un process), que :
+    ///   (1) DEUX engagements peuvent avoir un run vivant EN MÊME TEMPS (la map porte 2 clés) ;
+    ///   (2) un 2e /api/run sur un engagement DÉJÀ vivant -> 409 (FIFO PAR engagement), et le 409 porte
+    ///       le bon engagement_id ;
+    ///   (3) démarrer un run pour un TROISIÈME engagement pendant que #1 et #2 sont vivants -> 202
+    ///       (aucun 409 croisé — la concurrence inter-engagement est réelle) ;
+    ///   (4) le run de #3 est journalisé dans le ledger de #3 UNIQUEMENT (jamais ceux de #1/#2).
+    #[tokio::test]
+    async fn run_slot_is_per_engagement_not_global_fifo() {
+        let ledger_a = tmp_path("forge-test-conc-A");
+        let ledger_b = tmp_path("forge-test-conc-B");
+        let ledger_c = tmp_path("forge-test-conc-C");
+        // Globals volontairement PERMISSIFS (les 3 hosts) : la validation vient du scope de l'engagement.
+        let mut app = test_app_scoped(&ledger_a,
+            vec!["a.example.com".into(), "b.example.com".into(), "c.example.com".into()]);
+        app.python = Arc::new("true".into()); // spawn no-op : le run #3 aboutit sans lancer le moteur
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+        }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger_a); // A
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", &ledger_b); // B
+        insert_test_engagement(&app, 3, &["c.example.com"], "grey", &ledger_c); // C
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // (1) On pose À LA MAIN deux runs vivants simultanés (A sous la clé 1, B sous la clé 2). pgid=-1
+        // => kill_group ignore (aucun process réel visé). Deux engagements vivants EN MÊME TEMPS.
+        {
+            let mut st = app.run_state.lock().await;
+            st.current.insert(1, RunHandle { run_id: "run-held-A".into(), pgid: -1 });
+            st.current.insert(2, RunHandle { run_id: "run-held-B".into(), pgid: -1 });
+            assert_eq!(st.current.len(), 2, "deux engagements ont un run vivant EN MÊME TEMPS (map à 2 clés)");
+        }
+
+        // (2) 2e run sur un engagement DÉJÀ vivant -> 409, avec l'engagement_id fautif dans le corps.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cA2", Some(1), &["a.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "2e run sur #1 (déjà vivant) -> 409 (FIFO par engagement)");
+        let j = resp_json(resp).await;
+        assert_eq!(j["error"], "run_in_progress");
+        assert_eq!(j["engagement_id"], 1, "le 409 identifie l'engagement occupé (#1)");
+        // idem pour #2 (l'autre engagement vivant) -> 409, jamais un faux 202.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cB2", Some(2), &["b.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "2e run sur #2 (déjà vivant) -> 409");
+        assert_eq!(resp_json(resp).await["engagement_id"], 2);
+
+        // (3) un run pour un TROISIÈME engagement pendant que #1 ET #2 sont vivants -> 202 (aucun 409
+        // croisé : la présence de runs pour #1/#2 n'entrave pas #3). C'est LA preuve de la concurrence.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cC", Some(3), &["c.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED,
+            "run pour #3 pendant que #1 et #2 sont vivants -> 202 (concurrence inter-engagement, pas de 409 croisé)");
+        // run_job de #3 estampillé engagement_id=3.
+        let eid3: i64 = { let db = app.db(); db.query_row("SELECT engagement_id FROM run_job WHERE campaign='cC'", [], |r| r.get(0)).unwrap() };
+        assert_eq!(eid3, 3, "le run concurrent porte l'engagement #3");
+
+        // (4) isolation ledger : run.start de #3 dans SON ledger, JAMAIS dans ceux de #1/#2.
+        assert!(read_ledger_lines(&ledger_c).iter().any(|e| e["kind"] == "console.run.start" && e["detail"]["engagement_id"] == 3),
+            "run.start de #3 journalisé dans le ledger de #3");
+        assert!(!read_ledger_lines(&ledger_a).iter().any(|e| e["kind"] == "console.run.start"),
+            "le ledger de #1 ne reçoit PAS le run de #3 (isolation)");
+        assert!(!read_ledger_lines(&ledger_b).iter().any(|e| e["kind"] == "console.run.start"),
+            "le ledger de #2 ne reçoit PAS le run de #3 (isolation)");
+
+        let _ = std::fs::remove_file(&ledger_a);
+        let _ = std::fs::remove_file(&ledger_b);
+        let _ = std::fs::remove_file(&ledger_c);
+    }
+
+    /// [ISOLATION VERROUILLÉE] Un run pour A écrit UNIQUEMENT le ledger de A et n'altère RIEN de B :
+    ///   - PROBE (fail-closed) : un run de A contre une cible qui n'est QUE dans le scope de B est
+    ///     refusé (400 out_of_scope) — A ne peut PAS tirer sur le périmètre de B (isolation par scope) ;
+    ///   - le run de A (sur sa propre cible) est ACCEPTÉ et journalisé dans le ledger de A ;
+    ///   - le ledger de B est INCHANGÉ (aucune ligne ajoutée, aucun run.start de A) ;
+    ///   - les findings de B (engagement_id=2) sont INTACTS (nombre + contenu).
+    #[tokio::test]
+    async fn run_for_a_writes_only_a_ledger_and_leaves_b_untouched() {
+        let ledger_a = tmp_path("forge-test-lock-A");
+        let ledger_b = tmp_path("forge-test-lock-B");
+        // Globals permissifs (a+b) : la validation doit venir du scope de l'engagement, pas des globals.
+        let mut app = test_app_scoped(&ledger_a, vec!["a.example.com".into(), "b.example.com".into()]);
+        app.python = Arc::new("true".into());
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+            // Sème l'état de B : un finding (engagement_id=2) + une entrée de ledger propre à B.
+            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('finding-de-B','b.example.com','cB','HIGH',2)", []).unwrap();
+        }
+        ledger_append_standalone(&ledger_b, "engagement.seed", &json!({"note": "état initial de B"})).unwrap();
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger_a); // A
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", &ledger_b); // B
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // Instantané de l'état de B AVANT tout run de A.
+        let b_ledger_before = read_ledger_lines(&ledger_b).len();
+        let b_findings_before: i64 = { let db = app.db(); db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=2", [], |r| r.get(0)).unwrap() };
+        assert_eq!(b_findings_before, 1, "B a bien 1 finding au départ");
+
+        // PROBE : A ne peut PAS tirer contre une cible qui n'est QUE dans le scope de B -> 400 out_of_scope.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cA-probe", Some(1), &["b.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "A refuse une cible du scope de B (probe d'isolation)");
+        assert_eq!(resp_json(resp).await["error"], "out_of_scope");
+
+        // Run LÉGITIME de A sur sa propre cible -> 202, journalisé dans le ledger de A.
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("cA", Some(1), &["a.example.com"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "A accepte SA propre cible");
+        assert!(read_ledger_lines(&ledger_a).iter().any(|e| e["kind"] == "console.run.start" && e["detail"]["engagement_id"] == 1),
+            "run.start de A journalisé dans le ledger de A");
+
+        // VERROU : B est resté totalement intact — ledger et findings.
+        let b_ledger_after = read_ledger_lines(&ledger_b);
+        assert_eq!(b_ledger_after.len(), b_ledger_before, "le ledger de B n'a reçu AUCUNE ligne d'un run de A");
+        assert!(!b_ledger_after.iter().any(|e| e["kind"] == "console.run.start"),
+            "aucun run.start (a fortiori de A) n'apparaît dans le ledger de B");
+        let b_findings_after: i64 = { let db = app.db(); db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=2", [], |r| r.get(0)).unwrap() };
+        assert_eq!(b_findings_after, b_findings_before, "les findings de B sont intacts (nombre inchangé)");
+        let b_title: String = { let db = app.db(); db.query_row("SELECT title FROM finding WHERE engagement_id=2 LIMIT 1", [], |r| r.get(0)).unwrap() };
+        assert_eq!(b_title, "finding-de-B", "le finding de B est intact (contenu inchangé)");
+
+        let _ = std::fs::remove_file(&ledger_a);
+        let _ = std::fs::remove_file(&ledger_b);
+    }
+
+    /// Query<HashMap> pratique pour cibler un engagement en lecture dans les tests (`?engagement=<id>`).
+    fn eng_query(id: i64) -> Query<HashMap<String, String>> {
+        Query(HashMap::from([("engagement".to_string(), id.to_string())]))
+    }
+
+    /// [ENGAGEMENT — vues filtrées] Les endpoints de LISTE ne renvoient QUE les données de l'engagement
+    /// ciblé par `?engagement=<id>` : les findings/runrecords/roe/runs/campagnes/couverture de A ne sont
+    /// JAMAIS visibles sous B, et réciproquement (isolation stricte des vues, fail-closed).
+    #[tokio::test]
+    async fn list_endpoints_filter_by_engagement() {
+        let ledger = tmp_path("forge-test-eng-list");
+        let ledger2 = tmp_path("forge-test-eng-list2");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", &ledger2);
+        {
+            let db = app.db();
+            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fa','a.example.com','cA','HIGH',1)", []).unwrap();
+            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fb','b.example.com','cB','LOW',2)", []).unwrap();
+            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cA','a.example.com','recon.http','T1190',1,1)", []).unwrap();
+            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cB','b.example.com','recon.http','T1046',1,2)", []).unwrap();
+            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cA','r1','a1','a.example.com','recon.http','FIRE',1)", []).unwrap();
+            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cB','r2','a2','b.example.com','recon.http','VETO',2)", []).unwrap();
+            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r1','cA','done','propose',1)", []).unwrap();
+            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r2','cB','done','propose',2)", []).unwrap();
+        }
+
+        // findings : #1 ne voit que fa, #2 que fb.
+        let j = resp_json(findings(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let t1: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
+        assert!(t1.contains(&"fa".to_string()) && !t1.contains(&"fb".to_string()), "engagement #1 ne voit que SES findings");
+        let j = resp_json(findings(State(app.clone()), eng_query(2)).await.into_response()).await;
+        let t2: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
+        assert!(t2.contains(&"fb".to_string()) && !t2.contains(&"fa".to_string()), "engagement #2 ne voit que SES findings");
+
+        // runrecords : isolés par engagement.
+        let j = resp_json(runrecords(State(app.clone()), eng_query(1)).await.into_response()).await;
+        assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cA"), "runrecords #1 isolés");
+        assert!(!j.as_array().unwrap().is_empty(), "runrecords #1 non vides");
+
+        // roe : isolés par engagement.
+        let j = resp_json(roe(State(app.clone()), eng_query(2)).await.into_response()).await;
+        assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cB"), "roe #2 isolés");
+
+        // runs : isolés par engagement.
+        let j = resp_json(runs_list(State(app.clone()), eng_query(1)).await.into_response()).await;
+        assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cA"), "runs #1 isolés");
+
+        // campagnes (dérivées des findings) : isolées par engagement.
+        let j = resp_json(campaigns(State(app.clone()), eng_query(2)).await.into_response()).await;
+        let camps: Vec<String> = j.as_array().unwrap().iter().map(|c| c["campaign"].as_str().unwrap().to_string()).collect();
+        assert!(camps.contains(&"cB".to_string()) && !camps.contains(&"cA".to_string()), "campagnes #2 isolées");
+
+        // couverture ATT&CK : isolée par engagement (T1190 chez #1, T1046 chez #2).
+        let j = resp_json(coverage(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let mitres: Vec<String> = j.as_array().unwrap().iter().map(|c| c["mitre"].as_str().unwrap().to_string()).collect();
+        assert!(mitres.contains(&"T1190".to_string()) && !mitres.contains(&"T1046".to_string()), "couverture #1 isolée");
+
+        // finding_detail : un id de #2 n'est PAS servi sous #1 (404, isolation).
+        let fid_b: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fb'", [], |r| r.get(0)).unwrap() };
+        let resp = finding_detail(State(app.clone()), Path(fid_b), eng_query(1)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "détail d'un finding d'un AUTRE engagement -> 404");
+        let resp = finding_detail(State(app.clone()), Path(fid_b), eng_query(2)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "détail servi dans SON engagement");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [ENGAGEMENT — CRUD gouverné + ledgerisé] Création/édition = OPÉRATEUR (viewer -> 403) ; archive/
+    /// suppression = ADMIN (opérateur -> 403). Chaque mutation est journalisée `console.engagement.*`.
+    #[tokio::test]
+    async fn engagement_crud_role_gated_and_ledgered() {
+        let ledger = tmp_path("forge-test-eng-crud");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "adm", "admin", &hash_pw("pw")).unwrap();
+        }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger); // défaut #1 actif
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+        let (atok, _) = create_session(&app, uid_of(&app, "adm"));
+
+        // création sans session opérateur -> 403 (fail-closed).
+        let resp = engagements_create(State(app.clone()), conn_info(), HeaderMap::new(),
+            Json(json!({"name": "X", "scope_json": {"in_scope": ["x.example.com"]}}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "création sans opérateur refusée");
+
+        // création par un OPÉRATEUR -> 200 + nouvel engagement (id >= 2) + ledger create.
+        let resp = engagements_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"name": "Client Q3", "mode": "grey", "scope_json": {"in_scope": ["c.example.com"], "out_scope": []}}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "opérateur autorisé à créer");
+        let j = resp_json(resp).await;
+        let new_id = j["engagement"]["id"].as_i64().unwrap();
+        assert!(new_id >= 2, "nouvel engagement id >= 2");
+        assert!(read_ledger_lines(&ledger).iter().any(|e| e["kind"] == "console.engagement.create" && e["detail"]["engagement_id"] == new_id),
+            "création ledgerisée dans le ledger console");
+
+        // édition (rename) par un OPÉRATEUR -> 200.
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&otok), Path(new_id),
+            Json(json!({"name": "Renamed"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "opérateur autorisé à éditer");
+
+        // archive par un OPÉRATEUR -> 403 (réservé admin).
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&otok), Path(new_id),
+            Json(json!({"status": "archived"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "archive réservée admin");
+
+        // archive par un ADMIN -> 200 (il reste #1 actif, donc pas le dernier) + ledger archive.
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&atok), Path(new_id),
+            Json(json!({"status": "archived"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "admin autorisé à archiver");
+        assert!(read_ledger_lines(&ledger).iter().any(|e| e["kind"] == "console.engagement.archive"), "archive ledgerisée");
+
+        // suppression par un OPÉRATEUR -> 403 (réservé admin).
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&otok), Path(new_id),
+            Json(json!({"delete": true}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "suppression réservée admin");
+
+        // suppression par un ADMIN (engagement #new_id, archivé, pas #1, pas le dernier actif) -> 200 + ledger.
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&atok), Path(new_id),
+            Json(json!({"delete": true}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "admin autorisé à supprimer");
+        assert!(read_ledger_lines(&ledger).iter().any(|e| e["kind"] == "console.engagement.delete"), "suppression ledgerisée");
+        { let db = app.db(); assert!(db.query_row("SELECT 1 FROM engagement WHERE id=?", [new_id], |_| Ok(())).is_err(), "engagement supprimé de la base"); }
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [ENGAGEMENT — dernier actif protégé] On ne peut NI archiver NI supprimer le DERNIER engagement
+    /// actif (fail-closed : il faut toujours un espace de travail actif). #1 (défaut) n'est jamais
+    /// supprimable non plus.
+    #[tokio::test]
+    async fn last_active_engagement_archive_blocked() {
+        let ledger = tmp_path("forge-test-eng-last");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "adm", "admin", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger); // UNIQUE engagement actif
+        let (atok, _) = create_session(&app, uid_of(&app, "adm"));
+
+        // archiver le dernier engagement actif -> 409.
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&atok), Path(1i64),
+            Json(json!({"status": "archived"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "dernier engagement actif : archivage bloqué");
+        { let db = app.db(); let st: String = db.query_row("SELECT status FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+          assert_eq!(st, "active", "l'engagement reste actif (mutation refusée)"); }
+
+        // supprimer #1 (défaut + dernier actif) -> 409.
+        let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&atok), Path(1i64),
+            Json(json!({"delete": true}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "#1 par défaut non supprimable");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [ENGAGEMENT — sélection de techniques PAR-ENGAGEMENT] La sélection (profil + toggles) posée pour
+    /// l'engagement A n'affecte PAS B : chaque engagement round-trip sa propre sélection isolée.
+    /// L'engagement #1 utilise la clé LEGACY `technique_selection` (rétro-compat), les autres la clé
+    /// suffixée `technique_selection:<id>`.
+    #[tokio::test]
+    async fn per_engagement_technique_selection_round_trips() {
+        let ledger = tmp_path("forge-test-eng-tech");
+        let ledger2 = tmp_path("forge-test-eng-tech2");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", &ledger2);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // #1 -> profil pentest (+ toggle SQLi=false) ; #2 -> profil custom (+ rce.probe=true).
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+            Json(json!({"profile": "pentest", "categories": {"SQLi": false}, "techniques": {}}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "sélection #1 posée");
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(2), bearer_headers(&otok),
+            Json(json!({"profile": "custom", "categories": {}, "techniques": {"rce.probe": true}}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "sélection #2 posée");
+
+        // round-trip : chaque engagement relit SA sélection (isolation).
+        assert_eq!(technique_selection_value_for(&app, 1)["profile"], "pentest", "#1 -> pentest");
+        assert_eq!(technique_selection_value_for(&app, 2)["profile"], "custom", "#2 -> custom");
+        assert_eq!(technique_selection_value_for(&app, 1)["categories"]["SQLi"], json!(false), "toggle #1 isolé");
+        assert_eq!(technique_selection_value_for(&app, 2)["techniques"]["rce.probe"], json!(true), "toggle #2 isolé");
+
+        // clés de stockage : legacy pour #1, suffixée pour #2.
+        {
+            let db = app.db();
+            assert!(settings_get(&db, "technique_selection").is_some(), "engagement #1 -> clé legacy");
+            assert!(settings_get(&db, "technique_selection:2").is_some(), "engagement #2 -> clé suffixée");
+        }
+
+        // un id EXPLICITE inexistant est refusé (fail-closed : pas d'écriture pour un engagement fantôme).
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(99), bearer_headers(&otok),
+            Json(json!({"profile": "pentest"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "engagement inexistant -> 400");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
     }
 
     /// [parité lecture] parse_plan_verdicts : extrait verdict + kind→target des lignes du moteur
@@ -12024,13 +13200,13 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let (otok, _) = create_session(&app, uid_of(&app, "oo"));
 
         // viewer -> 403 (fail-closed) ET aucune persistance.
-        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&vtok),
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&vtok),
             Json(json!({"profile": "pentest"}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
         { let db = app.db(); assert!(settings_get(&db, "technique_selection").is_none(), "un refus ne persiste rien"); }
 
         // operator -> 200 + persistance + ledger attribué.
-        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Json(json!({"profile": "pentest", "categories": {"SQLi": false}}))).await;
         assert_eq!(resp.status(), StatusCode::OK, "operator autorisé");
         let stored = { let db = app.db(); settings_get(&db, "technique_selection").unwrap() };
@@ -12044,7 +13220,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert_eq!(last["detail"]["selection"]["profile"], "pentest");
 
         // profil invalide -> 400.
-        let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Json(json!({"profile": "root"}))).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "profil invalide -> 400");
         let _ = std::fs::remove_file(&path);
@@ -12119,13 +13295,13 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let (otok, _) = create_session(&app, uid_of(&app, "oo"));
 
         // viewer -> 403 (fail-closed) ET aucune persistance.
-        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&vtok),
+        let resp = workflow_create(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&vtok),
             Json(json!({"name": "my-wf", "steps": [{"kind": "recon.httpx"}]}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
         { let db = app.db(); assert!(settings_get(&db, "workflows").is_none(), "un refus ne persiste rien"); }
 
         // operator create -> 200 + persistance + ledger attribué.
-        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_create(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Json(json!({"name": "my-wf", "description": "d", "steps": [{"kind": "recon.httpx"}, {"kind": "sqli.probe", "params": {"param": "q"}}]}))).await;
         assert_eq!(resp.status(), StatusCode::OK, "operator autorisé");
         let stored = { let db = app.db(); settings_get(&db, "workflows").unwrap() };
@@ -12138,7 +13314,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert_eq!(last["detail"]["name"], "my-wf");
 
         // operator edit via :name -> 200 (remplace les étapes).
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Path("my-wf".into()), Json(json!({"steps": [{"kind": "web.nuclei"}]}))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let sv: Value = { let db = app.db(); serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap() };
@@ -12146,32 +13322,32 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert_eq!(sv["my-wf"]["steps"][0]["kind"], "web.nuclei");
 
         // création/édition avec un nom RÉSERVÉ (builtin) -> 409, aucune persistance du builtin.
-        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_create(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Json(json!({"name": "full-pentest", "steps": []}))).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT, "nom réservé refusé");
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Path("bug-bounty-web".into()), Json(json!({"steps": []}))).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT, "édition d'un builtin refusée");
 
         // suppression d'un BUILTIN -> 409 (protégé), même par operator.
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Path("recon-surface".into()), Json(json!({"delete": true}))).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT, "builtin non supprimable (fail-closed)");
 
         // suppression d'un INCONNU -> 404.
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Path("ghost".into()), Json(json!({"delete": true}))).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // viewer ne peut pas supprimer -> 403 (my-wf reste).
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&vtok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&vtok),
             Path("my-wf".into()), Json(json!({"delete": true}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         { let db = app.db(); let sv: Value = serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap();
           assert!(sv.get("my-wf").is_some(), "un delete refusé ne supprime rien"); }
 
         // operator supprime son workflow -> 200 + ledger `console.workflows.delete`.
-        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+        let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
             Path("my-wf".into()), Json(json!({"delete": true}))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let sv: Value = { let db = app.db(); serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap() };
@@ -12195,7 +13371,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
                 &json!({"my-wf": {"name": "my-wf", "description": "d", "builtin": false,
                                    "steps": [{"kind": "recon.httpx", "params": {}}, {"kind": "sqli.probe", "params": {}}]}}).to_string()).unwrap();
         }
-        let resp = workflows_list(State(app.clone())).await;
+        let resp = workflows_list(State(app.clone()), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let j = resp_json(resp).await;
         // builtins dérivés du moteur : recon-surface / bug-bounty-web / full-pentest, builtin:true.
@@ -12299,7 +13475,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let path = tmp_path("forge-test-techcat");
         let app = test_app(&path);
         // défaut (aucune sélection persistée -> bug_bounty).
-        let resp = techniques_catalog(State(app.clone())).await;
+        let resp = techniques_catalog(State(app.clone()), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp_json(resp).await;
         assert!(body.get("error").is_none(), "catalogue indisponible (spawn moteur): {body:?}");
@@ -12320,7 +13496,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             settings_set(&db, "technique_selection",
                 &json!({"profile":"pentest","categories":{},"techniques":{}}).to_string()).unwrap();
         }
-        let resp = techniques_catalog(State(app.clone())).await;
+        let resp = techniques_catalog(State(app.clone()), Query(HashMap::new())).await;
         let body = resp_json(resp).await;
         assert_eq!(body["profile"], "pentest");
         assert_eq!(flatten_enabled(&body).get("rce.probe"), Some(&true), "pentest -> rce.probe activé");

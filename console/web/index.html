@@ -112,12 +112,35 @@
 .pc-legend .pc-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .pc-legend .pc-dot.detected{background:var(--ok)} .pc-legend .pc-dot.missed{background:var(--sev4)} .pc-legend .pc-dot.unfired{background:var(--mut)}
 .pc-sub h3{font-size:13px;margin:18px 0 8px;color:var(--hd)}
+/* ENGAGEMENT — sélecteur header (indicateur proéminent de l'espace de travail actif) */
+.eng-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--acc) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--acc) 10%,transparent);max-width:340px}
+.eng-bar .eng-ic{display:inline-flex;color:var(--acc);flex:0 0 auto}
+.eng-bar .eng-ic .ic{width:15px;height:15px}
+.eng-select{background:transparent;border:0;color:var(--fg);font-weight:650;font-size:13px;max-width:230px;padding:3px 2px;cursor:pointer}
+.eng-select:focus{outline:none}
+.eng-new{padding:3px 6px;line-height:1}.eng-new .ic{width:15px;height:15px}
+.eng-bar.archived{border-color:color-mix(in srgb,var(--sev3) 50%,var(--bd));background:color-mix(in srgb,var(--sev3) 10%,transparent)}
+.eng-bar.archived .eng-ic{color:var(--sev3)}
+/* vue #engagements */
+.eg-active-row{background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.eg-actions{display:flex;flex-wrap:wrap;gap:6px}
+.eg-actions button{font-size:12px;padding:4px 9px}
+.eg-actions button.danger{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));color:var(--sev4)}
+.eg-actions button.danger:hover:not(:disabled){background:color-mix(in srgb,var(--sev4) 12%,transparent)}
 </style>
 </head>
 <body>
 <header>
   <button id="navtoggle" class="navtoggle" type="button" aria-label="Menu"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
   <h1><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span>Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></h1>
+  <!-- ENGAGEMENT ACTIF : sélecteur + indicateur PROÉMINENT. L'opérateur sait toujours dans quel
+       engagement (espace de travail isolé) il travaille. Change l'engagement -> recharge la vue et
+       ajoute ?engagement=<id> à chaque requête. « + » ouvre la création (operator). -->
+  <div id="eng-bar" class="eng-bar" role="group" aria-label="Engagement actif">
+    <span class="eng-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg></span>
+    <select id="engagement" class="eng-select" aria-label="Engagement actif" title="Engagement actif (espace de travail isolé)"></select>
+    <button id="eng-new" class="k-theme eng-new" type="button" aria-label="Nouvel engagement" title="Nouvel engagement (operator)"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  </div>
   <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
   <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
   <div class="hdr-tools">
@@ -143,6 +166,7 @@
 <div class="layout">
   <nav class="sidebar" id="nav" aria-label="Navigation">
     <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
+    <a href="#engagements"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg> <span>Engagements</span></a>
     <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement C2</span></a>
     <a href="#import"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> <span>Importer un scan</span></a>
     <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
@@ -173,6 +197,21 @@
   <section id="ov-modules" class="card" aria-labelledby="ovmh">
     <h2 id="ovmh">Capacités</h2>
     <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ENGAGEMENTS : objet de 1re classe (espace de travail isolé). Liste + création + édition/
+       archivage/suppression + bascule d'engagement actif. Chaque engagement porte SON scope, SON
+       ledger, SES techniques/workflows/profil. create/edit = operator ; archive/delete = admin. -->
+  <section id="engagements" class="card span2" aria-labelledby="egh">
+    <div class="panelhead">
+      <h2 id="egh">Engagements <span id="eg-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="eg-new2" type="button">+ Nouvel engagement</button>
+        <button id="eg-reload" class="k-theme" type="button" title="Rafraîchir">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Un <b>engagement</b> est un espace de travail <b>isolé</b> (à la workspace Metasploit) : son propre <b>scope</b> (fail-closed), son propre <b>ledger</b> tamper-evident, ses <b>findings / runs / techniques / workflows</b>. Un engagement ne voit JAMAIS les données d'un autre. On ne peut ni archiver ni supprimer le <b>dernier engagement actif</b>. Création/édition = <b>operator</b> ; archivage/suppression = <b>admin</b>.</p>
+    <div id="eg-result"><div class="muted">chargement…</div></div>
   </section>
 
   <!-- LANCEMENT C2 -->

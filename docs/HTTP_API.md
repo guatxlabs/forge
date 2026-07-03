@@ -78,7 +78,7 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 
 | Méthode & route | Objet |
 |---|---|
-| `POST /api/run` | **Lance une campagne gouvernée et auditée** (spawn `python3 -m forge.cli campaign`). Corps `{campaign, targets[], modules?, mode?, budget?, exhaustive?, reason?, arm?, allow_high_impact?, module_params?}`. Fail-closed : cibles ⊆ scope serveur, **plancher exploit** (exploit/destructif refusés sauf opt-in haut-impact = operator + `arm=true` + `reason`), FIFO (un seul run vivant → **409**). Voir [Architecture §3.3](ARCHITECTURE.md#33-le-run-flow--c2-light--gouverné). |
+| `POST /api/run` | **Lance une campagne gouvernée et auditée** (spawn `python3 -m forge.cli campaign`). Corps `{campaign, targets[], modules?, mode?, budget?, exhaustive?, reason?, arm?, allow_high_impact?, module_params?}`. Fail-closed : cibles ⊆ scope serveur, **plancher exploit** (exploit/destructif refusés sauf opt-in haut-impact = operator + `arm=true` + `reason`), **FIFO par engagement** (un run vivant *par engagement* ; 2e run sur le même engagement → **409** avec `engagement_id` ; autres engagements en parallèle). `engagement_id` optionnel dans le corps (défaut = engagement actif). Voir [Architecture §3.3](ARCHITECTURE.md#33-le-run-flow--c2-light--gouverné). |
 | `POST /api/runs/:id/cancel` | Annule le run courant. |
 | `POST /api/modules/refresh` | Re-peuple le catalogue `module` depuis `forge.cli modules`. |
 
