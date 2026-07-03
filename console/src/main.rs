@@ -666,7 +666,7 @@ fn effective_client_ip(peer: Option<IpAddr>, headers: &HeaderMap, trusted_proxy_
         // Le pair TCP DOIT être un proxy de confiance pour qu'on accorde foi au XFF qu'il a posé.
         if !trusted_proxy_cidrs.is_empty() && trusted_proxy_cidrs.iter().any(|c| ip_in_cidr(&p, c)) {
             if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-                if let Some(last) = xff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).last() {
+                if let Some(last) = xff.split(',').map(|s| s.trim()).rfind(|s| !s.is_empty()) {
                     if let Ok(ip) = last.parse::<IpAddr>() {
                         return Some(ip);
                     }
