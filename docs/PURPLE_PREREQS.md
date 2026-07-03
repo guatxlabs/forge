@@ -1,9 +1,17 @@
 # Prérequis Plume pour la boucle purple Forge (le moat)
 
+> **Plume est UN préréglage (`kind=plume`), pas la seule option.** La source de détection est un **plugin
+> configurable** : CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, un fichier JSONL ou une
+> commande maison se câblent **sans code** (wizard / *Administration → Source de détection*). Le modèle
+> `DetectionSource` complet et les préréglages par infra sont dans **[`DETECTION.md`](DETECTION.md)**. Ce
+> document ne couvre que le préréglage **Plume** ; `PLUME_URL`/`PLUME_TOKEN` restent supportés en
+> rétro-compat (interprétés comme `kind=plume`).
+
 ## Rappel du flux
 
-La console Forge `/api/purple/coverage` lit les run-records tirés (par `mitre`), fait
-`GET {PLUME_URL}/api/coverage/detections`, et **JOIN** → detected / missed / MTTD.
+La console Forge `/api/detection/coverage` (alias rétro-compat `/api/purple/coverage`) lit les run-records
+tirés (par `mitre`), interroge la **source de détection configurée**, et **JOIN** → detected / missed /
+MTTD. Pour le préréglage Plume, la source est `GET {PLUME_URL}/api/coverage/detections`.
 
 ## Checklist Plume (à faire avant le « go »)
 
@@ -35,11 +43,14 @@ La console Forge `/api/purple/coverage` lit les run-records tirés (par `mitre`)
 
 ## Côté Forge au « go »
 
-Régler `PLUME_URL` + auth Plume sur la console, confirmer le type d'auth, lancer la 1ʳᵉ campagne lab
-gatée ROE, sortir la matrice live + le rapport.
+Configurer la **source de détection** (préréglage Plume) — soit dans l'UI (*Administration → Source de
+détection*, ou l'étape 3 du wizard), soit via `PLUME_URL` + `PLUME_TOKEN` (rétro-compat) — confirmer le
+type d'auth, lancer la 1ʳᵉ campagne lab gatée ROE, sortir la matrice live + le rapport. Pour toute autre
+infra (CrowdSec, FortiGate, Elastic…), voir **[`DETECTION.md`](DETECTION.md)**.
 
 ## ⚠️ Sûreté
 
 - Le JOIN est **lecture seule** (sûr).
 - Tirer des techniques = **uniquement** cible autorisée / scopée. ROE / scope reste dur.
-- **JAMAIS** de tir sur prod non autorisée ni `PLUME_URL` détourné.
+- **JAMAIS** de tir sur prod non autorisée ni source de détection (`PLUME_URL`/`settings.detection_source`) détournée.
+- Source absente/injoignable ⇒ `source_reachable:false` : la mesure est déclarée **impossible**, jamais inventée.

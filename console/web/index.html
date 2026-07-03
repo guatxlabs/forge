@@ -451,6 +451,20 @@
     <p class="muted" style="margin:0 0 10px">Gouvernance des connecteurs (« installer / désinstaller » opérationnel). <b>État</b> = interrupteur opérateur (<code>enabled</code>) ; <b>override dispo</b> = surcharge de la sonde host (<code>available_override</code> : auto / forcer disponible / forcer indisponible) ; <b>web</b> = lançable depuis le web. Disponibilité <b>effective</b> = <code>enabled ET (override ?? sonde)</code>. Un connecteur <b>désactivé</b> ou <b>forcé indisponible</b> est <b>SKIP au tir</b> même si son binaire est présent — y compris pour les modules choisis par le planner. Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>.</p>
     <div id="admin-connectors-body"><div class="muted">chargement…</div></div>
   </section>
+
+  <!-- ADMINISTRATION — source de détection (boucle purple, réservé role=admin). GET/POST /api/detection/source
+       (check_admin, 403 sinon), ledgerisé ; le SECRET est WRITE-ONLY (affiché ••• une fois posé, jamais
+       renvoyé par GET). Test de joignabilité via POST /api/detection/test. Même composant que le wizard (étape 3). -->
+  <section id="admin-detection" class="card span2" aria-labelledby="adm-det-h">
+    <div class="panelhead">
+      <h2 id="adm-det-h">Administration — source de détection <span id="admin-det-kind" class="badge mut">—</span></h2>
+      <span class="qbar">
+        <button id="admin-det-reload" class="k-theme" type="button" title="Recharger la configuration de la source (secret rédigé)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Source <b>BLUE</b> (SIEM/IDS/pare-feu) corrélée à la boucle purple par identité MITRE. <b>N'importe quelle infra</b> se câble ici sans code (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, commande). Le <b>secret</b> est <b>write-only</b> (affiché <code>•••</code> une fois posé, jamais renvoyé) et manié comme un secret de session. Une source absente/injoignable ⇒ mesure déclarée <b>impossible</b> (<code>source_reachable:false</code>), jamais de détection inventée. Chaque enregistrement est <b>ledgerisé</b>. Détails : <code>docs/DETECTION.md</code>.</p>
+    <div id="admin-det-form"><div class="muted">chargement…</div></div>
+  </section>
 </main>
 </div>
 <!-- PORTAIL DE CONNEXION — gate du shell : affiché quand /api/whoami répond 401 (session requise et
@@ -498,30 +512,11 @@
       <div class="setup-note muted" id="su-enc-unavail">Chiffrement de la base au repos indisponible dans ce build — l'implémentation SQLCipher arrive dans une prochaine version.</div>
     </div>
 
-    <!-- STEP 3 — collecteur de détection (tout optionnel, stocké verbatim pour la boucle purple) -->
+    <!-- STEP 3 — source de détection (tout optionnel, stocké verbatim pour la boucle purple). MÊME composant
+         que le panneau admin (parité stricte du jeu de champs) : monté dynamiquement dans #su-det-form. -->
     <div class="setup-panel" data-panel="3">
-      <label class="login-f"><span>Collecteur de détection</span>
-        <select id="su-det-kind">
-          <option value="none" selected>Aucun</option>
-          <option value="plume">Plume (SOC)</option>
-          <option value="crowdsec">CrowdSec</option>
-          <option value="generic_http">HTTP générique</option>
-          <option value="file_jsonl">Fichier JSONL</option>
-          <option value="exec">Commande (exec)</option>
-        </select>
-      </label>
-      <label class="login-f"><span>Endpoint</span><input id="su-det-endpoint" type="text" autocomplete="off" spellcheck="false" placeholder="ex: http://plume:8080/api/coverage/detections"></label>
-      <label class="login-f"><span>Type d'authentification</span>
-        <select id="su-det-authtype">
-          <option value="" selected>—</option>
-          <option value="none">Aucune</option>
-          <option value="basic">Basic</option>
-          <option value="bearer">Bearer</option>
-          <option value="header">En-tête personnalisé</option>
-        </select>
-      </label>
-      <label class="login-f"><span>Secret / token</span><input id="su-det-secret" type="password" autocomplete="new-password" placeholder="laisser vide si aucun"></label>
-      <label class="login-f"><span>Mapping (JSON, optionnel)</span><textarea id="su-det-mapping" rows="2" spellcheck="false" placeholder='ex: {"technique":"mitre","ts":"timestamp"}'></textarea></label>
+      <div class="setup-note muted">Source BLUE (SIEM/IDS/pare-feu) corrélée par identité MITRE. Optionnelle — modifiable plus tard dans Administration. Le secret est write-only. Voir <code>docs/DETECTION.md</code>.</div>
+      <div id="su-det-form"></div>
     </div>
 
     <!-- STEP 4 — politique opérateur (C2). require_reason par défaut ON (parité comportement actuel) -->

@@ -692,3 +692,27 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .setup-btn-ghost{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer}
 .setup-btn-ghost:hover{border-color:var(--acc);color:var(--acc)}
 @media(max-width:420px){.setup-card{padding:20px 18px 16px}.setup-step-l{display:none}}
+
+/* Source de détection — composant PARTAGÉ (panneau #admin + étape 3 du wizard). Réutilise .login-f ;
+   ajoute le style select/textarea (hors .setup-view) + l'éditeur de mapping (lignes) + les actions. */
+.det-form{display:flex;flex-direction:column;gap:11px}
+.det-form .login-f select,.det-form .login-f textarea{background:var(--card2);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:10px 12px;font-size:14px;font-family:inherit}
+.det-form .login-f textarea{font-family:var(--font-mono);font-size:13px;resize:vertical;min-height:56px}
+.det-form .login-f select:focus,.det-form .login-f textarea:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.det-form .login-f[hidden]{display:none}
+.det-block{display:flex;flex-direction:column;gap:10px;padding:11px;border:1px solid var(--bd);border-radius:9px;background:var(--card2)}
+.det-block[hidden]{display:none}
+.det-sub{font-size:12px;font-weight:700;color:var(--fg)}
+.det-rows{display:flex;flex-direction:column;gap:6px}
+.det-row{display:flex;gap:6px;align-items:center}
+.det-row input{flex:1;min-width:0;background:var(--card);border:1px solid var(--bd);border-radius:7px;color:var(--fg);padding:7px 9px;font-size:13px;font-family:var(--font-mono)}
+.det-row input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.det-row .det-row-tech{flex:0 0 120px}
+.det-row-rm{flex:0 0 auto;padding:5px 9px;line-height:1}
+.det-addrow{align-self:flex-start;padding:5px 10px;font-size:12px}
+.det-hint{font-size:12px;line-height:1.5}
+.det-actions{display:flex;gap:8px;margin-top:12px}
+.det-save{margin-top:0;padding:9px 18px}
+.det-testres{margin-top:9px;font-size:13px;font-family:var(--font-mono)}
+.det-testres.ok{color:var(--ok,#2dd4bf)}
+.det-testres.bad{color:var(--bad)}
