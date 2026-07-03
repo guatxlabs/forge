@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Forge — moteur red-team gated par ROE. Antithèse offensive du SOC blue-team Plume (GuatX).
 
 Sûreté d'abord : tout passe par la gate `roe.Roe` (fail-closed, inerte par défaut) et est

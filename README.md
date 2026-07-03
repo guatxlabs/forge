@@ -7,6 +7,8 @@
 
 **·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
 
+**License: [AGPL-3.0-only](LICENSE) — open core**  ·  Enterprise edition commerciale → [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md)
+
 </div>
 
 Plume **observe** (la plume qui consigne, bleu). Forge **frappe** — et **trempe** les défenses de
@@ -294,5 +296,27 @@ concepts, CLI, API HTTP, sécurité, dépannage). Les pages phares :
 - [`docs/MIGRATION.md`](docs/MIGRATION.md) — reprendre un install existant (DB + ledger + clé `.ed25519`) vers Docker/autre cible ; option chiffrement au repos SQLCipher.
 - [`docs/BACKUP.md`](docs/BACKUP.md) — sauvegarde/restauration **toujours chiffrées** (argon2id + XChaCha20-Poly1305), programmation + expédition **offsite**.
 
-## Licence
-Usage autorisé / éthique uniquement.
+## License & model
+
+Forge suit un modèle **open-core**.
+
+- **Community edition — [AGPL-3.0-only](LICENSE)** : le **cœur complet de gouvernance** est open, gratuit
+  et auto-hébergeable. Scope-guard ROE fail-closed, ledger d'autorisation Ed25519 tamper-evident, oracles
+  orientés-preuve, registre extensible de techniques + toutes les classes de techniques, run C2-light
+  gouverné, console (UI + wizard + RBAC admin/operator/viewer), connecteurs/orchestration (nuclei/msf/
+  burp/…), détection infra-agnostique, backup/restore chiffré et boucle purple — **tout ce qu'il faut
+  pour faire tourner Forge en solo ou en petite équipe**. Comme c'est de l'AGPL, tout déploiement en
+  réseau doit offrir la source correspondante à ses utilisateurs.
+- **Enterprise edition — licence commerciale distincte** : la couche **échelle / équipe / conformité** —
+  multi-tenant/MSSP (isolation crypto par tenant), SSO/SCIM, RBAC composable avancé & grants par
+  engagement, HA/clustering/store distribué (Postgres), conformité (preuves SOC2/ISO, rétention
+  legal-hold/WORM, clés KMS/HSM), connecteurs premium, et support/SLA.
+
+**Principe** : le **cœur gouvernance + audit cryptographique reste OUVERT et vérifiable** — c'est toute la
+crédibilité du produit. Seule la couche **scale/équipe/conformité** est commerciale, construite en
+**modules séparables**. Détail de la frontière : **[`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md)**.
+
+> **Usage autorisé / éthique uniquement.** La licence AGPL couvre le *code* ; elle n'autorise **aucune**
+> action offensive hors d'un périmètre explicitement autorisé (bug bounty in-scope, pentest sous contrat,
+> CTF, infra propre). La gate ROE + le scope-guard + le ledger sont là pour imposer ET prouver cette
+> autorisation.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Forge console — store + API pour les findings/run-records de Forge.
 //!
 //! Fork minimal de la colonne Plume (axum + rusqlite, binaire unique). Donne à Forge :
