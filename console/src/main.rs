@@ -45,6 +45,10 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 // (visibles depuis un module descendant de la racine de crate).
 mod finding_templates;
 mod reports;
+// ENTERPRISE (separable, flag-gated) — row-level multi-tenancy. Community (default) build never engages
+// it (tenancy::enabled() false => single implicit tenant #1, byte-identical). Wired as its OWN module
+// (minimal main.rs delta) so the open core does not depend on it. See COMMUNITY_VS_ENTERPRISE.md.
+mod tenancy;
 
 // Version produit — SOURCE DE VÉRITÉ UNIQUE : le fichier `VERSION` à la racine du repo, lu à la
 // COMPILATION (`include_str!`). Le même fichier alimente le moteur Python (forge/__init__.py) et
@@ -122,7 +126,10 @@ CREATE TABLE IF NOT EXISTS settings(
 -- (finding/run_job) reste un sous-label LIBRE AU SEIN d'un engagement. finding/runrecord/roe_decision/
 -- run_job portent `engagement_id` (DEFAULT 1 = engagement #1, créé au boot depuis le scope serveur
 -- courant via ensure_default_engagement : migration rétro-compat ZÉRO-PERTE). `status` ∈ {active|
--- archived}, `mode` ∈ {white|grey|black} (contraintes applicatives, pas SQL).
+-- archived}, `mode` ∈ {white|grey|black} (contraintes applicatives, pas SQL). `tenant_id` (ENTERPRISE,
+-- ajouté par migrate ; DEFAULT 1 = tenant #1) rattache l'engagement à un TENANT : le filtre fail-closed
+-- tenancy.rs (flag-gated) restreint chaque lecture/écriture aux engagements des tenants accordés au
+-- caller — NO-OP en community (single implicit tenant #1, byte-identique).
 CREATE TABLE IF NOT EXISTS engagement(
   id INTEGER PRIMARY KEY, name TEXT, status TEXT DEFAULT 'active', mode TEXT DEFAULT 'grey',
   scope_json TEXT NOT NULL DEFAULT '{}', ledger_path TEXT NOT NULL DEFAULT '',
@@ -139,6 +146,22 @@ CREATE TABLE IF NOT EXISTS finding_template(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, vuln_class TEXT DEFAULT '', cwe TEXT DEFAULT '',
   severity TEXT DEFAULT 'INFO', title_tmpl TEXT DEFAULT '', description_tmpl TEXT DEFAULT '',
   remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '');
+-- TENANT (ENTERPRISE — row-level multi-tenancy, separable/flag-gated). Top of the hierarchy:
+-- TENANT ──< ENGAGEMENT ──< findings/runs (data inherits tenant via engagement_id). Community (default)
+-- runs as a SINGLE IMPLICIT TENANT #1 with byte-identical behaviour — the tenant filter (tenancy.rs) is a
+-- no-op unless the enterprise flag is engaged. `status` ∈ {active|archived} (applicative constraint).
+CREATE TABLE IF NOT EXISTS tenant(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, status TEXT DEFAULT 'active',
+  created TEXT DEFAULT '', updated TEXT DEFAULT '');
+-- TENANT_GRANT (ENTERPRISE) : maps which USERS may access which TENANTS. FAIL-CLOSED enforcement
+-- (tenancy.rs) — a user only sees/acts on engagements whose tenant_id is in their granted set; no grant
+-- => zero rows / 403. `role` ∈ {tenant_admin|tenant_operator|tenant_viewer} (applicative). UNIQUE(user,tenant)
+-- => at most one grant per (user,tenant). In community mode grants are unused (single implicit tenant).
+CREATE TABLE IF NOT EXISTS tenant_grant(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'tenant_viewer', created TEXT DEFAULT '',
+  UNIQUE(user_id, tenant_id) ON CONFLICT IGNORE);
+CREATE INDEX IF NOT EXISTS idx_tenant_grant_user ON tenant_grant(user_id);
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -190,6 +213,11 @@ fn migrate(db: &Connection) {
         "ALTER TABLE runrecord ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE roe_decision ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE run_job ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
+        // TENANT (ENTERPRISE) : chaque engagement appartient à un tenant. DEFAULT 1 (tenant #1) =>
+        // rétro-compat ZÉRO-PERTE : une base ANTÉRIEURE voit TOUS ses engagements rattachés au tenant
+        // par défaut (créé au boot par ensure_default_tenant). NOT NULL autorisé (DEFAULT constant).
+        // L'isolation applicative (filtre fail-closed) est portée par tenancy.rs — no-op en community.
+        "ALTER TABLE engagement ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1",
     ];
     for a in alters {
         let _ = db.execute(a, []); // error-ignored (colonne déjà présente)
@@ -220,6 +248,23 @@ fn migrate(db: &Connection) {
            remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')",
         [],
     );
+    // TENANT / TENANT_GRANT (ENTERPRISE) : re-créées ici (idempotent) en plus du SCHEMA, pour qu'une base
+    // ANTÉRIEURE à leur introduction les obtienne au 1er boot suivant la mise à jour (même discipline que
+    // `engagement`/`settings`). Le seeding du tenant #1 + backfill est fait par ensure_default_tenant.
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS tenant(
+           id INTEGER PRIMARY KEY, name TEXT NOT NULL, status TEXT DEFAULT 'active',
+           created TEXT DEFAULT '', updated TEXT DEFAULT '')",
+        [],
+    );
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS tenant_grant(
+           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+           role TEXT NOT NULL DEFAULT 'tenant_viewer', created TEXT DEFAULT '',
+           UNIQUE(user_id, tenant_id) ON CONFLICT IGNORE)",
+        [],
+    );
+    let _ = db.execute("CREATE INDEX IF NOT EXISTS idx_tenant_grant_user ON tenant_grant(user_id)", []);
 }
 
 /// Garantit l'existence du dashboard par défaut (id=1) — rétro-compat : la colonne `panel.dashboard_id`
@@ -312,6 +357,42 @@ fn ensure_default_engagement(db: &Connection, scope_in: &[String], scope_mode: &
         "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
          VALUES(1,?,?,?,?,?,datetime('now'),datetime('now'))",
         rusqlite::params!["Engagement par défaut", "active", scope_mode, scope_json, ledger_path],
+    );
+}
+
+/// MIGRATION ZÉRO-PERTE (ENTERPRISE / rétro-compat) — garantit le TENANT #1 (défaut). Si la table
+/// `tenant` est VIDE : crée le tenant #1, backfille tout engagement au tenant #1 (la colonne
+/// `engagement.tenant_id` a DEFAULT 1, ceci est un filet défensif), et SÈME un grant vers le tenant #1
+/// pour CHAQUE utilisateur existant (rôle dérivé du rôle RBAC : admin->tenant_admin, operator->
+/// tenant_operator, sinon tenant_viewer). But : quand l'admin ENGAGE plus tard le flag enterprise, les
+/// comptes déjà provisionnés conservent l'accès à l'espace historique (« existing users implicitly have
+/// full access to tenant #1 »). En COMMUNITY le filtre est de toute façon un no-op ; ces grants restent
+/// inertes. Idempotent : ne fait RIEN si un tenant existe déjà (n'écrase jamais un provisioning).
+fn ensure_default_tenant(db: &Connection) {
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM tenant", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 {
+        return; // déjà provisionné — ne jamais écraser
+    }
+    let _ = db.execute(
+        "INSERT INTO tenant(id,name,status,created,updated)
+         VALUES(1,'Tenant par défaut','active',datetime('now'),datetime('now'))",
+        [],
+    );
+    // filet défensif : tout engagement sans tenant valide -> tenant #1 (la colonne a déjà DEFAULT 1).
+    let _ = db.execute(
+        "UPDATE engagement SET tenant_id=1 WHERE tenant_id IS NULL OR tenant_id NOT IN (SELECT id FROM tenant)",
+        [],
+    );
+    // rétro-compat : chaque utilisateur existant reçoit un grant vers le tenant #1 (rôle dérivé du RBAC).
+    let _ = db.execute(
+        "INSERT OR IGNORE INTO tenant_grant(user_id,tenant_id,role,created)
+         SELECT id, 1,
+                CASE role WHEN 'admin' THEN 'tenant_admin' WHEN 'operator' THEN 'tenant_operator' ELSE 'tenant_viewer' END,
+                datetime('now')
+           FROM users",
+        [],
     );
 }
 
@@ -1330,6 +1411,12 @@ fn admin_update_user(app: &App, actor: &str, target_login: &str, body: &Value) -
     // hash HORS section critique (argon2id coûteux).
     let new_hash: Option<String> = if reset_pw { Some(hash_pw(&password)) } else { None };
 
+    // ENTERPRISE (fail-closed marker) : un super-admin DÉSIGNÉ (provisioning) est NON-DÉSACTIVABLE — on
+    // refuse toute désactivation / rétrogradation sous `admin`. No-op pour un login non super-admin.
+    // Appelé HORS du guard DB (guard_superadmin_user_mutation reverrouille son propre lock).
+    tenancy::guard_superadmin_user_mutation(app, &target_login, new_disabled == Some(true), new_role.as_deref(), false)
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+
     let (purge, eff_role, eff_disabled) = {
         let db = app.db();
         let (old_role, old_disabled_i): (String, i64) = db
@@ -1395,6 +1482,10 @@ fn admin_update_user(app: &App, actor: &str, target_login: &str, body: &Value) -
 /// UN SEUL guard DB (atomique). Recalcule `auth_required` et ledgerise l'action avec l'admin acteur.
 fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> Result<Value, (StatusCode, String)> {
     let target_login = validate_login(target_login).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // ENTERPRISE (fail-closed marker) : un super-admin DÉSIGNÉ est NON-SUPPRIMABLE. No-op pour un login
+    // ordinaire. Appelé HORS du guard DB (reverrouille son propre lock).
+    tenancy::guard_superadmin_user_mutation(app, &target_login, false, None, true)
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
     {
         let db = app.db();
         let (role, disabled): (String, i64) = db
@@ -2049,11 +2140,11 @@ fn paginate(q: &HashMap<String, String>, default_limit: i64, max_limit: i64) -> 
     (limit, offset)
 }
 
-async fn findings(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn findings(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT (objet de 1re classe) : la vue ne montre QUE les findings de l'engagement actif
     // (fail-closed : un engagement ne voit JAMAIS les findings d'un autre). `engagement_id` est un
     // entier RÉSOLU (jamais du texte client) -> inliné sans risque d'injection.
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
@@ -2096,10 +2187,10 @@ async fn findings(State(app): State<App>, Query(q): Query<HashMap<String, String
     Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows}))
 }
 
-async fn finding_detail(State(app): State<App>, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn finding_detail(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ISOLATION : le détail n'est servi QUE si le finding appartient à l'engagement actif (un id d'un
     // AUTRE engagement -> 404, jamais divulgué). engagement_id résolu (entier) inliné sans risque.
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     let row = db.query_row(
         &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id FROM finding WHERE id=? AND engagement_id={eid}"),
@@ -2129,9 +2220,9 @@ async fn finding_detail(State(app): State<App>, Path(id): Path<i64>, Query(q): Q
     }
 }
 
-async fn runrecords(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn runrecords(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les runrecords de la vue sont ceux de l'engagement actif UNIQUEMENT (isolation).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
@@ -2230,10 +2321,10 @@ async fn modules(State(app): State<App>) -> impl IntoResponse {
     Json(Value::Array(modules_catalog(&db)))
 }
 
-async fn campaigns(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : `campaign` est un sous-label LIBRE AU SEIN d'un engagement — on n'agrège donc QUE
     // les campagnes de l'engagement actif (une même chaîne dans un autre engagement reste invisible ici).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     // Agrège depuis les findings (source réelle) + table campaign (métadonnées). Pas de JOIN strict :
     // on liste les campagnes vues côté findings + celles déclarées, avec leurs compteurs.
@@ -2253,9 +2344,9 @@ async fn campaigns(State(app): State<App>, Query(q): Query<HashMap<String, Strin
     Json(Value::Array(out))
 }
 
-async fn roe(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les décisions du garde-fou sont celles de l'engagement actif UNIQUEMENT (isolation).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
@@ -2688,14 +2779,20 @@ fn read_ledger_lines(path: &str) -> Vec<Value> {
 }
 
 /// GET /api/ledger — liste les entrées du ledger (depuis le JSONL disque), paginé (limit/offset).
-async fn ledger(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn ledger(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : chaque engagement porte SON ledger DÉDIÉ (fichier JSONL). La vue lit UNIQUEMENT le
     // ledger de l'engagement actif — jamais celui d'un autre engagement (isolation tamper-evident).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    let (limit, offset) = paginate(&q, 200, 2000);
+    // ENTERPRISE fail-closed : un engagement d'un tenant NON accordé résout vers NO_ENGAGEMENT. On ne
+    // DOIT PAS appeler engagement_ledger_path (qui retomberait sur le ledger console par défaut = leak) :
+    // on renvoie un ledger VIDE. No-op en community (enabled=false, eid réel).
+    if tenancy::enabled(&app) && eid == tenancy::NO_ENGAGEMENT {
+        return Json(json!({"total": 0, "limit": limit, "offset": offset, "path": "", "engagement": eid, "entries": []}));
+    }
     let path = engagement_ledger_path(&app, eid);
     let entries = read_ledger_lines(&path);
     let total = entries.len();
-    let (limit, offset) = paginate(&q, 200, 2000);
     let page: Vec<Value> = entries.into_iter().skip(offset as usize).take(limit as usize).collect();
     Json(json!({"total": total, "limit": limit, "offset": offset, "path": path, "engagement": eid, "entries": page}))
 }
@@ -2793,17 +2890,24 @@ fn ledger_verify_api_json(v: &LedgerVerify, path: &str) -> Value {
 /// GET /api/ledger/verify — recalcule la chaîne SHA-256 (prev|seq|ts|kind|canon(detail))
 /// et vérifie chaque hash + le chaînage `prev`. NE vérifie PAS les signatures (Ed25519/HMAC) :
 /// la console n'a pas la clé -> `sig_checked: false` (la vérif signature reste côté `forge ledger verify`).
-async fn ledger_verify(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn ledger_verify(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : vérifie la chaîne du ledger DÉDIÉ de l'engagement actif (isolation).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // ENTERPRISE fail-closed : tenant non accordé -> NO_ENGAGEMENT ; ne PAS retomber sur le ledger par
+    // défaut (leak). On renvoie le contrat « ledger vide » (empty=true). No-op en community.
+    if tenancy::enabled(&app) && eid == tenancy::NO_ENGAGEMENT {
+        let v = LedgerVerify { ok: false, entries: 0, broken: Value::Null, why: Some("ledger absent".to_string()),
+            head: None, alg: String::new(), exists: false, empty: true };
+        return (StatusCode::OK, Json(ledger_verify_api_json(&v, "")));
+    }
     let path = engagement_ledger_path(&app, eid);
     let v = verify_ledger_chain(&path);
     (StatusCode::OK, Json(ledger_verify_api_json(&v, &path)))
 }
 
-async fn coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : couverture ATT&CK de l'engagement actif UNIQUEMENT (engagement_id résolu, inliné).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     // filtre campaign optionnel (param lié — pas d'inlining).
     let (sql, args): (String, Vec<String>) = match q.get("campaign") {
@@ -3599,9 +3703,9 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
 ///     ("error": "...")                 // présent UNIQUEMENT si source_reachable=false (raison lisible)
 ///   }
 /// Si source_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
-async fn purple_coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn purple_coverage(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : la couverture de détection est calculée sur les tirs de l'engagement actif UNIQUEMENT.
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     // côté RED : techniques tirées (fired=1) + horodatage du tir, filtrées par campaign optionnelle.
     let fired = read_fired_techniques(&app, Some(eid), q.get("campaign").map(|c| ("campaign", c.as_str())));
     (StatusCode::OK, Json(fetch_purple_coverage(&app, fired).await))
@@ -4020,9 +4124,9 @@ fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, Strin
 /// `bug_bounty_eligible`, `pentest_only`, `enabled_for_current_scope`. Lecture (viewer) — la sélection
 /// est visible de tous ; seule sa MUTATION est gouvernée (POST /api/techniques/selection). DÉRIVÉ du
 /// registre côté moteur : un nouveau module @register apparaît AUTOMATIQUEMENT sous sa catégorie.
-async fn techniques_catalog(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn techniques_catalog(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     // ENGAGEMENT : catalogue résolu contre la sélection/profil de l'engagement actif (par-engagement).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let sel = technique_selection_value_for(&app, eid);
     match spawn_techniques_catalog(&app, &sel) {
         Ok(mut v) => {
@@ -4060,7 +4164,7 @@ async fn technique_selection_set(
     // ENGAGEMENT : la sélection est PAR-ENGAGEMENT (chaque engagement a SON profil/toggles). L'engagement
     // cible vient de `?engagement=` (ou body.engagement_id), défaut = engagement actif. Un id EXPLICITE
     // doit exister (fail-closed : on n'écrit jamais une sélection pour un engagement fantôme).
-    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+    let eid = match resolve_mutation_engagement_id(&app, &headers, &q, &body) {
         Ok(e) => e,
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
     };
@@ -4228,10 +4332,10 @@ fn workflow_view(wf: &Value) -> Value {
 /// la MUTATION est gouvernée (POST). Fail-soft : si le moteur est absent, `builtins:[]` + note d'erreur
 /// (le SPA affiche encore les workflows utilisateur et le builder). Le SPA croise chaque étape avec
 /// `GET /api/techniques` (enabled_for_current_scope) pour montrer ce qui est activé/autorisé au scope.
-async fn workflows_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn workflows_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     // ENGAGEMENT : les workflows UTILISATEUR sont PAR-ENGAGEMENT (chaque engagement a SA bibliothèque).
     // Les builtins (dérivés du registre moteur) sont communs. `?engagement=` -> défaut = engagement actif.
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let user_map = workflows_user_map_for(&app, eid);
     let mut user: Vec<Value> = Vec::new();
     let mut names: Vec<&String> = user_map.keys().collect();
@@ -4286,7 +4390,7 @@ async fn workflow_create(
         return (s, j).into_response();
     }
     // ENGAGEMENT cible (par-engagement) : `?engagement=` (ou body.engagement_id), défaut = actif.
-    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+    let eid = match resolve_mutation_engagement_id(&app, &headers, &q, &body) {
         Ok(e) => e,
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
     };
@@ -4329,7 +4433,7 @@ async fn workflow_edit(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_name", "why": "nom de workflow mal formé"}))).into_response();
     }
     // ENGAGEMENT cible (par-engagement) : `?engagement=` (ou body.engagement_id), défaut = actif.
-    let eid = match resolve_mutation_engagement_id(&app, &q, &body) {
+    let eid = match resolve_mutation_engagement_id(&app, &headers, &q, &body) {
         Ok(e) => e,
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
     };
@@ -5660,7 +5764,7 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // #1). C'est SON scope (in/out), SON mode et SON ledger qui gouvernent ce run — PAS les App globals
     // (qui ne restent que les défauts de l'engagement #1). Fail-closed : engagement inconnu => 400.
     let engagement_id = body.get("engagement_id").and_then(|v| v.as_i64());
-    let eng = match resolve_engagement(&app, engagement_id) {
+    let eng = match resolve_engagement(&app, &headers, engagement_id) {
         Ok(e) => e,
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))),
     };
@@ -6386,7 +6490,15 @@ fn host_in_scope_list(scope_in: &[String], host: &str) -> bool {
 /// sinon le plus ancien tout court (rétro-compat : engagement #1). C'est CET engagement (son scope,
 /// son mode, son ledger) que le run flow consomme — JAMAIS les App globals (qui restent seulement les
 /// défauts de l'engagement #1 pour la rétro-compat). Verrouille et libère son propre lock DB.
-fn resolve_engagement(app: &App, requested: Option<i64>) -> Result<Engagement, String> {
+fn resolve_engagement(app: &App, headers: &HeaderMap, requested: Option<i64>) -> Result<Engagement, String> {
+    // ENTERPRISE (flag-gated) : un run ne peut cibler QUE un engagement d'un tenant accordé (fail-closed —
+    // resolve avant tout spawn). Les checks tenant verrouillent/relâchent leur propre lock DB, on ne les
+    // appelle donc PAS en tenant `app.db()`. Community => branche historique EXACTE (byte-identique).
+    if tenancy::enabled(app) {
+        let id = tenancy::run_engagement_id(app, headers, requested)?;
+        let db = app.db();
+        return load_engagement(&db, id).ok_or_else(|| format!("engagement {id} introuvable"));
+    }
     let db = app.db();
     let id = match requested {
         Some(id) => id,
@@ -6425,7 +6537,13 @@ fn resolve_engagement(app: &App, requested: Option<i64>) -> Result<Engagement, S
 /// engagement ACTIF le plus récent (status='active', ORDER BY id DESC), sinon le plus récent tout court,
 /// sinon 1 (rétro-compat mono-engagement). Verrouille et libère son propre lock DB (ne pas appeler en
 /// tenant déjà `app.db()`).
-fn resolve_view_engagement_id(app: &App, q: &HashMap<String, String>) -> i64 {
+fn resolve_view_engagement_id(app: &App, headers: &HeaderMap, q: &HashMap<String, String>) -> i64 {
+    // ENTERPRISE (flag-gated) : résolution TENANT-AWARE fail-closed — un engagement d'un tenant non
+    // accordé résout vers NO_ENGAGEMENT (zéro ligne). Community => branche historique EXACTE (byte-identique).
+    if tenancy::enabled(app) {
+        let requested = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok());
+        return tenancy::view_engagement_id(app, headers, requested);
+    }
     if let Some(id) = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok()) {
         return id;
     }
@@ -6439,14 +6557,30 @@ fn resolve_view_engagement_id(app: &App, q: &HashMap<String, String>) -> i64 {
 /// query `?engagement=` > body `engagement_id` > défaut (resolve_view_engagement_id). Un id EXPLICITE
 /// doit EXISTER (fail-closed : on n'écrit jamais une config pour un engagement fantôme). Sans id explicite
 /// on retombe sur le défaut (jamais d'erreur) — rétro-compat mono-engagement.
-fn resolve_mutation_engagement_id(app: &App, q: &HashMap<String, String>, body: &Value) -> Result<i64, String> {
+fn resolve_mutation_engagement_id(app: &App, headers: &HeaderMap, q: &HashMap<String, String>, body: &Value) -> Result<i64, String> {
     match q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok())
         .or_else(|| body.get("engagement_id").and_then(|v| v.as_i64())) {
         Some(id) => {
             let exists = { let db = app.db(); db.query_row("SELECT 1 FROM engagement WHERE id=?", [id], |_| Ok(())).is_ok() };
-            if exists { Ok(id) } else { Err(format!("engagement {id} introuvable")) }
+            if !exists {
+                return Err(format!("engagement {id} introuvable"));
+            }
+            // ENTERPRISE (flag-gated) fail-closed : on n'écrit JAMAIS une config par-engagement pour un
+            // engagement d'un tenant NON accordé — message identique à « introuvable » (pas de fuite
+            // d'existence). No-op en community (engagement_visible => true).
+            if tenancy::enabled(app) && !tenancy::engagement_visible(app, headers, id) {
+                return Err(format!("engagement {id} introuvable"));
+            }
+            Ok(id)
         }
-        None => Ok(resolve_view_engagement_id(app, q)),
+        None => {
+            let eid = resolve_view_engagement_id(app, headers, q);
+            // ENTERPRISE : aucun engagement accordé => refus (fail-closed) plutôt que d'écrire sur #1.
+            if tenancy::enabled(app) && eid == tenancy::NO_ENGAGEMENT {
+                return Err("aucun engagement accessible (aucun tenant accordé)".into());
+            }
+            Ok(eid)
+        }
     }
 }
 
@@ -6463,7 +6597,14 @@ fn engagement_ledger_path(app: &App, eid: i64) -> String {
 /// Dérive le ledger_path DÉDIÉ d'un NOUVEL engagement (jamais fourni par le client — anti write-anywhere) :
 /// fichier `engagement-<id>.jsonl` FRÈRE du ledger console (App.ledger_path). Ledger console au chemin nu
 /// ou vide => chemin relatif `engagement-<id>.jsonl`.
-fn derive_engagement_ledger_path(app: &App, id: i64) -> String {
+///
+/// ENTERPRISE (flag-gated) : le ledger est GROUPÉ par tenant (`tenant-<tid>/engagement-<id>.jsonl`) via
+/// tenancy::scoped_engagement_ledger_path. Community (flag OFF) => tenancy renvoie None et on garde le
+/// chemin PLAT historique (byte-identique). La signature Ed25519 par-ledger (.ed25519 frère) est inchangée.
+fn derive_engagement_ledger_path(app: &App, id: i64, tenant_id: i64) -> String {
+    if let Some(scoped) = tenancy::scoped_engagement_ledger_path(app, app.ledger_path.as_str(), id, tenant_id) {
+        return scoped;
+    }
     let base = app.ledger_path.as_str();
     if base.is_empty() {
         return format!("engagement-{id}.jsonl");
@@ -6536,31 +6677,49 @@ fn validate_engagement_scope(v: &Value) -> Result<(String, String), String> {
 
 /// Liste des engagements + compteurs agrégés (findings/runs) — aucune donnée d'un autre engagement n'est
 /// exposée (juste id/nom/statut/mode/date + compteurs). Lecture pure. Ordre par id.
-fn engagement_list_json(app: &App) -> Vec<Value> {
+fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value> {
+    // ENTERPRISE (flag-gated) : la liste ne montre QUE les engagements des tenants accordés au caller.
+    // Community => aucun filtre (WHERE vide) : SQL byte-identique à l'historique. Un grant vide => la
+    // clause `e.tenant_id IN (-1)` ne matche rien (fail-closed).
+    let where_clause = match tenancy::list_filter_sql(app, headers, "e") {
+        Some(cond) => format!(" WHERE {cond}"),
+        None => String::new(),
+    };
+    // ENTERPRISE (flag-gated) : n'expose `tenant_id` par engagement QUE sous le flag — le SPA en a besoin
+    // pour la hiérarchie tenant → engagement (filtrage du sélecteur par tenant actif). Community => champ
+    // ABSENT : le payload reste BYTE-IDENTIQUE à l'historique (aucune fuite de la dimension tenant).
+    let expose_tenant = tenancy::enabled(app);
     let db = app.db();
-    let mut stmt = match db.prepare(
+    let mut stmt = match db.prepare(&format!(
         "SELECT e.id, e.name, e.status, e.mode, e.created,
                 (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
-                (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id)
-         FROM engagement e ORDER BY e.id",
-    ) { Ok(s) => s, Err(_) => return vec![] };
+                (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
+                e.tenant_id
+         FROM engagement e{where_clause} ORDER BY e.id",
+    )) { Ok(s) => s, Err(_) => return vec![] };
     stmt.query_map([], |r| {
-        Ok(json!({
+        let tenant_id = r.get::<_, i64>(7)?;
+        let mut o = json!({
             "id": r.get::<_, i64>(0)?,
             "name": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
             "status": r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".into()),
             "mode": r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "grey".into()),
             "created": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
             "counts": {"findings": r.get::<_, i64>(5)?, "runs": r.get::<_, i64>(6)?},
-        }))
+        });
+        if expose_tenant {
+            o["tenant_id"] = json!(tenant_id);
+        }
+        Ok(o)
     })
     .map(|it| it.filter_map(|x| x.ok()).collect())
     .unwrap_or_default()
 }
 
 /// GET /api/engagements — liste + compteurs (viewer). Sert le sélecteur d'engagement du SPA.
-async fn engagements_list(State(app): State<App>) -> impl IntoResponse {
-    Json(json!({"engagements": engagement_list_json(&app)}))
+/// ENTERPRISE : restreinte aux tenants accordés (fail-closed) ; community => tous (no-op).
+async fn engagements_list(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
+    Json(json!({"engagements": engagement_list_json(&app, &headers)}))
 }
 
 /// POST /api/engagements {name, mode?, scope_json?} — CRÉE un engagement (OPÉRATEUR, fail-closed 403).
@@ -6593,9 +6752,22 @@ async fn engagements_create(
         None => scope_mode,
     };
     let actor = attribution_login(&app, &headers);
-    // INSERT (ledger_path provisoire vide) -> last_insert_rowid -> dérive ledger DÉDIÉ -> UPDATE. Sous un
-    // seul guard DB (atomique). Un engagement démarre TOUJOURS actif.
-    let (id, ledger_path) = {
+    // ENTERPRISE (flag-gated) : un engagement naît DANS un tenant accordé au créateur (fail-closed — on
+    // ne crée jamais un espace dans un tenant qu'on ne possède pas). Community => None (tenant #1 par
+    // défaut de la colonne, byte-identique). Résolu AVANT l'INSERT pour refuser (400) sans rien écrire.
+    let target_tenant: Option<i64> = if tenancy::enabled(&app) {
+        match tenancy::resolve_create_tenant(&app, &headers, &body) {
+            Ok(t) => Some(t),
+            Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_tenant", "why": why}))).into_response(),
+        }
+    } else {
+        None
+    };
+    // INSERT (ledger_path provisoire vide) -> last_insert_rowid -> rattache le tenant. Un engagement démarre
+    // TOUJOURS actif. Le ledger_path DÉDIÉ est dérivé HORS du guard (derive_engagement_ledger_path consulte
+    // tenancy::enabled qui reverrouille le mutex DB — ne JAMAIS l'appeler en tenant `app.db()`), puis posé
+    // par un UPDATE. Le champ reste '' entre l'INSERT et l'UPDATE (id pas encore divulgué : microfenêtre sûre).
+    let id = {
         let db = app.db();
         if let Err(e) = db.execute(
             "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,created,updated)
@@ -6605,10 +6777,19 @@ async fn engagements_create(
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response();
         }
         let id = db.last_insert_rowid();
-        let lp = derive_engagement_ledger_path(&app, id);
-        let _ = db.execute("UPDATE engagement SET ledger_path=? WHERE id=?", rusqlite::params![lp, id]);
-        (id, lp)
+        // ENTERPRISE : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
+        if let Some(t) = target_tenant {
+            let _ = db.execute("UPDATE engagement SET tenant_id=? WHERE id=?", rusqlite::params![t, id]);
+        }
+        id
     };
+    // Le ledger est GROUPÉ par tenant en enterprise (tenant-<tid>/…) ; en community target_tenant=None
+    // => tenant #1 et tenancy renvoie le chemin PLAT (byte-identique).
+    let ledger_path = derive_engagement_ledger_path(&app, id, target_tenant.unwrap_or(tenancy::DEFAULT_TENANT));
+    {
+        let db = app.db();
+        let _ = db.execute("UPDATE engagement SET ledger_path=? WHERE id=?", rusqlite::params![ledger_path, id]);
+    }
     // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
     append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
         "actor": actor, "engagement_id": id, "name": name, "mode": mode,
@@ -6750,6 +6931,12 @@ async fn engagements_update(
     } else if !check_operator(&app, &headers, Some(peer.ip())) {
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
+    }
+    // ENTERPRISE (flag-gated) fail-closed : on ne peut ÉDITER/ARCHIVER/SUPPRIMER QUE un engagement d'un
+    // tenant accordé. Un engagement d'un AUTRE tenant -> 404 (jamais divulgué, pas d'action cross-tenant).
+    // No-op en community (engagement_visible => true).
+    if tenancy::enabled(&app) && !tenancy::engagement_visible(&app, &headers, id) {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
     let actor = attribution_login(&app, &headers);
     let res = if is_delete {
@@ -7011,9 +7198,9 @@ fn run_job_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps,started_by,reason,targets,modules,started,finished,exit_code";
 
 /// GET /api/runs — liste les runs (récents d'abord). Lecture (viewer) — pas besoin d'opérateur.
-async fn runs_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : liste des runs de l'engagement actif UNIQUEMENT (isolation).
-    let eid = resolve_view_engagement_id(&app, &q);
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
     let db = app.db();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
@@ -9527,6 +9714,13 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
         // /api/report/branding (config admin-éditable). Secrets rédigés dans tous les formats.
         .merge(reports::routes())
+        // ENTERPRISE (separable, flag-gated) — TENANT ADMIN surface (console/src/tenancy.rs) : CRUD tenant
+        // (create/rename/archive) + gestion des grants, PLATFORM-ADMIN gated + ledgerisé `console.tenant.*`.
+        // Fusionné AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route
+        // refuse (403 enterprise_disabled) tant que le flag n'est pas engagé => community byte-identique
+        // (aucune surface d'administration tenant). La lecture cross-tenant du super-admin (audité) vit dans
+        // les résolveurs tenancy déjà câblés — pas de nouvelle route pour ça.
+        .merge(tenancy::routes())
         .fallback_service(ServeDir::new(web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     Router::new()
@@ -9674,6 +9868,10 @@ async fn main() {
     // scope serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Les lignes existantes gardent
     // engagement_id=1 (DEFAULT posé par migrate). Idempotent : ne réécrit jamais un engagement existant.
     ensure_default_engagement(&conn, &scope_in, &scope_mode, &ledger_path);
+    // TENANT #1 (ENTERPRISE / migration ZÉRO-PERTE) : si la table `tenant` est vide, crée le tenant par
+    // défaut, backfille les engagements (tenant_id=1) et sème les grants rétro-compat des comptes existants.
+    // NO-OP fonctionnel en community (le filtre tenancy.rs ne s'engage que sous le flag enterprise).
+    ensure_default_tenant(&conn);
     // racine des assets web statiques (style.css/app.js/fonts/…) servis en fallback.
     let web_dir = resolve_web_dir();
     println!("[forge-console] web assets: {web_dir}");
@@ -12051,45 +12249,611 @@ mod tests {
         }
 
         // findings : #1 ne voit que fa, #2 que fb.
-        let j = resp_json(findings(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let j = resp_json(findings(State(app.clone()), HeaderMap::new(), eng_query(1)).await.into_response()).await;
         let t1: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
         assert!(t1.contains(&"fa".to_string()) && !t1.contains(&"fb".to_string()), "engagement #1 ne voit que SES findings");
-        let j = resp_json(findings(State(app.clone()), eng_query(2)).await.into_response()).await;
+        let j = resp_json(findings(State(app.clone()), HeaderMap::new(), eng_query(2)).await.into_response()).await;
         let t2: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
         assert!(t2.contains(&"fb".to_string()) && !t2.contains(&"fa".to_string()), "engagement #2 ne voit que SES findings");
 
         // runrecords : isolés par engagement.
-        let j = resp_json(runrecords(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let j = resp_json(runrecords(State(app.clone()), HeaderMap::new(), eng_query(1)).await.into_response()).await;
         assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cA"), "runrecords #1 isolés");
         assert!(!j.as_array().unwrap().is_empty(), "runrecords #1 non vides");
 
         // roe : isolés par engagement.
-        let j = resp_json(roe(State(app.clone()), eng_query(2)).await.into_response()).await;
+        let j = resp_json(roe(State(app.clone()), HeaderMap::new(), eng_query(2)).await.into_response()).await;
         assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cB"), "roe #2 isolés");
 
         // runs : isolés par engagement.
-        let j = resp_json(runs_list(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let j = resp_json(runs_list(State(app.clone()), HeaderMap::new(), eng_query(1)).await.into_response()).await;
         assert!(j.as_array().unwrap().iter().all(|x| x["campaign"] == "cA"), "runs #1 isolés");
 
         // campagnes (dérivées des findings) : isolées par engagement.
-        let j = resp_json(campaigns(State(app.clone()), eng_query(2)).await.into_response()).await;
+        let j = resp_json(campaigns(State(app.clone()), HeaderMap::new(), eng_query(2)).await.into_response()).await;
         let camps: Vec<String> = j.as_array().unwrap().iter().map(|c| c["campaign"].as_str().unwrap().to_string()).collect();
         assert!(camps.contains(&"cB".to_string()) && !camps.contains(&"cA".to_string()), "campagnes #2 isolées");
 
         // couverture ATT&CK : isolée par engagement (T1190 chez #1, T1046 chez #2).
-        let j = resp_json(coverage(State(app.clone()), eng_query(1)).await.into_response()).await;
+        let j = resp_json(coverage(State(app.clone()), HeaderMap::new(), eng_query(1)).await.into_response()).await;
         let mitres: Vec<String> = j.as_array().unwrap().iter().map(|c| c["mitre"].as_str().unwrap().to_string()).collect();
         assert!(mitres.contains(&"T1190".to_string()) && !mitres.contains(&"T1046".to_string()), "couverture #1 isolée");
 
         // finding_detail : un id de #2 n'est PAS servi sous #1 (404, isolation).
         let fid_b: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fb'", [], |r| r.get(0)).unwrap() };
-        let resp = finding_detail(State(app.clone()), Path(fid_b), eng_query(1)).await.into_response();
+        let resp = finding_detail(State(app.clone()), HeaderMap::new(), Path(fid_b), eng_query(1)).await.into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "détail d'un finding d'un AUTRE engagement -> 404");
-        let resp = finding_detail(State(app.clone()), Path(fid_b), eng_query(2)).await.into_response();
+        let resp = finding_detail(State(app.clone()), HeaderMap::new(), Path(fid_b), eng_query(2)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK, "détail servi dans SON engagement");
 
         let _ = std::fs::remove_file(&ledger);
         let _ = std::fs::remove_file(&ledger2);
+    }
+
+    // =====================================================================================
+    // ENTERPRISE — ROW-LEVEL MULTI-TENANCY (tenancy.rs), flag-gated. Fail-closed tenant isolation +
+    // community no-op (byte-identical). Ces tests sont MUTATION-PROVABLES : affaiblir le filtre central
+    // (tenancy::engagement_visible / engagement_in / granted_tenants) fait passer un test AU ROUGE.
+    // =====================================================================================
+
+    /// Engage le flag enterprise via la config par-DB `enterprise.tenancy=on` (isolé par test, pas d'ENV
+    /// global). Le comportement community reste le défaut (flag absent).
+    fn enable_enterprise_tenancy(app: &App) {
+        let db = app.db();
+        settings_set(&db, "enterprise.tenancy", "on").unwrap();
+    }
+
+    /// Rattache l'engagement `eid` au tenant `tid` (crée la ligne tenant si besoin).
+    fn set_engagement_tenant(app: &App, eid: i64, tid: i64) {
+        let db = app.db();
+        db.execute(
+            "INSERT OR IGNORE INTO tenant(id,name,status,created,updated) VALUES(?,?,'active',datetime('now'),datetime('now'))",
+            rusqlite::params![tid, format!("tenant{tid}")],
+        ).unwrap();
+        db.execute("UPDATE engagement SET tenant_id=? WHERE id=?", rusqlite::params![tid, eid]).unwrap();
+    }
+
+    /// Accorde à `user_id` l'accès au tenant `tid` (rôle tenant_*).
+    fn grant_tenant(app: &App, user_id: i64, tid: i64, role: &str) {
+        let db = app.db();
+        db.execute(
+            "INSERT OR IGNORE INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
+            rusqlite::params![user_id, tid, role],
+        ).unwrap();
+    }
+
+    /// Sème deux tenants (1,2), deux engagements (#1->tenant1, #2->tenant2), chacun avec un finding/
+    /// runrecord/roe/run_job, et deux users (alice->tenant1, bob->tenant2). Retourne (app, alice_headers,
+    /// bob_headers, fid_a, fid_b). L'app est en mode ENTERPRISE.
+    fn seed_two_tenants(ledger: &str, ledger2: &str) -> (App, HeaderMap, HeaderMap, i64, i64) {
+        let app = test_app_scoped(ledger, vec!["a.example.com".into(), "b.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", ledger);  // A
+        insert_test_engagement(&app, 2, &["b.example.com"], "grey", ledger2); // B
+        set_engagement_tenant(&app, 1, 1);
+        set_engagement_tenant(&app, 2, 2);
+        {
+            let db = app.db();
+            upsert_user(&db, "alice", "operator", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "bob", "operator", &hash_pw("pw")).unwrap();
+            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fa','a.example.com','cA','HIGH',1)", []).unwrap();
+            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fb','b.example.com','cB','LOW',2)", []).unwrap();
+            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cA','a.example.com','recon.http','T1190',1,1)", []).unwrap();
+            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cB','b.example.com','recon.http','T1046',1,2)", []).unwrap();
+            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cA','r1','a1','a.example.com','recon.http','FIRE',1)", []).unwrap();
+            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cB','r2','a2','b.example.com','recon.http','VETO',2)", []).unwrap();
+            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r1','cA','done','propose',1)", []).unwrap();
+            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r2','cB','done','propose',2)", []).unwrap();
+        }
+        let (uid_a, uid_b) = (uid_of(&app, "alice"), uid_of(&app, "bob"));
+        grant_tenant(&app, uid_a, 1, "tenant_operator");
+        grant_tenant(&app, uid_b, 2, "tenant_operator");
+        let (atok, _) = create_session(&app, uid_a);
+        let (btok, _) = create_session(&app, uid_b);
+        let fid_a: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fa'", [], |r| r.get(0)).unwrap() };
+        let fid_b: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fb'", [], |r| r.get(0)).unwrap() };
+        enable_enterprise_tenancy(&app);
+        (app, bearer_headers(&atok), bearer_headers(&btok), fid_a, fid_b)
+    }
+
+    /// [TENANCY — community no-op] Flag OFF (défaut) : le filtre tenant est INERTE. Un user SANS aucun
+    /// grant voit TOUS les engagements et TOUTES leurs données (comportement mono-tenant historique,
+    /// byte-identique). C'est la garantie « default build = single implicit tenant ».
+    #[tokio::test]
+    async fn tenancy_disabled_is_community_noop() {
+        let ledger = tmp_path("forge-test-tnc-noop");
+        let ledger2 = tmp_path("forge-test-tnc-noop2");
+        // seed_two_tenants ENGAGE le flag ; on le DÉSACTIVE pour ce test (config community).
+        let (app, alice, _bob, _fa, fid_b) = seed_two_tenants(&ledger, &ledger2);
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        assert!(!tenancy::enabled(&app), "flag OFF => community");
+
+        // alice n'a de grant QUE sur tenant 1, mais en community elle voit AUSSI le tenant 2 (no-op).
+        assert!(tenancy::engagement_visible(&app, &alice, 2), "community : visibilité universelle (no-op)");
+        let engs = engagement_list_json(&app, &alice);
+        assert_eq!(engs.len(), 2, "community : la liste montre les DEUX engagements (no filtre)");
+        // findings de l'engagement #2 servis à alice malgré l'absence de grant (mono-tenant).
+        let j = resp_json(findings(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await;
+        let titles: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
+        assert!(titles.contains(&"fb".to_string()), "community : findings de #2 visibles (no-op)");
+        // finding_detail d'un id de #2 servi sous #2 (200) même sans grant.
+        let resp = finding_detail(State(app.clone()), alice.clone(), Path(fid_b), eng_query(2)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "community : détail servi (no-op)");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY — fail-closed cross-tenant] ENTERPRISE ON. alice (tenant A) ne peut NI LISTER, NI LIRE,
+    /// NI AGIR sur les engagements/findings/runs/roe/ledger/couverture/rapport de bob (tenant B), et
+    /// réciproquement. Aucun grant => zéro ligne / 403 (deny-by-default, comme le ROE).
+    ///
+    /// ⚠️ MUTATION-PROOF : si l'on affaiblit le filtre central (ex. `engagement_in`/`engagement_visible`
+    /// renvoient `true`), `view_engagement_id(alice, Some(2))` cesserait de renvoyer NO_ENGAGEMENT et les
+    /// findings/runs de B DÉBORDERAIENT chez alice -> les asserts « n'est PAS visible » passent AU ROUGE.
+    #[tokio::test]
+    async fn enterprise_tenant_isolation_is_fail_closed() {
+        let ledger = tmp_path("forge-test-tnc-iso");
+        let ledger2 = tmp_path("forge-test-tnc-iso2");
+        let (app, alice, bob, _fa, fid_b) = seed_two_tenants(&ledger, &ledger2);
+        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+
+        // (a) LISTE : alice ne voit QUE l'engagement de son tenant (A), bob QUE le sien (B).
+        let ea: Vec<i64> = engagement_list_json(&app, &alice).iter().map(|e| e["id"].as_i64().unwrap()).collect();
+        assert_eq!(ea, vec![1], "alice ne liste QUE l'engagement de son tenant");
+        let eb: Vec<i64> = engagement_list_json(&app, &bob).iter().map(|e| e["id"].as_i64().unwrap()).collect();
+        assert_eq!(eb, vec![2], "bob ne liste QUE l'engagement de son tenant");
+
+        // (b) FINDINGS : alice voit fa (A), JAMAIS fb (B) — même en ciblant explicitement ?engagement=2.
+        let j = resp_json(findings(State(app.clone()), alice.clone(), eng_query(1)).await.into_response()).await;
+        let ta: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
+        assert!(ta.contains(&"fa".to_string()), "alice voit SES findings");
+        let j = resp_json(findings(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await;
+        assert!(j["findings"].as_array().unwrap().is_empty(), "alice ne voit AUCUN finding de B (fail-closed)");
+
+        // (c) FINDING_DETAIL : un id de B n'est PAS servi à alice, même sous ?engagement=2 -> 404.
+        let resp = finding_detail(State(app.clone()), alice.clone(), Path(fid_b), eng_query(2)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "détail d'un finding de B refusé à alice (404)");
+
+        // (d) RUNRECORDS / ROE / RUNS / COVERAGE de B invisibles à alice.
+        assert!(resp_json(runrecords(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await.as_array().unwrap().is_empty(), "runrecords de B invisibles");
+        assert!(resp_json(roe(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await.as_array().unwrap().is_empty(), "roe de B invisibles");
+        assert!(resp_json(runs_list(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await.as_array().unwrap().is_empty(), "runs de B invisibles");
+        assert!(resp_json(coverage(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await.as_array().unwrap().is_empty(), "couverture de B invisible");
+
+        // (e) LEDGER : alice n'obtient PAS le ledger de B — ni entrées, ni chemin (aucun repli/leak).
+        let jl = resp_json(super::ledger(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await;
+        assert!(jl["entries"].as_array().unwrap().is_empty(), "ledger de B : aucune entrée servie à alice");
+        assert_eq!(jl["path"].as_str().unwrap(), "", "ledger de B : aucun chemin divulgué (pas de repli sur le ledger par défaut)");
+
+        // (f) RAPPORT / ÉDITION / RUN : le prédicat de garde (engagement_visible) refuse tout acte de A sur B.
+        assert!(!tenancy::engagement_visible(&app, &alice, 2), "alice ne voit pas l'engagement de B (gate rapport/CRUD)");
+        assert!(tenancy::engagement_visible(&app, &bob, 2), "bob voit SON engagement");
+        // run_create : alice ne peut cibler l'engagement de B (resolve -> Err, run refusé AVANT tout spawn).
+        assert!(resolve_engagement(&app, &alice, Some(2)).is_err(), "alice ne peut lancer un run sur l'engagement de B");
+        assert!(resolve_engagement(&app, &bob, Some(2)).is_ok(), "bob peut lancer un run sur SON engagement");
+        // technique-selection / workflows (mutation par-engagement) : refus cross-tenant.
+        let q2 = HashMap::from([("engagement".to_string(), "2".to_string())]);
+        assert!(resolve_mutation_engagement_id(&app, &alice, &q2, &json!({})).is_err(), "alice ne peut poser une config par-engagement sur B");
+        assert!(resolve_mutation_engagement_id(&app, &bob, &q2, &json!({})).is_ok(), "bob peut poser une config sur SON engagement");
+
+        // (g) ÉDITION/ARCHIVE/SUPPRESSION cross-tenant via le handler -> 404 (jamais divulgué ni muté).
+        let resp = engagements_update(State(app.clone()), conn_info(), alice.clone(), Path(2i64),
+            Json(json!({"name": "pwned-by-A"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "alice ne peut PAS éditer l'engagement de B (404)");
+        { let db = app.db(); let n: String = db.query_row("SELECT name FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
+          assert_ne!(n, "pwned-by-A", "l'engagement de B N'A PAS été muté par A"); }
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY — sans grant = rien] ENTERPRISE ON. Un compte SANS aucun tenant_grant (carol) n'accède à
+    /// RIEN : liste vide, résolution vers NO_ENGAGEMENT (zéro ligne), aucun engagement visible. Fail-closed
+    /// deny-by-default (miroir du ROE). Le repli bootstrap (hash env) n'a pas non plus de grant.
+    #[tokio::test]
+    async fn enterprise_no_grant_sees_nothing() {
+        let ledger = tmp_path("forge-test-tnc-nogrant");
+        let ledger2 = tmp_path("forge-test-tnc-nogrant2");
+        let (app, _alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        // carol : compte activé mais AUCUN grant.
+        { let db = app.db(); upsert_user(&db, "carol", "operator", &hash_pw("pw")).unwrap(); }
+        let (ctok, _) = create_session(&app, uid_of(&app, "carol"));
+        let carol = bearer_headers(&ctok);
+
+        assert!(engagement_list_json(&app, &carol).is_empty(), "sans grant : aucune liste");
+        assert_eq!(tenancy::view_engagement_id(&app, &carol, None), tenancy::NO_ENGAGEMENT, "sans grant : NO_ENGAGEMENT");
+        assert_eq!(tenancy::view_engagement_id(&app, &carol, Some(1)), tenancy::NO_ENGAGEMENT, "sans grant : #1 non résolu");
+        assert!(!tenancy::engagement_visible(&app, &carol, 1), "sans grant : #1 invisible");
+        assert!(!tenancy::engagement_visible(&app, &carol, 2), "sans grant : #2 invisible");
+        // requête anonyme (aucune session) : jamais aucun tenant accordé.
+        assert!(tenancy::granted_tenants(&app, &HeaderMap::new()).is_empty(), "anonyme : aucun tenant accordé");
+        let j = resp_json(findings(State(app.clone()), carol.clone(), eng_query(1)).await.into_response()).await;
+        assert!(j["findings"].as_array().unwrap().is_empty(), "sans grant : aucun finding servi");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY — filtre central, unité] Sémantique exacte de tenancy::view_engagement_id / engagement_visible
+    /// (l'ancre mutation-proof la plus directe : ces fonctions sont LE filtre). Enterprise ON.
+    #[tokio::test]
+    async fn tenancy_central_filter_semantics() {
+        let ledger = tmp_path("forge-test-tnc-central");
+        let ledger2 = tmp_path("forge-test-tnc-central2");
+        let (app, alice, bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        // visibilité stricte par appartenance tenant.
+        assert!(tenancy::engagement_visible(&app, &alice, 1) && !tenancy::engagement_visible(&app, &alice, 2), "alice: A oui, B non");
+        assert!(tenancy::engagement_visible(&app, &bob, 2) && !tenancy::engagement_visible(&app, &bob, 1), "bob: B oui, A non");
+        // resolution explicite : id du tenant accordé -> id ; sinon NO_ENGAGEMENT.
+        assert_eq!(tenancy::view_engagement_id(&app, &alice, Some(1)), 1);
+        assert_eq!(tenancy::view_engagement_id(&app, &alice, Some(2)), tenancy::NO_ENGAGEMENT);
+        // resolution par défaut (sans id) -> un engagement du tenant du caller (jamais NO_ENGAGEMENT s'il a un grant).
+        assert_eq!(tenancy::view_engagement_id(&app, &alice, None), 1, "défaut alice -> son engagement");
+        assert_eq!(tenancy::view_engagement_id(&app, &bob, None), 2, "défaut bob -> son engagement");
+        // granted_tenants reflète les grants.
+        assert!(tenancy::granted_tenants(&app, &alice).contains(&tenancy::DEFAULT_TENANT), "alice accède au tenant #1 (défaut)");
+        assert!(tenancy::granted_tenants(&app, &bob).contains(&2) && !tenancy::granted_tenants(&app, &bob).contains(&1), "bob accède UNIQUEMENT à tenant 2");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY — migration zéro-perte] ensure_default_tenant sur une base au SCHEMA courant : crée le
+    /// tenant #1, rattache TOUS les engagements existants au tenant #1, et sème un grant tenant #1 pour
+    /// CHAQUE utilisateur existant (rôle dérivé du RBAC). Idempotent (ne réécrit pas si un tenant existe).
+    #[test]
+    fn ensure_default_tenant_seeds_and_backfills() {
+        let conn = Connection::open_in_memory().expect("mem db");
+        conn.execute_batch(SCHEMA).expect("schema");
+        migrate(&conn);
+        // deux engagements + deux users AVANT toute provision tenant.
+        conn.execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(1,'e1','active','grey','{}','')", []).unwrap();
+        conn.execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(7,'e7','active','grey','{}','')", []).unwrap();
+        conn.execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('root','admin','h',0,'')", []).unwrap();
+        conn.execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('joe','viewer','h',0,'')", []).unwrap();
+
+        ensure_default_tenant(&conn);
+        // tenant #1 créé.
+        let tcount: i64 = conn.query_row("SELECT COUNT(*) FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(tcount, 1, "tenant #1 (défaut) créé");
+        // TOUS les engagements rattachés au tenant #1.
+        let bad: i64 = conn.query_row("SELECT COUNT(*) FROM engagement WHERE tenant_id<>1", [], |r| r.get(0)).unwrap();
+        assert_eq!(bad, 0, "tous les engagements existants -> tenant #1");
+        // grants rétro-compat : chaque user existant accède au tenant #1, rôle dérivé du RBAC.
+        let root_role: String = conn.query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='root' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(root_role, "tenant_admin", "admin -> tenant_admin");
+        let joe_role: String = conn.query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='joe' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(joe_role, "tenant_viewer", "viewer -> tenant_viewer");
+
+        // IDEMPOTENT : un 2e appel ne recrée rien ni n'écrase (renomme le tenant #1 -> doit rester).
+        conn.execute("UPDATE tenant SET name='custom' WHERE id=1", []).unwrap();
+        ensure_default_tenant(&conn);
+        let n: String = conn.query_row("SELECT name FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, "custom", "ensure_default_tenant idempotent (n'écrase pas un provisioning existant)");
+    }
+
+    // =====================================================================================
+    // ENTERPRISE — SUPER-ADMIN + TENANT CRUD + PER-TENANT LEDGER (tenancy.rs). Fail-closed, audited,
+    // separable. Non-disablable super-admin (mirror Plume), audited cross-tenant READ, platform-admin
+    // gated tenant CRUD, last-tenant/last-admin guards, tenant-scoped ledger paths.
+    // =====================================================================================
+
+    /// Provisionne un compte `admin` + une session, renvoie ses headers bearer.
+    fn admin_session(app: &App, login: &str) -> HeaderMap {
+        { let db = app.db(); upsert_user(&db, login, "admin", &hash_pw("pw")).unwrap(); }
+        let (tok, _) = create_session(app, uid_of(app, login));
+        bearer_headers(&tok)
+    }
+
+    /// Désigne le(s) super-admin(s) via la clé de PROVISIONING par-DB `enterprise.superadmin` (isolée par
+    /// test, pas d'ENV global). N'est PAS une route UI normale (aucune API n'écrit une clé settings arbitraire).
+    fn designate_superadmin(app: &App, csv: &str) {
+        let db = app.db();
+        settings_set(&db, "enterprise.superadmin", csv).unwrap();
+    }
+
+    /// [SUPER-ADMIN — désignation fail-closed, provisioning-only] Sans désignation, PERSONNE n'est
+    /// super-admin (même une session admin valide). La désignation (clé de provisioning) fait d'un admin
+    /// un super-admin ; un login non désigné, un opérateur désigné, ou un anonyme ne le sont JAMAIS.
+    #[test]
+    fn superadmin_designation_is_fail_closed() {
+        let ledger = tmp_path("forge-test-sa-desig");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        let root = admin_session(&app, "root");
+        // aucune désignation => fail-closed (personne).
+        assert!(!tenancy::is_superadmin(&app, &root), "aucune désignation => personne n'est super-admin");
+        assert!(!tenancy::is_superadmin_login(&app, "root"), "root non désigné");
+        // désignation via la clé de provisioning.
+        designate_superadmin(&app, "root");
+        assert!(tenancy::is_superadmin_login(&app, "root"), "root désigné");
+        assert!(tenancy::is_superadmin(&app, &root), "root (session admin) est super-admin");
+        // un AUTRE admin non désigné n'est pas super-admin.
+        let mallory = admin_session(&app, "mallory");
+        assert!(!tenancy::is_superadmin(&app, &mallory), "mallory non désignée => pas super-admin");
+        // un login désigné mais NON admin (operator) n'est pas super-admin (session admin obligatoire).
+        { let db = app.db(); upsert_user(&db, "opsa", "operator", &hash_pw("pw")).unwrap(); }
+        designate_superadmin(&app, "root, opsa");
+        let (otok, _) = create_session(&app, uid_of(&app, "opsa"));
+        assert!(!tenancy::is_superadmin(&app, &bearer_headers(&otok)), "opérateur désigné => PAS super-admin (admin requis)");
+        // anonyme (aucune session) jamais super-admin.
+        assert!(!tenancy::is_superadmin(&app, &HeaderMap::new()), "anonyme jamais super-admin");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [SUPER-ADMIN — cross-tenant READ audité] Un super-admin (sans grant natif) LIT les données d'un
+    /// autre tenant ; chaque accès émet `console.superadmin.access` (tenant + quoi). Un admin NON super
+    /// (grant natif ailleurs) ne traverse PAS. ⚠️ MUTATION-PROOF : retirer le bypass super-admin de
+    /// view_engagement_id fait échouer la lecture cross-tenant ; retirer l'audit fait échouer l'assert ledger.
+    #[tokio::test]
+    async fn superadmin_cross_tenant_read_is_ledgered() {
+        let ledger = tmp_path("forge-test-sa-read");
+        let ledger2 = tmp_path("forge-test-sa-read2");
+        let (app, _alice, _bob, _fa, fid_b) = seed_two_tenants(&ledger, &ledger2);
+        // root : admin, AUCUN grant natif, super-admin désigné.
+        let root = admin_session(&app, "root");
+        designate_superadmin(&app, "root");
+        assert!(tenancy::is_superadmin(&app, &root), "root super-admin");
+        // résolution cross-tenant explicite (tenant B) + lecture des findings de B.
+        assert_eq!(tenancy::view_engagement_id(&app, &root, Some(2)), 2, "super-admin traverse vers l'engagement de B");
+        let j = resp_json(findings(State(app.clone()), root.clone(), eng_query(2)).await.into_response()).await;
+        let titles: Vec<String> = j["findings"].as_array().unwrap().iter().map(|f| f["title"].as_str().unwrap().to_string()).collect();
+        assert!(titles.contains(&"fb".to_string()), "super-admin voit les findings du tenant B");
+        let resp = finding_detail(State(app.clone()), root.clone(), Path(fid_b), eng_query(2)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "détail cross-tenant servi au super-admin");
+        // AUDIT : au moins une entrée console.superadmin.access (tenant=2, actor=root).
+        let hit = read_ledger_lines(&ledger).iter().any(|e| e["kind"] == "console.superadmin.access"
+            && e["detail"]["tenant"] == json!(2) && e["detail"]["actor"] == json!("root"));
+        assert!(hit, "cross-tenant read super-admin ledgerisé (console.superadmin.access, tenant=2)");
+
+        // CONTRÔLE : un admin NON super-admin (grant natif tenant 1) ne traverse PAS vers B.
+        let admin2 = admin_session(&app, "admin2");
+        grant_tenant(&app, uid_of(&app, "admin2"), 1, "tenant_admin");
+        assert!(!tenancy::is_superadmin(&app, &admin2), "admin2 non désigné => pas super-admin");
+        assert_eq!(tenancy::view_engagement_id(&app, &admin2, Some(2)), tenancy::NO_ENGAGEMENT, "admin non-super ne traverse pas vers B");
+        let j = resp_json(findings(State(app.clone()), admin2.clone(), eng_query(2)).await.into_response()).await;
+        assert!(j["findings"].as_array().unwrap().is_empty(), "admin non-super ne voit AUCUN finding de B");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY CONTEXT — flag OFF = single implicit tenant, byte-identique] Le probe SPA GET /api/tenancy
+    /// renvoie EXACTEMENT `{"enabled": false}` en community : c'est CE signal qui fait que le SPA ne rend
+    /// AUCUNE surface tenant (ni sélecteur, ni vue #tenants, ni lien nav). La liste d'engagements n'expose
+    /// alors PAS `tenant_id` (payload historique) et un user sans grant voit TOUS les engagements
+    /// (mono-tenant, no-op) — un flux représentatif reste servi sans aucun filtrage tenant visible.
+    #[tokio::test]
+    async fn tenancy_context_flag_off_is_single_tenant() {
+        let ledger = tmp_path("forge-test-tnc-ctx-off");
+        let ledger2 = tmp_path("forge-test-tnc-ctx-off2");
+        let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        // community : on retire le flag semé par seed_two_tenants.
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        assert!(!tenancy::enabled(&app), "flag OFF => community");
+
+        // /api/tenancy => {"enabled": false} STRICT — rien d'autre (pas de tenants, pas de super-admin).
+        let ctx = resp_json(tenancy::tenancy_context(State(app.clone()), alice.clone()).await).await;
+        assert_eq!(ctx, json!({"enabled": false}), "community : contexte tenant fermé (le SPA ne montre rien)");
+
+        // Flux représentatif : liste d'engagements servie SANS `tenant_id` (byte-identique), un user sans
+        // grant voit les DEUX engagements (visibilité universelle, no-op).
+        let engs = engagement_list_json(&app, &alice);
+        assert_eq!(engs.len(), 2, "community : les deux engagements listés (no filtre)");
+        assert!(engs.iter().all(|e| e.get("tenant_id").is_none()), "community : aucun `tenant_id` exposé (byte-identique)");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANCY CONTEXT — flag ON = enforcement actif] Le probe SPA reflète le modèle multi-tenant : un
+    /// user normal (alice, grant tenant 1) reçoit `enabled=true`, `is_platform_admin=false` et UNIQUEMENT
+    /// son tenant ; un SUPER-ADMIN reçoit `is_platform_admin=true` et TOUS les tenants. La liste
+    /// d'engagements expose alors `tenant_id` (hiérarchie tenant→engagement) et le filtre de grant reste
+    /// fail-closed (alice ne liste QUE son engagement).
+    /// ⚠️ MUTATION-PROOF : élargir `accessible_tenants` (renvoyer TOUS les tenants à un non-super-admin)
+    /// fait passer l'assert « alice ne voit QUE le tenant 1 » AU ROUGE.
+    #[tokio::test]
+    async fn tenancy_context_flag_on_scopes_tenants_and_superadmin() {
+        let ledger = tmp_path("forge-test-tnc-ctx-on");
+        let ledger2 = tmp_path("forge-test-tnc-ctx-on2");
+        let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+
+        // (a) user normal : enabled=true, PAS platform-admin, tenants = [1] uniquement (fail-closed).
+        let ctx = resp_json(tenancy::tenancy_context(State(app.clone()), alice.clone()).await).await;
+        assert_eq!(ctx["enabled"], json!(true), "flag ON => enabled");
+        assert_eq!(ctx["is_platform_admin"], json!(false), "alice (operator) n'est pas platform-admin");
+        assert_eq!(ctx["is_superadmin"], json!(false), "alice n'est pas super-admin");
+        let tids: Vec<i64> = ctx["tenants"].as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect();
+        assert_eq!(tids, vec![1], "alice ne voit QUE le tenant de son grant (fail-closed)");
+
+        // (b) grant filter actif : liste d'engagements restreinte + `tenant_id` exposé (hiérarchie).
+        let engs = engagement_list_json(&app, &alice);
+        let ids: Vec<i64> = engs.iter().map(|e| e["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![1], "alice ne liste QUE l'engagement de son tenant");
+        assert_eq!(engs[0]["tenant_id"], json!(1), "flag ON => `tenant_id` exposé");
+
+        // (c) SUPER-ADMIN : platform-admin + TOUS les tenants dans le contexte (surface #tenants + switch).
+        let root = admin_session(&app, "root");
+        designate_superadmin(&app, "root");
+        let ctx = resp_json(tenancy::tenancy_context(State(app.clone()), root.clone()).await).await;
+        assert_eq!(ctx["is_superadmin"], json!(true), "root désigné => super-admin");
+        assert_eq!(ctx["is_platform_admin"], json!(true), "super-admin => platform-admin");
+        let mut tids: Vec<i64> = ctx["tenants"].as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect();
+        tids.sort_unstable();
+        assert_eq!(tids, vec![1, 2], "super-admin voit TOUS les tenants");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [TENANT_ADMIN de A -> 403 sur B] Un tenant_admin (rôle de GRANT) de A, non-admin console, ne voit
+    /// RIEN de B (data) et ne peut PAS administrer les tenants (403) — ni B, ni le sien. « A normal
+    /// tenant_admin can NEVER cross tenants. »
+    #[tokio::test]
+    async fn tenant_admin_of_a_cannot_cross_to_b() {
+        let ledger = tmp_path("forge-test-ta-cross");
+        let ledger2 = tmp_path("forge-test-ta-cross2");
+        let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        // alice : grant tenant_admin sur A, mais RBAC operator (pas admin console). uid_of AVANT le guard
+        // DB (uid_of reverrouille le mutex — jamais en tenant `app.db()`).
+        let ua = uid_of(&app, "alice");
+        { let db = app.db(); db.execute("UPDATE tenant_grant SET role='tenant_admin' WHERE user_id=? AND tenant_id=1", [ua]).unwrap(); }
+        // DATA : rien de B.
+        assert_eq!(tenancy::view_engagement_id(&app, &alice, Some(2)), tenancy::NO_ENGAGEMENT, "tenant_admin de A ne traverse pas vers B");
+        let j = resp_json(findings(State(app.clone()), alice.clone(), eng_query(2)).await.into_response()).await;
+        assert!(j["findings"].as_array().unwrap().is_empty(), "aucun finding de B");
+        // MANAGEMENT : pas platform-admin => 403 sur le tenant B ET à la création.
+        let resp = tenancy::tenant_grant_add(State(app.clone()), alice.clone(), Path(2i64), Json(json!({"login":"alice","role":"tenant_admin"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "tenant_admin (grant) de A -> 403 sur la gestion de B");
+        let resp = tenancy::tenants_create(State(app.clone()), alice.clone(), Json(json!({"name":"AlicesTenant"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "un non-admin console ne crée pas de tenant (403)");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [SUPER-ADMIN — NON-DISABLABLE] Un super-admin désigné ne peut être désactivé / supprimé / rétrogradé
+    /// sous admin (guard + handlers CRUD câblés). Deux admins présents => ce n'est PAS le garde-fou
+    /// « dernier admin » qui joue, mais bien le marqueur super-admin (fail-closed).
+    #[tokio::test]
+    async fn superadmin_account_is_non_disablable() {
+        let ledger = tmp_path("forge-test-sa-nondis");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        let _root = admin_session(&app, "root");
+        let _backup = admin_session(&app, "backup"); // 2e admin => le garde-fou dernier-admin ne joue pas
+        designate_superadmin(&app, "root");
+        // guard unitaire.
+        assert!(tenancy::guard_superadmin_user_mutation(&app, "root", true, None, false).is_err(), "désactivation refusée");
+        assert!(tenancy::guard_superadmin_user_mutation(&app, "root", false, None, true).is_err(), "suppression refusée");
+        assert!(tenancy::guard_superadmin_user_mutation(&app, "root", false, Some("viewer"), false).is_err(), "rétrogradation refusée");
+        assert!(tenancy::guard_superadmin_user_mutation(&app, "root", false, Some("admin"), false).is_ok(), "rester admin OK");
+        assert!(tenancy::guard_superadmin_user_mutation(&app, "backup", true, None, true).is_ok(), "login ordinaire : guard no-op");
+        // via les handlers CRUD réels (câblés) -> 409 avec un message super-admin.
+        let e = admin_update_user(&app, "backup", "root", &json!({"disabled": true})).unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT); assert!(e.1.contains("super-admin"), "message super-admin: {}", e.1);
+        let e = admin_delete_user(&app, "backup", "root").unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT); assert!(e.1.contains("super-admin"), "message super-admin: {}", e.1);
+        // root reste admin activé (non muté).
+        { let db = app.db(); let (role, dis): (String, i64) = db.query_row("SELECT role, disabled FROM users WHERE login='root'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+          assert_eq!(role, "admin", "root reste admin"); assert_eq!(dis, 0, "root reste activé"); }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [TENANT CRUD — gated + ledgerisé] Community (flag OFF) : la surface tenant est FERMÉE (403
+    /// enterprise_disabled) => byte-identique. Enterprise ON : create/rename/grant/revoke réservés à un
+    /// platform-admin (operator -> 403), chacun ledgerisé `console.tenant.*`.
+    #[tokio::test]
+    async fn tenant_crud_gated_and_ledgered() {
+        let ledger = tmp_path("forge-test-tenant-crud");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); ensure_default_tenant(&db); }
+        let admin = admin_session(&app, "adm");
+        let opr = { { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); } let (t,_) = create_session(&app, uid_of(&app, "opr")); bearer_headers(&t) };
+        // community : flag OFF => 403 enterprise_disabled (aucune surface tenant).
+        let resp = tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Acme"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag OFF => 403 enterprise_disabled");
+        enable_enterprise_tenancy(&app);
+        // operator => 403 ; admin => 200.
+        let resp = tenancy::tenants_create(State(app.clone()), opr.clone(), Json(json!({"name":"Acme"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "operator (non platform-admin) refusé");
+        let resp = tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Acme Corp"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "admin crée un tenant");
+        let tid = resp_json(resp).await["tenant"]["id"].as_i64().unwrap();
+        let resp = tenancy::tenants_update(State(app.clone()), admin.clone(), Path(tid), Json(json!({"name":"Acme Renamed"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "rename ok");
+        { let db = app.db(); upsert_user(&db, "carol", "viewer", &hash_pw("pw")).unwrap(); }
+        let resp = tenancy::tenant_grant_add(State(app.clone()), admin.clone(), Path(tid), Json(json!({"login":"carol","role":"tenant_viewer"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "grant add ok");
+        let resp = tenancy::tenant_grant_add(State(app.clone()), opr.clone(), Path(tid), Json(json!({"login":"carol","role":"tenant_admin"}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "grant add par operator refusé");
+        let resp = tenancy::tenant_grant_remove(State(app.clone()), admin.clone(), Path((tid, "carol".to_string()))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "grant remove ok");
+        // LEDGER : chaque mutation console.tenant.*.
+        let kinds: Vec<String> = read_ledger_lines(&ledger).iter().filter_map(|e| e["kind"].as_str().map(String::from)).collect();
+        for k in ["console.tenant.create", "console.tenant.rename", "console.tenant.grant", "console.tenant.revoke"] {
+            assert!(kinds.iter().any(|x| x == k), "{k} ledgerisé");
+        }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [TENANT — garde-fous fail-closed] Impossible d'archiver le DERNIER tenant actif ; impossible de
+    /// retirer le DERNIER grant tenant_admin d'un tenant (son dernier admin).
+    #[tokio::test]
+    async fn tenant_last_active_and_last_admin_protections() {
+        let ledger = tmp_path("forge-test-tenant-guards");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); ensure_default_tenant(&db); }
+        enable_enterprise_tenancy(&app);
+        let admin = admin_session(&app, "adm");
+        let tid2 = resp_json(tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Second"}))).await).await["tenant"]["id"].as_i64().unwrap();
+        // archive #1 (reste #2 actif) => OK.
+        let resp = tenancy::tenants_update(State(app.clone()), admin.clone(), Path(1i64), Json(json!({"status":"archived"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "archivage OK tant qu'un tenant reste actif");
+        // #2 seul actif : archivage REFUSÉ.
+        let resp = tenancy::tenants_update(State(app.clone()), admin.clone(), Path(tid2), Json(json!({"status":"archived"}))).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "dernier tenant actif : archivage refusé");
+        // dernier tenant_admin de #2 (adm, auto-grant à la création) : retrait REFUSÉ.
+        let resp = tenancy::tenant_grant_remove(State(app.clone()), admin.clone(), Path((tid2, "adm".to_string()))).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "dernier admin du tenant : retrait refusé");
+        // ajouter un 2e tenant_admin -> le retrait du 1er devient OK.
+        { let db = app.db(); upsert_user(&db, "dave", "operator", &hash_pw("pw")).unwrap(); }
+        let resp = tenancy::tenant_grant_add(State(app.clone()), admin.clone(), Path(tid2), Json(json!({"login":"dave","role":"tenant_admin"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "2e admin ajouté");
+        let resp = tenancy::tenant_grant_remove(State(app.clone()), admin.clone(), Path((tid2, "adm".to_string()))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "retrait OK dès qu'un 2e admin existe");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [PER-TENANT LEDGER — unité] Community (flag OFF) => None (chemin plat, byte-identique). Enterprise
+    /// ON => `tenant-<tid>/engagement-<eid>.jsonl` (groupé par tenant, cross-platform via PathBuf). Deux
+    /// tenants distincts => sous-dossiers distincts (isolation). La signature Ed25519 par-ledger est inchangée.
+    #[test]
+    fn per_tenant_ledger_path_is_scoped_and_community_flat() {
+        let ledger = tmp_path("forge-test-ledger-scope");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        let base = std::path::Path::new(&std::env::temp_dir()).join("forge").join("engagement.jsonl").to_string_lossy().into_owned();
+        // community => None.
+        assert!(tenancy::scoped_engagement_ledger_path(&app, &base, 7, 3).is_none(), "community => pas de scoping (chemin plat)");
+        enable_enterprise_tenancy(&app);
+        let p = tenancy::scoped_engagement_ledger_path(&app, &base, 7, 3).expect("scoped");
+        let expect = std::path::Path::new(&base).parent().unwrap().join("tenant-3").join("engagement-7.jsonl").to_string_lossy().into_owned();
+        assert_eq!(p, expect, "ledger groupé par tenant (tenant-3/engagement-7.jsonl)");
+        // même tenant => même sous-dossier ; tenant différent => dossier différent.
+        assert!(tenancy::scoped_engagement_ledger_path(&app, &base, 8, 3).unwrap().contains("tenant-3"), "même tenant, même sous-dossier");
+        let p3 = tenancy::scoped_engagement_ledger_path(&app, &base, 9, 4).unwrap();
+        assert!(p3.contains("tenant-4") && !p3.contains("tenant-3"), "tenant différent => dossier différent");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [PER-TENANT LEDGER — bout-en-bout] Un engagement créé en mode enterprise dans le tenant 5 reçoit un
+    /// ledger DÉDIÉ groupé sous `tenant-5/`, et sa genèse `console.engagement.create` y est écrite (le
+    /// fichier existe réellement). Prouve le câblage derive_engagement_ledger_path -> tenancy.
+    #[tokio::test]
+    async fn engagement_create_writes_tenant_scoped_ledger() {
+        let dir = tmp_path("forge-test-eng-tenant-ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = format!("{dir}/engagement.jsonl");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); ensure_default_tenant(&db); }
+        // opérateur granté sur un tenant 5. upsert PUIS (guard relâché) uid_of PUIS insert grant — uid_of
+        // reverrouille le mutex DB, ne jamais l'appeler en tenant `app.db()`.
+        { let db = app.db();
+          upsert_user(&db, "op5", "operator", &hash_pw("pw")).unwrap();
+          db.execute("INSERT INTO tenant(id,name,status,created,updated) VALUES(5,'T5','active',datetime('now'),datetime('now'))", []).unwrap();
+        }
+        let uid5 = uid_of(&app, "op5");
+        { let db = app.db(); db.execute("INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,5,'tenant_operator',datetime('now'))", [uid5]).unwrap(); }
+        enable_enterprise_tenancy(&app);
+        let (t,_) = create_session(&app, uid_of(&app, "op5"));
+        let opr = bearer_headers(&t);
+        let resp = engagements_create(State(app.clone()), conn_info(), opr.clone(),
+            Json(json!({"name":"Eng T5","scope_json":{"in_scope":["a.example.com"]},"tenant_id":5}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "création engagement dans tenant 5");
+        let id = resp_json(resp).await["engagement"]["id"].as_i64().unwrap();
+        let lp: String = { let db = app.db(); db.query_row("SELECT ledger_path FROM engagement WHERE id=?", [id], |r| r.get(0)).unwrap() };
+        let want = std::path::Path::new(&dir).join("tenant-5").join(format!("engagement-{id}.jsonl")).to_string_lossy().into_owned();
+        assert_eq!(lp, want, "ledger scoppé tenant-5");
+        assert!(std::path::Path::new(&lp).exists(), "fichier ledger tenant-scopé créé sur disque");
+        assert!(read_ledger_lines(&lp).iter().any(|e| e["kind"] == "console.engagement.create"), "genèse écrite dans le ledger du tenant");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// [ENGAGEMENT — CRUD gouverné + ledgerisé] Création/édition = OPÉRATEUR (viewer -> 403) ; archive/
@@ -13524,7 +14288,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
                 &json!({"my-wf": {"name": "my-wf", "description": "d", "builtin": false,
                                    "steps": [{"kind": "recon.httpx", "params": {}}, {"kind": "sqli.probe", "params": {}}]}}).to_string()).unwrap();
         }
-        let resp = workflows_list(State(app.clone()), Query(HashMap::new())).await;
+        let resp = workflows_list(State(app.clone()), HeaderMap::new(), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let j = resp_json(resp).await;
         // builtins dérivés du moteur : recon-surface / bug-bounty-web / full-pentest, builtin:true.
@@ -13628,7 +14392,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let path = tmp_path("forge-test-techcat");
         let app = test_app(&path);
         // défaut (aucune sélection persistée -> bug_bounty).
-        let resp = techniques_catalog(State(app.clone()), Query(HashMap::new())).await;
+        let resp = techniques_catalog(State(app.clone()), HeaderMap::new(), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp_json(resp).await;
         assert!(body.get("error").is_none(), "catalogue indisponible (spawn moteur): {body:?}");
@@ -13649,7 +14413,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             settings_set(&db, "technique_selection",
                 &json!({"profile":"pentest","categories":{},"techniques":{}}).to_string()).unwrap();
         }
-        let resp = techniques_catalog(State(app.clone()), Query(HashMap::new())).await;
+        let resp = techniques_catalog(State(app.clone()), HeaderMap::new(), Query(HashMap::new())).await;
         let body = resp_json(resp).await;
         assert_eq!(body["profile"], "pentest");
         assert_eq!(flatten_enabled(&body).get("rce.probe"), Some(&true), "pentest -> rce.probe activé");
