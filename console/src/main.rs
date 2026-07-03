@@ -38,6 +38,14 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
+// FINDINGS LIBRARY (modèles de findings réutilisables — livrable client type Ghostwriter). Feature
+// console à part entière : ses handlers/logique vivent dans son PROPRE module (règle : pas de gros bloc
+// de handlers dans ce main.rs déjà volumineux). Ce main.rs n'y contribue que la ligne `mod` + le
+// `merge` des routes (build_router). Le module réutilise App + les helpers d'auth/ledger de ce fichier
+// (visibles depuis un module descendant de la racine de crate).
+mod finding_templates;
+mod reports;
+
 // Version produit — SOURCE DE VÉRITÉ UNIQUE : le fichier `VERSION` à la racine du repo, lu à la
 // COMPILATION (`include_str!`). Le même fichier alimente le moteur Python (forge/__init__.py) et
 // est vérifié en dérive par la CI (`make check-version`). `CARGO_MANIFEST_DIR` = `console/`, donc
@@ -119,6 +127,18 @@ CREATE TABLE IF NOT EXISTS engagement(
   id INTEGER PRIMARY KEY, name TEXT, status TEXT DEFAULT 'active', mode TEXT DEFAULT 'grey',
   scope_json TEXT NOT NULL DEFAULT '{}', ledger_path TEXT NOT NULL DEFAULT '',
   classification TEXT, retention_policy TEXT, created TEXT DEFAULT '', updated TEXT DEFAULT '');
+-- FINDINGS LIBRARY (bibliothèque de modèles réutilisables — objet livrable client, cf. Ghostwriter).
+-- Un `finding_template` est GLOBAL (réutilisable ACROSS engagements — jamais rattaché à un engagement) :
+-- il porte des gabarits PARAMÉTRÉS (`{target}`/`{param}` remplis À L'APPLICATION). APPLIQUER un modèle
+-- CRÉE un finding dans l'engagement ACTIF UNIQUEMENT (isolation : le template est global, le finding
+-- produit appartient à SON engagement, comme tout finding). `refs` = références libres (SQL-safe : on
+-- évite le mot réservé `references`, exposé `references` dans l'API JSON). `severity` ∈ SEVERITIES
+-- (INFO|LOW|MEDIUM|HIGH|CRITICAL, contrainte applicative). CRUD gouverné (create/edit=operator,
+-- delete=admin) + ledgerisé `console.finding_template.*` — voir console/src/finding_templates.rs.
+CREATE TABLE IF NOT EXISTS finding_template(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, vuln_class TEXT DEFAULT '', cwe TEXT DEFAULT '',
+  severity TEXT DEFAULT 'INFO', title_tmpl TEXT DEFAULT '', description_tmpl TEXT DEFAULT '',
+  remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '');
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -188,6 +208,16 @@ fn migrate(db: &Connection) {
     // base ANTÉRIEURE à son introduction l'obtienne au 1er boot suivant la mise à jour. error-ignored.
     let _ = db.execute(
         "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL)",
+        [],
+    );
+    // FINDINGS LIBRARY : re-créée ici (idempotent) en plus du SCHEMA, pour qu'une base ANTÉRIEURE à son
+    // introduction obtienne la table `finding_template` au 1er boot suivant la mise à jour (même
+    // discipline que `engagement`/`settings`). GLOBALE (aucun engagement_id) — voir finding_templates.rs.
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS finding_template(
+           id INTEGER PRIMARY KEY, name TEXT NOT NULL, vuln_class TEXT DEFAULT '', cwe TEXT DEFAULT '',
+           severity TEXT DEFAULT 'INFO', title_tmpl TEXT DEFAULT '', description_tmpl TEXT DEFAULT '',
+           remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')",
         [],
     );
 }
@@ -9486,6 +9516,17 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/runs/:id/cancel", post(run_cancel))
         .route("/api/runs/:id/logs", get(run_logs))
         .route("/api/runs/:id/events", get(run_sse))
+        // FINDINGS LIBRARY (modèles réutilisables) : routes définies DANS le module dédié
+        // (finding_templates.rs). Fusionnées AVANT le fallback + le route_layer => elles héritent de
+        // l'auth_guard et du host_guard comme toute route protégée. GET=liste (global), POST=create
+        // (operator), POST/:id=edit (operator), DELETE/:id=delete (admin), POST/:id/apply=applique un
+        // modèle en un finding de l'engagement ACTIF (isolation). Chaque mutation ledgerisée.
+        .merge(finding_templates::routes())
+        // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
+        // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
+        // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
+        // /api/report/branding (config admin-éditable). Secrets rédigés dans tous les formats.
+        .merge(reports::routes())
         .fallback_service(ServeDir::new(web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     Router::new()
@@ -12759,6 +12800,98 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(b.contains("\"secret_set\":true"), "secret_set:true attendu : {b}");
         assert!(b.contains("generic_http"), "kind conservé : {b}");
         assert!(b.contains("soc.local"), "endpoint (non secret) conservé pour l'édition : {b}");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [REPORTS UI wiring — livrable client] Flux END-TO-END sur le VRAI routeur (build_router) : prouve
+    /// que le sous-routeur reports::routes() est bien MERGÉ (routes joignables, sous auth_guard/host_guard),
+    /// que le rapport d'engagement reflète l'engagement ACTIF (JSON/HTML contient son finding), que la
+    /// config de branding ROUND-TRIP (POST admin -> GET effective + rendu dans le HTML) et qu'elle est
+    /// ADMIN-GATÉE (viewer -> 403 en écriture mais 200 en lecture ; anonyme -> jamais 200 une fois la gate
+    /// engagée). Engagement #1 seedé avant service (Arc partagé) ; admin provisionné via /api/setup.
+    #[tokio::test]
+    async fn reports_ui_endpoints_wired_branding_round_trips_and_admin_gated() {
+        let ledger = tmp_path("reports-ui-ledger");
+        let app = test_app(&ledger);
+        // parité prod : colonnes additives (engagement_id/cwe/cvss) + engagement #1 + un finding dedans.
+        {
+            let db = app.db();
+            migrate(&db);
+            db.execute(
+                "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+                 VALUES(1,'Wired Eng','active','grey','{\"in_scope\":[\"a.example.com\"]}','',datetime('now'),datetime('now'))",
+                [],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+                 VALUES(datetime('now'),'camp','a.example.com','WIRED-REPORT-FINDING','HIGH','idor','T1190','vulnerable','preuve','oracle.idor','','fix','','CWE-639','',0,1)",
+                [],
+            ).unwrap();
+        }
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // provision admin -> cookie admin (la gate d'auth s'engage).
+        let r = http_raw(addr, &post_req("/api/setup",
+            &json!({"admin_login": "root", "admin_password": "hunter2pw"}).to_string(), "")).await;
+        assert_eq!(parse_status(&r), 200, "provision: {r}");
+        let admin = cookie_token(&r).expect("cookie admin");
+        let admin_h = format!("Cookie: forge_session={admin}\r\n");
+
+        // crée un viewer (admin) puis logue-le -> cookie viewer.
+        let r = http_raw(addr, &post_req("/api/users",
+            &json!({"login": "vv", "role": "viewer", "password": "viewerpw"}).to_string(), &admin_h)).await;
+        assert_eq!(parse_status(&r), 200, "création viewer: {r}");
+        let r = http_raw(addr, &post_req("/api/login",
+            &json!({"login": "vv", "password": "viewerpw"}).to_string(), "")).await;
+        assert_eq!(parse_status(&r), 200, "login viewer: {r}");
+        let viewer = cookie_token(&r).expect("cookie viewer");
+        let viewer_h = format!("Cookie: forge_session={viewer}\r\n");
+
+        // 1) RAPPORT WIRÉ + ISOLÉ : GET .../engagements/1/report?format=json (admin) -> 200 + le finding.
+        let r = http_raw(addr, &get_req("/api/engagements/1/report?format=json", &admin_h)).await;
+        assert_eq!(parse_status(&r), 200, "report json wiré: {r}");
+        let b = body_of(&r);
+        assert!(b.contains("WIRED-REPORT-FINDING"), "le rapport reflète le finding de l'engagement actif: {b}");
+        assert!(b.contains("\"id\":1") || b.contains("\"id\": 1"), "engagement #1 dans le rapport: {b}");
+
+        // format CSV wiré aussi (en-tête stable).
+        let r = http_raw(addr, &get_req("/api/engagements/1/report?format=csv", &admin_h)).await;
+        assert_eq!(parse_status(&r), 200, "report csv wiré: {r}");
+        assert!(body_of(&r).contains("WIRED-REPORT-FINDING"), "CSV contient le finding");
+
+        // 2) BRANDING lecture viewer+ : GET (viewer) -> 200 (endpoint wiré, lecture ouverte viewer+).
+        let r = http_raw(addr, &get_req("/api/report/branding", &viewer_h)).await;
+        assert_eq!(parse_status(&r), 200, "GET branding viewer -> 200: {r}");
+
+        // 3) ADMIN-GATÉ en écriture : POST branding viewer -> 403 (jamais 200), rien changé.
+        let r = http_raw(addr, &post_req("/api/report/branding",
+            &json!({"customer_name": "NOPE"}).to_string(), &viewer_h)).await;
+        assert_eq!(parse_status(&r), 403, "POST branding viewer -> 403 (admin-gated): {r}");
+        // anonyme (aucune session) -> jamais 200 une fois la gate engagée.
+        let r = http_raw(addr, &post_req("/api/report/branding",
+            &json!({"customer_name": "NOPE2"}).to_string(), "")).await;
+        assert_ne!(parse_status(&r), 200, "POST branding anonyme -> jamais 200: {r}");
+
+        // 4) ROUND-TRIP admin : POST (admin) -> 200, puis GET effective.customer_name == valeur posée.
+        let r = http_raw(addr, &post_req("/api/report/branding",
+            &json!({"customer_name": "ACME LIVE", "vendor": "GuatX Forge"}).to_string(), &admin_h)).await;
+        assert_eq!(parse_status(&r), 200, "POST branding admin -> 200: {r}");
+        let r = http_raw(addr, &get_req("/api/report/branding", &admin_h)).await;
+        assert_eq!(parse_status(&r), 200);
+        let cfg: Value = serde_json::from_str(body_of(&r)).expect("branding json");
+        assert_eq!(cfg["effective"]["customer_name"], "ACME LIVE", "round-trip du branding");
+
+        // 5) le branding est RENDU dans le rapport HTML de l'engagement actif.
+        let r = http_raw(addr, &get_req("/api/engagements/1/report?format=html", &admin_h)).await;
+        assert_eq!(parse_status(&r), 200);
+        assert!(body_of(&r).contains("ACME LIVE"), "branding rendu dans le rapport HTML");
+
         let _ = std::fs::remove_file(&ledger);
     }
 
