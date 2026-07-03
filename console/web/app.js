@@ -288,6 +288,11 @@ const HELP_TOPICS = [
     ['p', "Sélection PAR-SCOPE : le profil (bug_bounty | pentest | custom) donne l'ensemble de base, puis les toggles par catégorie / par technique AJOUTENT ou RETIRENT (la désactivation prime — fail-closed). « Au scope, retirer un test automatique » : une technique décochée n'est NI planifiée NI tirée par le moteur, en plus du scope-guard."],
     ['p', "Enregistrer la sélection est réservé aux comptes operator/admin et journalisé au ledger. La sélection s'applique aux prochains runs (scope.json profile/techniques_enabled/categories_enabled)."],
   ] },
+  { key: 'workflows', title: 'Workflows', icon: 'layout', doc: 'docs/MODULES.md', view: 'workflows', blocks: [
+    ['p', "Pipelines COMPOSÉS sans code : une sélection ORDONNÉE de techniques/outils (+ params par étape), sauvegardée et éditable. Absorbe les scan-engines de reNgine, les workflows d'Osmedeus et les pipelines visuels de Trickest — le builder réutilise le catalogue par catégorie et l'état activé par le scope."],
+    ['p', "GOUVERNANCE fail-closed : un workflow est une PROPOSITION. Le scope-guard ROE et la sélection par-scope restent seuls juges — une étape hors-scope / désactivée pour le scope est LARGUÉE au tir. Les étapes exploit restent derrière l'opt-in fort-impact. Les workflows intégrés (dérivés du registre) ne sont pas supprimables."],
+    ['p', "Création/édition/suppression réservées operator/admin et journalisées au ledger (POST /api/workflows[/:name]). « Lancer ce workflow » passe par le C2 gouverné (POST /api/run modules=étapes, auto_pentest) : mêmes garde-fous que le lancement C2 standard."],
+  ] },
   { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
     ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée » ou « ratée » côté défense."],
@@ -1510,6 +1515,250 @@ if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
   } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
 });
 
+// =====================================================================================
+//  WORKFLOWS — pipelines COMPOSÉS sans code (absorbe reNgine/Osmedeus/Trickest). Un workflow est une
+//  PROPOSITION gouvernée : GET /api/workflows (utilisateur + intégrés dérivés du registre) + le
+//  catalogue /api/techniques (groupé par catégorie + état ACTIVÉ par le scope) alimentent le builder ;
+//  la MUTATION (POST /api/workflows[/:name]) est operator/admin + ledgerisée. « Lancer ce workflow »
+//  passe par le C2 GOUVERNÉ (POST /api/run modules=étapes, auto_pentest) — le scope-guard ROE, la
+//  sélection par-scope et l'opt-in fort-impact restent seuls JUGES (étape hors-scope/désactivée larguée).
+// =====================================================================================
+let WF = { user: [], builtins: [], enabled: {}, groups: {}, rowByKind: {}, modmeta: {} };
+
+async function loadWorkflows() {
+  const host = $('#wf-list'); if (!host) return;
+  let wfs;
+  try { wfs = await api('/workflows'); }
+  catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
+  let cat, mods;
+  try { cat = await api('/techniques'); } catch (e) { cat = { groups: {} }; }
+  try { mods = await api('/modules'); } catch (e) { mods = { modules: [] }; }
+  WF.user = wfs.workflows || []; WF.builtins = wfs.builtins || [];
+  WF.groups = (cat && cat.groups) || {};
+  WF.enabled = {}; WF.rowByKind = {};
+  Object.values(WF.groups).forEach(rows => (rows || []).forEach(r => { WF.rowByKind[r.kind] = r; WF.enabled[r.kind] = !!r.enabled_for_current_scope; }));
+  WF.modmeta = {}; (((mods && mods.modules) || mods) || []).forEach(m => { if (m && m.kind) WF.modmeta[m.kind] = m; });
+  if ($('#wf-count')) $('#wf-count').textContent = (WF.user.length + WF.builtins.length) + ' workflows';
+  const st = $('#wf-status');
+  if (st) { if (wfs.error) { st.hidden = false; st.textContent = 'workflows intégrés indisponibles : ' + String(wfs.why || wfs.error); } else { st.hidden = true; } }
+  renderWorkflows();
+}
+
+// étape « lançable depuis le web » (web_allowed ET ni exploit ni destructif) — miroir client de la
+// gouvernance /api/run (validate_modules). Kind inconnu du catalogue modules => non lançable (fail-safe).
+function wfStepIsSafe(kind) { const m = WF.modmeta[kind]; return !!(m && m.web_allowed && !m.exploit && !m.destructive); }
+
+function wfStepChip(kind) {
+  const en = WF.enabled[kind];
+  const chip = document.createElement('span');
+  chip.className = 'wf-chip' + (en ? '' : ' off');
+  chip.title = (en ? 'activée pour le scope courant' : 'hors sélection du scope — sera LARGUÉE (fail-closed)')
+    + (wfStepIsSafe(kind) ? '' : ' · exploit/non-web : opt-in fort-impact requis');
+  chip.innerHTML = esc(kind) + (wfStepIsSafe(kind) ? '' : ' <span class="badge expl">expl</span>');
+  return chip;
+}
+
+function renderWorkflows() {
+  const host = $('#wf-list'); if (!host) return;
+  const all = WF.builtins.concat(WF.user);
+  if (!all.length) { host.innerHTML = '<div class="muted">aucun workflow — cliquez « Nouveau workflow » pour composer un pipeline</div>'; return; }
+  host.replaceChildren(...all.map(wf => {
+    const card = document.createElement('div'); card.className = 'wf-card';
+    const head = document.createElement('div'); head.className = 'wf-cardhead';
+    const title = document.createElement('span'); title.className = 'wf-name';
+    title.innerHTML = esc(wf.name) + ' '
+      + (wf.builtin ? '<span class="badge webyes">intégré</span>' : '<span class="badge">perso</span>')
+      + ` <span class="badge">${wf.step_count} étape${wf.step_count > 1 ? 's' : ''}</span>`;
+    head.appendChild(title);
+    const acts = document.createElement('span'); acts.className = 'wf-cardacts';
+    const mkBtn = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = label; b.onclick = fn; return b; };
+    acts.appendChild(mkBtn('Lancer', 'k-theme', () => runWorkflow(wf)));
+    acts.appendChild(mkBtn('Cloner', 'k-theme', () => openWorkflowBuilder(wf, { clone: true })));
+    if (!wf.builtin) {
+      acts.appendChild(mkBtn('Éditer', 'k-theme', () => openWorkflowBuilder(wf, {})));
+      acts.appendChild(mkBtn('Supprimer', 'k-theme danger', () => deleteWorkflow(wf)));
+    }
+    head.appendChild(acts); card.appendChild(head);
+    if (wf.description) { const d = document.createElement('p'); d.className = 'wf-desc'; d.textContent = wf.description; card.appendChild(d); }
+    const steps = document.createElement('div'); steps.className = 'wf-steps';
+    (wf.step_kinds || []).forEach(k => steps.appendChild(wfStepChip(k)));
+    card.appendChild(steps);
+    return card;
+  }));
+}
+
+async function deleteWorkflow(wf) {
+  const ok = await confirmModal('Supprimer le workflow « ' + wf.name + ' » ? (action ledgerisée)', { title: 'Supprimer le workflow', okText: 'Supprimer' });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/workflows/' + encodeURIComponent(wf.name), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ delete: true }) });
+    if (r.status === 403) { toast('Suppression réservée à un compte operator/admin', 'bad'); return; }
+    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast('Workflow supprimé (ledgerisé)', 'ok'); loadWorkflows();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// Builder natif (aucune modale navigateur) : nom + description + catalogue GROUPÉ PAR CATÉGORIE
+// (réutilise /api/techniques) pour AJOUTER des étapes, colonne d'étapes ORDONNÉES (monter/descendre/
+// retirer) + params JSON optionnels par étape. Enregistre POST /api/workflows (création) ou
+// /api/workflows/:name (édition). L'état activé du scope est affiché sur chaque technique.
+function openWorkflowBuilder(existing, opts) {
+  opts = opts || {};
+  const editing = !!(existing && !opts.clone);
+  let steps = existing ? (existing.steps || []).map(s => ({ kind: s.kind, params: JSON.stringify(s.params || {}) === '{}' ? '' : JSON.stringify(s.params) })) : [];
+  const ov = document.createElement('div'); ov.className = 'modal-ov';
+  const box = document.createElement('div'); box.className = 'modal wide wf-builder';
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  const close = () => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); };
+  document.addEventListener('keydown', onKey);
+  const h = document.createElement('h3'); h.textContent = editing ? ('Éditer le workflow « ' + existing.name + ' »') : 'Nouveau workflow'; box.appendChild(h);
+
+  const meta = document.createElement('div'); meta.className = 'wf-metarow';
+  const nameL = document.createElement('label'); nameL.className = 'wf-fld';
+  nameL.innerHTML = '<span>Nom</span>';
+  const nameI = document.createElement('input'); nameI.type = 'text'; nameI.placeholder = 'ex: web-idor-hunt';
+  nameI.value = existing ? (opts.clone ? existing.name + '-copy' : existing.name) : '';
+  nameI.disabled = editing;                         // le nom = la clé : figé en édition
+  nameL.appendChild(nameI);
+  const descL = document.createElement('label'); descL.className = 'wf-fld wf-fld-grow';
+  descL.innerHTML = '<span>Description</span>';
+  const descI = document.createElement('input'); descI.type = 'text'; descI.placeholder = 'à quoi sert ce pipeline';
+  descI.value = existing ? (existing.description || '') : '';
+  descL.appendChild(descI);
+  meta.append(nameL, descL); box.appendChild(meta);
+
+  const cols = document.createElement('div'); cols.className = 'wf-cols';
+  // colonne catalogue (gauche)
+  const cat = document.createElement('div'); cat.className = 'wf-cat';
+  cat.innerHTML = '<div class="wf-colh">Catalogue — cliquez pour ajouter une étape</div>';
+  const catBody = document.createElement('div'); catBody.className = 'wf-catbody';
+  const catNames = Object.keys(WF.groups).sort();
+  if (!catNames.length) catBody.innerHTML = '<div class="muted">catalogue indisponible (voir la vue Techniques)</div>';
+  catNames.forEach(c => {
+    const g = document.createElement('div'); g.className = 'wf-catgrp';
+    g.innerHTML = `<div class="wf-catname">${esc(c)}</div>`;
+    (WF.groups[c] || []).slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind))).forEach(r => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'wf-add' + (WF.enabled[r.kind] ? '' : ' off');
+      b.title = (WF.enabled[r.kind] ? 'activée pour le scope' : 'désactivée pour le scope — sera larguée au tir') + (wfStepIsSafe(r.kind) ? '' : ' · exploit (opt-in requis)');
+      b.innerHTML = '+ ' + esc(r.kind) + (wfStepIsSafe(r.kind) ? '' : ' <span class="badge expl">expl</span>');
+      b.onclick = () => { steps.push({ kind: r.kind, params: '' }); renderSteps(); };
+      g.appendChild(b);
+    });
+    catBody.appendChild(g);
+  });
+  cat.appendChild(catBody);
+  // colonne étapes (droite)
+  const stcol = document.createElement('div'); stcol.className = 'wf-stcol';
+  stcol.innerHTML = '<div class="wf-colh">Étapes (ordonnées) — l\'ordre d\'exécution reste topologique (recon → access → exploit)</div>';
+  const stBody = document.createElement('div'); stBody.className = 'wf-stbody';
+  stcol.appendChild(stBody);
+  cols.append(cat, stcol); box.appendChild(cols);
+
+  function renderSteps() {
+    if (!steps.length) { stBody.innerHTML = '<div class="muted">aucune étape — ajoutez des techniques depuis le catalogue</div>'; return; }
+    stBody.replaceChildren(...steps.map((s, i) => {
+      const row = document.createElement('div'); row.className = 'wf-step';
+      const kn = document.createElement('span'); kn.className = 'wf-stepkind' + (WF.enabled[s.kind] ? '' : ' off');
+      kn.innerHTML = esc(s.kind) + (WF.enabled[s.kind] ? '' : ' <span class="badge mut">larguée au scope</span>') + (wfStepIsSafe(s.kind) ? '' : ' <span class="badge expl">expl</span>');
+      const pin = document.createElement('input'); pin.type = 'text'; pin.className = 'wf-stepparams'; pin.placeholder = 'params JSON (optionnel) ex {"param":"q"}';
+      pin.value = s.params || ''; pin.oninput = () => { s.params = pin.value; };
+      const ctl = document.createElement('span'); ctl.className = 'wf-stepctl';
+      const mk = (lbl, fn, dis) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'k-theme'; b.textContent = lbl; b.disabled = !!dis; b.onclick = fn; return b; };
+      ctl.append(
+        mk('↑', () => { if (i > 0) { [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]]; renderSteps(); } }, i === 0),
+        mk('↓', () => { if (i < steps.length - 1) { [steps[i + 1], steps[i]] = [steps[i], steps[i + 1]]; renderSteps(); } }, i === steps.length - 1),
+        mk('✕', () => { steps.splice(i, 1); renderSteps(); })
+      );
+      row.append(kn, pin, ctl);
+      return row;
+    }));
+  }
+  renderSteps();
+
+  const err = document.createElement('div'); err.className = 'modal-err'; err.hidden = true; box.appendChild(err);
+  const act = document.createElement('div'); act.className = 'modal-act';
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'm-cancel'; cancel.textContent = 'Annuler'; cancel.onclick = close;
+  const save = document.createElement('button'); save.type = 'button'; save.className = 'm-ok'; save.textContent = 'Enregistrer';
+  save.onclick = async () => {
+    err.hidden = true;
+    const name = (nameI.value || '').trim();
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name) || name.startsWith('-')) { err.textContent = 'Nom invalide ([A-Za-z0-9._-], 1..64, pas de « - » en tête).'; err.hidden = false; return; }
+    const outSteps = [];
+    for (const s of steps) {
+      let params = {};
+      const raw = (s.params || '').trim();
+      if (raw) { try { const o = JSON.parse(raw); if (!o || typeof o !== 'object' || Array.isArray(o)) throw 0; params = o; } catch (e) { err.textContent = 'Params JSON invalides pour l\'étape « ' + s.kind +' ».'; err.hidden = false; return; } }
+      outSteps.push({ kind: s.kind, params });
+    }
+    const body = { name, description: (descI.value || '').trim(), steps: outSteps };
+    const url = editing ? ('/api/workflows/' + encodeURIComponent(name)) : '/api/workflows';
+    try {
+      const r = await fetch(url, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+      if (r.status === 403) { err.textContent = 'Réservé à un compte operator/admin.'; err.hidden = false; return; }
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { err.textContent = 'Échec : ' + String(j.why || j.error || r.status); err.hidden = false; return; }
+      toast('Workflow enregistré (ledgerisé)', 'ok'); close(); loadWorkflows();
+    } catch (e) { err.textContent = 'Erreur réseau : ' + String(e.message || e); err.hidden = false; }
+  };
+  act.append(cancel, save); box.appendChild(act);
+  ov.onclick = e => { if (e.target === ov) close(); };
+  ov.appendChild(box); document.body.appendChild(ov);
+  setTimeout(() => { (editing ? descI : nameI).focus(); }, 30);
+}
+
+async function runWorkflow(wf) {
+  const kinds = wf.step_kinds || [];
+  if (!kinds.length) { toast('Workflow vide — aucune étape à lancer', 'bad'); return; }
+  const defCamp = ($('#campaign') && $('#campaign').value) || 'default';
+  const vals = await modal({
+    title: 'Lancer le workflow « ' + wf.name + ' »', wide: true, okText: 'Lancer',
+    message: 'Lancement C2 gouverné : les étapes hors-scope / désactivées pour le scope sont LARGUÉES (fail-closed) ; les étapes exploit exigent l\'opt-in fort-impact (armer + raison). Le scope-guard reste seul juge du périmètre.',
+    fields: [
+      { name: 'campaign', label: 'Campagne', type: 'text', value: defCamp, required: true },
+      { name: 'targets', label: 'Cibles (une par ligne, ⊆ scope serveur)', type: 'textarea', required: true, placeholder: 'app.example.com' },
+      { name: 'operator', label: 'Secret opérateur', type: 'password', value: OPERATOR_SECRET, hint: 'jamais persisté — mémoire de session uniquement' },
+      { name: 'mode', label: 'Mode', type: 'select', value: 'propose', options: [{ value: 'propose', label: 'propose (approbation requise)' }, { value: 'auto', label: 'auto' }] },
+      { name: 'reason', label: 'Raison (requise pour l\'opt-in fort-impact)', type: 'text' },
+      { name: 'high', label: 'Inclure les étapes fort-impact (opt-in gouverné : armer + raison)', type: 'checkbox' },
+      { name: 'arm', label: 'Armer l\'engagement', type: 'checkbox' },
+    ],
+    validate: v => {
+      if (v.high && (!v.arm || !String(v.reason || '').trim())) return 'L\'opt-in fort-impact exige d\'ARMER ET une RAISON non vide.';
+      return null;
+    },
+  });
+  if (!vals) return;
+  OPERATOR_SECRET = vals.operator || '';
+  if (!OPERATOR_SECRET) { toast('Secret opérateur requis', 'bad'); return; }
+  const targets = String(vals.targets || '').split('\n').map(s => s.trim()).filter(Boolean);
+  if (!targets.length) { toast('Au moins une cible requise', 'bad'); return; }
+  const high = !!vals.high;
+  // modules = étapes du workflow ; hors opt-in fort-impact -> uniquement les étapes lançables web
+  // (les exploit exigent l'opt-in — sinon /api/run rejetterait tout le run via le plancher exploit).
+  const modules = high ? kinds.slice() : kinds.filter(wfStepIsSafe);
+  if (!modules.length) { toast('Aucune étape lançable depuis le web — activez l\'opt-in fort-impact ou éditez le workflow', 'bad'); return; }
+  const mp = {};
+  (wf.steps || []).forEach(s => { if (modules.includes(s.kind) && s.params && Object.keys(s.params).length) mp[s.kind] = { ...(mp[s.kind] || {}), ...s.params }; });
+  const body = { campaign: String(vals.campaign || '').trim(), targets, mode: vals.mode || 'propose', auto_pentest: true, modules, arm: !!vals.arm, allow_high_impact: high };
+  if (Object.keys(mp).length) body.module_params = mp;
+  body.reason = (String(vals.reason || '').trim() || ('workflow: ' + wf.name)).slice(0, 200);
+  let r, j;
+  try { r = await fetch('/api/run', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }); j = await r.json().catch(() => ({})); }
+  catch (err) { toast('Erreur réseau : ' + String(err.message || err), 'bad'); return; }
+  if (r.status === 202) {
+    toast('Workflow « ' + wf.name + ' » lancé (' + j.mode + ') — ' + j.run_id, 'ok');
+    location.hash = 'launch';
+    if (typeof followRun === 'function') followRun(j.run_id, { status: 'running', campaign: j.campaign, mode: j.mode, fired: 0, dry_run: 0, vetoed: 0, errors: 0 });
+    if (typeof loadRuns === 'function') loadRuns();
+    return;
+  }
+  const code = j && j.error ? j.error : ('http_' + r.status);
+  toast('Refus (' + code + ')' + (j && j.why ? ' — ' + j.why : ''), 'bad');
+}
+
+if ($('#wf-new')) $('#wf-new').addEventListener('click', () => openWorkflowBuilder(null, {}));
+if ($('#wf-reload')) $('#wf-reload').addEventListener('click', loadWorkflows);
+
 const SEV_BADGE = s => `<span class="sevb sevb-${SEVKEY(s)}">${esc(String(s || '').toUpperCase() || 'INFO')}</span>`;
 let F_STATE = { offset: 0, limit: 200 };
 async function loadFindings(offset = 0) {
@@ -2558,6 +2807,95 @@ if ($('#lc-reason')) $('#lc-reason').addEventListener('input', lcSyncDanger);
 if ($('#lc-allowhi')) $('#lc-allowhi').addEventListener('change', lcSyncDanger);
 
 // =====================================================================================
+//  IMPORT — migration : ingérer une SORTIE DE SCANNER EXISTANTE en findings orientés preuve.
+//  POST /api/import (opérateur, ledgerisé, scope-guardé). PUR DATA : le fichier est parsé côté
+//  serveur (moteur Python, SOURCE UNIQUE des parseurs), scope-filtré, secrets rédigés. Le secret
+//  opérateur est partagé avec le lancement C2 (OPERATOR_SECRET, jamais persisté).
+// =====================================================================================
+function imShowErr(msg) { const e = $('#im-err'); if (e) { e.textContent = msg; e.hidden = !msg; } }
+
+function loadImport() {
+  // reflète l'état du secret opérateur en session (partagé avec la vue Lancement C2).
+  const b = $('#im-c2state');
+  if (b) {
+    const ok = !!OPERATOR_SECRET;
+    b.textContent = ok ? 'secret opérateur en session' : 'secret opérateur requis';
+    b.className = 'badge ' + (ok ? 'webyes' : 'mut');
+  }
+  if ($('#im-operator') && OPERATOR_SECRET && !$('#im-operator').value) $('#im-operator').value = OPERATOR_SECRET;
+}
+
+function readFileText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ''));
+    r.onerror = () => reject(new Error('lecture du fichier impossible'));
+    r.readAsText(file);
+  });
+}
+
+function renderImportResult(j) {
+  const host = $('#im-result');
+  if (!host) return;
+  const c = j.counts || {};
+  const cell = v => (v === null || v === undefined) ? '—' : esc(String(v));
+  host.innerHTML =
+    '<div class="roecounters" style="margin-top:10px">' +
+    `<span class="badge ok">ingérés : ${esc(String(j.ingested ?? 0))}</span>` +
+    `<span class="badge">format : ${esc(String(j.format || '—'))}</span>` +
+    `<span class="badge mut">parsés : ${cell(c.parsed)}</span>` +
+    `<span class="badge webyes">in-scope : ${cell(c.in_scope)}</span>` +
+    `<span class="badge expl">hors-scope : ${cell(c.out_of_scope)}</span>` +
+    `<span class="badge mut">run : ${esc(String(j.run_id || '—'))}</span>` +
+    '</div>' +
+    '<p class="muted" style="margin:8px 0 0">Findings orientés preuve (jamais <code>vulnerable</code>). ' +
+    'Consulte-les dans <a href="#findings">Findings</a> ; l\'import est tracé au <a href="#ledger">Ledger</a> ' +
+    '(<code>console.import</code>).</p>';
+  host.hidden = false;
+}
+
+async function submitImport(ev) {
+  if (ev) ev.preventDefault();
+  imShowErr('');
+  const campaign = ($('#im-campaign') && $('#im-campaign').value || '').trim();
+  const format = ($('#im-format') && $('#im-format').value) || 'auto';
+  const fileEl = $('#im-file');
+  const file = fileEl && fileEl.files && fileEl.files[0];
+  const flag = !!($('#im-flag') && $('#im-flag').checked);
+  if (!OPERATOR_SECRET) { imShowErr('Secret opérateur C2 requis pour importer.'); if ($('#im-operator')) $('#im-operator').focus(); return; }
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(campaign) || campaign.startsWith('-')) { imShowErr('Campagne invalide (^[A-Za-z0-9._-]{1,64}$, pas de « - » en tête).'); return; }
+  if (!file) { imShowErr('Sélectionne un fichier de scan à importer.'); return; }
+  const btn = $('#im-submit'); const stat = $('#im-stat');
+  let content;
+  try { content = await readFileText(file); }
+  catch (e) { imShowErr('Erreur : ' + esc(String(e.message || e))); return; }
+  if (!content.trim()) { imShowErr('Le fichier est vide.'); return; }
+  if (btn) btn.disabled = true; if (stat) stat.textContent = 'import en cours…';
+  let r;
+  try {
+    r = await fetch('/api/import', {
+      method: 'POST',
+      headers: operatorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ campaign, format, filename: file.name || '', content, flag_out_of_scope: flag }),
+    });
+  } catch (err) {
+    if (btn) btn.disabled = false; if (stat) stat.textContent = '';
+    imShowErr('Erreur réseau : ' + esc(String(err.message || err))); return;
+  }
+  if (btn) btn.disabled = false; if (stat) stat.textContent = '';
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* réponse non-JSON */ }
+  if (r.status === 403) { imShowErr('Refusé : rôle opérateur requis (vérifie le secret opérateur C2).'); return; }
+  if (!r.ok) { imShowErr('Import refusé : ' + esc(String((j && (j.why || j.error)) || ('HTTP ' + r.status)))); return; }
+  renderImportResult(j);
+  toast(`Import OK — ${j.ingested ?? 0} finding(s) ingéré(s) (format ${j.format || '?'}).`, 'ok');
+}
+
+if ($('#im-form')) $('#im-form').addEventListener('submit', submitImport);
+if ($('#im-operator')) $('#im-operator').addEventListener('input', e => { OPERATOR_SECRET = e.target.value; loadImport(); });
+if ($('#im-clearop')) $('#im-clearop').addEventListener('click', () => { OPERATOR_SECRET = ''; if ($('#im-operator')) $('#im-operator').value = ''; loadImport(); toast('Secret opérateur oublié (session).', 'ok'); });
+
+// =====================================================================================
 //  PARITÉ LECTURE/GOUVERNANCE : scope-check, dry-plan + approbation RECON, rapport de run.
 //  Endpoints (tous viewer + host_guard) :
 //    POST /api/scope-check {target}            -> {target, in_scope, mode, allow_exploit, allow_destructive} | 400 bad_target
@@ -3581,12 +3919,13 @@ function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAdminDetecti
 const VIEWS = {
   'ov-summary': 'overview', 'ov-sev': 'overview', 'ov-modules': 'overview',
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
-  modules: 'modules', techniques: 'techniques', findings: 'findings', explore: 'explore',
+  import: 'import',
+  modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', explore: 'explore',
   coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
   admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
 };
 const LOADERS = {
-  overview: loadOverview, launch: loadLaunch, modules: loadModules, techniques: loadTechniques, findings: loadFindings,
+  overview: loadOverview, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings,
   coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
   admin: loadAdmin,
 };

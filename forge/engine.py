@@ -25,6 +25,11 @@ _SCOPE_INJECT_KINDS = frozenset({
     # à runtime -> mêmes garanties que recon.js_endpoints : le périmètre injecté sert à RE-VALIDER
     # fail-closed chaque endpoint découvert avant émission (le scope-guard du module en dépend).
     "evasion.discover",
+    # OUTILS OSS PRÉ-WRAPPÉS (toolcatalog.py) qui DÉCOUVRENT des ASSETS à runtime (sous-domaines, hosts
+    # résolus, ports, URLs crawlées/archivées, routes) : le périmètre injecté sert au wrapper à RE-VALIDER
+    # fail-closed chaque asset découvert avant d'émettre un finding (jamais un asset hors périmètre).
+    "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",
+    "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",
 })
 
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour

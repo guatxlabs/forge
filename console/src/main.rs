@@ -3863,6 +3863,265 @@ async fn technique_selection_set(
     (StatusCode::OK, Json(json!({"ok": true, "selection": sel}))).into_response()
 }
 
+// =====================================================================================
+// WORKFLOWS ÉDITABLES & SAUVEGARDÉS — pipelines COMPOSÉS par l'opérateur, SANS code (absorbe les
+// scan-engines de reNgine / workflows d'Osmedeus / pipelines visuels de Trickest). Un workflow est
+// une SÉLECTION ORDONNÉE de techniques/outils (+ params par-étape) puisée dans le registre. Persisté
+// dans la table `settings` (clé `workflows`) comme JSON {name: workflow}, éditable admin/operator,
+// ledgerisé au save. GOUVERNANCE fail-closed : un workflow est une PROPOSITION — le scope-guard ROE
+// + la sélection par-scope restent seuls JUGES (l'engine ré-filtre par l'ensemble activé au tir).
+// Les workflows INTÉGRÉS (builtins) sont DÉRIVÉS du registre côté moteur (`forge workflows --json`) :
+// non supprimables. Le lancement passe par le C2 gouverné (POST /api/run avec modules=étapes).
+// =====================================================================================
+
+/// Noms des workflows INTÉGRÉS — RÉSERVÉS (non supprimables, non écrasables par un workflow utilisateur).
+/// Doit rester en phase avec `forge/workflows.py::BUILTIN_NAMES` (source de vérité côté moteur ; ce
+/// miroir sert uniquement à refuser localement une CRUD sur un nom réservé — fail-closed sans spawn).
+const WORKFLOW_BUILTIN_NAMES: &[&str] = &["recon-surface", "bug-bounty-web", "full-pentest"];
+
+fn workflow_name_is_builtin(name: &str) -> bool {
+    WORKFLOW_BUILTIN_NAMES.contains(&name)
+}
+
+/// Nom de workflow / kind d'étape bien formé : `[A-Za-z0-9._-]{1,64}`, non vide, pas de `-` en tête
+/// (parité avec validate_login/validate_campaign — anti-flag + entrées hostiles). Fonction PURE.
+fn valid_workflow_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Valide/normalise un workflow POSTé : {name?, description?, steps:[{kind, params?}]}. `name_override`
+/// (segment d'URL) prime sur `body["name"]`. Grammaire stricte du nom/kind, steps ≤ 128, params objet.
+/// Les kinds INCONNUS du registre sont TOLÉRÉS (le résolveur moteur/engine les LARGUE via ∩ enabled —
+/// jamais une capacité fabriquée), exactement comme validate_technique_selection tolère une clé inconnue.
+/// Retourne le workflow canonique {name, description, builtin:false, steps:[{kind, params}]}. PURE.
+fn validate_workflow_body(body: &Value, name_override: Option<&str>) -> Result<Value, String> {
+    if !body.is_object() {
+        return Err("corps attendu : objet {name?, description?, steps:[{kind, params?}]}".into());
+    }
+    let name = match name_override {
+        Some(n) => n.to_string(),
+        None => body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    };
+    if !valid_workflow_token(&name) {
+        return Err("nom de workflow invalide ([A-Za-z0-9._-], 1..64, pas de '-' en tête)".into());
+    }
+    let description = match body.get("description") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.chars().take(500).collect::<String>(),
+        Some(_) => return Err("description doit être une chaîne".into()),
+    };
+    let raw_steps = match body.get("steps") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a.clone(),
+        Some(_) => return Err("steps doit être une liste [{kind, params?}]".into()),
+    };
+    if raw_steps.len() > 128 {
+        return Err("trop d'étapes (> 128)".into());
+    }
+    let mut steps = Vec::new();
+    for (i, st) in raw_steps.iter().enumerate() {
+        let obj = st.as_object().ok_or_else(|| format!("steps[{i}] : objet {{kind, params?}} attendu"))?;
+        let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_workflow_token(kind) {
+            return Err(format!("steps[{i}] : kind '{kind}' mal formé ([A-Za-z0-9._-], 1..64)"));
+        }
+        let params = match obj.get("params") {
+            None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+            Some(Value::Object(m)) => Value::Object(m.clone()),
+            Some(_) => return Err(format!("steps[{i}] : params doit être un objet {{clé: valeur}}")),
+        };
+        steps.push(json!({"kind": kind, "params": params}));
+    }
+    Ok(json!({"name": name, "description": description, "builtin": false, "steps": steps}))
+}
+
+/// Lit la map des workflows UTILISATEUR persistée (`settings.workflows`). Fail-soft : absente/illisible/
+/// non-objet -> map vide (jamais de valeur inventée). Ne verrouille que le mutex DB.
+fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
+    let raw = { let db = app.db(); settings_get(&db, "workflows") };
+    match raw.as_deref().map(serde_json::from_str::<Value>) {
+        Some(Ok(Value::Object(m))) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// Spawne `forge workflows --json` -> workflows INTÉGRÉS (DÉRIVÉS du registre côté moteur : SOURCE
+/// UNIQUE, toujours à jour). Renvoie le tableau `builtins` parsé, ou une erreur lisible (moteur absent /
+/// JSON illisible). Env passthrough sûr ; aucun argv sensible.
+fn spawn_workflows_builtins(app: &App) -> Result<Vec<Value>, String> {
+    let out = std::process::Command::new(app.python.as_str())
+        .args(["-m", "forge.cli", "workflows", "--json"])
+        .current_dir(app.pkg_dir.as_str())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("spawn échoué: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "moteur workflows rc={:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).chars().take(200).collect::<String>()
+        ));
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("JSON illisible: {e}"))?;
+    Ok(v.get("builtins").and_then(|b| b.as_array()).cloned().unwrap_or_default())
+}
+
+/// Enrichit un workflow (user ou builtin) avec `step_kinds` (ordre + dédup) + `step_count` — la forme
+/// LUE par le SPA (le builder). PURE (aucune I/O). Les params par-étape sont conservés tels quels.
+fn workflow_view(wf: &Value) -> Value {
+    let mut kinds: Vec<String> = Vec::new();
+    if let Some(steps) = wf.get("steps").and_then(|s| s.as_array()) {
+        for st in steps {
+            if let Some(k) = st.get("kind").and_then(|v| v.as_str()) {
+                if !kinds.iter().any(|x| x == k) {
+                    kinds.push(k.to_string());
+                }
+            }
+        }
+    }
+    json!({
+        "name": wf.get("name").cloned().unwrap_or(json!("")),
+        "description": wf.get("description").cloned().unwrap_or(json!("")),
+        "builtin": wf.get("builtin").and_then(|v| v.as_bool()).unwrap_or(false),
+        "steps": wf.get("steps").cloned().unwrap_or(json!([])),
+        "step_kinds": kinds,
+        "step_count": wf.get("steps").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0),
+    })
+}
+
+/// GET /api/workflows — LISTE les workflows : UTILISATEUR (persistés `settings.workflows`) + INTÉGRÉS
+/// (dérivés du registre via le moteur). Lecture (viewer) — la composition est visible de tous ; seule
+/// la MUTATION est gouvernée (POST). Fail-soft : si le moteur est absent, `builtins:[]` + note d'erreur
+/// (le SPA affiche encore les workflows utilisateur et le builder). Le SPA croise chaque étape avec
+/// `GET /api/techniques` (enabled_for_current_scope) pour montrer ce qui est activé/autorisé au scope.
+async fn workflows_list(State(app): State<App>) -> Response {
+    let user_map = workflows_user_map(&app);
+    let mut user: Vec<Value> = Vec::new();
+    let mut names: Vec<&String> = user_map.keys().collect();
+    names.sort();
+    for n in names {
+        if let Some(wf) = user_map.get(n) {
+            user.push(workflow_view(wf));
+        }
+    }
+    match spawn_workflows_builtins(&app) {
+        Ok(builtins) => {
+            let bl: Vec<Value> = builtins.iter().map(workflow_view).collect();
+            (StatusCode::OK, Json(json!({"workflows": user, "builtins": bl}))).into_response()
+        }
+        Err(e) => (StatusCode::OK, Json(json!({
+            "workflows": user, "builtins": [],
+            "error": "builtins_unavailable", "why": e,
+        }))).into_response(),
+    }
+}
+
+/// Persiste la map des workflows utilisateur + ledgerise la mutation (attribuée à l'acteur). Facteur
+/// commun de create/edit/delete. Retourne une Response 500 lisible si l'écriture settings échoue.
+fn workflows_persist(app: &App, map: &serde_json::Map<String, Value>, action: &str, name: &str,
+                     actor: &str, detail: Value) -> Result<(), Box<Response>> {
+    {
+        let db = app.db();
+        if let Err(e) = settings_set(&db, "workflows", &Value::Object(map.clone()).to_string()) {
+            return Err(Box::new((StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "persist_failed", "why": e}))).into_response()));
+        }
+    }
+    append_console_ledger(app, &format!("console.workflows.{action}"), json!({
+        "actor": actor, "by": "operator", "name": name, "detail": detail,
+    }));
+    Ok(())
+}
+
+/// POST /api/workflows {name, description?, steps:[{kind, params?}]} — CRÉE/REMPLACE un workflow
+/// UTILISATEUR. OPÉRATEUR/ADMIN (check_operator, FAIL-CLOSED 403 sinon) + LEDGERISÉ. Refuse un nom
+/// INTÉGRÉ réservé (409). Le workflow est une PROPOSITION : aucune capacité n'est accordée ici — le
+/// scope-guard + la sélection par-scope gouvernent l'exécution (POST /api/run avec modules=étapes).
+async fn workflow_create(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let wf = match validate_workflow_body(&body, None) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_workflow", "why": e}))).into_response(),
+    };
+    let name = wf["name"].as_str().unwrap_or("").to_string();
+    if workflow_name_is_builtin(&name) {
+        return (StatusCode::CONFLICT,
+                Json(json!({"error": "reserved_name", "why": format!("nom réservé (workflow intégré non modifiable) : {name}")}))).into_response();
+    }
+    let mut map = workflows_user_map(&app);
+    map.insert(name.clone(), wf.clone());
+    let actor = attribution_login(&app, &headers);
+    if let Err(resp) = workflows_persist(&app, &map, "save", &name, &actor,
+                                         json!({"step_count": wf["steps"].as_array().map(|a| a.len()).unwrap_or(0)})) {
+        return *resp;
+    }
+    (StatusCode::OK, Json(json!({"ok": true, "workflow": workflow_view(&wf)}))).into_response()
+}
+
+/// POST /api/workflows/:name — ÉDITE (upsert) ou SUPPRIME (`{"delete": true}`) un workflow UTILISATEUR.
+/// OPÉRATEUR/ADMIN (check_operator, FAIL-CLOSED 403) + LEDGERISÉ. Bloque la SUPPRESSION d'un builtin
+/// (409). Le `name` provient de l'URL (prime sur le corps). Édition = validate + remplace ; suppression
+/// = retire de la map (404 si inconnu et non-builtin).
+async fn workflow_edit(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    if !valid_workflow_token(&name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_name", "why": "nom de workflow mal formé"}))).into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    let is_delete = body.get("delete").and_then(|v| v.as_bool()).unwrap_or(false);
+    if is_delete {
+        // FAIL-CLOSED : un workflow INTÉGRÉ ne peut JAMAIS être supprimé (409).
+        if workflow_name_is_builtin(&name) {
+            return (StatusCode::CONFLICT,
+                    Json(json!({"error": "builtin_protected", "why": format!("workflow intégré non supprimable : {name}")}))).into_response();
+        }
+        let mut map = workflows_user_map(&app);
+        if map.remove(&name).is_none() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": format!("workflow inconnu : {name}")}))).into_response();
+        }
+        if let Err(resp) = workflows_persist(&app, &map, "delete", &name, &actor, json!({})) {
+            return *resp;
+        }
+        return (StatusCode::OK, Json(json!({"ok": true, "deleted": name}))).into_response();
+    }
+    // ÉDITION : refuse d'écraser un nom RÉSERVÉ (builtin).
+    if workflow_name_is_builtin(&name) {
+        return (StatusCode::CONFLICT,
+                Json(json!({"error": "reserved_name", "why": format!("nom réservé (workflow intégré non modifiable) : {name}")}))).into_response();
+    }
+    let wf = match validate_workflow_body(&body, Some(&name)) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_workflow", "why": e}))).into_response(),
+    };
+    let mut map = workflows_user_map(&app);
+    map.insert(name.clone(), wf.clone());
+    if let Err(resp) = workflows_persist(&app, &map, "save", &name, &actor,
+                                         json!({"step_count": wf["steps"].as_array().map(|a| a.len()).unwrap_or(0)})) {
+        return *resp;
+    }
+    (StatusCode::OK, Json(json!({"ok": true, "workflow": workflow_view(&wf)}))).into_response()
+}
+
 /// Extrait les couples action->verdict de la sortie texte du moteur en mode propose. Sortie :
 /// [{kind, target, verdict, line}], une entrée PAR ACTION réelle (pas par compteur de synthèse).
 ///
@@ -5422,6 +5681,166 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     spawn_supervisor(app.clone(), child, run_id.clone(), run_dir);
 
     (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": campaign, "mode": mode, "high_impact": high_impact, "auto_pentest": auto_pentest})))
+}
+
+/// Formats d'import acceptés par l'endpoint (alias inclus ; le moteur Python les normalise). "auto"
+/// déclenche l'auto-détection côté moteur. Grammaire FERMÉE (fail-closed) : un format inconnu -> 400.
+fn valid_import_format(f: &str) -> bool {
+    matches!(f,
+        "auto" | "nmap" | "nuclei" | "burp" | "httpx" | "ffuf" | "hosts"
+        | "generic-json" | "generic-csv" | "subfinder" | "amass" | "json" | "csv" | "generic"
+        | "nmap-xml" | "burp-xml" | "hostlist" | "subdomains")
+}
+
+/// Nom de fichier SÛR pour l'attribution ledger/UI : basename seul, caractères ASCII sûrs, borné.
+/// JAMAIS utilisé comme chemin (le contenu est écrit dans un fichier temp au nom fixe) — purement
+/// informatif. Zéro traversée de chemin, zéro métacaractère, zéro NUL.
+fn sanitize_filename(s: &str) -> String {
+    let base = s.rsplit(['/', '\\']).next().unwrap_or("");
+    base.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).take(128).collect()
+}
+
+/// POST /api/import — INGESTION de sorties de SCANNERS EXISTANTS (migration Faraday/Trickest/reNgine/
+/// Osmedeus). OPÉRATEUR/ADMIN (check_operator, 403 sinon) + LEDGERISÉ (`console.import`). Corps :
+///   {campaign, format:"auto"|<fmt>, content:<texte du fichier>, filename?, flag_out_of_scope?}
+///
+/// GOUVERNANCE — PUR DATA, ZÉRO exécution : le fichier est PARSÉ par le moteur Python (`forge import`,
+/// SOURCE UNIQUE des parseurs — pas de re-implémentation Rust qui dériverait) sous le SCOPE SERVEUR
+/// autoritatif (roe.Scope, LE scope-guard unique). Les findings d'assets HORS périmètre sont JETÉS
+/// (défaut) ou MARQUÉS (`flag_out_of_scope` -> status=skipped). Les secrets du fichier sont RÉDIGÉS par
+/// le moteur AVANT tout finding ; le fichier temp est supprimé aussitôt le parse fini (aucun secret ne
+/// persiste). Le ledger n'enregistre QUE l'attribution + les COMPTEURS (jamais le contenu). Orienté
+/// preuve : les findings importés sont tested/reported_by_tool (jamais `vulnerable`). no-shell (argv FIXE).
+async fn import_scan(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    // (1) gate opérateur fail-closed (comme /api/run — une ingestion mute l'engagement).
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    // (2) validation stricte de l'entrée
+    let campaign = match validate_campaign(body.get("campaign").and_then(|v| v.as_str()).unwrap_or("default")) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_campaign", "why": e}))).into_response(),
+    };
+    let fmt_in = body.get("format").and_then(|v| v.as_str()).unwrap_or("auto").trim().to_string();
+    if !valid_import_format(&fmt_in) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_format",
+            "why": "format inconnu (nmap|nuclei|burp|httpx|ffuf|hosts|generic-json|generic-csv|auto)"}))).into_response();
+    }
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) if !c.trim().is_empty() => c.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_content", "why": "content (texte du fichier de scan) requis"}))).into_response(),
+    };
+    if content.len() > 64 * 1024 * 1024 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "too_large", "why": "fichier trop volumineux (>64 MiB)"}))).into_response();
+    }
+    let filename = sanitize_filename(body.get("filename").and_then(|v| v.as_str()).unwrap_or(""));
+    let flag_oos = body.get("flag_out_of_scope").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // (3) écrit le fichier + le SCOPE SERVEUR (autoritatif) dans un dossier temp, PUIS parse via le
+    //     moteur Python. Le scope-guard (roe.Scope) filtre les assets hors périmètre au parse.
+    let import_dir = std::env::temp_dir().join(format!("forge-import-{}-{}", chrono_now_compact(),
+        gen_token().chars().take(8).collect::<String>()));
+    if std::fs::create_dir_all(&import_dir).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "mkdir_failed"}))).into_response();
+    }
+    let file_path = import_dir.join("scan.input");
+    let scope_path = import_dir.join("scope.json");
+    let scope_doc = json!({
+        "_comment": "scope serveur autoritatif — filtre les findings importés hors périmètre (scope-guard fail-closed)",
+        "mode": app.scope_mode.as_str(),
+        "in_scope": app.scope_in.as_ref().clone(),
+        "out_scope": [],
+    });
+    if std::fs::write(&file_path, content.as_bytes()).is_err()
+        || std::fs::write(&scope_path, serde_json::to_vec(&scope_doc).unwrap()).is_err()
+    {
+        let _ = std::fs::remove_dir_all(&import_dir);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "write_failed"}))).into_response();
+    }
+    // argv FIXE — aucune valeur concaténée à un shell ; le contenu ne transite QUE par un fichier.
+    let mut argv: Vec<String> = vec![
+        "-m".into(), "forge.cli".into(), "import".into(),
+        "--format".into(), fmt_in.clone(),
+        "--file".into(), file_path.to_string_lossy().into_owned(),
+        "--scope".into(), scope_path.to_string_lossy().into_owned(),
+        "--campaign".into(), campaign.clone(),
+        "--json".into(),
+    ];
+    if flag_oos { argv.push("--flag-out-of-scope".into()); }
+    let spawn = std::process::Command::new(app.python.as_str())
+        .args(&argv)
+        .current_dir(app.pkg_dir.as_str())
+        .stdin(std::process::Stdio::null())
+        .output();
+    // nettoyage IMMÉDIAT — le contenu (secrets potentiels) ne persiste jamais sur disque au-delà du parse.
+    let _ = std::fs::remove_dir_all(&import_dir);
+    let out = match spawn {
+        Ok(o) => o,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.to_string()}))).into_response(),
+    };
+    if !out.status.success() {
+        // stderr rédigé/borné (le moteur n'imprime jamais le contenu ni un secret sur stderr).
+        let why = String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>();
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "parse_failed", "why": why}))).into_response();
+    }
+    let env: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "bad_envelope", "why": e.to_string()}))).into_response(),
+    };
+    let fmt_detected = env.get("format").and_then(|v| v.as_str()).unwrap_or(fmt_in.as_str()).to_string();
+    let counts = env.get("counts").cloned().unwrap_or_else(|| json!({}));
+
+    // (4) INSÈRE les findings (déjà scope-filtrés par le moteur). MÊME dérivation CWE/CVSS que /api/ingest.
+    let run_id = format!("import-{}-{}", chrono_now_compact(), gen_token().chars().take(6).collect::<String>());
+    let mut ingested = 0i64;
+    if let Some(arr) = env.get("findings").and_then(|v| v.as_array()) {
+        let db = app.db();
+        for f in arr {
+            let cwe = { let c = gs(f, "cwe"); if c.is_empty() { extract_cwe(&gs(f, "category")) } else { c } };
+            let (mut cvss_vec, mut cvss_score) = (gs(f, "cvss_vector"), f.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+            if cvss_vec.is_empty() && cvss_score == 0.0 {
+                let (v, s) = cvss_base_for_severity(&gs(f, "severity"));
+                cvss_vec = v.to_string();
+                cvss_score = s;
+            }
+            if let Ok(n) = db.execute(
+                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
+                    gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
+                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score],
+            ) {
+                ingested += n as i64;
+            }
+        }
+    }
+
+    // (5) LEDGER : attribution + COMPTEURS uniquement — JAMAIS le contenu du fichier ni un secret.
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.import", json!({
+        "actor": actor, "by": "operator", "campaign": campaign,
+        "format": fmt_detected, "requested_format": fmt_in, "filename": filename,
+        "run_id": run_id, "flag_out_of_scope": flag_oos,
+        "counts": {
+            "parsed": counts.get("parsed").cloned().unwrap_or(json!(null)),
+            "in_scope": counts.get("in_scope").cloned().unwrap_or(json!(null)),
+            "out_of_scope": counts.get("out_of_scope").cloned().unwrap_or(json!(null)),
+            "emitted": counts.get("emitted").cloned().unwrap_or(json!(null)),
+            "ingested": ingested,
+        },
+        "note": "import PUR DATA (aucune exécution) ; scope-guard appliqué (hors périmètre jeté/marqué) ; secrets rédigés par le moteur"
+    }));
+
+    (StatusCode::OK, Json(json!({
+        "ok": true, "format": fmt_detected, "campaign": campaign, "run_id": run_id,
+        "counts": counts, "ingested": ingested
+    }))).into_response()
 }
 
 /// Valide une CHAÎNE issue des params par-module avant de l'écrire dans scope.json/targets.json.
@@ -8322,6 +8741,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // gouvernée (opérateur/admin, ledgerisée) de la sélection (profil + toggles catégorie/technique).
         .route("/api/techniques", get(techniques_catalog))
         .route("/api/techniques/selection", post(technique_selection_set))
+        // WORKFLOWS éditables & sauvegardés — pipelines composés (absorbe reNgine/Osmedeus/Trickest).
+        // GET = liste (viewer) ; POST /api/workflows = créer, POST /api/workflows/:name = éditer/
+        // supprimer — mutations OPÉRATEUR/ADMIN gouvernées + ledgerisées, builtins protégés. matchit :
+        // le segment statique `selection` (techniques) et `:name` (workflows) ne collisionnent pas.
+        .route("/api/workflows", get(workflows_list).post(workflow_create))
+        .route("/api/workflows/:name", post(workflow_edit))
         // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
         // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
         // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
@@ -8352,6 +8777,10 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/panels", get(panels_list).post(panel_create))
         .route("/api/panels/:id", post(panel_update).delete(panel_delete))
         .route("/api/panels/:id/data", get(panel_data))
+        // --- IMPORT (migration Faraday/Trickest/reNgine/Osmedeus) : ingestion de sorties de scanners
+        //     existantes en findings orientés preuve. OPÉRATEUR (fail-closed) + ledgerisé + scope-guardé.
+        //     PUR DATA (aucune exécution). DefaultBodyLimit relevé (fichiers de scan volumineux possibles).
+        .route("/api/import", post(import_scan).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         // --- C2-light : lancement gouverné/audité (opérateur fail-closed sur run/cancel) ---
         .route("/api/run", post(run_create))
         .route("/api/runs", get(runs_list))
@@ -8671,6 +9100,16 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         p.push(uniq);
         p.to_string_lossy().into_owned()
+    }
+
+    /// App de test avec un SCOPE SERVEUR non vide (pour les endpoints scope-guardés comme /api/import).
+    /// Applique aussi `migrate()` (colonnes additives run_id/cwe/cvss du finding) comme en production —
+    /// le boot serveur enchaîne toujours SCHEMA puis migrate ; les INSERT findings en dépendent.
+    fn test_app_scoped(ledger_path: &str, scope_in: Vec<String>) -> App {
+        let mut a = test_app(ledger_path);
+        a.scope_in = Arc::new(scope_in);
+        { let db = a.db(); migrate(&db); }
+        a
     }
 
     /// [HIGH] gen_token : entropie CSPRNG -> non tous-zeros, longueur fixe, valeurs distinctes.
@@ -11608,6 +12047,247 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let resp = technique_selection_set(State(app.clone()), conn_info(), bearer_headers(&otok),
             Json(json!({"profile": "root"}))).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "profil invalide -> 400");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // =============================================================================================
+    // WORKFLOWS ÉDITABLES & SAUVEGARDÉS — validation pure, routes non-conflictuelles, CRUD gouverné
+    // (opérateur/admin) + ledgerisé + persisté, builtins protégés (fail-closed).
+    // =============================================================================================
+
+    /// [workflows routes] les 2 routes workflows coexistent (segment statique vs `:name`, matchit).
+    #[test]
+    fn workflow_routes_do_not_conflict() {
+        let _r: Router<App> = Router::new()
+            .route("/api/workflows", get(workflows_list).post(workflow_create))
+            .route("/api/workflows/:name", post(workflow_edit));
+    }
+
+    /// [workflows pur] validate_workflow_body : grammaire nom/kind, steps typées, défauts, name_override,
+    /// kinds inconnus TOLÉRÉS (l'engine les LARGUE via ∩ enabled — pas de capacité forgée).
+    #[test]
+    fn validate_workflow_grammar_and_defaults() {
+        // minimal -> défauts (description "", builtin false, steps normalisées {kind, params}).
+        let v = validate_workflow_body(&json!({"name": "wf1", "steps": [{"kind": "recon.httpx"}]}), None).unwrap();
+        assert_eq!(v["name"], "wf1");
+        assert_eq!(v["description"], "");
+        assert_eq!(v["builtin"], false);
+        assert_eq!(v["steps"][0]["kind"], "recon.httpx");
+        assert_eq!(v["steps"][0]["params"], json!({}));
+        // name_override (segment d'URL) prime sur le corps.
+        let v = validate_workflow_body(&json!({"name": "ignored", "steps": []}), Some("from-url")).unwrap();
+        assert_eq!(v["name"], "from-url");
+        // noms mal formés refusés.
+        for bad in ["", "-x", "a b", "a/b"] {
+            assert!(validate_workflow_body(&json!({"name": bad, "steps": []}), None).is_err(), "nom '{bad}' refusé");
+        }
+        // kind mal formé refusé ; params non-objet refusé ; steps non-liste refusé.
+        assert!(validate_workflow_body(&json!({"name": "w", "steps": [{"kind": "bad kind"}]}), None).is_err());
+        assert!(validate_workflow_body(&json!({"name": "w", "steps": [{"kind": "recon.httpx", "params": []}]}), None).is_err());
+        assert!(validate_workflow_body(&json!({"name": "w", "steps": "nope"}), None).is_err());
+        // kind INCONNU du registre : toléré (résolveur moteur/engine le LARGUE).
+        let v = validate_workflow_body(&json!({"name": "w", "steps": [{"kind": "not.a.real.kind"}]}), None).unwrap();
+        assert_eq!(v["steps"][0]["kind"], "not.a.real.kind");
+        // trop d'étapes -> refus.
+        let many: Vec<Value> = (0..129).map(|_| json!({"kind": "recon.httpx"})).collect();
+        assert!(validate_workflow_body(&json!({"name": "w", "steps": many}), None).is_err(), "> 128 étapes refusé");
+    }
+
+    /// [workflows builtins protégés] validate + noms réservés (miroir local, sans spawn moteur).
+    #[test]
+    fn workflow_builtin_names_reserved() {
+        for n in WORKFLOW_BUILTIN_NAMES {
+            assert!(workflow_name_is_builtin(n), "'{n}' est un builtin réservé");
+        }
+        assert!(!workflow_name_is_builtin("my-custom"), "un nom utilisateur n'est pas réservé");
+    }
+
+    /// [workflows endpoint] CRUD GOUVERNÉ : viewer -> 403 SANS mutation ; operator -> create/edit
+    /// persistés (`settings.workflows`) + ledgerisés (`console.workflows.save/delete` attribués) ;
+    /// suppression d'un builtin -> 409 (protégé, fail-closed) ; suppression d'un inconnu -> 404 ;
+    /// création avec nom réservé -> 409. Appelle les handlers HTTP réels (check_operator).
+    #[tokio::test]
+    async fn workflow_endpoints_operator_gated_and_ledgered() {
+        let path = tmp_path("forge-test-wf-ep");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+
+        // viewer -> 403 (fail-closed) ET aucune persistance.
+        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&vtok),
+            Json(json!({"name": "my-wf", "steps": [{"kind": "recon.httpx"}]}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
+        { let db = app.db(); assert!(settings_get(&db, "workflows").is_none(), "un refus ne persiste rien"); }
+
+        // operator create -> 200 + persistance + ledger attribué.
+        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"name": "my-wf", "description": "d", "steps": [{"kind": "recon.httpx"}, {"kind": "sqli.probe", "params": {"param": "q"}}]}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "operator autorisé");
+        let stored = { let db = app.db(); settings_get(&db, "workflows").unwrap() };
+        let sv: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(sv["my-wf"]["steps"][1]["kind"], "sqli.probe");
+        assert_eq!(sv["my-wf"]["steps"][1]["params"]["param"], "q");
+        let last = read_ledger_lines(&path).into_iter().last().unwrap();
+        assert_eq!(last["kind"], "console.workflows.save", "création ledgerisée");
+        assert_eq!(last["detail"]["actor"], "oo", "attribuée à l'acteur opérateur");
+        assert_eq!(last["detail"]["name"], "my-wf");
+
+        // operator edit via :name -> 200 (remplace les étapes).
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path("my-wf".into()), Json(json!({"steps": [{"kind": "web.nuclei"}]}))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sv: Value = { let db = app.db(); serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap() };
+        assert_eq!(sv["my-wf"]["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(sv["my-wf"]["steps"][0]["kind"], "web.nuclei");
+
+        // création/édition avec un nom RÉSERVÉ (builtin) -> 409, aucune persistance du builtin.
+        let resp = workflow_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"name": "full-pentest", "steps": []}))).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "nom réservé refusé");
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path("bug-bounty-web".into()), Json(json!({"steps": []}))).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "édition d'un builtin refusée");
+
+        // suppression d'un BUILTIN -> 409 (protégé), même par operator.
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path("recon-surface".into()), Json(json!({"delete": true}))).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "builtin non supprimable (fail-closed)");
+
+        // suppression d'un INCONNU -> 404.
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path("ghost".into()), Json(json!({"delete": true}))).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // viewer ne peut pas supprimer -> 403 (my-wf reste).
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&vtok),
+            Path("my-wf".into()), Json(json!({"delete": true}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        { let db = app.db(); let sv: Value = serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap();
+          assert!(sv.get("my-wf").is_some(), "un delete refusé ne supprime rien"); }
+
+        // operator supprime son workflow -> 200 + ledger `console.workflows.delete`.
+        let resp = workflow_edit(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path("my-wf".into()), Json(json!({"delete": true}))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sv: Value = { let db = app.db(); serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap() };
+        assert!(sv.get("my-wf").is_none(), "supprimé de la map");
+        let last = read_ledger_lines(&path).into_iter().last().unwrap();
+        assert_eq!(last["kind"], "console.workflows.delete", "suppression ledgerisée");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [workflows GET] GET /api/workflows — LISTE (viewer) : workflows UTILISATEUR (settings) +
+    /// INTÉGRÉS dérivés du registre via le moteur (`forge workflows --json`). Nécessite python3 + forge
+    /// (..) comme le test du catalogue de techniques (SOURCE UNIQUE moteur). Chaque entrée porte
+    /// `step_kinds` + `step_count` ; les builtins portent `builtin:true` ; le user workflow apparaît.
+    #[tokio::test]
+    async fn workflows_list_returns_builtins_and_user() {
+        let path = tmp_path("forge-test-wf-list");
+        let app = test_app(&path);
+        {
+            let db = app.db();
+            settings_set(&db, "workflows",
+                &json!({"my-wf": {"name": "my-wf", "description": "d", "builtin": false,
+                                   "steps": [{"kind": "recon.httpx", "params": {}}, {"kind": "sqli.probe", "params": {}}]}}).to_string()).unwrap();
+        }
+        let resp = workflows_list(State(app.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = resp_json(resp).await;
+        // builtins dérivés du moteur : recon-surface / bug-bounty-web / full-pentest, builtin:true.
+        let builtins = j["builtins"].as_array().expect("builtins array");
+        assert!(builtins.len() >= 3, "au moins 3 workflows intégrés (dérivés du registre)");
+        let bnames: Vec<&str> = builtins.iter().filter_map(|b| b["name"].as_str()).collect();
+        for n in WORKFLOW_BUILTIN_NAMES {
+            assert!(bnames.contains(n), "workflow intégré '{n}' présent");
+        }
+        assert!(builtins.iter().all(|b| b["builtin"] == true), "les intégrés portent builtin:true");
+        assert!(builtins.iter().all(|b| b["step_count"].as_u64().unwrap_or(0) > 0), "chaque intégré a des étapes");
+        // le workflow utilisateur apparaît avec ses step_kinds dédupliqués/ordonnés.
+        let user = j["workflows"].as_array().expect("workflows array");
+        let mine = user.iter().find(|w| w["name"] == "my-wf").expect("user workflow listé");
+        assert_eq!(mine["builtin"], false);
+        assert_eq!(mine["step_count"], 2);
+        assert_eq!(mine["step_kinds"], json!(["recon.httpx", "sqli.probe"]));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [MIGRATION] POST /api/import — ingestion de scans EXISTANTS, OPÉRATEUR-gaté + LEDGERISÉ +
+    /// SCOPE-GUARDÉ. Viewer -> 403 (rien ingéré/ledgerisé). Operator -> 200 : findings insérés
+    /// (ORIENTÉS PREUVE : jamais `vulnerable`), ledger `console.import` attribué + compteurs, et le
+    /// CONTENU du fichier n'apparaît JAMAIS dans le ledger (filename assaini au basename). Un asset
+    /// HORS scope serveur est JETÉ. Un format inconnu -> 400. Nécessite python3 + forge (..), comme
+    /// le test du catalogue de techniques (le parse partage la SOURCE UNIQUE des parseurs du moteur).
+    #[tokio::test]
+    async fn import_endpoint_operator_gated_ledgered_and_scope_guarded() {
+        let path = tmp_path("forge-test-import-ep");
+        let app = test_app_scoped(&path, vec!["example.com".into(), "*.example.com".into()]);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+
+        let nmap = "<?xml version=\"1.0\"?><!DOCTYPE nmaprun><nmaprun><host>\
+            <address addr=\"1.1.1.1\" addrtype=\"ipv4\"/><hostnames><hostname name=\"example.com\"/></hostnames>\
+            <ports><port protocol=\"tcp\" portid=\"443\"><state state=\"open\"/><service name=\"https\"/></port></ports>\
+            </host></nmaprun>";
+        let body = json!({"campaign": "imp", "format": "auto", "filename": "../etc/scan.xml", "content": nmap});
+
+        // viewer -> 403 (fail-closed), rien ingéré.
+        let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&vtok), Json(body.clone())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
+        { let db = app.db(); let n: i64 = db.query_row("SELECT COUNT(*) FROM finding", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "un refus n'ingère rien"); }
+
+        // operator -> 200 : findings insérés, orientés preuve, ledgerisés.
+        let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK, "operator autorisé (nécessite python3+forge dans ..)");
+        let jr = resp_json(resp).await;
+        assert_eq!(jr["format"], "nmap", "format auto-détecté");
+        assert!(jr["ingested"].as_i64().unwrap() >= 1, "au moins un finding ingéré");
+        {
+            let db = app.db();
+            let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE campaign='imp'", [], |r| r.get(0)).unwrap();
+            assert!(n >= 1, "findings insérés pour la campagne");
+            let vuln: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE status='vulnerable'", [], |r| r.get(0)).unwrap();
+            assert_eq!(vuln, 0, "un import ne CONFIRME jamais (orienté preuve : jamais vulnerable)");
+            let tested: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE status='tested' AND tool='nmap'", [], |r| r.get(0)).unwrap();
+            assert!(tested >= 1, "nmap -> recon tested");
+        }
+        // ledger : console.import attribué + compteurs ; JAMAIS le contenu (filename assaini au basename).
+        let entries = read_ledger_lines(&path);
+        let last = entries.last().unwrap();
+        assert_eq!(last["kind"], "console.import", "mutation ledgerisée");
+        assert_eq!(last["detail"]["actor"], "oo", "attribuée à l'acteur opérateur");
+        assert!(last["detail"]["counts"]["ingested"].as_i64().unwrap() >= 1);
+        assert_eq!(last["detail"]["filename"], "scan.xml", "filename assaini (basename, pas de ../)");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("nmaprun"), "le contenu du fichier ne fuit JAMAIS dans le ledger");
+
+        // out-of-scope : un asset hors scope serveur est JETÉ (compté out_of_scope, 0 ingéré).
+        let oos = "<?xml version=\"1.0\"?><!DOCTYPE nmaprun><nmaprun><host>\
+            <address addr=\"9.9.9.9\" addrtype=\"ipv4\"/><hostnames><hostname name=\"evil.attacker.test\"/></hostnames>\
+            <ports><port protocol=\"tcp\" portid=\"22\"><state state=\"open\"/><service name=\"ssh\"/></port></ports>\
+            </host></nmaprun>";
+        let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"campaign": "imp2", "format": "nmap", "content": oos}))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let jr = resp_json(resp).await;
+        assert_eq!(jr["counts"]["out_of_scope"], 1, "asset hors scope compté");
+        assert_eq!(jr["ingested"].as_i64().unwrap(), 0, "asset hors scope JETÉ (rien ingéré)");
+        { let db = app.db(); let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE campaign='imp2'", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "aucun finding hors scope inséré"); }
+
+        // format inconnu -> 400 (grammaire fermée, fail-closed).
+        let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(json!({"campaign": "imp", "format": "nessus-xml", "content": nmap}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "format inconnu refusé");
+
         let _ = std::fs::remove_file(&path);
     }
 

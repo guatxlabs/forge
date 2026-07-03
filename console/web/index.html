@@ -144,8 +144,10 @@
   <nav class="sidebar" id="nav" aria-label="Navigation">
     <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
     <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement C2</span></a>
+    <a href="#import"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> <span>Importer un scan</span></a>
     <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
     <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
+    <a href="#workflows"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1"/><rect x="15" y="4" width="6" height="5" rx="1"/><rect x="9" y="15" width="6" height="5" rx="1"/><path d="M6 9v3h12V9M12 12v3"/></svg> <span>Workflows</span></a>
     <a href="#findings"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Findings</span></a>
     <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
     <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
@@ -296,6 +298,49 @@
     <div id="lc-runresult"><div class="muted">chargement…</div></div>
   </section>
 
+  <!-- IMPORT : migration — ingérer une sortie de scanner EXISTANTE en findings orientés preuve -->
+  <section id="import" class="card span2" aria-labelledby="imph">
+    <div class="panelhead">
+      <h2 id="imph">Importer un scan <span class="muted">— migration Faraday/Trickest/reNgine/Osmedeus</span></h2>
+      <span class="qbar"><span id="im-c2state" class="badge mut" title="État du rôle opérateur C2 côté serveur">—</span></span>
+    </div>
+    <p class="lc-planhint">Ingère une <b>sortie d'outil déjà produite</b> (nmap XML, nuclei JSON/JSONL, export Burp XML, httpx/ffuf JSON, listes subfinder/amass, ou JSON/CSV générique) en findings Forge <b>orientés preuve</b> : un scanner qui s'auto-déclare (nuclei/burp) devient <code>reported_by_tool</code>, la recon/découverte (nmap/httpx/ffuf/subfinder) devient <code>tested</code> — <b>jamais</b> <code>vulnerable</code>. <b>Pur data, aucune exécution.</b> Les assets <b>hors périmètre</b> sont écartés (scope-guard) et les <b>secrets</b> du fichier sont rédigés. L'import est <b>gouverné (opérateur)</b> et <b>journalisé au ledger</b>.</p>
+    <form id="im-form" class="ruleform" autocomplete="off">
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:1 1 220px"><span class="lc-lbl">Campagne</span>
+          <input id="im-campaign" placeholder="ex: migration-2026" required pattern="[A-Za-z0-9._][A-Za-z0-9._-]{0,63}" title="^[A-Za-z0-9._-]{1,64}$, pas de '-' en tête">
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Format</span>
+          <select id="im-format" title="auto = auto-détection du format d'après le contenu">
+            <option value="auto" selected>auto-détecter</option>
+            <option value="nmap">nmap (XML)</option>
+            <option value="nuclei">nuclei (JSON/JSONL)</option>
+            <option value="burp">Burp Suite (export XML)</option>
+            <option value="httpx">httpx (JSON)</option>
+            <option value="ffuf">ffuf (JSON)</option>
+            <option value="hosts">subfinder / amass (liste d'hôtes)</option>
+            <option value="generic-json">JSON générique</option>
+            <option value="generic-csv">CSV générique</option>
+          </select>
+        </label>
+      </div>
+      <label><span class="lc-lbl">Fichier de scan (le contenu est parsé côté serveur, secrets rédigés)</span>
+        <input id="im-file" type="file" accept=".xml,.json,.jsonl,.csv,.txt,application/json,text/xml,text/plain,text/csv">
+      </label>
+      <label style="flex:0 0 auto"><input id="im-flag" type="checkbox"> <b>Marquer</b> (au lieu de <b>jeter</b>) les findings hors-scope (conservés en <code>status=skipped</code>)</label>
+      <label><span class="lc-lbl">Secret opérateur C2 (requis pour importer)</span>
+        <input id="im-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur C2">
+      </label>
+      <div id="im-err" class="lc-warn bad" hidden></div>
+      <div class="lc-actions">
+        <button id="im-submit" type="submit">Importer les findings</button>
+        <button id="im-clearop" type="button" title="Oublier le secret opérateur de la session">Oublier le secret</button>
+        <span id="im-stat" class="muted" style="margin:0"></span>
+      </div>
+    </form>
+    <div id="im-result" hidden></div>
+  </section>
+
   <!-- CAPACITÉS / MODULES -->
   <section id="modules" class="card span2" aria-labelledby="modh">
     <div class="panelhead">
@@ -328,6 +373,20 @@
     <p class="muted" style="margin:0 0 10px">Catalogue des techniques du moteur, <b>groupé par catégorie</b> (lecture <code>/api/techniques</code>, DÉRIVÉ du registre). « Au scope, retirer des tests automatiques » : le <b>profil</b> donne l'ensemble de base, puis les <b>toggles</b> par catégorie / par technique <b>ajoutent</b> ou <b>retirent</b> (la désactivation prime — fail-closed). Une technique <b>désactivée n'est NI planifiée NI tirée</b> (le moteur l'ENFORCE, en plus du scope-guard). La mutation est réservée operator/admin et journalisée au ledger. Badges : <span class="badge webyes">BB</span> éligible bug bounty · <span class="badge expl">pentest</span> pentest-only.</p>
     <div id="tq-status" class="muted" style="margin:0 0 10px" hidden></div>
     <div id="tq-groups" class="tq-groups"></div>
+  </section>
+
+  <!-- WORKFLOWS — pipelines composés (absorbe reNgine/Osmedeus/Trickest), gouvernés fail-closed -->
+  <section id="workflows" class="card span2" aria-labelledby="wfh">
+    <div class="panelhead">
+      <h2 id="wfh">Workflows <span id="wf-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="wf-new" class="k-theme" type="button" title="Composer un nouveau workflow (pipeline de techniques ordonné)">Nouveau workflow</button>
+        <button id="wf-reload" class="k-theme" type="button" title="Recharger les workflows + l'état activé par le scope">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Pipelines <b>composés sans code</b> : une sélection <b>ordonnée</b> de techniques/outils (+ params par étape), sauvegardée et éditable — absorbe les <i>scan-engines</i> de reNgine, les <i>workflows</i> d'Osmedeus et les pipelines de Trickest. Un workflow est une <b>PROPOSITION</b> : le <b>scope-guard ROE</b> et la <b>sélection par-scope</b> restent seuls juges — une étape hors-scope / désactivée est <b>larguée</b> (fail-closed). Les étapes <span class="badge expl">exploit</span> restent derrière l'opt-in fort-impact. Les workflows <span class="badge webyes">intégré</span> (dérivés du registre) sont non supprimables. Création/édition réservées operator/admin et journalisées au ledger.</p>
+    <div id="wf-status" class="muted" style="margin:0 0 10px" hidden></div>
+    <div id="wf-list"><div class="muted">chargement…</div></div>
   </section>
 
   <!-- FINDINGS -->

@@ -26,4 +26,9 @@ from . import evasion  # noqa: F401  (evasion.xhr, evasion.turnstile, evasion.id
 from . import msf       # noqa: F401  (msf.module — connecteur msfrpcd, opérateur opt-in)
 from . import burp      # noqa: F401  (burp.scan — connecteur REST API Burp Suite)
 from . import pentest   # noqa: F401  (network.smb/ftp/ssh, mobile.apk — classes pentest-only adossées aux connecteurs)
+from . import toolcatalog  # noqa: F401  (~15 outils OSS PRÉ-WRAPPÉS via ToolSpec : subfinder/amass/dnsx/naabu/katana/gau/gospider/feroxbuster/whatweb/wafw00f/nikto/wpscan/testssl/dalfox/sqlmap)
 from .registry import REGISTRY, register, get, kinds, Module  # noqa: F401
+# Wrapper GÉNÉRIQUE d'outils externes (absorbe la propriété wrap-any-tool de Trickest/Faraday/Osmedeus) :
+# un utilisateur qui migre déclare `ToolSpec(...)` + `register_spec(spec)` pour enrober N'IMPORTE QUEL
+# outil CLI en module Forge gouverné (scope-guard, no-shell, proof-oriented, dégradation). Exposé ici.
+from .toolspec import ToolSpec, register_spec, build_argv, parse_output, ExternalToolModule  # noqa: F401

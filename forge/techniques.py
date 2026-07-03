@@ -672,6 +672,28 @@ def technique_for(key):
     return CATALOG.get(key)
 
 
+# --- EXTENSION POINT — enregistrement DYNAMIQUE d'un KIND de module (tool-specs externes) -----------
+def register_kind(technique):
+    """Enregistre une technique de KIND de module dans la table unique (`TECHNIQUES`) ET le catalogue
+    consolidé (`CATALOG`), pour qu'un tool-spec EXTERNE (wrapper générique d'un outil CLI, cf.
+    `forge/modules/toolspec.py`) apparaisse AUTOMATIQUEMENT dans TOUTES les vues dérivées
+    (technique_kinds / by_vuln_class / pipeline_ordered / profile_set / resolve_enabled_kinds) et les
+    résolveurs (mitre_for / cwe_for / action_class / action_exploit / technique_for), EXACTEMENT comme
+    une entrée `_k(...)` LIVRÉE — c'est le contrat « déclare-une-fois -> dérive-partout » ouvert aux
+    outils tiers (absorbe la propriété wrap-any-tool de Trickest/Faraday/Osmedeus, SOUS la gouvernance).
+
+    Mutation ADDITIVE des DEUX dicts (l'invariant `CATALOG == TECHNIQUES ∪ SURFACE` est préservé, cf.
+    test_catalog ; c'est le MÊME geste que le test « new_module_auto_appears_everywhere »). Un KIND de
+    module doit être une clé POINTÉE portant une `vuln_class` et ne doit PORTER NI `remediation` NI
+    `qualifying` (réservés au noyau hérité) — ainsi les vues HISTORIQUES remediation_map() /
+    qualifying_classes() / mitre_by_kind() restent byte-à-byte identiques (elles itèrent `TECHNIQUES`
+    mais ne sélectionnent QUE les entrées portant remediation/qualifying). Idempotent (ré-enregistrer la
+    même clé écrase proprement). Retourne la technique enregistrée."""
+    TECHNIQUES[technique.key] = technique
+    CATALOG[technique.key] = technique
+    return technique
+
+
 # --- Résolveurs par kind (interrogent le catalogue consolidé : héritage identique + kinds surface) -
 def action_class(kind):
     """Classe planner à passer au brain pour ce kind ("" si aucune override -> Action dérive le suffixe)."""

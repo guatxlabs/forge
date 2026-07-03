@@ -95,6 +95,13 @@ EXPECTED_KINDS = {
     "network.ftp",                                                # FTP anonyme/énum via nmap NSE / msf.module
     "network.ssh",                                                # test d'auth SSH via msf.module / nmap NSE (exploit, gaté)
     "mobile.apk",                                                 # analyse APK/IAP via MobSF/apktool (externe documenté)
+    # LOT MIGRATION-SUPERSET — outils OSS PRÉ-WRAPPÉS via ToolSpec (toolcatalog.py), self-registering, dégradent si absent
+    "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",    # découverte de surface (subdomains/DNS/ports)
+    "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",  # crawl / URLs d'archive / content discovery
+    "recon.whatweb", "recon.wafw00f",                            # fingerprint techno / détection WAF
+    "web.nikto", "web.wpscan", "web.testssl",                    # scanners serveur web / WordPress / TLS (reported_by_tool)
+    "xss.dalfox",                                                # scanner XSS (access, reported_by_tool)
+    "sqli.sqlmap",                                               # exploitation SQLi (exploit, gatée par le plancher opt-in)
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {
