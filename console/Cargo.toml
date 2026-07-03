@@ -34,6 +34,17 @@ getrandom = "0.2"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifi
 subtle = "2"        # comparaison à temps constant du bearer/token (anti timing-oracle)
 chacha20poly1305 = "0.10"   # AEAD PUR RUST (RustCrypto : chacha20 + poly1305, zéro dép C/openssl) — chiffre l'archive backup (XChaCha20-Poly1305, nonce 24o, tag auth). Build par défaut safe.
 tar = "0.4"                 # archive backup au format tar standard (pur Rust) : snapshot DB + ledger JSONL + clé .ed25519 + manifest.json
+# ENTERPRISE SSO (OIDC) — validation cryptographique de l'ID token (signature JWKS RS256, iss/aud/exp).
+# `default-features=false` : on retire la feature `use_pem` (parsing PEM via `pem`+`simple_asn1`) INUTILE
+# au runtime SSO (on valide via composantes RSA n/e du JWKS, pas via PEM). Le crate reste sur `ring`
+# (crypto RustCrypto/asm — AUCUN openssl) => le build PAR DÉFAUT reste openssl-free. Le module sso est
+# compilé mais INERTE tant que le flag runtime FORGE_ENTERPRISE_SSO / enterprise.sso est OFF (community).
+jsonwebtoken = { version = "9", default-features = false }
+
+[dev-dependencies]
+# Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste
+# sur `ring` (pas d'openssl). N'affecte PAS le build/binaire par défaut (dev-dependency).
+jsonwebtoken = { version = "9" }
 
 [profile.release]
 opt-level = "z"

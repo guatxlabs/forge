@@ -836,3 +836,29 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .rep-preview{border:1px solid var(--bd);border-radius:12px;overflow:hidden;background:var(--card2);min-height:420px}
 .rep-frame{width:100%;height:72vh;min-height:420px;border:0;background:#fff;display:block}
 @media (max-width:720px){.rep-frame{height:60vh}}
+
+/* ============================================================================
+   IDENTITY / SSO (ENTERPRISE) — vue #identity : provider OIDC, token SCIM,
+   mapping groupe -> rôle/grant. + bouton "Se connecter avec le SSO" (login).
+   Réutilise les tokens existants (var(--bd)/--card2/--mut/--acc). Rien de tout
+   ceci ne s'affiche en build community (flag OFF) : styles inertes.
+   ============================================================================ */
+.id-card{border:1px solid var(--bd);border-radius:12px;background:var(--card2);padding:16px;margin:0 0 16px}
+.id-card:last-child{margin-bottom:0}
+.id-h3{margin:0 0 10px;font-size:1rem;display:flex;align-items:center;gap:10px}
+.id-form{display:flex;flex-direction:column;gap:12px;max-width:640px}
+.id-row{display:flex;flex-wrap:wrap;gap:12px}
+.id-row .login-f{flex:1 1 180px;min-width:150px}
+.id-btn{align-self:flex-start}
+.id-token-once{margin-top:12px;padding:12px;border:1px dashed var(--acc);border-radius:10px;background:var(--acc-soft);display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.id-token-val{font-family:var(--font-mono);font-size:.86rem;word-break:break-all;background:var(--card);padding:6px 8px;border-radius:6px;border:1px solid var(--bd)}
+.id-map-add{margin-top:14px;padding-top:14px;border-top:1px solid var(--bd)}
+.id-map-tbl{width:100%;border-collapse:collapse;font-size:.9rem}
+.id-map-tbl th,.id-map-tbl td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd)}
+.id-map-tbl th{color:var(--mut);font-weight:600}
+.id-map-tbl code{font-family:var(--font-mono)}
+.login-sso{margin-top:8px}
+.login-sso-sep{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:.82rem;margin:12px 0}
+.login-sso-sep::before,.login-sso-sep::after{content:"";flex:1;height:1px;background:var(--bd)}
+.login-sso-btn{background:var(--card2);color:var(--fg);border:1px solid var(--bd)}
+.login-sso-btn:hover{border-color:var(--acc)}

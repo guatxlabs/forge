@@ -104,8 +104,70 @@ full access and **byte-identical** pre-tenancy behaviour (all existing tests gre
 **separable module** — `console/src/tenancy.rs` (+ a minimal `mod tenancy;` wiring in `main.rs`); the open
 core never depends on it.
 - **Enterprise identity** — **SSO / SCIM** (SAML/OIDC login, automated user provisioning/deprovisioning).
-- **Advanced authorization** — **composable RBAC** beyond admin/operator/viewer, and **per-engagement
-  grants** (scoped, time-boxed authority).
+  - **OIDC SSO login** *(implemented — `console/src/sso.rs`, flag-gated)*: an **Authorization-Code + PKCE**
+    login flow against any OIDC provider. `GET /api/sso/login` redirects to the IdP `authorize` endpoint
+    with a server-side **state + nonce + PKCE `S256` challenge** (persisted per pending-auth); `GET
+    /api/sso/callback` validates the state, exchanges the code (+ `code_verifier`) for tokens, and **fully
+    validates the ID token** — **RS256 signature via the IdP JWKS** (pure-Rust `jsonwebtoken`/`ring`, **no
+    openssl**), **issuer**, **audience == `client_id`**, **exp**, and the **nonce**. On success it maps the
+    OIDC `sub`/`email` to a Forge user (**match existing** or **auto-provision** with a configured default
+    role and an unusable local password) and issues **the same `forge_session` cookie** as local login
+    (HttpOnly / SameSite=Strict). Provider config (`GET/POST /api/sso/config`) is **admin-gated**, supports
+    **OIDC discovery** (`{issuer}/.well-known/openid-configuration`), and the **`client_secret` is
+    write-only** (redacted on GET). **Fail-closed**: any state / nonce / issuer / audience / signature /
+    exp mismatch is rejected (403); the browser is only ever redirected to an **allowlisted** return target
+    (mirrors the `oauth.flow` / `redirect.open` open-redirect discipline); the `client_secret` and the
+    ID/access tokens are **never logged, ledgered, or returned**; each login is ledgered
+    `console.sso.login` (actor + subject only). It is engaged only by **`FORGE_ENTERPRISE_SSO=1`** (or DB
+    config key `enterprise.sso=on`). **DEFAULT (community) build: flag OFF ⇒ `/api/sso/*` is disabled
+    (404) and LOCAL accounts behave byte-identically** to today (all existing tests green). The module is
+    separable — `console/src/sso.rs` (+ a `mod sso;` line and one route merge in `main.rs`); the open core
+    never depends on it.
+  - **SCIM 2.0 provisioning** *(implemented — `console/src/scim.rs`, flag-gated)*: automated user/group
+    provisioning + de-provisioning from an IdP (Okta / Azure AD). `GET/POST /scim/v2/Users`,
+    `GET/PUT/PATCH/DELETE /scim/v2/Users/:id`, and `/scim/v2/Groups` implement the SCIM 2.0 core schema
+    (`userName`, `active`, `emails`, `name`, `externalId`). It is authenticated by a **SCIM bearer token**
+    — a long random token an admin generates via `GET/POST /api/scim/config` (admin-gated) — that is a
+    **secret**: stored **hashed** (SHA-256, like a session token — never the raw token), compared
+    **constant-time**, and returned **once** at rotation (redacted thereafter). It is **not** a normal
+    session (an IdP has no `forge_session`); **fail-closed**: no/invalid/unconfigured token ⇒ **401**.
+    Mapping onto Forge: creating / activating a SCIM user **creates / enables** a Forge user (with a
+    **scoped default role** — viewer, **never** admin, **never** super-admin — and an unusable local
+    password); **deactivating** (`active=false`) or **DELETE** **disables the user and purges its sessions**
+    (immediate revocation); group membership maps to a scoped role / tenant-grant (ties to advanced RBAC,
+    bounded to viewer|operator). A **designated super-admin login is protected** — SCIM refuses to create /
+    deactivate / delete it (403). Every mutation is ledgered `console.scim.*` (metadata only — login /
+    externalId / active / booleans, **never the token**). It is engaged only by **`FORGE_ENTERPRISE_SCIM=1`**
+    (or DB config key `enterprise.scim=on`, or the enterprise-SSO flag). **DEFAULT (community) build: flag
+    OFF ⇒ `/scim/*` and `/api/scim/config` are disabled (404) and LOCAL accounts behave byte-identically**
+    to today (all existing tests green). The module is separable — `console/src/scim.rs` (+ a `mod scim;`
+    line and one route merge in `main.rs`); the open core never depends on it.
+  - **Advanced RBAC — IdP-group → {role, tenant grant} mapping** *(implemented — `console/src/rbac.rs`,
+    flag-gated)*: a CONFIGURABLE mapping from an IdP group name to a Forge authorization outcome —
+    `idp_group → { role: viewer|operator|admin, tenant_id?, tenant_role? }`. **Both** the OIDC SSO login
+    path (the ID-token `groups` claim) **and** the SCIM group-membership path consult this ONE table, so
+    an admin configures group → access in a single place (`GET/POST /api/rbac/group-map`,
+    `DELETE /api/rbac/group-map/:group` — **admin-gated**, ledgered `console.rbac.*`). It replaces the
+    earlier best-effort `displayName` heuristic; when no mapping is configured, behaviour is byte-identical
+    to before. **FAIL-CLOSED / least-privilege** (weaken any and a test flips RED): an SSO/SCIM identity
+    gets **ONLY** what its group mapping confers — no matching group ⇒ `role: None` ⇒ the identity keeps
+    its own least-privilege default (`viewer` at most), never more. **NEVER super-admin via SSO/SCIM** —
+    super-admin is a *provisioning-only* designation (see `tenancy.rs`), is not a `users.role` value, and
+    cannot be expressed in the table; a designated super-admin login is additionally never re-roled/re-
+    granted by SSO/SCIM. Roles are validated to `viewer|operator|admin` and tenant roles to
+    `tenant_admin|tenant_operator|tenant_viewer` (anything else — incl. `super_admin` — is rejected at
+    config time). When several mapped groups match, the **highest role wins** (capped at admin); **SCIM
+    additionally clamps admin → operator** (automated bulk provisioning never auto-confers console admin).
+    Tenant grants are landed only when **E1 multi-tenancy** is also engaged. It is engaged whenever
+    enterprise **SSO or SCIM** is engaged (`rbac::enabled()` = `sso::enabled() || scim::enabled()`).
+    **DEFAULT (community) build: both flags OFF ⇒ `/api/rbac/*` is disabled (404), the mapping table is
+    never created, and role assignment stays admin-only exactly as today** (all existing tests green). The
+    module is separable — `console/src/rbac.rs` (+ a `mod rbac;` line and one route merge in `main.rs`);
+    the open core never depends on it.
+  - **SAML** login is still on the enterprise roadmap (a documented FUTURE follow-up — **OIDC covers the
+    common case**; SAML would reuse the same group → role/tenant mapping in `rbac.rs`).
+- **Advanced authorization (further)** — **composable/custom roles** beyond admin/operator/viewer, and
+  **time-boxed per-engagement grants**, build on the `rbac.rs` mapping above (roadmap).
 - **High availability & scale** — **HA / clustering / distributed store** (Postgres instead of
   single-node SQLite), horizontal scale-out.
 - **Compliance** — **SOC2 / ISO evidence** exports, **legal-hold / WORM retention**, and **KMS/HSM-backed
