@@ -396,13 +396,14 @@ struct App {
     python: Arc<String>,            // interpréteur python (FORGE_PYTHON, défaut python3)
     scope_in: Arc<Vec<String>>,      // in_scope autorisé (recopié dans le scope du run, fail-closed)
     scope_mode: Arc<String>,         // mode du scope (white|grey|black) recopié tel quel
-    // PURPLE (défensif) : URL de la colonne BLEUE Plume (SOC) + credential pour interroger
-    // GET {plume_url}/api/coverage/detections. Vide => couverture purple en FAIL-OPEN LISIBLE
-    // (plume_reachable:false). plume_token = base64 d'un `user:pass` envoyé en `Authorization: Basic`
-    // (la route détections de Plume exige Basic/SSO ; les Bearer d'agent n'y sont PAS acceptés). Vide
-    // => aucun en-tête d'auth (cas SOC_PUBLIC_DEMO=1 côté Plume).
-    plume_url: Arc<String>,
-    plume_token: Arc<String>,
+    // DÉTECTION (défensif, purple) : SOURCE de détection CONFIGURABLE (plugin), plus rien de codé en
+    // dur. Objet JSON `{kind, endpoint?, auth?:{type,secret}, query?, mapping?}` chargé au boot depuis
+    // `settings.detection_source`, avec REPLI rétro-compat sur l'env legacy PLUME_URL/PLUME_TOKEN
+    // (traité comme `{kind:plume, endpoint:PLUME_URL, auth:{type:basic,secret:PLUME_TOKEN}}`). `kind`
+    // absent/none => couverture en FAIL-OPEN LISIBLE (source_reachable:false, aucune métrique inventée).
+    // Le SECRET (auth.secret) n'est JAMAIS renvoyé par un GET, ni journalisé, ni ledgerisé (rédigé).
+    // Verrou RW : rechargé (reload_detection_source) après toute mutation de `settings.detection_source`.
+    detection_source: Arc<std::sync::RwLock<Arc<Value>>>,
     run_timeout_secs: u64,           // watchdog (FORGE_RUN_TIMEOUT, défaut 1800s)
     run_state: Arc<AsyncMutex<RunState>>,
     events: broadcast::Sender<RunEvent>, // bus SSE lock-free (clone du Sender)
@@ -468,6 +469,25 @@ impl App {
     /// appeler en tenant déjà `self.db()` (any_enabled_admin reverrouille le mutex).
     fn provisioned(&self) -> bool {
         !self.pass_hash.is_empty() || self.any_enabled_admin()
+    }
+
+    /// Configuration COURANTE de la source de détection (clone bon-marché de l'`Arc<Value>` en cache).
+    /// Récupère un verrou empoisonné (into_inner) : un panic passé ne doit pas geler la lecture purple.
+    fn detection_config(&self) -> Arc<Value> {
+        self.detection_source.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Recalcule le cache `detection_source` depuis `settings.detection_source` (repli env legacy
+    /// PLUME_URL/PLUME_TOKEN si la clé est absente). À appeler au BOOT et après CHAQUE mutation de
+    /// `settings.detection_source` (wizard/config admin) pour que la source pilote la couverture sans
+    /// relire la table à chaque requête. Ne pas appeler en tenant déjà `self.db()` (relock du mutex DB).
+    fn reload_detection_source(&self) {
+        let cfg = {
+            let db = self.db();
+            resolve_detection_source(&db)
+        };
+        let mut w = self.detection_source.write().unwrap_or_else(|e| e.into_inner());
+        *w = Arc::new(cfg);
     }
 }
 
@@ -1731,6 +1751,11 @@ async fn setup_provision(State(app): State<App>, Json(body): Json<Value>) -> Res
     }
     // la gate d'auth s'engage : un admin activé existe désormais (état DB fait autorité).
     app.recompute_auth_required();
+    // la source de détection a pu être écrite dans settings -> recharge le cache (sinon la couverture
+    // resterait sur la config du boot, obsolète). No-op si detection_source n'a pas été fourni.
+    if det_set {
+        app.reload_detection_source();
+    }
     // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin.
     let (token, expires) = create_session(&app, user_id);
     let ttl = session_ttl_secs();
@@ -1770,11 +1795,26 @@ async fn setup_migrate(State(app): State<App>, Json(body): Json<Value>) -> Respo
         )
             .into_response();
     }
+    // COUCHE 1 — OPT-IN : la migration via API est DÉSACTIVÉE par défaut (CLI-seule). Sans le flag,
+    // on refuse AVANT toute I/O -> retire la primitive d'écriture/suppression de fichier non-auth du
+    // déploiement par défaut. La voie CLI (`forge-console migrate …`, invocation locale de confiance)
+    // reste pleinement fonctionnelle et NON restreinte (ce garde-fou ne touche QUE cet endpoint web).
+    if !env_flag_enabled("FORGE_ALLOW_API_MIGRATE") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "api_migrate_disabled",
+                "why": "migration via API désactivée — utiliser la CLI `forge-console migrate …` (poser FORGE_ALLOW_API_MIGRATE=1 pour ouvrir l'endpoint web)"
+            })),
+        )
+            .into_response();
+    }
     let from = gs(&body, "from");
     let to = gs(&body, "to");
     if from.is_empty() || to.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "champs `from` et `to` requis"}))).into_response();
     }
+    let ledger = body.get("ledger").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
     let encrypt = body.get("encrypt").and_then(|v| v.as_bool()).unwrap_or(false);
     if encrypt && !cfg!(feature = "encryption") {
         return (StatusCode::BAD_REQUEST, Json(json!({
@@ -1782,10 +1822,20 @@ async fn setup_migrate(State(app): State<App>, Json(body): Json<Value>) -> Respo
             "why": "chiffrement au repos non compilé (feature `encryption` absente) — recompiler avec --features encryption"
         }))).into_response();
     }
+    // COUCHE 2 — le flag est actif : confinement anti-traversal des chemins SOUS la racine allowlistée
+    // (racine de données console / $FORGE_CONSOLE_IMPORT_DIR). Rejette `..`, chemins absolus hors base,
+    // et l'écrasement d'une cible préexistante hors base. UNIQUEMENT ici (jamais sur la voie CLI).
+    if let Err(why) = validate_api_migrate_paths(&from, &to, ledger.as_deref()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "path_rejected", "why": why})),
+        )
+            .into_response();
+    }
     let opts = MigrateOpts {
         from,
         to,
-        ledger: body.get("ledger").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
+        ledger,
         verify: body.get("verify").and_then(|v| v.as_bool()).unwrap_or(false),
         encrypt,
         key_env: body.get("key_env").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
@@ -2675,22 +2725,188 @@ fn parse_fire_ts(ts: &str) -> Option<i64> {
     Some(epoch_utc - offset_secs)
 }
 
+// ===========================================================================================
+// SOURCE DE DÉTECTION CONFIGURABLE (plugin infra-agnostique) — substrat de la boucle purple.
+//
+// La console ne code plus « Plume » en dur. La SOURCE de détection (SIEM/IDS/pare-feu) est décrite
+// par un objet JSON `{kind, endpoint?, auth?:{type,secret}, query?, mapping?}` rangé dans
+// `settings.detection_source`. `kind` ∈ {plume, generic_http, crowdsec, fortigate_syslog, pfsense,
+// opnsense, file_jsonl, elastic, exec, none} ; `auth.type` ∈ {none, basic, bearer, api_key_header,
+// mtls}. Les kinds `plume`/`generic_http` (http) sont interrogés EN RUST (fetcher intégré ci-dessous) ;
+// les kinds « messy » (et generic_http en https, pour TLS) sont DÉLÉGUÉS au collecteur Python
+// (`forge.cli detections`). Dans TOUS les cas la sortie est normalisée en `[(mitre,count,first_ts)]`
+// puis passée à `compute_purple_coverage` (jointure MITRE INCHANGÉE). Échec/mauvaise config =>
+// FAIL-OPEN LISIBLE (source_reachable:false), jamais de detected/missed/MTTD inventés.
+// ===========================================================================================
+
+/// Résout la config de source de détection : `settings.detection_source` (VERBATIM si objet JSON
+/// valide) sinon REPLI rétro-compat sur l'env legacy PLUME_URL/PLUME_TOKEN (implicitement
+/// `{kind:plume, endpoint:PLUME_URL, auth:{type:basic,secret:PLUME_TOKEN}}`), sinon `{kind:none}`.
+/// Le repli n'a lieu QUE si la clé settings est ABSENTE (une config explicite `{kind:none}` NE
+/// retombe PAS sur l'env). Fonction pure vis-à-vis de la DB (lecture seule).
+fn resolve_detection_source(db: &Connection) -> Value {
+    if let Some(s) = settings_get(db, "detection_source") {
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            if v.is_object() {
+                return v;
+            }
+        }
+    }
+    // repli env legacy : uniquement si settings n'a PAS de detection_source lisible.
+    let url = std::env::var("PLUME_URL").unwrap_or_default().trim_end_matches('/').to_string();
+    let token = std::env::var("PLUME_TOKEN").unwrap_or_default();
+    if !url.is_empty() {
+        return json!({"kind": "plume", "endpoint": url, "auth": {"type": "basic", "secret": token}});
+    }
+    json!({"kind": "none"})
+}
+
+/// `kind` de la source (défaut "none", trim).
+fn ds_kind(cfg: &Value) -> String {
+    cfg.get("kind").and_then(|v| v.as_str()).unwrap_or("none").trim().to_string()
+}
+
+/// `endpoint` de la source (URL http(s):// ou chemin fichier selon le kind ; défaut vide, trim).
+fn ds_endpoint(cfg: &Value) -> String {
+    cfg.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
+}
+
+/// Type d'auth déclaré (`auth.type`, avec tolérance à la forme plate `auth_type` écrite par le
+/// wizard). Défaut "none". NE renvoie JAMAIS le secret — juste le NOM du schéma (pour le ledger/log).
+fn ds_auth_type(cfg: &Value) -> String {
+    cfg.get("auth").and_then(|a| a.get("type")).and_then(|v| v.as_str())
+        .or_else(|| cfg.get("auth_type").and_then(|v| v.as_str()))
+        .unwrap_or("none").trim().to_string()
+}
+
+/// Secret d'auth (`auth.secret`) — MANIÉ COMME UN SECRET DE SESSION : lu UNIQUEMENT pour construire
+/// l'en-tête d'auth du fetch et pour la rédaction ; jamais renvoyé/journalisé/ledgerisé.
+fn ds_secret(cfg: &Value) -> String {
+    cfg.get("auth").and_then(|a| a.get("secret")).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+/// Remplace toute occurrence du secret par `[secret rédigé]` dans un message destiné à une réponse/au
+/// log/au ledger. Garde-fou défense-en-profondeur (les messages d'erreur n'échoient normalement pas le
+/// secret) ; no-op si le secret est vide ou trop court pour être remplacé sans risque de sur-rédaction.
+fn redact_secret(msg: &str, secret: &str) -> String {
+    if secret.len() < 4 {
+        return msg.to_string();
+    }
+    msg.replace(secret, "[secret rédigé]")
+}
+
+/// Liste FERMÉE des `kind` de source de détection acceptés (parité avec le registre du collecteur Python
+/// `forge.collectors` + les kinds interrogés en Rust). `none` désactive la mesure (fail-open lisible).
+/// Sert de garde-fou d'entrée sur POST /api/detection/source (fail-closed : un kind inconnu est refusé,
+/// jamais persisté) et alimente le sélecteur de l'UI admin/wizard.
+const DETECTION_KINDS: &[&str] = &[
+    "none", "plume", "generic_http", "crowdsec", "elastic", "opensearch",
+    "fortigate_syslog", "pfsense", "opnsense", "file_jsonl", "exec",
+];
+
+fn is_known_detection_kind(kind: &str) -> bool {
+    DETECTION_KINDS.contains(&kind)
+}
+
+/// Copie RÉDIGÉE d'une config de source : retire le secret d'auth (`auth.secret`) et tout `secret` posé
+/// à plat. Utilisée par GET /api/detection/source et la réponse de POST — le SECRET n'est JAMAIS renvoyé
+/// (manié comme un secret de session). Tout le reste (kind/endpoint/auth.type/query/mapping) est conservé
+/// pour permettre l'édition côté admin sans jamais re-rendre le secret.
+fn redact_detection_config(cfg: &Value) -> Value {
+    let mut out = cfg.clone();
+    if let Some(m) = out.as_object_mut() {
+        m.remove("secret");
+        if let Some(auth) = m.get_mut("auth").and_then(|a| a.as_object_mut()) {
+            auth.remove("secret");
+        }
+    }
+    out
+}
+
+/// Sémantique WRITE-ONLY du secret : si `keep_secret` et que la config entrante ne porte PAS de secret
+/// non vide, réinjecte le secret STOCKÉ (config de détection effective courante) dans `auth.secret`.
+/// Permet à l'admin d'éditer endpoint/mapping — ou de TESTER la source — SANS re-saisir le secret (jamais
+/// rendu côté UI : affiché ••• une fois posé). No-op si aucun secret n'est déjà stocké, ou si l'appelant
+/// fournit un nouveau secret non vide (celui-ci prime alors).
+fn apply_kept_secret(app: &App, cfg: &Value, keep_secret: bool) -> Value {
+    let mut out = cfg.clone();
+    if keep_secret && ds_secret(cfg).is_empty() {
+        let stored = ds_secret(&app.detection_config());
+        if !stored.is_empty() {
+            let atype = ds_auth_type(cfg);
+            if let Some(m) = out.as_object_mut() {
+                let auth = m.entry("auth").or_insert_with(|| json!({}));
+                if !auth.is_object() {
+                    *auth = json!({});
+                }
+                if let Some(am) = auth.as_object_mut() {
+                    am.entry("type").or_insert_with(|| json!(atype));
+                    am.insert("secret".into(), json!(stored));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici (le client TCP brut ne fait
+/// pas de TLS — un endpoint mTLS passe par un kind délégué au collecteur Python).
+enum HttpAuth {
+    None,
+    Basic(String),                         // base64 de user:pass -> `Authorization: Basic ...`
+    Bearer(String),                        // token -> `Authorization: Bearer ...`
+    ApiKeyHeader { name: String, value: String }, // en-tête d'API arbitraire (ex: X-API-Key: ...)
+}
+
+/// Construit l'`HttpAuth` du fetcher intégré depuis la config source. `basic`/`bearer` prennent
+/// `auth.secret` ; `api_key_header` prend `auth.header` (défaut `X-API-Key`) + `auth.secret`. `none`,
+/// `mtls` ou un type inconnu => aucun en-tête (le TLS/mTLS relève d'un kind délégué au Python).
+fn parse_http_auth(cfg: &Value) -> HttpAuth {
+    let auth = cfg.get("auth");
+    let atype = ds_auth_type(cfg);
+    let secret = ds_secret(cfg);
+    match atype.as_str() {
+        "basic" => HttpAuth::Basic(secret),
+        "bearer" => HttpAuth::Bearer(secret),
+        "api_key_header" => {
+            let name = auth.and_then(|a| a.get("header")).and_then(|v| v.as_str())
+                .unwrap_or("X-API-Key").to_string();
+            HttpAuth::ApiKeyHeader { name, value: secret }
+        }
+        _ => HttpAuth::None,
+    }
+}
+
 /// GET HTTP/1.1 minimal et BLOQUANT (lancé via spawn_blocking) — pas de dépendance HTTP lourde.
-/// Ne gère QUE `http://host[:port]/path` (Plume bind en HTTP clair, derrière Traefik/forward-auth
-/// en prod ; pour TLS, mettre PLUME_URL=http://service-cluster-interne). `basic_b64` non vide =>
-/// en-tête `Authorization: Basic <basic_b64>`. Renvoie le corps (string) en cas de 200, sinon Err.
-/// Timeout dur (connect + lecture) pour ne jamais bloquer le handler axum.
-fn http_get_blocking(url: &str, basic_b64: &str, timeout: Duration) -> Result<String, String> {
+/// Ne gère QUE `http://host[:port]/path` (le service bind en HTTP clair, derrière Traefik/forward-auth
+/// en prod ; pour TLS, viser un endpoint interne http:// OU un kind délégué au collecteur Python).
+/// `auth` porte le schéma d'authentification (none/basic/bearer/api_key_header). `allow_https` : si
+/// faux (kind=plume, rétro-compat EXACTE) une URL https:// est refusée avec le message historique ;
+/// si vrai (generic_http) une URL https:// est refusée avec un message d'aiguillage (TLS non géré
+/// nativement) — le chemin generic_http+https est de toute façon délégué au Python en amont. Renvoie
+/// le corps (string) en cas de 200, sinon Err. Timeout dur (connect + lecture).
+fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, allow_https: bool) -> Result<String, String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    let rest = url.strip_prefix("http://").ok_or_else(|| "PLUME_URL doit commencer par http:// (TLS non géré côté console — utiliser un endpoint interne)".to_string())?;
+    let rest = if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else if url.strip_prefix("https://").is_some() {
+        return Err(if allow_https {
+            "HTTPS non géré nativement par le fetcher intégré — viser un endpoint http:// interne, \
+             ou un kind délégué au collecteur Python (elastic/exec) pour le TLS".to_string()
+        } else {
+            "PLUME_URL doit commencer par http:// (TLS non géré côté console — utiliser un endpoint interne)".to_string()
+        });
+    } else {
+        return Err("l'endpoint doit commencer par http:// (ou https:// pour un kind délégué)".to_string());
+    };
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
     let host = authority.split(':').next().unwrap_or(authority);
     let port: u16 = authority.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(80);
-    // résolution + connexion avec timeout (évite un blocage si Plume est down).
+    // résolution + connexion avec timeout (évite un blocage si la source est down).
     use std::net::ToSocketAddrs;
     let addr = (host, port)
         .to_socket_addrs()
@@ -2701,12 +2917,22 @@ fn http_get_blocking(url: &str, basic_b64: &str, timeout: Duration) -> Result<St
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     let mut req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-console-purple\r\nAccept: application/json\r\nConnection: close\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-console-detection\r\nAccept: application/json\r\nConnection: close\r\n"
     );
-    if !basic_b64.is_empty() {
-        req.push_str(&format!("Authorization: Basic {basic_b64}\r\n"));
+    // En-tête d'auth selon le schéma. Un secret/valeur vide => aucun en-tête (cas anonyme, ex.
+    // SOC_PUBLIC_DEMO). Anti-injection d'en-tête : on refuse toute valeur portant CR/LF.
+    let no_crlf = |s: &str| !s.contains('\r') && !s.contains('\n');
+    match auth {
+        HttpAuth::None => {}
+        HttpAuth::Basic(b) if !b.is_empty() && no_crlf(b) => req.push_str(&format!("Authorization: Basic {b}\r\n")),
+        HttpAuth::Bearer(t) if !t.is_empty() && no_crlf(t) => req.push_str(&format!("Authorization: Bearer {t}\r\n")),
+        HttpAuth::ApiKeyHeader { name, value }
+            if !name.is_empty() && !value.is_empty() && no_crlf(name) && no_crlf(value) =>
+        {
+            req.push_str(&format!("{name}: {value}\r\n"));
+        }
+        _ => {}
     }
-    req.push_str("\r\n");
     stream.write_all(req.as_bytes()).map_err(|e| format!("écriture requête échouée: {e}"))?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).map_err(|e| format!("lecture réponse échouée: {e}"))?;
@@ -2837,10 +3063,13 @@ fn compute_purple_coverage(
     })
 }
 
-/// Construit l'objet de FAIL-OPEN LISIBLE (plume_reachable:false) : compte les techniques tirées
-/// (pour information) mais NE FABRIQUE PAS de detected/missed/MTTD. Réutilisé par tous les chemins
-/// où la mesure n'a pas pu se faire (Plume absent/injoignable/illisible, lecture DB échouée).
-fn purple_fail_open(plume_url: &str, fired: &[(String, Option<i64>)], reason: &str) -> Value {
+/// Construit l'objet de FAIL-OPEN LISIBLE (source_reachable/plume_reachable:false) : compte les
+/// techniques tirées (pour information) mais NE FABRIQUE PAS de detected/missed/MTTD. Réutilisé par
+/// tous les chemins où la mesure n'a pas pu se faire (source absente/injoignable/illisible, lecture DB
+/// échouée). `plume_reachable`/`plume_url` sont conservés (rétro-compat du SPA et du rapport qui les
+/// lisent) et MIROITÉS en `source_reachable`/`source_url` (nommage neutre infra-agnostique). `url` ne
+/// contient JAMAIS le secret (endpoint seul). `reason` a déjà été rédigé par l'appelant.
+fn purple_fail_open(url: &str, fired: &[(String, Option<i64>)], reason: &str) -> Value {
     let n_fired = fired
         .iter()
         .filter(|(m, _)| !m.is_empty())
@@ -2849,7 +3078,9 @@ fn purple_fail_open(plume_url: &str, fired: &[(String, Option<i64>)], reason: &s
         .len() as i64;
     json!({
         "plume_reachable": false,
-        "plume_url": plume_url,
+        "source_reachable": false,
+        "plume_url": url,
+        "source_url": url,
         "error": reason,
         "techniques_fired": n_fired,
         "techniques_detected": 0,
@@ -2889,34 +3120,41 @@ fn read_fired_techniques(app: &App, extra_cond: Option<(&str, &str)>) -> Vec<(St
     .unwrap_or_default()
 }
 
-/// Interroge Plume et corrèle avec les techniques `fired` -> objet purple coverage complet.
-/// FAIL-OPEN LISIBLE à chaque étape qui peut échouer (URL absente, HTTP KO, JSON invalide) :
-/// `plume_reachable:false` + raison, JAMAIS de detected/missed/MTTD inventés. Réutilisé par
-/// l'endpoint /api/purple/coverage ET la section purple du rapport de run.
-async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> Value {
-    // FAIL-OPEN LISIBLE : Plume non configuré -> on n'invente RIEN.
-    if app.plume_url.is_empty() {
-        return purple_fail_open("", &fired, "PLUME_URL non configuré (couverture de détection indisponible)");
+/// Accès à une valeur JSON par CHEMIN POINTÉ ("a.b.c") ; None si un segment manque. Un chemin vide
+/// renvoie la valeur racine. Sert au `mapping` des sources generic_http (champ natif -> mitre/ts/count).
+fn json_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = v;
+    for seg in path.split('.') {
+        if seg.is_empty() {
+            continue;
+        }
+        cur = cur.get(seg)?;
     }
-    // côté BLUE : interroge Plume. `since` = plus ancien tir red (borne la fenêtre côté Plume) ;
-    // 0 si aucun tir horodaté lisible (on prend tout). Requête bloquante isolée dans spawn_blocking.
-    let since = fired.iter().filter_map(|(_, t)| *t).min().unwrap_or(0);
-    let url = format!("{}/api/coverage/detections?since={}", app.plume_url.as_str(), since);
-    let token = app.plume_token.as_str().to_string();
-    let timeout = Duration::from_secs(8);
-    let fetched = tokio::task::spawn_blocking(move || http_get_blocking(&url, &token, timeout))
-        .await
-        .unwrap_or_else(|e| Err(format!("tâche HTTP interrompue: {e}")));
-    let body = match fetched {
-        Ok(b) => b,
-        Err(e) => return purple_fail_open(app.plume_url.as_str(), &fired, &format!("Plume injoignable: {e}")),
-    };
-    // parse la réponse Plume {detections:[{mitre,count,first_ts}]}. Réponse illisible -> fail-open.
-    let parsed: Value = match serde_json::from_str(body.trim()) {
-        Ok(v) => v,
-        Err(e) => return purple_fail_open(app.plume_url.as_str(), &fired, &format!("réponse Plume illisible (JSON invalide): {e}")),
-    };
-    let mut detections: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    Some(cur)
+}
+
+/// Valeur au chemin pointé rendue en String (string telle quelle, sinon repr scalaire, sinon vide).
+fn json_path_str(v: &Value, path: &str) -> String {
+    match json_path(v, path) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.as_str().map(str::to_string).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// Valeur au chemin pointé rendue en i64 (int, sinon f64 tronqué, sinon parse d'une string ; None si
+/// absent/illisible).
+fn json_path_i64(v: &Value, path: &str) -> Option<i64> {
+    let n = json_path(v, path)?;
+    n.as_i64()
+        .or_else(|| n.as_f64().map(|f| f as i64))
+        .or_else(|| n.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+}
+
+/// Mapping IDENTITÉ de la réponse Plume `{detections:[{mitre,count,first_ts}]}` -> `[(mitre,count,ts)]`.
+/// Réutilisé aussi pour la sortie NORMALISÉE du collecteur Python (même contrat de sortie).
+fn parse_plume_detections(parsed: &Value) -> Vec<(String, i64, i64)> {
+    let mut out = Vec::new();
     if let Some(arr) = parsed.get("detections").and_then(|v| v.as_array()) {
         for d in arr {
             let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("");
@@ -2925,36 +3163,386 @@ async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> 
             }
             let count = d.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
             let first_ts = d.get("first_ts").and_then(|v| v.as_i64()).unwrap_or(0);
-            detections.insert(mitre.to_string(), (count, first_ts));
+            out.push((mitre.to_string(), count, first_ts));
         }
     }
-    // corrélation pure -> réponse purple. plume_reachable:true (la mesure a bien eu lieu).
-    let mut cov = compute_purple_coverage(&fired, &detections);
-    if let Value::Object(ref mut m) = cov {
-        m.insert("plume_reachable".into(), json!(true));
-        m.insert("plume_url".into(), json!(app.plume_url.as_str()));
-    }
-    cov
+    out
 }
 
-/// GET /api/purple/coverage[?campaign=X] — couverture de DÉTECTION (purple-team défensif).
-/// Joint runrecord[fired=1] (techniques tirées en red-team Forge) avec les détections du SOC Plume
-/// (GET {PLUME_URL}/api/coverage/detections). Réponse :
+/// Applique le `mapping` d'une source generic_http à une réponse arbitraire -> `[(mitre,count,ts)]`.
+/// `mapping` : `{records?: "chemin.vers.tableau", mitre?: "champ", ts?: "champ", count?: "champ"}`.
+/// - `records` localise le tableau d'enregistrements (défaut : tableau racine, sinon champ `detections`
+///   / `results`) ;
+/// - chaque enregistrement fournit `mitre` (défaut champ "mitre"), `ts` (défaut "first_ts"), et un
+///   `count` OPTIONNEL (si absent chaque enregistrement compte 1) ;
+/// - agrégation par mitre : count sommé, first_ts = min. Aucune fabrication : un tableau introuvable
+///   ou vide -> Err / vec vide (l'appelant bascule alors en fail-open).
+fn map_detections(parsed: &Value, mapping: Option<&Value>) -> Result<Vec<(String, i64, i64)>, String> {
+    let default_map = json!({});
+    let m = mapping.unwrap_or(&default_map);
+    let records_path = m.get("records").and_then(|v| v.as_str()).unwrap_or("");
+    let mitre_field = m.get("mitre").and_then(|v| v.as_str()).unwrap_or("mitre");
+    let ts_field = m.get("ts").and_then(|v| v.as_str()).unwrap_or("first_ts");
+    let count_field = m.get("count").and_then(|v| v.as_str());
+
+    let arr: Vec<Value> = if !records_path.is_empty() {
+        json_path(parsed, records_path)
+            .and_then(|v| v.as_array().cloned())
+            .ok_or_else(|| format!("aucun tableau de détections au chemin '{records_path}'"))?
+    } else {
+        parsed
+            .as_array()
+            .cloned()
+            .or_else(|| parsed.get("detections").and_then(|v| v.as_array()).cloned())
+            .or_else(|| parsed.get("results").and_then(|v| v.as_array()).cloned())
+            .ok_or_else(|| "aucun tableau de détections (records/detections/results absents)".to_string())?
+    };
+
+    // agrégation par mitre : (count sommé, first_ts min).
+    let mut agg: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for rec in &arr {
+        let mitre = json_path_str(rec, mitre_field);
+        if mitre.is_empty() {
+            continue;
+        }
+        let ts = json_path_i64(rec, ts_field).unwrap_or(0);
+        let c = match count_field {
+            Some(cf) => json_path_i64(rec, cf).unwrap_or(1),
+            None => 1,
+        };
+        let e = agg.entry(mitre).or_insert((0, ts));
+        e.0 += c;
+        if ts < e.1 {
+            e.1 = ts;
+        }
+    }
+    Ok(agg.into_iter().map(|(k, (c, t))| (k, c, t)).collect())
+}
+
+/// Construit l'URL d'une source generic_http : endpoint + `query` optionnelle (string, `{since}`
+/// substitué), jointe par '?' si l'endpoint n'a pas de query-string, sinon '&'.
+fn generic_http_url(endpoint: &str, query: Option<&Value>, since: i64) -> String {
+    match query.and_then(|v| v.as_str()).filter(|q| !q.is_empty()) {
+        Some(q) => {
+            let q = q.replace("{since}", &since.to_string());
+            let q = q.trim_start_matches(['?', '&']);
+            let sep = if endpoint.contains('?') { '&' } else { '?' };
+            format!("{endpoint}{sep}{q}")
+        }
+        None => endpoint.to_string(),
+    }
+}
+
+/// Fetch + normalisation EN RUST d'une source http (`plume` ou `generic_http` en clair). `is_plume` :
+/// URL = `{endpoint}/api/coverage/detections?since=N` + mapping IDENTITÉ + http-only (rétro-compat
+/// EXACTE) ; sinon URL = endpoint + `query`, mapping configuré, https autorisé (aiguillé au Python en
+/// amont). BLOQUANT (à lancer via spawn_blocking).
+fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Result<Vec<(String, i64, i64)>, String> {
+    let endpoint = ds_endpoint(cfg);
+    if endpoint.is_empty() {
+        return Err("endpoint de la source de détection non configuré".to_string());
+    }
+    let auth = parse_http_auth(cfg);
+    let timeout = Duration::from_secs(8);
+    let url = if is_plume {
+        format!("{}/api/coverage/detections?since={}", endpoint.trim_end_matches('/'), since)
+    } else {
+        generic_http_url(&endpoint, cfg.get("query"), since)
+    };
+    let body = http_get_blocking(&url, &auth, timeout, !is_plume)?;
+    let parsed: Value = serde_json::from_str(body.trim())
+        .map_err(|e| format!("réponse illisible (JSON invalide): {e}"))?;
+    if is_plume {
+        Ok(parse_plume_detections(&parsed))
+    } else {
+        map_detections(&parsed, cfg.get("mapping"))
+    }
+}
+
+/// Délègue la collecte au COLLECTEUR PYTHON pour les kinds « messy » (crowdsec/fortigate_syslog/
+/// pfsense/opnsense/file_jsonl/elastic/exec, et generic_http en https pour le TLS). Même patron de
+/// spawn no-shell que populate_modules (`python3 -m forge.cli detections --since N --source ...`).
+/// La config (AVEC secret) est passée par ENV `FORGE_DETECTION_SOURCE` (jamais en argv -> pas de fuite
+/// via `ps`/cmdline, cf. le token console de run_create) ; l'argv ne porte que `--source env:...`. Le
+/// collecteur émet `{detections:[{mitre,count,first_ts}]}` sur stdout. Toute erreur -> Err (fail-open),
+/// le stderr éventuel étant RÉDIGÉ du secret avant de remonter.
+async fn collect_via_python(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
+    let py = app.python.as_str().to_string();
+    let pkg_dir = app.pkg_dir.as_str().to_string();
+    let source_json = cfg.to_string();
+    let secret = ds_secret(cfg);
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new(&py)
+            .args([
+                "-m", "forge.cli", "detections",
+                "--since", &since.to_string(),
+                "--source", "env:FORGE_DETECTION_SOURCE",
+            ])
+            .current_dir(&pkg_dir)
+            .env("FORGE_DETECTION_SOURCE", &source_json)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("collecteur Python injoignable: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let err = redact_secret(err.trim(), &secret);
+            let err: String = err.chars().take(240).collect();
+            return Err(format!("collecteur Python a échoué (code {:?}): {err}", out.status.code()));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let parsed: Value = serde_json::from_str(stdout.trim())
+            .map_err(|e| format!("sortie du collecteur illisible (JSON invalide): {e}"))?;
+        Ok(parse_plume_detections(&parsed))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("tâche collecteur interrompue: {e}")))
+}
+
+/// AIGUILLAGE central : collecte les détections de la source CONFIGURÉE (cache App) -> `[(mitre,count,
+/// first_ts)]`. Voir `collect_detections_with` pour la logique de dispatch sur `kind`.
+async fn collect_detections(app: &App, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
+    let cfg = app.detection_config();
+    collect_detections_with(app, &cfg, since).await
+}
+
+/// Dispatch sur `kind` d'une config source DONNÉE (utilisé aussi par POST /api/detection/test pour
+/// tester une config fournie sans la persister). `plume`/`generic_http`(http) -> fetch Rust ;
+/// generic_http(https) + kinds messy -> collecteur Python. Résultat -> jointure MITRE INCHANGÉE.
+async fn collect_detections_with(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
+    match ds_kind(cfg).as_str() {
+        "none" | "" => {
+            Err("source de détection non configurée (kind=none) — couverture indisponible".to_string())
+        }
+        kind @ ("plume" | "generic_http") => {
+            let is_plume = kind == "plume";
+            // generic_http en https -> délégué au Python (TLS non géré par le fetcher intégré).
+            if !is_plume && ds_endpoint(cfg).starts_with("https://") {
+                return collect_via_python(app, cfg, since).await;
+            }
+            let cfg_owned = cfg.clone();
+            tokio::task::spawn_blocking(move || rust_http_collect(&cfg_owned, since, is_plume))
+                .await
+                .unwrap_or_else(|e| Err(format!("tâche HTTP interrompue: {e}")))
+        }
+        "crowdsec" | "fortigate_syslog" | "pfsense" | "opnsense" | "file_jsonl" | "elastic" | "exec" => {
+            collect_via_python(app, cfg, since).await
+        }
+        other => Err(format!("kind de source de détection inconnu: {other}")),
+    }
+}
+
+/// Interroge la SOURCE DE DÉTECTION configurée et corrèle avec les techniques `fired` -> objet de
+/// couverture complet. FAIL-OPEN LISIBLE à chaque étape qui peut échouer (source absente/injoignable/
+/// illisible) : `source_reachable`/`plume_reachable:false` + raison RÉDIGÉE, JAMAIS de detected/missed/
+/// MTTD inventés. La jointure MITRE (compute_purple_coverage) est INCHANGÉE quel que soit le `kind`.
+/// Réutilisé par l'endpoint /api/purple/coverage (alias /api/detection/coverage) ET la section purple
+/// du rapport de run. `endpoint`/`source_url` exposés pour la traçabilité NE contiennent jamais le secret.
+async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<i64>)>) -> Value {
+    let cfg = app.detection_config();
+    let disp = ds_endpoint(&cfg); // endpoint seul (jamais le secret) pour la traçabilité
+    let kind = ds_kind(&cfg);
+    // `since` = plus ancien tir red (borne la fenêtre côté source) ; 0 si aucun tir horodaté lisible.
+    let since = fired.iter().filter_map(|(_, t)| *t).min().unwrap_or(0);
+    match collect_detections(app, since).await {
+        Ok(dets) => {
+            let mut detections: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+            for (mitre, count, first_ts) in dets {
+                if mitre.is_empty() {
+                    continue;
+                }
+                // dernière occurrence prime (agrégée en amont) ; contrat identique à l'ancien parse.
+                detections.insert(mitre, (count, first_ts));
+            }
+            // corrélation pure -> réponse. reachable:true (la mesure a bien eu lieu).
+            let mut cov = compute_purple_coverage(&fired, &detections);
+            if let Value::Object(ref mut m) = cov {
+                m.insert("plume_reachable".into(), json!(true));
+                m.insert("source_reachable".into(), json!(true));
+                m.insert("plume_url".into(), json!(disp));
+                m.insert("source_url".into(), json!(disp));
+                m.insert("source_kind".into(), json!(kind));
+            }
+            cov
+        }
+        // fail-open lisible ; la raison est rédigée du secret (défense en profondeur).
+        Err(e) => purple_fail_open(&disp, &fired, &redact_secret(&e, &ds_secret(&cfg))),
+    }
+}
+
+/// GET /api/detection/coverage[?campaign=X] (alias rétro-compat /api/purple/coverage) — couverture de
+/// DÉTECTION (purple-team défensif). Joint runrecord[fired=1] (techniques tirées en red-team Forge)
+/// avec les détections de la SOURCE configurée (kind=plume/generic_http/crowdsec/…). Réponse :
 ///   {
-///     "plume_reachable": bool,         // false => FAIL-OPEN lisible (mesure impossible, rien d'inventé)
-///     "plume_url": "...",              // pour traçabilité (vide si non configuré)
+///     "source_reachable": bool,        // (miroir rétro-compat: plume_reachable) false => FAIL-OPEN lisible
+///     "source_url": "...",             // (miroir: plume_url) endpoint pour traçabilité — JAMAIS le secret
+///     "source_kind": "...",            // kind de la source (présent si reachable)
 ///     "techniques_fired|detected|missed": i64,
 ///     "detection_rate": f64,           // [0,1]
 ///     "mttd_avg_secs"|"mttd_max_secs": f64|i64|null,
 ///     "detected": [ {mitre, fires, alert_count, first_detection_ts, fire_ts, mttd_secs} ],
 ///     "missed":   [ {mitre, fires, fire_ts} ],
-///     ("error": "...")                 // présent UNIQUEMENT si plume_reachable=false (raison lisible)
+///     ("error": "...")                 // présent UNIQUEMENT si source_reachable=false (raison lisible)
 ///   }
-/// Si plume_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
+/// Si source_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
 async fn purple_coverage(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // côté RED : techniques tirées (fired=1) + horodatage du tir, filtrées par campaign optionnelle.
     let fired = read_fired_techniques(&app, q.get("campaign").map(|c| ("campaign", c.as_str())));
     (StatusCode::OK, Json(fetch_purple_coverage(&app, fired).await))
+}
+
+/// POST /api/detection/test — ADMIN (check_admin, fail-closed 403). Exécute collect_detections UNE
+/// fois contre une config FOURNIE (`{detection_source:{...}}` ou l'objet config à plat dans le corps)
+/// ou, à défaut, la config STOCKÉE. Renvoie `{reachable, count, sample_mitres, error?}` — le SECRET
+/// n'est JAMAIS renvoyé. Ledgerise `console.detection.test` (actor + kind + endpoint + auth_type +
+/// reachable + count ; JAMAIS le secret). LECTURE seule côté source (ne persiste pas la config testée).
+async fn detection_test(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    // WRITE-ONLY : `keep_secret` permet de tester une config éditée SANS re-saisir le secret déjà posé
+    // (le secret write-only n'est jamais rendu par GET). apply_kept_secret réinjecte alors le secret stocké.
+    let keep = body.get("keep_secret").and_then(|v| v.as_bool()).unwrap_or(false);
+    // config à tester : {detection_source:{...}} > objet-config à plat ({kind:...}) > config stockée.
+    let cfg: Arc<Value> = if let Some(v) = body.get("detection_source").filter(|v| v.is_object()) {
+        Arc::new(apply_kept_secret(&app, v, keep))
+    } else if body.is_object() && body.get("kind").is_some() {
+        Arc::new(apply_kept_secret(&app, &body, keep))
+    } else {
+        app.detection_config()
+    };
+    let secret = ds_secret(&cfg);
+    let kind = ds_kind(&cfg);
+    // since=0 : test « prends tout » (le but est de vérifier la joignabilité, pas une fenêtre précise).
+    let result = collect_detections_with(&app, &cfg, 0).await;
+    let (reachable, count, samples, error) = match result {
+        Ok(dets) => {
+            let count = dets.len() as i64;
+            // échantillon de mitres DISTINCTS (max 8) — aide au diagnostic sans divulguer de secret.
+            let mut seen = std::collections::BTreeSet::new();
+            let mut samples: Vec<String> = Vec::new();
+            for (m, _, _) in &dets {
+                if seen.insert(m.clone()) {
+                    samples.push(m.clone());
+                }
+                if samples.len() >= 8 {
+                    break;
+                }
+            }
+            (true, count, samples, None)
+        }
+        Err(e) => (false, 0i64, Vec::new(), Some(redact_secret(&e, &secret))),
+    };
+    // AUDIT : trace du test. JAMAIS le secret (endpoint + type d'auth seuls).
+    append_console_ledger(&app, "console.detection.test", json!({
+        "actor": actor,
+        "kind": kind,
+        "endpoint": ds_endpoint(&cfg),
+        "auth_type": ds_auth_type(&cfg),
+        "reachable": reachable,
+        "count": count,
+    }));
+    let mut out = json!({
+        "reachable": reachable,
+        "count": count,
+        "sample_mitres": samples,
+    });
+    if let (Value::Object(ref mut m), Some(e)) = (&mut out, error) {
+        m.insert("error".into(), json!(e));
+    }
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// GET /api/detection/source — ADMIN (check_admin, fail-closed 403). Renvoie la config de source de
+/// détection EFFECTIVE (settings.detection_source sinon repli env legacy PLUME_URL/PLUME_TOKEN), le
+/// SECRET RETIRÉ (jamais renvoyé — manié comme un secret de session), plus `secret_set` (un secret
+/// est-il posé ?) et la liste FERMÉE des kinds. L'UI admin/wizard édite cette config ; le secret
+/// write-only s'affiche ••• (secret_set) et n'est jamais re-rendu au client.
+async fn detection_source_get(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let cfg = app.detection_config();
+    let secret_set = !ds_secret(&cfg).is_empty();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "source": redact_detection_config(&cfg),
+            "secret_set": secret_set,
+            "kinds": DETECTION_KINDS,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/detection/source — ADMIN (check_admin, fail-closed 403). Persiste `settings.detection_source`
+/// (config VERBATIM) puis recharge le cache (la couverture utilise immédiatement la nouvelle source).
+/// Corps : `{detection_source:{...}}` OU l'objet-config à plat (`{kind,...}`), + `keep_secret?:bool`
+/// (write-only : conserver le secret déjà posé sans le re-saisir). `kind` est validé contre la liste
+/// FERMÉE (fail-closed, jamais persisté sinon). Ledgerise `console.detection.source.set` (actor + kind +
+/// endpoint + auth_type — JAMAIS le secret). Réponse = config RÉDIGÉE + secret_set (le secret n'y est jamais).
+async fn detection_source_set(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    // config entrante : {detection_source:{...}} > objet-config à plat ({kind:...}). Les clés de contrôle
+    // (keep_secret) sont retirées de la config à plat pour ne pas polluer ce qui est persisté.
+    let incoming: Value = if let Some(v) = body.get("detection_source").filter(|v| v.is_object()) {
+        v.clone()
+    } else if body.is_object() && body.get("kind").is_some() {
+        let mut c = body.clone();
+        if let Some(m) = c.as_object_mut() {
+            m.remove("keep_secret");
+        }
+        c
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "bad_request", "why": "corps attendu : {detection_source:{kind,...}} ou {kind,...}"})),
+        )
+            .into_response();
+    };
+    let kind = ds_kind(&incoming);
+    if !is_known_detection_kind(&kind) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "bad_kind", "why": format!("kind de source inconnu : {kind}")})),
+        )
+            .into_response();
+    }
+    // WRITE-ONLY : si keep_secret et aucun nouveau secret fourni, réinjecte le secret déjà posé.
+    let keep = body.get("keep_secret").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cfg = apply_kept_secret(&app, &incoming, keep);
+    {
+        let db = app.db();
+        if let Err(e) = settings_set(&db, "detection_source", &cfg.to_string()) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "settings_write_failed", "why": e})),
+            )
+                .into_response();
+        }
+    }
+    // recharge le cache -> /api/detection/coverage bascule immédiatement sur la nouvelle source.
+    app.reload_detection_source();
+    // AUDIT : mutation d'administration attribuée + ledgerisée. JAMAIS le secret (endpoint + type seuls).
+    append_console_ledger(&app, "console.detection.source.set", json!({
+        "actor": actor,
+        "kind": kind,
+        "endpoint": ds_endpoint(&cfg),
+        "auth_type": ds_auth_type(&cfg),
+    }));
+    let secret_set = !ds_secret(&cfg).is_empty();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "source": redact_detection_config(&cfg),
+            "secret_set": secret_set,
+            "saved": true,
+        })),
+    )
+        .into_response()
 }
 
 // ===========================================================================================
@@ -5566,6 +6154,119 @@ fn default_sibling_ledger(to: &str) -> String {
         .into_owned()
 }
 
+// ===========================================================================================
+// GARDE-FOU MIGRATION VIA API (POST /api/setup/migrate) — cet endpoint est joignable NON-AUTHENTIFIÉ
+// pendant la fenêtre de setup (avant le 1er provisioning). Sans garde, `from`/`to`/`ledger` sont des
+// chemins serveur ARBITRAIRES -> primitive d'écriture/suppression de fichier non-auth (traversal `..`,
+// chemins absolus). DEUX couches défendent cette frontière API (la voie CLI, invocation locale de
+// confiance, reste INCHANGÉE et non restreinte) :
+//   COUCHE 1 — opt-in `FORGE_ALLOW_API_MIGRATE` (défaut OFF = CLI-seule) : sans le flag, l'endpoint
+//              REFUSE avant toute I/O -> la primitive disparaît du déploiement par défaut.
+//   COUCHE 2 — quand le flag est actif, confinement anti-traversal des chemins sous une racine
+//              allowlistée (racine de données console), avec refus d'écraser une cible hors racine.
+// ===========================================================================================
+
+/// Lit un flag booléen d'ENV : `1`/`true`/`yes`/`on` (insensible à la casse) => true ; absent, vide,
+/// ou toute autre valeur => false. FAIL-CLOSED : un flag mal orthographié n'active RIEN.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false)
+}
+
+/// Racine autorisée pour l'import/export via API (allowlist anti-traversal). Par défaut : le DOSSIER
+/// parent de la base console ($FORGE_CONSOLE_DB — la racine de données), surchargeable explicitement
+/// par $FORGE_CONSOLE_IMPORT_DIR (dossier de staging dédié). Un chemin de base relatif sans parent
+/// (défaut `forge-console.db`) => `.` (cwd de la console). N'affecte QUE la frontière API.
+fn api_migrate_base_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var("FORGE_CONSOLE_IMPORT_DIR").ok().filter(|s| !s.is_empty()) {
+        return std::path::PathBuf::from(d);
+    }
+    let db = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge-console.db".to_string());
+    std::path::Path::new(&db)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Confine UN chemin d'import/export (frontière API) sous `base_canon` (déjà canonicalisé). Étapes :
+///   1) rejet de tout composant `..` (traversal explicite) AVANT toute résolution ;
+///   2) résolution : si la cible existe, canonicalise le chemin COMPLET ; sinon (to/ledger neufs)
+///      canonicalise le DOSSIER PARENT (qui doit exister) puis rejoint le nom de fichier ;
+///   3) confinement : le chemin résolu DOIT être SOUS `base_canon` (comparaison par composants).
+/// `must_exist` : la source (`from`) doit exister ; une cible préexistante HORS base est REFUSÉE
+/// (jamais d'écrasement/suppression hors racine). N'est appelée QUE sur la voie API (jamais la CLI).
+fn validate_api_migrate_path(
+    base_canon: &std::path::Path,
+    raw: &str,
+    label: &str,
+    must_exist: bool,
+) -> Result<(), String> {
+    if raw.is_empty() {
+        return Err(format!("chemin `{label}` vide"));
+    }
+    let p = std::path::Path::new(raw);
+    // 1) refus de tout composant `..` (traversal) — avant même de toucher le disque.
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("chemin `{label}` refusé : composant `..` interdit ({raw})"));
+    }
+    // 2) résolution en chemin absolu réel.
+    let resolved = if p.exists() {
+        // existe (source, OU cible préexistante) : canonicalise le chemin complet.
+        p.canonicalize()
+            .map_err(|e| format!("canonicalisation de `{label}` ({raw}) impossible: {e}"))?
+    } else {
+        if must_exist {
+            return Err(format!("source `{label}` introuvable: {raw}"));
+        }
+        // cible neuve : le PARENT doit exister et être sous la base ; on rejoint ensuite le nom.
+        let parent = p
+            .parent()
+            .filter(|pp| !pp.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let parent_canon = parent
+            .canonicalize()
+            .map_err(|e| format!("dossier parent de `{label}` ({raw}) inexistant/illisible: {e}"))?;
+        let name = p
+            .file_name()
+            .ok_or_else(|| format!("chemin `{label}` sans nom de fichier: {raw}"))?;
+        parent_canon.join(name)
+    };
+    // 3) confinement sous la racine allowlistée (starts_with = comparaison PAR COMPOSANTS, pas de
+    //    faux-positif "/a/bc".starts_with("/a/b")). Une cible préexistante hors base tombe ici => refus.
+    if !resolved.starts_with(base_canon) {
+        return Err(format!(
+            "chemin `{label}` hors de la racine autorisée : {} n'est pas sous {}",
+            resolved.display(),
+            base_canon.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Valide `from`/`to`/`ledger` de la migration API contre la racine allowlistée ($FORGE_CONSOLE_IMPORT_DIR
+/// ou la racine de données console). Résout+canonicalise la base UNE fois, puis délègue par chemin.
+/// N'est appelée QUE depuis `setup_migrate` (jamais la CLI). Err(why) => la requête est refusée (403).
+fn validate_api_migrate_paths(from: &str, to: &str, ledger: Option<&str>) -> Result<(), String> {
+    let base = api_migrate_base_dir();
+    let base_canon = base.canonicalize().map_err(|e| {
+        format!(
+            "racine d'import autorisée introuvable/illisible ({}): {e} — créer le dossier ou poser FORGE_CONSOLE_IMPORT_DIR",
+            base.display()
+        )
+    })?;
+    validate_api_migrate_path(&base_canon, from, "from", true)?;
+    validate_api_migrate_path(&base_canon, to, "to", false)?;
+    if let Some(l) = ledger {
+        validate_api_migrate_path(&base_canon, l, "ledger", false)?;
+    }
+    Ok(())
+}
+
 /// Append UNE entrée au ledger JSONL à `path`, en (re)lisant le head depuis le disque (chaîne
 /// SHA-256, alg "sha256-console", sig ""). AUTONOME (pas d'App/cache) — pour la migration one-shot :
 /// une seule entrée, pas de contention. Miroir strict de append_console_ledger côté pré-image, donc
@@ -6004,7 +6705,15 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/findings/:id", get(finding_detail))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
+        // Couverture de détection : nom canonique + alias rétro-compat /api/purple/coverage (le SPA
+        // interroge encore /purple/coverage — l'alias garantit qu'il ne casse pas).
+        .route("/api/detection/coverage", get(purple_coverage))
         .route("/api/purple/coverage", get(purple_coverage))
+        // Test admin d'une source de détection (config fournie ou stockée) — ne renvoie jamais le secret.
+        .route("/api/detection/test", post(detection_test))
+        // Config admin de la SOURCE de détection : GET (secret RETIRÉ) + POST (persiste settings.detection_source,
+        // recharge le cache, ledgerise ; write-only sur le secret). Réservé admin (check_admin, 403 sinon).
+        .route("/api/detection/source", get(detection_source_get).post(detection_source_set))
         .route("/api/modules", get(modules))
         .route("/api/modules/refresh", post(modules_refresh))
         // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
@@ -6146,11 +6855,10 @@ async fn main() {
     // scope serveur autorisé : pré-filtre fail-closed des cibles lançables depuis le web.
     // Source : FORGE_CONSOLE_SCOPE (chemin d'un scope.json) ; sinon scope.json relatif au pkg_dir.
     let (scope_in, scope_mode) = load_server_scope(&pkg_dir);
-    // PURPLE (mesure de couverture de détection) : colonne BLEUE Plume (SOC). PLUME_URL vide =>
-    // /api/purple/coverage répond en FAIL-OPEN LISIBLE (plume_reachable:false). On normalise l'URL
-    // (retrait du '/' final) pour concaténer proprement le chemin.
-    let plume_url = std::env::var("PLUME_URL").unwrap_or_default().trim_end_matches('/').to_string();
-    let plume_token = std::env::var("PLUME_TOKEN").unwrap_or_default();
+    // DÉTECTION (mesure de couverture, purple) : la SOURCE est configurable (settings.detection_source),
+    // avec repli rétro-compat sur l'env legacy PLUME_URL/PLUME_TOKEN. Le cache est chargé JUSTE APRÈS la
+    // construction de l'App (reload_detection_source, qui lit la table settings + l'env). Source absente
+    // => /api/detection/coverage (alias /api/purple/coverage) répond en FAIL-OPEN LISIBLE.
     let mut allowed = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
     if let Ok(h) = std::env::var("FORGE_CONSOLE_HOST") {
         if !h.is_empty() {
@@ -6196,12 +6904,8 @@ async fn main() {
         println!("[forge-console] C2 armé — rôle opérateur via en-tête X-Forge-Operator ; cibles ⊆ scope serveur ({} entrée(s)) ; exploit/destructif possibles UNIQUEMENT via opt-in haut-impact gouverné (allow_high_impact + arm + reason, journalisé au ledger) ; scope-guard moteur inchangé (hors-scope = VETO) ; watchdog={run_timeout_secs}s", scope_in.len());
     }
 
-    if plume_url.is_empty() {
-        println!("[forge-console] PURPLE OFF — PLUME_URL absent : /api/purple/coverage répondra en fail-open lisible (plume_reachable:false). Pose PLUME_URL (+ PLUME_TOKEN base64 user:pass) pour mesurer la couverture de détection SOC.");
-    } else {
-        println!("[forge-console] PURPLE armé — couverture de détection via GET {plume_url}/api/coverage/detections (auth {}) ; LECTURE seule, joint runrecord[fired] (red) vs détections Plume (blue).",
-            if plume_token.is_empty() { "anonyme (SOC_PUBLIC_DEMO)" } else { "Basic" });
-    }
+    // (log DÉTECTION déplacé après la construction de l'App + reload_detection_source — la source
+    //  n'est connue qu'une fois le cache chargé depuis settings/env.)
 
     // [SÉCURITÉ XFF] Garde-fou/migration du réglage `trusted_proxy` : il doit désormais contenir le/les
     // CIDR(s) du proxy amont (Traefik/cluster, egress Cloudflare…). Une valeur héritée « truthy » non-CIDR
@@ -6233,8 +6937,8 @@ async fn main() {
         python: Arc::new(python),
         scope_in: Arc::new(scope_in),
         scope_mode: Arc::new(scope_mode),
-        plume_url: Arc::new(plume_url),
-        plume_token: Arc::new(plume_token),
+        // cache provisoire (kind=none) ; rechargé depuis settings/env juste après (reload_detection_source).
+        detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
         run_timeout_secs,
         run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
         events,
@@ -6243,6 +6947,22 @@ async fn main() {
     // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
     // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
     app.recompute_auth_required();
+    // Cache de la SOURCE DE DÉTECTION : settings.detection_source (verbatim) sinon repli env legacy
+    // PLUME_URL/PLUME_TOKEN (kind=plume) sinon kind=none. Recalculé après chaque mutation (wizard).
+    app.reload_detection_source();
+    {
+        let cfg = app.detection_config();
+        let kind = ds_kind(&cfg);
+        let endpoint = ds_endpoint(&cfg);
+        let http_kind = kind == "plume" || kind == "generic_http";
+        if kind == "none" || kind.is_empty() || (http_kind && endpoint.is_empty()) {
+            println!("[forge-console] DÉTECTION OFF — aucune source configurée : /api/detection/coverage (alias /api/purple/coverage) répondra en fail-open lisible (source_reachable:false). Configure `settings.detection_source` (wizard) ou pose PLUME_URL/PLUME_TOKEN (rétro-compat kind=plume).");
+        } else {
+            // JAMAIS le secret dans le log — kind + endpoint + type d'auth seuls.
+            println!("[forge-console] DÉTECTION armée — kind={kind} endpoint={endpoint} auth={} ; LECTURE seule, joint runrecord[fired] (red) vs détections de la source (blue).",
+                ds_auth_type(&cfg));
+        }
+    }
 
     // Câblage du routeur extrait dans build_router (parité stricte prod/test : ce qui est gaté ici
     // l'est aussi dans les tests d'intégration). ConnectInfo est branché au serve pour que les
@@ -6264,6 +6984,17 @@ async fn main() {
 mod tests {
     use super::*;
 
+    /// Verrou global sérialisant les tests qui LISENT/ÉCRIVENT des variables d'ENV partagées
+    /// (FORGE_ALLOW_API_MIGRATE / FORGE_CONSOLE_IMPORT_DIR) — l'ENV du process est global, donc ces
+    /// tests ne doivent pas courir en parallèle. Empoisonnement ignoré (into_inner) : un panic
+    /// antérieur ne doit pas bloquer les suivants.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     /// App minimale pour tester append_console_ledger (ledger sur disque, reste inerte).
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
@@ -6284,8 +7015,7 @@ mod tests {
             python: Arc::new("python3".into()),
             scope_in: Arc::new(vec![]),
             scope_mode: Arc::new("grey".into()),
-            plume_url: Arc::new(String::new()),
-            plume_token: Arc::new(String::new()),
+            detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
             run_timeout_secs: 1800,
             run_state: Arc::new(AsyncMutex::new(RunState { current: None })),
             events,
@@ -6850,6 +7580,12 @@ mod tests {
     /// (aucun sqlcipher requis).
     #[tokio::test]
     async fn setup_migrate_public_pre_provision_then_409_once_provisioned() {
+        // COUCHE 1+2 activées : flag opt-in ON + racine d'import = temp_dir (où vivent from/to/ledger)
+        // -> l'endpoint accepte l'import pré-provision. (Le verrou sérialise vs le test flag-OFF.)
+        let _g = env_lock();
+        std::env::set_var("FORGE_ALLOW_API_MIGRATE", "1");
+        std::env::set_var("FORGE_CONSOLE_IMPORT_DIR", std::env::temp_dir().to_string_lossy().to_string());
+
         // source sur disque : base ANCIENNE + ledger intact.
         let src_dir = tmp_dir("forge-mig-http-src");
         let src_db = format!("{src_dir}/forge-console.db");
@@ -6878,11 +7614,78 @@ mod tests {
         let r = setup_migrate(State(app.clone()), Json(body)).await;
         assert_eq!(r.status(), StatusCode::CONFLICT, "une fois provisionné -> 409");
 
+        std::env::remove_var("FORGE_ALLOW_API_MIGRATE");
+        std::env::remove_var("FORGE_CONSOLE_IMPORT_DIR");
         let _ = std::fs::remove_dir_all(&src_dir);
         let _ = std::fs::remove_file(&led);
         let _ = std::fs::remove_file(&to);
         let _ = std::fs::remove_file(&target_ledger);
         let _ = std::fs::remove_file(format!("{target_ledger}.ed25519"));
+    }
+
+    /// [SETUP migrate — COUCHE 1] Défaut OFF : sans FORGE_ALLOW_API_MIGRATE, l'endpoint REFUSE (403)
+    /// AVANT toute I/O — la primitive d'écriture/suppression de fichier non-auth n'existe pas dans le
+    /// déploiement par défaut. Preuve : la cible n'est JAMAIS écrite malgré une source valide.
+    #[tokio::test]
+    async fn setup_migrate_api_disabled_by_default_no_file_op() {
+        let _g = env_lock();
+        std::env::remove_var("FORGE_ALLOW_API_MIGRATE");
+
+        let src_dir = tmp_dir("forge-mig-flagoff-src");
+        seed_old_source_db(&format!("{src_dir}/forge-console.db"));
+        let led = tmp_path("forge-mig-flagoff-led");
+        let app = test_app(&led); // non provisionnée -> la fenêtre de setup est ouverte.
+        assert!(!app.provisioned(), "console non provisionnée (fenêtre setup ouverte)");
+        let to = tmp_path("forge-mig-flagoff-to.db");
+        let body = json!({"from": src_dir, "to": to});
+
+        let r = setup_migrate(State(app.clone()), Json(body)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "flag OFF -> 403 (migration API désactivée)");
+        assert!(!std::path::Path::new(&to).exists(), "AUCUN fichier écrit quand la migration API est OFF");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// [SETUP migrate — COUCHE 2] Validation de chemin (flag ON) : (c) cible/ source SOUS la base
+    /// acceptées ; (b) traversal `..` + absolu hors base rejetés ; (d) cible PRÉEXISTANTE hors base
+    /// refusée SANS y toucher. Teste le helper directement (base injectée) -> aucune course d'ENV.
+    #[test]
+    fn api_migrate_path_validation_confines_to_base() {
+        let base = tmp_dir("forge-mig-base");
+        let base_canon = std::path::Path::new(&base).canonicalize().expect("canon base");
+
+        // (c) cible neuve VALIDE sous la base (parent = base existe, fichier absent) -> acceptée.
+        let ok_to = format!("{base}/staging.db");
+        assert!(validate_api_migrate_path(&base_canon, &ok_to, "to", false).is_ok(),
+            "cible neuve sous la base -> acceptée");
+        // source existante VALIDE sous la base -> acceptée (must_exist).
+        let src = format!("{base}/src.db");
+        std::fs::write(&src, b"x").unwrap();
+        assert!(validate_api_migrate_path(&base_canon, &src, "from", true).is_ok(),
+            "source existante sous la base -> acceptée");
+
+        // (b) traversal `..` -> rejeté AVANT toute résolution.
+        let trav = format!("{base}/../etc/evil");
+        assert!(validate_api_migrate_path(&base_canon, &trav, "to", false).is_err(),
+            "composant `..` -> rejeté");
+        // (b bis) chemin ABSOLU hors base -> rejeté.
+        assert!(validate_api_migrate_path(&base_canon, "/etc/passwd", "from", true).is_err(),
+            "absolu hors base -> rejeté");
+        // source inexistante -> rejetée (introuvable), jamais silencieusement acceptée.
+        assert!(validate_api_migrate_path(&base_canon, &format!("{base}/nope.db"), "from", true).is_err(),
+            "source introuvable -> rejetée");
+
+        // (d) cible PRÉEXISTANTE hors base -> refus d'écrasement, fichier intact.
+        let outside_dir = tmp_dir("forge-mig-outside");
+        let victim = format!("{outside_dir}/victim.db");
+        std::fs::write(&victim, b"precious").unwrap();
+        assert!(validate_api_migrate_path(&base_canon, &victim, "to", false).is_err(),
+            "cible préexistante HORS base -> refusée (pas d'écrasement)");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious", "la cible hors base reste intacte");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside_dir);
     }
 
     /// [SETUP wizard] Validation d'entrée + auto-désactivation par HASH ENV : login invalide -> 400,
@@ -7700,13 +8503,337 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(!md2.contains("aucune alerte SOC"), "aucun trou inventé en fail-open");
     }
 
-    /// [purple http] http_get_blocking : rejette une URL non-http:// (TLS non géré) avec un message
-    /// lisible — garantit que la console ne tente pas un handshake qu'elle ne sait pas faire.
+    /// [purple http] http_get_blocking : pour kind=plume (allow_https=false) une URL https:// est
+    /// rejetée (TLS non géré, rétro-compat EXACTE) avec un message lisible mentionnant http://.
     #[test]
     fn http_get_blocking_rejects_non_http() {
-        let e = http_get_blocking("https://plume:7000/api/coverage/detections", "", Duration::from_millis(50));
-        assert!(e.is_err(), "https non géré -> Err");
+        let e = http_get_blocking(
+            "https://plume:7000/api/coverage/detections",
+            &HttpAuth::None,
+            Duration::from_millis(50),
+            false, // allow_https=false (chemin plume)
+        );
+        assert!(e.is_err(), "https non géré (plume) -> Err");
         assert!(e.unwrap_err().contains("http://"), "message lisible mentionnant http://");
+    }
+
+    // =============================================================================================
+    // SOURCE DE DÉTECTION CONFIGURABLE (plugin) — refactor infra-agnostique de la boucle purple.
+    // =============================================================================================
+
+    /// Écrit la config de source de détection dans le cache de l'App (utilitaire de test).
+    fn set_detection_source(app: &App, cfg: Value) {
+        *app.detection_source.write().unwrap() = Arc::new(cfg);
+    }
+
+    /// Serveur HTTP mock (UNE connexion) : renvoie `body` en 200 et retourne la requête reçue (ligne +
+    /// en-têtes) pour inspection (ex. vérifier l'en-tête d'auth). Bind éphémère 127.0.0.1:0.
+    async fn mock_http_once(body: String) -> (SocketAddr, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = listener.accept().await.expect("accept mock");
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+            req // le drop de `sock` en fin de tâche ferme la connexion (EOF côté client)
+        });
+        (addr, handle)
+    }
+
+    /// [détection RÉTRO-COMPAT] resolve_detection_source : sans settings, l'env legacy PLUME_URL/
+    /// PLUME_TOKEN produit `{kind:plume, endpoint, auth:{type:basic,secret}}` ; une config `settings`
+    /// PRIME sur l'env (la clé settings verbatim gagne). Ces deux branches figent le repli rétro-compat.
+    #[test]
+    fn resolve_detection_source_env_fallback_and_settings_precedence() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        // env posé, settings vide -> repli plume implicite.
+        std::env::set_var("PLUME_URL", "http://soc.internal:7000/");
+        std::env::set_var("PLUME_TOKEN", "dXNlcjpwYXNz");
+        let v = resolve_detection_source(&conn);
+        std::env::remove_var("PLUME_URL");
+        std::env::remove_var("PLUME_TOKEN");
+        assert_eq!(ds_kind(&v), "plume", "repli env -> kind plume");
+        assert_eq!(ds_endpoint(&v), "http://soc.internal:7000", "endpoint = PLUME_URL (slash final retiré)");
+        assert_eq!(ds_auth_type(&v), "basic");
+        assert_eq!(ds_secret(&v), "dXNlcjpwYXNz", "auth.secret = PLUME_TOKEN");
+        // settings présent -> gagne, MÊME si l'env est posé.
+        std::env::set_var("PLUME_URL", "http://ignore-me:1");
+        settings_set(&conn, "detection_source",
+            "{\"kind\":\"generic_http\",\"endpoint\":\"http://siem:9200\",\"auth\":{\"type\":\"bearer\",\"secret\":\"abc\"}}").unwrap();
+        let v2 = resolve_detection_source(&conn);
+        std::env::remove_var("PLUME_URL");
+        assert_eq!(ds_kind(&v2), "generic_http", "settings prime sur l'env");
+        assert_eq!(ds_endpoint(&v2), "http://siem:9200");
+    }
+
+    /// [détection RÉTRO-COMPAT bout-en-bout] une source `kind=plume` (endpoint = mock renvoyant le
+    /// contrat historique `{detections:[{mitre,count,first_ts}]}`) produit EXACTEMENT la même couverture
+    /// que l'ancien chemin Plume : mapping IDENTITÉ, mêmes detected/missed/MTTD que compute_purple_coverage.
+    #[tokio::test]
+    async fn plume_source_yields_same_coverage_backcompat() {
+        let app = test_app(&tmp_path("det-plume-ledger"));
+        let body = r#"{"detections":[{"mitre":"T1110","count":3,"first_ts":1042},{"mitre":"T1190","count":1,"first_ts":1990}]}"#;
+        let (addr, handle) = mock_http_once(body.to_string()).await;
+        set_detection_source(&app, json!({
+            "kind": "plume",
+            "endpoint": format!("http://{addr}"),
+            "auth": {"type": "basic", "secret": "dXNlcjpwYXNz"}
+        }));
+        let fired = vec![
+            ("T1110".to_string(), Some(1000)),
+            ("T1190".to_string(), Some(2000)),
+            ("T1046".to_string(), Some(3000)),
+        ];
+        let cov = fetch_purple_coverage(&app, fired).await;
+        let req = handle.await.unwrap();
+        // le chemin plume envoie GET /api/coverage/detections?since=... + Basic (rétro-compat exacte).
+        assert!(req.contains("GET /api/coverage/detections?since=1000"), "chemin/param plume: {req}");
+        assert!(req.contains("Authorization: Basic dXNlcjpwYXNz"), "auth Basic transmise: {req}");
+        assert_eq!(cov["plume_reachable"], json!(true), "rétro-compat: plume_reachable conservé");
+        assert_eq!(cov["source_reachable"], json!(true), "miroir neutre présent");
+        assert_eq!(cov["source_kind"], json!("plume"));
+        assert_eq!(cov["techniques_detected"], json!(2));
+        assert_eq!(cov["techniques_missed"], json!(1));
+        let t1110 = cov["detected"].as_array().unwrap().iter().find(|d| d["mitre"] == json!("T1110")).unwrap();
+        assert_eq!(t1110["mttd_secs"], json!(42), "MTTD identique à l'ancien calcul");
+        assert_eq!(t1110["alert_count"], json!(3));
+    }
+
+    /// [détection generic_http + bearer + mapping] une source `generic_http` avec auth bearer est
+    /// interrogée (en-tête `Authorization: Bearer …` transmis) et la réponse aux CHAMPS NATIFS
+    /// (results/tech/seen/ts) est remappée puis corrélée — même jointure MITRE que plume.
+    #[tokio::test]
+    async fn generic_http_bearer_fetched_and_mapped() {
+        let app = test_app(&tmp_path("det-generic-ledger"));
+        let body = r#"{"results":[{"tech":"T1110","seen":3,"ts":1042},{"tech":"T1190","seen":1,"ts":1990}]}"#;
+        let (addr, handle) = mock_http_once(body.to_string()).await;
+        set_detection_source(&app, json!({
+            "kind": "generic_http",
+            "endpoint": format!("http://{addr}/api/alerts"),
+            "auth": {"type": "bearer", "secret": "tok-abc-123"},
+            "mapping": {"records": "results", "mitre": "tech", "count": "seen", "ts": "ts"}
+        }));
+        let fired = vec![
+            ("T1110".to_string(), Some(1000)),
+            ("T1190".to_string(), Some(2000)),
+            ("T1046".to_string(), Some(3000)),
+        ];
+        let cov = fetch_purple_coverage(&app, fired).await;
+        let req = handle.await.unwrap();
+        assert!(req.contains("GET /api/alerts "), "endpoint generic respecté: {req}");
+        assert!(req.contains("Authorization: Bearer tok-abc-123"), "bearer transmis: {req}");
+        assert_eq!(cov["source_reachable"], json!(true));
+        assert_eq!(cov["source_kind"], json!("generic_http"));
+        assert_eq!(cov["techniques_detected"], json!(2), "T1110+T1190 remappés et détectés");
+        assert_eq!(cov["techniques_missed"], json!(1), "T1046 = trou");
+        let t1110 = cov["detected"].as_array().unwrap().iter().find(|d| d["mitre"] == json!("T1110")).unwrap();
+        assert_eq!(t1110["alert_count"], json!(3), "count natif `seen` remappé");
+        assert_eq!(t1110["mttd_secs"], json!(42));
+    }
+
+    /// [détection FAIL-OPEN LISIBLE] une source injoignable (port fermé) => source_reachable:false SANS
+    /// aucun detected/missed inventé ; une config kind=none => idem. Le secret n'apparaît nulle part.
+    #[tokio::test]
+    async fn unreachable_source_fails_open_readable() {
+        let app = test_app(&tmp_path("det-unreach-ledger"));
+        set_detection_source(&app, json!({
+            "kind": "generic_http",
+            "endpoint": "http://127.0.0.1:1/x", // port 1 -> connexion refusée
+            "auth": {"type": "bearer", "secret": "MUST-NOT-LEAK-XYZ"}
+        }));
+        let fired = vec![("T1110".to_string(), Some(1000)), ("T1046".to_string(), Some(2000))];
+        let cov = fetch_purple_coverage(&app, fired).await;
+        assert_eq!(cov["source_reachable"], json!(false), "injoignable -> fail-open lisible");
+        assert_eq!(cov["plume_reachable"], json!(false), "miroir rétro-compat");
+        assert_eq!(cov["techniques_detected"], json!(0), "rien détecté inventé");
+        assert_eq!(cov["techniques_missed"], json!(0), "rien classé missed (mesure impossible)");
+        assert!(cov["detected"].as_array().unwrap().is_empty());
+        assert!(cov["missed"].as_array().unwrap().is_empty());
+        assert!(cov.get("error").is_some(), "raison lisible présente");
+        let ser = serde_json::to_string(&cov).unwrap();
+        assert!(!ser.contains("MUST-NOT-LEAK-XYZ"), "le secret ne DOIT jamais apparaître dans la réponse");
+
+        // config kind=none -> même fail-open lisible.
+        set_detection_source(&app, json!({"kind": "none"}));
+        let cov2 = fetch_purple_coverage(&app, vec![("T1110".to_string(), Some(1))]).await;
+        assert_eq!(cov2["source_reachable"], json!(false));
+        assert_eq!(cov2["techniques_detected"], json!(0));
+        assert!(cov2["detected"].as_array().unwrap().is_empty());
+    }
+
+    /// [détection /api/detection/test] ADMIN uniquement (sans session -> refus), n'expose JAMAIS le
+    /// secret dans la réponse ni le ledger, et renvoie {reachable,count,sample_mitres,error?}. Flux réel
+    /// via build_router (parité prod/test) : provision admin -> cookie -> POST test.
+    #[tokio::test]
+    async fn detection_test_admin_only_and_never_leaks_secret() {
+        let ledger = tmp_path("det-test-ledger");
+        let app = test_app(&ledger);
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // provision d'un admin -> cookie de session admin.
+        let setup_body = json!({"admin_login": "root", "admin_password": "hunter2pw"}).to_string();
+        let r = http_raw(addr, &post_req("/api/setup", &setup_body, "")).await;
+        assert_eq!(parse_status(&r), 200, "provision: {r}");
+        let tok = cookie_token(&r).expect("cookie admin");
+
+        let secret = "DETECT-SECRET-NEVER-LEAK-9999";
+        let test_body = json!({"detection_source": {
+            "kind": "generic_http",
+            "endpoint": "http://127.0.0.1:1/x",   // injoignable -> reachable:false
+            "auth": {"type": "bearer", "secret": secret}
+        }}).to_string();
+
+        // 1) SANS session -> refusé (gate engagée : 401/403, jamais 200).
+        let r = http_raw(addr, &post_req("/api/detection/test", &test_body, "")).await;
+        assert_ne!(parse_status(&r), 200, "sans admin -> pas 200 : {r}");
+
+        // 2) AVEC session admin -> 200 + reachable:false + secret ABSENT de la réponse.
+        let r = http_raw(addr, &post_req("/api/detection/test", &test_body,
+            &format!("Cookie: forge_session={tok}\r\n"))).await;
+        assert_eq!(parse_status(&r), 200, "admin -> 200 : {r}");
+        let b = body_of(&r);
+        assert!(b.contains("\"reachable\":false"), "source injoignable -> reachable:false : {b}");
+        assert!(b.contains("\"count\":0"));
+        assert!(!b.contains(secret), "le secret ne DOIT jamais être renvoyé : {b}");
+
+        // 3) le ledger trace le test SANS le secret (endpoint + type d'auth seuls).
+        let last = read_ledger_lines(&ledger).pop().expect("ledger detection.test");
+        assert_eq!(last["kind"], "console.detection.test");
+        assert_eq!(last["detail"]["actor"], "root");
+        assert_eq!(last["detail"]["kind"], "generic_http");
+        assert_eq!(last["detail"]["auth_type"], "bearer");
+        let ser = canon_json(&last);
+        assert!(!ser.contains(secret), "le secret ne DOIT jamais entrer dans le ledger : {ser}");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [détection GET /api/detection/source] ADMIN uniquement (sans session -> refus) et RÉDACTION du
+    /// secret : la config effective est renvoyée SANS `auth.secret`, avec `secret_set:true` et l'endpoint
+    /// (non secret) conservé. Flux réel via build_router (provision admin -> cookie -> GET).
+    #[tokio::test]
+    async fn detection_source_get_redacts_secret_and_admin_gated() {
+        let ledger = tmp_path("det-src-get-ledger");
+        let app = test_app(&ledger);
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // provision d'un admin AVEC une source de détection portant un secret.
+        let secret = "GET-REDACT-SECRET-7777";
+        let setup_body = json!({
+            "admin_login": "root", "admin_password": "hunter2pw",
+            "detection_source": {"kind": "generic_http", "endpoint": "http://soc.local:9/x",
+                                 "auth": {"type": "bearer", "secret": secret}}
+        }).to_string();
+        let r = http_raw(addr, &post_req("/api/setup", &setup_body, "")).await;
+        assert_eq!(parse_status(&r), 200, "provision: {r}");
+        let tok = cookie_token(&r).expect("cookie admin");
+
+        // 1) GET SANS session -> refusé (gate engagée : jamais 200).
+        let r = http_raw(addr, &get_req("/api/detection/source", "")).await;
+        assert_ne!(parse_status(&r), 200, "GET sans admin -> refus : {r}");
+
+        // 2) GET AVEC session admin -> 200 + secret ABSENT + secret_set:true + endpoint (non secret) présent.
+        let r = http_raw(addr, &get_req("/api/detection/source", &format!("Cookie: forge_session={tok}\r\n"))).await;
+        assert_eq!(parse_status(&r), 200, "admin -> 200 : {r}");
+        let b = body_of(&r);
+        assert!(!b.contains(secret), "le secret ne DOIT jamais être renvoyé par GET : {b}");
+        assert!(b.contains("\"secret_set\":true"), "secret_set:true attendu : {b}");
+        assert!(b.contains("generic_http"), "kind conservé : {b}");
+        assert!(b.contains("soc.local"), "endpoint (non secret) conservé pour l'édition : {b}");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [détection POST /api/detection/source] ADMIN uniquement (sans session -> refus, rien persisté) ;
+    /// une sauvegarde admin est LEDGERISÉE (console.detection.source.set, sans le secret) et persiste
+    /// `settings.detection_source` VERBATIM ; write-only : `keep_secret` conserve le secret déjà posé
+    /// sans le re-saisir, et le secret n'apparaît JAMAIS dans une réponse ni le ledger.
+    #[tokio::test]
+    async fn detection_source_set_admin_gated_ledgered_and_write_only_secret() {
+        let ledger = tmp_path("det-src-set-ledger");
+        let app = test_app(&ledger);
+        let router = build_router(app.clone(), "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // provision d'un admin SANS source de détection -> cookie admin.
+        let setup_body = json!({"admin_login": "root", "admin_password": "hunter2pw"}).to_string();
+        let r = http_raw(addr, &post_req("/api/setup", &setup_body, "")).await;
+        assert_eq!(parse_status(&r), 200, "provision: {r}");
+        let tok = cookie_token(&r).expect("cookie admin");
+
+        let secret = "SET-SECRET-NEVER-LEAK-4242";
+        let cfg = json!({"detection_source": {"kind": "generic_http", "endpoint": "http://soc.local:9/x",
+                        "auth": {"type": "bearer", "secret": secret}}}).to_string();
+
+        // 1) POST SANS session -> refusé + RIEN persisté (fail-closed avant toute écriture).
+        let r = http_raw(addr, &post_req("/api/detection/source", &cfg, "")).await;
+        assert_ne!(parse_status(&r), 200, "POST sans admin -> refus : {r}");
+        {
+            let db = app.db();
+            assert!(settings_get(&db, "detection_source").is_none(), "aucune écriture sans session admin");
+        }
+
+        // 2) POST AVEC session admin -> 200 + settings persistés VERBATIM + ledger source.set (sans secret).
+        let r = http_raw(addr, &post_req("/api/detection/source", &cfg, &format!("Cookie: forge_session={tok}\r\n"))).await;
+        assert_eq!(parse_status(&r), 200, "admin -> 200 : {r}");
+        let b = body_of(&r);
+        assert!(!b.contains(secret), "la réponse de sauvegarde ne DOIT jamais contenir le secret : {b}");
+        assert!(b.contains("\"saved\":true"));
+        {
+            let db = app.db();
+            let stored = settings_get(&db, "detection_source").expect("detection_source persisté");
+            assert!(stored.contains("generic_http"), "config persistée");
+            assert!(stored.contains(secret), "secret persisté verbatim côté serveur (jamais renvoyé)");
+        }
+        let last = read_ledger_lines(&ledger).pop().expect("ledger source.set");
+        assert_eq!(last["kind"], "console.detection.source.set");
+        assert_eq!(last["detail"]["actor"], "root");
+        assert_eq!(last["detail"]["kind"], "generic_http");
+        assert_eq!(last["detail"]["auth_type"], "bearer");
+        let ser = canon_json(&last);
+        assert!(!ser.contains(secret), "le secret ne DOIT jamais entrer dans le ledger : {ser}");
+
+        // 3) WRITE-ONLY : POST keep_secret SANS secret (endpoint modifié) -> le secret déjà posé est CONSERVÉ.
+        let cfg2 = json!({"keep_secret": true, "detection_source": {"kind": "generic_http",
+                         "endpoint": "http://soc.local:9/y", "auth": {"type": "bearer"}}}).to_string();
+        let r = http_raw(addr, &post_req("/api/detection/source", &cfg2, &format!("Cookie: forge_session={tok}\r\n"))).await;
+        assert_eq!(parse_status(&r), 200, "keep_secret -> 200 : {r}");
+        {
+            let db = app.db();
+            let stored = settings_get(&db, "detection_source").expect("detection_source persisté");
+            assert!(stored.contains("soc.local:9/y"), "endpoint mis à jour");
+            assert!(stored.contains(secret), "secret conservé via keep_secret (write-only) : {stored}");
+        }
+        // 4) GET ne renvoie JAMAIS le secret, même après le round-trip keep_secret.
+        let r = http_raw(addr, &get_req("/api/detection/source", &format!("Cookie: forge_session={tok}\r\n"))).await;
+        let b = body_of(&r);
+        assert!(!b.contains(secret), "GET post-keep_secret : secret toujours rédigé : {b}");
+        assert!(b.contains("\"secret_set\":true"));
+        let _ = std::fs::remove_file(&ledger);
     }
 
     /// [parité lecture] validate_host : /api/scope-check rejette les cibles malformées (métacaractères,
