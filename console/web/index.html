@@ -465,6 +465,27 @@
     <p class="muted" style="margin:0 0 10px">Source <b>BLUE</b> (SIEM/IDS/pare-feu) corrélée à la boucle purple par identité MITRE. <b>N'importe quelle infra</b> se câble ici sans code (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, commande). Le <b>secret</b> est <b>write-only</b> (affiché <code>•••</code> une fois posé, jamais renvoyé) et manié comme un secret de session. Une source absente/injoignable ⇒ mesure déclarée <b>impossible</b> (<code>source_reachable:false</code>), jamais de détection inventée. Chaque enregistrement est <b>ledgerisé</b>. Détails : <code>docs/DETECTION.md</code>.</p>
     <div id="admin-det-form"><div class="muted">chargement…</div></div>
   </section>
+
+  <!-- ADMINISTRATION — sauvegarde & restauration chiffrées (réservé role=admin). POST /api/backup,
+       POST /api/restore, GET/POST /api/backup/policy (check_admin, 403 sinon), ledgerisés. L'archive est
+       TOUJOURS chiffrée (argon2id + XChaCha20-Poly1305) et embarque la clé de signature .ed25519 + la
+       base + le ledger. La passphrase n'est JAMAIS persistée côté client (transmise puis oubliée). La
+       politique GET ne renvoie AUCUN secret (rédigé). Détails : docs/BACKUP.md. -->
+  <section id="admin-backup" class="card span2" aria-labelledby="adm-bk-h">
+    <div class="panelhead">
+      <h2 id="adm-bk-h">Administration — sauvegarde &amp; restauration <span id="admin-bk-badge" class="badge mut">chiffré</span></h2>
+      <span class="qbar">
+        <button id="admin-bk-reload" class="k-theme" type="button" title="Recharger la politique de sauvegarde (secrets rédigés)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Archive <b>toujours chiffrée</b> (argon2id + XChaCha20-Poly1305) : elle embarque la <b>base</b>, le <b>ledger</b> tamper-evident et la <b>clé de signature</b> <code>.ed25519</code> — il n'existe <b>aucun chemin en clair</b>. La <b>passphrase est obligatoire</b> (fail-closed) et n'est <b>jamais</b> stockée/loggée/ledgerisée (elle n'est pas conservée côté navigateur au-delà de la requête). La <b>restauration</b> valide + vérifie par défaut (aucune écriture) ; un <b>swap en place</b> exige une confirmation explicite et un <b>redémarrage</b>. Chaque action est <b>ledgerisée</b> (métadonnées seules). Détails : <code>docs/BACKUP.md</code>.</p>
+    <div class="det-actions" style="margin-bottom:12px">
+      <button id="bk-create" class="login-btn" type="button" title="Créer une sauvegarde chiffrée et la télécharger">Créer une sauvegarde…</button>
+      <button id="bk-restore" class="k-theme" type="button" title="Valider / restaurer une archive chiffrée">Restaurer une archive…</button>
+    </div>
+    <h3 style="margin:14px 0 6px;font-size:.95rem">Sauvegarde programmée &amp; offsite</h3>
+    <div id="admin-bk-policy"><div class="muted">chargement…</div></div>
+  </section>
 </main>
 </div>
 <!-- PORTAIL DE CONNEXION — gate du shell : affiché quand /api/whoami répond 401 (session requise et
