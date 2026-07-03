@@ -217,6 +217,11 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Ancrage hors-host** (`anchor.py` : interface `Anchor` + témoin co-signataire + `reconcile`) | ✅ testé (détecte une réécriture re-signée localement) |
 | **Mémoire sémantique** (`JaccardMemory` floue stdlib + bridge FAISS embeddings optionnel) | ✅ Jaccard testé, FAISS dégrade proprement |
 | **Cœur partagé `guatx-core`** (crate Rust **public neutre** en `GUATX/core/` ; console en dépend) | ✅ 6 tests Rust, déplacé hors du privé, console rebâtie |
+| **Wizard 1er déploiement** (self-deploy : provisionne admin/crypto/source de détection/politique opérateur **depuis le navigateur**, auto-désactivant, zéro défaut codé en dur) | ✅ — `GET /api/setup/state` · `POST /api/setup` |
+| **RBAC admin & gouvernance des connecteurs** (comptes `/api/users`, viewer/opérateur/admin ; msf/burp sondés à fire-time, `exploit` fail-safe, jamais de sur-classement) | ✅ — testé en live |
+| **Source de détection infra-agnostique** (plugin configurable dans l'UI : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec, secret write-only) | ✅ — cf. `docs/DETECTION.md` |
+| **Sauvegarde/restore chiffrées + migration** (archive **toujours chiffrée** argon2id+XChaCha20, scheduler + offsite, `migrate` DB+ledger+clé `.ed25519`) | ✅ — `/api/backup(/policy)` · `/api/restore` · `forge-console migrate` |
+| **Chiffrement AU REPOS SQLCipher** (image opt-in `--features encryption`, `PRAGMA key` au boot) | ✅ opt-in — `capabilities.sqlcipher` exposé au wizard |
 | Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
 
 **14 modules** (table générée depuis `forge modules --json`) :
@@ -248,13 +253,33 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 > hors-host (clé privée sur un signeur distant / co-signataire / transparency log) est la dernière
 > étape — l'architecture asymétrique le permet déjà (seule la clé publique circule). Documenté, pas caché.
 
+## Déploiement en production (self-deploy)
+
+Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est le
+parent `GUATX/` (la console dépend du sibling `guatx-core` en `path` ; `console/Cargo.lock` est committé
+pour des builds reproductibles) :
+
+```sh
+cd GUATX/forge && cp scope.example.json scope.json     # INERTE tant que in_scope vide ; éditer AVEC AUTORISATION
+cd .. && docker compose -f forge/docker-compose.yml up -d --build   # console SEULE (loopback :7100, healthcheck GET /health)
+```
+
+Ouvrir `http://127.0.0.1:7100` → le **wizard 1er boot** provisionne l'admin (RBAC argon2id), la crypto,
+la **source de détection de TON infra** (FortiGate/pfSense/CrowdSec/Elastic/… — [`docs/DETECTION.md`](docs/DETECTION.md),
+plugin sans code) et la politique opérateur — **rien de codé en dur**. Services optionnels
+(browser/msf/burp) derrière des **profils** (`--profile browser`), aucun `depends_on` dur → un `up` nu =
+console seule. **Chiffrement au repos** (image SQLCipher opt-in) et **sauvegardes chiffrées programmées**
+(offsite) : [`docs/MIGRATION.md`](docs/MIGRATION.md) · [`docs/BACKUP.md`](docs/BACKUP.md).
+
 ## Documentation
 
 - [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **démarrage bout-en-bout hors-ligne** (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
 - [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
 - [`docs/DETECTION.md`](docs/DETECTION.md) — **source de détection = plugin configurable** (brancher n'importe quelle infra BLUE sans code : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) + modèle `DetectionSource` et mapping MITRE.
 - [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis du préréglage **Plume** pour câbler la boucle purple (le moat) — un cas particulier de `DETECTION.md`.
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — empreinte mesurée et matrice de déploiement (Docker / k8s / host / venv).
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — **runbook self-deploy bout-en-bout** : build/run (mini·full · Docker · compose · natif/systemd · image `encryption` SQLCipher), **wizard 1er boot** (admin · crypto · source de détection · politique opérateur — rien de codé en dur), migration & **sauvegardes chiffrées** (schedule/offsite), contexte de build `guatx-core`, liveness `/health`. Inclut l'empreinte mesurée + matrice (Docker / k8s / host / venv).
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) — reprendre un install existant (DB + ledger + clé `.ed25519`) vers Docker/autre cible ; option chiffrement au repos SQLCipher.
+- [`docs/BACKUP.md`](docs/BACKUP.md) — sauvegarde/restauration **toujours chiffrées** (argon2id + XChaCha20-Poly1305), programmation + expédition **offsite**.
 
 ## Licence
 Usage autorisé / éthique uniquement.

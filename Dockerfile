@@ -18,6 +18,32 @@
 #
 #    Construire depuis `forge/` directement ÉCHOUERA (core/ hors contexte) — c'est voulu.
 #
+# ── Dépendance sibling `core/` (guatx-core) ──────────────────────────────────
+#    console/Cargo.toml : `guatx-core = { path = "../../core" }`. `core/` est un repo
+#    PARTAGÉ appartenant à l'utilisateur — NON vendoré, NON copié-committé ici : il est
+#    consommé DEPUIS le contexte de build parent (COPY core/ dans le stage builder).
+#    ➜ Migration future prévue quand le repo public existera : remplacer la dép `path`
+#      par une dép git ÉPINGLÉE, ex.
+#          guatx-core = { git = "https://github.com/guatx/core", tag = "vX.Y.Z" }
+#      À ce moment-là le contexte de build pourra redevenir `forge/` seul et le
+#      `COPY core/ ./core/` du builder disparaîtra. Tant que c'est une dép `path`,
+#      le contexte DOIT rester le parent `GUATX/`.
+#
+# ── Ignore du contexte de build ──────────────────────────────────────────────
+#    Le contexte réel = `GUATX/`, mais l'utilisateur ne modifie que `forge/`. On utilise
+#    donc l'ignore-file SPÉCIFIQUE au Dockerfile (fonction BuildKit) : `forge/Dockerfile.dockerignore`.
+#    BuildKit le préfère à un `.dockerignore` racine quand il existe à côté du Dockerfile
+#    référencé par `-f`. Ses motifs sont relatifs à la RACINE du contexte (`GUATX/`). Il
+#    exclut ~1.6 GB de `forge/console/target/`, les *.db/*.jsonl/ledger/secrets et les repos
+#    siblings inutiles au build (plume/, guatx-infra/, …) — cf. ce fichier.
+#
+# ── Profils d'outils (FORGE_TOOLS_PROFILE=full|mini) ─────────────────────────
+#    `full` (défaut) : embarque httpx/nuclei/subfinder (téléchargés + VÉRIFIÉS SHA256) et
+#      un moteur PDF (weasyprint, pip, pur-Python) → `?format=pdf` clé-en-main.
+#    `mini` : OMET ces outils ; les modules dégradent proprement (available:false, déjà géré)
+#      et `?format=pdf` répond `pdf_unavailable` (l'impression navigateur reste dispo).
+#      Build mini : `docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile .`
+#
 # Services EXTERNES (jamais embarqués ici — montés/réseau, cf. docker-compose.yml & ENV) :
 #   - browser-automation (Camoufox+Xvfb, :8080)  → FORGE_BROWSER_URL
 #   - msfrpcd (Metasploit RPC, :55553)           → MSF_RPC_*
@@ -54,11 +80,27 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # -----------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
+# Profil d'outils : `full` (défaut, embarque httpx/nuclei/subfinder + moteur PDF) ou `mini`
+# (les omet ; les modules dégradent en available:false — déjà géré côté engine).
+ARG FORGE_TOOLS_PROFILE=full
+
 # Versions pinnées des outils ProjectDiscovery (suite Go, binaires statiques).
 ARG HTTPX_VERSION=1.6.9
 ARG NUCLEI_VERSION=3.3.7
 ARG SUBFINDER_VERSION=2.6.7
 ARG TARGETARCH=amd64
+
+# Empreintes SHA256 des archives officielles (par arch), issues des `*_checksums.txt`
+# signés de chaque release ProjectDiscovery. Elles ÉPINGLENT le binaire téléchargé : le
+# build ÉCHOUE en cas de non-correspondance (plus de `curl`-par-tag non vérifié). Pour
+# mettre à jour lors d'un bump de version :
+#   curl -fsSL https://github.com/projectdiscovery/<tool>/releases/download/v<VER>/<tool>_<VER>_checksums.txt
+ARG HTTPX_SHA256_amd64=c8d36461b5d736e88c3f9104fed15f2112eb7263dbda35fd08aa5a771bddfb5f
+ARG HTTPX_SHA256_arm64=8cf124b4f62236ff3149b83a8bfc70203fcda3dfda6606013751b229b3e0aa95
+ARG NUCLEI_SHA256_amd64=725ef892fcffd1b03ad4f0874942fc4b623c0419b6b6c6c91fe4a5a65671f77c
+ARG NUCLEI_SHA256_arm64=a07744736613c73fa2c3aef63e176941e3de95fa76feb4870551a1c444ce7704
+ARG SUBFINDER_SHA256_amd64=d988a481d3037c55e685afee023eb104a81a77dd2691fb902b59019a365f6103
+ARG SUBFINDER_SHA256_arm64=07b7fa2c2cfe6770df9cdfc0ab761a33bbaaf7146add51ea44e806953edc2d88
 
 LABEL org.opencontainers.image.title="forge-console" \
       org.opencontainers.image.description="Forge red-team console (ROE fail-closed + ledger tamper-evident) — usage autorisé uniquement." \
@@ -81,23 +123,62 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Outils offensifs ProjectDiscovery (httpx / nuclei / subfinder), versions pinnées.
+# Outils offensifs ProjectDiscovery (httpx / nuclei / subfinder), versions ET DIGESTS pinnés.
 # Binaires Go statiques → simple téléchargement+install (pas de runtime Go embarqué).
+# ── Profil : `full` uniquement. En `mini`, ce bloc s'auto-court-circuite (exit 0) et les
+#    modules recon/web dégradent en available:false (déjà géré par l'engine, cf. runner.available).
+# ── Supply-chain : chaque archive est VÉRIFIÉE par sha256sum contre le pin ARG de l'arch ;
+#    toute non-correspondance (ou pin manquant) FAIT ÉCHOUER le build (set -e + exit 1).
 # Si tu préfères les MONTER depuis l'hôte (toolkit existant) plutôt que les embarquer,
-# commente ce bloc et bind-monte /usr/local/bin/{httpx,nuclei,subfinder} via compose.
+# construis en `mini` et bind-monte /usr/local/bin/{httpx,nuclei,subfinder} via compose.
 RUN set -eux; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] FORGE_TOOLS_PROFILE=${FORGE_TOOLS_PROFILE} (mini) -> outils ProjectDiscovery OMIS ; modules recon/web -> available:false."; \
+        exit 0; \
+    fi; \
+    case "${TARGETARCH}" in \
+      amd64) HX_SHA="${HTTPX_SHA256_amd64}"; NU_SHA="${NUCLEI_SHA256_amd64}"; SF_SHA="${SUBFINDER_SHA256_amd64}";; \
+      arm64) HX_SHA="${HTTPX_SHA256_arm64}"; NU_SHA="${NUCLEI_SHA256_arm64}"; SF_SHA="${SUBFINDER_SHA256_arm64}";; \
+      *) echo "[forge] FATAL: TARGETARCH=${TARGETARCH} non supporté (amd64|arm64) pour les pins SHA256." >&2; exit 1;; \
+    esac; \
     base="https://github.com/projectdiscovery"; \
     fetch() { \
-        name="$1"; ver="$2"; \
+        name="$1"; ver="$2"; sha="$3"; \
+        if [ -z "${sha}" ]; then echo "[forge] FATAL: pin SHA256 absent pour ${name}/${TARGETARCH} — refus de télécharger non vérifié." >&2; exit 1; fi; \
         url="${base}/${name}/releases/download/v${ver}/${name}_${ver}_linux_${TARGETARCH}.zip"; \
         curl -fsSL "$url" -o "/tmp/${name}.zip"; \
+        echo "${sha}  /tmp/${name}.zip" | sha256sum -c -; \
         unzip -o "/tmp/${name}.zip" "${name}" -d /usr/local/bin/; \
         chmod +x "/usr/local/bin/${name}"; \
         rm -f "/tmp/${name}.zip"; \
     }; \
-    fetch httpx "${HTTPX_VERSION}"; \
-    fetch nuclei "${NUCLEI_VERSION}"; \
-    fetch subfinder "${SUBFINDER_VERSION}"
+    fetch httpx "${HTTPX_VERSION}" "${HX_SHA}"; \
+    fetch nuclei "${NUCLEI_VERSION}" "${NU_SHA}"; \
+    fetch subfinder "${SUBFINDER_VERSION}" "${SF_SHA}"
+
+# Moteur PDF (weasyprint) — profil `full` uniquement, pour que `?format=pdf` marche clé-en-main.
+# ── weasyprint est PUR-PYTHON (pip), il n'ajoute NI Go NI Ruby (la claim de composition tient).
+#    Ses dépendances natives (pango/cairo/gdk-pixbuf/ffi) sont des libs C — même catégorie que
+#    nmap, déjà présent — installées via apt. Isolé dans un venv pour respecter PEP 668 (Debian
+#    externally-managed) ; `weasyprint` est symlinké dans /usr/local/bin pour que le lookup PATH
+#    de la console (which_in_path("weasyprint")) le trouve.
+# ── En `mini`, ce bloc s'auto-court-circuite : `?format=pdf` répond `pdf_unavailable` et pointe
+#    vers l'impression navigateur (?format=html + « Enregistrer au format PDF »). Aucun moteur embarqué.
+RUN set -eux; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] FORGE_TOOLS_PROFILE=${FORGE_TOOLS_PROFILE} (mini) -> pas de moteur PDF ; ?format=pdf -> pdf_unavailable (impression navigateur dispo)."; \
+        exit 0; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        python3-pip python3-venv \
+        libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libffi8 \
+        fonts-dejavu-core; \
+    python3 -m venv /opt/pdfenv; \
+    /opt/pdfenv/bin/pip install --no-cache-dir --upgrade pip; \
+    /opt/pdfenv/bin/pip install --no-cache-dir weasyprint; \
+    ln -sf /opt/pdfenv/bin/weasyprint /usr/local/bin/weasyprint; \
+    rm -rf /var/lib/apt/lists/*
 
 # --- Application ---------------------------------------------------------------
 # FORGE_PKG_DIR = racine où vit le package python `forge/` ET le scope.json par défaut.
@@ -151,6 +232,15 @@ ENV FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
 # bind 127.0.0.1 dans le binaire par défaut ; ici on bind 0.0.0.0 DANS le conteneur (réseau isolé).
 # ⚠️ N'expose JAMAIS 7100 sur une interface publique sans reverse-proxy + auth + Host-allowlist.
 EXPOSE 7100
+
+# Sonde de LIVENESS réelle (pas un simple TCP port-open) : GET /health -> attend HTTP 200.
+# /health est PUBLIC (hors auth_guard) mais SOUS host_guard (anti-DNS-rebinding) : la sonde DOIT
+# donc envoyer un Host autorisé. En visant http://127.0.0.1:7100/, urllib pose `Host: 127.0.0.1:7100`
+# ; host_guard retire le port -> `127.0.0.1`, présent dans l'allowlist PAR DÉFAUT (localhost,
+# 127.0.0.1, ::1). Vérifié en exécutant le binaire : Host 127.0.0.1 -> 200 (healthy) ; Host étranger
+# -> 421 (unhealthy). python3 est déjà dans l'image (la console spawn `python3 -m forge.cli`).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7100/health', timeout=3).getcode()==200 else 1)"]
 
 # Persistance hors cycle de vie du conteneur.
 VOLUME ["/data/db", "/data/ledger", "/data/scope"]

@@ -1,5 +1,12 @@
+# Build artefacts & bases locales — jamais suivis.
 /target
 *.db
 *.db-wal
 *.db-shm
-Cargo.lock
+
+# Cargo.lock — VOLONTAIREMENT SUIVI (retiré de l'ignore).
+# `forge-console` est un BINAIRE/PRODUIT livré, pas une bibliothèque : son Cargo.lock DOIT être
+# committé pour des BUILDS REPRODUCTIBLES (versions de deps verrouillées, identiques sur la machine
+# du client et en CI). Le Dockerfile build d'ailleurs `cargo build --release --locked`, ce qui EXIGE
+# un Cargo.lock présent et à jour. (Convention Rust : lib -> Cargo.lock ignoré ; bin/produit -> tracké.)
+# NE PAS ré-ignorer cette ligne.

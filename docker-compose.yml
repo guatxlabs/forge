@@ -22,6 +22,13 @@
 #   Filet de sécurité : l'entrypoint ci-dessous ÉCHOUE BRUYAMMENT si le chemin monté est un
 #   répertoire, et bascule sur le scope.example.json embarqué (INERTE) si scope.json manque/vide.
 # Env (secrets, connecteurs, boucle purple) : cf. `.env.example` à la racine + Dockerfile.
+#
+# SERVICES OPTIONNELS = derrière des PROFILES → un `docker compose up` NU démarre la CONSOLE SEULE
+# (aucun `depends_on` sur une image que le client n'a pas). Les activer à la demande :
+#     docker compose -f forge/docker-compose.yml --profile browser up -d   # + accès/évasion (Camoufox)
+#     docker compose -f forge/docker-compose.yml --profile msf --profile burp up -d  # + connecteurs (BYO images)
+# Les connecteurs (browser/msf/burp) restent INERTES tant que leur service n'est pas joignable
+# (sonde à fire-time, auto-neutralisation) — cohérent avec l'inertie par défaut de Forge.
 
 name: forge
 
@@ -35,6 +42,10 @@ services:
       context: ..
       dockerfile: forge/Dockerfile
       args:
+        # Profil d'image : `full` (défaut, httpx/nuclei/subfinder vérifiés SHA256 + moteur PDF
+        # weasyprint) ou `mini` (les omet ; modules -> available:false, ?format=pdf -> pdf_unavailable).
+        # Override : `FORGE_TOOLS_PROFILE=mini docker compose -f forge/docker-compose.yml build`.
+        FORGE_TOOLS_PROFILE: "${FORGE_TOOLS_PROFILE:-full}"
         # Pins repropagés au Dockerfile (cohérence build reproductible).
         HTTPX_VERSION: "1.6.9"
         NUCLEI_VERSION: "3.3.7"
@@ -81,16 +92,53 @@ services:
       FORGE_PKG_DIR: "/opt/forge"
       FORGE_PYTHON: "python3"
       FORGE_RUN_TIMEOUT: "900"
-      # Service d'accès/évasion (interne au réseau compose). Décommenter le service
-      # browser-automation ci-dessous, ou pointer un service externe existant.
+      # --- Couche accès/évasion (browser-automation) ---------------------------------------
+      # Service OPTIONNEL derrière `profiles: ["browser"]` (défini plus bas). Ce nom d'hôte ne
+      # résout QUE sous `docker compose --profile browser up`. Sinon le connecteur évasion sonde à
+      # fire-time, ne joint personne, et s'auto-neutralise (inerte). Aucun `depends_on` dur → la
+      # console démarre seule.
       FORGE_BROWSER_URL: "http://browser-automation:8080"
-      # Connecteurs opérateur (laisser vide = inerte à fire-time) :
-      #   MSF_RPC_HOST / MSF_RPC_PORT / MSF_RPC_USER / MSF_RPC_PASS / MSF_RPC_SSL / MSF_RPC_TOKEN
-      #   BURP_API_URL / BURP_API_KEY
-      # Boucle purple (mesure de couverture de détection Plume — vide = OFF/fail-open lisible) :
-      #   cf. docs/PURPLE_PREREQS.md
-      #   PLUME_URL=http://plume-internal:PORT   # http:// uniquement (endpoint interne, pas de TLS console)
-      #   PLUME_TOKEN=<base64 user:pass>         # SECRET — Basic auth vers Plume
+
+      # --- Connecteurs opérateur (BRING-YOUR-OWN, vide = inerte à fire-time) ----------------
+      # Forge PILOTE des outils standards que l'opérateur exécute déjà ; il n'embarque AUCUNE
+      # capacité offensive. Pointer vers TES services (souvent hors compose). Secrets → `.env`,
+      # jamais ici. Stubs profilés ["msf"]/["burp"] en bas de fichier (BYO images).
+      #   MSF_RPC_HOST: "msfrpcd"          # ou l'hôte réel
+      #   MSF_RPC_PORT: "55553"
+      #   MSF_RPC_USER: "msf"
+      #   MSF_RPC_SSL:  "true"
+      #   MSF_RPC_PASS: ""                 # [SECRET] → forge/.env
+      #   BURP_API_URL: "http://burp:1337"
+      #   BURP_API_KEY: ""                 # [SECRET] → forge/.env
+
+      # --- Source de détection (boucle purple) : SETTINGS-DRIVEN d'abord -------------------
+      # La source BLUE (SIEM/IDS/pare-feu) se configure de préférence dans l'UI (wizard 1er boot
+      # ou Administration → Source de détection ; stockée write-only dans settings.detection_source).
+      # AUCUNE infra n'est codée en dur. Modèle + préréglages (CrowdSec/FortiGate/pfSense/OPNsense/
+      # Elastic/OpenSearch/fichier/exec) : docs/DETECTION.md. Repli COLLECTEUR (kinds messy en
+      # https/mTLS/exec) via ENV JSON (jamais en argv) — décommenter seulement si pilotage hors-UI :
+      #   FORGE_DETECTION_SOURCE: '{"kind":"crowdsec","endpoint":"http://crowdsec:8080/v1/alerts","auth":{"type":"bearer","secret":"..."}}'  # [SECRET] → forge/.env
+      #
+      # Préréglage LEGACY kind=plume (rétro-compat ; utilisé SEULEMENT si settings.detection_source
+      # est absent). Vide = boucle purple OFF/fail-open lisible (source_reachable:false, aucune
+      # métrique inventée). cf. docs/PURPLE_PREREQS.md :
+      #   PLUME_URL:   "http://plume-internal:PORT"   # http:// interne uniquement (pas de TLS côté console)
+      #   PLUME_TOKEN: "<base64 user:pass>"           # [SECRET] → forge/.env (Basic auth vers Plume)
+
+      # --- Chiffrement AU REPOS (image opt-in `--features encryption`) ---------------------
+      # UNIQUEMENT si tu construis l'image chiffrée (forge-console:0.0.1-encryption, cf.
+      # docs/MIGRATION.md Runbook B). La console lit FORGE_DB_KEY au boot et émet `PRAGMA key`
+      # AVANT toute requête (contrat SQLCipher). Sans clé correcte → base illisible (fail-closed).
+      # Dans le build PAR DÉFAUT ce hook N'EXISTE PAS (base en clair) → la variable est ignorée.
+      #   FORGE_DB_KEY: "${FORGE_DB_KEY:-}"           # [SECRET] → forge/.env / docker secret ; JAMAIS commité
+
+      # --- Sauvegardes chiffrées programmées (offsite) -------------------------------------
+      # La POLITIQUE (activation/intervalle/rétention/offsite rclone|exec) se règle dans l'UI
+      # (Administration → Sauvegarde) ou `POST /api/backup/policy` — rien n'est codé en dur. Le
+      # scheduler en-console lit ces 2 knobs d'environnement ; l'archive est TOUJOURS chiffrée
+      # (argon2id + XChaCha20-Poly1305). Détails/restore/offsite : docs/BACKUP.md.
+      #   FORGE_BACKUP_TICK_SECS:  "60"               # période de réveil du scheduler (défaut 60s)
+      #   FORGE_BACKUP_PASSPHRASE: ""                 # [SECRET] → forge/.env ; nom d'ENV référencé par policy.passphrase_env
     ports:
       # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
       - "127.0.0.1:7100:7100"
@@ -103,30 +151,36 @@ services:
       - ./scope.json:/data/scope/scope.json:ro
     networks:
       - forge-net
-    # Le service browser-automation est un service EXTERNE optionnel ; on ne bloque pas
-    # le boot de la console dessus (le connecteur sonde à fire-time et reste inerte sinon).
-    depends_on:
-      - browser-automation
+    # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et
+    # ne sont PAS requis au boot. `docker compose up` démarre la console SEULE ; chaque connecteur
+    # sonde son service à fire-time et s'auto-neutralise si injoignable (inertie par défaut). Ne PAS
+    # remettre un `depends_on` sur une image qu'un client n'aura pas — ça casserait un `up` nu.
     healthcheck:
-      # Sonde TCP du port API via python3 stdlib (présent dans l'image).
+      # Sonde de LIVENESS réelle : GET /health -> attend HTTP 200 (pas un simple TCP port-open,
+      # qui passerait même si le routeur HTTP est mort). /health est PUBLIC mais SOUS host_guard
+      # (anti-DNS-rebinding) : viser 127.0.0.1 pose `Host: 127.0.0.1:7100` -> host_guard retire le
+      # port -> `127.0.0.1`, dans l'allowlist PAR DÉFAUT (localhost/127.0.0.1/::1). Un Host étranger
+      # -> 421 -> unhealthy (vérifié en exécutant le binaire). python3 est présent dans l'image.
       test:
         - "CMD"
         - "python3"
         - "-c"
-        - "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(s.connect_ex(('127.0.0.1',7100)))"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7100/health', timeout=3).getcode()==200 else 1)"
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   # ---------------------------------------------------------------------------
   # browser-automation — couche ACCÈS/ÉVASION (Camoufox + Xvfb, port 8080).
   # ---------------------------------------------------------------------------
-  # Référencé ici pour documenter l'intégration. L'image vit dans le repo
-  # YesWeHack/toolkit/browser-automation (build local `browser-automation-browser`).
-  # Adapter `image:` au tag réellement construit sur ta machine, ou remplacer par
+  # OPTIONNEL — derrière le profil "browser". EXCLU d'un `docker compose up` nu ; démarrer via :
+  #     docker compose -f forge/docker-compose.yml --profile browser up -d
+  # L'image vit dans le repo YesWeHack/toolkit/browser-automation (build local
+  # `browser-automation-browser`). Adapter `image:` au tag réellement construit, ou remplacer par
   # `build: { context: ../../YesWeHack/toolkit/browser-automation }` si présent.
   browser-automation:
+    profiles: ["browser"]
     image: browser-automation-browser:latest
     container_name: forge-browser
     restart: unless-stopped
@@ -136,6 +190,38 @@ services:
       - "8080"
     networks:
       - forge-net
+
+  # ---------------------------------------------------------------------------
+  # msfrpcd — connecteur msf.module (OPTIONNEL, profil "msf", BRING-YOUR-OWN).
+  # ---------------------------------------------------------------------------
+  # Forge PILOTE msfrpcd, il n'embarque PAS Metasploit (aucune image fournie). La plupart des
+  # opérateurs lancent msfrpcd hors compose (VM/outillage existant) et pointent MSF_RPC_* dessus.
+  # Ce STUB (commenté) documente le câblage si tu veux l'orchestrer ici avec TA propre image :
+  #
+  # msfrpcd:
+  #   profiles: ["msf"]
+  #   image: <ton-image-metasploit>          # non fourni par Forge (licence/outillage opérateur)
+  #   container_name: forge-msfrpcd
+  #   restart: unless-stopped
+  #   command: ["msfrpcd","-a","0.0.0.0","-p","55553","-U","msf","-P","${MSF_RPC_PASS}","-S"]
+  #   expose: ["55553"]
+  #   networks: [forge-net]
+  #   # puis dans forge-console.environment : MSF_RPC_HOST=msfrpcd (+ MSF_RPC_PASS via forge/.env)
+
+  # ---------------------------------------------------------------------------
+  # burp — connecteur burp.scan (OPTIONNEL, profil "burp", BRING-YOUR-OWN).
+  # ---------------------------------------------------------------------------
+  # REST API Burp Suite Pro/Enterprise (licence requise, non fournie). Souvent hors compose.
+  # Ce STUB (commenté) documente le câblage si tu veux l'orchestrer ici avec TA propre image :
+  #
+  # burp:
+  #   profiles: ["burp"]
+  #   image: <ton-image-burp-rest>           # non fourni par Forge (licence PortSwigger)
+  #   container_name: forge-burp
+  #   restart: unless-stopped
+  #   expose: ["1337"]
+  #   networks: [forge-net]
+  #   # puis dans forge-console.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via forge/.env)
 
 networks:
   forge-net:
