@@ -21,7 +21,7 @@ import hashlib
 import re
 
 from .. import techniques
-from .oracle import Oracle
+from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 
 # Tokens volatils à neutraliser AVANT comparaison de corps : un IDOR réel renvoie le MÊME objet à A
@@ -221,4 +221,149 @@ class IdorDifferential(Oracle):
                           f"{_body_hash(before[1])[:12]} après={after[0]}/{_body_hash(after[1])[:12]} "
                           f"muté={mutated}"),
                 poc=self._curl(url, B.get("headers", {}), method=method, data=body)))
+        return findings
+
+
+# =================================================================================================
+#  access_control.privesc — élévation de privilège VERTICALE / function-level à PREUVE DEUX-COMPTES-
+#  OPÉRATEUR (T1068 / CWE-269) — NON DESTRUCTIF (lecture ; les méthodes write sont gardées destructive)
+# =================================================================================================
+@register("access_control.privesc")
+class PrivEsc(ScopeGuardedOracle):
+    """Oracle d'élévation de privilège VERTICALE (function/object-level) à preuve, avec le contexte
+    DEUX-COMPTES DE L'OPÉRATEUR : le compte BAS-PRIVILÈGE (accounts[0]) atteint-il une fonction/objet
+    ADMIN-ONLY (accounts[1] = le compte privilégié de l'opérateur) qui DEVRAIT lui être refusé ?
+
+    Preuve NETTE (jamais un verdict aveugle) : le compte bas-privilège obtient la fonction privilégiée
+    (marqueur admin fourni par l'opérateur PRÉSENT dans SA réponse, OU même corps NORMALISÉ que le
+    compte admin — statuts 2xx), le compte ADMIN l'obtient aussi (c'est bien une fonction privilégiée
+    RÉELLE, pas une 404) ET l'anonyme est REFUSÉ (la fonction est bien protégée). Tout le reste ->
+    `tested`. Comptes A(bas) et B(admin) DÉTENUS par l'opérateur — JAMAIS un tiers réel.
+
+    Garde-fous : scope-guard fail-closed (cible + CHAQUE admin_url re-validés, hors-scope -> aucun I/O) ;
+    non destructif (GET ; une méthode write MUTE -> gardée `destructive`, refusée sans allow_destructive) ;
+    session gouvernée scope-guardée jamais journalisée."""
+
+    kind = "access_control.privesc"
+    exploit = True                       # atteint une fonction admin-only -> exige allow_exploit
+    destructive = False                  # GET = lecture ; les méthodes write sont gardées (voir _is_write)
+    web_allowed = True                   # interaction web (réseau) -> gardée par le ROE
+    available = True                     # urllib stdlib
+    mitre = techniques.mitre_for("access_control.privesc")   # source de vérité : techniques.py (T1068)
+    cwe = techniques.cwe_for("access_control.privesc")       # CWE-269 (Improper Privilege Management)
+    tool = "forge/modules/access_control.py:access_control.privesc"
+    fix = ("Contrôle d'accès FONCTION-PAR-FONCTION côté serveur (deny-by-default) : vérifier le RÔLE/les "
+           "droits du principal authentifié sur CHAQUE fonction et objet admin-only avant de répondre ou "
+           "d'agir ; ne jamais dériver le niveau de privilège d'un identifiant/paramètre fourni par le "
+           "client ni de la seule présence d'un lien UI ; centraliser l'autorisation (RBAC) (CWE-269).")
+    description = ("Oracle privesc VERTICALE (function-level) à PREUVE 2-comptes opérateur : le compte "
+                   "bas-privilège atteint-il une fonction admin-only (compte admin = baseline, anon "
+                   "refusé) ? Comptes DÉTENUS par l'opérateur. Sinon tested. CWE-269.")
+
+    _OK = (200, 206)
+    _DENY = (401, 403)
+
+    @staticmethod
+    def _is_write(method):
+        return method in ("POST", "PUT", "PATCH", "DELETE")
+
+    @staticmethod
+    def _fetch(url, headers, timeout=15, method="GET", body=None):
+        """(status, body, content_type) — adosse le câblage urllib partagé (Oracle._http). Seam patché."""
+        st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
+        ct = ""
+        if h is not None:
+            try:
+                ct = (h.get("Content-Type") or "").split(";")[0].strip().lower()
+            except Exception:            # noqa: BLE001
+                ct = ""
+        return st, txt, ct
+
+    def _admin_urls(self, action):
+        """Fonctions/objets ADMIN-ONLY à sonder : params.admin_urls (liste) + params.admin_url (single) +
+        params.urls (compat). Dédupliqué en préservant l'ordre."""
+        urls = list(action.params.get("admin_urls") or [])
+        u = action.params.get("admin_url")
+        if u:
+            urls.append(u)
+        urls += list(action.params.get("urls") or [])
+        return list(dict.fromkeys(urls))
+
+    def dry(self, action):
+        method = str(action.params.get("method", "GET")).upper()
+        n = len(self._admin_urls(action)) or "?"
+        marker = action.params.get("admin_marker")
+        how = (f"marqueur admin '{marker}'" if marker else "même corps NORMALISÉ que le compte admin")
+        return (f"# privesc VERTICALE {method} sur {n} fonction(s) admin-only : le compte BAS-PRIVILÈGE "
+                f"de l'opérateur les demande ; PREUVE = il obtient la fonction ({how}), le compte admin "
+                f"l'obtient (baseline) ET l'anonyme est refusé ; comptes-opérateur uniquement ; sinon tested")
+
+    def fire(self, action):
+        # (1) SCOPE-GUARD fail-closed sur la cible primaire — hors périmètre -> skipped, AUCUN réseau.
+        if not self._in_scope(action, action.target):
+            return [self._scope_refused(action)]
+        accounts = action.params.get("accounts", [])
+        urls = self._admin_urls(action)
+        if len(accounts) < 2 or not urls:
+            return [self.skip(
+                target=action.target, title="Privesc non testé — config manquante",
+                evidence=("Requiert params.accounts (>=2 : [0]=compte BAS-PRIVILÈGE opérateur, [1]=compte "
+                          "ADMIN opérateur — jamais un tiers) et params.admin_urls (fonctions/objets "
+                          "admin-only). Optionnel : params.admin_marker (chaîne unique de la fonction "
+                          "privilégiée), params.method."),
+                poc=self.dry(action))]
+        method = str(action.params.get("method", "GET")).upper()
+        # FAIL-CLOSED capacité : le chemin write MUTE (privesc via action admin) -> destructif. Refusé
+        # tant que le ROE n'a pas autorisé (allow_destructive => action.destructive=True). Aucune requête.
+        if self._is_write(method) and not getattr(action, "destructive", False):
+            return [self.skip(
+                target=action.target,
+                title=f"Privesc write {method} non tiré — capacité destructive non autorisée",
+                evidence=(f"La méthode {method} exécute une action privilégiée (destructif). Requiert "
+                          f"allow_destructive dans le ROE + action.destructive=True. Aucune requête émise "
+                          f"(fail-closed)."),
+                poc=self.dry(action))]
+        low, admin = accounts[0], accounts[1]
+        marker = action.params.get("admin_marker")
+        findings = []
+        for url in urls:
+            # (1bis) SCOPE-GUARD PAR-URL fail-closed — une admin_url hors périmètre : AUCUN I/O vers elle.
+            if not self._in_scope(action, url):
+                findings.append(self.degraded(
+                    target=url,
+                    title="Privesc non testé — fonction admin hors périmètre (scope-guard fail-closed)",
+                    evidence="Cette fonction admin-only n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            r_low = self._fetch(url, low.get("headers", {}), method=method)
+            r_admin = self._fetch(url, admin.get("headers", {}), method=method)
+            r_anon = self._fetch(url, {}, method=method)
+            low_ok = r_low[0] in self._OK
+            admin_ok = r_admin[0] in self._OK
+            anon_denied = r_anon[0] in self._DENY
+            if marker:
+                # PREUVE marqueur : la fonction privilégiée renvoie un marqueur admin unique. Le compte
+                # bas-privilège l'obtient (il a exécuté la fonction admin) ET l'admin aussi (baseline).
+                low_reached = low_ok and (marker in (r_low[1] or ""))
+                baseline = admin_ok and (marker in (r_admin[1] or ""))
+            else:
+                # PREUVE différentielle : le compte bas-privilège obtient le MÊME corps NORMALISÉ que
+                # l'admin (retire CSRF/nonce/horodatages) — même fonction privilégiée servie aux deux.
+                low_reached = (low_ok and admin_ok and _normalize_body(r_low[1])
+                               and _body_hash(r_low[1]) == _body_hash(r_admin[1]))
+                baseline = admin_ok
+            proven = bool(low_reached) and bool(baseline) and anon_denied
+            findings.append(self.proof(
+                target=url, proven=proven,
+                title=("Privesc VERTICALE CONFIRMÉE — le compte bas-privilège atteint une fonction "
+                       "admin-only (admin=baseline, anon refusé)" if proven
+                       else "Privesc non confirmée — fonction non atteinte par le bas-privilège (ou non protégée)"),
+                severity=("HIGH" if proven else "INFO"),
+                evidence=(f"bas-priv={r_low[0]}/{r_low[2] or '?'} admin={r_admin[0]}/{r_admin[2] or '?'} "
+                          f"anon={r_anon[0]} ; bas-priv_atteint={bool(low_reached)} baseline_admin={bool(baseline)} "
+                          f"anon_refusé={anon_denied} ; preuve="
+                          + (f"marqueur admin '{marker}'" if marker else "corps normalisé identique à l'admin")
+                          + " ; comptes bas-priv ET admin DÉTENUS par l'opérateur (jamais un tiers) ; "
+                          "session gouvernée non journalisée"),
+                poc=self._curl(url, low.get("headers", {}), method=method)))
         return findings

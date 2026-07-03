@@ -145,6 +145,7 @@
     <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
     <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement C2</span></a>
     <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
+    <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
     <a href="#findings"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Findings</span></a>
     <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
     <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
@@ -306,6 +307,27 @@
     </div>
     <p class="muted" style="margin:0 0 10px">Catalogue des modules du moteur (lecture <code>/api/modules</code>). Le badge <span class="badge webyes">web</span> indique un module autorisé en cadre web ; <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> portent un risque accru (gatés par les ROE au lancement).</p>
     <div id="mod-grid" class="modgrid"></div>
+  </section>
+
+  <!-- TECHNIQUES & SÉLECTION PAR-SCOPE (catalogue groupé par catégorie + profil + toggles) -->
+  <section id="techniques" class="card span2" aria-labelledby="tqh">
+    <div class="panelhead">
+      <h2 id="tqh">Techniques &amp; Sélection <span id="tq-count" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="modfilt" title="Profil = ensemble de base des techniques activées au scope">Profil
+          <select id="tq-profile" class="k-select">
+            <option value="bug_bounty">bug_bounty</option>
+            <option value="pentest">pentest</option>
+            <option value="custom">custom</option>
+          </select>
+        </label>
+        <button id="tq-save" class="k-theme" type="button" title="Persiste la sélection (profil + toggles). Opérateur/admin requis, action ledgerisée.">Enregistrer la sélection</button>
+        <button id="tq-reload" class="k-theme" type="button" title="Recharger le catalogue depuis le moteur">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Catalogue des techniques du moteur, <b>groupé par catégorie</b> (lecture <code>/api/techniques</code>, DÉRIVÉ du registre). « Au scope, retirer des tests automatiques » : le <b>profil</b> donne l'ensemble de base, puis les <b>toggles</b> par catégorie / par technique <b>ajoutent</b> ou <b>retirent</b> (la désactivation prime — fail-closed). Une technique <b>désactivée n'est NI planifiée NI tirée</b> (le moteur l'ENFORCE, en plus du scope-guard). La mutation est réservée operator/admin et journalisée au ledger. Badges : <span class="badge webyes">BB</span> éligible bug bounty · <span class="badge expl">pentest</span> pentest-only.</p>
+    <div id="tq-status" class="muted" style="margin:0 0 10px" hidden></div>
+    <div id="tq-groups" class="tq-groups"></div>
   </section>
 
   <!-- FINDINGS -->

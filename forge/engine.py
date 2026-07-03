@@ -43,6 +43,15 @@ class Engine:
         # + `sessions` par-hôte). Lié autour de chaque fire() (execute) ; les modules recon/oracle y
         # puisent le matériel à attacher AUX SEULES requêtes in-scope. Store inerte si rien de configuré.
         self.sessions = session.SessionStore.from_scope(scope)
+        # SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed) — snapshot de l'ensemble EFFECTIF
+        # de kinds ACTIVÉS pour ce scope (profil + toggles catégorie/technique, DÉRIVÉ de la table
+        # unique). `enabled_kinds is None` <=> scope LEGACY (aucune sélection) => AUCUN filtrage
+        # (rétro-compat STRICTE : n'importe quel kind enregistré — y compris un connecteur ad-hoc hors
+        # table — tire comme avant). Configuré => une technique HORS de cet ensemble n'est NI planifiée
+        # (_prepare) NI tirée (execute), en PLUS du scope-guard et de la gouvernance connecteur. Le scope
+        # ne change pas pendant un run -> snapshot unique.
+        self.enabled_kinds = (scope.effective_technique_kinds()
+                              if scope.technique_selection_configured() else None)
         self.campaign_id = campaign  # boucle purple : corrèle les run-records à la campagne…
         self.run_id = run_id         # …et au run (console). None tant que non fournis (additif).
         self.findings = []
@@ -82,6 +91,20 @@ class Engine:
             res = {"action": action.id, "target": action.target, "kind": action.kind,
                    "verdict": "SKIP",
                    "reasons": ["module désactivé par la console (gouvernance connecteur)"],
+                   "output": None}
+            self.results.append(res)
+            return res
+
+        # SÉLECTION DE TECHNIQUES PAR-SCOPE — ENFORCEMENT AU TIR (fail-closed) : une technique HORS de
+        # l'ensemble EFFECTIF activé pour ce scope (profil/catégorie/technique désactivée) est SKIP
+        # EXACTEMENT comme un connecteur désactivé — MÊME si son module est disponible et la cible
+        # in-scope. C'est le plancher qui garantit qu'une technique retirée « au scope » ne tire JAMAIS,
+        # y compris si elle échappait au filtre du planner. No-op sur un scope legacy (enabled_kinds is
+        # None). Vérifié AVANT la sonde `available` et la gate ROE (raison la + précise).
+        if self.enabled_kinds is not None and action.kind not in self.enabled_kinds:
+            res = {"action": action.id, "target": action.target, "kind": action.kind,
+                   "verdict": "SKIP",
+                   "reasons": ["technique désactivée pour ce scope (sélection profil/catégorie/technique)"],
                    "output": None}
             self.results.append(res)
             return res
@@ -162,6 +185,13 @@ class Engine:
         wanted = {m for m in (modules or []) if m}
         if wanted:
             actions = [a for a in actions if a.kind in wanted]
+
+        # (1bis) SÉLECTION DE TECHNIQUES PAR-SCOPE — le PLAN est filtré par l'ensemble EFFECTIF activé
+        # (== `pipeline_ordered` filtré par la sélection du scope). Une technique hors-profil/désactivée
+        # n'est jamais PLANIFIÉE (le tir la re-refuserait de toute façon : défense en profondeur). No-op
+        # sur un scope legacy (enabled_kinds is None). Appliqué à CHAQUE vague.
+        if self.enabled_kinds is not None:
+            actions = [a for a in actions if a.kind in self.enabled_kinds]
 
         # (2) params par-module -> action.params (la console les écrit dans scope ET target.attrs).
         #     Priorité : params spécifiques à la cible (target.attrs) > params globaux (scope).

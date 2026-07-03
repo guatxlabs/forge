@@ -59,10 +59,42 @@ class Technique:
     phase: str = ""            # phase d'engagement : recon | access | exploit ("" = alias non-phasé)
     capability: str = ""       # capacité : passive | active | exploit ("" = alias non-phasé)
     proof_required: bool = False  # promotion au-delà de status=tested EXIGE une preuve concrète
+    # --- CONSOLIDATION TAXONOMIE (LOT REGISTRY) — rendre les techniques SCALABLES -------------------
+    # Une entrée de KIND de module porte désormais TOUTE sa taxonomie : catégorie de vuln, éligibilité
+    # bug bounty, profils, outils qui la couvrent, et son ordonnancement dans le pipeline pentest. Les
+    # ALIAS de classe/CWE laissent ces champs vides (ce ne sont pas des techniques de module).
+    vuln_class: str = ""       # CATÉGORIE (SQLi/XSS/RCE/IDOR/Auth/SSRF/CORS/… ; "" = alias non-technique)
+    bug_bounty_eligible: bool = False  # produit un finding PAYABLE en bug bounty (classe qualifiante)
+    pentest_only: bool = False  # ne tourne que dans le profil pentest (hors profil bug_bounty)
+    tools: tuple = ()          # kinds de module / connecteurs qui COUVRENT cette technique
+    stage: str = ""            # étage du pipeline pentest automatisé (== phase pour un kind de module)
+    depends_on: tuple = ()     # kinds requis EN AMONT (ordonnancement topologique du pipeline)
+    default_profiles: tuple = ()  # profils par défaut (("bug_bounty","pentest") | ("pentest",))
+
+    @property
+    def pipeline(self):
+        """Descripteur d'ordonnancement du pipeline pentest automatisé : {stage, depends_on:[kinds]}.
+        Dérivé (dict frais à chaque accès) pour garder le dataclass frozen ET hashable (les champs de
+        stockage `stage`/`depends_on` sont des scalaires/tuples immuables)."""
+        return {"stage": self.stage, "depends_on": list(self.depends_on)}
 
 
 def _t(key, **kw):
     return Technique(key=key, **kw)
+
+
+def _k(key, vuln_class, bug_bounty_eligible, depends_on=(), tools=None, **kw):
+    """Helper d'une entrée de KIND de module — technique SELF-DESCRIBING. Dérive automatiquement
+    `pentest_only`, `default_profiles`, `tools` (défaut : le kind lui-même) et `stage` (== la phase),
+    pour qu'UN SEUL appel décrive entièrement une technique. C'est le cœur du contrat « une nouvelle
+    technique = UNE entrée ici + un module @register » : rien d'autre à câbler."""
+    profiles = ("bug_bounty", "pentest") if bug_bounty_eligible else ("pentest",)
+    return Technique(
+        key=key, vuln_class=vuln_class, bug_bounty_eligible=bug_bounty_eligible,
+        pentest_only=not bug_bounty_eligible, stage=kw.get("phase", ""),
+        depends_on=tuple(depends_on),
+        tools=tuple(tools) if tools is not None else (key,),
+        default_profiles=profiles, **kw)
 
 
 # --- Remédiations verbatim (identiques à l'ancien schema.DEFAULT_FIXES — NE PAS reformuler) ---
@@ -147,27 +179,37 @@ _R_WAF = ("S'assurer que le WAF/CDN ne peut être contourné : verrouiller l'ori
 # Les kinds de module portent désormais aussi attck_tactic/phase/capability (catalogue structuré) —
 # additif, aucune vue dérivée ne les lit (remediation_map/qualifying_classes/mitre_by_kind inchangées).
 TECHNIQUES = {t.key: t for t in [
-    # (1) KINDS de module — mitre (badge/purple), cwe (category+cwe des findings), cls/exploit (brain).
+    # (1) KINDS de module — chaque entrée est SELF-DESCRIBING via `_k(key, vuln_class, bug_bounty_eligible,
+    #     depends_on=..., ...)` : elle porte sa CATÉGORIE de vuln, son éligibilité bug bounty, son étage
+    #     de pipeline (== phase) et ses dépendances amont, EN PLUS de mitre/cwe/cls/exploit/phase ATT&CK.
+    #     `_k` en dérive pentest_only/default_profiles/tools/stage. UN nouveau module = UNE entrée ici.
     #     `cls` = override de classe planner pour le brain ("" => Action dérive du suffixe du kind).
-    _t("access_control.idor", cls="access_control", cwe="CWE-639", mitre="T1190", exploit=True,
+    _k("access_control.idor", "IDOR", True, depends_on=("recon.httpx",),
+       cls="access_control", cwe="CWE-639", mitre="T1190", exploit=True,
        attck_tactic="Initial Access", phase="exploit", capability="exploit", proof_required=True),
-    _t("ssrf.callback",       cls="ssrf",           cwe="CWE-918", mitre="T1190", exploit=True,
+    _k("ssrf.callback",       "SSRF", True, depends_on=("recon.httpx",),
+       cls="ssrf",           cwe="CWE-918", mitre="T1190", exploit=True,
        attck_tactic="Initial Access", phase="exploit", capability="exploit", proof_required=True),
-    _t("auth.takeover",       cls="auth",           cwe="CWE-287", mitre="T1212", exploit=True,
+    _k("auth.takeover",       "Auth", True, depends_on=("recon.httpx",),
+       cls="auth",           cwe="CWE-287", mitre="T1212", exploit=True,
        attck_tactic="Credential Access", phase="exploit", capability="exploit", proof_required=True),
-    _t("cors.credentials",    cls="access_control", cwe="CWE-942", mitre="T1539", exploit=True,
+    _k("cors.credentials",    "CORS", True, depends_on=("recon.httpx",),
+       cls="access_control", cwe="CWE-942", mitre="T1539", exploit=True,
        attck_tactic="Credential Access", phase="exploit", capability="exploit", proof_required=True),
     # ORACLES d'INJECTION server-side à PREUVE BÉNIGNE (slice injection.py) — VÉRIFICATION, pas
-    # weaponization : marqueur arithmétique (SSTI), canari bénin (traversal), différentiel booléen /
-    # version SGBD (SQLi). exploit=False/destructive=False (sondes bénignes non destructives) ->
-    # capability="active", phase="access". `proof_required` : promotion `vulnerable` sur preuve concrète
-    # seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/
+    # weaponization : marqueur arithmétique (SSTI -> RCE), canari bénin (traversal -> LFI), différentiel
+    # booléen / version SGBD (SQLi). exploit=False/destructive=False (sondes bénignes non destructives)
+    # -> capability="active", phase="access". `proof_required` : promotion `vulnerable` sur preuve
+    # concrète seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/
     # mitre_by_kind() restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par le module.
-    _t("ssti.eval",           cwe="CWE-1336", mitre="T1190",
+    _k("ssti.eval",           "RCE", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-1336", mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
-    _t("path.traversal",      cwe="CWE-22",   mitre="T1190",
+    _k("path.traversal",      "LFI", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-22",   mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
-    _t("sqli.probe",          cls="sqli", cwe="CWE-89", mitre="T1190",
+    _k("sqli.probe",          "SQLi", True, depends_on=("recon.js_endpoints",),
+       cls="sqli", cwe="CWE-89", mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
     # ORACLES CLIENT-SIDE / FLUX DE REQUÊTE à PREUVE MINIMALE (slice clientflow.py) — VÉRIFICATION,
     # pas weaponization : marqueur bénin réfléchi en contexte JS-exécutable (XSS reflected), cible de
@@ -177,82 +219,153 @@ TECHNIQUES = {t.key: t for t in [
     # preuve concrète ET impactante (contexte exécutable / chaîne sensible / action critique). Aucune
     # `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind() restent
     # INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par chaque module.
-    _t("xss.reflected",       cwe="CWE-79",  mitre="T1059",
+    _k("xss.reflected",       "XSS", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-79",  mitre="T1059",
        attck_tactic="Execution", phase="access", capability="active", proof_required=True),
-    _t("redirect.open",       cwe="CWE-601", mitre="T1204.001",
+    _k("redirect.open",       "OpenRedirect", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-601", mitre="T1204.001",
        attck_tactic="Execution", phase="access", capability="active", proof_required=True),
-    _t("csrf.state_change",   cwe="CWE-352", mitre="T1204",
+    _k("csrf.state_change",   "CSRF", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-352", mitre="T1204",
        attck_tactic="Execution", phase="access", capability="active", proof_required=True),
     # ORACLES TOKEN/API à PREUVE COMPTE-OPÉRATEUR (slice tokenapi.py) — VÉRIFICATION scope-locked, pas
-    # weaponization : jetons forgés acceptés POUR le compte de l'opérateur (jwt.weakness, signature
-    # contournable), objet d'un SECOND compte détenu lu cross-compte (graphql.access, BOLA). Jamais un
-    # tiers. exploit=False/destructive=False (sondes bénignes non destructives) -> capability="active",
-    # phase="access". `proof_required` : promotion `vulnerable` sur preuve concrète compte-opérateur
-    # seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/
-    # mitre_by_kind() restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par le module.
-    _t("jwt.weakness",        cwe="CWE-347", mitre="T1606",
+    # weaponization : jetons forgés acceptés POUR le compte de l'opérateur (jwt.weakness -> Auth, signature
+    # contournable), objet d'un SECOND compte détenu lu cross-compte (graphql.access -> IDOR/Access, BOLA).
+    # Jamais un tiers. exploit=False/destructive=False (sondes bénignes non destructives) ->
+    # capability="active", phase="access". `proof_required` : promotion `vulnerable` sur preuve concrète
+    # compte-opérateur seulement. Aucune `remediation`/`qualifying` ici -> remediation_map()/
+    # qualifying_classes()/mitre_by_kind() restent INCHANGÉES ; le fix est déclaré par le module.
+    _k("jwt.weakness",        "Auth", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-347", mitre="T1606",
        attck_tactic="Credential Access", phase="access", capability="active", proof_required=True),
-    _t("graphql.access",      cwe="CWE-639", mitre="T1190",
+    _k("graphql.access",      "IDOR", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-639", mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
-    _t("web.nuclei",          mitre="T1595.002",
+    # SCANNERS / CONNECTEURS (recon-phase active) — nuclei/burp signalent (reported_by_tool), ne
+    # confirment pas ; vuln_class="Scanner", pentest_only (pas de finding payable en propre).
+    _k("web.nuclei",          "Scanner", False, depends_on=("recon.httpx",), mitre="T1595.002",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
-    _t("origin.find",         mitre="T1590.005",
+    _k("burp.scan",           "Scanner", False, depends_on=("recon.httpx",), mitre="T1595.002",
+       attck_tactic="Reconnaissance", phase="recon", capability="active"),
+    _k("origin.find",         "Recon", False, depends_on=("recon.httpx",), mitre="T1590.005",
        attck_tactic="Reconnaissance", phase="recon", capability="active", proof_required=True),
-    _t("recon.httpx",         mitre="T1595",
+    _k("recon.httpx",         "Recon", False, depends_on=("recon.subdomains",), mitre="T1595",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
-    _t("recon.nmap",          mitre="T1046",
+    _k("recon.nmap",          "Recon", False, mitre="T1046",
        attck_tactic="Discovery", phase="recon", capability="active"),
     # KINDS de modules PASSIFS de cartographie de surface (slice recon_surface.py) — comme
     # recon.httpx/recon.nmap, ce sont des kinds de modules LIVRÉS : ils portent mitre + phase/
     # capability et ONT un module enregistré (test_module_mitre_matches_table). Aucune remédiation
     # ni caractère qualifiant -> remediation_map()/qualifying_classes()/mitre_by_kind() INCHANGÉES.
-    _t("recon.subdomains",    mitre="T1590",
+    _k("recon.subdomains",    "Recon", False, mitre="T1590",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
-    _t("recon.dns",           mitre="T1590.002",
+    _k("recon.dns",           "Recon", False, depends_on=("recon.subdomains",), mitre="T1590.002",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
-    _t("recon.js_endpoints",  mitre="T1594",
+    _k("recon.js_endpoints",  "Recon", False, depends_on=("recon.httpx",), mitre="T1594",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
-    _t("recon.urls",          mitre="T1596",
+    _k("recon.urls",          "Recon", False, mitre="T1596",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
-    _t("recon.tech",          mitre="T1592.002",
+    _k("recon.tech",          "Recon", False, depends_on=("recon.httpx",), mitre="T1592.002",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
     # KINDS de modules ACTIFS de reachability/discovery (slice recon_active.py) — scope-locked,
     # rate-limited, lecture/énumération SEULE (aucune exploitation). Comme recon.subdomains/recon.tech,
     # ce sont des kinds de modules LIVRÉS portant mitre + phase/capability, SANS remédiation ni
     # caractère qualifiant (recon non destructif) -> remediation_map()/qualifying_classes()/
-    # mitre_by_kind() restent INCHANGÉES (byte-à-byte). Chaque kind a un module enregistré
-    # (test_module_mitre_matches_table) et son mitre == cette table (source de vérité).
-    _t("recon.content",       mitre="T1595.003",
+    # mitre_by_kind() restent INCHANGÉES (byte-à-byte). recon.secrets -> ExposedSecrets (BB, preuve exigée).
+    _k("recon.content",       "Recon", False, depends_on=("recon.httpx",), mitre="T1595.003",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
-    _t("recon.secrets",       mitre="T1552.001",
+    _k("recon.secrets",       "ExposedSecrets", True, depends_on=("recon.js_endpoints",), mitre="T1552.001",
        attck_tactic="Credential Access", phase="recon", capability="passive", proof_required=True),
-    _t("recon.waf",           mitre="T1590",
+    _k("recon.waf",           "Recon", False, depends_on=("recon.httpx",), mitre="T1590",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
-    _t("demo.fingerprint",    mitre="T1595",
+    _k("demo.fingerprint",    "Recon", False, mitre="T1595",
        attck_tactic="Reconnaissance", phase="recon", capability="passive"),
     # KINDS d'ÉVASION (accès derrière CDN/WAF/anti-bot via browser-automation) — planner-SELECTABLE
     # pour les cibles PROTÉGÉES (le brain les propose sur un host marqué protégé / fingerprint WAF).
-    # `xhr`/`turnstile` sont des ENABLERS d'accès (non-exploit) ; `idor_intercept` tamper une requête
-    # en vol -> exploit=True (gardé par le ROE). mitre == la déclaration du module (source de vérité,
-    # cf. test_module_mitre_matches_table). Aucune remédiation ni caractère qualifiant -> les vues
-    # héritées (remediation_map/qualifying_classes/mitre_by_kind) restent INCHANGÉES (byte-à-byte).
-    _t("evasion.xhr",            cls="evasion", mitre="T1190",
+    # `xhr`/`turnstile` sont des ENABLERS d'accès (non-exploit, vuln_class="Evasion") ; `idor_intercept`
+    # tamper une requête en vol -> vuln_class="IDOR", exploit=True (gardé par le ROE, pentest_only :
+    # variante exploit-floor du benign oracle access_control.idor). mitre == la déclaration du module
+    # (source de vérité, cf. test_module_mitre_matches_table). Aucune remédiation ni caractère qualifiant
+    # -> les vues héritées (remediation_map/qualifying_classes/mitre_by_kind) restent INCHANGÉES.
+    _k("evasion.xhr",            "Evasion", False, depends_on=("recon.waf",),
+       cls="evasion", mitre="T1190",
        attck_tactic="Defense Evasion", phase="access", capability="active"),
-    _t("evasion.turnstile",      cls="evasion", mitre="T1556",
+    _k("evasion.turnstile",      "Evasion", False, depends_on=("recon.waf",),
+       cls="evasion", mitre="T1556",
        attck_tactic="Defense Evasion", phase="access", capability="active"),
-    _t("evasion.idor_intercept", cls="evasion", mitre="T1190", exploit=True,
+    _k("evasion.idor_intercept", "IDOR", False, depends_on=("evasion.discover",),
+       cls="evasion", mitre="T1190", exploit=True,
        attck_tactic="Defense Evasion", phase="exploit", capability="exploit"),
     # DÉCOUVERTE BACKED-BROWSER derrière WAF/challenge managé : pilote le browser-automation pour
     # franchir le challenge, PUIS extrait les endpoints du rendu (DOM/JS/XHR) — cartographie active,
-    # navigate/lecture SEULE (exploit=False, non destructif). C'est le jumeau browser de
-    # recon.js_endpoints : il émet le MÊME DISCOVERY_ENDPOINT_MARKER (T1594) pour que le cerveau
-    # chaîne les oracles — d'où phase=recon/capability=active (reconnaissance active) même s'il vit
-    # dans la famille évasion (cls="evasion", proposé sur les cibles PROTÉGÉES par le brain).
-    _t("evasion.discover",       cls="evasion", mitre="T1594",
+    # navigate/lecture SEULE (exploit=False, non destructif, vuln_class="Recon"). C'est le jumeau
+    # browser de recon.js_endpoints : il émet le MÊME DISCOVERY_ENDPOINT_MARKER (T1594) pour que le
+    # cerveau chaîne les oracles — d'où phase=recon/capability=active même s'il vit dans la famille
+    # évasion (cls="evasion", proposé sur les cibles PROTÉGÉES par le brain).
+    _k("evasion.discover",       "Recon", False, depends_on=("recon.waf",),
+       cls="evasion", mitre="T1594",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
+    # CONNECTEUR METASPLOIT (opérateur opt-in, EXPLOIT-phase) — un module MSF peut être un exploit
+    # fort-impact (exploit=True au niveau classe -> l'engine exige allow_exploit) : vuln_class="Exploit",
+    # pentest_only. mitre T1210 (Exploitation of Remote Services). SANS remédiation/qualifying ->
+    # vues héritées INCHANGÉES ; son mitre == la déclaration du module (test_module_mitre_matches_table).
+    _k("msf.module",          "Exploit", False, depends_on=("recon.nmap",), mitre="T1210", exploit=True,
+       attck_tactic="Lateral Movement", phase="exploit", capability="exploit"),
+
+    # =============================================================================================
+    #  LOT SCALE — nouvelles classes de vuln, chacune SELF-DESCRIBING via `_k(...)` : UNE entrée ici
+    #  + UN module @register (importé dans modules/__init__.py) = auto-intégration dans le catalogue
+    #  groupé par catégorie (by_vuln_class), le pipeline pentest ordonné (pipeline_ordered), la
+    #  sélection par-scope et les bons profils (profile_set) — SANS câblage par-technique ailleurs.
+    #  C'est la DÉMONSTRATION du point d'extension (« drop-in technique »). Aucune `remediation`/
+    #  `qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind() restent INCHANGÉES
+    #  (le fix est déclaré explicitement par chaque module ; la classe qualifiante vient de l'alias).
+    # ---------------------------------------------------------------------------------------------
+    # access_control.privesc — élévation de privilège VERTICALE / function-level (BB) : depuis le
+    # compte BAS-PRIVILÈGE de l'opérateur, atteindre une fonction/objet admin-only qui devrait être
+    # REFUSÉ (comptes-opérateur UNIQUEMENT, jamais un tiers réel). exploit=True -> exige allow_exploit.
+    _k("access_control.privesc", "PrivEsc", True, depends_on=("recon.httpx",),
+       cls="access_control", cwe="CWE-269", mitre="T1068", exploit=True,
+       attck_tactic="Privilege Escalation", phase="exploit", capability="exploit", proof_required=True),
+    # xxe.probe — traitement d'entité externe XML (BB) détecté par marqueur BÉNIGN (callback OOB vers le
+    # collecteur opérateur OU lecture d'un canari bénin NON sensible) ; JAMAIS de fichier système/cred.
+    # Sonde de VÉRIFICATION bénigne (exploit=False) -> phase=access, capability=active.
+    _k("xxe.probe",           "XXE", True, depends_on=("recon.js_endpoints",),
+       cls="xxe", cwe="CWE-611", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # rfi.probe — remote file inclusion (BB) : preuve = le contenu d'un marqueur BÉNIGN contrôlé par
+    # l'opérateur est INCLUS par l'app (aucune charge malveillante). exploit=False (marqueur bénin).
+    _k("rfi.probe",           "RFI", True, depends_on=("recon.js_endpoints",),
+       cls="rfi", cwe="CWE-98", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # ssrf.xspa — variante SSRF port-scan (BB) : joignabilité de ports internes via différentiel de
+    # réponse/timing CONTRE LA CIBLE IN-SCOPE UNIQUEMENT ; informatif/proof-minimal, non destructif
+    # (exploit=False : aucune requête vers une infra attaquant, aucun tiers). phase=access/active.
+    _k("ssrf.xspa",           "XSPA", True, depends_on=("recon.httpx",),
+       cls="ssrf", cwe="CWE-918", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # xss.stored — XSS stocké/DOM (BB) via le chemin browser/évasion : persiste un marqueur BÉNIGN
+    # unique et confirme qu'il se reflète en contexte JS-exécutable sur une AUTRE vue (dégrade en
+    # skipped si le module navigateur est absent). exploit=False (marqueur bénin, compte opérateur).
+    _k("xss.stored",          "XSS", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-79", mitre="T1059",
+       attck_tactic="Execution", phase="access", capability="active", proof_required=True),
+    # rce.probe — VÉRIFICATION d'exécution de code distante GOUVERNÉE (PENTEST-ONLY) : preuve par
+    # marqueur de commande BÉNIGN (arithmétique/echo dont la sortie UNIQUE revient), scope-locked, NON
+    # destructif, GARDÉE derrière le plancher opt-in exploit/fort-impact (refusée sans allow_exploit/
+    # allow_high_impact + opérateur + scope). exploit=True, pentest_only (jamais un finding BB payable).
+    _k("rce.probe",           "RCE", False, depends_on=("recon.js_endpoints",),
+       cls="rce", cwe="CWE-78", mitre="T1059", exploit=True,
+       attck_tactic="Execution", phase="exploit", capability="exploit", proof_required=True),
+    # business_logic.scan — SCAFFOLD de checks de logique métier automatisables (PENTEST-ONLY, SEMI-
+    # automatisé) : quantité négative / price-tamper / coupon-stack là où détectable SÛREMENT ; là où un
+    # jugement humain est requis -> status=tested avec note « manual review ». exploit=False, non destructif.
+    _k("business_logic.scan", "BusinessLogic", False, depends_on=("recon.js_endpoints",),
+       cls="business_logic", cwe="CWE-840", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
 
     # (2) JETONS de classe QUALIFIANTS (plancher planner). Certains portent aussi une remédiation.
-    #     Ce sont des ALIAS de classe (pas des kinds de module) : pas de phase/capability.
+    #     Ce sont des ALIAS de classe (pas des kinds de module) : pas de vuln_class/phase/capability.
     _t("idor",           qualifying=True, remediation=_R_IDOR),
     _t("bola",           qualifying=True, remediation=_R_BOLA),
     _t("access_control", qualifying=True, remediation=_R_ACCESS),
@@ -461,3 +574,169 @@ def mitre_for_cwe(cwe):
         if t.cwe and t.mitre and t.cwe.upper() == target:
             return t.mitre
     return ""
+
+
+# --- CONSOLIDATION taxonomie : vues DÉRIVÉES « scale » (LOT REGISTRY) ------------------------------
+# Le contrat « derive-everywhere » : un module qui s'enregistre avec UNE entrée technique apparaît
+# AUTOMATIQUEMENT dans le catalogue groupé par catégorie (`by_vuln_class`), le pipeline pentest
+# ordonné (`pipeline_ordered`/`techniques_for`), la sélection par-scope et les bons profils
+# (`profile_set`) — sans câblage par-technique ailleurs. Ces vues DÉRIVENT toutes de la table unique.
+PROFILES = ("bug_bounty", "pentest")
+_PHASE_RANK = {"recon": 0, "access": 1, "exploit": 2, "": 3}
+
+
+def technique_kinds():
+    """Liste des KINDS de module-technique du catalogue (clé pointée portant une `vuln_class`). C'est
+    l'ensemble des techniques RÉELLES (un module enregistré) — à l'exclusion des ALIAS de classe/CWE
+    (non-phasés, sans vuln_class) et des placeholders de SURFACE (métadonnées sans module livré)."""
+    return [k for k, t in CATALOG.items() if "." in k and t.vuln_class]
+
+
+def by_vuln_class():
+    """Dict CATÉGORIE -> [kinds triés] : LE catalogue groupé par classe de vuln (SQLi/XSS/IDOR/SSRF/…).
+    C'est la vue « catalogue » : un nouveau module apparaît sous sa catégorie sans autre câblage."""
+    out = {}
+    for k in technique_kinds():
+        out.setdefault(CATALOG[k].vuln_class, []).append(k)
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def profile_set(profile, custom=None):
+    """Ensemble de kinds appartenant à un PROFIL :
+      - "pentest"     -> TOUTES les techniques (le pentest peut tout lancer) ;
+      - "bug_bounty"  -> les techniques `bug_bounty_eligible` (les classes payables) ;
+      - "custom"      -> l'ensemble fourni par l'appelant (`custom=...`) ;
+      - un ensemble/liste/tuple de kinds passé DIRECTEMENT -> pris tel quel (custom implicite) ;
+      - tout autre nom de profil -> les techniques dont `default_profiles` contient ce nom.
+    Pur ; ne lève jamais. Cohérent par construction : `bug_bounty` via le flag == via default_profiles."""
+    kinds = technique_kinds()
+    if isinstance(profile, (set, frozenset, list, tuple)):
+        return set(profile)
+    if profile == "pentest":
+        return set(kinds)
+    if profile == "bug_bounty":
+        return {k for k in kinds if CATALOG[k].bug_bounty_eligible}
+    if profile == "custom":
+        return set(custom or ())
+    return {k for k in kinds if profile in CATALOG[k].default_profiles}
+
+
+def pipeline_ordered():
+    """Les kinds-techniques ordonnés TOPOLOGIQUEMENT par phase (recon < access < exploit) puis par
+    dépendances (`depends_on`) — l'ordonnancement du pipeline pentest automatisé. Déterministe
+    (tie-break stable : rang de phase puis clé). Robuste : un `depends_on` hors de l'ensemble est
+    ignoré ; un cycle (ne devrait jamais arriver — les deps pointent vers des phases antérieures) est
+    brisé en repli sur l'ordre de priorité (jamais de boucle infinie)."""
+    kinds = technique_kinds()
+    nodeset = set(kinds)
+    deps = {k: [d for d in CATALOG[k].depends_on if d in nodeset] for k in kinds}
+
+    def prio(k):
+        return (_PHASE_RANK.get(CATALOG[k].phase, 3), k)
+
+    ordered, placed, remaining = [], set(), set(kinds)
+    while remaining:
+        ready = [k for k in remaining if all(d in placed for d in deps[k])]
+        if not ready:                                    # cycle défensif : ne jamais boucler
+            ready = list(remaining)
+        nxt = min(ready, key=prio)
+        ordered.append(nxt)
+        placed.add(nxt)
+        remaining.discard(nxt)
+    return ordered
+
+
+def techniques_for(selection):
+    """Le pipeline FILTRÉ + ORDONNÉ pour une sélection : un nom de profil ("bug_bounty"/"pentest"/
+    "custom") OU un ensemble explicite de kinds activés (sélection par-scope). Retourne les kinds
+    ACTIVÉS dans l'ordre de `pipeline_ordered`. Les dépendances non activées sont simplement absentes
+    (filtrage, pas d'auto-ajout) : c'est « le pipeline filtré » demandé par la sélection."""
+    if isinstance(selection, str):
+        enabled = profile_set(selection)
+    else:
+        enabled = set(selection or ())
+    return [k for k in pipeline_ordered() if k in enabled]
+
+
+# --- SÉLECTION PAR-SCOPE : profil + toggles catégorie/technique (DÉRIVÉE de la table unique) --------
+# Contrat : un scope (ou la console) porte un `profile` + des toggles explicites, et l'ENSEMBLE EFFECTIF
+# de techniques activées en est RÉSOLU — sans câblage par-technique. C'est LA fonction que l'enforcement
+# (engine/planner/brain, cf. Scope.effective_technique_kinds) et l'API `GET /api/techniques` partagent.
+# La résolution ci-dessous est la SPEC PARTAGÉE (mirroir Rust côté console) : garder les deux en phase.
+PROFILE_NAMES = PROFILES + ("custom",)              # bug_bounty | pentest | custom (noms de profil)
+
+
+def recon_infra_kinds():
+    """Kinds de PHASE recon = infrastructure de DÉCOUVERTE de surface (subdomains/httpx/js_endpoints/…,
+    scanners, origin). TOUJOURS inclus dans la base du profil bug_bounty : un profil choisit les CLASSES
+    de vuln à VÉRIFIER, pas s'il faut découvrir la surface — un profil sans recon affamerait tout le
+    pipeline (recon -> chaînage -> oracles). Restent DÉSACTIVABLES explicitement (toggle -> fail-closed)."""
+    return {k for k in technique_kinds() if CATALOG[k].phase == "recon"}
+
+
+def _profile_base(profile, custom=None):
+    """Ensemble de BASE d'un profil pour la sélection PAR-SCOPE :
+      - "pentest"    -> TOUTES les techniques (le pentest peut tout balayer) ;
+      - "bug_bounty" -> les techniques bug_bounty_eligible + l'infrastructure de recon (surface) ;
+      - "custom"     -> vide (l'opérateur construit tout via les toggles explicites) ;
+      - un ensemble/liste/tuple passé DIRECTEMENT -> pris tel quel.
+    Distinct de `profile_set` (INCHANGÉ — contrat historique où bug_bounty == strictement bb-eligible) :
+    ce base AJOUTE le recon au bug_bounty pour que la sélection reste un PIPELINE FONCTIONNEL. Pur."""
+    if isinstance(profile, (set, frozenset, list, tuple)):
+        return set(profile)
+    if profile == "pentest":
+        return set(technique_kinds())
+    if profile == "bug_bounty":
+        return profile_set("bug_bounty") | recon_infra_kinds()
+    if profile == "custom":
+        return set(custom or ())
+    return profile_set(profile)                     # nom inconnu -> via default_profiles (cohérent)
+
+
+def _split_toggles(spec):
+    """Sépare une spec de toggles en (activés, désactivés). Accepte :
+      - None                -> (set(), set()) ;
+      - un ITÉRABLE de clés -> toutes ACTIVÉES (forme « ensemble d'ajouts ») ;
+      - une MAP {clé: bool}  -> True = activée, False = désactivée (forme « panneau de toggles »).
+    Pur ; ne lève jamais (une valeur non-bool d'une map est traitée par sa véracité)."""
+    enabled, disabled = set(), set()
+    if spec is None:
+        return enabled, disabled
+    if isinstance(spec, dict):
+        for k, v in spec.items():
+            (enabled if v else disabled).add(k)
+    else:
+        try:
+            for k in spec:
+                enabled.add(k)
+        except TypeError:                           # spec non itérable -> ignorée (fail-safe)
+            pass
+    return enabled, disabled
+
+
+def resolve_enabled_kinds(profile="bug_bounty", techniques_enabled=None,
+                          categories_enabled=None, custom=None):
+    """L'ENSEMBLE EFFECTIF de kinds-techniques ACTIVÉS pour un scope. Sémantique CLAIRE (SPEC PARTAGÉE) :
+      1. BASE   = le profil (bug_bounty = classes payables + recon ; pentest = tout ; custom = vide) ;
+      2. + ADD  = activations explicites (catégories entières PUIS techniques) ;
+      3. − DROP = désactivations explicites (catégories PUIS techniques) — qui PRIMENT (fail-closed) ;
+      4. ∩ technique_kinds() (seuls des kinds RÉELS survivent).
+    `techniques_enabled` / `categories_enabled` acceptent chacun soit un ITÉRABLE (tout activé), soit une
+    MAP {clé: bool} (toggle on/off) — exactement ce qu'un panneau de sélection produit. Les DÉSACTIVATIONS
+    l'emportent sur les activations (ordre-indépendant, fail-closed) : « au scope retirer une technique/
+    catégorie des tests automatiques » supprime DÉFINITIVEMENT ces kinds de l'ensemble effectif. Pur."""
+    all_kinds = set(technique_kinds())
+    base = _profile_base(profile if profile else "bug_bounty", custom=custom)
+    cat_en, cat_dis = _split_toggles(categories_enabled)
+    tech_en, tech_dis = _split_toggles(techniques_enabled)
+    bvc = by_vuln_class()
+    enabled = set(base)
+    for cat in cat_en:                              # (2) ADD catégories entières
+        enabled |= set(bvc.get(cat, ()))
+    enabled |= {k for k in tech_en if k in all_kinds}   # (2) ADD techniques
+    for cat in cat_dis:                             # (3) DROP catégories (PRIMENT)
+        enabled -= set(bvc.get(cat, ()))
+    enabled -= set(tech_dis)                        # (3) DROP techniques (PRIMENT)
+    return enabled & all_kinds                      # (4) seuls des kinds réels

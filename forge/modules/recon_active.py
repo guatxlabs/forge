@@ -250,6 +250,13 @@ DEFAULT_CONFIG_PATHS = [
     "/.env", "/config.json", "/config.js", "/app.config.js", "/settings.json",
     "/.git/config", "/credentials.json", "/secrets.json",
 ]
+# Extraction d'hôtes RÉFÉRENCÉS dans la VALEUR d'un secret (URL embarquée / host qualifié). Sert à
+# détecter qu'un secret exposé PERTIENT à un asset IN-SCOPE (ex un credential associé à une API in-scope)
+# -> le secret est directement actionnable dans l'engagement, on l'ÉLÈVE et on le RATTACHE au périmètre.
+# Le host final exige un TLD alphabétique (>=2) pour éviter les faux positifs sur des versions (10.5.8).
+_SECRET_URL_HOST_RX = re.compile(r'https?://([a-z0-9._-]+)', re.I)
+_SECRET_HOST_RX = re.compile(r'\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b', re.I)
+_SEVERITY_LADDER = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 @register("recon.secrets")
@@ -406,17 +413,51 @@ class SecretScan(PassiveSurface):
             self.dry(action))]
         for s in secrets[:self.MAX_ASSETS * 5]:
             verified = bool(s.get("verified"))
+            base = "MEDIUM" if verified else "LOW"
+            # ENRICHISSEMENT SCOPE-TIE : un secret dont la VALEUR référence un asset IN-SCOPE est
+            # directement actionnable dans l'engagement -> on l'ÉLÈVE d'un cran et on le RATTACHE au
+            # périmètre (finding tied). On n'expose QUE l'hôte in-scope (déjà connu du scope), jamais
+            # la valeur du secret (toujours redactée).
+            tied_host = self._scope_ref(action, s.get("raw"))
+            severity = self._elevate(base) if tied_host else base
             findings.append(self.finding(
                 target=target,
-                title=f"Secret exposé : {s.get('detector')}" + (" (VÉRIFIÉ)" if verified else ""),
-                severity=("MEDIUM" if verified else "LOW"),
+                title=(f"Secret exposé : {s.get('detector')}" + (" (VÉRIFIÉ)" if verified else "")
+                       + (f" [IN-SCOPE: {tied_host}]" if tied_host else "")),
+                severity=severity,
                 category=self.category, mitre=self.mitre, status="tested", tool=name,
                 fix=self._SECRETS_FIX,
                 evidence=(f"détecteur={s.get('detector')} vérifié={verified} "
                           f"fichier={s.get('file')}:{s.get('line')} valeur={self._redact(s.get('raw'))} "
-                          f"(exposition prouvée ; secret NON utilisé/exploité)")[:1800],
+                          + (f"scope_tied=True asset_in_scope={tied_host} (secret rattaché à un asset du "
+                             f"périmètre -> sévérité ÉLEVÉE {base}->{severity}) "
+                             if tied_host else "scope_tied=False ")
+                          + "(exposition prouvée ; secret NON utilisé/exploité)")[:1800],
                 poc=self.dry(action)))
         return findings
+
+    def _scope_ref(self, action, raw):
+        """Premier HÔTE IN-SCOPE référencé par la VALEUR du secret (URL/host embarqué), ou "" si aucun.
+        Sert le contrat « ÉLEVER un secret qui pertient à un asset in-scope » : on ne tient compte QUE
+        des hôtes appartenant au périmètre déclaré (jamais un service tiers hors-scope). Ne fuite JAMAIS
+        la valeur du secret — on retourne uniquement l'hôte in-scope (déjà connu du scope). Pur, ne lève
+        jamais : sans périmètre injecté (dev/test), `_host_in_scope` reste fail-closed -> pas d'élévation."""
+        s = str(raw or "")
+        cands = _SECRET_URL_HOST_RX.findall(s) + _SECRET_HOST_RX.findall(s)
+        for h in cands:
+            host = _host_only(h)
+            if host and self._host_in_scope(action, host):
+                return host
+        return ""
+
+    @staticmethod
+    def _elevate(sev):
+        """Élève une sévérité d'un cran sur l'échelle INFO<LOW<MEDIUM<HIGH<CRITICAL (plafonnée CRITICAL)."""
+        try:
+            i = _SEVERITY_LADDER.index(sev)
+        except ValueError:
+            return sev
+        return _SEVERITY_LADDER[min(i + 1, len(_SEVERITY_LADDER) - 1)]
 
     @staticmethod
     def _redact(raw):

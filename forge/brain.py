@@ -331,3 +331,40 @@ class HeuristicBrain(Brain):
             return pairs[0][0] if pairs else ""
         except Exception:            # noqa: BLE001
             return ""
+
+
+class AutoPentestBrain(HeuristicBrain):
+    """Cerveau MODE AUTO-PENTEST : balaie TOUTES les techniques ACTIVÉES à travers la surface DÉCOUVERTE
+    (recon -> chaînage -> oracles), de bout en bout, gouverné À L'IDENTIQUE d'un run normal (scope-guard,
+    plancher exploit, ledger). Il ÉTEND `HeuristicBrain` (recon + oracles heuristiques + chaînage
+    discovery/origin/endpoints) puis AJOUTE, sur CHAQUE cible que le plan heuristique touche (hôtes
+    initiaux + sous-domaines/endpoints/IP d'origine découverts), une action pour CHAQUE technique
+    ACTIVÉE encore non proposée. L'engine filtre ensuite par l'effective set du scope et gate chaque
+    action par le ROE — « il balaie simplement le pipeline effectif du scope » (aucun câblage par-technique).
+
+    `enabled_kinds` = l'ensemble EFFECTIF de kinds activés (typiquement `scope.effective_technique_kinds()`).
+    Défaut (None) = tout le pipeline. BORNÉ : les cibles balayées proviennent du plan heuristique (déjà
+    fan-out-borné) ; idempotent (id d'action stable kind:target) -> point fixe garanti sur les vagues."""
+
+    def __init__(self, enabled_kinds=None):
+        self.enabled = (set(enabled_kinds) if enabled_kinds is not None
+                        else set(techniques.technique_kinds()))
+
+    def propose(self, graph_state):
+        base = super().propose(graph_state)          # recon + oracles heuristiques + chaînage
+        order = techniques.techniques_for(self.enabled)   # kinds ACTIVÉS, ordre du pipeline
+        seen_ids = {a.id for a in base}
+        # cibles touchées par le plan heuristique (respecte son fan-out bound) — on y balaie l'ensemble.
+        targets, seen_t = [], set()
+        for a in base:
+            if a.target not in seen_t:
+                seen_t.add(a.target)
+                targets.append(a.target)
+        extra = []
+        for tgt in targets:
+            for kind in order:
+                aid = f"{kind}:{tgt}"
+                if aid not in seen_ids:              # ne double jamais une action déjà proposée
+                    seen_ids.add(aid)
+                    extra.append(_action(kind, tgt, desc=f"auto-pentest : balayage {kind}"))
+        return base + extra

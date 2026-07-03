@@ -66,6 +66,14 @@ EXPECTED_KINDS = {
     "xss.reflected", "redirect.open", "csrf.state_change",
     # oracles token/API à preuve compte-opérateur (tokenapi.py)
     "jwt.weakness", "graphql.access",
+    # LOT SCALE — nouvelles classes de vuln, chacune self-describing (une entrée technique + un module)
+    "access_control.privesc",                                     # PrivEsc vertical (access_control.py)
+    "xxe.probe",                                                  # XXE à preuve bénigne (xxe.py)
+    "rfi.probe",                                                  # RFI marqueur bénin (rfi.py)
+    "ssrf.xspa",                                                  # XSPA port-scan différentiel (ssrf.py)
+    "xss.stored",                                                 # Stored/DOM XSS via browser (clientflow.py)
+    "rce.probe",                                                  # RCE gouvernée pentest-only (rce.py)
+    "business_logic.scan",                                        # scaffold logique métier pentest-only (business_logic.py)
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {

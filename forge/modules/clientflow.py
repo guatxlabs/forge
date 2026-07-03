@@ -45,6 +45,7 @@ import urllib.parse
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from ..roe import Scope
+from .. import browser_client as bc
 from .. import techniques
 
 
@@ -450,3 +451,139 @@ class CsrfStateChange(ClientFlowOracle):
             poc=(f"# probe non destructif: {self._curl(probe, headers, 'GET')}\n"
                  f"# PREUVE = action critique + cookie de session sans SameSite=Lax/Strict + aucun jeton "
                  f"anti-CSRF ; la requête mutante cross-site n'est PAS exécutée (détection seule)"))]
+
+
+# =================================================================================================
+#  xss.stored — Stored / DOM XSS à PREUVE MINIMALE via le CHEMIN BROWSER/ÉVASION (T1059 / CWE-79)
+# =================================================================================================
+# Persiste un MARQUEUR BÉNIGN unique (marqueur + ponctuation de sonde, PAS un payload) dans un champ
+# PERSISTANT via le compte de l'OPÉRATEUR, puis RE-RENDU d'une AUTRE vue par le module navigateur pour
+# confirmer que le marqueur atterrit NON échappé dans un contexte JS-exécutable (<script>/on*=/DOM sink)
+# du DOM effectivement rendu. NÉCESSITE le module navigateur (browser-automation) : indisponible ->
+# dégradation `skipped` (offline-safe). Aucune charge weaponisée n'est jamais envoyée ; le marqueur vit
+# dans le PROPRE champ de l'opérateur (compte-opérateur, non destructif).
+@register("xss.stored")
+class XssStored(ClientFlowOracle):
+    kind = "xss.stored"
+    exploit = False              # marqueur BÉNIGN dans le champ de l'opérateur -> non-exploit
+    destructive = False          # persistance d'un marqueur bénin dans SON PROPRE champ : pas destructif
+    web_allowed = True           # interaction web (réseau) -> gardée par le ROE
+    available = True             # listé/sélectionnable ; DÉGRADE en skipped à fire-time si browser absent
+    mitre = techniques.mitre_for("xss.stored")           # source de vérité : techniques.py (T1059)
+    cwe = "CWE-79"                                        # category + cwe des findings
+    tool = "forge/modules/clientflow.py:xss.stored"
+    fix = ("Encoder/échapper la sortie selon le CONTEXTE (HTML/attribut/JS) sur TOUTE donnée persistée "
+           "puis re-rendue ; ne jamais réinjecter une valeur stockée non encodée dans un `<script>`, un "
+           "attribut `on*=` ou un DOM sink ; CSP stricte (sans 'unsafe-inline'), frameworks auto-"
+           "échappants, validation d'entrée en allowlist (CWE-79).")
+    description = ("Oracle Stored/DOM XSS à PREUVE BÉNIGNE via le module navigateur : persiste un marqueur "
+                   "unique (compte opérateur) et confirme qu'il se reflète NON échappé en contexte "
+                   "JS-exécutable sur une AUTRE vue rendue. Browser requis -> sinon skipped. CWE-79.")
+
+    # --- seams navigateur (patchables ; mêmes conventions que les seams sqlmap d'injection.py) ---
+    @staticmethod
+    def _browser_available():
+        """Seam (patchable) : le service browser-automation répond-il ? Absent -> dégradation `skipped`."""
+        return bc.health()
+
+    @staticmethod
+    def _browser_render(url, tab=bc.DEFAULT_TAB):
+        """Seam (patchable) : navigue vers `url` via le browser gouverné et renvoie (status, DOM rendu).
+        La session authentifiée SECRÈTE vit DANS le service (jamais lue/loggée/reportée ici)."""
+        bc.goto(url, tab=tab)
+        cst, body = bc.content(tab=tab)
+        if isinstance(body, dict):
+            dom = body.get("content") or body.get("html") or body.get("body") or ""
+        else:
+            dom = body if isinstance(body, str) else str(body or "")
+        return cst, dom
+
+    def _persist(self, action, store_url, param, payload):
+        """Persiste le marqueur (compte opérateur) : POST par défaut (ou params.store_method) dans un
+        champ persistant. GET -> query ; autre -> corps urlencodé. Renvoie (status, body). En-têtes
+        explicites priment ; session gouvernée scope-guardée fusionnée SOUS eux par `Oracle._http`."""
+        headers = dict(action.params.get("headers", {}))
+        method = str(action.params.get("store_method", "POST")).upper()
+        if method == "GET":
+            sep = "&" if "?" in store_url else "?"
+            url = f"{store_url}{sep}{urllib.parse.urlencode({param: payload})}"
+            st, _body, _pairs = self._fetch(url, headers=headers, method="GET")
+            return st
+        st, _body, _pairs = self._fetch(store_url, headers=headers, method=method,
+                                        data=urllib.parse.urlencode({param: payload}))
+        return st
+
+    def dry(self, action):
+        param = action.params.get("param", "?")
+        store_url = action.params.get("store_url") or action.target
+        view_url = action.params.get("view_url") or action.target
+        marker = self._marker(store_url, action.params.get("param", ""), "storedxss")
+        return (f"# persiste {param}={marker}{_XSS_PROBE} (marqueur BÉNIGN, compte opérateur) sur {store_url} ; "
+                f"puis RE-REND {view_url} via le module navigateur ; PREUVE = le marqueur revient NON "
+                f"échappé en contexte JS-exécutable (<script>/on*=/DOM sink) du DOM rendu ; browser requis "
+                f"-> sinon skipped ; sinon tested")
+
+    def fire(self, action):
+        store_url = action.params.get("store_url") or action.target
+        view_url = action.params.get("view_url") or action.target
+        # (1) SCOPE-GUARD fail-closed sur la persistance ET la vue — l'un hors périmètre -> skipped, ZÉRO I/O.
+        if not self._in_scope(action, store_url):
+            return [self._scope_refused(action)]
+        if not self._in_scope(action, view_url):
+            return [self.degraded(
+                target=view_url,
+                title="XSS stored non testé — vue hors périmètre (scope-guard fail-closed)",
+                evidence="La vue de re-rendu n'est pas in-scope ; aucune requête émise (fail-closed).",
+                poc=self.dry(action))]
+        param = action.params.get("param")
+        if not param:
+            return [self.skip(
+                target=action.target, title="XSS stored non testé — config manquante",
+                evidence=("Requiert params.param (champ persistant). Optionnel : params.store_url (défaut "
+                          "cible), params.view_url (AUTRE vue de re-rendu, défaut cible), params.store_method, "
+                          "params.headers."),
+                poc=self.dry(action))]
+        # (5) BROWSER REQUIS : le module navigateur atteste le rendu DOM. Absent -> dégradation `skipped`.
+        if not self._browser_available():
+            return [self.degraded(
+                target=view_url,
+                title="XSS stored non testé — module navigateur indisponible (dégradation gracieuse)",
+                evidence=("Cet oracle EXIGE le module navigateur (browser-automation) pour rendre la vue et "
+                          "attester le contexte JS-exécutable ; service injoignable -> skipped (offline-safe). "
+                          "Lancer toolkit/browser-automation (port 8080) pour activer."),
+                poc=self.dry(action))]
+        marker = self._marker(store_url, param, "storedxss")
+        payload = marker + _XSS_PROBE
+        # 1) PERSISTER le marqueur bénin (compte opérateur, son propre champ) — non destructif.
+        pst = self._persist(action, store_url, param, payload)
+        if pst is None:
+            return [self.degraded(
+                target=store_url, title="XSS stored non testé — persistance indisponible (dégradation gracieuse)",
+                evidence="Aucune réponse du serveur à la persistance du marqueur (transport indisponible) ; offline-safe.",
+                poc=self.dry(action))]
+        # 2) RE-RENDRE une AUTRE vue via le module navigateur et lire le DOM effectif.
+        rst, dom = self._browser_render(view_url, tab=action.params.get("tab", bc.DEFAULT_TAB))
+        if rst is None or not dom:
+            return [self.degraded(
+                target=view_url, title="XSS stored non testé — rendu navigateur indisponible (dégradation gracieuse)",
+                evidence="Le module navigateur n'a pas renvoyé de DOM pour la vue de re-rendu ; offline-safe.",
+                poc=self.dry(action))]
+        reflected = marker in dom
+        unescaped = _reflected_unescaped(dom, marker)
+        context = _executable_context(dom, marker) if reflected else ""
+        proven = reflected and unescaped and bool(context)
+        return [self.proof(
+            target=view_url, proven=proven,
+            title=(f"XSS stored CONFIRMÉ — marqueur BÉNIGN persistant réfléchi NON échappé en contexte "
+                   f"JS-exécutable ({context}) sur une autre vue rendue" if proven
+                   else "XSS stored non confirmé — pas de reflet exécutable non échappé dans le DOM rendu"),
+            severity=("HIGH" if proven else "INFO"),
+            evidence=(f"persistance HTTP {pst} (champ opérateur) ; vue re-rendue={view_url} (DOM navigateur) ; "
+                      f"marqueur={marker} réfléchi={reflected} non_échappé={unescaped} contexte_exécutable="
+                      f"{context or 'aucun'} ; module NAVIGATEUR utilisé pour le rendu DOM ; aucune charge "
+                      f"weaponisée envoyée (marqueur bénin, compte opérateur) ; session navigateur SECRÈTE "
+                      f"non journalisée"),
+            poc=(f"# 1) persister (compte opérateur) : {param}={marker}{_XSS_PROBE} sur {store_url}\n"
+                 f"# 2) rendre {view_url} via le module navigateur (browser-automation) et lire le DOM\n"
+                 f"# PREUVE = le marqueur bénin revient NON échappé en contexte JS-exécutable "
+                 f"(<script>/on*=/DOM sink) ; charge weaponisée JAMAIS envoyée"))]
