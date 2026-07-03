@@ -14,6 +14,8 @@ import os
 import secrets
 from pathlib import Path
 
+from . import portability
+
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     _HAVE_ED = True
@@ -88,10 +90,7 @@ def _load_or_make_secret(path) -> bytes:
     key = secrets.token_bytes(32)
     kp.parent.mkdir(parents=True, exist_ok=True)
     kp.write_bytes(key)
-    try:
-        os.chmod(kp, 0o600)
-    except OSError:
-        pass
+    portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
     return key
 
 
@@ -106,10 +105,7 @@ def make_signer(base_path, prefer_ed25519=True) -> Signer:
             priv = Ed25519PrivateKey.generate()
             kp.parent.mkdir(parents=True, exist_ok=True)
             kp.write_bytes(priv.private_bytes_raw())
-            try:
-                os.chmod(kp, 0o600)
-            except OSError:
-                pass
+            portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
         return Ed25519Signer(priv)
     return HmacSigner(_load_or_make_secret(base + ".key"))
 
@@ -125,10 +121,7 @@ def generate_ed25519_keypair(base_path) -> "Ed25519Signer":
     priv = Ed25519PrivateKey.generate()
     kp.parent.mkdir(parents=True, exist_ok=True)
     kp.write_bytes(priv.private_bytes_raw())
-    try:
-        os.chmod(kp, 0o600)
-    except OSError:
-        pass
+    portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
     return Ed25519Signer(priv)
 
 

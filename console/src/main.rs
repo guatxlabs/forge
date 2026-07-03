@@ -5510,6 +5510,8 @@ fn spawn_setsid(cmd: &mut tokio::process::Command) {
 }
 
 /// Tue le groupe de process (SIGTERM puis on laisse le watchdog/await récupérer le code).
+/// UNIX : `killpg` via `libc::kill(-pgid, SIGTERM)` — coupe tout le sous-arbre détaché par setsid.
+#[cfg(unix)]
 fn kill_group(pgid: i32) {
     if pgid > 1 {
         unsafe {
@@ -5517,6 +5519,16 @@ fn kill_group(pgid: i32) {
             libc::kill(-pgid, libc::SIGTERM);
         }
     }
+}
+
+/// Repli non-Unix (Windows/…) : les groupes de process POSIX (setsid/killpg) n'existent pas, donc
+/// il n'y a PAS de killpg du sous-arbre. Best-effort/no-op : le process enfant spawné reste
+/// néanmoins terminé via `kill_on_drop(true)` quand son handle Tokio est libéré, et le run est
+/// marqué terminal en base par le superviseur/reconciler. La sémantique « couper tout le
+/// sous-arbre détaché » n'est pas disponible hors Unix (documenté).
+#[cfg(not(unix))]
+fn kill_group(pgid: i32) {
+    let _ = pgid;
 }
 
 /// Réconcilie les run_job 'running' au boot : un process spawné qui n'a pas survécu au reboot de la
@@ -8710,8 +8722,10 @@ fn backup_inspect(archive: &[u8], passphrase: &str) -> Result<Value, String> {
     let mut ledger_ok = true;
     let mut ledger_entries = 0i64;
     if let Some(l) = get(BACKUP_ENTRY_LEDGER) {
-        let tmpv = format!("{}/forge-inspect-{}.jsonl",
-            std::env::temp_dir().to_string_lossy(), tmp_nonce());
+        let tmpv = std::env::temp_dir()
+            .join(format!("forge-inspect-{}.jsonl", tmp_nonce()))
+            .to_string_lossy()
+            .into_owned();
         std::fs::write(&tmpv, l).map_err(|e| format!("écriture temp de vérif ledger échouée: {e}"))?;
         let v = verify_ledger_chain(&tmpv);
         ledger_entries = read_ledger_lines(&tmpv).len() as i64;
@@ -8760,7 +8774,10 @@ async fn api_backup(State(app): State<App>, headers: HeaderMap, Json(body): Json
         ).into_response();
     }
     // archive écrite dans un temporaire (0600) puis relue et supprimée ; jamais persistée côté serveur.
-    let out = format!("{}/{}.tmp-{}", std::env::temp_dir().to_string_lossy(), backup_archive_name(), tmp_nonce());
+    let out = std::env::temp_dir()
+        .join(format!("{}.tmp-{}", backup_archive_name(), tmp_nonce()))
+        .to_string_lossy()
+        .into_owned();
     let opts = BackupOpts {
         out: out.clone(),
         passphrase: passphrase.to_string(),
@@ -8884,7 +8901,10 @@ async fn api_restore(State(app): State<App>, headers: HeaderMap, Json(body): Jso
     }
     // écrit l'archive dans un temporaire (run_restore lit un chemin), puis restaure vers la base/ledger LIVE.
     // `force=true` : la confirmation explicite vaut autorisation d'écraser l'install existant (non vide).
-    let tmp = format!("{}/forge-restore-{}.forge", std::env::temp_dir().to_string_lossy(), tmp_nonce());
+    let tmp = std::env::temp_dir()
+        .join(format!("forge-restore-{}.forge", tmp_nonce()))
+        .to_string_lossy()
+        .into_owned();
     if let Err(e) = std::fs::write(&tmp, &archive) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "restore_stage_failed", "why": e.to_string()}))).into_response();
     }

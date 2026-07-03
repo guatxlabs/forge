@@ -47,13 +47,17 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120)
     refuse plus un outil pourtant exécutable localement sous prétexte qu'il est dockerisé."""
     args = list(args or [])
     docker_ok = docker_image and shutil.which("docker")
-    local_ok = bool(shutil.which(binary))
+    # Résolution PATH via shutil.which : gère les suffixes .exe/.bat/.cmd (PATHEXT) sous Windows,
+    # là où passer le nom nu à CreateProcess ne trouverait pas un wrapper .bat/.cmd. Sous Linux le
+    # chemin résolu pointe le même binaire — comportement inchangé.
+    local_path = shutil.which(binary)
+    local_ok = bool(local_path)
     cmd = None
     order = (("docker", docker_ok), ("local", local_ok)) if prefer_docker \
         else (("local", local_ok), ("docker", docker_ok))
     for which, ok in order:
         if ok and which == "local":
-            cmd = [binary, *args]
+            cmd = [local_path, *args]              # argv = binaire RÉSOLU (pas le nom nu) — portable
             break
         if ok and which == "docker":
             cmd = ["docker", "run", "--rm", "--network", "host", docker_image, *args]
