@@ -50,6 +50,8 @@ const ICONS = {
   chevright: '<path d="M9 6l6 6-6 6"/>',
   grip: '<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>',
   lock: '<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.4 2.4 0 0 1 4.4 1.3c0 1.6-2 1.9-2.4 3.3"/><path d="M12 17.2h.01"/>',
+  book: '<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 1 2-2h13"/>',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 
@@ -199,6 +201,8 @@ function modal(opts = {}) {
       else if (f.type === 'checkbox') html += `<input type="checkbox" data-n="${esc(f.name)}"${f.value ? ' checked' : ''}>`;
       else if (f.type === 'textarea') html += `<textarea data-n="${esc(f.name)}" rows="2" spellcheck="false" placeholder="${esc(f.placeholder || '')}">${esc(f.value == null ? '' : f.value)}</textarea>`;
       else html += `<input type="${esc(f.type || 'text')}" data-n="${esc(f.name)}" value="${esc(f.value == null ? '' : f.value)}" placeholder="${esc(f.placeholder || '')}"${f.required ? ' required' : ''}>`;
+      // indice explicatif optionnel sous le champ (accessible : décrit le champ, pas juste un label).
+      if (f.hint) html += `<small class="modal-fhint">${esc(f.hint)}</small>`;
       html += `</label>`;
     });
     html += `<div class="modal-err" hidden></div>`;
@@ -239,6 +243,206 @@ function infoModal(title, buildBody) {
   ov.onclick = e => { if (e.target === ov) close(); };
   ov.appendChild(box); document.body.appendChild(ov);
 }
+
+// =====================================================================================
+//  AIDE IN-APP — centre d'aide natif (aucun alert/confirm/prompt navigateur).
+//  Un bouton « ? » persistant dans l'en-tête ouvre une modale accessible (role=dialog, aria-modal,
+//  focus-trap, Escape/clic-dehors, restauration du focus) qui explique la vue COURANTE (déduite du
+//  hash) et donne accès à toutes les rubriques, dont « Comment Forge fonctionne » (modèle de sûreté).
+//  Le contenu est STATIQUE et rendu en DOM sûr (textContent) ; les liens sont des ancres in-app (#vue).
+// =====================================================================================
+// Rubriques ordonnées. blocks = [type, payload] : 'p' paragraphe, 'h' sous-titre, 'ul' liste, 'steps' étapes.
+const HELP_TOPICS = [
+  { key: 'governance', title: 'Comment Forge fonctionne — sûreté & gouvernance', icon: 'shield', doc: 'docs/SECURITY_MODEL.md', pinned: true, blocks: [
+    ['p', "Forge est un produit d'évaluation red-team autorisé et gouverné : chaque action passe par des garde-fous conçus pour échouer du côté sûr (fail-closed). Voici le modèle de sûreté qu'un opérateur doit comprendre AVANT de lancer quoi que ce soit."],
+    ['h', 'Scope-guard fail-closed'],
+    ['p', "Le périmètre autorisé (scope serveur) fait autorité. Toute cible hors-scope est vétoée côté serveur (VETO dur) et ne peut JAMAIS être élargie depuis le web. En cas de doute, on refuse plutôt que d'autoriser."],
+    ['h', 'Défaut non-exploit / non-destructif'],
+    ['p', "Un lancement est non-exploit et non-destructif par défaut. Les modules exploit/destructif restent grisés tant que l'opt-in gouverné « fort impact » n'est pas activé — il exige d'armer, une raison d'audit ET le secret opérateur, plus une double-confirmation explicite."],
+    ['h', 'Proof-oracles'],
+    ['p', "Un résultat n'est retenu que s'il est étayé par une preuve vérifiable (oracle), pas par une supposition. On ne fabrique jamais de résultat : une mesure impossible (source injoignable) est déclarée impossible, jamais transformée en « détecté »."],
+    ['h', 'Ledger tamper-evident'],
+    ['p', "Chaque décision et chaque lancement sont journalisés dans un ledger append-only chaîné par SHA-256 et signé. Toute altération casse la chaîne et devient visible. La console recalcule l'intégrité hash ; la signature cryptographique se vérifie en CLI."],
+  ] },
+  { key: 'overview', title: "Vue d'ensemble", icon: 'home', doc: 'docs/OVERVIEW.md', view: 'overview', blocks: [
+    ['p', "Tableau de bord d'entrée : l'état de la boucle purple, la répartition des findings par sévérité et les capacités disponibles. C'est le point de départ pour situer l'engagement en cours."],
+    ['p', "Le sélecteur de campagne (en-tête) filtre toutes les vues sur une campagne précise. Le badge « posture » résume l'état de la boucle."],
+  ] },
+  { key: 'launch', title: 'Lancement C2 (campagne)', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
+    ['p', "Compose et lance une campagne C2-light gouvernée. Non-exploit / non-destructif par défaut ; tout est borné au scope serveur et journalisé au ledger (console.run.start)."],
+    ['steps', [
+      "Vérifiez une cible (lecture pure) : la décision in-scope / hors-scope s'affiche sans rien lancer.",
+      "Renseignez la campagne, le mode (propose = simulation ; auto = exécute les actions FIRE) et les cibles (⊆ scope serveur, une par ligne).",
+      "Choisissez des modules (vide = le planner décide). Les modules exploit/destructif restent grisés hors opt-in fort impact.",
+      "Facultatif : « Dry-plan » affiche un aperçu INERTE des verdicts garde-fou (FIRE / DRY_RUN / VETO / SKIP) sans rien exécuter ni persister.",
+      "Pour lancer : fournissez le secret opérateur. Pour le fort impact, activez la zone danger (armer + raison + secret) puis double-confirmez.",
+    ]],
+    ['p', "Le run en cours diffuse ses logs en direct ; la liste des runs conserve l'historique et permet d'annuler un run actif."],
+  ] },
+  { key: 'modules', title: 'Capacités & Modules', icon: 'flask', doc: 'docs/MODULES.md', view: 'modules', blocks: [
+    ['p', "Catalogue des capacités du moteur. Le badge « web » marque un module lançable en cadre web ; « exploit » / « destructif » portent un risque accru et sont gatés par les ROE au lancement."],
+    ['p', "La disponibilité EFFECTIVE d'un module dépend de la sonde host ET de la gouvernance des connecteurs (Administration). Un connecteur désactivé est SKIP au tir, même si son binaire est présent."],
+  ] },
+  { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
+    ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
+    ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée » ou « ratée » côté défense."],
+  ] },
+  { key: 'explore', title: 'Recherche & Explore (soql)', icon: 'search', doc: 'docs/CONCEPTS.md', view: 'explore', blocks: [
+    ['p', "Requêteur soql (langage de recherche en pipeline) sur les données de l'engagement, ex : search severity=HIGH | stats count by mitre | sort -count | head 20."],
+    ['p', "Choisissez une visualisation (table / barres / courbe / stat). Cliquez une valeur pour un drilldown ; « Panneau » enregistre la requête comme panneau réutilisable dans un dashboard."],
+  ] },
+  { key: 'coverage', title: 'Couverture ATT&CK', icon: 'activity', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'coverage', blocks: [
+    ['p', "Couverture ATT&CK côté offensif : par technique MITRE, combien de runs l'ont tentée et combien ont « tiré » (déclenché un résultat)."],
+    ['p', "Une technique tentée mais à 0 tiré est couverte sans résultat côté cible. Pour l'axe défensif (détecté vs raté), voir « Détection purple »."],
+  ] },
+  { key: 'purple-coverage', title: 'Détection purple', icon: 'layout', doc: 'docs/DETECTION.md', view: 'purple-coverage', blocks: [
+    ['p', "Mesure DÉFENSIVE et OPTIONNELLE : pour chaque technique tirée en red-team, a-t-elle été détectée par votre source BLUE (SOC/IDS/pare-feu) ? Vert = détecté, rouge = trou de détection. Le MTTD mesure le délai tir → alerte."],
+    ['p', "Aucune source n'est requise : sans source, Forge tourne en AUTONOME (standalone) et l'état est neutre — ce n'est pas une panne. Si une source est configurée mais injoignable, la mesure est déclarée impossible ; aucun « détecté » n'est inventé."],
+    ['h', 'Connecter une source de détection'],
+    ['steps', [
+      "Ouvrez Administration → Source de détection.",
+      "Choisissez le type (Plume, CrowdSec, Elastic/OpenSearch, FortiGate/pfSense, fichier, commande…), l'endpoint, l'authentification et le mapping MITRE.",
+      "Testez la joignabilité, puis enregistrez. La boucle purple s'active dès que la source répond.",
+    ]],
+  ] },
+  { key: 'campaigns', title: 'Campagnes', icon: 'server', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'campaigns', blocks: [
+    ['p', "Regroupe l'activité par campagne (une opération d'évaluation nommée). Sélectionnez-en une pour filtrer transversalement findings, couverture, ROE et ledger."],
+  ] },
+  { key: 'roe', title: 'ROE / Garde-fou', icon: 'shield', doc: 'docs/SECURITY_MODEL.md', view: 'roe', blocks: [
+    ['p', "Journal des décisions du garde-fou (Rules of Engagement). Chaque action proposée par le moteur reçoit un verdict : FIRE (exécutée), DRY_RUN (simulée) ou VETO (bloquée), avec sa raison."],
+    ['p', "C'est la transparence anti-masquage : on voit pourquoi une action a été autorisée, simulée ou refusée — jamais de refus silencieux."],
+  ] },
+  { key: 'ledger', title: "Ledger d'engagement", icon: 'lock', doc: 'docs/SECURITY_MODEL.md', view: 'ledger', blocks: [
+    ['p', "Journal d'engagement append-only chaîné par SHA-256 : preuve d'intégrité de toutes les actions et décisions. La console recalcule la chaîne de hash (intégrité hash-only)."],
+    ['p', "La signature cryptographique se vérifie hors-console : forge ledger verify --pubkey <clé>."],
+  ] },
+  { key: 'dashboards', title: 'Dashboards / Vues', icon: 'layout', doc: 'docs/CONCEPTS.md', view: 'dashboards', blocks: [
+    ['p', "Compose des dashboards de panneaux soql (glisser pour réordonner, coin pour redimensionner). Une « vue » est une collection de dashboards — un simple filtre d'affichage local."],
+  ] },
+  { key: 'admin', title: 'Administration', icon: 'user', doc: 'docs/ADMINISTRATION.md', view: 'admin', blocks: [
+    ['p', "Réservé au rôle admin. Toutes les mutations sont attribuées à votre compte et ledgerisées."],
+    ['h', 'Comptes'],
+    ['p', "viewer (lecture seule) · operator (arme le C2) · admin (administre). Désactivation, rétrogradation et réinitialisation de mot de passe révoquent immédiatement les sessions du compte. Le dernier admin activé est protégé (anti-verrouillage)."],
+    ['h', 'Connecteurs'],
+    ['p', "Interrupteur opérateur par module. Désactiver — ou forcer « indisponible » — un connecteur le rend SKIP au tir, y compris pour les modules choisis par le planner. Disponibilité effective = activé ET (override ?? sonde host)."],
+    ['h', 'Source de détection'],
+    ['p', "Câble une source BLUE (SIEM/IDS/pare-feu) sans code, corrélée par identité MITRE. Le secret est write-only. Une source absente/injoignable ⇒ mesure déclarée impossible."],
+    ['h', 'Sauvegarde & restauration'],
+    ['p', "Archive TOUJOURS chiffrée (argon2id + XChaCha20-Poly1305) embarquant base + ledger + clé de signature. La passphrase est obligatoire et jamais persistée. La restauration valide par défaut ; le swap en place exige une confirmation + un redémarrage."],
+  ] },
+];
+const HELP_BY_KEY = Object.fromEntries(HELP_TOPICS.map(t => [t.key, t]));
+// hash de la vue courante -> clé de rubrique (identité ; repli overview).
+function currentHelpKey() { const v = (location.hash.slice(1) || 'overview'); return HELP_BY_KEY[v] ? v : 'overview'; }
+function helpBlockEl(block) {
+  const [type, payload] = block;
+  if (type === 'h') { const e = document.createElement('h4'); e.className = 'help-h'; e.textContent = payload; return e; }
+  if (type === 'ul') { const ul = document.createElement('ul'); ul.className = 'help-ul'; (payload || []).forEach(t => { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); }); return ul; }
+  if (type === 'steps') { const ol = document.createElement('ol'); ol.className = 'help-steps'; (payload || []).forEach(t => { const li = document.createElement('li'); li.textContent = t; ol.appendChild(li); }); return ol; }
+  const p = document.createElement('p'); p.className = 'help-p'; p.textContent = String(payload == null ? '' : payload); return p;
+}
+let _helpOpen = false;
+function openHelp(startKey) {
+  if (_helpOpen) return;              // une seule modale d'aide à la fois
+  _helpOpen = true;
+  const opener = document.activeElement; // pour restaurer le focus à la fermeture
+  const titleId = 'help-title';
+  const ov = document.createElement('div'); ov.className = 'modal-ov';
+  const box = document.createElement('div');
+  box.className = 'modal wide help-modal';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.setAttribute('aria-labelledby', titleId);
+
+  // en-tête : titre générique + bouton fermer
+  const head = document.createElement('div'); head.className = 'help-head';
+  const h = document.createElement('h3'); h.id = titleId; h.textContent = 'Aide — Forge';
+  const xb = document.createElement('button'); xb.type = 'button'; xb.className = 'k-theme help-x'; xb.setAttribute('aria-label', 'Fermer l\'aide'); xb.innerHTML = ic('x');
+  head.append(h, xb);
+
+  // corps : table des matières (nav) + panneau de contenu
+  const body = document.createElement('div'); body.className = 'help-body';
+  const toc = document.createElement('nav'); toc.className = 'help-toc'; toc.setAttribute('aria-label', 'Rubriques d\'aide');
+  const content = document.createElement('div'); content.className = 'help-content'; content.tabIndex = -1;
+  body.append(toc, content);
+
+  // boutons de TOC (governance épinglée en tête, séparée par un filet)
+  const tocBtns = {};
+  let pinnedDone = false;
+  HELP_TOPICS.forEach(t => {
+    if (!t.pinned && !pinnedDone) { const sep = document.createElement('div'); sep.className = 'help-toc-sep'; toc.appendChild(sep); pinnedDone = true; }
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'help-toc-btn' + (t.pinned ? ' pinned' : '');
+    b.innerHTML = ic(t.icon || 'book'); const sp = document.createElement('span'); sp.textContent = t.title; b.appendChild(sp);
+    b.addEventListener('click', () => select(t.key, true));
+    toc.appendChild(b); tocBtns[t.key] = b;
+  });
+
+  function renderContent(key) {
+    const t = HELP_BY_KEY[key] || HELP_TOPICS[0];
+    content.replaceChildren();
+    const th = document.createElement('h4'); th.className = 'help-title'; th.textContent = t.title; content.appendChild(th);
+    (t.blocks || []).forEach(bl => content.appendChild(helpBlockEl(bl)));
+    // pied : lien vers la vue in-app (ferme la modale) + référence documentaire
+    const meta = document.createElement('div'); meta.className = 'help-meta';
+    if (t.view) {
+      const a = document.createElement('a'); a.href = '#' + t.view; a.className = 'help-gotolink'; a.innerHTML = ic('ext'); const gs = document.createElement('span'); gs.textContent = 'Aller à la vue'; a.appendChild(gs);
+      a.addEventListener('click', () => { close(); });
+      meta.appendChild(a);
+    }
+    if (t.doc) {
+      const d = document.createElement('span'); d.className = 'help-doc'; d.title = 'Fichier de documentation dans le dépôt';
+      d.innerHTML = ic('book'); const dl = document.createElement('span'); dl.className = 'help-doc-l'; dl.textContent = 'Documentation : '; const dc = document.createElement('code'); dc.textContent = t.doc;
+      d.append(dl, dc); meta.appendChild(d);
+    }
+    content.appendChild(meta);
+    content.scrollTop = 0;
+  }
+  function select(key, focusContent) {
+    Object.entries(tocBtns).forEach(([k, b]) => { const on = k === key; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    renderContent(key);
+    if (focusContent) { try { content.focus(); } catch (e) {} }
+  }
+
+  box.append(head, body);
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+
+  // --- accessibilité : focus-trap (Tab cycle), Escape/clic-dehors, restauration du focus ---
+  const focusable = () => [...box.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el => el.offsetParent !== null || el === document.activeElement);
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Tab') {
+      const f = focusable(); if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  function close() {
+    if (!_helpOpen) return;
+    _helpOpen = false;
+    document.removeEventListener('keydown', onKey, true);
+    ov.classList.add('out'); setTimeout(() => ov.remove(), 160);
+    try { if (opener && typeof opener.focus === 'function') opener.focus(); } catch (e) {}
+  }
+  xb.addEventListener('click', close);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', onKey, true);
+
+  select(HELP_BY_KEY[startKey] ? startKey : currentHelpKey(), false);
+  // focus initial : le bouton de rubrique actif (dans le trap, annonçable au lecteur d'écran)
+  setTimeout(() => { const active = tocBtns[HELP_BY_KEY[startKey] ? startKey : currentHelpKey()]; try { (active || xb).focus(); } catch (e) {} }, 30);
+}
+// bouton « ? » de l'en-tête : ouvre l'aide de la vue courante.
+if ($('#help')) $('#help').addEventListener('click', () => openHelp(currentHelpKey()));
+// raccourci clavier « ? » (Shift+/) — ignoré si l'utilisateur tape dans un champ.
+document.addEventListener('keydown', e => {
+  if (e.key !== '?' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target, tag = t && t.tagName;
+  if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return;
+  if (document.body.classList.contains('gated')) return; // pas d'aide shell derrière le portail de login
+  e.preventDefault(); openHelp(currentHelpKey());
+});
 
 // =====================================================================================
 //  zoom temporel + infobulle de graphe (porté de Plume)
@@ -1330,15 +1534,24 @@ async function loadPurpleCoverage() {
     if (plumeBadge) { plumeBadge.className = 'badge mut'; plumeBadge.textContent = '—'; }
     return;
   }
-  // badge cible Plume
+  // Une source de détection est-elle CONFIGURÉE ? Sinon Forge tourne en AUTONOME (standalone) : ce
+  // n'est PAS une panne. Priorité au champ serveur `source_configured` ; repli (payload ancien) sur
+  // la présence d'un endpoint. `reachable` accepte les deux noms (source_/plume_ rétro-compat).
+  const srcUrl = String(p.source_url || p.plume_url || '');
+  const configured = (p.source_configured === true)
+    || (p.source_configured === undefined && !!srcUrl);
+  const reachable = (p.source_reachable === true) || (p.plume_reachable === true);
+
+  // badge source de détection : autonome (neutre) / joignable / injoignable.
   if (plumeBadge) {
-    const url = String(p.plume_url || '');
-    if (!url) { plumeBadge.className = 'badge mut'; plumeBadge.textContent = 'Plume non configuré'; plumeBadge.title = 'PLUME_URL vide — corrélation de détection désactivée'; }
-    else {
-      const ok = p.plume_reachable === true;
-      plumeBadge.className = 'badge ' + (ok ? 'ok' : 'destr');
-      plumeBadge.innerHTML = `${ic(ok ? 'check' : 'warn')} Plume ${ok ? 'joignable' : 'injoignable'}`;
-      plumeBadge.title = url;
+    if (!configured) {
+      plumeBadge.className = 'badge mut';
+      plumeBadge.textContent = 'Autonome (standalone)';
+      plumeBadge.title = 'Aucune source de détection configurée — Forge fonctionne en autonome. Connectez une source (Plume/CrowdSec/FortiGate/Elastic/fichier…) dans Administration pour activer la boucle purple.';
+    } else {
+      plumeBadge.className = 'badge ' + (reachable ? 'ok' : 'destr');
+      plumeBadge.innerHTML = `${ic(reachable ? 'check' : 'warn')} Source ${reachable ? 'joignable' : 'injoignable'}`;
+      plumeBadge.title = srcUrl || (p.source_kind ? ('kind=' + p.source_kind) : 'source de détection');
     }
   }
   host.replaceChildren();
@@ -1348,22 +1561,42 @@ async function loadPurpleCoverage() {
   const detected = Array.isArray(p.detected) ? p.detected : [];
   const missed = Array.isArray(p.missed) ? p.missed : [];
 
-  // FAIL-OPEN LISIBLE : Plume injoignable -> mesure impossible. On n'affiche AUCUN « détecté »
-  // ni taux : ce ne sont pas des 0 réels, c'est de l'absence de mesure. On reste honnête.
-  if (p.plume_reachable !== true) {
+  // AUTONOME (standalone) : aucune source de détection configurée. État NEUTRE et ATTENDU — Forge ne
+  // dépend d'aucune source. On rend un « connectez une source » clair, PAS une erreur : l'UI ne paraît
+  // jamais cassée. Plume n'est qu'un préréglage parmi d'autres.
+  if (!configured) {
+    const so = document.createElement('div'); so.className = 'pc-standalone';
+    const head = document.createElement('div'); head.className = 'pc-so-head';
+    head.innerHTML = `${ic('plug')} <span>Aucune source de détection configurée — Forge fonctionne en autonome</span><span class="pc-dtag">standalone</span>`;
+    const det = document.createElement('div'); det.className = 'pc-so-detail';
+    det.innerHTML = `Forge ne dépend d'aucune source de détection. Connectez-en une (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier…) dans <a href="#admin-detection">Administration &rarr; Source de détection</a> pour activer la boucle purple (détecté / raté / MTTD). ${fired} technique(s) distincte(s) déjà tirée(s) côté Forge en attendant.`;
+    // actions d'aide : ouvrir directement la source de détection + expliquer la boucle purple (aide in-app).
+    const acts = document.createElement('div'); acts.className = 'pc-so-acts';
+    const goBtn = document.createElement('a'); goBtn.href = '#admin-detection'; goBtn.className = 'k-theme'; goBtn.innerHTML = `${ic('plug')}<span>Connecter une source</span>`;
+    const helpBtn = document.createElement('button'); helpBtn.type = 'button'; helpBtn.className = 'k-theme'; helpBtn.innerHTML = `${ic('help')}<span>Comment ça marche&nbsp;?</span>`;
+    helpBtn.addEventListener('click', () => openHelp('purple-coverage'));
+    acts.append(goBtn, helpBtn);
+    so.append(head, det, acts);
+    host.appendChild(so);
+    return;
+  }
+
+  // FAIL-OPEN LISIBLE : source configurée mais INJOIGNABLE -> mesure impossible (anomalie). On n'affiche
+  // AUCUN « détecté » ni taux : ce ne sont pas des 0 réels, c'est de l'absence de mesure. On reste honnête.
+  if (!reachable) {
     const fo = document.createElement('div'); fo.className = 'pc-failopen';
     const head = document.createElement('div'); head.className = 'pc-fo-head';
-    head.innerHTML = `${ic('warn')} <span>Mesure de détection impossible — Plume injoignable (fail-open lisible)</span><span class="pc-dtag">non mesuré</span>`;
+    head.innerHTML = `${ic('warn')} <span>Mesure de détection impossible — source injoignable (fail-open lisible)</span><span class="pc-dtag">non mesuré</span>`;
     const det = document.createElement('div'); det.className = 'pc-fo-detail';
-    const reason = (typeof p.error === 'string' && p.error) ? p.error : 'cible Plume injoignable';
-    const urlTxt = p.plume_url ? `cible : ${p.plume_url}` : 'PLUME_URL non configuré';
+    const reason = (typeof p.error === 'string' && p.error) ? p.error : 'source de détection injoignable';
+    const urlTxt = srcUrl ? `cible : ${srcUrl}` : 'endpoint non renseigné';
     det.textContent = `${reason} — ${urlTxt}. Aucun « détecté » n'est inventé : detected/missed vides, taux et MTTD non mesurés. ${fired} technique(s) distincte(s) tirée(s) côté Forge (information offensive conservée).`;
     fo.append(head, det);
     host.appendChild(fo);
     return;
   }
 
-  // ---- Plume joignable : mesure exploitable -------------------------------------------------
+  // ---- source de détection joignable : mesure exploitable -----------------------------------
   const nDet = detected.length, nMiss = missed.length, total = nDet + nMiss;
   const rate = (typeof p.detection_rate === 'number' && isFinite(p.detection_rate)) ? p.detection_rate : (total ? nDet / total : 0);
   const ratePct = Math.round(Math.max(0, Math.min(1, rate)) * 100);
@@ -2568,9 +2801,9 @@ async function adminCreateUser() {
     title: 'Nouveau compte',
     okText: 'Creer',
     fields: [
-      { name: 'login', label: 'Login', required: true, placeholder: '[A-Za-z0-9._-]' },
-      { name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: 'viewer' },
-      { name: 'password', label: 'Mot de passe', type: 'password', required: true, placeholder: 'mot de passe du compte' },
+      { name: 'login', label: 'Login', required: true, placeholder: '[A-Za-z0-9._-]', hint: 'Identifiant de connexion : lettres, chiffres, . _ - (1 à 64 car., sans tiret initial).' },
+      { name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: 'viewer', hint: 'viewer = lecture seule (aucun tir) · operator = arme et lance le C2 (opt-in fort impact possible) · admin = administre comptes, connecteurs, source de détection et sauvegardes. Attribuez le minimum requis.' },
+      { name: 'password', label: 'Mot de passe', type: 'password', required: true, placeholder: 'mot de passe du compte', hint: 'Haché en argon2id côté serveur (jamais stocké en clair). Choisissez une phrase de passe forte ; le compte pourra la changer.' },
     ],
     validate: v => loginError(v.login) || (!String(v.password || '') ? 'Mot de passe requis.' : null),
   });
@@ -2585,7 +2818,7 @@ async function adminEditRole(u) {
   const r = await modal({
     title: 'Changer le role — ' + u.login,
     okText: 'Appliquer',
-    fields: [{ name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: u.role }],
+    fields: [{ name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: u.role, hint: 'viewer = lecture seule · operator = arme/lance le C2 · admin = administration complète. Rétrograder révoque immédiatement les sessions du compte.' }],
   });
   if (!r || r.role === u.role) return;
   try {
@@ -2711,8 +2944,8 @@ if ($('#admin-conn-reload')) $('#admin-conn-reload').addEventListener('click', l
 // =====================================================================================
 // Liste FERMÉE des kinds (parité avec DETECTION_KINDS côté console + le registre collecteur Python).
 const DETECTION_KINDS = [
-  { value: 'none', label: 'Aucune — mesure désactivée' },
-  { value: 'plume', label: 'Plume (SOC) — préréglage' },
+  { value: 'none', label: 'Aucune (standalone) — Forge en autonome' },
+  { value: 'plume', label: 'Plume (SOC) — préréglage optionnel' },
   { value: 'generic_http', label: 'HTTP générique (JSON)' },
   { value: 'crowdsec', label: 'CrowdSec (LAPI)' },
   { value: 'elastic', label: 'Elastic (_search)' },
@@ -2738,10 +2971,12 @@ function detEl(tag, cls, attrs) {
   if (attrs) for (const k in attrs) { if (k === 'text') e.textContent = attrs[k]; else e[k] = attrs[k]; }
   return e;
 }
-function detField(labelText, control) {
+function detField(labelText, control, hint) {
   const l = detEl('label', 'login-f');
   l.appendChild(detEl('span', null, { text: labelText }));
   l.appendChild(control);
+  // indice explicatif optionnel : reste dans le label -> se masque/affiche avec lui (refreshVisibility).
+  if (hint) l.appendChild(detEl('small', 'det-fhint', { text: hint }));
   return l;
 }
 // Factory : monte le jeu de champs dans `host` et renvoie un contrôleur { setConfig, getConfig, clearSecret, el }.
@@ -2752,11 +2987,13 @@ function detectionSourceForm(host) {
 
   const kindSel = detEl('select', 'det-kind');
   DETECTION_KINDS.forEach(k => kindSel.appendChild(detEl('option', null, { value: k.value, text: k.label })));
-  host.appendChild(detField('Type de source (kind)', kindSel));
+  host.appendChild(detField('Type de source (kind)', kindSel,
+    'La famille de la source BLUE : « Aucune » = autonome (Forge tourne sans SOC). Les autres câblent un SIEM/IDS/pare-feu (Plume, CrowdSec, Elastic, FortiGate, fichier, commande…) — le reste du formulaire s\'adapte au type choisi.'));
 
   // endpoint / chemin / commande (une seule entrée, ré-étiquetée selon le kind).
   const epInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off' });
-  const epLabel = detField('Endpoint', epInput);
+  const epLabel = detField('Endpoint', epInput,
+    'Où lire les détections : une URL (HTTP), un chemin de fichier (syslog/JSONL) ou une commande (exec). Le libellé s\'ajuste au type de source.');
   host.appendChild(epLabel);
 
   // --- bloc auth (http kinds) ---
@@ -2764,25 +3001,30 @@ function detectionSourceForm(host) {
   const authSel = detEl('select');
   [['', '— aucune'], ['basic', 'Basic'], ['bearer', 'Bearer'], ['api_key_header', "En-tête d'API"]]
     .forEach(([v, l]) => authSel.appendChild(detEl('option', null, { value: v, text: l })));
-  authWrap.appendChild(detField("Type d'authentification", authSel));
+  authWrap.appendChild(detField("Type d'authentification", authSel,
+    'Comment Forge s\'authentifie auprès de la source : Basic (login:mot de passe), Bearer (jeton porteur) ou En-tête d\'API (clé dans un en-tête nommé). « Aucune » si l\'endpoint est ouvert.'));
   const hdrInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: X-Api-Key' });
-  const hdrLabel = detField("Nom de l'en-tête d'API", hdrInput);
+  const hdrLabel = detField("Nom de l'en-tête d'API", hdrInput,
+    'Uniquement pour « En-tête d\'API » : le nom de l\'en-tête HTTP qui portera le secret (ex : X-Api-Key pour CrowdSec).');
   authWrap.appendChild(hdrLabel);
   const secInput = detEl('input', null, { type: 'password', autocomplete: 'new-password', placeholder: 'secret / token' });
   secInput.addEventListener('input', () => { st.secretDirty = true; });
-  authWrap.appendChild(detField('Secret / token (write-only)', secInput));
+  authWrap.appendChild(detField('Secret / token (write-only)', secInput,
+    'Write-only : envoyé au serveur puis affiché ••• (jamais renvoyé). Laissez vide pour conserver le secret déjà posé ; saisissez une valeur uniquement pour le remplacer.'));
   host.appendChild(authWrap);
 
   // --- query (http kinds) ---
   const qInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: since={since}' });
-  const qLabel = detField('Query', qInput);
+  const qLabel = detField('Query', qInput,
+    'Filtre côté source : chaîne avec {since} substitué à la fenêtre (HTTP/CrowdSec), ou corps JSON de requête _search (Elastic/OpenSearch).');
   host.appendChild(qLabel);
 
   // --- mapping MITRE ---
   const mapWrap = detEl('div', 'det-block');
   mapWrap.appendChild(detEl('div', 'det-sub', { text: 'Mapping MITRE — règle/signature native → technique' }));
   const sigInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: scenario' });
-  const sigLabel = detField('Champ signature natif', sigInput);
+  const sigLabel = detField('Champ signature natif', sigInput,
+    'Le champ de l\'événement source qui porte la règle/signature native (ex : scenario chez CrowdSec). Les lignes ci-dessous traduisent chaque valeur de ce champ en technique MITRE.');
   mapWrap.appendChild(sigLabel);
   const rowsHost = detEl('div', 'det-rows');
   mapWrap.appendChild(rowsHost);
@@ -2790,13 +3032,16 @@ function detectionSourceForm(host) {
   mapWrap.appendChild(addBtn);
   // options mapping fines (records / ts) — kinds http/fichier.
   const recInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: hits.hits' });
-  const recLabel = detField('Chemin du tableau (records, optionnel)', recInput);
+  const recLabel = detField('Chemin du tableau (records, optionnel)', recInput,
+    'Où trouver le tableau d\'événements dans la réponse JSON (ex : hits.hits pour Elastic). Vide = la racine est déjà un tableau.');
   mapWrap.appendChild(recLabel);
   const tsInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: created_at' });
-  const tsLabel = detField('Champ horodatage (ts, optionnel)', tsInput);
+  const tsLabel = detField('Champ horodatage (ts, optionnel)', tsInput,
+    'Champ portant l\'heure de l\'alerte — sert à calculer le MTTD (délai tir → détection). Vide = MTTD non mesuré pour cette source.');
   mapWrap.appendChild(tsLabel);
   const advTa = detEl('textarea', null, { rows: 3, spellcheck: false, placeholder: '{"mitre":"_source.threat.technique.id","ts":"@timestamp"}' });
-  const advLabel = detField('Mapping avancé (JSON — écrase l’éditeur ci-dessus)', advTa);
+  const advLabel = detField('Mapping avancé (JSON — écrase l’éditeur ci-dessus)', advTa,
+    'Pour les cas non couverts par les lignes : un objet JSON de mapping (chemins mitre/ts/records…). S\'il est renseigné, il remplace l\'éditeur de lignes ci-dessus.');
   mapWrap.appendChild(advLabel);
   host.appendChild(mapWrap);
 
@@ -2822,7 +3067,7 @@ function detectionSourceForm(host) {
   }
 
   const HINTS = {
-    none: 'Aucune source : la couverture purple reste en fail-open lisible (source_reachable:false).',
+    none: 'Aucune source (autonome / standalone) : Forge fonctionne SANS dépendre d’un SOC. La boucle purple reste en attente (source_reachable:false, aucune métrique inventée). Une source est OPTIONNELLE et ajoutable plus tard dans Administration.',
     plume: 'Préréglage Plume : GET {endpoint}/api/coverage/detections?since=N, Basic auth, mapping identité (aucun mapping requis).',
     generic_http: 'Source JSON : si elle porte déjà un champ `mitre`, aucun mapping ; sinon utilisez le mapping table (signature → technique).',
     crowdsec: 'CrowdSec n’est PAS taggé MITRE : mapping table scénario → technique REQUIS (endpoint LAPI + clé X-Api-Key).',
@@ -3033,8 +3278,8 @@ async function backupCreate() {
     message: 'L’archive embarque la base, le ledger et la clé de signature .ed25519 — elle est TOUJOURS chiffrée. Choisissez une passphrase FORTE : sans elle, l’archive est irrécupérable. Elle n’est ni stockée, ni loggée, ni ledgerisée.',
     okText: 'Créer & télécharger',
     fields: [
-      { name: 'passphrase', label: 'Passphrase (obligatoire)', type: 'password', required: true },
-      { name: 'confirm', label: 'Confirmer la passphrase', type: 'password', required: true },
+      { name: 'passphrase', label: 'Passphrase (obligatoire)', type: 'password', required: true, hint: 'Dérive la clé (argon2id) qui chiffre l\'archive. Elle n\'est ni stockée, ni loggée, ni ledgerisée — conservez-la hors-ligne : sans elle, l\'archive est définitivement irrécupérable.' },
+      { name: 'confirm', label: 'Confirmer la passphrase', type: 'password', required: true, hint: 'Ressaisie pour éviter une faute de frappe sur une passphrase qu\'on ne peut pas récupérer.' },
     ],
     validate: v => (v.passphrase !== v.confirm ? 'Les deux passphrases diffèrent.' : (String(v.passphrase).length < 1 ? 'Passphrase requise.' : null)),
   });
@@ -3069,9 +3314,10 @@ function backupRestore() {
   form.innerHTML =
     '<h3>Restaurer une archive chiffrée</h3>' +
     '<p class="modal-msg">Par défaut, l’archive est <b>validée</b> (déchiffrement, sha256, chaîne ledger) sans rien écrire. Le <b>swap en place</b> (appliquer) remplace base + ledger + clé et <b>exige un redémarrage</b> de la console.</p>' +
-    '<label class="modal-f"><span>Archive chiffrée (.forge)</span><input type="file" data-n="file" required></label>' +
-    '<label class="modal-f"><span>Passphrase</span><input type="password" data-n="passphrase" required></label>' +
+    '<label class="modal-f"><span>Archive chiffrée (.forge)</span><input type="file" data-n="file" required><small class="modal-fhint">Le fichier produit par « Créer une sauvegarde » (base + ledger + clé de signature, chiffré).</small></label>' +
+    '<label class="modal-f"><span>Passphrase</span><input type="password" data-n="passphrase" required><small class="modal-fhint">La passphrase utilisée à la création. Effacée du navigateur dès l\'envoi ; jamais conservée.</small></label>' +
     '<label class="modal-f det-inline"><input type="checkbox" data-n="apply"> <span>Appliquer le swap en place (destructif — redémarrage requis)</span></label>' +
+    '<small class="modal-fhint">Décoché = validation seule (déchiffre + vérifie la chaîne ledger, n\'écrit rien). Coché = remplace la base/ledger/clé en place — irréversible, nécessite un redémarrage.</small>' +
     '<label class="modal-f det-inline"><input type="checkbox" data-n="confirm"> <span>Je confirme explicitement l’écrasement de l’installation existante</span></label>' +
     '<div class="modal-err" hidden></div>' +
     '<div class="modal-act"><button type="button" class="m-cancel">Annuler</button><button type="submit" class="m-ok danger">Valider / Restaurer</button></div>';
@@ -3166,15 +3412,15 @@ async function editBackupPolicy(current) {
     okText: 'Enregistrer',
     message: 'La passphrase du backup programmé provient d’une VARIABLE D’ENV (nommée ci-dessous) — jamais stockée en clair. L’offsite « exec » lance un argv FIXE (aucun shell). Rien n’est programmé si « activer » est décoché.',
     fields: [
-      { name: 'enabled', label: 'Activer la sauvegarde programmée', type: 'checkbox', value: !!current.enabled },
-      { name: 'interval_secs', label: 'Intervalle (secondes)', type: 'text', value: current.interval_secs != null ? String(current.interval_secs) : '' },
-      { name: 'retention', label: 'Rétention (nb d’archives locales, 0 = illimité)', type: 'text', value: current.retention != null ? String(current.retention) : '' },
-      { name: 'passphrase_env', label: 'Variable d’ENV portant la passphrase (nom)', type: 'text', value: current.passphrase_env || '' },
-      { name: 'staging_dir', label: 'Dossier de staging (optionnel)', type: 'text', value: current.staging_dir || '' },
-      { name: 'offsite_kind', label: 'Destination offsite', type: 'select', value: off.kind || 'none', options: OFFSITE_KINDS },
-      { name: 'offsite_dir', label: 'Offsite local_dir : dossier', type: 'text', value: off.dir || '' },
-      { name: 'offsite_program', label: 'Offsite exec : programme (chemin absolu)', type: 'text', value: off.program || '' },
-      { name: 'offsite_args', label: 'Offsite exec : arguments (un par ligne ; {archive} = chemin)', type: 'textarea', value: Array.isArray(off.args) ? off.args.join('\n') : '' },
+      { name: 'enabled', label: 'Activer la sauvegarde programmée', type: 'checkbox', value: !!current.enabled, hint: 'Décoché = aucune sauvegarde automatique (défaut). Coché = le runner crée une archive chiffrée à chaque intervalle.' },
+      { name: 'interval_secs', label: 'Intervalle (secondes)', type: 'text', value: current.interval_secs != null ? String(current.interval_secs) : '', hint: 'Fréquence des sauvegardes automatiques, en secondes (ex : 86400 = quotidien). Requis et > 0 quand activé.' },
+      { name: 'retention', label: 'Rétention (nb d’archives locales, 0 = illimité)', type: 'text', value: current.retention != null ? String(current.retention) : '', hint: 'Combien d\'archives locales conserver ; les plus anciennes au-delà sont purgées. 0 = tout garder.' },
+      { name: 'passphrase_env', label: 'Variable d’ENV portant la passphrase (nom)', type: 'text', value: current.passphrase_env || '', hint: 'NOM d\'une variable d\'environnement (ex : FORGE_BACKUP_PASSPHRASE), pas la passphrase elle-même. Le runner la lit à l\'exécution — jamais stockée en clair.' },
+      { name: 'staging_dir', label: 'Dossier de staging (optionnel)', type: 'text', value: current.staging_dir || '', hint: 'Où déposer les archives locales avant expédition offsite. Vide = dossier par défaut de la console.' },
+      { name: 'offsite_kind', label: 'Destination offsite', type: 'select', value: off.kind || 'none', options: OFFSITE_KINDS, hint: 'Copie hors-machine de l\'archive chiffrée : Aucune, Dossier local (montage/partage) ou Commande (argv fixe, sans shell — ex : rclone/scp).' },
+      { name: 'offsite_dir', label: 'Offsite local_dir : dossier', type: 'text', value: off.dir || '', hint: 'Uniquement pour « Dossier local » : chemin de destination où copier l\'archive.' },
+      { name: 'offsite_program', label: 'Offsite exec : programme (chemin absolu)', type: 'text', value: off.program || '', hint: 'Uniquement pour « Commande » : chemin absolu de l\'exécutable (sans shell). L\'archive chiffrée lui est passée.' },
+      { name: 'offsite_args', label: 'Offsite exec : arguments (un par ligne ; {archive} = chemin)', type: 'textarea', value: Array.isArray(off.args) ? off.args.join('\n') : '', hint: 'Arguments fixes de la commande, un par ligne. Le jeton {archive} est remplacé par le chemin de l\'archive à expédier.' },
     ],
     validate: v => {
       if (v.enabled) {

@@ -1,5 +1,7 @@
 # Runbook — campagne purple « recon-large » sur lab.guatx.com
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Prérequis Plume](PURPLE_PREREQS.md) · [Référence CLI](CLI.md) · [MTTD](MTTD.md)
+
 > **Statut : RUNBOOK — NE PAS EXÉCUTER MAINTENANT.** À lancer uniquement sur le « go » explicite
 > de l'opérateur. Ce document définit une campagne **RECON-ONLY** plus large (plus de techniques
 > tirées → matrice purple plus riche, avec des trous visibles) sur une cible **déjà autorisée**

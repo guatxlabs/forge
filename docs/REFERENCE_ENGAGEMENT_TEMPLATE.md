@@ -1,5 +1,7 @@
 # Forge — Write-up d'engagement de référence (TEMPLATE)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Concepts](CONCEPTS.md) · [Positionnement](POSITIONING.md) · [Prérequis Plume](PURPLE_PREREQS.md)
+
 > **But** : ce squelette devient la **preuve commerciale** de Forge. À remplir **après la 1ʳᵉ
 > campagne purple live** (cf. [`PLAN.md`](PLAN.md) Étape 1 + [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md)).
 > Le message final qui vend : *« Votre SOC a raté N techniques. Voici lesquelles, et comment combler. »*

@@ -1,5 +1,8 @@
 # Forge — Déploiement self-service (runbook) & empreinte
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Installation](INSTALLATION.md) ·
+> [Premier déploiement (wizard)](FIRST_DEPLOYMENT.md) · [Configuration](CONFIGURATION.md)
+
 > **Usage AUTORISÉ uniquement.** Forge reste **INERTE par défaut** (`in_scope` vide = tout refusé).
 > Rien de ce runbook n'arme quoi que ce soit : l'opérateur arme chaque couche consciemment (cf. la
 > gate ROE à 4 couches dans le [README](../README.md)).

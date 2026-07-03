@@ -719,3 +719,58 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .det-testres{margin-top:9px;font-size:13px;font-family:var(--font-mono)}
 .det-testres.ok{color:var(--ok,#2dd4bf)}
 .det-testres.bad{color:var(--bad)}
+
+/* ================================================================================
+   AIDE IN-APP — indices de champ (inline) + centre d'aide (modale accessible).
+   Réutilise les variables de thème + les composants existants (modale/badge/k-theme).
+   ================================================================================ */
+/* indices explicatifs sous les champs : setup wizard (.fhint), modales (.modal-fhint), détection (.det-fhint) */
+.fhint,.modal-fhint,.det-fhint{display:block;font-size:11px;line-height:1.5;color:var(--mut);font-weight:400;margin-top:4px}
+.fhint code,.modal-fhint code,.det-fhint code{font-family:var(--font-mono);color:var(--acc)}
+.fhint b,.modal-fhint b,.det-fhint b{color:var(--fg);font-weight:600}
+.modal-fhint{margin:-6px 0 11px}                 /* colle l'indice au champ dans .modal-f (gap 5px) */
+.modal-f .modal-fhint{margin:0}                  /* dans un label flex, l'indice suit le contrôle */
+
+/* action d'aide sur l'état autonome (purple standalone) */
+.pc-so-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.pc-so-acts .k-theme{gap:6px;text-decoration:none;font-size:12px}
+
+/* --- centre d'aide (modale role=dialog) : TOC à gauche + contenu à droite --- */
+.help-modal{width:min(880px,95vw);display:flex;flex-direction:column;max-height:88vh;padding:0}
+.help-head{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--bd)}
+.help-head h3{margin:0;flex:1}
+.help-x{padding:6px;border-radius:8px}
+.help-body{display:flex;min-height:0;flex:1;overflow:hidden}
+.help-toc{flex:0 0 232px;display:flex;flex-direction:column;gap:2px;padding:12px;overflow:auto;border-right:1px solid var(--bd);background:var(--card2)}
+.help-toc-sep{height:1px;background:var(--bd);margin:6px 4px}
+.help-toc-btn{display:flex;align-items:center;gap:9px;text-align:left;background:transparent;border:1px solid transparent;border-radius:9px;padding:8px 10px;color:var(--fg);cursor:pointer;font-size:13px;font-weight:500;line-height:1.3}
+.help-toc-btn .ic{width:16px;height:16px;flex:0 0 auto;color:var(--mut)}
+.help-toc-btn:hover{background:var(--acc-bg);color:var(--hd)}
+.help-toc-btn.on{background:var(--acc-bg);color:var(--acc);border-color:color-mix(in srgb,var(--acc) 30%,transparent);font-weight:700}
+.help-toc-btn.on .ic{color:var(--acc)}
+.help-toc-btn.pinned{font-weight:700}
+.help-toc-btn.pinned .ic{color:var(--acc)}
+.help-content{flex:1;min-width:0;overflow:auto;padding:18px 22px}
+.help-content:focus{outline:none}
+.help-title{margin:0 0 12px;color:var(--hd);font-size:17px;font-weight:800}
+.help-h{margin:16px 0 5px;color:var(--hd);font-size:13px;font-weight:700}
+.help-p{margin:0 0 10px;color:var(--fg);font-size:13px;line-height:1.6}
+.help-ul,.help-steps{margin:0 0 10px;padding-left:20px;color:var(--fg);font-size:13px;line-height:1.6}
+.help-ul li,.help-steps li{margin-bottom:5px}
+.help-content code{font-family:var(--font-mono);font-size:12px;color:var(--acc);background:var(--card2);border:1px solid var(--bd);border-radius:5px;padding:1px 5px}
+.help-meta{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin-top:16px;padding-top:12px;border-top:1px solid var(--bd);font-size:12px}
+.help-gotolink{display:inline-flex;align-items:center;gap:6px;color:var(--acc);text-decoration:none;font-weight:600;border:1px solid color-mix(in srgb,var(--acc) 30%,transparent);border-radius:var(--pill);padding:5px 12px}
+.help-gotolink:hover{background:var(--acc-bg)}
+.help-gotolink .ic{width:14px;height:14px}
+.help-doc{display:inline-flex;align-items:center;gap:6px;color:var(--mut)}
+.help-doc .ic{width:14px;height:14px;flex:0 0 auto}
+.help-doc code{background:var(--card2);border:1px solid var(--bd)}
+/* responsive : la TOC passe au-dessus du contenu sur écran étroit */
+@media(max-width:640px){
+  .help-modal{max-height:92vh}
+  .help-body{flex-direction:column;overflow:auto}
+  .help-toc{flex:0 0 auto;flex-direction:row;flex-wrap:wrap;gap:6px;max-height:34vh;border-right:0;border-bottom:1px solid var(--bd)}
+  .help-toc-sep{display:none}
+  .help-toc-btn{padding:7px 10px;font-size:12px;border:1px solid var(--bd);background:var(--card)}
+  .help-content{overflow:visible}
+}

@@ -1,5 +1,8 @@
 # Forge — Démarrage (parcours opérateur bout-en-bout, 100 % hors-ligne)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.md) ·
+> [Installation](INSTALLATION.md) · [Référence CLI](CLI.md)
+
 > Ce guide se fait **entièrement hors-ligne**, avec l'**engagement de référence synthétique** fourni
 > ([`examples/reference-engagement/`](../examples/reference-engagement/)) et le **stub mock-Plume**
 > stdlib ([`tools/mock_plume.py`](../tools/mock_plume.py)). **Aucun service externe, aucune cible

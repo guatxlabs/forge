@@ -1,5 +1,8 @@
 # Sauvegarde & restauration chiffrées
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Administration](ADMINISTRATION.md#5-sauvegarde--restauration) ·
+> [Migration de données](MIGRATION.md) · [Configuration](CONFIGURATION.md#16-sauvegardes-programmées)
+
 Ce runbook décrit la **sauvegarde** et la **restauration** de la Forge Console : le format
 d'archive, le chiffrement, pourquoi **la clé de signature voyage à l'intérieur de l'archive
 chiffrée**, les garde-fous de restauration, et la programmation + expédition **offsite**.

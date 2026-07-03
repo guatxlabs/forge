@@ -1,5 +1,7 @@
 # MTTD — ce que la métrique mesure (et ne mesure PAS)
 
+> 🧭 [Documentation Forge](README.md) · Voir aussi : [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) · [Prérequis Plume](PURPLE_PREREQS.md)
+
 ## TL;DR
 
 Le MTTD reporté par Forge est un **time-to-ALERT**, pas un **time-to-event**. Il inclut la latence

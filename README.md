@@ -19,6 +19,10 @@ l'opérateur n'a pas armé chaque couche consciemment.
 > La gate ROE + le scope-guard + le ledger sont là pour **imposer ET prouver** l'autorisation.
 > Passer un WAF/Cloudflare ≠ une faille : c'est un enabler d'accès, pas un bug.
 
+> 📚 **Documentation produit complète → [`docs/`](docs/README.md)** — vue d'ensemble, architecture,
+> installation, wizard de 1er déploiement, référence de configuration (env + settings), administration,
+> concepts, référence CLI & API HTTP, standalone, modèle de sécurité, désinstallation, dépannage.
+
 ## Sûreté d'abord — la gate à 4 couches (`forge/roe.py`)
 
 Toutes doivent être franchies pour qu'une action LIVE parte. Sinon : `DRY_RUN` (simulation) ou
@@ -224,7 +228,8 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Chiffrement AU REPOS SQLCipher** (image opt-in `--features encryption`, `PRAGMA key` au boot) | ✅ opt-in — `capabilities.sqlcipher` exposé au wizard |
 | Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
 
-**14 modules** (table générée depuis `forge modules --json`) :
+**Modules** (extrait ; table générée depuis `forge modules --json`) — le **catalogue complet à jour
+(31 modules)** avec dépendances et statut est dans **[`docs/MODULES.md`](docs/MODULES.md)** :
 
 | kind | exploit | ATT&CK | description |
 |---|:---:|---|---|
@@ -273,6 +278,14 @@ console seule. **Chiffrement au repos** (image SQLCipher opt-in) et **sauvegarde
 
 ## Documentation
 
+**➡️ Sommaire complet et navigable : [`docs/README.md`](docs/README.md)** — l'ensemble de la
+documentation produit (vue d'ensemble, architecture, installation, configuration, administration,
+concepts, CLI, API HTTP, sécurité, dépannage). Les pages phares :
+
+- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — **ce qu'est Forge**, la valeur, le fonctionnement standalone.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — **comment c'est construit** (moteur Python + console Rust + SPA + gouvernance).
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — **référence complète** des variables d'env et des clés `settings`.
+- [`docs/CLI.md`](docs/CLI.md) · [`docs/HTTP_API.md`](docs/HTTP_API.md) — références CLI & API HTTP.
 - [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **démarrage bout-en-bout hors-ligne** (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
 - [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
 - [`docs/DETECTION.md`](docs/DETECTION.md) — **source de détection = plugin configurable** (brancher n'importe quelle infra BLUE sans code : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) + modèle `DetectionSource` et mapping MITRE.
