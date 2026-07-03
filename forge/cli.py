@@ -38,6 +38,7 @@ from .memory import Memory
 from . import purple
 from . import signing
 from . import console_client
+from . import collectors
 from . import modules as mods
 
 
@@ -351,12 +352,78 @@ def _count_mitre_tagged(detections):
     return n
 
 
+def _doctor_source_preflight(args, source):
+    """Préflight GÉNÉRALISÉ à la source de détection CONFIGURÉE (kind ≠ plume/legacy). LECTURE SEULE :
+    GET console `/health` + `collector.doctor()` (sonde de joignabilité) + une collecte de sonde pour
+    compter détections/tags MITRE. Dégrade gracieusement (FAIL/N/A, jamais de crash). Critiques =
+    console joignable + source joignable/configurée. Le secret n'apparaît jamais (détails rédigés)."""
+    console_url = console_client.base_url()
+    timeout = getattr(args, "timeout", None) or 8.0
+    lines = []
+    critical_ok = True
+
+    st, body, err = _purple_get(console_url + "/health", timeout=timeout)
+    if st == 200:
+        lines.append(("ok", "console-reachable", f"{console_url}/health -> 200 {body.strip()[:16]}"))
+    elif st is not None:
+        lines.append(("fail", "console-reachable", f"{console_url}/health -> HTTP {st}")); critical_ok = False
+    else:
+        lines.append(("fail", "console-reachable", f"{console_url}/health injoignable ({err})")); critical_ok = False
+
+    col = collectors.get_collector(source)
+    if col is None:
+        lines.append(("fail", "source-configured", f"kind inconnu: {source.get('kind')}")); critical_ok = False
+        for lbl in ("source-reachable", "detections-returned", "mitre-tagged"):
+            lines.append(("na", lbl, "kind inconnu"))
+    else:
+        cfg_err = col.config_error()
+        if cfg_err:
+            lines.append(("fail", "source-configured", collectors.safe_error(ValueError(cfg_err), source)))
+            critical_ok = False
+        else:
+            lines.append(("ok", "source-configured", collectors.describe(source)))
+        rows = col.fetch(0)                    # sonde LECTURE SEULE (ne lève jamais)
+        if col.reachable:
+            lines.append(("ok", "source-reachable", col.doctor().get("detail", "")))
+            n = len(rows)
+            lines.append(("ok" if n else "info", "detections-returned", f"{n} technique(s)"))
+            if n == 0:
+                lines.append(("na", "mitre-tagged", "aucune détection à inspecter"))
+            else:
+                tagged = _count_mitre_tagged(rows)
+                state = "ok" if tagged else "info"
+                lines.append((state, "mitre-tagged", f"champ technique Txxxx présent ({tagged}/{n})"))
+        else:
+            lines.append(("fail", "source-reachable", col.error_detail())); critical_ok = False
+            for lbl in ("detections-returned", "mitre-tagged"):
+                lines.append(("na", lbl, "source injoignable"))
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": critical_ok,
+                          "checks": [{"check": lbl, "state": state, "detail": detail}
+                                     for state, lbl, detail in lines]}))
+        return 0 if critical_ok else 1
+    verdict = "PRÊTE ✅" if critical_ok else "INCOMPLÈTE ⛔"
+    print(f"=== forge doctor --purple — boucle purple {verdict} (source: {source.get('kind')}) ===\n")
+    for state, lbl, detail in lines:
+        print(f"  [{_PURPLE_MARK.get(state, state):8}] {lbl:20} {detail}")
+    print("\nNote : lecture seule — aucun tir, ni scope ni ledger touchés. Critiques = console joignable "
+          "+ source configurée/joignable. Détections/MITRE sont informatifs (0 détection = SOC frais).")
+    return 0 if critical_ok else 1
+
+
 def cmd_doctor_purple(args):
     """Préflight de la boucle purple (LECTURE SEULE, ne tire rien, ne touche ni scope ni ledger) :
-    GET console `/health` + GET Plume `/api/coverage/detections?since=0` (Basic auth). Imprime une
-    checklist claire (console/plume joignables, auth OK, nb détections, tag MITRE) et DÉGRADE
-    GRACIEUSEMENT si une dépendance est injoignable (ligne FAIL/N/A, jamais de crash). Sortie non
-    nulle si un contrôle CRITIQUE échoue (console/plume joignables + auth), 0 si tout est vert."""
+    GET console `/health` + sonde de la SOURCE DE DÉTECTION configurée. Imprime une checklist claire
+    et DÉGRADE GRACIEUSEMENT si une dépendance est injoignable (ligne FAIL/N/A, jamais de crash).
+
+    Si une source NON-legacy est configurée (env `FORGE_DETECTION_SOURCE`, kind ≠ plume/none) ->
+    préflight généralisé via le collecteur. Sinon -> chemin legacy `PLUME_URL`/`PLUME_TOKEN` INCHANGÉ
+    (rétro-compat : GET Plume `/api/coverage/detections?since=0`, Basic auth)."""
+    src = _configured_source()
+    if src is not None and str(src.get("kind", "")).strip() not in ("", "none", "plume"):
+        return _doctor_source_preflight(args, src)
+
     console_url = console_client.base_url()            # respecte FORGE_CONSOLE_URL (défaut 127.0.0.1:7100)
     plume_url = os.environ.get("PLUME_URL", "").rstrip("/")
     plume_token = os.environ.get("PLUME_TOKEN", "")    # base64 de user:pass -> Authorization: Basic
@@ -439,6 +506,53 @@ def cmd_doctor_purple(args):
     return 0 if critical_ok else 1
 
 
+def cmd_detections(args):
+    """Collecteur de détections (délégué par la console pour les sources « messy »). Lit la SOURCE
+    (`--source env:NOM` | `@fichier` | JSON littéral), INSTANCIE le collecteur du bon `kind`, et
+    imprime `{"detections":[{mitre,count,first_ts}]}` sur stdout.
+
+    CONTRAT fail-open lisible (ce que la console spawne et interprète) :
+    - source JOIGNABLE (même 0 détection) -> stdout `{"detections":[...]}`, code 0 (reachable=True) ;
+    - source INJOIGNABLE / mal configurée / kind inconnu -> code non nul + message RÉDIGÉ du secret
+      sur stderr, stdout VIDE -> la console bascule en `source_reachable:false` sans rien fabriquer.
+    Le secret d'auth n'est JAMAIS imprimé. `fetch()` du collecteur ne lève jamais ; c'est `reachable`
+    qui distingue « joignable mais vide » de « injoignable »."""
+    source = None
+    try:
+        source = collectors.load_source(args.source)
+    except Exception as e:  # noqa: BLE001 — spec illisible : fail-open, message rédigé
+        sys.stderr.write(collectors.safe_error(e, source) + "\n")
+        return 1
+    col = collectors.get_collector(source)
+    if col is None:
+        sys.stderr.write("kind de source non pris en charge par le collecteur Python: "
+                         + str(source.get("kind", "none")) + "\n")
+        return 1
+    rows = col.fetch(args.since)              # ne lève jamais : [] sur erreur, positionne reachable
+    if not col.reachable:
+        sys.stderr.write(col.error_detail() + "\n")   # rédigé du secret
+        return 1
+    print(json.dumps({"detections": rows}, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def _configured_source():
+    """Résout la source de détection VISIBLE par la CLI (diagnostic) : env `FORGE_DETECTION_SOURCE`
+    (JSON posé par la console), sinon repli rétro-compat `PLUME_URL`/`PLUME_TOKEN` -> preset `plume`,
+    sinon None (non configurée -> boucle purple INERTE). Ne lève jamais."""
+    raw = os.environ.get("FORGE_DETECTION_SOURCE", "").strip()
+    if raw:
+        try:
+            return collectors.load_source("env:FORGE_DETECTION_SOURCE")
+        except Exception:  # noqa: BLE001 — JSON illisible -> traité comme non configuré
+            return None
+    url = os.environ.get("PLUME_URL", "").strip()
+    if url:
+        return {"kind": "plume", "endpoint": url.rstrip("/"),
+                "auth": {"type": "basic", "secret": os.environ.get("PLUME_TOKEN", "")}}
+    return None
+
+
 def cmd_doctor(args):
     """Diagnostic : pour chaque module, dit s'il est OPÉRATIONNEL (sonde `.available`) et
     rappelle l'outil/service attendu + l'astuce d'install/config. Ne tire RIEN, ne touche pas
@@ -454,8 +568,9 @@ def cmd_doctor(args):
         dep, tip = _DOCTOR_HINTS.get(k, ("(dépendance non documentée)", ""))
         rows.append({"kind": k, "available": bool(getattr(m, "available", True)),
                      "dep": dep, "tip": tip})
+    det_row = _detection_health_row()      # santé de la source de détection configurée (collecteur)
     if getattr(args, "json", False):
-        print(json.dumps(rows))
+        print(json.dumps(rows + [det_row]))
         return 0
     ok = sum(1 for r in rows if r["available"])
     print(f"=== forge doctor — {ok}/{len(rows)} modules opérationnels ===\n")
@@ -465,9 +580,33 @@ def cmd_doctor(args):
         print(f"      attendu : {r['dep']}")
         if not r["available"] and r["tip"]:
             print(f"      install : {r['tip']}")
-    print("\nNote : un module INDISPONIBLE est simplement auto-neutralisé (jamais tiré). "
-          "La gate ROE reste fail-closed indépendamment de la disponibilité des outils.")
+    dmark = "OK ✅" if det_row["available"] else "INERTE / KO ⛔"
+    print(f"\n  [{dmark:16}] {det_row['kind']}")
+    print(f"      source  : {det_row['dep']}")
+    print(f"      état    : {det_row['tip']}")
+    print("\nNote : un module INDISPONIBLE est simplement auto-neutralisé (jamais tiré). Une source de "
+          "détection INERTE (non configurée/injoignable) -> couverture purple fail-open lisible "
+          "(source_reachable:false), jamais de métrique inventée. La gate ROE reste fail-closed.")
     return 0
+
+
+def _detection_health_row():
+    """Ligne de santé de la source de détection configurée, au format des rangées `doctor` (kind /
+    available / dep / tip). Utilise `collector.doctor()` (LECTURE SEULE, ne lève jamais). Non configurée
+    -> available:False + note « inerte » (état VALIDE, pas une erreur)."""
+    src = _configured_source()
+    if src is None:
+        return {"kind": "detection.source", "available": False,
+                "dep": "settings.detection_source / env FORGE_DETECTION_SOURCE / legacy PLUME_URL",
+                "tip": "non configurée — couverture purple INERTE (fail-open lisible, aucune métrique inventée)"}
+    col = collectors.get_collector(src)
+    if col is None:
+        return {"kind": "detection.source", "available": False,
+                "dep": collectors.describe(src),
+                "tip": f"kind inconnu du collecteur Python: {src.get('kind')}"}
+    d = col.doctor()
+    return {"kind": "detection.source", "available": bool(d.get("ok")),
+            "dep": collectors.describe(src), "tip": d.get("detail", "")}
 
 
 def cmd_demo(args):
@@ -546,6 +685,10 @@ def build_parser():
     dc.add_argument("--timeout", type=float, default=8.0, help="timeout (s) des sondes HTTP du préflight --purple")
     dc.set_defaults(fn=cmd_doctor)
     dm = sub.add_parser("demo"); dm.set_defaults(fn=cmd_demo)
+    de = sub.add_parser("detections")
+    de.add_argument("--source", required=True, help="config de source : env:NOM | @fichier | JSON littéral (voie privilégiée: env, pour ne pas fuiter le secret via argv)")
+    de.add_argument("--since", type=int, default=0, help="borne basse epoch (s) transmise à la source (0 = tout)")
+    de.set_defaults(fn=cmd_detections)
     return p
 
 

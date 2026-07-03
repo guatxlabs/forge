@@ -188,8 +188,10 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 
 - **Cœur** = `roe.py` (gate) + `ledger.py` (preuve) + `engine.py` + `schema.py`. Pur-stdlib.
 - **Modules** restent indépendants (le `Module` ne fait que `dry()`→PoC et `fire()`→findings).
-- **Boucle purple** : chaque finding porte un champ `mitre` (ATT&CK) = clé de jointure pour que
-  Plume valide la détection (BAS). Voir [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **Boucle purple** : chaque finding porte un champ `mitre` (ATT&CK) = clé de jointure pour valider la
+  détection côté défense (BAS). La **source de détection est un plugin configurable** (Plume n'est qu'un
+  préréglage — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec se câblent sans
+  code) : voir [`docs/DETECTION.md`](docs/DETECTION.md) et [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## État (v0.0.1 — 260 tests passent, zéro réseau) — **P1 + P2 complets**
 
@@ -250,7 +252,8 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 
 - [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **démarrage bout-en-bout hors-ligne** (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
 - [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
-- [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis Plume pour câbler la boucle purple (le moat).
+- [`docs/DETECTION.md`](docs/DETECTION.md) — **source de détection = plugin configurable** (brancher n'importe quelle infra BLUE sans code : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) + modèle `DetectionSource` et mapping MITRE.
+- [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis du préréglage **Plume** pour câbler la boucle purple (le moat) — un cas particulier de `DETECTION.md`.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — empreinte mesurée et matrice de déploiement (Docker / k8s / host / venv).
 
 ## Licence

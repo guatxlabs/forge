@@ -6198,6 +6198,7 @@ fn api_migrate_base_dir() -> std::path::PathBuf {
 ///   2) résolution : si la cible existe, canonicalise le chemin COMPLET ; sinon (to/ledger neufs)
 ///      canonicalise le DOSSIER PARENT (qui doit exister) puis rejoint le nom de fichier ;
 ///   3) confinement : le chemin résolu DOIT être SOUS `base_canon` (comparaison par composants).
+///
 /// `must_exist` : la source (`from`) doit exister ; une cible préexistante HORS base est REFUSÉE
 /// (jamais d'écrasement/suppression hors racine). N'est appelée QUE sur la voie API (jamais la CLI).
 fn validate_api_migrate_path(
@@ -7578,6 +7579,10 @@ mod tests {
     /// [SETUP migrate] POST /api/setup/migrate : PUBLIC en pré-provision (exécute la migration + rend
     /// le rapport verify), puis AUTO-DÉSACTIVANTE (409) dès qu'un admin activé existe. Chemin plaintext
     /// (aucun sqlcipher requis).
+    // env_lock() sérialise l'ENV process-global entre threads de test ; le garder à travers l'await
+    // de setup_migrate est VOULU (l'ENV doit rester stable pendant l'appel awaité). Runtime de test
+    // current_thread => aucun risque de blocage de l'exécuteur.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn setup_migrate_public_pre_provision_then_409_once_provisioned() {
         // COUCHE 1+2 activées : flag opt-in ON + racine d'import = temp_dir (où vivent from/to/ledger)
@@ -7626,6 +7631,10 @@ mod tests {
     /// [SETUP migrate — COUCHE 1] Défaut OFF : sans FORGE_ALLOW_API_MIGRATE, l'endpoint REFUSE (403)
     /// AVANT toute I/O — la primitive d'écriture/suppression de fichier non-auth n'existe pas dans le
     /// déploiement par défaut. Preuve : la cible n'est JAMAIS écrite malgré une source valide.
+    // env_lock() sérialise l'ENV process-global entre threads de test ; le garder à travers l'await
+    // de setup_migrate est VOULU (l'ENV doit rester stable pendant l'appel awaité). Runtime de test
+    // current_thread => aucun risque de blocage de l'exécuteur.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn setup_migrate_api_disabled_by_default_no_file_op() {
         let _g = env_lock();

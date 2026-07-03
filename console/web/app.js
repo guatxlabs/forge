@@ -2700,8 +2700,321 @@ async function connectorSet(kind, patch) {
   } catch (e) { toast('Mise a jour refusee : ' + e.message, 'bad'); }
 }
 if ($('#admin-conn-reload')) $('#admin-conn-reload').addEventListener('click', loadAdminConnectors);
-// Vue #admin : charge comptes ET connecteurs (deux tables gouvernees, meme role admin).
-function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); }
+
+// =====================================================================================
+//  SOURCE DE DÉTECTION — composant PARTAGÉ (panneau #admin ET étape 3 du wizard)
+//  La source BLUE (SIEM/IDS/pare-feu) est configurable SANS code : `kind` + connexion (endpoint/auth/
+//  query) + éditeur de mapping MITRE (règle/signature native -> technique). Le SECRET est WRITE-ONLY :
+//  affiché ••• une fois posé (secret_set), jamais re-rendu par le serveur. GET/POST /api/detection/source
+//  (admin, ledgerisé) ; test de joignabilité via POST /api/detection/test. Le même composant sert le
+//  wizard et l'admin (parité stricte du jeu de champs — exigence de cohérence).
+// =====================================================================================
+// Liste FERMÉE des kinds (parité avec DETECTION_KINDS côté console + le registre collecteur Python).
+const DETECTION_KINDS = [
+  { value: 'none', label: 'Aucune — mesure désactivée' },
+  { value: 'plume', label: 'Plume (SOC) — préréglage' },
+  { value: 'generic_http', label: 'HTTP générique (JSON)' },
+  { value: 'crowdsec', label: 'CrowdSec (LAPI)' },
+  { value: 'elastic', label: 'Elastic (_search)' },
+  { value: 'opensearch', label: 'OpenSearch (_search)' },
+  { value: 'fortigate_syslog', label: 'FortiGate (syslog)' },
+  { value: 'pfsense', label: 'pfSense (filterlog)' },
+  { value: 'opnsense', label: 'OPNsense (filterlog)' },
+  { value: 'file_jsonl', label: 'Fichier JSONL' },
+  { value: 'exec', label: 'Commande (exec)' },
+];
+const DET_HTTP_KINDS = new Set(['plume', 'generic_http', 'crowdsec', 'elastic', 'opensearch']);
+const DET_SYSLOG_KINDS = new Set(['fortigate_syslog', 'pfsense', 'opnsense']);
+const DET_TABLE_KINDS = new Set(['generic_http', 'crowdsec', 'elastic', 'opensearch', 'file_jsonl', 'exec']);
+const DET_AUTH_KINDS = new Set(['plume', 'generic_http', 'crowdsec', 'elastic', 'opensearch']);
+const DET_QUERY_KINDS = new Set(['generic_http', 'crowdsec', 'elastic', 'opensearch']);
+const DET_JSON_QUERY_KINDS = new Set(['elastic', 'opensearch']); // query = corps JSON (dict)
+// clés de mapping représentables par l'éditeur de lignes (le reste -> éditeur JSON avancé).
+const DET_MAP_SIMPLE_KEYS = new Set(['table', 'field', 'rules', 'records', 'ts']);
+// petit constructeur DOM sûr : détail = attrs (value/placeholder/type/...) posés via propriété (jamais innerHTML).
+function detEl(tag, cls, attrs) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (attrs) for (const k in attrs) { if (k === 'text') e.textContent = attrs[k]; else e[k] = attrs[k]; }
+  return e;
+}
+function detField(labelText, control) {
+  const l = detEl('label', 'login-f');
+  l.appendChild(detEl('span', null, { text: labelText }));
+  l.appendChild(control);
+  return l;
+}
+// Factory : monte le jeu de champs dans `host` et renvoie un contrôleur { setConfig, getConfig, clearSecret, el }.
+function detectionSourceForm(host) {
+  host.classList.add('det-form');
+  host.replaceChildren();
+  const st = { secretSet: false, secretDirty: false, kind: 'none' };
+
+  const kindSel = detEl('select', 'det-kind');
+  DETECTION_KINDS.forEach(k => kindSel.appendChild(detEl('option', null, { value: k.value, text: k.label })));
+  host.appendChild(detField('Type de source (kind)', kindSel));
+
+  // endpoint / chemin / commande (une seule entrée, ré-étiquetée selon le kind).
+  const epInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off' });
+  const epLabel = detField('Endpoint', epInput);
+  host.appendChild(epLabel);
+
+  // --- bloc auth (http kinds) ---
+  const authWrap = detEl('div', 'det-block');
+  const authSel = detEl('select');
+  [['', '— aucune'], ['basic', 'Basic'], ['bearer', 'Bearer'], ['api_key_header', "En-tête d'API"]]
+    .forEach(([v, l]) => authSel.appendChild(detEl('option', null, { value: v, text: l })));
+  authWrap.appendChild(detField("Type d'authentification", authSel));
+  const hdrInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: X-Api-Key' });
+  const hdrLabel = detField("Nom de l'en-tête d'API", hdrInput);
+  authWrap.appendChild(hdrLabel);
+  const secInput = detEl('input', null, { type: 'password', autocomplete: 'new-password', placeholder: 'secret / token' });
+  secInput.addEventListener('input', () => { st.secretDirty = true; });
+  authWrap.appendChild(detField('Secret / token (write-only)', secInput));
+  host.appendChild(authWrap);
+
+  // --- query (http kinds) ---
+  const qInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: since={since}' });
+  const qLabel = detField('Query', qInput);
+  host.appendChild(qLabel);
+
+  // --- mapping MITRE ---
+  const mapWrap = detEl('div', 'det-block');
+  mapWrap.appendChild(detEl('div', 'det-sub', { text: 'Mapping MITRE — règle/signature native → technique' }));
+  const sigInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: scenario' });
+  const sigLabel = detField('Champ signature natif', sigInput);
+  mapWrap.appendChild(sigLabel);
+  const rowsHost = detEl('div', 'det-rows');
+  mapWrap.appendChild(rowsHost);
+  const addBtn = detEl('button', 'k-theme det-addrow', { type: 'button', text: '+ ligne' });
+  mapWrap.appendChild(addBtn);
+  // options mapping fines (records / ts) — kinds http/fichier.
+  const recInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: hits.hits' });
+  const recLabel = detField('Chemin du tableau (records, optionnel)', recInput);
+  mapWrap.appendChild(recLabel);
+  const tsInput = detEl('input', null, { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'ex: created_at' });
+  const tsLabel = detField('Champ horodatage (ts, optionnel)', tsInput);
+  mapWrap.appendChild(tsLabel);
+  const advTa = detEl('textarea', null, { rows: 3, spellcheck: false, placeholder: '{"mitre":"_source.threat.technique.id","ts":"@timestamp"}' });
+  const advLabel = detField('Mapping avancé (JSON — écrase l’éditeur ci-dessus)', advTa);
+  mapWrap.appendChild(advLabel);
+  host.appendChild(mapWrap);
+
+  const hint = detEl('div', 'det-hint muted');
+  host.appendChild(hint);
+
+  function addRow(native, technique) {
+    const row = detEl('div', 'det-row');
+    const a = detEl('input', 'det-row-native', { type: 'text', spellcheck: false, autocomplete: 'off', value: native || '' });
+    const b = detEl('input', 'det-row-tech', { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: 'Txxxx', value: technique || '' });
+    const rm = detEl('button', 'k-theme danger det-row-rm', { type: 'button', text: '×', title: 'Retirer la ligne' });
+    rm.addEventListener('click', () => row.remove());
+    row.appendChild(a); row.appendChild(b); row.appendChild(rm);
+    rowsHost.appendChild(row);
+  }
+  addBtn.addEventListener('click', () => addRow('', ''));
+  function setRows(rows) { rowsHost.replaceChildren(); (rows || []).forEach(r => addRow(r.native, r.technique)); }
+  function collectRows() {
+    return [...rowsHost.querySelectorAll('.det-row')].map(r => ({
+      native: (r.querySelector('.det-row-native').value || '').trim(),
+      technique: (r.querySelector('.det-row-tech').value || '').trim(),
+    })).filter(r => r.native && r.technique);
+  }
+
+  const HINTS = {
+    none: 'Aucune source : la couverture purple reste en fail-open lisible (source_reachable:false).',
+    plume: 'Préréglage Plume : GET {endpoint}/api/coverage/detections?since=N, Basic auth, mapping identité (aucun mapping requis).',
+    generic_http: 'Source JSON : si elle porte déjà un champ `mitre`, aucun mapping ; sinon utilisez le mapping table (signature → technique).',
+    crowdsec: 'CrowdSec n’est PAS taggé MITRE : mapping table scénario → technique REQUIS (endpoint LAPI + clé X-Api-Key).',
+    elastic: 'Elastic _search : query = corps JSON (dict). Mapping via chemin `mitre` (ex _source.…) ou table + champ.',
+    opensearch: 'OpenSearch _search : query = corps JSON (dict). Même dialecte qu’Elastic (hits.hits).',
+    fortigate_syslog: 'FortiGate syslog : endpoint = chemin du fichier ; règles regex → technique REQUISES (pas de tag MITRE natif).',
+    pfsense: 'pfSense filterlog : endpoint = chemin du fichier ; règles regex → technique REQUISES.',
+    opnsense: 'OPNsense filterlog : endpoint = chemin du fichier ; règles regex → technique REQUISES.',
+    file_jsonl: 'Fichier JSONL d’événements natifs : endpoint = chemin ; mapping table/champ (ou mitre direct).',
+    exec: 'Commande (argv séparés par des espaces) imprimant du JSON sur stdout ; mapping table/champ. Admin de confiance uniquement.',
+  };
+
+  function refreshVisibility() {
+    const kind = kindSel.value;
+    st.kind = kind;
+    const syslog = DET_SYSLOG_KINDS.has(kind);
+    const isExec = kind === 'exec';
+    const isFile = kind === 'file_jsonl';
+    // libellé/visibilité de l'entrée connexion.
+    if (isExec) { epLabel.querySelector('span').textContent = 'Commande (argv séparés par des espaces)'; epInput.placeholder = 'ex: /opt/soc/pull.sh --json'; }
+    else if (syslog || isFile) { epLabel.querySelector('span').textContent = 'Chemin du fichier'; epInput.placeholder = 'ex: /var/log/filterlog'; }
+    else { epLabel.querySelector('span').textContent = 'Endpoint (URL)'; epInput.placeholder = 'ex: http://soc.local:8080/api/coverage/detections'; }
+    epLabel.hidden = (kind === 'none');
+    authWrap.hidden = !DET_AUTH_KINDS.has(kind);
+    hdrLabel.hidden = authSel.value !== 'api_key_header';
+    qLabel.hidden = !DET_QUERY_KINDS.has(kind);
+    qLabel.querySelector('span').textContent = DET_JSON_QUERY_KINDS.has(kind) ? 'Query (corps JSON)' : 'Query (chaîne, {since} substitué)';
+    // mapping : masqué pour none et plume (identité) ; sinon visible. `field`/records/ts masqués en syslog.
+    const showMap = kind !== 'none' && kind !== 'plume';
+    mapWrap.hidden = !showMap;
+    sigLabel.hidden = syslog || !DET_TABLE_KINDS.has(kind);
+    recLabel.hidden = syslog || !showMap;
+    tsLabel.hidden = syslog || !showMap;
+    mapWrap.querySelector('.det-sub').textContent = syslog
+      ? 'Mapping MITRE — regex (ligne syslog) → technique'
+      : 'Mapping MITRE — signature native → technique';
+    hint.textContent = HINTS[kind] || '';
+  }
+  kindSel.addEventListener('change', refreshVisibility);
+  authSel.addEventListener('change', () => { hdrLabel.hidden = authSel.value !== 'api_key_header'; });
+
+  function setConfig(cfg, secretSet) {
+    cfg = (cfg && typeof cfg === 'object') ? cfg : {};
+    kindSel.value = DETECTION_KINDS.some(k => k.value === cfg.kind) ? cfg.kind : 'none';
+    // connexion
+    if (cfg.kind === 'exec') epInput.value = Array.isArray(cfg.cmd) ? cfg.cmd.join(' ') : (Array.isArray(cfg.argv) ? cfg.argv.join(' ') : (cfg.cmd || ''));
+    else epInput.value = cfg.endpoint || cfg.path || '';
+    // auth
+    const auth = (cfg.auth && typeof cfg.auth === 'object') ? cfg.auth : {};
+    authSel.value = ['basic', 'bearer', 'api_key_header'].includes(auth.type || cfg.auth_type) ? (auth.type || cfg.auth_type) : '';
+    hdrInput.value = auth.header || '';
+    secInput.value = '';
+    st.secretSet = !!secretSet; st.secretDirty = false;
+    secInput.placeholder = secretSet ? '•••••••• (défini — laisser vide pour conserver)' : 'secret / token';
+    // query
+    const q = cfg.query;
+    qInput.value = (typeof q === 'string') ? q : (q && typeof q === 'object' ? JSON.stringify(q) : '');
+    // mapping
+    const m = (cfg.mapping && typeof cfg.mapping === 'object') ? cfg.mapping : {};
+    sigInput.value = m.field || '';
+    recInput.value = m.records || '';
+    tsInput.value = m.ts || '';
+    const unrepresentable = Object.keys(m).some(k => !DET_MAP_SIMPLE_KEYS.has(k));
+    if (unrepresentable) { advTa.value = JSON.stringify(m, null, 2); setRows([]); }
+    else {
+      advTa.value = '';
+      if (Array.isArray(m.rules)) setRows(m.rules.filter(r => r && r.match).map(r => ({ native: r.match, technique: r.mitre || '' })));
+      else if (m.table && typeof m.table === 'object') setRows(Object.entries(m.table).map(([k, v]) => ({ native: k, technique: String(v) })));
+      else setRows([]);
+    }
+    refreshVisibility();
+  }
+
+  // Renvoie { config, keepSecret, error }. error non nul -> le hôte (save/test) affiche un toast et n'envoie rien.
+  function getConfig() {
+    const kind = kindSel.value;
+    if (kind === 'none') return { config: { kind: 'none' }, keepSecret: false, error: null };
+    const config = { kind };
+    const ep = (epInput.value || '').trim();
+    if (kind === 'exec') { if (ep) config.cmd = ep.split(/\s+/).filter(Boolean); }
+    else if (ep) config.endpoint = ep;
+    let keepSecret = false;
+    if (DET_AUTH_KINDS.has(kind)) {
+      const at = authSel.value;
+      if (at) {
+        const auth = { type: at };
+        if (at === 'api_key_header' && (hdrInput.value || '').trim()) auth.header = hdrInput.value.trim();
+        if (st.secretDirty && secInput.value) auth.secret = secInput.value;
+        else if (st.secretSet && !st.secretDirty) keepSecret = true; // secret write-only conservé
+        config.auth = auth;
+      }
+    }
+    if (DET_QUERY_KINDS.has(kind)) {
+      const qv = (qInput.value || '').trim();
+      if (qv) {
+        if (DET_JSON_QUERY_KINDS.has(kind)) {
+          try { config.query = JSON.parse(qv); } catch (e) { return { config: null, keepSecret: false, error: 'Query (corps JSON) invalide : ' + e.message }; }
+        } else config.query = qv;
+      }
+    }
+    // mapping : JSON avancé prioritaire, sinon lignes.
+    const adv = (advTa.value || '').trim();
+    if (adv) {
+      let parsed;
+      try { parsed = JSON.parse(adv); } catch (e) { return { config: null, keepSecret: false, error: 'Mapping avancé (JSON) invalide : ' + e.message }; }
+      if (parsed && typeof parsed === 'object') config.mapping = parsed;
+    } else if (kind !== 'plume') {
+      const mapping = {};
+      const rows = collectRows();
+      if (DET_SYSLOG_KINDS.has(kind)) { if (rows.length) mapping.rules = rows.map(r => ({ match: r.native, mitre: r.technique })); }
+      else if (rows.length) {
+        mapping.table = {}; rows.forEach(r => { mapping.table[r.native] = r.technique; });
+        const fld = (sigInput.value || '').trim(); if (fld) mapping.field = fld;
+      }
+      const rec = (recInput.value || '').trim(); if (rec && !DET_SYSLOG_KINDS.has(kind)) mapping.records = rec;
+      const ts = (tsInput.value || '').trim(); if (ts && !DET_SYSLOG_KINDS.has(kind)) mapping.ts = ts;
+      if (Object.keys(mapping).length) config.mapping = mapping;
+    }
+    return { config, keepSecret, error: null };
+  }
+  function clearSecret() { secInput.value = ''; st.secretDirty = false; }
+
+  refreshVisibility();
+  return { el: host, setConfig, getConfig, clearSecret, kind: () => kindSel.value };
+}
+
+// --- Panneau admin « source de détection » : GET config (secret rédigé) -> monte le composant + actions
+//     (Tester / Enregistrer). POST /api/detection/source (admin, ledgerisé) ; POST /api/detection/test.
+let ADMIN_DET_FORM = null;
+async function loadAdminDetection() {
+  const host = $('#admin-det-form'); if (!host) return;
+  const kindBadge = $('#admin-det-kind');
+  if (!isAdmin()) { host.innerHTML = '<div class="muted">reserve aux administrateurs</div>'; if (kindBadge) kindBadge.textContent = '—'; return; }
+  host.innerHTML = '<div class="muted">chargement…</div>';
+  let data;
+  try { data = await adminApi('/detection/source'); }
+  catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
+  const src = (data && data.source) || { kind: 'none' };
+  const secretSet = !!(data && data.secret_set);
+  host.replaceChildren();
+  const formHost = detEl('div');
+  host.appendChild(formHost);
+  ADMIN_DET_FORM = detectionSourceForm(formHost);
+  ADMIN_DET_FORM.setConfig(src, secretSet);
+  if (kindBadge) kindBadge.textContent = src.kind || 'none';
+  // barre d'actions + zone de résultat de test.
+  const act = detEl('div', 'det-actions');
+  const testBtn = detEl('button', 'k-theme', { type: 'button', text: 'Tester la connexion' });
+  const saveBtn = detEl('button', 'login-btn det-save', { type: 'button', text: 'Enregistrer' });
+  act.appendChild(testBtn); act.appendChild(saveBtn);
+  host.appendChild(act);
+  const resBox = detEl('div', 'det-testres muted');
+  host.appendChild(resBox);
+
+  testBtn.addEventListener('click', async () => {
+    const { config, keepSecret, error } = ADMIN_DET_FORM.getConfig();
+    if (error) { toast(error, 'bad'); return; }
+    resBox.className = 'det-testres muted'; resBox.textContent = 'test en cours…';
+    testBtn.disabled = true;
+    try {
+      const r = await adminApi('/detection/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ detection_source: config, keep_secret: keepSecret }),
+      });
+      const reachable = !!(r && r.reachable);
+      const samples = (r && Array.isArray(r.sample_mitres)) ? r.sample_mitres : [];
+      resBox.className = 'det-testres ' + (reachable ? 'ok' : 'bad');
+      resBox.textContent = reachable
+        ? `joignable — ${r.count || 0} détection(s)${samples.length ? ' · ' + samples.join(', ') : ''}`
+        : `injoignable — ${(r && r.error) ? r.error : 'source_reachable:false'}`;
+    } catch (e) { resBox.className = 'det-testres bad'; resBox.textContent = 'test refusé : ' + e.message; }
+    finally { testBtn.disabled = false; }
+  });
+  saveBtn.addEventListener('click', async () => {
+    const { config, keepSecret, error } = ADMIN_DET_FORM.getConfig();
+    if (error) { toast(error, 'bad'); return; }
+    saveBtn.disabled = true;
+    try {
+      await adminApi('/detection/source', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ detection_source: config, keep_secret: keepSecret }),
+      });
+      toast('Source de détection enregistrée.', 'ok');
+      loadAdminDetection(); // recharge (secret rédigé, secret_set à jour)
+    } catch (e) { toast('Enregistrement refusé : ' + e.message, 'bad'); }
+    finally { saveBtn.disabled = false; }
+  });
+}
+if ($('#admin-det-reload')) $('#admin-det-reload').addEventListener('click', loadAdminDetection);
+
+// Vue #admin : charge comptes, connecteurs ET source de détection (gouvernées, meme role admin).
+function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAdminDetection(); }
 
 // =====================================================================================
 //  Navigation (sidebar repliable + hash-routing) + chargement par vue
@@ -2711,7 +3024,7 @@ const VIEWS = {
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
   modules: 'modules', findings: 'findings', explore: 'explore',
   coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
-  admin: 'admin', 'admin-connectors': 'admin',
+  admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
 };
 const LOADERS = {
   overview: loadOverview, launch: loadLaunch, modules: loadModules, findings: loadFindings,
@@ -2900,10 +3213,18 @@ if ($('#logout')) $('#logout').addEventListener('click', async () => {
 // =====================================================================================
 let SETUP_STEP = 1;
 const SETUP_MAX = 4;
+let SETUP_DET_FORM = null; // composant source de détection partagé (étape 3 du wizard)
 function showSetup(state) {
   document.body.classList.add('gated');
   const lv = $('#login-view'); if (lv) lv.hidden = true;
   const sv = $('#setup-view'); if (sv) sv.hidden = false;
+  // étape 3 : monte le MÊME composant source de détection que le panneau admin (parité du jeu de champs).
+  // Config vierge (aucun défaut, aucun secret posé) — tout est optionnel côté provisioning.
+  const detHost = $('#su-det-form');
+  if (detHost && typeof detectionSourceForm === 'function') {
+    SETUP_DET_FORM = detectionSourceForm(detHost);
+    SETUP_DET_FORM.setConfig({ kind: 'none' }, false);
+  }
   // capacité SQLCipher : la bascule de chiffrement au repos n'apparaît QUE si le build l'expose
   // (capabilities.sqlcipher). Faux dans le build par défaut -> bascule masquée, note « indisponible ».
   const sqlcipher = !!(state && state.capabilities && state.capabilities.sqlcipher);
@@ -2944,19 +3265,11 @@ function setupBuildPayload() {
   const login = (($('#su-login') && $('#su-login').value) || '').trim();
   const pass = ($('#su-pass') && $('#su-pass').value) || '';
   const payload = { admin_login: login, admin_password: pass };
-  // détection (étape 3) : verbatim, UNIQUEMENT si un collecteur est choisi (kind != none/vide).
-  const kind = ($('#su-det-kind') && $('#su-det-kind').value) || 'none';
-  if (kind && kind !== 'none') {
-    const ds = { kind };
-    const ep = (($('#su-det-endpoint') && $('#su-det-endpoint').value) || '').trim();
-    const at = ($('#su-det-authtype') && $('#su-det-authtype').value) || '';
-    const sec = ($('#su-det-secret') && $('#su-det-secret').value) || '';
-    const mapRaw = (($('#su-det-mapping') && $('#su-det-mapping').value) || '').trim();
-    if (ep) ds.endpoint = ep;
-    if (at) ds.auth_type = at;
-    if (sec) ds.secret = sec;
-    if (mapRaw) { try { ds.mapping = JSON.parse(mapRaw); } catch (e) { ds.mapping = mapRaw; } }
-    payload.detection_source = ds;
+  // détection (étape 3) : lue depuis le composant partagé, verbatim, UNIQUEMENT si un kind est choisi
+  // (kind != none). Même schéma canonique (auth:{type,secret}) que le panneau admin.
+  if (SETUP_DET_FORM) {
+    const { config } = SETUP_DET_FORM.getConfig();
+    if (config && config.kind && config.kind !== 'none') payload.detection_source = config;
   }
   // politique opérateur (étape 4) : booléens explicites (require_reason par défaut ON = comportement
   // actuel) + allowlist CIDR source seulement si non vide (sinon aucune restriction — défaut = none).
@@ -2975,6 +3288,8 @@ async function setupSubmit() {
   // sanity légère sur les CIDR (pas d'espace interne) — le serveur reste l'autorité (fail-closed).
   const badCidr = (($('#su-op-cidrs') && $('#su-op-cidrs').value) || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean).find(l => /\s/.test(l));
   if (badCidr) { setupGoto(4); setupErr('CIDR invalide (espace interne) : ' + badCidr); return; }
+  // détection (étape 3) : mapping avancé / query JSON invalide -> stop (le serveur reste l'autorité).
+  if (SETUP_DET_FORM) { const dc = SETUP_DET_FORM.getConfig(); if (dc.error) { setupGoto(3); setupErr(dc.error); return; } }
   const fin = $('#su-finish'); if (fin) fin.disabled = true;
   setupErr('');
   try {
@@ -2997,7 +3312,8 @@ async function setupSubmit() {
       return;
     }
     // succès : le serveur a posé le cookie de session (nouvel admin). Efface les secrets, démarre le shell.
-    ['#su-pass', '#su-pass2', '#su-det-secret'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+    ['#su-pass', '#su-pass2'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+    if (SETUP_DET_FORM) SETUP_DET_FORM.clearSecret();
     const sv = $('#setup-view'); if (sv) sv.hidden = true;
     showApp();
     toast('Console provisionnée — bienvenue.', 'ok');
