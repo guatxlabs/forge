@@ -293,6 +293,7 @@ concepts, CLI, API HTTP, sécurité, dépannage). Les pages phares :
 - [`docs/DETECTION.md`](docs/DETECTION.md) — **source de détection = plugin configurable** (brancher n'importe quelle infra BLUE sans code : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) + modèle `DetectionSource` et mapping MITRE.
 - [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis du préréglage **Plume** pour câbler la boucle purple (le moat) — un cas particulier de `DETECTION.md`.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — **runbook self-deploy bout-en-bout** : build/run (mini·full · Docker · compose · natif/systemd · image `encryption` SQLCipher), **wizard 1er boot** (admin · crypto · source de détection · politique opérateur — rien de codé en dur), migration & **sauvegardes chiffrées** (schedule/offsite), contexte de build `guatx-core`, liveness `/health`. Inclut l'empreinte mesurée + matrice (Docker / k8s / host / venv).
+- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — **matrice de support OS** (Linux primaire · macOS pleinement supporté · Windows best-effort) : ce qui marche partout vs la seule capacité Unix-only (kill de sous-arbre `setsid`/`killpg` du run C2), et la résolution des répertoires config/data/temp par OS.
 - [`docs/MIGRATION.md`](docs/MIGRATION.md) — reprendre un install existant (DB + ledger + clé `.ed25519`) vers Docker/autre cible ; option chiffrement au repos SQLCipher.
 - [`docs/BACKUP.md`](docs/BACKUP.md) — sauvegarde/restauration **toujours chiffrées** (argon2id + XChaCha20-Poly1305), programmation + expédition **offsite**.
 

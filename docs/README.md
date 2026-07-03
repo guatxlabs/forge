@@ -85,6 +85,10 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
 
 - **[Modèle de sécurité](SECURITY_MODEL.md)** — authz, gates fail-closed, intégrité du ledger,
   chiffrement au repos, gestion des secrets, host-guard, plancher exploit.
+- **[Plateformes supportées](PLATFORMS.md)** — matrice OS (Linux primaire, macOS pleinement
+  supporté, Windows best-effort) : composants qui marchent partout vs la seule capacité Unix-only
+  (kill de sous-arbre `setsid`/`killpg` du run C2 gouverné), résolution config/données/temp par OS,
+  et le filet anti-régression `tests/test_portability_guard.py`.
 - **[Dépannage & FAQ](TROUBLESHOOTING.md)** — symptômes courants, diagnostics, questions fréquentes.
 - **[Désinstallation & suppression des données](UNINSTALL.md)** — arrêter, supprimer
   image/conteneur/volumes, purger DB/ledger/clés, désinstaller les outils.
