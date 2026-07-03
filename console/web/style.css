@@ -515,6 +515,9 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .modal h3{margin:0 0 10px;color:var(--hd);font-size:16px;font-weight:800}
 .modal-msg{color:var(--fg);margin:0 0 12px;font-size:13px;line-height:1.5}
 .modal-f{display:flex;flex-direction:column;gap:5px;margin-bottom:11px;font-size:12px;color:var(--mut)}
+/* rangée inline (case à cocher + libellé) — sauvegarde/restauration */
+.modal-f.det-inline{flex-direction:row;align-items:center;gap:9px}
+.modal-f.det-inline span{font-weight:500;color:var(--fg)}
 /* --- modal de plage temporelle (presets + absolu) --- */
 .rangemodal{width:min(580px,94vw)}
 .rmsub{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px}
