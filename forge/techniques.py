@@ -364,6 +364,142 @@ TECHNIQUES = {t.key: t for t in [
        cls="business_logic", cwe="CWE-840", mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
 
+    # =============================================================================================
+    #  LOT INJECTION/PROTOCOLE — classes d'attaque injection & protocole HTTP prouvées utilisées par le
+    #  toolkit opérateur (FAISS) mais absentes de Forge. Chacune SELF-DESCRIBING via `_k(...)` : UNE
+    #  entrée ici + UN module @register (importé dans modules/__init__.py) = auto-intégration dans
+    #  by_vuln_class / pipeline_ordered / la sélection par-scope / les profils / `modules --json`, SANS
+    #  câblage par-technique. Sondes de VÉRIFICATION BÉNIGNES & NON DESTRUCTIVES (exploit=False) ->
+    #  phase=access, capability=active, proof_required (promotion `vulnerable` sur preuve concrète seule).
+    #  Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind()
+    #  restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par chaque module.
+    # ---------------------------------------------------------------------------------------------
+    # nosql.probe — injection NoSQL (BB) par différentiel d'OPÉRATEUR (Mongo $ne/$gt/$regex broaden vs
+    # $eq/$lt narrow) prouvant que les opérateurs de requête sont interprétés. Aucun dump (hash/statut).
+    _k("nosql.probe",         "NoSQLi", True, depends_on=("recon.js_endpoints",),
+       cls="nosqli", cwe="CWE-943", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # prototype_pollution.probe — pollution de prototype client/serveur (BB) par marqueur d'injection de
+    # propriété BÉNIGN (`__proto__[MARK]=VAL`) dont l'EFFET est réfléchi UNIQUEMENT via le vecteur proto
+    # (différentiel vs contrôle) -> propriété polluée surfacée. Aucun gadget exploité.
+    _k("prototype_pollution.probe", "PrototypePollution", True, depends_on=("recon.js_endpoints",),
+       cls="prototype_pollution", cwe="CWE-1321", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # request_smuggling.probe — désync HTTP CL.TE/TE.CL (BB) par sonde de TIMING différentielle NON
+    # destructive : une variante ambiguë HANG (back-end attend un terminateur) là où la baseline répond
+    # vite. Sonde AUTO-CONTENUE sur NOTRE connexion (aucun poisoning de file d'un autre user).
+    _k("request_smuggling.probe", "RequestSmuggling", True, depends_on=("recon.httpx",),
+       cls="request_smuggling", cwe="CWE-444", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # cache_poisoning.probe — web cache poisoning (BB) : un en-tête NON CLÉ (X-Forwarded-Host…) portant un
+    # marqueur BÉNIGN se REFLÈTE dans une réponse CACHEABLE (diff vs contrôle). Cache-buster unique ->
+    # jamais de persistance d'entrée nuisible pour de vrais users (probe-only).
+    _k("cache_poisoning.probe", "CachePoisoning", True, depends_on=("recon.httpx",),
+       cls="cache_poisoning", cwe="CWE-525", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # header_injection.probe — injection d'en-tête / Host header (BB) par marqueur BÉNIGN : CRLF response-
+    # splitting (un en-tête bénin injecté apparaît dans la réponse, CWE-113) OU host poisoning (marqueur
+    # d'hôte reflété dans le corps/Location, CWE-644, ex reset-password). Non destructif. cwe canonique
+    # CWE-113 (host header CWE-644 noté dans l'evidence).
+    _k("header_injection.probe", "HeaderInjection", True, depends_on=("recon.httpx",),
+       cls="header_injection", cwe="CWE-113", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # lucene.probe — injection de requête de recherche Lucene/Elasticsearch (BB) par différentiel de
+    # RUPTURE DE SYNTAXE BÉNIGNE : une entrée invalide provoque une ParseException Lucene (absente de la
+    # baseline) OU un différentiel booléen (OR broaden / AND narrow). Aucun dump.
+    _k("lucene.probe",        "SearchInjection", True, depends_on=("recon.js_endpoints",),
+       cls="lucene", cwe="CWE-943", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # cmdi.probe — VÉRIFICATION d'injection de commande OS (BB) à PREUVE STRICTEMENT BÉNIGNE : marqueur
+    # echo/arithmétique dont la SORTIE UNIQUE revient. DISTINCT de rce.probe (l'exploit gouverné pentest-
+    # only derrière le plancher exploit) : cmdi reste exploit=False, non destructif, NE lance JAMAIS de
+    # commande nuisible (garde-fou benign). mitre T1059/Execution (comme xss.reflected/cmdline).
+    _k("cmdi.probe",          "CommandInjection", True, depends_on=("recon.js_endpoints",),
+       cls="cmdi", cwe="CWE-78", mitre="T1059",
+       attck_tactic="Execution", phase="access", capability="active", proof_required=True),
+
+    # =============================================================================================
+    #  LOT AUTH-FLOW / RACE — classes d'attaque flux-d'authentification & concurrence prouvées utilisées
+    #  par le toolkit opérateur (FAISS : PoC race recovery-code / refresh-token / device-code, faiblesses
+    #  de flux OAuth redirect_uri/state) mais absentes de Forge. Chacune SELF-DESCRIBING via `_k(...)` :
+    #  UNE entrée ici + UN module @register (importé dans modules/__init__.py) = auto-intégration dans
+    #  by_vuln_class / pipeline_ordered / la sélection par-scope / les profils / `modules --json`, SANS
+    #  câblage par-technique. Sondes GOUVERNÉES, COMPTE-OPÉRATEUR & NON DESTRUCTIVES (exploit=False) ->
+    #  phase=access, capability=active, proof_required (promotion `vulnerable` sur preuve concrète seule).
+    #  Aucune `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind()
+    #  restent INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par chaque module.
+    # ---------------------------------------------------------------------------------------------
+    # race.condition — RaceCondition/TOCTOU (BB) sur une ressource LIMITÉE du compte OPÉRATEUR (code à
+    # usage unique, coupon, refresh/device/recovery token, solde) : une PETITE rafale de requêtes
+    # PARALLÈLES (bornée, jamais un DoS) prouve qu'une action à usage limité a réussi PLUS que le quota
+    # autorisé. Preuve = la limite est DÉMONTRABLEMENT contournée sur le compte PROPRE de l'opérateur ;
+    # jamais un tiers. Sonde de VÉRIFICATION (exploit=False, non destructif au-delà de ce qui prouve sur
+    # la ressource propre). cwe canonique CWE-362 (Race Condition ; TOCTOU CWE-367 noté dans l'evidence).
+    _k("race.condition",      "RaceCondition", True, depends_on=("recon.js_endpoints",),
+       cls="race", cwe="CWE-362", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # oauth.flow — faiblesses de FLUX OAuth/OIDC (BB) sur le PROPRE flux de l'opérateur (son client_id
+    # enregistré, jamais une identité tierce) : bypass de validation redirect_uri (open-redirect dans la
+    # redirection OAuth -> vol de code/jeton), `state` manquant/faible (CSRF sur le flux), manipulation de
+    # scope/`idp_hint`, downgrade/absence de PKCE. Preuve MINIMALE (redirect_uri vers un hôte bénin
+    # contrôlé par l'opérateur ACCEPTÉ ; `state` non imposé) ; la partie redirection suit la discipline
+    # CHAÎNABLE-SEULEMENT (miroir redirect.open). Réutilise jwt.weakness pour les problèmes de JETON ; ceci
+    # couvre le FLUX. cwe canonique CWE-601 (redirect_uri ; CSRF CWE-352 & auth CWE-287 notés dans l'evidence).
+    _k("oauth.flow",          "OAuthFlow", True, depends_on=("recon.js_endpoints",),
+       cls="oauth", cwe="CWE-601", mitre="T1528",
+       attck_tactic="Credential Access", phase="access", capability="active", proof_required=True),
+
+    # =============================================================================================
+    #  LOT RECON/EXPOSURE/TAKEOVER — classes de recon/exposition/takeover prouvées utilisées par le
+    #  toolkit opérateur (FAISS : subdomain takeover, actuator/framework exposure, SSRF métadonnées cloud)
+    #  mais absentes de Forge. Chacune SELF-DESCRIBING via `_k(...)` : UNE entrée + UN module @register =
+    #  auto-intégration (by_vuln_class / pipeline_ordered / sélection par-scope / profils / modules --json),
+    #  SANS câblage par-technique. Native, scope-lockées, PREUVE MINIMALE & BÉNIGNE (jamais de réclamation
+    #  de ressource, ni de vol de secret — valeurs rédigées). bug_bounty_eligible. Aucune `remediation`/
+    #  `qualifying` ici -> les vues héritées restent INCHANGÉES (le fix est déclaré par chaque module).
+    # ---------------------------------------------------------------------------------------------
+    # subdomain.takeover — prise de contrôle de sous-domaine (BB) : CNAME PENDANT vers un service tiers NON
+    # RÉCLAMÉ (fingerprint OU cible NXDOMAIN). INFORMATIONNEL/proof-minimal — la ressource n'est JAMAIS
+    # réclamée (on flague la cible pendante). Recon-phase (comme recon.secrets), preuve exigée.
+    _k("subdomain.takeover",  "SubdomainTakeover", True, depends_on=("recon.subdomains",),
+       cwe="CWE-350", mitre="T1584.001",
+       attck_tactic="Resource Development", phase="recon", capability="active", proof_required=True),
+    # framework.exposure — surface de framework exposée (BB) : Spring Actuator /actuator/*, Next.js
+    # __NEXT_DATA__/runtimeConfig, Laravel Telescope/Horizon/Ignition. PREUVE = surface sensible joignable
+    # qui FUIT config/données (secret RÉDIGÉ). Recon-phase, active, preuve exigée.
+    _k("framework.exposure",  "Exposure", True, depends_on=("recon.httpx",),
+       cwe="CWE-200", mitre="T1592.002",
+       attck_tactic="Reconnaissance", phase="recon", capability="active", proof_required=True),
+    # ssrf.cloud_metadata — SSRF vers les métadonnées cloud (BB) : AWS/GCP/Azure IMDS (169.254.169.254 /
+    # metadata.google.internal). PREUVE = signature de contenu métadonnées in-band (reflet neutralisé,
+    # credential RÉDIGÉ) OU callback collecteur out-of-band. Scope-lockée, bénigne (chemins index non-secrets).
+    _k("ssrf.cloud_metadata", "SSRF", True, depends_on=("recon.httpx",),
+       cls="ssrf", cwe="CWE-918", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+
+    # =============================================================================================
+    #  LOT PENTEST-ONLY (réseau/mobile) — classes d'attaque réseau/mobile PROUVÉES par le pentest mais qui
+    #  ne sont PAS des surfaces bug-bounty et NE doivent PAS embarquer de capacité offensive native dans
+    #  Forge. On les ENREGISTRE (catalogue + profil pentest) en POINTANT vers les connecteurs gouvernés
+    #  (`msf.module`, `tools=(...)`) / outils externes documentés (nmap NSE, MobSF/apktool). Le module
+    #  @register est un AVIS GOUVERNÉ (scope-guard + plancher exploit + dégradation), ZÉRO exploit natif.
+    #  bug_bounty_eligible=False -> pentest_only, EXCLUES du profil bug_bounty (phase NON-recon : jamais
+    #  tirées comme « infrastructure de découverte »). Les classes EXPLOIT (smb/ssh) portent exploit=True
+    #  -> le ROE exige allow_exploit (plancher opt-in), re-vérifié en défense en profondeur par le module.
+    # ---------------------------------------------------------------------------------------------
+    _k("network.smb",         "SMB", False, depends_on=("recon.nmap",), tools=("msf.module",),
+       mitre="T1210", exploit=True,
+       attck_tactic="Lateral Movement", phase="exploit", capability="exploit"),
+    _k("network.ftp",         "FTP", False, depends_on=("recon.nmap",), tools=("recon.nmap", "msf.module"),
+       mitre="T1046",
+       attck_tactic="Discovery", phase="access", capability="active"),
+    _k("network.ssh",         "SSH", False, depends_on=("recon.nmap",), tools=("recon.nmap", "msf.module"),
+       mitre="T1110.001", exploit=True,
+       attck_tactic="Credential Access", phase="exploit", capability="exploit"),
+    _k("mobile.apk",          "MobileApp", False,
+       mitre="T1406",
+       attck_tactic="Discovery", phase="access", capability="active"),
+
     # (2) JETONS de classe QUALIFIANTS (plancher planner). Certains portent aussi une remédiation.
     #     Ce sont des ALIAS de classe (pas des kinds de module) : pas de vuln_class/phase/capability.
     _t("idor",           qualifying=True, remediation=_R_IDOR),

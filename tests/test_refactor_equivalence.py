@@ -74,6 +74,27 @@ EXPECTED_KINDS = {
     "xss.stored",                                                 # Stored/DOM XSS via browser (clientflow.py)
     "rce.probe",                                                  # RCE gouvernée pentest-only (rce.py)
     "business_logic.scan",                                        # scaffold logique métier pentest-only (business_logic.py)
+    # LOT INJECTION/PROTOCOLE — injections server-side à preuve bénigne (injection_probes.py)
+    "nosql.probe",                                                # NoSQLi différentiel d'opérateur ($ne/$gt/$regex)
+    "lucene.probe",                                               # SearchInjection Lucene/ES (rupture de syntaxe)
+    "cmdi.probe",                                                 # CommandInjection benign (echo/arith, distinct de rce.probe)
+    "prototype_pollution.probe",                                  # PrototypePollution (marqueur proto réfléchi)
+    # LOT INJECTION/PROTOCOLE — attaques flux/protocole HTTP à preuve bénigne (httpflow.py)
+    "request_smuggling.probe",                                    # RequestSmuggling CL.TE/TE.CL (timing différentiel)
+    "cache_poisoning.probe",                                      # CachePoisoning (en-tête non clé réfléchi cacheable)
+    "header_injection.probe",                                     # HeaderInjection/HostHeader (CRLF + host poisoning)
+    # LOT AUTH-FLOW / RACE — flux d'authentification & concurrence à preuve compte/flux-opérateur
+    "race.condition",                                             # Race/TOCTOU rafale bornée compte-opérateur (race.py)
+    "oauth.flow",                                                 # faiblesses de flux OAuth/OIDC redirect_uri/state/PKCE (oauth.py)
+    # LOT RECON/EXPOSURE/TAKEOVER — recon/exposition/takeover natifs à preuve minimale & bénigne
+    "subdomain.takeover",                                         # CNAME pendant vers service tiers non réclamé (takeover.py)
+    "framework.exposure",                                         # Spring Actuator/Next.js/Laravel exposés (exposure.py)
+    "ssrf.cloud_metadata",                                        # SSRF métadonnées cloud AWS/GCP/Azure IMDS (ssrf.py)
+    # LOT PENTEST-ONLY (réseau/mobile) — classes adossées aux connecteurs (pentest.py), ZÉRO exploit natif
+    "network.smb",                                                # SMB/EternalBlue via msf.module (exploit, gaté)
+    "network.ftp",                                                # FTP anonyme/énum via nmap NSE / msf.module
+    "network.ssh",                                                # test d'auth SSH via msf.module / nmap NSE (exploit, gaté)
+    "mobile.apk",                                                 # analyse APK/IAP via MobSF/apktool (externe documenté)
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {
