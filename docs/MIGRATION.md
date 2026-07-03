@@ -218,3 +218,45 @@ Il renvoie le **résultat de vérification** du ledger et se **ferme (409)** dè
 provisionnée (un admin activé existe). C'est un raccourci minimal : l'**UX documentée primaire
 reste la sous-commande CLI** exécutée dans un conteneur one-shot (ci-dessus). Le chiffrement
 (`"encrypt":true`) y exige également un binaire compilé `--features encryption` (sinon `400`).
+
+---
+
+## Migration vers le modèle **Engagement** (objet de 1re classe) — zéro perte
+
+L'engagement est désormais un **objet de 1re classe** : chaque engagement porte **SON** scope (in/out),
+**SON** mode et **SON** ledger dédié, et chaque ligne de données (`finding` / `runrecord` /
+`roe_decision` / `run_job`) porte un `engagement_id`. Cette bascule est **rétro-compatible ZÉRO-PERTE**
+pour tout install antérieur (mono-scope, mono-ledger) — **rien à faire, tout continue de fonctionner** :
+
+- **Backfill automatique.** La migration de schéma ajoute `engagement_id INTEGER NOT NULL DEFAULT 1` :
+  **toutes** les lignes existantes sont rétro-rattachées à l'**engagement #1**. Aucune donnée n'est
+  déplacée, réécrite ni perdue.
+- **Engagement #1 = ton install actuel.** Au 1er boot, `ensure_default_engagement` crée l'engagement #1
+  **depuis le scope serveur COURANT** (`in_scope` + `mode`) et le **ledger COURANT**
+  (`FORGE_CONSOLE_LEDGER`). Ton scope et ton ledger d'origine deviennent donc, à l'identique, ceux de
+  l'engagement #1. L'opération est **idempotente** : elle ne réécrit jamais un engagement déjà présent.
+- **Le `campaign` reste un sous-label.** Le champ free-text `campaign` existant reste un **sous-label
+  AU SEIN** d'un engagement (il n'est **pas** un engagement) — tes campagnes historiques restent
+  lisibles telles quelles sous l'engagement #1.
+- **Ledger inchangé pour #1.** L'engagement #1 continue d'écrire dans le ledger console d'origine
+  (`FORGE_CONSOLE_LEDGER`) ; la chaîne SHA-256 existante est **prolongée**, jamais rompue. Les nouveaux
+  engagements reçoivent chacun un ledger **dédié** dérivé côté serveur (`engagement-<id>.jsonl`, frère
+  du ledger console) — jamais un chemin fourni par le client (anti write-anywhere).
+
+### Runs concurrents, isolés par engagement
+
+Le slot de run n'est plus un FIFO console-global : c'est **un slot par engagement**. Conséquences,
+toutes **fail-closed** :
+
+- **Concurrence inter-engagement.** Plusieurs engagements peuvent avoir un run vivant **en même temps** ;
+  lancer un run pour B pendant qu'un run de A tourne renvoie **202**, jamais un 409 croisé.
+- **FIFO par engagement.** Un 2e `POST /api/run` sur le **même** engagement renvoie **409**
+  (`{"error":"run_in_progress","engagement_id":<id>}`).
+- **Isolation stricte.** Un run pour A applique le scope-guard de A et écrit le ledger de A **uniquement**
+  — il ne peut ni lire ni écrire le scope, les findings, le ledger ou le slot d'un autre engagement
+  (chaque requête porte son `engagement_id` ; isolation par construction). Un run de A ne peut pas
+  tirer contre une cible qui n'est que dans le scope de B (**400 out_of_scope** avant tout spawn).
+
+**Aucune action de migration n'est requise** pour bénéficier de tout cela : un install mono-engagement
+est simplement un déploiement à **un seul** engagement (le #1), et le jour où tu crées un 2e engagement
+(`POST /api/engagements`), il démarre isolé avec son propre scope et son propre ledger.

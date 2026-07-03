@@ -51,7 +51,10 @@ Points clés :
 `POST /api/run` refuse les modules `exploit`/`destructive` (**400**) **sauf** opt-in haut-impact
 **gouverné** — honoré uniquement si `operator + arm=true + reason non vide` (`high_impact_gate`).
 Sinon le scope écrit pour le run **force** `allow_exploit=false`. Les cibles doivent être ⊆ scope
-serveur (**400 out_of_scope** avant tout spawn). Un seul run vivant (FIFO, **409** sinon).
+serveur (**400 out_of_scope** avant tout spawn). **FIFO par engagement** : au plus un run vivant *par
+engagement* (**409** sur le même engagement ; les autres engagements tournent en parallèle). Chaque run
+applique le scope-guard et écrit le ledger **de SON engagement** — jamais ceux d'un autre (isolation
+fail-closed par construction).
 
 ## 3. La gate ROE (moteur)
 

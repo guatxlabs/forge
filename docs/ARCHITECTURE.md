@@ -142,7 +142,10 @@ gouverné et audité**. À chaque run :
 4. **Plancher exploit** : les modules `exploit`/`destructive` sont **refusés (400)** sauf **opt-in
    haut-impact gouverné** — honoré **uniquement** si `operator + arm=true + reason non vide`
    (`high_impact_gate`). Sinon le scope écrit pour le run **force** `allow_exploit=false`.
-5. **FIFO** : un seul run vivant (409 sinon).
+5. **FIFO PAR ENGAGEMENT** : au plus un run vivant *par engagement* (slot indexé par `engagement_id`) —
+   un 2e run sur le **même** engagement → **409** (`engagement_id` dans le corps) ; un run pour un
+   **autre** engagement démarre en **parallèle** sans 409 (concurrence inter-engagement, isolation par
+   scope + ledger dédiés).
 6. **Spawn** `python3 -m forge.cli campaign …` (setsid), avec un scope.json/targets.json temporaires,
    un watchdog (`FORGE_RUN_TIMEOUT`), des logs streamés en **SSE** (`/api/runs/:id/events`).
 

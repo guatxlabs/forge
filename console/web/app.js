@@ -83,10 +83,41 @@ function token() {
 function authHeaders(extra = {}) { return { Authorization: 'Bearer ' + token(), ...extra }; }
 
 // =====================================================================================
+//  ENGAGEMENT ACTIF (objet de 1re classe — à la workspace Metasploit)
+// =====================================================================================
+// L'engagement actif est persisté CÔTÉ CLIENT (localStorage) et ajouté à CHAQUE requête via
+// `?engagement=<id>`. Le serveur FILTRE les vues (findings/runrecords/roe/ledger/coverage/runs) sur
+// cet id -> un engagement ne voit JAMAIS les données d'un autre. Absent -> le serveur retombe sur
+// l'engagement actif le plus récent (défaut mono-engagement = #1, rétro-compat).
+let ENGAGEMENTS = [];        // dernière liste connue (id/name/status/mode/counts) pour le sélecteur + vue
+function activeEngagement() {
+  const v = localStorage.getItem('forge_engagement');
+  const n = v == null ? NaN : parseInt(v, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+function setActiveEngagement(id) {
+  if (id == null) localStorage.removeItem('forge_engagement');
+  else localStorage.setItem('forge_engagement', String(id));
+}
+function activeEngagementName() {
+  const id = activeEngagement();
+  const e = ENGAGEMENTS.find(x => x.id === id) || ENGAGEMENTS.find(x => x.status === 'active') || ENGAGEMENTS[0];
+  return e ? e.name : '';
+}
+// Ajoute ?engagement=<id> à une URL/chemin quelconque (idempotent : ne double jamais le param).
+function withEngagement(url) {
+  const id = activeEngagement();
+  if (id == null || /[?&]engagement=/.test(url)) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'engagement=' + id;
+}
+
+// =====================================================================================
 //  API helpers
 // =====================================================================================
 async function api(path) {
-  const r = await fetch('/api' + path, { headers: { Accept: 'application/json' } });
+  // Toute LECTURE est scopée à l'engagement actif (withEngagement) — un endpoint qui ignore le param
+  // le laisse inerte (sans effet), donc l'ajout global est sûr.
+  const r = await fetch(withEngagement('/api' + path), { headers: { Accept: 'application/json' } });
   const body = await r.text().catch(() => '');
   // On NE PROPAGE PAS le corps brut du serveur dans Error.message (un proxy/gateway peut renvoyer
   // du HTML non-fiable -> XSS si rendu via innerHTML en aval). On ne remonte que le code HTTP et,
@@ -1506,7 +1537,7 @@ if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
   const body = { profile: TQ.profile, categories: {}, techniques };
   const st = $('#tq-status');
   try {
-    const r = await fetch('/api/techniques/selection', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    const r = await fetch(withEngagement('/api/techniques/selection'), { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (r.status === 403) { toast('Sélection réservée à un compte operator/admin', 'bad'); return; }
     if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
     toast('Sélection enregistrée (ledgerisée)', 'ok');
@@ -1591,7 +1622,7 @@ async function deleteWorkflow(wf) {
   const ok = await confirmModal('Supprimer le workflow « ' + wf.name + ' » ? (action ledgerisée)', { title: 'Supprimer le workflow', okText: 'Supprimer' });
   if (!ok) return;
   try {
-    const r = await fetch('/api/workflows/' + encodeURIComponent(wf.name), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ delete: true }) });
+    const r = await fetch(withEngagement('/api/workflows/' + encodeURIComponent(wf.name)), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ delete: true }) });
     if (r.status === 403) { toast('Suppression réservée à un compte operator/admin', 'bad'); return; }
     if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
     toast('Workflow supprimé (ledgerisé)', 'ok'); loadWorkflows();
@@ -1693,7 +1724,7 @@ function openWorkflowBuilder(existing, opts) {
     const body = { name, description: (descI.value || '').trim(), steps: outSteps };
     const url = editing ? ('/api/workflows/' + encodeURIComponent(name)) : '/api/workflows';
     try {
-      const r = await fetch(url, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+      const r = await fetch(withEngagement(url), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
       if (r.status === 403) { err.textContent = 'Réservé à un compte operator/admin.'; err.hidden = false; return; }
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { err.textContent = 'Échec : ' + String(j.why || j.error || r.status); err.hidden = false; return; }
@@ -1742,6 +1773,8 @@ async function runWorkflow(wf) {
   const body = { campaign: String(vals.campaign || '').trim(), targets, mode: vals.mode || 'propose', auto_pentest: true, modules, arm: !!vals.arm, allow_high_impact: high };
   if (Object.keys(mp).length) body.module_params = mp;
   body.reason = (String(vals.reason || '').trim() || ('workflow: ' + wf.name)).slice(0, 200);
+  // ENGAGEMENT : le run opère SUR l'engagement actif (son scope + son ledger gouvernent, cf. serveur).
+  const _eng = activeEngagement(); if (_eng != null) body.engagement_id = _eng;
   let r, j;
   try { r = await fetch('/api/run', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }); j = await r.json().catch(() => ({})); }
   catch (err) { toast('Erreur réseau : ' + String(err.message || err), 'bad'); return; }
@@ -2209,6 +2242,202 @@ function operatorHeaders(extra = {}) {
   return h;
 }
 
+// =====================================================================================
+//  ENGAGEMENTS — vue de gestion + sélecteur d'engagement actif (header)
+// =====================================================================================
+// Charge /api/engagements, alimente le sélecteur header (#engagement) + l'indicateur proéminent, et
+// rend la vue #engagements (liste + créer/éditer/archiver/supprimer/basculer). L'engagement actif est
+// persisté localStorage (activeEngagement) et ajouté à CHAQUE requête (withEngagement) : chaque vue ne
+// montre QUE ses données. create/edit = operator ; archive/delete = admin (gate serveur, fail-closed).
+
+async function fetchEngagements() {
+  const d = await api('/engagements');
+  ENGAGEMENTS = (d && Array.isArray(d.engagements)) ? d.engagements : [];
+  return ENGAGEMENTS;
+}
+
+// Choisit un engagement actif VALIDE : celui persisté s'il existe encore, sinon l'actif le plus récent,
+// sinon le 1er. Corrige localStorage si l'id persisté a disparu (engagement supprimé entre-temps).
+function pickActiveEngagement() {
+  const cur = activeEngagement();
+  if (cur != null && ENGAGEMENTS.some(e => e.id === cur)) return cur;
+  const act = [...ENGAGEMENTS].reverse().find(e => e.status === 'active') || ENGAGEMENTS[0];
+  const id = act ? act.id : null;
+  setActiveEngagement(id);
+  return id;
+}
+
+// Peuple le sélecteur header + l'indicateur proéminent (nom · mode [· archivé]).
+function renderEngagementSelector() {
+  const active = pickActiveEngagement();
+  const sel = $('#engagement');
+  if (sel) {
+    sel.replaceChildren();
+    if (!ENGAGEMENTS.length) {
+      const o = document.createElement('option'); o.value = ''; o.textContent = '(aucun engagement)'; sel.appendChild(o);
+    } else {
+      ENGAGEMENTS.forEach(e => {
+        const o = document.createElement('option');
+        o.value = String(e.id);
+        o.textContent = e.name + ' · ' + e.mode + (e.status === 'archived' ? ' [archivé]' : '');
+        sel.appendChild(o);
+      });
+      if (active != null) sel.value = String(active);
+    }
+  }
+  const bar = $('#eng-bar');
+  if (bar) {
+    const e = ENGAGEMENTS.find(x => x.id === active);
+    bar.classList.toggle('archived', !!(e && e.status === 'archived'));
+    bar.title = e ? ('Engagement actif : ' + e.name + ' (' + e.mode + ', ' + e.status + ')') : 'Aucun engagement';
+  }
+}
+
+function reloadCurrentView() {
+  const v = location.hash.slice(1) || 'overview';
+  const fn = LOADERS[VIEWS_HAS(v) ? v : 'overview']; if (fn) fn();
+}
+
+// Recharge la liste d'engagements + le sélecteur, puis (optionnel) recharge la vue courante.
+async function loadEngagementSelector(reloadView) {
+  try { await fetchEngagements(); } catch (e) { /* fail-soft : sélecteur vide */ }
+  renderEngagementSelector();
+  if (reloadView) reloadCurrentView();
+}
+
+// bascule d'engagement actif (sélecteur header OU vue) -> persiste + recharge la vue + les statuts.
+function switchEngagement(id) {
+  setActiveEngagement(id);
+  renderEngagementSelector();
+  reloadCurrentView();
+  if (typeof loadStatuses === 'function') { try { loadStatuses(); } catch (e) {} }
+  const e = ENGAGEMENTS.find(x => x.id === id);
+  if (e) toast('Engagement actif : ' + e.name, 'ok');
+}
+
+const _scopeLines = s => String(s || '').split('\n').map(x => x.trim()).filter(Boolean);
+
+// modale de création (operator) : nom + mode + scope in/out (une entrée par ligne).
+async function engagementCreateModal() {
+  const vals = await modal({
+    title: 'Nouvel engagement', okText: 'Créer', wide: true,
+    message: 'Un nouvel espace de travail ISOLÉ, avec son propre scope (fail-closed) et son propre ledger tamper-evident. Réservé operator.',
+    fields: [
+      { name: 'name', label: 'Nom', type: 'text', required: true, placeholder: 'Client — Q3 pentest' },
+      { name: 'mode', label: 'Mode', type: 'select', value: 'grey', options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
+      { name: 'in_scope', label: 'In-scope (une entrée par ligne — host / *.wildcard / CIDR)', type: 'textarea', placeholder: 'app.example.com\n*.example.com\n10.0.0.0/8' },
+      { name: 'out_scope', label: 'Out-of-scope (optionnel)', type: 'textarea', placeholder: 'admin.example.com' },
+    ],
+  });
+  if (!vals) return;
+  const body = {
+    name: String(vals.name || '').trim(),
+    mode: vals.mode || 'grey',
+    scope_json: { mode: vals.mode || 'grey', in_scope: _scopeLines(vals.in_scope), out_scope: _scopeLines(vals.out_scope) },
+  };
+  try {
+    const r = await fetch('/api/engagements', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 403) { toast('Réservé à un compte operator.', 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    toast('Engagement créé (ledgerisé).', 'ok');
+    await fetchEngagements();
+    if (j.engagement && j.engagement.id) setActiveEngagement(j.engagement.id);
+    renderEngagementSelector();
+    reloadCurrentView();
+    if (location.hash.slice(1) === 'engagements') loadEngagements();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// modale d'édition (operator) : rename + mode + (optionnel) redéfinir le scope.
+async function engagementEditModal(e) {
+  const vals = await modal({
+    title: 'Éditer « ' + e.name + ' »', okText: 'Enregistrer', wide: true,
+    message: 'Renommer / changer le mode / redéfinir le scope. Laisser les zones scope VIDES ne les modifie pas.',
+    fields: [
+      { name: 'name', label: 'Nom', type: 'text', value: e.name, required: true },
+      { name: 'mode', label: 'Mode', type: 'select', value: e.mode, options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
+      { name: 'in_scope', label: 'Redéfinir in-scope (vide = inchangé — une entrée par ligne)', type: 'textarea', placeholder: 'app.example.com' },
+      { name: 'out_scope', label: 'Redéfinir out-of-scope (vide = inchangé)', type: 'textarea' },
+    ],
+  });
+  if (!vals) return;
+  const body = { name: String(vals.name || '').trim(), mode: vals.mode || e.mode };
+  const inl = _scopeLines(vals.in_scope), outl = _scopeLines(vals.out_scope);
+  if (inl.length || outl.length) body.scope_json = { mode: vals.mode || e.mode, in_scope: inl, out_scope: outl };
+  await engagementMutate(e.id, body, 'Engagement mis à jour.');
+}
+
+// mutation POST /api/engagements/:id (edit/archive/activate/delete). operatorHeaders porte X-Forge-Operator
+// ET le bearer de session (admin) : le serveur gate selon l'opération (fail-closed).
+async function engagementMutate(id, body, okMsg) {
+  try {
+    const r = await fetch('/api/engagements/' + id, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 403) { toast('Action non autorisée pour votre rôle.', 'bad'); return false; }
+    if (r.status === 409) { toast(String(j.why || 'opération refusée (fail-closed)'), 'bad'); return false; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return false; }
+    toast(okMsg || 'OK', 'ok');
+    await loadEngagementSelector(true);
+    if (location.hash.slice(1) === 'engagements') loadEngagements();
+    return true;
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); return false; }
+}
+
+// rend la vue #engagements (table + actions : basculer/éditer/archiver-réactiver/supprimer).
+async function loadEngagements() {
+  const host = $('#eg-result'); if (!host) return;
+  try { await fetchEngagements(); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
+  renderEngagementSelector();
+  const active = activeEngagement();
+  if ($('#eg-count')) $('#eg-count').textContent = ENGAGEMENTS.length + ' engagement(s)';
+  if (!ENGAGEMENTS.length) { host.innerHTML = '<div class="muted">aucun engagement</div>'; return; }
+  const table = document.createElement('table'); table.className = 'qtable';
+  table.innerHTML = '<thead><tr><th>#</th><th>Nom</th><th>Mode</th><th>Statut</th><th>Findings</th><th>Runs</th><th>Actions</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  ENGAGEMENTS.forEach(e => {
+    const tr = document.createElement('tr');
+    if (e.id === active) tr.classList.add('eg-active-row');
+    const c = e.counts || {};
+    const isActive = e.status === 'active';
+    tr.innerHTML =
+      '<td class="numcol">' + e.id + '</td>' +
+      '<td>' + esc(e.name) + (e.id === active ? ' <span class="badge">actif</span>' : '') + '</td>' +
+      '<td><code>' + esc(e.mode) + '</code></td>' +
+      '<td><span class="badge ' + (isActive ? 'ok' : 'mut') + '">' + esc(e.status) + '</span></td>' +
+      '<td>' + (c.findings != null ? c.findings : 0) + '</td>' +
+      '<td>' + (c.runs != null ? c.runs : 0) + '</td>' +
+      '<td class="eg-actions"></td>';
+    const act = tr.querySelector('.eg-actions');
+    const mkBtn = (label, cls, title, fn, disabled) => {
+      const b = document.createElement('button'); b.className = cls; b.textContent = label;
+      if (title) b.title = title; if (disabled) b.disabled = true; b.onclick = fn; act.appendChild(b); return b;
+    };
+    mkBtn('Basculer', 'k-theme', 'Rendre cet engagement actif', () => switchEngagement(e.id), e.id === active);
+    mkBtn('Éditer', 'k-theme', 'Renommer / mode / scope (operator)', () => engagementEditModal(e));
+    if (isActive) {
+      mkBtn('Archiver', 'k-theme', 'Archiver (admin) — refusé si dernier actif', async () => {
+        if (await confirmModal('Archiver « ' + e.name + ' » ?', { okText: 'Archiver' })) engagementMutate(e.id, { status: 'archived' }, 'Engagement archivé.');
+      });
+    } else {
+      mkBtn('Réactiver', 'k-theme', 'Réactiver (operator)', () => engagementMutate(e.id, { status: 'active' }, 'Engagement réactivé.'));
+    }
+    if (e.id !== 1) {
+      mkBtn('Supprimer', 'k-theme danger', 'Supprimer (admin) — supprime aussi findings/runs ; refusé si dernier actif', async () => {
+        if (await confirmModal('Supprimer « ' + e.name + ' » et TOUTES ses données (findings/runs) ? Le ledger reste archivé sur disque.', { danger: true, okText: 'Supprimer' })) engagementMutate(e.id, { delete: true }, 'Engagement supprimé.');
+      });
+    }
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  host.replaceChildren(table);
+}
+
+if ($('#engagement')) $('#engagement').addEventListener('change', ev => { const v = parseInt(ev.target.value, 10); if (Number.isInteger(v)) switchEngagement(v); });
+if ($('#eng-new')) $('#eng-new').addEventListener('click', engagementCreateModal);
+if ($('#eg-new2')) $('#eg-new2').addEventListener('click', engagementCreateModal);
+if ($('#eg-reload')) $('#eg-reload').addEventListener('click', loadEngagements);
+
 // ---------------------------------------------------------------------------------
 //  Params SPÉCIFIQUES par module (envoyés dans /api/run body.module_params).
 //  Schéma additif : chaque clé = kind de module ; valeur = liste de champs.
@@ -2596,6 +2825,8 @@ async function submitRun(e) {
   const budgetRaw = ($('#lc-budget') && $('#lc-budget').value || '').trim();
   if (budgetRaw !== '') { const b = Number(budgetRaw); if (!Number.isNaN(b)) body.budget = b; }
   if (reason) body.reason = reason.slice(0, 200);
+  // ENGAGEMENT : le run opère SUR l'engagement actif (son scope + son ledger gouvernent, cf. serveur).
+  { const _eng = activeEngagement(); if (_eng != null) body.engagement_id = _eng; }
 
   // DOUBLE-CONFIRMATION : tout lancement avec allow_high_impact=true exige une validation explicite
   // récapitulant cibles, modules à fort impact, scope (⊆ scope serveur — hors-scope vétoé), et raison.
@@ -3075,6 +3306,8 @@ async function lcApproveAndRun() {
   const reason = ($('#lc-reason') && $('#lc-reason').value || '').trim();
   body.reason = (reason ? reason + ' — ' : '') + `approbation dry-plan (${checked.length} action(s) RECON)`;
   body.reason = body.reason.slice(0, 200);
+  // ENGAGEMENT : le run opère SUR l'engagement actif (son scope + son ledger gouvernent, cf. serveur).
+  { const _eng = activeEngagement(); if (_eng != null) body.engagement_id = _eng; }
   const stat = $('#lc-approvestat'); const btn = $('#lc-approve');
   if (btn) btn.disabled = true; if (stat) stat.textContent = 'lancement…';
   let r, j;
@@ -3918,6 +4151,7 @@ function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAdminDetecti
 // =====================================================================================
 const VIEWS = {
   'ov-summary': 'overview', 'ov-sev': 'overview', 'ov-modules': 'overview',
+  engagements: 'engagements',
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
   import: 'import',
   modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', explore: 'explore',
@@ -3925,7 +4159,7 @@ const VIEWS = {
   admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
 };
 const LOADERS = {
-  overview: loadOverview, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings,
+  overview: loadOverview, engagements: loadEngagements, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings,
   coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
   admin: loadAdmin,
 };
@@ -4261,6 +4495,9 @@ async function bootApp() {
   }
   renderWhoami(w);
   showApp();
+  // ENGAGEMENT ACTIF : charger la liste + le sélecteur AVANT de router (pour que withEngagement porte
+  // l'id dès la 1re vue). Fail-soft : en cas d'échec le sélecteur reste vide et le serveur défaut #1.
+  await loadEngagementSelector();
   loadCampaigns();
   loadStatuses();
   route();
