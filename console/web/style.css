@@ -630,6 +630,42 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .tq-mitre{font-size:10px;color:var(--acc)}
 .tq-tools{font-size:10px;color:var(--mut);font-family:var(--mono,monospace)}
 
+/* WORKFLOWS — cartes de pipelines + builder (catalogue -> étapes ordonnées) */
+#wf-list{display:flex;flex-direction:column;gap:10px}
+.wf-card{background:var(--card2);border:1px solid var(--bd);border-radius:12px;padding:11px 13px;display:flex;flex-direction:column;gap:8px}
+.wf-cardhead{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.wf-name{font-weight:700;color:var(--hd);display:inline-flex;align-items:center;gap:7px;flex-wrap:wrap}
+.wf-cardacts{display:inline-flex;gap:5px;flex-wrap:wrap}
+.wf-cardacts .k-theme{padding:3px 9px;font-size:12px}
+.wf-cardacts .k-theme.danger:hover{border-color:var(--bad);color:var(--bad)}
+.wf-desc{margin:0;font-size:12px;color:var(--mut)}
+.wf-steps{display:flex;flex-wrap:wrap;gap:5px}
+.wf-chip{font-family:var(--font-mono);font-size:11px;padding:2px 8px;border-radius:var(--pill);background:var(--card);border:1px solid var(--bd);color:var(--fg);display:inline-flex;align-items:center;gap:5px}
+.wf-chip.off{opacity:.5;text-decoration:line-through}
+/* builder */
+.wf-builder{width:min(920px,96vw)}
+.wf-metarow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.wf-fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mut)}
+.wf-fld-grow{flex:1;min-width:220px}
+.wf-fld input{background:var(--card2);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:7px 9px;font-size:13px}
+.wf-fld input:disabled{opacity:.6}
+.wf-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.wf-cols{grid-template-columns:1fr}}
+.wf-cat,.wf-stcol{background:var(--card2);border:1px solid var(--bd);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:120px}
+.wf-colh{font-size:11px;color:var(--mut);font-weight:600;border-bottom:1px solid var(--bd);padding-bottom:6px}
+.wf-catbody,.wf-stbody{display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow:auto}
+.wf-catgrp{display:flex;flex-direction:column;gap:3px}
+.wf-catname{font-size:11px;color:var(--acc);font-weight:700;margin-top:4px}
+.wf-add{text-align:left;background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:4px 8px;color:var(--fg);cursor:pointer;font-size:12px;font-family:var(--font-mono)}
+.wf-add:hover{border-color:var(--acc);color:var(--acc)}
+.wf-add.off{opacity:.5}
+.wf-step{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:5px 7px;flex-wrap:wrap}
+.wf-stepkind{font-family:var(--font-mono);font-size:12px;color:var(--fg);display:inline-flex;align-items:center;gap:5px;flex:1;min-width:120px}
+.wf-stepkind.off{opacity:.55}
+.wf-stepparams{flex:1;min-width:150px;background:var(--card2);border:1px solid var(--bd);border-radius:7px;color:var(--fg);padding:4px 7px;font-size:11px;font-family:var(--font-mono)}
+.wf-stepctl{display:inline-flex;gap:3px}
+.wf-stepctl .k-theme{padding:2px 8px;font-size:12px;min-width:28px;justify-content:center}
+
 /* couverture ATT&CK : barre runs + sur-barre "fired" */
 .bartrack{position:relative}
 .barfill.fired{position:absolute;top:0;left:0;height:100%;background:linear-gradient(90deg,var(--sev3),color-mix(in srgb,var(--sev3) 60%,transparent));opacity:.85}

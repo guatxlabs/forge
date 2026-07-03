@@ -42,6 +42,7 @@ from . import console_client
 from . import collectors
 from . import modules as mods
 from . import techniques
+from . import workflows
 
 
 def _load_actions(path):
@@ -120,6 +121,13 @@ def _load_targets(path):
     return out
 
 
+def _workflows_path(args):
+    """Chemin du fichier de workflows UTILISATEUR : `--workflows PATH` sinon env `FORGE_WORKFLOWS_FILE`
+    sinon "" (builtins seuls — WorkflowStore.load tolère un chemin absent). Les workflows INTÉGRÉS sont
+    toujours disponibles sans fichier (dérivés du registre)."""
+    return getattr(args, "workflows", None) or os.environ.get("FORGE_WORKFLOWS_FILE", "")
+
+
 def cmd_campaign(args):
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
@@ -136,13 +144,38 @@ def cmd_campaign(args):
     modules = [m.strip() for m in (args.modules or "").split(",") if m.strip()] or None
     # params par-module globaux : exposés par Scope (plus de double-lecture du scope.json) ;
     # les params par-cible vivent dans targets.json[].attrs.module_params (chargés via _load_targets).
-    module_params = scope.module_params
+    module_params = dict(scope.module_params or {})
+    auto_pentest = getattr(args, "auto_pentest", False)
+    # --workflow NAME : lance EXACTEMENT les étapes d'un workflow SAUVEGARDÉ (pipeline composé sans code).
+    # Un workflow est une PROPOSITION : ses kinds RESTREIGNENT le plan (--modules) et ses params par-étape
+    # enrichissent module_params, MAIS le scope-guard + la sélection par-scope restent seuls JUGES —
+    # `resolve()` FILTRE les étapes par l'ensemble EFFECTIF activé du scope (une étape hors-scope/
+    # désactivée est LARGUÉE, fail-closed), et l'engine ré-enforce `enabled_kinds` + ROE au tir (défense
+    # en profondeur). On force le balayage auto-pentest pour que CHAQUE étape activée soit bien proposée.
+    if getattr(args, "workflow", None):
+        store = workflows.WorkflowStore.load(_workflows_path(args))
+        wf = store.get(args.workflow)
+        if wf is None:
+            raise SystemExit(f"forge campaign : workflow inconnu '{args.workflow}' "
+                             f"(disponibles : {', '.join(sorted(store.list()))})")
+        enabled = scope.effective_technique_kinds()
+        kept, dropped = workflows.resolve(wf, enabled)
+        modules = workflows.step_kinds(wf) or None     # la PROPOSITION (l'engine larguera les désactivées)
+        for kind, p in workflows.workflow_module_params(wf).items():
+            merged = dict(module_params.get(kind, {})); merged.update(p or {}); module_params[kind] = merged
+        auto_pentest = True
+        print(f"# Workflow '{wf['name']}' — {len(kept)} étape(s) activée(s) pour ce scope, "
+              f"{len(dropped)} larguée(s) (hors-scope/désactivée, fail-closed).")
+        if kept:
+            print("  Activées : " + ", ".join(s["kind"] for s in kept))
+        if dropped:
+            print("  Larguées : " + ", ".join(s["kind"] for s in dropped))
     # --auto-pentest : MODE PENTEST AUTOMATISÉ — balaie TOUTES les techniques ACTIVÉES du scope à
     # travers la surface découverte (recon -> chaînage -> oracles), gouverné à l'identique (scope-guard,
     # plancher exploit, ledger). Sinon cerveau heuristique standard. L'ensemble balayé = l'effective set
     # du scope (profil + toggles) -> respecte la sélection par-scope sans câblage par-technique.
     brain = (AutoPentestBrain(scope.effective_technique_kinds())
-             if getattr(args, "auto_pentest", False) else HeuristicBrain())
+             if auto_pentest else HeuristicBrain())
     engine.campaign(targets, brain, planner,
                     modules=modules, module_params=module_params)
     if ledger is not None:                 # scelle la fin de campagne : checkpoint (ancré si anchor configuré)
@@ -333,6 +366,40 @@ def cmd_techniques(args):
     out = {"profile": profile, "profiles": list(techniques.PROFILE_NAMES),
            "selection": sel, "enabled": sorted(enabled),
            "groups": {c: groups[c] for c in sorted(groups)}}
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_workflows(args):
+    """Workflows sauvegardés (pipelines composés) — DÉRIVÉS du registre pour les INTÉGRÉS + fichier
+    UTILISATEUR optionnel. C'est LA vue consommée par `GET /api/workflows` (la console) et l'opérateur
+    CLI. Chaque workflow porte {name, description, builtin, steps:[{kind, params}], step_kinds}.
+    Sortie JSON : {builtins:[...], workflows:[...]} (builtins = intégrés dérivés ; workflows = utilisateur).
+    Avec `--resolve @scope.json`, ajoute par workflow `kept`/`dropped` (l'aperçu fail-closed : quelles
+    étapes seraient activées/larguées pour ce scope)."""
+    store = workflows.WorkflowStore.load(_workflows_path(args))
+    enabled = None
+    if getattr(args, "resolve", None):
+        try:
+            enabled = Scope.load(args.resolve.lstrip("@")).effective_technique_kinds()
+        except Exception:                              # noqa: BLE001 — scope illisible -> pas d'aperçu
+            enabled = None
+
+    def _row(wf):
+        row = {"name": wf["name"], "description": wf.get("description", ""),
+               "builtin": bool(wf.get("builtin")), "steps": wf.get("steps", []),
+               "step_kinds": workflows.step_kinds(wf), "step_count": len(wf.get("steps", []))}
+        if enabled is not None:
+            kept, dropped = workflows.resolve(wf, enabled)
+            row["kept"] = [s["kind"] for s in kept]
+            row["dropped"] = [s["kind"] for s in dropped]
+        return row
+
+    builtins = workflows.builtin_workflows()
+    out = {
+        "builtins": [_row(builtins[n]) for n in sorted(builtins)],
+        "workflows": [_row(store.user[n]) for n in sorted(store.user)],
+    }
     print(json.dumps(out))
     return 0
 
@@ -654,6 +721,67 @@ def _configured_source():
     return None
 
 
+def _parse_map(spec):
+    """Parse un mapping de colonnes générique 'target=host,title=name,severity=risk' -> dict.
+    None/'' -> None (aucun remappage). Ignore les entrées mal formées (fail-safe, jamais de crash)."""
+    if not spec:
+        return None
+    out = {}
+    for pair in str(spec).split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k and v:
+                out[k] = v
+    return out or None
+
+
+def cmd_import(args):
+    """`forge import` — ingère une SORTIE DE SCANNER EXISTANTE (nmap/nuclei/burp/httpx/ffuf/hosts/
+    generic-json/generic-csv) en findings Forge ORIENTÉS PREUVE (jamais `vulnerable` : scanner ->
+    `reported_by_tool`, recon -> `tested`). Auto-détecte le format (`--format auto`/défaut). Les secrets
+    du fichier sont RÉDIGÉS avant tout finding. Avec `--scope`, applique le SCOPE-GUARD (`roe.Scope`) :
+    les findings HORS périmètre sont JETÉS (défaut) ou MARQUÉS (`--flag-out-of-scope`, status=skipped).
+
+    Sortie : `--json` -> enveloppe {format, counts, findings} ; sinon résumé lisible. `--console URL`
+    (+ `--console-token`) ingère aussi les findings dans la console (POST /api/ingest). PUR DATA — zéro
+    exécution, zéro I/O réseau de scan (le fichier est déjà produit). Codes : 0 OK, 2 erreur."""
+    from . import importers
+    path = Path(args.file)
+    if not path.exists():
+        raise SystemExit(f"forge import : fichier introuvable: {args.file}")
+    try:
+        fmt, findings = importers.parse_file(path, fmt=(args.format or "auto"),
+                                             mapping=_parse_map(getattr(args, "map", None)))
+    except ValueError as e:
+        raise SystemExit(f"forge import : {e}")
+    counts = {"parsed": len(findings), "in_scope": None, "out_of_scope": None, "emitted": len(findings)}
+    if args.scope:
+        scope = Scope.load(args.scope)
+        findings, counts = importers.scope_filter(
+            findings, scope, flag_out_of_scope=getattr(args, "flag_out_of_scope", False))
+    envelope = {"format": fmt, "counts": counts, "findings": [f.to_dict() for f in findings]}
+    if args.console:
+        try:
+            st, _resp = console_client.ingest(args.campaign, findings, [],
+                                              url=args.console, token=args.console_token)
+            envelope["console"] = {"status": st}
+        except Exception as e:  # noqa: BLE001 — l'ingest console ne doit pas faire échouer le parse
+            envelope["console"] = {"error": repr(e)}
+    if getattr(args, "json", False):
+        print(json.dumps(envelope))
+        return 0
+    print(f"# forge import — format={fmt} fichier={args.file}")
+    print(f"parsed={counts['parsed']} in_scope={counts['in_scope']} "
+          f"out_of_scope={counts['out_of_scope']} emitted={counts['emitted']}")
+    for f in findings[:500]:
+        print(f"  [{f.severity:8}] {f.status:16} {f.tool:16} {f.target}  {f.title}")
+    if "console" in envelope:
+        print(f"Console <- ingest: {envelope['console']}")
+    return 0
+
+
 def cmd_doctor(args):
     """Diagnostic : pour chaque module, dit s'il est OPÉRATIONNEL (sonde `.available`) et
     rappelle l'outil/service attendu + l'astuce d'install/config. Ne tire RIEN, ne touche pas
@@ -768,6 +896,8 @@ def build_parser():
     cp.add_argument("--auto-pentest", dest="auto_pentest", action="store_true",
                     help="mode pentest automatisé : balaie TOUTES les techniques ACTIVÉES du scope (profil+toggles) sur la surface découverte, gouverné à l'identique")
     cp.add_argument("--modules", help="liste de kinds (séparés par des virgules) restreignant le plan ; vide = plan complet du cerveau")
+    cp.add_argument("--workflow", help="nom d'un workflow SAUVEGARDÉ : lance EXACTEMENT ses étapes (techniques+params), filtrées par l'ensemble activé du scope + ROE (fail-closed)")
+    cp.add_argument("--workflows", help="fichier JSON de workflows utilisateur (sinon env FORGE_WORKFLOWS_FILE ; les workflows intégrés sont toujours disponibles)")
     cp.add_argument("--ledger"); cp.add_argument("--report"); cp.add_argument("--purple")
     cp.add_argument("--reason"); cp.add_argument("--memory")
     cp.add_argument("--campaign", default="default"); cp.add_argument("--console"); cp.add_argument("--console-token")
@@ -787,10 +917,26 @@ def build_parser():
     tq.add_argument("--json", action="store_true", help="sortie JSON (défaut : toujours JSON pour cette commande)")
     tq.add_argument("--selection", help="sélection par-scope : env:NOM | @fichier | JSON littéral {profile,techniques,categories} ; sinon env FORGE_TECHNIQUE_SELECTION")
     tq.set_defaults(fn=cmd_techniques)
+    wf = sub.add_parser("workflows", help="workflows sauvegardés (pipelines composés) : intégrés (dérivés du registre) + fichier utilisateur (JSON)")
+    wf.add_argument("--json", action="store_true", help="sortie JSON (défaut : toujours JSON pour cette commande)")
+    wf.add_argument("--workflows", help="fichier JSON de workflows utilisateur (sinon env FORGE_WORKFLOWS_FILE)")
+    wf.add_argument("--resolve", help="@scope.json : ajoute par workflow l'aperçu kept/dropped pour ce scope (fail-closed)")
+    wf.set_defaults(fn=cmd_workflows)
     dc = sub.add_parser("doctor"); dc.add_argument("--json", action="store_true")
     dc.add_argument("--purple", action="store_true", help="préflight boucle purple : console /health + Plume /api/coverage/detections (lecture seule)")
     dc.add_argument("--timeout", type=float, default=8.0, help="timeout (s) des sondes HTTP du préflight --purple")
     dc.set_defaults(fn=cmd_doctor)
+    im = sub.add_parser("import", help="ingère une sortie de scanner existante (nmap/nuclei/burp/httpx/ffuf/hosts/generic) en findings orientés preuve")
+    im.add_argument("--format", default="auto", help="nmap|nuclei|burp|httpx|ffuf|hosts|generic-json|generic-csv|auto (défaut: auto-détection)")
+    im.add_argument("--file", required=True, help="chemin du fichier de scan à importer")
+    im.add_argument("--scope", help="scope.json : applique le scope-guard (findings hors périmètre jetés, ou marqués avec --flag-out-of-scope)")
+    im.add_argument("--flag-out-of-scope", dest="flag_out_of_scope", action="store_true", help="conserver les findings hors-scope en les NEUTRALISANT (status=skipped, marqués) au lieu de les jeter")
+    im.add_argument("--campaign", default="default", help="nom de campagne (pour --console)")
+    im.add_argument("--map", help="mapping de colonnes générique: 'target=host,title=name,severity=risk,cwe=weakness'")
+    im.add_argument("--json", action="store_true", help="sortie JSON enveloppe {format, counts, findings}")
+    im.add_argument("--console", help="URL console pour ingérer aussi les findings (POST /api/ingest)")
+    im.add_argument("--console-token", dest="console_token", help="token bearer console (sinon env FORGE_CONSOLE_TOKEN)")
+    im.set_defaults(fn=cmd_import)
     dm = sub.add_parser("demo"); dm.set_defaults(fn=cmd_demo)
     de = sub.add_parser("detections")
     de.add_argument("--source", required=True, help="config de source : env:NOM | @fichier | JSON littéral (voie privilégiée: env, pour ne pas fuiter le secret via argv)")
