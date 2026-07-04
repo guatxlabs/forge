@@ -150,7 +150,7 @@ RUN set -eux; \
         name="$1"; ver="$2"; sha="$3"; \
         if [ -z "${sha}" ]; then echo "[forge] FATAL: pin SHA256 absent pour ${name}/${TARGETARCH} — refus de télécharger non vérifié." >&2; exit 1; fi; \
         url="${base}/${name}/releases/download/v${ver}/${name}_${ver}_linux_${TARGETARCH}.zip"; \
-        curl -fsSL "$url" -o "/tmp/${name}.zip"; \
+        curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors --connect-timeout 30 --max-time 300 "$url" -o "/tmp/${name}.zip"; \
         echo "${sha}  /tmp/${name}.zip" | sha256sum -c -; \
         unzip -o "/tmp/${name}.zip" "${name}" -d /usr/local/bin/; \
         chmod +x "/usr/local/bin/${name}"; \
