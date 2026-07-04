@@ -170,8 +170,68 @@ core never depends on it.
   **time-boxed per-engagement grants**, build on the `rbac.rs` mapping above (roadmap).
 - **High availability & scale** — **HA / clustering / distributed store** (Postgres instead of
   single-node SQLite), horizontal scale-out.
-- **Compliance** — **SOC2 / ISO evidence** exports, **legal-hold / WORM retention**, and **KMS/HSM-backed
-  keys** (hardware-rooted signing/encryption).
+- **Compliance — legal-hold / WORM retention** *(implemented — `console/src/compliance.rs` +
+  `forge/compliance_signer.py`, flag-gated)*: a **retention policy** (a configurable retention duration for
+  the audit trail + findings/runs) settable **per global / per tenant / per engagement** (most-specific
+  wins), and a **legal-hold** flag (per global/tenant/engagement) that **blocks any deletion/purge
+  regardless of retention** — **hold always wins** (fail-closed). **WORM enforcement**: while a ledger
+  record is under retention *or* under legal-hold it **cannot be deleted, altered, or purged**. A
+  **governed purge** (`POST /api/compliance/purge`, admin) is allowed **only** when retention has **expired**
+  **and** there is **no hold**, and it **never silently deletes**: it (a) **archives the expired segment
+  first — encrypted**, reusing the backup discipline (`backup_encrypt`, XChaCha20-Poly1305 + argon2id),
+  then (b) **re-anchors** the ledger and records a **signed checkpoint ledger event
+  `console.compliance.purge`** (counts, segment SHA-256, encrypted-archive SHA-256, purged head, time,
+  actor). The **remaining chain stays verifiable** under the **existing** verifier
+  (`crate::verify_ledger_chain`) *and* the Python `Ledger.verify` — the surviving entries' audited content
+  is byte-preserved (only their `prev`/`hash` are re-linked), so **tamper-evidence and Ed25519 verify are
+  untouched**. **Fail-closed corner**: a purge **refuses** (409 `signed_survivor`) if any *surviving* entry
+  is Ed25519/HMAC-signed (re-hashing it would break its signature) and **refuses** (400) if no archive key
+  is configured (never an unrecoverable delete). The **pluggable checkpoint signer**
+  (`forge/compliance_signer.py`) keeps **verify byte-identical** to `signing.verify_with_pubkey` and exposes
+  a **KMS/HSM seam** (`CallableComplianceSigner`) so a hardware-rooted signer plugs in without changing the
+  verify path. It is engaged only by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or DB config key
+  `enterprise.compliance=on`). **DEFAULT (community) build: flag OFF ⇒ every `/api/compliance/*` route is
+  disabled (404), WORM/retention/hold are inert, and the ledger + engagement data are byte-identical** (all
+  existing tests green). The module is separable — `console/src/compliance.rs` (+ a `mod compliance;` line,
+  one route merge, one SPA flag, and a flag-gated delete/archive WORM guard in `main.rs`); the open core
+  never depends on it.
+- **Compliance — pluggable ledger signer (KMS/HSM/remote key)** *(implemented — `forge/signing.py`,
+  flag-gated)*: the audit ledger's **Ed25519 private key can live OFF-HOST** — in a KMS/HSM, a remote signer
+  endpoint, or a **no-shell `exec` helper** — so the private key **never lands on disk**. Selected by config
+  (`FORGE_LEDGER_SIGNER` = `local` | `kms` | `hsm` | `http` | `remote` | `exec`, plus
+  `FORGE_LEDGER_SIGNER_{ENDPOINT,CREDENTIAL,PUBKEY,ARGV,TIMEOUT}`) and gated by
+  **`FORGE_ENTERPRISE_COMPLIANCE=1`**. A `RemoteSigner` produces a **standard Ed25519 signature over the same
+  bytes**, so **verify is UNCHANGED** — `Ledger.verify` / `Ledger.verify_external(pubkey)` /
+  `signing.verify_with_pubkey` accept it with the **public key alone**, byte-identical regardless of who
+  signed. **Fail-closed & no-fallback**: an unreachable/misconfigured/non-verifying remote signer **raises
+  `RemoteSignerError`** and the append aborts — Forge **never** writes an unsigned or insecure entry and
+  **never** silently downgrades to the local key (a remote signer requested without the enterprise flag is
+  refused). **Secrets**: the endpoint/credential/argv are **redacted** (`redact_signer_config`) and never
+  logged/ledgered/leaked (not even in error messages or `repr`); the `exec` signer is **no-shell** (fixed,
+  admin-configured argv — a shell string is rejected). **DEFAULT (community) build**: nothing configured ⇒
+  `make_ledger_signer` returns the **`LocalFileSigner`** (the on-disk `<ledger>.ed25519` key) — **byte-identical
+  to before** (all existing ledger tests green). Separable — the whole seam is additive in `forge/signing.py`
+  (`LocalFileSigner`, `RemoteSigner`, `make_ledger_signer`); the open core's default path is unchanged.
+- **Compliance — SOC 2 / ISO 27001 evidence export** *(implemented — `console/src/compliance.rs`,
+  flag-gated)*: a **read-only** evidence bundle for a **tenant / engagement / timeframe**, assembled from the
+  **existing** ledger + RBAC + backup state (it **never mutates** any data). It contains the **authorization
+  audit trail** (who authorized what, when, on which scope — mined from the tamper-evident ledger), the
+  **RBAC / grant state** (console accounts, tenant grants, IdP group→role mappings for *this* tenant), the
+  **access / mutation log**, the **backup attestation** (restore-**proven**, from the console ledger), and the
+  **ledger integrity attestation** — **head hash + Ed25519 public key + chain-verify result + an external
+  `forge ledger verify` command** (verification needs the **public key alone**; no secret is included).
+  `GET /api/compliance/evidence?engagement_id=&format=json|html|pdf&from=&to=` (admin) returns **JSON** or a
+  **human-readable HTML** (the HTML **degrades to `?format=html` + print-to-PDF** when no PDF engine is on the
+  host — same `render_pdf_from_html` seam as the branded report). The bundle is **tenant/engagement-isolated**
+  (only that engagement's ledger + counts, only that tenant's grants) and **secret-redacted** end-to-end
+  (passphrases / tokens / credentials / `client_secret` / private keys → `[REDACTED]`; **public keys are
+  preserved**). The **act of exporting is itself ledgered** (`console.compliance.evidence.export` — actor,
+  scope, format, ledger head, chain-ok). Engaged only by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or DB config
+  `enterprise.compliance=on`); **community (flag OFF) ⇒ the route 404s and nothing changes**.
+- **Compliance (further)** — **KMS/HSM-backed keys** are now available for both the **audit-ledger signer**
+  (`forge/signing.py` `RemoteSigner`, above) and the **compliance checkpoint signer**
+  (`forge/compliance_signer.py` `CallableComplianceSigner`); hardware-rooted **encryption** (backup/archive at
+  rest) is the remaining seam.
 - **Premium connectors** — additional/commercial tool and platform integrations.
 - **Support & SLA** — commercial support, response-time guarantees, and roadmap influence.
 
