@@ -65,14 +65,18 @@ def _entry_hash(prev, seq, ts, kind, detail):
 
 
 class Ledger:
-    def __init__(self, path, key=None, signer=None, prefer_ed25519=True, anchor=None):
+    def __init__(self, path, key=None, signer=None, prefer_ed25519=True, anchor=None, signer_config=None):
         self.path = Path(path)
         if signer is not None:
             self.signer = signer
         elif key is not None:                       # rétro-compat : clé fournie => HMAC
             self.signer = signing.HmacSigner(key)
         else:
-            self.signer = signing.make_signer(self.path, prefer_ed25519=prefer_ed25519)
+            # PLUGGABLE signer seam (E3): default = LocalFileSigner (community, byte-identical) ; an operator
+            # may select a remote KMS/HSM/exec signer via `signer_config` or env (flag-gated). With no config
+            # and no env the returned signer is exactly today's local Ed25519/HMAC — nothing changes.
+            self.signer = signing.make_ledger_signer(
+                self.path, prefer_ed25519=prefer_ed25519, config=signer_config)
         self.alg = self.signer.alg
         self.anchor = anchor                        # anchor.Anchor | None — ancrage hors-host
         self._head = GENESIS

@@ -67,6 +67,14 @@ mod scim;
 // least-privilege: an SSO/SCIM identity gets ONLY what its group mapping confers, NEVER super-admin. Wired
 // as its OWN module (minimal main.rs delta = this line + one route merge). See COMMUNITY_VS_ENTERPRISE.md.
 mod rbac;
+// ENTERPRISE (separable, flag-gated) — E3 COMPLIANCE: WORM / retention / legal-hold on the audit ledger +
+// engagement data. Community (default) build never engages it (compliance::enabled() OFF => every
+// /api/compliance/* route 404s, WORM/retention/hold inert, ledger + data byte-identical). A GOVERNED purge
+// (behind FORGE_ENTERPRISE_COMPLIANCE / enterprise.compliance) archives the expired ledger segment ENCRYPTED
+// (reusing the backup discipline) then re-anchors + emits a signed `console.compliance.purge` checkpoint so
+// the chain stays verifiable — NEVER a silent delete. Wired as its OWN module (this line + one route merge +
+// one SPA flag + a flag-gated delete guard). See COMMUNITY_VS_ENTERPRISE.md + forge/compliance_signer.py.
+mod compliance;
 
 // Version produit — SOURCE DE VÉRITÉ UNIQUE : le fichier `VERSION` à la racine du repo, lu à la
 // COMPILATION (`include_str!`). Le même fichier alimente le moteur Python (forge/__init__.py) et
@@ -1289,6 +1297,7 @@ async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse
         "sso": sso::enabled(&app),
         "scim": scim::enabled(&app),
         "rbac": rbac::enabled(&app),
+        "compliance": compliance::enabled(&app),
     });
     match resolve_identity(&app, &headers) {
         Some(id) => Json(json!({
@@ -6971,6 +6980,24 @@ async fn engagements_update(
     if tenancy::enabled(&app) && !tenancy::engagement_visible(&app, &headers, id) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
+    // ENTERPRISE (E3 COMPLIANCE, flag-gated) WORM : un LEGAL-HOLD bloque la suppression ET l'archivage,
+    // quelle que soit la rétention (hold always wins, fail-closed). INERTE (None) tant que le flag compliance
+    // est OFF => community byte-identique. Ne touche que delete/archive (édition/activation non concernées).
+    if is_delete || archiving {
+        if let Some(scope) = compliance::deletion_blocked(&app, id) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "legal_hold", "why": format!("legal hold ({scope}) en vigueur — suppression/archivage bloqué (WORM, fail-closed)")})),
+            )
+                .into_response();
+        }
+        // ENTERPRISE (E3 COMPLIANCE, flag-gated) WORM : la RÉTENTION gagne aussi sur delete/archive, exactement
+        // comme sur purge — un enregistrement ledgerisé ENCORE dans la fenêtre de rétention ne peut être détruit.
+        // INERTE (None) tant que le flag compliance est OFF => community byte-identique.
+        if let Some(why) = compliance::retention_blocked(&app, id) {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "retention", "why": why}))).into_response();
+        }
+    }
     let actor = attribution_login(&app, &headers);
     let res = if is_delete {
         engagement_do_delete(&app, id, &actor)
@@ -9754,6 +9781,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // (aucune surface d'administration tenant). La lecture cross-tenant du super-admin (audité) vit dans
         // les résolveurs tenancy déjà câblés — pas de nouvelle route pour ça.
         .merge(tenancy::routes())
+        // ENTERPRISE (separable, flag-gated) — E3 COMPLIANCE surface (console/src/compliance.rs) : retention
+        // policy + legal-hold config (admin) + the GOVERNED WORM purge, all `console.compliance.*` ledgered.
+        // Merged AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route 404
+        // (not_found) tant que le flag n'est pas engagé => community byte-identique (aucune surface compliance).
+        .merge(compliance::routes())
         .fallback_service(ServeDir::new(web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     Router::new()

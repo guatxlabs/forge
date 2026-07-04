@@ -212,6 +212,10 @@
          sso|scim=true) ET que le caller est admin (applyIdentityUi le dé-masque). Le serveur reste
          l'autorité (routes gatées flag + check_admin -> 404/403) — masquage = défense en profondeur. -->
     <a href="#identity" id="nav-identity" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/><path d="M5 21a7 7 0 0 1 14 0"/></svg> <span>Identité / SSO</span></a>
+    <!-- COMPLIANCE (ENTERPRISE, flag-gated) : lien affiché UNIQUEMENT quand whoami.enterprise.compliance=true
+         ET caller admin (applyComplianceUi le dé-masque). Le serveur reste l'autorité (routes flag + check_admin
+         -> 404/403) — masquage = défense en profondeur. En community (flag OFF) : aucun lien, aucune vue. -->
+    <a href="#compliance" id="nav-compliance" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Compliance</span></a>
   </nav>
 <main>
   <!-- VUE D'ENSEMBLE -->
@@ -714,6 +718,63 @@
         <label class="login-f"><span>Rôle tenant <span class="muted">(optionnel)</span></span><select id="id-map-trole"><option value="">— (dérivé du rôle)</option><option value="tenant_viewer">tenant_viewer</option><option value="tenant_operator">tenant_operator</option><option value="tenant_admin">tenant_admin</option></select></label>
         <div id="id-map-err" class="login-err" role="alert" hidden></div>
         <button type="submit" class="login-btn id-btn">Ajouter / Mettre à jour le mapping</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- COMPLIANCE (ENTERPRISE, flag-gated) — vue #compliance : (1) politique de rétention (global/tenant/
+       engagement), (2) legal-hold (toggle, hold gagne toujours), (3) signer du ledger KMS/HSM (rédigé,
+       lecture seule), (4) export de PREUVES SOC 2 / ISO (engagement + fenêtre temporelle + format). Réservé
+       admin + flag engagé (complianceAdmin()). Le serveur reste l'autorité (routes flag+admin -> 404/403).
+       En community (flag OFF) : aucun lien, aucune vue, ledger/données byte-identiques. -->
+  <section id="compliance" class="card span2" aria-labelledby="cmp-h">
+    <div class="panelhead">
+      <h2 id="cmp-h">Compliance <span class="badge" title="ENTERPRISE — WORM / rétention / legal-hold + preuves SOC 2 / ISO">enterprise</span></h2>
+      <span class="qbar"><button id="cmp-reload" class="k-theme" type="button" title="Recharger la politique + le signer (secrets rédigés)">Rafraîchir</button></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px"><b>WORM / rétention / legal-hold</b> sur le ledger tamper-evident + les données d'engagement, et export de <b>preuves d'audit SOC 2 / ISO 27001</b>. La rétention est <b>la plus spécifique</b> (engagement → tenant → global) ; un <b>legal-hold</b> (à n'importe quel niveau) <b>bloque toute purge/suppression</b> — le hold <b>gagne toujours</b> (fail-closed). Chaque mutation est <b>attribuée</b> et <b>ledgerisée</b>. Les secrets (clé d'archive, endpoint/credential du signer) sont <b>rédigés</b> : jamais affichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, ledger/données inchangés.</p>
+
+    <!-- (1) POLITIQUE DE RÉTENTION + (2) LEGAL-HOLD (par scope) -->
+    <div class="id-card">
+      <h3 class="id-h3">Politique de rétention &amp; legal-hold</h3>
+      <form id="cmp-policy-form" class="id-form" autocomplete="off">
+        <div class="id-row">
+          <label class="login-f"><span>Scope</span><select id="cmp-scope"><option value="global">global</option><option value="tenant">tenant</option><option value="engagement" selected>engagement</option></select></label>
+          <label class="login-f"><span>id <span class="muted">(tenant/engagement)</span></span><input id="cmp-scope-id" type="number" min="1" value="1"></label>
+          <label class="login-f"><span>Rétention (secondes, 0/vide = illimité)</span><input id="cmp-retention" type="number" min="0" placeholder="ex. 220752000 (7 ans)"></label>
+        </div>
+        <div id="cmp-policy-err" class="login-err" role="alert" hidden></div>
+        <div class="id-row">
+          <button type="submit" class="login-btn id-btn">Enregistrer la rétention</button>
+          <button id="cmp-hold-on" type="button" class="k-theme" title="Placer un legal-hold sur ce scope (bloque toute purge)">Placer un legal-hold</button>
+          <button id="cmp-hold-off" type="button" class="k-theme" title="Lever le legal-hold sur ce scope">Lever le legal-hold</button>
+        </div>
+      </form>
+      <div id="cmp-policy-state" class="muted" style="margin-top:8px">chargement…</div>
+    </div>
+
+    <!-- (3) SIGNER DU LEDGER (KMS / HSM) — RÉDIGÉ, LECTURE SEULE -->
+    <div class="id-card">
+      <h3 class="id-h3">Signer du ledger d'audit (KMS / HSM) <span id="cmp-signer-badge" class="badge"></span></h3>
+      <p class="muted" style="margin:0 0 8px">La clé privée Ed25519 du ledger peut vivre <b>hors-hôte</b> (KMS/HSM/exec). La <b>vérification</b> n'utilise que la <b>clé publique</b> ; l'endpoint / le credential / l'argv sont <b>secrets</b> — jamais affichés (seul un booléen <code>*_set</code> l'indique). Configuration en lecture seule (via variables d'environnement <code>FORGE_LEDGER_SIGNER*</code>).</p>
+      <div id="cmp-signer" class="muted">—</div>
+    </div>
+
+    <!-- (4) EXPORT DE PREUVES SOC 2 / ISO — engagement + fenêtre + format -->
+    <div class="id-card">
+      <h3 class="id-h3">Export de preuves (SOC 2 / ISO 27001)</h3>
+      <p class="muted" style="margin:0 0 8px">Bundle <b>lecture seule</b> (ne modifie rien) : piste d'audit d'<b>autorisation</b>, état <b>RBAC</b>, journal d'<b>accès/mutation</b>, attestation de <b>sauvegarde</b> (restore-prouvé) et attestation d'<b>intégrité du ledger</b> (head hash + clé publique Ed25519 + résultat de vérification). <b>Isolé</b> par tenant/engagement, <b>secrets rédigés</b>. L'export est lui-même <b>ledgerisé</b>.</p>
+      <form id="cmp-evidence-form" class="id-form" autocomplete="off">
+        <div class="id-row">
+          <label class="login-f"><span>Engagement</span><select id="cmp-ev-engagement"></select></label>
+          <label class="login-f"><span>Format</span><select id="cmp-ev-format"><option value="json">JSON</option><option value="html">HTML</option><option value="pdf">PDF</option></select></label>
+        </div>
+        <div class="id-row">
+          <label class="login-f"><span>De <span class="muted">(optionnel)</span></span><input id="cmp-ev-from" type="datetime-local"></label>
+          <label class="login-f"><span>À <span class="muted">(optionnel)</span></span><input id="cmp-ev-to" type="datetime-local"></label>
+        </div>
+        <div id="cmp-ev-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Exporter les preuves</button>
       </form>
     </div>
   </section>
