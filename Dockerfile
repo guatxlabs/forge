@@ -64,6 +64,10 @@ WORKDIR /build
 # On reproduit l'arborescence relative attendue : /build/forge/console -> ../../core = /build/core.
 COPY core/ ./core/
 COPY forge/console/ ./forge/console/
+# VERSION vit à la racine du crate (`forge/`) : la console la lit à la COMPILATION via
+# `include_str!(CARGO_MANIFEST_DIR "/../VERSION")` = /build/forge/VERSION. Il faut donc la
+# copier explicitement (elle n'est pas sous forge/console/ que COPY ci-dessus embarque).
+COPY forge/VERSION ./forge/VERSION
 
 WORKDIR /build/forge/console
 
