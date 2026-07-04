@@ -41,3 +41,10 @@ Aujourd'hui les outils de sécurité externes (httpx, nuclei, subfinder ; nmap e
 - Fix build préalable : `COPY forge/VERSION` (build cassé car `include_str!` compile-time cherchait `/build/forge/VERSION` absent) — commit `fc903fe`.
 - Durcissement du download d'outils au build (curl `--http1.1` + retries) suite au flake réseau HTTP/2 — même lot que cette roadmap.
 - Résidu connexe hors-scope : le `pip install weasyprint` du stage runtime n'a PAS de retry et a flaké une fois (read-timeout PyPI) ; candidat au même traitement plus tard.
+
+## Résidus egress / robustesse réseau (à surveiller)
+L'hôte de build a un **egress instable** (deux flakes observés le 2026-07-04 : `curl (18)` HTTP/2 partial-file sur le download des outils ProjectDiscovery, et un read-timeout PyPI sur `pip install`). Deux points consignés :
+
+1. **`pip install weasyprint` sans retry.** Le stage runtime installe weasyprint (PDF) via `pip install` **sans** politique de retry/timeout, contrairement au download curl des outils désormais durci. Il a flaké une fois (read-timeout `files.pythonhosted.org`). **Pas encore corrigé — hors scope du lot courant.** Candidat au même traitement (retries + timeouts bornés, p.ex. `pip --retries N --timeout T` ou variables `PIP_RETRIES`/`PIP_DEFAULT_TIMEOUT`) **si ça se reproduit**.
+
+2. **Le fix curl est un contournement, pas la racine.** Forcer HTTP/1.1 + retries sur le download des outils est robuste et suffisant en pratique, mais si les flakes réseau **persistent**, la vraie cause est la **connectivité egress de l'hôte** (réseau/DNS/MTU/proxy), pas le Dockerfile. Auquel cas : diagnostiquer la connectivité hôte plutôt que d'empiler des retries dans l'image.
