@@ -234,6 +234,22 @@ fn sqlite_value_ref_to_value(vr: rusqlite::types::ValueRef<'_>) -> Value {
     }
 }
 
+/// Map a backend-neutral [`Value`] to a `serde_json::Value`, reproducing EXACTLY the cell typing that
+/// the SoQL-style readers (`query.rs::cell` via `exec_soql`, and `cli.rs::cli_query_rows`) apply:
+/// `Int` -> JSON number, `Real` -> JSON number, `Text` -> JSON string, `Blob` -> `Null`, `Null` ->
+/// `Null`. Extracted here so BOTH call sites route their `Row::get_value` result through ONE shared
+/// mapping and stay byte-identical (the pre-seam `cell`'s `ValueRef` dispatch produced these exact
+/// JSON shapes).
+pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Int(n) => serde_json::json!(n),
+        Value::Real(f) => serde_json::json!(f),
+        Value::Text(s) => serde_json::json!(s),
+        Value::Blob(_) => serde_json::Value::Null,
+        Value::Null => serde_json::Value::Null,
+    }
+}
+
 // ================================================================================================
 // ROW — typed column accessor exposing ONLY backend-neutral getters (no generic `get<T: FromSql>`,
 // which would leak rusqlite). Both a rusqlite row (now) and a postgres row (later) implement these.
@@ -250,7 +266,7 @@ enum RowInner<'stmt> {
 }
 
 impl<'stmt> Row<'stmt> {
-    fn sqlite(r: &'stmt rusqlite::Row<'stmt>) -> Self {
+    pub(crate) fn sqlite(r: &'stmt rusqlite::Row<'stmt>) -> Self {
         Row { inner: RowInner::Sqlite(r) }
     }
 

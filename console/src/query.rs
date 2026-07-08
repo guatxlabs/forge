@@ -16,18 +16,19 @@ use guatx_core::soql; // cœur partagé (extrait) — moteur soql compile/schema
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
-use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// Lit la cellule à l'index `i` d'une ligne de type SQLite INCONNU à la compilation (moteur SoQL) via
+/// la couche seam : `Row::get_value` dispatch sur la classe de stockage RUNTIME (Int/Real/Text/Blob/
+/// Null) puis `store::value_to_json` la mappe en JSON. Byte-identique à l'ancien dispatch `ValueRef` :
+/// Int/Real -> nombre, Text -> chaîne, Blob/Null -> Null, et toute erreur de lecture -> Null. Helper
+/// PARTAGÉ par `exec_soql` (ici) et `cli::cli_query_rows` (même typage de cellule).
 pub(crate) fn cell(row: &rusqlite::Row, i: usize) -> Value {
-    match row.get_ref(i) {
-        Ok(ValueRef::Null) | Err(_) => Value::Null,
-        Ok(ValueRef::Integer(n)) => json!(n),
-        Ok(ValueRef::Real(f)) => json!(f),
-        Ok(ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
-        Ok(ValueRef::Blob(_)) => Value::Null,
+    match crate::store::Row::sqlite(row).get_value(i) {
+        Ok(v) => crate::store::value_to_json(&v),
+        Err(_) => Value::Null,
     }
 }
 
@@ -121,25 +122,25 @@ pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) 
 
 /// GET /api/dashboards — liste les dashboards (ordre `position`, id). Lecture (viewer).
 pub(crate) async fn dashboards_list(State(app): State<App>) -> impl IntoResponse {
-    let db = app.db();
-    let mut stmt = match db.prepare(
-        "SELECT d.id, d.name, d.descr, d.position, d.created, d.updated,
-                (SELECT COUNT(*) FROM panel p WHERE p.dashboard_id=d.id) AS panels
-         FROM dashboard d ORDER BY d.position, d.id",
-    ) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map([], |r| {
-            Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "descr": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "position": r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                "created": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "updated": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "panels": r.get::<_, i64>(6)?,
-            }))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
+    let store = app.store();
+    let out: Vec<Value> = store
+        .query_lax(
+            "SELECT d.id, d.name, d.descr, d.position, d.created, d.updated,
+                    (SELECT COUNT(*) FROM panel p WHERE p.dashboard_id=d.id) AS panels
+             FROM dashboard d ORDER BY d.position, d.id",
+            &[],
+            |r| {
+                Ok(json!({
+                    "id": r.get_i64(0)?,
+                    "name": r.get_str(1)?,
+                    "descr": r.get_opt_str(2)?.unwrap_or_default(),
+                    "position": r.get_opt_i64(3)?.unwrap_or(0),
+                    "created": r.get_opt_str(4)?.unwrap_or_default(),
+                    "updated": r.get_opt_str(5)?.unwrap_or_default(),
+                    "panels": r.get_i64(6)?,
+                }))
+            },
+        )
         .unwrap_or_default();
     Json(Value::Array(out))
 }
@@ -155,12 +156,12 @@ pub(crate) async fn dashboard_create(State(app): State<App>, headers: HeaderMap,
     }
     let descr = gs(&body, "descr");
     let position = body.get("position").and_then(|v| v.as_i64()).unwrap_or(0);
-    let db = app.db();
-    match db.execute(
+    let store = app.store();
+    match store.execute(
         "INSERT INTO dashboard(name,descr,position,created,updated) VALUES(?,?,?,datetime('now'),datetime('now'))",
-        rusqlite::params![name, descr, position],
+        &crate::sql_params![&name, &descr, position],
     ) {
-        Ok(_) => (StatusCode::OK, Json(json!({"id": db.last_insert_rowid()}))),
+        Ok(_) => (StatusCode::OK, Json(json!({"id": store.last_insert_id()}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -170,25 +171,24 @@ pub(crate) async fn dashboard_update(State(app): State<App>, headers: HeaderMap,
     if !check_token(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
     }
-    let db = app.db();
+    let store = app.store();
     let mut sets: Vec<String> = Vec::new();
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut args: Vec<crate::store::Param> = Vec::new();
     if let Some(v) = body.get("name").and_then(|v| v.as_str()) {
         if v.is_empty() || v.len() > 128 {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "name invalide (1..128)"})));
         }
-        sets.push("name=?".into()); args.push(Box::new(v.to_string()));
+        sets.push("name=?".into()); args.push(crate::store::Param::Text(v.to_string()));
     }
-    if let Some(v) = body.get("descr").and_then(|v| v.as_str()) { sets.push("descr=?".into()); args.push(Box::new(v.to_string())); }
-    if let Some(v) = body.get("position").and_then(|v| v.as_i64()) { sets.push("position=?".into()); args.push(Box::new(v)); }
+    if let Some(v) = body.get("descr").and_then(|v| v.as_str()) { sets.push("descr=?".into()); args.push(crate::store::Param::Text(v.to_string())); }
+    if let Some(v) = body.get("position").and_then(|v| v.as_i64()) { sets.push("position=?".into()); args.push(crate::store::Param::Int(v)); }
     if sets.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "aucun champ à mettre à jour"})));
     }
     sets.push("updated=datetime('now')".into());
-    args.push(Box::new(id));
+    args.push(crate::store::Param::Int(id));
     let sql = format!("UPDATE dashboard SET {} WHERE id=?", sets.join(","));
-    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    match db.execute(&sql, refs.as_slice()) {
+    match store.execute(&sql, &args) {
         Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "dashboard introuvable"}))),
         Ok(_) => (StatusCode::OK, Json(json!({"updated": id}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
@@ -204,10 +204,10 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
     if id == 1 {
         return (StatusCode::CONFLICT, Json(json!({"error": "default_protected", "why": "le dashboard par défaut (#1) ne peut pas être supprimé"})));
     }
-    let db = app.db();
+    let store = app.store();
     // les panels du dashboard supprimé retombent sur le défaut (jamais perdus/orphelins).
-    let _ = db.execute("UPDATE panel SET dashboard_id=1 WHERE dashboard_id=?", [id]);
-    match db.execute("DELETE FROM dashboard WHERE id=?", [id]) {
+    let _ = store.execute("UPDATE panel SET dashboard_id=1 WHERE dashboard_id=?", &crate::sql_params![id]);
+    match store.execute("DELETE FROM dashboard WHERE id=?", &crate::sql_params![id]) {
         Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "dashboard introuvable"}))),
         Ok(_) => (StatusCode::OK, Json(json!({"deleted": id, "panels_reassigned_to": 1}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
@@ -219,28 +219,26 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
 /// GET /api/panels?dashboard_id=N — liste les panels, optionnellement filtrés par dashboard.
 /// Sans `dashboard_id` : tous les panels (rétro-compat). `dashboard_id` est lié (param), pas inliné.
 pub(crate) async fn panels_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    let db = app.db();
-    let (where_, args): (&str, Vec<i64>) = match q.get("dashboard_id").and_then(|s| s.parse::<i64>().ok()) {
-        Some(d) => (" WHERE dashboard_id=?", vec![d]),
+    let store = app.store();
+    let (where_, args): (&str, Vec<crate::store::Param>) = match q.get("dashboard_id").and_then(|s| s.parse::<i64>().ok()) {
+        Some(d) => (" WHERE dashboard_id=?", vec![crate::store::Param::Int(d)]),
         None => ("", vec![]),
     };
     let sql = format!("SELECT id,name,query,viz,position,descr,col_span,updated,dashboard_id FROM panel{where_} ORDER BY position, id");
-    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+    let out: Vec<Value> = store
+        .query_lax(&sql, &args, |r| {
             Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "query": r.get::<_, String>(2)?,
-                "viz": r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "table".to_string()),
-                "position": r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                "descr": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "col_span": r.get::<_, Option<i64>>(6)?.unwrap_or(1),
-                "updated": r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                "dashboard_id": r.get::<_, Option<i64>>(8)?.unwrap_or(1),
+                "id": r.get_i64(0)?,
+                "name": r.get_str(1)?,
+                "query": r.get_str(2)?,
+                "viz": r.get_opt_str(3)?.unwrap_or_else(|| "table".to_string()),
+                "position": r.get_opt_i64(4)?.unwrap_or(0),
+                "descr": r.get_opt_str(5)?.unwrap_or_default(),
+                "col_span": r.get_opt_i64(6)?.unwrap_or(1),
+                "updated": r.get_opt_str(7)?.unwrap_or_default(),
+                "dashboard_id": r.get_opt_i64(8)?.unwrap_or(1),
             }))
         })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
     Json(Value::Array(out))
 }
@@ -264,16 +262,16 @@ pub(crate) async fn panel_create(State(app): State<App>, headers: HeaderMap, Jso
     if let Err(e) = soql::compile(&qy, &soql::Schema::forge()) {     // ne sauve pas un panel à la requête invalide
         return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("query invalide: {e}")})));
     }
-    let db = app.db();
-    let exists: bool = db.query_row("SELECT 1 FROM dashboard WHERE id=?", [dashboard_id], |_| Ok(())).is_ok();
+    let store = app.store();
+    let exists: bool = store.query_row("SELECT 1 FROM dashboard WHERE id=?", &crate::sql_params![dashboard_id], |_| Ok(())).is_ok();
     if !exists {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown_dashboard", "why": format!("dashboard #{dashboard_id} inexistant")})));
     }
-    match db.execute(
+    match store.execute(
         "INSERT INTO panel(name,query,viz,descr,col_span,position,dashboard_id,updated) VALUES(?,?,?,?,?,?,?,datetime('now'))",
-        rusqlite::params![name, qy, viz, descr, col_span, position, dashboard_id],
+        &crate::sql_params![&name, &qy, &viz, &descr, col_span, position, dashboard_id],
     ) {
-        Ok(_) => (StatusCode::OK, Json(json!({"id": db.last_insert_rowid()}))),
+        Ok(_) => (StatusCode::OK, Json(json!({"id": store.last_insert_id()}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -289,31 +287,30 @@ pub(crate) async fn panel_update(State(app): State<App>, headers: HeaderMap, Pat
             return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("query invalide: {e}")})));
         }
     }
-    let db = app.db();
+    let store = app.store();
     let mut sets: Vec<String> = Vec::new();
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(v) = body.get("name").and_then(|v| v.as_str()) { sets.push("name=?".into()); args.push(Box::new(v.to_string())); }
-    if let Some(v) = body.get("query").and_then(|v| v.as_str()) { sets.push("query=?".into()); args.push(Box::new(v.to_string())); }
-    if let Some(v) = body.get("viz").and_then(|v| v.as_str()) { sets.push("viz=?".into()); args.push(Box::new(v.to_string())); }
-    if let Some(v) = body.get("descr").and_then(|v| v.as_str()) { sets.push("descr=?".into()); args.push(Box::new(v.to_string())); }
-    if let Some(v) = body.get("col_span").and_then(|v| v.as_i64()) { sets.push("col_span=?".into()); args.push(Box::new(v.clamp(1, 4))); }
-    if let Some(v) = body.get("position").and_then(|v| v.as_i64()) { sets.push("position=?".into()); args.push(Box::new(v)); }
+    let mut args: Vec<crate::store::Param> = Vec::new();
+    if let Some(v) = body.get("name").and_then(|v| v.as_str()) { sets.push("name=?".into()); args.push(crate::store::Param::Text(v.to_string())); }
+    if let Some(v) = body.get("query").and_then(|v| v.as_str()) { sets.push("query=?".into()); args.push(crate::store::Param::Text(v.to_string())); }
+    if let Some(v) = body.get("viz").and_then(|v| v.as_str()) { sets.push("viz=?".into()); args.push(crate::store::Param::Text(v.to_string())); }
+    if let Some(v) = body.get("descr").and_then(|v| v.as_str()) { sets.push("descr=?".into()); args.push(crate::store::Param::Text(v.to_string())); }
+    if let Some(v) = body.get("col_span").and_then(|v| v.as_i64()) { sets.push("col_span=?".into()); args.push(crate::store::Param::Int(v.clamp(1, 4))); }
+    if let Some(v) = body.get("position").and_then(|v| v.as_i64()) { sets.push("position=?".into()); args.push(crate::store::Param::Int(v)); }
     // ré-assignation de dashboard : vérifiée pour éviter l'orphelinage (FK soft).
     if let Some(v) = body.get("dashboard_id").and_then(|v| v.as_i64()) {
-        let exists: bool = db.query_row("SELECT 1 FROM dashboard WHERE id=?", [v], |_| Ok(())).is_ok();
+        let exists: bool = store.query_row("SELECT 1 FROM dashboard WHERE id=?", &crate::sql_params![v], |_| Ok(())).is_ok();
         if !exists {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown_dashboard", "why": format!("dashboard #{v} inexistant")})));
         }
-        sets.push("dashboard_id=?".into()); args.push(Box::new(v));
+        sets.push("dashboard_id=?".into()); args.push(crate::store::Param::Int(v));
     }
     if sets.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "aucun champ à mettre à jour"})));
     }
     sets.push("updated=datetime('now')".into());
-    args.push(Box::new(id));
+    args.push(crate::store::Param::Int(id));
     let sql = format!("UPDATE panel SET {} WHERE id=?", sets.join(","));
-    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    match db.execute(&sql, refs.as_slice()) {
+    match store.execute(&sql, &args) {
         Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "panel introuvable"}))),
         Ok(_) => (StatusCode::OK, Json(json!({"updated": id}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
@@ -324,8 +321,8 @@ pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Pat
     if !check_token(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
     }
-    let db = app.db();
-    let _ = db.execute("DELETE FROM panel WHERE id=?", [id]);
+    let store = app.store();
+    let _ = store.execute("DELETE FROM panel WHERE id=?", &crate::sql_params![id]);
     (StatusCode::OK, Json(json!({"deleted": id})))
 }
 
@@ -333,8 +330,8 @@ pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Pat
 /// `from`/`to` (epoch seconds) bornent `ts` via compile_with_time (0 = pas de borne).
 pub(crate) async fn panel_data(State(app): State<App>, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let qy: Option<String> = {
-        let db = app.db();
-        db.query_row("SELECT query FROM panel WHERE id=?", [id], |r| r.get::<_, String>(0)).ok()
+        let store = app.store();
+        store.query_row("SELECT query FROM panel WHERE id=?", &crate::sql_params![id], |r| r.get_str(0)).ok()
     };
     let from = q.get("from").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     let to = q.get("to").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
