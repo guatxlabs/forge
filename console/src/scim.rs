@@ -165,8 +165,8 @@ fn gate(app: &App, headers: &HeaderMap) -> Option<Response> {
 // the IdP-specific attributes (externalId, email, name) that the core `users` table does not carry.
 // ============================================================================================
 
-fn ensure_schema(db: &rusqlite::Connection) {
-    let _ = db.execute_batch(
+fn ensure_schema(store: &crate::store::Store) {
+    let _ = store.execute_batch(
         "CREATE TABLE IF NOT EXISTS scim_user(
            user_id     INTEGER PRIMARY KEY,
            external_id TEXT NOT NULL DEFAULT '',
@@ -345,8 +345,8 @@ async fn users_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<
     let count: i64 = q.get("count").and_then(|s| s.parse().ok()).filter(|&n| n >= 0).unwrap_or(100);
 
     let ids: Vec<i64> = {
-        let db = app.db();
-        ensure_schema(&db);
+        let store = app.store();
+        ensure_schema(&store);
         let sql = "SELECT s.user_id FROM scim_user s JOIN users u ON u.id = s.user_id \
                    WHERE (?1 = '' OR u.login = ?1) ORDER BY s.user_id";
         let key = filter_login.clone().unwrap_or_default();
@@ -354,14 +354,7 @@ async fn users_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<
         // When a filter is present but no match, `key` is a concrete login → empty result (correct).
         // When absent, `key=''` matches all (the `?1=''` short-circuit).
         let bind = if has_filter { key } else { String::new() };
-        let rows: Vec<i64> = match db.prepare(sql) {
-            Ok(mut stmt) => stmt
-                .query_map([&bind], |r| r.get::<_, i64>(0))
-                .map(|it| it.filter_map(|x| x.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => vec![],
-        };
-        rows
+        store.query_lax(sql, &crate::sql_params![&bind], |r| r.get_i64(0)).unwrap_or_default()
     };
     let total = ids.len() as i64;
     let page: Vec<Value> = ids
@@ -410,23 +403,23 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
     let hash = crate::hash_pw(&rand_hex(32));
 
     let id = {
-        let db = app.db();
-        ensure_schema(&db);
-        if db.query_row("SELECT 1 FROM users WHERE login=?", [&login], |_| Ok(())).is_ok() {
+        let store = app.store();
+        ensure_schema(&store);
+        if store.query_row("SELECT 1 FROM users WHERE login=?", &crate::sql_params![&login], |_| Ok(())).is_ok() {
             return scim_err(StatusCode::CONFLICT, format!("user '{login}' already exists"), Some("uniqueness"));
         }
-        if let Err(e) = db.execute(
+        if let Err(e) = store.execute(
             "INSERT INTO users(login,role,pass_hash,disabled,created) VALUES(?,?,?,?,datetime('now'))",
-            rusqlite::params![login, role, hash, (!active) as i64],
+            &crate::sql_params![&login, &role, &hash, (!active) as i64],
         ) {
             return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
         }
-        let id = db.last_insert_rowid();
+        let id = store.last_insert_id();
         let now = crate::now_epoch();
-        let _ = db.execute(
+        let _ = store.execute(
             "INSERT INTO scim_user(user_id,external_id,email,given_name,family_name,display_name,created,updated)
              VALUES(?,?,?,?,?,?,?,?)",
-            rusqlite::params![
+            &crate::sql_params![
                 id,
                 attrs.external_id.clone().unwrap_or_default(),
                 attrs.email.clone().unwrap_or_default(),
@@ -518,13 +511,13 @@ async fn user_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<
         None => return scim_err(StatusCode::NOT_FOUND, "user not found", None),
     };
     let login = {
-        let db = app.db();
-        ensure_schema(&db);
+        let store = app.store();
+        ensure_schema(&store);
         // Must be a SCIM-managed user (has a scim_user row) — SCIM never touches local accounts.
-        match db.query_row(
+        match store.query_row(
             "SELECT u.login FROM users u JOIN scim_user s ON s.user_id = u.id WHERE u.id = ?",
-            [uid],
-            |r| r.get::<_, String>(0),
+            &crate::sql_params![uid],
+            |r| r.get_str(0),
         ) {
             Ok(l) => l,
             Err(_) => return scim_err(StatusCode::NOT_FOUND, "user not found", None),
@@ -534,12 +527,12 @@ async fn user_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<
         return scim_err(StatusCode::FORBIDDEN, "protected super-admin cannot be de-provisioned via SCIM", Some("mutability"));
     }
     {
-        let db = app.db();
+        let store = app.store();
         // Disable + purge sessions + drop mapping under ONE db guard (atomic).
-        let _ = db.execute("UPDATE users SET disabled=1 WHERE id=?", [uid]);
-        let _ = db.execute("DELETE FROM session WHERE user_id=?", [uid]);
-        let _ = db.execute("DELETE FROM scim_user WHERE user_id=?", [uid]);
-        let _ = db.execute("DELETE FROM scim_group_member WHERE user_id=?", [uid]);
+        let _ = store.execute("UPDATE users SET disabled=1 WHERE id=?", &crate::sql_params![uid]);
+        let _ = store.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid]);
+        let _ = store.execute("DELETE FROM scim_user WHERE user_id=?", &crate::sql_params![uid]);
+        let _ = store.execute("DELETE FROM scim_group_member WHERE user_id=?", &crate::sql_params![uid]);
     }
     app.recompute_auth_required();
     crate::append_console_ledger(
@@ -555,12 +548,12 @@ async fn user_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<
 /// the account — PURGES its sessions (immediate revocation). Ledgered `console.scim.user.update`.
 fn apply_update(app: &App, uid: i64, attrs: &UserAttrs) -> Response {
     let (login, was_disabled) = {
-        let db = app.db();
-        ensure_schema(&db);
-        match db.query_row(
+        let store = app.store();
+        ensure_schema(&store);
+        match store.query_row(
             "SELECT u.login, u.disabled FROM users u JOIN scim_user s ON s.user_id = u.id WHERE u.id = ?",
-            [uid],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            &crate::sql_params![uid],
+            |r| Ok((r.get_str(0)?, r.get_i64(1)?)),
         ) {
             Ok((l, d)) => (l, d != 0),
             Err(_) => return scim_err(StatusCode::NOT_FOUND, "user not found", None),
@@ -573,32 +566,32 @@ fn apply_update(app: &App, uid: i64, attrs: &UserAttrs) -> Response {
     let mut purged = false;
     let mut now_disabled = was_disabled;
     {
-        let db = app.db();
+        let store = app.store();
         if let Some(active) = attrs.active {
             let disabled = !active;
-            let _ = db.execute("UPDATE users SET disabled=? WHERE id=?", rusqlite::params![disabled as i64, uid]);
+            let _ = store.execute("UPDATE users SET disabled=? WHERE id=?", &crate::sql_params![disabled as i64, uid]);
             now_disabled = disabled;
             // DISABLING (or a de-provision) must revoke access IMMEDIATELY → purge sessions.
             if disabled {
-                let _ = db.execute("DELETE FROM session WHERE user_id=?", [uid]);
+                let _ = store.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid]);
                 purged = true;
             }
         }
         let now = crate::now_epoch();
         if let Some(v) = &attrs.external_id {
-            let _ = db.execute("UPDATE scim_user SET external_id=?, updated=? WHERE user_id=?", rusqlite::params![v, now, uid]);
+            let _ = store.execute("UPDATE scim_user SET external_id=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
         }
         if let Some(v) = &attrs.email {
-            let _ = db.execute("UPDATE scim_user SET email=?, updated=? WHERE user_id=?", rusqlite::params![v, now, uid]);
+            let _ = store.execute("UPDATE scim_user SET email=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
         }
         if let Some(v) = &attrs.given {
-            let _ = db.execute("UPDATE scim_user SET given_name=?, updated=? WHERE user_id=?", rusqlite::params![v, now, uid]);
+            let _ = store.execute("UPDATE scim_user SET given_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
         }
         if let Some(v) = &attrs.family {
-            let _ = db.execute("UPDATE scim_user SET family_name=?, updated=? WHERE user_id=?", rusqlite::params![v, now, uid]);
+            let _ = store.execute("UPDATE scim_user SET family_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
         }
         if let Some(v) = &attrs.display {
-            let _ = db.execute("UPDATE scim_user SET display_name=?, updated=? WHERE user_id=?", rusqlite::params![v, now, uid]);
+            let _ = store.execute("UPDATE scim_user SET display_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
         }
     }
     app.recompute_auth_required();
@@ -625,13 +618,9 @@ async fn groups_list(State(app): State<App>, headers: HeaderMap) -> Response {
         return r;
     }
     let ids: Vec<i64> = {
-        let db = app.db();
-        ensure_schema(&db);
-        let rows: Vec<i64> = match db.prepare("SELECT id FROM scim_group ORDER BY id") {
-            Ok(mut s) => s.query_map([], |r| r.get::<_, i64>(0)).map(|it| it.filter_map(|x| x.ok()).collect()).unwrap_or_default(),
-            Err(_) => vec![],
-        };
-        rows
+        let store = app.store();
+        ensure_schema(&store);
+        store.query_lax("SELECT id FROM scim_group ORDER BY id", &[], |r| r.get_i64(0)).unwrap_or_default()
     };
     let total = ids.len() as i64;
     let res: Vec<Value> = ids.into_iter().filter_map(|id| group_resource(&app, id)).collect();
@@ -662,16 +651,16 @@ async fn groups_create(State(app): State<App>, headers: HeaderMap, body: Bytes) 
     // mapping is configured this is byte-identical to the previous behaviour.
     let role = crate::rbac::scim_role_for_group(&app, &display, &role_for_group(&display));
     let gid = {
-        let db = app.db();
-        ensure_schema(&db);
+        let store = app.store();
+        ensure_schema(&store);
         let now = crate::now_epoch();
-        if let Err(e) = db.execute(
+        if let Err(e) = store.execute(
             "INSERT INTO scim_group(display_name,external_id,role,created,updated) VALUES(?,?,?,?,?)",
-            rusqlite::params![display, external_id, role, now, now],
+            &crate::sql_params![&display, &external_id, &role, now, now],
         ) {
             return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
         }
-        db.last_insert_rowid()
+        store.last_insert_id()
     };
     // Apply any initial members.
     let member_ids = member_ids_from_resource(&res);
@@ -716,9 +705,9 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
         None => return scim_err(StatusCode::NOT_FOUND, "group not found", None),
     };
     let role = {
-        let db = app.db();
-        ensure_schema(&db);
-        match db.query_row("SELECT role FROM scim_group WHERE id=?", [gid], |r| r.get::<_, String>(0)) {
+        let store = app.store();
+        ensure_schema(&store);
+        match store.query_row("SELECT role FROM scim_group WHERE id=?", &crate::sql_params![gid], |r| r.get_str(0)) {
             Ok(r) => r,
             Err(_) => return scim_err(StatusCode::NOT_FOUND, "group not found", None),
         }
@@ -733,8 +722,8 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
     if let Some(members) = doc.get("members").and_then(|m| m.as_array()) {
         // PUT-style full replace of membership.
         {
-            let db = app.db();
-            let _ = db.execute("DELETE FROM scim_group_member WHERE group_id=?", [gid]);
+            let store = app.store();
+            let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid]);
         }
         for uid in members.iter().filter_map(member_id_of) {
             add_member(&app, gid, uid, &role);
@@ -762,8 +751,8 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
                 "remove" => {
                     // path like: members[value eq "42"]  → extract the id.
                     if let Some(uid) = extract_member_path_id(path).or_else(|| vals.and_then(member_id_of)) {
-                        let db = app.db();
-                        let _ = db.execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", rusqlite::params![gid, uid]);
+                        let store = app.store();
+                        let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", &crate::sql_params![gid, uid]);
                         removed += 1;
                     }
                 }
@@ -772,8 +761,8 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
         }
     }
     {
-        let db = app.db();
-        let _ = db.execute("UPDATE scim_group SET updated=? WHERE id=?", rusqlite::params![crate::now_epoch(), gid]);
+        let store = app.store();
+        let _ = store.execute("UPDATE scim_group SET updated=? WHERE id=?", &crate::sql_params![crate::now_epoch(), gid]);
     }
     crate::append_console_ledger(
         &app,
@@ -796,13 +785,13 @@ async fn group_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path
         None => return scim_err(StatusCode::NOT_FOUND, "group not found", None),
     };
     {
-        let db = app.db();
-        ensure_schema(&db);
-        if db.query_row("SELECT 1 FROM scim_group WHERE id=?", [gid], |_| Ok(())).is_err() {
+        let store = app.store();
+        ensure_schema(&store);
+        if store.query_row("SELECT 1 FROM scim_group WHERE id=?", &crate::sql_params![gid], |_| Ok(())).is_err() {
             return scim_err(StatusCode::NOT_FOUND, "group not found", None);
         }
-        let _ = db.execute("DELETE FROM scim_group_member WHERE group_id=?", [gid]);
-        let _ = db.execute("DELETE FROM scim_group WHERE id=?", [gid]);
+        let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid]);
+        let _ = store.execute("DELETE FROM scim_group WHERE id=?", &crate::sql_params![gid]);
     }
     crate::append_console_ledger(&app, "console.scim.group.delete", json!({ "actor": "scim", "group_id": gid }));
     (StatusCode::NO_CONTENT, ()).into_response()
@@ -820,8 +809,8 @@ fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
     let tenancy_on = crate::tenancy::enabled(app);
     let mapped_grant = if tenancy_on {
         let display: String = {
-            let db = app.db();
-            db.query_row("SELECT display_name FROM scim_group WHERE id=?", [gid], |r| r.get::<_, String>(0))
+            let store = app.store();
+            store.query_row("SELECT display_name FROM scim_group WHERE id=?", &crate::sql_params![gid], |r| r.get_str(0))
                 .unwrap_or_default()
         };
         crate::rbac::scim_tenant_grants_for_group(app, &display).into_iter().next()
@@ -829,32 +818,32 @@ fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
         None
     };
 
-    let db = app.db();
-    let _ = db.execute(
+    let store = app.store();
+    let _ = store.execute(
         "INSERT OR IGNORE INTO scim_group_member(group_id,user_id) VALUES(?,?)",
-        rusqlite::params![gid, uid],
+        &crate::sql_params![gid, uid],
     );
     // Only re-role SCIM-managed, non-admin accounts (never elevate to admin/super-admin).
-    let managed_nonadmin: bool = db
+    let managed_nonadmin: bool = store
         .query_row(
             "SELECT 1 FROM users u JOIN scim_user s ON s.user_id=u.id WHERE u.id=? AND u.role != 'admin'",
-            [uid],
+            &crate::sql_params![uid],
             |_| Ok(()),
         )
         .is_ok();
     if managed_nonadmin && (role == "viewer" || role == "operator") {
-        let _ = db.execute("UPDATE users SET role=? WHERE id=?", rusqlite::params![role, uid]);
+        let _ = store.execute("UPDATE users SET role=? WHERE id=?", &crate::sql_params![role, uid]);
         // Scoped tenant-grant when tenancy is engaged: the group's mapped grant (clamped to tenant_operator
         // — never tenant_admin via SCIM) if configured, else the default tenant #1 grant derived from role.
         if tenancy_on {
             let (tid, trole) = mapped_grant.clone().unwrap_or_else(|| {
                 (1i64, if role == "operator" { "tenant_operator".to_string() } else { "tenant_viewer".to_string() })
             });
-            let _ = db.execute(
+            let _ = store.execute(
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
                  VALUES(?,?,?,datetime('now'))
                  ON CONFLICT(user_id,tenant_id) DO UPDATE SET role=excluded.role",
-                rusqlite::params![uid, tid, trole],
+                &crate::sql_params![uid, tid, trole],
             );
         }
     }
@@ -1005,25 +994,25 @@ fn primary_email_from_value(emails: &Value) -> Option<String> {
 /// Build a SCIM User resource JSON for a Forge user id (joined with its `scim_user` row). None if the id
 /// is unknown OR the user is not SCIM-managed (no `scim_user` row).
 fn user_resource(app: &App, uid: i64) -> Option<Value> {
-    let db = app.db();
-    let row = db
+    let store = app.store();
+    let row = store
         .query_row(
             "SELECT u.login, u.role, u.disabled, u.created,
                     s.external_id, s.email, s.given_name, s.family_name, s.display_name
                FROM users u JOIN scim_user s ON s.user_id = u.id
               WHERE u.id = ?",
-            [uid],
+            &crate::sql_params![uid],
             |r| {
                 Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, String>(8)?,
+                    r.get_str(0)?,
+                    r.get_str(1)?,
+                    r.get_i64(2)?,
+                    r.get_opt_str(3)?.unwrap_or_default(),
+                    r.get_str(4)?,
+                    r.get_str(5)?,
+                    r.get_str(6)?,
+                    r.get_str(7)?,
+                    r.get_str(8)?,
                 ))
             },
         )
@@ -1058,24 +1047,21 @@ fn user_resource(app: &App, uid: i64) -> Option<Value> {
 
 /// Build a SCIM Group resource for a group id (with its members). None if unknown.
 fn group_resource(app: &App, gid: i64) -> Option<Value> {
-    let db = app.db();
-    let (display, external_id): (String, String) = db
-        .query_row("SELECT display_name, external_id FROM scim_group WHERE id=?", [gid], |r| Ok((r.get(0)?, r.get(1)?)))
+    let store = app.store();
+    let (display, external_id): (String, String) = store
+        .query_row("SELECT display_name, external_id FROM scim_group WHERE id=?", &crate::sql_params![gid], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
         .ok()?;
-    let members: Vec<Value> = {
-        let mut stmt = db
-            .prepare(
-                "SELECT u.id, u.login FROM scim_group_member m JOIN users u ON u.id=m.user_id WHERE m.group_id=? ORDER BY u.id",
-            )
-            .ok()?;
-        stmt.query_map([gid], |r| {
-            let id: i64 = r.get(0)?;
-            let login: String = r.get(1)?;
-            Ok(json!({ "value": id.to_string(), "display": login }))
-        })
-        .map(|it| it.filter_map(|x| x.ok()).collect())
-        .unwrap_or_default()
-    };
+    let members: Vec<Value> = store
+        .query_lax(
+            "SELECT u.id, u.login FROM scim_group_member m JOIN users u ON u.id=m.user_id WHERE m.group_id=? ORDER BY u.id",
+            &crate::sql_params![gid],
+            |r| {
+                let id: i64 = r.get_i64(0)?;
+                let login: String = r.get_str(1)?;
+                Ok(json!({ "value": id.to_string(), "display": login }))
+            },
+        )
+        .ok()?;
     let mut res = json!({
         "schemas": [SCHEMA_GROUP],
         "id": gid.to_string(),

@@ -200,19 +200,19 @@ async fn login_start(State(app): State<App>, Query(q): Query<HashMap<String, Str
     let code_verifier = rand_hex(32); // 64 hex chars — within the 43..128 PKCE range, unreserved charset
     let challenge = code_challenge(&code_verifier);
     {
-        let db = app.db();
-        ensure_schema(&db);
+        let store = app.store();
+        ensure_schema(&store);
         let now = crate::now_epoch();
-        let _ = db.execute(
+        let _ = store.execute(
             "INSERT OR REPLACE INTO sso_pending(state,nonce,code_verifier,return_to,token_endpoint,jwks_uri,created,expires)
              VALUES(?,?,?,?,?,?,?,?)",
-            rusqlite::params![
-                state,
-                nonce,
-                code_verifier,
-                return_to,
-                disc.token_endpoint,
-                disc.jwks_uri,
+            &crate::sql_params![
+                &state,
+                &nonce,
+                &code_verifier,
+                &return_to,
+                &disc.token_endpoint,
+                &disc.jwks_uri,
                 now,
                 now + PENDING_TTL_SECS
             ],
@@ -257,9 +257,9 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
 
     // STATE validation: look up + CONSUME the pending row (one-time use, anti-replay). Missing => reject.
     let pend = {
-        let db = app.db();
-        ensure_schema(&db);
-        match take_pending(&db, state) {
+        let store = app.store();
+        ensure_schema(&store);
+        match take_pending(&store, state) {
             Some(p) => p,
             None => return err(StatusCode::FORBIDDEN, "invalid_state", "unknown or already-used state"),
         }
@@ -580,8 +580,8 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, provision_role: 
 
     // Existing account?
     {
-        let db = app.db();
-        if let Ok(id) = db.query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get::<_, i64>(0)) {
+        let store = app.store();
+        if let Ok(id) = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
             return Ok((id, login, false));
         }
     }
@@ -597,16 +597,16 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, provision_role: 
     // never succeed for this account (SSO-only). Hash OUTSIDE the DB lock (argon2 is deliberately slow).
     let hash = crate::hash_pw(&rand_hex(32));
     let (id, inserted) = {
-        let db = app.db();
-        let inserted = db
+        let store = app.store();
+        let inserted = store
             .execute(
                 "INSERT OR IGNORE INTO users(login,role,pass_hash,disabled,created)
                  VALUES(?,?,?,0,datetime('now'))",
-                rusqlite::params![login, role, hash],
+                &crate::sql_params![&login, &role, &hash],
             )
             .unwrap_or(0);
-        let id = db
-            .query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get::<_, i64>(0))
+        let id = store
+            .query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0))
             .map_err(|e| format!("provision lookup failed: {e}"))?;
         (id, inserted)
     };
@@ -676,8 +676,8 @@ struct Pending {
 
 /// Create the pending-auth table if absent (idempotent) and purge expired rows. Called lazily from the
 /// login/callback handlers so the COMMUNITY DB (flag OFF => routes 404 before this runs) is untouched.
-fn ensure_schema(db: &rusqlite::Connection) {
-    let _ = db.execute_batch(
+fn ensure_schema(store: &crate::store::Store) {
+    let _ = store.execute_batch(
         "CREATE TABLE IF NOT EXISTS sso_pending(
            state TEXT PRIMARY KEY,
            nonce TEXT NOT NULL,
@@ -688,28 +688,28 @@ fn ensure_schema(db: &rusqlite::Connection) {
            created INTEGER NOT NULL,
            expires INTEGER NOT NULL);",
     );
-    let _ = db.execute("DELETE FROM sso_pending WHERE expires <= ?", [crate::now_epoch()]);
+    let _ = store.execute("DELETE FROM sso_pending WHERE expires <= ?", &crate::sql_params![crate::now_epoch()]);
 }
 
 /// Look up AND delete (one-time use) the pending-auth row for `state`. `None` if unknown/already-used.
-fn take_pending(db: &rusqlite::Connection, state: &str) -> Option<Pending> {
-    let p = db
+fn take_pending(store: &crate::store::Store, state: &str) -> Option<Pending> {
+    let p = store
         .query_row(
             "SELECT nonce,code_verifier,return_to,token_endpoint,jwks_uri,expires FROM sso_pending WHERE state=?",
-            [state],
+            &crate::sql_params![state],
             |r| {
                 Ok(Pending {
-                    nonce: r.get(0)?,
-                    code_verifier: r.get(1)?,
-                    return_to: r.get(2)?,
-                    token_endpoint: r.get(3)?,
-                    jwks_uri: r.get(4)?,
-                    expires: r.get(5)?,
+                    nonce: r.get_str(0)?,
+                    code_verifier: r.get_str(1)?,
+                    return_to: r.get_str(2)?,
+                    token_endpoint: r.get_str(3)?,
+                    jwks_uri: r.get_str(4)?,
+                    expires: r.get_i64(5)?,
                 })
             },
         )
         .ok()?;
-    let _ = db.execute("DELETE FROM sso_pending WHERE state=?", [state]);
+    let _ = store.execute("DELETE FROM sso_pending WHERE state=?", &crate::sql_params![state]);
     Some(p)
 }
 

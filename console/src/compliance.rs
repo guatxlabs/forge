@@ -119,8 +119,8 @@ fn hold_key_engagement(id: i64) -> String {
 
 /// The tenant owning an engagement (ENTERPRISE column, DEFAULT 1). None if the engagement is unknown.
 fn engagement_tenant_id(app: &App, engagement_id: i64) -> Option<i64> {
-    let db = app.db();
-    db.query_row("SELECT tenant_id FROM engagement WHERE id=?", [engagement_id], |r| r.get::<_, i64>(0)).ok()
+    let store = app.store();
+    store.query_row("SELECT tenant_id FROM engagement WHERE id=?", &crate::sql_params![engagement_id], |r| r.get_i64(0)).ok()
 }
 
 fn setting_i64(app: &App, key: &str) -> Option<i64> {
@@ -231,20 +231,13 @@ pub fn retention_blocked(app: &App, engagement_id: i64) -> Option<String> {
         _ => return None, // no retention window configured => retention does not block (hold still can)
     };
     let now = crate::now_epoch();
-    let db = app.db();
+    let store = app.store();
     // FIXED table literals (never user input) — no SQL-injection surface. roe_decision (FIX D) carries
     // per-action audit verdicts also destroyed by delete/archive; each has ts + engagement_id columns.
     for table in ["finding", "runrecord", "roe_decision"] {
         let sql = format!("SELECT ts FROM {table} WHERE engagement_id=?");
-        let mut stmt = match db.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let rows = match stmt.query_map([engagement_id], |r| r.get::<_, Option<String>>(0)) {
-            Ok(it) => it,
-            Err(_) => continue,
-        };
-        for ts in rows.flatten() {
+        let rows = store.query_lax(&sql, &crate::sql_params![engagement_id], |r| r.get_opt_str(0)).unwrap_or_default();
+        for ts in rows {
             let ts = ts.unwrap_or_default();
             // "within retention" <=> NOT purgeable. Unparseable ts => not purgeable => within (fail-closed).
             let within = match parse_ts_epoch(&ts) {
@@ -797,36 +790,32 @@ fn collect_expired_rows(app: &App, eid: i64, retention: i64, now: i64, table: &s
         _ => return (vec![], vec![]),
     };
     let sql = format!("SELECT {cols} FROM {table} WHERE engagement_id=?");
-    let db = app.db();
-    let mut stmt = match db.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return (vec![], vec![]),
-    };
-    let rows = stmt.query_map([eid], |r| {
-        let id: i64 = r.get(0)?;
-        let ts: String = r.get::<_, Option<String>>(1)?.unwrap_or_default();
-        // capture the row as a name->value map for a faithful archive.
-        let mut obj = serde_json::Map::new();
-        obj.insert("id".into(), json!(id));
-        obj.insert("ts".into(), json!(ts.clone()));
-        for (i, name) in cols.split(", ").enumerate().skip(2) {
-            let v: Option<String> = r.get::<_, Option<String>>(i).ok().flatten();
-            obj.insert(name.trim().to_string(), json!(v));
-        }
-        Ok((id, ts, Value::Object(obj)))
-    });
+    let store = app.store();
+    let rows = store
+        .query_lax(&sql, &crate::sql_params![eid], |r| {
+            let id: i64 = r.get_i64(0)?;
+            let ts: String = r.get_opt_str(1)?.unwrap_or_default();
+            // capture the row as a name->value map for a faithful archive.
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("ts".into(), json!(ts.clone()));
+            for (i, name) in cols.split(", ").enumerate().skip(2) {
+                let v: Option<String> = r.get_opt_str(i).ok().flatten();
+                obj.insert(name.trim().to_string(), json!(v));
+            }
+            Ok((id, ts, Value::Object(obj)))
+        })
+        .unwrap_or_default();
     let mut arch = vec![];
     let mut ids = vec![];
-    if let Ok(iter) = rows {
-        for row in iter.flatten() {
-            let (id, ts, obj) = row;
-            match parse_ts_epoch(&ts) {
-                Some(ep) if worm_purgeable(Some(retention), now - ep, false) => {
-                    arch.push(obj);
-                    ids.push(id);
-                }
-                _ => {} // unparseable or not expired => keep (fail-closed)
+    for row in rows {
+        let (id, ts, obj) = row;
+        match parse_ts_epoch(&ts) {
+            Some(ep) if worm_purgeable(Some(retention), now - ep, false) => {
+                arch.push(obj);
+                ids.push(id);
             }
+            _ => {} // unparseable or not expired => keep (fail-closed)
         }
     }
     (arch, ids)
@@ -837,9 +826,9 @@ fn delete_rows(app: &App, table: &str, ids: &[i64]) {
     if ids.is_empty() || !matches!(table, "finding" | "runrecord") {
         return;
     }
-    let db = app.db();
+    let store = app.store();
     for id in ids {
-        let _ = db.execute(&format!("DELETE FROM {table} WHERE id=?"), [id]);
+        let _ = store.execute(&format!("DELETE FROM {table} WHERE id=?"), &crate::sql_params![*id]);
     }
 }
 
@@ -893,11 +882,11 @@ fn ledger_actor(detail: &Value) -> String {
 fn build_evidence(app: &App, eid: i64, from: Option<i64>, to: Option<i64>) -> Result<Value, Box<Response>> {
     // 1) engagement identity (isolation anchor).
     let (name, status, mode, tenant_id) = {
-        let db = app.db();
-        match db.query_row(
+        let store = app.store();
+        match store.query_row(
             "SELECT name, status, mode, tenant_id FROM engagement WHERE id=?",
-            [eid],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)),
+            &crate::sql_params![eid],
+            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?, r.get_i64(3)?)),
         ) {
             Ok(t) => t,
             Err(_) => return Err(Box::new(err(StatusCode::NOT_FOUND, "unknown_engagement", format!("engagement {eid} introuvable")))),
@@ -958,36 +947,31 @@ fn build_evidence(app: &App, eid: i64, from: Option<i64>, to: Option<i64>) -> Re
     let mut tenant_grants: Vec<Value> = vec![];
     let mut group_mappings: Vec<Value> = vec![];
     {
-        let db = app.db();
-        if let Ok(mut st) = db.prepare("SELECT login, role, disabled FROM users ORDER BY login") {
-            if let Ok(rows) = st.query_map([], |r| {
-                Ok(json!({ "login": r.get::<_, String>(0)?, "role": r.get::<_, String>(1)?, "disabled": r.get::<_, i64>(2)? != 0 }))
-            }) {
-                accounts = rows.flatten().collect();
-            }
-        }
-        if let Ok(mut st) = db.prepare(
-            "SELECT u.login, tg.role FROM tenant_grant tg JOIN users u ON u.id=tg.user_id WHERE tg.tenant_id=? ORDER BY u.login",
-        ) {
-            if let Ok(rows) = st.query_map([tenant_id], |r| {
-                Ok(json!({ "login": r.get::<_, String>(0)?, "tenant_role": r.get::<_, String>(1)? }))
-            }) {
-                tenant_grants = rows.flatten().collect();
-            }
-        }
-        if let Ok(mut st) =
-            db.prepare("SELECT idp_group, role, tenant_id, tenant_role FROM rbac_group_map WHERE tenant_id=? ORDER BY idp_group")
-        {
-            if let Ok(rows) = st.query_map([tenant_id], |r| {
-                Ok(json!({
-                    "idp_group": r.get::<_, String>(0)?, "role": r.get::<_, String>(1)?,
-                    "tenant_id": r.get::<_, Option<i64>>(2)?, "tenant_role": r.get::<_, Option<String>>(3)?,
-                }))
-            }) {
-                group_mappings = rows.flatten().collect();
-            }
-        }
-        drop(db); // end the block with a statement so the tail if-let's temporaries drop before `db`
+        let store = app.store();
+        accounts = store
+            .query_lax("SELECT login, role, disabled FROM users ORDER BY login", &[], |r| {
+                Ok(json!({ "login": r.get_str(0)?, "role": r.get_str(1)?, "disabled": r.get_i64(2)? != 0 }))
+            })
+            .unwrap_or_default();
+        tenant_grants = store
+            .query_lax(
+                "SELECT u.login, tg.role FROM tenant_grant tg JOIN users u ON u.id=tg.user_id WHERE tg.tenant_id=? ORDER BY u.login",
+                &crate::sql_params![tenant_id],
+                |r| Ok(json!({ "login": r.get_str(0)?, "tenant_role": r.get_str(1)? })),
+            )
+            .unwrap_or_default();
+        group_mappings = store
+            .query_lax(
+                "SELECT idp_group, role, tenant_id, tenant_role FROM rbac_group_map WHERE tenant_id=? ORDER BY idp_group",
+                &crate::sql_params![tenant_id],
+                |r| {
+                    Ok(json!({
+                        "idp_group": r.get_str(0)?, "role": r.get_str(1)?,
+                        "tenant_id": r.get_opt_i64(2)?, "tenant_role": r.get_opt_str(3)?,
+                    }))
+                },
+            )
+            .unwrap_or_default();
     }
 
     // 5) backup attestation (restore-PROVEN) — scanned from the console (global) ledger: backup/restore
@@ -1023,9 +1007,9 @@ fn build_evidence(app: &App, eid: i64, from: Option<i64>, to: Option<i64>) -> Re
 
     // 6) counts (this engagement only) + retention/hold policy in force.
     let (n_findings, n_runrecords) = {
-        let db = app.db();
-        let nf: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", [eid], |r| r.get(0)).unwrap_or(0);
-        let nr: i64 = db.query_row("SELECT COUNT(*) FROM runrecord WHERE engagement_id=?", [eid], |r| r.get(0)).unwrap_or(0);
+        let store = app.store();
+        let nf: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![eid], |r| r.get_i64(0)).unwrap_or(0);
+        let nr: i64 = store.query_row("SELECT COUNT(*) FROM runrecord WHERE engagement_id=?", &crate::sql_params![eid], |r| r.get_i64(0)).unwrap_or(0);
         (nf, nr)
     };
     let retention = resolve_retention_secs(app, eid, Some(tenant_id));

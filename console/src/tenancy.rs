@@ -70,14 +70,15 @@ fn caller_user_id(app: &App, headers: &HeaderMap) -> Option<i64> {
         return None;
     }
     let token_sha = crate::sha_hex(&tok);
-    let db = app.db();
-    db.query_row(
-        "SELECT u.id FROM session s JOIN users u ON u.id = s.user_id
+    let store = app.store();
+    store
+        .query_row(
+            "SELECT u.id FROM session s JOIN users u ON u.id = s.user_id
           WHERE s.token_sha = ? AND u.disabled = 0 AND s.expires > ?",
-        rusqlite::params![token_sha, crate::now_epoch()],
-        |r| r.get::<_, i64>(0),
-    )
-    .ok()
+            &crate::sql_params![token_sha, crate::now_epoch()],
+            |r| r.get_i64(0),
+        )
+        .ok()
 }
 
 /// The SET of tenant_ids the caller is granted (their access universe). ENTERPRISE-only semantics.
@@ -87,14 +88,13 @@ pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
         Some(u) => u,
         None => return HashSet::new(),
     };
-    let db = app.db();
+    let store = app.store();
     let mut set = HashSet::new();
-    if let Ok(mut stmt) = db.prepare("SELECT tenant_id FROM tenant_grant WHERE user_id = ?") {
-        if let Ok(rows) = stmt.query_map([uid], |r| r.get::<_, i64>(0)) {
-            for t in rows.flatten() {
-                set.insert(t);
-            }
-        }
+    for t in store
+        .query_lax("SELECT tenant_id FROM tenant_grant WHERE user_id = ?", &crate::sql_params![uid], |r| r.get_i64(0))
+        .unwrap_or_default()
+    {
+        set.insert(t);
     }
     set
 }
@@ -102,8 +102,8 @@ pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
 /// tenant_id owning engagement `eid` (data inherits tenant via engagement_id). None if the engagement
 /// does not exist. Pure lookup.
 fn tenant_of_engagement(app: &App, eid: i64) -> Option<i64> {
-    let db = app.db();
-    db.query_row("SELECT tenant_id FROM engagement WHERE id = ?", [eid], |r| r.get::<_, i64>(0)).ok()
+    let store = app.store();
+    store.query_row("SELECT tenant_id FROM engagement WHERE id = ?", &crate::sql_params![eid], |r| r.get_i64(0)).ok()
 }
 
 /// Is engagement `eid` VISIBLE to the caller?  ── THE CENTRAL FAIL-CLOSED FILTER ──
@@ -165,19 +165,20 @@ pub fn view_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>
     if !native.is_empty() {
         let csv = tenants_csv(&native);
         let own = {
-            let db = app.db();
-            db.query_row(
-                &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .or_else(|_| {
-                db.query_row(
-                    &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
-                    [],
-                    |r| r.get::<_, i64>(0),
+            let store = app.store();
+            store
+                .query_row(
+                    &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
+                    &[],
+                    |r| r.get_i64(0),
                 )
-            })
+                .or_else(|_| {
+                    store.query_row(
+                        &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
+                        &[],
+                        |r| r.get_i64(0),
+                    )
+                })
         };
         if let Ok(id) = own {
             return id;
@@ -186,19 +187,20 @@ pub fn view_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>
     // SUPER-ADMIN with NO engagement in their own tenant(s): fall back across ALL tenants (AUDITED).
     if sa {
         let found = {
-            let db = app.db();
-            db.query_row(
-                "SELECT id, tenant_id FROM engagement WHERE status='active' ORDER BY id DESC LIMIT 1",
-                [],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .or_else(|_| {
-                db.query_row(
-                    "SELECT id, tenant_id FROM engagement ORDER BY id DESC LIMIT 1",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            let store = app.store();
+            store
+                .query_row(
+                    "SELECT id, tenant_id FROM engagement WHERE status='active' ORDER BY id DESC LIMIT 1",
+                    &[],
+                    |r| Ok((r.get_i64(0)?, r.get_i64(1)?)),
                 )
-            })
+                .or_else(|_| {
+                    store.query_row(
+                        "SELECT id, tenant_id FROM engagement ORDER BY id DESC LIMIT 1",
+                        &[],
+                        |r| Ok((r.get_i64(0)?, r.get_i64(1)?)),
+                    )
+                })
         };
         if let Ok((id, tid)) = found {
             audit_superadmin_read(app, headers, tid, &format!("view:default:{id}"));
@@ -224,20 +226,21 @@ pub fn run_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>)
         };
     }
     let csv = tenants_csv(&granted);
-    let db = app.db();
-    db.query_row(
-        &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
-        [],
-        |r| r.get::<_, i64>(0),
-    )
-    .or_else(|_| {
-        db.query_row(
-            &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
-            [],
-            |r| r.get::<_, i64>(0),
+    let store = app.store();
+    store
+        .query_row(
+            &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
+            &[],
+            |r| r.get_i64(0),
         )
-    })
-    .map_err(|_| "aucun engagement accessible".to_string())
+        .or_else(|_| {
+            store.query_row(
+                &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
+                &[],
+                |r| r.get_i64(0),
+            )
+        })
+        .map_err(|_| "aucun engagement accessible".to_string())
 }
 
 /// Membership test: does engagement `eid` belong to one of `granted`'s tenants?  (central filter helper)
@@ -386,14 +389,10 @@ pub fn guard_superadmin_user_mutation(
 
 /// All tenant ids currently present (for computing what a super-admin list reveals beyond native tenants).
 fn all_tenant_ids(app: &App) -> HashSet<i64> {
-    let db = app.db();
+    let store = app.store();
     let mut set = HashSet::new();
-    if let Ok(mut stmt) = db.prepare("SELECT id FROM tenant") {
-        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
-            for t in rows.flatten() {
-                set.insert(t);
-            }
-        }
+    for t in store.query_lax("SELECT id FROM tenant", &[], |r| r.get_i64(0)).unwrap_or_default() {
+        set.insert(t);
     }
     set
 }
@@ -520,7 +519,7 @@ pub(crate) async fn tenancy_context(State(app): State<App>, headers: HeaderMap) 
 /// `Some(set)` => exactly the granted tenants (empty set => `id IN (-1)` => zero rows, fail-closed). Pure
 /// read; ids are i64 (safe to inline in SQL). Ordered by id for a deterministic selector.
 fn accessible_tenants(app: &App, granted: &Option<HashSet<i64>>) -> Vec<Value> {
-    let db = app.db();
+    let store = app.store();
     let sql = match granted {
         None => "SELECT id, name, status FROM tenant ORDER BY id".to_string(),
         Some(set) => format!(
@@ -528,19 +527,15 @@ fn accessible_tenants(app: &App, granted: &Option<HashSet<i64>>) -> Vec<Value> {
             tenants_csv(set)
         ),
     };
-    let mut stmt = match db.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    stmt.query_map([], |r| {
-        Ok(json!({
-            "id": r.get::<_, i64>(0)?,
-            "name": r.get::<_, String>(1)?,
-            "status": r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".into()),
-        }))
-    })
-    .map(|it| it.filter_map(|x| x.ok()).collect())
-    .unwrap_or_default()
+    store
+        .query_lax(&sql, &[], |r| {
+            Ok(json!({
+                "id": r.get_i64(0)?,
+                "name": r.get_str(1)?,
+                "status": r.get_opt_str(2)?.unwrap_or_else(|| "active".into()),
+            }))
+        })
+        .unwrap_or_default()
 }
 
 /// A platform-admin: a console `admin` session (check_admin) OR a super-admin. FAIL-CLOSED.
@@ -597,29 +592,27 @@ pub(crate) async fn tenants_list(State(app): State<App>, headers: HeaderMap) -> 
     if let Some(r) = gate(&app, &headers) {
         return r;
     }
-    let db = app.db();
-    let mut stmt = match db.prepare(
+    let store = app.store();
+    let rows: Vec<Value> = match store.query_lax(
         "SELECT t.id, t.name, t.status, t.created, t.updated,
                 (SELECT COUNT(*) FROM engagement e WHERE e.tenant_id=t.id),
                 (SELECT COUNT(*) FROM tenant_grant g WHERE g.tenant_id=t.id)
          FROM tenant t ORDER BY t.id",
+        &[],
+        |r| {
+            Ok(json!({
+                "id": r.get_i64(0)?,
+                "name": r.get_str(1)?,
+                "status": r.get_opt_str(2)?.unwrap_or_else(|| "active".into()),
+                "created": r.get_opt_str(3)?.unwrap_or_default(),
+                "updated": r.get_opt_str(4)?.unwrap_or_default(),
+                "counts": {"engagements": r.get_i64(5)?, "grants": r.get_i64(6)?},
+            }))
+        },
     ) {
-        Ok(s) => s,
+        Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
-    let rows: Vec<Value> = stmt
-        .query_map([], |r| {
-            Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "status": r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".into()),
-                "created": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                "updated": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "counts": {"engagements": r.get::<_, i64>(5)?, "grants": r.get::<_, i64>(6)?},
-            }))
-        })
-        .map(|it| it.filter_map(|x| x.ok()).collect())
-        .unwrap_or_default();
     (StatusCode::OK, Json(json!({ "tenants": rows }))).into_response()
 }
 
@@ -636,20 +629,20 @@ pub(crate) async fn tenants_create(State(app): State<App>, headers: HeaderMap, J
     }
     let actor = crate::attribution_login(&app, &headers);
     let (id, self_grant): (i64, bool) = {
-        let db = app.db();
-        if let Err(e) = db.execute(
+        let store = app.store();
+        if let Err(e) = store.execute(
             "INSERT INTO tenant(name,status,created,updated) VALUES(?,?,datetime('now'),datetime('now'))",
-            rusqlite::params![name, "active"],
+            &crate::sql_params![&name, "active"],
         ) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", e.to_string());
         }
-        let id = db.last_insert_rowid();
-        let uid: Option<i64> = db.query_row("SELECT id FROM users WHERE login=?", [&actor], |r| r.get::<_, i64>(0)).ok();
+        let id = store.last_insert_id();
+        let uid: Option<i64> = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&actor], |r| r.get_i64(0)).ok();
         let mut sg = false;
         if let Some(u) = uid {
-            let _ = db.execute(
+            let _ = store.execute(
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
-                rusqlite::params![u, id, "tenant_admin"],
+                &crate::sql_params![u, id, "tenant_admin"],
             );
             sg = true;
         }
@@ -694,23 +687,23 @@ pub(crate) async fn tenants_update(
     }
     // existence + last-active guard + mutations under ONE db guard (atomic, anti-TOCTOU).
     let action: &str = {
-        let db = app.db();
-        let cur_status: String = match db.query_row("SELECT status FROM tenant WHERE id=?", [id], |r| r.get(0)) {
+        let store = app.store();
+        let cur_status: String = match store.query_row("SELECT status FROM tenant WHERE id=?", &crate::sql_params![id], |r| r.get_str(0)) {
             Ok(s) => s,
             Err(_) => return err(StatusCode::NOT_FOUND, "unknown_tenant", format!("tenant {id} introuvable")),
         };
         let archiving = new_status.as_deref() == Some("archived") && cur_status == "active";
         if archiving {
-            let active: i64 = db.query_row("SELECT COUNT(*) FROM tenant WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+            let active: i64 = store.query_row("SELECT COUNT(*) FROM tenant WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
             if active <= 1 {
                 return err(StatusCode::CONFLICT, "last_active_tenant", "impossible : dernier tenant actif (archivage refusé, fail-closed)");
             }
         }
         if let Some(n) = &new_name {
-            let _ = db.execute("UPDATE tenant SET name=?, updated=datetime('now') WHERE id=?", rusqlite::params![n, id]);
+            let _ = store.execute("UPDATE tenant SET name=?, updated=datetime('now') WHERE id=?", &crate::sql_params![n, id]);
         }
         if let Some(s) = &new_status {
-            let _ = db.execute("UPDATE tenant SET status=?, updated=datetime('now') WHERE id=?", rusqlite::params![s, id]);
+            let _ = store.execute("UPDATE tenant SET status=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]);
         }
         if new_status.as_deref() == Some("archived") {
             "archive"
@@ -733,27 +726,25 @@ pub(crate) async fn tenant_grants_list(State(app): State<App>, headers: HeaderMa
     if let Some(r) = gate(&app, &headers) {
         return r;
     }
-    let db = app.db();
-    if db.query_row("SELECT 1 FROM tenant WHERE id=?", [id], |_| Ok(())).is_err() {
+    let store = app.store();
+    if store.query_row("SELECT 1 FROM tenant WHERE id=?", &crate::sql_params![id], |_| Ok(())).is_err() {
         return err(StatusCode::NOT_FOUND, "unknown_tenant", format!("tenant {id} introuvable"));
     }
-    let mut stmt = match db.prepare(
+    let rows: Vec<Value> = match store.query_lax(
         "SELECT u.login, g.role, g.created FROM tenant_grant g JOIN users u ON u.id=g.user_id
           WHERE g.tenant_id=? ORDER BY u.login",
+        &crate::sql_params![id],
+        |r| {
+            Ok(json!({
+                "login": r.get_str(0)?,
+                "role": r.get_str(1)?,
+                "created": r.get_opt_str(2)?.unwrap_or_default(),
+            }))
+        },
     ) {
-        Ok(s) => s,
+        Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
-    let rows: Vec<Value> = stmt
-        .query_map([id], |r| {
-            Ok(json!({
-                "login": r.get::<_, String>(0)?,
-                "role": r.get::<_, String>(1)?,
-                "created": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            }))
-        })
-        .map(|it| it.filter_map(|x| x.ok()).collect())
-        .unwrap_or_default();
     (StatusCode::OK, Json(json!({ "tenant_id": id, "grants": rows }))).into_response()
 }
 
@@ -778,23 +769,23 @@ pub(crate) async fn tenant_grant_add(
     };
     let actor = crate::attribution_login(&app, &headers);
     {
-        let db = app.db();
-        if db.query_row("SELECT 1 FROM tenant WHERE id=?", [id], |_| Ok(())).is_err() {
+        let store = app.store();
+        if store.query_row("SELECT 1 FROM tenant WHERE id=?", &crate::sql_params![id], |_| Ok(())).is_err() {
             return err(StatusCode::NOT_FOUND, "unknown_tenant", format!("tenant {id} introuvable"));
         }
-        let uid: i64 = match db.query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get(0)) {
+        let uid: i64 = match store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
             Ok(u) => u,
             Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
         };
         // one grant per (user,tenant): UPDATE the role if it exists, else INSERT (two steps — unambiguous
         // vs the table-level ON CONFLICT IGNORE constraint).
-        let updated = db
-            .execute("UPDATE tenant_grant SET role=? WHERE user_id=? AND tenant_id=?", rusqlite::params![role, uid, id])
+        let updated = store
+            .execute("UPDATE tenant_grant SET role=? WHERE user_id=? AND tenant_id=?", &crate::sql_params![role, uid, id])
             .unwrap_or(0);
         if updated == 0 {
-            let _ = db.execute(
+            let _ = store.execute(
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
-                rusqlite::params![uid, id, role],
+                &crate::sql_params![uid, id, role],
             );
         }
     }
@@ -822,25 +813,25 @@ pub(crate) async fn tenant_grant_remove(
     };
     let actor = crate::attribution_login(&app, &headers);
     {
-        let db = app.db();
-        if db.query_row("SELECT 1 FROM tenant WHERE id=?", [id], |_| Ok(())).is_err() {
+        let store = app.store();
+        if store.query_row("SELECT 1 FROM tenant WHERE id=?", &crate::sql_params![id], |_| Ok(())).is_err() {
             return err(StatusCode::NOT_FOUND, "unknown_tenant", format!("tenant {id} introuvable"));
         }
-        let uid: i64 = match db.query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get(0)) {
+        let uid: i64 = match store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
             Ok(u) => u,
             Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
         };
-        let cur_role: String = match db.query_row(
+        let cur_role: String = match store.query_row(
             "SELECT role FROM tenant_grant WHERE user_id=? AND tenant_id=?",
-            rusqlite::params![uid, id],
-            |r| r.get(0),
+            &crate::sql_params![uid, id],
+            |r| r.get_str(0),
         ) {
             Ok(r) => r,
             Err(_) => return err(StatusCode::NOT_FOUND, "no_grant", format!("aucun grant pour '{login}' sur le tenant {id}")),
         };
         if cur_role == "tenant_admin" {
-            let admins: i64 = db
-                .query_row("SELECT COUNT(*) FROM tenant_grant WHERE tenant_id=? AND role='tenant_admin'", [id], |r| r.get(0))
+            let admins: i64 = store
+                .query_row("SELECT COUNT(*) FROM tenant_grant WHERE tenant_id=? AND role='tenant_admin'", &crate::sql_params![id], |r| r.get_i64(0))
                 .unwrap_or(0);
             if admins <= 1 {
                 return err(
@@ -850,7 +841,7 @@ pub(crate) async fn tenant_grant_remove(
                 );
             }
         }
-        let _ = db.execute("DELETE FROM tenant_grant WHERE user_id=? AND tenant_id=?", rusqlite::params![uid, id]);
+        let _ = store.execute("DELETE FROM tenant_grant WHERE user_id=? AND tenant_id=?", &crate::sql_params![uid, id]);
     }
     crate::append_console_ledger(
         &app,
