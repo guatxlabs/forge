@@ -15,9 +15,10 @@
 
 ## Postgres program (staged)
 
-- **Stage 0** — Store DB-access seam (DML-only; PRAGMA/DDL/backup + SoQL's own read-only connection stay backend-specific). Seam coverage-complete + pilot done; **Stage 0b** converts the remaining ~16 modules to the seam.
-- **Stage 1** — SQL dialect normalization behind the seam (`?` vs `$N` placeholders, autoincrement, `INSERT OR REPLACE` → `ON CONFLICT`, `json_extract` → `->>`, PRAGMA guarded). Still SQLite-only.
-- **Stage 2** — Postgres backend behind cargo feature `store-postgres` (OFF by default → community byte-identical, openssl-free via rustls). Runtime `FORGE_ENTERPRISE_STORE=postgres` + `FORGE_DB_URL`. PG schema DDL. SoQL reader gets a PG `value` → neutral-`Value` mapping.
+- **Stage 0 — DONE** — Store DB-access seam (DML-only; PRAGMA/DDL/backup + SoQL's own read-only connection stay backend-specific). Seam coverage-complete + pilot done; **Stage 0b** converts the remaining ~16 modules to the seam.
+- **Stage 1 — DONE** — SQL dialect normalization behind the seam (`?` vs `$N` placeholders, autoincrement, `INSERT OR REPLACE` → `ON CONFLICT`, `json_extract` → `->>`, PRAGMA guarded). Still SQLite-only.
+- **Stage 2 — backend implemented + integration-tested (docker), BANKED FAIL-CLOSED behind `store-postgres` — NOT enabled at runtime.** Postgres backend behind cargo feature `store-postgres` (OFF by default → community byte-identical, openssl-free via rustls). Runtime `FORGE_ENTERPRISE_STORE=postgres` + `FORGE_DB_URL`. PG schema DDL. SoQL reader gets a PG `value` → neutral-`Value` mapping.
+- **Stage 2b — data-path completion** — route ALL remaining raw `db()` DML (~100 sites) + boot seeding (`populate_modules` / `ensure_default_engagement`/`tenant`/`dashboard`) through the ACTIVE backend, and validate the whole app (not just the seam) against a real Postgres, so `FORGE_ENTERPRISE_STORE=postgres` can be enabled without a split-brain.
 - **Stage 3** — Governed migrator: CLI `migrate-store --from sqlite --to postgres` (FK-order, idempotent, `--dry-run` + row-count verify, signed `console.store.migrate` ledger checkpoint).
 - **Stage 4** — HA/ops: connection pool + timeouts, `/health` DB ping, Postgres in docker-compose enterprise profile, backup/restore doc, CI matrix (SQLite + PG).
 
