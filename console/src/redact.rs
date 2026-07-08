@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Secret redaction — the ONE copy of the two redactors previously duplicated in `reports.rs`
 //! (`redact_secrets`, string scan + PEM-block stripping) and `compliance.rs` (`redact_evidence`,
-//! JSON-key redaction). The sensitive-key sets here are the UNION of both former lists, so each
-//! redactor now redacts AT LEAST everything it did before (never un-redacts — over-redaction is the
-//! safe direction for secrets). No new deps (no regex): PEM-block strip + word scan / JSON walk.
+//! JSON-key redaction). The shared engine is PARAMETERISED by the CALLER's key-set/config: each
+//! public entry point supplies its OWN original list (and recursion semantics), so the output is
+//! BYTE-IDENTICAL to the pre-consolidation behaviour of both callers — no single hardcoded union.
+//! No new deps (no regex): PEM-block strip + word scan / JSON walk.
 
 use serde_json::{json, Value};
 
@@ -11,19 +12,30 @@ use serde_json::{json, Value};
 pub(crate) const REDACT: &str = "[REDACTED]";
 
 // -------------------------------------------------------------------------------------------------
-//  STRING REDACTOR (used by reports.rs). Keys are matched after NORMALISATION to alphanumeric
-//  lowercase. UNION = reports' original list ∪ compliance's exact keys (normalised).
+//  CALLER KEY-SETS — each caller keeps its EXACT original list. NOT merged into a union.
 // -------------------------------------------------------------------------------------------------
 
-/// Sensitive keys, NORMALISED (alphanumeric lowercase) — compared against a normalised key.
-const SENSITIVE_KEYS: &[&str] = &[
-    // reports.rs original set
+/// reports.rs original sensitive keys, NORMALISED (alphanumeric lowercase) — compared against a
+/// normalised key in the string redactor. Verbatim pre-consolidation list (does NOT include the
+/// `passphrase` / `credential` keys the compliance module used — those never applied here).
+const REPORTS_SENSITIVE_KEYS: &[&str] = &[
     "password", "passwd", "pwd", "secret", "secretkey", "clientsecret", "apikey", "accesskey",
     "accesstoken", "token", "authorization", "auth", "xapikey", "cookie", "setcookie", "privatekey",
     "sessiontoken", "session",
-    // compliance.rs additions (normalised: api_key -> apikey, private_key -> privatekey already present)
-    "passphrase", "credential",
 ];
+
+/// compliance.rs original exact JSON-key list — compared by lowercase FULL name in the JSON
+/// redactor. Verbatim pre-consolidation list of 10 keys (does NOT include reports' `auth`/`session`/
+/// … keys, so a sub-object keyed `auth`/`session` is RECURSED into, not wholesale-replaced).
+const COMPLIANCE_EXACT_KEYS: &[&str] = &[
+    "passphrase", "password", "credential", "secret", "token", "apikey", "api_key", "cookie",
+    "authorization", "private_key",
+];
+
+// -------------------------------------------------------------------------------------------------
+//  STRING REDACTOR (used by reports.rs). Keys are matched after NORMALISATION to alphanumeric
+//  lowercase, against the CALLER-SUPPLIED key-set.
+// -------------------------------------------------------------------------------------------------
 
 /// Rédige les blocs PEM de clef privée (`-----BEGIN … PRIVATE KEY----- … -----END … PRIVATE KEY-----`).
 fn redact_private_key_blocks(s: &str) -> String {
@@ -73,9 +85,10 @@ fn is_secret_token(raw: &str) -> bool {
     false
 }
 
-/// Rédige UN mot. `prev_bearer` = le mot précédent était le mot-clef « Bearer » (ce jeton est alors le
-/// token à masquer). Renvoie `(mot rédigé, ce mot est-il le mot-clef Bearer ?)`.
-fn redact_word(prev_bearer: bool, word: &str) -> (String, bool) {
+/// Rédige UN mot. `sensitive_keys` = le key-set du caller. `prev_bearer` = le mot précédent était le
+/// mot-clef « Bearer » (ce jeton est alors le token à masquer). Renvoie `(mot rédigé, ce mot est-il le
+/// mot-clef Bearer ?)`.
+fn redact_word(sensitive_keys: &[&str], prev_bearer: bool, word: &str) -> (String, bool) {
     if prev_bearer {
         return (REDACT.to_string(), false);
     }
@@ -93,7 +106,7 @@ fn redact_word(prev_bearer: bool, word: &str) -> (String, bool) {
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>()
             .to_ascii_lowercase();
-        if !val.is_empty() && (SENSITIVE_KEYS.contains(&knorm.as_str()) || is_secret_token(val)) {
+        if !val.is_empty() && (sensitive_keys.contains(&knorm.as_str()) || is_secret_token(val)) {
             return (format!("{k}{sep}{REDACT}"), is_bearer_kw);
         }
     }
@@ -103,8 +116,9 @@ fn redact_word(prev_bearer: bool, word: &str) -> (String, bool) {
     (word.to_string(), is_bearer_kw)
 }
 
-/// Neutralise les secrets d'une chaîne (blocs PEM + scan mot-à-mot). Préserve les blancs (formatage).
-pub(crate) fn redact_secrets(input: &str) -> String {
+/// Engine: neutralise les secrets d'une chaîne (blocs PEM + scan mot-à-mot) avec le key-set fourni.
+/// Préserve les blancs (formatage).
+fn redact_secrets_with(input: &str, sensitive_keys: &[&str]) -> String {
     let s = redact_private_key_blocks(input);
     let mut out = String::with_capacity(s.len());
     let mut word = String::new();
@@ -112,7 +126,7 @@ pub(crate) fn redact_secrets(input: &str) -> String {
     for ch in s.chars() {
         if ch.is_whitespace() {
             if !word.is_empty() {
-                let (red, is_b) = redact_word(prev_bearer, &word);
+                let (red, is_b) = redact_word(sensitive_keys, prev_bearer, &word);
                 out.push_str(&red);
                 prev_bearer = is_b;
                 word.clear();
@@ -125,33 +139,30 @@ pub(crate) fn redact_secrets(input: &str) -> String {
         }
     }
     if !word.is_empty() {
-        let (red, _) = redact_word(prev_bearer, &word);
+        let (red, _) = redact_word(sensitive_keys, prev_bearer, &word);
         out.push_str(&red);
     }
     out
 }
 
+/// Neutralise les secrets d'une chaîne pour reports.rs — utilise le key-set ORIGINAL de reports.
+pub(crate) fn redact_secrets(input: &str) -> String {
+    redact_secrets_with(input, REPORTS_SENSITIVE_KEYS)
+}
+
 // -------------------------------------------------------------------------------------------------
-//  JSON REDACTOR (used by compliance.rs). Keys are matched by lowercase full name (exact list ∪
-//  suffix rules). UNION = compliance's exact list ∪ reports' key set (already lowercase, no underscore).
+//  JSON REDACTOR (used by compliance.rs). Keys are matched by lowercase full name against the
+//  CALLER-SUPPLIED exact list + compliance's original suffix rules. Sub-objects whose KEY name is
+//  not itself secret are RECURSED into (structural fidelity preserved for SOC2/ISO evidence).
 // -------------------------------------------------------------------------------------------------
 
-/// Is a JSON object key SECRET (its value must be redacted before export)? PRECISE (not a broad
-/// substring) so structural keys survive: `authorization_audit_trail` is NOT a secret, but a
-/// `credential` / `client_secret` / `archive_key` value IS. A PUBLIC key (`pubkey`/`public_key`) is
-/// handled by the caller's key-name conventions (a `pubkey` field has no secret suffix, so it survives).
-fn is_secret_key(key: &str) -> bool {
+/// Is a JSON object key SECRET (its value must be redacted before export)? Deliberately PRECISE (not a
+/// broad substring) so structural keys survive: e.g. `authorization_audit_trail` is NOT a secret, but a
+/// `credential` / `client_secret` / `archive_key` value IS. A PUBLIC key (`pubkey`/`public_key`) is NEVER
+/// redacted (it is the verification material, by design public). `exact` = the caller's exact key-set.
+fn is_secret_key(exact: &[&str], key: &str) -> bool {
     let k = key.to_ascii_lowercase();
-    // UNION of compliance's exact list and reports' sensitive-key set.
-    const EXACT: &[&str] = &[
-        // compliance.rs original
-        "passphrase", "password", "credential", "secret", "token", "apikey", "api_key", "cookie",
-        "authorization", "private_key",
-        // reports.rs additions
-        "passwd", "pwd", "secretkey", "clientsecret", "accesskey", "accesstoken", "auth", "xapikey",
-        "setcookie", "privatekey", "sessiontoken", "session",
-    ];
-    if EXACT.contains(&k.as_str()) {
+    if exact.contains(&k.as_str()) {
         return true;
     }
     k.ends_with("_secret")
@@ -163,27 +174,34 @@ fn is_secret_key(key: &str) -> bool {
         || k.ends_with("_apikey")
 }
 
-/// Recursively REDACT any secret-named field's value to `"[REDACTED]"` (fail-safe: run over the WHOLE
-/// assembled bundle right before it leaves the process, so even an unforeseen secret in a ledger detail
-/// never leaks). Public keys / structural keys are preserved.
-pub(crate) fn redact_evidence(v: &mut Value) {
+/// Engine: recursively REDACT any secret-named field's value with the caller's exact key-set. A
+/// sub-object whose key is NOT secret is RECURSED into (only nested secret-keyed values are masked).
+fn redact_evidence_with(v: &mut Value, exact: &[&str]) {
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
-                if is_secret_key(k) {
+                if is_secret_key(exact, k) {
                     if !val.is_null() {
                         *val = json!("[REDACTED]");
                     }
                 } else {
-                    redact_evidence(val);
+                    redact_evidence_with(val, exact);
                 }
             }
         }
         Value::Array(a) => {
             for it in a.iter_mut() {
-                redact_evidence(it);
+                redact_evidence_with(it, exact);
             }
         }
         _ => {}
     }
+}
+
+/// Recursively REDACT any secret-named field's value to `"[REDACTED]"` for compliance.rs (fail-safe:
+/// run over the WHOLE assembled bundle right before it leaves the process, so even an unforeseen secret
+/// in a ledger detail never leaks). Uses compliance's ORIGINAL exact key-set; public keys / structural
+/// keys are preserved (and non-secret sub-objects are recursed into, not wholesale-replaced).
+pub(crate) fn redact_evidence(v: &mut Value) {
+    redact_evidence_with(v, COMPLIANCE_EXACT_KEYS);
 }
