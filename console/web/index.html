@@ -14,12 +14,16 @@
 .lc-lbl{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
 .lc-modblock{display:flex;flex-direction:column;gap:8px}
 .lc-modlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
-.lc-modopt{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);font-size:13px;cursor:pointer}
+.lc-modbulk{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lc-modbulk .k-theme{padding:3px 8px;font-size:11px}
+.lc-modopt{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);font-size:13px;cursor:pointer;min-width:0}
 .lc-modopt input{flex:0 0 auto}
-.lc-modopt .lc-modname{font-family:var(--font-mono);font-size:12px}
+.lc-modopt .lc-modname{font-family:var(--font-mono);font-size:12px;min-width:0;flex:1 1 auto;overflow-wrap:anywhere;word-break:break-word}
 .lc-modopt.disabled{opacity:.55;cursor:not-allowed}
 .lc-modopt.disabled input{cursor:not-allowed}
-.lc-modopt .lc-clionly{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--sev3);white-space:nowrap}
+/* outil absent du host : indispo neutre (distinct d'une désactivation admin) */
+.lc-modopt.unavail .lc-clionly{color:var(--mut)}
+.lc-modopt .lc-clionly{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--sev3);white-space:normal;overflow-wrap:anywhere;text-align:right}
 /* module a fort impact debloque par l'opt-in : liseré danger, mention « fort impact » */
 .lc-modopt.hi-armed{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));background:color-mix(in srgb,var(--sev4) 7%,var(--card))}
 .lc-modopt.hi-armed .lc-clionly{color:var(--sev4)}
@@ -53,7 +57,7 @@
 .roecount.errors{border-color:color-mix(in srgb,var(--sev4) 35%,var(--bd))} .roecount.errors .rcn{color:var(--sev4)}
 /* params specifiques par module (revele quand le module est coche) */
 .lc-modopt.has-params{flex-direction:column;align-items:stretch}
-.lc-modopt .lc-modtop{display:flex;align-items:center;gap:8px}
+.lc-modopt .lc-modtop{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
 .lc-modparams{display:none;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--bd)}
 .lc-modopt.params-open .lc-modparams{display:flex}
 .lc-modparams .lc-pf{display:flex;flex-direction:column;gap:3px}
@@ -284,9 +288,13 @@
         <textarea id="lc-targets" rows="3" spellcheck="false" placeholder="guatx.com&#10;192.0.2.0/24"></textarea>
       </label>
       <div class="lc-modblock">
-        <div class="rf-row" style="justify-content:space-between">
+        <div class="rf-row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
           <span class="lc-lbl" style="margin:0">Modules (optionnel — vide = le planner choisit)</span>
-          <span id="lc-modhint" class="muted" style="margin:0">chargement…</span>
+          <span class="lc-modbulk">
+            <button id="lc-modall" type="button" class="k-theme" title="Cocher tous les modules SÉLECTIONNABLES (les modules désactivés ou dont l'outil est absent restent décochés)">Tout sélectionner</button>
+            <button id="lc-modnone" type="button" class="k-theme" title="Décocher tous les modules">Tout désélectionner</button>
+            <span id="lc-modhint" class="muted" style="margin:0">chargement…</span>
+          </span>
         </div>
         <div id="lc-modlist" class="lc-modlist"></div>
       </div>

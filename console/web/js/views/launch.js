@@ -38,8 +38,14 @@ export function renderLaunchModules() {
   // connecteur DÉSACTIVÉ par l'admin (enabled=0 ou available_override=0) : jamais sélectionnable au
   // lancement (le serveur refuse de toute façon — module_disabled 400 ; on l'expose ici sans surprise).
   const connOff = m => (m.enabled === false) || (m.available_override === false);
-  const webable = sorted.filter(m => m.web_allowed && !m.exploit && !m.destructive && !connOff(m));
-  const blocked = sorted.filter(m => m.exploit || m.destructive || !m.web_allowed || connOff(m));
+  // disponibilité EFFECTIVE (sonde host ∧ intention opérateur) : effective_available si le moteur l'expose,
+  // sinon la sonde brute `available`. Un module dont l'outil sous-jacent est ABSENT au niveau host n'est
+  // PAS lançable — sans ce contrôle il serait sélectionnable puis SKIP silencieusement au run (no-op).
+  const effAvail = m => (m.effective_available === undefined) ? (m.available !== false) : (m.effective_available !== false);
+  // outil ABSENT (sonde host négative) SANS être une désactivation opérateur (enabled/override) : indispo.
+  const toolAbsent = m => !effAvail(m) && !connOff(m);
+  const webable = sorted.filter(m => m.web_allowed && !m.exploit && !m.destructive && !connOff(m) && !toolAbsent(m));
+  const blocked = sorted.filter(m => m.exploit || m.destructive || !m.web_allowed || connOff(m) || toolAbsent(m));
   if (hint) hint.textContent = `${webable.length} web · ${blocked.length} ${hiOn ? 'à gouverner' : 'bloqués'}`;
   if (guardList(host, sorted, 'aucun module exposé par le moteur')) return;
   host.replaceChildren();
@@ -48,13 +54,17 @@ export function renderLaunchModules() {
     // un connecteur DÉSACTIVÉ par l'admin n'est JAMAIS sélectionnable (au-dessus du plancher exploit :
     // même l'opt-in fort-impact ne le débloque pas — le serveur le refuse via module_disabled).
     const disabledByAdmin = connOff(m);
+    // outil non installé sur l'hôte (sonde de disponibilité négative) : jamais lançable — le run le
+    // SKIP en silence sinon (item no-op). Distinct d'une désactivation opérateur (disabledByAdmin).
+    const disabledByAbsent = toolAbsent(m);
     // un module est sélectionnable s'il est web_allowed non-exploit/non-destructif, OU s'il est à
-    // fort impact ET que l'opt-in gouverné est activé — et JAMAIS s'il est désactivé par l'admin.
-    const allowed = !disabledByAdmin && ((!!m.web_allowed && !highImpact) || (highImpact && hiOn));
+    // fort impact ET que l'opt-in gouverné est activé — et JAMAIS s'il est désactivé par l'admin
+    // ou dont l'outil est absent du host.
+    const allowed = !disabledByAdmin && !disabledByAbsent && ((!!m.web_allowed && !highImpact) || (highImpact && hiOn));
     const armedHi = highImpact && allowed;   // module à fort impact débloqué par l'opt-in
     const specs = (allowed && MODULE_PARAMS[m.kind]) || null;
     const lab = document.createElement('label');
-    lab.className = 'lc-modopt' + (allowed ? '' : ' disabled') + (armedHi ? ' hi-armed' : '') + (specs ? ' has-params' : '');
+    lab.className = 'lc-modopt' + (allowed ? '' : ' disabled') + (disabledByAbsent ? ' unavail' : '') + (armedHi ? ' hi-armed' : '') + (specs ? ' has-params' : '');
     // ligne du haut : case + nom (+ mention bloquée / fort impact)
     const top = document.createElement('div'); top.className = 'lc-modtop';
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = m.kind; cb.dataset.lcmod = '1';
@@ -65,16 +75,20 @@ export function renderLaunchModules() {
     if (!allowed) {
       const why = disabledByAdmin
         ? 'désactivé (admin)'
-        : (highImpact
-          ? 'CLI/opérateur — activer l\'opt-in ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/')
-          : 'CLI opérateur uniquement — non autorisé web');
+        : disabledByAbsent
+          ? 'indispo (outil absent)'
+          : (highImpact
+            ? 'CLI/opérateur — activer l\'opt-in ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/')
+            : 'CLI opérateur uniquement — non autorisé web');
       const tag = document.createElement('span'); tag.className = 'lc-clionly'; tag.textContent = why;
       top.appendChild(tag);
       lab.title = disabledByAdmin
         ? 'Connecteur désactivé par un administrateur (gouvernance) — non lançable (le serveur le refuse : module_disabled).'
-        : (highImpact
-          ? 'Module à fort impact : active l\'opt-in « fort impact » (zone danger) pour le sélectionner.'
-          : 'Ce module ne peut pas être lancé depuis le web (non autorisé web).');
+        : disabledByAbsent
+          ? 'Outil non installé sur l\'hôte (sonde de disponibilité négative) — non lançable (le run le SKIP en silence).'
+          : (highImpact
+            ? 'Module à fort impact : active l\'opt-in « fort impact » (zone danger) pour le sélectionner.'
+            : 'Ce module ne peut pas être lancé depuis le web (non autorisé web).');
     } else if (armedHi) {
       const tag = document.createElement('span'); tag.className = 'lc-clionly'; tag.textContent = 'fort impact — ' + [m.exploit ? 'exploit' : '', m.destructive ? 'destructif' : ''].filter(Boolean).join('/');
       top.appendChild(tag);
@@ -113,6 +127,18 @@ export function renderLaunchModules() {
   });
 }
 
+// Coche (on=true) / décoche (on=false) en masse les modules du formulaire de lancement.
+// « Tout sélectionner » ne coche QUE les modules SÉLECTIONNABLES (checkbox non-disabled) : les modules
+// désactivés (admin) ou dont l'outil est absent restent décochés (respect du gate d'indisponibilité).
+// « Tout désélectionner » décoche tout (y compris un éventuel coché résiduel). On dispatche `change`
+// pour que le bloc de params (params-open) reste synchronisé sans dupliquer la logique de rendu.
+export function lcSelectModules(on) {
+  [...document.querySelectorAll('#lc-modlist input[data-lcmod]')].forEach(cb => {
+    if (on && cb.disabled) return;          // select-all ignore les modules non lançables
+    if (cb.checked !== on) { cb.checked = on; cb.dispatchEvent(new Event('change')); }
+  });
+}
+
 // Construit body.module_params à partir des modules WEB-ALLOWED cochés qui ont des champs renseignés.
 // Coercition : list -> array (vide ignoré) ; number -> Number (NaN ignoré) ; text/select -> string non vide.
 // Un module sans aucun champ renseigné est omis (pas de clé vide -> no-op côté backend).
@@ -122,7 +148,7 @@ export function collectModuleParams() {
     const kind = box.dataset.lcparamsFor;
     const lab = box.closest('.lc-modopt');
     const cb = lab && lab.querySelector('input[data-lcmod]');
-    if (!cb || !cb.checked) return;                 // seuls les modules cochés (et donc dans modules[])
+    if (!cb || !cb.checked || cb.disabled) return;  // seuls les modules cochés ET sélectionnables (⊆ modules[])
     const params = {};
     box.querySelectorAll('[data-lcparam]').forEach(inp => {
       const key = inp.dataset.lcparam, t = inp.dataset.lcparamType, raw = (inp.value || '').trim();
@@ -359,7 +385,9 @@ export async function submitRun(e) {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(campaign) || campaign.startsWith('-')) { lcShowErr(LC_ERRMAP.bad_campaign); return; }
   const targets = ($('#lc-targets').value || '').split('\n').map(s => s.trim()).filter(Boolean);
   if (!targets.length) { lcShowErr(LC_ERRMAP.no_targets); return; }
-  const checkedCbs = [...document.querySelectorAll('#lc-modlist input[data-lcmod]:checked')];
+  // :not(:disabled) — défense en profondeur : un module désactivé/indispo (checkbox disabled) n'entre
+  // JAMAIS dans le payload, même s'il a été coché programmatiquement (le serveur le refuserait de toute façon).
+  const checkedCbs = [...document.querySelectorAll('#lc-modlist input[data-lcmod]:checked:not(:disabled)')];
   const modules = checkedCbs.map(c => c.value);
   // modules à fort impact (exploit/destructif) effectivement cochés — ne peuvent l'être que si l'opt-in est ON.
   const hiModules = checkedCbs.filter(c => c.dataset.lchi === '1').map(c => c.value);
@@ -600,6 +628,9 @@ if ($('#lc-arm')) $('#lc-arm').addEventListener('change', e => { const w = $('#l
 if ($('#lc-reason')) $('#lc-reason').addEventListener('input', lcSyncDanger);
 // ZONE DANGER : opt-in fort impact (défaut OFF) — (dé)bloque exploit/destructif + recalcule les conditions.
 if ($('#lc-allowhi')) $('#lc-allowhi').addEventListener('change', lcSyncDanger);
+// SÉLECTION EN MASSE des modules : « Tout sélectionner » (disponibles uniquement) / « Tout désélectionner ».
+if ($('#lc-modall')) $('#lc-modall').addEventListener('click', () => lcSelectModules(true));
+if ($('#lc-modnone')) $('#lc-modnone').addEventListener('click', () => lcSelectModules(false));
 
 // =====================================================================================
 //  PARITÉ LECTURE/GOUVERNANCE : scope-check, dry-plan + approbation RECON, rapport de run.
@@ -660,7 +691,7 @@ export let LC_PLAN = null;   // dernier dry-plan : { targets, modules, actions[]
 // lit les cibles/modules courants du formulaire (mêmes règles miroir que submitRun, sans secret opérateur).
 export function lcReadTargetsModules() {
   const targets = ($('#lc-targets') && $('#lc-targets').value || '').split('\n').map(s => s.trim()).filter(Boolean);
-  const modules = [...document.querySelectorAll('#lc-modlist input[data-lcmod]:checked')].map(c => c.value);
+  const modules = [...document.querySelectorAll('#lc-modlist input[data-lcmod]:checked:not(:disabled)')].map(c => c.value);
   return { targets, modules };
 }
 export async function lcDryPlan() {

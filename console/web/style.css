@@ -603,8 +603,8 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .modgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
 .modcard{background:var(--card2);border:1px solid var(--bd);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
 .modcard.off{opacity:.6}
-.modhead{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
-.modkind{font-weight:700;color:var(--hd);display:inline-flex;align-items:center;gap:7px}
+.modhead{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.modkind{font-weight:700;color:var(--hd);display:inline-flex;align-items:center;gap:7px;min-width:0;overflow-wrap:anywhere;word-break:break-word}
 .modkind .ic{width:15px;height:15px;color:var(--acc)}
 .modbadges{display:inline-flex;gap:5px;flex-wrap:wrap}
 .modmitre code{font-size:11px;color:var(--acc)}
@@ -625,10 +625,10 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .tq-item:hover{background:color-mix(in srgb,var(--acc) 8%,transparent)}
 .tq-item input{cursor:pointer;flex:none}
 .tq-item.off{opacity:.5}
-.tq-meta{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px}
-.tq-kind{color:var(--fg);font-weight:600}
+.tq-meta{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;min-width:0}
+.tq-kind{color:var(--fg);font-weight:600;min-width:0;overflow-wrap:anywhere;word-break:break-word}
 .tq-mitre{font-size:10px;color:var(--acc)}
-.tq-tools{font-size:10px;color:var(--mut);font-family:var(--mono,monospace)}
+.tq-tools{font-size:10px;color:var(--mut);font-family:var(--mono,monospace);min-width:0;overflow-wrap:anywhere;word-break:break-word}
 
 /* WORKFLOWS — cartes de pipelines + builder (catalogue -> étapes ordonnées) */
 #wf-list{display:flex;flex-direction:column;gap:10px}
