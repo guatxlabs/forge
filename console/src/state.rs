@@ -669,8 +669,8 @@ impl App {
     /// (`LIMIT 1`). Ne verrouille QUE le mutex DB : ne JAMAIS l'appeler en tenant déjà `self.db()`
     /// (deadlock). Un échec de lecture -> false (l'engagement de la gate retombe alors sur `pass_hash`).
     pub(crate) fn any_enabled_user(&self) -> bool {
-        let db = self.db();
-        db.query_row("SELECT 1 FROM users WHERE disabled=0 LIMIT 1", [], |_| Ok(())).is_ok()
+        let store = self.store();
+        store.query_row("SELECT 1 FROM users WHERE disabled=0 LIMIT 1", &crate::sql_params![], |_| Ok(())).is_ok()
     }
 
     /// Recalcule et met en cache `auth_required` : la gate d'auth s'engage si un hash d'env est posé
@@ -693,8 +693,8 @@ impl App {
     /// « provisionnée » dès qu'un ADMIN peut administrer (pas un simple viewer). Requête légère
     /// (`LIMIT 1`). Ne verrouille QUE le mutex DB (ne pas appeler en tenant déjà `self.db()`).
     pub(crate) fn any_enabled_admin(&self) -> bool {
-        let db = self.db();
-        db.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", [], |_| Ok(())).is_ok()
+        let store = self.store();
+        store.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", &crate::sql_params![], |_| Ok(())).is_ok()
     }
 
     /// La console est-elle déjà PROVISIONNÉE ? Vrai si un admin activé existe en base OU si un hash
@@ -1163,7 +1163,7 @@ pub(crate) fn purple_fail_open(url: &str, fired: &[(String, Option<i64>)], reaso
 /// Lit les techniques tirées (runrecord.fired=1, mitre non vide) + horodatage du tir, filtrées par
 /// une clause WHERE additionnelle (campaign ou run_id) déjà validée par l'appelant (param lié).
 pub(crate) fn read_fired_techniques(app: &App, eid: Option<i64>, extra_cond: Option<(&str, &str)>) -> Vec<(String, Option<i64>)> {
-    let db = app.db();
+    let store = app.store();
     // ENGAGEMENT : `eid=Some(id)` restreint aux tirs de CET engagement (vue /purple/coverage). `None`
     // = pas de filtre engagement (run_report : le `run_id` isole déjà les records d'un seul engagement).
     // engagement_id est un entier RÉSOLU -> inliné sans risque d'injection.
@@ -1178,17 +1178,17 @@ pub(crate) fn read_fired_techniques(app: &App, eid: Option<i64>, extra_cond: Opt
             vec![],
         ),
     };
-    let mut stmt = match db.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
-        let mitre: String = r.get::<_, Option<String>>(0)?.unwrap_or_default();
-        let ts_raw: String = r.get::<_, Option<String>>(1)?.unwrap_or_default();
-        Ok((mitre, parse_fire_ts(&ts_raw)))
-    })
-    .map(|it| it.filter_map(|r| r.ok()).collect())
-    .unwrap_or_default()
+    // LENIENT (query_lax) : un prepare échoué -> Err -> unwrap_or_default -> vec![] (à l'identique de
+    // l'early-return d'avant) ; une ligne malformée est ignorée (filter_map(ok)). Bind des args &String
+    // en TEXT, comme le `params_from_iter(args.iter())` d'origine.
+    let params: Vec<crate::store::Param> = args.iter().map(|s| crate::store::Param::Text(s.clone())).collect();
+    store
+        .query_lax(&sql, &params, |r| {
+            let mitre = r.get_opt_str(0)?.unwrap_or_default();
+            let ts_raw = r.get_opt_str(1)?.unwrap_or_default();
+            Ok((mitre, parse_fire_ts(&ts_raw)))
+        })
+        .unwrap_or_default()
 }
 
 /// Accès à une valeur JSON par CHEMIN POINTÉ ("a.b.c") ; None si un segment manque. Un chemin vide
@@ -1723,15 +1723,16 @@ pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Q
 /// acte console lié à un run (cancel, fin de run) est journalisé dans le ledger de SON engagement,
 /// jamais celui d'un autre.
 pub(crate) fn engagement_ledger_for_run(app: &App, run_id: &str) -> String {
-    let db = app.db();
-    db.query_row(
-        "SELECT e.ledger_path FROM run_job j JOIN engagement e ON e.id=j.engagement_id WHERE j.run_id=?",
-        [run_id],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| app.ledger_path.as_str().to_string())
+    let store = app.store();
+    store
+        .query_row(
+            "SELECT e.ledger_path FROM run_job j JOIN engagement e ON e.id=j.engagement_id WHERE j.run_id=?",
+            &crate::sql_params![run_id],
+            |r| r.get_str(0),
+        )
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| app.ledger_path.as_str().to_string())
 }
 
 /// Journalise un acte de run dans le ledger de SON engagement. Si l'engagement partage le ledger de la
