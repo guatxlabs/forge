@@ -209,109 +209,98 @@ fn derive_taxo(category: &str, severity: &str, cwe_in: &str, vec_in: &str, score
 /// Lit les findings de l'engagement `eid` (UNIQUEMENT) en Value JSON, chaque champ texte RÉDIGÉ.
 /// `category` est exposé aussi bien en `category` qu'en `vuln_class` (le générateur groupe dessus).
 fn read_engagement_findings(app: &App, eid: i64) -> Vec<Value> {
-    let db = app.db();
-    let mut stmt = match db.prepare(
+    let store = app.store();
+    // LENIENT (query_lax) : prepare échoué -> vec vide, ligne malformée ignorée (idem query_map+filter_map).
+    store.query_lax(
         "SELECT title,target,severity,category,mitre,status,tool,evidence,poc,fix,cwe,cvss_vector,cvss_score,campaign,ts \
          FROM finding WHERE engagement_id=? ORDER BY id DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    let rows = stmt.query_map([eid], |r| {
-        let title = r.get::<_, Option<String>>(0)?.unwrap_or_default();
-        let target = r.get::<_, Option<String>>(1)?.unwrap_or_default();
-        let severity = r.get::<_, Option<String>>(2)?.unwrap_or_default();
-        let category = r.get::<_, Option<String>>(3)?.unwrap_or_default();
-        let mitre = r.get::<_, Option<String>>(4)?.unwrap_or_default();
-        let status = r.get::<_, Option<String>>(5)?.unwrap_or_default();
-        let tool = r.get::<_, Option<String>>(6)?.unwrap_or_default();
-        let evidence = r.get::<_, Option<String>>(7)?.unwrap_or_default();
-        let poc = r.get::<_, Option<String>>(8)?.unwrap_or_default();
-        let fix = r.get::<_, Option<String>>(9)?.unwrap_or_default();
-        let cwe_in = r.get::<_, Option<String>>(10)?.unwrap_or_default();
-        let vec_in = r.get::<_, Option<String>>(11)?.unwrap_or_default();
-        let score_in = r.get::<_, Option<f64>>(12)?.unwrap_or(0.0);
-        let campaign = r.get::<_, Option<String>>(13)?.unwrap_or_default();
-        let ts = r.get::<_, Option<String>>(14)?.unwrap_or_default();
-        let (cwe, cvss_vector, cvss_score) = derive_taxo(&category, &severity, &cwe_in, &vec_in, score_in);
-        // RÉDACTION des champs texte libre (severity/cwe/mitre/status/cvss = énumérés/ids -> intacts).
-        Ok(json!({
-            "title": redact_secrets(&title),
-            "target": redact_secrets(&target),
-            "severity": severity,
-            "category": redact_secrets(&category),
-            "vuln_class": redact_secrets(&category),
-            "mitre": mitre,
-            "status": status,
-            "tool": redact_secrets(&tool),
-            "evidence": redact_secrets(&evidence),
-            "poc": redact_secrets(&poc),
-            "fix": redact_secrets(&fix),
-            "cwe": cwe,
-            "cvss_vector": cvss_vector,
-            "cvss_score": cvss_score,
-            "campaign": redact_secrets(&campaign),
-            "ts": ts,
-            "engagement_id": eid,
-        }))
-    });
-    match rows {
-        Ok(it) => it.filter_map(|x| x.ok()).collect(),
-        Err(_) => vec![],
-    }
+        &crate::sql_params![eid],
+        |r| {
+            let title = r.get_opt_str(0)?.unwrap_or_default();
+            let target = r.get_opt_str(1)?.unwrap_or_default();
+            let severity = r.get_opt_str(2)?.unwrap_or_default();
+            let category = r.get_opt_str(3)?.unwrap_or_default();
+            let mitre = r.get_opt_str(4)?.unwrap_or_default();
+            let status = r.get_opt_str(5)?.unwrap_or_default();
+            let tool = r.get_opt_str(6)?.unwrap_or_default();
+            let evidence = r.get_opt_str(7)?.unwrap_or_default();
+            let poc = r.get_opt_str(8)?.unwrap_or_default();
+            let fix = r.get_opt_str(9)?.unwrap_or_default();
+            let cwe_in = r.get_opt_str(10)?.unwrap_or_default();
+            let vec_in = r.get_opt_str(11)?.unwrap_or_default();
+            let score_in = r.get_opt_f64(12)?.unwrap_or(0.0);
+            let campaign = r.get_opt_str(13)?.unwrap_or_default();
+            let ts = r.get_opt_str(14)?.unwrap_or_default();
+            let (cwe, cvss_vector, cvss_score) = derive_taxo(&category, &severity, &cwe_in, &vec_in, score_in);
+            // RÉDACTION des champs texte libre (severity/cwe/mitre/status/cvss = énumérés/ids -> intacts).
+            Ok(json!({
+                "title": redact_secrets(&title),
+                "target": redact_secrets(&target),
+                "severity": severity,
+                "category": redact_secrets(&category),
+                "vuln_class": redact_secrets(&category),
+                "mitre": mitre,
+                "status": status,
+                "tool": redact_secrets(&tool),
+                "evidence": redact_secrets(&evidence),
+                "poc": redact_secrets(&poc),
+                "fix": redact_secrets(&fix),
+                "cwe": cwe,
+                "cvss_vector": cvss_vector,
+                "cvss_score": cvss_score,
+                "campaign": redact_secrets(&campaign),
+                "ts": ts,
+                "engagement_id": eid,
+            }))
+        },
+    )
+    .unwrap_or_default()
 }
 
 /// Lit les runs de l'engagement `eid` (UNIQUEMENT) en Value JSON (métadonnées de run, pas de secret).
 fn read_engagement_runs(app: &App, eid: i64) -> Vec<Value> {
-    let db = app.db();
-    let mut stmt = match db.prepare(
+    let store = app.store();
+    // LENIENT (query_lax) : prepare échoué -> vec vide, ligne malformée ignorée (idem query_map+filter_map).
+    store.query_lax(
         "SELECT run_id,campaign,mode,status,started,finished,started_by,fired,dry_run,vetoed,errors \
          FROM run_job WHERE engagement_id=? ORDER BY id DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    let rows = stmt.query_map([eid], |r| {
-        Ok(json!({
-            "run_id": r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            "campaign": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            "mode": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            "status": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            "started": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            "finished": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            "started_by": r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            "fired": r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-            "dry_run": r.get::<_, Option<i64>>(8)?.unwrap_or(0),
-            "vetoed": r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-            "errors": r.get::<_, Option<i64>>(10)?.unwrap_or(0),
-        }))
-    });
-    match rows {
-        Ok(it) => it.filter_map(|x| x.ok()).collect(),
-        Err(_) => vec![],
-    }
+        &crate::sql_params![eid],
+        |r| {
+            Ok(json!({
+                "run_id": r.get_opt_str(0)?.unwrap_or_default(),
+                "campaign": r.get_opt_str(1)?.unwrap_or_default(),
+                "mode": r.get_opt_str(2)?.unwrap_or_default(),
+                "status": r.get_opt_str(3)?.unwrap_or_default(),
+                "started": r.get_opt_str(4)?.unwrap_or_default(),
+                "finished": r.get_opt_str(5)?.unwrap_or_default(),
+                "started_by": r.get_opt_str(6)?.unwrap_or_default(),
+                "fired": r.get_opt_i64(7)?.unwrap_or(0),
+                "dry_run": r.get_opt_i64(8)?.unwrap_or(0),
+                "vetoed": r.get_opt_i64(9)?.unwrap_or(0),
+                "errors": r.get_opt_i64(10)?.unwrap_or(0),
+            }))
+        },
+    )
+    .unwrap_or_default()
 }
 
 /// Agrège les techniques ATT&CK EXERCÉES (fired=1) de l'engagement `eid` (UNIQUEMENT), groupées par
 /// identifiant MITRE : kinds, cibles, nombre de tirs. Trié par MITRE.
 fn aggregate_techniques(app: &App, eid: i64) -> Vec<Value> {
-    let db = app.db();
-    let mut stmt = match db.prepare(
+    let store = app.store();
+    // LENIENT (query_lax) : prepare/ligne en erreur -> rows vide -> agrégation vide (idem l'ancien
+    // double early-return `return vec![]`, dont la sortie finale était de toute façon vide).
+    let rows: Vec<(String, String, String)> = store.query_lax(
         "SELECT mitre,kind,target FROM runrecord WHERE engagement_id=? AND fired=1 AND mitre<>''",
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    let rows: Vec<(String, String, String)> = match stmt.query_map([eid], |r| {
-        Ok((
-            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        ))
-    }) {
-        Ok(it) => it.filter_map(|x| x.ok()).collect(),
-        Err(_) => return vec![],
-    };
+        &crate::sql_params![eid],
+        |r| {
+            Ok((
+                r.get_opt_str(0)?.unwrap_or_default(),
+                r.get_opt_str(1)?.unwrap_or_default(),
+                r.get_opt_str(2)?.unwrap_or_default(),
+            ))
+        },
+    ).unwrap_or_default();
     // agrégation déterministe (BTreeMap trie par MITRE ; sets triés).
     use std::collections::{BTreeMap, BTreeSet};
     let mut agg: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>, i64)> = BTreeMap::new();
@@ -421,22 +410,23 @@ fn summarize(findings: &[Value]) -> Value {
 async fn build_report_data(app: &App, eid: i64) -> Value {
     // méta engagement (name/status/classification) + scope (via load_engagement).
     let (name, status, classification): (String, String, String) = {
-        let db = app.db();
-        db.query_row(
+        let store = app.store();
+        store.query_row(
             "SELECT COALESCE(name,''),COALESCE(status,''),COALESCE(classification,'') FROM engagement WHERE id=?",
-            [eid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            &crate::sql_params![eid],
+            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?)),
         )
         .unwrap_or_default()
     };
+    // load_engagement thread un &Connection vers un helper hors périmètre (state.rs) -> reste sur db().
     let eng = load_engagement(&app.db(), eid);
     let (mode, scope_in, scope_out) = match &eng {
         Some(e) => (e.mode.clone(), e.scope_in.clone(), e.scope_out.clone()),
         None => (String::new(), vec![], vec![]),
     };
     let generated: String = {
-        let db = app.db();
-        db.query_row("SELECT datetime('now')", [], |r| r.get::<_, String>(0)).unwrap_or_default()
+        let store = app.store();
+        store.query_row("SELECT datetime('now')", &[], |r| r.get_str(0)).unwrap_or_default()
     };
 
     let findings = read_engagement_findings(app, eid);
@@ -836,7 +826,7 @@ async fn engagement_report(
         return bad(format!("format inconnu '{format}' (html|pdf|docx|csv|json)"));
     }
     // ISOLATION : l'engagement doit EXISTER (sinon 404 — jamais les données d'un autre).
-    let exists = { let db = app.db(); db.query_row("SELECT 1 FROM engagement WHERE id=?", [id], |_| Ok(())).is_ok() };
+    let exists = { let store = app.store(); store.query_row("SELECT 1 FROM engagement WHERE id=?", &crate::sql_params![id], |_| Ok(())).is_ok() };
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }

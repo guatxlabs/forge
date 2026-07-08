@@ -1674,16 +1674,16 @@ pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Q
     match format {
         "html" => {
             let html = {
-                let db = app.db();
-                render_run_report_html(&db, &id, &job, Some(&purple), &custody)
+                let store = app.store();
+                render_run_report_html(&store, &id, &job, Some(&purple), &custody)
             };
             ([("content-type", "text/html; charset=utf-8")], Html(html)).into_response()
         }
         "pdf" => {
             // PDF : depuis le HTML brandé, via un outil système SI présent (pas de dep lourde ajoutée).
             let html = {
-                let db = app.db();
-                render_run_report_html(&db, &id, &job, Some(&purple), &custody)
+                let store = app.store();
+                render_run_report_html(&store, &id, &job, Some(&purple), &custody)
             };
             match render_pdf_from_html(&html).await {
                 Some(bytes) => (
@@ -1707,8 +1707,8 @@ pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Q
         _ => {
             // md (défaut) — rétro-compat stricte : même contenu qu'avant + annexe custody.
             let md = {
-                let db = app.db();
-                render_run_report_md(&db, &id, &job, Some(&purple), Some(&custody))
+                let store = app.store();
+                render_run_report_md(&store, &id, &job, Some(&purple), Some(&custody))
             };
             (StatusCode::OK, [("content-type", "text/markdown; charset=utf-8")], md).into_response()
         }
