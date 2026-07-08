@@ -69,12 +69,6 @@ class BusinessLogicScan(ScopeGuardedOracle):
                    "price-tamper / coupon-stack. Automatisé via une sonde DEVIS non destructive + "
                    "anomaly_marker ; sinon note 'manual review' (status=tested). CWE-840.")
 
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
-        return st, body
-
     def _check_cfg(self, action, name):
         """Config de sonde d'un check : params.probes[name] = {probe_url, param, tamper_value,
         anomaly_marker}. Absente -> check MANUEL (note 'manual review')."""

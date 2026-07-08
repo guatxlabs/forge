@@ -53,12 +53,6 @@ class RfiProbe(ScopeGuardedOracle):
                    "l'opérateur ; PREUVE = le contenu du marqueur est INCLUS dans la réponse. Aucune "
                    "charge malveillante. Sinon tested. CWE-98.")
 
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
-        return st, body
-
     def _send(self, action, payload, method):
         """Injecte `payload` dans params.param (query GET ou corps urlencodé). Renvoie (où, status, body)."""
         headers = dict(action.params.get("headers", {}))

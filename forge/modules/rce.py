@@ -83,12 +83,6 @@ class RceProbe(ScopeGuardedOracle):
         m = 100003 + ((h >> 64) % 899000)
         return token, n, m, n * m
 
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
-        return st, body
-
     def _send(self, action, payload, method):
         """Injecte `payload` dans params.param (query GET ou corps urlencodé). Renvoie (où, status, body)."""
         headers = dict(action.params.get("headers", {}))

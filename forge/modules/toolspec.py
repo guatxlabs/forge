@@ -32,11 +32,10 @@ Zéro dépendance (stdlib) — cohérent avec le cœur Forge.
 import json
 import re
 
+from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
 from .. import runner
 from .. import techniques
-from .. import session as _session
-from ..roe import Scope
 
 _MISSING = object()                      # sentinelle : placeholder requis manquant -> token abandonné
 _MAX_HITS = 200                          # borne le nombre de findings émis par exécution (anti-flood)
@@ -266,7 +265,7 @@ def parse_output(spec, rc, stdout, stderr=""):
 # =================================================================================================
 #  ExternalToolModule — la base GOUVERNÉE que toute sous-classe générée hérite
 # =================================================================================================
-class ExternalToolModule(Module):
+class ExternalToolModule(ScopeGuardMixin, Module):
     """Base des modules-wrappers générés depuis un `ToolSpec`. Aucune sous-classe n'ajoute de logique :
     le comportement gouverné (scope-guard, plancher exploit, dégradation, parsing proof-oriented) vit
     ICI ; le spec porte les données. Non enregistrée (base abstraite : aucun `@register`)."""
@@ -281,28 +280,7 @@ class ExternalToolModule(Module):
         s = self.spec
         return runner.available(s.binary, s.docker_image or None, prefer_docker=s.prefer_docker)
 
-    # --- scope-guard fail-closed (miroir EXACT de ScopeGuardedOracle / PentestConnector) ---
-    @staticmethod
-    def _scope(action):
-        enforce = "in_scope" in action.params or "out_scope" in action.params
-        sc = Scope({"in_scope": action.params.get("in_scope", []),
-                    "out_scope": action.params.get("out_scope", [])})
-        return enforce, sc
-
-    def _in_scope(self, action, target):
-        enforce, sc = self._scope(action)
-        return True if not enforce else sc.is_in_scope(target)
-
-    @staticmethod
-    def _bound_allow_exploit():
-        """(scope, armed) depuis le SessionStore lié — (None, False) si aucun. `armed` = allow_exploit
-        OU allow_high_impact. Non lié -> défère au ROE de l'engine (ne se sur-refuse pas en fire direct)."""
-        store = _session.current()
-        scope = getattr(store, "scope", None) if store is not None else None
-        if scope is None:
-            return None, False
-        return scope, bool(getattr(scope, "allow_exploit", False)
-                           or getattr(scope, "allow_high_impact", False))
+    # --- scope-guard fail-closed : voir ScopeGuardMixin (source unique) ---
 
     def _argv(self, action):
         return build_argv(self.spec, action.target, action.params)

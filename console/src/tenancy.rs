@@ -58,21 +58,7 @@ pub const DEFAULT_TENANT: i64 = 1;
 /// Two sources (either engages it): the deployment env flag `FORGE_ENTERPRISE_TENANCY` (truthy), or the
 /// DB config key `enterprise.tenancy` (on|1|true|yes). Config is per-DB, so tests toggle it in isolation.
 pub fn enabled(app: &App) -> bool {
-    if env_truthy("FORGE_ENTERPRISE_TENANCY") {
-        return true;
-    }
-    let db = app.db();
-    matches!(
-        crate::settings_get(&db, "enterprise.tenancy").as_deref(),
-        Some("on") | Some("1") | Some("true") | Some("yes")
-    )
-}
-
-/// Truthy env var read (1|true|on|yes, case-insensitive). Absent/other => false.
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
-        .unwrap_or(false)
+    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_TENANCY", "enterprise.tenancy")
 }
 
 /// user_id of the caller's INDIVIDUAL session (non-expired, enabled account) — or None.
@@ -293,7 +279,13 @@ pub fn resolve_create_tenant(app: &App, headers: &HeaderMap, body: &Value) -> Re
         };
     }
     if granted.len() == 1 {
-        return Ok(*granted.iter().next().unwrap());
+        // len==1 invariant guarantees Some; ok_or_else removes the panic path without changing behaviour.
+        let only = granted
+            .iter()
+            .next()
+            .copied()
+            .ok_or_else(|| "aucun tenant accordé — création d'engagement refusée".to_string())?;
+        return Ok(only);
     }
     Err("tenant_id requis (plusieurs tenants accordés)".into())
 }
@@ -576,8 +568,8 @@ fn valid_tenant_role(r: &str) -> Option<&'static str> {
     }
 }
 
-fn err(status: StatusCode, code: &str, why: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": code, "why": why.into() }))).into_response()
+fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
 }
 
 /// Common gate for every tenant-admin route: enterprise engaged + platform-admin. Returns the error

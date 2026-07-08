@@ -55,6 +55,19 @@ const ICONS = {
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 
+// safeHtml`...` : gabarit balisé qui ECHAPPE AUTOMATIQUEMENT chaque interpolation via esc() (même
+// contrat que les interpolations `${esc(x)}` open-codées, mais impossible à oublier). Pour insérer un
+// fragment déjà connu-HTML/contrôlé (ex: SEV_BADGE(), ic()), l'envelopper dans raw() -> inséré tel quel.
+function raw(x) { return { __raw: String(x == null ? '' : x) }; }
+function safeHtml(strings, ...vals) {
+  let out = strings[0];
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    out += ((v && typeof v === 'object' && '__raw' in v) ? v.__raw : esc(v)) + strings[i + 1];
+  }
+  return out;
+}
+
 // =====================================================================================
 //  TOKEN (écritures panels : Bearer = l'« ingest token » affiché au démarrage du daemon)
 // =====================================================================================
@@ -132,6 +145,32 @@ async function api(path) {
 }
 const campaignParam = () => { const c = $('#campaign') && $('#campaign').value; return c ? '?campaign=' + encodeURIComponent(c) : ''; };
 const withCampaign = qs => { const c = $('#campaign') && $('#campaign').value; if (!c) return qs; return qs + (qs.includes('?') ? '&' : '?') + 'campaign=' + encodeURIComponent(c); };
+
+// Ecriture centralisée (POST/DELETE). Réunit ce que ~20 sites open-codaient : choix d'en-têtes selon
+// `auth` (operator = X-Forge-Operator[+Bearer] ; token = Bearer viewer ; admin = cookie de session),
+// sérialisation JSON du corps, scoping engagement/campagne (UNIQUEMENT quand le site le faisait déjà,
+// via les flags), et la MÊME extraction anti-XSS que api() : on ne renvoie JAMAIS le corps brut du
+// serveur (un proxy/gateway peut renvoyer du HTML non-fiable), seulement le JSON structuré parsé (dont
+// les champs contrôlés .why/.error) + le code HTTP. Retour : { ok, status, json } (json = {} si vide/
+// non-JSON, exactement comme `await r.json().catch(() => ({}))`). Appeler authHeaders()/operatorHeaders()
+// préserve leurs effets de bord (prompt de token viewer, injection du secret opérateur).
+async function write(path, { method = 'POST', body, auth = 'operator', engagement = false, campaign = false } = {}) {
+  let url = path;
+  if (engagement) url = withEngagement(url);
+  if (campaign) url = withCampaign(url);
+  const hasBody = body !== undefined;
+  const extra = hasBody ? { 'Content-Type': 'application/json' } : {};
+  const headers = auth === 'token' ? authHeaders(extra)
+    : auth === 'admin' ? { ...extra, Accept: 'application/json' }
+    : operatorHeaders(extra);
+  const opts = { method, headers };
+  if (hasBody) opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  const text = await r.text().catch(() => '');
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch (e) { json = {}; }
+  return { ok: r.ok, status: r.status, json };
+}
 
 // =====================================================================================
 //  drilldown / historique / zoom (porté de Plume — pilote l'Explore)
@@ -212,16 +251,24 @@ function statDrill(query, drill) {
 // =====================================================================================
 function toast(msg, kind = 'info', ms = 3200) {
   let host = $('#toasts');
-  if (!host) { host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
+  if (!host) { host = document.createElement('div'); host.id = 'toasts'; host.setAttribute('aria-live', 'polite'); host.setAttribute('aria-atomic', 'false'); document.body.appendChild(host); }
   const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = msg;
   host.appendChild(t);
   setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 220); }, ms);
 }
 function showErr(form, msg) { const e = form.querySelector('.modal-err'); if (e) { e.textContent = msg; e.hidden = false; } }
+// État vide réutilisable : rend un message « muted » dans un hôte (identique aux gardes open-codées
+// `host.innerHTML = '<div class="muted">…</div>'` ; esc() est un no-op sur les libellés statiques).
+function emptyState(host, msg) { if (host) host.innerHTML = '<div class="muted">' + esc(msg) + '</div>'; }
+// Garde de liste vide : rend le message et renvoie true quand la liste est vide -> `if (guardList(host,
+// rows, 'aucun X')) return;` remplace `if (!rows.length) { host.innerHTML = '…'; return; }` à l'identique.
+function guardList(host, rows, msg) { if (rows && rows.length) return false; emptyState(host, msg); return true; }
 function modal(opts = {}) {
   return new Promise(resolve => {
+    const prevFocus = document.activeElement;   // a11y : on rend le focus à l'élément déclencheur à la fermeture
     const ov = document.createElement('div'); ov.className = 'modal-ov';
     const box = document.createElement('div'); box.className = 'modal' + (opts.danger ? ' danger' : '') + (opts.wide ? ' wide' : '');
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true');
     const form = document.createElement('form');
     let html = '';
     if (opts.title) html += `<h3>${esc(opts.title)}</h3>`;
@@ -239,8 +286,18 @@ function modal(opts = {}) {
     html += `<div class="modal-err" hidden></div>`;
     html += `<div class="modal-act"><button type="button" class="m-cancel">${esc(opts.cancelText || 'Annuler')}</button><button type="submit" class="m-ok${opts.danger ? ' danger' : ''}">${esc(opts.okText || 'OK')}</button></div>`;
     form.innerHTML = html; box.appendChild(form); ov.appendChild(box); document.body.appendChild(ov);
-    const close = val => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); resolve(val); };
-    const onKey = e => { if (e.key === 'Escape') close(null); };
+    const close = val => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); if (prevFocus && typeof prevFocus.focus === 'function') { try { prevFocus.focus(); } catch (e) {} } resolve(val); };
+    const onKey = e => {
+      if (e.key === 'Escape') { close(null); return; }
+      // focus-trap : Tab/Shift-Tab bouclent DANS la modale (jamais vers le shell derrière l'overlay).
+      if (e.key === 'Tab') {
+        const f = box.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])');
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
     document.addEventListener('keydown', onKey);
     const first = form.querySelector('input,select,textarea'); if (first) setTimeout(() => first.focus(), 30);
     form.querySelector('.m-cancel').onclick = () => close(null);
@@ -260,10 +317,21 @@ async function confirmModal(message, opts = {}) {
 }
 // modale d'info read-only (détail finding / entrée ledger) : DOM sûr (textContent).
 function infoModal(title, buildBody) {
+  const prevFocus = document.activeElement;   // a11y : restaurer le focus déclencheur à la fermeture
   const ov = document.createElement('div'); ov.className = 'modal-ov';
   const box = document.createElement('div'); box.className = 'modal wide';
-  const onKey = e => { if (e.key === 'Escape') close(); };
-  const close = () => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); };
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true');
+  const onKey = e => {
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Tab') {   // focus-trap : Tab boucle dans la modale
+      const f = box.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])');
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  const close = () => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); if (prevFocus && typeof prevFocus.focus === 'function') { try { prevFocus.focus(); } catch (e) {} } };
   document.addEventListener('keydown', onKey);
   const h = document.createElement('h3'); h.textContent = title; box.appendChild(h);
   const body = document.createElement('div'); body.className = 'infobody'; box.appendChild(body);
@@ -978,13 +1046,13 @@ function saveViewStore(v) { try { localStorage.setItem('forge_dash_views', JSON.
 
 // PATCH d'un panneau (POST /api/panels/:id, Bearer). Le backend connaît name/query/viz/descr/col_span/position/dashboard_id.
 async function patchPanel(id, upd) {
-  const r = await fetch('/api/panels/' + id, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(upd) });
+  const r = await write('/api/panels/' + id, { body: upd, auth: 'token' });
   if (r.status === 401) { localStorage.removeItem('forge_token'); toast('Token invalide ou requis pour éditer un panneau.', 'bad'); }
   return r;
 }
 // PATCH d'un dashboard (POST /api/dashboards/:id, Bearer). Champs backend : name/descr/position.
 async function patchDash(id, upd) {
-  const r = await fetch('/api/dashboards/' + id, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(upd) });
+  const r = await write('/api/dashboards/' + id, { body: upd, auth: 'token' });
   if (r.status === 401) { localStorage.removeItem('forge_token'); toast('Token invalide ou requis pour éditer un dashboard.', 'bad'); }
   return r;
 }
@@ -1001,8 +1069,8 @@ async function createPanelModal(did = 1, query = '') {
   if (!r) return;
   const body = { name: r.name.trim(), query: r.query.trim(), viz: r.viz, descr: r.descr, col_span: 1, position: 999 };
   if (did && Number(did) !== 1) body.dashboard_id = Number(did);   // 1 = défaut (omis pour rétro-compat)
-  const resp = await fetch('/api/panels', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-  const j = await resp.json().catch(() => ({}));
+  const resp = await write('/api/panels', { body, auth: 'token' });
+  const j = resp.json;
   if (!resp.ok) { if (resp.status === 401) localStorage.removeItem('forge_token'); toast('Erreur : ' + (j.error || resp.status), 'bad'); return; }
   toast('Panneau créé', 'ok');
   loadDashboards();
@@ -1036,7 +1104,7 @@ function renderPanel(p) {
   open.onclick = () => { $('#sql').value = p.query; location.hash = 'explore'; runQuery(); };
   const edit = document.createElement('button'); edit.className = 'picon editonly'; edit.innerHTML = ic('pencil'); edit.title = 'Éditer le panneau';
   const del = document.createElement('button'); del.className = 'picon editonly'; del.innerHTML = ic('x'); del.title = 'Supprimer le panneau';
-  del.onclick = async () => { if (await confirmModal('Supprimer ce panneau ?', { danger: true })) { await fetch('/api/panels/' + p.id, { method: 'DELETE', headers: authHeaders() }); loadDashboards(); } };
+  del.onclick = async () => { if (await confirmModal('Supprimer ce panneau ?', { danger: true })) { await write('/api/panels/' + p.id, { method: 'DELETE', auth: 'token' }); loadDashboards(); } };
   const wsel = document.createElement('select'); wsel.className = 'picon editonly'; wsel.title = 'Largeur (colonnes)';
   [1, 2, 3, 4].forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n + ' col'; wsel.appendChild(o); });
   wsel.value = String(p.col_span || 1);
@@ -1091,7 +1159,7 @@ function renderPanel(p) {
     const newDash = Number(dsel.value) || 1;
     if (newDash !== (p.dashboard_id || 1)) upd.dashboard_id = newDash;   // assigner à un autre dashboard
     const r = await patchPanel(p.id, upd);
-    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Erreur : ' + (j.error || r.status), 'bad'); return; }
+    if (!r.ok) { toast('Erreur : ' + (r.json.error || r.status), 'bad'); return; }
     loadDashboards();
   };
   card.appendChild(ef);
@@ -1192,15 +1260,15 @@ function renderDashboard(d) {
     });
     if (!r) return;
     const resp = await patchDash(d.id, { name: r.name.trim(), descr: r.descr.trim() });
-    if (!resp.ok) { const j = await resp.json().catch(() => ({})); toast('Erreur : ' + (j.error || resp.status), 'bad'); return; }
+    if (!resp.ok) { toast('Erreur : ' + (resp.json.error || resp.status), 'bad'); return; }
     loadDashboards();
   };
   wsel.onchange = () => { const n = Number(wsel.value); tile.style.flexBasis = tileBasis(n); setDashPref(d.id, { cols: n }); };
   del.onclick = async () => {
     if (d.id === 1) return;   // garde-fou : dashboard par défaut protégé (409 côté serveur de toute façon)
     if (!await confirmModal('Supprimer ce dashboard ? Ses panneaux seront réassignés au dashboard par défaut.', { danger: true })) return;
-    const resp = await fetch('/api/dashboards/' + d.id, { method: 'DELETE', headers: authHeaders() });
-    const j = await resp.json().catch(() => ({}));
+    const resp = await write('/api/dashboards/' + d.id, { method: 'DELETE', auth: 'token' });
+    const j = resp.json;
     if (!resp.ok) {
       if (resp.status === 401) localStorage.removeItem('forge_token');
       toast(j.error === 'default_protected' ? 'Le dashboard par défaut ne peut pas être supprimé.' : ('Erreur : ' + (j.error || resp.status)), 'bad');
@@ -1356,8 +1424,8 @@ if ($('#dash-new')) $('#dash-new').addEventListener('click', async () => {
     ], validate: v => dashList.some(d => d.name === v.name.trim()) ? 'Un dashboard porte déjà ce nom.' : null,
   });
   if (!r) return;
-  const resp = await fetch('/api/dashboards', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ name: r.name.trim(), descr: r.descr.trim(), position: dashList.length }) });
-  const j = await resp.json().catch(() => ({}));
+  const resp = await write('/api/dashboards', { body: { name: r.name.trim(), descr: r.descr.trim(), position: dashList.length }, auth: 'token' });
+  const j = resp.json;
   if (!resp.ok) { if (resp.status === 401) localStorage.removeItem('forge_token'); toast('Erreur : ' + (j.error || resp.status), 'bad'); return; }
   toast('Dashboard créé', 'ok');
   loadDashboards();
@@ -1425,7 +1493,7 @@ function renderModules() {
   const grid = $('#mod-grid'); if (!grid) return;
   const onlyAvail = $('#mod-avail') && $('#mod-avail').checked;
   const list = MODULES.filter(m => !onlyAvail || m.available).sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
-  if (!list.length) { grid.innerHTML = '<div class="muted">aucun module' + (onlyAvail ? ' disponible' : '') + '</div>'; return; }
+  if (guardList(grid, list, 'aucun module' + (onlyAvail ? ' disponible' : ''))) return;
   grid.replaceChildren(...list.map(m => {
     // « effectif » = enabled ET (override ?? sonde) — grise la carte si le connecteur ne tirerait pas.
     const effective = (m.effective_available === undefined) ? m.available : m.effective_available;
@@ -1491,7 +1559,7 @@ function tqEnabledCount() { return Object.values(TQ.desired).filter(Boolean).len
 function renderTechniques() {
   const host = $('#tq-groups'); if (!host) return;
   const cats = Object.keys(TQ.groups).sort();
-  if (!cats.length) { host.innerHTML = '<div class="muted">aucune technique</div>'; return; }
+  if (guardList(host, cats, 'aucune technique')) return;
   host.replaceChildren(...cats.map(cat => {
     const rows = (TQ.groups[cat] || []).slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
     const on = rows.filter(r => TQ.desired[r.kind]).length;
@@ -1542,9 +1610,9 @@ if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
   const body = { profile: TQ.profile, categories: {}, techniques };
   const st = $('#tq-status');
   try {
-    const r = await fetch(withEngagement('/api/techniques/selection'), { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    const r = await write('/api/techniques/selection', { body, auth: 'token', engagement: true });
     if (r.status === 403) { toast('Sélection réservée à un compte operator/admin', 'bad'); return; }
-    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(r.json.why || r.json.error || r.status), 'bad'); return; }
     toast('Sélection enregistrée (ledgerisée)', 'ok');
     if (st) { st.hidden = false; st.textContent = 'Sélection persistée — appliquée aux prochains runs (' + tqEnabledCount() + ' techniques activées).'; }
     loadTechniques();
@@ -1597,7 +1665,7 @@ function wfStepChip(kind) {
 function renderWorkflows() {
   const host = $('#wf-list'); if (!host) return;
   const all = WF.builtins.concat(WF.user);
-  if (!all.length) { host.innerHTML = '<div class="muted">aucun workflow — cliquez « Nouveau workflow » pour composer un pipeline</div>'; return; }
+  if (guardList(host, all, 'aucun workflow — cliquez « Nouveau workflow » pour composer un pipeline')) return;
   host.replaceChildren(...all.map(wf => {
     const card = document.createElement('div'); card.className = 'wf-card';
     const head = document.createElement('div'); head.className = 'wf-cardhead';
@@ -1627,9 +1695,9 @@ async function deleteWorkflow(wf) {
   const ok = await confirmModal('Supprimer le workflow « ' + wf.name + ' » ? (action ledgerisée)', { title: 'Supprimer le workflow', okText: 'Supprimer' });
   if (!ok) return;
   try {
-    const r = await fetch(withEngagement('/api/workflows/' + encodeURIComponent(wf.name)), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ delete: true }) });
+    const r = await write('/api/workflows/' + encodeURIComponent(wf.name), { body: { delete: true }, auth: 'operator', engagement: true });
     if (r.status === 403) { toast('Suppression réservée à un compte operator/admin', 'bad'); return; }
-    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(r.json.why || r.json.error || r.status), 'bad'); return; }
     toast('Workflow supprimé (ledgerisé)', 'ok'); loadWorkflows();
   } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
 }
@@ -1691,7 +1759,7 @@ function openWorkflowBuilder(existing, opts) {
   cols.append(cat, stcol); box.appendChild(cols);
 
   function renderSteps() {
-    if (!steps.length) { stBody.innerHTML = '<div class="muted">aucune étape — ajoutez des techniques depuis le catalogue</div>'; return; }
+    if (guardList(stBody, steps, 'aucune étape — ajoutez des techniques depuis le catalogue')) return;
     stBody.replaceChildren(...steps.map((s, i) => {
       const row = document.createElement('div'); row.className = 'wf-step';
       const kn = document.createElement('span'); kn.className = 'wf-stepkind' + (WF.enabled[s.kind] ? '' : ' off');
@@ -1729,9 +1797,9 @@ function openWorkflowBuilder(existing, opts) {
     const body = { name, description: (descI.value || '').trim(), steps: outSteps };
     const url = editing ? ('/api/workflows/' + encodeURIComponent(name)) : '/api/workflows';
     try {
-      const r = await fetch(withEngagement(url), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+      const r = await write(url, { body, auth: 'operator', engagement: true });
       if (r.status === 403) { err.textContent = 'Réservé à un compte operator/admin.'; err.hidden = false; return; }
-      const j = await r.json().catch(() => ({}));
+      const j = r.json;
       if (!r.ok) { err.textContent = 'Échec : ' + String(j.why || j.error || r.status); err.hidden = false; return; }
       toast('Workflow enregistré (ledgerisé)', 'ok'); close(); loadWorkflows();
     } catch (e) { err.textContent = 'Erreur réseau : ' + String(e.message || e); err.hidden = false; }
@@ -1781,7 +1849,7 @@ async function runWorkflow(wf) {
   // ENGAGEMENT : le run opère SUR l'engagement actif (son scope + son ledger gouvernent, cf. serveur).
   const _eng = activeEngagement(); if (_eng != null) body.engagement_id = _eng;
   let r, j;
-  try { r = await fetch('/api/run', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }); j = await r.json().catch(() => ({})); }
+  try { r = await write('/api/run', { body, auth: 'operator' }); j = r.json; }
   catch (err) { toast('Erreur réseau : ' + String(err.message || err), 'bad'); return; }
   if (r.status === 202) {
     toast('Workflow « ' + wf.name + ' » lancé (' + j.mode + ') — ' + j.run_id, 'ok');
@@ -1812,13 +1880,13 @@ async function loadFindings(offset = 0) {
   try { d = await api('/findings?' + qp.toString()); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
   const rows = d.findings || [];
   if ($('#f-count')) $('#f-count').textContent = d.total + ' findings';
-  if (!rows.length) { host.innerHTML = '<div class="muted">aucun finding</div>'; return; }
+  if (guardList(host, rows, 'aucun finding')) return;
   const table = document.createElement('table'); table.className = 'qtable findtable';
   table.innerHTML = `<thead><tr><th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>Outil</th><th>Date</th></tr></thead>`;
   const tb = document.createElement('tbody');
   rows.forEach((x, i) => {
     const tr = document.createElement('tr'); tr.style.cursor = 'pointer'; tr.title = 'Cliquer pour voir le détail (evidence / PoC / fix)';
-    tr.innerHTML = `<td class="numcol">${offset + i + 1}</td><td>${SEV_BADGE(x.severity)}</td><td>${esc(x.target)}</td><td>${esc(x.title)}</td><td><code>${esc(x.mitre)}</code></td><td>${esc(x.status)}</td><td class="mut">${esc(x.tool)}</td><td class="mut">${esc(fmtTs(x.ts))}</td>`;
+    tr.innerHTML = safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`;
     tr.onclick = () => openFinding(x.id);
     tb.appendChild(tr);
   });
@@ -1839,7 +1907,7 @@ async function openFinding(id) {
   try { d = await api('/findings/' + id); } catch (e) { toast('Détail finding : ' + e.message, 'bad'); return; }
   infoModal(d.title || ('Finding #' + id), body => {
     const meta = document.createElement('div'); meta.className = 'findmeta';
-    meta.innerHTML = `${SEV_BADGE(d.severity)} <span class="badge">${esc(d.status)}</span> <code>${esc(d.mitre)}</code> <span class="muted">${esc(d.category)}</span>`;
+    meta.innerHTML = safeHtml`${raw(SEV_BADGE(d.severity))} <span class="badge">${d.status}</span> <code>${d.mitre}</code> <span class="muted">${d.category}</span>`;
     body.appendChild(meta);
     const kv = document.createElement('dl'); kv.className = 'kvdetail';
     [['Campagne', d.campaign], ['Cible', d.target], ['Outil', d.tool], ['Run', d.run_id], ['Date', fmtTs(d.ts)]].forEach(([k, v]) => {
@@ -1876,7 +1944,7 @@ async function loadFindingsLibrary() {
   catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
   FT_TEMPLATES = (d && d.templates) || [];
   if ($('#ftpl-count')) $('#ftpl-count').textContent = FT_TEMPLATES.length + ' modèle' + (FT_TEMPLATES.length > 1 ? 's' : '');
-  if (!FT_TEMPLATES.length) { host.innerHTML = '<div class="muted">aucun modèle — cliquez « Nouveau modèle » pour capitaliser un finding réutilisable</div>'; return; }
+  if (guardList(host, FT_TEMPLATES, 'aucun modèle — cliquez « Nouveau modèle » pour capitaliser un finding réutilisable')) return;
   host.replaceChildren(...FT_TEMPLATES.map(renderTemplateCard));
 }
 
@@ -1895,9 +1963,9 @@ function renderTemplateCard(tpl) {
   const card = document.createElement('div'); card.className = 'wf-card';
   const head = document.createElement('div'); head.className = 'wf-cardhead';
   const title = document.createElement('span'); title.className = 'wf-name';
-  title.innerHTML = esc(tpl.name) + ' ' + SEV_BADGE(tpl.severity)
-    + (tpl.cwe ? ` <span class="badge">${esc(tpl.cwe)}</span>` : '')
-    + (tpl.vuln_class ? ` <span class="badge mut">${esc(tpl.vuln_class)}</span>` : '');
+  title.innerHTML = safeHtml`${tpl.name} ${raw(SEV_BADGE(tpl.severity))}`
+    + (tpl.cwe ? safeHtml` <span class="badge">${tpl.cwe}</span>` : '')
+    + (tpl.vuln_class ? safeHtml` <span class="badge mut">${tpl.vuln_class}</span>` : '');
   head.appendChild(title);
   const acts = document.createElement('span'); acts.className = 'wf-cardacts';
   const mk = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = label; b.onclick = fn; return b; };
@@ -1937,9 +2005,9 @@ async function openTemplateEditor(existing) {
   if (!vals) return;
   const path = editing ? '/api/finding-templates/' + existing.id : '/api/finding-templates';
   try {
-    const r = await fetch(path, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(vals) });
+    const r = await write(path, { body: vals, auth: 'operator' });
     if (r.status === 403) { toast('Création/édition réservée à un compte operator/admin', 'bad'); return; }
-    if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(r.json.why || r.json.error || r.status), 'bad'); return; }
     toast(editing ? 'Modèle enregistré (ledgerisé)' : 'Modèle créé (ledgerisé)', 'ok');
     loadFindingsLibrary();
   } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
@@ -1979,9 +2047,9 @@ async function applyTemplate(tpl) {
   const body = { target: vals.__target || '', campaign: vals.__campaign || '', params };
   const eng = activeEngagement(); if (eng != null) body.engagement_id = eng;    // isolation : engagement actif
   try {
-    const r = await fetch(withEngagement('/api/finding-templates/' + tpl.id + '/apply'), { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    const r = await write('/api/finding-templates/' + tpl.id + '/apply', { body, auth: 'operator', engagement: true });
     if (r.status === 403) { toast('Application réservée à un compte operator/admin', 'bad'); return; }
-    const j = await r.json().catch(() => ({}));
+    const j = r.json;
     if (r.status === 409) { toast('Finding déjà présent (campagne/cible/titre identiques) — dédupliqué', 'info'); return; }
     if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
     toast('Finding créé dans l\'engagement actif (ledgerisé)', 'ok');
@@ -2017,7 +2085,7 @@ async function loadCoverage() {
   const host = $('#cov-result'); if (!host) return;
   let cov = [];
   try { cov = await api(withCampaign('/coverage')); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
-  if (!Array.isArray(cov) || !cov.length) { host.innerHTML = '<div class="muted">aucun run-record</div>'; return; }
+  if (guardList(host, Array.isArray(cov) && cov, 'aucun run-record')) return;
   cov.sort((a, b) => (b.runs || 0) - (a.runs || 0));
   const max = Math.max(1, ...cov.map(c => c.runs || 0));
   const wrap = document.createElement('div'); wrap.className = 'bars';
@@ -2247,7 +2315,7 @@ function renderCampaigns() {
   const filt = ($('#cm-filter') && $('#cm-filter').value.trim().toLowerCase()) || '';
   const list = CAMPAIGNS.filter(c => !filt || String(c.campaign).toLowerCase().includes(filt));
   if ($('#cm-count')) $('#cm-count').textContent = CAMPAIGNS.length + ' campagnes';
-  if (!list.length) { host.innerHTML = '<div class="muted">aucune campagne</div>'; return; }
+  if (guardList(host, list, 'aucune campagne')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = `<thead><tr><th>Campagne</th><th>Findings</th><th>Dernier</th></tr></thead>`;
   const tb = document.createElement('tbody');
@@ -2276,7 +2344,7 @@ async function loadRoe() {
   rows.forEach(r => { const k = String(r.verdict || '').toUpperCase(); if (counts[k] != null) counts[k]++; });
   const cc = $('#roe-counters');
   if (cc) cc.innerHTML = ['FIRE', 'DRY_RUN', 'VETO'].map(k => `<div class="roecount v-${k}"><span class="rcn">${counts[k]}</span><span class="rcl">${k}</span></div>`).join('');
-  if (!rows.length) { host.innerHTML = '<div class="muted">aucune décision ROE</div>'; return; }
+  if (guardList(host, rows, 'aucune décision ROE')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = `<thead><tr><th>#</th><th>Verdict</th><th>Cible</th><th>Type</th><th>Risque</th><th>Raisons</th><th>Date</th></tr></thead>`;
   const tb = document.createElement('tbody');
@@ -2310,7 +2378,7 @@ async function loadLedger() {
   try { d = await api('/ledger?limit=200'); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
   if ($('#lg-path')) $('#lg-path').textContent = d.path || '';
   const entries = d.entries || [];
-  if (!entries.length) { host.innerHTML = '<div class="muted">ledger vide ou absent</div>'; return; }
+  if (guardList(host, entries, 'ledger vide ou absent')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = `<thead><tr><th>Seq</th><th>Date</th><th>Type</th><th>Hash</th><th>Alg</th></tr></thead>`;
   const tb = document.createElement('tbody');
@@ -2504,8 +2572,8 @@ async function engagementCreateModal() {
     scope_json: { mode: vals.mode || 'grey', in_scope: _scopeLines(vals.in_scope), out_scope: _scopeLines(vals.out_scope) },
   };
   try {
-    const r = await fetch('/api/engagements', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    const j = await r.json().catch(() => ({}));
+    const r = await write('/api/engagements', { body, auth: 'operator' });
+    const j = r.json;
     if (r.status === 403) { toast('Réservé à un compte operator.', 'bad'); return; }
     if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
     toast('Engagement créé (ledgerisé).', 'ok');
@@ -2540,8 +2608,8 @@ async function engagementEditModal(e) {
 // ET le bearer de session (admin) : le serveur gate selon l'opération (fail-closed).
 async function engagementMutate(id, body, okMsg) {
   try {
-    const r = await fetch('/api/engagements/' + id, { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    const j = await r.json().catch(() => ({}));
+    const r = await write('/api/engagements/' + id, { body, auth: 'operator' });
+    const j = r.json;
     if (r.status === 403) { toast('Action non autorisée pour votre rôle.', 'bad'); return false; }
     if (r.status === 409) { toast(String(j.why || 'opération refusée (fail-closed)'), 'bad'); return false; }
     if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return false; }
@@ -2559,7 +2627,7 @@ async function loadEngagements() {
   renderEngagementSelector();
   const active = activeEngagement();
   if ($('#eg-count')) $('#eg-count').textContent = ENGAGEMENTS.length + ' engagement(s)';
-  if (!ENGAGEMENTS.length) { host.innerHTML = '<div class="muted">aucun engagement</div>'; return; }
+  if (guardList(host, ENGAGEMENTS, 'aucun engagement')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = '<thead><tr><th>#</th><th>Nom</th><th>Mode</th><th>Statut</th><th>Findings</th><th>Runs</th><th>Actions</th></tr></thead>';
   const tb = document.createElement('tbody');
@@ -2715,7 +2783,7 @@ async function loadTenants() {
   catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
   const tenants = (data && data.tenants) || [];
   if ($('#tenants-count')) $('#tenants-count').textContent = tenants.length + ' tenant' + (tenants.length > 1 ? 's' : '');
-  if (!tenants.length) { host.innerHTML = '<div class="muted">aucun tenant</div>'; return; }
+  if (guardList(host, tenants, 'aucun tenant')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = '<thead><tr><th>#</th><th>Nom</th><th>État</th><th>Engagements</th><th>Grants</th><th>Créé</th><th>Actions</th></tr></thead>';
   const tb = document.createElement('tbody');
@@ -2964,7 +3032,7 @@ async function loadIdentityMap() {
   let data = null;
   try { data = await adminApi('/rbac/group-map'); } catch (e) { host.innerHTML = '<div class="muted">Chargement refusé : ' + esc(e.message) + '</div>'; return; }
   const rows = (data && Array.isArray(data.mappings)) ? data.mappings : [];
-  if (!rows.length) { host.innerHTML = '<div class="muted">Aucun mapping — un groupe non mappé ne confère aucun droit (moindre privilège).</div>'; return; }
+  if (guardList(host, rows, 'Aucun mapping — un groupe non mappé ne confère aucun droit (moindre privilège).')) return;
   let html = '<table class="id-map-tbl"><thead><tr><th>Groupe IdP</th><th>Rôle</th><th>Tenant</th><th>Rôle tenant</th><th></th></tr></thead><tbody>';
   rows.forEach(m => {
     html += '<tr><td><code>' + esc(m.group) + '</code></td><td>' + esc(m.role) + '</td><td>' + (m.tenant_id == null ? '—' : esc(m.tenant_id)) + '</td><td>' + (m.tenant_role == null ? '—' : esc(m.tenant_role)) + '</td>'
@@ -3173,7 +3241,7 @@ function renderLaunchModules() {
   const webable = sorted.filter(m => m.web_allowed && !m.exploit && !m.destructive && !connOff(m));
   const blocked = sorted.filter(m => m.exploit || m.destructive || !m.web_allowed || connOff(m));
   if (hint) hint.textContent = `${webable.length} web · ${blocked.length} ${hiOn ? 'à gouverner' : 'bloqués'}`;
-  if (!sorted.length) { host.innerHTML = '<div class="muted">aucun module exposé par le moteur</div>'; return; }
+  if (guardList(host, sorted, 'aucun module exposé par le moteur')) return;
   host.replaceChildren();
   sorted.forEach(m => {
     const highImpact = !!(m.exploit || m.destructive);
@@ -3535,8 +3603,8 @@ async function submitRun(e) {
   if (btn) btn.disabled = true; if (stat) stat.textContent = 'lancement…';
   let r, j;
   try {
-    r = await fetch('/api/run', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    j = await r.json().catch(() => ({}));
+    r = await write('/api/run', { body, auth: 'operator' });
+    j = r.json;
   } catch (err) {
     if (btn) btn.disabled = false; if (stat) stat.textContent = '';
     lcShowErr('Erreur réseau : ' + esc(String(err.message || err))); return;
@@ -3630,8 +3698,8 @@ async function cancelRun() {
   if (!(await confirmModal('Annuler le run en cours ? Le groupe de processus sera tué.', { danger: true, okText: 'Annuler le run' }))) return;
   let r, j;
   try {
-    r = await fetch('/api/runs/' + encodeURIComponent(runId) + '/cancel', { method: 'POST', headers: operatorHeaders() });
-    j = await r.json().catch(() => ({}));
+    r = await write('/api/runs/' + encodeURIComponent(runId) + '/cancel', { auth: 'operator' });
+    j = r.json;
   } catch (err) { toast('Erreur réseau : ' + (err.message || err), 'bad'); return; }
   if (r.ok) { toast('Annulation demandée — kill group envoyé.', 'ok'); lcSetLiveBadge('cancelled'); }
   else {
@@ -3650,7 +3718,7 @@ async function loadRuns() {
   catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
   LC_RUNS = Array.isArray(rows) ? rows : [];
   if ($('#lc-runcount')) $('#lc-runcount').textContent = LC_RUNS.length + ' runs';
-  if (!LC_RUNS.length) { host.innerHTML = '<div class="muted">aucun run</div>'; return; }
+  if (guardList(host, LC_RUNS, 'aucun run')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = `<thead><tr><th>#</th><th>Statut</th><th>Campagne</th><th>Mode</th><th>FIRE/DRY/VETO</th><th>Err</th><th>Cibles</th><th>Date</th></tr></thead>`;
   const tb = document.createElement('tbody');
@@ -3800,18 +3868,13 @@ async function submitImport(ev) {
   if (btn) btn.disabled = true; if (stat) stat.textContent = 'import en cours…';
   let r;
   try {
-    r = await fetch('/api/import', {
-      method: 'POST',
-      headers: operatorHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ campaign, format, filename: file.name || '', content, flag_out_of_scope: flag }),
-    });
+    r = await write('/api/import', { body: { campaign, format, filename: file.name || '', content, flag_out_of_scope: flag }, auth: 'operator' });
   } catch (err) {
     if (btn) btn.disabled = false; if (stat) stat.textContent = '';
     imShowErr('Erreur réseau : ' + esc(String(err.message || err))); return;
   }
   if (btn) btn.disabled = false; if (stat) stat.textContent = '';
-  let j = {};
-  try { j = await r.json(); } catch (e) { /* réponse non-JSON */ }
+  const j = r.json;
   if (r.status === 403) { imShowErr('Refusé : rôle opérateur requis (vérifie le secret opérateur C2).'); return; }
   if (!r.ok) { imShowErr('Import refusé : ' + esc(String((j && (j.why || j.error)) || ('HTTP ' + r.status)))); return; }
   renderImportResult(j);
@@ -4008,8 +4071,8 @@ async function lcApproveAndRun() {
   if (btn) btn.disabled = true; if (stat) stat.textContent = 'lancement…';
   let r, j;
   try {
-    r = await fetch('/api/run', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-    j = await r.json().catch(() => ({}));
+    r = await write('/api/run', { body, auth: 'operator' });
+    j = r.json;
   } catch (err) { if (btn) btn.disabled = false; if (stat) stat.textContent = ''; lcShowErr('Erreur réseau : ' + esc(String(err.message || err))); location.hash = 'launch'; return; }
   if (btn) btn.disabled = false; if (stat) stat.textContent = '';
   if (r.status === 202) {
@@ -4104,7 +4167,7 @@ async function loadReports() {
   const noEng = (id == null);
   ['rep-generate', 'rep-refresh'].forEach(bid => { const b = $('#' + bid); if (b) b.disabled = noEng; });
   const host = $('#rep-preview'); if (!host) return;
-  if (noEng) { host.innerHTML = '<div class="muted">Aucun engagement actif — sélectionnez-en un dans l\'en-tête pour générer son rapport.</div>'; return; }
+  if (noEng) { emptyState(host, 'Aucun engagement actif — sélectionnez-en un dans l\'en-tête pour générer son rapport.'); return; }
   await previewReport();
 }
 
@@ -4217,8 +4280,8 @@ async function refreshModules() {
   if (btn) btn.disabled = true;
   let r, j;
   try {
-    r = await fetch('/api/modules/refresh', { method: 'POST', headers: operatorHeaders({ 'Content-Type': 'application/json' }) });
-    j = await r.json().catch(() => ({}));
+    r = await write('/api/modules/refresh', { auth: 'operator' });
+    j = r.json;
   } catch (e) { if (btn) btn.disabled = false; toast('Erreur réseau : ' + (e.message || e), 'bad'); return; }
   if (btn) btn.disabled = false;
   if (r.status === 403) { toast('Rôle opérateur requis ou preuve invalide (fail-closed).', 'bad'); return; }
@@ -4275,7 +4338,7 @@ async function loadAdminUsers() {
   catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
   const users = (data && data.users) || [];
   if ($('#admin-count')) $('#admin-count').textContent = users.length + ' compte' + (users.length > 1 ? 's' : '');
-  if (!users.length) { host.innerHTML = '<div class="muted">aucun compte</div>'; return; }
+  if (guardList(host, users, 'aucun compte')) return;
   const me = (WHOAMI && WHOAMI.login) || '';
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = '<thead><tr><th>Login</th><th>Role</th><th>Etat</th><th>Cree</th><th>Actions</th></tr></thead>';
@@ -4392,7 +4455,7 @@ async function loadAdminConnectors() {
   catch (e) { host.innerHTML = `<div class="bad">erreur : ${esc(e.message)}</div>`; return; }
   const list = Array.isArray(mods) ? mods.slice().sort((a, b) => String(a.kind).localeCompare(String(b.kind))) : [];
   if ($('#admin-conn-count')) $('#admin-conn-count').textContent = list.length + ' connecteur' + (list.length > 1 ? 's' : '');
-  if (!list.length) { host.innerHTML = '<div class="muted">aucun connecteur</div>'; return; }
+  if (guardList(host, list, 'aucun connecteur')) return;
   const table = document.createElement('table'); table.className = 'qtable';
   table.innerHTML = '<thead><tr><th>Connecteur</th><th>Sonde host</th><th>Etat</th><th>Override dispo</th><th>Effectif</th><th>Web</th><th>Actions</th></tr></thead>';
   const tb = document.createElement('tbody');
@@ -4887,7 +4950,7 @@ function backupRestore() {
 // --- Panneau politique de sauvegarde programmée + offsite (GET rédige les secrets ; POST valide).
 async function loadAdminBackup() {
   const host = $('#admin-bk-policy'); if (!host) return;
-  if (!isAdmin()) { host.innerHTML = '<div class="muted">reserve aux administrateurs</div>'; return; }
+  if (!isAdmin()) { emptyState(host, 'reserve aux administrateurs'); return; }
   host.innerHTML = '<div class="muted">chargement…</div>';
   let data;
   try { data = await adminApi('/backup/policy'); }
@@ -5014,14 +5077,10 @@ if ($('#navtoggle')) $('#navtoggle').onclick = () => { const l = document.queryS
 
 // campagne globale : recharge la vue courante + les compteurs croisés
 if ($('#campaign')) $('#campaign').addEventListener('change', () => {
-  const v = location.hash.slice(1) || 'overview';
-  const fn = LOADERS[VIEWS_HAS(v) ? v : 'overview']; if (fn) fn();
-  if (v === 'findings') loadFindings(0);
+  reloadCurrentView();
+  if ((location.hash.slice(1) || 'overview') === 'findings') loadFindings(0);
 });
-if ($('#reload')) $('#reload').addEventListener('click', () => {
-  const v = location.hash.slice(1) || 'overview';
-  const fn = LOADERS[VIEWS_HAS(v) ? v : 'overview']; if (fn) fn();
-});
+if ($('#reload')) $('#reload').addEventListener('click', () => { reloadCurrentView(); });
 
 // =====================================================================================
 //  Thème clair / sombre (Aurora) + auto-refresh + boot
@@ -5038,8 +5097,7 @@ if ($('#reload')) $('#reload').addEventListener('click', () => {
     localStorage.setItem('forge-theme', t);
     paint();
     // recolore les vues à graphes SVG (ils lisent les variables CSS au rendu)
-    const v = location.hash.slice(1) || 'overview';
-    const fn = LOADERS[VIEWS_HAS(v) ? v : 'overview']; if (fn) fn();
+    reloadCurrentView();
   };
 })();
 
@@ -5048,9 +5106,8 @@ function applyAutoRefresh() {
   if (autoTimer) clearInterval(autoTimer);
   const s = Number(($('#refresh') && $('#refresh').value) || 0);
   if (s > 0) autoTimer = setInterval(() => {
-    const v = location.hash.slice(1) || 'overview';
-    const fn = LOADERS[VIEWS_HAS(v) ? v : 'overview']; if (fn) fn();
-    if (v === 'dashboards') refreshPanels();
+    reloadCurrentView();
+    if ((location.hash.slice(1) || 'overview') === 'dashboards') refreshPanels();
   }, s * 1000);
 }
 if ($('#refresh')) $('#refresh').addEventListener('change', applyAutoRefresh);

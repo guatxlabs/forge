@@ -121,14 +121,6 @@ class TokenApiOracle(ScopeGuardedOracle):
     web_allowed = True           # interaction web (réseau) -> gardée par le ROE
     available = True             # stdlib (hmac/hashlib/base64/urllib) -> toujours disponible
 
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Le SessionStore gouverné
-        (scope-guardé) est fusionné par `_http` UNIQUEMENT sur des URL in-scope. Seam monkeypatché."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method,
-                                   data=data, maxlen=200000)
-        return st, body
-
 
 # =================================================================================================
 #  jwt.weakness — vérification de signature JWT contournable, à PREUVE COMPTE-OPÉRATEUR (T1606 / CWE-347)

@@ -57,9 +57,9 @@ fn disabled() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
-/// Standard typed-error response (mirrors sso::err / tenancy::err). Never carries a secret.
-fn err(status: StatusCode, code: &str, why: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": code, "why": why.into() }))).into_response()
+/// Standard typed-error response (shared substrate; byte-identical `{"error","why"}`). Never a secret.
+fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
 }
 
 // ============================================================================================

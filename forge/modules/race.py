@@ -68,15 +68,6 @@ class RaceCondition(ScopeGuardedOracle):
                    "réussit PLUS que le quota autorisé. Ressource PROPRE seulement, jamais un tiers. "
                    "Sinon tested. CWE-362/367.")
 
-    # --- câblage HTTP (seam monkeypatché par les tests) adossé à Oracle._http (session gouvernée in-scope) ---
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="POST", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Le SessionStore gouverné
-        (scope-guardé) est fusionné par `_http` UNIQUEMENT sur des URL in-scope. Seam monkeypatché."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method,
-                                   data=data, maxlen=200000)
-        return st, body
-
     @staticmethod
     def _burst_size(action):
         """Taille de rafale EFFECTIVE, clampée dans [_MIN_BURST, _MAX_BURST] (plafond DUR anti-DoS).

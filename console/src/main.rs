@@ -44,6 +44,13 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 // `merge` des routes (build_router). Le module réutilise App + les helpers d'auth/ledger de ce fichier
 // (visibles depuis un module descendant de la racine de crate).
 mod finding_templates;
+// Shared internal substrate for the flag-gated enterprise modules (dedup, behaviour-neutral):
+//   error  — compact typed ApiError + IntoResponse (byte-identical `{"error","why"}` envelope).
+//   flags  — the single copy of `env_truthy` + `enterprise_enabled` (env|per-DB config gate).
+//   redact — the single copy of the two secret redactors (string scan + JSON-key walk).
+mod error;
+mod flags;
+mod redact;
 mod reports;
 // ENTERPRISE (separable, flag-gated) — row-level multi-tenancy. Community (default) build never engages
 // it (tenancy::enabled() false => single implicit tenant #1, byte-identical). Wired as its OWN module
@@ -3286,23 +3293,34 @@ fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, allow_https:
     let body = &text[split + 4..];
     // gère un éventuel Transfer-Encoding: chunked (Plume/axum peut chunker) — décode best-effort.
     if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        Ok(dechunk(body))
+        // IDIO-1 : dé-chunk sur les OCTETS BRUTS du corps (l'en-tête HTTP est ASCII, donc l'offset
+        // `split + 4` calculé sur la vue lossy est le même offset d'octet dans `raw`).
+        Ok(dechunk(&raw[split + 4..]))
     } else {
         Ok(body.to_string())
     }
 }
 
 /// Décode un corps HTTP `chunked` (best-effort) : tailles hex par ligne, terminé par un chunk 0.
-fn dechunk(body: &str) -> String {
-    let mut out = String::new();
-    let mut rest = body;
-    while let Some(nl) = rest.find("\r\n") {
+///
+/// IDIO-1 : le dé-chunking opère sur les OCTETS BRUTS (`&[u8]`). Les tailles de chunk sont des comptes
+/// d'octets ; indexer une chaîne issue de `from_utf8_lossy` avec ces offsets pouvait tomber au milieu
+/// d'un caractère (les octets invalides deviennent U+FFFD, 3 octets) -> panique de tranche `&str` ou
+/// sortie décalée. On assemble d'abord les octets utiles, puis on convertit UNE fois en fin. Pour une
+/// entrée ASCII valide, la sortie est identique à l'ancienne implémentation.
+fn dechunk(body: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::new();
+    let mut rest: &[u8] = body;
+    while let Some(nl) = rest.windows(2).position(|w| w == b"\r\n") {
         let size_line = &rest[..nl];
         // la taille peut porter des extensions après ';' — on ne garde que l'hex.
-        let hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = match usize::from_str_radix(hex, 16) {
-            Ok(s) => s,
-            Err(_) => break,
+        let hex_seg = size_line.split(|&b| b == b';').next().unwrap_or(&[]);
+        let size = match std::str::from_utf8(hex_seg)
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
+        {
+            Some(s) => s,
+            None => break,
         };
         if size == 0 {
             break;
@@ -3310,14 +3328,14 @@ fn dechunk(body: &str) -> String {
         let start = nl + 2;
         let end = start + size;
         if end > rest.len() {
-            out.push_str(&rest[start..]);
+            out.extend_from_slice(&rest[start..]);
             break;
         }
-        out.push_str(&rest[start..end]);
+        out.extend_from_slice(&rest[start..end]);
         // saute le CRLF de fin de chunk.
-        rest = if end + 2 <= rest.len() { &rest[end + 2..] } else { "" };
+        rest = if end + 2 <= rest.len() { &rest[end + 2..] } else { &[] };
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Corrélation PURE (testable, sans I/O) red-team(tiré) × blue-team(détecté).
@@ -7091,7 +7109,9 @@ fn append_console_ledger(app: &App, kind: &str, detail: Value) {
     use std::io::Write;
     // n'avance le head EN CACHE que si l'écriture disque réussit (sinon on relira au prochain append).
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        if writeln!(f, "{}", canon_json(&rec)).is_ok() {
+        // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à un
+        // crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
+        if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
             head.prev = hash;
             head.seq = seq;
         } else {
@@ -7900,6 +7920,8 @@ fn ledger_append_standalone(path: &str, kind: &str, detail: &Value) -> Result<St
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)
         .map_err(|e| format!("ouverture ledger cible '{path}' impossible: {e}"))?;
     writeln!(f, "{}", canon_json(&rec)).map_err(|e| format!("écriture ledger cible échouée: {e}"))?;
+    // SYS-2 : fsync -> l'entrée du ledger dédié est DURABLE avant de retourner (comme append_console_ledger).
+    f.sync_all().map_err(|e| format!("sync ledger cible échoué: {e}"))?;
     Ok(hash)
 }
 
@@ -7992,15 +8014,13 @@ fn copy_ledger_and_key(src_ledger: &str, target_ledger: &str) -> Result<(bool, b
         let src_key = format!("{src_ledger}{ext}");
         if std::path::Path::new(&src_key).exists() {
             let dst_key = format!("{target_ledger}{ext}");
-            std::fs::copy(&src_key, &dst_key)
+            // SYS-3 : la clé destination NAÎT en 0600 (backup_write_atomic écrit un temp 0600 puis rename)
+            // -> plus de fenêtre 0644 sur le fichier final. L'ancien std::fs::copy créait dst en 0644 PUIS
+            // chmod 0600 (bref instant lisible par autrui). Contenu + perms finales identiques (0600).
+            let bytes = std::fs::read(&src_key)
+                .map_err(|e| format!("lecture de la clé '{src_key}' échouée: {e}"))?;
+            backup_write_atomic(&dst_key, &bytes, 0o600)
                 .map_err(|e| format!("copie de la clé '{src_key}' -> '{dst_key}' échouée: {e}"))?;
-            // PRÉSERVE 0600 explicitement (secret de signature — jamais lisible par autrui).
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dst_key, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| format!("chmod 0600 de '{dst_key}' échoué: {e}"))?;
-            }
             if ext == ".ed25519" { ed_copied = true; }
         }
     }
@@ -8465,10 +8485,29 @@ fn backup_write_atomic(path: &str, data: &[u8], mode: u32) -> Result<(), String>
     }
     #[cfg(not(unix))]
     let _ = mode;
+    // SYS-1 : fsync du CONTENU du fichier temporaire AVANT le rename — sinon un crash peut laisser une
+    // entrée renommée mais vide/partielle (le rename est durable, pas les données qu'il pointe).
+    {
+        let f = std::fs::File::open(&tmp).map_err(|e| format!("réouverture de '{tmp}' pour sync échouée: {e}"))?;
+        f.sync_all().map_err(|e| format!("sync de '{tmp}' échoué: {e}"))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("renommage de '{tmp}' -> '{path}' échoué: {e}")
     })?;
+    // SYS-1 : fsync du DOSSIER PARENT APRÈS le rename — rend l'entrée de répertoire (le nouveau nom)
+    // durable. Best-effort (unix uniquement ; no-op ailleurs). Ne bloque pas la réussite du write.
+    #[cfg(unix)]
+    {
+        let parent = std::path::Path::new(path).parent();
+        let dir = match parent {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        };
+        if let Ok(dirf) = std::fs::File::open(dir) {
+            let _ = dirf.sync_all();
+        }
+    }
     Ok(())
 }
 

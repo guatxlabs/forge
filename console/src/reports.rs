@@ -59,125 +59,10 @@ fn bad(why: impl Into<String>) -> Response {
 }
 
 // =====================================================================================
-//  RÉDACTION DES SECRETS (miroir Rust de forge/report_engagement.redact_secrets)
-//
-//  Sans crate regex (hors deps) : passe blocs de clef privée + scan mot-à-mot préservant les espaces.
-//  Neutralise : paires clef=valeur sensibles, jetons Bearer, formes connues (AWS AKIA/ASIA, JWT,
-//  GitHub/GitLab/Slack/Google/OpenAI). Idempotent. Appliqué UNE FOIS au niveau des champs de finding.
+//  RÉDACTION DES SECRETS — désormais MUTUALISÉE dans `crate::redact` (union des listes de clefs
+//  sensibles reports.rs + compliance.rs ; strip de blocs PEM + scan mot-à-mot). Voir src/redact.rs.
 // =====================================================================================
-const REDACT: &str = "[REDACTED]";
-/// Clefs sensibles NORMALISÉES (alphanumérique minuscule) — comparaison après normalisation de la clef.
-const SENSITIVE_KEYS: &[&str] = &[
-    "password", "passwd", "pwd", "secret", "secretkey", "clientsecret", "apikey", "accesskey",
-    "accesstoken", "token", "authorization", "auth", "xapikey", "cookie", "setcookie", "privatekey",
-    "sessiontoken", "session",
-];
-
-/// Rédige les blocs PEM de clef privée (`-----BEGIN … PRIVATE KEY----- … -----END … PRIVATE KEY-----`).
-fn redact_private_key_blocks(s: &str) -> String {
-    let mut out = s.to_string();
-    while let Some(b) = out.find("-----BEGIN ") {
-        // le bloc doit contenir un marqueur PRIVATE KEY (sinon ce n'est pas une clef privée).
-        if out[b..].find("PRIVATE KEY-----").is_none() {
-            break;
-        }
-        let Some(e_rel) = out[b..].find("-----END ") else { break };
-        let after_end = b + e_rel;
-        let Some(ke_rel) = out[after_end..].find("PRIVATE KEY-----") else { break };
-        let end = after_end + ke_rel + "PRIVATE KEY-----".len();
-        out.replace_range(b..end, REDACT);
-    }
-    out
-}
-
-/// Vrai si `raw` (jeton isolé) a la FORME d'un secret connu (préfixe/structure). Bornes de longueur
-/// pour éviter les faux positifs sur du texte courant.
-fn is_secret_token(raw: &str) -> bool {
-    let w = raw.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | '.'));
-    // AWS access key id : AKIA/ASIA + 16 [A-Z0-9], longueur 20.
-    if (w.starts_with("AKIA") || w.starts_with("ASIA"))
-        && w.len() == 20
-        && w[4..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-    {
-        return true;
-    }
-    // JWT : trois segments base64url séparés par des points, 1er commençant par eyJ.
-    if w.starts_with("eyJ") {
-        let parts: Vec<&str> = w.split('.').collect();
-        if parts.len() == 3
-            && parts.iter().all(|p| p.len() >= 4 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-        {
-            return true;
-        }
-    }
-    for pre in [
-        "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "glpat-", "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-",
-        "AIza", "sk-",
-    ] {
-        if w.starts_with(pre) && w.len() >= pre.len() + 8 {
-            return true;
-        }
-    }
-    false
-}
-
-/// Rédige UN mot. `prev_bearer` = le mot précédent était le mot-clef « Bearer » (ce jeton est alors le
-/// token à masquer). Renvoie `(mot rédigé, ce mot est-il le mot-clef Bearer ?)`.
-fn redact_word(prev_bearer: bool, word: &str) -> (String, bool) {
-    if prev_bearer {
-        return (REDACT.to_string(), false);
-    }
-    let core_lower = word
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-        .to_ascii_lowercase();
-    let is_bearer_kw = core_lower == "bearer";
-    // paire clef=valeur / clef:valeur.
-    if let Some(pos) = word.find(['=', ':']) {
-        let (k, _) = word.split_at(pos);
-        let sep = &word[pos..pos + 1];
-        let val = &word[pos + 1..];
-        let knorm: String = k
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        if !val.is_empty() && (SENSITIVE_KEYS.contains(&knorm.as_str()) || is_secret_token(val)) {
-            return (format!("{k}{sep}{REDACT}"), is_bearer_kw);
-        }
-    }
-    if is_secret_token(word) {
-        return (REDACT.to_string(), is_bearer_kw);
-    }
-    (word.to_string(), is_bearer_kw)
-}
-
-/// Neutralise les secrets d'une chaîne (blocs PEM + scan mot-à-mot). Préserve les blancs (formatage).
-fn redact_secrets(input: &str) -> String {
-    let s = redact_private_key_blocks(input);
-    let mut out = String::with_capacity(s.len());
-    let mut word = String::new();
-    let mut prev_bearer = false;
-    for ch in s.chars() {
-        if ch.is_whitespace() {
-            if !word.is_empty() {
-                let (red, is_b) = redact_word(prev_bearer, &word);
-                out.push_str(&red);
-                prev_bearer = is_b;
-                word.clear();
-            } else {
-                // un blanc n'annule pas le drapeau bearer seulement s'il n'y a pas eu de mot entre-temps
-            }
-            out.push(ch);
-        } else {
-            word.push(ch);
-        }
-    }
-    if !word.is_empty() {
-        let (red, _) = redact_word(prev_bearer, &word);
-        out.push_str(&red);
-    }
-    out
-}
+use crate::redact::redact_secrets;
 
 // =====================================================================================
 //  BRANDING (config admin-éditable, globale ou par-engagement)
@@ -1156,7 +1041,7 @@ mod tests {
         for s in [S_AWS, S_PWD, S_JWT] {
             assert!(!red.contains(s), "secret non rédigé: {s}");
         }
-        assert!(red.contains(REDACT));
+        assert!(red.contains(crate::redact::REDACT));
         // idempotent
         assert_eq!(redact_secrets(&red), red);
         // texte anodin conservé (URL, domaine, mot 'author')
@@ -1251,7 +1136,7 @@ mod tests {
             for s in [S_AWS, S_PWD, S_JWT] {
                 assert!(!body.contains(s), "{fmt}: secret '{s}' non rédigé");
             }
-            assert!(body.contains(REDACT), "{fmt}: marqueur de rédaction attendu");
+            assert!(body.contains(crate::redact::REDACT), "{fmt}: marqueur de rédaction attendu");
         }
         let _ = std::fs::remove_file(&led);
     }

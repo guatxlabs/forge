@@ -56,14 +56,6 @@ class InjectionOracle(ScopeGuardedOracle):
     web_allowed = True           # interaction web (réseau) -> gardée par le ROE
     available = True             # urllib stdlib -> toujours disponible ; dégrade à runtime si besoin
 
-    # --- câblage HTTP (seam monkeypatché par les tests) ---
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Le SessionStore gouverné
-        (scope-guardé) est fusionné par `_http` uniquement sur des URL in-scope. Seam monkeypatché."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
-        return st, body
-
     # --- injection d'un payload dans un paramètre : query si GET, corps urlencodé sinon ---
     def _send(self, action, param, payload, method="GET"):
         """Émet la requête d'injection et renvoie (où, status, body). GET -> payload dans la query ;

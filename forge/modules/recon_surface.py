@@ -39,6 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
 from .. import runner
 from .. import session as _session
@@ -64,7 +65,7 @@ def _under(host, root):
     return bool(root) and (host == root or host.endswith("." + root))
 
 
-class PassiveSurface(Module):
+class PassiveSurface(ScopeGuardMixin, Module):
     """Base des modules passifs de surface : plomberie Finding + HTTP + périmètre partagée.
 
     Un module concret déclare ses métadonnées (kind/mitre/tool/description) et surcharge `fire()`
@@ -78,30 +79,12 @@ class PassiveSurface(Module):
     mitre = ""
     tool = ""
 
-    # --- périmètre : lecture du scope injecté + gardes fail-closed ---
-    @staticmethod
-    def _scope(action):
-        """(enforce, Scope) reconstruit depuis les params injectés par l'engine. `enforce` distingue
-        « scope fourni » (chemin de production) de « appelé en direct sans scope » (dev/test)."""
-        enforce = "in_scope" in action.params or "out_scope" in action.params
-        sc = Scope({"in_scope": action.params.get("in_scope", []),
-                    "out_scope": action.params.get("out_scope", [])})
-        return enforce, sc
-
+    # --- périmètre : scope-guard fail-closed dans ScopeGuardMixin (`_scope`/`_in_scope_flat`) ---
     def _roots(self, action):
         return [r for r in (_root_of(p) for p in action.params.get("in_scope", [])) if r]
 
     def _out_roots(self, action):
         return [r for r in (_root_of(p) for p in action.params.get("out_scope", [])) if r]
-
-    def _in_scope_flat(self, action, host):
-        """Appartenance PLATE (miroir exact de la gate ROE de l'engine) pour un hôte requêté :
-        l'engine n'a fait tirer l'action que si `is_in_scope(target)` — on applique la même règle.
-        Sans scope injecté (dev/test) -> permissif (l'engine injecte TOUJOURS en production)."""
-        enforce, sc = self._scope(action)
-        if not enforce:
-            return True
-        return sc.is_in_scope(host)
 
     def _target_allowed(self, action):
         return self._in_scope_flat(action, action.target)

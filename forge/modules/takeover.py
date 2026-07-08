@@ -83,6 +83,7 @@ class SubdomainTakeover(ScopeGuardedOracle):
     mitre = techniques.mitre_for("subdomain.takeover")   # source de vérité : techniques.py (T1584.001)
     cwe = "CWE-350"                                       # category + cwe des findings
     tool = "forge/modules/takeover.py:subdomain.takeover"
+    MAXLEN = 100000                                        # troncature du corps lu (cf. Oracle._fetch_body)
     fix = ("Supprimer ou re-pointer l'enregistrement DNS PENDANT (dangling) sans attendre : retirer le "
            "CNAME/ALIAS dès qu'un service tiers est déprovisionné, tenir un inventaire à jour des "
            "sous-domaines et de leurs cibles, et RÉCLAMER/verrouiller la ressource tierce si elle doit "
@@ -141,12 +142,6 @@ class SubdomainTakeover(ScopeGuardedOracle):
             return cname, resolves, True
         # 3) aucun backend DNS -> dégradation gracieuse
         return "", False, False
-
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, maxlen=100000)
-        return st, body
 
     @staticmethod
     def _match_service(cname):

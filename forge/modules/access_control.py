@@ -112,13 +112,7 @@ class IdorDifferential(Oracle):
         différents (html vs json) ne sont jamais « le même objet ». body peut être None.
         Adosse le câblage urllib partagé (Oracle._http) — seam monkeypatché par les tests."""
         st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
-        ct = ""
-        if h is not None:
-            try:
-                ct = (h.get("Content-Type") or "").split(";")[0].strip().lower()
-            except Exception:            # noqa: BLE001
-                ct = ""
-        return st, txt, ct
+        return st, txt, Oracle._content_type(h)
 
     @staticmethod
     def _same_object(resp_a, resp_b):
@@ -271,13 +265,7 @@ class PrivEsc(ScopeGuardedOracle):
     def _fetch(url, headers, timeout=15, method="GET", body=None):
         """(status, body, content_type) — adosse le câblage urllib partagé (Oracle._http). Seam patché."""
         st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
-        ct = ""
-        if h is not None:
-            try:
-                ct = (h.get("Content-Type") or "").split(";")[0].strip().lower()
-            except Exception:            # noqa: BLE001
-                ct = ""
-        return st, txt, ct
+        return st, txt, Oracle._content_type(h)
 
     def _admin_urls(self, action):
         """Fonctions/objets ADMIN-ONLY à sonder : params.admin_urls (liste) + params.admin_url (single) +

@@ -104,12 +104,7 @@ class FrameworkExposure(ScopeGuardedOracle):
                    "sensible joignable qui FUIT config/données (secret rédigé). Sinon tested. CWE-200.")
 
     MAX_PATHS = 40                                        # borne le nombre de chemins actuator sondés
-
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, maxlen=300000)
-        return st, body
+    MAXLEN = 300000                                       # corps actuator plus gros -> troncature élargie
 
     @staticmethod
     def _base(target):
