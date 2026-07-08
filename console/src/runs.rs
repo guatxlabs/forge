@@ -471,6 +471,10 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
     cmd.args(&argv)
         .current_dir(app.pkg_dir.as_str())
         .env("FORGE_CONSOLE_URL", &console_url)
+        // STREAMING LIVE : force le stdout Python en mode NON bufferisé pour que les lignes d'avancement
+        // par action (verdict/SKIP) et les bannières de vague atteignent le superviseur -> run_log -> SSE
+        // AU FIL DE L'EAU, au lieu d'arriver en bloc à la fin (stdout est block-buffered vers un pipe).
+        .env("PYTHONUNBUFFERED", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

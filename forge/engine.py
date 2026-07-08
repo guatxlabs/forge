@@ -87,7 +87,7 @@ class ExecResult:
 
 class Engine:
     def __init__(self, scope, ledger=None, mode="propose", memory=None, graph=None,
-                 campaign=None, run_id=None):
+                 campaign=None, run_id=None, progress=None):
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
@@ -108,6 +108,12 @@ class Engine:
                               if scope.technique_selection_configured() else None)
         self.campaign_id = campaign  # boucle purple : corrèle les run-records à la campagne…
         self.run_id = run_id         # …et au run (console). None tant que non fournis (additif).
+        # ÉMISSION PROGRESSIVE (OPTIONNELLE, additive) : callback `progress(line: str)` invoqué au fil de
+        # l'eau — une ligne par action exécutée (via run()) + une bannière par vague (via campaign()) —
+        # pour que la console STREAME l'avancement en direct (SSE). None par défaut (CLI directe, tests) :
+        # AUCUN appel, AUCUNE sortie -> comportement byte-à-byte inchangé. Ne touche RIEN de la
+        # gouvernance/ROE ni des findings : pure observabilité (ne fait que refléter des res déjà décidés).
+        self._progress = progress
         self.findings = []
         self.results = []          # [{action, verdict, reasons, output}]
         self.run_records = []      # boucle purple : un record ATT&CK par action tirée
@@ -229,8 +235,41 @@ class Engine:
         self.results.append(res)
         return res
 
+    # --- émission progressive (observabilité live ; no-op si aucun callback) ---
+    def _emit(self, line):
+        """Pousse une ligne d'avancement au callback `progress` s'il est branché. Best-effort :
+        une exception du callback (console injoignable, etc.) n'interrompt JAMAIS le run."""
+        cb = self._progress
+        if cb is None:
+            return
+        try:
+            cb(line)
+        except Exception:  # noqa: BLE001 — l'observabilité ne doit jamais casser l'exécution gouvernée
+            pass
+
+    def _emit_result(self, res):
+        """Émet une ligne concise par action exécutée : verdict + kind + cible + 1re raison (courte).
+        Rend VISIBLES en direct les SKIP/UNAVAILABLE (outil absent, technique désactivée, connecteur
+        désactivé) et les VETO, là où seul le rapport final les montrait. Purement dérivé de `res`."""
+        if self._progress is None:
+            return
+        reasons = res.get("reasons") or []
+        reason = str(reasons[0]) if reasons else ""
+        line = f"[{res['verdict']}] {res['kind']} -> {res['target']}"
+        if reason:
+            line += f" ({reason})"
+        self._emit(line)
+
     def run(self, actions):
-        return [self.execute(a) for a in actions]
+        # CHOKE POINT unique de l'émission par-action : chaque action passée à run() (proposition
+        # directe ET chaque vague de campaign()) émet sa ligne d'avancement APRÈS décision. Les
+        # actions DÉFÉRÉES par le planner (skipped_budget) ne passent pas ici -> pas de bruit.
+        out = []
+        for a in actions:
+            res = self.execute(a)
+            self._emit_result(res)
+            out.append(res)
+        return out
 
     def _prepare(self, actions, modules, global_params, attrs_by_host):
         """Filtre (sélection modules) + injection de params/scope sur une VAGUE d'actions.
@@ -331,6 +370,10 @@ class Engine:
             ordered, skipped = planner.order(fresh)
             for a in skipped:                        # defer != delete : accumulé, jamais jeté
                 skipped_by_id[a.id] = a
+            # bannière de vague (live) : borne visuellement les vagues plan->observe->replan et annonce
+            # le nb d'actions ordonnées + différées. No-op si aucun callback (byte-identique).
+            self._emit(f"=== vague {waves + 1} — {len(ordered)} action(s) ordonnée(s)"
+                       + (f", {len(skipped)} différée(s)" if skipped else "") + " ===")
             self.run(ordered)
             waves += 1
 
