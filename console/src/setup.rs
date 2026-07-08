@@ -34,11 +34,11 @@ pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Re
     // lookup compte. On vérifie TOUJOURS le hash (même si compte introuvable : timing uniforme via un
     // hash factice) pour limiter l'oracle d'énumération de login.
     let (user_id, role, pass_hash, disabled): (i64, String, String, i64) = {
-        let db = app.db();
-        db.query_row(
+        let store = app.store();
+        store.query_row(
             "SELECT id, role, pass_hash, disabled FROM users WHERE login=?",
-            [login_in],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            &crate::sql_params![login_in],
+            |r| Ok((r.get_i64(0)?, r.get_str(1)?, r.get_str(2)?, r.get_i64(3)?)),
         )
         .unwrap_or((-1, String::new(), String::new(), 1))
     };

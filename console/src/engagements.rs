@@ -114,9 +114,9 @@ pub(crate) fn resolve_view_engagement_id(app: &App, headers: &HeaderMap, q: &Has
     if let Some(id) = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok()) {
         return id;
     }
-    let db = app.db();
-    db.query_row("SELECT id FROM engagement WHERE status='active' ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, i64>(0))
-        .or_else(|_| db.query_row("SELECT id FROM engagement ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, i64>(0)))
+    let store = app.store();
+    store.query_row("SELECT id FROM engagement WHERE status='active' ORDER BY id DESC LIMIT 1", &[], |r| r.get_i64(0))
+        .or_else(|_| store.query_row("SELECT id FROM engagement ORDER BY id DESC LIMIT 1", &[], |r| r.get_i64(0)))
         .unwrap_or(1)
 }
 
@@ -128,7 +128,7 @@ pub(crate) fn resolve_mutation_engagement_id(app: &App, headers: &HeaderMap, q: 
     match q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok())
         .or_else(|| body.get("engagement_id").and_then(|v| v.as_i64())) {
         Some(id) => {
-            let exists = { let db = app.db(); db.query_row("SELECT 1 FROM engagement WHERE id=?", [id], |_| Ok(())).is_ok() };
+            let exists = { let store = app.store(); store.query_row("SELECT 1 FROM engagement WHERE id=?", &crate::sql_params![id], |_| Ok(())).is_ok() };
             if !exists {
                 return Err(format!("engagement {id} introuvable"));
             }
@@ -230,30 +230,28 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
     // pour la hiérarchie tenant → engagement (filtrage du sélecteur par tenant actif). Community => champ
     // ABSENT : le payload reste BYTE-IDENTIQUE à l'historique (aucune fuite de la dimension tenant).
     let expose_tenant = tenancy::enabled(app);
-    let db = app.db();
-    let mut stmt = match db.prepare(&format!(
+    let store = app.store();
+    store.query_lax(&format!(
         "SELECT e.id, e.name, e.status, e.mode, e.created,
                 (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
                 (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
                 e.tenant_id
          FROM engagement e{where_clause} ORDER BY e.id",
-    )) { Ok(s) => s, Err(_) => return vec![] };
-    stmt.query_map([], |r| {
-        let tenant_id = r.get::<_, i64>(7)?;
+    ), &[], |r| {
+        let tenant_id = r.get_i64(7)?;
         let mut o = json!({
-            "id": r.get::<_, i64>(0)?,
-            "name": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            "status": r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".into()),
-            "mode": r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "grey".into()),
-            "created": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            "counts": {"findings": r.get::<_, i64>(5)?, "runs": r.get::<_, i64>(6)?},
+            "id": r.get_i64(0)?,
+            "name": r.get_opt_str(1)?.unwrap_or_default(),
+            "status": r.get_opt_str(2)?.unwrap_or_else(|| "active".into()),
+            "mode": r.get_opt_str(3)?.unwrap_or_else(|| "grey".into()),
+            "created": r.get_opt_str(4)?.unwrap_or_default(),
+            "counts": {"findings": r.get_i64(5)?, "runs": r.get_i64(6)?},
         });
         if expose_tenant {
             o["tenant_id"] = json!(tenant_id);
         }
         Ok(o)
     })
-    .map(|it| it.filter_map(|x| x.ok()).collect())
     .unwrap_or_default()
 }
 
@@ -309,18 +307,18 @@ pub(crate) async fn engagements_create(
     // tenancy::enabled qui reverrouille le mutex DB — ne JAMAIS l'appeler en tenant `app.db()`), puis posé
     // par un UPDATE. Le champ reste '' entre l'INSERT et l'UPDATE (id pas encore divulgué : microfenêtre sûre).
     let id = {
-        let db = app.db();
-        if let Err(e) = db.execute(
+        let store = app.store();
+        if let Err(e) = store.execute(
             "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,created,updated)
              VALUES(?,?,?,?,'',datetime('now'),datetime('now'))",
-            rusqlite::params![name, "active", mode, scope_json],
+            &crate::sql_params![&name, "active", &mode, scope_json],
         ) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response();
         }
-        let id = db.last_insert_rowid();
+        let id = store.last_insert_id();
         // ENTERPRISE : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
         if let Some(t) = target_tenant {
-            let _ = db.execute("UPDATE engagement SET tenant_id=? WHERE id=?", rusqlite::params![t, id]);
+            let _ = store.execute("UPDATE engagement SET tenant_id=? WHERE id=?", &crate::sql_params![t, id]);
         }
         id
     };
@@ -328,8 +326,8 @@ pub(crate) async fn engagements_create(
     // => tenant #1 et tenancy renvoie le chemin PLAT (byte-identique).
     let ledger_path = derive_engagement_ledger_path(&app, id, target_tenant.unwrap_or(tenancy::DEFAULT_TENANT));
     {
-        let db = app.db();
-        let _ = db.execute("UPDATE engagement SET ledger_path=? WHERE id=?", rusqlite::params![ledger_path, id]);
+        let store = app.store();
+        let _ = store.execute("UPDATE engagement SET ledger_path=? WHERE id=?", &crate::sql_params![&ledger_path, id]);
     }
     // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
     append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
@@ -348,8 +346,8 @@ pub(crate) async fn engagements_create(
 /// EFFECTIVE (edit|archive|activate). Retourne la vue ou (code, message).
 pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
     let cur_status: String = {
-        let db = app.db();
-        db.query_row("SELECT status FROM engagement WHERE id=?", [id], |r| r.get(0))
+        let store = app.store();
+        store.query_row("SELECT status FROM engagement WHERE id=?", &crate::sql_params![id], |r| r.get_str(0))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?
     };
     let new_name: Option<String> = match body.get("name") {
@@ -385,17 +383,17 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
     }
     let archiving = new_status.as_deref() == Some("archived") && cur_status == "active";
     {
-        let db = app.db();
+        let store = app.store();
         if archiving {
-            let active_count: i64 = db.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+            let active_count: i64 = store.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
             if active_count <= 1 {
                 return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (archivage refusé, fail-closed)".into()));
             }
         }
-        if let Some(n) = &new_name { let _ = db.execute("UPDATE engagement SET name=?, updated=datetime('now') WHERE id=?", rusqlite::params![n, id]); }
-        if let Some(s) = &new_scope { let _ = db.execute("UPDATE engagement SET scope_json=?, updated=datetime('now') WHERE id=?", rusqlite::params![s, id]); }
-        if let Some(m) = &new_mode { let _ = db.execute("UPDATE engagement SET mode=?, updated=datetime('now') WHERE id=?", rusqlite::params![m, id]); }
-        if let Some(s) = &new_status { let _ = db.execute("UPDATE engagement SET status=?, updated=datetime('now') WHERE id=?", rusqlite::params![s, id]); }
+        if let Some(n) = &new_name { let _ = store.execute("UPDATE engagement SET name=?, updated=datetime('now') WHERE id=?", &crate::sql_params![n, id]); }
+        if let Some(s) = &new_scope { let _ = store.execute("UPDATE engagement SET scope_json=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
+        if let Some(m) = &new_mode { let _ = store.execute("UPDATE engagement SET mode=?, updated=datetime('now') WHERE id=?", &crate::sql_params![m, id]); }
+        if let Some(s) = &new_status { let _ = store.execute("UPDATE engagement SET status=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
     }
     let action = if new_status.as_deref() == Some("archived") { "archive" }
         else if new_status.as_deref() == Some("active") && cur_status == "archived" { "activate" }
@@ -416,17 +414,17 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
         return Err((StatusCode::CONFLICT, "engagement par défaut (#1) non supprimable — archivez-le".into()));
     }
     let (status, ledger, findings, runs): (String, String, i64, i64) = {
-        let db = app.db();
-        let (status, ledger): (String, String) = db
-            .query_row("SELECT status, ledger_path FROM engagement WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+        let store = app.store();
+        let (status, ledger): (String, String) = store
+            .query_row("SELECT status, ledger_path FROM engagement WHERE id=?", &crate::sql_params![id], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?;
-        let f: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", [id], |r| r.get(0)).unwrap_or(0);
-        let r: i64 = db.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", [id], |r| r.get(0)).unwrap_or(0);
+        let f: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
+        let r: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         (status, ledger, f, r)
     };
     if status == "active" {
-        let db = app.db();
-        let active_count: i64 = db.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", [], |r| r.get(0)).unwrap_or(0);
+        let store = app.store();
+        let active_count: i64 = store.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
         if active_count <= 1 {
             return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (suppression refusée, fail-closed)".into()));
         }
@@ -437,14 +435,14 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
             &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
     }
     {
-        let db = app.db();
-        let _ = db.execute("DELETE FROM finding WHERE engagement_id=?", [id]);
-        let _ = db.execute("DELETE FROM runrecord WHERE engagement_id=?", [id]);
-        let _ = db.execute("DELETE FROM roe_decision WHERE engagement_id=?", [id]);
-        let _ = db.execute("DELETE FROM run_job WHERE engagement_id=?", [id]);
-        let _ = db.execute("DELETE FROM settings WHERE key=?", [technique_selection_key(id)]);
-        let _ = db.execute("DELETE FROM settings WHERE key=?", [workflows_key(id)]);
-        let _ = db.execute("DELETE FROM engagement WHERE id=?", [id]);
+        let store = app.store();
+        let _ = store.execute("DELETE FROM finding WHERE engagement_id=?", &crate::sql_params![id]);
+        let _ = store.execute("DELETE FROM runrecord WHERE engagement_id=?", &crate::sql_params![id]);
+        let _ = store.execute("DELETE FROM roe_decision WHERE engagement_id=?", &crate::sql_params![id]);
+        let _ = store.execute("DELETE FROM run_job WHERE engagement_id=?", &crate::sql_params![id]);
+        let _ = store.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![technique_selection_key(id)]);
+        let _ = store.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![workflows_key(id)]);
+        let _ = store.execute("DELETE FROM engagement WHERE id=?", &crate::sql_params![id]);
     }
     append_console_ledger(app, "console.engagement.delete", json!({
         "actor": actor, "engagement_id": id, "findings": findings, "runs": runs,

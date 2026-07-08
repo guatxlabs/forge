@@ -320,17 +320,17 @@ pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option
         return None;
     }
     let token_sha = sha_hex(&tok);
-    let db = app.db();
-    let row = db.query_row(
+    let store = app.store();
+    let row = store.query_row(
         "SELECT s.expires, u.login, u.role, u.disabled
            FROM session s JOIN users u ON u.id = s.user_id
           WHERE s.token_sha = ?",
-        [&token_sha],
+        &crate::sql_params![&token_sha],
         |r| Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
+            r.get_i64(0)?,
+            r.get_str(1)?,
+            r.get_str(2)?,
+            r.get_i64(3)?,
         )),
     );
     match row {
@@ -340,7 +340,7 @@ pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option
             }
             if now_epoch() >= expires {
                 // session expirée -> purge best-effort et refus
-                let _ = db.execute("DELETE FROM session WHERE token_sha=?", [&token_sha]);
+                let _ = store.execute("DELETE FROM session WHERE token_sha=?", &crate::sql_params![&token_sha]);
                 return None;
             }
             let is_operator = role == "operator" || role == "admin";
@@ -414,11 +414,11 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
     let token_sha = sha_hex(&token);
     let now = now_epoch();
     let expires = now + session_ttl_secs();
-    let db = app.db();
-    let _ = db.execute("DELETE FROM session WHERE user_id=? AND expires<=?", rusqlite::params![user_id, now]);
-    let _ = db.execute(
+    let store = app.store();
+    let _ = store.execute("DELETE FROM session WHERE user_id=? AND expires<=?", &crate::sql_params![user_id, now]);
+    let _ = store.execute(
         "INSERT OR REPLACE INTO session(token_sha,user_id,created,expires) VALUES(?,?,?,?)",
-        rusqlite::params![token_sha, user_id, now, expires],
+        &crate::sql_params![token_sha, user_id, now, expires],
     );
     (token, expires)
 }
