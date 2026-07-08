@@ -20,7 +20,7 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
     let campaign = body.get("campaign").and_then(|v| v.as_str()).unwrap_or("default").to_string();
     // run_id : corrèle ce lot de findings/run-records/décisions au run qui les a produits.
     let run_id = body.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let db = app.db();
+    let store = app.store();
     // ENGAGEMENT propriétaire de ce lot : résolu depuis le run_job créé par run_create (engagement_id).
     // run_id inconnu/absent (ingest hors run flow, ex. CLI directe) => engagement #1 (DEFAULT, rétro-
     // compat). Chaque finding/runrecord/roe_decision est ainsi ESTAMPILLÉ de SON engagement — jamais
@@ -28,7 +28,7 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
     let engagement_id: i64 = if run_id.is_empty() {
         1
     } else {
-        db.query_row("SELECT engagement_id FROM run_job WHERE run_id=?", [&run_id], |r| r.get(0)).unwrap_or(1)
+        store.query_row("SELECT engagement_id FROM run_job WHERE run_id=?", &crate::sql_params![&run_id], |r| r.get_i64(0)).unwrap_or(1)
     };
     let (mut nf, mut nr, mut nd) = (0i64, 0i64, 0i64);
     if let Some(arr) = body.get("findings").and_then(|v| v.as_array()) {
@@ -46,12 +46,12 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
                 cvss_vec = v.to_string();
                 cvss_score = s;
             }
-            if let Ok(n) = db.execute(
+            if let Ok(n) = store.execute(
                 "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
+                &crate::sql_params![gs(f,"ts"), &campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
-                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score, engagement_id],
+                    gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score, engagement_id],
             ) {
                 nf += n as i64;
             }
@@ -60,9 +60,9 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
     if let Some(arr) = body.get("run_records").and_then(|v| v.as_array()) {
         for rr in arr {
             let fired = if rr.get("fired").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
-            if let Ok(n) = db.execute(
+            if let Ok(n) = store.execute(
                 "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id,engagement_id) VALUES(?,?,?,?,?,?,?,?,?)",
-                rusqlite::params![gs(rr,"ts"), campaign, gs(rr,"target"), gs(rr,"kind"), gs(rr,"mitre"), fired, gs(rr,"detail"), run_id, engagement_id],
+                &crate::sql_params![gs(rr,"ts"), &campaign, gs(rr,"target"), gs(rr,"kind"), gs(rr,"mitre"), fired, gs(rr,"detail"), &run_id, engagement_id],
             ) {
                 nr += n as i64;
             }
@@ -74,10 +74,10 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
             let ex = if d.get("exploit").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
             let de = if d.get("destructive").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
             let reasons = d.get("reasons").map(|r| r.to_string()).unwrap_or_else(|| "[]".into());
-            if let Ok(n) = db.execute(
+            if let Ok(n) = store.execute(
                 "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons,engagement_id)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                rusqlite::params![gs(d,"ts"), campaign, run_id, gs(d,"action_id"), gs(d,"target"),
+                &crate::sql_params![gs(d,"ts"), &campaign, &run_id, gs(d,"action_id"), gs(d,"target"),
                     gs(d,"kind"), gs(d,"verdict"), ex, de, reasons, engagement_id],
             ) {
                 nd += n as i64;
@@ -91,13 +91,13 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
         let gaps = body.get("coverage_gaps").map(|g| g.to_string()).unwrap_or_else(|| "{}".into());
         let skipped = body.get("skipped_budget").map(|s| s.to_string()).unwrap_or_else(|| "[]".into());
         let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let _ = db.execute(
+        let _ = store.execute(
             "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps)
              VALUES(?,?,datetime('now'),'done',?,?,?,?,?,?,?)
              ON CONFLICT(run_id) DO UPDATE SET status='done', mode=excluded.mode, fired=excluded.fired,
                dry_run=excluded.dry_run, vetoed=excluded.vetoed, errors=excluded.errors,
                skipped_budget=excluded.skipped_budget, coverage_gaps=excluded.coverage_gaps",
-            rusqlite::params![run_id, campaign, mode, geti("fired"), geti("dry_run"),
+            &crate::sql_params![&run_id, &campaign, mode, geti("fired"), geti("dry_run"),
                 geti("vetoed"), geti("errors"), skipped, gaps],
         );
     }

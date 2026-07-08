@@ -60,19 +60,18 @@ pub(crate) fn modules_catalog(db: &Connection) -> Vec<Value> {
 /// moteur les SKIP déjà via sa propre sonde, avec la raison « outil absent »). Fail-closed lisible : sur
 /// erreur DB -> liste vide (aucune désactivation fabriquée ; l'enforcement retombe sur le filtre argv).
 pub(crate) fn operator_disabled_modules(app: &App) -> Vec<String> {
-    let db = app.db();
-    let mut stmt = match db.prepare("SELECT kind,enabled,available_override FROM module ORDER BY kind") {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    stmt.query_map([], |r| {
-        let kind: String = r.get(0)?;
-        let enabled = r.get::<_, i64>(1)? != 0;
-        let ov: Option<bool> = r.get::<_, Option<i64>>(2)?.map(|v| v != 0);
+    let store = app.store();
+    store.query_lax("SELECT kind,enabled,available_override FROM module ORDER BY kind", &[], |r| {
+        let kind: String = r.get_str(0)?;
+        let enabled = r.get_i64(1)? != 0;
+        let ov: Option<bool> = r.get_opt_i64(2)?.map(|v| v != 0);
         Ok((kind, module_operator_disabled(enabled, ov)))
     })
-    .map(|it| it.filter_map(|x| x.ok()).filter(|(_, dis)| *dis).map(|(k, _)| k).collect())
     .unwrap_or_default()
+    .into_iter()
+    .filter(|(_, dis)| *dis)
+    .map(|(k, _)| k)
+    .collect()
 }
 
 /// Filtre une liste de kinds demandés vers le SOUS-ENSEMBLE non désactivé par l'opérateur. Défense en

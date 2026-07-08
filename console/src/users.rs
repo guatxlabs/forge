@@ -24,7 +24,6 @@ use crate::*;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use rusqlite::Connection;
 use serde_json::{json, Value};
 
 // =====================================================================================
@@ -50,27 +49,22 @@ pub(crate) fn role_rank(r: &str) -> i32 {
 /// on n'autorise JAMAIS une opération qui laisserait 0 admin activé (verrouillage total de l'admin).
 /// À appeler EN TENANT DÉJÀ le guard `db` (pas de re-lock) pour que le check+mutation soient ATOMIQUES
 /// sous le même mutex (anti-TOCTOU). Échec de lecture -> 0 => l'opération est refusée (fail-closed).
-pub(crate) fn enabled_admin_count(db: &Connection) -> i64 {
-    db.query_row("SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0", [], |r| r.get(0)).unwrap_or(0)
+pub(crate) fn enabled_admin_count(store: &crate::store::Store) -> i64 {
+    store.query_row("SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0", &[], |r| r.get_i64(0)).unwrap_or(0)
 }
 
 /// Liste les comptes pour l'admin — `{login, role, disabled, created}`. Ne SÉLECTIONNE même pas
 /// `pass_hash` (fuite structurellement impossible). Ordre alphabétique. Lecture pure (aucun ledger).
 pub(crate) fn admin_list_users(app: &App) -> Vec<Value> {
-    let db = app.db();
-    let mut stmt = match db.prepare("SELECT login, role, disabled, created FROM users ORDER BY login") {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    stmt.query_map([], |r| {
+    let store = app.store();
+    store.query_lax("SELECT login, role, disabled, created FROM users ORDER BY login", &[], |r| {
         Ok(json!({
-            "login": r.get::<_, String>(0)?,
-            "role": r.get::<_, String>(1)?,
-            "disabled": r.get::<_, i64>(2)? != 0,
-            "created": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            "login": r.get_str(0)?,
+            "role": r.get_str(1)?,
+            "disabled": r.get_i64(2)? != 0,
+            "created": r.get_opt_str(3)?.unwrap_or_default(),
         }))
     })
-    .map(|it| it.filter_map(|x| x.ok()).collect())
     .unwrap_or_default()
 }
 
@@ -128,9 +122,9 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
         .map_err(|e| (StatusCode::CONFLICT, e))?;
 
     let (purge, eff_role, eff_disabled) = {
-        let db = app.db();
-        let (old_role, old_disabled_i): (String, i64) = db
-            .query_row("SELECT role, disabled FROM users WHERE login=?", [&target_login], |r| Ok((r.get(0)?, r.get(1)?)))
+        let store = app.store();
+        let (old_role, old_disabled_i): (String, i64) = store
+            .query_row("SELECT role, disabled FROM users WHERE login=?", &crate::sql_params![&target_login], |r| Ok((r.get_str(0)?, r.get_i64(1)?)))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("compte '{target_login}' introuvable")))?;
         let old_disabled = old_disabled_i != 0;
         let eff_role = new_role.clone().unwrap_or_else(|| old_role.clone());
@@ -139,22 +133,22 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
         // refuser tant qu'il ne reste qu'un seul admin activé (fail-closed : jamais 0 admin -> lockout).
         let was_enabled_admin = old_role == "admin" && !old_disabled;
         let still_enabled_admin = eff_role == "admin" && !eff_disabled;
-        if was_enabled_admin && !still_enabled_admin && enabled_admin_count(&db) <= 1 {
+        if was_enabled_admin && !still_enabled_admin && enabled_admin_count(&store) <= 1 {
             return Err((
                 StatusCode::CONFLICT,
                 "impossible : dernier admin activé (désactivation/rétrogradation refusée, fail-closed)".into(),
             ));
         }
         if let Some(r) = &new_role {
-            db.execute("UPDATE users SET role=? WHERE login=?", rusqlite::params![r, target_login])
+            store.execute("UPDATE users SET role=? WHERE login=?", &crate::sql_params![r, &target_login])
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj rôle échouée: {e}")))?;
         }
         if let Some(h) = &new_hash {
-            db.execute("UPDATE users SET pass_hash=? WHERE login=?", rusqlite::params![h, target_login])
+            store.execute("UPDATE users SET pass_hash=? WHERE login=?", &crate::sql_params![h, &target_login])
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj mot de passe échouée: {e}")))?;
         }
         if let Some(d) = new_disabled {
-            db.execute("UPDATE users SET disabled=? WHERE login=?", rusqlite::params![d as i64, target_login])
+            store.execute("UPDATE users SET disabled=? WHERE login=?", &crate::sql_params![d as i64, &target_login])
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj état échouée: {e}")))?;
         }
         let downgrade = new_role.as_ref().map(|r| role_rank(r) < role_rank(&old_role)).unwrap_or(false);
@@ -162,9 +156,9 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
         let purge = disabling || downgrade || reset_pw;
         if purge {
             // effet IMMÉDIAT : révoque toutes les sessions actives du compte (même mutex que l'update).
-            let _ = db.execute(
+            let _ = store.execute(
                 "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
-                [&target_login],
+                &crate::sql_params![&target_login],
             );
         }
         (purge, eff_role, eff_disabled)
@@ -197,19 +191,19 @@ pub(crate) fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> R
     tenancy::guard_superadmin_user_mutation(app, &target_login, false, None, true)
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     {
-        let db = app.db();
-        let (role, disabled): (String, i64) = db
-            .query_row("SELECT role, disabled FROM users WHERE login=?", [&target_login], |r| Ok((r.get(0)?, r.get(1)?)))
+        let store = app.store();
+        let (role, disabled): (String, i64) = store
+            .query_row("SELECT role, disabled FROM users WHERE login=?", &crate::sql_params![&target_login], |r| Ok((r.get_str(0)?, r.get_i64(1)?)))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("compte '{target_login}' introuvable")))?;
-        if role == "admin" && disabled == 0 && enabled_admin_count(&db) <= 1 {
+        if role == "admin" && disabled == 0 && enabled_admin_count(&store) <= 1 {
             return Err((StatusCode::CONFLICT, "impossible de supprimer le dernier admin activé (fail-closed)".into()));
         }
         // révoque les sessions AVANT la suppression de la ligne (effet immédiat + pas d'orphelin).
-        let _ = db.execute(
+        let _ = store.execute(
             "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
-            [&target_login],
+            &crate::sql_params![&target_login],
         );
-        db.execute("DELETE FROM users WHERE login=?", [&target_login])
+        store.execute("DELETE FROM users WHERE login=?", &crate::sql_params![&target_login])
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("suppression échouée: {e}")))?;
     }
     app.recompute_auth_required();
