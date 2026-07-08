@@ -820,7 +820,7 @@ fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
 
     let store = app.store();
     let _ = store.execute(
-        "INSERT OR IGNORE INTO scim_group_member(group_id,user_id) VALUES(?,?)",
+        "INSERT INTO scim_group_member(group_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING",
         &crate::sql_params![gid, uid],
     );
     // Only re-role SCIM-managed, non-admin accounts (never elevate to admin/super-admin).

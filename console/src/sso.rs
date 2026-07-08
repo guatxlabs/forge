@@ -203,9 +203,13 @@ async fn login_start(State(app): State<App>, Query(q): Query<HashMap<String, Str
         let store = app.store();
         ensure_schema(&store);
         let now = crate::now_epoch();
+        // OR REPLACE -> ON CONFLICT DO UPDATE (portable PG). Équivalent EXACT : `sso_pending` = (state PK +
+        // 7 colonnes), l'INSERT liste TOUTES les colonnes, aucun trigger DELETE ni FK ON DELETE CASCADE ->
+        // DELETE-then-INSERT et UPDATE ciblé coïncident.
         let _ = store.execute(
-            "INSERT OR REPLACE INTO sso_pending(state,nonce,code_verifier,return_to,token_endpoint,jwks_uri,created,expires)
-             VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO sso_pending(state,nonce,code_verifier,return_to,token_endpoint,jwks_uri,created,expires)
+             VALUES(?,?,?,?,?,?,?,?)
+             ON CONFLICT(state) DO UPDATE SET nonce=excluded.nonce, code_verifier=excluded.code_verifier, return_to=excluded.return_to, token_endpoint=excluded.token_endpoint, jwks_uri=excluded.jwks_uri, created=excluded.created, expires=excluded.expires",
             &crate::sql_params![
                 &state,
                 &nonce,
@@ -600,8 +604,8 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, provision_role: 
         let store = app.store();
         let inserted = store
             .execute(
-                "INSERT OR IGNORE INTO users(login,role,pass_hash,disabled,created)
-                 VALUES(?,?,?,0,datetime('now'))",
+                "INSERT INTO users(login,role,pass_hash,disabled,created)
+                 VALUES(?,?,?,0,datetime('now')) ON CONFLICT DO NOTHING",
                 &crate::sql_params![&login, &role, &hash],
             )
             .unwrap_or(0);

@@ -416,8 +416,12 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
     let expires = now + session_ttl_secs();
     let store = app.store();
     let _ = store.execute("DELETE FROM session WHERE user_id=? AND expires<=?", &crate::sql_params![user_id, now]);
+    // OR REPLACE -> ON CONFLICT DO UPDATE (portable PG). Équivalent EXACT ici : `session` = (token_sha PK,
+    // user_id, created, expires) — l'INSERT liste TOUTES les colonnes, aucun trigger DELETE ni FK ON DELETE
+    // CASCADE ne dépend de la ligne, donc le DELETE-then-INSERT d'OR REPLACE et le UPDATE ciblé coïncident.
     let _ = store.execute(
-        "INSERT OR REPLACE INTO session(token_sha,user_id,created,expires) VALUES(?,?,?,?)",
+        "INSERT INTO session(token_sha,user_id,created,expires) VALUES(?,?,?,?)
+         ON CONFLICT(token_sha) DO UPDATE SET user_id=excluded.user_id, created=excluded.created, expires=excluded.expires",
         &crate::sql_params![token_sha, user_id, now, expires],
     );
     (token, expires)
