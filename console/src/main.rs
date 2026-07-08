@@ -1557,7 +1557,16 @@ mod tests {
         assert!(index.contains("aria-haspopup=\"dialog\""), "affordance d'aide non annoncée comme dialog");
         assert!(index.contains("class=\"fhint\""), "indices de champ (.fhint) absents du wizard de 1er déploiement");
 
-        let app = include_str!("../web/app.js");
+        // Le front est désormais découpé en modules ES (app.js = entrée ; le code vit sous web/js/**).
+        // On agrège les modules porteurs de ces marqueurs et on cherche dans l'ensemble : le centre
+        // d'aide (help.js), la modale accessible (ui.js) et les indices de source de détection (admin.js).
+        let app = [
+            include_str!("../web/app.js"),
+            include_str!("../web/js/core/help.js"),
+            include_str!("../web/js/core/ui.js"),
+            include_str!("../web/js/views/admin.js"),
+        ]
+        .concat();
         assert!(app.contains("function openHelp("), "openHelp() absent du front");
         assert!(app.contains("HELP_TOPICS"), "registre d'aide HELP_TOPICS absent");
         assert!(app.contains("'governance'"), "rubrique « Comment Forge fonctionne » (gouvernance) absente");
