@@ -11,10 +11,13 @@ use crate::*;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
+use crate::store::Param;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+// NOTE: `rows_to_json` below is DEAD CODE that takes a raw `&Connection` (not an `App`), so it is not
+// an `app.db()` DML site — it stays on rusqlite and is left unconverted (no `App::store()` in scope).
 #[allow(dead_code)] // helper générique conservé (colonnes texte) ; les handlers typés le court-circuitent.
 pub(crate) fn rows_to_json(db: &Connection, sql: &str, args: &[String], cols: &[&str]) -> Vec<Value> {
     let mut stmt = match db.prepare(sql) {
@@ -42,7 +45,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     // (fail-closed : un engagement ne voit JAMAIS les findings d'un autre). `engagement_id` est un
     // entier RÉSOLU (jamais du texte client) -> inliné sans risque d'injection.
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(s) = q.get("severity") { conds.push("severity=?".into()); args.push(s.clone()); }
@@ -51,35 +54,33 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); args.push(m.clone()); }
     if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
-    let total: i64 = db
-        .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), rusqlite::params_from_iter(args.iter()), |r| r.get(0))
+    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
+    let total: i64 = store
+        .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), &params, |r| r.get_i64(0))
         .unwrap_or(0);
     let (limit, offset) = paginate(&q, 200, 1000);
     let sql = format!(
         "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id FROM finding{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
     );
     // requête typée : `id` est un entier (rows_to_json le rendrait vide en le lisant comme String).
-    let mut stmt = match db.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return Json(json!({"total": total, "limit": limit, "offset": offset, "findings": []})),
-    };
-    let rows: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+    // LENIENT (query_lax): un prepare échoué -> Err -> unwrap_or_default -> findings vides + total, à
+    // l'identique de l'early-return d'avant ; une ligne malformée est ignorée (filter_map(ok)).
+    let rows: Vec<Value> = store
+        .query_lax(&sql, &params, |r| {
             Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "ts": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "campaign": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "target": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                "title": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "severity": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "category": r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                "mitre": r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                "status": r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                "tool": r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                "run_id": r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                "id": r.get_i64(0)?,
+                "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                "campaign": r.get_opt_str(2)?.unwrap_or_default(),
+                "target": r.get_opt_str(3)?.unwrap_or_default(),
+                "title": r.get_opt_str(4)?.unwrap_or_default(),
+                "severity": r.get_opt_str(5)?.unwrap_or_default(),
+                "category": r.get_opt_str(6)?.unwrap_or_default(),
+                "mitre": r.get_opt_str(7)?.unwrap_or_default(),
+                "status": r.get_opt_str(8)?.unwrap_or_default(),
+                "tool": r.get_opt_str(9)?.unwrap_or_default(),
+                "run_id": r.get_opt_str(10)?.unwrap_or_default(),
             }))
         })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
     Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows}))
 }
@@ -88,26 +89,26 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     // ISOLATION : le détail n'est servi QUE si le finding appartient à l'engagement actif (un id d'un
     // AUTRE engagement -> 404, jamais divulgué). engagement_id résolu (entier) inliné sans risque.
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
-    let row = db.query_row(
+    let store = app.store();
+    let row = store.query_row(
         &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id FROM finding WHERE id=? AND engagement_id={eid}"),
-        [id],
+        &crate::sql_params![id],
         |r| {
             Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "ts": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "campaign": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "target": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                "title": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "severity": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "category": r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                "mitre": r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                "status": r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                "evidence": r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                "tool": r.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                "poc": r.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                "fix": r.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                "run_id": r.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                "id": r.get_i64(0)?,
+                "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                "campaign": r.get_opt_str(2)?.unwrap_or_default(),
+                "target": r.get_opt_str(3)?.unwrap_or_default(),
+                "title": r.get_opt_str(4)?.unwrap_or_default(),
+                "severity": r.get_opt_str(5)?.unwrap_or_default(),
+                "category": r.get_opt_str(6)?.unwrap_or_default(),
+                "mitre": r.get_opt_str(7)?.unwrap_or_default(),
+                "status": r.get_opt_str(8)?.unwrap_or_default(),
+                "evidence": r.get_opt_str(9)?.unwrap_or_default(),
+                "tool": r.get_opt_str(10)?.unwrap_or_default(),
+                "poc": r.get_opt_str(11)?.unwrap_or_default(),
+                "fix": r.get_opt_str(12)?.unwrap_or_default(),
+                "run_id": r.get_opt_str(13)?.unwrap_or_default(),
             }))
         },
     );
@@ -120,7 +121,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
 pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les runrecords de la vue sont ceux de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
@@ -133,22 +134,22 @@ pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query
         "SELECT id,ts,campaign,target,kind,mitre,fired,detail,run_id FROM runrecord{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
     );
     // `fired` est un entier (0/1) — colonne réelle ; on la rend telle quelle via une requête typée.
-    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+    // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
+    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
+    let out: Vec<Value> = store
+        .query_lax(&sql, &params, |r| {
             Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "ts": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "campaign": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "target": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                "kind": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "mitre": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "fired": r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                "detail": r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                "run_id": r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                "id": r.get_i64(0)?,
+                "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                "campaign": r.get_opt_str(2)?.unwrap_or_default(),
+                "target": r.get_opt_str(3)?.unwrap_or_default(),
+                "kind": r.get_opt_str(4)?.unwrap_or_default(),
+                "mitre": r.get_opt_str(5)?.unwrap_or_default(),
+                "fired": r.get_opt_i64(6)?.unwrap_or(0),
+                "detail": r.get_opt_str(7)?.unwrap_or_default(),
+                "run_id": r.get_opt_str(8)?.unwrap_or_default(),
             }))
         })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
     Json(Value::Array(out))
 }
@@ -157,21 +158,22 @@ pub(crate) async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(
     // ENGAGEMENT : `campaign` est un sous-label LIBRE AU SEIN d'un engagement — on n'agrège donc QUE
     // les campagnes de l'engagement actif (une même chaîne dans un autre engagement reste invisible ici).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     // Agrège depuis les findings (source réelle) + table campaign (métadonnées). Pas de JOIN strict :
     // on liste les campagnes vues côté findings + celles déclarées, avec leurs compteurs.
-    let mut stmt = match db.prepare(
-        &format!("SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id={eid} GROUP BY campaign ORDER BY last_ts DESC"),
-    ) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map([], |r| {
-            Ok(json!({
-                "campaign": r.get::<_, String>(0)?,
-                "findings": r.get::<_, i64>(1)?,
-                "last_ts": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            }))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
+    // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
+    let out: Vec<Value> = store
+        .query_lax(
+            &format!("SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id={eid} GROUP BY campaign ORDER BY last_ts DESC"),
+            &[],
+            |r| {
+                Ok(json!({
+                    "campaign": r.get_str(0)?,
+                    "findings": r.get_i64(1)?,
+                    "last_ts": r.get_opt_str(2)?.unwrap_or_default(),
+                }))
+            },
+        )
         .unwrap_or_default();
     Json(Value::Array(out))
 }
@@ -179,7 +181,7 @@ pub(crate) async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(
 pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les décisions du garde-fou sont celles de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
@@ -189,27 +191,27 @@ pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Qu
     let sql = format!(
         "SELECT id,ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons FROM roe_decision{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
     );
-    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+    // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
+    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
+    let out: Vec<Value> = store
+        .query_lax(&sql, &params, |r| {
             // reasons stocké en JSON (array) — on le re-parse pour le rendre structuré au front.
-            let reasons_raw: String = r.get::<_, Option<String>>(10)?.unwrap_or_default();
+            let reasons_raw: String = r.get_opt_str(10)?.unwrap_or_default();
             let reasons = serde_json::from_str::<Value>(&reasons_raw).unwrap_or(Value::String(reasons_raw));
             Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "ts": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "campaign": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "run_id": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                "action_id": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "target": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                "kind": r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                "verdict": r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                "exploit": r.get::<_, i64>(8)? != 0,
-                "destructive": r.get::<_, i64>(9)? != 0,
+                "id": r.get_i64(0)?,
+                "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                "campaign": r.get_opt_str(2)?.unwrap_or_default(),
+                "run_id": r.get_opt_str(3)?.unwrap_or_default(),
+                "action_id": r.get_opt_str(4)?.unwrap_or_default(),
+                "target": r.get_opt_str(5)?.unwrap_or_default(),
+                "kind": r.get_opt_str(6)?.unwrap_or_default(),
+                "verdict": r.get_opt_str(7)?.unwrap_or_default(),
+                "exploit": r.get_i64(8)? != 0,
+                "destructive": r.get_i64(9)? != 0,
                 "reasons": reasons,
             }))
         })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
     Json(Value::Array(out))
 }
@@ -217,7 +219,7 @@ pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Qu
 pub(crate) async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : couverture ATT&CK de l'engagement actif UNIQUEMENT (engagement_id résolu, inliné).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     // filtre campaign optionnel (param lié — pas d'inlining).
     let (sql, args): (String, Vec<String>) = match q.get("campaign") {
         Some(c) => (
@@ -229,16 +231,16 @@ pub(crate) async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q
             vec![],
         ),
     };
-    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+    // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
+    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
+    let out: Vec<Value> = store
+        .query_lax(&sql, &params, |row| {
             Ok(json!({
-                "mitre": row.get::<_, String>(0)?,
-                "runs": row.get::<_, i64>(1)?,
-                "fired": row.get::<_, i64>(2)?
+                "mitre": row.get_str(0)?,
+                "runs": row.get_i64(1)?,
+                "fired": row.get_i64(2)?
             }))
         })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
     Json(Value::Array(out))
 }

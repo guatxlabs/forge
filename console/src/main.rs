@@ -3729,7 +3729,9 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         let db = app.db();
         let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
-        let md = render_run_report_md(&db, "run-1", &job, None, None);
+        drop(db); // relâcher le guard avant app.store() (même Mutex -> sinon deadlock)
+        let store = app.store();
+        let md = render_run_report_md(&store, "run-1", &job, None, None);
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
         assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu");
@@ -3742,7 +3744,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(md.contains("Posture :"), "phrase posture présente");
         assert!(md.contains("**CWE**") && md.contains("**CVSS**"), "CWE et CVSS rendus séparément");
         assert!(md.contains("7.5"), "CVSS de base dérivé de la sévérité HIGH");
-        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3807,8 +3808,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
         drop(db);
         let custody = build_ledger_custody(&app, "alice+high_impact");
-        let db = app.db();
-        let html = render_run_report_html(&db, "run-1", &job, None, &custody);
+        let store = app.store();
+        let html = render_run_report_html(&store, "run-1", &job, None, &custody);
         // structure & branding
         assert!(html.starts_with("<!doctype html>"), "document HTML autonome");
         assert!(html.contains("Guat<span class=\"x\">X</span>"), "branding GuatX");
@@ -3831,7 +3832,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(html.contains("forge ledger verify --ledger") && html.contains("--pubkey"), "commande de vérif externe");
         assert!(html.contains("VALIDE"), "intégrité de la chaîne recalculée");
         assert!(html.contains("alice") && html.contains("HAUT-IMPACT"), "attribution actor + opt-in haut-impact");
-        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 

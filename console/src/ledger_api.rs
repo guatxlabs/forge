@@ -224,8 +224,8 @@ pub(crate) async fn ledger_verify(State(app): State<App>, headers: HeaderMap, Qu
 /// rétro-compat) si l'id est inconnu ou son ledger vide. ISOLATION : la vue /api/ledger d'un engagement
 /// lit UNIQUEMENT le fichier ledger de CET engagement.
 pub(crate) fn engagement_ledger_path(app: &App, eid: i64) -> String {
-    let db = app.db();
-    db.query_row("SELECT ledger_path FROM engagement WHERE id=?", [eid], |r| r.get::<_, String>(0))
+    let store = app.store();
+    store.query_row("SELECT ledger_path FROM engagement WHERE id=?", &crate::sql_params![eid], |r| r.get_str(0))
         .ok().filter(|s| !s.is_empty())
         .unwrap_or_else(|| app.ledger_path.as_str().to_string())
 }

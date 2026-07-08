@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 
-use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::{
@@ -119,58 +118,58 @@ impl FindingRow {
 /// Lit les findings d'un run dans l'ordre d'affichage (récents d'abord), avec CWE/CVSS séparés.
 /// Rétro-compat : si la colonne `cwe` est vide (base ancienne / finding ingéré avant ce lot), on
 /// dérive le CWE depuis `category` ; idem CVSS dérivé de la sévérité si absent. Lecture only.
-pub(crate) fn read_finding_rows(db: &Connection, run_id: &str) -> Vec<FindingRow> {
-    let mut stmt = match db.prepare(
+pub(crate) fn read_finding_rows(store: &crate::store::Store, run_id: &str) -> Vec<FindingRow> {
+    // LENIENT (query_lax) : miroir de `query_map(..).filter_map(ok).collect()` — prepare échoué ou ligne
+    // malformée -> unwrap_or_default -> vec vide / ligne ignorée (parité stricte avec l'ancien idiom).
+    store.query_lax(
         "SELECT title,target,severity,category,mitre,status,tool,evidence,poc,fix,cwe,cvss_vector,cvss_score \
          FROM finding WHERE run_id=? ORDER BY id DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    stmt.query_map([run_id], |r| {
-        let category = r.get::<_, Option<String>>(3)?.unwrap_or_default();
-        let severity = r.get::<_, Option<String>>(2)?.unwrap_or_default();
-        let mut cwe = r.get::<_, Option<String>>(10)?.unwrap_or_default();
-        if cwe.is_empty() {
-            cwe = extract_cwe(&category);
-        }
-        let mut cvss_vector = r.get::<_, Option<String>>(11)?.unwrap_or_default();
-        let mut cvss_score = r.get::<_, Option<f64>>(12)?.unwrap_or(0.0);
-        if cvss_vector.is_empty() && cvss_score <= 0.0 {
-            let (v, s) = cvss_base_for_severity(&severity);
-            cvss_vector = v.to_string();
-            cvss_score = s;
-        }
-        Ok(FindingRow {
-            title: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            target: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            severity,
-            category,
-            cwe,
-            cvss_vector,
-            cvss_score,
-            mitre: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            status: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            tool: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            evidence: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            poc: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            fix: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-        })
-    })
-    .map(|it| it.filter_map(|r| r.ok()).collect())
+        &crate::sql_params![run_id],
+        |r| {
+            let category = r.get_opt_str(3)?.unwrap_or_default();
+            let severity = r.get_opt_str(2)?.unwrap_or_default();
+            let mut cwe = r.get_opt_str(10)?.unwrap_or_default();
+            if cwe.is_empty() {
+                cwe = extract_cwe(&category);
+            }
+            let mut cvss_vector = r.get_opt_str(11)?.unwrap_or_default();
+            let mut cvss_score = r.get_opt_f64(12)?.unwrap_or(0.0);
+            if cvss_vector.is_empty() && cvss_score <= 0.0 {
+                let (v, s) = cvss_base_for_severity(&severity);
+                cvss_vector = v.to_string();
+                cvss_score = s;
+            }
+            Ok(FindingRow {
+                title: r.get_opt_str(0)?.unwrap_or_default(),
+                target: r.get_opt_str(1)?.unwrap_or_default(),
+                severity,
+                category,
+                cwe,
+                cvss_vector,
+                cvss_score,
+                mitre: r.get_opt_str(4)?.unwrap_or_default(),
+                status: r.get_opt_str(5)?.unwrap_or_default(),
+                tool: r.get_opt_str(6)?.unwrap_or_default(),
+                evidence: r.get_opt_str(7)?.unwrap_or_default(),
+                poc: r.get_opt_str(8)?.unwrap_or_default(),
+                fix: r.get_opt_str(9)?.unwrap_or_default(),
+            })
+        },
+    )
     .unwrap_or_default()
 }
 
 /// Notes d'engagement d'une campagne (table `campaign.notes`) — contexte client (cadre, ROE, objet
 /// de la mission) à brancher dans l'executive summary. '' si la campagne n'a pas de métadonnées.
-pub(crate) fn campaign_notes(db: &Connection, name: &str) -> String {
+pub(crate) fn campaign_notes(store: &crate::store::Store, name: &str) -> String {
     if name.is_empty() {
         return String::new();
     }
-    db.query_row(
+    // single-row query_row : NoRows -> Err -> .ok()==None (idem rusqlite) ; `notes` nullable -> get_opt_str.
+    store.query_row(
         "SELECT notes FROM campaign WHERE name=? ORDER BY id DESC LIMIT 1",
-        [name],
-        |r| r.get::<_, Option<String>>(0),
+        &crate::sql_params![name],
+        |r| r.get_opt_str(0),
     )
     .ok()
     .flatten()
@@ -317,7 +316,7 @@ pub(crate) fn prose_posture(by_sev: &HashMap<String, i64>) -> String {
 /// section PURPLE (couverture de détection SOC) quand `purple` est fourni, et annexe chaîne-de-custody
 /// (head du ledger, nb entrées, algo, clé publique, attribution actor) quand `custody` est fourni.
 /// Les compteurs proviennent de run_job ; le détail des findings/verdicts des tables finding/roe_decision.
-pub(crate) fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>, custody: Option<&LedgerCustody>) -> String {
+pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, job: &Value, purple: Option<&Value>, custody: Option<&LedgerCustody>) -> String {
     const SEVERITIES: &[&str] = &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
     let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
     let mut out: Vec<String> = vec![
@@ -340,7 +339,7 @@ pub(crate) fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, p
 
     // --- synthèse findings par sévérité (sur les findings de CE run) ---
     let mut by_sev: HashMap<String, i64> = HashMap::new();
-    let finding_rows = read_finding_rows(db, run_id);
+    let finding_rows = read_finding_rows(store, run_id);
     for f in &finding_rows {
         *by_sev.entry(f.severity.clone()).or_insert(0) += 1;
     }
@@ -349,7 +348,7 @@ pub(crate) fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, p
     //     posture. Contexte d'engagement = Campaign.notes si renseigné. ---
     out.push("## Résumé exécutif".into());
     out.push(String::new());
-    let notes = campaign_notes(db, campaign);
+    let notes = campaign_notes(store, campaign);
     if !notes.is_empty() {
         out.push(format!("**Contexte d'engagement.** {notes}"));
         out.push(String::new());
@@ -421,23 +420,23 @@ pub(crate) fn render_run_report_md(db: &Connection, run_id: &str, job: &Value, p
     out.push(String::new());
 
     // détail des verdicts non-FIRE (DRY_RUN/VETO) — réutilise la table roe_decision de l'ingest.
-    let verdict_rows: Vec<(String, String, String, String)> = {
-        let mut stmt = match db.prepare(
-            "SELECT verdict,kind,target,reasons FROM roe_decision WHERE run_id=? AND verdict<>'FIRE' ORDER BY id",
-        ) {
-            Ok(s) => s,
-            Err(_) => return out.join("\n"),
-        };
-        stmt.query_map([run_id], |r| {
+    // LENIENT + early-return sur prepare échoué (parité stricte : l'ancien `db.prepare(..) Err => return
+    // out.join("\n")` interrompait la fonction ENTIÈRE ; query_lax renvoie Err au même moment). Les lignes
+    // malformées sont ignorées (query_lax = filter_map(ok)).
+    let verdict_rows: Vec<(String, String, String, String)> = match store.query_lax(
+        "SELECT verdict,kind,target,reasons FROM roe_decision WHERE run_id=? AND verdict<>'FIRE' ORDER BY id",
+        &crate::sql_params![run_id],
+        |r| {
             Ok((
-                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                r.get_opt_str(0)?.unwrap_or_default(),
+                r.get_opt_str(1)?.unwrap_or_default(),
+                r.get_opt_str(2)?.unwrap_or_default(),
+                r.get_opt_str(3)?.unwrap_or_default(),
             ))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        },
+    ) {
+        Ok(v) => v,
+        Err(_) => return out.join("\n"),
     };
     if !verdict_rows.is_empty() {
         for (verdict, kind, target, reasons_raw) in &verdict_rows {
@@ -528,7 +527,7 @@ pub(crate) fn sev_css_class(sev: &str) -> &'static str {
 /// Campaign.notes), findings détaillés avec evidence/PoC/FIX + CWE/CVSS SÉPARÉS, transparence ROE,
 /// couverture purple, et annexe chaîne-de-custody (head ledger, nb entrées, algo, clé publique,
 /// commande `forge ledger verify --pubkey`, attribution actor). Tout texte dynamique est échappé HTML.
-pub(crate) fn render_run_report_html(db: &Connection, run_id: &str, job: &Value, purple: Option<&Value>, custody: &LedgerCustody) -> String {
+pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, job: &Value, purple: Option<&Value>, custody: &LedgerCustody) -> String {
     let e = html_escape; // alias court
     let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
     let mode = job.get("mode").and_then(|v| v.as_str()).unwrap_or("—");
@@ -541,12 +540,12 @@ pub(crate) fn render_run_report_html(db: &Connection, run_id: &str, job: &Value,
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
-    let finding_rows = read_finding_rows(db, run_id);
+    let finding_rows = read_finding_rows(store, run_id);
     let mut by_sev: HashMap<String, i64> = HashMap::new();
     for f in &finding_rows {
         *by_sev.entry(f.severity.clone()).or_insert(0) += 1;
     }
-    let notes = campaign_notes(db, campaign);
+    let notes = campaign_notes(store, campaign);
 
     let mut h = String::with_capacity(16_384);
     h.push_str("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\">");
@@ -672,7 +671,7 @@ pub(crate) fn render_run_report_html(db: &Connection, run_id: &str, job: &Value,
     }
     h.push_str("</div>");
     // détail des verdicts non-FIRE.
-    let verdicts = read_nonfire_verdicts(db, run_id);
+    let verdicts = read_nonfire_verdicts(store, run_id);
     if !verdicts.is_empty() {
         h.push_str("<table class=\"vtab\"><thead><tr><th>Verdict</th><th>Kind</th><th>Cible</th><th>Raisons</th></tr></thead><tbody>");
         for (verdict, kind, target, reasons) in &verdicts {
@@ -745,23 +744,24 @@ pub(crate) fn dash_or(s: &str) -> &str {
 }
 
 /// Lit les verdicts non-FIRE (DRY_RUN/VETO) d'un run, raisons aplaties en une chaîne lisible.
-pub(crate) fn read_nonfire_verdicts(db: &Connection, run_id: &str) -> Vec<(String, String, String, String)> {
-    let mut stmt = match db.prepare(
+pub(crate) fn read_nonfire_verdicts(store: &crate::store::Store, run_id: &str) -> Vec<(String, String, String, String)> {
+    // LENIENT (query_lax) : prepare échoué -> vec vide, ligne malformée ignorée (idem query_map+filter_map).
+    store.query_lax(
         "SELECT verdict,kind,target,reasons FROM roe_decision WHERE run_id=? AND verdict<>'FIRE' ORDER BY id",
-    ) { Ok(s) => s, Err(_) => return vec![] };
-    stmt.query_map([run_id], |r| {
-        let reasons_raw = r.get::<_, Option<String>>(3)?.unwrap_or_default();
-        let reasons = serde_json::from_str::<Value>(&reasons_raw).ok()
-            .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>().join(" ; ")))
-            .unwrap_or(reasons_raw);
-        Ok((
-            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            reasons,
-        ))
-    })
-    .map(|it| it.filter_map(|r| r.ok()).collect())
+        &crate::sql_params![run_id],
+        |r| {
+            let reasons_raw = r.get_opt_str(3)?.unwrap_or_default();
+            let reasons = serde_json::from_str::<Value>(&reasons_raw).ok()
+                .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>().join(" ; ")))
+                .unwrap_or(reasons_raw);
+            Ok((
+                r.get_opt_str(0)?.unwrap_or_default(),
+                r.get_opt_str(1)?.unwrap_or_default(),
+                r.get_opt_str(2)?.unwrap_or_default(),
+                reasons,
+            ))
+        },
+    )
     .unwrap_or_default()
 }
 
