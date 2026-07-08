@@ -654,6 +654,17 @@ impl App {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// PORTABLE DB SEAM (Stage 0) — acquires the SAME `Mutex<Connection>` guard `db()` does and hands
+    /// it to a backend-agnostic `Store` (public API leaks no rusqlite type; a Postgres backend
+    /// satisfies it at Stage 2 without touching call sites). Holds the lock for the `Store`'s lifetime,
+    /// so a sequence of `store.execute/query` runs under ONE lock exactly like `let db = self.db();`
+    /// followed by several `db.*` calls — locking granularity and concurrency semantics are unchanged.
+    /// Same poisoned-mutex recovery as `db()`. Like `db()`, NEVER hold the returned `Store` across an
+    /// `.await` (the guard is `!Send`). Modules migrate from `db()` to `store()` one at a time.
+    pub(crate) fn store(&self) -> crate::store::Store<'_> {
+        crate::store::Store::sqlite(self.db.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// Vrai s'il existe AU MOINS un compte ACTIVÉ (`disabled=0`) dans la table `users`. Requête légère
     /// (`LIMIT 1`). Ne verrouille QUE le mutex DB : ne JAMAIS l'appeler en tenant déjà `self.db()`
     /// (deadlock). Un échec de lecture -> false (l'engagement de la gate retombe alors sur `pass_hash`).

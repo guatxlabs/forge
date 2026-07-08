@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use crate::store::{Param, Row, StoreResult};
 use crate::{
     admin_denied, append_console_ledger, attribution_login, check_admin, check_operator,
     cvss_base_for_severity, operator_denied, resolve_mutation_engagement_id, App,
@@ -86,19 +87,19 @@ fn body_str<'a>(body: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Sérialise une ligne `finding_template` (colonnes = SELECT_COLS) en JSON d'API. `refs` -> `references`.
-fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+fn row_to_json(r: &Row) -> StoreResult<Value> {
     Ok(json!({
-        "id": r.get::<_, i64>(0)?,
-        "name": r.get::<_, String>(1)?,
-        "vuln_class": r.get::<_, String>(2)?,
-        "cwe": r.get::<_, String>(3)?,
-        "severity": r.get::<_, String>(4)?,
-        "title_tmpl": r.get::<_, String>(5)?,
-        "description_tmpl": r.get::<_, String>(6)?,
-        "remediation_tmpl": r.get::<_, String>(7)?,
-        "references": r.get::<_, String>(8)?,
-        "created": r.get::<_, String>(9)?,
-        "updated": r.get::<_, String>(10)?,
+        "id": r.get_i64(0)?,
+        "name": r.get_str(1)?,
+        "vuln_class": r.get_str(2)?,
+        "cwe": r.get_str(3)?,
+        "severity": r.get_str(4)?,
+        "title_tmpl": r.get_str(5)?,
+        "description_tmpl": r.get_str(6)?,
+        "remediation_tmpl": r.get_str(7)?,
+        "references": r.get_str(8)?,
+        "created": r.get_str(9)?,
+        "updated": r.get_str(10)?,
     }))
 }
 
@@ -175,16 +176,14 @@ fn params_from_body(body: &Value) -> HashMap<String, String> {
 /// GET /api/finding-templates — LISTE GLOBALE des modèles (lecture). JAMAIS filtrée par engagement :
 /// un modèle est réutilisable across engagements. Trié par nom (insensible casse) puis id.
 async fn ft_list(State(app): State<App>) -> Response {
-    let db = app.db();
+    let store = app.store();
     let sql = format!(
         "SELECT {SELECT_COLS} FROM finding_template ORDER BY name COLLATE NOCASE ASC, id ASC"
     );
-    let mut stmt = match db.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => return internal(e.to_string()),
-    };
-    let rows: Vec<Value> = match stmt.query_map([], row_to_json) {
-        Ok(it) => it.filter_map(|x| x.ok()).collect(),
+    // LENIENT read (pre-seam: `query_map(..).filter_map(|x| x.ok()).collect()`): prepare/bind errors
+    // still 500, but a single malformed row is skipped rather than sinking the whole list.
+    let rows: Vec<Value> = match store.query_lax(&sql, &[], row_to_json) {
+        Ok(rows) => rows,
         Err(e) => return internal(e.to_string()),
     };
     (StatusCode::OK, Json(json!({"templates": rows, "count": rows.len()}))).into_response()
@@ -230,15 +229,24 @@ async fn ft_create(
 
     let actor = attribution_login(&app, &headers);
     let id = {
-        let db = app.db();
-        if let Err(e) = db.execute(
+        let store = app.store();
+        if let Err(e) = store.execute(
             "INSERT INTO finding_template(name,vuln_class,cwe,severity,title_tmpl,description_tmpl,remediation_tmpl,refs,created,updated)
              VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
-            rusqlite::params![name, vuln_class, cwe, severity, title_tmpl, description_tmpl, remediation_tmpl, refs],
+            &crate::sql_params![
+                name.clone(),
+                vuln_class.clone(),
+                cwe,
+                severity.clone(),
+                title_tmpl,
+                description_tmpl,
+                remediation_tmpl,
+                refs
+            ],
         ) {
             return internal(format!("création du modèle échouée: {e}"));
         }
-        db.last_insert_rowid()
+        store.last_insert_id()
     };
     append_console_ledger(&app, "console.finding_template.create", json!({
         "actor": actor, "id": id, "name": name, "severity": severity, "vuln_class": vuln_class,
@@ -265,8 +273,10 @@ async fn ft_edit(
     }
     // existence (fail-closed : on n'édite jamais un modèle fantôme).
     {
-        let db = app.db();
-        let exists = db.query_row("SELECT 1 FROM finding_template WHERE id=?", [id], |_| Ok(())).is_ok();
+        let store = app.store();
+        let exists = store
+            .query_row("SELECT 1 FROM finding_template WHERE id=?", &crate::sql_params![id], |_| Ok(()))
+            .is_ok();
         if !exists {
             return not_found(format!("modèle {id} introuvable"));
         }
@@ -325,11 +335,12 @@ async fn ft_edit(
     }
     let actor = attribution_login(&app, &headers);
     {
-        let db = app.db();
+        let store = app.store();
         let sql = format!("UPDATE finding_template SET {}, updated=datetime('now') WHERE id=?", sets.join(", "));
-        let mut params: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        params.push(&id);
-        if let Err(e) = db.execute(&sql, params.as_slice()) {
+        // Dynamic parameter list: the SET values (all TEXT) followed by the WHERE `id` bind.
+        let mut params: Vec<Param> = vals.iter().map(|s| Param::Text(s.clone())).collect();
+        params.push(Param::Int(id));
+        if let Err(e) = store.execute(&sql, &params) {
             return internal(format!("édition du modèle échouée: {e}"));
         }
     }
@@ -351,16 +362,20 @@ async fn ft_delete(
         return admin_denied().into_response();
     }
     let name: String = {
-        let db = app.db();
-        match db.query_row("SELECT name FROM finding_template WHERE id=?", [id], |r| r.get::<_, String>(0)) {
+        let store = app.store();
+        match store.query_row(
+            "SELECT name FROM finding_template WHERE id=?",
+            &crate::sql_params![id],
+            |r| r.get_str(0),
+        ) {
             Ok(n) => n,
             Err(_) => return not_found(format!("modèle {id} introuvable")),
         }
     };
     let actor = attribution_login(&app, &headers);
     {
-        let db = app.db();
-        if let Err(e) = db.execute("DELETE FROM finding_template WHERE id=?", [id]) {
+        let store = app.store();
+        if let Err(e) = store.execute("DELETE FROM finding_template WHERE id=?", &crate::sql_params![id]) {
             return internal(format!("suppression du modèle échouée: {e}"));
         }
     }
@@ -396,11 +411,11 @@ async fn ft_apply(
     };
     // charge le modèle (fail-closed : modèle fantôme -> 404).
     let (name, severity, vuln_class, cwe, title_t, desc_t, rem_t): (String, String, String, String, String, String, String) = {
-        let db = app.db();
-        match db.query_row(
+        let store = app.store();
+        match store.query_row(
             "SELECT name,severity,vuln_class,cwe,title_tmpl,description_tmpl,remediation_tmpl FROM finding_template WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            &crate::sql_params![id],
+            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?, r.get_str(3)?, r.get_str(4)?, r.get_str(5)?, r.get_str(6)?)),
         ) {
             Ok(t) => t,
             Err(_) => return not_found(format!("modèle {id} introuvable")),
@@ -419,18 +434,31 @@ async fn ft_apply(
     let (cvss_vec, cvss_score) = cvss_base_for_severity(&severity);
 
     let (created, finding_id) = {
-        let db = app.db();
+        let store = app.store();
         // INSERT OR IGNORE : la contrainte UNIQUE(campaign,target,title) du finding s'applique (dédup) —
         // un doublon exact est ignoré (created=false), jamais une erreur.
-        let n = match db.execute(
+        let n = match store.execute(
             "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
              VALUES(datetime('now'),?,?,?,?,?,'','tested',?,?,'',?,'',?,?,?,?)",
-            rusqlite::params![campaign, target, title, severity, vuln_class, description, tool, remediation, cwe, cvss_vec, cvss_score, engagement_id],
+            &crate::sql_params![
+                campaign,
+                target.clone(),
+                title.clone(),
+                severity.clone(),
+                vuln_class,
+                description,
+                tool,
+                remediation,
+                cwe,
+                cvss_vec,
+                cvss_score,
+                engagement_id
+            ],
         ) {
             Ok(n) => n,
             Err(e) => return internal(format!("création du finding échouée: {e}")),
         };
-        if n > 0 { (true, db.last_insert_rowid()) } else { (false, -1) }
+        if n > 0 { (true, store.last_insert_id()) } else { (false, -1) }
     };
 
     if !created {

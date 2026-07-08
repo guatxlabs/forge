@@ -69,8 +69,8 @@ fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Respon
 /// The group-mapping table. `idp_group` is the IdP's group name (exact match). `role` is a console
 /// role (viewer|operator|admin). `tenant_id`/`tenant_role` are OPTIONAL: when set, membership also
 /// lands a scoped tenant grant (E1 multi-tenancy). Created lazily — the community DB never sees it.
-fn ensure_schema(db: &rusqlite::Connection) {
-    let _ = db.execute_batch(
+fn ensure_schema(store: &crate::store::Store) {
+    let _ = store.execute_batch(
         "CREATE TABLE IF NOT EXISTS rbac_group_map(
            idp_group   TEXT PRIMARY KEY,
            role        TEXT NOT NULL,
@@ -149,13 +149,19 @@ async fn map_set(State(app): State<App>, headers: HeaderMap, Json(body): Json<Va
         return err(StatusCode::BAD_REQUEST, "tenant_role_without_id", "tenant_role requires a tenant_id");
     }
     {
-        let db = app.db();
-        ensure_schema(&db);
-        if let Err(e) = db.execute(
+        let store = app.store();
+        ensure_schema(&store);
+        if let Err(e) = store.execute(
             "INSERT INTO rbac_group_map(idp_group,role,tenant_id,tenant_role,created)
              VALUES(?,?,?,?,?)
              ON CONFLICT(idp_group) DO UPDATE SET role=excluded.role, tenant_id=excluded.tenant_id, tenant_role=excluded.tenant_role",
-            rusqlite::params![group, role, tenant_id, tenant_role, crate::now_epoch()],
+            &crate::sql_params![
+                group.clone(),
+                role.clone(),
+                tenant_id,
+                tenant_role.clone(),
+                crate::now_epoch()
+            ],
         ) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e.to_string());
         }
@@ -183,9 +189,11 @@ async fn map_delete(State(app): State<App>, headers: HeaderMap, Path(group): Pat
         return err(StatusCode::FORBIDDEN, "admin_required", "advanced-RBAC config is admin-only");
     }
     let removed = {
-        let db = app.db();
-        ensure_schema(&db);
-        db.execute("DELETE FROM rbac_group_map WHERE idp_group=?", [&group]).unwrap_or(0)
+        let store = app.store();
+        ensure_schema(&store);
+        store
+            .execute("DELETE FROM rbac_group_map WHERE idp_group=?", &crate::sql_params![group.clone()])
+            .unwrap_or(0)
     };
     if removed == 0 {
         return err(StatusCode::NOT_FOUND, "not_found", "no mapping for that group");
@@ -200,24 +208,26 @@ async fn map_delete(State(app): State<App>, headers: HeaderMap, Path(group): Pat
 
 /// Every mapping as a JSON array (admin view). Never carries a secret.
 fn list_mappings(app: &App) -> Vec<Value> {
-    let db = app.db();
-    ensure_schema(&db);
-    let mut out = Vec::new();
-    if let Ok(mut stmt) =
-        db.prepare("SELECT idp_group, role, tenant_id, tenant_role FROM rbac_group_map ORDER BY idp_group")
-    {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok(json!({
-                "group": r.get::<_, String>(0)?,
-                "role": r.get::<_, String>(1)?,
-                "tenant_id": r.get::<_, Option<i64>>(2)?,
-                "tenant_role": r.get::<_, Option<String>>(3)?,
-            }))
-        }) {
-            out = rows.filter_map(|x| x.ok()).collect();
-        }
-    }
-    out
+    let store = app.store();
+    ensure_schema(&store);
+    // LENIENT read (pre-seam: `filter_map(|x| x.ok()).collect()`): a per-row error skips that row and
+    // returns the rest; `unwrap_or_default()` only swallows a prepare/bind `Err` to `[]`, exactly as
+    // the pre-seam `if let Ok(stmt)/if let Ok(rows)` guards did. (NOT `query()`, which would collapse
+    // the whole list to `[]` on the FIRST bad row.)
+    store
+        .query_lax(
+            "SELECT idp_group, role, tenant_id, tenant_role FROM rbac_group_map ORDER BY idp_group",
+            &[],
+            |r| {
+                Ok(json!({
+                    "group": r.get_str(0)?,
+                    "role": r.get_str(1)?,
+                    "tenant_id": r.get_opt_i64(2)?,
+                    "tenant_role": r.get_opt_str(3)?,
+                }))
+            },
+        )
+        .unwrap_or_default()
 }
 
 // ============================================================================================
@@ -241,8 +251,8 @@ pub(crate) fn resolve(app: &App, groups: &[String]) -> Resolved {
     if groups.is_empty() {
         return Resolved::default();
     }
-    let db = app.db();
-    ensure_schema(&db);
+    let store = app.store();
+    ensure_schema(&store);
     let mut role: Option<String> = None;
     let mut grants: HashMap<i64, String> = HashMap::new();
     for g in groups {
@@ -250,16 +260,10 @@ pub(crate) fn resolve(app: &App, groups: &[String]) -> Resolved {
         if g.is_empty() {
             continue;
         }
-        let row = db.query_row(
+        let row = store.query_row(
             "SELECT role, tenant_id, tenant_role FROM rbac_group_map WHERE idp_group=?",
-            [g],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<i64>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            },
+            &crate::sql_params![g],
+            |r| Ok((r.get_str(0)?, r.get_opt_i64(1)?, r.get_opt_str(2)?)),
         );
         let (r, tid, trole) = match row {
             Ok(v) => v,
@@ -308,20 +312,23 @@ pub(crate) fn apply_to_user(
     let mut applied_role: Option<String> = None;
     let mut n_grants = 0usize;
     {
-        let db = app.db();
+        let store = app.store();
         if let Some(r) = &resolved.role {
             let role = clamp_role(r, cap_operator);
-            let _ = db.execute("UPDATE users SET role=? WHERE id=?", rusqlite::params![role, user_id]);
+            let _ = store.execute(
+                "UPDATE users SET role=? WHERE id=?",
+                &crate::sql_params![role.clone(), user_id],
+            );
             applied_role = Some(role);
         }
         if tenancy_on {
             for (tid, trole) in &resolved.tenant_grants {
                 let trole = clamp_tenant_role(trole, cap_operator);
-                let _ = db.execute(
+                let _ = store.execute(
                     "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
                      VALUES(?,?,?,datetime('now'))
                      ON CONFLICT(user_id,tenant_id) DO UPDATE SET role=excluded.role",
-                    rusqlite::params![user_id, tid, trole],
+                    &crate::sql_params![user_id, *tid, trole],
                 );
                 n_grants += 1;
             }
@@ -489,12 +496,12 @@ mod tests {
     }
 
     fn set_map(app: &App, group: &str, role: &str, tenant: Option<i64>, trole: Option<&str>) {
-        let db = app.db();
-        ensure_schema(&db);
-        db.execute(
+        let store = app.store();
+        ensure_schema(&store);
+        store.execute(
             "INSERT INTO rbac_group_map(idp_group,role,tenant_id,tenant_role,created) VALUES(?,?,?,?,0)
              ON CONFLICT(idp_group) DO UPDATE SET role=excluded.role, tenant_id=excluded.tenant_id, tenant_role=excluded.tenant_role",
-            rusqlite::params![group, role, tenant, trole],
+            &crate::sql_params![group, role, tenant, trole],
         )
         .unwrap();
     }
