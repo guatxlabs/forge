@@ -989,6 +989,8 @@ byHb5g3JqJSE6WJSuyEQrUob
         let (events, _) = broadcast::channel::<crate::RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "store-postgres")]
+            pg: None,
             db_path: Arc::new(":memory:".into()),
             token_sha: Arc::new(crate::sha_hex("t")),
             token_raw: Arc::new("t".into()),

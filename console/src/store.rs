@@ -58,6 +58,309 @@
 use rusqlite::types::Value as SqlValue;
 
 // ================================================================================================
+// POSTGRES BACKEND (Stage 2) — everything postgres-specific lives behind `#[cfg(feature =
+// "store-postgres")]`. The DEFAULT build compiles NONE of this (byte-identical, openssl-free); the
+// feature build stays openssl-free too (rustls + ring, never native-tls/openssl). The seam's PUBLIC
+// surface (`Param`/`Value`/`Row`/`Store`/`StoreError`) is UNCHANGED — only new arms/impls are added.
+//
+// ⚠️ NOT WIRED INTO APP STARTUP YET (Stage 2b pending). This backend is INTEGRATION-TESTED (the
+// `pg_tests` module below constructs a `Store::postgres(..)` DIRECTLY against a real Postgres,
+// bypassing app startup, so it fully validates the backend) but the running console NEVER selects it:
+// `main.rs::enterprise_store_gate` FAILS CLOSED (refuses to start) when `FORGE_ENTERPRISE_STORE=
+// postgres`, and `App.pg` is always `None`, so `App::store()` always resolves to SQLite. This is
+// deliberate: routing `store()` to Postgres while the >100 raw `db()` call sites and ALL boot seeding
+// (`populate_modules` / `ensure_default_*`) still write to SQLite would SPLIT the database. Stage 2b
+// MUST route ALL DML + boot seeding through the active backend BEFORE `FORGE_ENTERPRISE_STORE=postgres`
+// can be enabled; only then may the startup gate and the `App.pg` wiring be re-activated.
+// ================================================================================================
+
+#[cfg(feature = "store-postgres")]
+use postgres::types::{IsNull, ToSql, Type};
+
+/// TYPED-NEUTRAL SQL NULL. Postgres statically types every bound parameter from the *prepared
+/// statement's* inferred column type, then calls `ToSql::accepts(inferred_type)` — so binding a
+/// concrete Rust `Option::<i64>::None` for, say, a `TEXT` column is REJECTED at `accepts` time even
+/// though the value is NULL. `PgNull` sidesteps that: `accepts` returns `true` for EVERY type and
+/// `to_sql` writes `IsNull::Yes`, so it binds a NULL regardless of the column's inferred type — the
+/// portable analogue of `Param::Null` -> `SqlValue::Null` on SQLite.
+#[cfg(feature = "store-postgres")]
+#[derive(Debug)]
+struct PgNull;
+
+#[cfg(feature = "store-postgres")]
+impl ToSql for PgNull {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        _out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(IsNull::Yes)
+    }
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+    postgres::types::to_sql_checked!();
+}
+
+/// Adapt a backend-neutral `&[Param]` slice to OWNED boxed `ToSql` binds (the postgres client takes
+/// `&[&(dyn ToSql + Sync)]`). Binding rules mirror the SQLite lowering EXACTLY:
+///   - `Int(i64)`  -> `i64`  (BIGINT — the schema maps every SQLite `INTEGER` to `BIGINT`)
+///   - `Real(f64)` -> `f64`  (DOUBLE PRECISION)
+///   - `Text`      -> `String`
+///   - `Blob`      -> `Vec<u8>` (BYTEA)
+///   - `Bool(b)`   -> `i64` 0/1 (NOT PG `bool`: the schema stores booleans as `BIGINT` 0/1 to match
+///     SQLite's `INTEGER` 0/1 semantics, identical to `Param::Bool` on SQLite)
+///   - `Null`      -> `PgNull` (typed-neutral NULL, see above)
+#[cfg(feature = "store-postgres")]
+fn pg_binds(params: &[Param]) -> Vec<Box<dyn ToSql + Sync>> {
+    params
+        .iter()
+        .map(|p| -> Box<dyn ToSql + Sync> {
+            match p {
+                Param::Int(v) => Box::new(*v),
+                Param::Real(v) => Box::new(*v),
+                Param::Text(v) => Box::new(v.clone()),
+                Param::Blob(v) => Box::new(v.clone()),
+                Param::Bool(v) => Box::new(if *v { 1_i64 } else { 0_i64 }),
+                Param::Null => Box::new(PgNull),
+            }
+        })
+        .collect()
+}
+
+/// Translate the seam's SQLite `?` placeholders to postgres `$1, $2, …` LEFT-TO-RIGHT. `?` characters
+/// INSIDE single-quoted string literals are left VERBATIM (the console's SQL is static/controlled, but
+/// this stays safe against a literal that contains a `?`). SQL-standard doubled-quote escapes (`''`)
+/// inside a literal are handled so the literal boundary is tracked correctly.
+///
+/// SCOPE / LIMITATIONS (STATIC SQL ONLY): this tracks single-quoted literals ONLY. It does NOT skip a
+/// `?` that appears inside a SQL comment (`-- …` line / `/* … */` block), a dollar-quoted string
+/// (`$$ … ?$$` / `$tag$ … $tag$`), or a double-quoted identifier (`"col?"`). None of those appear in
+/// the console's static, hand-written SQL (which is what this seam translates), so this is safe by
+/// construction here — but if that assumption ever changes (dynamic SQL, generated identifiers, or a
+/// literal `?` inside a comment/dollar-quote), the translator would MIS-COUNT and MUST be extended to
+/// track those contexts too. It is NOT a general-purpose SQL rewriter.
+#[cfg(feature = "store-postgres")]
+fn translate_placeholders(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut n: u32 = 0;
+    let mut in_squote = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_squote {
+            out.push(c);
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    // Doubled '' escape: consume the second quote, stay inside the literal.
+                    out.push('\'');
+                    chars.next();
+                } else {
+                    in_squote = false;
+                }
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_squote = true;
+                out.push('\'');
+            }
+            '?' => {
+                n += 1;
+                out.push('$');
+                out.push_str(&n.to_string());
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Map a `postgres::Error` to the seam's `StoreError` (message VERBATIM — same discipline as the
+/// rusqlite `From` impl, so `format!("… {e}")` call sites read identically).
+#[cfg(feature = "store-postgres")]
+fn pg_err(e: postgres::Error) -> StoreError {
+    StoreError::Backend(e.to_string())
+}
+
+/// Run a BLOCKING postgres-client call safely w.r.t. the tokio runtime.
+///
+/// WHY THIS EXISTS: the synchronous `postgres` client drives its OWN current-thread tokio runtime via
+/// `block_on` for every call. Invoking that from a thread that is ALREADY inside a tokio runtime (an
+/// axum handler runs on a multi-thread worker) panics with *"Cannot start a runtime from within a
+/// runtime"*. `tokio::task::block_in_place` announces the blocking section so the multi-thread runtime
+/// parks the worker and the nested `block_on` becomes legal (empirically validated). Rusqlite needs
+/// none of this because it is pure-C synchronous with no runtime.
+///
+/// OUTSIDE any runtime — the SYNC integration tests, and any CLI/off-runtime caller — we call `f`
+/// directly, because `block_in_place` ITSELF panics when there is no current runtime. `Handle::
+/// try_current()` distinguishes the two cases. NOTE: the runtime MUST be multi-thread (the console's
+/// `#[tokio::main]` default + `rt-multi-thread`); `block_in_place` is unsupported on a current-thread
+/// runtime. The matching boot-time requirement is that the client be CONNECTED (and dropped) off the
+/// runtime — see `App` wiring in `main.rs` (connect on a dedicated `std::thread`).
+#[cfg(feature = "store-postgres")]
+fn pg_block<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(f),
+        Err(_) => f(),
+    }
+}
+
+/// Build a SESSION-PINNED synchronous `postgres::Client` for `url` (a `postgres://…` DSN). TLS is
+/// openssl-free: a rustls `ClientConfig` on the `ring` crypto provider (NOT aws-lc / native-tls) with
+/// Mozilla's webpki-roots as the trust anchor set, wrapped in `tokio-postgres-rustls`'s
+/// `MakeRustlsConnect`. TLS is USED when the server offers it (sslmode negotiation); a local server
+/// without SSL falls back to plaintext — so the same connector serves a TLS prod DSN and a plaintext
+/// docker test DSN. The returned client is the ONE client the `App` holds for its lifetime (see the
+/// module docs on `last_insert_id` session-pinning).
+#[cfg(feature = "store-postgres")]
+pub(crate) fn connect_postgres(url: &str) -> Result<postgres::Client, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("rustls config: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
+    postgres::Client::connect(url, tls).map_err(|e| format!("postgres connect ({url}): {e}"))
+}
+
+// --- postgres row getters (positional) ----------------------------------------------------------
+// Postgres is STATICALLY typed: `Row::try_get::<T>` succeeds only if `T` matches the column's runtime
+// type. The seam schema maps every `INTEGER` to `BIGINT` (int8) and `REAL` to `DOUBLE PRECISION`
+// (float8), but `SELECT 1` yields int4 and a narrowed column could be int2/float4 — so the integer/
+// float getters TRY the widest type first and fall back through narrower ones (widening losslessly),
+// reproducing SQLite's permissive numeric reads.
+
+#[cfg(feature = "store-postgres")]
+fn pg_get_i64(r: &postgres::Row, idx: usize) -> StoreResult<i64> {
+    if let Ok(v) = r.try_get::<_, i64>(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = r.try_get::<_, i32>(idx) {
+        return Ok(v as i64);
+    }
+    if let Ok(v) = r.try_get::<_, i16>(idx) {
+        return Ok(v as i64);
+    }
+    r.try_get::<_, i64>(idx).map_err(pg_err)
+}
+
+#[cfg(feature = "store-postgres")]
+fn pg_get_opt_i64(r: &postgres::Row, idx: usize) -> StoreResult<Option<i64>> {
+    if let Ok(v) = r.try_get::<_, Option<i64>>(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = r.try_get::<_, Option<i32>>(idx) {
+        return Ok(v.map(|x| x as i64));
+    }
+    if let Ok(v) = r.try_get::<_, Option<i16>>(idx) {
+        return Ok(v.map(|x| x as i64));
+    }
+    r.try_get::<_, Option<i64>>(idx).map_err(pg_err)
+}
+
+#[cfg(feature = "store-postgres")]
+fn pg_get_f64(r: &postgres::Row, idx: usize) -> StoreResult<f64> {
+    if let Ok(v) = r.try_get::<_, f64>(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = r.try_get::<_, f32>(idx) {
+        return Ok(v as f64);
+    }
+    r.try_get::<_, f64>(idx).map_err(pg_err)
+}
+
+#[cfg(feature = "store-postgres")]
+fn pg_get_opt_f64(r: &postgres::Row, idx: usize) -> StoreResult<Option<f64>> {
+    if let Ok(v) = r.try_get::<_, Option<f64>>(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = r.try_get::<_, Option<f32>>(idx) {
+        return Ok(v.map(|x| x as f64));
+    }
+    r.try_get::<_, Option<f64>>(idx).map_err(pg_err)
+}
+
+#[cfg(feature = "store-postgres")]
+fn pg_get_bool(r: &postgres::Row, idx: usize) -> StoreResult<bool> {
+    // Schema stores booleans as BIGINT 0/1, so read the integer and test != 0. Accept a genuine PG
+    // BOOL column too (defensive), matching rusqlite's tolerant `get::<bool>`.
+    if let Ok(v) = r.try_get::<_, i64>(idx) {
+        return Ok(v != 0);
+    }
+    if let Ok(v) = r.try_get::<_, i32>(idx) {
+        return Ok(v != 0);
+    }
+    if let Ok(v) = r.try_get::<_, bool>(idx) {
+        return Ok(v);
+    }
+    r.try_get::<_, bool>(idx).map_err(pg_err)
+}
+
+/// Dynamic/untyped read: dispatch on the column's PG type OID and return the backend-neutral [`Value`]
+/// — the postgres dual of `sqlite_value_ref_to_value`. int2/int4/int8 -> `Int`, float4/float8 ->
+/// `Real`, text/varchar/bpchar/name -> `Text`, bytea -> `Blob`, bool -> `Int` 0/1 (SQLite has no bool
+/// storage class; a boolean reads back as a number, matching the SoQL reader), NULL -> `Null`. Any
+/// OTHER PG type falls back to its string form (or `Null` if not string-readable), matching
+/// SoQL-over-SQLite's text-leaning generic read.
+#[cfg(feature = "store-postgres")]
+fn pg_get_value(r: &postgres::Row, idx: usize) -> StoreResult<Value> {
+    let ty = r.columns()[idx].type_().clone();
+    if ty == Type::INT8 {
+        Ok(r.try_get::<_, Option<i64>>(idx).map_err(pg_err)?.map(Value::Int).unwrap_or(Value::Null))
+    } else if ty == Type::INT4 {
+        Ok(r
+            .try_get::<_, Option<i32>>(idx)
+            .map_err(pg_err)?
+            .map(|v| Value::Int(v as i64))
+            .unwrap_or(Value::Null))
+    } else if ty == Type::INT2 {
+        Ok(r
+            .try_get::<_, Option<i16>>(idx)
+            .map_err(pg_err)?
+            .map(|v| Value::Int(v as i64))
+            .unwrap_or(Value::Null))
+    } else if ty == Type::FLOAT8 {
+        Ok(r.try_get::<_, Option<f64>>(idx).map_err(pg_err)?.map(Value::Real).unwrap_or(Value::Null))
+    } else if ty == Type::FLOAT4 {
+        Ok(r
+            .try_get::<_, Option<f32>>(idx)
+            .map_err(pg_err)?
+            .map(|v| Value::Real(v as f64))
+            .unwrap_or(Value::Null))
+    } else if ty == Type::TEXT || ty == Type::VARCHAR || ty == Type::BPCHAR || ty == Type::NAME {
+        Ok(r.try_get::<_, Option<String>>(idx).map_err(pg_err)?.map(Value::Text).unwrap_or(Value::Null))
+    } else if ty == Type::BYTEA {
+        Ok(r.try_get::<_, Option<Vec<u8>>>(idx).map_err(pg_err)?.map(Value::Blob).unwrap_or(Value::Null))
+    } else if ty == Type::BOOL {
+        Ok(r
+            .try_get::<_, Option<bool>>(idx)
+            .map_err(pg_err)?
+            .map(|b| Value::Int(if b { 1 } else { 0 }))
+            .unwrap_or(Value::Null))
+    } else {
+        // Other PG types -> best-effort string form (Null if not String-readable).
+        match r.try_get::<_, Option<String>>(idx) {
+            Ok(Some(s)) => Ok(Value::Text(s)),
+            _ => Ok(Value::Null),
+        }
+    }
+}
+
+/// Resolve a column NAME to its positional index on a postgres row (postgres exposes `columns()` with
+/// names; the by-NAME getters route through this then reuse the positional helpers).
+#[cfg(feature = "store-postgres")]
+fn pg_col_index(r: &postgres::Row, col: &str) -> StoreResult<usize> {
+    r.columns()
+        .iter()
+        .position(|c| c.name() == col)
+        .ok_or_else(|| StoreError::Backend(format!("no such column: {col}")))
+}
+
+// ================================================================================================
 // PARAM — backend-agnostic bound parameter. Maps 1:1 to a SQLite storage class today; a Postgres
 // backend maps the same variants to its own bind types at Stage 2.
 // ================================================================================================
@@ -195,6 +498,13 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
+#[cfg(feature = "store-postgres")]
+impl From<postgres::Error> for StoreError {
+    fn from(e: postgres::Error) -> Self {
+        StoreError::Backend(e.to_string())
+    }
+}
+
 /// Result alias used across the seam.
 pub(crate) type StoreResult<T> = Result<T, StoreError>;
 
@@ -263,6 +573,8 @@ pub(crate) struct Row<'stmt> {
 
 enum RowInner<'stmt> {
     Sqlite(&'stmt rusqlite::Row<'stmt>),
+    #[cfg(feature = "store-postgres")]
+    Postgres(&'stmt postgres::Row),
 }
 
 impl<'stmt> Row<'stmt> {
@@ -270,45 +582,66 @@ impl<'stmt> Row<'stmt> {
         Row { inner: RowInner::Sqlite(r) }
     }
 
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn postgres(r: &'stmt postgres::Row) -> Self {
+        Row { inner: RowInner::Postgres(r) }
+    }
+
     // --- positional getters --------------------------------------------------------------------
     pub(crate) fn get_i64(&self, idx: usize) -> StoreResult<i64> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, i64>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_i64(r, idx),
         }
     }
     pub(crate) fn get_str(&self, idx: usize) -> StoreResult<String> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, String>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, String>(idx).map_err(pg_err),
         }
     }
     pub(crate) fn get_opt_str(&self, idx: usize) -> StoreResult<Option<String>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Option<String>>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, Option<String>>(idx).map_err(pg_err),
         }
     }
     pub(crate) fn get_opt_i64(&self, idx: usize) -> StoreResult<Option<i64>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Option<i64>>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_opt_i64(r, idx),
         }
     }
     pub(crate) fn get_f64(&self, idx: usize) -> StoreResult<f64> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, f64>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_f64(r, idx),
         }
     }
     pub(crate) fn get_opt_f64(&self, idx: usize) -> StoreResult<Option<f64>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Option<f64>>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_opt_f64(r, idx),
         }
     }
     pub(crate) fn get_bool(&self, idx: usize) -> StoreResult<bool> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, bool>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_bool(r, idx),
         }
     }
     pub(crate) fn get_blob(&self, idx: usize) -> StoreResult<Vec<u8>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Vec<u8>>(idx)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, Vec<u8>>(idx).map_err(pg_err),
         }
     }
 
@@ -316,36 +649,50 @@ impl<'stmt> Row<'stmt> {
     pub(crate) fn get_i64_by(&self, col: &str) -> StoreResult<i64> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, i64>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_i64(r, pg_col_index(r, col)?),
         }
     }
     pub(crate) fn get_str_by(&self, col: &str) -> StoreResult<String> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, String>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, String>(col).map_err(pg_err),
         }
     }
     pub(crate) fn get_opt_str_by(&self, col: &str) -> StoreResult<Option<String>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Option<String>>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, Option<String>>(col).map_err(pg_err),
         }
     }
     pub(crate) fn get_opt_i64_by(&self, col: &str) -> StoreResult<Option<i64>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Option<i64>>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_opt_i64(r, pg_col_index(r, col)?),
         }
     }
     pub(crate) fn get_f64_by(&self, col: &str) -> StoreResult<f64> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, f64>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_f64(r, pg_col_index(r, col)?),
         }
     }
     pub(crate) fn get_bool_by(&self, col: &str) -> StoreResult<bool> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, bool>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_bool(r, pg_col_index(r, col)?),
         }
     }
     pub(crate) fn get_blob_by(&self, col: &str) -> StoreResult<Vec<u8>> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(r.get::<_, Vec<u8>>(col)?),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => r.try_get::<_, Vec<u8>>(col).map_err(pg_err),
         }
     }
 
@@ -362,6 +709,8 @@ impl<'stmt> Row<'stmt> {
     pub(crate) fn get_value(&self, idx: usize) -> StoreResult<Value> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(sqlite_value_ref_to_value(r.get_ref(idx)?)),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_value(r, idx),
         }
     }
 
@@ -370,6 +719,8 @@ impl<'stmt> Row<'stmt> {
     pub(crate) fn get_value_by(&self, col: &str) -> StoreResult<Value> {
         match &self.inner {
             RowInner::Sqlite(r) => Ok(sqlite_value_ref_to_value(r.get_ref(col)?)),
+            #[cfg(feature = "store-postgres")]
+            RowInner::Postgres(r) => pg_get_value(r, pg_col_index(r, col)?),
         }
     }
 }
@@ -387,13 +738,26 @@ pub(crate) struct Store<'a> {
 
 enum Backend<'a> {
     Sqlite(std::sync::MutexGuard<'a, rusqlite::Connection>),
-    // Stage 2: Postgres(deadpool_postgres::Client) — added behind `#[cfg(feature = "postgres")]`.
+    // Stage 2: a SESSION-PINNED synchronous postgres client held for the `Store`'s lifetime — the SAME
+    // Mutex model as `Sqlite` (one held guard, so `execute(INSERT)` + `last_insert_id()` run on ONE
+    // session, cf. the module docs). The sync `postgres::Client` DML methods take `&mut self`, whereas
+    // the seam methods take `&self`; a `RefCell` provides the interior mutability (the `Store` is
+    // single-threaded / `!Send`, so borrows never overlap across the brief per-call `borrow_mut`).
+    #[cfg(feature = "store-postgres")]
+    Postgres(std::cell::RefCell<std::sync::MutexGuard<'a, postgres::Client>>),
 }
 
 impl<'a> Store<'a> {
     /// Wrap a held SQLite connection guard. Called by `App::store()`.
     pub(crate) fn sqlite(guard: std::sync::MutexGuard<'a, rusqlite::Connection>) -> Self {
         Store { backend: Backend::Sqlite(guard) }
+    }
+
+    /// Wrap a held postgres client guard (session-pinned for the `Store`'s lifetime). Called by
+    /// `App::store()` when the `store-postgres` feature is compiled AND the runtime selects Postgres.
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn postgres(guard: std::sync::MutexGuard<'a, postgres::Client>) -> Self {
+        Store { backend: Backend::Postgres(std::cell::RefCell::new(guard)) }
     }
 
     /// Execute a non-query statement; returns the number of affected rows (mirrors rusqlite's
@@ -404,6 +768,14 @@ impl<'a> Store<'a> {
                 let vals = to_sql_values(params);
                 Ok(conn.execute(sql, rusqlite::params_from_iter(vals))?)
             }
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(cell) => {
+                let sql = translate_placeholders(sql);
+                let boxed = pg_binds(params);
+                let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
+                let mut cl = cell.borrow_mut();
+                Ok(pg_block(|| cl.execute(sql.as_str(), &refs)).map_err(pg_err)? as usize)
+            }
         }
     }
 
@@ -412,6 +784,13 @@ impl<'a> Store<'a> {
     pub(crate) fn execute_batch(&self, sql: &str) -> StoreResult<()> {
         match &self.backend {
             Backend::Sqlite(conn) => Ok(conn.execute_batch(sql)?),
+            #[cfg(feature = "store-postgres")]
+            // No parameters => no placeholder translation. `batch_execute` runs `;`-separated DDL and
+            // the transaction control words (`BEGIN`/`COMMIT`/`ROLLBACK`) `with_tx` issues.
+            Backend::Postgres(cell) => {
+                let mut cl = cell.borrow_mut();
+                pg_block(|| cl.batch_execute(sql)).map_err(pg_err)
+            }
         }
     }
 
@@ -431,6 +810,21 @@ impl<'a> Store<'a> {
                 let mut out = Vec::new();
                 while let Some(r) = rows.next()? {
                     out.push(map(&Row::sqlite(r))?);
+                }
+                Ok(out)
+            }
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(cell) => {
+                let sql = translate_placeholders(sql);
+                let boxed = pg_binds(params);
+                let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
+                let mut cl = cell.borrow_mut();
+                // Postgres materialises the full result set (no per-row step error to skip); STRICT:
+                // the FIRST `map` closure `Err` sinks the whole read via `?`, matching the Sqlite arm.
+                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
+                let mut out = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    out.push(map(&Row::postgres(r))?);
                 }
                 Ok(out)
             }
@@ -469,6 +863,23 @@ impl<'a> Store<'a> {
                 }
                 Ok(out)
             }
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(cell) => {
+                let sql = translate_placeholders(sql);
+                let boxed = pg_binds(params);
+                let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
+                let mut cl = cell.borrow_mut();
+                // PREPARE/BIND errors PROPAGATE (a broken statement is a hard failure, like Sqlite);
+                // a per-row `map` `Err` is SKIPPED (dropped), collecting only rows that mapped to `Ok`.
+                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
+                let mut out = Vec::with_capacity(rows.len());
+                for r in &rows {
+                    if let Ok(v) = map(&Row::postgres(r)) {
+                        out.push(v);
+                    }
+                }
+                Ok(out)
+            }
         }
     }
 
@@ -492,6 +903,18 @@ impl<'a> Store<'a> {
                     None => Ok(None),
                 }
             }
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(cell) => {
+                let sql = translate_placeholders(sql);
+                let boxed = pg_binds(params);
+                let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
+                let mut cl = cell.borrow_mut();
+                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
+                match rows.first() {
+                    Some(r) => Ok(Some(map(&Row::postgres(r))?)),
+                    None => Ok(None),
+                }
+            }
         }
     }
 
@@ -506,10 +929,24 @@ impl<'a> Store<'a> {
     }
 
     /// Rowid of the most recent successful INSERT on this connection (mirrors
-    /// `Connection::last_insert_rowid`). A Postgres backend satisfies this via `RETURNING id` at Stage 2.
+    /// `Connection::last_insert_rowid`). SESSION-SCOPED: meaningful only when paired with an
+    /// `execute(INSERT …)` on the SAME `Store` (one held guard) with no interleaved INSERT between.
+    /// The Postgres arm reads `SELECT lastval()` on the SAME session-pinned client — this is why the
+    /// client MUST be session-pinned (a per-call pooled connection could surface another session's
+    /// insert id). `lastval()` returns the last value produced by a sequence (an `INSERT` into a
+    /// `GENERATED … AS IDENTITY` column advances one), matching SQLite's last-rowid semantics; `0` if
+    /// no sequence has advanced on this session yet (mirrors rusqlite's `0` before any INSERT).
     pub(crate) fn last_insert_id(&self) -> i64 {
         match &self.backend {
             Backend::Sqlite(conn) => conn.last_insert_rowid(),
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(cell) => {
+                let mut cl = cell.borrow_mut();
+                pg_block(|| cl.query_one("SELECT lastval()", &[]))
+                    .ok()
+                    .and_then(|r| r.try_get::<_, i64>(0).ok())
+                    .unwrap_or(0)
+            }
         }
     }
 
@@ -642,5 +1079,250 @@ mod tests {
         assert_eq!(to_json(&row.get_value(2).unwrap()), serde_json::json!("hello"));
         assert_eq!(to_json(&row.get_value(3).unwrap()), serde_json::Value::Null);
         assert_eq!(to_json(&row.get_value(4).unwrap()), serde_json::Value::Null);
+    }
+}
+
+// ================================================================================================
+// POSTGRES TESTS (feature `store-postgres`).
+//   - `pg_translate_placeholders_*` : PURE unit tests of the `?` -> `$n` translator (no server).
+//   - `pg_seam_end_to_end` : INTEGRATION test — GATED on `TEST_PG_URL` (skips with a note when unset).
+//     Connects to a real Postgres, applies `PG_SCHEMA`, then exercises the WHOLE seam and asserts the
+//     results match SQLite semantics: execute INSERT + `last_insert_id`, `query`/`query_lax`/
+//     `query_opt`, `get_value` on mixed-type columns (int/real/text/bytea/null), typed getters, a
+//     nullable-column read, an `ON CONFLICT DO NOTHING` upsert, and a transaction commit + rollback.
+// ================================================================================================
+#[cfg(all(test, feature = "store-postgres"))]
+mod pg_tests {
+    use super::*;
+
+    #[test]
+    fn pg_translate_placeholders_basic() {
+        assert_eq!(translate_placeholders("SELECT * FROM t WHERE a=? AND b=?"),
+                   "SELECT * FROM t WHERE a=$1 AND b=$2");
+        assert_eq!(translate_placeholders("INSERT INTO t(a,b,c) VALUES(?,?,?)"),
+                   "INSERT INTO t(a,b,c) VALUES($1,$2,$3)");
+        // No placeholders -> verbatim.
+        assert_eq!(translate_placeholders("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn pg_translate_placeholders_skips_string_literals() {
+        // A `?` inside a single-quoted literal is NOT a placeholder.
+        assert_eq!(translate_placeholders("SELECT '?' , ? , 'a?b' , ?"),
+                   "SELECT '?' , $1 , 'a?b' , $2");
+        // Doubled '' escape inside a literal keeps the literal boundary correct.
+        assert_eq!(translate_placeholders("UPDATE t SET s='it''s ?' WHERE id=?"),
+                   "UPDATE t SET s='it''s ?' WHERE id=$1");
+    }
+
+    // Acquire a fresh Store on the shared client. Each op MUST be in its own scope so the guard drops
+    // before the next Store locks (a std Mutex is non-reentrant — mirrors one `App::store()` per op).
+    fn pg_client_or_skip() -> Option<postgres::Client> {
+        match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => Some(connect_postgres(&u).expect("connect TEST_PG_URL")),
+            _ => {
+                eprintln!("[pg_seam_end_to_end] TEST_PG_URL unset — skipping (set it to run against a real Postgres)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn pg_seam_end_to_end() {
+        let client = match pg_client_or_skip() {
+            Some(c) => c,
+            None => return,
+        };
+        let m = std::sync::Mutex::new(client);
+
+        // 1) DDL: reset test tables, then apply the REAL PG_SCHEMA (proves the schema DDL runs on PG).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch(
+                "DROP TABLE IF EXISTS seam_mixed; DROP TABLE IF EXISTS seam_auto;
+                 DROP TABLE IF EXISTS finding CASCADE;",
+            ).expect("drop test tables");
+            s.execute_batch(crate::state::PG_SCHEMA).expect("apply PG_SCHEMA");
+            s.execute_batch(
+                "CREATE TABLE seam_auto(
+                   id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT,
+                   score DOUBLE PRECISION, active BIGINT);
+                 CREATE TABLE seam_mixed(i BIGINT, r DOUBLE PRECISION, s TEXT, b BYTEA, n TEXT);",
+            ).expect("create seam test tables");
+        }
+
+        // 2) execute(INSERT) + last_insert_id() on the SAME session-pinned client (IDENTITY column).
+        let (id1, id2);
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n = s.execute(
+                "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                &sql_params!["alpha", 1.5_f64, true],
+            ).expect("insert alpha");
+            assert_eq!(n, 1, "one row inserted");
+            id1 = s.last_insert_id();
+            assert!(id1 > 0, "IDENTITY id assigned (lastval on same session): {id1}");
+            s.execute(
+                "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                &sql_params!["beta", 2.5_f64, false],
+            ).expect("insert beta");
+            id2 = s.last_insert_id();
+            assert!(id2 > id1, "second id strictly greater: {id2} > {id1}");
+        }
+
+        // 3) Bool binding read-back (Param::Bool -> BIGINT 0/1, NOT PG bool) + typed getters.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let (active_alpha, bool_alpha): (i64, bool) = s.query_row(
+                "SELECT active FROM seam_auto WHERE name=?",
+                &sql_params!["alpha"],
+                |r| Ok((r.get_i64(0)?, r.get_bool(0)?)),
+            ).expect("read alpha active");
+            assert_eq!(active_alpha, 1, "Bool(true) bound as BIGINT 1");
+            assert!(bool_alpha, "get_bool reads BIGINT 1 as true");
+            let active_beta: i64 = s.query_row(
+                "SELECT active FROM seam_auto WHERE name=?",
+                &sql_params!["beta"],
+                |r| r.get_i64(0),
+            ).expect("read beta active");
+            assert_eq!(active_beta, 0, "Bool(false) bound as BIGINT 0");
+        }
+
+        // 4) query (strict, all rows) + query_lax (skip a mapping error) + query_opt (Some/None).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let all: Vec<String> = s.query(
+                "SELECT name FROM seam_auto ORDER BY id",
+                &sql_params![],
+                |r| r.get_str(0),
+            ).expect("query all names");
+            assert_eq!(all, vec!["alpha".to_string(), "beta".to_string()]);
+
+            // query_lax: closure returns Err for "beta" -> that row is SKIPPED, "alpha" kept.
+            let kept: Vec<String> = s.query_lax(
+                "SELECT name FROM seam_auto ORDER BY id",
+                &sql_params![],
+                |r| {
+                    let name = r.get_str(0)?;
+                    if name == "beta" { Err(StoreError::Backend("skip".into())) } else { Ok(name) }
+                },
+            ).expect("query_lax");
+            assert_eq!(kept, vec!["alpha".to_string()], "query_lax skips the erroring row");
+
+            // query_opt: present -> Some, absent -> None.
+            let present: Option<i64> = s.query_opt(
+                "SELECT id FROM seam_auto WHERE name=?",
+                &sql_params!["alpha"],
+                |r| r.get_i64(0),
+            ).expect("query_opt present");
+            assert_eq!(present, Some(id1));
+            let absent: Option<i64> = s.query_opt(
+                "SELECT id FROM seam_auto WHERE name=?",
+                &sql_params!["nope"],
+                |r| r.get_i64(0),
+            ).expect("query_opt absent");
+            assert_eq!(absent, None);
+        }
+
+        // 5) get_value on a column PER type (BIGINT/DOUBLE/TEXT/BYTEA/NULL) + a nullable-column read.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO seam_mixed(i, r, s, b, n) VALUES(?,?,?,?,?)",
+                &sql_params![42_i64, 3.5_f64, "hello", vec![1_u8, 2_u8], Option::<String>::None],
+            ).expect("insert seam_mixed");
+            s.query_row(
+                "SELECT i, r, s, b, n FROM seam_mixed",
+                &sql_params![],
+                |r| {
+                    // Dynamic dispatch on the PG column type -> neutral Value (matches SQLite).
+                    assert_eq!(r.get_value(0)?, Value::Int(42));
+                    assert_eq!(r.get_value(1)?, Value::Real(3.5));
+                    assert_eq!(r.get_value(2)?, Value::Text("hello".into()));
+                    assert_eq!(r.get_value(3)?, Value::Blob(vec![1, 2]));
+                    assert_eq!(r.get_value(4)?, Value::Null);
+                    // value_to_json parity with SoQL-over-SQLite (blob/null -> JSON null).
+                    assert_eq!(value_to_json(&r.get_value(0)?), serde_json::json!(42));
+                    assert_eq!(value_to_json(&r.get_value(3)?), serde_json::Value::Null);
+                    // Typed getters + nullable-column read.
+                    assert_eq!(r.get_i64(0)?, 42);
+                    assert_eq!(r.get_f64(1)?, 3.5);
+                    assert_eq!(r.get_str(2)?, "hello");
+                    assert_eq!(r.get_blob(3)?, vec![1, 2]);
+                    assert_eq!(r.get_opt_str(4)?, None, "nullable column reads back None");
+                    // by-name variants dispatch identically.
+                    assert_eq!(r.get_value_by("i")?, Value::Int(42));
+                    assert_eq!(r.get_opt_str_by("n")?, None);
+                    Ok(())
+                },
+            ).expect("read seam_mixed row");
+        }
+
+        // 6) ON CONFLICT DO NOTHING upsert on the REAL finding table (UNIQUE(campaign,target,title)).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n1 = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &sql_params!["2026-01-01", "c1", "t1", "dup-title", "LOW"],
+            ).expect("first finding insert");
+            assert_eq!(n1, 1, "first insert creates the row");
+            let fid = s.last_insert_id();
+            assert!(fid > 0, "finding IDENTITY id: {fid}");
+            let n2 = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &sql_params!["2026-01-02", "c1", "t1", "dup-title", "HIGH"],
+            ).expect("duplicate finding insert");
+            assert_eq!(n2, 0, "duplicate (campaign,target,title) is a no-op via ON CONFLICT DO NOTHING");
+            // Row count is still 1 for that key, and severity unchanged (DO NOTHING, not DO UPDATE).
+            let sev: String = s.query_row(
+                "SELECT severity FROM finding WHERE campaign=? AND target=? AND title=?",
+                &sql_params!["c1", "t1", "dup-title"],
+                |r| r.get_str(0),
+            ).expect("read finding severity");
+            assert_eq!(sev, "LOW", "DO NOTHING left the original row untouched");
+        }
+
+        // 7) transaction COMMIT — inserted row persists.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.with_tx(|tx| {
+                tx.execute(
+                    "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                    &sql_params!["committed", 9.0_f64, 1_i64],
+                )?;
+                Ok(())
+            }).expect("tx commit");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let cnt: i64 = s.query_row(
+                "SELECT COUNT(*) FROM seam_auto WHERE name=?",
+                &sql_params!["committed"],
+                |r| r.get_i64(0),
+            ).expect("count committed");
+            assert_eq!(cnt, 1, "committed row persisted");
+        }
+
+        // 8) transaction ROLLBACK — closure returns Err, the insert is undone.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let res: StoreResult<()> = s.with_tx(|tx| {
+                tx.execute(
+                    "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                    &sql_params!["rolledback", 9.0_f64, 1_i64],
+                )?;
+                Err(StoreError::Backend("force rollback".into()))
+            });
+            assert!(res.is_err(), "with_tx surfaces the closure error");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let cnt: i64 = s.query_row(
+                "SELECT COUNT(*) FROM seam_auto WHERE name=?",
+                &sql_params!["rolledback"],
+                |r| r.get_i64(0),
+            ).expect("count rolledback");
+            assert_eq!(cnt, 0, "rolled-back row absent");
+        }
     }
 }

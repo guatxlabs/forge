@@ -484,6 +484,22 @@ async fn main() {
     populate_modules(&conn); // table `module` peuplée depuis `forge.cli modules`
     reconcile_runs(&conn); // run_job 'running' orphelins (reboot console) -> 'failed'
 
+    // ENTERPRISE STORE (Postgres) — FAIL-CLOSED (migration Stage 2b INCOMPLÈTE). Le backend PG du seam
+    // (store.rs) est intégration-testé mais PAS ENCORE câblé au démarrage. Router `store()` sur Postgres
+    // pendant que les >100 sites `db()` bruts + TOUT l'amorçage boot (populate_modules / ensure_default_*)
+    // continuent d'écrire sur SQLite produirait une base SCINDÉE (split-brain SQLite/Postgres). Tant que
+    // Stage 2b n'a pas routé TOUT le DML + l'amorçage à travers le backend actif, on REFUSE de démarrer
+    // si FORGE_ENTERPRISE_STORE=postgres — que la feature `store-postgres` soit compilée OU NON (le build
+    // community ne pouvait déjà pas ; le build feature doit AUSSI refuser maintenant). L'App tourne donc
+    // TOUJOURS sur SQLite (`App.pg = None`) : le bras `Backend::Postgres` reste compilé derrière la
+    // feature mais INATTEIGNABLE depuis le démarrage normal (seuls les tests d'intégration le pilotent,
+    // en construisant un `Store::postgres` DIRECTEMENT). Décision isolée dans `enterprise_store_gate`
+    // (pure, testable). Env absent/autre (ex. "sqlite") => SQLite, défaut inchangé/byte-identique.
+    if let Err(msg) = enterprise_store_gate(std::env::var("FORGE_ENTERPRISE_STORE").ok().as_deref()) {
+        eprintln!("[forge-console] FATAL {msg}");
+        std::process::exit(2);
+    }
+
     let token = std::env::var("FORGE_CONSOLE_TOKEN").unwrap_or_else(|_| gen_token());
     let user = std::env::var("FORGE_CONSOLE_USER").unwrap_or_else(|_| "forge".to_string());
     let pass_hash = std::env::var("FORGE_CONSOLE_PASS_HASH").unwrap_or_default();
@@ -577,6 +593,11 @@ async fn main() {
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         db_path: Arc::new(db_path.clone()),
+        // FAIL-CLOSED (Stage 2b) : jamais de client PG au démarrage — l'App tourne sur SQLite. Le champ
+        // n'existe que sous la feature ; le bras `Backend::Postgres` du seam reste compilé mais, `pg`
+        // étant toujours `None`, `store()` retombe sur SQLite (bras PG inatteignable hors tests d'intégr.).
+        #[cfg(feature = "store-postgres")]
+        pg: None,
         token_sha: Arc::new(sha_hex(&token)),
         token_raw: Arc::new(token.clone()),
         user: Arc::new(user),
@@ -637,12 +658,47 @@ async fn main() {
         .expect("serve");
 }
 
+/// FAIL-CLOSED gate for the enterprise store selection (Stage 2b guard). Given the runtime value of
+/// `FORGE_ENTERPRISE_STORE`, returns `Err(message)` when Postgres is requested — the Postgres backend
+/// is integration-tested but NOT yet wired into startup, so enabling it now would split the DB between
+/// SQLite (all `db()` sites + boot seeding) and Postgres (only `store()`); see `store.rs` module docs.
+/// Returns `Ok(())` for any other value (`None`, `"sqlite"`, …), which starts normally on SQLite. This
+/// refusal holds WHETHER OR NOT the `store-postgres` feature is compiled. Pure over its input so the
+/// fail-closed behaviour is unit-testable without spawning the process.
+fn enterprise_store_gate(requested: Option<&str>) -> Result<(), String> {
+    if requested == Some("postgres") {
+        return Err("FORGE_ENTERPRISE_STORE=postgres is not yet available: the Postgres data-path \
+                    migration (Stage 2b) is incomplete; refusing to start to avoid a split \
+                    SQLite/Postgres database."
+            .to_string());
+    }
+    Ok(())
+}
+
 // =====================================================================================
 // Tests de régression des correctifs de sûreté/sécurité (durcissement audit).
 // =====================================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FAIL-CLOSED : demander le backend Postgres au démarrage (FORGE_ENTERPRISE_STORE=postgres) DOIT
+    /// être refusé avec un message clair tant que la migration du chemin de données (Stage 2b) n'est pas
+    /// faite — sinon split-brain SQLite/Postgres. Toute autre valeur démarre normalement (SQLite). Ce
+    /// test est indépendant de la feature (il vaut pour le build community ET le build `store-postgres`).
+    #[test]
+    fn enterprise_store_postgres_is_fail_closed() {
+        let err = enterprise_store_gate(Some("postgres"))
+            .expect_err("postgres must be refused at startup (Stage 2b incomplete)");
+        assert!(err.contains("not yet available"), "clear refusal message: {err}");
+        assert!(err.contains("Stage 2b"), "names the incomplete stage: {err}");
+        assert!(err.contains("refusing to start"), "states it refuses to start: {err}");
+        assert!(err.contains("split"), "explains the split-brain risk: {err}");
+        // The community default and any non-postgres selection start normally on SQLite.
+        assert!(enterprise_store_gate(None).is_ok(), "default (unset) starts on SQLite");
+        assert!(enterprise_store_gate(Some("sqlite")).is_ok(), "explicit sqlite starts normally");
+        assert!(enterprise_store_gate(Some("")).is_ok(), "empty value starts normally");
+    }
 
     /// Verrou global sérialisant les tests qui LISENT/ÉCRIVENT des variables d'ENV partagées
     /// (FORGE_ALLOW_API_MIGRATE / FORGE_CONSOLE_IMPORT_DIR) — l'ENV du process est global, donc ces
@@ -663,6 +719,8 @@ mod tests {
         App {
             db: Arc::new(Mutex::new(conn)),
             db_path: Arc::new(":memory:".into()),
+            #[cfg(feature = "store-postgres")]
+            pg: None,
             token_sha: Arc::new(sha_hex("t")),
             token_raw: Arc::new("t".into()),
             user: Arc::new("forge".into()),
@@ -2234,6 +2292,8 @@ mod tests {
         let (events, _) = broadcast::channel::<RunEvent>(64);
         let app = App {
             db: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "store-postgres")]
+            pg: None,
             db_path: Arc::new(db_path.clone()),
             token_sha: Arc::new(sha_hex("t")),
             token_raw: Arc::new("t".into()),
