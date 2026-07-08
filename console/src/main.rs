@@ -3511,8 +3511,8 @@ async fn plan(State(app): State<App>, Json(body): Json<Value>) -> impl IntoRespo
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    if let Err((code, j)) = validate_modules(&app, &requested_modules, false) {
-        return (code, j);
+    if let Err(e) = validate_modules(&app, &requested_modules, false) {
+        return e.into_parts();
     }
 
     // (3) dir temp éphémère : scope.json (allow_* FORCÉS false) + targets.json. Nettoyé en fin.
@@ -4418,7 +4418,7 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // vide. Sinon 400 explicite. Ok(false) => plancher exploit inchangé (comportement actuel).
     let high_impact = match high_impact_gate(allow_high_impact, true, arm, &reason) {
         Ok(v) => v,
-        Err((code, j)) => return (code, j),
+        Err(e) => return e.into_parts(),
     };
 
     // modules demandés : ⊆ kinds connus ET web_allowed=1 ; PLANCHER EXPLOIT (exploit|destructive => 400)
@@ -4428,8 +4428,8 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    if let Err((code, j)) = validate_modules(&app, &requested_modules, high_impact) {
-        return (code, j);
+    if let Err(e) = validate_modules(&app, &requested_modules, high_impact) {
+        return e.into_parts();
     }
 
     // params PAR-MODULE (passthrough) : validés (taille/profondeur/NUL/kind bien formé) puis
@@ -4438,7 +4438,7 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // allow_exploit/destructive restent forcés false plus bas, quel que soit le contenu des params.
     let module_params = match validate_module_params(&body, &requested_modules) {
         Ok(m) => m,
-        Err((code, j)) => return (code, j),
+        Err(e) => return e.into_parts(),
     };
 
     let mode = match body.get("mode").and_then(|v| v.as_str()).unwrap_or("propose") {
@@ -4539,7 +4539,7 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     // Target.attrs tel quel). Doublon volontaire avec le scope : selon que le module lit le scope
     // global ou les attrs de sa cible, les params sont disponibles des deux côtés (passthrough sûr).
     let module_params_val = Value::Object(module_params.clone());
-    let targets_doc: Vec<Value> = scope_doc["in_scope"].as_array().unwrap().iter()
+    let targets_doc: Vec<Value> = targets.iter()
         .map(|h| json!({"host": h, "kind": "host", "attrs": {"module_params": module_params_val.clone()}}))
         .collect();
     let scope_path = run_dir.join("scope.json");
@@ -4840,45 +4840,32 @@ async fn import_scan(
 fn validate_module_params(
     body: &Value,
     modules: &[String],
-) -> Result<serde_json::Map<String, Value>, (StatusCode, Json<Value>)> {
+) -> Result<serde_json::Map<String, Value>, error::ApiError> {
     let mut out = serde_json::Map::new();
     let raw = match body.get("module_params") {
         None | Some(Value::Null) => return Ok(out),
         Some(Value::Object(m)) => m,
         Some(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "bad_module_params", "why": "module_params doit être un objet {kind: {params}}"
-            }))));
+            return Err(error::ApiError::bad("bad_module_params", "module_params doit être un objet {kind: {params}}"));
         }
     };
     if raw.len() > 128 {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "bad_module_params", "why": "trop de modules dans module_params (>128)"
-        }))));
+        return Err(error::ApiError::bad("bad_module_params", "trop de modules dans module_params (>128)"));
     }
     for (kind, params) in raw {
         // clé = kind bien formé (même grammaire que validate_campaign : pas de métacaractère/-en-tête).
         if let Err(e) = validate_campaign(kind) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "bad_module_params", "why": format!("clé module '{kind}' invalide: {e}")
-            }))));
+            return Err(error::ApiError::bad("bad_module_params", format!("clé module '{kind}' invalide: {e}")));
         }
         // si une allow-list explicite est fournie, on n'accepte de params QUE pour ces modules.
         if !modules.is_empty() && !modules.iter().any(|m| m == kind) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "param_for_unrequested_module",
-                "why": format!("params fournis pour '{kind}' qui n'est pas dans modules[]")
-            }))));
+            return Err(error::ApiError::bad("param_for_unrequested_module", format!("params fournis pour '{kind}' qui n'est pas dans modules[]")));
         }
         if !params.is_object() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "bad_module_params", "why": format!("params de '{kind}' doivent être un objet")
-            }))));
+            return Err(error::ApiError::bad("bad_module_params", format!("params de '{kind}' doivent être un objet")));
         }
         if let Err(e) = validate_param_value(params, 0) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "bad_module_params", "why": format!("params de '{kind}': {e}")
-            }))));
+            return Err(error::ApiError::bad("bad_module_params", format!("params de '{kind}': {e}")));
         }
         out.insert(kind.clone(), params.clone());
     }
@@ -4894,7 +4881,7 @@ fn validate_module_params(
 /// acceptés (et la dérivée `web_allowed=0` qui n'existe QUE parce que exploit/destructif/idor est
 /// elle aussi tolérée). Le contrôle `unknown_module` reste TOUJOURS appliqué — on n'accepte jamais
 /// un kind inconnu du registre, même armé. `false` (défaut) => comportement actuel inchangé.
-fn validate_modules(app: &App, modules: &[String], allow_high_impact: bool) -> Result<(), (StatusCode, Json<Value>)> {
+fn validate_modules(app: &App, modules: &[String], allow_high_impact: bool) -> Result<(), error::ApiError> {
     if modules.is_empty() {
         return Ok(());
     }
@@ -4916,10 +4903,7 @@ fn validate_modules(app: &App, modules: &[String], allow_high_impact: bool) -> R
                 // AU-DESSUS du plancher exploit : vérifié AVANT le bypass high-impact. (Un binaire
                 // simplement absent, sans intention opérateur, reste accepté puis SKIP par le moteur.)
                 if module_operator_disabled(enabled, available_override) {
-                    return Err((StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "module_disabled",
-                        "why": format!("module '{m}' désactivé (gouvernance connecteur) — non lançable, même armé")
-                    }))));
+                    return Err(error::ApiError::bad("module_disabled", format!("module '{m}' désactivé (gouvernance connecteur) — non lançable, même armé")));
                 }
                 // Opt-in haut-impact honoré : on NE rejette PAS exploit/destructif. Le scope-guard du
                 // moteur reste seul juge des cibles (hors-scope = VETO), l'écriture allow_* ne touche
@@ -4928,23 +4912,14 @@ fn validate_modules(app: &App, modules: &[String], allow_high_impact: bool) -> R
                     continue;
                 }
                 if exploit != 0 || destructive != 0 {
-                    return Err((StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "exploit_floor",
-                        "why": format!("module '{m}' est exploit/destructif — interdit depuis le web (sans opt-in haut-impact gouverné)")
-                    }))));
+                    return Err(error::ApiError::bad("exploit_floor", format!("module '{m}' est exploit/destructif — interdit depuis le web (sans opt-in haut-impact gouverné)")));
                 }
                 if web_allowed == 0 {
-                    return Err((StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "not_web_allowed",
-                        "why": format!("module '{m}' n'est pas lançable depuis le web (web_allowed=0)")
-                    }))));
+                    return Err(error::ApiError::bad("not_web_allowed", format!("module '{m}' n'est pas lançable depuis le web (web_allowed=0)")));
                 }
             }
             Err(_) => {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "unknown_module",
-                    "why": format!("module '{m}' inconnu du registre")
-                }))));
+                return Err(error::ApiError::bad("unknown_module", format!("module '{m}' inconnu du registre")));
             }
         }
     }
@@ -4997,7 +4972,7 @@ fn high_impact_gate(
     operator_ok: bool,
     arm: bool,
     reason: &str,
-) -> Result<bool, (StatusCode, Json<Value>)> {
+) -> Result<bool, error::ApiError> {
     if !allow_high_impact {
         return Ok(false); // défaut : aucune dérogation, plancher exploit inchangé
     }
@@ -5005,10 +4980,7 @@ fn high_impact_gate(
     // on le revérifie ici par défense en profondeur — un opt-in haut-impact ne peut JAMAIS être
     // honoré sans preuve operator, quelle que soit l'ordre des futurs appelants (fail-closed).
     if !operator_ok || !arm || reason.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "high_impact_requires_arm_and_reason",
-            "why": "allow_high_impact n'est honoré qu'avec operator authentifié + arm=true + reason non vide"
-        }))));
+        return Err(error::ApiError::bad("high_impact_requires_arm_and_reason", "allow_high_impact n'est honoré qu'avec operator authentifié + arm=true + reason non vide"));
     }
     Ok(true)
 }
@@ -10049,8 +10021,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             (true, true, "   "),  // reason blanche (trim)
         ] {
             let err = high_impact_gate(true, op, arm, reason).unwrap_err();
-            assert_eq!(err.0, StatusCode::BAD_REQUEST);
-            assert_eq!(err.1.0["error"], "high_impact_requires_arm_and_reason",
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(err.code, "high_impact_requires_arm_and_reason",
                 "condition manquante (op={op}, arm={arm}, reason={reason:?}) doit 400");
         }
     }
@@ -10066,14 +10038,14 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         // sans opt-in : recon OK, exploit refusé (plancher).
         assert!(validate_modules(&app, &["recon.httpx".into()], false).is_ok());
         let err = validate_modules(&app, &["exploit.rce".into()], false).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1.0["error"], "exploit_floor", "plancher exploit tient sans opt-in");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "exploit_floor", "plancher exploit tient sans opt-in");
         // avec opt-in honoré : exploit accepté.
         assert!(validate_modules(&app, &["exploit.rce".into()], true).is_ok(),
             "opt-in honoré -> exploit/destructif acceptés");
         // INVARIANT : kind inconnu refusé même avec opt-in (anti-injection d'argv préservé).
         let err = validate_modules(&app, &["forge.injected".into()], true).unwrap_err();
-        assert_eq!(err.1.0["error"], "unknown_module", "kind inconnu refusé même armé");
+        assert_eq!(err.code, "unknown_module", "kind inconnu refusé même armé");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -10164,11 +10136,11 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         // désactivé -> 400 module_disabled (sans opt-in).
         let err = validate_modules(&app, &["recon.httpx".into()], false).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1.0["error"], "module_disabled", "connecteur désactivé refusé");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "module_disabled", "connecteur désactivé refusé");
         // désactivé -> 400 module_disabled MÊME sous opt-in haut-impact (au-dessus du plancher exploit).
         let err = validate_modules(&app, &["recon.httpx".into()], true).unwrap_err();
-        assert_eq!(err.1.0["error"], "module_disabled", "désactivé refusé même armé (gouvernance > plancher)");
+        assert_eq!(err.code, "module_disabled", "désactivé refusé même armé (gouvernance > plancher)");
         // réactive -> OK ; binaire absent (actif) -> accepté (skip côté moteur, pas un refus web).
         { let db = app.db(); db.execute("UPDATE module SET enabled=1 WHERE kind='recon.httpx'", []).unwrap(); }
         assert!(validate_modules(&app, &["recon.httpx".into()], false).is_ok(), "réactivé -> accepté");

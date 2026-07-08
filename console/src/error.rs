@@ -12,6 +12,7 @@ use axum::{
 use serde_json::json;
 
 /// Typed API error — the shared substrate of every enterprise module's `err(...)` helper.
+#[derive(Debug)]
 pub(crate) struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
@@ -40,6 +41,13 @@ impl ApiError {
     #[allow(dead_code)]
     pub(crate) fn not_found(code: &'static str, why: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, why)
+    }
+
+    /// Décompose en la paire `(StatusCode, Json<Value>)` — enveloppe STRICTEMENT identique à
+    /// `into_response` — pour les handlers `impl IntoResponse` dont le type concret de retour est
+    /// déjà ce tuple (on ne peut y injecter un `Response` sans casser l'unicité du type concret).
+    pub(crate) fn into_parts(self) -> (StatusCode, Json<serde_json::Value>) {
+        (self.status, Json(json!({ "error": self.code, "why": self.why })))
     }
 }
 
