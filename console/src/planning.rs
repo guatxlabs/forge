@@ -193,6 +193,9 @@ pub(crate) async fn plan(State(app): State<App>, Json(body): Json<Value>) -> imp
     let output = std::process::Command::new(app.python.as_str())
         .args(&argv)
         .current_dir(app.pkg_dir.as_str())
+        // parité avec run_create : stdout Python non bufferisé (le dry-plan est collecté d'un bloc via
+        // .output(), donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
+        .env("PYTHONUNBUFFERED", "1")
         .stdin(std::process::Stdio::null())
         .output();
     let _ = std::fs::remove_dir_all(&plan_dir); // nettoyage best-effort quel que soit le résultat

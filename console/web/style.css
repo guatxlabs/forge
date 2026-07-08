@@ -679,6 +679,14 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .roecount.v-FIRE{border-color:color-mix(in srgb,var(--sev3) 35%,var(--bd))} .roecount.v-FIRE .rcn{color:var(--sev3)}
 .roecount.v-DRY_RUN{border-color:color-mix(in srgb,var(--sev2) 35%,var(--bd))} .roecount.v-DRY_RUN .rcn{color:var(--sev2)}
 .roecount.v-VETO{border-color:color-mix(in srgb,var(--ok) 35%,var(--bd))} .roecount.v-VETO .rcn{color:var(--ok)}
+/* SKIP (module indisponible/gouvernance) distinct des ERREURS (échec réel) — #4 visibilité par-module */
+.roecount.skipped{border-color:color-mix(in srgb,var(--mut) 45%,var(--bd))} .roecount.skipped .rcn{color:var(--mut)}
+.roecount.errors{border-color:color-mix(in srgb,var(--sev4) 35%,var(--bd))} .roecount.errors .rcn{color:var(--sev4)}
+/* panneau résultat live + tables scrollables (issue par module / findings) + état vide (#4/#5) */
+.lc-result{margin-top:12px}
+.lc-tablescroll{overflow-x:auto;max-height:40vh;overflow-y:auto;border-radius:8px}
+.lc-oreason{white-space:normal;max-width:360px}
+.lc-emptyfind{background:var(--card2);border:1px dashed var(--bd);border-radius:8px;padding:12px 14px;color:var(--mut);font-family:var(--font-mono);font-size:12px}
 
 /* détail finding (infoModal) */
 .modal.wide{width:min(720px,94vw)}

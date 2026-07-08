@@ -98,7 +98,13 @@ def cmd_campaign(args):
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = Memory(args.memory) if args.memory else None
-    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory)
+    # ÉMISSION PROGRESSIVE : la console pompe le stdout du moteur ligne à ligne vers le flux SSE du run.
+    # On branche un callback qui imprime CHAQUE ligne d'avancement immédiatement (flush) pour que les
+    # verdicts/SKIP par action et les bannières de vague STREAMENT en direct (au lieu du seul récap final).
+    # `flush=True` complète PYTHONUNBUFFERED posé par la console au spawn (sortie non bufferisée).
+    def _progress(line):
+        print(line, flush=True)
+    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, progress=_progress)
     if args.arm:
         engine.arm(f"forge campaign --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
