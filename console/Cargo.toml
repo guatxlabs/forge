@@ -26,6 +26,15 @@ encryption = ["rusqlite/bundled-sqlcipher"]
 # `unreachable_pub` (24 hits — would narrow the enterprise modules' deliberately-`pub` separable API).
 [lints.clippy]
 await_holding_lock = "warn"
+# `significant_drop_tightening` : ÉVALUÉ pour CONC-1 puis LAISSÉ OFF. Le verrou async `run_state` de
+# run_create ne couvre désormais que `contains_key`+`insert` (travail lourd hors verrou, réservation
+# FIFO portée par le guard RAII synchrone `RunReservation`), donc run_create le PASSE — mais activer le
+# lint globalement flague 93 sites PRÉEXISTANTS et HORS-SCOPE (le pattern `app.db()` MutexGuard tenu
+# jusqu'en fin de scope + lectures `RwLock`, dans 15+ fichiers). Cascade non maîtrisable sans churn
+# large/risqué ; on garde clippy VERT plutôt que de saupoudrer 93 `#[allow]`. À reconsidérer si le
+# pattern `db()` est un jour refactoré. (`await_holding_lock` couvre déjà l'invariant central CONC-1 :
+# aucun std Mutex tenu à travers un `.await`.)
+# significant_drop_tightening = "warn"
 
 [dependencies]
 guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe

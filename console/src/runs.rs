@@ -174,6 +174,37 @@ pub(crate) fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
     });
 }
 
+/// Guard RAII CANCELLATION-SAFE de la réservation de slot FIFO d'un engagement (CONC-1).
+///
+/// PROBLÈME résolu : `run_create` réserve le slot FIFO d'un engagement AVANT de faire le travail lourd
+/// (écritures fs, INSERT DB, spawn, appends ledger) SANS tenir le verrou async `run_state` pendant tout
+/// ce temps (deux engagements différents peuvent donc démarrer EN PARALLÈLE). La réservation vit dans
+/// `App.run_reservations` (set std synchrone). Si le future du handler est DROPPÉ à un point d'`.await`
+/// AVANT la promotion en run vivant (déconnexion client / annulation), une libération faite par une
+/// re-lock AWAITÉE ne s'exécuterait JAMAIS -> le slot fuiterait définitivement (409 erroné à chaque
+/// retry du même engagement). Ce guard corrige ça : son `Drop` est SYNCHRONE et s'exécute sur retour
+/// normal, early-return, panic ET drop-du-future. Tant que `active`, il retire `eng_id` du set.
+///
+/// Sur SUCCÈS, l'appelant insère le `RunHandle` réel dans `run_state` puis met `active=false` : le Drop
+/// devient un no-op (la réservation est PROMUE en run vivant, pas simplement libérée — pas de
+/// double-libération, pas de fenêtre où ni la réservation ni le run vivant n'existeraient).
+struct RunReservation<'a> {
+    app: &'a App,
+    eng_id: i64,
+    active: bool,
+}
+
+impl Drop for RunReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            // Verrou std SYNCHRONE tenu quelques microsecondes (jamais à travers un `.await`).
+            // Poison-safe (comme App::db) : un panic ailleurs ne doit pas empêcher la libération.
+            let mut resv = self.app.run_reservations.lock().unwrap_or_else(|e| e.into_inner());
+            resv.remove(&self.eng_id);
+        }
+    }
+}
+
 /// POST /api/run — démarre une campagne. Corps JSON :
 ///   {campaign, targets:[host…], modules:[kind…]?, mode:"propose"|"auto"?, budget:num?,
 ///    exhaustive:bool?, reason:str?, arm:bool?, allow_high_impact:bool?}
@@ -281,10 +312,29 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
     // d'un run pour un AUTRE engagement (autre clé de la map) n'entrave PAS ce démarrage — deux
     // engagements peuvent tourner en parallèle sans 409 croisé. La clé est l'engagement_id résolu (eng.id)
     // : on ne consulte JAMAIS le slot d'un autre engagement.
-    let mut state = app.run_state.lock().await;
-    if state.current.contains_key(&eng.id) {
-        return (StatusCode::CONFLICT, Json(json!({"error": "run_in_progress", "engagement_id": eng.id, "why": format!("un run est déjà en cours pour l'engagement #{} (FIFO par engagement : un seul à la fois par engagement)", eng.id)})));
-    }
+    // RÉSERVATION CANCELLATION-SAFE (CONC-1) : on prend le verrou async `run_state` (bref : juste
+    // `contains_key` + rien d'autre) ET le verrou std `run_reservations` (microsecondes) le temps de
+    // décider ET de poser la réservation, PUIS on les relâche IMMÉDIATEMENT (fin de bloc) — le travail
+    // lourd (fs/DB/spawn/ledger) se fait SANS aucun de ces verrous. 409 si un run est déjà VIVANT
+    // (run_state) OU déjà RÉSERVÉ (run_reservations) pour CET engagement : la fenêtre entre réservation
+    // et promotion est ainsi couverte (deux /api/run concurrents sur le même engagement -> le 2e voit
+    // la réservation -> 409). ISOLATION : clé = eng.id ; un autre engagement (autre clé) n'entrave rien
+    // -> deux engagements DIFFÉRENTS démarrent en parallèle (plus de sérialisation globale). Aucun
+    // verrou tenu à travers un `.await` (le std `run_reservations` en particulier ne l'est jamais).
+    {
+        let state = app.run_state.lock().await;
+        // std Mutex : jamais tenu à travers un `.await` ; poison-safe.
+        let mut resv = app.run_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        if state.current.contains_key(&eng.id) || resv.contains(&eng.id) {
+            return (StatusCode::CONFLICT, Json(json!({"error": "run_in_progress", "engagement_id": eng.id, "why": format!("un run est déjà en cours pour l'engagement #{} (FIFO par engagement : un seul à la fois par engagement)", eng.id)})));
+        }
+        resv.insert(eng.id);
+    } // les DEUX verrous sont relâchés ici — le travail lourd ci-dessous n'en tient AUCUN.
+
+    // À partir d'ici, TOUT chemin de sortie (return d'erreur, panic, drop-du-future/annulation) libère
+    // la réservation via le `Drop` de ce guard. Sur SUCCÈS, on posera `active=false` après avoir promu
+    // le run dans `run_state` (cf. plus bas), pour que le Drop soit un no-op.
+    let mut reservation = RunReservation { app: &app, eng_id: eng.id, active: true };
 
     // run_id : horodaté + suffixe aléatoire (traçable, unique).
     let run_id = format!("run-{}-{}", chrono_now_compact(), gen_token().chars().take(8).collect::<String>());
@@ -492,11 +542,22 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         "exploit_floor": if high_impact { "lifted via governed high-impact opt-in (allow_exploit=true allow_destructive=true)" } else { "forced allow_exploit=false allow_destructive=false" }
     }));
 
-    // Réserve le slot SOUS LA CLÉ engagement_id : ce run est le run vivant de CET engagement. Un autre
-    // engagement garde son propre slot (ou aucun) — aucune interférence.
-    state.current.insert(eng.id, RunHandle { run_id: run_id.clone(), pgid });
+    // PROMOTION réservation -> run vivant. On reprend le verrou async `run_state` BRIÈVEMENT (juste un
+    // insert) pour enregistrer le RunHandle réel sous la clé engagement_id (ce run devient le run vivant
+    // de CET engagement ; un autre engagement garde son propre slot — aucune interférence), PUIS on
+    // retire la réservation du set std et on désarme le guard (active=false) pour que son Drop soit un
+    // no-op. Ordre volontaire : le run vivant est publié dans `run_state` AVANT de retirer la
+    // réservation, donc il n'existe aucune fenêtre où ni la réservation ni le run vivant ne seraient
+    // visibles (un /api/run concurrent voit toujours l'un ou l'autre -> 409 maintenu). Aucun `.await`
+    // n'est fait tant que le verrou std `run_reservations` est tenu.
+    {
+        let mut state = app.run_state.lock().await;
+        state.current.insert(eng.id, RunHandle { run_id: run_id.clone(), pgid });
+        let mut resv = app.run_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        resv.remove(&eng.id);
+        reservation.active = false; // run promu et traqué dans run_state -> Drop = no-op (pas de double-libération)
+    } // verrous run_state (async) + run_reservations (std) relâchés ici.
     let _ = app.events.send(RunEvent { run_id: run_id.clone(), kind: "status".into(), payload: json!({"status": "running"}) });
-    drop(state); // libère le verrou FIFO avant de détacher le superviseur
 
     // superviseur : pompe stdout/stderr -> run_log + SSE ; watchdog timeout ; finalisation atomique.
     // Reçoit l'engagement_id (clé du slot à libérer), le pgid (kill group du watchdog) et le ledger
