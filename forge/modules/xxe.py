@@ -80,12 +80,6 @@ class XxeProbe(ScopeGuardedOracle):
                 f'<!DOCTYPE forge [<!ENTITY x SYSTEM "{entity_url}">]>'
                 '<forge><probe>&x;</probe></forge>')
 
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="POST", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=200000)
-        return st, body
-
     def _send_xml(self, action, xml):
         """Émet le XML vers la cible : dans params.param (urlencodé) si fourni, sinon en corps brut
         (Content-Type application/xml). Renvoie (status, body). Les en-têtes explicites priment ; la

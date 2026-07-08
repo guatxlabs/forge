@@ -20,9 +20,9 @@ chaque module concret et restent gardés par le ROE.
 import urllib.error
 import urllib.request
 
+from ._scopeguard import ScopeGuardMixin
 from .registry import Module
 from .. import session as _session
-from ..roe import Scope
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -45,6 +45,7 @@ class Oracle(Module):
     cwe = ""                    # CWE canonique de l'oracle (ex "CWE-918") : sert de category ET de cwe
     fix = ""                    # remédiation par défaut de l'oracle (le fix explicite d'un finding prime)
     tool = ""                   # chaîne de provenance estampillée sur les findings
+    MAXLEN = 200000             # troncature du corps lu par `_fetch_body` (cas commun ; surchargée par oracle)
 
     # --- construction UNIFORME de Finding (le coeur factorisé) ---
     def proof(self, *, target, proven, title, severity, evidence, poc, fix=None):
@@ -110,6 +111,35 @@ class Oracle(Module):
         except Exception:                # noqa: BLE001  (réseau hostile : on ne crashe pas)
             return None, "", None
 
+    # --- fetch (status, body) PARTAGÉ (seam `_fetch` monkeypatché par les tests) ---
+    @classmethod
+    def _fetch_body(cls, url, headers=None, timeout=15, method="GET", data=None):
+        """(status, body) — adosse le câblage urllib partagé (Oracle._http), en tronquant le corps à
+        `cls.MAXLEN` (100000/200000/300000 selon l'oracle). Source UNIQUE des ~10 `_fetch` (st, body)
+        recopiés dans ssrf/tokenapi/rce/business_logic/xxe/race/rfi/injection/exposure/takeover : ils ne
+        divergeaient QUE par le maxlen. Le SessionStore gouverné (scope-guardé) est fusionné par `_http`
+        UNIQUEMENT sur des URL in-scope. Exposé aussi sous le nom `_fetch` (seam patché par les tests)."""
+        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method,
+                                   data=data, maxlen=cls.MAXLEN)
+        return st, body
+
+    # Nom historique du seam : les modules concrets appellent `self._fetch(...)` et les tests le
+    # monkeypatchent par classe. Résout vers la méthode hoistée ci-dessus (par héritage/alias).
+    _fetch = _fetch_body
+
+    @staticmethod
+    def _content_type(headers):
+        """Content-Type NORMALISÉ (type/sous-type minuscule, paramètres retirés) depuis un mapping
+        d'en-têtes (ou None). '' si absent/illisible. Source unique de l'extraction recopiée dans
+        access_control (cadre la comparaison différentielle : html vs json ≠ même objet). Ne lève jamais."""
+        ct = ""
+        if headers is not None:
+            try:
+                ct = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            except Exception:            # noqa: BLE001
+                ct = ""
+        return ct
+
     # --- PoC curl partagé (IDOR / SSRF / ATO) — un drapeau -H par en-tête (commande rejouable) ---
     @staticmethod
     def _curl(url, headers, method="GET", data=None):
@@ -126,31 +156,14 @@ class Oracle(Module):
         return " ".join(parts)
 
 
-class ScopeGuardedOracle(Oracle):
+class ScopeGuardedOracle(ScopeGuardMixin, Oracle):
     """Base des oracles à VÉRIFICATION qui portent un SCOPE-GUARD NATIF fail-closed (défense en
     profondeur : l'engine gate déjà en Couche 2, on re-valide localement AVANT tout réseau) + une
     DÉGRADATION GRACIEUSE uniforme (`status='skipped'` quand le réseau/outil optionnel est absent,
     pour que les tests offline passent). Ce mixin ne porte AUCUNE capacité élargie : exploit/
     destructive restent déclarés par chaque module concret et gardés par le ROE.
 
-    Source UNIQUE du scope-guard des oracles d'injection/flux (`injection.py`, `clientflow.py`) :
-    une seule implémentation à auditer, jamais recopiée."""
-
-    @staticmethod
-    def _scope(action):
-        """(enforce, Scope) reconstruit depuis le périmètre injecté par l'engine (in_scope/out_scope
-        dans action.params). `enforce` distingue « périmètre fourni » (production) de « appelé sans
-        scope » (dev/test) — sans scope on n'élargit jamais le périmètre (permissif dev, gate ROE amont)."""
-        enforce = "in_scope" in action.params or "out_scope" in action.params
-        sc = Scope({"in_scope": action.params.get("in_scope", []),
-                    "out_scope": action.params.get("out_scope", [])})
-        return enforce, sc
-
-    def _in_scope(self, action, target):
-        """Appartenance PLATE (miroir exact de la gate ROE) pour la cible requêtée. Sans scope injecté
-        -> permissif (l'engine injecte TOUJOURS le périmètre en production, et gate en amont)."""
-        enforce, sc = self._scope(action)
-        return True if not enforce else sc.is_in_scope(target)
+    Le scope-guard (`_scope`/`_in_scope`) vit dans `ScopeGuardMixin` (source UNIQUE à auditer)."""
 
     def _scope_refused(self, action):
         """Refus fail-closed : cible hors périmètre -> Finding `skipped` INFO, AUCUNE requête émise.

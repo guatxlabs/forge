@@ -18,6 +18,15 @@ path = "src/main.rs"
 # chiffré au repos (`cargo build --features encryption`).
 encryption = ["rusqlite/bundled-sqlcipher"]
 
+# Wave-1 lints: only lints that are GREEN under `-D warnings` today are locked in (so CI can enforce
+# them without churn). `await_holding_lock` guards the deferred CONC-1 work (never hold a std Mutex
+# across `.await`). The other candidates were dropped this wave because they flag pre-existing,
+# out-of-scope issues that cannot be fixed without broad/risky churn: `string_slice` (29 hits — string
+# indexing is pervasive), `redundant_clone` (17 hits, nursery lint w/ false positives), and
+# `unreachable_pub` (24 hits — would narrow the enterprise modules' deliberately-`pub` separable API).
+[lints.clippy]
+await_holding_lock = "warn"
+
 [dependencies]
 guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe
 axum = "0.7"

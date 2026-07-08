@@ -70,21 +70,7 @@ const PURGE_KIND: &str = "console.compliance.purge";
 /// Is enterprise COMPLIANCE engaged?  false => community (every `/api/compliance/*` route 404s, ledger/data
 /// byte-identical, WORM/retention/hold inert).
 pub fn enabled(app: &App) -> bool {
-    if env_truthy("FORGE_ENTERPRISE_COMPLIANCE") {
-        return true;
-    }
-    let db = app.db();
-    matches!(
-        crate::settings_get(&db, "enterprise.compliance").as_deref(),
-        Some("on") | Some("1") | Some("true") | Some("yes")
-    )
-}
-
-/// Truthy env read (1|true|on|yes, case-insensitive). Absent/other => false.
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
-        .unwrap_or(false)
+    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_COMPLIANCE", "enterprise.compliance")
 }
 
 // ============================================================================================
@@ -348,8 +334,8 @@ pub fn parse_ts_epoch(ts: &str) -> Option<i64> {
 // RESPONSE HELPERS
 // ============================================================================================
 
-fn err(status: StatusCode, code: &str, why: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": code, "why": why.into() }))).into_response()
+fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
 }
 
 /// Flag OFF => 404 not_found (no compliance surface at all — byte-identical community).
@@ -405,7 +391,7 @@ fn redacted_ledger_signer() -> Value {
     json!({
         "mode": mode,
         "off_host": off_host,
-        "enterprise_flag": env_truthy("FORGE_ENTERPRISE_COMPLIANCE"),
+        "enterprise_flag": crate::flags::env_truthy("FORGE_ENTERPRISE_COMPLIANCE"),
         "pubkey": pubkey,
         "endpoint": if endpoint_set { "***REDACTED***" } else { "" },
         "endpoint_set": endpoint_set,
@@ -893,50 +879,9 @@ fn is_authorization_kind(kind: &str) -> bool {
         || kind == "console.setup.provision"
 }
 
-/// Is a JSON object key SECRET (its value must be redacted before export)? Deliberately PRECISE (not a
-/// broad substring) so structural keys survive: e.g. `authorization_audit_trail` is NOT a secret, but a
-/// `credential` / `client_secret` / `archive_key` value IS. A PUBLIC key (`pubkey`/`public_key`) is NEVER
-/// redacted (it is the verification material, by design public).
-fn is_secret_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    const EXACT: [&str; 10] =
-        ["passphrase", "password", "credential", "secret", "token", "apikey", "api_key", "cookie", "authorization", "private_key"];
-    if EXACT.contains(&k.as_str()) {
-        return true;
-    }
-    k.ends_with("_secret")
-        || k.ends_with("_token")
-        || k.ends_with("_password")
-        || k.ends_with("_credential")
-        || k.ends_with("_passphrase")
-        || k.ends_with("_key")
-        || k.ends_with("_apikey")
-}
-
-/// Recursively REDACT any secret-named field's value to `"[REDACTED]"` (fail-safe: run over the WHOLE
-/// assembled bundle right before it leaves the process, so even an unforeseen secret in a ledger detail
-/// never leaks). Public keys / structural keys are preserved.
-fn redact_evidence(v: &mut Value) {
-    match v {
-        Value::Object(map) => {
-            for (k, val) in map.iter_mut() {
-                if is_secret_key(k) {
-                    if !val.is_null() {
-                        *val = json!("[REDACTED]");
-                    }
-                } else {
-                    redact_evidence(val);
-                }
-            }
-        }
-        Value::Array(a) => {
-            for it in a.iter_mut() {
-                redact_evidence(it);
-            }
-        }
-        _ => {}
-    }
-}
+// Secret-key detection + recursive evidence redaction now live in the shared `crate::redact` module
+// (union of the reports.rs / compliance.rs sensitive-key lists — redacts AT LEAST what this module did).
+use crate::redact::redact_evidence;
 
 fn ledger_actor(detail: &Value) -> String {
     detail.get("actor").and_then(|v| v.as_str()).unwrap_or("").to_string()

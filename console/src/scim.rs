@@ -73,27 +73,10 @@ const SCHEMA_ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 
 /// Is enterprise SCIM engaged?  false => community (every `/scim/*` + `/api/scim/config` route 404s).
 pub fn enabled(app: &App) -> bool {
-    if env_truthy("FORGE_ENTERPRISE_SCIM") {
-        return true;
-    }
-    {
-        let db = app.db();
-        if matches!(
-            crate::settings_get(&db, "enterprise.scim").as_deref(),
-            Some("on") | Some("1") | Some("true") | Some("yes")
-        ) {
-            return true;
-        }
-    }
-    // SCIM is part of the enterprise-identity bundle — engaging SSO engages SCIM too (single toggle).
-    crate::sso::enabled(app)
-}
-
-/// Truthy env read (1|true|on|yes, case-insensitive). Absent/other => false.
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
-        .unwrap_or(false)
+    // Own env flag OR per-DB config (shared substrate), OR — SCIM ships in the enterprise-identity
+    // bundle — the SSO flag engages it too (single toggle). Same short-circuit order as before.
+    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_SCIM", "enterprise.scim")
+        || crate::sso::enabled(app)
 }
 
 // ============================================================================================
@@ -125,9 +108,9 @@ fn disabled() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
-/// Admin-config typed error (mirror sso::err) — never carries a secret.
-fn cfg_err(status: StatusCode, code: &str, why: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": code, "why": why.into() }))).into_response()
+/// Admin-config typed error (shared substrate; byte-identical `{"error","why"}`) — never a secret.
+fn cfg_err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
 }
 
 // ============================================================================================

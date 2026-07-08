@@ -62,14 +62,7 @@ const PENDING_TTL_SECS: i64 = 600;
 
 /// Is enterprise OIDC SSO engaged?  false => community (every `/api/sso/*` route 404s, local login unchanged).
 pub fn enabled(app: &App) -> bool {
-    if env_truthy("FORGE_ENTERPRISE_SSO") {
-        return true;
-    }
-    let db = app.db();
-    matches!(
-        crate::settings_get(&db, "enterprise.sso").as_deref(),
-        Some("on") | Some("1") | Some("true") | Some("yes")
-    )
+    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_SSO", "enterprise.sso")
 }
 
 /// Is an interactive SSO login available right now?  true iff the flag is engaged AND the OIDC provider
@@ -78,13 +71,6 @@ pub fn enabled(app: &App) -> bool {
 /// only that SSO is offered, exactly what the button itself does). false in the community default.
 pub fn login_available(app: &App) -> bool {
     enabled(app) && load_config(app).is_some()
-}
-
-/// Truthy env read (1|true|on|yes, case-insensitive). Absent/other => false.
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
-        .unwrap_or(false)
 }
 
 /// HTTP fetch timeout for discovery / JWKS / token exchange (env `FORGE_SSO_HTTP_TIMEOUT`, default 10s).
@@ -154,9 +140,9 @@ fn load_config(app: &App) -> Option<SsoConfig> {
     })
 }
 
-/// Standard typed-error response (mirrors tenancy::err). Never carries a secret.
-fn err(status: StatusCode, code: &str, why: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": code, "why": why.into() }))).into_response()
+/// Standard typed-error response (shared substrate; byte-identical `{"error","why"}`). Never a secret.
+fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
 }
 
 /// Flag-OFF response: the route behaves as ABSENT (community build shows no SSO surface).
@@ -813,7 +799,8 @@ fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Dura
     }
     let body_out = &text[split + 4..];
     if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        Ok(crate::dechunk(body_out))
+        // IDIO-1 : dé-chunk sur les OCTETS BRUTS (en-tête ASCII => `split + 4` est le même offset dans `raw`).
+        Ok(crate::dechunk(&raw[split + 4..]))
     } else {
         Ok(body_out.to_string())
     }

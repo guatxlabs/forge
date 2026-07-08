@@ -39,6 +39,7 @@ class SsrfCallback(Oracle):
     mitre = techniques.mitre_for("ssrf.callback")   # source de vérité : forge/techniques.py (T1190)
     cwe = "CWE-918"                      # category + cwe des findings (via Oracle.proof/skip)
     tool = "forge/modules/ssrf.py:ssrf.callback"
+    MAXLEN = 100000                      # troncature du corps lu (cf. Oracle._fetch_body)
     fix = ("Allowlist stricte des hôtes/schemas autorisés côté serveur ; bloquer les IP internes "
            "(RFC1918, loopback, link-local) et les endpoints de métadonnées cloud "
            "(169.254.169.254, metadata.google.internal) ; résoudre puis re-valider l'IP avant la "
@@ -64,12 +65,6 @@ class SsrfCallback(Oracle):
         return (f"# injecte {param}={cb} dans {action.target} ; "
                 f"puis GET {action.params.get('callback_check_url', '<collecteur>')} et cherche le token "
                 f"{token} — PREUVE = token reçu côté serveur (sinon tested, jamais vuln aveugle)")
-
-    @staticmethod
-    def _fetch(url, headers=None, timeout=15, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=100000)
-        return st, body
 
     def fire(self, action):
         param = action.params.get("param")
@@ -131,6 +126,7 @@ class SsrfXspa(ScopeGuardedOracle):
     mitre = techniques.mitre_for("ssrf.xspa")            # source de vérité : techniques.py (T1190)
     cwe = "CWE-918"                                       # category + cwe des findings
     tool = "forge/modules/ssrf.py:ssrf.xspa"
+    MAXLEN = 100000                                       # troncature du corps lu (cf. Oracle._fetch_body)
     fix = ("Allowlist stricte des hôtes/schemas autorisés côté serveur ; bloquer les IP internes "
            "(RFC1918, loopback, link-local) et les ports internes non nécessaires ; résoudre puis "
            "re-valider l'IP (anti-DNS-rebinding) et interdire les schémas/ports arbitraires fournis par "
@@ -138,12 +134,6 @@ class SsrfXspa(ScopeGuardedOracle):
     description = ("Oracle XSPA (SSRF port-scan) à PREUVE DIFFÉRENTIELLE contre la cible IN-SCOPE "
                    "uniquement : joignabilité de ports internes via différentiel de réponse/timing vs une "
                    "baseline fermée (reflet neutralisé). Informatif, non destructif. Sinon tested. CWE-918.")
-
-    @staticmethod
-    def _fetch(url, headers=None, timeout=10, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=100000)
-        return st, body
 
     def _internal_host(self, action):
         """Hôte à port-scanner : params.internal_host (déclaré par l'opérateur) OU, par défaut, l'HÔTE
@@ -333,6 +323,7 @@ class SsrfCloudMetadata(ScopeGuardedOracle):
     mitre = techniques.mitre_for("ssrf.cloud_metadata")   # source de vérité : techniques.py (T1190)
     cwe = "CWE-918"                                        # category + cwe des findings
     tool = "forge/modules/ssrf.py:ssrf.cloud_metadata"
+    MAXLEN = 100000                                        # troncature du corps lu (cf. Oracle._fetch_body)
     fix = ("Allowlist stricte des hôtes/schemas côté serveur ; BLOQUER la plage lien-local et les "
            "endpoints de métadonnées cloud (169.254.169.254, metadata.google.internal, 100.100.200.200) ; "
            "résoudre puis re-valider l'IP avant connexion (anti-DNS-rebinding), désactiver le suivi de "
@@ -341,12 +332,6 @@ class SsrfCloudMetadata(ScopeGuardedOracle):
     description = ("Oracle SSRF vers les métadonnées cloud (AWS/GCP/Azure IMDS) à PREUVE BÉNIGNE : "
                    "signature de contenu métadonnées in-band (reflet neutralisé, credential rédigé) OU "
                    "callback collecteur out-of-band confirmé. Scope-locké. Sinon tested. CWE-918.")
-
-    @staticmethod
-    def _fetch(url, headers=None, timeout=10, method="GET", data=None):
-        """(status, body) — adosse le câblage urllib partagé (Oracle._http). Seam monkeypatché par les tests."""
-        st, body, _ = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=data, maxlen=100000)
-        return st, body
 
     @staticmethod
     def _token(target, param):

@@ -7,6 +7,9 @@ Chaque action est tracée (results) avec son verdict pour le rapport anti-masqua
 Bridge secpipe (optionnel) : si secpipe est importable, on pourra brancher son planner
 coverage-safe + graph (P2). v0 fonctionne sans, en mode liste-d'actions explicite.
 """
+import enum
+from dataclasses import dataclass
+
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
 from . import modules as mods
@@ -35,6 +38,51 @@ _SCOPE_INJECT_KINDS = frozenset({
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour
 # que le module borne son trafic (ex: ffuf -rate). Additif (setdefault) : n'écrase jamais un param posé.
 _RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"})
+
+
+class Verdict(enum.Enum):
+    """Verdict d'exécution d'une action — enum INTERNE au moteur. Les trois verdicts ROE
+    (VETO/DRY_RUN/FIRE) reprennent VERBATIM les chaînes de `roe` (source de vérité, comparées par
+    `coverage()`), plus les deux verdicts propres au moteur (ERROR/SKIP). La sérialisation
+    (`ExecResult.to_dict`) émet TOUJOURS la CHAÎNE (`.value`) : la frontière JSON (results/ledger/
+    console/rapport) reste byte-à-byte identique au pré-refactor."""
+    VETO = VETO
+    DRY_RUN = DRY_RUN
+    FIRE = FIRE
+    ERROR = "ERROR"
+    SKIP = "SKIP"
+
+
+class Phase(enum.Enum):
+    """Étage de la boucle `execute()` qui a PRODUIT un résultat — enum INTERNE (jamais sérialisé :
+    absent de `to_dict()`, donc aucun changement de forme de sortie). Sert à nommer sans ambiguïté
+    les cinq points de construction d'un `ExecResult` (traçabilité de la gouvernance/gate)."""
+    NO_MODULE = "no_module"                    # aucun module enregistré pour le kind
+    GOVERNANCE_DISABLED = "governance_disabled"  # connecteur désactivé (console)
+    TECHNIQUE_DESELECTED = "technique_deselected"  # technique hors sélection par-scope
+    UNAVAILABLE = "unavailable"                # outil/service sous-jacent absent
+    DECIDED = "decided"                        # verdict rendu par la gate ROE (VETO/DRY_RUN/FIRE)
+
+
+@dataclass
+class ExecResult:
+    """Résultat d'exécution d'une action. Centralise la construction des enregistrements auparavant
+    bâtis à la main en 5 endroits. `to_dict()` reproduit EXACTEMENT les clés/valeurs historiques
+    ({action,target,kind,verdict,reasons,output}) — `phase` reste interne (non émis). `verdict` peut
+    être un `Verdict` (chemins moteur) ou la chaîne de verdict ROE brute (chemin `decision.verdict`) ;
+    dans les deux cas `to_dict` émet la chaîne."""
+    action: str
+    target: str
+    kind: str
+    verdict: object
+    reasons: list
+    output: object = None
+    phase: object = None
+
+    def to_dict(self):
+        verdict = self.verdict.value if isinstance(self.verdict, Verdict) else self.verdict
+        return {"action": self.action, "target": self.target, "kind": self.kind,
+                "verdict": verdict, "reasons": self.reasons, "output": self.output}
 
 
 class Engine:
@@ -79,9 +127,10 @@ class Engine:
     def execute(self, action):
         module = mods.get(action.kind)
         if module is None:
-            res = {"action": action.id, "target": action.target, "kind": action.kind,
-                   "verdict": "ERROR", "reasons": [f"aucun module enregistré pour '{action.kind}'"],
-                   "output": None}
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.ERROR,
+                             reasons=[f"aucun module enregistré pour '{action.kind}'"],
+                             output=None, phase=Phase.NO_MODULE).to_dict()
             self.results.append(res)
             if self.ledger:
                 self.ledger.append("engine.error", res)
@@ -94,10 +143,10 @@ class Engine:
         # `available` pour porter la raison la plus spécifique dans le rapport anti-masquage.
         disabled = getattr(self.scope, "disabled_modules", None) or set()
         if action.kind in disabled:
-            res = {"action": action.id, "target": action.target, "kind": action.kind,
-                   "verdict": "SKIP",
-                   "reasons": ["module désactivé par la console (gouvernance connecteur)"],
-                   "output": None}
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP,
+                             reasons=["module désactivé par la console (gouvernance connecteur)"],
+                             output=None, phase=Phase.GOVERNANCE_DISABLED).to_dict()
             self.results.append(res)
             return res
 
@@ -108,17 +157,18 @@ class Engine:
         # y compris si elle échappait au filtre du planner. No-op sur un scope legacy (enabled_kinds is
         # None). Vérifié AVANT la sonde `available` et la gate ROE (raison la + précise).
         if self.enabled_kinds is not None and action.kind not in self.enabled_kinds:
-            res = {"action": action.id, "target": action.target, "kind": action.kind,
-                   "verdict": "SKIP",
-                   "reasons": ["technique désactivée pour ce scope (sélection profil/catégorie/technique)"],
-                   "output": None}
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP,
+                             reasons=["technique désactivée pour ce scope (sélection profil/catégorie/technique)"],
+                             output=None, phase=Phase.TECHNIQUE_DESELECTED).to_dict()
             self.results.append(res)
             return res
 
         if getattr(module, "available", True) is False:
-            res = {"action": action.id, "target": action.target, "kind": action.kind,
-                   "verdict": "SKIP", "reasons": ["module indisponible (outil sous-jacent absent)"],
-                   "output": None}
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP,
+                             reasons=["module indisponible (outil sous-jacent absent)"],
+                             output=None, phase=Phase.UNAVAILABLE).to_dict()
             self.results.append(res)
             return res
 
@@ -173,8 +223,9 @@ class Engine:
                 self.ledger.append("purple.runrecord", rr)
             output = [f.to_dict() for f in new]
 
-        res = {"action": action.id, "target": action.target, "kind": action.kind,
-               "verdict": decision.verdict, "reasons": decision.reasons, "output": output}
+        res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                         verdict=decision.verdict, reasons=decision.reasons, output=output,
+                         phase=Phase.DECIDED).to_dict()
         self.results.append(res)
         return res
 
