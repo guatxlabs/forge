@@ -160,10 +160,10 @@ pub(crate) fn purge_stale_run_dirs() {
 /// Écrit une ligne de log de run en base ET la diffuse aux abonnés SSE.
 pub(crate) fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
     {
-        let db = app.db();
-        let _ = db.execute(
+        let store = app.store();
+        let _ = store.execute(
             "INSERT INTO run_log(run_id,ts,stream,line) VALUES(?,datetime('now'),?,?)",
-            rusqlite::params![run_id, stream, line],
+            &crate::sql_params![run_id, stream, line],
         );
     }
     // bus SSE lock-free (best-effort : ignore l'absence d'abonné)
@@ -501,13 +501,13 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
     let actor = attribution_login(&app, &headers);
     let started_by = if high_impact { format!("{actor}+high_impact") } else { actor.clone() };
     {
-        let db = app.db();
-        let _ = db.execute(
+        let store = app.store();
+        let _ = store.execute(
             "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id)
              VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'),?)
              ON CONFLICT(run_id) DO UPDATE SET status='running', pid=excluded.pid, started=excluded.started",
-            rusqlite::params![
-                run_id, campaign, mode, pgid, started_by, reason,
+            &crate::sql_params![
+                &run_id, &campaign, mode, pgid, &started_by, &reason,
                 serde_json::to_string(&body.get("targets").cloned().unwrap_or(json!([]))).unwrap_or_else(|_| "[]".into()),
                 serde_json::to_string(&requested_modules).unwrap_or_else(|_| "[]".into()),
                 eng.id
@@ -667,7 +667,7 @@ pub(crate) async fn import_scan(
     let run_id = format!("import-{}-{}", chrono_now_compact(), gen_token().chars().take(6).collect::<String>());
     let mut ingested = 0i64;
     if let Some(arr) = env.get("findings").and_then(|v| v.as_array()) {
-        let db = app.db();
+        let store = app.store();
         for f in arr {
             let cwe = { let c = gs(f, "cwe"); if c.is_empty() { extract_cwe(&gs(f, "category")) } else { c } };
             let (mut cvss_vec, mut cvss_score) = (gs(f, "cvss_vector"), f.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0));
@@ -676,12 +676,12 @@ pub(crate) async fn import_scan(
                 cvss_vec = v.to_string();
                 cvss_score = s;
             }
-            if let Ok(n) = db.execute(
+            if let Ok(n) = store.execute(
                 "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                rusqlite::params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
+                &crate::sql_params![gs(f,"ts"), &campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
-                    gs(f,"fix"), run_id, cwe, cvss_vec, cvss_score],
+                    gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score],
             ) {
                 ingested += n as i64;
             }
@@ -764,14 +764,14 @@ pub(crate) fn validate_modules(app: &App, modules: &[String], allow_high_impact:
     if modules.is_empty() {
         return Ok(());
     }
-    let db = app.db();
+    let store = app.store();
     for m in modules {
-        let row = db.query_row(
+        let row = store.query_row(
             "SELECT exploit,destructive,web_allowed,enabled,available_override FROM module WHERE kind=?",
-            [m],
+            &crate::sql_params![m],
             |r| Ok((
-                r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)? != 0, r.get::<_, Option<i64>>(4)?.map(|v| v != 0),
+                r.get_i64(0)?, r.get_i64(1)?, r.get_i64(2)?,
+                r.get_i64(3)? != 0, r.get_opt_i64(4)?.map(|v| v != 0),
             )),
         );
         match row {
@@ -810,16 +810,16 @@ pub(crate) fn validate_modules(app: &App, modules: &[String], allow_high_impact:
 /// (ledger + run_job) : tracer précisément quelles capacités haut-impact ont été débloquées pour ce
 /// run. N'altère aucun garde-fou. Liste vide => le planner choisit seul (rien d'explicitement listé).
 pub(crate) fn high_impact_modules(app: &App, modules: &[String]) -> Vec<String> {
-    let db = app.db();
+    let store = app.store();
     modules
         .iter()
         .filter(|m| {
-            db.query_row(
+            store.query_row(
                 "SELECT exploit,destructive,enabled,available_override FROM module WHERE kind=?",
-                [m.as_str()],
+                &crate::sql_params![m.as_str()],
                 |r| Ok((
-                    r.get::<_, i64>(0)?, r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)? != 0, r.get::<_, Option<i64>>(3)?.map(|v| v != 0),
+                    r.get_i64(0)?, r.get_i64(1)?,
+                    r.get_i64(2)? != 0, r.get_opt_i64(3)?.map(|v| v != 0),
                 )),
             )
             // haut-impact ET effectivement activable : un connecteur exploit/destructif DÉSACTIVÉ par
@@ -917,20 +917,20 @@ pub(crate) fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_i
         // finalisation : status terminal + exit_code + finished. Ne pas écraser un statut 'cancelled'
         // déjà posé par run_cancel (cancel l'emporte sur la cause secondaire SIGTERM).
         {
-            let db = app.db();
+            let store = app.store();
             // UPDATE conditionnel : ne finalise QUE si le run est encore 'running' ou 'cancelled'
             // (course superviseur vs cancel). Un statut déjà terminal posé ailleurs n'est pas écrasé.
             // CASE préserve 'cancelled' (cancel l'emporte sur la cause secondaire SIGTERM/timeout).
-            let _ = db.execute(
+            let _ = store.execute(
                 "UPDATE run_job SET status=CASE WHEN status='cancelled' THEN 'cancelled' ELSE ? END,
                    finished=datetime('now'), pid=-1, exit_code=?
                  WHERE run_id=? AND status IN ('running','cancelled')",
-                rusqlite::params![final_status, exit_code, run_id],
+                &crate::sql_params![final_status, exit_code, &run_id],
             );
         }
         let terminal: String = {
-            let db = app.db();
-            db.query_row("SELECT status FROM run_job WHERE run_id=?", [&run_id], |r| r.get::<_, String>(0))
+            let store = app.store();
+            store.query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params![&run_id], |r| r.get_str(0))
                 .unwrap_or_else(|_| final_status.to_string())
         };
         append_run_ledger_path(&app, &ledger_path, "console.run.end", json!({
@@ -968,8 +968,8 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
     if pgid <= 1 {
         // run inconnu ou déjà terminé.
         let exists: bool = {
-            let db = app.db();
-            db.query_row("SELECT 1 FROM run_job WHERE run_id=?", [&id], |_| Ok(())).is_ok()
+            let store = app.store();
+            store.query_row("SELECT 1 FROM run_job WHERE run_id=?", &crate::sql_params![&id], |_| Ok(())).is_ok()
         };
         return if exists {
             (StatusCode::CONFLICT, Json(json!({"error": "not_running", "why": "le run n'est pas en cours"})))
@@ -981,8 +981,8 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
     // conditionnel : course cancel vs finalisation superviseur — on ne ré-ouvre pas un run déjà
     // terminal en 'cancelled'). Le superviseur, lui, préserve 'cancelled' s'il le voit posé.
     {
-        let db = app.db();
-        let _ = db.execute("UPDATE run_job SET status='cancelled' WHERE run_id=? AND status='running'", [&id]);
+        let store = app.store();
+        let _ = store.execute("UPDATE run_job SET status='cancelled' WHERE run_id=? AND status='running'", &crate::sql_params![&id]);
     }
     let actor = attribution_login(&app, &headers);
     push_run_log(&app, &id, "system", &format!("cancel demandé par '{actor}' — kill group"));
@@ -1053,23 +1053,26 @@ pub(crate) async fn run_detail(State(app): State<App>, Path(id): Path<String>) -
 pub(crate) async fn run_logs(State(app): State<App>, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let after = q.get("after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(2000).clamp(1, 5000);
-    let db = app.db();
-    let mut stmt = match db.prepare(
-        "SELECT id,ts,stream,line FROM run_log WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
-    ) { Ok(s) => s, Err(_) => return Json(json!({"last_id": after, "lines": []})) };
+    let store = app.store();
     let mut last = after;
-    let lines: Vec<Value> = stmt
-        .query_map(rusqlite::params![id, after, limit], |r| {
-            let lid: i64 = r.get(0)?;
-            Ok((lid, json!({
-                "id": lid,
-                "ts": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "stream": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "line": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            })))
-        })
-        .map(|it| it.filter_map(|r| r.ok()).map(|(lid, v)| { if lid > last { last = lid; } v }).collect())
-        .unwrap_or_default();
+    let lines: Vec<Value> = store
+        .query_lax(
+            "SELECT id,ts,stream,line FROM run_log WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
+            &crate::sql_params![&id, after, limit],
+            |r| {
+                let lid = r.get_i64(0)?;
+                Ok((lid, json!({
+                    "id": lid,
+                    "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                    "stream": r.get_opt_str(2)?.unwrap_or_default(),
+                    "line": r.get_opt_str(3)?.unwrap_or_default(),
+                })))
+            },
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(lid, v)| { if lid > last { last = lid; } v })
+        .collect();
     Json(json!({"last_id": last, "lines": lines}))
 }
 
