@@ -233,6 +233,11 @@ pub(crate) use crate::users::*;
 mod state;
 pub(crate) use crate::state::*;
 
+// PORTABLE DB-ACCESS SEAM (Stage 0) — backend-agnostic façade over the SQLite connection whose public
+// API leaks no rusqlite type (see store.rs). `App::store()` wraps the SAME `Mutex<Connection>` as
+// `App::db()`; modules migrate onto it one at a time (`App::db()` stays available for the rest).
+mod store;
+
 
 
 /// Construit le routeur axum complet : routes PUBLIQUES (hors auth_guard : /health, /api/login, wizard
