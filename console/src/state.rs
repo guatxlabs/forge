@@ -618,6 +618,17 @@ pub(crate) struct App {
     pub(crate) detection_source: Arc<std::sync::RwLock<Arc<Value>>>,
     pub(crate) run_timeout_secs: u64,           // watchdog (FORGE_RUN_TIMEOUT, défaut 1800s)
     pub(crate) run_state: Arc<AsyncMutex<RunState>>,
+    /// RÉSERVATIONS de slot FIFO (CONC-1) — engagement_id dont un `run_create` a réservé le slot mais
+    /// dont le run n'est PAS encore promu dans `run_state` (fenêtre fs-writes / DB insert / spawn /
+    /// ledger). Mutex std SYNCHRONE tenu quelques MICROSECONDES uniquement (jamais à travers un
+    /// `.await`) : c'est ce qui permet une libération CANCELLATION-SAFE via un guard RAII `Drop`
+    /// (cf. runs.rs::RunReservation) — le slot est libéré sur retour normal, early-return, panic ET
+    /// drop du future (déconnexion/annulation à un point d'await), là où une re-lock awaitée fuiterait.
+    /// `run_cancel`/`runs_list`/`reconcile_runs`/superviseur n'y touchent JAMAIS (ils opèrent sur
+    /// `run_state` = runs VIVANTS) : un slot réservé-non-encore-spawné leur est invisible (aucun
+    /// pgid, aucun kill erroné). `Arc<Mutex<..>>` (et non `Mutex` nu) car App est `Clone`/`State<App>`
+    /// est cloné par requête : tous les clones DOIVENT partager le MÊME set (sinon réservations perdues).
+    pub(crate) run_reservations: Arc<Mutex<std::collections::HashSet<i64>>>,
     pub(crate) events: broadcast::Sender<RunEvent>, // bus SSE lock-free (clone du Sender)
     // Sérialise lecture-head -> calcul -> écriture du ledger JSONL (anti-race : deux appends
     // concurrents liraient le MÊME prev/seq et casseraient la chaîne SHA-256). Cache aussi le head

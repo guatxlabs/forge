@@ -1258,6 +1258,7 @@ mod tests {
             detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
             run_timeout_secs: 1800,
             run_state: Arc::new(AsyncMutex::new(crate::RunState { current: HashMap::new() })),
+            run_reservations: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             events,
             ledger_lock: Arc::new(Mutex::new(crate::LedgerHead::default())),
         }
