@@ -12,8 +12,6 @@
 
 use guatx_core::soql; // cœur partagé (extrait) — remplace l'ancien `mod soql;`
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
@@ -26,7 +24,6 @@ use base64::Engine;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +41,11 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 // `merge` des routes (build_router). Le module réutilise App + les helpers d'auth/ledger de ce fichier
 // (visibles depuis un module descendant de la racine de crate).
 mod finding_templates;
+// Helpers "feuilles" SANS ÉTAT (crypto/hash, échappement HTML, CWE/CVSS, pagination, validateurs purs)
+// extraits de ce main.rs (Wave-2 PURE MOVE). Ré-exportés au crate root pour que `crate::<helper>`
+// (appels cross-module) et `super::<helper>` (bloc de tests inline) résolvent à l'identique.
+mod common;
+pub(crate) use crate::common::*;
 // Shared internal substrate for the flag-gated enterprise modules (dedup, behaviour-neutral):
 //   error  — compact typed ApiError + IntoResponse (byte-identical `{"error","why"}` envelope).
 //   flags  — the single copy of `env_truthy` + `enterprise_enabled` (env|per-DB config gate).
@@ -789,106 +791,11 @@ impl App {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn sha_hex(s: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    hex(&h.finalize())
-}
-
-/// Comparaison à TEMPS CONSTANT de deux empreintes (anti timing-oracle sur le bearer/token).
-/// Les deux opérandes sont des hex de sha256 (longueur fixe 64) -> la divulgation de longueur est
-/// inoffensive ; on protège contre la fuite octet-par-octet d'un `==` court-circuitant.
-fn ct_eq_str(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-fn gen_token() -> String {
-    // CSPRNG OS (getrandom) — le Result DOIT être propagé : un échec d'entropie laisserait un buffer
-    // tous-zeros et produirait un token bearer PRÉVISIBLE (auth /api/ingest contournable). On panique
-    // plutôt que de générer un secret faible (fail-closed sur l'entropie).
-    let mut b = [0u8; 16];
-    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer un token faible");
-    hex(&b)
-}
-
 fn gs(v: &Value, k: &str) -> String {
     v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
-/// Extrait un identifiant CWE canonique ('CWE-639') d'une chaîne arbitraire ('cwe_639', 'CWE 639',
-/// 'access_control.CWE-862'), ou '' si absent. Miroir Rust de `schema.extract_cwe` (rétro-compat :
-/// permet de dériver le CWE depuis `category` quand le moteur ne fournit pas le champ `cwe` dédié).
-fn extract_cwe(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    if let Some(pos) = lower.find("cwe") {
-        let rest = &lower[pos + 3..];
-        // saute un éventuel séparateur (espace, '_', '-') puis lit les chiffres.
-        let digits: String = rest
-            .trim_start_matches([' ', '_', '-'])
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if !digits.is_empty() {
-            return format!("CWE-{digits}");
-        }
-    }
-    String::new()
-}
-
-/// (vecteur, score) CVSS 3.1 de BASE pour une sévérité — repère grossier de priorisation, PAS un
-/// calcul CVSS complet par finding. Miroir de `schema.CVSS_BASE_BY_SEVERITY`. ('', 0.0) si inconnue
-/// (ex INFO) — fail-open : le rapport affiche alors '—' au lieu d'inventer un score.
-fn cvss_base_for_severity(severity: &str) -> (&'static str, f64) {
-    match severity.to_ascii_uppercase().as_str() {
-        "CRITICAL" => ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8),
-        "HIGH" => ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", 7.5),
-        "MEDIUM" => ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N", 5.3),
-        "LOW" => ("CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N", 3.1),
-        _ => ("", 0.0),
-    }
-}
-
-/// Échappement HTML minimal (texte -> contenu/attribut sûr) — empêche toute injection dans le
-/// rapport HTML branded (les findings/notes proviennent du moteur ; on ne fait JAMAIS confiance au
-/// contenu). Échappe & < > " '. Suffisant pour du texte inséré dans des nœuds/attributs HTML.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 // --- auth opérateur (argon2) + RBAC, repris du modèle auth_guard/host_guard de Plume ---
-
-fn verify_pw(pw: &str, hash: &str) -> bool {
-    PasswordHash::new(hash)
-        .ok()
-        .map(|ph| Argon2::default().verify_password(pw.as_bytes(), &ph).is_ok())
-        .unwrap_or(false)
-}
-
-fn hash_pw(pw: &str) -> String {
-    // Sel argon2id via CSPRNG OS (getrandom) — le Result DOIT être propagé : un échec d'entropie
-    // laisserait un sel tous-zeros (CONSTANT) -> hash identique pour un même mot de passe sur toutes
-    // les installs, cassant la résistance aux rainbow tables. On panique plutôt que de saler à zéro.
-    let mut s = [0u8; 16];
-    getrandom::getrandom(&mut s).expect("CSPRNG (getrandom) indisponible — refus de générer un sel faible");
-    let salt = SaltString::encode_b64(&s).expect("salt");
-    Argon2::default().hash_password(pw.as_bytes(), &salt).expect("hash").to_string()
-}
 
 fn check_basic(app: &App, b64: &str) -> bool {
     let raw = match base64::engine::general_purpose::STANDARD.decode(b64) {
@@ -1183,30 +1090,6 @@ fn now_epoch() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// Rôles valides — contrainte APPLICATIVE (la table stocke un TEXT libre). `viewer` lit, `operator`
-/// arme le C2, `admin` = superset (peut aussi armer). Tout autre rôle est refusé à la création.
-fn validate_role(r: &str) -> Result<String, String> {
-    match r {
-        "viewer" | "operator" | "admin" => Ok(r.to_string()),
-        _ => Err("rôle invalide (attendu: viewer|operator|admin)".into()),
-    }
-}
-
-/// Validation stricte d'un login : `[A-Za-z0-9._-]{1,64}`, non vide, pas de `-` en tête (parité avec
-/// validate_campaign — anti confusion avec un flag CLI et entrées hostiles).
-fn validate_login(s: &str) -> Result<String, String> {
-    if s.is_empty() || s.len() > 64 {
-        return Err("login vide ou > 64 caractères".into());
-    }
-    if s.starts_with('-') {
-        return Err("login ne peut pas commencer par '-'".into());
-    }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
-        return Err("login : seuls [A-Za-z0-9._-] sont autorisés".into());
-    }
-    Ok(s.to_string())
 }
 
 /// Identité résolue d'un appelant : login affiché en attribution + rôle effectif. `is_operator`
@@ -1713,65 +1596,6 @@ async fn module_governance(State(app): State<App>, headers: HeaderMap, Path(kind
     }
 }
 
-/// Validation stricte d'un nom de campagne : `[A-Za-z0-9._-]{1,64}`, jamais vide, pas de `-` en
-/// tête (anti confusion avec un flag CLI). Renvoie la valeur validée ou une erreur.
-fn validate_campaign(s: &str) -> Result<String, String> {
-    if s.is_empty() || s.len() > 64 {
-        return Err("campaign vide ou > 64 caractères".into());
-    }
-    if s.starts_with('-') {
-        return Err("campaign ne peut pas commencer par '-'".into());
-    }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
-        return Err("campaign : seuls [A-Za-z0-9._-] sont autorisés".into());
-    }
-    Ok(s.to_string())
-}
-
-/// Valide un hôte cible : hostname (labels alphanum + `-`, points) OU CIDR/IP (a.b.c.d[/n]).
-/// REJETTE tout métacaractère shell, espace, NUL, et le `-` en tête (anti-injection d'option CLI).
-/// Les cibles sont écrites dans un FICHIER puis passées par chemin — jamais concaténées à un shell —
-/// mais on durcit malgré tout la forme pour refuser des entrées manifestement hostiles.
-fn validate_host(s: &str) -> Result<String, String> {
-    if s.is_empty() || s.len() > 253 {
-        return Err("hôte vide ou trop long".into());
-    }
-    if s.starts_with('-') {
-        return Err(format!("hôte '{s}' ne peut pas commencer par '-'"));
-    }
-    // rejet dur : NUL, espaces/whitespace, métacaractères shell et glob/redirections.
-    const BAD: &[char] = &[
-        ' ', '\t', '\n', '\r', '\0', ';', '&', '|', '`', '$', '(', ')', '<', '>',
-        '{', '}', '[', ']', '!', '\\', '"', '\'', '*', '?', '~', '#', '@', '^', '%', '+', '=', ',',
-    ];
-    if let Some(c) = s.chars().find(|c| BAD.contains(c)) {
-        return Err(format!("hôte '{s}' contient un caractère interdit: {c:?}"));
-    }
-    // CIDR / IP ?
-    if let Some((ip, mask)) = s.split_once('/') {
-        if ip.parse::<std::net::IpAddr>().is_ok() && mask.parse::<u8>().map(|m| m <= 128).unwrap_or(false) {
-            return Ok(s.to_string());
-        }
-        return Err(format!("'{s}' : CIDR invalide"));
-    }
-    if s.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(s.to_string());
-    }
-    // hostname : labels [A-Za-z0-9-] séparés par '.', label ni vide ni bordé de '-'.
-    let valid_host = s.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    });
-    if valid_host {
-        Ok(s.to_string())
-    } else {
-        Err(format!("'{s}' n'est ni un hostname ni un CIDR valide"))
-    }
-}
-
 /// Anti-DNS-rebinding : l'en-tête Host doit être NON VIDE et présent dans l'allowlist.
 /// FAIL-CLOSED : un Host absent/vide est REFUSÉ (avant, il passait — fail-open exploitable par un
 /// client qui omet/efface Host pour contourner le filtre anti-rebinding). 421 dans tous les cas non
@@ -2203,13 +2027,6 @@ fn rows_to_json(db: &Connection, sql: &str, args: &[String], cols: &[&str]) -> V
         Ok(it) => it.filter_map(|r| r.ok()).collect(),
         Err(_) => vec![],
     }
-}
-
-/// LIMIT/OFFSET bornés et validés (anti-injection : on n'inline que des entiers parsés).
-fn paginate(q: &HashMap<String, String>, default_limit: i64, max_limit: i64) -> (i64, i64) {
-    let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(default_limit).clamp(1, max_limit);
-    let offset = q.get("offset").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0).max(0);
-    (limit, offset)
 }
 
 async fn findings(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
@@ -4288,15 +4105,6 @@ fn workflow_name_is_builtin(name: &str) -> bool {
     WORKFLOW_BUILTIN_NAMES.contains(&name)
 }
 
-/// Nom de workflow / kind d'étape bien formé : `[A-Za-z0-9._-]{1,64}`, non vide, pas de `-` en tête
-/// (parité avec validate_login/validate_campaign — anti-flag + entrées hostiles). Fonction PURE.
-fn valid_workflow_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && !s.starts_with('-')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
 /// Valide/normalise un workflow POSTé : {name?, description?, steps:[{kind, params?}]}. `name_override`
 /// (segment d'URL) prime sur `body["name"]`. Grammaire stricte du nom/kind, steps ≤ 128, params objet.
 /// Les kinds INCONNUS du registre sont TOLÉRÉS (le résolveur moteur/engine les LARGUE via ∩ enabled —
@@ -5198,23 +5006,6 @@ async fn run_create(State(app): State<App>, ConnectInfo(peer): ConnectInfo<Socke
     (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": campaign, "mode": mode, "high_impact": high_impact, "auto_pentest": auto_pentest})))
 }
 
-/// Formats d'import acceptés par l'endpoint (alias inclus ; le moteur Python les normalise). "auto"
-/// déclenche l'auto-détection côté moteur. Grammaire FERMÉE (fail-closed) : un format inconnu -> 400.
-fn valid_import_format(f: &str) -> bool {
-    matches!(f,
-        "auto" | "nmap" | "nuclei" | "burp" | "httpx" | "ffuf" | "hosts"
-        | "generic-json" | "generic-csv" | "subfinder" | "amass" | "json" | "csv" | "generic"
-        | "nmap-xml" | "burp-xml" | "hostlist" | "subdomains")
-}
-
-/// Nom de fichier SÛR pour l'attribution ledger/UI : basename seul, caractères ASCII sûrs, borné.
-/// JAMAIS utilisé comme chemin (le contenu est écrit dans un fichier temp au nom fixe) — purement
-/// informatif. Zéro traversée de chemin, zéro métacaractère, zéro NUL.
-fn sanitize_filename(s: &str) -> String {
-    let base = s.rsplit(['/', '\\']).next().unwrap_or("");
-    base.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).take(128).collect()
-}
-
 /// POST /api/import — INGESTION de sorties de SCANNERS EXISTANTS (migration Faraday/Trickest/reNgine/
 /// Osmedeus). OPÉRATEUR/ADMIN (check_operator, 403 sinon) + LEDGERISÉ (`console.import`). Corps :
 ///   {campaign, format:"auto"|<fmt>, content:<texte du fichier>, filename?, flag_out_of_scope?}
@@ -5356,50 +5147,6 @@ async fn import_scan(
         "ok": true, "format": fmt_detected, "campaign": campaign, "run_id": run_id,
         "counts": counts, "ingested": ingested
     }))).into_response()
-}
-
-/// Valide une CHAÎNE issue des params par-module avant de l'écrire dans scope.json/targets.json.
-/// Le moteur lit ces fichiers sans shell, mais on durcit malgré tout : refus des octets NUL et des
-/// chaînes démesurées (anti-DoS d'écriture). Les métacaractères shell sont tolérés DANS les valeurs
-/// (ex: une URL avec `?`, `&`) car elles ne sont jamais concaténées à un shell — seulement le NUL et
-/// une borne de longueur sont durs. C'est cohérent avec validate_host (qui, lui, gardait des HÔTES).
-fn validate_param_string(s: &str) -> Result<(), String> {
-    if s.len() > 2048 {
-        return Err("valeur de param trop longue (>2048)".into());
-    }
-    if s.contains('\0') {
-        return Err("valeur de param contient un octet NUL".into());
-    }
-    Ok(())
-}
-
-/// Profondeur/validation récursive d'une valeur de param (anti-bombe JSON : profondeur bornée).
-fn validate_param_value(v: &Value, depth: u32) -> Result<(), String> {
-    if depth > 8 {
-        return Err("params imbriqués trop profondément (>8)".into());
-    }
-    match v {
-        Value::String(s) => validate_param_string(s),
-        Value::Array(a) => {
-            if a.len() > 256 {
-                return Err("tableau de params trop long (>256)".into());
-            }
-            for x in a { validate_param_value(x, depth + 1)?; }
-            Ok(())
-        }
-        Value::Object(m) => {
-            if m.len() > 128 {
-                return Err("objet de params trop large (>128 clés)".into());
-            }
-            for (k, x) in m {
-                validate_param_string(k)?;
-                validate_param_value(x, depth + 1)?;
-            }
-            Ok(())
-        }
-        // null / bool / number : inoffensifs.
-        _ => Ok(()),
-    }
 }
 
 /// Valide les params PAR-MODULE du corps /api/run. Forme attendue :
@@ -5735,22 +5482,6 @@ fn derive_engagement_ledger_path(app: &App, id: i64, tenant_id: i64) -> String {
         Some(dir) => dir.join(format!("engagement-{id}.jsonl")).to_string_lossy().into_owned(),
         None => format!("engagement-{id}.jsonl"),
     }
-}
-
-/// Nom d'engagement bien formé : 1..80 caractères imprimables (lettres/chiffres/espace + `.`_-/()#`),
-/// pas vide, pas de `-` en tête (anti confusion flag). Fonction PURE.
-fn valid_engagement_name(s: &str) -> bool {
-    let t = s.trim();
-    !t.is_empty() && t.chars().count() <= 80 && !t.starts_with('-')
-        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '/' | '(' | ')' | '#'))
-}
-
-/// Entrée de scope (motif in/out) bien formée : 1..253 caractères d'un jeu host/CIDR/wildcard
-/// (`[A-Za-z0-9._*/:-]`), pas d'espace. Plus permissif que validate_host (autorise `*.` et CIDR) car
-/// c'est un MOTIF de périmètre, pas une cible ; le scope-guard du moteur (host_in_scope_list) reste juge.
-fn valid_scope_entry(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 253
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '/' | ':'))
 }
 
 /// Valide/canonicalise le scope d'un engagement depuis un objet `{mode?, in_scope?, out_scope?}`.
