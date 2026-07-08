@@ -677,8 +677,8 @@ pub(crate) async fn import_scan(
                 cvss_score = s;
             }
             if let Ok(n) = store.execute(
-                "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
                 &crate::sql_params![gs(f,"ts"), &campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
                     gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score],
@@ -994,26 +994,26 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
 }
 
 /// Sérialise un run_job en JSON (vue détaillée / liste).
-pub(crate) fn run_job_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+pub(crate) fn run_job_json(r: &crate::store::Row) -> crate::store::StoreResult<Value> {
     Ok(json!({
-        "run_id": r.get::<_, String>(0)?,
-        "campaign": r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        "ts": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        "status": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        "mode": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-        "fired": r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-        "dry_run": r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-        "vetoed": r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-        "errors": r.get::<_, Option<i64>>(8)?.unwrap_or(0),
-        "skipped_budget": serde_json::from_str::<Value>(&r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
-        "coverage_gaps": serde_json::from_str::<Value>(&r.get::<_, Option<String>>(10)?.unwrap_or_else(|| "{}".into())).unwrap_or(json!({})),
-        "started_by": r.get::<_, Option<String>>(11)?.unwrap_or_default(),
-        "reason": r.get::<_, Option<String>>(12)?.unwrap_or_default(),
-        "targets": serde_json::from_str::<Value>(&r.get::<_, Option<String>>(13)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
-        "modules": serde_json::from_str::<Value>(&r.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
-        "started": r.get::<_, Option<String>>(15)?.unwrap_or_default(),
-        "finished": r.get::<_, Option<String>>(16)?.unwrap_or_default(),
-        "exit_code": r.get::<_, Option<i64>>(17)?,
+        "run_id": r.get_str(0)?,
+        "campaign": r.get_opt_str(1)?.unwrap_or_default(),
+        "ts": r.get_opt_str(2)?.unwrap_or_default(),
+        "status": r.get_opt_str(3)?.unwrap_or_default(),
+        "mode": r.get_opt_str(4)?.unwrap_or_default(),
+        "fired": r.get_opt_i64(5)?.unwrap_or(0),
+        "dry_run": r.get_opt_i64(6)?.unwrap_or(0),
+        "vetoed": r.get_opt_i64(7)?.unwrap_or(0),
+        "errors": r.get_opt_i64(8)?.unwrap_or(0),
+        "skipped_budget": serde_json::from_str::<Value>(&r.get_opt_str(9)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
+        "coverage_gaps": serde_json::from_str::<Value>(&r.get_opt_str(10)?.unwrap_or_else(|| "{}".into())).unwrap_or(json!({})),
+        "started_by": r.get_opt_str(11)?.unwrap_or_default(),
+        "reason": r.get_opt_str(12)?.unwrap_or_default(),
+        "targets": serde_json::from_str::<Value>(&r.get_opt_str(13)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
+        "modules": serde_json::from_str::<Value>(&r.get_opt_str(14)?.unwrap_or_else(|| "[]".into())).unwrap_or(json!([])),
+        "started": r.get_opt_str(15)?.unwrap_or_default(),
+        "finished": r.get_opt_str(16)?.unwrap_or_default(),
+        "exit_code": r.get_opt_i64(17)?,
     }))
 }
 
@@ -1023,26 +1023,26 @@ pub(crate) const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_
 pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : liste des runs de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let db = app.db();
+    let store = app.store();
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 100, 1000);
     let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}");
-    let mut stmt = match db.prepare(&sql) { Ok(s) => s, Err(_) => return Json(json!([])) };
-    let out: Vec<Value> = stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), run_job_json)
-        .map(|it| it.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+    // query_lax reproduit `query_map(..).filter_map(|r| r.ok())` (lignes malformées ignorées) ; une erreur
+    // de prepare/bind PROPAGE (Err) -> unwrap_or_default() rend `[]`, identique à l'ancien `Err(_) => []`.
+    let params: Vec<crate::store::Param> = args.iter().map(|s| crate::store::Param::from(s.as_str())).collect();
+    let out: Vec<Value> = store.query_lax(&sql, &params, run_job_json).unwrap_or_default();
     Json(Value::Array(out))
 }
 
 /// GET /api/runs/:id — détail d'un run. Lecture (viewer).
 pub(crate) async fn run_detail(State(app): State<App>, Path(id): Path<String>) -> impl IntoResponse {
-    let db = app.db();
+    let store = app.store();
     let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?");
-    match db.query_row(&sql, [&id], run_job_json) {
+    // query_row rend Err(NoRows) sur résultat vide (miroir de QueryReturnedNoRows) -> branche 404 inchangée.
+    match store.query_row(&sql, &crate::sql_params![&id], run_job_json) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))),
     }

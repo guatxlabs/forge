@@ -438,8 +438,8 @@ async fn ft_apply(
         // INSERT OR IGNORE : la contrainte UNIQUE(campaign,target,title) du finding s'applique (dédup) —
         // un doublon exact est ignoré (created=false), jamais une erreur.
         let n = match store.execute(
-            "INSERT OR IGNORE INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
-             VALUES(datetime('now'),?,?,?,?,?,'','tested',?,?,'',?,'',?,?,?,?)",
+            "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+             VALUES(datetime('now'),?,?,?,?,?,'','tested',?,?,'',?,'',?,?,?,?) ON CONFLICT DO NOTHING",
             &crate::sql_params![
                 campaign,
                 target.clone(),

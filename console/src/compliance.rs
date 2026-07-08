@@ -178,23 +178,24 @@ fn any_legal_hold_key(app: &App) -> Option<String> {
     // instead be treated as "a hold MIGHT exist" so the purge REFUSES — never destroy audit records on
     // an error we cannot interpret. Any prepare/query/row error => return a sentinel key (Some => block).
     const UNREADABLE: &str = "compliance.hold.<unreadable-settings>";
-    let db = app.db();
-    let mut stmt = match db.prepare("SELECT key, value FROM settings WHERE key LIKE 'compliance.hold.%'") {
-        Ok(s) => s,
+    let store = app.store();
+    // STRICT `query` (fail-closed) : toute erreur prepare/bind OU ligne malformée SINKS toute la lecture
+    // (Err) -> sentinelle UNREADABLE (bloque la purge). Miroir exact de l'ancien fail-closed sur
+    // prepare/query_map/row-error. NB: `query` matérialise avant de rendre — pour ces clés (`key`/`value`
+    // TEXT NOT NULL écrites par settings_set) `get_str` ne peut échouer, donc le résultat est identique
+    // au parcours paresseux d'origine ; une vraie erreur DB (I/O, table illisible) faillit toujours à
+    // UNREADABLE. (query_lax est PROSCRIT ici : il SKIPPERAIT une ligne mauvaise au lieu de fail-closed.)
+    let rows: Vec<(String, String)> = match store.query(
+        "SELECT key, value FROM settings WHERE key LIKE 'compliance.hold.%'",
+        &[],
+        |r| Ok((r.get_str(0)?, r.get_str(1)?)),
+    ) {
+        Ok(v) => v,
         Err(_) => return Some(UNREADABLE.to_string()),
     };
-    let rows = match stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
-        Ok(it) => it,
-        Err(_) => return Some(UNREADABLE.to_string()),
-    };
-    for row in rows {
-        match row {
-            Ok((key, value)) => {
-                if matches!(value.trim(), "on" | "1" | "true" | "yes") {
-                    return Some(key);
-                }
-            }
-            Err(_) => return Some(UNREADABLE.to_string()), // a row-level error also fails closed
+    for (key, value) in rows {
+        if matches!(value.trim(), "on" | "1" | "true" | "yes") {
+            return Some(key);
         }
     }
     None

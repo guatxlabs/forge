@@ -1606,8 +1606,21 @@ pub(crate) async fn detection_source_set(State(app): State<App>, headers: Header
     let keep = body.get("keep_secret").and_then(|v| v.as_bool()).unwrap_or(false);
     let cfg = apply_kept_secret(&app, &incoming, keep);
     {
-        let db = app.db();
-        if let Err(e) = settings_set(&db, "detection_source", &cfg.to_string()) {
+        // Écriture ISOLÉE (le bloc n'appelle aucun autre helper `&Connection`) -> routée par le seam pour
+        // la portabilité PG. SQL/params/erreur VERBATIM de `settings_set` (INSERT..ON CONFLICT déjà
+        // portable ; `datetime('now')` reste un point dialecte Stage-2). Le helper `settings_set(&Connection)`
+        // est CONSERVÉ pour ses appelants boot-partagés (main.rs `settings_get` sur la conn de boot) et
+        // interleaved (setup.rs `upsert_user` dans le même guard) — convertis en bloc au Stage 2.
+        let store = app.store();
+        let r = store
+            .execute(
+                "INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                &crate::sql_params!["detection_source", cfg.to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("écriture settings échouée: {e}"));
+        if let Err(e) = r {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "settings_write_failed", "why": e})),
@@ -1654,14 +1667,17 @@ pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Q
     // le run doit exister (sinon 404, comme run_detail). Le verrou DB est confiné dans ce bloc :
     // AUCUN MutexGuard rusqlite (!Send) ne doit survivre à l'await réseau plus bas.
     let (job, fired) = {
-        let db = app.db();
-        let job = match db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), [&id], run_job_json) {
-            Ok(v) => v,
-            Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
+        // Verrou DB confiné à ce bloc `store` : il DROPPE avant read_fired_techniques (qui reprend le même
+        // Mutex via app.store() -> sinon deadlock). query_row rend Err(NoRows) sur run inconnu -> 404.
+        let job = {
+            let store = app.store();
+            match store.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params![&id], run_job_json) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
+            }
         };
-        // PURPLE : techniques TIRÉES par CE run (red) — lues avant de relâcher le verrou. Le `run_id`
+        // PURPLE : techniques TIRÉES par CE run (red) — lues après relâche du verrou. Le `run_id`
         // isole déjà les records d'un seul engagement -> pas de filtre engagement additionnel (None).
-        drop(db);
         let fired = read_fired_techniques(&app, None, Some(("run_id", &id)));
         (job, fired)
     };

@@ -3727,10 +3727,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
                 [],
             ).unwrap();
         }
-        let db = app.db();
-        let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
-        drop(db); // relâcher le guard avant app.store() (même Mutex -> sinon deadlock)
         let store = app.store();
+        let job = store.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params!["run-1"], run_job_json).unwrap();
         let md = render_run_report_md(&store, "run-1", &job, None, None);
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
@@ -3804,9 +3802,10 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         // ledger non vide -> annexe custody avec head + intégrité VALIDE.
         append_console_ledger(&app, "console.run.start", json!({"run_id":"run-1","actor":"alice","by":"operator"}));
-        let db = app.db();
-        let job = db.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), ["run-1"], run_job_json).unwrap();
-        drop(db);
+        let job = {
+            let store = app.store();
+            store.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params!["run-1"], run_job_json).unwrap()
+        };
         let custody = build_ledger_custody(&app, "alice+high_impact");
         let store = app.store();
         let html = render_run_report_html(&store, "run-1", &job, None, &custody);
