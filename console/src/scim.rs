@@ -132,8 +132,8 @@ fn bearer(headers: &HeaderMap) -> String {
 /// against the stored SHA-256. No token configured, no token presented, or a mismatch => 401.
 fn scim_auth(app: &App, headers: &HeaderMap) -> Option<Response> {
     let stored = {
-        let db = app.db();
-        crate::settings_get(&db, TOKEN_KEY).unwrap_or_default()
+        let store = app.store();
+        crate::settings_get_store(&store, TOKEN_KEY).unwrap_or_default()
     };
     if stored.is_empty() {
         // No SCIM token provisioned => the provisioning surface is closed (fail-closed).
@@ -227,10 +227,10 @@ async fn config_get(State(app): State<App>, headers: HeaderMap) -> Response {
         return cfg_err(StatusCode::FORBIDDEN, "admin_required", "SCIM config is admin-only");
     }
     let (token_set, role) = {
-        let db = app.db();
+        let store = app.store();
         (
-            crate::settings_get(&db, TOKEN_KEY).map(|s| !s.is_empty()).unwrap_or(false),
-            crate::settings_get(&db, DEFAULT_ROLE_KEY).unwrap_or_else(|| "viewer".to_string()),
+            crate::settings_get_store(&store, TOKEN_KEY).map(|s| !s.is_empty()).unwrap_or(false),
+            crate::settings_get_store(&store, DEFAULT_ROLE_KEY).unwrap_or_else(|| "viewer".to_string()),
         )
     };
     (
@@ -283,21 +283,21 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
     // The RAW token: generated here on rotate, returned ONCE, NEVER stored/logged/ledgered in the clear.
     let mut raw_token: Option<String> = None;
     {
-        let db = app.db();
+        let store = app.store();
         if rotate {
             let tok = rand_hex(32); // 256-bit
-            if let Err(e) = crate::settings_set(&db, TOKEN_KEY, &crate::sha_hex(&tok)) {
+            if let Err(e) = crate::settings_set_store(&store, TOKEN_KEY, &crate::sha_hex(&tok)) {
                 return cfg_err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
             }
             raw_token = Some(tok);
         }
         if revoke {
-            if let Err(e) = crate::settings_set(&db, TOKEN_KEY, "") {
+            if let Err(e) = crate::settings_set_store(&store, TOKEN_KEY, "") {
                 return cfg_err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
             }
         }
         if let Some(r) = &new_role {
-            if let Err(e) = crate::settings_set(&db, DEFAULT_ROLE_KEY, r) {
+            if let Err(e) = crate::settings_set_store(&store, DEFAULT_ROLE_KEY, r) {
                 return cfg_err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
             }
         }
@@ -319,8 +319,8 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, body: Bytes) -> 
 
     // Response: echo the RAW token ONLY on rotate (once). Otherwise redacted status.
     let token_set = {
-        let db = app.db();
-        crate::settings_get(&db, TOKEN_KEY).map(|s| !s.is_empty()).unwrap_or(false)
+        let store = app.store();
+        crate::settings_get_store(&store, TOKEN_KEY).map(|s| !s.is_empty()).unwrap_or(false)
     };
     let mut resp = json!({ "ok": true, "token_set": token_set });
     if let Some(t) = raw_token {
@@ -1078,8 +1078,8 @@ fn group_resource(app: &App, gid: i64) -> Option<Value> {
 /// The scoped default role for a SCIM-provisioned user: `settings.scim.default_role` if set to a valid
 /// scoped role (viewer|operator), else `viewer`. NEVER admin (SCIM does not auto-provision admins).
 fn default_role(app: &App) -> String {
-    let db = app.db();
-    match crate::settings_get(&db, DEFAULT_ROLE_KEY).as_deref() {
+    let store = app.store();
+    match crate::settings_get_store(&store, DEFAULT_ROLE_KEY).as_deref() {
         Some("operator") => "operator".to_string(),
         _ => "viewer".to_string(),
     }

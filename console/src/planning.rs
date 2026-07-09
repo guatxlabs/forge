@@ -19,7 +19,6 @@ use crate::*;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,29 +27,31 @@ use std::net::SocketAddr;
 /// Expose la disponibilité SONDÉE (`available`), l'INTENTION opérateur (`enabled`,
 /// `available_override`) ET la disponibilité EFFECTIVE dérivée (`effective_available`) pour piloter la
 /// table de gouvernance de l'admin. Lecture pure (aucun effet de bord).
-pub(crate) fn modules_catalog(db: &Connection) -> Vec<Value> {
-    let mut stmt = match db.prepare(
+pub(crate) fn modules_catalog(store: &crate::store::Store) -> Vec<Value> {
+    // LENIENT read (`query_lax`) reproduces the pre-seam `query_map(..).filter_map(|r| r.ok())`
+    // byte-for-byte: a malformed row is skipped, a prepare error yields an empty catalogue.
+    store.query_lax(
         "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override \
          FROM module ORDER BY kind",
-    ) { Ok(s) => s, Err(_) => return vec![] };
-    stmt.query_map([], |r| {
-        let probed = r.get::<_, i64>(3)? != 0;
-        let enabled = r.get::<_, i64>(7)? != 0;
-        let override_bool: Option<bool> = r.get::<_, Option<i64>>(8)?.map(|v| v != 0);
-        Ok(json!({
-            "kind": r.get::<_, String>(0)?,
-            "exploit": r.get::<_, i64>(1)? != 0,
-            "destructive": r.get::<_, i64>(2)? != 0,
-            "available": probed,                 // disponibilité SONDÉE (host)
-            "mitre": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            "descr": r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            "web_allowed": r.get::<_, i64>(6)? != 0,
-            "enabled": enabled,                  // intention opérateur : connecteur (dés)installé
-            "available_override": match override_bool { Some(b) => Value::Bool(b), None => Value::Null },
-            "effective_available": module_effectively_available(enabled, override_bool, probed),
-        }))
-    })
-    .map(|it| it.filter_map(|r| r.ok()).collect())
+        &[],
+        |r| {
+            let probed = r.get_i64(3)? != 0;
+            let enabled = r.get_i64(7)? != 0;
+            let override_bool: Option<bool> = r.get_opt_i64(8)?.map(|v| v != 0);
+            Ok(json!({
+                "kind": r.get_str(0)?,
+                "exploit": r.get_i64(1)? != 0,
+                "destructive": r.get_i64(2)? != 0,
+                "available": probed,                 // disponibilité SONDÉE (host)
+                "mitre": r.get_opt_str(4)?.unwrap_or_default(),
+                "descr": r.get_opt_str(5)?.unwrap_or_default(),
+                "web_allowed": r.get_i64(6)? != 0,
+                "enabled": enabled,                  // intention opérateur : connecteur (dés)installé
+                "available_override": match override_bool { Some(b) => Value::Bool(b), None => Value::Null },
+                "effective_available": module_effectively_available(enabled, override_bool, probed),
+            }))
+        },
+    )
     .unwrap_or_default()
 }
 
@@ -84,8 +85,8 @@ pub(crate) fn filter_enabled_modules(app: &App, requested: &[String]) -> Vec<Str
 }
 
 pub(crate) async fn modules(State(app): State<App>) -> impl IntoResponse {
-    let db = app.db();
-    Json(Value::Array(modules_catalog(&db)))
+    let store = app.store();
+    Json(Value::Array(modules_catalog(&store)))
 }
 
 /// POST /api/scope-check {target} -> {target, in_scope, mode, allow_exploit, allow_destructive}.
@@ -250,7 +251,7 @@ pub(crate) fn technique_selection_key(eid: i64) -> String {
 /// Fail-soft : absente/illisible/non-objet -> défaut. Ne verrouille que le mutex DB.
 pub(crate) fn technique_selection_value_for(app: &App, eid: i64) -> Value {
     let key = technique_selection_key(eid);
-    let raw = { let db = app.db(); settings_get(&db, &key) };
+    let raw = { let store = app.store(); crate::settings_get_store(&store, &key) };
     match raw.as_deref().map(serde_json::from_str::<Value>) {
         Some(Ok(v)) if v.is_object() => v,
         _ => default_technique_selection(),
@@ -390,8 +391,8 @@ pub(crate) async fn technique_selection_set(
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_selection", "why": e}))).into_response(),
     };
     {
-        let db = app.db();
-        if let Err(e) = settings_set(&db, &technique_selection_key(eid), &sel.to_string()) {
+        let store = app.store();
+        if let Err(e) = crate::settings_set_store(&store, &technique_selection_key(eid), &sel.to_string()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
         }
     }
@@ -478,7 +479,7 @@ pub(crate) fn workflows_key(eid: i64) -> String {
 /// Fail-soft : absente/illisible/non-objet -> map vide (jamais de valeur inventée). Verrouille le mutex DB.
 pub(crate) fn workflows_user_map_for(app: &App, eid: i64) -> serde_json::Map<String, Value> {
     let key = workflows_key(eid);
-    let raw = { let db = app.db(); settings_get(&db, &key) };
+    let raw = { let store = app.store(); crate::settings_get_store(&store, &key) };
     match raw.as_deref().map(serde_json::from_str::<Value>) {
         Some(Ok(Value::Object(m))) => m,
         _ => serde_json::Map::new(),
@@ -570,8 +571,8 @@ pub(crate) async fn workflows_list(State(app): State<App>, headers: HeaderMap, Q
 pub(crate) fn workflows_persist(app: &App, eid: i64, map: &serde_json::Map<String, Value>, action: &str, name: &str,
                      actor: &str, detail: Value) -> Result<(), Box<Response>> {
     {
-        let db = app.db();
-        if let Err(e) = settings_set(&db, &workflows_key(eid), &Value::Object(map.clone()).to_string()) {
+        let store = app.store();
+        if let Err(e) = crate::settings_set_store(&store, &workflows_key(eid), &Value::Object(map.clone()).to_string()) {
             return Err(Box::new((StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({"error": "persist_failed", "why": e}))).into_response()));
         }
@@ -776,7 +777,7 @@ pub(crate) async fn modules_refresh(State(app): State<App>, ConnectInfo(peer): C
     }
     // relit le catalogue pour le renvoyer (transparence : l'opérateur voit l'état post-refresh —
     // l'intention `enabled`/`available_override` est PRÉSERVÉE par le re-probe, cf. populate_modules).
-    let db = app.db();
-    let mods = modules_catalog(&db);
+    let store = app.store();
+    let mods = modules_catalog(&store);
     (StatusCode::OK, Json(json!({"refreshed": mods.len(), "modules": mods})))
 }

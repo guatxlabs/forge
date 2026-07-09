@@ -109,8 +109,8 @@ struct SsoConfig {
 /// redirect_uri is missing — the flow is disabled until an admin sets them.
 fn load_config(app: &App) -> Option<SsoConfig> {
     let raw = {
-        let db = app.db();
-        crate::settings_get(&db, CFG_KEY)?
+        let store = app.store();
+        crate::settings_get_store(&store, CFG_KEY)?
     };
     let v: Value = serde_json::from_str(&raw).ok()?;
     let issuer = v.get("issuer").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -444,8 +444,8 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
         "user_claim": user_claim,
     });
     {
-        let db = app.db();
-        if let Err(e) = crate::settings_set(&db, CFG_KEY, &cfg.to_string()) {
+        let store = app.store();
+        if let Err(e) = crate::settings_set_store(&store, CFG_KEY, &cfg.to_string()) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
         }
     }
@@ -472,8 +472,8 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
 /// added. Never exposes the secret.
 fn redacted_config(app: &App) -> Value {
     let raw = {
-        let db = app.db();
-        crate::settings_get(&db, CFG_KEY)
+        let store = app.store();
+        crate::settings_get_store(&store, CFG_KEY)
     };
     let mut v = raw
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())

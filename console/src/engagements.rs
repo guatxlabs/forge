@@ -63,24 +63,24 @@ pub(crate) fn resolve_engagement(app: &App, headers: &HeaderMap, requested: Opti
     // appelle donc PAS en tenant `app.db()`. Community => branche historique EXACTE (byte-identique).
     if tenancy::enabled(app) {
         let id = tenancy::run_engagement_id(app, headers, requested)?;
-        let db = app.db();
-        return load_engagement(&db, id).ok_or_else(|| format!("engagement {id} introuvable"));
+        let store = app.store();
+        return load_engagement(&store, id).ok_or_else(|| format!("engagement {id} introuvable"));
     }
-    let db = app.db();
+    let store = app.store();
     let id = match requested {
         Some(id) => id,
-        None => db
+        None => store
             .query_row(
                 "SELECT id FROM engagement WHERE status='active' ORDER BY id LIMIT 1",
-                [],
-                |r| r.get::<_, i64>(0),
+                &[],
+                |r| r.get_i64(0),
             )
             .or_else(|_| {
-                db.query_row("SELECT id FROM engagement ORDER BY id LIMIT 1", [], |r| r.get::<_, i64>(0))
+                store.query_row("SELECT id FROM engagement ORDER BY id LIMIT 1", &[], |r| r.get_i64(0))
             })
             .map_err(|_| "aucun engagement provisionné".to_string())?,
     };
-    load_engagement(&db, id).ok_or_else(|| format!("engagement {id} introuvable"))
+    load_engagement(&store, id).ok_or_else(|| format!("engagement {id} introuvable"))
 }
 
 // =====================================================================================

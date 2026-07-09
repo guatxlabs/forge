@@ -185,15 +185,15 @@ pub(crate) fn parse_trusted_proxy_cidrs(raw: &str) -> Vec<String> {
 /// check_operator) — jamais l'admin ni le viewer.
 pub(crate) fn operator_source_allowed(app: &App, headers: &HeaderMap, peer: Option<IpAddr>) -> bool {
     let (cidrs, trusted_proxy_cidrs) = {
-        let db = app.db();
-        let cidrs: Vec<String> = settings_get(&db, "operator_policy")
+        let store = app.store();
+        let cidrs: Vec<String> = crate::settings_get_store(&store, "operator_policy")
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v.get("source_cidrs").and_then(|c| c.as_array()).cloned())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
         // `trusted_proxy` = CIDR(s) des proxies de confiance (cf. parse_trusted_proxy_cidrs). Un XFF
         // n'est honoré que si le pair TCP tombe dans l'un d'eux ; sinon repli fail-closed sur le pair.
-        let trusted_proxy_cidrs = settings_get(&db, "trusted_proxy")
+        let trusted_proxy_cidrs = crate::settings_get_store(&store, "trusted_proxy")
             .map(|s| parse_trusted_proxy_cidrs(&s))
             .unwrap_or_default();
         (cidrs, trusted_proxy_cidrs)

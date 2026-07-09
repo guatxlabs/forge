@@ -390,12 +390,12 @@ pub(crate) fn scope_json_list(v: &Value, key: &str) -> Vec<String> {
 /// Charge un engagement par id : décode `scope_json` (in/out scope) et le `mode` (le `mode` du
 /// scope_json prime sur la colonne `mode` s'il est présent — le scope reste la source autoritaire du
 /// périmètre). None si l'id n'existe pas. Pure lecture (aucune écriture).
-pub(crate) fn load_engagement(db: &Connection, id: i64) -> Option<Engagement> {
-    let (mode_col, scope_json, ledger_path): (String, String, String) = db
+pub(crate) fn load_engagement(store: &crate::store::Store, id: i64) -> Option<Engagement> {
+    let (mode_col, scope_json, ledger_path): (String, String, String) = store
         .query_row(
             "SELECT mode, scope_json, ledger_path FROM engagement WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            &crate::sql_params![id],
+            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?)),
         )
         .ok()?;
     let v: Value = serde_json::from_str(&scope_json).unwrap_or_else(|_| json!({}));
@@ -874,6 +874,16 @@ pub(crate) fn settings_get(db: &Connection, key: &str) -> Option<String> {
     db.query_row("SELECT value FROM settings WHERE key=?", [key], |r| r.get::<_, String>(0)).ok()
 }
 
+/// PORTABLE SEAM analogue of [`settings_get`] over `App::store()`. Byte-identical SQL/semantics: a
+/// fail-soft LECTURE (absent key or read error -> `None`, never a fabricated value). Runtime callers
+/// migrated off `app.db()` use this; the `&Connection` version above remains for tests (which lock the
+/// DB directly) and the boot/CLI carve-outs.
+pub(crate) fn settings_get_store(store: &crate::store::Store, key: &str) -> Option<String> {
+    store
+        .query_row("SELECT value FROM settings WHERE key=?", &crate::sql_params![key], |r| r.get_str(0))
+        .ok()
+}
+
 /// Écrit (upsert) une clé de configuration avec l'horodatage `updated` courant. PRIMARY KEY sur `key`
 /// => une seule ligne par clé (pas de doublon). Renvoie une erreur si l'écriture DB échoue (l'appelant
 /// admin doit pouvoir la propager avant de ledgeriser). Mutations réservées à check_admin.
@@ -886,6 +896,21 @@ pub(crate) fn settings_set(db: &Connection, key: &str, value: &str) -> Result<()
     )
     .map(|_| ())
     .map_err(|e| format!("écriture settings échouée: {e}"))
+}
+
+/// PORTABLE SEAM analogue of [`settings_set`] over `App::store()`. Byte-identical SQL/params (verbatim
+/// upsert; `datetime('now')` stays on SQLite, is dialect-mapped only on a Postgres backend) and the
+/// same error text on failure. Runtime callers use this; the `&Connection` version above stays for
+/// tests and the boot/CLI carve-outs.
+pub(crate) fn settings_set_store(store: &crate::store::Store, key: &str, value: &str) -> Result<(), String> {
+    store
+        .execute(
+            "INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+            &crate::sql_params![key, value],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("écriture settings échouée: {e}"))
 }
 
 // =====================================================================================
@@ -943,6 +968,26 @@ pub(crate) fn upsert_user(db: &Connection, login: &str, role: &str, pass_hash: &
         rusqlite::params![login, role, pass_hash],
     )
     .map_err(|e| format!("écriture users échouée: {e}"))?;
+    Ok(role)
+}
+
+/// PORTABLE SEAM analogue of [`upsert_user`] over `App::store()`. Same validation (login/role), same
+/// verbatim upsert SQL/params and identical error text. Runtime handlers use this; the `&Connection`
+/// version above stays for tests and the `console user` CLI carve-out (its own connection).
+pub(crate) fn upsert_user_store(store: &crate::store::Store, login: &str, role: &str, pass_hash: &str) -> Result<String, String> {
+    let login = validate_login(login)?;
+    let role = validate_role(role)?;
+    if pass_hash.is_empty() {
+        return Err("hash de mot de passe vide".into());
+    }
+    store
+        .execute(
+            "INSERT INTO users(login,role,pass_hash,disabled,created)
+         VALUES(?,?,?,0,datetime('now'))
+         ON CONFLICT(login) DO UPDATE SET role=excluded.role, pass_hash=excluded.pass_hash, disabled=0",
+            &crate::sql_params![&login, &role, pass_hash],
+        )
+        .map_err(|e| format!("écriture users échouée: {e}"))?;
     Ok(role)
 }
 

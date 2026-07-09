@@ -124,13 +124,13 @@ fn engagement_tenant_id(app: &App, engagement_id: i64) -> Option<i64> {
 }
 
 fn setting_i64(app: &App, key: &str) -> Option<i64> {
-    let db = app.db();
-    crate::settings_get(&db, key).and_then(|s| s.trim().parse::<i64>().ok())
+    let store = app.store();
+    crate::settings_get_store(&store, key).and_then(|s| s.trim().parse::<i64>().ok())
 }
 
 fn setting_truthy(app: &App, key: &str) -> bool {
-    let db = app.db();
-    matches!(crate::settings_get(&db, key).as_deref(), Some("on") | Some("1") | Some("true") | Some("yes"))
+    let store = app.store();
+    matches!(crate::settings_get_store(&store, key).as_deref(), Some("on") | Some("1") | Some("true") | Some("yes"))
 }
 
 /// Effective retention (seconds) for an engagement: MOST-SPECIFIC wins (engagement → tenant → global).
@@ -457,10 +457,10 @@ async fn policy_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
     };
     let actor = crate::attribution_login(&app, &headers);
     {
-        let db = app.db();
+        let store = app.store();
         let res = match value {
-            Some(n) => crate::settings_set(&db, &key, &n.to_string()),
-            None => crate::settings_set(&db, &key, ""), // empty => setting_i64 parses to None (cleared)
+            Some(n) => crate::settings_set_store(&store, &key, &n.to_string()),
+            None => crate::settings_set_store(&store, &key, ""), // empty => setting_i64 parses to None (cleared)
         };
         if let Err(e) = res {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
@@ -491,11 +491,11 @@ async fn legal_hold_set(State(app): State<App>, headers: HeaderMap, Json(body): 
     };
     let actor = crate::attribution_login(&app, &headers);
     {
-        let db = app.db();
+        let store = app.store();
         let res = if hold {
-            crate::settings_set(&db, &key, "on")
+            crate::settings_set_store(&store, &key, "on")
         } else {
-            crate::settings_set(&db, &key, "") // empty => setting_truthy false (released)
+            crate::settings_set_store(&store, &key, "") // empty => setting_truthy false (released)
         };
         if let Err(e) = res {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
@@ -563,8 +563,8 @@ fn archive_passphrase(app: &App) -> Option<String> {
             return Some(v);
         }
     }
-    let db = app.db();
-    crate::settings_get(&db, "compliance.archive_key").filter(|s| !s.is_empty())
+    let store = app.store();
+    crate::settings_get_store(&store, "compliance.archive_key").filter(|s| !s.is_empty())
 }
 
 /// POST /api/compliance/purge {engagement_id} — governed WORM purge of an engagement's audit ledger +
@@ -998,12 +998,12 @@ fn build_evidence(app: &App, eid: i64, from: Option<i64>, to: Option<i64>) -> Re
         }
     }
     let backup_last_run = {
-        let db = app.db();
-        crate::settings_get(&db, "backup_last_run")
+        let store = app.store();
+        crate::settings_get_store(&store, "backup_last_run")
     };
     let backup_configured = {
-        let db = app.db();
-        crate::settings_get(&db, "backup_policy").is_some()
+        let store = app.store();
+        crate::settings_get_store(&store, "backup_policy").is_some()
     };
 
     // 6) counts (this engagement only) + retention/hold policy in force.

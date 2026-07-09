@@ -37,7 +37,7 @@ use crate::{
     admin_denied, append_console_ledger, attribution_login, canon_json, check_admin,
     cvss_base_for_severity, engagement_ledger_path, extract_cwe, fetch_purple_coverage, html_escape,
     load_engagement, read_fired_techniques, read_ledger_lines, render_pdf_from_html,
-    resolve_identity, settings_get, settings_set, sev_css_class, sha_hex, App, REPORT_CSS,
+    resolve_identity, sev_css_class, sha_hex, App, REPORT_CSS,
 };
 
 const SEVERITIES: [&str; 5] = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -72,11 +72,11 @@ use crate::redact::redact_secrets;
 /// `settings.branding.<id>` (par-engagement). Champs : customer_name, logo, vendor, confidentiality.
 /// Aucun secret. Substrat neutre : clef absente -> défaut sobre (jamais inventé).
 fn effective_branding(app: &App, eid: i64) -> Value {
-    let db = app.db();
-    let global = settings_get(&db, "branding")
+    let store = app.store();
+    let global = crate::settings_get_store(&store, "branding")
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or_else(|| json!({}));
-    let per = settings_get(&db, &format!("branding.{eid}"))
+    let per = crate::settings_get_store(&store, &format!("branding.{eid}"))
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or_else(|| json!({}));
     let pick = |key: &str, default: &str| -> String {
@@ -104,10 +104,10 @@ async fn branding_get(State(app): State<App>, headers: HeaderMap, Query(q): Quer
     }
     let eid = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(1);
     let (global, per) = {
-        let db = app.db();
+        let store = app.store();
         (
-            settings_get(&db, "branding").and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({})),
-            settings_get(&db, &format!("branding.{eid}")).and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({})),
+            crate::settings_get_store(&store, "branding").and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({})),
+            crate::settings_get_store(&store, &format!("branding.{eid}")).and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({})),
         )
     };
     (StatusCode::OK, Json(json!({
@@ -150,8 +150,8 @@ async fn branding_set(
     };
     let value = Value::Object(obj.clone()).to_string();
     {
-        let db = app.db();
-        if let Err(e) = settings_set(&db, &key, &value) {
+        let store = app.store();
+        if let Err(e) = crate::settings_set_store(&store, &key, &value) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal", "why": e}))).into_response();
         }
     }
@@ -418,8 +418,8 @@ async fn build_report_data(app: &App, eid: i64) -> Value {
         )
         .unwrap_or_default()
     };
-    // load_engagement thread un &Connection vers un helper hors périmètre (state.rs) -> reste sur db().
-    let eng = load_engagement(&app.db(), eid);
+    // load_engagement passe désormais par le seam Store (state.rs) — portable Postgres.
+    let eng = load_engagement(&app.store(), eid);
     let (mode, scope_in, scope_out) = match &eng {
         Some(e) => (e.mode.clone(), e.scope_in.clone(), e.scope_out.clone()),
         None => (String::new(), vec![], vec![]),
