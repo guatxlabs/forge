@@ -344,8 +344,8 @@ pub(crate) fn migrate(db: &Connection) {
 /// Garantit l'existence du dashboard par défaut (id=1) — rétro-compat : la colonne `panel.dashboard_id`
 /// a DEFAULT 1, donc tout panel pré-existant pointe déjà ici. Idempotent (INSERT OR IGNORE sur id=1).
 /// Recale aussi les panels orphelins (dashboard_id NULL/0/inexistant) vers le dashboard #1.
-pub(crate) fn ensure_default_dashboard(db: &Connection) {
-    let _ = db.execute(
+pub(crate) fn ensure_default_dashboard(store: &crate::store::Store) {
+    let _ = store.execute(
         // DIALECT-NEUTRAL (Stage 2b) : `INSERT OR IGNORE` (SQLite-only) -> `INSERT … ON CONFLICT(id)
         // DO NOTHING` (portable SQLite+PG ; conflit sur la PK `id`, cf. SCHEMA/PG_SCHEMA). `datetime('now')`
         // (SQLite-only) -> `CAST(CURRENT_TIMESTAMP AS TEXT)` : sur SQLite CURRENT_TIMESTAMP rend le MÊME
@@ -354,13 +354,13 @@ pub(crate) fn ensure_default_dashboard(db: &Connection) {
         "INSERT INTO dashboard(id,name,descr,position,created,updated)
          VALUES(1,'Défaut','Dashboard par défaut (rétro-compat)',0,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))
          ON CONFLICT(id) DO NOTHING",
-        [],
+        &crate::sql_params![],
     );
     // panels sans dashboard valide -> rattachés au défaut (ne casse jamais un panel existant).
-    let _ = db.execute(
+    let _ = store.execute(
         "UPDATE panel SET dashboard_id=1
          WHERE dashboard_id IS NULL OR dashboard_id NOT IN (SELECT id FROM dashboard)",
-        [],
+        &crate::sql_params![],
     );
 }
 
@@ -419,9 +419,9 @@ pub(crate) fn load_engagement(db: &Connection, id: i64) -> Option<Engagement> {
 /// gardent engagement_id=1 (DEFAULT de la colonne ajoutée par migrate) => rétro-compat totale. Le
 /// `campaign` free-text existant reste un sous-label AU SEIN de l'engagement #1. Idempotent : ne fait
 /// RIEN si un engagement existe déjà (n'écrase jamais un scope/ledger déjà provisionné).
-pub(crate) fn ensure_default_engagement(db: &Connection, scope_in: &[String], scope_mode: &str, ledger_path: &str) {
-    let count: i64 = db
-        .query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0))
+pub(crate) fn ensure_default_engagement(store: &crate::store::Store, scope_in: &[String], scope_mode: &str, ledger_path: &str) {
+    let count: i64 = store
+        .query_row("SELECT COUNT(*) FROM engagement", &crate::sql_params![], |r| r.get_i64(0))
         .unwrap_or(0);
     if count > 0 {
         return; // déjà provisionné — ne jamais écraser
@@ -433,13 +433,13 @@ pub(crate) fn ensure_default_engagement(db: &Connection, scope_in: &[String], sc
         "out_scope": []
     })
     .to_string();
-    let _ = db.execute(
+    let _ = store.execute(
         // DIALECT-NEUTRAL (Stage 2b) : `datetime('now')` (SQLite-only) -> `CAST(CURRENT_TIMESTAMP AS TEXT)`
         // (portable). L'INSERT explicite id=1 est déjà portable (PG : IDENTITY … BY DEFAULT autorise l'id
         // explicite ; SCHEMA : INTEGER PRIMARY KEY). Sur SQLite, valeur/format IDENTIQUES à datetime('now').
         "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
          VALUES(1,?,?,?,?,?,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
-        rusqlite::params!["Engagement par défaut", "active", scope_mode, scope_json, ledger_path],
+        &crate::sql_params!["Engagement par défaut", "active", scope_mode, scope_json, ledger_path],
     );
 }
 
@@ -451,27 +451,27 @@ pub(crate) fn ensure_default_engagement(db: &Connection, scope_in: &[String], sc
 /// comptes déjà provisionnés conservent l'accès à l'espace historique (« existing users implicitly have
 /// full access to tenant #1 »). En COMMUNITY le filtre est de toute façon un no-op ; ces grants restent
 /// inertes. Idempotent : ne fait RIEN si un tenant existe déjà (n'écrase jamais un provisioning).
-pub(crate) fn ensure_default_tenant(db: &Connection) {
-    let count: i64 = db
-        .query_row("SELECT COUNT(*) FROM tenant", [], |r| r.get(0))
+pub(crate) fn ensure_default_tenant(store: &crate::store::Store) {
+    let count: i64 = store
+        .query_row("SELECT COUNT(*) FROM tenant", &crate::sql_params![], |r| r.get_i64(0))
         .unwrap_or(0);
     if count > 0 {
         return; // déjà provisionné — ne jamais écraser
     }
-    let _ = db.execute(
+    let _ = store.execute(
         // DIALECT-NEUTRAL (Stage 2b) : `datetime('now')` -> `CAST(CURRENT_TIMESTAMP AS TEXT)` (portable ;
         // sur SQLite valeur/format IDENTIQUES). L'INSERT id=1 est déjà portable (garde early-return count>0).
         "INSERT INTO tenant(id,name,status,created,updated)
          VALUES(1,'Tenant par défaut','active',CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
-        [],
+        &crate::sql_params![],
     );
     // filet défensif : tout engagement sans tenant valide -> tenant #1 (la colonne a déjà DEFAULT 1).
-    let _ = db.execute(
+    let _ = store.execute(
         "UPDATE engagement SET tenant_id=1 WHERE tenant_id IS NULL OR tenant_id NOT IN (SELECT id FROM tenant)",
-        [],
+        &crate::sql_params![],
     );
     // rétro-compat : chaque utilisateur existant reçoit un grant vers le tenant #1 (rôle dérivé du RBAC).
-    let _ = db.execute(
+    let _ = store.execute(
         // DIALECT-NEUTRAL (Stage 2b) : `INSERT OR IGNORE` -> `INSERT … ON CONFLICT(user_id,tenant_id) DO
         // NOTHING` (portable ; cible = la contrainte UNIQUE(user_id,tenant_id) que l'IGNORE couvrait, cf.
         // SCHEMA/PG_SCHEMA). `datetime('now')` -> `CAST(CURRENT_TIMESTAMP AS TEXT)`. Le `WHERE true` est
@@ -483,7 +483,7 @@ pub(crate) fn ensure_default_tenant(db: &Connection) {
                 CAST(CURRENT_TIMESTAMP AS TEXT)
            FROM users WHERE true
          ON CONFLICT(user_id,tenant_id) DO NOTHING",
-        [],
+        &crate::sql_params![],
     );
 }
 
@@ -579,7 +579,7 @@ pub(crate) fn load_server_scope(pkg_dir: &str) -> (Vec<String>, String) {
 ///   "  <kind>   exploit=<bool> destructive=<bool>". Best-effort : si python/forge absent, on
 ///   laisse la table en l'état (les lectures /api/modules renverront ce qu'il y a). `forge` est
 ///   importé depuis le parent du cwd console ; on lance depuis FORGE_PKG_DIR si défini, sinon `..`.
-pub(crate) fn populate_modules(db: &Connection) {
+pub(crate) fn populate_modules(store: &crate::store::Store) {
     let pkg_dir = std::env::var("FORGE_PKG_DIR").unwrap_or_else(|_| "..".to_string());
     let py = std::env::var("FORGE_PYTHON").unwrap_or_else(|_| "python3".to_string());
     // 1) essai JSON
@@ -615,7 +615,7 @@ pub(crate) fn populate_modules(db: &Connection) {
         let available = m.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
         let mitre = m.get("mitre").and_then(|v| v.as_str()).unwrap_or("");
         let descr = m.get("descr").or_else(|| m.get("desc")).and_then(|v| v.as_str()).unwrap_or("");
-        upsert_probed_module(db, kind, exploit, destructive, available, mitre, descr);
+        upsert_probed_module(store, kind, exploit, destructive, available, mitre, descr);
         n += 1;
     }
     println!("[forge-console] modules: {n} enregistrés dans la table `module`");
@@ -629,15 +629,15 @@ pub(crate) fn populate_modules(db: &Connection) {
 /// populate_modules pour être testé sans spawn Python (régression : un disable manuel survit au re-probe).
 /// Le plancher exploit reste garanti indépendamment de web_allowed (validate_modules teste
 /// exploit/destructive en propre, en amont).
-pub(crate) fn upsert_probed_module(db: &Connection, kind: &str, exploit: bool, destructive: bool,
+pub(crate) fn upsert_probed_module(store: &crate::store::Store, kind: &str, exploit: bool, destructive: bool,
                         available: bool, mitre: &str, descr: &str) {
     let web_allowed = module_web_allowed(kind, exploit, destructive);
-    let _ = db.execute(
+    let _ = store.execute(
         "INSERT INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed)
          VALUES(?,?,?,?,?,?,?)
          ON CONFLICT(kind) DO UPDATE SET exploit=excluded.exploit, destructive=excluded.destructive,
            available=excluded.available, mitre=excluded.mitre, descr=excluded.descr",
-        rusqlite::params![kind, exploit as i64, destructive as i64, available as i64, mitre, descr, web_allowed as i64],
+        &crate::sql_params![kind, exploit as i64, destructive as i64, available as i64, mitre, descr, web_allowed as i64],
     );
 }
 

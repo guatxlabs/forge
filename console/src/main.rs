@@ -478,11 +478,14 @@ async fn main() {
     // ligne -> query_row), error-ignoré : si le FS ne supporte pas WAL, on retombe sur le mode par défaut.
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    // SQLITE CARVE-OUT (connexion brute, backend-specific) : PRAGMA/SCHEMA/migrate/SQLCipher préparent
+    // la base SQLite qui devient `App.db` (toujours présente, même en mode Postgres — c'est le fallback
+    // du seam). `execute_batch(SCHEMA)+migrate()` est la BRANCHE SQLITE du backend-switch de DDL boot :
+    // quand le backend actif sera Postgres, PG_SCHEMA est appliqué EN PLUS via `app.store()` après la
+    // construction de l'App (cf. plus bas). L'AMORÇAGE (ensure_default_*/populate_modules/reconcile_runs)
+    // ne s'exécute plus ICI : il est routé par le backend ACTIF (`app.store()`), après l'App.
     conn.execute_batch(SCHEMA).expect("schema");
     migrate(&conn); // ALTER additifs error-ignored (run_id, fix, panel étendu, run_job C2, dashboard_id)
-    ensure_default_dashboard(&conn); // dashboard #1 (rétro-compat) + rattache les panels orphelins
-    populate_modules(&conn); // table `module` peuplée depuis `forge.cli modules`
-    reconcile_runs(&conn); // run_job 'running' orphelins (reboot console) -> 'failed'
 
     // ENTERPRISE STORE (Postgres) — FAIL-CLOSED (migration Stage 2b INCOMPLÈTE). Le backend PG du seam
     // (store.rs) est intégration-testé mais PAS ENCORE câblé au démarrage. Router `store()` sur Postgres
@@ -528,14 +531,8 @@ async fn main() {
 
     // ledger JSONL : chemin par défaut relatif au pkg dir Forge (où `forge campaign --ledger` écrit).
     let ledger_path = std::env::var("FORGE_CONSOLE_LEDGER").unwrap_or_else(|_| "engagement.jsonl".to_string());
-    // ENGAGEMENT #1 (migration ZÉRO-PERTE) : si la table `engagement` est vide, on la crée depuis le
-    // scope serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Les lignes existantes gardent
-    // engagement_id=1 (DEFAULT posé par migrate). Idempotent : ne réécrit jamais un engagement existant.
-    ensure_default_engagement(&conn, &scope_in, &scope_mode, &ledger_path);
-    // TENANT #1 (ENTERPRISE / migration ZÉRO-PERTE) : si la table `tenant` est vide, crée le tenant par
-    // défaut, backfille les engagements (tenant_id=1) et sème les grants rétro-compat des comptes existants.
-    // NO-OP fonctionnel en community (le filtre tenancy.rs ne s'engage que sous le flag enterprise).
-    ensure_default_tenant(&conn);
+    // NB: l'amorçage ENGAGEMENT #1 / TENANT #1 (migration ZÉRO-PERTE) est routé par le backend ACTIF via
+    // `app.store()` APRÈS la construction de l'App (cf. bloc « AMORÇAGE BOOT »), plus ici sur `conn` brut.
     // racine des assets web statiques (style.css/app.js/fonts/…) servis en fallback.
     let web_dir = resolve_web_dir();
     println!("[forge-console] web assets: {web_dir}");
@@ -618,6 +615,29 @@ async fn main() {
         events,
         ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
     };
+
+    // ========================= AMORÇAGE BOOT (routé par le backend ACTIF) =========================
+    // Backend-switch du DDL boot : la BRANCHE SQLITE (execute_batch(SCHEMA)+migrate) a déjà tourné sur
+    // la connexion brute ci-dessus ; si le backend ACTIF est Postgres, on applique PG_SCHEMA EN PLUS via
+    // `app.store()` (le miroir PG du SCHEMA, colonnes de migrate() déjà fusionnées). AUJOURD'HUI `app.pg`
+    // est toujours `None` (gate fail-closed) donc `store()` = SQLite et cette branche ne s'exécute JAMAIS
+    // (build community : non compilée). L'amorçage passe ENSUITE par `app.store()` : il sème le backend
+    // ACTIF (SQLite aujourd'hui, byte-identique ; Postgres au Stage 2b batch 5 une fois la gate levée).
+    #[cfg(feature = "store-postgres")]
+    if app.pg.is_some() {
+        app.store().execute_batch(PG_SCHEMA).expect("pg schema");
+    }
+    ensure_default_dashboard(&app.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
+    populate_modules(&app.store());         // table `module` peuplée depuis `forge.cli modules`
+    reconcile_runs(&app.store());           // run_job 'running' orphelins (reboot console) -> 'failed'
+    // ENGAGEMENT #1 (migration ZÉRO-PERTE) : si la table `engagement` est vide, crée #1 depuis le scope
+    // serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Idempotent : ne réécrit jamais un
+    // engagement existant. Les lignes existantes gardent engagement_id=1 (DEFAULT posé par migrate).
+    ensure_default_engagement(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
+    // TENANT #1 (ENTERPRISE / migration ZÉRO-PERTE) : tenant par défaut + backfill engagements (tenant_id=1)
+    // + grants rétro-compat des comptes existants. NO-OP fonctionnel en community (filtre tenancy.rs sous flag).
+    ensure_default_tenant(&app.store());
+
     // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
     // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
     app.recompute_auth_required();
@@ -2677,30 +2697,33 @@ mod tests {
     /// (in_scope + mode) + le ledger courant, et est IDEMPOTENT (n'écrase jamais un engagement existant).
     #[test]
     fn migrate_creates_engagement_one_and_backfills_engagement_id() {
-        let conn = Connection::open_in_memory().expect("mem db");
-        conn.execute_batch(SCHEMA).expect("schema"); // `finding` n'a PAS encore engagement_id
+        // `conn()` rend une garde fraîche sur la MÊME connexion (le seeder prend désormais un `&Store` ;
+        // les ops rusqlite directes + migrate/load_engagement gardent leur `&Connection` via le deref).
+        let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
+        let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
+        conn().execute_batch(SCHEMA).expect("schema"); // `finding` n'a PAS encore engagement_id
         // ligne « ancienne » insérée AVANT l'ajout de la colonne (simule une base antérieure).
-        conn.execute(
+        conn().execute(
             "INSERT INTO finding(id,title,target,campaign) VALUES(1,'old-finding','h.example','c1')",
             [],
         )
         .unwrap();
-        migrate(&conn); // ALTER ... ADD COLUMN engagement_id NOT NULL DEFAULT 1 -> backfill à 1
-        let eid: i64 = conn
+        migrate(&conn()); // ALTER ... ADD COLUMN engagement_id NOT NULL DEFAULT 1 -> backfill à 1
+        let eid: i64 = conn()
             .query_row("SELECT engagement_id FROM finding WHERE id=1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(eid, 1, "ligne existante rétro-rattachée à l'engagement #1 (DEFAULT)");
 
         // table engagement vide -> ensure_default_engagement crée #1 depuis le scope/ledger COURANTS.
-        let n0: i64 = conn.query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
+        let n0: i64 = conn().query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
         assert_eq!(n0, 0, "aucun engagement avant l'amorçage");
         ensure_default_engagement(
-            &conn,
+            &crate::store::Store::sqlite(conn()),
             &["a.example.com".to_string(), "*.b.example.com".to_string()],
             "grey",
             "/tmp/eng1.jsonl",
         );
-        let eng = load_engagement(&conn, 1).expect("engagement #1 créé");
+        let eng = load_engagement(&conn(), 1).expect("engagement #1 créé");
         assert_eq!(eng.id, 1);
         assert_eq!(eng.mode, "grey");
         assert_eq!(eng.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
@@ -2708,12 +2731,12 @@ mod tests {
         assert_eq!(eng.ledger_path, "/tmp/eng1.jsonl", "ledger de l'engagement #1 = ledger courant");
 
         // idempotent : un 2e appel (scope/ledger DIFFÉRENTS) ne réécrit PAS l'engagement #1.
-        ensure_default_engagement(&conn, &["changed.example".to_string()], "black", "/tmp/other.jsonl");
-        let eng2 = load_engagement(&conn, 1).unwrap();
+        ensure_default_engagement(&crate::store::Store::sqlite(conn()), &["changed.example".to_string()], "black", "/tmp/other.jsonl");
+        let eng2 = load_engagement(&conn(), 1).unwrap();
         assert_eq!(eng2.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
             "idempotent : scope inchangé");
         assert_eq!(eng2.ledger_path, "/tmp/eng1.jsonl", "idempotent : ledger inchangé");
-        let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
+        let cnt: i64 = conn().query_row("SELECT COUNT(*) FROM engagement", [], |r| r.get(0)).unwrap();
         assert_eq!(cnt, 1, "idempotent : pas de doublon d'engagement");
     }
 
@@ -3222,32 +3245,35 @@ mod tests {
     /// CHAQUE utilisateur existant (rôle dérivé du RBAC). Idempotent (ne réécrit pas si un tenant existe).
     #[test]
     fn ensure_default_tenant_seeds_and_backfills() {
-        let conn = Connection::open_in_memory().expect("mem db");
-        conn.execute_batch(SCHEMA).expect("schema");
-        migrate(&conn);
+        // `conn()` rend une garde fraîche sur la MÊME connexion (le seeder prend désormais un `&Store` ;
+        // les ops rusqlite directes + migrate gardent leur `&Connection` via le deref de la garde).
+        let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
+        let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
+        conn().execute_batch(SCHEMA).expect("schema");
+        migrate(&conn());
         // deux engagements + deux users AVANT toute provision tenant.
-        conn.execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(1,'e1','active','grey','{}','')", []).unwrap();
-        conn.execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(7,'e7','active','grey','{}','')", []).unwrap();
-        conn.execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('root','admin','h',0,'')", []).unwrap();
-        conn.execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('joe','viewer','h',0,'')", []).unwrap();
+        conn().execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(1,'e1','active','grey','{}','')", []).unwrap();
+        conn().execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(7,'e7','active','grey','{}','')", []).unwrap();
+        conn().execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('root','admin','h',0,'')", []).unwrap();
+        conn().execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('joe','viewer','h',0,'')", []).unwrap();
 
-        ensure_default_tenant(&conn);
+        ensure_default_tenant(&crate::store::Store::sqlite(conn()));
         // tenant #1 créé.
-        let tcount: i64 = conn.query_row("SELECT COUNT(*) FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
+        let tcount: i64 = conn().query_row("SELECT COUNT(*) FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(tcount, 1, "tenant #1 (défaut) créé");
         // TOUS les engagements rattachés au tenant #1.
-        let bad: i64 = conn.query_row("SELECT COUNT(*) FROM engagement WHERE tenant_id<>1", [], |r| r.get(0)).unwrap();
+        let bad: i64 = conn().query_row("SELECT COUNT(*) FROM engagement WHERE tenant_id<>1", [], |r| r.get(0)).unwrap();
         assert_eq!(bad, 0, "tous les engagements existants -> tenant #1");
         // grants rétro-compat : chaque user existant accède au tenant #1, rôle dérivé du RBAC.
-        let root_role: String = conn.query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='root' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
+        let root_role: String = conn().query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='root' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(root_role, "tenant_admin", "admin -> tenant_admin");
-        let joe_role: String = conn.query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='joe' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
+        let joe_role: String = conn().query_row("SELECT g.role FROM tenant_grant g JOIN users u ON u.id=g.user_id WHERE u.login='joe' AND g.tenant_id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(joe_role, "tenant_viewer", "viewer -> tenant_viewer");
 
         // IDEMPOTENT : un 2e appel ne recrée rien ni n'écrase (renomme le tenant #1 -> doit rester).
-        conn.execute("UPDATE tenant SET name='custom' WHERE id=1", []).unwrap();
-        ensure_default_tenant(&conn);
-        let n: String = conn.query_row("SELECT name FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
+        conn().execute("UPDATE tenant SET name='custom' WHERE id=1", []).unwrap();
+        ensure_default_tenant(&crate::store::Store::sqlite(conn()));
+        let n: String = conn().query_row("SELECT name FROM tenant WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(n, "custom", "ensure_default_tenant idempotent (n'écrase pas un provisioning existant)");
     }
 
@@ -3464,7 +3490,7 @@ mod tests {
     async fn tenant_crud_gated_and_ledgered() {
         let ledger = tmp_path("forge-test-tenant-crud");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
-        { let db = app.db(); ensure_default_tenant(&db); }
+        { let store = app.store(); ensure_default_tenant(&store); }
         let admin = admin_session(&app, "adm");
         let opr = { { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); } let (t,_) = create_session(&app, uid_of(&app, "opr")); bearer_headers(&t) };
         // community : flag OFF => 403 enterprise_disabled (aucune surface tenant).
@@ -3500,7 +3526,7 @@ mod tests {
     async fn tenant_last_active_and_last_admin_protections() {
         let ledger = tmp_path("forge-test-tenant-guards");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
-        { let db = app.db(); ensure_default_tenant(&db); }
+        { let store = app.store(); ensure_default_tenant(&store); }
         enable_enterprise_tenancy(&app);
         let admin = admin_session(&app, "adm");
         let tid2 = resp_json(tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Second"}))).await).await["tenant"]["id"].as_i64().unwrap();
@@ -3552,7 +3578,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = format!("{dir}/engagement.jsonl");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
-        { let db = app.db(); ensure_default_tenant(&db); }
+        { let store = app.store(); ensure_default_tenant(&store); }
         // opérateur granté sur un tenant 5. upsert PUIS (guard relâché) uid_of PUIS insert grant — uid_of
         // reverrouille le mutex DB, ne jamais l'appeler en tenant `app.db()`.
         { let db = app.db();
@@ -4655,16 +4681,16 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let path = tmp_path("forge-test-noclobber");
         let app = test_app(&path);
         {
-            let db = app.db();
+            let store = app.store();
             // 1er probe : module recon dispo.
-            upsert_probed_module(&db, "recon.httpx", false, false, true, "", "recon httpx");
+            upsert_probed_module(&store, "recon.httpx", false, false, true, "", "recon httpx");
             // l'admin DÉSACTIVE le connecteur + masque + retire du web (intention opérateur).
-            db.execute("UPDATE module SET enabled=0, available_override=0, web_allowed=0 WHERE kind='recon.httpx'", []).unwrap();
+            store.execute("UPDATE module SET enabled=0, available_override=0, web_allowed=0 WHERE kind='recon.httpx'", &crate::sql_params![]).unwrap();
             // re-probe (nouvelle version : gagne une capacité exploit, sonde toujours dispo, descr changée).
-            upsert_probed_module(&db, "recon.httpx", true, false, true, "T1190", "recon httpx v2");
-            let (enabled, ov, web, exploit, descr): (i64, Option<i64>, i64, i64, String) = db.query_row(
+            upsert_probed_module(&store, "recon.httpx", true, false, true, "T1190", "recon httpx v2");
+            let (enabled, ov, web, exploit, descr): (i64, Option<i64>, i64, i64, String) = store.query_row(
                 "SELECT enabled, available_override, web_allowed, exploit, descr FROM module WHERE kind='recon.httpx'",
-                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap();
+                &crate::sql_params![], |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?, r.get_i64(2)?, r.get_i64(3)?, r.get_str(4)?))).unwrap();
             // INTENTION OPÉRATEUR préservée :
             assert_eq!(enabled, 0, "enabled=0 préservé au re-probe (no-clobber)");
             assert_eq!(ov, Some(0), "available_override=0 préservé au re-probe");
@@ -4675,11 +4701,11 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         }
         // un NOUVEAU module hérite des DEFAULT enabled=1 / override=NULL.
         {
-            let db = app.db();
-            upsert_probed_module(&db, "recon.new", false, false, true, "", "neuf");
-            let (enabled, ov): (i64, Option<i64>) = db.query_row(
-                "SELECT enabled, available_override FROM module WHERE kind='recon.new'", [],
-                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            let store = app.store();
+            upsert_probed_module(&store, "recon.new", false, false, true, "", "neuf");
+            let (enabled, ov): (i64, Option<i64>) = store.query_row(
+                "SELECT enabled, available_override FROM module WHERE kind='recon.new'", &crate::sql_params![],
+                |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?))).unwrap();
             assert_eq!(enabled, 1, "nouveau module -> enabled par défaut");
             assert_eq!(ov, None, "nouveau module -> pas d'override par défaut (suit la sonde)");
         }

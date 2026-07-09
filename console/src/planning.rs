@@ -771,8 +771,8 @@ pub(crate) async fn modules_refresh(State(app): State<App>, ConnectInfo(peer): C
         return (s, j);
     }
     {
-        let db = app.db();
-        populate_modules(&db); // re-spawn `forge.cli modules --json` + UPSERT dans `module`
+        let store = app.store();
+        populate_modules(&store); // re-spawn `forge.cli modules --json` + UPSERT dans `module`
     }
     // relit le catalogue pour le renvoyer (transparence : l'opérateur voit l'état post-refresh —
     // l'intention `enabled`/`available_override` est PRÉSERVÉE par le re-probe, cf. populate_modules).
