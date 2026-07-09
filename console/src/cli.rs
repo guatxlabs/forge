@@ -54,6 +54,66 @@ pub(crate) fn cli_flag(args: &[String], name: &str) -> bool {
     args.contains(&flag)
 }
 
+// =====================================================================================
+// ROUTAGE POSTGRES DES SOUS-COMMANDES CLI (Stage 2b) — les sous-commandes CLI ouvrent leur PROPRE
+// connexion (elles court-circuitent l'App, qui n'existe pas hors du chemin HTTP). Quand le backend
+// enterprise Postgres est sélectionné (FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL) ET que la
+// feature `store-postgres` est compilée, elles se connectent à Postgres et exécutent leur DML/DDL À
+// TRAVERS LE SEAM (`Store::postgres`), pour que `forge-console useradd`/`seed-demo`/lectures marchent
+// sur un déploiement PG — la gate de démarrage fail-closée ne bloque QUE le serveur, pas le
+// provisioning CLI de la base PG en amont. Hors de ce cas (et TOUJOURS en community, blocs non
+// compilés) : SQLite EXACTEMENT comme avant (byte-identique). Tout ce bloc PG est gardé par la feature.
+// =====================================================================================
+
+/// URL Postgres si la CLI doit cibler PG : `FORGE_ENTERPRISE_STORE=postgres` + `FORGE_DB_URL` non vide.
+/// `None` => SQLite. En community (feature absente) cette fonction n'existe pas : les sites d'appel
+/// sont eux aussi gardés `#[cfg(feature = "store-postgres")]`, donc le build par défaut est inchangé.
+#[cfg(feature = "store-postgres")]
+fn cli_pg_url() -> Option<String> {
+    if std::env::var("FORGE_ENTERPRISE_STORE").as_deref() == Ok("postgres") {
+        match std::env::var("FORGE_DB_URL") {
+            Ok(u) if !u.is_empty() => return Some(u),
+            _ => eprintln!("[forge-console] FORGE_ENTERPRISE_STORE=postgres mais FORGE_DB_URL absent/vide — repli SQLite"),
+        }
+    }
+    None
+}
+
+/// Connecte un client Postgres session-pinné pour `url`, en construit un `Store::postgres` (même
+/// modèle held-guard que `App::store()` : le client est verrouillé pour la vie du `Store`), et passe
+/// ce store à `f`. Le client est connecté HORS de tout runtime tokio (contexte CLI synchrone), ce que
+/// `connect_postgres` requiert. Renvoie `Err(String)` (message lisible) si la connexion échoue.
+#[cfg(feature = "store-postgres")]
+fn with_pg_store<T>(url: &str, f: impl FnOnce(&crate::store::Store) -> T) -> Result<T, String> {
+    let client = crate::store::connect_postgres(url)?;
+    let m = std::sync::Mutex::new(client);
+    let store = crate::store::Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
+    Ok(f(&store))
+}
+
+/// Analogue seam de [`cli_query_rows`] : exécute un SELECT paramétré à travers le `Store` (donc PG) et
+/// renvoie chaque ligne en objet JSON {col: valeur}, en préservant le type via `Row::get_value` +
+/// `store::value_to_json` — MÊME typage par cellule que `cell`/`cli_query_rows`. Les paramètres sont
+/// liés en TEXT (comme la version SQLite qui bind des `String`). LAX : `query_lax` saute les lignes
+/// dont le map échoue et propage une erreur de préparation (best-effort -> vec vide).
+#[cfg(feature = "store-postgres")]
+fn cli_query_rows_store(store: &crate::store::Store, sql: &str, params: &[String], cols: &[&str]) -> Vec<Value> {
+    let binds: Vec<crate::store::Param> = params.iter().map(|s| crate::store::Param::Text(s.clone())).collect();
+    store
+        .query_lax(sql, &binds, |row| {
+            let mut o = serde_json::Map::new();
+            for (i, c) in cols.iter().enumerate() {
+                let v = match row.get_value(i) {
+                    Ok(v) => crate::store::value_to_json(&v),
+                    Err(_) => Value::Null,
+                };
+                o.insert((*c).to_string(), v);
+            }
+            Ok(Value::Object(o))
+        })
+        .unwrap_or_default()
+}
+
 /// Imprime un tableau ASCII simple (colonnes alignées) — sans dépendance externe. Les cellules
 /// non-textuelles sont rendues compactes ; les valeurs longues sont laissées telles quelles (lecture
 /// locale par l'opérateur). Vide -> ligne « (aucune ligne) ».
@@ -152,6 +212,12 @@ pub(crate) fn run_useradd_cli(args: &[String]) -> i32 {
         eprintln!("[forge-console] useradd: mot de passe vide refusé");
         return 2;
     }
+    // POSTGRES (feature `store-postgres`) : provisionne le compte dans PG via le seam. En community
+    // (bloc non compilé) et hors mode PG, on continue sur le chemin SQLite INCHANGÉ ci-dessous.
+    #[cfg(feature = "store-postgres")]
+    if let Some(url) = cli_pg_url() {
+        return run_useradd_pg(&url, login, role, &pw);
+    }
     let db_path = cli_db_path();
     let conn = match Connection::open(&db_path) {
         Ok(c) => c,
@@ -173,6 +239,31 @@ pub(crate) fn run_useradd_cli(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
+            eprintln!("[forge-console] useradd: {e}");
+            2
+        }
+    }
+}
+
+/// Chemin POSTGRES de `useradd` (feature `store-postgres`). Connecte PG, garantit le schéma
+/// (`PG_SCHEMA` — permet de créer le 1er compte sur une base PG neuve, parité avec `execute_batch(SCHEMA)`
+/// côté SQLite) puis upsert via `upsert_user_store` (le MÊME analogue seam que le runtime — DRY : une
+/// seule définition de l'upsert users). Codes : 0 OK, 2 erreur (connexion/schéma/écriture).
+#[cfg(feature = "store-postgres")]
+fn run_useradd_pg(url: &str, login: &str, role: &str, pw: &str) -> i32 {
+    let hash = hash_pw(pw);
+    let outcome = with_pg_store(url, |store| {
+        store
+            .execute_batch(crate::state::PG_SCHEMA)
+            .map_err(|e| format!("initialisation du schéma Postgres impossible: {e}"))?;
+        upsert_user_store(store, login, role, &hash)
+    });
+    match outcome {
+        Ok(Ok(role)) => {
+            println!("[forge-console] compte '{login}' (role={role}) provisionné dans Postgres");
+            0
+        }
+        Ok(Err(e)) | Err(e) => {
             eprintln!("[forge-console] useradd: {e}");
             2
         }
@@ -268,6 +359,14 @@ pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
     };
+
+    // POSTGRES (feature `store-postgres`) : sème le backend PG à travers le seam. Les lectures JSONL
+    // ci-dessus sont backend-agnostiques (fichiers) ; on branche ICI, après elles, pour laisser le
+    // chemin SQLite ci-dessous BYTE-IDENTIQUE. En community (bloc non compilé) et hors mode PG : SQLite.
+    #[cfg(feature = "store-postgres")]
+    if let Some(url) = cli_pg_url() {
+        return run_seed_demo_pg(&url, &campaign, &dir, &findings, &runrecords, &roe);
+    }
 
     let db_path = cli_db_path();
     let conn = match Connection::open(&db_path) {
@@ -367,11 +466,130 @@ pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
     0
 }
 
+/// Chemin POSTGRES de `seed-demo` (feature `store-postgres`). Sème le MÊME engagement de référence que
+/// le chemin SQLite, à travers le seam (`Store::postgres`), en DIALECTE PG : `INSERT OR IGNORE` ->
+/// `INSERT … ON CONFLICT DO NOTHING`, `datetime('now')` -> `CAST(CURRENT_TIMESTAMP AS TEXT)` (cf.
+/// state.rs). N'applique NI le PRAGMA WAL NI `migrate()` (spécifiques SQLite) : `PG_SCHEMA` porte déjà
+/// toutes les colonnes de migrate. Idempotent : purge la campagne démo (+ son run) puis réinsère.
+/// Réutilise la MÊME dérivation CWE/CVSS que le handler ingest / le chemin SQLite (résultat identique).
+#[cfg(feature = "store-postgres")]
+#[allow(clippy::too_many_arguments)]
+fn run_seed_demo_pg(
+    url: &str,
+    campaign: &str,
+    dir: &std::path::Path,
+    findings: &[Value],
+    runrecords: &[Value],
+    roe: &[Value],
+) -> i32 {
+    let outcome = with_pg_store(url, |store| -> Result<(i64, i64, i64, i64, i64, i64), String> {
+        store
+            .execute_batch(crate::state::PG_SCHEMA)
+            .map_err(|e| format!("initialisation du schéma Postgres impossible: {e}"))?;
+
+        // IDEMPOTENCE : purge UNIQUEMENT la campagne démo (+ son run) — n'affecte aucune autre campagne.
+        let _ = store.execute("DELETE FROM finding WHERE campaign=?", &crate::sql_params![campaign]);
+        let _ = store.execute("DELETE FROM runrecord WHERE campaign=?", &crate::sql_params![campaign]);
+        let _ = store.execute("DELETE FROM roe_decision WHERE campaign=?", &crate::sql_params![campaign]);
+        let _ = store.execute("DELETE FROM run_job WHERE run_id=?", &crate::sql_params![SEED_DEMO_RUN_ID]);
+
+        // --- findings : MÊME dérivation CWE/CVSS que /api/ingest et le chemin SQLite ---
+        let mut nf = 0i64;
+        for f in findings {
+            let cwe = {
+                let c = gs(f, "cwe");
+                if c.is_empty() { extract_cwe(&gs(f, "category")) } else { c }
+            };
+            let (mut cvss_vec, mut cvss_score) =
+                (gs(f, "cvss_vector"), f.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+            if cvss_vec.is_empty() && cvss_score == 0.0 {
+                let (v, s) = cvss_base_for_severity(&gs(f, "severity"));
+                cvss_vec = v.to_string();
+                cvss_score = s;
+            }
+            if let Ok(n) = store.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &crate::sql_params![gs(f,"ts"), campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
+                    gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
+                    gs(f,"fix"), SEED_DEMO_RUN_ID, cwe, cvss_vec, cvss_score],
+            ) { nf += n as i64; }
+        }
+
+        // --- run-records (fires ATT&CK) ---
+        let (mut nr, mut fired_cnt) = (0i64, 0i64);
+        let mut targets: Vec<String> = Vec::new();
+        let mut modules: Vec<String> = Vec::new();
+        for rr in runrecords {
+            let fired = if rr.get("fired").and_then(|v| v.as_bool()).unwrap_or(false) { 1i64 } else { 0 };
+            let (tgt, kind) = (gs(rr, "target"), gs(rr, "kind"));
+            if !tgt.is_empty() && !targets.contains(&tgt) { targets.push(tgt.clone()); }
+            if !kind.is_empty() && !modules.contains(&kind) { modules.push(kind.clone()); }
+            if let Ok(n) = store.execute(
+                "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id) VALUES(?,?,?,?,?,?,?,?)",
+                &crate::sql_params![gs(rr,"ts"), campaign, tgt, kind, gs(rr,"mitre"), fired, gs(rr,"detail"), SEED_DEMO_RUN_ID],
+            ) { nr += n as i64; fired_cnt += fired; }
+        }
+
+        // --- décisions ROE (FIRE / VETO / DRY_RUN) ---
+        let (mut nd, mut vetoed_cnt, mut dry_run_cnt) = (0i64, 0i64, 0i64);
+        for d in roe {
+            let verdict = gs(d, "verdict");
+            match verdict.as_str() {
+                "VETO" => vetoed_cnt += 1,
+                "DRY_RUN" => dry_run_cnt += 1,
+                _ => {}
+            }
+            let ex = if d.get("exploit").and_then(|v| v.as_bool()).unwrap_or(false) { 1i64 } else { 0 };
+            let de = if d.get("destructive").and_then(|v| v.as_bool()).unwrap_or(false) { 1i64 } else { 0 };
+            let reasons = d.get("reasons").map(|r| r.to_string()).unwrap_or_else(|| "[]".into());
+            if let Ok(n) = store.execute(
+                "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons)
+                 VALUES(?,?,?,?,?,?,?,?,?,?)",
+                &crate::sql_params![gs(d,"ts"), campaign, SEED_DEMO_RUN_ID, gs(d,"action_id"), gs(d,"target"),
+                    gs(d,"kind"), verdict, ex, de, reasons],
+            ) { nd += n as i64; }
+        }
+
+        // --- un run_job récapitulatif (onglet Runs) — `datetime('now')` -> CAST(CURRENT_TIMESTAMP AS TEXT) ---
+        let targets_json = serde_json::to_string(&targets).unwrap_or_else(|_| "[]".into());
+        let modules_json = serde_json::to_string(&modules).unwrap_or_else(|_| "[]".into());
+        let coverage_gaps = "{\"shop.lab.example\":[\"injection.sqli\"]}";
+        let skipped_budget = "[{\"kind\":\"web.xss\",\"target\":\"shop.lab.example\",\"cls\":\"xss\"}]";
+        let _ = store.execute(
+            "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps,started_by,reason,targets,modules,started,finished,exit_code)
+             VALUES(?,?,CAST(CURRENT_TIMESTAMP AS TEXT),'done','grey',?,?,?,0,?,?,'seed-demo','bundled reference engagement (synthetic lab — examples/reference-engagement)',?,?,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT),0)",
+            &crate::sql_params![SEED_DEMO_RUN_ID, campaign, fired_cnt, dry_run_cnt, vetoed_cnt,
+                skipped_budget, coverage_gaps, targets_json, modules_json],
+        );
+        Ok((nf, nr, fired_cnt, nd, vetoed_cnt, dry_run_cnt))
+    });
+
+    match outcome {
+        Ok(Ok((nf, nr, fired_cnt, nd, vetoed_cnt, dry_run_cnt))) => {
+            println!("[forge-console] seed-demo (Postgres) : engagement de référence chargé depuis {}", dir.display());
+            println!("[forge-console] backend=postgres  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
+            println!("[forge-console] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
+            0
+        }
+        Ok(Err(e)) | Err(e) => {
+            eprintln!("[forge-console] seed-demo: {e}");
+            2
+        }
+    }
+}
+
 /// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/SOQL).
 pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
     let campaign = cli_opt(args, "campaign");
     let db_path = cli_db_path();
+    // POSTGRES (feature `store-postgres`) : parité LECTURE contre PG (mêmes SELECT, moteur SoQL inclus),
+    // à travers le seam. En community (bloc non compilé) et hors mode PG : chemin SQLite INCHANGÉ.
+    #[cfg(feature = "store-postgres")]
+    if let Some(url) = cli_pg_url() {
+        return run_read_cli_pg(cmd, &url, args, as_json, campaign.as_deref());
+    }
     match cmd {
         "findings" => {
             let conn = match cli_open_ro(&db_path) { Some(c) => c, None => return 2 };
@@ -465,6 +683,110 @@ pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
             }
         }
         _ => 2,
+    }
+}
+
+/// Chemin POSTGRES de [`run_read_cli`] (feature `store-postgres`). Même sémantique/mêmes colonnes que
+/// le chemin SQLite, mais lu à travers le seam (`Store::postgres` + `cli_query_rows_store` pour les
+/// SELECT statiques, `exec_soql_time_pg_store` pour `query`). Les SELECT `findings`/`roe`/`coverage`
+/// sont dialect-neutres (aucun `datetime('now')` ni `INSERT OR IGNORE`), donc réutilisés VERBATIM.
+#[cfg(feature = "store-postgres")]
+fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaign: Option<&str>) -> i32 {
+    let outcome = with_pg_store(url, |store| -> i32 {
+        match cmd {
+            "findings" => {
+                let (where_, params): (String, Vec<String>) = match campaign {
+                    Some(c) => (" WHERE campaign=?".into(), vec![c.to_string()]),
+                    None => (String::new(), vec![]),
+                };
+                let sql = format!(
+                    "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id FROM finding{where_} ORDER BY id DESC LIMIT 1000"
+                );
+                let rows = cli_query_rows_store(store, &sql, &params, &[
+                    "id", "ts", "campaign", "target", "title", "severity", "category", "mitre", "status", "tool", "run_id",
+                ]);
+                print_objects(&["id", "ts", "campaign", "target", "title", "severity", "status", "mitre", "tool"], &rows, as_json);
+                0
+            }
+            "roe" => {
+                let (where_, params): (String, Vec<String>) = match campaign {
+                    Some(c) => (" WHERE campaign=?".into(), vec![c.to_string()]),
+                    None => (String::new(), vec![]),
+                };
+                let sql = format!(
+                    "SELECT id,ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons FROM roe_decision{where_} ORDER BY id DESC LIMIT 2000"
+                );
+                let rows = cli_query_rows_store(store, &sql, &params, &[
+                    "id", "ts", "campaign", "run_id", "action_id", "target", "kind", "verdict", "exploit", "destructive", "reasons",
+                ]);
+                print_objects(&["id", "ts", "campaign", "run_id", "target", "kind", "verdict", "exploit", "destructive"], &rows, as_json);
+                0
+            }
+            "coverage" => {
+                let (sql, params): (&str, Vec<String>) = match campaign {
+                    Some(c) => (
+                        "SELECT mitre, COUNT(*) runs, COALESCE(SUM(fired),0) fired FROM runrecord WHERE mitre<>'' AND campaign=? GROUP BY mitre ORDER BY runs DESC",
+                        vec![c.to_string()],
+                    ),
+                    None => (
+                        "SELECT mitre, COUNT(*) runs, COALESCE(SUM(fired),0) fired FROM runrecord WHERE mitre<>'' GROUP BY mitre ORDER BY runs DESC",
+                        vec![],
+                    ),
+                };
+                let rows = cli_query_rows_store(store, sql, &params, &["mitre", "runs", "fired"]);
+                print_objects(&["mitre", "runs", "fired"], &rows, as_json);
+                0
+            }
+            "query" => {
+                // --soql '...' (ou 1er positionnel non-drapeau) — MÊME extraction que le chemin SQLite.
+                let soql = cli_opt(args, "soql").or_else(|| {
+                    let mut it = args.iter();
+                    while let Some(a) = it.next() {
+                        if a == "--campaign" || a == "--soql" { it.next(); continue; }
+                        if !a.starts_with("--") { return Some(a.clone()); }
+                    }
+                    None
+                });
+                let soql = match soql {
+                    Some(s) if !s.is_empty() => s,
+                    _ => {
+                        eprintln!("usage: forge-console query --soql '<pipeline soql>' [--json]");
+                        return 2;
+                    }
+                };
+                // MÊME moteur SoQL read-only que l'API, routé sur PG (transaction READ ONLY sur ce store).
+                match crate::exec_soql_time_pg_store(store, &soql, 0, 0) {
+                    Ok(v) => {
+                        if as_json {
+                            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));
+                        } else {
+                            let cols: Vec<String> = v.get("columns").and_then(|c| c.as_array())
+                                .map(|a| a.iter().map(cell_string).collect()).unwrap_or_default();
+                            let table: Vec<Vec<String>> = v.get("rows").and_then(|r| r.as_array())
+                                .map(|rows| rows.iter().map(|row| {
+                                    row.as_array().map(|cells| cells.iter().map(cell_string).collect())
+                                        .unwrap_or_default()
+                                }).collect())
+                                .unwrap_or_default();
+                            print_table(&cols, &table);
+                        }
+                        0
+                    }
+                    Err((_, e)) => {
+                        eprintln!("[forge-console] query: SOQL invalide: {e}");
+                        2
+                    }
+                }
+            }
+            _ => 2,
+        }
+    });
+    match outcome {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[forge-console] lecture CLI (Postgres): {e}");
+            2
+        }
     }
 }
 

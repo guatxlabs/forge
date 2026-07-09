@@ -62,6 +62,73 @@ pub(crate) fn exec_soql_time(db_path: &str, q: &str, from: i64, to: i64) -> Resu
     Ok(json!({"columns": c.columns, "rows": rows, "total": rows.len(), "stats": stats, "compiled": c.sql}))
 }
 
+/// BACKEND-ROUTED SoQL (Stage 2b) — compile+run une requête SoQL sur le backend ACTIF de l'App.
+/// SQLite (aujourd'hui, `App.pg` toujours `None` — gate fail-closed) => le chemin read-only
+/// SQLite EXISTANT (`exec_soql_time`), BYTE-IDENTIQUE. Postgres (feature `store-postgres` + `App.pg`
+/// = Some) => `exec_soql_time_pg` (session PG read-only). Les handlers qui DISPOSENT de l'App
+/// (`query`/`query_post`/`panel_data`) passent par ICI ; la sous-commande CLI `query` (sans App)
+/// garde `exec_soql` (SQLite) ou route elle-même vers PG (cli.rs). L'isolation READ-ONLY est
+/// préservée sur les DEUX backends.
+pub(crate) fn exec_soql_app(app: &App, q: &str) -> Result<Value, (StatusCode, String)> {
+    exec_soql_time_app(app, q, 0, 0)
+}
+
+/// Variante bornée dans le temps de [`exec_soql_app`] (from/to epoch ; 0 = pas de borne).
+pub(crate) fn exec_soql_time_app(app: &App, q: &str, from: i64, to: i64) -> Result<Value, (StatusCode, String)> {
+    // POSTGRES (feature `store-postgres`) : si l'App tient un client PG session-pinné, on lit dessus
+    // (transaction READ ONLY). Sinon — et TOUJOURS dans le build community (bloc non compilé) — on
+    // retombe sur le chemin SQLite read-only INCHANGÉ ci-dessous.
+    #[cfg(feature = "store-postgres")]
+    if app.pg.is_some() {
+        let store = app.store();
+        return exec_soql_time_pg_store(&store, q, from, to);
+    }
+    exec_soql_time(&app.db_path, q, from, to)
+}
+
+/// CHEMIN LECTURE POSTGRES du moteur SoQL (feature `store-postgres`). ATTEIGNABLE uniquement quand
+/// `App.pg` est `Some` — la gate de démarrage reste fail-closed, donc ce chemin n'est JAMAIS exercé
+/// dans le build community (compilé, prouvé par `store.rs::pg_tests`, mais pas câblé au runtime).
+/// Reproduit EXACTEMENT le typage par cellule du chemin SQLite : compile la MÊME SoQL -> SQL, puis lit
+/// chaque cellule via l'accesseur dynamique du seam `Row::get_value` + le helper PARTAGÉ
+/// `store::value_to_json` (Int/Real -> nombre, Text -> chaîne, Blob/Null -> Null, erreur de lecture ->
+/// Null) — byte-identique au dispatch `ValueRef` de `cell`. ISOLATION READ-ONLY : la SoQL arbitraire de
+/// l'utilisateur tourne dans une transaction `READ ONLY` sur le client session-pinné du store (défense
+/// en profondeur — un bug ne peut pas muter la base), l'analogue PG de la connexion
+/// `SQLITE_OPEN_READ_ONLY`. LAX : on saute une ligne malformée exactement comme le
+/// `query_map(..).filter_map(|r| r.ok())` du chemin SQLite.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn exec_soql_time_pg_store(
+    store: &crate::store::Store,
+    q: &str,
+    from: i64,
+    to: i64,
+) -> Result<Value, (StatusCode, String)> {
+    let c = soql::compile_with_time(q, from, to, &soql::Schema::forge()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let ncol = c.columns.len();
+    // Transaction READ ONLY = la MÊME isolation read-only que le SQLITE_OPEN_READ_ONLY du chemin SQLite.
+    // Un BEGIN qui échoue est une erreur dure (aucune tx ouverte -> on sort). Le COMMIT best-effort est
+    // TOUJOURS émis après la lecture (READ ONLY : rien à persister ; sur tx avortée, COMMIT = ROLLBACK)
+    // pour ne JAMAIS laisser une transaction ouverte sur le client session-pinné réutilisé.
+    store
+        .execute_batch("BEGIN TRANSACTION READ ONLY")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result = store.query_lax(&c.sql, &crate::sql_params![], |row| {
+        Ok(Value::Array(
+            (0..ncol)
+                .map(|i| match row.get_value(i) {
+                    Ok(v) => crate::store::value_to_json(&v),
+                    Err(_) => Value::Null,
+                })
+                .collect(),
+        ))
+    });
+    let _ = store.execute_batch("COMMIT");
+    let rows: Vec<Value> = result.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let stats = soql_stats(&c.columns, &rows);
+    Ok(json!({"columns": c.columns, "rows": rows, "total": rows.len(), "stats": stats, "compiled": c.sql}))
+}
+
 /// Stats par colonne sur le jeu de résultats : pour chaque colonne entièrement numérique,
 /// renvoie {min,max,sum,count}. Léger (pas de 2e requête SQL) — calculé en mémoire sur les rows.
 pub(crate) fn soql_stats(columns: &[String], rows: &[Value]) -> Value {
@@ -92,7 +159,7 @@ pub(crate) fn soql_stats(columns: &[String], rows: &[Value]) -> Value {
 
 pub(crate) async fn query(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let qs = q.get("q").cloned().unwrap_or_else(|| "search".to_string());
-    match exec_soql(&app.db_path, &qs) {
+    match exec_soql_app(&app, &qs) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((s, e)) => (s, Json(json!({"error": e}))),
     }
@@ -108,7 +175,7 @@ pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) 
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "search".to_string());
-    match exec_soql(&app.db_path, &qs) {
+    match exec_soql_app(&app, &qs) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((s, e)) => (s, Json(json!({"error": e}))),
     }
@@ -267,6 +334,9 @@ pub(crate) async fn panel_create(State(app): State<App>, headers: HeaderMap, Jso
     if !exists {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown_dashboard", "why": format!("dashboard #{dashboard_id} inexistant")})));
     }
+    // AUDIT last_insert_id (Stage 2b) : le SELECT d'existence du dashboard ci-dessus n'insère RIEN — cet
+    // execute(INSERT panel) puis last_insert_id() sont back-to-back sur le MÊME store, aucun INSERT
+    // intercalé. Session-safe sur PG (lastval() = séquence panel).
     match store.execute(
         "INSERT INTO panel(name,query,viz,descr,col_span,position,dashboard_id,updated) VALUES(?,?,?,?,?,?,?,datetime('now'))",
         &crate::sql_params![&name, &qy, &viz, &descr, col_span, position, dashboard_id],
@@ -337,7 +407,7 @@ pub(crate) async fn panel_data(State(app): State<App>, Path(id): Path<i64>, Quer
     let to = q.get("to").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     match qy {
         None => (StatusCode::NOT_FOUND, Json(json!({"error": "panel introuvable"}))),
-        Some(q) => match exec_soql_time(&app.db_path, &q, from, to) {
+        Some(q) => match exec_soql_time_app(&app, &q, from, to) {
             Ok(v) => (StatusCode::OK, Json(v)),
             Err((s, e)) => (s, Json(json!({"error": e}))),
         },
