@@ -414,6 +414,9 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
         ) {
             return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
         }
+        // AUDIT last_insert_id (Stage 2b) : le SELECT d'unicité ci-dessus n'insère RIEN — cet
+        // execute(INSERT users) puis last_insert_id() sont donc back-to-back sur le MÊME store, aucun
+        // INSERT intercalé. L'INSERT scim_user suivant vient APRÈS (id déjà capturé). Session-safe sur PG.
         let id = store.last_insert_id();
         let now = crate::now_epoch();
         let _ = store.execute(
@@ -660,6 +663,9 @@ async fn groups_create(State(app): State<App>, headers: HeaderMap, body: Bytes) 
         ) {
             return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
         }
+        // AUDIT last_insert_id (Stage 2b) : `ensure_schema` (CREATE TABLE IF NOT EXISTS) est du DDL, pas
+        // un INSERT, et s'exécute AVANT cet INSERT scim_group — pas d'INSERT intercalé. INSERT puis
+        // last_insert_id() back-to-back sur le MÊME store. Session-safe sur PG (lastval() = seq scim_group).
         store.last_insert_id()
     };
     // Apply any initial members.

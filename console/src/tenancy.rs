@@ -636,6 +636,9 @@ pub(crate) async fn tenants_create(State(app): State<App>, headers: HeaderMap, J
         ) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", e.to_string());
         }
+        // AUDIT last_insert_id (Stage 2b) : INSERT tenant puis last_insert_id() back-to-back sur le MÊME
+        // store, aucun INSERT intercalé — le SELECT users et l'INSERT tenant_grant viennent APRÈS (id du
+        // tenant déjà capturé dans `id`). Session-safe sur PG.
         let id = store.last_insert_id();
         let uid: Option<i64> = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&actor], |r| r.get_i64(0)).ok();
         let mut sg = false;
