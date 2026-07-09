@@ -70,6 +70,21 @@ fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Respon
 /// role (viewer|operator|admin). `tenant_id`/`tenant_role` are OPTIONAL: when set, membership also
 /// lands a scoped tenant grant (E1 multi-tenancy). Created lazily — the community DB never sees it.
 fn ensure_schema(store: &crate::store::Store) {
+    // POSTGRES dialect (feature `store-postgres` + backend actif PG) : `INTEGER`->`BIGINT` (parité binds
+    // i64 du seam pour tenant_id/created). `idp_group TEXT PRIMARY KEY` inchangé. Table flag-gated créée
+    // paresseusement — HORS de PG_SCHEMA (la base community ne la voit jamais).
+    #[cfg(feature = "store-postgres")]
+    if store.is_postgres() {
+        let _ = store.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rbac_group_map(
+               idp_group   TEXT PRIMARY KEY,
+               role        TEXT NOT NULL,
+               tenant_id   BIGINT,
+               tenant_role TEXT,
+               created     BIGINT NOT NULL DEFAULT 0);",
+        );
+        return;
+    }
     let _ = store.execute_batch(
         "CREATE TABLE IF NOT EXISTS rbac_group_map(
            idp_group   TEXT PRIMARY KEY,
