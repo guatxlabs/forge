@@ -388,7 +388,7 @@ export function runCountTilesHtml(d, outcome) {
   const tiles = [['FIRE', (outcome ? outcome.fired : d.fired), 'v-FIRE'],
                  ['DRY_RUN', (outcome ? outcome.dry_run : d.dry_run), 'v-DRY_RUN'],
                  ['VETO', (outcome ? outcome.vetoed : d.vetoed), 'v-VETO']];
-  if (outcome) tiles.push(['SKIP (indispo)', outcome.skipped, 'skipped'], ['ERREURS', outcome.errors, 'errors']);
+  if (outcome) tiles.push(['SKIP/ignoré', outcome.skipped, 'skipped'], ['ERREURS', outcome.errors, 'errors']);
   else tiles.push(['ERREURS', d.errors, 'errors']);
   return tiles.map(([lab, n, cls]) => `<div class="roecount ${cls}"><span class="rcn">${Number(n || 0)}</span><span class="rcl">${esc(lab)}</span></div>`).join('');
 }
@@ -426,7 +426,7 @@ export function renderOutcomeTable(roeRows) {
 }
 
 // Liste des FINDINGS de ce run (titre / sévérité / cible / outil) + ÉTAT VIDE explicite récapitulant
-// l'issue (0 finding · N fired · M skipped · K erreurs). Retourne un fragment DOM. Source :
+// l'issue (0 finding · N fired · M ignorés · K erreurs). Retourne un fragment DOM. Source :
 // GET /api/findings?run_id=... (déjà borné à l'engagement actif côté serveur).
 export function renderRunFindings(findings, outcome, status) {
   const rows = Array.isArray(findings) ? findings : [];
@@ -437,7 +437,7 @@ export function renderRunFindings(findings, outcome, status) {
     const o = outcome || {};
     const term = TERMINAL_RUN.has(status) ? 'Run terminé' : 'Run en cours';
     const e = document.createElement('div'); e.className = 'lc-emptyfind';
-    e.textContent = `${term} — 0 finding · ${Number(o.fired || 0)} fired · ${Number(o.skipped || 0)} skipped (outils absents) · ${Number(o.errors || 0)} erreurs`;
+    e.textContent = `${term} — 0 finding · ${Number(o.fired || 0)} fired · ${Number(o.skipped || 0)} ignorés · ${Number(o.errors || 0)} erreurs`;
     wrap.appendChild(e); return wrap;
   }
   const scroller = document.createElement('div'); scroller.className = 'lc-tablescroll';
@@ -730,7 +730,7 @@ export async function openRun(runId) {
     meta.appendChild(repPdf);
     body.appendChild(meta);
     const counts = document.createElement('div'); counts.className = 'roecounters'; counts.style.marginTop = '12px';
-    // avec les lignes roe (ro.outcome) : SKIP (indispo) et ERREURS séparés ; sinon repli run_job (agrégé).
+    // avec les lignes roe (ro.outcome) : SKIP/ignoré et ERREURS séparés ; sinon repli run_job (agrégé).
     counts.innerHTML = runCountTilesHtml(d, ro.outcome);
     body.appendChild(counts);
     const kv = document.createElement('dl'); kv.className = 'kvdetail';
