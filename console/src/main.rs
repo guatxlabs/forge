@@ -487,21 +487,45 @@ async fn main() {
     conn.execute_batch(SCHEMA).expect("schema");
     migrate(&conn); // ALTER additifs error-ignored (run_id, fix, panel étendu, run_job C2, dashboard_id)
 
-    // ENTERPRISE STORE (Postgres) — FAIL-CLOSED (migration Stage 2b INCOMPLÈTE). Le backend PG du seam
-    // (store.rs) est intégration-testé mais PAS ENCORE câblé au démarrage. Router `store()` sur Postgres
-    // pendant que les >100 sites `db()` bruts + TOUT l'amorçage boot (populate_modules / ensure_default_*)
-    // continuent d'écrire sur SQLite produirait une base SCINDÉE (split-brain SQLite/Postgres). Tant que
-    // Stage 2b n'a pas routé TOUT le DML + l'amorçage à travers le backend actif, on REFUSE de démarrer
-    // si FORGE_ENTERPRISE_STORE=postgres — que la feature `store-postgres` soit compilée OU NON (le build
-    // community ne pouvait déjà pas ; le build feature doit AUSSI refuser maintenant). L'App tourne donc
-    // TOUJOURS sur SQLite (`App.pg = None`) : le bras `Backend::Postgres` reste compilé derrière la
-    // feature mais INATTEIGNABLE depuis le démarrage normal (seuls les tests d'intégration le pilotent,
-    // en construisant un `Store::postgres` DIRECTEMENT). Décision isolée dans `enterprise_store_gate`
-    // (pure, testable). Env absent/autre (ex. "sqlite") => SQLite, défaut inchangé/byte-identique.
-    if let Err(msg) = enterprise_store_gate(std::env::var("FORGE_ENTERPRISE_STORE").ok().as_deref()) {
-        eprintln!("[forge-console] FATAL {msg}");
-        std::process::exit(2);
-    }
+    // ENTERPRISE STORE (Postgres) — CÂBLÉ (Stage 2b batch 5). La gate décide le backend ACTIF depuis
+    // FORGE_ENTERPRISE_STORE + FORGE_DB_URL : Postgres UNIQUEMENT si la feature `store-postgres` est
+    // compilée ET FORGE_DB_URL est posé (sinon erreur claire) ; tout autre cas => SQLite (défaut
+    // community inchangé/byte-identique). Le split-brain d'antan n'existe plus : quand PG est actif,
+    // TOUT le DML + l'amorçage boot passent par `app.store()` (routé sur le client PG) et le DDL boot
+    // applique PG_SCHEMA au lieu de SCHEMA+migrate (cf. bloc AMORÇAGE plus bas). La connexion SQLite
+    // ouverte ci-dessus reste le repli du seam (`App.db`), non utilisée quand `App.pg` est `Some`.
+    let requested_store = std::env::var("FORGE_ENTERPRISE_STORE").ok();
+    let db_url_env = std::env::var("FORGE_DB_URL").ok();
+    let store_selection = match enterprise_store_gate(requested_store.as_deref(), db_url_env.as_deref()) {
+        Ok(sel) => sel,
+        Err(msg) => {
+            eprintln!("[forge-console] FATAL {msg}");
+            std::process::exit(2);
+        }
+    };
+    // Connexion PG (feature `store-postgres`) : établie HORS du runtime tokio (le client `postgres`
+    // synchrone pilote son PROPRE `block_on` — le connecter depuis le runtime `#[tokio::main]`
+    // paniquerait « runtime within a runtime »). On la fait donc sur un `std::thread` dédié, puis on
+    // porte le client session-pinné dans `App.pg`. En SQLite (ou build community, bloc non compilé) :
+    // `None` -> `store()` retombe sur SQLite.
+    #[cfg(feature = "store-postgres")]
+    let pg: Option<Arc<Mutex<postgres::Client>>> = match &store_selection {
+        StoreSelection::Postgres(url) => {
+            let url = url.clone();
+            let client = std::thread::spawn(move || crate::store::connect_postgres(&url))
+                .join()
+                .expect("postgres connect thread panicked")
+                .unwrap_or_else(|e| {
+                    eprintln!("[forge-console] FATAL {e}");
+                    std::process::exit(2);
+                });
+            println!("[forge-console] store: Postgres (FORGE_DB_URL) — client session-pinné connecté");
+            Some(Arc::new(Mutex::new(client)))
+        }
+        StoreSelection::Sqlite => None,
+    };
+    #[cfg(not(feature = "store-postgres"))]
+    let _ = &store_selection; // SQLite only (community) — variable consommée pour éviter un warning
 
     let token = std::env::var("FORGE_CONSOLE_TOKEN").unwrap_or_else(|_| gen_token());
     let user = std::env::var("FORGE_CONSOLE_USER").unwrap_or_else(|_| "forge".to_string());
@@ -590,11 +614,11 @@ async fn main() {
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         db_path: Arc::new(db_path.clone()),
-        // FAIL-CLOSED (Stage 2b) : jamais de client PG au démarrage — l'App tourne sur SQLite. Le champ
-        // n'existe que sous la feature ; le bras `Backend::Postgres` du seam reste compilé mais, `pg`
-        // étant toujours `None`, `store()` retombe sur SQLite (bras PG inatteignable hors tests d'intégr.).
+        // ENTERPRISE STORE (Stage 2b batch 5) : `Some(client)` quand PG est sélectionné (gate ci-dessus),
+        // sinon `None` -> `store()` route sur SQLite. Le champ n'existe que sous la feature (struct
+        // byte-identique quand OFF).
         #[cfg(feature = "store-postgres")]
-        pg: None,
+        pg,
         token_sha: Arc::new(sha_hex(&token)),
         token_raw: Arc::new(token.clone()),
         user: Arc::new(user),
@@ -618,11 +642,12 @@ async fn main() {
 
     // ========================= AMORÇAGE BOOT (routé par le backend ACTIF) =========================
     // Backend-switch du DDL boot : la BRANCHE SQLITE (execute_batch(SCHEMA)+migrate) a déjà tourné sur
-    // la connexion brute ci-dessus ; si le backend ACTIF est Postgres, on applique PG_SCHEMA EN PLUS via
-    // `app.store()` (le miroir PG du SCHEMA, colonnes de migrate() déjà fusionnées). AUJOURD'HUI `app.pg`
-    // est toujours `None` (gate fail-closed) donc `store()` = SQLite et cette branche ne s'exécute JAMAIS
-    // (build community : non compilée). L'amorçage passe ENSUITE par `app.store()` : il sème le backend
-    // ACTIF (SQLite aujourd'hui, byte-identique ; Postgres au Stage 2b batch 5 une fois la gate levée).
+    // la connexion de repli ci-dessus ; si le backend ACTIF est Postgres (`app.pg` = Some), on applique
+    // PG_SCHEMA via `app.store()` (routé sur le client PG) — le miroir PG du SCHEMA, colonnes de
+    // migrate() déjà fusionnées — À LA PLACE de SCHEMA+migrate pour le backend actif. En SQLite (`app.pg`
+    // = None, et build community non compilé) cette branche ne s'exécute pas : SCHEMA+migrate sur la
+    // connexion SQLite = App.db font foi. L'amorçage ci-dessous passe ENSUITE par `app.store()` : il sème
+    // le backend ACTIF (SQLite = byte-identique ; Postgres via le MÊME chemin seeder, cf. seeders portés).
     #[cfg(feature = "store-postgres")]
     if app.pg.is_some() {
         app.store().execute_batch(PG_SCHEMA).expect("pg schema");
@@ -637,6 +662,10 @@ async fn main() {
     // TENANT #1 (ENTERPRISE / migration ZÉRO-PERTE) : tenant par défaut + backfill engagements (tenant_id=1)
     // + grants rétro-compat des comptes existants. NO-OP fonctionnel en community (filtre tenancy.rs sous flag).
     ensure_default_tenant(&app.store());
+    // POSTGRES : après TOUT seeding à id explicite (dashboard/engagement/tenant #1), recaler les séquences
+    // IDENTITY sur max(id) — sinon le 1er INSERT-sans-id au runtime régénère id=1 -> duplicate key (HTTP 500).
+    // NO-OP en community/SQLite (is_postgres()=false). Idempotent : sûr à chaque boot.
+    advance_pg_identity_sequences(&app.store());
 
     // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
     // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
@@ -678,21 +707,45 @@ async fn main() {
         .expect("serve");
 }
 
-/// FAIL-CLOSED gate for the enterprise store selection (Stage 2b guard). Given the runtime value of
-/// `FORGE_ENTERPRISE_STORE`, returns `Err(message)` when Postgres is requested — the Postgres backend
-/// is integration-tested but NOT yet wired into startup, so enabling it now would split the DB between
-/// SQLite (all `db()` sites + boot seeding) and Postgres (only `store()`); see `store.rs` module docs.
-/// Returns `Ok(())` for any other value (`None`, `"sqlite"`, …), which starts normally on SQLite. This
-/// refusal holds WHETHER OR NOT the `store-postgres` feature is compiled. Pure over its input so the
-/// fail-closed behaviour is unit-testable without spawning the process.
-fn enterprise_store_gate(requested: Option<&str>) -> Result<(), String> {
+/// Backend the console boots on, as decided by [`enterprise_store_gate`]. The `Postgres` arm only
+/// exists under the `store-postgres` feature (the DEFAULT build can only ever select SQLite).
+#[derive(Debug)]
+enum StoreSelection {
+    Sqlite,
+    #[cfg(feature = "store-postgres")]
+    Postgres(String), // the FORGE_DB_URL DSN to connect the session-pinned client to
+}
+
+/// Enterprise store-selection gate (Stage 2b batch 5). Decides — from the runtime values of
+/// `FORGE_ENTERPRISE_STORE` (`requested`) and `FORGE_DB_URL` (`db_url`) — which backend the console
+/// boots on, FAIL-CLOSED:
+///   - `requested == Some("postgres")` WITH the `store-postgres` feature compiled: `Ok(Postgres(url))`
+///     IFF `FORGE_DB_URL` is set to a non-empty DSN; otherwise `Err` (clear "requires FORGE_DB_URL").
+///   - `requested == Some("postgres")` WITHOUT the feature: `Err` telling the operator to rebuild with
+///     `--features store-postgres` (the Postgres arm is not compiled into this binary).
+///   - Anything else (`None`, `"sqlite"`, `""`, …): `Ok(Sqlite)` — the community default, unchanged.
+///
+/// Pure over its inputs so the whole contract is unit-testable without touching the environment.
+fn enterprise_store_gate(requested: Option<&str>, db_url: Option<&str>) -> Result<StoreSelection, String> {
     if requested == Some("postgres") {
-        return Err("FORGE_ENTERPRISE_STORE=postgres is not yet available: the Postgres data-path \
-                    migration (Stage 2b) is incomplete; refusing to start to avoid a split \
-                    SQLite/Postgres database."
-            .to_string());
+        #[cfg(feature = "store-postgres")]
+        {
+            return match db_url {
+                Some(u) if !u.is_empty() => Ok(StoreSelection::Postgres(u.to_string())),
+                _ => Err("FORGE_ENTERPRISE_STORE=postgres requires FORGE_DB_URL to be set to a \
+                          postgres:// DSN; refusing to start without it."
+                    .to_string()),
+            };
+        }
+        #[cfg(not(feature = "store-postgres"))]
+        {
+            let _ = db_url; // unused in the community build
+            return Err("FORGE_ENTERPRISE_STORE=postgres requires a binary built with the \
+                        store-postgres feature; rebuild with --features store-postgres."
+                .to_string());
+        }
     }
-    Ok(())
+    Ok(StoreSelection::Sqlite)
 }
 
 // =====================================================================================
@@ -702,22 +755,47 @@ fn enterprise_store_gate(requested: Option<&str>) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// FAIL-CLOSED : demander le backend Postgres au démarrage (FORGE_ENTERPRISE_STORE=postgres) DOIT
-    /// être refusé avec un message clair tant que la migration du chemin de données (Stage 2b) n'est pas
-    /// faite — sinon split-brain SQLite/Postgres. Toute autre valeur démarre normalement (SQLite). Ce
-    /// test est indépendant de la feature (il vaut pour le build community ET le build `store-postgres`).
+    /// GATE CONTRACT (Stage 2b batch 5) : la sélection du backend enterprise est FAIL-CLOSED.
+    ///   - Toute valeur non-postgres (`None`/`"sqlite"`/`""`) -> `Sqlite`, dans LES DEUX builds.
+    ///   - `postgres` SANS la feature -> refus clair « rebuild with --features store-postgres ».
+    ///   - `postgres` AVEC la feature -> `Postgres(url)` SSI FORGE_DB_URL non vide ; sinon refus
+    ///     nommant FORGE_DB_URL. (Bloc feature-gated ci-dessous.)
     #[test]
-    fn enterprise_store_postgres_is_fail_closed() {
-        let err = enterprise_store_gate(Some("postgres"))
-            .expect_err("postgres must be refused at startup (Stage 2b incomplete)");
-        assert!(err.contains("not yet available"), "clear refusal message: {err}");
-        assert!(err.contains("Stage 2b"), "names the incomplete stage: {err}");
-        assert!(err.contains("refusing to start"), "states it refuses to start: {err}");
-        assert!(err.contains("split"), "explains the split-brain risk: {err}");
-        // The community default and any non-postgres selection start normally on SQLite.
-        assert!(enterprise_store_gate(None).is_ok(), "default (unset) starts on SQLite");
-        assert!(enterprise_store_gate(Some("sqlite")).is_ok(), "explicit sqlite starts normally");
-        assert!(enterprise_store_gate(Some("")).is_ok(), "empty value starts normally");
+    fn enterprise_store_gate_contract() {
+        // Non-postgres selections always boot on SQLite, in both builds.
+        assert!(matches!(enterprise_store_gate(None, None), Ok(StoreSelection::Sqlite)),
+                "default (unset) starts on SQLite");
+        assert!(matches!(enterprise_store_gate(Some("sqlite"), None), Ok(StoreSelection::Sqlite)),
+                "explicit sqlite starts on SQLite");
+        assert!(matches!(enterprise_store_gate(Some(""), None), Ok(StoreSelection::Sqlite)),
+                "empty value starts on SQLite");
+        // A stray FORGE_DB_URL is IGNORED unless postgres is explicitly requested.
+        assert!(matches!(enterprise_store_gate(None, Some("postgres://x")), Ok(StoreSelection::Sqlite)),
+                "db_url alone does not select postgres");
+
+        #[cfg(not(feature = "store-postgres"))]
+        {
+            // Without the feature compiled, postgres is refused with a rebuild message, whatever the url.
+            let e = enterprise_store_gate(Some("postgres"), None)
+                .expect_err("postgres refused without the feature");
+            assert!(e.contains("store-postgres"), "names the feature to rebuild with: {e}");
+            let e2 = enterprise_store_gate(Some("postgres"), Some("postgres://x"))
+                .expect_err("still refused even with a url");
+            assert!(e2.contains("store-postgres"), "names the feature: {e2}");
+        }
+        #[cfg(feature = "store-postgres")]
+        {
+            // With the feature, postgres is ACCEPTED iff FORGE_DB_URL is a non-empty DSN.
+            match enterprise_store_gate(Some("postgres"), Some("postgres://u@h/db")) {
+                Ok(StoreSelection::Postgres(u)) => assert_eq!(u, "postgres://u@h/db", "carries the DSN"),
+                other => panic!("expected Postgres selection, got {other:?}"),
+            }
+            let e = enterprise_store_gate(Some("postgres"), None)
+                .expect_err("postgres refused without FORGE_DB_URL");
+            assert!(e.contains("FORGE_DB_URL"), "names the missing var: {e}");
+            assert!(enterprise_store_gate(Some("postgres"), Some("")).is_err(),
+                    "empty FORGE_DB_URL refused");
+        }
     }
 
     /// Verrou global sérialisant les tests qui LISENT/ÉCRIVENT des variables d'ENV partagées

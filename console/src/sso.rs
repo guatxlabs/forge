@@ -681,6 +681,25 @@ struct Pending {
 /// Create the pending-auth table if absent (idempotent) and purge expired rows. Called lazily from the
 /// login/callback handlers so the COMMUNITY DB (flag OFF => routes 404 before this runs) is untouched.
 fn ensure_schema(store: &crate::store::Store) {
+    // POSTGRES dialect (feature `store-postgres` + backend actif PG) : `INTEGER`->`BIGINT` (parité binds
+    // i64 du seam pour created/expires). `state TEXT PRIMARY KEY` inchangé (portable). Table flag-gated
+    // créée paresseusement — HORS de PG_SCHEMA (la base community ne la voit jamais).
+    #[cfg(feature = "store-postgres")]
+    if store.is_postgres() {
+        let _ = store.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sso_pending(
+               state TEXT PRIMARY KEY,
+               nonce TEXT NOT NULL,
+               code_verifier TEXT NOT NULL,
+               return_to TEXT NOT NULL,
+               token_endpoint TEXT NOT NULL,
+               jwks_uri TEXT NOT NULL,
+               created BIGINT NOT NULL,
+               expires BIGINT NOT NULL);",
+        );
+        let _ = store.execute("DELETE FROM sso_pending WHERE expires <= ?", &crate::sql_params![crate::now_epoch()]);
+        return;
+    }
     let _ = store.execute_batch(
         "CREATE TABLE IF NOT EXISTS sso_pending(
            state TEXT PRIMARY KEY,

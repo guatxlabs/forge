@@ -84,11 +84,25 @@ fn cli_pg_url() -> Option<String> {
 /// ce store à `f`. Le client est connecté HORS de tout runtime tokio (contexte CLI synchrone), ce que
 /// `connect_postgres` requiert. Renvoie `Err(String)` (message lisible) si la connexion échoue.
 #[cfg(feature = "store-postgres")]
-fn with_pg_store<T>(url: &str, f: impl FnOnce(&crate::store::Store) -> T) -> Result<T, String> {
-    let client = crate::store::connect_postgres(url)?;
-    let m = std::sync::Mutex::new(client);
-    let store = crate::store::Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
-    Ok(f(&store))
+fn with_pg_store<T: Send>(url: &str, f: impl FnOnce(&crate::store::Store) -> T + Send) -> Result<T, String> {
+    // Run the WHOLE lifecycle — connect, seam ops, AND drop of the client — on a dedicated `std::thread`,
+    // clear of the tokio runtime. The CLI subcommands are dispatched from inside `#[tokio::main]`, and the
+    // synchronous `postgres` client drives its OWN `block_on` both at connect time AND in its `Drop`
+    // (connection close); either panics "runtime within a runtime" if it happens on a runtime worker. A
+    // plain std thread has no ambient runtime, so `pg_block` runs the client calls directly and the client
+    // closes cleanly when it drops at the end of the thread scope. `thread::scope` lets the closure borrow
+    // `url`/captures without a `'static` bound; `T: Send` + `f: Send` carry the result back.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let client = crate::store::connect_postgres(url)?;
+                let m = std::sync::Mutex::new(client);
+                let store = crate::store::Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
+                Ok(f(&store)) // store guard then `m` (client) drop HERE, on this off-runtime thread
+            })
+            .join()
+            .map_err(|_| "postgres worker thread panicked".to_string())?
+    })
 }
 
 /// Analogue seam de [`cli_query_rows`] : exécute un SELECT paramétré à travers le `Store` (donc PG) et

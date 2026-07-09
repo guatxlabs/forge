@@ -176,6 +176,71 @@ fn translate_placeholders(sql: &str) -> String {
     out
 }
 
+/// Rewrite the SQLite-only `datetime('now')` timestamp expression to the portable
+/// `CAST(CURRENT_TIMESTAMP AS TEXT)` for the Postgres backend — the SAME lowering the boot seeders
+/// (`state.rs::ensure_default_*`) already apply INLINE, generalised here so EVERY seam DML site that
+/// still writes `datetime('now')` (settings/users/run_job/run_log/engagement/tenant…) is portable
+/// without touching each call site. On SQLite the seam does NOT call this (the SQLite arm passes SQL
+/// verbatim), so those sites stay byte-identical; on SQLite `CAST(CURRENT_TIMESTAMP AS TEXT)` renders
+/// the SAME `YYYY-MM-DD HH:MM:SS` text as `datetime('now')` (parity the seeders already rely on).
+///
+/// Matched case-insensitively and ONLY OUTSIDE single-quoted string literals — a `datetime('now')`
+/// appearing inside a DATA literal is left verbatim (single-quote tracking mirrors
+/// `translate_placeholders`, incl. the doubled `''` escape). STATIC SQL ONLY (same controlled-input
+/// assumption as the placeholder translator); no other dialect rewrite is done. Byte-preserving: it
+/// copies original bytes verbatim and only inserts ASCII, so non-ASCII literals (e.g. `'Défaut'`) round
+/// -trip intact.
+#[cfg(feature = "store-postgres")]
+fn rewrite_datetime_now(sql: &str) -> String {
+    const NEEDLE: &[u8] = b"datetime('now')";
+    const REPL: &[u8] = b"CAST(CURRENT_TIMESTAMP AS TEXT)";
+    let bytes = sql.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(sql.len());
+    let mut i = 0;
+    let mut in_squote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            out.push(c);
+            if c == b'\'' {
+                // Doubled '' escape: stay inside the literal, copy both quotes.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    out.push(b'\'');
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        // Outside any literal: try to match the whole `datetime('now')` token case-insensitively. The
+        // token embeds a `'now'` literal, but matching it as one unit means we never toggle `in_squote`
+        // for that inner quote.
+        if i + NEEDLE.len() <= bytes.len() && bytes[i..i + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE) {
+            out.extend_from_slice(REPL);
+            i += NEEDLE.len();
+            continue;
+        }
+        if c == b'\'' {
+            in_squote = true;
+        }
+        out.push(c);
+        i += 1;
+    }
+    // Byte-preserving copy of valid UTF-8 with only ASCII inserted at ASCII boundaries -> valid UTF-8.
+    String::from_utf8(out).expect("rewrite_datetime_now: byte-preserving rewrite stays valid UTF-8")
+}
+
+/// Full SQLite-`?`-dialect -> Postgres SQL translation for the seam's PG arm: dialect rewrites
+/// (`datetime('now')` -> portable timestamp) FIRST, then `?` -> `$n` placeholder numbering. Order is
+/// irrelevant to the numbering (the datetime rewrite inserts no `?`), but doing dialect first keeps the
+/// placeholder pass operating on the final statement text. SQLite arm never calls this (verbatim SQL).
+#[cfg(feature = "store-postgres")]
+fn translate_sql(sql: &str) -> String {
+    translate_placeholders(&rewrite_datetime_now(sql))
+}
+
 /// Map a `postgres::Error` to the seam's `StoreError` (message VERBATIM — same discipline as the
 /// rusqlite `From` impl, so `format!("… {e}")` call sites read identically).
 #[cfg(feature = "store-postgres")]
@@ -760,6 +825,19 @@ impl<'a> Store<'a> {
         Store { backend: Backend::Postgres(std::cell::RefCell::new(guard)) }
     }
 
+    /// Which backend is this `Store` bound to? Lets the ENTERPRISE modules that create their tables
+    /// LAZILY (scim_*/sso_*/rbac_group_map — deliberately NOT in `PG_SCHEMA`, since they are flag-gated
+    /// and the community DB must never see them) pick the SQLite-vs-Postgres DDL dialect. In the DEFAULT
+    /// build (feature OFF) the `Postgres` arm does not exist, so this is a const `false` and those
+    /// modules keep their unchanged SQLite DDL (byte-identical).
+    pub(crate) fn is_postgres(&self) -> bool {
+        match &self.backend {
+            Backend::Sqlite(_) => false,
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres(_) => true,
+        }
+    }
+
     /// Execute a non-query statement; returns the number of affected rows (mirrors rusqlite's
     /// `Connection::execute`). Placeholder style is SQLite `?`.
     pub(crate) fn execute(&self, sql: &str, params: &[Param]) -> StoreResult<usize> {
@@ -770,7 +848,7 @@ impl<'a> Store<'a> {
             }
             #[cfg(feature = "store-postgres")]
             Backend::Postgres(cell) => {
-                let sql = translate_placeholders(sql);
+                let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
                 let mut cl = cell.borrow_mut();
@@ -815,7 +893,7 @@ impl<'a> Store<'a> {
             }
             #[cfg(feature = "store-postgres")]
             Backend::Postgres(cell) => {
-                let sql = translate_placeholders(sql);
+                let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
                 let mut cl = cell.borrow_mut();
@@ -865,7 +943,7 @@ impl<'a> Store<'a> {
             }
             #[cfg(feature = "store-postgres")]
             Backend::Postgres(cell) => {
-                let sql = translate_placeholders(sql);
+                let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
                 let mut cl = cell.borrow_mut();
@@ -905,7 +983,7 @@ impl<'a> Store<'a> {
             }
             #[cfg(feature = "store-postgres")]
             Backend::Postgres(cell) => {
-                let sql = translate_placeholders(sql);
+                let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
                 let mut cl = cell.borrow_mut();
@@ -1095,6 +1173,14 @@ mod tests {
 mod pg_tests {
     use super::*;
 
+    // Both DB integration tests DROP/CREATE the SAME tables on the shared TEST_PG_URL database. Under
+    // cargo's default test parallelism they race (one's DROP CASCADE tears down tables the other is mid-
+    // flight on). Serialize the two DB-touching tests on this process-local mutex — NO new crate (no
+    // serial_test). `unwrap_or_else(|e| e.into_inner())` recovers the guard even if a prior test panicked
+    // while holding it (a poisoned mutex must not cascade the whole PG suite into failures). The pure
+    // translator unit tests (no server) don't lock.
+    static PG_DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn pg_translate_placeholders_basic() {
         assert_eq!(translate_placeholders("SELECT * FROM t WHERE a=? AND b=?"),
@@ -1115,6 +1201,32 @@ mod pg_tests {
                    "UPDATE t SET s='it''s ?' WHERE id=$1");
     }
 
+    #[test]
+    fn pg_rewrite_datetime_now_and_full_translate() {
+        // `datetime('now')` outside a literal -> portable CAST; placeholders still numbered after.
+        assert_eq!(
+            translate_sql("INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))"),
+            "INSERT INTO settings(key,value,updated) VALUES($1,$2,CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // Multiple occurrences all rewritten; case-insensitive on the function name.
+        assert_eq!(
+            rewrite_datetime_now("VALUES(1,DATETIME('now'),datetime('now'))"),
+            "VALUES(1,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // A `datetime('now')` INSIDE a single-quoted data literal is left VERBATIM.
+        assert_eq!(
+            rewrite_datetime_now("UPDATE t SET note='ran datetime(''now'') once' WHERE id=1"),
+            "UPDATE t SET note='ran datetime(''now'') once' WHERE id=1"
+        );
+        // Non-ASCII literal round-trips intact (byte-preserving).
+        assert_eq!(
+            rewrite_datetime_now("INSERT INTO tenant(name,created) VALUES('Défaut',datetime('now'))"),
+            "INSERT INTO tenant(name,created) VALUES('Défaut',CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // No datetime token -> only placeholder translation happens.
+        assert_eq!(translate_sql("SELECT * FROM t WHERE a=?"), "SELECT * FROM t WHERE a=$1");
+    }
+
     // Acquire a fresh Store on the shared client. Each op MUST be in its own scope so the guard drops
     // before the next Store locks (a std Mutex is non-reentrant — mirrors one `App::store()` per op).
     fn pg_client_or_skip() -> Option<postgres::Client> {
@@ -1129,6 +1241,7 @@ mod pg_tests {
 
     #[test]
     fn pg_seam_end_to_end() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let client = match pg_client_or_skip() {
             Some(c) => c,
             None => return,
@@ -1323,6 +1436,157 @@ mod pg_tests {
                 |r| r.get_i64(0),
             ).expect("count rolledback");
             assert_eq!(cnt, 0, "rolled-back row absent");
+        }
+    }
+
+    /// WHOLE-APP round-trip on a REAL Postgres (Stage 2b batch 5) — proves the WIRED backend behaves:
+    /// apply `PG_SCHEMA`, run the SHARED boot seeders (dashboard #1 / engagement #1 / tenant #1 / module
+    /// catalog) through the seam, provision + read back a login, and drive a run/ingest round-trip
+    /// (run_job + finding + runrecord + roe_decision) — every `datetime('now')` site exercising the
+    /// seam's Postgres dialect rewrite. Also proves settings read/write and that `is_postgres()` is true.
+    /// Each op is its own `Store` scope (the shared std Mutex is non-reentrant) — the same
+    /// one-`App::store()`-per-op discipline the runtime uses.
+    #[test]
+    fn pg_boot_seed_login_run_roundtrip() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = match pg_client_or_skip() {
+            Some(c) => c,
+            None => return,
+        };
+        let m = std::sync::Mutex::new(client);
+
+        // 0) Clean slate: drop the base tables, then apply the REAL PG_SCHEMA (the boot DDL branch).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            assert!(s.is_postgres(), "backend routed to Postgres");
+            s.execute_batch(
+                "DROP TABLE IF EXISTS finding CASCADE; DROP TABLE IF EXISTS runrecord CASCADE;
+                 DROP TABLE IF EXISTS roe_decision CASCADE; DROP TABLE IF EXISTS run_job CASCADE;
+                 DROP TABLE IF EXISTS run_log CASCADE; DROP TABLE IF EXISTS module CASCADE;
+                 DROP TABLE IF EXISTS dashboard CASCADE; DROP TABLE IF EXISTS panel CASCADE;
+                 DROP TABLE IF EXISTS engagement CASCADE; DROP TABLE IF EXISTS tenant CASCADE;
+                 DROP TABLE IF EXISTS tenant_grant CASCADE; DROP TABLE IF EXISTS settings CASCADE;
+                 DROP TABLE IF EXISTS users CASCADE; DROP TABLE IF EXISTS session CASCADE;
+                 DROP TABLE IF EXISTS finding_template CASCADE; DROP TABLE IF EXISTS campaign CASCADE;
+                 DROP TABLE IF EXISTS ledger_entry CASCADE;",
+            ).expect("drop base tables");
+            s.execute_batch(crate::state::PG_SCHEMA).expect("apply PG_SCHEMA");
+        }
+
+        // 1) BOOT SEEDING through the seam — the SAME seeder functions main.rs calls at boot.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::state::ensure_default_dashboard(&s);
+            crate::state::ensure_default_engagement(&s, &["a.example.com".to_string()], "grey", "/tmp/eng.jsonl");
+            crate::state::ensure_default_tenant(&s);
+            // module catalog (populate_modules spawns python; here we seed one row via the shared upsert).
+            crate::state::upsert_probed_module(&s, "recon.web", false, false, true, "T1595", "web recon");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let dash: i64 = s.query_row("SELECT COUNT(*) FROM dashboard WHERE id=1", &sql_params![], |r| r.get_i64(0)).unwrap();
+            let eng: i64 = s.query_row("SELECT COUNT(*) FROM engagement WHERE id=1", &sql_params![], |r| r.get_i64(0)).unwrap();
+            let ten: i64 = s.query_row("SELECT COUNT(*) FROM tenant WHERE id=1", &sql_params![], |r| r.get_i64(0)).unwrap();
+            let modl: i64 = s.query_row("SELECT COUNT(*) FROM module WHERE kind=?", &sql_params!["recon.web"], |r| r.get_i64(0)).unwrap();
+            assert_eq!((dash, eng, ten, modl), (1, 1, 1, 1), "boot seeding landed in PG");
+        }
+
+        // 1b) IDENTITY sequence desync fix: the seeders inserted an EXPLICIT id=1 into
+        // dashboard/engagement/tenant, which on PG does NOT advance the GENERATED-BY-DEFAULT IDENTITY
+        // sequence. advance_pg_identity_sequences() setval's each to max(id); the NEXT runtime
+        // INSERT-without-id must then yield id>1 (not a colliding id=1 -> duplicate key). This is the
+        // exact boot ordering main.rs uses (seed -> advance).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::state::advance_pg_identity_sequences(&s);
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO dashboard(name,descr,position,created,updated) \
+                 VALUES(?,?,?,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
+                &sql_params!["dash2", "second", 1_i64],
+            ).expect("runtime dashboard insert (no id)");
+            let new_id = s.last_insert_id();
+            assert!(new_id > 1, "IDENTITY advanced past seeded id=1 (got {new_id}) — no duplicate-key collision");
+        }
+
+        // 2) LOGIN provisioning — upsert_user_store uses `datetime('now')` (seam rewrite) + ON CONFLICT.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let role = crate::state::upsert_user_store(&s, "admin", "admin", "argon2-hash-placeholder")
+                .expect("provision admin");
+            assert_eq!(role, "admin");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let (login, role): (String, String) = s.query_row(
+                "SELECT login, role FROM users WHERE login=?",
+                &sql_params!["admin"],
+                |r| Ok((r.get_str(0)?, r.get_str(1)?)),
+            ).expect("read back admin");
+            assert_eq!((login.as_str(), role.as_str()), ("admin", "admin"), "admin login readable in PG");
+            // `created` was written via datetime('now') -> CAST(CURRENT_TIMESTAMP AS TEXT): a non-empty TEXT.
+            let created: String = s.query_row("SELECT created FROM users WHERE login=?", &sql_params!["admin"], |r| r.get_str(0)).unwrap();
+            assert!(!created.is_empty(), "datetime('now') rewrite produced a timestamp: {created:?}");
+        }
+
+        // 3) RUN CREATE — run_job insert (run_create path) uses datetime('now') + ON CONFLICT(run_id).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id)
+                 VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'),?)
+                 ON CONFLICT(run_id) DO UPDATE SET status='running', pid=excluded.pid, started=excluded.started",
+                &sql_params!["run-1", "camp", "grey", 4242_i64, "admin", "manual", "[\"a.example.com\"]", "[\"recon.web\"]", 1_i64],
+            ).expect("run_job insert");
+        }
+
+        // 4) INGEST — finding (ON CONFLICT DO NOTHING) + runrecord + roe_decision + run_job upsert.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &sql_params!["2026-07-09", "camp", "a.example.com", "IDOR", "HIGH", "idor", "T1190", "vulnerable",
+                    "ev", "oracle.idor", "poc", "fix", "run-1", "CWE-639", "", 0.0_f64, 1_i64],
+            ).expect("finding insert");
+            assert_eq!(n, 1, "finding inserted");
+            s.execute(
+                "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id,engagement_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                &sql_params!["2026-07-09", "camp", "a.example.com", "recon.web", "T1595", 1_i64, "d", "run-1", 1_i64],
+            ).expect("runrecord insert");
+            s.execute(
+                "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                &sql_params!["2026-07-09", "camp", "run-1", "a1", "a.example.com", "recon.web", "FIRE", 0_i64, 0_i64, "[]", 1_i64],
+            ).expect("roe_decision insert");
+            s.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps)
+                 VALUES(?,?,datetime('now'),'done',?,?,?,?,?,?,?)
+                 ON CONFLICT(run_id) DO UPDATE SET status='done', mode=excluded.mode, fired=excluded.fired",
+                &sql_params!["run-1", "camp", "grey", 1_i64, 0_i64, 0_i64, 0_i64, "[]", "{}"],
+            ).expect("run_job upsert (ingest)");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let f: i64 = s.query_row("SELECT COUNT(*) FROM finding WHERE run_id=?", &sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rr: i64 = s.query_row("SELECT COUNT(*) FROM runrecord WHERE run_id=?", &sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rd: i64 = s.query_row("SELECT COUNT(*) FROM roe_decision WHERE run_id=?", &sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rj: String = s.query_row("SELECT status FROM run_job WHERE run_id=?", &sql_params!["run-1"], |r| r.get_str(0)).unwrap();
+            assert_eq!((f, rr, rd), (1, 1, 1), "run produced finding/runrecord/roe_decision rows in PG");
+            assert_eq!(rj, "done", "run_job upsert transitioned running->done in PG");
+        }
+
+        // 5) SETTINGS read/write round-trip (settings_set_store uses datetime('now') -> seam rewrite).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::state::settings_set_store(&s, "detection_source", "{\"kind\":\"none\"}").expect("settings write");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let v = crate::state::settings_get_store(&s, "detection_source");
+            assert_eq!(v.as_deref(), Some("{\"kind\":\"none\"}"), "settings round-trip in PG");
         }
     }
 }
