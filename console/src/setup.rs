@@ -131,26 +131,26 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
     let ttl_set = body.get("session_ttl").and_then(|v| v.as_i64()).map(|n| n > 0).unwrap_or(false);
 
     let user_id: i64 = {
-        let db = app.db();
+        let store = app.store();
         // course anti-TOCTOU : re-vérifier sous le mutex qu'aucun admin activé n'a surgi entre-temps.
-        if db.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", [], |_| Ok(())).is_ok() {
+        if store.query_row("SELECT 1 FROM users WHERE role='admin' AND disabled=0 LIMIT 1", &[], |_| Ok(())).is_ok() {
             return (StatusCode::CONFLICT, Json(json!({"error": "already_provisioned", "why": "un admin a été provisionné entre-temps"}))).into_response();
         }
-        if let Err(e) = upsert_user(&db, &login, "admin", &hash) {
+        if let Err(e) = crate::upsert_user_store(&store, &login, "admin", &hash) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "provision_failed", "why": e}))).into_response();
         }
         // settings optionnels — VERBATIM, uniquement si l'appelant les fournit (objets JSON). Un `null`
         // ou tout non-objet est ignoré silencieusement (aucun défaut inventé, cf. principe ZÉRO-défaut).
         if let Some(v) = body.get("operator_policy").filter(|v| v.is_object()) {
-            let _ = settings_set(&db, "operator_policy", &v.to_string());
+            let _ = crate::settings_set_store(&store, "operator_policy", &v.to_string());
         }
         if let Some(v) = body.get("detection_source").filter(|v| v.is_object()) {
-            let _ = settings_set(&db, "detection_source", &v.to_string());
+            let _ = crate::settings_set_store(&store, "detection_source", &v.to_string());
         }
         if let Some(ttl) = body.get("session_ttl").and_then(|v| v.as_i64()).filter(|&n| n > 0) {
-            let _ = settings_set(&db, "session_ttl", &ttl.to_string());
+            let _ = crate::settings_set_store(&store, "session_ttl", &ttl.to_string());
         }
-        db.query_row("SELECT id FROM users WHERE login=?", [&login], |r| r.get::<_, i64>(0)).unwrap_or(-1)
+        store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)).unwrap_or(-1)
     };
     if user_id < 0 {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "provision_failed", "why": "compte introuvable après création"}))).into_response();

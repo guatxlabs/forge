@@ -2723,7 +2723,7 @@ mod tests {
             "grey",
             "/tmp/eng1.jsonl",
         );
-        let eng = load_engagement(&conn(), 1).expect("engagement #1 créé");
+        let eng = load_engagement(&crate::store::Store::sqlite(conn()), 1).expect("engagement #1 créé");
         assert_eq!(eng.id, 1);
         assert_eq!(eng.mode, "grey");
         assert_eq!(eng.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
@@ -2732,7 +2732,7 @@ mod tests {
 
         // idempotent : un 2e appel (scope/ledger DIFFÉRENTS) ne réécrit PAS l'engagement #1.
         ensure_default_engagement(&crate::store::Store::sqlite(conn()), &["changed.example".to_string()], "black", "/tmp/other.jsonl");
-        let eng2 = load_engagement(&conn(), 1).unwrap();
+        let eng2 = load_engagement(&crate::store::Store::sqlite(conn()), 1).unwrap();
         assert_eq!(eng2.scope_in, vec!["a.example.com".to_string(), "*.b.example.com".to_string()],
             "idempotent : scope inchangé");
         assert_eq!(eng2.ledger_path, "/tmp/eng1.jsonl", "idempotent : ledger inchangé");

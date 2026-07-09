@@ -81,12 +81,12 @@ pub(crate) fn admin_create_user(app: &App, actor: &str, body: &Value) -> Result<
     // argon2id est coûteux -> on hash AVANT de prendre le mutex DB (ne pas geler l'API pendant le KDF).
     let hash = hash_pw(&password);
     {
-        let db = app.db();
+        let store = app.store();
         // création STRICTE : un login déjà présent -> 409 (passer par l'édition pour modifier).
-        if db.query_row("SELECT 1 FROM users WHERE login=?", [&login], |_| Ok(())).is_ok() {
+        if store.query_row("SELECT 1 FROM users WHERE login=?", &crate::sql_params![&login], |_| Ok(())).is_ok() {
             return Err((StatusCode::CONFLICT, format!("le compte '{login}' existe déjà (utilisez l'édition)")));
         }
-        upsert_user(&db, &login, &role, &hash).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        crate::upsert_user_store(&store, &login, &role, &hash).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     app.recompute_auth_required();
     append_console_ledger(app, "console.admin.user.create", json!({"actor": actor, "login": login, "role": role}));
@@ -246,32 +246,32 @@ pub(crate) fn admin_set_module(app: &App, actor: &str, kind: &str, body: &Value)
     }
 
     let view = {
-        let db = app.db();
+        let store = app.store();
         // le connecteur doit exister (catalogue = source de vérité des kinds, peuplé au boot).
-        if db.query_row("SELECT 1 FROM module WHERE kind=?", [&kind], |_| Ok(())).is_err() {
+        if store.query_row("SELECT 1 FROM module WHERE kind=?", &crate::sql_params![&kind], |_| Ok(())).is_err() {
             return Err((StatusCode::NOT_FOUND, format!("connecteur '{kind}' inconnu du registre")));
         }
         if let Some(e) = enabled {
-            db.execute("UPDATE module SET enabled=? WHERE kind=?", rusqlite::params![e as i64, kind])
+            store.execute("UPDATE module SET enabled=? WHERE kind=?", &crate::sql_params![e as i64, &kind])
                 .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj enabled échouée: {err}")))?;
         }
         if let Some(w) = web_allowed {
-            db.execute("UPDATE module SET web_allowed=? WHERE kind=?", rusqlite::params![w as i64, kind])
+            store.execute("UPDATE module SET web_allowed=? WHERE kind=?", &crate::sql_params![w as i64, &kind])
                 .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj web_allowed échouée: {err}")))?;
         }
         match ov {
             Ov::Unchanged => {}
             Ov::Clear => {
-                db.execute("UPDATE module SET available_override=NULL WHERE kind=?", [&kind])
+                store.execute("UPDATE module SET available_override=NULL WHERE kind=?", &crate::sql_params![&kind])
                     .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj available_override échouée: {err}")))?;
             }
             Ov::Set(b) => {
-                db.execute("UPDATE module SET available_override=? WHERE kind=?", rusqlite::params![b as i64, kind])
+                store.execute("UPDATE module SET available_override=? WHERE kind=?", &crate::sql_params![b as i64, &kind])
                     .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("maj available_override échouée: {err}")))?;
             }
         }
         // vue à-jour (un seul row) pour la réponse ET le ledger (effective_available inclus).
-        modules_catalog(&db)
+        modules_catalog(&store)
             .into_iter()
             .find(|m| m.get("kind").and_then(|v| v.as_str()) == Some(kind.as_str()))
             .unwrap_or_else(|| json!({"kind": kind}))

@@ -772,8 +772,19 @@ pub(crate) fn backup_policy_default() -> Value {
 
 /// Lit `settings.backup_policy` (objet JSON) ; défaut si absente/illisible. Ne renvoie jamais d'erreur
 /// (fail-soft en lecture — l'appelant obtient la politique par défaut, jamais une valeur inventée).
+#[allow(dead_code)] // conservé pour les tests (accès SQLite direct) — le runtime passe par _store.
 pub(crate) fn load_backup_policy(db: &Connection) -> Value {
     settings_get(db, "backup_policy")
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(backup_policy_default)
+}
+
+/// PORTABLE SEAM analogue of [`load_backup_policy`] over `App::store()`. Identical fail-soft read
+/// (défaut si absente/illisible/non-objet). Runtime callers use this; the `&Connection` version above
+/// stays for tests.
+pub(crate) fn load_backup_policy_store(store: &crate::store::Store) -> Value {
+    crate::settings_get_store(store, "backup_policy")
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .filter(|v| v.is_object())
         .unwrap_or_else(backup_policy_default)
@@ -1093,14 +1104,14 @@ pub(crate) async fn api_backup_policy_get(State(app): State<App>, headers: Heade
         return admin_denied().into_response();
     }
     let (policy, last_run) = {
-        let db = app.db();
-        (load_backup_policy(&db), settings_get(&db, "backup_last_run"))
+        let store = app.store();
+        (load_backup_policy_store(&store), crate::settings_get_store(&store, "backup_last_run"))
     };
     (StatusCode::OK, Json(json!({
         "policy": redact_backup_policy(&policy),
         "offsite_kinds": OFFSITE_KINDS,
         "last_run": last_run,
-        "configured": settings_get(&app.db(), "backup_policy").is_some(),
+        "configured": crate::settings_get_store(&app.store(), "backup_policy").is_some(),
     }))).into_response()
 }
 
@@ -1125,8 +1136,8 @@ pub(crate) async fn api_backup_policy_set(State(app): State<App>, headers: Heade
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_policy", "why": e}))).into_response(),
     };
     {
-        let db = app.db();
-        if let Err(e) = settings_set(&db, "backup_policy", &clean.to_string()) {
+        let store = app.store();
+        if let Err(e) = crate::settings_set_store(&store, "backup_policy", &clean.to_string()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "settings_write_failed", "why": e}))).into_response();
         }
     }
@@ -1249,7 +1260,7 @@ pub(crate) fn apply_backup_retention(dir: &str, keep: usize) {
 /// Fail-closed sur passphrase absente. Renvoie un rapport ou une erreur (l'appelant ledgerise l'échec).
 /// Fonction BLOQUANTE (argon2 + I/O) -> à invoquer via spawn_blocking depuis le runner async.
 pub(crate) fn run_scheduled_backup(app: &App) -> Result<Value, String> {
-    let policy = { let db = app.db(); load_backup_policy(&db) };
+    let policy = { let store = app.store(); load_backup_policy_store(&store) };
     if !policy.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Ok(json!({"skipped": true, "reason": "policy_disabled"}));
     }
@@ -1321,6 +1332,7 @@ pub(crate) fn run_scheduled_backup(app: &App) -> Result<Value, String> {
 
 /// Vrai si une sauvegarde programmée est DUE : politique activée + `interval_secs` écoulé depuis
 /// `settings.backup_last_run` (0/absent -> due immédiatement). Lecture seule (aucun effet de bord).
+#[allow(dead_code)] // conservé pour les tests (accès SQLite direct) — le runtime passe par _store.
 pub(crate) fn scheduled_backup_due(db: &Connection) -> bool {
     let policy = load_backup_policy(db);
     if !policy.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -1335,6 +1347,23 @@ pub(crate) fn scheduled_backup_due(db: &Connection) -> bool {
     now.saturating_sub(last) >= interval
 }
 
+/// PORTABLE SEAM analogue of [`scheduled_backup_due`] over `App::store()`. Byte-identical gate logic
+/// (activée + `interval_secs` écoulé depuis `settings.backup_last_run`). Runtime scheduler uses this;
+/// the `&Connection` version above stays for tests.
+pub(crate) fn scheduled_backup_due_store(store: &crate::store::Store) -> bool {
+    let policy = load_backup_policy_store(store);
+    if !policy.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return false;
+    }
+    let interval = policy.get("interval_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    if interval == 0 {
+        return false;
+    }
+    let now: u64 = chrono_now_compact().parse().unwrap_or(0);
+    let last: u64 = crate::settings_get_store(store, "backup_last_run").and_then(|s| s.parse().ok()).unwrap_or(0);
+    now.saturating_sub(last) >= interval
+}
+
 /// Runner périodique EN CONSOLE : à chaque tick, si une politique est DUE, exécute une sauvegarde
 /// programmée (via spawn_blocking — argon2 hors runtime async), met à jour `backup_last_run`, et
 /// ledgerise. FAIL-OPEN : un échec de backup/offsite est loggé + ledgerisé (`console.backup.error`) mais
@@ -1345,7 +1374,7 @@ pub(crate) async fn backup_scheduler_loop(app: App) {
         .and_then(|s| s.parse::<u64>().ok()).filter(|&n| n > 0).unwrap_or(60);
     loop {
         tokio::time::sleep(Duration::from_secs(tick)).await;
-        let due = { let db = app.db(); scheduled_backup_due(&db) };
+        let due = { let store = app.store(); scheduled_backup_due_store(&store) };
         if !due {
             continue;
         }
@@ -1353,8 +1382,8 @@ pub(crate) async fn backup_scheduler_loop(app: App) {
         let res = tokio::task::spawn_blocking(move || run_scheduled_backup(&app2)).await;
         // marque la tentative (succès OU échec) pour ne pas boucler serré ; prochaine tentative après interval.
         {
-            let db = app.db();
-            let _ = settings_set(&db, "backup_last_run", &chrono_now_compact());
+            let store = app.store();
+            let _ = crate::settings_set_store(&store, "backup_last_run", &chrono_now_compact());
         }
         match res {
             Ok(Ok(v)) => {

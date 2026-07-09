@@ -325,8 +325,8 @@ fn parse_logins(s: &str) -> HashSet<String> {
 fn superadmin_logins(app: &App) -> HashSet<String> {
     let mut set = parse_logins(&std::env::var("FORGE_SUPERADMIN").unwrap_or_default());
     let db_val = {
-        let db = app.db();
-        crate::settings_get(&db, "enterprise.superadmin")
+        let store = app.store();
+        crate::settings_get_store(&store, "enterprise.superadmin")
     };
     if let Some(v) = db_val {
         set.extend(parse_logins(&v));

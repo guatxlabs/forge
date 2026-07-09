@@ -20,9 +20,9 @@ pub(crate) fn enterprise_enabled(app: &App, env_key: &str, setting_key: &str) ->
     if env_truthy(env_key) {
         return true;
     }
-    let db = app.db();
+    let store = app.store();
     matches!(
-        crate::settings_get(&db, setting_key).as_deref(),
+        crate::settings_get_store(&store, setting_key).as_deref(),
         Some("on") | Some("1") | Some("true") | Some("yes")
     )
 }
