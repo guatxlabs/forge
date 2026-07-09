@@ -28,7 +28,6 @@ use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
-use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -103,29 +102,28 @@ pub(crate) fn kill_group(pgid: i32) {
 ///   - tue le GROUPE de process (killpg) de tout pgid enregistré et encore vivant (un moteur détaché
 ///     qui aurait survécu à un simple restart console deviendrait sinon incontrôlable -> on le coupe) ;
 ///   - purge les dirs temp `forge-run-*` (scope.json/targets.json) laissés par des runs interrompus.
-pub(crate) fn reconcile_runs(db: &Connection) {
-    // 1) collecter les pgid des runs marqués 'running' (avant de les flipper).
-    let orphan_pgids: Vec<i32> = {
-        let stmt = db.prepare("SELECT pid FROM run_job WHERE status='running' AND pid>1");
-        match stmt {
-            Ok(mut s) => s
-                .query_map([], |r| r.get::<_, i64>(0))
-                .map(|it| it.filter_map(|r| r.ok()).map(|p| p as i32).collect())
-                .unwrap_or_default(),
-            Err(_) => vec![],
-        }
-    };
+pub(crate) fn reconcile_runs(store: &crate::store::Store) {
+    // 1) collecter les pgid des runs marqués 'running' (avant de les flipper). query_lax = idiome
+    //    lenient (les lignes mal formées sont sautées, comme `query_map(..).filter_map(|r| r.ok())`) ;
+    //    une erreur de PREPARE propage -> `unwrap_or_default()` rend `vec![]` (parité `Err(_) => vec![]`).
+    let orphan_pgids: Vec<i32> = store
+        .query_lax(
+            "SELECT pid FROM run_job WHERE status='running' AND pid>1",
+            &crate::sql_params![],
+            |r| r.get_i64(0).map(|p| p as i32),
+        )
+        .unwrap_or_default();
     // 2) couper tout groupe encore vivant (best-effort ; SIGTERM via killpg). kill_group ignore <=1.
     for pgid in &orphan_pgids {
         kill_group(*pgid);
     }
     // 3) marquer les runs orphelins comme 'failed'.
-    let n = db
+    let n = store
         .execute(
             "UPDATE run_job SET status='failed', finished=datetime('now'), pid=-1,
                detail=COALESCE(NULLIF(detail,''),'')||' [reconciled: orphelin au boot]'
              WHERE status='running'",
-            [],
+            &crate::sql_params![],
         )
         .unwrap_or(0);
     if n > 0 {
