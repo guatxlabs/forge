@@ -346,8 +346,14 @@ pub(crate) fn migrate(db: &Connection) {
 /// Recale aussi les panels orphelins (dashboard_id NULL/0/inexistant) vers le dashboard #1.
 pub(crate) fn ensure_default_dashboard(db: &Connection) {
     let _ = db.execute(
-        "INSERT OR IGNORE INTO dashboard(id,name,descr,position,created,updated)
-         VALUES(1,'Défaut','Dashboard par défaut (rétro-compat)',0,datetime('now'),datetime('now'))",
+        // DIALECT-NEUTRAL (Stage 2b) : `INSERT OR IGNORE` (SQLite-only) -> `INSERT … ON CONFLICT(id)
+        // DO NOTHING` (portable SQLite+PG ; conflit sur la PK `id`, cf. SCHEMA/PG_SCHEMA). `datetime('now')`
+        // (SQLite-only) -> `CAST(CURRENT_TIMESTAMP AS TEXT)` : sur SQLite CURRENT_TIMESTAMP rend le MÊME
+        // texte `YYYY-MM-DD HH:MM:SS` que datetime('now') (CAST no-op sur une valeur déjà TEXT) ; sur PG
+        // le CAST est requis pour lier un timestamptz dans une colonne TEXT (pas de cast d'assignation).
+        "INSERT INTO dashboard(id,name,descr,position,created,updated)
+         VALUES(1,'Défaut','Dashboard par défaut (rétro-compat)',0,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))
+         ON CONFLICT(id) DO NOTHING",
         [],
     );
     // panels sans dashboard valide -> rattachés au défaut (ne casse jamais un panel existant).
@@ -428,8 +434,11 @@ pub(crate) fn ensure_default_engagement(db: &Connection, scope_in: &[String], sc
     })
     .to_string();
     let _ = db.execute(
+        // DIALECT-NEUTRAL (Stage 2b) : `datetime('now')` (SQLite-only) -> `CAST(CURRENT_TIMESTAMP AS TEXT)`
+        // (portable). L'INSERT explicite id=1 est déjà portable (PG : IDENTITY … BY DEFAULT autorise l'id
+        // explicite ; SCHEMA : INTEGER PRIMARY KEY). Sur SQLite, valeur/format IDENTIQUES à datetime('now').
         "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
-         VALUES(1,?,?,?,?,?,datetime('now'),datetime('now'))",
+         VALUES(1,?,?,?,?,?,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
         rusqlite::params!["Engagement par défaut", "active", scope_mode, scope_json, ledger_path],
     );
 }
@@ -450,8 +459,10 @@ pub(crate) fn ensure_default_tenant(db: &Connection) {
         return; // déjà provisionné — ne jamais écraser
     }
     let _ = db.execute(
+        // DIALECT-NEUTRAL (Stage 2b) : `datetime('now')` -> `CAST(CURRENT_TIMESTAMP AS TEXT)` (portable ;
+        // sur SQLite valeur/format IDENTIQUES). L'INSERT id=1 est déjà portable (garde early-return count>0).
         "INSERT INTO tenant(id,name,status,created,updated)
-         VALUES(1,'Tenant par défaut','active',datetime('now'),datetime('now'))",
+         VALUES(1,'Tenant par défaut','active',CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
         [],
     );
     // filet défensif : tout engagement sans tenant valide -> tenant #1 (la colonne a déjà DEFAULT 1).
@@ -461,11 +472,17 @@ pub(crate) fn ensure_default_tenant(db: &Connection) {
     );
     // rétro-compat : chaque utilisateur existant reçoit un grant vers le tenant #1 (rôle dérivé du RBAC).
     let _ = db.execute(
-        "INSERT OR IGNORE INTO tenant_grant(user_id,tenant_id,role,created)
+        // DIALECT-NEUTRAL (Stage 2b) : `INSERT OR IGNORE` -> `INSERT … ON CONFLICT(user_id,tenant_id) DO
+        // NOTHING` (portable ; cible = la contrainte UNIQUE(user_id,tenant_id) que l'IGNORE couvrait, cf.
+        // SCHEMA/PG_SCHEMA). `datetime('now')` -> `CAST(CURRENT_TIMESTAMP AS TEXT)`. Le `WHERE true` est
+        // OBLIGATOIRE : sur un INSERT…SELECT, SQLite ne peut pas distinguer `FROM users ON CONFLICT…` d'un
+        // JOIN `... ON <expr>` — la clause WHERE lève l'ambiguïté (idiome documenté). Valide aussi sur PG.
+        "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
          SELECT id, 1,
                 CASE role WHEN 'admin' THEN 'tenant_admin' WHEN 'operator' THEN 'tenant_operator' ELSE 'tenant_viewer' END,
-                datetime('now')
-           FROM users",
+                CAST(CURRENT_TIMESTAMP AS TEXT)
+           FROM users WHERE true
+         ON CONFLICT(user_id,tenant_id) DO NOTHING",
         [],
     );
 }
