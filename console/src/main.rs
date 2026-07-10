@@ -81,6 +81,12 @@ mod saved_views;
 // ET le câblage d'UN `Extension<PresenceRegistry>` (état EN MÉMOIRE, per-instance) dans build_router — donc
 // AUCUN champ ajouté à App (zéro site de construction touché). Réutilise App + le bus App.events + auth/tenancy.
 mod presence;
+// HA (#10 Wave A — foundation) — leader lease + per-instance heartbeat, PG-only + opt-in FORGE_HA, INERT
+// this wave (no consumer gates on leadership yet; only /health surfaces `leader`/`instance_id`). Compiled
+// under `store-postgres` (HA can only run on Postgres) OR `test` (the dialect-portable acquire/renew step
+// is exercised on SQLite by `cargo test`). The DEFAULT/community build compiles NONE of it — byte-identical.
+#[cfg(any(feature = "store-postgres", test))]
+mod ha;
 // Helpers "feuilles" SANS ÉTAT (crypto/hash, échappement HTML, CWE/CVSS, pagination, validateurs purs)
 // extraits de ce main.rs (Wave-2 PURE MOVE). Ré-exportés au crate root pour que `crate::<helper>`
 // (appels cross-module) et `super::<helper>` (bloc de tests inline) résolvent à l'identique.
@@ -263,11 +269,22 @@ mod store;
 /// forme community `{status, version}` reste compatible (le healthcheck compose ne teste que le 200).
 async fn health(axum::extract::State(app): axum::extract::State<App>) -> Json<Value> {
     let db_ok = health_db_ping(&app);
-    Json(json!({
+    #[allow(unused_mut)] // `body` is only mutated under the `store-postgres` HA arm below.
+    let mut body = json!({
         "status": "ok",
         "version": forge_version(),
         "db": if db_ok { "ok" } else { "degraded" },
-    }))
+    });
+    // HA (#10 Wave A) — ADDITIVE `leader`/`instance_id`. PG-only (feature-gated): the community build does
+    // not compile this arm, so its `/health` stays `{status, version, db}` byte-identical. In the Postgres
+    // build a SINGLE instance (FORGE_HA unset) reports `leader:true` (ha::is_leader short-circuits); under HA
+    // exactly one replica reports `leader:true` (it holds the lease), the others `leader:false`.
+    #[cfg(feature = "store-postgres")]
+    {
+        body["leader"] = Value::Bool(crate::ha::is_leader(&app));
+        body["instance_id"] = Value::String((*app.instance_id).clone());
+    }
+    Json(body)
 }
 
 /// PING léger et borné du store ACTIF : `SELECT 1` via `App::store()`. `true` si la valeur `1` revient.
@@ -613,6 +630,34 @@ async fn main() {
     #[cfg(not(feature = "store-postgres"))]
     let _ = &store_selection; // SQLite only (community) — variable consommée pour éviter un warning
 
+    // ================================ HA (#10 Wave A) — OPT-IN + FAIL-CLOSED ================================
+    // HA engages ONLY when FORGE_HA is truthy AND the ACTIVE store is Postgres. On a NON-Postgres store a
+    // shared leader lease is meaningless (each replica has its own SQLite file) and UNSAFE, so we FAIL CLOSED
+    // at boot (clear error + non-zero exit) rather than silently run split-brain. `instance_id` is this
+    // process's identity (FORGE_INSTANCE_ID | container hostname | a boot gen_token) — the lease holder key
+    // and a per-replica id under `--scale`. Read ONCE here; stored on `App.{ha,instance_id,is_leader}`.
+    #[cfg(feature = "store-postgres")]
+    let (ha, instance_id) = {
+        let want_ha = flags::env_truthy("FORGE_HA");
+        if want_ha && pg.is_none() {
+            eprintln!("[forge-console] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite");
+            std::process::exit(2);
+        }
+        let iid = std::env::var("FORGE_INSTANCE_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(gen_token);
+        (want_ha && pg.is_some(), iid)
+    };
+    // Community build (no Postgres backend compiled): HA is impossible. If the operator set FORGE_HA expecting
+    // it, FAIL CLOSED with the same guidance rather than silently running a single unsynchronised instance.
+    #[cfg(not(feature = "store-postgres"))]
+    if flags::env_truthy("FORGE_HA") {
+        eprintln!("[forge-console] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite (this binary has no Postgres backend; rebuild with --features store-postgres)");
+        std::process::exit(2);
+    }
+
     let token = std::env::var("FORGE_CONSOLE_TOKEN").unwrap_or_else(|_| gen_token());
     let user = std::env::var("FORGE_CONSOLE_USER").unwrap_or_else(|_| "forge".to_string());
     let pass_hash = std::env::var("FORGE_CONSOLE_PASS_HASH").unwrap_or_default();
@@ -705,6 +750,15 @@ async fn main() {
         // byte-identique quand OFF).
         #[cfg(feature = "store-postgres")]
         pg,
+        // HA (#10 Wave A) — computed once above. `is_leader` starts at `!ha` : a single instance (or a
+        // non-HA Postgres deploy) is leader immediately; under HA it starts NOT-leader until the first
+        // heartbeat acquires the lease (`ha::is_leader` short-circuits to true when `ha` is false anyway).
+        #[cfg(feature = "store-postgres")]
+        ha,
+        #[cfg(feature = "store-postgres")]
+        instance_id: Arc::new(instance_id),
+        #[cfg(feature = "store-postgres")]
+        is_leader: Arc::new(AtomicBool::new(!ha)),
         token_sha: Arc::new(sha_hex(&token)),
         token_raw: Arc::new(token.clone()),
         user: Arc::new(user),
@@ -771,6 +825,20 @@ async fn main() {
             println!("[forge-console] DÉTECTION armée — kind={kind} endpoint={endpoint} auth={} ; LECTURE seule, joint runrecord[fired] (red) vs détections de la source (blue).",
                 ds_auth_type(&cfg));
         }
+    }
+
+    // HA (#10 Wave A) — HEARTBEAT : quand HA est engagé (FORGE_HA + store Postgres actif), une tâche
+    // périodique renouvelle/acquiert le bail `run-worker` toutes les ~TTL/3 s et publie l'état de
+    // leadership sur `App.is_leader` (lu par /health). INERTE cette vague : AUCUN consumer ne gate encore
+    // sur is_leader (reconcile/run/scheduler inchangés). Non-HA (single instance) : aucun ticker, is_leader
+    // reste true. Cloné AVANT que build_router ne déplace `app`.
+    #[cfg(feature = "store-postgres")]
+    if app.ha {
+        println!(
+            "[forge-console] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader/instance_id publiés sur /health (INERTE : aucun consumer ne gate encore sur is_leader).",
+            app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS
+        );
+        tokio::spawn(crate::ha::heartbeat_loop(app.clone()));
     }
 
     // RUNNER DE SAUVEGARDE PROGRAMMÉE (fail-open) : tâche périodique qui, SI une politique
@@ -905,6 +973,12 @@ mod tests {
             db_path: Arc::new(":memory:".into()),
             #[cfg(feature = "store-postgres")]
             pg: None,
+            #[cfg(feature = "store-postgres")]
+            ha: false,
+            #[cfg(feature = "store-postgres")]
+            instance_id: Arc::new("test-instance".into()),
+            #[cfg(feature = "store-postgres")]
+            is_leader: Arc::new(AtomicBool::new(true)),
             token_sha: Arc::new(sha_hex("t")),
             token_raw: Arc::new("t".into()),
             user: Arc::new("forge".into()),
@@ -2478,6 +2552,12 @@ mod tests {
             db: Arc::new(Mutex::new(conn)),
             #[cfg(feature = "store-postgres")]
             pg: None,
+            #[cfg(feature = "store-postgres")]
+            ha: false,
+            #[cfg(feature = "store-postgres")]
+            instance_id: Arc::new("test-instance".into()),
+            #[cfg(feature = "store-postgres")]
+            is_leader: Arc::new(AtomicBool::new(true)),
             db_path: Arc::new(db_path.clone()),
             token_sha: Arc::new(sha_hex("t")),
             token_raw: Arc::new("t".into()),

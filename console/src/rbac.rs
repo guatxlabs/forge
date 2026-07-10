@@ -485,6 +485,12 @@ mod tests {
             db: Arc::new(Mutex::new(conn)),
             #[cfg(feature = "store-postgres")]
             pg: None,
+            #[cfg(feature = "store-postgres")]
+            ha: false,
+            #[cfg(feature = "store-postgres")]
+            instance_id: Arc::new("test-instance".into()),
+            #[cfg(feature = "store-postgres")]
+            is_leader: Arc::new(AtomicBool::new(true)),
             db_path: Arc::new(":memory:".into()),
             token_sha: Arc::new(crate::sha_hex("t")),
             token_raw: Arc::new("t".into()),

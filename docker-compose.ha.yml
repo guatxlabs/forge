@@ -1,0 +1,71 @@
+# Forge — OVERRIDE ADDITIF « HA / multi-instance » (#10 Wave A — foundation).
+# =============================================================================================
+# Ce fichier NE REMPLACE PAS docker-compose.yml : il le COMPLÈTE, EN PLUS de l'override Postgres.
+# HA exige un store PARTAGÉ (Postgres) : on l'empile donc SUR docker-compose.postgres.yml. Sans lui,
+# le déploiement PAR DÉFAUT reste SQLite mono-instance (byte-identique). Le build community (FORGE_HA
+# non posé) est inchangé.
+#
+# Lancer DEPUIS le dossier parent `GUATX/` (contexte de build = .. pour inclure core/ ET forge/) :
+#
+#   docker compose -f forge/docker-compose.yml \
+#                  -f forge/docker-compose.postgres.yml \
+#                  -f forge/docker-compose.ha.yml \
+#                  --profile ha up -d --build --scale forge-console=2
+#
+# (`--profile ha` démarre le load-balancer `lb` ; `--profile postgres` est impliqué par le service
+#  postgres de l'override PG — l'ajouter si le service postgres ne démarre pas : `--profile postgres
+#  --profile ha`. `--scale forge-console=2` lance 2 réplicas.)
+#
+# CE QUE FAIT CET OVERRIDE :
+#   - forge-console devient RÉPLICABLE : on RETIRE le `container_name` fixe (collision sous --scale) et
+#     le publish hôte 7100 (une seule socket hôte possible ; c'est le LB qui publie). `!reset`/`!override`
+#     remplacent la valeur héritée au lieu de la concaténer (sémantique de merge Compose des listes).
+#   - on ENGAGE HA : FORGE_HA=1 (le boot FAIL-CLOSED si le store actif n'est pas Postgres). L'identité
+#     d'instance vient du HOSTNAME du conteneur (unique par réplica sous --scale) via le fallback de
+#     `instance_id` — on ne fixe donc PAS FORGE_INSTANCE_ID (une valeur statique collisionnerait entre
+#     réplicas, exactement le bug à éviter). Poser FORGE_INSTANCE_ID seulement pour un mono-réplica nommé.
+#   - FORGE_CONSOLE_HOST=forge-console : autorise le Host de la SONDE de santé active de Caddy (voir
+#     Caddyfile) dans l'allowlist anti-rebinding, sinon 421 -> réplicas marqués unhealthy -> 502.
+#   - FORGE_CONSOLE_DB pointe une base SQLite LOCALE au conteneur (fallback du seam, INUTILISÉE quand
+#     Postgres est actif) : évite que N réplicas écrivent le même fichier SQLite du volume partagé au boot.
+#   - le volume `forge-ledger` PARTAGÉ reste monté (hérité de la base) — chaîne d'audit commune.
+
+name: forge
+
+services:
+  forge-console:
+    # Sous --scale, pas de nom fixe (chaque réplica a son propre nom auto `forge-forge-console-N`).
+    container_name: !reset null
+    # Un seul publish hôte possible : on RETIRE celui de la base (7100) — seul le LB publie 7100.
+    ports: !override []
+    environment:
+      # Engage HA (opt-in). Le boot exige un store Postgres actif (fourni par docker-compose.postgres.yml) ;
+      # sinon FAIL-CLOSED (FORGE_HA sur SQLite = non sûr).
+      FORGE_HA: "1"
+      # Host de la sonde de santé active de Caddy (= adresse upstream `forge-console`) -> allowlist.
+      FORGE_CONSOLE_HOST: "forge-console"
+      # Base SQLite LOCALE au conteneur (fallback du seam, non lue quand Postgres est actif) — évite la
+      # contention multi-réplica sur le fichier du volume partagé `forge-db`.
+      FORGE_CONSOLE_DB: "/tmp/forge-console.db"
+      # NB: FORGE_INSTANCE_ID volontairement NON posé -> fallback HOSTNAME (unique par réplica sous --scale).
+
+  # ---------------------------------------------------------------------------
+  # lb — load-balancer / reverse-proxy sticky devant les réplicas de la console.
+  # ---------------------------------------------------------------------------
+  # Derrière le profil "ha" -> EXCLU d'un `up` nu. Publie 7100 sur la loopback hôte et reverse-proxie
+  # vers `forge-console:7100` (Docker DNS round-robin sur les réplicas), sticky par cookie pour que les
+  # flux SSE restent sur un backend. Health-checks actifs GET /health -> failover visible.
+  lb:
+    profiles: ["ha"]
+    image: caddy:2-alpine
+    container_name: forge-lb
+    restart: unless-stopped
+    depends_on:
+      - forge-console
+    ports:
+      # Endpoint unique publié sur la loopback hôte (jamais 0.0.0.0 par défaut).
+      - "127.0.0.1:7100:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - forge-net
