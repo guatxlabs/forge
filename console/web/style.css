@@ -729,6 +729,15 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .badge.role-operator{background:var(--acc-bg);color:var(--acc);border-color:color-mix(in srgb,var(--acc) 30%,transparent)}
 #logout{gap:5px}
 #logout .ic{width:15px;height:15px}
+/* PRÉSENCE (#9) : indicateur multi-opérateur — avatars (initiales) qui se chevauchent + compteur. */
+.presence{display:flex;align-items:center;gap:6px}
+.presence-avatars{display:inline-flex;flex-direction:row-reverse;align-items:center}
+.presence-avatars .pav{width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;font-family:var(--font-mono);color:var(--acc-ink);background:var(--acc);border:2px solid var(--bg);margin-left:-8px;text-transform:uppercase;line-height:1;box-shadow:0 0 0 1px color-mix(in srgb,var(--acc) 30%,transparent)}
+.presence-avatars .pav:last-child{margin-left:0}
+.presence-avatars .pav.self{background:var(--card2);color:var(--acc);border-color:var(--bg);box-shadow:0 0 0 1px color-mix(in srgb,var(--acc) 45%,transparent)}
+.presence-avatars .pav.more{background:var(--card2);color:var(--mut);box-shadow:0 0 0 1px var(--bd)}
+.presence-count{font-size:11px}
+.presence-count .ic{width:12px;height:12px;vertical-align:-2px;margin-right:3px}
 /* vue de login : plein écran, fond aurora (hérité de body::before), carte centrée */
 /* z-index 150 : au-dessus de l'en-tête (20) et des modales app (100), mais SOUS les toasts (200)
    pour que les notifications (ex. « Déconnecté ») restent lisibles par-dessus le portail. */

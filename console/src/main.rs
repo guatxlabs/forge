@@ -76,6 +76,11 @@ mod finding_templates;
 // main.rs n'y contribue que la ligne `mod` + le `merge` des routes (build_router). Réutilise App + les
 // helpers d'auth/ledger de ce fichier (visibles depuis un module descendant de la racine de crate).
 mod saved_views;
+// PRESENCE (#9) — roster multi-opérateur LIVE (qui est connecté/en train d'opérer). Même discipline :
+// handlers/état dans son PROPRE module ; main.rs n'y contribue que la ligne `mod`, le `merge` des routes
+// ET le câblage d'UN `Extension<PresenceRegistry>` (état EN MÉMOIRE, per-instance) dans build_router — donc
+// AUCUN champ ajouté à App (zéro site de construction touché). Réutilise App + le bus App.events + auth/tenancy.
+mod presence;
 // Helpers "feuilles" SANS ÉTAT (crypto/hash, échappement HTML, CWE/CVSS, pagination, validateurs purs)
 // extraits de ce main.rs (Wave-2 PURE MOVE). Ré-exportés au crate root pour que `crate::<helper>`
 // (appels cross-module) et `super::<helper>` (bloc de tests inline) résolvent à l'identique.
@@ -376,6 +381,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // le fallback + le route_layer => héritent de l'auth_guard/host_guard. GET=liste (vues de
         // l'appelant), POST=create (operator), DELETE/:id=delete (operator, propriété stricte). Ledgerisé.
         .merge(saved_views::routes())
+        // PRESENCE (#9) : roster multi-opérateur LIVE (in-memory, per-instance). Routes DANS
+        // console/src/presence.rs, fusionnées AVANT le fallback + le route_layer => héritent de
+        // l'auth_guard/host_guard. GET /api/presence[?engagement] = roster ; GET /api/presence/events =
+        // flux SSE (join au connect, leave au drop, heartbeat interne) ; POST /api/presence/heartbeat.
+        // FAIL-CLOSED auth + tenant-scopé. L'état vit dans l'Extension câblée sur le routeur externe.
+        .merge(presence::routes())
         // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
         // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
@@ -430,6 +441,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // assignment stays admin-only exactly as today. Under host_guard like everything else.
         .merge(rbac::routes())
         .merge(protected)
+        // PRESENCE (#9) : registre EN MÉMOIRE per-instance, câblé UNE fois ici (Extension partagée par
+        // tous les clones d'App/handlers). Créé par routeur (donc par serveur) -> isolation naturelle en
+        // test ; jamais persisté (aucune table, aucun changement de schéma). Les handlers presence::* le
+        // récupèrent via `Extension<PresenceRegistry>` ; les autres routes l'ignorent (inoffensif).
+        .layer(axum::Extension(presence::PresenceRegistry::default()))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app)
 }
