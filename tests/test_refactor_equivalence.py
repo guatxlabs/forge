@@ -102,6 +102,12 @@ EXPECTED_KINDS = {
     "web.nikto", "web.wpscan", "web.testssl",                    # scanners serveur web / WordPress / TLS (reported_by_tool)
     "xss.dalfox",                                                # scanner XSS (access, reported_by_tool)
     "sqli.sqlmap",                                               # exploitation SQLi (exploit, gatée par le plancher opt-in)
+    # INTÉGRATIONS EXTERNES SUPPLÉMENTAIRES (recon/scan/OSINT, non-destructif/non-exploit, proof-oriented)
+    "recon.masscan",                                             # balayage de ports rapide (complète naabu)
+    "recon.gobuster_dns",                                        # énumération DNS de sous-domaines (complète feroxbuster)
+    "recon.theharvester",                                        # OSINT PASSIF emails/sous-domaines
+    "fuzz.wfuzz",                                                # fuzzing de contenu/paramètres web
+    "web.zap_baseline",                                          # scan web BASELINE PASSIF OWASP ZAP (aucune attaque active)
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {
