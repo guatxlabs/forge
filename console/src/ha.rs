@@ -173,6 +173,98 @@ pub(crate) async fn heartbeat_loop(app: crate::App) {
     }
 }
 
+// ================================================================================================
+// WAVE C — multi-instance completion. Everything below is gated on `ha_enabled(app)` so the community
+// single-instance build stays BYTE-IDENTICAL (the HA arms are const-folded away, the community mirrors
+// are pass-throughs / no-ops).
+// ================================================================================================
+
+/// Fixed advisory-lock key for the COLD-START SCHEMA-INIT critical section (Wave-B LOW fix). Two replicas
+/// booting a FRESH cluster both run `execute_batch(PG_SCHEMA)` + the id=1 seeders simultaneously; `CREATE
+/// … IF NOT EXISTS` and `SELECT COUNT(*) … then INSERT id=1` are NOT concurrency-safe on the shared PG
+/// catalog (one replica panics on a duplicate `pg_type`/`pg_class` tuple or a duplicate PK). Holding this
+/// cluster-global `pg_advisory_xact_lock` around the whole DDL+seed block SERIALIZES init: only one replica
+/// applies DDL/seeds at a time, the others wait then see everything already exists (idempotent). Arbitrary
+/// stable 64-bit constant (namespaced away from any hashtext(ledger_path) key by being fixed & explicit).
+#[cfg(feature = "store-postgres")]
+pub(crate) const BOOT_DDL_LOCK_KEY: i64 = 0x_F0_67_65_DD_10_00_01; // "Forge" DDL lock #1
+
+/// Cadence (seconds) of the cross-instance cache-invalidation poll (B6). Each instance polls the shared
+/// `settings.cache_epoch` and reloads its local caches when it changed on a peer. Short enough that a
+/// detection-source / user mutation on instance A is reflected on instance B within a few seconds.
+#[cfg(feature = "store-postgres")]
+pub(crate) const CACHE_POLL_SECS: u64 = 4;
+
+/// B5 — LEDGER MULTI-INSTANCE (no chain forks). Run the ledger append critical section `f` (read-tail ->
+/// compute -> append) under a CROSS-INSTANCE lock so two replicas never read the same tail hash and both
+/// append (which would fork the SHA-256 chain and break /api/ledger/verify). Under HA we take a PG
+/// `pg_advisory_xact_lock(hashtext(path))` — cluster-global, keyed on the ledger file path — inside a short
+/// transaction; the caller invalidates its (possibly stale) head cache and re-reads the tail from the
+/// SHARED file INSIDE this lock. Single writer at a time => the existing in-proc `ledger_lock` + preimage/
+/// hash stay correct and byte-identical, so verify is unchanged; zero forks by construction.
+///
+/// `f` runs EXACTLY ONCE: inside the tx when the lock is held (normal path, released at COMMIT), or — if the
+/// DB is unavailable and the tx never reached `f` — once as a best-effort fallback so a transient PG outage
+/// never DROPS an audit entry (the in-proc `ledger_lock` still serialises intra-instance). Single-instance
+/// (!ha): pure pass-through — the in-proc lock alone is authoritative, exactly as today.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn with_ledger_lock(app: &crate::App, path: &str, f: impl FnOnce()) {
+    if !ha_enabled(app) {
+        f();
+        return;
+    }
+    let store = app.store();
+    let mut slot = Some(f);
+    let res = store.with_tx(|tx| {
+        // Cluster-global advisory lock keyed on the ledger path; auto-released at COMMIT/ROLLBACK. A peer
+        // appending to the SAME file blocks here until we commit -> serialised single writer.
+        tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", &crate::sql_params![path])?;
+        if let Some(g) = slot.take() {
+            g();
+        }
+        Ok::<(), crate::store::StoreError>(())
+    });
+    if res.is_err() {
+        // BEGIN / lock statement failed before `f` ran (DB down) -> append anyway (best-effort durability;
+        // the in-proc ledger_lock still prevents an intra-instance fork). Runs `f` AT MOST once (take()).
+        if let Some(g) = slot.take() {
+            g();
+        }
+    }
+}
+
+/// Community mirror of [`with_ledger_lock`] — HA is impossible without Postgres, so the ledger is never
+/// shared cross-instance: run `f` directly (the in-proc `ledger_lock` is authoritative). Byte-identical.
+#[cfg(not(feature = "store-postgres"))]
+pub(crate) fn with_ledger_lock(_app: &crate::App, _path: &str, f: impl FnOnce()) {
+    f();
+}
+
+/// B6 — CROSS-INSTANCE CACHE INVALIDATION (poll). Spawned once per instance when HA is engaged. Polls the
+/// shared `settings.cache_epoch` every [`CACHE_POLL_SECS`]; when a PEER bumped it (a detection-source /
+/// user create-disable-role-delete mutation calls `App::bump_cache_epoch`), reloads THIS instance's local
+/// caches via the SAME single-call fns used locally today (`reload_detection_source` +
+/// `recompute_auth_required`) — they already do the right thing, just triggered by a remote change here.
+/// Reloading both on any bump is cheap + idempotent (up-to-poll staleness, acceptable for v1). The `Store`
+/// guard is `!Send` and scoped to the sync method bodies (dropped before every `.await`), so this future
+/// stays `Send`/spawnable. Single-instance (!ha): never spawned — caches reload locally as today.
+#[cfg(feature = "store-postgres")]
+pub(crate) async fn cache_poll_loop(app: crate::App) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(CACHE_POLL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Seed with the epoch observed at boot so we only reload on a CHANGE (not once spuriously at start).
+    let mut last = app.current_cache_epoch();
+    loop {
+        ticker.tick().await;
+        let epoch = app.current_cache_epoch();
+        if epoch != last {
+            last = epoch;
+            app.reload_detection_source();
+            app.recompute_auth_required();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +382,178 @@ mod pg_tests {
             .expect("count lease");
         assert_eq!(n, 1, "PG: single lease row");
         assert_eq!(holder, "B", "PG: held by B after takeover");
+    }
+
+    /// B5 — LEDGER MULTI-INSTANCE (no chain forks). Two "instances" (SEPARATE PG connections) hammer appends
+    /// to the SAME shared ledger file, each serialising via `pg_advisory_xact_lock(hashtext(path))` inside a
+    /// tx and re-reading the tail from disk (`ledger_append_standalone` — the same preimage the API verifies).
+    /// Proves the SHA-256 chain stays INTACT (no fork, contiguous seq) under real cross-connection concurrency
+    /// -> GET /api/ledger/verify would return {ok:true}. This is the code-level analogue of the docker-compose
+    /// "drive runs/imports from BOTH instances then verify" check.
+    #[test]
+    fn pg_ledger_no_fork_under_advisory_lock() {
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_ledger] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let path = std::env::temp_dir()
+            .join(format!("forge-wavec-ledger-{}.jsonl", crate::gen_token()))
+            .to_string_lossy()
+            .into_owned();
+        const N: i64 = 30;
+        let handles: Vec<_> = (0..2)
+            .map(|tid| {
+                let url = url.clone();
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let client = crate::store::connect_postgres(&url).expect("connect");
+                    let m = std::sync::Mutex::new(client);
+                    for i in 0..N {
+                        let store = Store::postgres(m.lock().unwrap());
+                        // SAME critical section as ha::with_ledger_lock: advisory xact lock (keyed on the
+                        // shared path) + re-read tail from disk + append. A peer blocks until COMMIT.
+                        let _ = store.with_tx(|tx| {
+                            tx.execute(
+                                "SELECT pg_advisory_xact_lock(hashtext(?))",
+                                &crate::sql_params![path.as_str()],
+                            )?;
+                            let _ = crate::ledger_append_standalone(
+                                &path,
+                                "console.race",
+                                &serde_json::json!({"t": tid, "i": i}),
+                            );
+                            Ok::<(), crate::store::StoreError>(())
+                        });
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let v = crate::verify_ledger_chain(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(v.ok, "PG: chain intact under concurrent cross-instance appends (why={:?})", v.why);
+        assert_eq!(v.entries, (2 * N) as usize, "PG: every append landed, contiguous SHA-256 chain, no fork");
+    }
+
+    /// B7 — PRESENCE PG TABLE (rosters span instances). Exercises the exact SQL the PG-backed
+    /// `PresenceRegistry` runs: join (upsert), snapshot (SELECT, incl. a NULL engagement), lazy-TTL GC
+    /// (DELETE stale), touch (UPDATE last_seen), leave (DELETE). A snapshot taken via ANY connection sees the
+    /// rows written by BOTH "instances" (inst-A + inst-B) -> the roster spans replicas.
+    #[test]
+    fn pg_presence_table_roundtrip() {
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_presence] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let client = crate::store::connect_postgres(&url).expect("connect");
+        let m = std::sync::Mutex::new(client);
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch("DROP TABLE IF EXISTS presence").expect("drop");
+            s.execute_batch(
+                "CREATE TABLE presence(conn_id TEXT PRIMARY KEY, login TEXT NOT NULL, role TEXT NOT NULL, \
+                 engagement_id BIGINT, instance_id TEXT, since BIGINT, last_seen BIGINT)",
+            )
+            .expect("create");
+        }
+        let join = |cid: &str, login: &str, role: &str, eng: Option<i64>, inst: &str, ts: i64| {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO presence(conn_id,login,role,engagement_id,instance_id,since,last_seen) \
+                 VALUES(?,?,?,?,?,?,?) ON CONFLICT(conn_id) DO UPDATE SET last_seen=excluded.last_seen",
+                &crate::sql_params![cid, login, role, eng, inst, ts, ts],
+            )
+            .expect("join");
+        };
+        // instance A hosts alice(eng2); instance B hosts bob(no engagement).
+        join("c1", "alice", "operator", Some(2), "inst-A", 100);
+        join("c2", "bob", "viewer", None, "inst-B", 101);
+        // snapshot (either connection) sees BOTH instances' operators.
+        let rows: Vec<(String, Option<i64>, String)> = {
+            let s = Store::postgres(m.lock().unwrap());
+            s.query(
+                "SELECT login, engagement_id, instance_id FROM presence ORDER BY login",
+                &crate::sql_params![],
+                |r| Ok((r.get_str(0)?, r.get_opt_i64(1)?, r.get_str(2)?)),
+            )
+            .expect("snapshot")
+        };
+        assert_eq!(rows.len(), 2, "roster spans both instances");
+        assert_eq!(rows[0], ("alice".to_string(), Some(2), "inst-A".to_string()));
+        assert_eq!(rows[1], ("bob".to_string(), None, "inst-B".to_string()));
+        // touch bob (UPDATE), leave alice (DELETE).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            assert_eq!(
+                s.execute("UPDATE presence SET last_seen=? WHERE login=?", &crate::sql_params![200i64, "bob"]).unwrap(),
+                1,
+                "touch refreshes exactly bob's row"
+            );
+            s.execute("DELETE FROM presence WHERE conn_id=?", &crate::sql_params!["c1"]).expect("leave");
+        }
+        let remaining: i64 = {
+            let s = Store::postgres(m.lock().unwrap());
+            s.query_row("SELECT count(*) FROM presence", &crate::sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+        assert_eq!(remaining, 1, "leave removed alice; bob remains");
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch("DROP TABLE presence").expect("cleanup");
+        }
+    }
+
+    /// B6 — CROSS-INSTANCE CACHE INVALIDATION (epoch write/read). Proves the `settings.cache_epoch`
+    /// upsert-then-read contract the poll relies on: a peer's bump changes the value a subsequent read
+    /// observes (change => reload). Uses a scoped throwaway table to avoid clobbering the shared `settings`.
+    #[test]
+    fn pg_cache_epoch_bump_observed() {
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_cache_epoch] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let client = crate::store::connect_postgres(&url).expect("connect");
+        let m = std::sync::Mutex::new(client);
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch("DROP TABLE IF EXISTS settings_wavec").expect("drop");
+            s.execute_batch("CREATE TABLE settings_wavec(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL)")
+                .expect("create");
+        }
+        let bump = |v: i64| {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO settings_wavec(key,value,updated) VALUES('cache_epoch',?,CAST(CURRENT_TIMESTAMP AS TEXT)) \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                &crate::sql_params![v.to_string()],
+            )
+            .expect("bump");
+        };
+        let read = || -> i64 {
+            let s = Store::postgres(m.lock().unwrap());
+            s.query_row("SELECT value FROM settings_wavec WHERE key='cache_epoch'", &crate::sql_params![], |r| r.get_str(0))
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+        };
+        assert_eq!(read(), 0, "unset epoch reads 0 (no spurious reload at boot)");
+        bump(111);
+        assert_eq!(read(), 111, "peer bump observed -> reload trigger");
+        bump(222);
+        assert_eq!(read(), 222, "subsequent bump observed");
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch("DROP TABLE settings_wavec").expect("cleanup");
+        }
     }
 }

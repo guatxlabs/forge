@@ -480,6 +480,7 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
     };
     // A new ENABLED account changes the auth-gate DB state (mirror the account-CRUD discipline).
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SCIM-provisioned account)
     crate::append_console_ledger(
         &app,
         "console.scim.user.create",
@@ -581,6 +582,7 @@ async fn user_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<
         let _ = store.execute("DELETE FROM scim_group_member WHERE user_id=?", &crate::sql_params![uid]);
     }
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SCIM account deprovisioned)
     crate::append_console_ledger(
         &app,
         "console.scim.user.delete",
@@ -641,6 +643,7 @@ fn apply_update(app: &App, uid: i64, attrs: &UserAttrs) -> Response {
         }
     }
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SCIM account patched)
     crate::append_console_ledger(
         app,
         "console.scim.user.update",

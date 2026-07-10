@@ -455,10 +455,13 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
             return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (suppression refusée, fail-closed)".into()));
         }
     }
-    // entrée FINALE dans le ledger DÉDIÉ (avant retrait de la ligne) — l'audit du fichier survit.
+    // entrée FINALE dans le ledger DÉDIÉ (avant retrait de la ligne) — l'audit du fichier survit. B5 (HA) :
+    // sous le verrou consultatif cross-instance keyed sur ce ledger (pas de fourche si un pair appende encore).
     if !ledger.is_empty() && ledger != app.ledger_path.as_str() {
-        let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
-            &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
+        crate::ha::with_ledger_lock(app, &ledger, || {
+            let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
+                &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
+        });
     }
     {
         let store = app.store();

@@ -239,50 +239,63 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
     // -> chaîne SHA-256 cassée (la vérif /api/ledger/verify échouerait). Empoisonnement récupéré
     // (into_inner) : un panic passé ne doit pas geler l'audit.
     let mut head = app.ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
-    // initialisation paresseuse du head depuis le disque (une seule relecture intégrale, au 1er append) ;
-    // ensuite on garde (prev,seq) en cache -> O(1) amorti au lieu de relire tout le fichier (O(n²)).
-    if !head.loaded {
-        head.prev = "0".repeat(64);
-        head.seq = 0;
-        if let Ok(s) = std::fs::read_to_string(path) {
-            for line in s.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(rec) = serde_json::from_str::<Value>(line) {
-                    if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { head.prev = h.to_string(); }
-                    if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { head.seq = q; }
+    // B5 — LEDGER MULTI-INSTANCE : sous HA le fichier ledger est PARTAGÉ entre réplicas ; un pair a pu
+    // appender depuis notre dernier head EN CACHE. On sérialise la section critique read-tail->compute->
+    // append CROSS-INSTANCE via un verrou consultatif PG (`ha::with_ledger_lock`, keyed sur le path) et, à
+    // l'intérieur du verrou, on INVALIDE le cache pour RELIRE la tête du fichier partagé -> aucune fourche
+    // de la chaîne SHA-256 (verify inchangé). Single-instance (!ha) : `with_ledger_lock` est un pass-through
+    // et le verrou in-proc + le cache O(1) restent autoritatifs, byte-identique à avant.
+    crate::ha::with_ledger_lock(app, path, || {
+        if crate::ha::ha_enabled(app) {
+            // Un pair a pu écrire dans le fichier partagé -> notre (prev,seq) en cache est périmé. On force
+            // une relecture de la tête depuis le disque SOUS le verrou consultatif (single writer garanti).
+            head.loaded = false;
+        }
+        // initialisation paresseuse du head depuis le disque (une seule relecture intégrale, au 1er append) ;
+        // ensuite on garde (prev,seq) en cache -> O(1) amorti au lieu de relire tout le fichier (O(n²)).
+        if !head.loaded {
+            head.prev = "0".repeat(64);
+            head.seq = 0;
+            if let Ok(s) = std::fs::read_to_string(path) {
+                for line in s.lines().filter(|l| !l.trim().is_empty()) {
+                    if let Ok(rec) = serde_json::from_str::<Value>(line) {
+                        if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { head.prev = h.to_string(); }
+                        if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { head.seq = q; }
+                    }
                 }
             }
+            head.loaded = true;
         }
-        head.loaded = true;
-    }
-    let prev = head.prev.clone();
-    let seq = head.seq + 1;
-    let ts = {
-        // ISO-ish UTC sans dépendance : on réutilise le compact + 'Z' épochal. verify ne parse pas ts.
-        format!("@{}", chrono_now_compact())
-    };
-    let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(&detail));
-    let hash = sha_hex(&preimage);
-    let rec = json!({
-        "seq": seq, "ts": ts, "kind": kind, "detail": detail,
-        "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
-    });
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    use std::io::Write;
-    // n'avance le head EN CACHE que si l'écriture disque réussit (sinon on relira au prochain append).
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à un
-        // crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
-        if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
-            head.prev = hash;
-            head.seq = seq;
+        let prev = head.prev.clone();
+        let seq = head.seq + 1;
+        let ts = {
+            // ISO-ish UTC sans dépendance : on réutilise le compact + 'Z' épochal. verify ne parse pas ts.
+            format!("@{}", chrono_now_compact())
+        };
+        let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(&detail));
+        let hash = sha_hex(&preimage);
+        let rec = json!({
+            "seq": seq, "ts": ts, "kind": kind, "detail": detail,
+            "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
+        });
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        // n'avance le head EN CACHE que si l'écriture disque réussit (sinon on relira au prochain append).
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à un
+            // crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
+            if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
+                head.prev = hash;
+                head.seq = seq;
+            } else {
+                head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
+            }
         } else {
-            head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
+            head.loaded = false;
         }
-    } else {
-        head.loaded = false;
-    }
+    });
 }
 
 /// Routes du sous-système ledger — GET /api/ledger (liste paginée) + GET /api/ledger/verify

@@ -186,6 +186,16 @@ CREATE TABLE IF NOT EXISTS leader_lease(
 -- community (jamais écrite/lue sans HA opt-in) -> byte-identique.
 CREATE TABLE IF NOT EXISTS ha_instance(
   instance_id TEXT PRIMARY KEY, last_seen BIGINT);
+-- PRESENCE (HA #10 Wave C) : roster multi-opérateur PARTAGÉ cross-instance. Une ligne par CONNEXION SSE
+-- (conn_id PK = token aléatoire par flux), portant le login/role, l'engagement où l'opérateur travaille,
+-- l'`instance_id` qui héberge le flux, l'epoch de 1re connexion (`since`) et du dernier heartbeat
+-- (`last_seen`, sert au GC TTL paresseux). Sous HA (opt-in FORGE_HA + Postgres) le PresenceRegistry écrit
+-- ICI -> `GET /api/presence` sur N'IMPORTE quelle instance agrège les opérateurs de TOUS les réplicas.
+-- En mono-instance/community le registre reste EN MÉMOIRE (byte-identique) et cette table n'est ni lue ni
+-- écrite. ADDITIVE + INERTE en community.
+CREATE TABLE IF NOT EXISTS presence(
+  conn_id TEXT PRIMARY KEY, login TEXT NOT NULL, role TEXT NOT NULL,
+  engagement_id BIGINT, instance_id TEXT, since BIGINT, last_seen BIGINT);
 ";
 
 // SCHEMA POSTGRES (feature `store-postgres`) — MIROIR du `SCHEMA` SQLite ci-dessus AVEC les colonnes
@@ -310,6 +320,12 @@ CREATE TABLE IF NOT EXISTS leader_lease(
 -- autre owner que si cet owner n'a plus de heartbeat frais (mort). INERTE en community (opt-in FORGE_HA).
 CREATE TABLE IF NOT EXISTS ha_instance(
   instance_id TEXT PRIMARY KEY, last_seen BIGINT);
+-- PRESENCE (HA #10 Wave C) — MIROIR PG de la table SQLite. Roster multi-opérateur PARTAGÉ cross-instance
+-- (une ligne par flux SSE, conn_id PK). Écrite par le PresenceRegistry PG-backé quand HA est engagé ;
+-- inerte en community (registre en mémoire).
+CREATE TABLE IF NOT EXISTS presence(
+  conn_id TEXT PRIMARY KEY, login TEXT NOT NULL, role TEXT NOT NULL,
+  engagement_id BIGINT, instance_id TEXT, since BIGINT, last_seen BIGINT);
 ";
 
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
@@ -469,6 +485,15 @@ pub(crate) fn migrate(db: &Connection) {
     let _ = db.execute(
         "CREATE TABLE IF NOT EXISTS ha_instance(
            instance_id TEXT PRIMARY KEY, last_seen BIGINT)",
+        [],
+    );
+    // PRESENCE (HA #10 Wave C) : re-créée ici (idempotent) en plus du SCHEMA, pour qu'une base ANTÉRIEURE
+    // l'obtienne au 1er boot suivant la mise à jour (même discipline que ha_instance/leader_lease). ADDITIVE
+    // + INERTE en community (registre en mémoire ; jamais écrite/lue sans HA opt-in) -> byte-identique.
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS presence(
+           conn_id TEXT PRIMARY KEY, login TEXT NOT NULL, role TEXT NOT NULL,
+           engagement_id BIGINT, instance_id TEXT, since BIGINT, last_seen BIGINT)",
         [],
     );
     // HA (#10 Wave B — fencing correctness) : INDEX UNIQUE PARTIEL « au plus UN run 'running' par
@@ -1090,6 +1115,40 @@ impl App {
     pub(crate) fn invalidate_ledger_head(&self) {
         let mut head = self.ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
         head.loaded = false;
+    }
+
+    /// B6 — CROSS-INSTANCE CACHE INVALIDATION (write side). Bumps the SHARED `settings.cache_epoch` so
+    /// peers' `ha::cache_poll_loop` observe the change and reload their local caches (detection_source /
+    /// auth_required). Called at each relevant mutation site (detection-source set, user create/disable/
+    /// role/delete) AFTER the local reload. GATED on `ha_enabled`: a NO-OP (no write, no behaviour change)
+    /// on single-instance / community — the caches only need cross-instance invalidation under HA. Must NOT
+    /// be called from the reload fns themselves (the poll calls those; bumping there would ping-pong).
+    pub(crate) fn bump_cache_epoch(&self) {
+        if !crate::ha::ha_enabled(self) {
+            return;
+        }
+        let now = crate::now_epoch();
+        let store = self.store();
+        let _ = store.execute(
+            // `datetime('now')` is lowered to `CAST(CURRENT_TIMESTAMP AS TEXT)` on PG by the seam; `?`->`$1`.
+            "INSERT INTO settings(key,value,updated) VALUES('cache_epoch',?,datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+            &crate::sql_params![now.to_string()],
+        );
+    }
+
+    /// Reads the SHARED `settings.cache_epoch` (0 when unset). The poll compares consecutive reads to detect
+    /// a peer's mutation. Fail-soft: any read error => 0 (a benign "no change since 0" — the next real bump
+    /// still triggers a reload). PG-only: consumed solely by `ha::cache_poll_loop` (spawned under HA); the
+    /// community build has no poll, so this is compiled only under the Postgres backend.
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn current_cache_epoch(&self) -> i64 {
+        let store = self.store();
+        store
+            .query_row("SELECT value FROM settings WHERE key='cache_epoch'", &crate::sql_params![], |r| r.get_str(0))
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
     }
 }
 
@@ -2052,6 +2111,7 @@ pub(crate) async fn detection_source_set(State(app): State<App>, headers: Header
     }
     // recharge le cache -> /api/detection/coverage bascule immédiatement sur la nouvelle source.
     app.reload_detection_source();
+    app.bump_cache_epoch(); // B6 (HA): invalide le cache detection_source des pairs (nouvelle source)
     // AUDIT : mutation d'administration attribuée + ledgerisée. JAMAIS le secret (endpoint + type seuls).
     append_console_ledger(&app, "console.detection.source.set", json!({
         "actor": actor,
@@ -2182,7 +2242,13 @@ pub(crate) fn append_run_ledger_path(app: &App, ledger_path: &str, kind: &str, d
     if ledger_path == app.ledger_path.as_str() {
         append_console_ledger(app, kind, detail);
     } else {
-        let _ = ledger_append_standalone(ledger_path, kind, &detail);
+        // DEDICATED engagement ledger (a distinct SHARED file). B5: `ledger_append_standalone` already
+        // re-reads the tail from disk every call (no cache to invalidate), so wrapping it in the SAME
+        // cross-instance advisory lock keyed on THIS path makes the dedicated-ledger append fork-safe under
+        // HA. Single-instance (!ha): `with_ledger_lock` is a pass-through -> byte-identical.
+        crate::ha::with_ledger_lock(app, ledger_path, || {
+            let _ = ledger_append_standalone(ledger_path, kind, &detail);
+        });
     }
 }
 
