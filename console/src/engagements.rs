@@ -416,11 +416,24 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
                 return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (archivage refusé, fail-closed)".into()));
             }
         }
-        if let Some(n) = &new_name { let _ = store.execute("UPDATE engagement SET name=?, updated=datetime('now') WHERE id=?", &crate::sql_params![n, id]); }
-        if let Some(s) = &new_scope { let _ = store.execute("UPDATE engagement SET scope_json=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
-        if let Some(m) = &new_mode { let _ = store.execute("UPDATE engagement SET mode=?, updated=datetime('now') WHERE id=?", &crate::sql_params![m, id]); }
-        if let Some(s) = &new_status { let _ = store.execute("UPDATE engagement SET status=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
-        if let Some(c) = &new_class { let _ = store.execute("UPDATE engagement SET classification=?, updated=datetime('now') WHERE id=?", &crate::sql_params![c, id]); }
+        // ÉCRITURE ATOMIQUE + FAIL-CLOSED (même classe que finding_update) : un SEUL UPDATE porte toutes
+        // les colonnes fournies -> aucun état partiel possible. On MATCHE le Result : un échec (lock/disque/
+        // pg) -> 500 typé et on N'ÉCRIT PAS le ledger plus bas, sinon la piste tamper-evident attesterait
+        // une mutation jamais appliquée (divergence ledger↔DB + faux `ok:true`). >=1 SET garanti (le
+        // no-change est déjà rejeté 400 plus haut).
+        let mut sets: Vec<&str> = Vec::new();
+        let mut vals: Vec<String> = Vec::new();
+        if let Some(n) = &new_name { sets.push("name=?"); vals.push(n.clone()); }
+        if let Some(s) = &new_scope { sets.push("scope_json=?"); vals.push(s.clone()); }
+        if let Some(m) = &new_mode { sets.push("mode=?"); vals.push(m.clone()); }
+        if let Some(s) = &new_status { sets.push("status=?"); vals.push(s.clone()); }
+        if let Some(c) = &new_class { sets.push("classification=?"); vals.push(c.clone()); }
+        let sql = format!("UPDATE engagement SET {}, updated=datetime('now') WHERE id=?", sets.join(", "));
+        let mut params: Vec<crate::store::Param> = vals.iter().map(|s| crate::store::Param::Text(s.clone())).collect();
+        params.push(crate::store::Param::Int(id));
+        if let Err(e) = store.execute(&sql, &params) {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("écriture de l'engagement échouée: {e}")));
+        }
     }
     let action = if new_status.as_deref() == Some("archived") { "archive" }
         else if new_status.as_deref() == Some("active") && cur_status == "archived" { "activate" }

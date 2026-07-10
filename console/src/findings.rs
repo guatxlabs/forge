@@ -310,14 +310,22 @@ pub(crate) async fn finding_update(
     // quand une session cookie est présente (resolve_session_identity), ce qui AUTO-DEADLOCKerait le thread
     // si le guard restait tenu. (Le premier lock ne se manifestait pas via le repli operator-header, qui
     // court-circuite resolve_session_identity avant tout app.store().)
+    // ÉCRITURE ATOMIQUE + FAIL-CLOSED : un SEUL UPDATE porte les colonnes optionnelles (status et/ou
+    // classification), donc AUCUN état partiel possible sur le chemin d'erreur. On MATCHE le Result :
+    // si l'écriture ÉCHOUE (lock/disque plein/erreur Postgres) -> 500 typé et on N'ÉCRIT PAS le ledger,
+    // sinon la piste tamper-evident attesterait une mutation qui n'a jamais atteint la base
+    // (divergence ledger↔DB, et l'appelant recevrait un faux `ok:true`). Le guard `store` est libéré à
+    // la fermeture du bloc AVANT attribution_login/append_console_ledger (anti auto-deadlock inchangé).
     {
         let store = app.store();
-        if let Some(s) = &new_status {
-            let _ = store.execute(&format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"), &crate::sql_params![s, id]);
-        }
-        if let Some(c) = &new_class {
-            let _ = store.execute(&format!("UPDATE finding SET classification=? WHERE id=? AND engagement_id={eid}"), &crate::sql_params![c, id]);
-            drop(store);
+        let mut sets: Vec<&str> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
+        if let Some(s) = &new_status { sets.push("status=?"); params.push(Param::Text(s.clone())); }
+        if let Some(c) = &new_class { sets.push("classification=?"); params.push(Param::Text(c.clone())); }
+        params.push(Param::Int(id)); // borne WHERE (>=1 SET garanti : no_change déjà rejeté 400 plus haut)
+        let sql = format!("UPDATE finding SET {} WHERE id=? AND engagement_id={eid}", sets.join(", "));
+        if let Err(e) = store.execute(&sql, &params) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "db_write_failed", "why": format!("écriture du finding échouée: {e}")}))).into_response();
         }
     }
     let actor = attribution_login(&app, &headers);
@@ -406,33 +414,49 @@ pub(crate) async fn findings_bulk_status(
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }
-    let (mut applied, mut skipped): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
+    let (mut applied, mut skipped, mut errored): (Vec<i64>, Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new(), Vec::new());
     {
         // Le guard `store` est SCOPÉ ce bloc et LIBÉRÉ avant `attribution_login`/`append_console_ledger`
         // (qui re-verrouillent le MÊME Mutex de connexion quand une session cookie est présente) — sinon
         // AUTO-DEADLOCK sur le thread. Même discipline que finding_templates.rs.
-        
+
         for id in &ids {
-            // UPDATE confiné à l'engagement actif : une ligne d'un AUTRE engagement -> 0 affectée -> SKIP.
-            // Chaque id est un i64 (parsé de JSON) ; `eid` est un entier résolu (jamais du texte client).
-            let n = app.store()
-                .execute(
-                    &format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"),
-                    &crate::sql_params![status.clone(), *id],
-                )
-                .unwrap_or(0);
-            if n > 0 {
-                applied.push(*id);
-            } else {
-                skipped.push(*id);
+            // UPDATE confiné à l'engagement actif. On CLASSE selon le Result (l'échec n'est PLUS avalé) :
+            //   Ok(n>0) = muté ; Ok(0) = id d'un AUTRE engagement / inexistant -> SKIP légitime ;
+            //   Err     = ÉCRITURE ÉCHOUÉE (lock/disque/pg) -> `errored`, JAMAIS confondu avec un skip
+            //             (sinon un échec DB passerait pour un « non trouvé » et l'appelant croirait à un
+            //             succès partiel silencieux). Chaque id est un i64 ; `eid` est un entier résolu.
+            match app.store().execute(
+                &format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"),
+                &crate::sql_params![status.clone(), *id],
+            ) {
+                Ok(n) if n > 0 => applied.push(*id),
+                Ok(_) => skipped.push(*id),
+                Err(_) => errored.push(*id),
             }
         }
     }
     let actor = attribution_login(&app, &headers);
-    append_console_ledger(&app, "console.finding.bulk_status", json!({
+    // Le ledger reflète la RÉALITÉ DB : `applied` ne contient QUE des mutations réellement durables
+    // (aucune attestation d'une écriture qui n'a pas eu lieu). `errored` n'est ajouté au ledger QUE s'il
+    // y a eu des échecs -> le chemin nominal (aucune erreur) reste BYTE-IDENTIQUE (ledger + réponse).
+    let mut detail = json!({
         "actor": actor, "engagement_id": eid, "status": status,
         "applied": applied, "skipped": skipped,
-    }));
+    });
+    if !errored.is_empty() {
+        detail.as_object_mut().unwrap().insert("errored".into(), json!(errored));
+    }
+    append_console_ledger(&app, "console.finding.bulk_status", detail);
+    // Des écritures ONT ÉCHOUÉ -> 500 + liste `errored`, pour que l'appelant NE prenne PAS un échec
+    // partiel pour un succès total (anti false-200). Aucune erreur -> 200 BYTE-IDENTIQUE à avant.
+    if !errored.is_empty() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false, "error": "db_write_failed", "status": status, "engagement_id": eid,
+            "applied": applied, "skipped": skipped, "errored": errored,
+            "applied_count": applied.len(), "skipped_count": skipped.len(), "errored_count": errored.len(),
+        }))).into_response();
+    }
     (StatusCode::OK, Json(json!({
         "ok": true, "status": status, "engagement_id": eid,
         "applied": applied, "skipped": skipped,
@@ -1007,6 +1031,72 @@ mod tests {
         assert_eq!(status_of(&app, f2), "confirmed");
         assert_eq!(status_of(&app, fx), "new", "le finding d'un AUTRE engagement est INTOUCHÉ");
         assert_eq!(read_ledger_lines(&led).last().unwrap()["kind"], "console.finding.bulk_status");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// FINDING UPDATE — INJECTION D'ÉCHEC : un TRIGGER `BEFORE UPDATE ... RAISE(ABORT)` fait ÉCHOUER
+    /// l'écriture (les SELECT d'existence passent). Le handler DOIT alors : (a) renvoyer 500 typé
+    /// `db_write_failed` (PAS un faux `ok:true`), (b) N'ÉCRIRE AUCUNE entrée au ledger (anti divergence
+    /// ledger↔DB — la piste tamper-evident ne doit jamais attester une mutation qui n'a pas eu lieu),
+    /// (c) laisser le finding INTOUCHÉ. Régression directe du bug audité (write avalé -> faux 200 + ledger).
+    #[tokio::test]
+    async fn finding_update_db_failure_500_and_no_ledger() {
+        let led = tmp_ledger("upd-fail");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+        // Injecte un échec d'ÉCRITURE : tout UPDATE de finding est ABORTé (les lectures restent OK).
+        {
+            let db = app.db();
+            db.execute_batch("CREATE TRIGGER t_block_upd BEFORE UPDATE ON finding BEGIN SELECT RAISE(ABORT,'boom'); END;")
+                .unwrap();
+        }
+        let before = read_ledger_lines(&led).len();
+        let r = finding_update(State(app.clone()), peer(), bearer(&otok), Path(f1),
+            Query(HashMap::from([("engagement".into(), "1".into())])),
+            Json(json!({"status": "confirmed", "classification": "GREEN"}))).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "écriture échouée -> 500");
+        let b = to_json(r).await;
+        assert_eq!(b["error"], "db_write_failed", "erreur typée (enveloppe existante)");
+        assert_eq!(status_of(&app, f1), "new", "aucune mutation appliquée (état intouché)");
+        assert_eq!(read_ledger_lines(&led).len(), before, "un échec d'écriture NE ledgerise PAS");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// BULK STATUS — INJECTION D'ÉCHEC : avec le même trigger, TOUTES les écritures échouent. Le handler
+    /// DOIT : (a) 500 (pas un succès total), (b) classer les ids en `errored` (JAMAIS en `skipped`, sinon
+    /// un échec DB passerait pour un « non trouvé »), (c) NE PAS muter, (d) si un ledger est écrit, son
+    /// `applied` est VIDE (aucune fausse attestation de mutation).
+    #[tokio::test]
+    async fn bulk_status_db_failure_marks_errored_not_skipped() {
+        let led = tmp_ledger("bulk-fail");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let f2 = seed_finding(&app, 1, "f2", "new");
+        let (_v, otok) = seed_roles(&app);
+        {
+            let db = app.db();
+            db.execute_batch("CREATE TRIGGER t_block_upd BEFORE UPDATE ON finding BEGIN SELECT RAISE(ABORT,'boom'); END;")
+                .unwrap();
+        }
+        let r = findings_bulk_status(State(app.clone()), peer(), bearer(&otok),
+            Query(HashMap::from([("engagement".into(), "1".into())])),
+            Json(json!({"ids": [f1, f2], "status": "confirmed"}))).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "des écritures échouées -> 500");
+        let b = to_json(r).await;
+        let errored: Vec<i64> = b["errored"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+        assert!(errored.contains(&f1) && errored.contains(&f2), "ids en ERRORED, pas en skipped");
+        assert_eq!(b["applied"].as_array().unwrap().len(), 0, "rien appliqué");
+        assert_eq!(status_of(&app, f1), "new", "aucune mutation (échec DB)");
+        // Si une entrée ledger a été écrite, elle n'atteste AUCUNE mutation (applied vide).
+        if let Some(last) = read_ledger_lines(&led).last() {
+            if last["kind"] == "console.finding.bulk_status" {
+                assert_eq!(last["detail"]["applied"].as_array().map(|a| a.len()).unwrap_or(0), 0,
+                    "le ledger n'atteste aucune mutation qui n'a pas eu lieu");
+            }
+        }
         let _ = std::fs::remove_file(&led);
     }
 
