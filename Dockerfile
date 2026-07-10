@@ -71,11 +71,19 @@ COPY forge/VERSION ./forge/VERSION
 
 WORKDIR /build/forge/console
 
+# Cargo features OPTIONNELLES à activer au build (ADDITIF — VIDE PAR DÉFAUT => build community
+# byte-identique, aucune dépendance supplémentaire). Ex. `store-postgres` (backend Postgres, TLS
+# rustls/ring openssl-free) pour un déploiement HA/multi-instance :
+#   docker compose ... build --build-arg FORGE_CARGO_FEATURES=store-postgres
+# (l'override docker-compose.postgres.yml le pose automatiquement — cf. docs/DEPLOYMENT.md § Postgres).
+ARG FORGE_CARGO_FEATURES=""
+
 # Build release reproductible (profil release pinné dans Cargo.toml : opt-level=z, lto, strip).
-# Le Cargo.lock du crate est committé → versions de deps verrouillées.
+# Le Cargo.lock du crate est committé → versions de deps verrouillées. `${FORGE_CARGO_FEATURES:+...}` :
+# n'ajoute `--features <…>` QUE si l'ARG est non vide (sinon la ligne est IDENTIQUE au build par défaut).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/forge/console/target \
-    cargo build --release --locked \
+    cargo build --release --locked ${FORGE_CARGO_FEATURES:+--features "$FORGE_CARGO_FEATURES"} \
     && mkdir -p /out \
     && cp target/release/forge-console /out/forge-console
 
@@ -126,6 +134,36 @@ RUN apt-get update \
         unzip \
         tini \
     && rm -rf /var/lib/apt/lists/*
+
+# POSTGRES BACKEND (feature `store-postgres`) — installe le CLIENT Postgres (`pg_dump`/`pg_restore`)
+# UNIQUEMENT quand l'image est buildée avec la feature (`FORGE_CARGO_FEATURES` contient store-postgres).
+# La console se CONNECTE via rustls (aucun libpq requis) ; `pg_dump` sert la SAUVEGARDE Postgres (Stage 4
+# — cf. backup.rs). Build community (ARG vide) : le `grep` échoue -> aucun paquet installé -> image PAR
+# DÉFAUT inchangée (aucun binaire Postgres). Ré-déclaré ici car un ARG ne traverse pas les stages FROM.
+#
+# ⚠️ VERSION du client : le postgresql-client de Debian bookworm est en v15, qui REFUSE de dumper un
+# serveur v16 (« server version mismatch »). On installe donc le client depuis le dépôt PGDG officiel à la
+# version `FORGE_PG_CLIENT_VERSION` (défaut 16, alignée sur le service `postgres:16` du compose) — un
+# pg_dump vN dumpe un serveur <= vN. Le dépôt PGDG utilise une clé signée (signed-by .asc, sans gnupg).
+ARG FORGE_CARGO_FEATURES=""
+ARG FORGE_PG_CLIENT_VERSION=16
+RUN set -eux; \
+    if echo "${FORGE_CARGO_FEATURES}" | grep -q "store-postgres"; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends curl ca-certificates; \
+        install -d /usr/share/postgresql-common/pgdg; \
+        curl --fail -sSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+        codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"; \
+        echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+            > /etc/apt/sources.list.d/pgdg.list; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends "postgresql-client-${FORGE_PG_CLIENT_VERSION}"; \
+        rm -rf /var/lib/apt/lists/*; \
+        pg_dump --version; \
+    else \
+        echo "[build] store-postgres absent des features -> pg_dump non installé (image community inchangée)"; \
+    fi
 
 # Outils offensifs ProjectDiscovery (httpx / nuclei / subfinder), versions ET DIGESTS pinnés.
 # Binaires Go statiques → simple téléchargement+install (pas de runtime Go embarqué).

@@ -934,7 +934,7 @@ const MIGRATE_STORE_FK_ORDER: &[&str] = &[
 /// (`user:pass@`) et la query-string. Best-effort : si l'URL n'a pas la forme attendue on renvoie au
 /// minimum le schéma + hôte, jamais le mot de passe.
 #[cfg(feature = "store-postgres")]
-fn redact_pg_url(url: &str) -> String {
+pub(crate) fn redact_pg_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((s, r)) => (s, r),
         None => return "<redacted>".to_string(),
@@ -1180,8 +1180,15 @@ fn migrate_store_core(
             counts.push(MigTableCount { table: t.clone(), source: copied, dest: 0 });
         }
         // Recale TOUTES les séquences IDENTITY (id + seq + scim_*/sso_* éventuels) — après insertion des
-        // ids explicites, sinon le 1er INSERT-sans-id post-migration collisionne. Dans la transaction (setval
-        // est transactionnel en PG) : rollback -> séquences aussi restaurées.
+        // ids explicites, sinon le 1er INSERT-sans-id post-migration collisionne. ⚠️ CORRECTIF Stage-3 :
+        // `setval` N'EST **PAS** transactionnel en Postgres — les modifications de séquence ne sont JAMAIS
+        // annulées par un ROLLBACK (les séquences sont non-transactionnelles by design). Si la vérif des
+        // comptes ci-dessous échoue et que `with_tx` rollback, les DONNÉES cibles sont bien restaurées mais
+        // les séquences restent avancées. C'est INOFFENSIF ici : sur rollback la cible retourne à son état
+        // pré-migration (vide, ou pré-`--force`), et un simple retry — soit `--force` (TRUNCATE ... RESTART
+        // IDENTITY remet les séquences à zéro), soit sur une cible vide (le prochain `setval` les recale sur
+        // max(id) réel) — reconverge. Aucune corruption : des séquences en avance ne produisent que des ids
+        // plus grands, jamais de collision.
         let identity = crate::state::advance_pg_identity_sequences_all(tx.store())?;
         // VÉRIFICATION : source vs cible, table par table (comptes relus DANS la transaction).
         let mut mismatch = false;
@@ -1231,7 +1238,8 @@ fn print_migration_counts(report: &MigrationReport) {
 /// `forge-console migrate-store --to <postgres-url> [--from <sqlite-path>] [--dry-run] [--force]
 ///   [--ledger <path>]` — migrateur gouverné SQLite -> Postgres (feature `store-postgres`).
 /// Codes de sortie : 0 = OK ; 1 = refus de gouvernance (cible non vide sans `--force`) OU comptes
-/// discordants (rollback) ; 2 = usage / connexion / schéma.
+/// discordants (rollback) ; 2 = usage / connexion / schéma ; 3 = migration COMMITTÉE mais checkpoint
+/// ledger tamper-evident non écrit (gouvernance : jamais de succès sans checkpoint auditable).
 #[cfg(feature = "store-postgres")]
 pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     let to_url = match cli_opt(args, "to").filter(|s| !s.is_empty()) {
@@ -1329,7 +1337,8 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
         "tables": per_table,
         "ts_unix": crate::state::chrono_now_compact(),
     });
-    match crate::dbmigrate::ledger_append_standalone(&ledger_path, "console.store.migrate", &detail) {
+    let checkpoint = crate::dbmigrate::ledger_append_standalone(&ledger_path, "console.store.migrate", &detail);
+    match &checkpoint {
         Ok(hash) => {
             println!("[forge-console] migrate-store : checkpoint ledger '{ledger_path}' (console.store.migrate) signé, hash={hash}");
         }
@@ -1339,9 +1348,21 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     }
 
     if dry_run {
+        // DRY-RUN : AUCUNE donnée committée -> un échec de checkpoint n'a rien à « rendre invérifiable ».
+        // On le signale (ci-dessus) mais on sort 0 : rien n'a été migré, il n'y a pas de succès à trahir.
         println!("[forge-console] migrate-store [DRY-RUN] terminé — AUCUNE écriture dans la cible.");
-    } else {
-        println!("[forge-console] migrate-store terminé — {} ligne(s) migrée(s), comptes vérifiés.", report.total_rows);
+        return 0;
     }
+
+    // GOUVERNANCE (correctif Stage-3) : la migration est COMMITTÉE mais son checkpoint tamper-evident
+    // a ÉCHOUÉ -> ne JAMAIS rapporter un succès (exit 0). Une migration sans son checkpoint signé n'est
+    // pas auditable : on sort NON-ZÉRO (3, distinct de 1=gouvernance/mismatch et 2=usage/connexion) pour
+    // que l'orchestrateur/CI le traite comme un échec et exige la ré-émission manuelle du checkpoint.
+    if checkpoint.is_err() {
+        eprintln!("[forge-console] migrate-store: ÉCHEC GOUVERNANCE — {} ligne(s) migrée(s) et COMMITTÉE(s), mais le checkpoint ledger signé n'a PAS pu être écrit (ci-dessus). La migration N'EST PAS auditable ; exit non-zéro. Vérifie l'accessibilité/permissions du ledger '{ledger_path}' puis ré-émets le checkpoint console.store.migrate.", report.total_rows);
+        return 3;
+    }
+
+    println!("[forge-console] migrate-store terminé — {} ligne(s) migrée(s), comptes vérifiés.", report.total_rows);
     0
 }

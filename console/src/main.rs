@@ -245,6 +245,33 @@ mod store;
 /// tout sous host_guard (anti-rebinding). Extrait de main() pour être exercé TEL QUEL par les tests
 /// d'intégration (parité stricte du câblage : ce qui est gaté en prod l'est en test). `app` est déplacé
 /// dans le routeur (with_state) ; le ConnectInfo est branché au moment du `serve`, pas ici.
+/// GET /health — sonde PUBLIQUE (hors auth_guard). ADDITIF Stage 4 : PING du store ACTIF (SQLite ou
+/// Postgres) via un `SELECT 1` à travers le seam. RAPIDE + NON-FATAL : /health répond TOUJOURS 200
+/// (liveness du routeur HTTP) et ajoute `db: "ok" | "degraded"` — `degraded` si le ping échoue (PG
+/// down/injoignable ; sous PG le ping traverse le reconnect+retry single-shot, donc une coupure
+/// transitoire GUÉRIT en `ok`, un serveur réellement down retombe en `degraded`). Champ `db` ADDITIF : la
+/// forme community `{status, version}` reste compatible (le healthcheck compose ne teste que le 200).
+async fn health(axum::extract::State(app): axum::extract::State<App>) -> Json<Value> {
+    let db_ok = health_db_ping(&app);
+    Json(json!({
+        "status": "ok",
+        "version": forge_version(),
+        "db": if db_ok { "ok" } else { "degraded" },
+    }))
+}
+
+/// PING léger et borné du store ACTIF : `SELECT 1` via `App::store()`. `true` si la valeur `1` revient.
+/// SYNCHRONE (aucun `.await` en tenant le guard `!Send`) et sans panique (toute `Err` -> `false`). Sous
+/// Postgres, `store().query_row` traverse le reconnect+retry HA : une coupure transitoire est guérie
+/// (db:ok), un PG réellement down échoue la (re)connexion -> `false` -> `db:degraded`.
+fn health_db_ping(app: &App) -> bool {
+    let store = app.store();
+    store
+        .query_row("SELECT 1", &crate::sql_params![], |r| r.get_i64(0))
+        .map(|v| v == 1)
+        .unwrap_or(false)
+}
+
 fn build_router(app: App, web_dir: &str) -> Router {
     // routes protégées par auth_guard ; ServeDir sert les assets statiques (style.css/app.js/quetzal.svg/
     // favicon.svg/fonts/…) en fallback pour toute route non-API non matchée — l'index `/` reste rendu
@@ -354,9 +381,10 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .fallback_service(ServeDir::new(web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     Router::new()
-        // /health : sonde ouverte (hors auth_guard). JSON {status, version} — `version` provient
-        // du fichier VERSION (source unique). `forge doctor --purple` ne teste que le code HTTP 200.
-        .route("/health", get(|| async { Json(json!({"status": "ok", "version": forge_version()})) }))
+        // /health : sonde ouverte (hors auth_guard). JSON {status, version, db} — `version` provient du
+        // fichier VERSION (source unique) ; `db` (ADDITIF Stage 4) PING le store ACTIF. `forge doctor
+        // --purple` et le healthcheck compose ne testent que le code HTTP 200 (forme préservée).
+        .route("/health", get(health))
         // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
         // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
         .route("/api/login", post(login))
@@ -518,18 +546,21 @@ async fn main() {
     // porte le client session-pinné dans `App.pg`. En SQLite (ou build community, bloc non compilé) :
     // `None` -> `store()` retombe sur SQLite.
     #[cfg(feature = "store-postgres")]
-    let pg: Option<Arc<Mutex<postgres::Client>>> = match &store_selection {
+    let pg: Option<Arc<crate::store::PgConn>> = match &store_selection {
         StoreSelection::Postgres(url) => {
             let url = url.clone();
-            let client = std::thread::spawn(move || crate::store::connect_postgres(&url))
+            let connect_url = url.clone();
+            let client = std::thread::spawn(move || crate::store::connect_postgres(&connect_url))
                 .join()
                 .expect("postgres connect thread panicked")
                 .unwrap_or_else(|e| {
                     eprintln!("[forge-console] FATAL {e}");
                     std::process::exit(2);
                 });
-            println!("[forge-console] store: Postgres (FORGE_DB_URL) — client session-pinné connecté");
-            Some(Arc::new(Mutex::new(client)))
+            println!("[forge-console] store: Postgres (FORGE_DB_URL) — client session-pinné connecté (reconnect+retry HA armé)");
+            // Stage 4 HA : le DSN voyage AVEC le client (PgConn) pour re-établir la session après une
+            // coupure (restart/failover) — cf. `Store::postgres_reconnectable`.
+            Some(Arc::new(crate::store::PgConn { url, client: Mutex::new(client) }))
         }
         StoreSelection::Sqlite => None,
     };

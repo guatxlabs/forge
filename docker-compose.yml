@@ -223,6 +223,40 @@ services:
   #   networks: [forge-net]
   #   # puis dans forge-console.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via forge/.env)
 
+  # ---------------------------------------------------------------------------
+  # postgres — backend ENTERPRISE (OPTIONNEL, profil "postgres", Stage 4 HA/multi-instance).
+  # ---------------------------------------------------------------------------
+  # EXCLU d'un `docker compose up` NU (profil "postgres") => le déploiement PAR DÉFAUT reste SQLite,
+  # INCHANGÉ. Pour l'activer, il faut À LA FOIS ce profil ET l'override qui recompile la console avec la
+  # feature `store-postgres` et pointe FORGE_DB_URL sur ce service (cf. docs/DEPLOYMENT.md § Postgres) :
+  #     docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+  #                    --profile postgres up -d --build
+  # Sans l'override, la console (build SQLite) IGNORE ce Postgres. Credentials : défauts d'ÉVAL
+  # (forge/forge) — à SURCHARGER via forge/.env (FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB) en prod.
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16
+    container_name: forge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${FORGE_PG_USER:-forge}"
+      POSTGRES_PASSWORD: "${FORGE_PG_PASSWORD:-forge}"
+      POSTGRES_DB: "${FORGE_PG_DB:-forge}"
+    volumes:
+      - forge-pg:/var/lib/postgresql/data
+    # Service INTERNE : joignable via le réseau compose à `postgres:5432` (cf. FORGE_DB_URL de l'override).
+    # Pas de port publié par défaut (ne pas exposer Postgres publiquement).
+    expose:
+      - "5432"
+    networks:
+      - forge-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FORGE_PG_USER:-forge} -d ${FORGE_PG_DB:-forge}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 networks:
   forge-net:
     driver: bridge
@@ -230,3 +264,5 @@ networks:
 volumes:
   forge-db:
   forge-ledger:
+  # Données Postgres (utilisé UNIQUEMENT sous le profil "postgres" + l'override — cf. docs/DEPLOYMENT.md).
+  forge-pg:

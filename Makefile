@@ -2,7 +2,16 @@
 # Sûreté d'abord : aucune cible ici ne tire quoi que ce soit contre une cible réelle.
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-py test-rust check-version install console doctor clean demo demo-purple demo-seed
+.PHONY: help test test-py test-rust test-pg check-version install console doctor clean demo demo-purple demo-seed
+
+# --- Postgres (Stage 4) : conteneur éphémère pour les tests d'intégration du backend store-postgres ---
+PG_IMAGE      ?= postgres:16
+PG_CONTAINER  ?= forge-pg-test
+PG_PORT       ?= 5433
+PG_USER       ?= forge
+PG_PASS       ?= forgepw
+PG_DB         ?= forge
+PG_URL        ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)
 
 # --- Démo hors-ligne (engagement de référence synthétique — TLD .example, aucune cible réelle) ---
 DEMO_DIR   ?= examples/reference-engagement
@@ -20,6 +29,25 @@ test-py:  ## Tests Python (stdlib, zéro réseau)
 
 test-rust:  ## Tests Rust de la console (cargo test, offline)
 	cd console && cargo test
+
+test-pg:  ## Tests d'intégration Postgres (Stage 4) : spin docker PG -> cargo test --features store-postgres -> teardown
+	@echo "[test-pg] démarrage d'un Postgres éphémère ($(PG_IMAGE)) sur :$(PG_PORT)..."
+	@docker rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true
+	@docker run -d --name $(PG_CONTAINER) \
+		-e POSTGRES_USER=$(PG_USER) -e POSTGRES_PASSWORD=$(PG_PASS) -e POSTGRES_DB=$(PG_DB) \
+		-p $(PG_PORT):5432 $(PG_IMAGE) >/dev/null
+	@echo "[test-pg] attente de la disponibilité..."
+	@for i in $$(seq 1 30); do \
+		docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "[test-pg] cargo test --features store-postgres (TEST_PG_URL positionné)..."
+	@set -e; \
+	  ( cd console && TEST_PG_URL="$(PG_URL)" cargo test --features store-postgres ); \
+	  rc=$$?; \
+	  echo "[test-pg] teardown du conteneur $(PG_CONTAINER)"; \
+	  docker rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true; \
+	  exit $$rc
 
 check-version:  ## Vérifie que VERSION == pyproject == Cargo.toml (échoue sinon)
 	python3 scripts/check_version.py

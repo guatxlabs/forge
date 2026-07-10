@@ -764,9 +764,11 @@ pub(crate) struct App {
     // client pour la vie de l'App : `execute(INSERT)`+`last_insert_id()` tombent sur la MÊME session,
     // cf. store.rs). `Some` UNIQUEMENT si FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL et feature
     // compilée ; sinon `None` -> `store()` retombe sur SQLite (build community inchangé). Le champ
-    // n'existe QUE sous la feature (struct byte-identique quand OFF).
+    // n'existe QUE sous la feature (struct byte-identique quand OFF). Stage 4 HA : `PgConn` bundle le
+    // client + son DSN (`url`) pour que `store()` puisse le RE-ÉTABLIR après une coupure (restart/
+    // failover) — cf. `Store::postgres_reconnectable` / `pg_run`.
     #[cfg(feature = "store-postgres")]
-    pub(crate) pg: Option<Arc<Mutex<postgres::Client>>>,
+    pub(crate) pg: Option<Arc<crate::store::PgConn>>,
     pub(crate) token_sha: Arc<String>,
     pub(crate) token_raw: Arc<String>,          // token bearer EN CLAIR — passé au moteur spawné pour /api/ingest
     pub(crate) user: Arc<String>,
@@ -849,7 +851,9 @@ impl App {
         // et TOUJOURS dans le build community (bloc non compilé) — on retombe sur SQLite, inchangé.
         #[cfg(feature = "store-postgres")]
         if let Some(pg) = self.pg.as_ref() {
-            return crate::store::Store::postgres(pg.lock().unwrap_or_else(|e| e.into_inner()));
+            // Stage 4 HA : held-guard sur le client PG + son DSN -> reconnect+retry single-shot sur coupure.
+            let guard = pg.client.lock().unwrap_or_else(|e| e.into_inner());
+            return crate::store::Store::postgres_reconnectable(guard, &pg.url);
         }
         crate::store::Store::sqlite(self.db.lock().unwrap_or_else(|e| e.into_inner()))
     }
