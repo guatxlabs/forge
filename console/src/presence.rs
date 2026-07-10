@@ -75,13 +75,50 @@ struct PresenceEntry {
 /// (chaque méthode lock -> mute -> release en synchrone) : conforme au lint `await_holding_lock`.
 #[derive(Clone, Default)]
 pub(crate) struct PresenceRegistry {
-    inner: Arc<Mutex<HashMap<String, PresenceEntry>>>, // conn_id -> entrée
+    inner: Arc<Mutex<HashMap<String, PresenceEntry>>>, // conn_id -> entrée (backend EN MÉMOIRE, !ha)
+    // HA #10 Wave C — PRESENCE PG TABLE. `Some(app)` UNIQUEMENT quand HA est engagé : les mêmes méthodes
+    // (join/touch/touch_login/leave/snapshot) écrivent alors la table `presence` PARTAGÉE (roster
+    // cross-instance) au lieu de la map en mémoire. `None` (défaut, community/mono-instance) -> map en
+    // mémoire, BYTE-IDENTIQUE. Feature-gated : le champ n'existe pas dans le build community (struct
+    // identique à avant), et `derive(Default)` le laisse à `None`.
+    #[cfg(feature = "store-postgres")]
+    backend: Option<crate::App>,
 }
 
 impl PresenceRegistry {
-    /// Inscrit (ou remplace) la connexion `conn_id`. `since`/`last_seen` = maintenant.
+    /// Construit le registre pour CET `app` : PG-backé (table `presence` partagée) quand HA est engagé,
+    /// sinon EN MÉMOIRE (défaut, byte-identique). Câblé une fois dans `build_router`. En community/!store-
+    /// postgres, TOUJOURS en mémoire.
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn for_app(app: &crate::App) -> Self {
+        if crate::ha::ha_enabled(app) {
+            PresenceRegistry { inner: Arc::default(), backend: Some(app.clone()) }
+        } else {
+            PresenceRegistry::default()
+        }
+    }
+    #[cfg(not(feature = "store-postgres"))]
+    pub(crate) fn for_app(_app: &crate::App) -> Self {
+        PresenceRegistry::default()
+    }
+
+    /// Inscrit (ou remplace) la connexion `conn_id`. `since`/`last_seen` = maintenant. Sous HA -> upsert
+    /// dans la table `presence` PARTAGÉE (stampée de l'`instance_id` hôte) ; sinon map en mémoire.
     fn join(&self, conn_id: &str, login: &str, role: &str, engagement_id: Option<i64>) {
         let now = now_epoch();
+        #[cfg(feature = "store-postgres")]
+        if let Some(app) = &self.backend {
+            let store = app.store();
+            let _ = store.execute(
+                "INSERT INTO presence(conn_id,login,role,engagement_id,instance_id,since,last_seen)
+                 VALUES(?,?,?,?,?,?,?)
+                 ON CONFLICT(conn_id) DO UPDATE SET login=excluded.login, role=excluded.role,
+                   engagement_id=excluded.engagement_id, instance_id=excluded.instance_id,
+                   since=excluded.since, last_seen=excluded.last_seen",
+                &crate::sql_params![conn_id, login, role, engagement_id, app.instance_id.as_str(), now, now],
+            );
+            return;
+        }
         let mut m = self.inner.lock().unwrap();
         m.insert(
             conn_id.to_string(),
@@ -92,6 +129,12 @@ impl PresenceRegistry {
     /// Rafraîchit le `last_seen` d'UNE connexion (heartbeat interne du flux). No-op si déjà retirée.
     fn touch(&self, conn_id: &str) {
         let now = now_epoch();
+        #[cfg(feature = "store-postgres")]
+        if let Some(app) = &self.backend {
+            let store = app.store();
+            let _ = store.execute("UPDATE presence SET last_seen=? WHERE conn_id=?", &crate::sql_params![now, conn_id]);
+            return;
+        }
         let mut m = self.inner.lock().unwrap();
         if let Some(e) = m.get_mut(conn_id) {
             e.last_seen = now;
@@ -102,6 +145,13 @@ impl PresenceRegistry {
     /// rafraîchi. Permet à un client qui préfère le polling de maintenir sa présence sans flux SSE ouvert.
     fn touch_login(&self, login: &str) -> usize {
         let now = now_epoch();
+        #[cfg(feature = "store-postgres")]
+        if let Some(app) = &self.backend {
+            let store = app.store();
+            return store
+                .execute("UPDATE presence SET last_seen=? WHERE login=?", &crate::sql_params![now, login])
+                .unwrap_or(0);
+        }
         let mut m = self.inner.lock().unwrap();
         let mut n = 0;
         for e in m.values_mut() {
@@ -115,14 +165,58 @@ impl PresenceRegistry {
 
     /// Retire la connexion `conn_id` (déconnexion). Renvoie l'entrée retirée (pour diffuser le leave).
     fn leave(&self, conn_id: &str) -> Option<PresenceEntry> {
+        #[cfg(feature = "store-postgres")]
+        if let Some(app) = &self.backend {
+            let store = app.store();
+            // lit l'entrée AVANT de la supprimer (pour diffuser le leave login/engagement). Best-effort.
+            let entry = store
+                .query_row(
+                    "SELECT login, role, engagement_id, since, last_seen FROM presence WHERE conn_id=?",
+                    &crate::sql_params![conn_id],
+                    |r| {
+                        Ok(PresenceEntry {
+                            login: r.get_str(0)?,
+                            role: r.get_str(1)?,
+                            engagement_id: r.get_opt_i64(2)?,
+                            since: r.get_i64(3)?,
+                            last_seen: r.get_i64(4)?,
+                        })
+                    },
+                )
+                .ok();
+            let _ = store.execute("DELETE FROM presence WHERE conn_id=?", &crate::sql_params![conn_id]);
+            return entry;
+        }
         let mut m = self.inner.lock().unwrap();
         m.remove(conn_id)
     }
 
     /// Snapshot des entrées NON périmées (GC paresseux : purge en passant les entrées dont le `last_seen`
-    /// dépasse le TTL — une connexion morte sans Drop finit par disparaître).
+    /// dépasse le TTL — une connexion morte sans Drop finit par disparaître). Sous HA -> DELETE des lignes
+    /// périmées puis SELECT de TOUTES les lignes vivantes de la table PARTAGÉE (le filtre tenancy reste dans
+    /// `presence_roster`) -> le roster agrège les opérateurs de TOUS les réplicas.
     fn snapshot(&self) -> Vec<PresenceEntry> {
         let cutoff = now_epoch() - PRESENCE_TTL_SECS;
+        #[cfg(feature = "store-postgres")]
+        if let Some(app) = &self.backend {
+            let store = app.store();
+            let _ = store.execute("DELETE FROM presence WHERE last_seen < ?", &crate::sql_params![cutoff]);
+            return store
+                .query(
+                    "SELECT login, role, engagement_id, since, last_seen FROM presence",
+                    &crate::sql_params![],
+                    |r| {
+                        Ok(PresenceEntry {
+                            login: r.get_str(0)?,
+                            role: r.get_str(1)?,
+                            engagement_id: r.get_opt_i64(2)?,
+                            since: r.get_i64(3)?,
+                            last_seen: r.get_i64(4)?,
+                        })
+                    },
+                )
+                .unwrap_or_default();
+        }
         let mut m = self.inner.lock().unwrap();
         m.retain(|_, e| e.last_seen >= cutoff);
         m.values().cloned().collect()

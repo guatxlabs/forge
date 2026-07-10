@@ -464,7 +464,7 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // tous les clones d'App/handlers). Créé par routeur (donc par serveur) -> isolation naturelle en
         // test ; jamais persisté (aucune table, aucun changement de schéma). Les handlers presence::* le
         // récupèrent via `Extension<PresenceRegistry>` ; les autres routes l'ignorent (inoffensif).
-        .layer(axum::Extension(presence::PresenceRegistry::default()))
+        .layer(axum::Extension(presence::PresenceRegistry::for_app(&app)))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app)
 }
@@ -790,44 +790,61 @@ async fn main() {
     // = None, et build community non compilé) cette branche ne s'exécute pas : SCHEMA+migrate sur la
     // connexion SQLite = App.db font foi. L'amorçage ci-dessous passe ENSUITE par `app.store()` : il sème
     // le backend ACTIF (SQLite = byte-identique ; Postgres via le MÊME chemin seeder, cf. seeders portés).
+    // WAVE-B LOW FIX — COLD-START DDL RACE (HA) : sous HA, deux réplicas démarrant un cluster VIERGE lancent
+    // `execute_batch(PG_SCHEMA)` + les seeders id=1 (dashboard/engagement/tenant) SIMULTANÉMENT. `CREATE …
+    // IF NOT EXISTS` (catalogue PG PARTAGÉ) et `SELECT COUNT(*) … puis INSERT id=1` NE sont PAS concurrency-
+    // safe -> un réplica panique (« tuple concurrently updated » sur pg_type/pg_class, ou duplicate key). On
+    // SÉRIALISE toute la section DDL+seed sous un `pg_advisory_xact_lock(BOOT_DDL_LOCK_KEY)` cluster-global :
+    // un SEUL réplica applique schéma/seeds à la fois, les autres attendent puis voient tout déjà présent
+    // (idempotent, aucun panic/abort). `populate_modules` (spawn python, upsert ON CONFLICT row-safe) et le
+    // boot-reconcile restent HORS du verrou (aucune course id=1 ; on ne tient pas le verrou pendant un spawn).
+    // En SQLite/community : chemin INCHANGÉ (aucun catalogue partagé -> aucun verrou, seeders directs).
     #[cfg(feature = "store-postgres")]
-    if app.pg.is_some() {
-        app.store().execute_batch(PG_SCHEMA).expect("pg schema");
+    let pg_active = app.pg.is_some();
+    #[cfg(not(feature = "store-postgres"))]
+    let pg_active = false;
+    if pg_active {
+        // PG : PG_SCHEMA + seeders id=1 + recalage des séquences IDENTITY, TOUT sous le verrou DDL cluster-
+        // global (pg_advisory_xact_lock, auto-relâché au COMMIT). Le miroir PG du SCHEMA a les colonnes de
+        // migrate() déjà fusionnées. Les seeders reçoivent le store TRANSACTIONNEL (tx.store()) -> même
+        // connexion, dans le BEGIN, donc dans la section critique verrouillée.
+        #[cfg(feature = "store-postgres")]
+        app.store()
+            .with_tx(|tx| {
+                tx.execute("SELECT pg_advisory_xact_lock(?)", &crate::sql_params![crate::ha::BOOT_DDL_LOCK_KEY])?;
+                tx.execute_batch(PG_SCHEMA)?;
+                let s = tx.store();
+                ensure_default_dashboard(s); // dashboard #1 (rétro-compat) + rattache les panels orphelins
+                // ENGAGEMENT #1 / TENANT #1 (migration ZÉRO-PERTE) — idempotents (count>0 => no-op). Sous le
+                // verrou, un seul réplica les crée ; l'autre voit count>0 et ne réinsère pas id=1.
+                ensure_default_engagement(s, &app.scope_in, &app.scope_mode, &app.ledger_path);
+                ensure_default_tenant(s);
+                // Après TOUT seeding à id explicite : recale les séquences IDENTITY sur max(id) (sinon le 1er
+                // INSERT-sans-id régénère id=1 -> duplicate key). Idempotent.
+                advance_pg_identity_sequences(s);
+                Ok::<(), crate::store::StoreError>(())
+            })
+            .expect("pg boot schema+seed (serialized under the DDL advisory lock)");
+    } else {
+        // SQLite (repli du seam) / community : SCHEMA+migrate ont déjà tourné sur la connexion brute ci-dessus.
+        // Seeders directs, exactement comme historiquement (byte-identique). advance_pg_identity_sequences est
+        // un NO-OP en SQLite (is_postgres()=false).
+        ensure_default_dashboard(&app.store());
+        ensure_default_engagement(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
+        ensure_default_tenant(&app.store());
+        advance_pg_identity_sequences(&app.store());
     }
-    ensure_default_dashboard(&app.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
-    // HA (#10 Wave B) — EFFETS DE BORD DE BOOT. Deux natures distinctes, traitées différemment :
-    //
-    //  (1) `populate_modules` : INCONDITIONNEL sur CHAQUE instance, à chaque boot (comme en mono-instance).
-    //      Ce n'est PAS leader-sensible : c'est un UPSERT IDEMPOTENT de la table `module` PARTAGÉE, qui ne
-    //      remet JAMAIS en cause l'intention opérateur (enabled/available_override préservés). Le gater sur
-    //      `is_leader` était un BUG : sous HA `is_leader` est FAUX au boot (le heartbeat ne le bascule
-    //      qu'APRÈS ce point), donc AUCUN réplica ne peuplait -> registre `module` VIDE -> tout run avec
-    //      sélection explicite de modules -> 400 unknown_module. On le rend donc inconditionnel.
-    //
-    //  (2) BOOT-RECONCILE (run_job 'running' orphelins d'un crash -> 'failed', killpg des pgid locaux) :
-    //      DOIT tourner APRÈS l'établissement du leadership.
-    //        - mono-instance (!ha) : au boot, ici, scope=All (killpg tous les pgid, historique byte-identique).
-    //        - HA : DIFFÉRÉ au leader-tick (cf. runs::leader_tick_loop). `is_leader` étant FAUX au boot,
-    //          on ne peut pas le faire ici ; le premier tick où CETTE instance DÉTIENT le bail exécute un
-    //          boot-reconcile OWNER-SCOPÉ de SES PROPRES runs orphelins (un leader qui redémarre-après-crash
-    //          avec un instance_id STABLE réconcilie ses propres lignes 'running' bloquées une fois le bail
-    //          réacquis). Jamais killpg un pgid cross-host.
-    populate_modules(&app.store()); // table `module` peuplée depuis `forge.cli modules` — inconditionnel
+    // `populate_modules` : INCONDITIONNEL sur CHAQUE instance (upsert idempotent de la table `module`
+    // PARTAGÉE, jamais leader-sensible ; hors du verrou DDL car il spawn un process python). En HA les 2
+    // réplicas peuplent (upsert ON CONFLICT row-safe). En mono-instance : identique à avant.
+    populate_modules(&app.store());
+    // BOOT-RECONCILE (run_job 'running' orphelins d'un crash -> 'failed', killpg des pgid locaux) :
+    //   - mono-instance (!ha) : ICI, scope=All (byte-identique au comportement historique) ;
+    //   - HA : DIFFÉRÉ au leader-tick (is_leader est FAUX au boot ; cf. runs::leader_tick_loop) — boot-
+    //     reconcile OWNER-SCOPÉ des propres orphelins une fois le bail acquis, jamais killpg cross-host.
     if !crate::ha::ha_enabled(&app) {
-        // mono-instance : reconcile au boot, scope=All (byte-identique au comportement historique).
         reconcile_runs(&app.store(), runs::ReconcileScope::All);
     }
-    // ENGAGEMENT #1 (migration ZÉRO-PERTE) : si la table `engagement` est vide, crée #1 depuis le scope
-    // serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Idempotent : ne réécrit jamais un
-    // engagement existant. Les lignes existantes gardent engagement_id=1 (DEFAULT posé par migrate).
-    ensure_default_engagement(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
-    // TENANT #1 (ENTERPRISE / migration ZÉRO-PERTE) : tenant par défaut + backfill engagements (tenant_id=1)
-    // + grants rétro-compat des comptes existants. NO-OP fonctionnel en community (filtre tenancy.rs sous flag).
-    ensure_default_tenant(&app.store());
-    // POSTGRES : après TOUT seeding à id explicite (dashboard/engagement/tenant #1), recaler les séquences
-    // IDENTITY sur max(id) — sinon le 1er INSERT-sans-id au runtime régénère id=1 -> duplicate key (HTTP 500).
-    // NO-OP en community/SQLite (is_postgres()=false). Idempotent : sûr à chaque boot.
-    advance_pg_identity_sequences(&app.store());
 
     // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
     // recalculer aussi après toute mutation de comptes (routes d'administration à venir).
@@ -865,6 +882,11 @@ async fn main() {
         // orphelins des leaders morts (failover) et exécute les cancels observés pour ses runs. Ne fait le
         // travail QUE quand `is_leader` (cf. leader_tick_loop). Cloné AVANT que build_router ne déplace `app`.
         tokio::spawn(crate::runs::leader_tick_loop(app.clone()));
+        // CACHE-INVALIDATION CROSS-INSTANCE (Wave C, B6) : chaque réplica poll `settings.cache_epoch` et
+        // recharge ses caches locaux (detection_source / auth_required) quand un PAIR l'a bumpé (mutation
+        // detection-source / user create-disable-role-delete). Tourne sur CHAQUE instance (pas seulement le
+        // leader). Cloné AVANT que build_router ne déplace `app`.
+        tokio::spawn(crate::ha::cache_poll_loop(app.clone()));
     }
 
     // RUNNER DE SAUVEGARDE PROGRAMMÉE (fail-open) : tâche périodique qui, SI une politique

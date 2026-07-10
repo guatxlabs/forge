@@ -89,6 +89,7 @@ pub(crate) fn admin_create_user(app: &App, actor: &str, body: &Value) -> Result<
         crate::upsert_user_store(&store, &login, &role, &hash).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (new/changed account)
     append_console_ledger(app, "console.admin.user.create", json!({"actor": actor, "login": login, "role": role}));
     Ok(json!({"login": login, "role": role, "disabled": false}))
 }
@@ -164,6 +165,7 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
         (purge, eff_role, eff_disabled)
     };
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (role/disable change)
     append_console_ledger(app, "console.admin.user.update", json!({
         "actor": actor,
         "login": target_login,
@@ -207,6 +209,7 @@ pub(crate) fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> R
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("suppression échouée: {e}")))?;
     }
     app.recompute_auth_required();
+    app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (account deleted)
     append_console_ledger(app, "console.admin.user.delete", json!({"actor": actor, "login": target_login}));
     Ok(json!({"deleted": target_login}))
 }

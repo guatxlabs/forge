@@ -162,6 +162,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
     if det_set {
         app.reload_detection_source();
     }
+    app.bump_cache_epoch(); // B6 (HA): 1er admin (auth gate) + éventuelle detection_source -> invalide les pairs
     // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin.
     let (token, expires) = create_session(&app, user_id);
     let ttl = session_ttl_secs();

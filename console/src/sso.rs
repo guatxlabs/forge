@@ -330,6 +330,7 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
     if provisioned {
         // A new individual account exists now — re-arm the auth gate on DB state (mirrors account CRUD).
         app.recompute_auth_required();
+        app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SSO JIT-provisioned account)
     }
     // Sync the account's role + tenant grants to what its groups confer (fail-closed least privilege; a
     // designated super-admin login is never touched). `cap_operator=false`: an admin-configured group ->
