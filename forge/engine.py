@@ -7,14 +7,24 @@ Chaque action est tracée (results) avec son verdict pour le rapport anti-masqua
 Bridge secpipe (optionnel) : si secpipe est importable, on pourra brancher son planner
 coverage-safe + graph (P2). v0 fonctionne sans, en mode liste-d'actions explicite.
 """
+from __future__ import annotations
+
 import enum
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
 from . import modules as mods
 from . import purple
 from . import session
+
+if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
+    from collections.abc import Callable, Iterable
+    from .roe import Action, Scope
+    from .ledger import Ledger
+    from .planner import Planner
+    from .schema import Finding, Target
 
 # Kinds dont le module DÉCOUVRE/RÉSOUT des hôtes à runtime (au-delà de la cible gatée par le ROE) :
 # l'engine leur injecte le périmètre (in_scope/out_scope) dans action.params pour que chaque hôte
@@ -74,20 +84,22 @@ class ExecResult:
     action: str
     target: str
     kind: str
-    verdict: object
-    reasons: list
+    verdict: Verdict | str
+    reasons: list[str]
     output: object = None
-    phase: object = None
+    phase: Phase | None = None
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         verdict = self.verdict.value if isinstance(self.verdict, Verdict) else self.verdict
         return {"action": self.action, "target": self.target, "kind": self.kind,
                 "verdict": verdict, "reasons": self.reasons, "output": self.output}
 
 
 class Engine:
-    def __init__(self, scope, ledger=None, mode="propose", memory=None, graph=None,
-                 campaign=None, run_id=None, progress=None):
+    def __init__(self, scope: Scope, ledger: "Ledger | None" = None, mode: str = "propose",
+                 memory: Any = None, graph: EngagementGraph | None = None,
+                 campaign: str | None = None, run_id: str | None = None,
+                 progress: "Callable[[str], None] | None" = None) -> None:
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
@@ -114,23 +126,23 @@ class Engine:
         # AUCUN appel, AUCUNE sortie -> comportement byte-à-byte inchangé. Ne touche RIEN de la
         # gouvernance/ROE ni des findings : pure observabilité (ne fait que refléter des res déjà décidés).
         self._progress = progress
-        self.findings = []
-        self.results = []          # [{action, verdict, reasons, output}]
-        self.run_records = []      # boucle purple : un record ATT&CK par action tirée
-        self.skipped_budget = []   # actions déférées par le planner (defer != delete)
-        self.coverage_gaps = {}    # classes jamais tentées, par cible
+        self.findings: list[Finding] = []
+        self.results: list[dict[str, Any]] = []          # [{action, verdict, reasons, output}]
+        self.run_records: list[dict[str, Any]] = []      # boucle purple : un record ATT&CK par action tirée
+        self.skipped_budget: list[Action] = []           # actions déférées par le planner (defer != delete)
+        self.coverage_gaps: dict[str, list[str]] = {}    # classes jamais tentées, par cible
         self.dups = 0              # findings ignorés car déjà en mémoire
         self.waves = 0             # nb de vagues plan->observe->replan exécutées (campagne itérative)
 
     # --- armement délégué (gestes journalisés) ---
-    def arm(self, reason="armed by operator"):
+    def arm(self, reason: str = "armed by operator") -> None:
         self.roe.arm(reason)
 
-    def approve(self, action_id, reason="approved by operator"):
+    def approve(self, action_id: str, reason: str = "approved by operator") -> None:
         self.roe.approve(action_id, reason)
 
     # --- exécution d'une action via son module ---
-    def execute(self, action):
+    def execute(self, action: Action) -> dict[str, Any]:
         module = mods.get(action.kind)
         if module is None:
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
@@ -236,7 +248,7 @@ class Engine:
         return res
 
     # --- émission progressive (observabilité live ; no-op si aucun callback) ---
-    def _emit(self, line):
+    def _emit(self, line: str) -> None:
         """Pousse une ligne d'avancement au callback `progress` s'il est branché. Best-effort :
         une exception du callback (console injoignable, etc.) n'interrompt JAMAIS le run."""
         cb = self._progress
@@ -247,7 +259,7 @@ class Engine:
         except Exception:  # noqa: BLE001 — l'observabilité ne doit jamais casser l'exécution gouvernée
             pass
 
-    def _emit_result(self, res):
+    def _emit_result(self, res: dict[str, Any]) -> None:
         """Émet une ligne concise par action exécutée : verdict + kind + cible + 1re raison (courte).
         Rend VISIBLES en direct les SKIP/UNAVAILABLE (outil absent, technique désactivée, connecteur
         désactivé) et les VETO, là où seul le rapport final les montrait. Purement dérivé de `res`."""
@@ -260,7 +272,7 @@ class Engine:
             line += f" ({reason})"
         self._emit(line)
 
-    def run(self, actions):
+    def run(self, actions: Iterable[Action]) -> list[dict[str, Any]]:
         # CHOKE POINT unique de l'émission par-action : chaque action passée à run() (proposition
         # directe ET chaque vague de campaign()) émet sa ligne d'avancement APRÈS décision. Les
         # actions DÉFÉRÉES par le planner (skipped_budget) ne passent pas ici -> pas de bruit.
@@ -271,7 +283,8 @@ class Engine:
             out.append(res)
         return out
 
-    def _prepare(self, actions, modules, global_params, attrs_by_host):
+    def _prepare(self, actions: list[Action], modules: "Iterable[str] | None",
+                 global_params: dict[str, Any], attrs_by_host: dict[str, Any]) -> list[Action]:
         """Filtre (sélection modules) + injection de params/scope sur une VAGUE d'actions.
 
         Extrait de la boucle pour être appliqué identiquement à chaque vague (1re proposition ET
@@ -319,7 +332,9 @@ class Engine:
                 a.params.setdefault("rate", self.scope.rate)
         return actions
 
-    def campaign(self, targets, brain, planner, modules=None, module_params=None, max_waves=4):
+    def campaign(self, targets: list[Target], brain: Any, planner: Planner,
+                 modules: "Iterable[str] | None" = None,
+                 module_params: dict[str, Any] | None = None, max_waves: int = 4) -> dict[str, Any]:
         """ITÉRATIF : plan -> observe -> replan, jusqu'à un critère d'arrêt.
 
         Boucle (chaque vague) : `brain.propose(self.graph)` lit le world-model -> planner ordonne
@@ -353,8 +368,8 @@ class Engine:
         attrs_by_host = {t.host: (t.attrs or {}).get("module_params", {}) or {} for t in targets}
         hosts = [t.host for t in targets]
 
-        executed_ids = set()                         # ids d'actions déjà planifiées (dedup inter-vagues)
-        skipped_by_id = {}                           # accumule les déférées (par id, pas de doublon)
+        executed_ids: set[str] = set()               # ids d'actions déjà planifiées (dedup inter-vagues)
+        skipped_by_id: dict[str, Action] = {}        # accumule les déférées (par id, pas de doublon)
         waves = 0
         while waves < max_waves:
             # le cerveau lit l'ÉTAT (graphe enrichi par la vague précédente), pas juste les cibles.
@@ -384,14 +399,14 @@ class Engine:
         self.waves = waves
         return self.coverage()
 
-    def _final_gaps(self, planner, hosts):
+    def _final_gaps(self, planner: Planner, hosts: list[str]) -> dict[str, list[str]]:
         """Lacunes APRÈS toutes les vagues : classe de la checklist jamais tentée sur le host.
 
         Dérive des `results` (kinds réellement planifiés, toutes vagues confondues) -> reflète le
         chaînage (une classe tentée en vague 2 n'est plus une lacune). cls = suffixe du kind, comme
         la dataclass Action (`access_control.idor` -> `idor`... mais on garde la classe d'action si
         connue). On reconstruit la classe par la même règle que Action.__post_init__."""
-        attempted = {h: set() for h in hosts}
+        attempted: dict[str, set[str]] = {h: set() for h in hosts}
         for r in self.results:
             cls = r["kind"].split(".")[-1]
             # repli sur le préfixe pour les kinds composés (access_control.idor -> access_control)
@@ -405,7 +420,7 @@ class Engine:
                 if tgt == hs or tgt.startswith(hs + ":") or tgt.startswith(hs + "/"):
                     attempted[h].add(cls)
                     attempted[h].add(prefix)
-        out = {}
+        out: dict[str, list[str]] = {}
         for h in hosts:
             missing = [c for c in planner.checklist if c not in attempted[h]]
             if missing:
@@ -413,14 +428,14 @@ class Engine:
         return out
 
     # --- transparence (anti-masquage, repris de secpipe) ---
-    def coverage(self):
+    def coverage(self) -> dict[str, Any]:
         fired = [r for r in self.results if r["verdict"] == FIRE]
         dry = [r for r in self.results if r["verdict"] == DRY_RUN]
         vetoed = [r for r in self.results if r["verdict"] == VETO]
         errors = [r for r in self.results if r["verdict"] in ("ERROR", "SKIP")]
         return {"fired": fired, "dry_run": dry, "vetoed": vetoed, "errors": errors}
 
-    def roe_decisions(self):
+    def roe_decisions(self) -> list[dict[str, Any]]:
         """Trace ROE sérialisable : un verdict par action évaluée (anti-masquage).
 
         Dérivé de `self.results` (le journal des décisions) — chaque entrée porte le
