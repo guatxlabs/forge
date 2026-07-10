@@ -68,3 +68,12 @@ export function safeHtml(strings, ...vals) {
   return out;
 }
 export const SEV_BADGE = s => `<span class="sevb sevb-${SEVKEY(s)}">${esc(String(s || '').toUpperCase() || 'INFO')}</span>`;
+
+// TLP 2.0 (classification/diffusion, #15) — jeu FERMÉ (CLEAR|GREEN|AMBER|AMBER+STRICT|RED). TLP_KEY
+// normalise (casse, préfixe `TLP:`, espace -> `+`) et renvoie '' pour toute valeur hors jeu (non
+// classifié). TLP_BADGE rend un badge coloré (classe .tlpb-<clé>) ou '' si non classifié.
+export const TLP_CLASSES = ['CLEAR', 'GREEN', 'AMBER', 'AMBER+STRICT', 'RED'];
+export const TLP_KEY = s => { const u = String(s == null ? '' : s).toUpperCase().replace('TLP:', '').trim().replace(/ +/g, '+'); return TLP_CLASSES.includes(u) ? u : ''; };
+export const TLP_BADGE = s => { const k = TLP_KEY(s); if (!k) return ''; const cls = k.replace('+', '-').toLowerCase(); return `<span class="tlpb tlpb-${cls}" title="Traffic Light Protocol 2.0 — TLP:${esc(k)}">TLP:${esc(k)}</span>`; };
+// Vocabulaire de cycle de vie d'un finding (#15) — miroir du serveur (findings.rs::FINDING_STATUSES).
+export const FINDING_STATUSES = ['new', 'triaged', 'confirmed', 'remediated', 'false_positive', 'accepted', 'wontfix'];

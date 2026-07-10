@@ -235,7 +235,7 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
         "SELECT e.id, e.name, e.status, e.mode, e.created,
                 (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
                 (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
-                e.tenant_id
+                e.tenant_id, e.classification
          FROM engagement e{where_clause} ORDER BY e.id",
     ), &[], |r| {
         let tenant_id = r.get_i64(7)?;
@@ -246,6 +246,8 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
             "mode": r.get_opt_str(3)?.unwrap_or_else(|| "grey".into()),
             "created": r.get_opt_str(4)?.unwrap_or_default(),
             "counts": {"findings": r.get_i64(5)?, "runs": r.get_i64(6)?},
+            // CLASSIFICATION TLP 2.0 (#15) : label de diffusion de l'engagement (vide = non classifié).
+            "classification": r.get_opt_str(8)?.unwrap_or_default(),
         });
         if expose_tenant {
             o["tenant_id"] = json!(tenant_id);
@@ -290,6 +292,15 @@ pub(crate) async fn engagements_create(
         Some(m) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_mode", "why": format!("mode '{m}' invalide (white|grey|black)")}))).into_response(),
         None => scope_mode,
     };
+    // CLASSIFICATION TLP 2.0 (#15) : la colonne `engagement.classification` (jusqu'ici texte libre) est
+    // désormais VALIDÉE au jeu TLP (tolérante : vide = non classifié autorisé ; non vide hors jeu -> 400).
+    let classification = match body.get("classification").and_then(|v| v.as_str()) {
+        None => String::new(),
+        Some(s) => match norm_tlp(s) {
+            Some(x) => x,
+            None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_classification", "why": format!("classification '{s}' invalide (TLP: {})", TLP_CLASSES.join("|"))}))).into_response(),
+        },
+    };
     let actor = attribution_login(&app, &headers);
     // ENTERPRISE (flag-gated) : un engagement naît DANS un tenant accordé au créateur (fail-closed — on
     // ne crée jamais un espace dans un tenant qu'on ne possède pas). Community => None (tenant #1 par
@@ -309,9 +320,9 @@ pub(crate) async fn engagements_create(
     let id = {
         let store = app.store();
         if let Err(e) = store.execute(
-            "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,created,updated)
-             VALUES(?,?,?,?,'',datetime('now'),datetime('now'))",
-            &crate::sql_params![&name, "active", &mode, scope_json],
+            "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,classification,created,updated)
+             VALUES(?,?,?,?,'',?,datetime('now'),datetime('now'))",
+            &crate::sql_params![&name, "active", &mode, scope_json, &classification],
         ) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response();
         }
@@ -378,8 +389,19 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
         Some(s) if matches!(s, "active" | "archived") => Some(s.to_string()),
         Some(s) => return Err((StatusCode::BAD_REQUEST, format!("status '{s}' invalide (active|archived)"))),
     };
-    if new_name.is_none() && new_scope.is_none() && new_mode.is_none() && new_status.is_none() {
-        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (name|mode|scope_json|status)".into()));
+    // CLASSIFICATION TLP 2.0 (#15) : validée au même vocabulaire (tolérante : vide = non classifié).
+    let new_class: Option<String> = match body.get("classification") {
+        None => None,
+        Some(v) => {
+            let s = v.as_str().unwrap_or("");
+            match norm_tlp(s) {
+                Some(x) => Some(x),
+                None => return Err((StatusCode::BAD_REQUEST, format!("classification '{s}' invalide (TLP: {})", TLP_CLASSES.join("|")))),
+            }
+        }
+    };
+    if new_name.is_none() && new_scope.is_none() && new_mode.is_none() && new_status.is_none() && new_class.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (name|mode|scope_json|status|classification)".into()));
     }
     let archiving = new_status.as_deref() == Some("archived") && cur_status == "active";
     {
@@ -394,6 +416,7 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
         if let Some(s) = &new_scope { let _ = store.execute("UPDATE engagement SET scope_json=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
         if let Some(m) = &new_mode { let _ = store.execute("UPDATE engagement SET mode=?, updated=datetime('now') WHERE id=?", &crate::sql_params![m, id]); }
         if let Some(s) = &new_status { let _ = store.execute("UPDATE engagement SET status=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]); }
+        if let Some(c) = &new_class { let _ = store.execute("UPDATE engagement SET classification=?, updated=datetime('now') WHERE id=?", &crate::sql_params![c, id]); }
     }
     let action = if new_status.as_deref() == Some("archived") { "archive" }
         else if new_status.as_deref() == Some("active") && cur_status == "archived" { "activate" }
@@ -401,6 +424,7 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
     append_console_ledger(app, &format!("console.engagement.{action}"), json!({
         "actor": actor, "engagement_id": id,
         "name": new_name, "mode": new_mode, "status": new_status, "scope_changed": new_scope.is_some(),
+        "classification": new_class,
     }));
     Ok(json!({"ok": true, "engagement_id": id, "action": action}))
 }

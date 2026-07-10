@@ -1,5 +1,15 @@
 import { api, write } from '../core/api.js';
-import { $, esc } from '../core/dom.js';
+import { $, TLP_BADGE, esc } from '../core/dom.js';
+
+// Options TLP 2.0 (#15) partagées par les modales create/edit d'engagement.
+const TLP_OPTS = [
+  { value: '', label: '(non classifié)' },
+  { value: 'CLEAR', label: 'TLP:CLEAR' },
+  { value: 'GREEN', label: 'TLP:GREEN' },
+  { value: 'AMBER', label: 'TLP:AMBER' },
+  { value: 'AMBER+STRICT', label: 'TLP:AMBER+STRICT' },
+  { value: 'RED', label: 'TLP:RED' },
+];
 import { loadStatuses } from './overview.js';
 import { LOADERS, VIEWS_HAS } from '../core/router.js';
 import { ENGAGEMENTS, activeEngagement, getEngagements, setActiveEngagement, setEngagements } from '../core/state.js';
@@ -94,6 +104,7 @@ export async function engagementCreateModal() {
     fields: [
       { name: 'name', label: 'Nom', type: 'text', required: true, placeholder: 'Client — Q3 pentest' },
       { name: 'mode', label: 'Mode', type: 'select', value: 'grey', options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
+      { name: 'classification', label: 'Classification (TLP 2.0)', type: 'select', value: '', options: TLP_OPTS },
       { name: 'in_scope', label: 'In-scope (une entrée par ligne — host / *.wildcard / CIDR)', type: 'textarea', placeholder: 'app.example.com\n*.example.com\n10.0.0.0/8' },
       { name: 'out_scope', label: 'Out-of-scope (optionnel)', type: 'textarea', placeholder: 'admin.example.com' },
     ],
@@ -102,6 +113,7 @@ export async function engagementCreateModal() {
   const body = {
     name: String(vals.name || '').trim(),
     mode: vals.mode || 'grey',
+    classification: vals.classification || '',
     scope_json: { mode: vals.mode || 'grey', in_scope: _scopeLines(vals.in_scope), out_scope: _scopeLines(vals.out_scope) },
   };
   try {
@@ -126,12 +138,13 @@ export async function engagementEditModal(e) {
     fields: [
       { name: 'name', label: 'Nom', type: 'text', value: e.name, required: true },
       { name: 'mode', label: 'Mode', type: 'select', value: e.mode, options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
+      { name: 'classification', label: 'Classification (TLP 2.0)', type: 'select', value: e.classification || '', options: TLP_OPTS },
       { name: 'in_scope', label: 'Redéfinir in-scope (vide = inchangé — une entrée par ligne)', type: 'textarea', placeholder: 'app.example.com' },
       { name: 'out_scope', label: 'Redéfinir out-of-scope (vide = inchangé)', type: 'textarea' },
     ],
   });
   if (!vals) return;
-  const body = { name: String(vals.name || '').trim(), mode: vals.mode || e.mode };
+  const body = { name: String(vals.name || '').trim(), mode: vals.mode || e.mode, classification: vals.classification || '' };
   const inl = _scopeLines(vals.in_scope), outl = _scopeLines(vals.out_scope);
   if (inl.length || outl.length) body.scope_json = { mode: vals.mode || e.mode, in_scope: inl, out_scope: outl };
   await engagementMutate(e.id, body, 'Engagement mis à jour.');
@@ -171,7 +184,7 @@ export async function loadEngagements() {
     const isActive = e.status === 'active';
     tr.innerHTML =
       '<td class="numcol">' + e.id + '</td>' +
-      '<td>' + esc(e.name) + (e.id === active ? ' <span class="badge">actif</span>' : '') + '</td>' +
+      '<td>' + esc(e.name) + (e.id === active ? ' <span class="badge">actif</span>' : '') + (e.classification ? ' ' + TLP_BADGE(e.classification) : '') + '</td>' +
       '<td><code>' + esc(e.mode) + '</code></td>' +
       '<td><span class="badge ' + (isActive ? 'ok' : 'mut') + '">' + esc(e.status) + '</span></td>' +
       '<td>' + (c.findings != null ? c.findings : 0) + '</td>' +
