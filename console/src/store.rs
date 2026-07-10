@@ -295,7 +295,9 @@ pub(crate) fn connect_postgres(url: &str) -> Result<postgres::Client, String> {
 /// SESSION-PINNED postgres client BUNDLED with its DSN so the client can be RE-ESTABLISHED after a
 /// connection break (Stage 4 HA — PG restart / failover). Held by `App.pg` as `Arc<PgConn>`;
 /// `App::store()` locks `client` and hands BOTH the held guard AND `url` to
-/// [`Store::postgres_reconnectable`], which reconnects+retries ONCE on a connection-level failure. The
+/// [`Store::postgres_reconnectable`]. On a connection-level failure a READ reconnects+retries ONCE
+/// ([`pg_run_read`]); a WRITE / transaction-control op reconnects the client for the NEXT op but is NEVER
+/// auto-re-run ([`pg_run_write`]) — so a failover can never silently duplicate a write. The
 /// `Mutex` keeps the SAME held-guard model as the SQLite fallback (one client for the App's lifetime, so
 /// `execute(INSERT)`+`last_insert_id()` stay on ONE session). Reconnect swaps the client INSIDE this
 /// Mutex, so every later `store()` on the shared `Arc` transparently uses the healed client.
@@ -332,18 +334,23 @@ fn pg_is_conn_error(e: &postgres::Error) -> bool {
     false
 }
 
-/// Run one PG operation `op` on the held client, with SINGLE-SHOT RECONNECT-AND-RETRY on a
-/// connection-level failure (Stage 4 HA). Attempt once; if it fails with a [`pg_is_conn_error`] AND a DSN
-/// (`url`) is present, RECONNECT ([`connect_postgres`]) ONCE, swap the fresh client INTO the held Mutex
-/// (so subsequent `store()` calls on the shared `Arc` reuse the healed client), and RETRY `op` exactly
-/// once; a still-failing retry returns its error. A NON-connection error (SQLSTATE query error) or a
-/// `Store` built WITHOUT a url (`postgres` / the CLI/tests) returns the first error immediately — no
-/// retry. Reconnect is at OP granularity ONLY: it never runs mid-`with_tx` (transaction control uses
-/// `execute_batch`, which is intentionally NOT wrapped), and `last_insert_id()` is not wrapped either, so
-/// an `INSERT`+`last_insert_id()` pair can never straddle a reconnect (a break between them surfaces an
-/// error / a `0`, which is correct/safe — never a wrong id from a fresh session).
+/// Run one IDEMPOTENT READ `op` (query / query_lax / query_opt) on the held client, with SINGLE-SHOT
+/// RECONNECT-AND-RETRY on a connection-level failure (Stage 4 HA). Attempt once; if it fails with a
+/// [`pg_is_conn_error`] AND a DSN (`url`) is present, RECONNECT ([`connect_postgres`]) ONCE, swap the
+/// fresh client INTO the held Mutex (so subsequent `store()` calls on the shared `Arc` reuse the healed
+/// client), and RETRY `op` exactly once; a still-failing retry returns its error. A NON-connection error
+/// (SQLSTATE query error) or a `Store` built WITHOUT a url (`postgres` / the CLI/tests) returns the first
+/// error immediately — no retry.
+///
+/// RETRY IS SOUND ONLY BECAUSE THE OP IS AN IDEMPOTENT READ: re-running a `SELECT` after a failover
+/// yields the same rows and applies NOTHING. WRITES/TRANSACTION-CONTROL must NEVER take this path — see
+/// [`pg_run_write`], which reconnects for the NEXT op but does NOT re-run the failed statement (so a
+/// failover in the post-commit/pre-ack window can never SILENTLY DUPLICATE a write). Reconnect is at OP
+/// granularity ONLY; `last_insert_id()` is not wrapped, so an `INSERT`+`last_insert_id()` pair can never
+/// straddle a reconnect (a break between them surfaces an error / a `0` — never a wrong id from a fresh
+/// session).
 #[cfg(feature = "store-postgres")]
-fn pg_run<T>(
+fn pg_run_read<T>(
     cell: &std::cell::RefCell<std::sync::MutexGuard<'_, postgres::Client>>,
     url: Option<&str>,
     mut op: impl FnMut(&mut postgres::Client) -> Result<T, postgres::Error>,
@@ -366,7 +373,7 @@ fn pg_run<T>(
     // sync `postgres` `Drop` closes the connection via ITS OWN `block_on`; and the retried op blocks too.
     // Every one of those nested `block_on`s MUST run under `block_in_place` — dropping the old client on a
     // bare tokio worker would panic "cannot start a runtime from within a runtime". Sharing one blocking
-    // section covers connect + drop + retry together.
+    // section covers connect + drop + retry together. (Sound because `op` is an idempotent read.)
     let url = url.expect("reconnect path is only taken when url is Some");
     let mut cl = cell.borrow_mut();
     pg_block(move || -> StoreResult<T> {
@@ -374,6 +381,48 @@ fn pg_run<T>(
         **cl = fresh; // old broken client dropped HERE, inside block_in_place
         op(&mut cl).map_err(pg_err)
     })
+}
+
+/// Run one WRITE / TRANSACTION-CONTROL `op` (execute / execute_batch — the latter also issues the
+/// `BEGIN`/`COMMIT`/`ROLLBACK` of `with_tx`) on the held client. Unlike [`pg_run_read`], a connection
+/// failure here NEVER auto-retries the op: re-running an `INSERT`/`UPDATE`/`DELETE` (or a tx-control
+/// statement) across a failover risks applying it TWICE — a failover in the narrow post-commit/pre-ack
+/// window would turn "at-least-once" into a SILENT DUPLICATE write. Instead, on a [`pg_is_conn_error`]
+/// (and when a DSN is present) we RECONNECT the held client — swapping the fresh client into the Mutex so
+/// the NEXT op on the shared `Arc` works — but RETURN THE ORIGINAL ERROR without re-executing.
+///
+/// CONTRACT: the write either SUCCEEDED (and may still surface an error the caller must reconcile — e.g.
+/// the ack was lost) or FAILED, but is NEVER automatically re-applied. A transaction that hits a broken
+/// connection FAILS AS A WHOLE — the reconnect is never used to continue the tx (the fresh session is not
+/// inside the old `BEGIN`); `with_tx` sees the error, runs a best-effort `ROLLBACK` on the healed
+/// session, and surfaces the original error so the caller can retry the WHOLE tx. A `Store` without a url,
+/// or a non-connection (SQLSTATE) error, returns the first error immediately (no reconnect attempt).
+#[cfg(feature = "store-postgres")]
+fn pg_run_write<T>(
+    cell: &std::cell::RefCell<std::sync::MutexGuard<'_, postgres::Client>>,
+    url: Option<&str>,
+    mut op: impl FnMut(&mut postgres::Client) -> Result<T, postgres::Error>,
+) -> StoreResult<T> {
+    let mut cl = cell.borrow_mut();
+    // `&mut cl` deref-coerces RefMut<MutexGuard<Client>> -> &mut Client at this call site.
+    let e = match pg_block(|| op(&mut cl)) {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    // Connection-level failure: RECONNECT the held client so the NEXT op works, but DO NOT re-run this
+    // write (no at-least-once duplicate). Connect + drop-old-client share ONE `block_in_place` (both drive
+    // nested `block_on`s). Best-effort: if the reconnect itself fails, the (broken) client stays and the
+    // NEXT op will attempt to reconnect again; either way the ORIGINAL op error is what the caller sees.
+    if pg_is_conn_error(&e) {
+        if let Some(url) = url {
+            let _ = pg_block(move || -> Result<(), String> {
+                let fresh = connect_postgres(url)?;
+                **cl = fresh; // old broken client dropped HERE, inside block_in_place
+                Ok(())
+            });
+        }
+    }
+    Err(pg_err(e))
 }
 
 // --- postgres row getters (positional) ----------------------------------------------------------
@@ -893,9 +942,10 @@ enum Backend<'a> {
     // the seam methods take `&self`; a `RefCell` provides the interior mutability (the `Store` is
     // single-threaded / `!Send`, so borrows never overlap across the brief per-call `borrow_mut`).
     // Stage 4 HA: `url` is the DSN (borrowed from the `Arc<PgConn>` held by `App.pg`) — `Some` for the
-    // runtime `App::store()` handle (single-shot reconnect+retry via `pg_run`), `None` for the CLI/tests
-    // (one-shot lifecycles that never outlive a restart). `pg_run` swaps the client inside the held Mutex
-    // on reconnect, so the shared `Arc` heals for every later `store()`.
+    // runtime `App::store()` handle (reads reconnect+retry via `pg_run_read`; writes/tx reconnect-for-
+    // next-op-without-retry via `pg_run_write`), `None` for the CLI/tests (one-shot lifecycles that never
+    // outlive a restart). Either helper swaps the client inside the held Mutex on reconnect, so the shared
+    // `Arc` heals for every later `store()`.
     #[cfg(feature = "store-postgres")]
     Postgres {
         client: std::cell::RefCell<std::sync::MutexGuard<'a, postgres::Client>>,
@@ -918,9 +968,12 @@ impl<'a> Store<'a> {
     }
 
     /// Wrap a held postgres client guard TOGETHER with its DSN (Stage 4 HA). On a connection-level
-    /// failure a seam DML op RECONNECTS once (`connect_postgres(url)`), swaps the fresh client into the
-    /// held Mutex, and RETRIES once (see [`pg_run`]). Called by `App::store()` at runtime — where the
-    /// long-lived console must survive a Postgres restart/failover.
+    /// failure a seam DML op RECONNECTS (`connect_postgres(url)`) and swaps the fresh client into the held
+    /// Mutex, so the console heals in place. The RETRY semantics differ by op kind: an IDEMPOTENT READ is
+    /// re-run once ([`pg_run_read`]); a WRITE / transaction-control op is NOT re-run — the reconnect only
+    /// readies the client for the NEXT op and the original error surfaces ([`pg_run_write`]), so a failover
+    /// can never silently duplicate a write and a transaction fails as a whole. Called by `App::store()` at
+    /// runtime — where the long-lived console must survive a Postgres restart/failover.
     #[cfg(feature = "store-postgres")]
     pub(crate) fn postgres_reconnectable(
         guard: std::sync::MutexGuard<'a, postgres::Client>,
@@ -955,8 +1008,10 @@ impl<'a> Store<'a> {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
-                Ok(pg_run(client, *url, |cl| cl.execute(sql.as_str(), &refs))? as usize)
+                // WRITE: on a connection break, reconnect the client for the NEXT op but NEVER auto-retry
+                // this statement — re-running an INSERT/UPDATE/DELETE could silently DUPLICATE it. The
+                // original error surfaces; the caller must reconcile (see [`pg_run_write`]).
+                Ok(pg_run_write(client, *url, |cl| cl.execute(sql.as_str(), &refs))? as usize)
             }
         }
     }
@@ -967,15 +1022,16 @@ impl<'a> Store<'a> {
         match &self.backend {
             Backend::Sqlite(conn) => Ok(conn.execute_batch(sql)?),
             #[cfg(feature = "store-postgres")]
-            // No parameters => no placeholder translation. `batch_execute` runs `;`-separated DDL and
-            // the transaction control words (`BEGIN`/`COMMIT`/`ROLLBACK`) `with_tx` issues. DELIBERATELY
-            // NOT wrapped in `pg_run`: transaction control / DDL must NEVER silently reconnect (a
-            // mid-transaction reconnect would abandon the tx on the dead session and re-run BEGIN/COMMIT
-            // on a fresh one, corrupting atomicity). A broken connection here surfaces as an error and
-            // `with_tx` rolls back / the caller retries the whole op — reconnect is at OP granularity.
-            Backend::Postgres { client, .. } => {
-                let mut cl = client.borrow_mut();
-                pg_block(|| cl.batch_execute(sql)).map_err(pg_err)
+            // No parameters => no placeholder translation. `batch_execute` runs `;`-separated DDL and the
+            // transaction-control words (`BEGIN`/`COMMIT`/`ROLLBACK`) that `with_tx` issues. Wrapped in
+            // [`pg_run_write`], NOT [`pg_run_read`]: a broken connection here reconnects the client so the
+            // NEXT op works, but the failed statement is NEVER auto-re-run. This is what makes a tx fail
+            // AS A WHOLE — the reconnect never continues the old `BEGIN` (the fresh session is not inside
+            // it), so `with_tx` catches the error, best-effort `ROLLBACK`s on the healed session, and lets
+            // the caller retry the WHOLE tx. Reconnect stays at OP granularity; it never re-executes a
+            // statement mid-transaction (which would corrupt atomicity / risk a duplicate write).
+            Backend::Postgres { client, url } => {
+                pg_run_write(client, *url, |cl| cl.batch_execute(sql))
             }
         }
     }
@@ -1004,8 +1060,8 @@ impl<'a> Store<'a> {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
-                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
+                // READ: idempotent, so single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run_read(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 // Postgres materialises the full result set (no per-row step error to skip); STRICT:
                 // the FIRST `map` closure `Err` sinks the whole read via `?`, matching the Sqlite arm.
                 let mut out = Vec::with_capacity(rows.len());
@@ -1056,8 +1112,8 @@ impl<'a> Store<'a> {
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
                 // PREPARE/BIND errors PROPAGATE (a broken statement is a hard failure, like Sqlite);
                 // a per-row `map` `Err` is SKIPPED (dropped), collecting only rows that mapped to `Ok`.
-                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
-                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
+                // READ: idempotent, so single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run_read(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in &rows {
                     if let Ok(v) = map(&Row::postgres(r)) {
@@ -1094,8 +1150,8 @@ impl<'a> Store<'a> {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
-                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
+                // READ: idempotent, so single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run_read(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 match rows.first() {
                     Some(r) => Ok(Some(map(&Row::postgres(r))?)),
                     None => Ok(None),
@@ -1126,7 +1182,7 @@ impl<'a> Store<'a> {
         match &self.backend {
             Backend::Sqlite(conn) => conn.last_insert_rowid(),
             #[cfg(feature = "store-postgres")]
-            // DELIBERATELY NOT wrapped in `pg_run`: `lastval()` is meaningful ONLY on the SAME session as
+            // DELIBERATELY NOT wrapped in a reconnect helper: `lastval()` is meaningful ONLY on the SAME session as
             // the preceding `execute(INSERT)`. Reconnecting here would query a FRESH session (no sequence
             // advanced -> wrong id / error). If the connection broke between the INSERT and this call the
             // caller gets `0` — correct/safe: an INSERT+last_insert_id pair must never straddle a reconnect.
@@ -1142,6 +1198,16 @@ impl<'a> Store<'a> {
 
     /// Run `f` inside a transaction: `BEGIN`, then `COMMIT` if `f` returns `Ok`, else `ROLLBACK`. The
     /// `Tx` handle exposes the same `execute`/`query*` surface, delegating to this held connection.
+    ///
+    /// RECONNECT CONTRACT (Postgres, Stage 4 HA): a broken connection at ANY point — `BEGIN`, a statement
+    /// inside `f` (`Tx::execute`/`execute_batch` -> [`pg_run_write`]), or `COMMIT` — FAILS THE WHOLE TX.
+    /// The reconnect is never used to CONTINUE a transaction mid-flight: the fresh session is not inside
+    /// the old `BEGIN`, and no write/tx-control statement is ever auto-re-run (so no partial re-apply / no
+    /// silent duplicate). On `f`'s `Err` we issue a best-effort `ROLLBACK` (a no-op NOTICE if the healed
+    /// session has no open tx) and surface the ORIGINAL error, leaving the caller free to retry the whole
+    /// tx on the now-healed client. Reads inside `f` may still reconnect+retry (idempotent) via
+    /// [`pg_run_read`], but that never crosses a tx boundary because the enclosing write/tx-control fails
+    /// closed first.
     pub(crate) fn with_tx<T, F>(&self, f: F) -> StoreResult<T>
     where
         F: FnOnce(&Tx) -> StoreResult<T>,
@@ -1711,8 +1777,9 @@ mod pg_tests {
         }
     }
 
-    /// STAGE 4 HA — reconnect+retry (`postgres_reconnectable` / `pg_run`). Proves a store op transparently
-    /// RECONNECTS when the pinned session is torn down (the deterministic analogue of a PG restart /
+    /// STAGE 4 HA — read reconnect+retry (`postgres_reconnectable` / `pg_run_read`). Proves an idempotent
+    /// READ op transparently RECONNECTS+RETRIES when the pinned session is torn down (the deterministic
+    /// analogue of a PG restart /
     /// failover), WITHOUT restarting the server: capture the pinned client's backend PID, terminate THAT
     /// backend from a SEPARATE connection (so the pinned client is dead but the test's own connection is
     /// not), then assert the NEXT op on the reconnectable store SUCCEEDS and now runs on a NEW backend PID
@@ -1744,16 +1811,21 @@ mod pg_tests {
         {
             let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
             let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
-            let _ = ks.execute("SELECT pg_terminate_backend(?::int)", &sql_params![pid]);
+            // pid is a trusted integer from pg_backend_pid() — INTERPOLATE it. A bound `?::int` makes
+            // Postgres infer the param as int4 and tokio-postgres rejects the i64 bind (WrongType
+            // Int4/i64); that error, if swallowed, would leave the backend ALIVE and make this test pass
+            // WITHOUT ever terminating the session (a vacuous reconnect test). Assert the kill ran.
+            ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &sql_params![])
+                .expect("pg_terminate_backend must actually run");
             let mut gone = false;
             for _ in 0..200 {
                 let alive: i64 = ks
                     .query_row(
-                        "SELECT count(*) FROM pg_stat_activity WHERE pid = ?::int",
-                        &sql_params![pid],
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &sql_params![],
                         |r| r.get_i64(0),
                     )
-                    .unwrap_or(0);
+                    .expect("poll pg_stat_activity");
                 if alive == 0 {
                     gone = true;
                     break;
@@ -1784,5 +1856,165 @@ mod pg_tests {
             assert_eq!(four, 4);
         }
         let _ = pid; // captured only to terminate the pinned session above
+    }
+
+    /// STAGE 4 HA — WRITE break MUST NOT auto-re-apply (`pg_run_write`). Proves the write path's
+    /// at-most-once contract: an `execute(INSERT)` whose pinned session is torn down mid-flight returns
+    /// an ERROR to the caller (never a silent success), the failed statement is NEVER auto-retried (so the
+    /// row is not duplicated), and the held client is HEALED so the NEXT op works. Deterministic analogue
+    /// of a PG restart/failover, same technique as `pg_reconnect_after_session_terminated`: capture the
+    /// pinned backend PID, terminate THAT backend from a SEPARATE connection, wait until it is gone, then
+    /// drive a WRITE on the reconnectable store. Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_write_break_does_not_duplicate() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_write_break_does_not_duplicate] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+
+        // Fresh single-row-per-tag probe table on the pinned session; capture that session's backend PID.
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute_batch(
+                "DROP TABLE IF EXISTS dup_probe; CREATE TABLE dup_probe(id BIGINT GENERATED BY DEFAULT AS IDENTITY, tag TEXT)",
+            )
+            .expect("create dup_probe");
+            s.query_row("SELECT pg_backend_pid()", &sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection, then WAIT until it is actually gone (SIGTERM is
+        // async): guarantees the next pinned-store op hits a DEAD session (deterministic break).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            // pid is a trusted integer from pg_backend_pid() — interpolate it (binding `?::int` fails with
+            // a WrongType Int4/i64 mismatch that would be silently swallowed, leaving the backend alive).
+            let killed = ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &sql_params![]);
+            assert!(killed.is_ok(), "pg_terminate_backend must actually run: {killed:?}");
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &sql_params![],
+                        |r| r.get_i64(0),
+                    )
+                    .expect("poll pg_stat_activity");
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
+        }
+
+        // WRITE on the DEAD session: the caller MUST receive an error — the write is NOT silently retried
+        // and NOT silently reported as success. (`pg_run_write` reconnects for the NEXT op but returns the
+        // ORIGINAL error without re-executing.)
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            let r = s.execute(
+                "INSERT INTO dup_probe(tag) VALUES(?)",
+                &sql_params!["broke"],
+            );
+            assert!(r.is_err(), "write against a torn-down session surfaces an error (no silent success)");
+        }
+
+        // The failed write was NEVER auto-re-applied: exactly ZERO rows for that tag (at-most-once — the
+        // statement never reached a live backend, and `pg_run_write` did not retry it). Must never be >= 1
+        // (a retry would have produced a row) and never == 2 (a duplicate). Runs on the HEALED client that
+        // `pg_run_write` swapped into the shared Mutex — a NON-reconnectable store proves the heal persisted.
+        {
+            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
+            let cnt: i64 = s
+                .query_row(
+                    "SELECT count(*) FROM dup_probe WHERE tag = ?",
+                    &sql_params!["broke"],
+                    |r| r.get_i64(0),
+                )
+                .expect("shared mutex holds the healed client after the broken WRITE");
+            assert_eq!(cnt, 0, "the broken write was neither applied nor auto-duplicated");
+        }
+
+        // The healed client is fully usable for subsequent WRITES too (a real INSERT now lands exactly once).
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute("INSERT INTO dup_probe(tag) VALUES(?)", &sql_params!["ok"])
+                .expect("write on the healed client succeeds");
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM dup_probe WHERE tag = ?", &sql_params!["ok"], |r| r.get_i64(0))
+                .unwrap();
+            assert_eq!(cnt, 1, "post-heal write landed exactly once");
+        }
+        let _ = pid;
+    }
+
+    /// STAGE 4 HA — a transaction that hits a broken connection FAILS AS A WHOLE (`with_tx` + `pg_run_write`):
+    /// no mid-tx reconnect, no partial commit. Break the session INSIDE `with_tx` (kill the pinned backend
+    /// between two statements of the closure), assert `with_tx` returns an ERROR, and assert NEITHER
+    /// statement's row is present (the whole tx is gone — the reconnect never continued the old `BEGIN`).
+    /// Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_tx_break_fails_whole_no_partial_commit() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_tx_break_fails_whole_no_partial_commit] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+        let killer_url = url.clone();
+
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute_batch("DROP TABLE IF EXISTS tx_probe; CREATE TABLE tx_probe(tag TEXT)")
+                .expect("create tx_probe");
+
+            let res: StoreResult<()> = s.with_tx(|tx| {
+                // First statement lands inside the BEGIN.
+                tx.execute("INSERT INTO tx_probe(tag) VALUES(?)", &sql_params!["first"])?;
+                // Tear down THIS session's backend from a separate connection, wait until gone, so the
+                // NEXT tx statement hits a dead connection mid-transaction.
+                let pid: i64 = tx
+                    .query_row("SELECT pg_backend_pid()", &sql_params![], |r| r.get_i64(0))?;
+                let k = std::sync::Mutex::new(connect_postgres(&killer_url).expect("connect killer"));
+                let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+                // pid is trusted (from pg_backend_pid) — interpolate; a bound `?::int` mismatches i64/Int4.
+                ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &sql_params![])
+                    .expect("terminate the in-tx backend");
+                for _ in 0..200 {
+                    let alive: i64 = ks
+                        .query_row(&format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"), &sql_params![], |r| r.get_i64(0))
+                        .expect("poll pg_stat_activity");
+                    if alive == 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                // Second statement on the now-dead session: pg_run_write errors (and heals for next op),
+                // the `?` bubbles the error out of the closure -> with_tx best-effort ROLLBACKs + surfaces it.
+                tx.execute("INSERT INTO tx_probe(tag) VALUES(?)", &sql_params!["second"])?;
+                Ok(())
+            });
+            assert!(res.is_err(), "a tx that hits a broken connection fails as a whole");
+        }
+
+        // NEITHER row is present: the BEGIN died with its session, no partial commit, the reconnect never
+        // continued the tx. Runs on the healed client.
+        {
+            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM tx_probe", &sql_params![], |r| r.get_i64(0))
+                .expect("healed client reads back the tx_probe table");
+            assert_eq!(cnt, 0, "no row from the broken tx committed (whole-tx failure, no partial/duplicate)");
+        }
     }
 }
