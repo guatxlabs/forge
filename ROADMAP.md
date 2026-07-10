@@ -35,6 +35,20 @@
 
 > Note: the tamper-evident ledger is a file (`jsonl`), not in the DB — Postgres does not affect audit integrity.
 
+## Enterprise SSO
+
+- **SSO / SAML (readiness #16) — RESOLVED for deployment.** Forge enterprise SSO is **OIDC**
+  (`FORGE_ENTERPRISE_SSO`, flag-gated in `console/src/sso.rs`: Authorization-Code + PKCE, RS256/JWKS ID-token
+  validation, redirect allowlist, and IdP `groups` → Forge role/grants via the RBAC groups-from-claims seam).
+  **SAML-only IdPs are supported via an external OIDC bridge** — front Forge with **Dex** (SAML connector),
+  **Keycloak identity brokering**, or **oauth2-proxy**, which terminates SAML and presents OIDC to Forge.
+  Rationale: native in-process SAML would pull `samael` → openssl + libxmlsec1 (C toolchain), breaking the
+  openssl-free (rustls/ring) posture, and hand-rolled XML-DSig/exclusive-C14N is the XML-Signature-Wrapping
+  (XSW) auth-bypass foot-gun class; the bridge keeps Forge's auth surface pure-Rust with zero new deps.
+  Documented in [`docs/DEPLOYMENT.md` §3ter](docs/DEPLOYMENT.md). Native in-process SAML stays **DEFERRED**
+  behind an optional `saml` cargo feature (samael-backed, openssl+libxmlsec1 build variant; community default
+  stays openssl-free) — available on request if a contract hard-requires it, not built today.
+
 ## Deferred engineering
 
 - **`significant_drop_tightening` clippy lint** — currently OFF (~93 preexisting lock-hold sites out of scope); `await_holding_lock` covers the CONC-1 invariant. Enable after tightening those sites.
