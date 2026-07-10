@@ -779,5 +779,6 @@ pub(crate) async fn modules_refresh(State(app): State<App>, ConnectInfo(peer): C
     // l'intention `enabled`/`available_override` est PRÉSERVÉE par le re-probe, cf. populate_modules).
     let store = app.store();
     let mods = modules_catalog(&store);
+    drop(store);
     (StatusCode::OK, Json(json!({"refreshed": mods.len(), "modules": mods})))
 }

@@ -481,6 +481,11 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
 /// est `active`), `None` si un run est déjà VIVANT ou RÉSERVÉ pour CET engagement (-> l'appelant renvoie
 /// 409 / laisse pending). ISOLATION : clé = eng_id ; un autre engagement (autre clé) n'entrave rien.
 /// Aucun verrou tenu à travers un `.await` (le std `run_reservations` en particulier ne l'est jamais).
+// ALLOW significant_drop_tightening: the two guards form ONE atomic check-then-act (contains_key/
+// contains -> insert). Both MUST span the check AND the insert; tightening either would open a TOCTOU
+// window where a concurrent reservation could interleave between check and insert (double-spawn). The
+// hold is the correctness guarantee, not incidental.
+#[allow(clippy::significant_drop_tightening)]
 pub(crate) async fn reserve_engagement_slot(app: &App, eng_id: i64) -> Option<RunReservation<'_>> {
     let state = app.run_state.lock().await;
     // std Mutex : jamais tenu à travers un `.await` ; poison-safe.
@@ -659,6 +664,10 @@ fn unclaim_running_on_failure(app: &App, run_id: &str, ha: bool) {
 /// (le FIFO garantit déjà l'unicité, l'index ne se déclenche jamais). L'appelant DÉTIENT déjà la réservation
 /// FIFO (passée ici, RAII). Renvoie la réponse HTTP (202 running ; 409 claim perdu ; 5xx échec fs/spawn — la
 /// réservation est alors libérée par le Drop du guard).
+// ALLOW significant_drop_tightening: the promotion critical section below holds run_state + run_reservations
+// together across insert-then-remove (atomic hand-off from reservation to live run). Tightening either guard
+// reopens a window where an observer sees NEITHER — a real race, so the hold is load-bearing.
+#[allow(clippy::significant_drop_tightening)]
 pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservation: RunReservation<'_>) -> (StatusCode, Json<Value>) {
     let run_id = spec.run_id.as_str();
     // owner (HA #10 Wave B) : MOI sous HA (Some), None sinon -> NULL (reconcile-all mono-instance préservé).
@@ -834,6 +843,9 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     // PROMOTION réservation -> run vivant. run_state publié AVANT de retirer la réservation (aucune fenêtre
     // où ni la réservation ni le run vivant ne seraient visibles). Aucun `.await` sous le verrou std.
     {
+        // ATOMIC promotion (see the fn-level allow): both guards are held together across insert-then-
+        // remove so no observer ever sees NEITHER the reservation NOR the live run; releasing either early
+        // reopens that window. The hold is the correctness guarantee, not incidental.
         let mut state = app.run_state.lock().await;
         state.current.insert(spec.eng_id, RunHandle { run_id: run_id.to_string(), pgid });
         let mut resv = app.run_reservations.lock().unwrap_or_else(|e| e.into_inner());
@@ -1045,9 +1057,9 @@ pub(crate) fn validate_modules(app: &App, modules: &[String], allow_high_impact:
     if modules.is_empty() {
         return Ok(());
     }
-    let store = app.store();
+    
     for m in modules {
-        let row = store.query_row(
+        let row = app.store().query_row(
             "SELECT exploit,destructive,web_allowed,enabled,available_override FROM module WHERE kind=?",
             &crate::sql_params![m],
             |r| Ok((
@@ -1378,6 +1390,7 @@ pub(crate) async fn leader_tick_loop(app: App) {
         {
             let store = app.store();
             let n = reap_dead_leader_runs(&store, &me);
+            drop(store);
             if n > 0 {
                 println!("[forge-console] leader-tick: {n} run(s) orphelin(s) d'un leader mort -> 'failed' (failover, sans killpg cross-host)");
             }
@@ -1449,8 +1462,8 @@ pub(crate) async fn claim_pending_tick(app: &App) {
         let spec = match spec {
             Some(s) => s,
             None => {
-                let store = app.store();
-                let _ = store.execute(
+                
+                let _ = (app.store()).execute(
                     "UPDATE run_job SET status='failed', finished=datetime('now'), pid=-1,
                        detail=COALESCE(NULLIF(detail,''),'')||' [claim: spawn_spec corrompu]'
                      WHERE run_id=? AND status='pending'",
@@ -1501,7 +1514,7 @@ pub(crate) const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_
 pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : liste des runs de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
+    
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
@@ -1511,7 +1524,7 @@ pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(
     // query_lax reproduit `query_map(..).filter_map(|r| r.ok())` (lignes malformées ignorées) ; une erreur
     // de prepare/bind PROPAGE (Err) -> unwrap_or_default() rend `[]`, identique à l'ancien `Err(_) => []`.
     let params: Vec<crate::store::Param> = args.iter().map(|s| crate::store::Param::from(s.as_str())).collect();
-    let out: Vec<Value> = store.query_lax(&sql, &params, run_job_json).unwrap_or_default();
+    let out: Vec<Value> = app.store().query_lax(&sql, &params, run_job_json).unwrap_or_default();
     Json(Value::Array(out))
 }
 
@@ -1531,9 +1544,9 @@ pub(crate) async fn run_detail(State(app): State<App>, Path(id): Path<String>) -
 pub(crate) async fn run_logs(State(app): State<App>, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let after = q.get("after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(2000).clamp(1, 5000);
-    let store = app.store();
+    
     let mut last = after;
-    let lines: Vec<Value> = store
+    let lines: Vec<Value> = app.store()
         .query_lax(
             "SELECT id,ts,stream,line FROM run_log WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
             &crate::sql_params![&id, after, limit],

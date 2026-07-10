@@ -122,6 +122,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
             }))
         })
         .unwrap_or_default();
+    drop(store);
     Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows}))
 }
 
@@ -129,8 +130,8 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     // ISOLATION : le détail n'est servi QUE si le finding appartient à l'engagement actif (un id d'un
     // AUTRE engagement -> 404, jamais divulgué). engagement_id résolu (entier) inliné sans risque.
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
-    let row = store.query_row(
+    
+    let row = app.store().query_row(
         &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification FROM finding WHERE id=? AND engagement_id={eid}"),
         &crate::sql_params![id],
         |r| {
@@ -243,6 +244,7 @@ pub(crate) async fn finding_update(
         }
         if let Some(c) = &new_class {
             let _ = store.execute(&format!("UPDATE finding SET classification=? WHERE id=? AND engagement_id={eid}"), &crate::sql_params![c, id]);
+            drop(store);
         }
     }
     let actor = attribution_login(&app, &headers);
@@ -336,11 +338,11 @@ pub(crate) async fn findings_bulk_status(
         // Le guard `store` est SCOPÉ ce bloc et LIBÉRÉ avant `attribution_login`/`append_console_ledger`
         // (qui re-verrouillent le MÊME Mutex de connexion quand une session cookie est présente) — sinon
         // AUTO-DEADLOCK sur le thread. Même discipline que finding_templates.rs.
-        let store = app.store();
+        
         for id in &ids {
             // UPDATE confiné à l'engagement actif : une ligne d'un AUTRE engagement -> 0 affectée -> SKIP.
             // Chaque id est un i64 (parsé de JSON) ; `eid` est un entier résolu (jamais du texte client).
-            let n = store
+            let n = app.store()
                 .execute(
                     &format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"),
                     &crate::sql_params![status.clone(), *id],
@@ -460,7 +462,7 @@ pub(crate) async fn findings_bulk_export(
 pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les runrecords de la vue sont ceux de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
+    
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
@@ -475,7 +477,7 @@ pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query
     // `fired` est un entier (0/1) — colonne réelle ; on la rend telle quelle via une requête typée.
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
     let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
-    let out: Vec<Value> = store
+    let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |r| {
             Ok(json!({
                 "id": r.get_i64(0)?,
@@ -497,11 +499,11 @@ pub(crate) async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(
     // ENGAGEMENT : `campaign` est un sous-label LIBRE AU SEIN d'un engagement — on n'agrège donc QUE
     // les campagnes de l'engagement actif (une même chaîne dans un autre engagement reste invisible ici).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
+    
     // Agrège depuis les findings (source réelle) + table campaign (métadonnées). Pas de JOIN strict :
     // on liste les campagnes vues côté findings + celles déclarées, avec leurs compteurs.
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
-    let out: Vec<Value> = store
+    let out: Vec<Value> = app.store()
         .query_lax(
             &format!("SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id={eid} GROUP BY campaign ORDER BY last_ts DESC"),
             &[],
@@ -520,7 +522,7 @@ pub(crate) async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(
 pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : les décisions du garde-fou sont celles de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
+    
     let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
     if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
     if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
@@ -532,7 +534,7 @@ pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Qu
     );
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
     let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
-    let out: Vec<Value> = store
+    let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |r| {
             // reasons stocké en JSON (array) — on le re-parse pour le rendre structuré au front.
             let reasons_raw: String = r.get_opt_str(10)?.unwrap_or_default();
@@ -558,7 +560,7 @@ pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Qu
 pub(crate) async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : couverture ATT&CK de l'engagement actif UNIQUEMENT (engagement_id résolu, inliné).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let store = app.store();
+    
     // filtre campaign optionnel (param lié — pas d'inlining).
     let (sql, args): (String, Vec<String>) = match q.get("campaign") {
         Some(c) => (
@@ -572,7 +574,7 @@ pub(crate) async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q
     };
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
     let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
-    let out: Vec<Value> = store
+    let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |row| {
             Ok(json!({
                 "mitre": row.get_str(0)?,

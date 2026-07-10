@@ -100,6 +100,7 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
             &crate::sql_params![&run_id, &campaign, mode, geti("fired"), geti("dry_run"),
                 geti("vetoed"), geti("errors"), skipped, gaps],
         );
+        drop(store);
     }
     (StatusCode::OK, Json(json!({"findings_ingested": nf, "runrecords_ingested": nr, "roe_decisions_ingested": nd})))
 }

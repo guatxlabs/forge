@@ -167,7 +167,9 @@ pub(crate) async fn heartbeat_loop(app: crate::App) {
                  ON CONFLICT(instance_id) DO UPDATE SET last_seen = ?",
                 &crate::sql_params![app.instance_id.as_str(), now, now],
             );
-            acquire_or_renew(&store, &app.instance_id)
+            let leader = acquire_or_renew(&store, &app.instance_id);
+            drop(store); // release the single-tick DB session after the last read (heartbeat + acquire done)
+            leader
         };
         app.is_leader.store(leader, std::sync::atomic::Ordering::SeqCst);
     }
@@ -213,9 +215,9 @@ pub(crate) fn with_ledger_lock(app: &crate::App, path: &str, f: impl FnOnce()) {
         f();
         return;
     }
-    let store = app.store();
+    
     let mut slot = Some(f);
-    let res = store.with_tx(|tx| {
+    let res = (app.store()).with_tx(|tx| {
         // Cluster-global advisory lock keyed on the ledger path; auto-released at COMMIT/ROLLBACK. A peer
         // appending to the SAME file blocks here until we commit -> serialised single writer.
         tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", &crate::sql_params![path])?;

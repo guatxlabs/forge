@@ -196,6 +196,7 @@ pub(crate) fn operator_source_allowed(app: &App, headers: &HeaderMap, peer: Opti
         let trusted_proxy_cidrs = crate::settings_get_store(&store, "trusted_proxy")
             .map(|s| parse_trusted_proxy_cidrs(&s))
             .unwrap_or_default();
+        drop(store);
         (cidrs, trusted_proxy_cidrs)
     };
     if cidrs.is_empty() {
@@ -341,6 +342,7 @@ pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option
             if now_epoch() >= expires {
                 // session expirée -> purge best-effort et refus
                 let _ = store.execute("DELETE FROM session WHERE token_sha=?", &crate::sql_params![&token_sha]);
+                drop(store);
                 return None;
             }
             let is_operator = role == "operator" || role == "admin";
@@ -424,6 +426,7 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
          ON CONFLICT(token_sha) DO UPDATE SET user_id=excluded.user_id, created=excluded.created, expires=excluded.expires",
         &crate::sql_params![token_sha, user_id, now, expires],
     );
+    drop(store);
     (token, expires)
 }
 

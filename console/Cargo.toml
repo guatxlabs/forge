@@ -43,15 +43,16 @@ object-store = ["dep:rust-s3"]
 # `unreachable_pub` (24 hits — would narrow the enterprise modules' deliberately-`pub` separable API).
 [lints.clippy]
 await_holding_lock = "warn"
-# `significant_drop_tightening` : ÉVALUÉ pour CONC-1 puis LAISSÉ OFF. Le verrou async `run_state` de
-# run_create ne couvre désormais que `contains_key`+`insert` (travail lourd hors verrou, réservation
-# FIFO portée par le guard RAII synchrone `RunReservation`), donc run_create le PASSE — mais activer le
-# lint globalement flague 93 sites PRÉEXISTANTS et HORS-SCOPE (le pattern `app.db()` MutexGuard tenu
-# jusqu'en fin de scope + lectures `RwLock`, dans 15+ fichiers). Cascade non maîtrisable sans churn
-# large/risqué ; on garde clippy VERT plutôt que de saupoudrer 93 `#[allow]`. À reconsidérer si le
-# pattern `db()` est un jour refactoré. (`await_holding_lock` couvre déjà l'invariant central CONC-1 :
-# aucun std Mutex tenu à travers un `.await`.)
-# significant_drop_tightening = "warn"
+# `significant_drop_tightening` : ACTIVÉ (readiness #6). Le lint flaguait ~93 sites PRÉEXISTANTS (pattern
+# `app.db()`/`app.store()` MutexGuard tenu jusqu'en fin de scope + lectures `RwLock`). RÉSOLU site par site :
+# la grande majorité TIGHTENED (guard relâché juste après son dernier usage — `drop()` explicite ou
+# construction inlinée — le travail restant ne touche plus la DB, donc BEHAVIOR-PRESERVING) ; une poignée de
+# sections ATOMIQUES gardent le verrou par CORRECTION et portent un `#[allow(...)]` fn-level justifié
+# (réservation FIFO run_state/run_reservations dans `reserve_engagement_slot`/`claim_and_spawn`, check-then-
+# act d'`admin_create_user`, apply RBAC multi-écritures d'`apply_to_user`, write-then-readback d'`admin_set_
+# module`, + fixtures de test miroir). Tightening ces sections rouvrirait une fenêtre de course.
+# `await_holding_lock` couvre l'invariant CONC-1 (aucun std Mutex tenu à travers un `.await`).
+significant_drop_tightening = "warn"
 
 [dependencies]
 guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe

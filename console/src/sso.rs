@@ -613,6 +613,7 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, provision_role: 
         let id = store
             .query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0))
             .map_err(|e| format!("provision lookup failed: {e}"))?;
+        drop(store);
         (id, inserted)
     };
     Ok((id, login, inserted > 0))
@@ -1359,8 +1360,8 @@ byHb5g3JqJSE6WJSuyEQrUob
 
         // But the secret IS persisted (write-only store).
         {
-            let db = app.db();
-            let stored = crate::settings_get(&db, CFG_KEY).unwrap();
+            
+            let stored = crate::settings_get(&app.db(), CFG_KEY).unwrap();
             assert!(stored.contains("top-secret-oidc"), "secret persisted verbatim in settings");
         }
         // Ledger never carries the secret.

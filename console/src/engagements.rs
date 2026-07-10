@@ -80,7 +80,9 @@ pub(crate) fn resolve_engagement(app: &App, headers: &HeaderMap, requested: Opti
             })
             .map_err(|_| "aucun engagement provisionné".to_string())?,
     };
-    load_engagement(&store, id).ok_or_else(|| format!("engagement {id} introuvable"))
+    let engagement = load_engagement(&store, id);
+    drop(store); // release DB lock after the last read; only response shaping (ok_or_else) remains
+    engagement.ok_or_else(|| format!("engagement {id} introuvable"))
 }
 
 // =====================================================================================
@@ -446,11 +448,12 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?;
         let f: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         let r: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
+        drop(store);
         (status, ledger, f, r)
     };
     if status == "active" {
-        let store = app.store();
-        let active_count: i64 = store.query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
+        
+        let active_count: i64 = app.store().query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
         if active_count <= 1 {
             return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (suppression refusée, fail-closed)".into()));
         }

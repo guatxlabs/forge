@@ -121,6 +121,7 @@ async fn sv_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<Has
         Ok(rows) => rows,
         Err(e) => return internal(e.to_string()),
     };
+    drop(store);
     (StatusCode::OK, Json(json!({"views": rows, "count": rows.len(), "user_id": user}))).into_response()
 }
 
@@ -369,6 +370,7 @@ mod tests {
             let db = app.db();
             let n: i64 = db.query_row("SELECT COUNT(*) FROM saved_view WHERE engagement_id IS NULL", [], |r| r.get(0)).unwrap();
             let e: Option<i64> = db.query_row("SELECT engagement_id FROM saved_view WHERE name='eng-new'", [], |r| r.get(0)).unwrap();
+            drop(db);
             (n, e)
         };
         assert_eq!(n_null, 1, "la vue globale a engagement_id NULL");

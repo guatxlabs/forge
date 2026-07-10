@@ -71,6 +71,10 @@ pub(crate) fn admin_list_users(app: &App) -> Vec<Value> {
 /// Crée un compte individuel. Valide login/rôle (fail-closed), hash argon2id HORS mutex, refuse un login
 /// déjà pris (409 — l'édition sert à muter). Recalcule `auth_required` (1er compte activé -> gate) et
 /// ledgerise avec l'admin acteur (login/rôle seuls, JAMAIS le mot de passe). Retourne la vue publique.
+// ALLOW significant_drop_tightening: the block is a check-then-act (SELECT the login exists? -> INSERT)
+// under ONE store lock. Tightening (clippy would drop the guard between the existence check and the insert)
+// opens a TOCTOU where two concurrent creates both pass the check and both insert. Hold is load-bearing.
+#[allow(clippy::significant_drop_tightening)]
 pub(crate) fn admin_create_user(app: &App, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
     let login = validate_login(&gs(body, "login")).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let role = validate_role(&gs(body, "role")).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -161,6 +165,7 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
                 "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
                 &crate::sql_params![&target_login],
             );
+            drop(store);
         }
         (purge, eff_role, eff_disabled)
     };
@@ -221,6 +226,11 @@ pub(crate) fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> R
 /// crée pas de module fantôme). Mutation attribuée + ledgerisée (jamais de secret). Renvoie la vue à-jour
 /// (avec `effective_available`). L'enforcement au tir vit ailleurs (scope.json disabled_modules + filtre
 /// --modules + refus validate_modules) : ici on ne fait QUE persister l'intention.
+// ALLOW significant_drop_tightening: the `let view = { … }` block holds ONE store lock across the
+// existence check + the enabled/web_allowed/override UPDATEs + the modules_catalog read-back, so the view
+// returned reflects exactly the writes just made with no concurrent writer interleaving (write-then-read
+// consistency). clippy would drop the guard before the read-back, splitting that atomic section.
+#[allow(clippy::significant_drop_tightening)]
 pub(crate) fn admin_set_module(app: &App, actor: &str, kind: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
     // kind = clé de module bien formée (même grammaire que validate_campaign) — anti entrée hostile.
     let kind = validate_campaign(kind).map_err(|e| (StatusCode::BAD_REQUEST, format!("kind invalide: {e}")))?;
