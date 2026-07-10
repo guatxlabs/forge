@@ -1056,7 +1056,16 @@ pub(crate) struct Tx<'s, 'a> {
     store: &'s Store<'a>,
 }
 
-impl Tx<'_, '_> {
+impl<'a> Tx<'_, 'a> {
+    /// Borrow the enclosing `Store` (same held connection, INSIDE this transaction's `BEGIN`). Lets a
+    /// caller pass the transactional handle to a helper that takes `&Store` (e.g. the migrator's
+    /// identity-sequence advance / row-count helpers) so those run within the transaction, not on a
+    /// separate connection. Gated on `store-postgres`: it is used ONLY by the Postgres migrator, so the
+    /// DEFAULT build compiles no new code here and stays byte-identical.
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn store(&self) -> &Store<'a> {
+        self.store
+    }
     pub(crate) fn execute(&self, sql: &str, params: &[Param]) -> StoreResult<usize> {
         self.store.execute(sql, params)
     }

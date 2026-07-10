@@ -95,6 +95,17 @@ fn ensure_schema(store: &crate::store::Store) {
     );
 }
 
+/// PG-ONLY — crée la table enterprise RBAC `rbac_group_map` (mappings IdP-groupe -> rôle) sur la CIBLE
+/// Postgres pour le migrateur de données (`cli::migrate-store`) : hors de `PG_SCHEMA` (créée paresseusement),
+/// le migrateur doit invoquer ce chemin pour que la cible la possède AVANT la copie (sinon absente ->
+/// hard-fail, jamais de skip silencieux — sinon les autorisations IdP->rôle seraient perdues en silence).
+/// Délègue à `ensure_schema` (branche `is_postgres()`). Entièrement gardé `store-postgres` : le build
+/// community ne compile pas cette fonction.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn ensure_pg_schema(store: &crate::store::Store) {
+    ensure_schema(store);
+}
+
 // ============================================================================================
 // ROUTES — admin-gated CRUD of the mapping (merged in the OUTER router; self-gates like sso/scim).
 // ============================================================================================

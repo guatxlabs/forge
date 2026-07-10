@@ -441,6 +441,15 @@ async fn main() {
         Some("migrate") => {
             std::process::exit(run_migrate_cli(&args[2..]));
         }
+        // MIGRATION DE STORE (feature `store-postgres`) : forge-console migrate-store --to <postgres-url>
+        //   [--from <sqlite-path>] [--dry-run] [--force] [--ledger <path>]. Copie gouvernée SQLite ->
+        //   Postgres à travers le seam (ids + typage préservés, ordre FK, recalage IDENTITY, vérif des
+        //   comptes, checkpoint ledger signé). Arm ENTIÈREMENT gardé par la feature -> le build community
+        //   (défaut) ne la connaît pas (retombe sur le boot serveur), et reste BYTE-IDENTICAL.
+        #[cfg(feature = "store-postgres")]
+        Some("migrate-store") => {
+            std::process::exit(crate::cli::run_migrate_store_cli(&args[2..]));
+        }
         // SAUVEGARDE CHIFFRÉE : forge-console backup --out <archive> --passphrase-env <ENVVAR>
         //   [--db <path>] [--ledger <path>]. Archive TOUJOURS chiffrée (argon2id + XChaCha20-Poly1305)
         //   regroupant snapshot DB (VACUUM INTO) + ledger + clé .ed25519 + manifest.json. Passphrase

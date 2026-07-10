@@ -224,6 +224,17 @@ fn ensure_schema(store: &crate::store::Store) {
     );
 }
 
+/// PG-ONLY — crée les tables enterprise SCIM (`scim_user`/`scim_group`/`scim_group_member`) sur la CIBLE
+/// Postgres pour le migrateur de données (`cli::migrate-store`) : ces tables sont HORS de `PG_SCHEMA` (créées
+/// paresseusement au 1er usage runtime), donc le migrateur doit invoquer explicitement ce chemin pour que la
+/// cible les possède AVANT la copie (sinon elles seraient absentes -> hard-fail au lieu d'un skip silencieux).
+/// Délègue à `ensure_schema` (branche `is_postgres()`). Entièrement gardé `store-postgres` : le build
+/// community ne compile pas cette fonction (byte-identical).
+#[cfg(feature = "store-postgres")]
+pub(crate) fn ensure_pg_schema(store: &crate::store::Store) {
+    ensure_schema(store);
+}
+
 // ============================================================================================
 // ROUTES — merged into the OUTER router (like sso), NOT behind `auth_guard`: the IdP has no session, it
 // authenticates with the SCIM bearer token INTERNALLY. Under host_guard like everything else. Each route
