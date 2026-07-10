@@ -826,6 +826,14 @@ async fn main() {
         #[cfg(feature = "store-postgres")]
         app.store()
             .with_tx(|tx| {
+                // FIX (isolation assumption): this serialization is correct ONLY under READ COMMITTED — the
+                // seam's `with_tx` default isolation. Under READ COMMITTED the SECOND replica, once it wins the
+                // advisory lock, re-evaluates its `SELECT COUNT(*)` seeder predicates against the FIRST
+                // replica's ALREADY-COMMITTED rows and sees id=1 present -> no re-seed (idempotent). A stricter
+                // level (REPEATABLE READ / SERIALIZABLE) would pin the second replica's snapshot at BEGIN,
+                // BEFORE the first replica committed, so its COUNT(*) would still read 0 and it would re-INSERT
+                // id=1 -> duplicate-key / double-seed. Do NOT raise the isolation of THIS boot tx without
+                // moving the seeders to ON CONFLICT DO NOTHING upserts. (Comment only — no behaviour change.)
                 tx.execute("SELECT pg_advisory_xact_lock(?)", &crate::sql_params![crate::ha::BOOT_DDL_LOCK_KEY])?;
                 tx.execute_batch(PG_SCHEMA)?;
                 // `tx.store()` is a getter returning the tx-owned `&Store` (the transaction owns the critical
@@ -904,6 +912,11 @@ async fn main() {
         // detection-source / user create-disable-role-delete). Tourne sur CHAQUE instance (pas seulement le
         // leader). Cloné AVANT que build_router ne déplace `app`.
         tokio::spawn(crate::ha::cache_poll_loop(app.clone()));
+        // GC PRÉSENCE PÉRIODIQUE (Wave C, write-amplification fix) : la purge des lignes `presence` périmées
+        // n'est PLUS faite sur chaque lecture `/api/presence` (amplification proportionnelle au trafic) mais
+        // par un DELETE de fond leader-only à la cadence du heartbeat ; le snapshot filtre déjà les périmés
+        // sur la lecture (TTL inchangé). Cloné AVANT que build_router ne déplace `app`.
+        tokio::spawn(crate::presence::presence_gc_loop(app.clone()));
     }
 
     // RUNNER DE SAUVEGARDE PROGRAMMÉE (fail-open) : tâche périodique qui, SI une politique

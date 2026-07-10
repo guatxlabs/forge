@@ -1123,17 +1123,27 @@ impl App {
     /// role/delete) AFTER the local reload. GATED on `ha_enabled`: a NO-OP (no write, no behaviour change)
     /// on single-instance / community — the caches only need cross-instance invalidation under HA. Must NOT
     /// be called from the reload fns themselves (the poll calls those; bumping there would ping-pong).
+    ///
+    /// MONOTONIC COUNTER (not a wall-clock stamp): the epoch is ATOMICALLY INCREMENTED at the DB
+    /// (`value = value + 1`) so every mutation STRICTLY increases it. A wall-clock (seconds) stamp would leave
+    /// two mutations in the SAME second identical -> a peer polling between them would see no change and stay
+    /// stale. The increment is a single UPDATE (the DB serialises concurrent bumps: N -> N+1 -> N+2), so a
+    /// peer's next poll ALWAYS observes a different value and reloads. Portable across both backends:
+    /// `CAST(CAST(value AS INTEGER)+1 AS TEXT)` are standard-SQL casts SQLite AND Postgres both evaluate
+    /// identically (value is a TEXT column holding the integer); seeds at '1' on first bump. Monotonic
+    /// regardless of any legacy epoch-seconds value already stored (it just keeps incrementing from there).
     pub(crate) fn bump_cache_epoch(&self) {
         if !crate::ha::ha_enabled(self) {
             return;
         }
-        let now = crate::now_epoch();
         let store = self.store();
         let _ = store.execute(
-            // `datetime('now')` is lowered to `CAST(CURRENT_TIMESTAMP AS TEXT)` on PG by the seam; `?`->`$1`.
-            "INSERT INTO settings(key,value,updated) VALUES('cache_epoch',?,datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
-            &crate::sql_params![now.to_string()],
+            // `datetime('now')` is lowered to `CAST(CURRENT_TIMESTAMP AS TEXT)` on PG by the seam. The
+            // ON CONFLICT arm increments the EXISTING row's value atomically (single UPDATE, no read-modify-
+            // write race). No `?` params: the value is derived server-side from the current row.
+            "INSERT INTO settings(key,value,updated) VALUES('cache_epoch','1',datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(settings.value AS INTEGER) + 1 AS TEXT), updated=datetime('now')",
+            &crate::sql_params![],
         );
     }
 
