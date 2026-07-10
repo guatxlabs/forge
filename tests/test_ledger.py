@@ -344,6 +344,61 @@ class TestDowngradeAttack(unittest.TestCase):
         self.assertTrue(v["ok"], v)
         self.assertEqual(v["entries"], 2)
 
+    def test_append_rereads_tail_chains_onto_external_writer(self):
+        # Deux instances Ledger sur le MÊME fichier (simule console Rust + moteur Python, même clé HMAC).
+        # `b` a un _head PÉRIMÉ (il n'a pas vu l'entrée de `a`) : son append DOIT relire la queue disque
+        # SOUS le verrou et chaîner sur l'entrée de `a`, au lieu de l'écraser (prev==GENESIS aurait forké).
+        a = Ledger(self.path, key=b"k" * 32)
+        b = Ledger(self.path, key=b"k" * 32)
+        a.append("roe.arm", {"n": 1})            # seq 1
+        rec = b.append("roe.decision", {"n": 2})
+        self.assertEqual(rec["seq"], 2, "seq contigu malgré un _head mémoire périmé")
+        self.assertEqual(rec["prev"], a.head, "chaîné sur l'entrée du writer concurrent (re-read tail)")
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v)
+        self.assertEqual(v["entries"], 2)
+
+    def test_append_after_truncated_last_line_chains_onto_last_valid(self):
+        # Un crash en plein write laisse une dernière ligne TRONQUÉE (sans '\n'). L'append suivant DOIT :
+        # relire la queue en ignorant la ligne corrompue, chaîner sur la dernière entrée VALIDE, et écrire
+        # sur une NOUVELLE ligne (pas collée à la corrompue -> sinon la nouvelle serait perdue).
+        led = Ledger(self.path, key=b"k" * 32)
+        r1 = led.append("roe.arm", {"n": 1})                       # seq 1, valide
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write('{"seq": 2, "ts": "@x", "kin')                 # JSON tronqué, PAS de newline
+        led2 = Ledger(self.path, key=b"k" * 32)                    # comme un autre processus
+        r_new = led2.append("roe.decision", {"n": 3})
+        self.assertEqual(r_new["prev"], r1["hash"], "chaîné sur la dernière entrée VALIDE (r1)")
+        self.assertEqual(r_new["seq"], 2, "seq = dernier seq valide + 1 (ligne tronquée ignorée)")
+        lines = [ln for ln in self.path.read_text().splitlines() if ln.strip()]
+        last = json.loads(lines[-1])                               # ne doit PAS lever (ligne propre)
+        self.assertEqual(last["hash"], r_new["hash"], "la nouvelle entrée est sur sa propre ligne")
+
+    def test_concurrent_threaded_appends_keep_chain_verifiable(self):
+        # Deux threads, chacun sa propre instance Ledger, appendent en parallèle sur le MÊME chemin.
+        # Le flock+re-read-tail garantit une chaîne CONTIGUË et VÉRIFIABLE (sans le verrou, les deux
+        # partiraient de leur _head mémoire et forkeraient la chaîne : seq dupliqués, verify() cassé).
+        import threading
+        n_each = 25
+        errors = []
+
+        def worker():
+            try:
+                led = Ledger(self.path, key=b"k" * 32)
+                for i in range(n_each):
+                    led.append("roe.decision", {"i": i})
+            except Exception as e:  # noqa: BLE001 — remonter l'échec du thread au test
+                errors.append(e)
+
+        t1, t2 = threading.Thread(target=worker), threading.Thread(target=worker)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        self.assertEqual(errors, [], f"un thread a échoué (deadlock/exception ?) : {errors}")
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v)
+        self.assertEqual(v["entries"], 2 * n_each, "aucune entrée perdue ni écrasée")
+        seqs = [json.loads(l)["seq"] for l in self.path.read_text().splitlines() if l.strip()]
+        self.assertEqual(seqs, list(range(1, 2 * n_each + 1)), "seq strictement contigus 1..N")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

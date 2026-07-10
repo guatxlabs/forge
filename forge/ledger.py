@@ -23,13 +23,29 @@ vérifiée, signature non-applicable » (intégrité garantie par le hash-chaini
 altération de contenu/hash ou une signature ed25519 invalide reste TOUJOURS détectée.
 
 Format disque : JSONL (1 entrée/ligne, champs incl. `sig` + `alg`). Core stdlib (signing.py gère la dep).
+
+CONCURRENCE : le même fichier étant écrit par la console Rust ET le moteur Python, `append()` est
+SÉRIALISÉ ENTRE PROCESSUS par un verrou consultatif exclusif `fcntl.flock(LOCK_EX)` (POSIX) et rendu
+DURABLE par `flush()+os.fsync()` avant relâche du verrou. Sous le verrou, la queue réelle du disque est
+RELUE pour chaîner sur une écriture concurrente (jamais l'écraser). Sur non-POSIX (Windows) `fcntl` est
+absent -> repli sans verrou (sûr uniquement en écrivain unique, cf. import défensif plus bas).
 """
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import signing
+
+# POSIX advisory file locking. On Windows `fcntl` is unavailable — we import it DEFENSIVELY and fall
+# back to the historical (no-lock) behavior. CAVEAT (non-POSIX only): without flock, two processes
+# appending to the SAME ledger concurrently can still fork the hash-chain — cross-process serialization
+# requires POSIX flock. On Linux (the deployment target) the lock+fsync path below always runs.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX (Windows) fallback
+    fcntl = None
 
 GENESIS = "0" * 64
 # Les entrées de la console Rust (chaîne SHA-256 NON signée, alg=sha256-console) portent toujours un
@@ -85,7 +101,19 @@ class Ledger:
             self._restore_head()
 
     def _restore_head(self):
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        self._head, self._seq = self._disk_tail()
+
+    def _disk_tail(self):
+        """Renvoie (hash, seq) de la DERNIÈRE entrée VALIDE sur disque, ou (GENESIS, 0) si le ledger est
+        vide/absent. Une dernière ligne CORROMPUE ou TRONQUÉE (crash en plein write) est ignorée — on
+        chaîne alors sur la dernière entrée valide. Doit être appelé sous le verrou fichier (append
+        re-lit la queue ici pour chaîner sur une écriture concurrente au lieu de l'écraser)."""
+        head, seq = GENESIS, 0
+        try:
+            data = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return head, seq
+        for line in data.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -93,20 +121,59 @@ class Ledger:
                 rec = json.loads(line)
                 head, seq = rec["hash"], rec["seq"]
             except (ValueError, KeyError, TypeError):
-                continue                            # ligne corrompue : on garde le dernier head valide
-            self._head, self._seq = head, seq
+                continue                            # ligne corrompue/tronquée : dernier head valide gardé
+        return head, seq
 
-    # --- append (le seul moyen d'écrire) ---
+    # --- append (le seul moyen d'écrire) — flock+fsync-sérialisé ENTRE PROCESSUS ---
+    # Le MÊME ledger est écrit par la console Rust (kinds `console.*`) ET le moteur Python. Un append
+    # est donc rendu ATOMIQUE vis-à-vis des autres processus par un verrou consultatif EXCLUSIF
+    # (`fcntl.flock LOCK_EX`, POSIX) et DURABLE par `flush()+os.fsync()` avant relâche du verrou. Comme
+    # `_head` est mis en cache en mémoire, on RE-LIT la vraie queue sur disque SOUS le verrou : l'entrée
+    # d'un writer concurrent est ainsi CHAÎNÉE dessus (pas écrasée). Sans ce verrou, deux appends quasi
+    # simultanés liraient le même `_head` et écriraient tous deux prev=H -> verify() verrait la chaîne
+    # rompue sur un ledger honnête ; un crash en plein write pourrait tronquer la dernière ligne.
     def append(self, kind, detail):
-        seq = self._seq + 1
-        ts = _now()
-        h = _entry_hash(self._head, seq, ts, kind, detail)
-        sig = self.signer.sign(h.encode("utf-8"))
-        rec = {"seq": seq, "ts": ts, "kind": kind, "detail": detail,
-               "prev": self._head, "hash": h, "alg": self.signer.alg, "sig": sig}
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(_canon(rec) + "\n")
+        existed = self.path.exists()               # fail-closed : ne pas laisser un ledger VIDE si sign() lève
+        try:
+            with self.path.open("a+", encoding="utf-8") as f:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    # SOUS LE VERROU : re-lire la queue disque (le `_head` mémoire peut être périmé si un autre
+                    # processus — ou la console Rust — a appendé depuis). Empty/absent -> GENESIS/0.
+                    head, last_seq = self._disk_tail()
+                    seq = last_seq + 1
+                    ts = _now()
+                    h = _entry_hash(head, seq, ts, kind, detail)
+                    sig = self.signer.sign(h.encode("utf-8"))   # PEUT LEVER (ex: KMS injoignable) -> fail-closed
+                    rec = {"seq": seq, "ts": ts, "kind": kind, "detail": detail,
+                           "prev": head, "hash": h, "alg": self.signer.alg, "sig": sig}
+                    # Si la dernière ligne existante est TRONQUÉE (crash sans '\n' final), l'isoler d'abord :
+                    # sans ça, l'append (à EOF) collerait la nouvelle entrée sur la ligne corrompue, la rendant
+                    # elle aussi illisible. `os.pread` lit à un offset SANS bouger la position du flux (POSIX).
+                    if fcntl is not None:
+                        end = os.fstat(f.fileno()).st_size
+                        if end and os.pread(f.fileno(), 1, end - 1) != b"\n":
+                            f.write("\n")
+                    f.write(_canon(rec) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())           # durable AVANT de relâcher le verrou
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except BaseException:
+            # sign() (ou une I/O) a échoué APRÈS l'open : si on vient de CRÉER le fichier et qu'il est resté
+            # VIDE (aucune entrée écrite), le supprimer — ne pas laisser de ledger vide (fail-closed, parité
+            # avec l'ancien comportement qui signait AVANT d'ouvrir le fichier). Le garde `st_size == 0` ne
+            # supprime JAMAIS un fichier contenant des données.
+            if not existed:
+                try:
+                    if self.path.exists() and self.path.stat().st_size == 0:
+                        self.path.unlink()
+                except OSError:
+                    pass
+            raise
         self._head, self._seq = h, seq
         return rec
 
