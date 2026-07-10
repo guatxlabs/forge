@@ -32,13 +32,21 @@ from forge.roe import Action, Scope                            # noqa: E402
 from forge.modules.toolspec import (ToolSpec, build_argv, parse_output, make_module,   # noqa: E402
                                     spec_to_technique, ExternalToolModule)
 
+# Intégrations externes SUPPLÉMENTAIRES (recon/scan/OSINT, non-destructif/non-exploit, proof-oriented).
+NEW_KINDS = {
+    "recon.masscan", "recon.gobuster_dns", "recon.theharvester",
+    "fuzz.wfuzz", "web.zap_baseline",
+}
+
 # Les kinds livrés par le catalogue (toolcatalog.py) — pinnés pour prouver l'auto-intégration.
+# NEW_KINDS y est FONDU : toutes les assertions d'auto-intégration (registered / mitre / profils /
+# pipeline / modules --json / flags cohérents / deps enregistrées) s'appliquent AUSSI aux nouveaux.
 CATALOG_KINDS = {
     "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",
     "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",
     "recon.whatweb", "recon.wafw00f",
     "web.nikto", "web.wpscan", "web.testssl", "xss.dalfox", "sqli.sqlmap",
-}
+} | NEW_KINDS
 
 
 class _Patch:
@@ -318,6 +326,88 @@ class TestExploitFloor(unittest.TestCase):
         for x in f:
             self.assertIn(x.status, ("reported_by_tool", "tested"))
             self.assertNotEqual(x.status, "vulnerable")
+
+
+# =================================================================================================
+class TestNewIntegrations(unittest.TestCase):
+    """Intégrations externes AJOUTÉES (masscan, gobuster-dns, theHarvester, wfuzz, ZAP baseline) —
+    enregistrées, gouvernées (scope-guard ZÉRO I/O), no-shell, NON-exploit / NON-destructif, et
+    présentes dans les vues dérivées (mitre_for / by_vuln_class / technique_for)."""
+
+    def test_all_new_kinds_registered_as_external_modules(self):
+        for k in NEW_KINDS:
+            self.assertIn(k, mods.kinds(), f"{k} non enregistré comme module")
+            self.assertIsInstance(mods.get(k), ExternalToolModule, f"{k} n'est pas un wrapper externe")
+
+    def test_new_kinds_in_derived_views(self):
+        # chaque nouvelle technique est FOLDÉE dans techniques.CATALOG + résolveur mitre_for.
+        for k in NEW_KINDS:
+            self.assertIsNotNone(techniques.technique_for(k), f"{k} absent de CATALOG")
+            self.assertTrue(techniques.mitre_for(k), f"{k} sans mitre dans la table")
+            self.assertEqual(mods.get(k).mitre, techniques.mitre_for(k), f"mitre dérive pour {k}")
+        bvc = techniques.by_vuln_class()
+        self.assertIn("recon.masscan", bvc.get("PortScan", []))
+        self.assertIn("recon.gobuster_dns", bvc.get("SubdomainEnum", []))
+        self.assertIn("recon.theharvester", bvc.get("OSINT", []))
+        self.assertIn("fuzz.wfuzz", bvc.get("Fuzzing", []))
+        self.assertIn("web.zap_baseline", bvc.get("WebScan", []))
+
+    def test_new_kinds_non_exploit_non_destructive(self):
+        # philosophie proof-oriented : recon/scan/OSINT -> jamais exploit, jamais destructif.
+        for k in NEW_KINDS:
+            m = mods.get(k)
+            self.assertFalse(m.exploit, f"{k} ne doit pas être exploit")
+            self.assertFalse(m.destructive, f"{k} ne doit pas être destructif")
+            self.assertFalse(techniques.technique_for(k).exploit, f"{k} exploit dans la table")
+        self.assertEqual(techniques.technique_for("recon.theharvester").capability, "passive")
+
+    def test_new_kinds_scope_guard_zero_io(self):
+        # cible HORS périmètre -> skipped, runner.tool JAMAIS atteint (fail-closed).
+        for k in NEW_KINDS:
+            m = mods.get(k)
+            with _Patch(tool=_boom, available=lambda *a, **k: True):
+                f = m.fire(Action(k, "evil.attacker.com", params={"in_scope": ["good.test"]}))
+            self.assertEqual(f[0].status, "skipped", f"{k} n'a pas été bloqué hors scope")
+            self.assertIn("hors périmètre", f[0].title, f"{k} mauvais motif de skip")
+
+    def test_new_kinds_argv_no_shell(self):
+        # une cible avec métacaractères shell reste dans UN SEUL élément d'argv (anti-injection).
+        meta = "good.test; rm -rf / && `id`"
+        for k in NEW_KINDS:
+            argv = build_argv(mods.get(k).spec, meta, {"wordlist": "/tmp/wl.txt"})
+            # aucun élément ne doit être un fragment shell isolé produit par une découpe.
+            self.assertNotIn("rm", argv)
+            self.assertNotIn("&&", argv)
+            # le token qui porte la cible la contient INTÉGRALEMENT (au moins jusqu'au 1er '/').
+            self.assertTrue(any("good.test" in e for e in argv), f"{k}: cible absente de l'argv {argv}")
+
+    def test_new_kinds_hits_never_vulnerable(self):
+        # les hits sont CLAMPÉS à tested/reported_by_tool — jamais vulnerable.
+        samples = {
+            "recon.masscan": "Discovered open port 443/tcp on 1.2.3.4\n",
+            "recon.gobuster_dns": "Found: api.good.test\n",
+            "recon.theharvester": "foo@good.test\nwww.good.test\n",
+            "fuzz.wfuzz": "000000001:   200        0 L   3 W   45 Ch   \"admin\"\n",
+            "web.zap_baseline": "WARN-NEW: Cookie No HttpOnly Flag [10010] x 3\n",
+        }
+        for k, out in samples.items():
+            m = mods.get(k)
+            with _Patch(available=lambda *a, **k: True, tool=lambda *a, **k: (0, out, "")):
+                f = m.fire(Action(k, "http://good.test/",
+                                  params={"in_scope": ["good.test", "*.good.test"]}))
+            self.assertTrue(f, f"{k}: aucun finding")
+            for x in f:
+                self.assertIn(x.status, ("tested", "reported_by_tool"), f"{k}: statut {x.status}")
+                self.assertNotEqual(x.status, "vulnerable")
+
+    def test_zap_docker_invocation_includes_script(self):
+        # l'entrypoint de l'image ZAP n'est pas le script -> zap-baseline.py doit être le 1er token
+        # d'argv pour que `docker run IMG zap-baseline.py -t URL` soit correct.
+        spec = mods.get("web.zap_baseline").spec
+        argv = build_argv(spec, "https://good.test", {})
+        self.assertEqual(argv[0], "zap-baseline.py")
+        self.assertIn("-t", argv)
+        self.assertNotIn("-a", argv)                 # PASSIF : aucune attaque active
 
 
 if __name__ == "__main__":
