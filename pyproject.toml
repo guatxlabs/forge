@@ -17,3 +17,24 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["forge", "forge.modules"]
+
+# --- mypy : gate de typage scopé au COEUR de sûreté (ROE / ledger / planner / engine) ---
+# mypy est un outil de DEV uniquement (jamais une dépendance runtime — cf. `dependencies = []`). Installer
+# dans un venv jetable puis lancer le gate :
+#   python -m venv /tmp/mypyenv && /tmp/mypyenv/bin/pip install mypy
+#   /tmp/mypyenv/bin/mypy forge/roe.py forge/ledger.py forge/planner.py forge/engine.py
+# Le gate est délibérément SCOPÉ à ces 4 modules (le fail-closed ROE + la hash-chain du ledger) : ce sont
+# les fichiers annotés. Les autres modules ne sont pas encore typés -> `follow_imports=silent` les suit
+# pour en tirer les types SANS exiger d'annotations, et `ignore_missing_imports` absorbe les deps tierces
+# optionnelles (cryptography, etc.). Étendre la liste `module` ci-dessous au fur et à mesure du typage.
+[tool.mypy]
+# Cible d'analyse mypy (>= 3.10, requis par mypy récent). Le CODE reste compatible 3.9 : toutes les
+# annotations sont différées (`from __future__ import annotations`) donc `X | None` / `list[str]` sont
+# des chaînes non évaluées au runtime — aucune exigence de syntaxe 3.10 à l'exécution.
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["forge.roe", "forge.ledger", "forge.planner", "forge.engine"]
+disallow_untyped_defs = true

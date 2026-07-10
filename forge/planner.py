@@ -14,6 +14,11 @@ Self-test en __main__ : une action qualifiante sous-notée reste planifiée. Zé
 SOURCE DE VÉRITÉ : QUALIFYING et DEFAULT_CHECKLIST sont DÉRIVÉS de forge/techniques.py (la table
 unique) — plus de recopie de la taxonomie entre planner, brain, schema et les modules.
 """
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
 try:                                            # import package normal
     from . import techniques
 except ImportError:                             # exécution directe (python3 forge/planner.py — self-test)
@@ -21,6 +26,9 @@ except ImportError:                             # exécution directe (python3 fo
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from forge import techniques
+
+if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
+    from .roe import Action
 
 FLOOR = 0.5
 # classes qualifiantes (plancher anti-starvation) = jetons `qualifying=True` de la table unique.
@@ -30,19 +38,20 @@ DEFAULT_CHECKLIST = list(techniques.DEFAULT_CHECKLIST)
 
 
 class Planner:
-    def __init__(self, budget=None, exhaustive=False, checklist=None):
+    def __init__(self, budget: float | None = None, exhaustive: bool = False,
+                 checklist: Iterable[str] | None = None) -> None:
         self.budget = budget                       # None = illimité
         self.exhaustive = exhaustive
         self.checklist = list(checklist or DEFAULT_CHECKLIST)
 
     @staticmethod
-    def ev(action):
+    def ev(action: Action) -> float:
         base = action.value * action.confidence / max(action.cost, 0.01)
         if action.cls in QUALIFYING:               # plancher : jamais affamer une voie payable
             return max(base, FLOOR)
         return base
 
-    def order(self, actions):
+    def order(self, actions: list[Action]) -> tuple[list[Action], list[Action]]:
         """Retourne (ordered, skipped_budget). Préserve toutes les actions (defer != delete).
 
         Le budget ne borne QUE le travail NON-QUALIFIANT : une action dont `cls` est dans
@@ -54,7 +63,9 @@ class Planner:
         ranked = sorted(actions, key=self.ev, reverse=True)
         if self.budget is None:
             return ranked, []
-        ordered, skipped, spent = [], [], 0.0
+        ordered: list[Action] = []
+        skipped: list[Action] = []
+        spent = 0.0
         for a in ranked:
             qualifying = a.cls in QUALIFYING
             if spent + a.cost <= self.budget or qualifying:  # qualifiant = toujours gardé
@@ -67,9 +78,9 @@ class Planner:
                 skipped.append(a)
         return ordered, skipped
 
-    def coverage_gaps(self, actions, targets):
+    def coverage_gaps(self, actions: list[Action], targets: Iterable[str]) -> dict[str, list[str]]:
         """Par cible : classes de la checklist jamais présentes dans les actions proposées."""
-        gaps = {}
+        gaps: dict[str, list[str]] = {}
         for t in targets:
             attempted = {a.cls for a in actions if a.target == t}
             missing = [c for c in self.checklist if c not in attempted]

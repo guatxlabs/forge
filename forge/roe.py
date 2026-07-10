@@ -20,12 +20,19 @@ Politique fail-closed : toute erreur, champ inconnu, ou exception => VETO (jamai
 Chaque décision est journalisée dans le ledger append-time (qui/quoi/quand/verdict/raisons).
 Zéro dépendance (stdlib).
 """
+from __future__ import annotations
+
 import fnmatch
 import ipaddress
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
+    from .ledger import Ledger
 
 VETO = "VETO"
 DRY_RUN = "DRY_RUN"
@@ -36,7 +43,7 @@ class ScopeError(Exception):
     pass
 
 
-def _now():
+def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -52,14 +59,14 @@ class Action:
     exploit: bool = False
     destructive: bool = False
     desc: str = ""
-    params: dict = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
     cls: str = ""
     value: float = 0.5
     confidence: float = 0.5
     cost: float = 1.0
     id: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.cls:
             self.cls = self.kind.split(".")[-1]
         if not self.id:
@@ -75,14 +82,14 @@ class Decision:
     kind: str
     exploit: bool
     destructive: bool
-    reasons: list
+    reasons: list[str]
     ts: str = field(default_factory=_now)
 
     @property
-    def will_fire(self):
+    def will_fire(self) -> bool:
         return self.verdict == FIRE
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict, "action_id": self.action_id, "target": self.target,
             "kind": self.kind, "exploit": self.exploit, "destructive": self.destructive,
@@ -93,7 +100,7 @@ class Decision:
 class Scope:
     """Périmètre autorisé. Appartenance fail-closed : in_scope vide => rien n'est en scope."""
 
-    def __init__(self, data):
+    def __init__(self, data: dict[str, Any]) -> None:
         self.mode = data.get("mode", "black")                 # white | grey | black
         self.in_scope = list(data.get("in_scope", []))
         self.out_scope = list(data.get("out_scope", []))
@@ -134,11 +141,11 @@ class Scope:
         self.notes = data.get("notes", "")
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path: str | Path) -> "Scope":
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
     @staticmethod
-    def _host(value):
+    def _host(value: Any) -> str:
         """Hôte canonique pour le matching glob : retire scheme/port, casefold.
         Conserve la valeur brute pour le chemin CIDR/IP (qui n'appelle pas ceci)."""
         s = str(value).strip().casefold()
@@ -153,7 +160,7 @@ class Scope:
             s = s.split(":", 1)[0]
         return s
 
-    def _match(self, target, patterns):
+    def _match(self, target: str, patterns: Iterable[Any]) -> bool:
         host = self._host(target)
         for p in patterns:
             if not isinstance(p, str):                        # pattern non-string => fail-closed (ignore)
@@ -176,7 +183,7 @@ class Scope:
                 return True
         return False
 
-    def is_in_scope(self, target):
+    def is_in_scope(self, target: str) -> bool:
         if not target:
             return False
         if self._match(target, self.out_scope):               # out_scope l'emporte toujours
@@ -184,14 +191,14 @@ class Scope:
         return self._match(target, self.in_scope)
 
     # --- SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed, en plus du scope-guard) ---
-    def technique_selection_configured(self):
+    def technique_selection_configured(self) -> bool:
         """True si ce scope porte une SÉLECTION de techniques (profil et/ou toggles). Sinon (scope
         LEGACY) l'effective set = toutes les techniques : aucun filtrage, rétro-compat stricte."""
         return (self.profile is not None
                 or self.techniques_enabled is not None
                 or self.categories_enabled is not None)
 
-    def effective_technique_kinds(self):
+    def effective_technique_kinds(self) -> set[str]:
         """L'ENSEMBLE EFFECTIF de kinds-techniques ACTIVÉS pour ce scope (fail-closed). NON configuré
         -> TOUTES les techniques (aucun filtrage : rétro-compat). Configuré -> RÉSOLU depuis la table
         unique (profil bug_bounty par défaut) : profil ∪ activations − désactivations. C'est l'ensemble
@@ -209,29 +216,29 @@ class Scope:
 class Roe:
     """Gate ROE à quatre couches. Inerte par défaut (armed=False, mode='propose')."""
 
-    def __init__(self, scope, ledger=None, mode="propose"):
+    def __init__(self, scope: Scope, ledger: "Ledger | None" = None, mode: str = "propose") -> None:
         self.scope = scope
         self.ledger = ledger                                  # ledger.Ledger | None
         self.mode = mode                                      # 'propose' (approbation requise) | 'auto'
         self.armed = False
-        self._approved = set()                                # ids d'actions approuvées
+        self._approved: set[str] = set()                      # ids d'actions approuvées
 
     # --- armement (gestes conscients, journalisés) ---
-    def arm(self, reason="armed by operator"):
+    def arm(self, reason: str = "armed by operator") -> None:
         self.armed = True
         self._log("roe.arm", {"reason": reason})
 
-    def disarm(self, reason="disarmed"):
+    def disarm(self, reason: str = "disarmed") -> None:
         self.armed = False
         self._log("roe.disarm", {"reason": reason})
 
-    def approve(self, action_id, reason="approved by operator"):
+    def approve(self, action_id: str, reason: str = "approved by operator") -> None:
         self._approved.add(action_id)
         self._log("roe.approve", {"action_id": action_id, "reason": reason})
 
     # --- décision (le coeur) ---
-    def decide(self, action):
-        reasons = []
+    def decide(self, action: Action) -> Decision:
+        reasons: list[str] = []
         try:
             # Couche 2 — appartenance (fail-closed)
             if not self.scope.is_in_scope(action.target):
@@ -265,18 +272,18 @@ class Roe:
             return self._finish(VETO, action, reasons)
 
     # --- garde stricte (pour les modules : lève si pas FIRE) ---
-    def guard(self, action):
+    def guard(self, action: Action) -> Decision:
         d = self.decide(action)
         if not d.will_fire:
             raise ScopeError(f"{d.verdict}: {action.target} — " + " ; ".join(d.reasons))
         return d
 
-    def _finish(self, verdict, action, reasons):
+    def _finish(self, verdict: str, action: Action, reasons: list[str]) -> Decision:
         d = Decision(verdict, action.id, action.target, action.kind,
                      action.exploit, action.destructive, reasons)
         self._log("roe.decision", d.to_dict())
         return d
 
-    def _log(self, kind, detail):
+    def _log(self, kind: str, detail: dict[str, Any]) -> None:
         if self.ledger is not None:
             self.ledger.append(kind, detail)

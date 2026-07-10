@@ -44,10 +44,24 @@ SECRET = "S3CR3T-cf-9d1e0f"                                      # jeton témoin
 
 
 def _patch(cls, fn):
-    """Remplace cls._fetch par fn (staticmethod) et renvoie un restaurateur."""
-    orig = cls._fetch
+    """Remplace cls._fetch par fn (staticmethod) et renvoie un restaurateur.
+
+    `_fetch` est un @staticmethod HÉRITÉ de ClientFlowOracle (aucune sous-classe ne le redéfinit). On
+    lit le DESCRIPTEUR BRUT via `cls.__dict__` (et non `cls._fetch`, qui déréférence le staticmethod en
+    fonction nue) : la restauration doit soit reposer le descripteur d'origine, soit — si la sous-classe
+    n'avait pas d'override propre — SUPPRIMER l'attribut pour restaurer l'héritage. Sans ça, `setattr`
+    reposait une fonction NUE sur la sous-classe : `self._fetch(...)` la liait alors comme méthode
+    d'instance (self capturé en 1er positionnel) -> `TypeError: got multiple values for argument
+    'headers'` polluant les tests suivants (ex: TestSessionSecrecy) qui ne repatchent pas `_fetch`."""
+    orig = cls.__dict__.get("_fetch")            # descripteur staticmethod propre à cls, ou None si hérité
     cls._fetch = staticmethod(fn)
-    return lambda: setattr(cls, "_fetch", orig)
+
+    def restore():
+        if orig is None:
+            del cls._fetch                       # retire l'override -> restaure le staticmethod hérité
+        else:
+            setattr(cls, "_fetch", orig)         # repose le descripteur d'origine tel quel
+    return restore
 
 
 def _boom(*a, **k):

@@ -30,13 +30,19 @@ DURABLE par `flush()+os.fsync()` avant relâche du verrou. Sous le verrou, la qu
 RELUE pour chaîner sur une écriture concurrente (jamais l'écraser). Sur non-POSIX (Windows) `fcntl` est
 absent -> repli sans verrou (sûr uniquement en écrivain unique, cf. import défensif plus bas).
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from . import signing
+
+if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
+    from .anchor import Anchor
 
 # POSIX advisory file locking. On Windows `fcntl` is unavailable — we import it DEFENSIVELY and fall
 # back to the historical (no-lock) behavior. CAVEAT (non-POSIX only): without flock, two processes
@@ -45,7 +51,7 @@ from . import signing
 try:
     import fcntl
 except ImportError:  # pragma: no cover — non-POSIX (Windows) fallback
-    fcntl = None
+    fcntl = None  # type: ignore[assignment]  # idiome import-optionnel : sentinelle testée par `is not None`
 
 GENESIS = "0" * 64
 # Les entrées de la console Rust (chaîne SHA-256 NON signée, alg=sha256-console) portent toujours un
@@ -54,11 +60,11 @@ GENESIS = "0" * 64
 CONSOLE_KIND_PREFIX = "console."
 
 
-def _now():
+def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _alg_kind_allowed(alg, kind):
+def _alg_kind_allowed(alg: Any, kind: Any) -> bool:
     """Garde structurel anti-downgrade : l'algo NON signé `sha256-console` n'est légitime QUE sur une
     entrée console (kind 'console.*'). Tout autre algo (ed25519/hmac) est interdit sur un kind console
     (le moteur n'écrit jamais ces kinds -> une entrée console signée est forcément forgée/relabelée).
@@ -70,18 +76,21 @@ def _alg_kind_allowed(alg, kind):
     return not is_console_kind            # algos signés interdits sur un kind console
 
 
-def _canon(obj):
+def _canon(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _entry_hash(prev, seq, ts, kind, detail):
+def _entry_hash(prev: str, seq: int, ts: str, kind: str, detail: Any) -> str:
     h = hashlib.sha256()
     h.update(f"{prev}|{seq}|{ts}|{kind}|{_canon(detail)}".encode("utf-8"))
     return h.hexdigest()
 
 
 class Ledger:
-    def __init__(self, path, key=None, signer=None, prefer_ed25519=True, anchor=None, signer_config=None):
+    def __init__(self, path: str | Path, key: bytes | None = None,
+                 signer: "signing.Signer | None" = None, prefer_ed25519: bool = True,
+                 anchor: "Anchor | None" = None,
+                 signer_config: dict[str, Any] | None = None) -> None:
         self.path = Path(path)
         if signer is not None:
             self.signer = signer
@@ -100,10 +109,10 @@ class Ledger:
         if self.path.exists():
             self._restore_head()
 
-    def _restore_head(self):
+    def _restore_head(self) -> None:
         self._head, self._seq = self._disk_tail()
 
-    def _disk_tail(self):
+    def _disk_tail(self) -> tuple[str, int]:
         """Renvoie (hash, seq) de la DERNIÈRE entrée VALIDE sur disque, ou (GENESIS, 0) si le ledger est
         vide/absent. Une dernière ligne CORROMPUE ou TRONQUÉE (crash en plein write) est ignorée — on
         chaîne alors sur la dernière entrée valide. Doit être appelé sous le verrou fichier (append
@@ -132,7 +141,7 @@ class Ledger:
     # d'un writer concurrent est ainsi CHAÎNÉE dessus (pas écrasée). Sans ce verrou, deux appends quasi
     # simultanés liraient le même `_head` et écriraient tous deux prev=H -> verify() verrait la chaîne
     # rompue sur un ledger honnête ; un crash en plein write pourrait tronquer la dernière ligne.
-    def append(self, kind, detail):
+    def append(self, kind: str, detail: Any) -> dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists()               # fail-closed : ne pas laisser un ledger VIDE si sign() lève
         try:
@@ -177,7 +186,7 @@ class Ledger:
         self._head, self._seq = h, seq
         return rec
 
-    def checkpoint(self, note=""):
+    def checkpoint(self, note: str = "") -> dict[str, Any]:
         cp = {"seq": self._seq, "head": self._head, "ts": _now()}
         receipt = self.anchor.anchor(cp) if self.anchor is not None else {"anchored": False}
         return self.append("ledger.checkpoint",
@@ -185,7 +194,7 @@ class Ledger:
                             "pub": self.signer.public_id(), "anchor": receipt})
 
     # --- verify : recalcul intégral depuis la genèse (avec le signeur local) ---
-    def verify(self):
+    def verify(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"ok": True, "entries": 0, "broken": None, "alg": self.alg}
         prev = GENESIS
@@ -223,7 +232,7 @@ class Ledger:
         return {"ok": True, "entries": n, "broken": None, "head": prev, "alg": self.alg, "pub": self.signer.public_id()}
 
     # --- verify EXTERNE : un tiers vérifie avec la seule clé publique Ed25519 (non-répudiation) ---
-    def verify_external(self, pubkey_hex):
+    def verify_external(self, pubkey_hex: str) -> dict[str, Any]:
         if not self.path.exists():
             return {"ok": True, "entries": 0}
         prev = GENESIS
@@ -264,8 +273,8 @@ class Ledger:
         return {"ok": True, "entries": n, "broken": None}
 
     @property
-    def head(self):
+    def head(self) -> str:
         return self._head
 
-    def public_id(self):
+    def public_id(self) -> str:
         return self.signer.public_id()
