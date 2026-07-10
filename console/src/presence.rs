@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Forge console — PRESENCE (#9) : roster multi-opérateur LIVE (qui est connecté/en train d'opérer).
 //!
-//! Aujourd'hui la console a un BUS d'événements SSE (`App.events`, cf. runs.rs) + l'attribution
-//! `started_by`, mais AUCUNE présence partagée : un opérateur ne voit pas qui d'autre est connecté. Ce
-//! module ajoute une PRÉSENCE PAR-INSTANCE, entièrement EN MÉMOIRE (aucune table, aucun changement de
-//! schéma), branchée sur le CYCLE DE VIE de la connexion SSE :
+//! La console a un BUS d'événements SSE (`App.events`, cf. runs.rs) + l'attribution `started_by`. Ce
+//! module ajoute la présence : qui d'autre est connecté/en train d'opérer. Le registre a DEUX backends,
+//! choisis une fois à la construction (`PresenceRegistry::for_app`, dans `build_router`) :
+//!   - MONO-INSTANCE / community (défaut) : entièrement EN MÉMOIRE (aucune table lue/écrite) ;
+//!   - HA (opt-in `FORGE_HA` + Postgres, feature `store-postgres`) : backé par la table `presence`
+//!     PARTAGÉE (cf. state.rs SCHEMA/PG_SCHEMA) -> `GET /api/presence` sur N'IMPORTE quel réplica agrège
+//!     l'UNION des opérateurs de TOUS les réplicas (chaque ligne stampée de `FORGE_INSTANCE_ID`).
+//! Les DEUX backends exposent les MÊMES méthodes et sont branchés sur le CYCLE DE VIE de la connexion SSE :
 //!   - un client ouvre `GET /api/presence/events` -> on l'INSCRIT (join) + on diffuse un event `presence`
 //!     sur le bus existant pour que les autres clients se rafraîchissent ;
 //!   - tant que le flux vit, un tick interne rafraîchit le `last_seen` (heartbeat côté serveur) ;
@@ -19,12 +23,16 @@
 //! heartbeat depuis `PRESENCE_TTL_SECS`) expire (GC paresseux à la lecture) : une connexion tuée sans
 //! `Drop` (crash réseau) finit par disparaître.
 //!
-//! PER-INSTANCE (délibéré) : la map vit dans le process. La présence PARTAGÉE multi-instance (roster
-//! agrégé derrière un LB) est la tâche HA (#10, role-split) — hors périmètre ici.
+//! BYTE-IDENTIQUE HORS-HA (garantie forte) : sans `FORGE_HA`, le backend PG n'est jamais attaché (`for_app`
+//! renvoie le registre EN MÉMOIRE) ; le champ `backend` et CHAQUE branche PG sont `#[cfg(store-postgres)]`
+//! -> dans le build community le code PG est littéralement absent (struct identique à avant, aucune dep PG
+//! tirée), et dans un build `store-postgres` mono-instance `backend == None` court-circuite vers la map en
+//! mémoire. Les lignes périmées d'un réplica mort expirent par TTL (`last_seen`, filtré à la lecture +
+//! GC de fond leader-only `presence_gc_loop`) -> jamais de roster fantôme.
 //!
-//! Ce module réutilise `App` + le bus `App.events` + les helpers d'auth/tenancy. Il n'AJOUTE aucune dep
-//! ni aucune table ; l'état vit dans un `Extension<PresenceRegistry>` câblé une fois dans `build_router`
-//! (donc ZÉRO champ ajouté à `App` -> aucun site de construction touché).
+//! Ce module réutilise `App` + le bus `App.events` + les helpers d'auth/tenancy. L'état vit dans un
+//! `Extension<PresenceRegistry>` câblé une fois dans `build_router` (donc ZÉRO champ ajouté à `App` ->
+//! aucun site de construction touché) ; la table `presence` partagée n'est touchée QUE sous HA.
 
 use axum::{
     extract::{Extension, Query, State},
