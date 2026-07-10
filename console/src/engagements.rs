@@ -461,10 +461,15 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
     // entrée FINALE dans le ledger DÉDIÉ (avant retrait de la ligne) — l'audit du fichier survit. B5 (HA) :
     // sous le verrou consultatif cross-instance keyed sur ce ledger (pas de fourche si un pair appende encore).
     if !ledger.is_empty() && ledger != app.ledger_path.as_str() {
+        // GOVERNED ACTION: the FINAL dedicated-ledger entry must land BEFORE we delete the rows. Under HA the
+        // advisory lock is the SOLE serialiser; if it is unreachable (FAIL-CLOSED), the append is REFUSED —
+        // so we must NOT proceed with the delete (a governed act must not run unaudited). Surface 503; the
+        // client retries once PG recovers. Single-instance (!ha): always `Ok`, this branch never trips.
         crate::ha::with_ledger_lock(app, &ledger, || {
             let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
                 &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
-        });
+        })
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
     }
     {
         let store = app.store();

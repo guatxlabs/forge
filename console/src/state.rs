@@ -2256,7 +2256,10 @@ pub(crate) fn append_run_ledger_path(app: &App, ledger_path: &str, kind: &str, d
         // re-reads the tail from disk every call (no cache to invalidate), so wrapping it in the SAME
         // cross-instance advisory lock keyed on THIS path makes the dedicated-ledger append fork-safe under
         // HA. Single-instance (!ha): `with_ledger_lock` is a pass-through -> byte-identical.
-        crate::ha::with_ledger_lock(app, ledger_path, || {
+        // Fire-and-forget run-ledger helper. A FAIL-CLOSED outage REFUSES the append (logged by
+        // `with_ledger_lock`); the run act it records is itself blocked by the same PG outage, so discard the
+        // `Result`. Single-instance (!ha): pass-through, always `Ok`, byte-identical.
+        let _ = crate::ha::with_ledger_lock(app, ledger_path, || {
             let _ = ledger_append_standalone(ledger_path, kind, &detail);
         });
     }

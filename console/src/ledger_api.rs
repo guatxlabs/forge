@@ -245,7 +245,10 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
     // l'intérieur du verrou, on INVALIDE le cache pour RELIRE la tête du fichier partagé -> aucune fourche
     // de la chaîne SHA-256 (verify inchangé). Single-instance (!ha) : `with_ledger_lock` est un pass-through
     // et le verrou in-proc + le cache O(1) restent autoritatifs, byte-identique à avant.
-    crate::ha::with_ledger_lock(app, path, || {
+    // Fire-and-forget console-ledger helper (63 governed call sites). Under a FAIL-CLOSED outage the append
+    // is REFUSED; `with_ledger_lock` already logs it loudly, and the governing action is itself failing
+    // (store()=PG is down), so we explicitly discard the `Result` here. Single-instance: always `Ok`.
+    let _ = crate::ha::with_ledger_lock(app, path, || {
         if crate::ha::ha_enabled(app) {
             // Un pair a pu écrire dans le fichier partagé -> notre (prev,seq) en cache est périmé. On force
             // une relecture de la tête depuis le disque SOUS le verrou consultatif (single writer garanti).
