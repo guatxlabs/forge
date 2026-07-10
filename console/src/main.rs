@@ -561,21 +561,36 @@ async fn main() {
     // porte le client session-pinné dans `App.pg`. En SQLite (ou build community, bloc non compilé) :
     // `None` -> `store()` retombe sur SQLite.
     #[cfg(feature = "store-postgres")]
-    let pg: Option<Arc<crate::store::PgConn>> = match &store_selection {
+    let pg: Option<Arc<crate::store::PgPool>> = match &store_selection {
         StoreSelection::Postgres(url) => {
             let url = url.clone();
+            // Taille du pool : FORGE_PG_POOL (défaut 8, borné 1..=64). N clients = N écritures
+            // concurrentes non sérialisées au sein d'une instance.
+            let pool_size = std::env::var("FORGE_PG_POOL")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .map(|n| n.min(64))
+                .unwrap_or(8);
             let connect_url = url.clone();
-            let client = std::thread::spawn(move || crate::store::connect_postgres(&connect_url))
-                .join()
-                .expect("postgres connect thread panicked")
-                .unwrap_or_else(|e| {
-                    eprintln!("[forge-console] FATAL {e}");
-                    std::process::exit(2);
-                });
-            println!("[forge-console] store: Postgres (FORGE_DB_URL) — client session-pinné connecté (reconnect+retry HA armé)");
-            // Stage 4 HA : le DSN voyage AVEC le client (PgConn) pour re-établir la session après une
-            // coupure (restart/failover) — cf. `Store::postgres_reconnectable`.
-            Some(Arc::new(crate::store::PgConn { url, client: Mutex::new(client) }))
+            // Connexion HORS du runtime tokio (le client `postgres` synchrone pilote son PROPRE
+            // `block_on` — connecter depuis `#[tokio::main]` paniquerait « runtime within a runtime »).
+            // On connecte les N clients sur un `std::thread` dédié ; un échec sur l'un est fatal.
+            let clients: Vec<crate::store::PgClient> = std::thread::spawn(move || {
+                (0..pool_size)
+                    .map(|_| crate::store::connect_postgres(&connect_url))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .join()
+            .expect("postgres connect thread panicked")
+            .unwrap_or_else(|e| {
+                eprintln!("[forge-console] FATAL {e}");
+                std::process::exit(2);
+            });
+            println!("[forge-console] store: Postgres (FORGE_DB_URL) — pool de {pool_size} clients connecté (écritures concurrentes, reconnect+retry HA armé)");
+            // Stage 4 HA : le DSN voyage AVEC le pool pour re-établir un client cassé dans son slot après
+            // une coupure (restart/failover) — cf. `Store::postgres_reconnectable`.
+            Some(Arc::new(crate::store::PgPool::new(url, clients)))
         }
         StoreSelection::Sqlite => None,
     };

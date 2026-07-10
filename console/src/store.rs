@@ -278,6 +278,11 @@ fn pg_block<T>(f: impl FnOnce() -> T) -> T {
 /// without SSL falls back to plaintext — so the same connector serves a TLS prod DSN and a plaintext
 /// docker test DSN. The returned client is the ONE client the `App` holds for its lifetime (see the
 /// module docs on `last_insert_id` session-pinning).
+/// The synchronous postgres client type the pool holds (re-exported so `main.rs` can name it without a
+/// direct `postgres` path dependency).
+#[cfg(feature = "store-postgres")]
+pub(crate) type PgClient = postgres::Client;
+
 #[cfg(feature = "store-postgres")]
 pub(crate) fn connect_postgres(url: &str) -> Result<postgres::Client, String> {
     let mut roots = rustls::RootCertStore::empty();
@@ -292,19 +297,75 @@ pub(crate) fn connect_postgres(url: &str) -> Result<postgres::Client, String> {
     postgres::Client::connect(url, tls).map_err(|e| format!("postgres connect ({url}): {e}"))
 }
 
-/// SESSION-PINNED postgres client BUNDLED with its DSN so the client can be RE-ESTABLISHED after a
-/// connection break (Stage 4 HA — PG restart / failover). Held by `App.pg` as `Arc<PgConn>`;
-/// `App::store()` locks `client` and hands BOTH the held guard AND `url` to
-/// [`Store::postgres_reconnectable`]. On a connection-level failure a READ reconnects+retries ONCE
-/// ([`pg_run_read`]); a WRITE / transaction-control op reconnects the client for the NEXT op but is NEVER
-/// auto-re-run ([`pg_run_write`]) — so a failover can never silently duplicate a write. The
-/// `Mutex` keeps the SAME held-guard model as the SQLite fallback (one client for the App's lifetime, so
-/// `execute(INSERT)`+`last_insert_id()` stay on ONE session). Reconnect swaps the client INSIDE this
-/// Mutex, so every later `store()` on the shared `Arc` transparently uses the healed client.
+/// CONNECTION POOL of `N` postgres clients BUNDLED with the DSN so a broken client can be
+/// RE-ESTABLISHED (Stage 4 HA — PG restart / failover). Held by `App.pg` as `Arc<PgPool>`;
+/// `App::store()` calls [`PgPool::checkout`] to grab ONE FREE client (a per-slot `MutexGuard`) and
+/// hands BOTH the held guard AND `url` to [`Store::postgres_reconnectable`]. The guard is held for the
+/// `Store`'s lifetime and RELEASED on drop (check-in) — so concurrent operators run on DIFFERENT slots
+/// and DO NOT serialise on one client. Within a `Store` the SAME checked-out client serves every op
+/// (so `with_tx` runs all its statements on ONE connection); across `Store`s the pool spreads load.
+///
+/// WHY A POOL IS NOW SAFE: the id source is no longer session-scoped `lastval()` — every runtime insert
+/// uses [`Store::execute_returning_id`] (`RETURNING id` in ONE statement), so an insert's id never
+/// depends on which pooled connection it ran on. On a connection-level failure a READ reconnects+retries
+/// ONCE ([`pg_run_read`]); a WRITE / transaction-control op reconnects the client for the NEXT op but is
+/// NEVER auto-re-run ([`pg_run_write`]). Reconnect swaps the FRESH client INTO the SAME slot's `Mutex`
+/// (the broken client is dropped there), so that slot heals in place for its next checkout — the exact
+/// per-connection reconnect logic, now applied to whichever slot a `Store` checked out.
 #[cfg(feature = "store-postgres")]
-pub(crate) struct PgConn {
+pub(crate) struct PgPool {
     pub(crate) url: String,
-    pub(crate) client: std::sync::Mutex<postgres::Client>,
+    /// One `Mutex<Client>` per slot. A checkout `try_lock`s a FREE slot; a held guard IS the checkout,
+    /// released (checked back in) on drop. Reconnect swaps a fresh client into the slot's `Mutex`.
+    clients: Vec<std::sync::Mutex<postgres::Client>>,
+    /// Round-robin starting index for the checkout scan, so bursts of checkouts fan out across slots
+    /// instead of all probing slot 0 first. `Relaxed` is fine — it only biases which slot is TRIED
+    /// first, never correctness (the scan still finds any free slot).
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "store-postgres")]
+impl PgPool {
+    /// Build a pool from `n` already-connected clients (connected OFF the tokio runtime — see the
+    /// `App` wiring in `main.rs`). `clients` must be non-empty (the caller connects at least one).
+    pub(crate) fn new(url: String, clients: Vec<postgres::Client>) -> Self {
+        debug_assert!(!clients.is_empty(), "PgPool needs at least one client");
+        PgPool {
+            url,
+            clients: clients.into_iter().map(std::sync::Mutex::new).collect(),
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Number of pooled clients (fixed at construction).
+    pub(crate) fn size(&self) -> usize {
+        self.clients.len()
+    }
+
+    /// Check out ONE client for the caller's `Store`. Scans all slots with `try_lock` starting at the
+    /// round-robin cursor and returns the FIRST free slot's guard — so up to `N` concurrent operators
+    /// each get a DISTINCT client and run in parallel (no serialisation on one mutex). A poisoned-but-
+    /// free slot is RECOVERED in place (a prior panic must not strand a connection). If EVERY slot is
+    /// currently busy, BLOCK on the round-robin slot (excess load fans in across the `N` slots, bounded).
+    /// The returned guard is the checkout; dropping it (end of the `Store`) checks the client back in.
+    pub(crate) fn checkout(&self) -> std::sync::MutexGuard<'_, postgres::Client> {
+        use std::sync::atomic::Ordering;
+        let n = self.clients.len();
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+        for i in 0..n {
+            let idx = (start.wrapping_add(i)) % n;
+            match self.clients[idx].try_lock() {
+                Ok(g) => return g,
+                // Free but poisoned by a prior panic — recover the guard (the sync `postgres::Client`
+                // itself is not left in a torn state by a panicked seam op; a failed query returns Err).
+                Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            }
+        }
+        // All slots busy: block on the round-robin slot until it frees (recover poison the same way).
+        let idx = start % n;
+        self.clients[idx].lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// Is `e` a CONNECTION-level failure (client closed / broken pipe / reset / server shutting the session
@@ -941,7 +1002,7 @@ enum Backend<'a> {
     // session, cf. the module docs). The sync `postgres::Client` DML methods take `&mut self`, whereas
     // the seam methods take `&self`; a `RefCell` provides the interior mutability (the `Store` is
     // single-threaded / `!Send`, so borrows never overlap across the brief per-call `borrow_mut`).
-    // Stage 4 HA: `url` is the DSN (borrowed from the `Arc<PgConn>` held by `App.pg`) — `Some` for the
+    // Stage 4 HA: `url` is the DSN (borrowed from the `Arc<PgPool>` held by `App.pg`) — `Some` for the
     // runtime `App::store()` handle (reads reconnect+retry via `pg_run_read`; writes/tx reconnect-for-
     // next-op-without-retry via `pg_run_write`), `None` for the CLI/tests (one-shot lifecycles that never
     // outlive a restart). Either helper swaps the client inside the held Mutex on reconnect, so the shared
@@ -1014,6 +1075,55 @@ impl<'a> Store<'a> {
                 Ok(pg_run_write(client, *url, |cl| cl.execute(sql.as_str(), &refs))? as usize)
             }
         }
+    }
+
+    /// Execute an INSERT and return the id of the inserted row in a SINGLE statement — NO session-scoped
+    /// `lastval()` / `last_insert_rowid()` dependency, so it is safe on a POOLED backend where each
+    /// checkout may land on a different connection. `Ok(None)` means NO row was inserted (an
+    /// `ON CONFLICT DO NOTHING` that fired), mirroring the pre-seam `if n > 0 { last_insert_id() }` guard.
+    ///
+    ///   - SQLite: `execute(sql)` then `last_insert_rowid()` on THIS held connection when a row landed
+    ///     (`n > 0`), else `None`. BYTE-IDENTICAL to the pre-seam `execute` + `last_insert_id` idiom
+    ///     (the SQL is passed VERBATIM — no `RETURNING` appended, so the SQLite path is unchanged).
+    ///   - Postgres: append ` RETURNING id` to the translated INSERT and read column 0 of the returned
+    ///     row from the SAME statement (0 rows -> `None` for a DO-NOTHING conflict; 1 row -> `Some(id)`).
+    ///     This removes the `lastval()` session affinity that forced a single pinned client, so inserts
+    ///     run correctly on ANY pooled connection. WRITE semantics: routed through [`pg_run_write`] (a
+    ///     broken connection reconnects for the NEXT op but the INSERT is NEVER auto-re-applied).
+    ///
+    /// REQUIREMENT: the target table MUST have an `id` column (every seam table maps its SQLite
+    /// `INTEGER PRIMARY KEY` to `id BIGINT GENERATED BY DEFAULT AS IDENTITY`, cf. `PG_SCHEMA`).
+    pub(crate) fn execute_returning_id_opt(&self, sql: &str, params: &[Param]) -> StoreResult<Option<i64>> {
+        match &self.backend {
+            Backend::Sqlite(conn) => {
+                let vals = to_sql_values(params);
+                let n = conn.execute(sql, rusqlite::params_from_iter(vals))?;
+                Ok(if n > 0 { Some(conn.last_insert_rowid()) } else { None })
+            }
+            #[cfg(feature = "store-postgres")]
+            Backend::Postgres { client, url } => {
+                let sql = format!("{} RETURNING id", translate_sql(sql));
+                let boxed = pg_binds(params);
+                let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
+                // WRITE (INSERT … RETURNING id): single round-trip, no lastval/session dependency. Routed
+                // through pg_run_write (NOT pg_run_read) — an INSERT must never be silently re-applied on a
+                // connection break. `query` yields 0..1 rows: 0 => ON CONFLICT DO NOTHING fired (-> None).
+                let rows = pg_run_write(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
+                match rows.first() {
+                    Some(r) => Ok(Some(pg_get_i64(r, 0)?)),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Execute an INSERT expected to ALWAYS create exactly one row, returning its id in a SINGLE
+    /// statement (see [`Store::execute_returning_id_opt`] for the mechanism). `Err(StoreError::NoRows)`
+    /// if no row was inserted — use [`Store::execute_returning_id_opt`] for `ON CONFLICT DO NOTHING`
+    /// inserts that may legitimately insert nothing. Replaces the `execute(INSERT)` + `last_insert_id()`
+    /// pair at every runtime call site so the PG id source is session-independent (pool-safe).
+    pub(crate) fn execute_returning_id(&self, sql: &str, params: &[Param]) -> StoreResult<i64> {
+        self.execute_returning_id_opt(sql, params)?.ok_or(StoreError::NoRows)
     }
 
     /// Execute one or more `;`-separated statements with NO parameters (DDL / `CREATE TABLE IF NOT
@@ -2015,6 +2125,163 @@ mod pg_tests {
                 .query_row("SELECT count(*) FROM tx_probe", &sql_params![], |r| r.get_i64(0))
                 .expect("healed client reads back the tx_probe table");
             assert_eq!(cnt, 0, "no row from the broken tx committed (whole-tx failure, no partial/duplicate)");
+        }
+    }
+
+    /// POOL — CONCURRENT WRITERS do NOT serialise (the whole point of the pool). Build a `PgPool` of
+    /// `N` clients, fire `N` threads that EACH check out a client and run a SLOW insert
+    /// (`… SELECT ?::text FROM pg_sleep(D) … RETURNING id`) at the same time, and assert:
+    ///   (a) every insert returns a DISTINCT new id via `execute_returning_id` (no lastval/session dep);
+    ///   (b) exactly `N` rows land — none lost, none duplicated;
+    ///   (c) wall-clock is ~1×D, NOT `N`×D — proving the writers ran in PARALLEL on different pooled
+    ///       connections rather than serialising on one client (a single-client backend would take N×D).
+    /// Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_pool_concurrent_writers() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_pool_concurrent_writers] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        const N: usize = 8;
+        const SLEEP_S: f64 = 0.4;
+
+        // Connect N clients OFF any runtime (the sync client drives its own block_on) and build the pool.
+        let clients: Vec<postgres::Client> =
+            (0..N).map(|_| connect_postgres(&url).expect("connect pool client")).collect();
+        let pool = std::sync::Arc::new(PgPool::new(url.clone(), clients));
+        assert_eq!(pool.size(), N, "pool holds N clients");
+
+        // Fresh probe table (own scope so the guard drops before the threads check out).
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute_batch(
+                "DROP TABLE IF EXISTS pool_probe; \
+                 CREATE TABLE pool_probe(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, tag TEXT)",
+            )
+            .expect("create pool_probe");
+        }
+
+        // N threads, each: check out a client, run a SLOW insert returning its id. If the pool truly
+        // parallelises, all N sleeps overlap -> ~1×SLEEP_S; if it serialised on one client -> N×SLEEP_S.
+        let start = std::time::Instant::now();
+        let ids: Vec<i64> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..N)
+                .map(|i| {
+                    let pool = std::sync::Arc::clone(&pool);
+                    scope.spawn(move || {
+                        let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+                        s.execute_returning_id(
+                            "INSERT INTO pool_probe(tag) SELECT ?::text FROM pg_sleep(0.4)",
+                            &sql_params![format!("w{i}")],
+                        )
+                        .expect("concurrent slow insert returns its id")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("writer thread panicked")).collect()
+        });
+        let elapsed = start.elapsed().as_secs_f64();
+
+        // (a) distinct ids.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), N, "every concurrent insert got a DISTINCT id: {ids:?}");
+
+        // (b) exactly N rows, none lost/duplicated.
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM pool_probe", &sql_params![], |r| r.get_i64(0))
+                .expect("count pool_probe");
+            assert_eq!(cnt, N as i64, "exactly N rows persisted (no lost/duplicate writes)");
+        }
+
+        // (c) parallel, not serial: wall-clock well under the serialised bound N×SLEEP_S. Half of it is a
+        // generous margin (parallel ~= SLEEP_S + overhead; serial would be ~N×SLEEP_S = {:.1}s).
+        let serial_bound = N as f64 * SLEEP_S;
+        eprintln!(
+            "[pg_pool_concurrent_writers] {N} writers, {SLEEP_S}s each: wall={elapsed:.2}s \
+             (serialised would be ~{serial_bound:.1}s) ; ids={ids:?}"
+        );
+        assert!(
+            elapsed < serial_bound * 0.5,
+            "concurrent writers ran in PARALLEL: {elapsed:.2}s (serialised would be ~{serial_bound:.1}s)"
+        );
+    }
+
+    /// POOL — a BROKEN pooled connection is HEALED in place on its next use. Size-1 pool so the checked-
+    /// out slot is DETERMINISTIC: capture the slot's backend PID, terminate it from a separate connection,
+    /// wait until it is gone, then assert the NEXT checkout+op RECONNECTS+SUCCEEDS (read reconnect+retry)
+    /// and a subsequent WRITE lands on the healed slot. Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_pool_slot_heals_after_break() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_pool_slot_heals_after_break] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        // Size-1 pool: every checkout returns the SAME slot -> deterministic target for the kill/heal.
+        let pool = std::sync::Arc::new(PgPool::new(
+            url.clone(),
+            vec![connect_postgres(&url).expect("connect single pool client")],
+        ));
+
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute_batch("DROP TABLE IF EXISTS pool_heal; CREATE TABLE pool_heal(tag TEXT)")
+                .expect("create pool_heal");
+            s.query_row("SELECT pg_backend_pid()", &sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection, wait until it disappears (SIGTERM is async).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &sql_params![])
+                .expect("pg_terminate_backend runs");
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &sql_params![],
+                        |r| r.get_i64(0),
+                    )
+                    .expect("poll pg_stat_activity");
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(gone, "terminated backend {pid} did not disappear");
+        }
+
+        // Next checkout on the (now-dead) slot: an idempotent READ reconnects+retries and succeeds.
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            let two: i64 = s
+                .query_row("SELECT 2", &sql_params![], |r| r.get_i64(0))
+                .expect("pooled slot reconnects+retries the read after its backend was terminated");
+            assert_eq!(two, 2);
+        }
+        // The healed slot serves subsequent WRITES too (reconnect swapped a fresh client into the slot).
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute("INSERT INTO pool_heal(tag) VALUES(?)", &sql_params!["ok"])
+                .expect("write on the healed pooled slot lands");
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM pool_heal WHERE tag=?", &sql_params!["ok"], |r| r.get_i64(0))
+                .unwrap();
+            assert_eq!(cnt, 1, "post-heal write landed exactly once on the pooled slot");
         }
     }
 }

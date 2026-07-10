@@ -825,16 +825,18 @@ pub(crate) struct RunHandle {
 pub(crate) struct App {
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) db_path: Arc<String>,
-    // ENTERPRISE STORE (Postgres, feature `store-postgres`) — client SESSION-PINNÉ partagé (un seul
-    // client pour la vie de l'App : `execute(INSERT)`+`last_insert_id()` tombent sur la MÊME session,
-    // cf. store.rs). `Some` UNIQUEMENT si FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL et feature
-    // compilée ; sinon `None` -> `store()` retombe sur SQLite (build community inchangé). Le champ
-    // n'existe QUE sous la feature (struct byte-identique quand OFF). Stage 4 HA : `PgConn` bundle le
-    // client + son DSN (`url`) pour que `store()` puisse le RE-ÉTABLIR après une coupure (restart/
-    // failover) — cf. `Store::postgres_reconnectable` / `pg_run_read` (reads: reconnect+retry) /
-    // `pg_run_write` (writes/tx: reconnect-for-next-op, never auto-retry).
+    // ENTERPRISE STORE (Postgres, feature `store-postgres`) — POOL de N clients partagé. `store()`
+    // CHECKOUT un client libre par Store (tenu pour la vie du Store, rendu au drop) : les opérateurs
+    // concurrents tombent sur des slots DIFFÉRENTS -> pas de sérialisation sur un unique client. L'id
+    // d'insertion ne dépend plus de la session (`execute_returning_id` -> `RETURNING id` en UN
+    // statement), donc n'importe quel client poolé est correct. `Some` UNIQUEMENT si
+    // FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL et feature compilée ; sinon `None` -> `store()`
+    // retombe sur SQLite (build community inchangé). Le champ n'existe QUE sous la feature (struct
+    // byte-identique quand OFF). Stage 4 HA : `PgPool` bundle les clients + le DSN (`url`) pour RE-ÉTABLIR
+    // un client cassé dans son slot après une coupure — cf. `Store::postgres_reconnectable` /
+    // `pg_run_read` (reads: reconnect+retry) / `pg_run_write` (writes/tx: reconnect-for-next-op, no retry).
     #[cfg(feature = "store-postgres")]
-    pub(crate) pg: Option<Arc<crate::store::PgConn>>,
+    pub(crate) pg: Option<Arc<crate::store::PgPool>>,
     pub(crate) token_sha: Arc<String>,
     pub(crate) token_raw: Arc<String>,          // token bearer EN CLAIR — passé au moteur spawné pour /api/ingest
     pub(crate) user: Arc<String>,
@@ -917,8 +919,11 @@ impl App {
         // et TOUJOURS dans le build community (bloc non compilé) — on retombe sur SQLite, inchangé.
         #[cfg(feature = "store-postgres")]
         if let Some(pg) = self.pg.as_ref() {
-            // Stage 4 HA : held-guard sur le client PG + son DSN -> reconnect+retry single-shot sur coupure.
-            let guard = pg.client.lock().unwrap_or_else(|e| e.into_inner());
+            // POOL : on CHECKOUT un client LIBRE parmi les N du pool (guard tenu pour la vie du Store,
+            // rendu au drop). Les opérateurs concurrents tombent sur des slots DIFFÉRENTS -> pas de
+            // sérialisation sur un unique client. Stage 4 HA : le guard porte aussi le DSN -> reconnect+
+            // retry single-shot sur coupure, la reconnexion échange le client frais DANS ce slot.
+            let guard = pg.checkout();
             return crate::store::Store::postgres_reconnectable(guard, &pg.url);
         }
         crate::store::Store::sqlite(self.db.lock().unwrap_or_else(|e| e.into_inner()))

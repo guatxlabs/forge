@@ -230,7 +230,9 @@ async fn ft_create(
     let actor = attribution_login(&app, &headers);
     let id = {
         let store = app.store();
-        if let Err(e) = store.execute(
+        // execute_returning_id : id du modèle lu du MÊME INSERT (RETURNING id sur PG), sans lastval() —
+        // session-indépendant, sûr sur backend poolé.
+        match store.execute_returning_id(
             "INSERT INTO finding_template(name,vuln_class,cwe,severity,title_tmpl,description_tmpl,remediation_tmpl,refs,created,updated)
              VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
             &crate::sql_params![
@@ -244,9 +246,9 @@ async fn ft_create(
                 refs
             ],
         ) {
-            return internal(format!("création du modèle échouée: {e}"));
+            Ok(id) => id,
+            Err(e) => return internal(format!("création du modèle échouée: {e}")),
         }
-        store.last_insert_id()
     };
     append_console_ledger(&app, "console.finding_template.create", json!({
         "actor": actor, "id": id, "name": name, "severity": severity, "vuln_class": vuln_class,
@@ -437,7 +439,10 @@ async fn ft_apply(
         let store = app.store();
         // INSERT OR IGNORE : la contrainte UNIQUE(campaign,target,title) du finding s'applique (dédup) —
         // un doublon exact est ignoré (created=false), jamais une erreur.
-        let n = match store.execute(
+        // execute_returning_id_opt : id du finding lu du MÊME INSERT (RETURNING id sur PG), sans
+        // lastval() — session-indépendant, sûr sur backend poolé. `None` == ON CONFLICT DO NOTHING a
+        // ignoré un doublon (aucune ligne insérée), byte-identique à l'ancien garde `if n > 0`.
+        match store.execute_returning_id_opt(
             "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
              VALUES(datetime('now'),?,?,?,?,?,'','tested',?,?,'',?,'',?,?,?,?) ON CONFLICT DO NOTHING",
             &crate::sql_params![
@@ -455,10 +460,10 @@ async fn ft_apply(
                 engagement_id
             ],
         ) {
-            Ok(n) => n,
+            Ok(Some(id)) => (true, id),
+            Ok(None) => (false, -1),
             Err(e) => return internal(format!("création du finding échouée: {e}")),
-        };
-        if n > 0 { (true, store.last_insert_id()) } else { (false, -1) }
+        }
     };
 
     if !created {

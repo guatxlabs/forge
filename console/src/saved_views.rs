@@ -159,14 +159,16 @@ async fn sv_create(
     let user = attribution_login(&app, &headers);
     let id = {
         let store = app.store();
-        if let Err(e) = store.execute(
+        // execute_returning_id : id de la vue lu du MÊME INSERT (RETURNING id sur PG), sans lastval()
+        // — session-indépendant, sûr sur backend poolé.
+        match store.execute_returning_id(
             "INSERT INTO saved_view(user_id,engagement_id,name,filter_json,created)
              VALUES(?,?,?,?,datetime('now'))",
             &crate::sql_params![user.clone(), engagement_id, name.clone(), filter_json.clone()],
         ) {
-            return internal(format!("création de la vue échouée: {e}"));
+            Ok(id) => id,
+            Err(e) => return internal(format!("création de la vue échouée: {e}")),
         }
-        store.last_insert_id()
     };
     let actor = user.clone();
     append_console_ledger(&app, "console.saved_view.create", json!({
