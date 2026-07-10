@@ -319,14 +319,16 @@ pub(crate) async fn engagements_create(
     // par un UPDATE. Le champ reste '' entre l'INSERT et l'UPDATE (id pas encore divulgué : microfenêtre sûre).
     let id = {
         let store = app.store();
-        if let Err(e) = store.execute(
+        // execute_returning_id : id du nouvel engagement lu du MÊME INSERT (RETURNING id sur PG), sans
+        // lastval() — session-indépendant, sûr sur backend poolé. L'UPDATE tenant/ledger vient APRÈS.
+        let id = match store.execute_returning_id(
             "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,classification,created,updated)
              VALUES(?,?,?,?,'',?,datetime('now'),datetime('now'))",
             &crate::sql_params![&name, "active", &mode, scope_json, &classification],
         ) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response();
-        }
-        let id = store.last_insert_id();
+            Ok(id) => id,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response(),
+        };
         // ENTERPRISE : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
         if let Some(t) = target_tenant {
             let _ = store.execute("UPDATE engagement SET tenant_id=? WHERE id=?", &crate::sql_params![t, id]);

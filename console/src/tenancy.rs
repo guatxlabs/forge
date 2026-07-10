@@ -701,16 +701,16 @@ pub(crate) async fn tenants_create(State(app): State<App>, headers: HeaderMap, J
     let actor = crate::attribution_login(&app, &headers);
     let (id, self_grant): (i64, bool) = {
         let store = app.store();
-        if let Err(e) = store.execute(
+        // execute_returning_id : id du tenant lu du MÊME INSERT (RETURNING id sur PG), sans lastval() —
+        // session-indépendant, sûr sur backend poolé. Le SELECT users et l'INSERT tenant_grant viennent
+        // APRÈS (id du tenant déjà capturé dans `id`).
+        let id = match store.execute_returning_id(
             "INSERT INTO tenant(name,status,created,updated) VALUES(?,?,datetime('now'),datetime('now'))",
             &crate::sql_params![&name, "active"],
         ) {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", e.to_string());
-        }
-        // AUDIT last_insert_id (Stage 2b) : INSERT tenant puis last_insert_id() back-to-back sur le MÊME
-        // store, aucun INSERT intercalé — le SELECT users et l'INSERT tenant_grant viennent APRÈS (id du
-        // tenant déjà capturé dans `id`). Session-safe sur PG.
-        let id = store.last_insert_id();
+            Ok(id) => id,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", e.to_string()),
+        };
         let uid: Option<i64> = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&actor], |r| r.get_i64(0)).ok();
         let mut sg = false;
         if let Some(u) = uid {

@@ -224,11 +224,13 @@ pub(crate) async fn dashboard_create(State(app): State<App>, headers: HeaderMap,
     let descr = gs(&body, "descr");
     let position = body.get("position").and_then(|v| v.as_i64()).unwrap_or(0);
     let store = app.store();
-    match store.execute(
+    // execute_returning_id : l'id de la ligne insérée vient du MÊME statement (RETURNING id sur PG),
+    // sans dépendance de session lastval() — sûr sur backend poolé (plus de client épinglé requis).
+    match store.execute_returning_id(
         "INSERT INTO dashboard(name,descr,position,created,updated) VALUES(?,?,?,datetime('now'),datetime('now'))",
         &crate::sql_params![&name, &descr, position],
     ) {
-        Ok(_) => (StatusCode::OK, Json(json!({"id": store.last_insert_id()}))),
+        Ok(id) => (StatusCode::OK, Json(json!({"id": id}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -334,14 +336,13 @@ pub(crate) async fn panel_create(State(app): State<App>, headers: HeaderMap, Jso
     if !exists {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown_dashboard", "why": format!("dashboard #{dashboard_id} inexistant")})));
     }
-    // AUDIT last_insert_id (Stage 2b) : le SELECT d'existence du dashboard ci-dessus n'insère RIEN — cet
-    // execute(INSERT panel) puis last_insert_id() sont back-to-back sur le MÊME store, aucun INSERT
-    // intercalé. Session-safe sur PG (lastval() = séquence panel).
-    match store.execute(
+    // execute_returning_id : id du panel inséré lu depuis le MÊME statement (RETURNING id sur PG),
+    // sans lastval() — indépendant de la session, sûr sur backend poolé.
+    match store.execute_returning_id(
         "INSERT INTO panel(name,query,viz,descr,col_span,position,dashboard_id,updated) VALUES(?,?,?,?,?,?,?,datetime('now'))",
         &crate::sql_params![&name, &qy, &viz, &descr, col_span, position, dashboard_id],
     ) {
-        Ok(_) => (StatusCode::OK, Json(json!({"id": store.last_insert_id()}))),
+        Ok(id) => (StatusCode::OK, Json(json!({"id": id}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
     }
 }

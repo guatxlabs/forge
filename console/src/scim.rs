@@ -452,16 +452,15 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
         if store.query_row("SELECT 1 FROM users WHERE login=?", &crate::sql_params![&login], |_| Ok(())).is_ok() {
             return scim_err(StatusCode::CONFLICT, format!("user '{login}' already exists"), Some("uniqueness"));
         }
-        if let Err(e) = store.execute(
+        // execute_returning_id : id du user lu du MÊME INSERT (RETURNING id sur PG), sans lastval() —
+        // session-indépendant, sûr sur backend poolé. L'INSERT scim_user suivant vient APRÈS (id capturé).
+        let id = match store.execute_returning_id(
             "INSERT INTO users(login,role,pass_hash,disabled,created) VALUES(?,?,?,?,datetime('now'))",
             &crate::sql_params![&login, &role, &hash, (!active) as i64],
         ) {
-            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
-        }
-        // AUDIT last_insert_id (Stage 2b) : le SELECT d'unicité ci-dessus n'insère RIEN — cet
-        // execute(INSERT users) puis last_insert_id() sont donc back-to-back sur le MÊME store, aucun
-        // INSERT intercalé. L'INSERT scim_user suivant vient APRÈS (id déjà capturé). Session-safe sur PG.
-        let id = store.last_insert_id();
+            Ok(id) => id,
+            Err(e) => return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None),
+        };
         let now = crate::now_epoch();
         let _ = store.execute(
             "INSERT INTO scim_user(user_id,external_id,email,given_name,family_name,display_name,created,updated)
@@ -701,16 +700,15 @@ async fn groups_create(State(app): State<App>, headers: HeaderMap, body: Bytes) 
         let store = app.store();
         ensure_schema(&store);
         let now = crate::now_epoch();
-        if let Err(e) = store.execute(
+        // execute_returning_id : id du scim_group lu du MÊME INSERT (RETURNING id sur PG), sans lastval()
+        // — session-indépendant, sûr sur backend poolé.
+        match store.execute_returning_id(
             "INSERT INTO scim_group(display_name,external_id,role,created,updated) VALUES(?,?,?,?,?)",
             &crate::sql_params![&display, &external_id, &role, now, now],
         ) {
-            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
+            Ok(id) => id,
+            Err(e) => return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None),
         }
-        // AUDIT last_insert_id (Stage 2b) : `ensure_schema` (CREATE TABLE IF NOT EXISTS) est du DDL, pas
-        // un INSERT, et s'exécute AVANT cet INSERT scim_group — pas d'INSERT intercalé. INSERT puis
-        // last_insert_id() back-to-back sur le MÊME store. Session-safe sur PG (lastval() = seq scim_group).
-        store.last_insert_id()
     };
     // Apply any initial members.
     let member_ids = member_ids_from_resource(&res);
