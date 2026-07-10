@@ -292,6 +292,90 @@ pub(crate) fn connect_postgres(url: &str) -> Result<postgres::Client, String> {
     postgres::Client::connect(url, tls).map_err(|e| format!("postgres connect ({url}): {e}"))
 }
 
+/// SESSION-PINNED postgres client BUNDLED with its DSN so the client can be RE-ESTABLISHED after a
+/// connection break (Stage 4 HA — PG restart / failover). Held by `App.pg` as `Arc<PgConn>`;
+/// `App::store()` locks `client` and hands BOTH the held guard AND `url` to
+/// [`Store::postgres_reconnectable`], which reconnects+retries ONCE on a connection-level failure. The
+/// `Mutex` keeps the SAME held-guard model as the SQLite fallback (one client for the App's lifetime, so
+/// `execute(INSERT)`+`last_insert_id()` stay on ONE session). Reconnect swaps the client INSIDE this
+/// Mutex, so every later `store()` on the shared `Arc` transparently uses the healed client.
+#[cfg(feature = "store-postgres")]
+pub(crate) struct PgConn {
+    pub(crate) url: String,
+    pub(crate) client: std::sync::Mutex<postgres::Client>,
+}
+
+/// Is `e` a CONNECTION-level failure (client closed / broken pipe / reset / server shutting the session
+/// down — e.g. after a PG restart or failover) rather than a server-side SQL error we must surface as-is?
+/// A SQLSTATE db-error is normally a REAL query error (constraint/syntax/…) and MUST NOT trigger a
+/// reconnect+retry — EXCEPT the fatal connection classes the server sends while tearing a session down:
+/// SQLSTATE class `08` (connection exception) and `57P01`/`57P02`/`57P03` (admin/crash shutdown,
+/// cannot-connect-now). Otherwise: `is_closed()` catches a terminated connection, and a non-db error
+/// whose `source()` chain carries an `io::Error` catches the first failing send after a break.
+#[cfg(feature = "store-postgres")]
+fn pg_is_conn_error(e: &postgres::Error) -> bool {
+    use std::error::Error as _;
+    if let Some(db) = e.as_db_error() {
+        let code = db.code().code();
+        return code.starts_with("08") || matches!(code, "57P01" | "57P02" | "57P03");
+    }
+    if e.is_closed() {
+        return true;
+    }
+    let mut src = e.source();
+    while let Some(s) = src {
+        if s.downcast_ref::<std::io::Error>().is_some() {
+            return true;
+        }
+        src = s.source();
+    }
+    false
+}
+
+/// Run one PG operation `op` on the held client, with SINGLE-SHOT RECONNECT-AND-RETRY on a
+/// connection-level failure (Stage 4 HA). Attempt once; if it fails with a [`pg_is_conn_error`] AND a DSN
+/// (`url`) is present, RECONNECT ([`connect_postgres`]) ONCE, swap the fresh client INTO the held Mutex
+/// (so subsequent `store()` calls on the shared `Arc` reuse the healed client), and RETRY `op` exactly
+/// once; a still-failing retry returns its error. A NON-connection error (SQLSTATE query error) or a
+/// `Store` built WITHOUT a url (`postgres` / the CLI/tests) returns the first error immediately — no
+/// retry. Reconnect is at OP granularity ONLY: it never runs mid-`with_tx` (transaction control uses
+/// `execute_batch`, which is intentionally NOT wrapped), and `last_insert_id()` is not wrapped either, so
+/// an `INSERT`+`last_insert_id()` pair can never straddle a reconnect (a break between them surfaces an
+/// error / a `0`, which is correct/safe — never a wrong id from a fresh session).
+#[cfg(feature = "store-postgres")]
+fn pg_run<T>(
+    cell: &std::cell::RefCell<std::sync::MutexGuard<'_, postgres::Client>>,
+    url: Option<&str>,
+    mut op: impl FnMut(&mut postgres::Client) -> Result<T, postgres::Error>,
+) -> StoreResult<T> {
+    // First attempt on the current client (borrow scoped so it drops before any reconnect re-borrow).
+    {
+        let mut cl = cell.borrow_mut();
+        // `&mut cl` deref-coerces RefMut<MutexGuard<Client>> -> &mut Client at this call site.
+        match pg_block(|| op(&mut cl)) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if !(url.is_some() && pg_is_conn_error(&e)) {
+                    return Err(pg_err(e));
+                }
+            }
+        }
+    }
+    // Reconnect ONCE, swap the client held in the Mutex, then RETRY the op — ALL inside ONE
+    // `block_in_place`. Connect drives its own `block_on`; the swap DROPS the old broken client, whose
+    // sync `postgres` `Drop` closes the connection via ITS OWN `block_on`; and the retried op blocks too.
+    // Every one of those nested `block_on`s MUST run under `block_in_place` — dropping the old client on a
+    // bare tokio worker would panic "cannot start a runtime from within a runtime". Sharing one blocking
+    // section covers connect + drop + retry together.
+    let url = url.expect("reconnect path is only taken when url is Some");
+    let mut cl = cell.borrow_mut();
+    pg_block(move || -> StoreResult<T> {
+        let fresh = connect_postgres(url).map_err(StoreError::Backend)?;
+        **cl = fresh; // old broken client dropped HERE, inside block_in_place
+        op(&mut cl).map_err(pg_err)
+    })
+}
+
 // --- postgres row getters (positional) ----------------------------------------------------------
 // Postgres is STATICALLY typed: `Row::try_get::<T>` succeeds only if `T` matches the column's runtime
 // type. The seam schema maps every `INTEGER` to `BIGINT` (int8) and `REAL` to `DOUBLE PRECISION`
@@ -808,8 +892,15 @@ enum Backend<'a> {
     // session, cf. the module docs). The sync `postgres::Client` DML methods take `&mut self`, whereas
     // the seam methods take `&self`; a `RefCell` provides the interior mutability (the `Store` is
     // single-threaded / `!Send`, so borrows never overlap across the brief per-call `borrow_mut`).
+    // Stage 4 HA: `url` is the DSN (borrowed from the `Arc<PgConn>` held by `App.pg`) — `Some` for the
+    // runtime `App::store()` handle (single-shot reconnect+retry via `pg_run`), `None` for the CLI/tests
+    // (one-shot lifecycles that never outlive a restart). `pg_run` swaps the client inside the held Mutex
+    // on reconnect, so the shared `Arc` heals for every later `store()`.
     #[cfg(feature = "store-postgres")]
-    Postgres(std::cell::RefCell<std::sync::MutexGuard<'a, postgres::Client>>),
+    Postgres {
+        client: std::cell::RefCell<std::sync::MutexGuard<'a, postgres::Client>>,
+        url: Option<&'a str>,
+    },
 }
 
 impl<'a> Store<'a> {
@@ -818,11 +909,24 @@ impl<'a> Store<'a> {
         Store { backend: Backend::Sqlite(guard) }
     }
 
-    /// Wrap a held postgres client guard (session-pinned for the `Store`'s lifetime). Called by
-    /// `App::store()` when the `store-postgres` feature is compiled AND the runtime selects Postgres.
+    /// Wrap a held postgres client guard (session-pinned for the `Store`'s lifetime). NO reconnect
+    /// (`url = None`): used by the CLI subcommands and the integration tests — one-shot lifecycles that
+    /// never outlive a server restart. The runtime `App::store()` uses [`Store::postgres_reconnectable`].
     #[cfg(feature = "store-postgres")]
     pub(crate) fn postgres(guard: std::sync::MutexGuard<'a, postgres::Client>) -> Self {
-        Store { backend: Backend::Postgres(std::cell::RefCell::new(guard)) }
+        Store { backend: Backend::Postgres { client: std::cell::RefCell::new(guard), url: None } }
+    }
+
+    /// Wrap a held postgres client guard TOGETHER with its DSN (Stage 4 HA). On a connection-level
+    /// failure a seam DML op RECONNECTS once (`connect_postgres(url)`), swaps the fresh client into the
+    /// held Mutex, and RETRIES once (see [`pg_run`]). Called by `App::store()` at runtime — where the
+    /// long-lived console must survive a Postgres restart/failover.
+    #[cfg(feature = "store-postgres")]
+    pub(crate) fn postgres_reconnectable(
+        guard: std::sync::MutexGuard<'a, postgres::Client>,
+        url: &'a str,
+    ) -> Self {
+        Store { backend: Backend::Postgres { client: std::cell::RefCell::new(guard), url: Some(url) } }
     }
 
     /// Which backend is this `Store` bound to? Lets the ENTERPRISE modules that create their tables
@@ -834,7 +938,7 @@ impl<'a> Store<'a> {
         match &self.backend {
             Backend::Sqlite(_) => false,
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(_) => true,
+            Backend::Postgres { .. } => true,
         }
     }
 
@@ -847,12 +951,12 @@ impl<'a> Store<'a> {
                 Ok(conn.execute(sql, rusqlite::params_from_iter(vals))?)
             }
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(cell) => {
+            Backend::Postgres { client, url } => {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                let mut cl = cell.borrow_mut();
-                Ok(pg_block(|| cl.execute(sql.as_str(), &refs)).map_err(pg_err)? as usize)
+                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
+                Ok(pg_run(client, *url, |cl| cl.execute(sql.as_str(), &refs))? as usize)
             }
         }
     }
@@ -864,9 +968,13 @@ impl<'a> Store<'a> {
             Backend::Sqlite(conn) => Ok(conn.execute_batch(sql)?),
             #[cfg(feature = "store-postgres")]
             // No parameters => no placeholder translation. `batch_execute` runs `;`-separated DDL and
-            // the transaction control words (`BEGIN`/`COMMIT`/`ROLLBACK`) `with_tx` issues.
-            Backend::Postgres(cell) => {
-                let mut cl = cell.borrow_mut();
+            // the transaction control words (`BEGIN`/`COMMIT`/`ROLLBACK`) `with_tx` issues. DELIBERATELY
+            // NOT wrapped in `pg_run`: transaction control / DDL must NEVER silently reconnect (a
+            // mid-transaction reconnect would abandon the tx on the dead session and re-run BEGIN/COMMIT
+            // on a fresh one, corrupting atomicity). A broken connection here surfaces as an error and
+            // `with_tx` rolls back / the caller retries the whole op — reconnect is at OP granularity.
+            Backend::Postgres { client, .. } => {
+                let mut cl = client.borrow_mut();
                 pg_block(|| cl.batch_execute(sql)).map_err(pg_err)
             }
         }
@@ -892,14 +1000,14 @@ impl<'a> Store<'a> {
                 Ok(out)
             }
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(cell) => {
+            Backend::Postgres { client, url } => {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                let mut cl = cell.borrow_mut();
+                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 // Postgres materialises the full result set (no per-row step error to skip); STRICT:
                 // the FIRST `map` closure `Err` sinks the whole read via `?`, matching the Sqlite arm.
-                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in &rows {
                     out.push(map(&Row::postgres(r))?);
@@ -942,14 +1050,14 @@ impl<'a> Store<'a> {
                 Ok(out)
             }
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(cell) => {
+            Backend::Postgres { client, url } => {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                let mut cl = cell.borrow_mut();
                 // PREPARE/BIND errors PROPAGATE (a broken statement is a hard failure, like Sqlite);
                 // a per-row `map` `Err` is SKIPPED (dropped), collecting only rows that mapped to `Ok`.
-                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
+                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in &rows {
                     if let Ok(v) = map(&Row::postgres(r)) {
@@ -982,12 +1090,12 @@ impl<'a> Store<'a> {
                 }
             }
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(cell) => {
+            Backend::Postgres { client, url } => {
                 let sql = translate_sql(sql);
                 let boxed = pg_binds(params);
                 let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| b.as_ref()).collect();
-                let mut cl = cell.borrow_mut();
-                let rows = pg_block(|| cl.query(sql.as_str(), &refs)).map_err(pg_err)?;
+                // Single-shot reconnect+retry on a connection break (Stage 4 HA).
+                let rows = pg_run(client, *url, |cl| cl.query(sql.as_str(), &refs))?;
                 match rows.first() {
                     Some(r) => Ok(Some(map(&Row::postgres(r))?)),
                     None => Ok(None),
@@ -1018,8 +1126,12 @@ impl<'a> Store<'a> {
         match &self.backend {
             Backend::Sqlite(conn) => conn.last_insert_rowid(),
             #[cfg(feature = "store-postgres")]
-            Backend::Postgres(cell) => {
-                let mut cl = cell.borrow_mut();
+            // DELIBERATELY NOT wrapped in `pg_run`: `lastval()` is meaningful ONLY on the SAME session as
+            // the preceding `execute(INSERT)`. Reconnecting here would query a FRESH session (no sequence
+            // advanced -> wrong id / error). If the connection broke between the INSERT and this call the
+            // caller gets `0` — correct/safe: an INSERT+last_insert_id pair must never straddle a reconnect.
+            Backend::Postgres { client, .. } => {
+                let mut cl = client.borrow_mut();
                 pg_block(|| cl.query_one("SELECT lastval()", &[]))
                     .ok()
                     .and_then(|r| r.try_get::<_, i64>(0).ok())
@@ -1597,5 +1709,80 @@ mod pg_tests {
             let v = crate::state::settings_get_store(&s, "detection_source");
             assert_eq!(v.as_deref(), Some("{\"kind\":\"none\"}"), "settings round-trip in PG");
         }
+    }
+
+    /// STAGE 4 HA — reconnect+retry (`postgres_reconnectable` / `pg_run`). Proves a store op transparently
+    /// RECONNECTS when the pinned session is torn down (the deterministic analogue of a PG restart /
+    /// failover), WITHOUT restarting the server: capture the pinned client's backend PID, terminate THAT
+    /// backend from a SEPARATE connection (so the pinned client is dead but the test's own connection is
+    /// not), then assert the NEXT op on the reconnectable store SUCCEEDS and now runs on a NEW backend PID
+    /// (proving the healed client was swapped into the shared Mutex). Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_reconnect_after_session_terminated() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_reconnect_after_session_terminated] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+
+        // Baseline: the reconnectable store works, and capture the pinned session's backend PID.
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            assert_eq!(s.query_row("SELECT 1", &sql_params![], |r| r.get_i64(0)).unwrap(), 1);
+            s.query_row("SELECT pg_backend_pid()", &sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection (NOT the reconnecting store — avoids cascading the
+        // self-terminate through its retry), then WAIT until the backend is actually GONE from
+        // pg_stat_activity. `pg_terminate_backend` returns once the SIGTERM is SENT, not once the backend
+        // has exited — polling to disappearance removes that race so the next pinned-store op is guaranteed
+        // to hit a dead session (deterministic reconnect).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            let _ = ks.execute("SELECT pg_terminate_backend(?::int)", &sql_params![pid]);
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        "SELECT count(*) FROM pg_stat_activity WHERE pid = ?::int",
+                        &sql_params![pid],
+                        |r| r.get_i64(0),
+                    )
+                    .unwrap_or(0);
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
+        }
+
+        // The NEXT op on the pinned store MUST reconnect once and succeed (would error without HA).
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            let two: i64 = s
+                .query_row("SELECT 2", &sql_params![], |r| r.get_i64(0))
+                .expect("store op reconnects after the pinned session was terminated");
+            assert_eq!(two, 2);
+        }
+
+        // The reconnect SWAPPED the healed client INTO the shared Mutex — proven pid-reuse-immune: a
+        // NON-reconnectable store on the SAME mutex now SUCCEEDS. If the swap had NOT persisted (e.g. the
+        // reconnect healed only a local client), the mutex would still hold the DEAD client and this
+        // no-retry store would ERROR. (A pid comparison is unreliable: PostgreSQL recycles backend pids.)
+        {
+            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
+            let four: i64 = s
+                .query_row("SELECT 4", &sql_params![], |r| r.get_i64(0))
+                .expect("shared mutex holds the healed client (non-reconnectable store succeeds)");
+            assert_eq!(four, 4);
+        }
+        let _ = pid; // captured only to terminate the pinned session above
     }
 }

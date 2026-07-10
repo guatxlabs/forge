@@ -68,6 +68,19 @@ exist_ok)`. Voir [`CONFIGURATION.md`](CONFIGURATION.md) pour la table exhaustive
 
 ---
 
+## Backend Postgres (`store-postgres`) — dépendances hôte
+
+Le backend Postgres OPT-IN (feature Cargo `store-postgres`, cf. [`DEPLOYMENT.md`](DEPLOYMENT.md) §3bis)
+reste **openssl-free** (TLS `rustls`/`ring`) et la **connexion** ne requiert **aucun** binaire externe
+(pas de libpq — client Rust pur). La **SAUVEGARDE Postgres** appelle en revanche le binaire externe
+**`pg_dump`** (et `pg_restore` à la restauration) : il doit être **sur le PATH** de l'hôte/du conteneur,
+**dans une version ≥ celle du serveur** (un `pg_dump` v15 refuse un serveur v16). L'image Docker buildée
+avec la feature installe `postgresql-client-16` depuis le dépôt PGDG (ARG `FORGE_PG_CLIENT_VERSION`) ;
+en natif, installer le paquet client correspondant. Sans `pg_dump`, la sauvegarde **échoue clairement**
+(jamais de repli silencieux). Multi-plateforme : `pg_dump` existe sous Linux/macOS/Windows.
+
+---
+
 ## Limitation Unix-only documentée (récapitulatif)
 
 Une seule capacité est strictement Unix : **le kill de groupe de process (`setsid` + `killpg`) du

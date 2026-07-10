@@ -1,0 +1,48 @@
+# Forge — OVERRIDE ADDITIF « backend Postgres » (Stage 4 HA / multi-instance).
+# =============================================================================
+# Ce fichier NE REMPLACE PAS docker-compose.yml : il le COMPLÈTE. Sans lui, le déploiement PAR DÉFAUT
+# reste SQLite (docker-compose.yml seul), byte-identique/inchangé. Avec lui + le profil `postgres`, la
+# console est REBUILDÉE avec la feature `store-postgres` et branchée sur le service `postgres`.
+#
+# Lancer DEPUIS le dossier parent `GUATX/` (contexte de build = .. pour inclure core/ ET forge/) :
+#
+#   docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+#                  --profile postgres up -d --build
+#
+# ÉTAPES OBLIGATOIRES (cf. docs/DEPLOYMENT.md § Postgres) :
+#   1) Pré-étape scope.json (comme le déploiement SQLite) : `cp scope.example.json scope.json` dans forge/.
+#   2) `--profile postgres` DÉMARRE le service `postgres` (sinon la console démarre sans sa DB -> échec au
+#      boot : FORGE_ENTERPRISE_STORE=postgres exige FORGE_DB_URL joignable).
+#   3) `--build` RECOMPILE l'image avec `FORGE_CARGO_FEATURES=store-postgres` (feature opt-in) — l'image
+#      SQLite par défaut n'inclut pas le backend PG.
+#   4) MIGRATION des données SQLite existantes (Stage 3) — AVANT le 1er run Postgres, si tu avais déjà des
+#      données SQLite à conserver, lance le migrateur gouverné (one-shot) :
+#        docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+#          --profile postgres run --rm --entrypoint forge-console forge-console \
+#          migrate-store --to "postgres://forge:forge@postgres:5432/forge" \
+#          --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl
+#      (dry-run d'abord en ajoutant `--dry-run` ; `--force` pour écraser une cible non vide.)
+#
+# Credentials : défauts d'ÉVAL (forge/forge). En PROD, poser FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB
+# dans forge/.env (repris À LA FOIS par le service postgres et par FORGE_DB_URL ci-dessous).
+
+name: forge
+
+services:
+  forge-console:
+    build:
+      args:
+        # Recompile la console AVEC le backend Postgres (TLS rustls/ring — openssl-free). L'image
+        # runtime installe alors `pg_dump`/`pg_restore` (postgresql-client) pour la SAUVEGARDE Postgres.
+        FORGE_CARGO_FEATURES: "store-postgres"
+    environment:
+      # Sélectionne le backend Postgres (gate FAIL-CLOSED : refuse de démarrer sans FORGE_DB_URL).
+      FORGE_ENTERPRISE_STORE: "postgres"
+      # DSN interne au réseau compose (`postgres` = nom du service). sslmode `prefer` par défaut du client
+      # (TLS si offert, sinon plaintext sur le réseau Docker isolé). Surcharger les creds via forge/.env.
+      FORGE_DB_URL: "postgres://${FORGE_PG_USER:-forge}:${FORGE_PG_PASSWORD:-forge}@postgres:5432/${FORGE_PG_DB:-forge}"
+    # La console attend que Postgres soit SAIN avant de démarrer (le boot applique PG_SCHEMA + seeders).
+    # `postgres` est derrière le profil "postgres" -> lancer avec `--profile postgres` (cf. en-tête).
+    depends_on:
+      postgres:
+        condition: service_healthy

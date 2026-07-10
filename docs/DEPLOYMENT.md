@@ -220,6 +220,142 @@ re-vérifié, clé `.ed25519` replacée en `0600`.
 
 ---
 
+## 3bis. Backend Postgres (Stage 4 — HA / multi-instance)
+
+Le backend PAR DÉFAUT est **SQLite** (fichier local, zéro dépendance) — **inchangé**. Un backend
+**Postgres** OPT-IN existe derrière la feature Cargo `store-postgres` : plusieurs instances **console
+stateless** peuvent partager **UNE** base Postgres. Le backend PG est **openssl-free** (TLS `rustls` +
+provider `ring`, jamais native-tls/openssl) ; le build community (feature OFF) ne compile **aucune** dép
+Postgres et reste byte-identique.
+
+### 3bis.1 Build & run avec Postgres
+
+Deux réglages runtime pilotent la sélection (gate **FAIL-CLOSED**) :
+
+| Variable | Rôle |
+|---|---|
+| `FORGE_ENTERPRISE_STORE=postgres` | sélectionne le backend Postgres (sinon SQLite) |
+| `FORGE_DB_URL` | DSN `postgres://user:pass@host:5432/db` — **requis** si `…=postgres` (sinon refus de démarrer) |
+
+La feature doit être **compilée** dans le binaire (`FORGE_ENTERPRISE_STORE=postgres` sur un binaire
+community échoue au boot avec un message clair « rebuild with `--features store-postgres` »).
+
+```sh
+# Natif : build feature (openssl-free) puis run
+cd console && cargo build --release --features store-postgres
+FORGE_ENTERPRISE_STORE=postgres \
+FORGE_DB_URL='postgres://forge:forge@db.internal:5432/forge' \
+  ./target/release/forge-console
+```
+
+**docker-compose** — un override ADDITIF (`docker-compose.postgres.yml`) recompile l'image avec la
+feature (`--build-arg FORGE_CARGO_FEATURES=store-postgres`, qui installe aussi `pg_dump`/`pg_restore`
+dans l'image) et démarre un service `postgres:16` (profil `postgres`). Le déploiement SQLite par défaut
+(`docker-compose.yml` seul) reste **inchangé** :
+
+```sh
+# depuis GUATX/ (contexte de build = parent, cf. §4) — profil postgres + override
+docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+               --profile postgres up -d --build
+```
+
+Credentials par défaut d'ÉVAL (`forge/forge`) — **surcharger** en prod via `forge/.env`
+(`FORGE_PG_USER`/`FORGE_PG_PASSWORD`/`FORGE_PG_DB`, repris à la fois par le service `postgres` et par
+`FORGE_DB_URL`). Ne **jamais** publier le port Postgres publiquement (le service reste `expose:`-only sur
+le réseau compose).
+
+### 3bis.2 Migrer les données SQLite → Postgres (Stage 3, gouverné)
+
+Si tu as déjà des données SQLite à conserver, migre-les **AVANT** le 1er run Postgres avec le migrateur
+gouverné (copie table par table en ordre FK, recalage des séquences IDENTITY, **vérification des comptes
+ligne à ligne** avec ROLLBACK sur écart, **checkpoint ledger signé**) :
+
+```sh
+# dry-run d'abord (n'écrit RIEN) — inspecte ce qui SERAIT copié
+forge-console migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl --dry-run
+# puis la vraie migration (--force pour écraser une cible non vide)
+forge-console migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl
+```
+
+Codes de sortie : `0` OK · `1` refus de gouvernance (cible non vide sans `--force`) ou écart de comptes
+(rollback) · `2` usage/connexion/schéma · **`3` migration committée mais checkpoint ledger non écrit**
+(gouvernance : une migration sans son checkpoint tamper-evident ne rapporte **jamais** un succès — à
+traiter comme un échec, ré-émettre le checkpoint). En Docker, lancer via un conteneur one-shot
+`run --rm --entrypoint forge-console … migrate-store …` (cf. `docker-compose.postgres.yml`).
+
+### 3bis.3 Sauvegarde & restauration Postgres (`pg_dump`)
+
+Sous un backend Postgres actif, `forge-console backup` (CLI / `POST /api/backup` / scheduler) sauvegarde
+**Postgres** — plus le fichier SQLite (qui serait **vide**). L'artefact `db` de l'archive chiffrée est un
+dump **`pg_dump -Fc`** (format custom, compressé, **restaurable via `pg_restore`**), sous l'entrée
+`db.pgdump` (le manifeste porte `db_format: "pgdump"`). `pg_dump` est invoqué en **argv fixe (no-shell)**
+et les credentials du DSN sont **rédigés** dans les logs/le ledger. **Si `pg_dump` est absent** du PATH,
+la sauvegarde **échoue avec un message clair** (jamais de repli silencieux sur un SQLite vide) — d'où
+`postgresql-client` dans l'image PG.
+
+Le reste de la chaîne est **inchangé** : archive **toujours chiffrée** (argon2id + XChaCha20-Poly1305),
+ledger + clé `.ed25519` inclus, chaîne du ledger vérifiée avant/après.
+
+**Restauration Postgres** (manuelle, hors console) — extraire `db.pgdump` de l'archive déchiffrée puis :
+
+```sh
+# 1) déchiffrer l'archive (POST /api/restore apply=false, ou l'outil de restore) et extraire db.pgdump
+# 2) restaurer dans une base cible avec pg_restore (custom format)
+createdb -h HOST -U forge forge_restored
+pg_restore -h HOST -U forge -d forge_restored --no-owner db.pgdump
+# vérifier : pg_restore --list db.pgdump  (liste les TABLE DATA — dump non trivial + restorable)
+```
+
+> Le **swap-en-place** de `POST /api/restore apply=true` reste SQLite-only (il remplace le fichier
+> local). Sous Postgres, la restauration se fait via `pg_restore` ci-dessus (le dump est un artefact PG
+> standard). Le `restore` CLI SQLite n'est **pas** le chemin PG.
+
+### 3bis.4 Liveness `/health` sous PG
+
+`/health` (§5) **ping le store ACTIF** : sous PG il fait un `SELECT 1` **à travers le backend** (donc via
+le **reconnect+retry** HA — voir 3bis.5). Champ **additif `db`** : `"ok"` si le ping passe, `"degraded"`
+si la base est injoignable. La sonde reste **rapide et non-fatale** : `/health` répond **toujours 200**
+(liveness du routeur HTTP) même en `degraded`, donc le `HEALTHCHECK` (qui ne teste que le code 200)
+n'oscille pas sur une coupure DB transitoire — mais un superviseur peut lire `db` pour alerter.
+
+### 3bis.5 HA / multi-instance — ce qui est turnkey et ce qui NE l'est PAS
+
+**Turnkey** : `N` instances console **stateless** contre **UNE** base Postgres partagée. Chaque instance
+détient un **client session-pinné** ; sur une coupure (restart/failover Postgres) une opération du store
+qui échoue avec une **erreur de connexion** **se RECONNECTE une fois puis REJOUE** l'opération
+(reconnect au grain d'une opération — jamais au milieu d'une transaction ; une paire
+`INSERT`+`last_insert_id` ne peut pas chevaucher un reconnect). Le seam PG partage la même **granularité
+de verrou** que SQLite.
+
+**PAS turnkey — contraintes réelles à connaître (soyons honnêtes) :**
+
+- **Le ledger tamper-evident est un FICHIER (`engagement.jsonl`), pas dans Postgres.** Le multi-instance
+  exige donc soit un **stockage partagé** pour ce fichier (volume RWX / NFS — attention aux appends
+  concurrents : la console sérialise ses propres appends sous un verrou **par instance**, ce qui ne
+  couvre **pas** deux instances écrivant le **même** fichier en parallèle), soit **un ledger par
+  instance** (chaînes séparées, à agréger à la lecture). Il n'y a **pas** de ledger partagé
+  transactionnel « clé en main ». Pour un vrai multi-writer, préférer **un ledger par instance** (chaque
+  chaîne reste vérifiable indépendamment) plutôt qu'un fichier partagé exposé aux appends concourants.
+- **Caches en mémoire par instance / éventuellement cohérents.** Plusieurs caches sont **locaux** à
+  chaque process et **recalculés au boot / après une mutation faite PAR CETTE instance** :
+  `detection_config` (source de détection), `auth_required` (gate d'auth engagée), le **head du ledger**
+  (`prev`/`seq`). Une mutation faite via l'**instance A** (ex. changer la source de détection, créer un
+  compte) n'invalide **pas** le cache de l'**instance B** tant que B ne re-boote pas / ne refait pas
+  l'action → fenêtre d'**éventuelle cohérence**. La **donnée** (table `settings`/`users`…) est cohérente
+  dans Postgres immédiatement ; c'est le **cache** qui traîne. Sûr pour la lecture (fail-open lisible),
+  mais ne comptez pas sur une propagation inter-instances instantanée des réglages d'admin.
+- **Sticky sessions recommandées** : les caches par instance + le head ledger par instance rendent un
+  routage **collant** (une session admin → toujours la même instance) plus prévisible qu'un round-robin
+  pur.
+
+En résumé : **scale-out en lecture/exécution contre un Postgres partagé = OK** ; l'audit-ledger partagé
+et la propagation instantanée des réglages d'admin **ne sont pas** automatiques — dimensionner en
+conséquence (ledger par instance, ou stockage partagé assumé ; réglages d'admin propagés au reboot).
+
+---
+
 ## 4. Contexte de build & dépendance `guatx-core`
 
 ⚠️ Le contexte de build est le **PARENT `GUATX/`**, pas `forge/` : le crate `console` dépend du sibling
@@ -264,9 +400,16 @@ simple TCP port-open (qui passerait même si le routeur HTTP est mort).
 - Derrière un reverse-proxy avec `FORGE_CONSOLE_HOST` restreint, la sonde continue de viser `127.0.0.1`
   (toujours dans l'allowlist par défaut, indépendamment de `FORGE_CONSOLE_HOST`) — le healthcheck reste
   vert sans ouvrir le host-guard.
+- **Corps `/health`** : `{"status":"ok","version":"X.Y.Z","db":"ok|degraded"}`. Le champ **`db`** est
+  **additif** (Stage 4) : il **ping le store ACTIF** (SQLite : `SELECT 1` trivial ; Postgres : `SELECT 1`
+  via le backend, donc à travers le reconnect+retry HA). `"degraded"` = base injoignable. La sonde est
+  **non-fatale** : `/health` répond **toujours 200** même en `degraded` (le `HEALTHCHECK` ne teste que le
+  code 200 → il n'oscille pas sur une coupure DB transitoire), mais un superviseur externe peut lire `db`
+  pour alerter/évincer une instance dont la DB est down.
 
 ```sh
 docker inspect --format '{{.State.Health.Status}}' forge-console      # -> healthy
+curl -s http://127.0.0.1:7100/health   # -> {"db":"ok","status":"ok","version":"0.0.1"}
 ```
 
 ---

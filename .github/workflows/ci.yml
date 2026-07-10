@@ -124,3 +124,85 @@ jobs:
           path: forge/console/target/release/forge-console
           if-no-files-found: error
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Console (Postgres) — MATRICE de backend : le job `console` ci-dessus couvre le DÉFAUT SQLite
+  # (feature OFF) ; ce job couvre le backend Postgres OPT-IN (`--features store-postgres`) contre un
+  # vrai Postgres 16 (service container). Prouve le seam PG + le reconnect+retry HA (Stage 4). Le build
+  # community reste byte-identique/openssl-free — c'est le job `console` qui le garde vert.
+  # ---------------------------------------------------------------------------
+  console-postgres:
+    name: console (postgres — cargo test --features store-postgres)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forgepw
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        # Le runner attend que le service soit SAIN avant de lancer les steps.
+        options: >-
+          --health-cmd "pg_isready -U forge"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@v4
+        with:
+          path: forge
+
+      - name: Checkout core (guatx-core)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/core
+          ref: main
+          path: core
+        continue-on-error: true
+
+      - name: Repli monorepo — localiser core/ si le checkout dédié a échoué
+        run: |
+          if [ ! -f core/Cargo.toml ]; then
+            if [ -f forge/../core/Cargo.toml ]; then
+              echo "core/ absent en checkout dédié mais présent en monorepo — OK."
+            else
+              echo "::error::crate guatx-core introuvable (core/Cargo.toml) — ajuster le checkout core."
+              exit 1
+            fi
+          fi
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+
+      - name: Cache cargo (registry + target)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            forge/console/target
+          key: cargo-pg-${{ runner.os }}-${{ hashFiles('forge/console/Cargo.lock') }}
+          restore-keys: |
+            cargo-pg-${{ runner.os }}-
+
+      # clippy DOIT rester vert avec la feature (openssl-free, TLS rustls/ring).
+      - name: clippy (feature store-postgres)
+        working-directory: forge/console
+        run: cargo clippy --all-targets --features store-postgres
+
+      # Le seam PG + les tests d'intégration (dont le reconnect+retry HA) tournent contre le service PG.
+      - name: cargo test (feature store-postgres, contre le service Postgres)
+        working-directory: forge/console
+        env:
+          TEST_PG_URL: postgres://forge:forgepw@localhost:5432/forge
+        run: cargo test --locked --features store-postgres --verbose
+
+      - name: cargo build --release (feature store-postgres)
+        working-directory: forge/console
+        run: cargo build --release --locked --features store-postgres --verbose
