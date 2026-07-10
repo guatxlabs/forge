@@ -511,6 +511,40 @@ pub(crate) fn advance_pg_identity_sequences(store: &crate::store::Store) {
     }
 }
 
+/// POSTGRES UNIQUEMENT — variante EXHAUSTIVE de [`advance_pg_identity_sequences`] pour la migration de
+/// données (`migrate-store`). Là où la version boot ne recale que les 3 tables semées à id explicite, la
+/// migration COPIE des ids explicites dans TOUTES les colonnes IDENTITY (id de chaque table + `seq` du
+/// ledger_entry + tout `scim_*`/`sso_*` présent) : chacune doit être recalée sinon le PREMIER INSERT-sans-id
+/// post-migration régénère un id déjà pris -> `duplicate key`. On DÉCOUVRE dynamiquement chaque colonne
+/// IDENTITY du schéma courant via `information_schema.columns.is_identity='YES'` (couvre `id` ET `seq`, base
+/// ET modules enterprise), puis `setval(seq, GREATEST(COALESCE(max(col),1),1))` sur chacune. Les noms
+/// viennent du CATALOGUE (jamais d'entrée utilisateur) -> interpolation sûre. Renvoie la liste
+/// `(table, colonne, valeur_de_séquence)` pour le rapport/preuve. NO-OP + `Ok(vec![])` en SQLite.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn advance_pg_identity_sequences_all(
+    store: &crate::store::Store,
+) -> crate::store::StoreResult<Vec<(String, String, i64)>> {
+    if !store.is_postgres() {
+        return Ok(vec![]);
+    }
+    let cols = store.query(
+        "SELECT table_name, column_name FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND is_identity = 'YES' \
+         ORDER BY table_name, column_name",
+        &crate::sql_params![],
+        |r| Ok((r.get_str(0)?, r.get_str(1)?)),
+    )?;
+    let mut out = Vec::with_capacity(cols.len());
+    for (t, c) in cols {
+        let sql = format!(
+            "SELECT setval(pg_get_serial_sequence('{t}','{c}'), (SELECT GREATEST(COALESCE(max({c}),1),1) FROM {t}))"
+        );
+        let v = store.query_row(&sql, &crate::sql_params![], |r| r.get_i64(0))?;
+        out.push((t, c, v));
+    }
+    Ok(out)
+}
+
 /// `web_allowed` : un module est lançable depuis l'UI web seulement s'il n'exploite pas, n'est pas
 /// destructif, et n'est pas l'interception IDOR (qui tamper une requête en vol — réservé CLI/opérateur).
 pub(crate) fn module_web_allowed(kind: &str, exploit: bool, destructive: bool) -> bool {

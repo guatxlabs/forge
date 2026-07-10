@@ -714,6 +714,16 @@ fn ensure_schema(store: &crate::store::Store) {
     let _ = store.execute("DELETE FROM sso_pending WHERE expires <= ?", &crate::sql_params![crate::now_epoch()]);
 }
 
+/// PG-ONLY — crée la table enterprise SSO `sso_pending` sur la CIBLE Postgres pour le migrateur de données
+/// (`cli::migrate-store`) : hors de `PG_SCHEMA` (créée paresseusement), le migrateur doit invoquer ce chemin
+/// pour que la cible la possède AVANT la copie (sinon absente -> hard-fail, jamais de skip silencieux).
+/// Délègue à `ensure_schema` (branche `is_postgres()` ; le DELETE des rows expirées y est un no-op sur une
+/// cible neuve). Entièrement gardé `store-postgres` : le build community ne compile pas cette fonction.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn ensure_pg_schema(store: &crate::store::Store) {
+    ensure_schema(store);
+}
+
 /// Look up AND delete (one-time use) the pending-auth row for `state`. `None` if unknown/already-used.
 fn take_pending(store: &crate::store::Store, state: &str) -> Option<Pending> {
     let p = store
