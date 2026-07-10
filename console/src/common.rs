@@ -197,6 +197,34 @@ pub(crate) fn paginate(q: &HashMap<String, String>, default_limit: i64, max_limi
     (limit, offset)
 }
 
+/// KEYSET (seek) pagination — CURSEUR OPAQUE pour les listes triées `ORDER BY id DESC`. Pour ces listes
+/// `id` EST À LA FOIS la clé de tri ET un tiebreaker UNIQUE (clé primaire monotone) : encoder l'`id` de
+/// la dernière ligne suffit — deux lignes ne peuvent jamais avoir la même clé, donc aucune ligne n'est
+/// SAUTÉE ni DUPLIQUÉE à la frontière de page (contrairement à OFFSET sous inserts concurrents).
+///
+/// Le jeton est base64url-sans-padding de `f1:<id>` (versionné `f1` pour pouvoir évoluer sans casser les
+/// vieux clients). Le contenu N'EST JAMAIS interpolé dans du SQL : le décodage rend un `i64` STRICTEMENT
+/// parsé (même discipline que `paginate`) qui est ensuite LIÉ comme `Param::Int` via le seam Store —
+/// zéro surface d'injection. `encode`/`decode` sont PURES (aucun état, aucune I/O).
+pub(crate) fn encode_id_cursor(id: i64) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("f1:{id}"))
+}
+
+/// Décode un curseur keyset -> `Some(id)` bien formé, ou `None` FAIL-CLOSED sur tout jeton malformé
+/// (base64 invalide, UTF-8 invalide, version inconnue, entier non parsable / hors `i64`). Le caller
+/// traduit `None` en `400` — JAMAIS un scan de table complet ni une requête non bornée. Un `id` négatif
+/// ou énorme reste un `i64` VALIDE (pas d'erreur) : lié en paramètre, il borne simplement le seek
+/// (`id < ?`) et la requête garde son `LIMIT` — aucune pathologie.
+pub(crate) fn decode_id_cursor(s: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.as_bytes()).ok()?;
+    let text = std::str::from_utf8(&raw).ok()?;
+    let rest = text.strip_prefix("f1:")?;
+    // Anti-injection : parse STRICT en i64. Un suffixe non numérique, vide, ou hors bornes -> None.
+    rest.parse::<i64>().ok()
+}
+
 /// Nom de workflow / kind d'étape bien formé : `[A-Za-z0-9._-]{1,64}`, non vide, pas de `-` en tête
 /// (parité avec validate_login/validate_campaign — anti-flag + entrées hostiles). Fonction PURE.
 pub(crate) fn valid_workflow_token(s: &str) -> bool {
