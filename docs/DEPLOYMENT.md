@@ -413,6 +413,120 @@ En résumé : **scale-out en lecture/exécution contre un Postgres partagé = OK
 et la propagation instantanée des réglages d'admin **ne sont pas** automatiques — dimensionner en
 conséquence (ledger par instance, ou stockage partagé assumé ; réglages d'admin propagés au reboot).
 
+### 3bis.6 HA sur Kubernetes — manifests `k8s/` (readiness-dossier #13)
+
+Les manifests HA vivent dans **`k8s/`** (à la racine du repo) et matérialisent la topologie Wave A/B/C
+ci-dessus sur Kubernetes : **console à N réplicas** contre **un Postgres partagé**, MinIO/S3 pour les
+artefacts, Ingress collant pour les flux SSE, et — le cœur du #13 — des **NetworkPolicies deny-by-default
+est-ouest**. C'est le pendant k8s du harnais `docker-compose.ha.yml` + `Caddyfile`. Cette section
+**REMPLACE** l'ancienne note « k3s / k8s single-replica » (voir §5 « Contrainte d'archi ») pour le cas HA.
+
+**Appliquer.**
+
+```sh
+# 1) Construire l'image AVEC le backend Postgres (+ object-store si artefacts S3) — l'image community
+#    SQLite par défaut FAIL-CLOSE sous FORGE_HA=1.
+docker build -f Dockerfile \
+  --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
+  -t <registry>/forge-console:0.0.1 ..        # contexte = parent GUATX/ (inclut core/ + forge/)
+docker push <registry>/forge-console:0.0.1
+
+# 2) Régler l'image dans k8s/40-console.yaml (et le host réel dans k8s/50-ingress.yaml +
+#    FORGE_CONSOLE_HOST dans k8s/11-config.yaml).
+
+# 3) PROD : NE PAS appliquer k8s/10-secrets.example.yaml (placeholders d'ÉVAL). Provisionner les 3
+#    Secrets (forge-db, forge-console-auth, forge-objectstore) hors-bande (SealedSecrets/ExternalSecrets/
+#    SOPS), retirer la ligne du kustomization.yaml, puis :
+kubectl apply -k k8s/                          # namespace + config + PG + MinIO + console + ingress + netpol
+# (lab : appliquer tel quel — les Secrets d'éval bootent le cluster de test.)
+```
+
+Validé par **`kubeconform -strict`** (20 ressources, 0 invalide) et `kubectl kustomize k8s/`.
+
+**Contrat env de la console (= Wave A/B/C).** `k8s/40-console.yaml` reproduit exactement le contrat des
+overrides compose :
+
+| Variable | Source k8s | Rôle |
+|---|---|---|
+| `FORGE_HA=1` | ConfigMap | engage HA — boot FAIL-CLOSED si le store actif ≠ Postgres |
+| `FORGE_ENTERPRISE_STORE=postgres` | ConfigMap | sélectionne le backend PG (exige `FORGE_DB_URL`) |
+| `FORGE_DB_URL` | **Secret** `forge-db` | DSN Postgres partagé |
+| `FORGE_INSTANCE_ID` | **`fieldRef: metadata.name`** | identité d'instance = **nom du pod** (unique par réplica → clé du bail leader). Une valeur statique collisionnerait — d'où le `fieldRef`, équivalent k8s du fallback HOSTNAME de compose |
+| `FORGE_CONSOLE_ADDR=0.0.0.0:7100` | ConfigMap | bind interne au pod (jamais public — Service + Ingress + NetworkPolicy devant) |
+| `FORGE_CONSOLE_HOST` | ConfigMap | allowlist Host anti-DNS-rebinding — DOIT inclure le host public de l'Ingress + les noms de Service |
+| `FORGE_CONSOLE_TOKEN` / `_PASS_HASH` / `_OPERATOR_HASH` | **Secret** `forge-console-auth` | bearer d'ingestion + hashes argon2id (stables entre réplicas) |
+| `FORGE_BLOB_S3_*` | ConfigMap (endpoint/bucket) + **Secret** `forge-objectstore` (clés) | object-store artefacts, actif seulement si l'image est buildée `--features object-store` |
+| `FORGE_CONSOLE_DB` | ConfigMap → `emptyDir` | fallback SQLite **local au pod** (inutilisé sous PG) — jamais sur le volume partagé |
+
+**Élection du leader — pas de worker séparé.** Les réplicas sont identiques. Ils **auto-élisent un unique
+run-leader** via le bail single-row `leader_lease` (`scope='run-worker'`, TTL 45 s) dans le Postgres
+partagé : le leader exécute les engagements (one-run-per-engagement, fencé en DB), les autres servent
+UI/API et **reprennent le bail** à son expiration. `leader`/`instance_id` sont publiés sur `GET /health`.
+**Aucun Deployment worker distinct n'est nécessaire** — scaler `replicas` suffit.
+
+**Sondes.** `readinessProbe`/`livenessProbe` = `GET /health` sur 7100, avec **`Host: localhost`** en
+en-tête (dans l'allowlist par défaut) — sinon kubelet enverrait `Host: <podIP>` → 421 → faux unhealthy.
+`/health` répond **toujours 200** quand le routeur HTTP est vivant (`db:"degraded"` sur coupure DB
+transitoire, sans faire flapper la sonde).
+
+**Ledger partagé RWX — le choix à faire (RWX vs object-store vs ledger-par-instance).** Le ledger
+tamper-evident est un **fichier** (`engagement.jsonl`), pas une table Postgres. `k8s/40-console.yaml` le
+place sur un **PVC `ReadWriteMany`** monté par tous les réplicas — ce qui **exige une StorageClass RWX**
+(NFS / CephFS / EFS / Azure Files / Filestore). Les volumes bloc classiques (**RWO** : EBS, GCE-PD, la
+plupart des CSI par défaut) **ne satisfont pas** RWX et le 2ᵉ réplica ne schedulera pas. Trois options,
+par ordre de robustesse d'audit :
+
+1. **Ledger par instance** (recommandé pour un vrai multi-writer) — chaque réplica écrit **sa propre**
+   chaîne (StatefulSet + PVC RWO par pod) ; chaque chaîne reste vérifiable indépendamment, agrégée à la
+   lecture. Pas d'appends concourants sur un même fichier. *(Le manifeste fourni utilise un Deployment +
+   PVC RWX partagé pour rester turnkey ; migrer vers un StatefulSet par-instance si l'audit strict
+   l'impose.)*
+2. **PVC RWX partagé** (fourni) — un seul `engagement.jsonl` pour tous. La console **sérialise ses propres
+   appends par instance** ; ce verrou **ne couvre pas** deux instances écrivant le même fichier en
+   parallèle → accepter la mise en garde « appends concourants » ou router de façon collante.
+3. **Object-store pour les artefacts** — les **évidences/exports/backups** (pas le ledger lui-même) vont
+   sur MinIO/S3 via le seam `object-store` (`FORGE_BLOB_S3_*`), déchargeant le volume partagé du gros
+   binaire. Orthogonal au choix ledger : combinable avec (1) ou (2).
+
+**Postgres — managé recommandé en prod.** `k8s/20-postgres.yaml` fournit un **StatefulSet single-replica +
+Service headless + PVC RWO** pour le **test/dev**. En **prod, préférer un Postgres managé/opéré** (RDS,
+Cloud SQL, CloudNativePG/Crunchy) : un Postgres mono-pod ne rend pas la stack HA (backups, failover, PITR
+viennent du managé). Pour pointer la console dessus : ne pas appliquer `20-postgres.yaml`, mettre le DSN
+managé dans le Secret `forge-db`, et remplacer la règle d'egress `console→postgres` par un `ipBlock` vers
+l'endpoint managé (cf. notes de `60-networkpolicies.yaml`). Idem MinIO → **S3 externe** en prod.
+
+**Sticky sessions pour SSE.** Les flux SSE (logs de run, présence live) doivent rester **épinglés à un
+seul backend** pour la durée du stream, et les caches par-instance + le head de ledger par-instance
+rendent le routage collant correct de toute façon. Deux niveaux, cumulés :
+
+- **Ingress nginx** (`k8s/50-ingress.yaml`) : `affinity: cookie` (cookie `forge_lb`) — équivalent k8s du
+  `lb_policy cookie` de Caddy ; plus `proxy-buffering: off` + `proxy-read-timeout: 3600` pour ne pas
+  bufferiser/couper les streams.
+- **Service** (`k8s/40-console.yaml`) : `sessionAffinity: ClientIP` (ceinture + bretelles). L'alternative
+  sans ingress-controller est un `Service type: LoadBalancer` + `ClientIP` + `externalTrafficPolicy:
+  Local` (fourni commenté).
+
+**Modèle NetworkPolicy — deny-by-default est-ouest (cœur du #13).** `k8s/60-networkpolicies.yaml` pose
+d'abord un **`default-deny-all`** (podSelector vide, `policyTypes: [Ingress, Egress]`, aucune règle → tout
+refusé dans les deux sens pour **tous** les pods du namespace), puis **uniquement** les chemins
+least-privilege, additifs :
+
+| Flux autorisé | Egress (source) | Ingress (destination) |
+|---|---|---|
+| Ingress-controller → **console:7100** | — (hors namespace) | policy `forge-console` (from ns `ingress-nginx`) |
+| **console → Postgres:5432** | policy `forge-console` | policy `forge-postgres` (from pods console) |
+| **console → MinIO:9000** | policy `forge-console` | policy `forge-minio` (from pods console) |
+| **\<tous pods\> → kube-dns:53** (UDP+TCP) | policy `allow-dns-egress` | (kube-system) |
+
+**Tout le reste est refusé** : pas d'egress internet, pas de mouvement latéral, **pas de trafic
+console↔console** (le bail leader, la présence et l'invalidation de cache inter-instances passent **par
+Postgres**, pas pod-à-pod ; le ledger partagé est un volume fichier, pas un chemin réseau). Une connexion
+ne passe que si elle est autorisée **des deux côtés** (egress source **et** ingress destination) — les deux
+sont fournis. Deux mises en garde documentées dans le fichier : (a) les **sondes kubelet** viennent du
+nœud, pas d'un pod — la plupart des CNI (Calico/Cilium) les exemptent ; sinon décommenter le stub
+`ipBlock` vers le **CIDR du nœud** dans la policy console ; (b) pour un **backend externe** (PG managé / S3
+externe), remplacer la règle pod-selector par un `ipBlock` vers son CIDR:port.
+
 ---
 
 ## 3ter. SSO entreprise — OIDC natif, SAML via pont OIDC (Stage entreprise, flag-gated)
@@ -614,10 +728,14 @@ build**. Bump de version = rafraîchir version **et** digest.
 
 #### k3s / k8s ✅
 
-- Deployment **single-replica**.
+- **Deux modes** : (a) **single-replica** SQLite (défaut community, ci-dessous) ; (b) **HA multi-réplicas**
+  contre Postgres partagé → **manifests `k8s/` + NetworkPolicies deny-by-default**, cf.
+  [§3bis.6](#3bis6-ha-sur-kubernetes--manifests-k8s-readiness-dossier-13).
+- Mode (a) : Deployment **single-replica**.
 - ⚠️① la console **SPAWN** `python3 -m forge.cli` (setsid) → python + package forge **DANS LE MÊME
   conteneur** (pas séparable).
-- ⚠️② SQLite + ledger = **PVC ReadWriteOnce** → pas de scale horizontal.
+- ⚠️② en mode (a) SQLite + ledger = **PVC ReadWriteOnce** → pas de scale horizontal. Le mode (b) lève ça
+  via Postgres partagé + ledger sur PVC **RWX** (ou ledger-par-instance) — cf. §3bis.6.
 - Outils externes (browser:8080, msfrpcd:55553, burp:1337) = Services / sidecars optionnels.
 
 #### Host natif ✅

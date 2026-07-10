@@ -1,0 +1,91 @@
+# Forge — Postgres backing store (#13). StatefulSet + headless Service + per-pod PVC.
+# =============================================================================================
+# PRODUCTION RECOMMENDATION: use a MANAGED Postgres (RDS / Cloud SQL / Crunchy or CloudNativePG
+# operator) rather than this in-cluster single-replica StatefulSet. HA of the CONSOLE tier does not
+# make a single-pod Postgres highly available — a managed/operated Postgres gives you backups,
+# failover, and PITR. This StatefulSet is for TEST/DEV: it gives a stable network identity
+# (forge-postgres-0.forge-postgres) and a persistent PVC so the eval cluster has a real store.
+# To point the console at managed Postgres instead: leave this file out and set FORGE_DB_URL in the
+# forge-db Secret to the managed endpoint (and drop the console->postgres NetworkPolicy for an
+# egress-to-CIDR rule toward the managed host — see 60-networkpolicies.yaml notes).
+---
+# Headless Service — stable DNS for the StatefulSet pod(s). clusterIP: None ⇒ DNS resolves to the
+# pod IP(s) directly. The console reaches it as `forge-postgres:5432` (matches FORGE_DB_URL).
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-postgres
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: postgres }
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: forge-postgres
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: postgres }
+spec:
+  serviceName: forge-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: forge
+        app.kubernetes.io/name: postgres
+    spec:
+      securityContext:
+        fsGroup: 999   # postgres group in the official image — lets it own the PVC data dir.
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: forge-db   # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+          env:
+            # Keep PGDATA in a subdir of the mount (Postgres refuses a non-empty mountpoint root
+            # containing lost+found on some CSIs).
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "1000m", memory: "1Gi" }
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]   # single-writer DB pod — RWO is correct here.
+        resources:
+          requests:
+            storage: 10Gi
+        # storageClassName: <your-block-sc>   # uncomment/set to your cluster's block storage class.

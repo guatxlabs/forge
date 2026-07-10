@@ -1,0 +1,14 @@
+# Forge — HA topology on Kubernetes (readiness-dossier #13).
+# =============================================================================================
+# Dedicated namespace for the Forge HA deployment. Every NetworkPolicy in 60-networkpolicies.yaml
+# is scoped to THIS namespace: the default-deny-all baseline applies to all pods here, and the
+# explicit allow-rules only open the least-privilege east-west paths (Ingress->console,
+# console->Postgres, console->MinIO, console->DNS). Nothing outside this namespace is trusted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: forge
+  labels:
+    app.kubernetes.io/part-of: forge
+    # Stamped so ingress/DNS NetworkPolicies can select this namespace by its well-known label.
+    kubernetes.io/metadata.name: forge
