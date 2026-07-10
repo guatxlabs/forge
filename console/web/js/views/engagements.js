@@ -14,6 +14,7 @@ import { loadStatuses } from './overview.js';
 import { LOADERS, VIEWS_HAS } from '../core/router.js';
 import { ENGAGEMENTS, activeEngagement, getEngagements, setActiveEngagement, setEngagements } from '../core/state.js';
 import { visibleEngagements, tenancyAdmin, TENANT_ROLES } from './tenancy.js';
+import { restartPresence } from '../core/presence.js';
 import { confirmModal, guardList, modal, toast } from '../core/ui.js';
 
 
@@ -89,6 +90,8 @@ export function switchEngagement(id) {
   setActiveEngagement(id);
   renderEngagementSelector();
   reloadCurrentView();
+  // PRÉSENCE (#9) : re-scoper le flux LIVE sur le nouvel engagement (leave l'ancien, join le nouveau).
+  try { restartPresence(); } catch (e) {}
   if (typeof loadStatuses === 'function') { try { loadStatuses(); } catch (e) {} }
   const e = ENGAGEMENTS.find(x => x.id === id);
   if (e) toast('Engagement actif : ' + e.name, 'ok');

@@ -168,6 +168,13 @@
   <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
   <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
   <div class="hdr-tools">
+    <!-- PRÉSENCE (#9) : indicateur multi-opérateur LIVE — qui est connecté sur l'engagement actif.
+         Initiales/avatars + compteur, mis à jour en direct via SSE (/api/presence/events). Discret,
+         masqué tant qu'il n'y a personne (ou un seul soi-même). Per-instance (voir presence.rs). -->
+    <div id="presence" class="presence" role="status" aria-live="polite" aria-label="Opérateurs connectés" hidden>
+      <span id="presence-avatars" class="presence-avatars" aria-hidden="true"></span>
+      <span id="presence-count" class="presence-count badge" title="Opérateurs connectés sur cet engagement">0</span>
+    </div>
     <div id="whoami" class="whoami" role="status" aria-live="polite" hidden>
       <span id="whoami-role" class="badge" title="Rôle effectif de la session">-</span>
       <span id="whoami-user" class="whoami-user" title="Compte connecté"></span>

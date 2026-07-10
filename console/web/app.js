@@ -21,6 +21,7 @@ import './js/views/engagements.js';
 import './js/views/tenancy.js';
 import './js/views/identity.js';
 import './js/views/compliance.js';
+import './js/core/presence.js';
 import './js/core/auth.js';
 import './js/views/import.js';
 import './js/views/reports.js';

@@ -7,6 +7,7 @@ import { lcStopLive } from '../views/launch.js';
 import { loadStatuses } from '../views/overview.js';
 import { route } from './router.js';
 import { loadTenancyContext } from '../views/tenancy.js';
+import { initPresence } from './presence.js';
 import { confirmModal, toast } from './ui.js';
 
 export function complianceOn() { return !!(ENTERPRISE && ENTERPRISE.compliance); }
@@ -301,5 +302,7 @@ export async function bootApp() {
   await loadEngagementSelector();
   loadCampaigns();
   loadStatuses();
+  // PRÉSENCE (#9) : ouvrir le flux LIVE après le sélecteur d'engagement (pour scoper sur l'engagement actif).
+  try { initPresence(); } catch (e) { /* fail-soft : l'indicateur reste masqué */ }
   route();
 }
