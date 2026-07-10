@@ -200,82 +200,81 @@ pub(crate) const CACHE_POLL_SECS: u64 = 4;
 /// Bounded backoff (milliseconds) for RE-ACQUIRING the ledger advisory lock when the first attempt fails
 /// (PG connection blip). PG blips recover fast, so a few short sleeps ride out a reconnect without giving up
 /// the single-writer guarantee. Total worst case ≈ sum ≈ 400 ms — comparable to the fsync this call already
-/// does — before we fall back to the cross-instance FILE lock. Kept small: INTEGRITY over latency.
+/// does — before we FAIL-CLOSED (refuse the append). The advisory lock is the SOLE cross-instance
+/// serialiser; there is no second lock to fall back to. Kept small: INTEGRITY over latency.
 #[cfg(feature = "store-postgres")]
 pub(crate) const LEDGER_LOCK_RETRY_BACKOFF_MS: &[u64] = &[25, 50, 75, 100, 150];
 
-/// FALLBACK cross-instance serialisation when Postgres is UNREACHABLE: an exclusive `flock(LOCK_EX)` on a
-/// sidecar `<ledger>.lock` file living on the SAME shared RWX volume as the ledger. `flock` is associated
-/// with the OPEN FILE DESCRIPTION (not the append fd) so it serialises appends ACROSS instances/processes
-/// that mount the same volume — a peer appending to the same ledger BLOCKS on its own `LOCK_EX` until we
-/// release ours. Runs `g` EXACTLY ONCE while the lock is held; releases on `LOCK_UN` + close.
-///
-/// Returns `true` iff `g` ran under a held lock. `false` (could not open/lock the sidecar) => the caller
-/// must NOT append unlocked (fail-closed on integrity — a deferred entry beats a forked chain).
-///
-/// NFS CAVEAT: `flock` is reliable on LOCAL / overlay / bind-mounted / tmpfs volumes (the docker-compose &
-/// k8s shared ledger volume). On some ancient/misconfigured NFS `flock` can degrade to a no-op; the shipped
-/// compose/k8s deployment uses a local shared volume where `flock` is authoritative (validated). If you run
-/// the ledger on NFS, mount with `-o local_lock=all` (or accept the advisory-lock primary path only).
-#[cfg(feature = "store-postgres")]
-fn with_ledger_flock(path: &str, g: impl FnOnce()) -> bool {
-    use std::os::unix::io::AsRawFd;
-    let lock_path = format!("{path}.lock");
-    if let Some(parent) = std::path::Path::new(&lock_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Sidecar lock file on the shared volume. Separate from the append fd so flock never interferes with the
-    // O_APPEND write itself.
-    let file = match std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path) {
-        Ok(f) => f,
-        Err(_) => return false, // cannot create the sidecar -> fail-closed (no unlocked append)
-    };
-    let fd = file.as_raw_fd();
-    // Blocking EXCLUSIVE lock: waits until we hold it cluster-wide on the shared volume.
-    // SAFETY: `fd` is a valid open descriptor owned by `file` for the whole call.
-    if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-        return false; // flock failed -> fail-closed (do NOT append unlocked)
-    }
-    g();
-    // Explicit unlock then drop; close() would release too, but be deterministic about ordering.
-    // SAFETY: same valid `fd`.
-    unsafe {
-        libc::flock(fd, libc::LOCK_UN);
-    }
-    drop(file);
-    true
+/// Returned by [`with_ledger_lock`] when an HA ledger append could NOT be serialised: Postgres — and thus
+/// the SOLE cross-instance serialiser, `pg_advisory_xact_lock` — stayed unreachable across the whole
+/// [`LEDGER_LOCK_RETRY_BACKOFF_MS`] retry budget. The append was REFUSED (deferred), NOT written: `f` never
+/// ran, so the tamper-evident chain stays contiguous and /api/ledger/verify stays {ok:true}. The CALLER
+/// MUST surface this — a governed action must not proceed as though its audit entry landed. This is only
+/// reachable under HA when THIS replica's Postgres is down; since the data plane is `store()`=Postgres, the
+/// governing action is already failing, so refusing the audit append is the consistent, integrity-first
+/// outcome. Defined unconditionally so the community mirror shares the signature (it never returns `Err`).
+#[derive(Debug, Clone)]
+pub(crate) struct LedgerUnavailable {
+    pub(crate) path: String,
 }
 
-/// B5 — LEDGER MULTI-INSTANCE (no chain forks). Run the ledger append critical section `f` (read-tail ->
-/// compute -> append) under a CROSS-INSTANCE lock so two replicas never read the same tail hash and both
-/// append (which would fork the SHA-256 chain and break /api/ledger/verify). Under HA we take a PG
-/// `pg_advisory_xact_lock(hashtext(path))` — cluster-global, keyed on the ledger file path — inside a short
-/// transaction; the caller invalidates its (possibly stale) head cache and re-reads the tail from the
+impl std::fmt::Display for LedgerUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ledger temporarily unavailable — append deferred/refused (Postgres advisory lock unreachable for '{}')",
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for LedgerUnavailable {}
+
+/// B5 / FIX #17 — LEDGER MULTI-INSTANCE, SINGLE AUTHORITATIVE SERIALISER (no chain forks, no disjoint lock
+/// window). Run the ledger append critical section `f` (read-tail -> compute -> append) under ONE
+/// cross-instance lock so two replicas never read the same tail hash and both append (which would fork the
+/// SHA-256 chain and break /api/ledger/verify). Under HA the SOLE serialiser is a PG
+/// `pg_advisory_xact_lock(hashtext(path))` — cluster-global, keyed on the ledger file path — taken inside a
+/// short transaction; the caller invalidates its (possibly stale) head cache and re-reads the tail from the
 /// SHARED file INSIDE this lock. Single writer at a time => the existing in-proc `ledger_lock` + preimage/
 /// hash stay correct and byte-identical, so verify is unchanged; zero forks by construction.
 ///
-/// INTEGRITY > AVAILABILITY (tamper-evident ledger). `f` NEVER runs UNLOCKED — a fork is worse than a
-/// deferred entry. Path selection:
-///   1. PRIMARY — advisory lock inside a tx, RETRIED with a short bounded backoff ([`LEDGER_LOCK_RETRY_BACKOFF_MS`])
-///      to ride out a PG connection blip. `f` runs inside the tx while the cluster-global lock is held.
-///   2. FALLBACK — PG still unreachable after the retries: serialise cross-instance via `flock(LOCK_EX)` on a
-///      sidecar lock file on the SHARED volume ([`with_ledger_flock`]). During a full PG outage EVERY replica
-///      converges on this same file lock, so appends stay serialised (single writer) — no fork, no data loss.
-///   3. FAIL-CLOSED — even the file lock is unavailable (sidecar cannot be created/locked): REFUSE the append
-///      (the entry is DEFERRED, not forked). The chain stays contiguous and /api/ledger/verify stays {ok:true};
-///      the missing entry is the integrity-preserving outcome under a total lock outage.
+/// WHY ONE LOCK (the fork window this closes): a prior design used the advisory lock as PRIMARY with a
+/// shared-volume `flock` FALLBACK. Those two mechanisms are DISJOINT — they do not mutually exclude — so a
+/// PARTIAL outage opened a race: replica A (pooled PG connection still alive) holds the advisory lock and
+/// appends, while replica B (its connect fails) falls to the flock and appends CONCURRENTLY; both read tail
+/// seq=N and write seq=N+1 -> forked chain (verify rejects it). Removing the flock entirely leaves exactly
+/// ONE mechanism governing every HA append regardless of PG state, so there is no transition window where
+/// two appenders both enter the critical section.
 ///
-/// `f` runs AT MOST ONCE across all paths (guarded by `slot.take()`). Single-instance (!ha): pure
-/// pass-through — the in-proc `ledger_lock` alone is authoritative, exactly as today.
+/// INTEGRITY > AVAILABILITY (tamper-evident ledger). `f` NEVER runs UNLOCKED, and never via a second,
+/// disjoint lock — a fork is worse than a deferred entry:
+///   1. ACQUIRE — advisory lock inside a tx, RETRIED with a short bounded backoff ([`LEDGER_LOCK_RETRY_BACKOFF_MS`])
+///      to ride out a PG connection blip (blips recover in ms). `f` runs inside the tx while the
+///      cluster-global lock is held, then the lock releases at COMMIT.
+///   2. FAIL-CLOSED — PG stays unreachable after the whole retry budget: REFUSE the append (the entry is
+///      DEFERRED, not forked, and NOT written via any second path). Return [`LedgerUnavailable`] so the
+///      CALLER surfaces it. Partial outage is handled by construction: the replica whose PG is up appends
+///      under the advisory lock; the replica whose PG is down fails to acquire and defers here — it never
+///      reaches a disjoint path, so the two can never both write seq=N+1.
+///
+/// `f` runs AT MOST ONCE (guarded by `slot.take()`) and only ever under the held advisory lock. Returns
+/// `Ok(())` iff the append was serialised (or single-instance pass-through); `Err(LedgerUnavailable)` iff it
+/// was refused. Single-instance (!ha): pure pass-through — the in-proc `ledger_lock` alone is authoritative,
+/// `f` always runs, always `Ok`, exactly as today.
 #[cfg(feature = "store-postgres")]
-pub(crate) fn with_ledger_lock(app: &crate::App, path: &str, f: impl FnOnce()) {
+pub(crate) fn with_ledger_lock(
+    app: &crate::App,
+    path: &str,
+    f: impl FnOnce(),
+) -> Result<(), LedgerUnavailable> {
     if !ha_enabled(app) {
         f();
-        return;
+        return Ok(());
     }
 
     let mut slot = Some(f);
-    // 1) PRIMARY: advisory-lock inside a tx, retried with bounded backoff on a transient PG failure.
+    // SOLE SERIALISER: advisory-lock inside a tx, retried with bounded backoff on a transient PG failure.
     for (attempt, backoff_ms) in std::iter::once(0u64)
         .chain(LEDGER_LOCK_RETRY_BACKOFF_MS.iter().copied())
         .enumerate()
@@ -285,7 +284,8 @@ pub(crate) fn with_ledger_lock(app: &crate::App, path: &str, f: impl FnOnce()) {
         }
         let res = (app.store()).with_tx(|tx| {
             // Cluster-global advisory lock keyed on the ledger path; auto-released at COMMIT/ROLLBACK. A peer
-            // appending to the SAME file blocks here until we commit -> serialised single writer.
+            // appending to the SAME file blocks here until we commit -> serialised single writer. This is the
+            // ONLY mechanism that governs the critical section — there is no second (disjoint) lock.
             tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", &crate::sql_params![path])?;
             if let Some(g) = slot.take() {
                 g();
@@ -293,35 +293,39 @@ pub(crate) fn with_ledger_lock(app: &crate::App, path: &str, f: impl FnOnce()) {
             Ok::<(), crate::store::StoreError>(())
         });
         if res.is_ok() {
-            return; // appended under the advisory lock (released at COMMIT).
+            return Ok(()); // appended under the advisory lock (released at COMMIT).
         }
         // with_tx failed. If `slot` is now empty, `f` ALREADY ran while the lock was held (only COMMIT
-        // failed afterwards) -> it was serialised; do NOT re-run. Otherwise BEGIN/lock failed before `f`
-        // ran -> retry (or fall through to the file-lock fallback).
+        // failed afterwards) -> it was serialised under the lock; do NOT re-run and do NOT report an outage.
+        // Otherwise BEGIN/lock failed before `f` ran -> retry.
         if slot.is_none() {
-            return;
+            return Ok(());
         }
     }
 
-    // 2) FALLBACK: PG stayed unreachable across every retry. Do NOT append unlocked — serialise
-    //    cross-instance via a shared-volume FILE lock instead so the outage never forks the chain.
-    if let Some(g) = slot.take() {
-        if !with_ledger_flock(path, g) {
-            // 3) FAIL-CLOSED: neither PG nor the file lock is available -> REFUSE the append (deferred, not
-            //    forked). The entry is dropped THIS call; the tamper-evident chain stays contiguous & verifiable.
-            eprintln!(
-                "[forge-console] LEDGER TEMPORARILY UNAVAILABLE — Postgres unreachable and flock fallback \
-                 failed on '{path}.lock'; audit entry DEFERRED (integrity > availability, no unlocked fork)."
-            );
-        }
-    }
+    // FAIL-CLOSED: PG stayed unreachable across every retry. Do NOT append — not unlocked, and not via any
+    // second/disjoint lock (there is none). Drop `f` unexecuted and surface the outage so the CALLER refuses
+    // to proceed as if audited. The tamper-evident chain stays contiguous & /api/ledger/verify stays {ok:true}.
+    drop(slot); // `f` never ran; the closure is dropped without being invoked.
+    eprintln!(
+        "[forge-console] LEDGER TEMPORARILY UNAVAILABLE — Postgres advisory lock unreachable for '{path}' \
+         after the retry budget; audit entry REFUSED (integrity > availability, no unlocked/disjoint fork)."
+    );
+    Err(LedgerUnavailable { path: path.to_string() })
 }
 
 /// Community mirror of [`with_ledger_lock`] — HA is impossible without Postgres, so the ledger is never
-/// shared cross-instance: run `f` directly (the in-proc `ledger_lock` is authoritative). Byte-identical.
+/// shared cross-instance: run `f` directly (the in-proc `ledger_lock` is authoritative) and always succeed.
+/// Byte-identical behaviour to the historical `()`-returning helper (the `Ok(())` is never inspected off
+/// the happy path in this build). Signature matches the HA arm so callers compile identically.
 #[cfg(not(feature = "store-postgres"))]
-pub(crate) fn with_ledger_lock(_app: &crate::App, _path: &str, f: impl FnOnce()) {
+pub(crate) fn with_ledger_lock(
+    _app: &crate::App,
+    _path: &str,
+    f: impl FnOnce(),
+) -> Result<(), LedgerUnavailable> {
     f();
+    Ok(())
 }
 
 /// B6 — CROSS-INSTANCE CACHE INVALIDATION (poll). Spawned once per instance when HA is engaged. Polls the
@@ -524,6 +528,129 @@ mod pg_tests {
         assert_eq!(v.entries, (2 * N) as usize, "PG: every append landed, contiguous SHA-256 chain, no fork");
     }
 
+    /// FIX #17 — SINGLE-LOCK LEDGER SERIALISER, POOLED-CONNECTION RACE (the exact production geometry the old
+    /// disjoint flock fallback broke). MODELS the partial-outage race: replica A holds a LIVE, PERSISTENT
+    /// (pooled) PG connection, takes `pg_advisory_xact_lock`, and is MID-APPEND; replica B (a SEPARATE pooled
+    /// connection) then tries to acquire the SAME advisory lock. With ONE authoritative mechanism, B's acquire
+    /// MUST BLOCK until A COMMITs — B can NEVER enter the critical section while A is in it — so the two never
+    /// read the same tail seq=N and both write seq=N+1 (the fork the flock path produced, because flock and
+    /// the advisory lock are DISJOINT and don't mutually exclude).
+    ///
+    /// This is the precise scenario the FINDING describes (pooled connection alive on A while B falls to a
+    /// second lock). Both appenders use PERSISTENT connections held for the whole test — NOT fresh-connect-
+    /// per-attempt — reproducing the pool. Assertions: (a) MUTUAL EXCLUSION — when B finally acquires, A has
+    /// already LEFT the critical section (`overlap` never set); (b) B genuinely BLOCKED on A's held lock (its
+    /// acquire waited a meaningful fraction of A's hold); (c) NO FORK — the SHA-256 chain is contiguous
+    /// (seq 1 then 2, verify {ok:true}), which is impossible if the two ever overlapped.
+    #[test]
+    fn pg_ledger_single_lock_blocks_pooled_second_appender() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_pooled_race] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let path = std::env::temp_dir()
+            .join(format!("forge-fix17-pooled-{}.jsonl", crate::gen_token()))
+            .to_string_lossy()
+            .into_owned();
+
+        // `a_in_crit`: true while A holds the advisory lock AND is inside read-tail->append. `overlap`: set iff
+        // B ever observes A still in the critical section at the instant B acquires the lock (i.e. the DISJOINT-
+        // lock bug). `(tx_held, rx_held)`: A signals "I now hold the advisory lock" so B starts racing for it.
+        let a_in_crit = Arc::new(AtomicBool::new(false));
+        let overlap = Arc::new(AtomicBool::new(false));
+        let (tx_held, rx_held) = std::sync::mpsc::channel::<()>();
+
+        // Replica A: PERSISTENT pooled connection. Acquire the advisory xact lock, enter crit, append seq=1,
+        // HOLD the lock ~250 ms (so B's acquire has to block on it), leave crit, then COMMIT (releasing lock).
+        let a = {
+            let (url, path) = (url.clone(), path.clone());
+            let (a_in_crit, tx_held) = (a_in_crit.clone(), tx_held);
+            std::thread::spawn(move || {
+                let client = crate::store::connect_postgres(&url).expect("A connect (pooled)");
+                let m = std::sync::Mutex::new(client);
+                Store::postgres(m.lock().unwrap())
+                    .with_tx(|tx| {
+                        tx.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext(?))",
+                            &crate::sql_params![path.as_str()],
+                        )?;
+                        a_in_crit.store(true, Ordering::SeqCst);
+                        let _ = tx_held.send(()); // lock is HELD -> tell B to start racing for the SAME lock.
+                        let _ = crate::ledger_append_standalone(
+                            &path,
+                            "console.race",
+                            &serde_json::json!({"replica": "A", "seq_intent": 1}),
+                        );
+                        // Hold the advisory lock across B's blocked acquire.
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        a_in_crit.store(false, Ordering::SeqCst); // leave crit BEFORE the COMMIT releases the lock.
+                        Ok::<(), crate::store::StoreError>(())
+                    })
+                    .expect("A tx commits (advisory lock released here)");
+            })
+        };
+
+        // Wait until A actually holds the lock, THEN race B for it.
+        rx_held.recv().expect("A signalled the advisory lock is held");
+
+        // Replica B: a DIFFERENT persistent pooled connection. Try to acquire the SAME advisory lock. With one
+        // authoritative mechanism this BLOCKS until A COMMITs; the moment B holds it, A must have LEFT the crit
+        // section. (Under the old disjoint flock path, B would have taken a DIFFERENT lock and appended
+        // concurrently -> `overlap` set + seq collision.)
+        let b = {
+            let (url, path) = (url.clone(), path.clone());
+            let (a_in_crit, overlap) = (a_in_crit.clone(), overlap.clone());
+            std::thread::spawn(move || -> std::time::Duration {
+                let client = crate::store::connect_postgres(&url).expect("B connect (pooled)");
+                let m = std::sync::Mutex::new(client);
+                let t0 = std::time::Instant::now();
+                let waited = Store::postgres(m.lock().unwrap())
+                    .with_tx(|tx| {
+                        tx.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext(?))",
+                            &crate::sql_params![path.as_str()],
+                        )?;
+                        let waited = t0.elapsed();
+                        // The ONLY way to be here is A already COMMITted (single lock) -> A must be out of crit.
+                        if a_in_crit.load(Ordering::SeqCst) {
+                            overlap.store(true, Ordering::SeqCst);
+                        }
+                        let _ = crate::ledger_append_standalone(
+                            &path,
+                            "console.race",
+                            &serde_json::json!({"replica": "B", "seq_intent": 2}),
+                        );
+                        Ok::<std::time::Duration, crate::store::StoreError>(waited)
+                    })
+                    .expect("B tx commits");
+                waited
+            })
+        };
+
+        a.join().unwrap();
+        let waited = b.join().unwrap();
+
+        assert!(
+            !overlap.load(Ordering::SeqCst),
+            "SINGLE LOCK: B must NOT enter the critical section while A holds it (no disjoint flock window)"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(100),
+            "B's advisory acquire BLOCKED on A's held lock (serialised, not concurrent) — waited {waited:?}"
+        );
+
+        let v = crate::verify_ledger_chain(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+        assert!(v.ok, "no fork: contiguous SHA-256 chain after serialised appends (why={:?})", v.why);
+        assert_eq!(v.entries, 2, "exactly two appends, serialised seq 1 then 2 — no tail re-read collision");
+    }
+
     /// B7 — PRESENCE PG TABLE (rosters span instances). Exercises the exact SQL the PG-backed
     /// `PresenceRegistry` runs: join (upsert), snapshot (SELECT, incl. a NULL engagement), lazy-TTL GC
     /// (DELETE stale), touch (UPDATE last_seen), leave (DELETE). A snapshot taken via ANY connection sees the
@@ -647,15 +774,18 @@ mod pg_tests {
         }
     }
 
-    /// FIX #1 — LEDGER NO-FORK UNDER A POSTGRES OUTAGE (the docker-compose scenario, code-level analogue).
-    /// Two "instances" (separate PG connections, fresh-connected per attempt like `app.store()`'s pool)
-    /// hammer appends to the SAME shared ledger file through the EXACT three-tier `with_ledger_lock` logic
-    /// (advisory-lock tx w/ bounded backoff -> REAL [`with_ledger_flock`] fallback -> fail-closed). Partway
-    /// through, this test STOPS the Postgres container (simulating the outage the task drives with
-    /// `docker stop`), then RESTARTS it. Asserts the SHA-256 chain stays INTACT (no fork, contiguous seq,
-    /// verify {ok:true}) across the whole outage — during the outage every append serialises via the shared-
-    /// volume flock, exactly as two compose replicas would. Then proves the OLD (unlocked) behaviour COULD
-    /// fork by constructing the two-writers-same-tail state and showing verify catches it.
+    /// FIX #17 — LEDGER NO-FORK UNDER A POSTGRES OUTAGE, SINGLE-LOCK (the docker-compose scenario, code-level
+    /// analogue). Two "instances" (separate PG connections, fresh-connected per attempt like `app.store()`'s
+    /// pool healing) hammer appends to the SAME shared ledger file through the EXACT two-tier `with_ledger_lock`
+    /// logic: (1) advisory-lock tx w/ bounded backoff, then (2) FAIL-CLOSED (refuse/defer) — there is NO flock
+    /// tier, so no disjoint window. Partway through, this test STOPS the Postgres container (the outage the
+    /// task drives with `docker stop`), then RESTARTS it. During the outage, appends whose connect stays down
+    /// across the retry budget DEFER (fail-closed, dropped) rather than take a second lock; once PG heals they
+    /// resume under the advisory lock. Asserts the SHA-256 chain stays INTACT (no fork, contiguous seq,
+    /// verify {ok:true}) across the whole outage, that every LANDED append is exactly the advisory-serialised
+    /// count, and that the outage actually exercised the fail-closed path (`deferred > 0`). Then proves the OLD
+    /// (unlocked/disjoint) behaviour COULD fork by constructing the two-writers-same-tail state and showing
+    /// verify catches it.
     ///
     /// Gated on `FORGE_OUTAGE_PG_CONTAINER` (docker container name of the PG under `TEST_PG_URL`) so normal
     /// `cargo test` skips it — it manipulates a real container. Run it explicitly with both env vars set.
@@ -685,8 +815,10 @@ mod pg_tests {
             .to_string_lossy()
             .into_owned();
 
-        // The EXACT three-tier critical section of `ha::with_ledger_lock`, per-append (fresh connect each
-        // attempt so a healed PG resumes the advisory path — like the pool). Returns which tier landed it.
+        // The EXACT two-tier critical section of `ha::with_ledger_lock`, per-append (fresh connect each
+        // attempt so a healed PG resumes the advisory path — like the pool). The SOLE serialiser is the
+        // advisory lock; if PG stays down across the whole retry budget, we FAIL-CLOSED (defer) — never a
+        // second/disjoint lock. Returns which tier landed (or "deferred").
         let url_c = url.clone();
         let path_c = path.clone();
         let append_one = move |tid: i64, i: i64| -> &'static str {
@@ -701,7 +833,7 @@ mod pg_tests {
                 }
                 let client = match crate::store::connect_postgres(&url_c) {
                     Ok(c) => c,
-                    Err(_) => continue, // PG down -> retry, then fall through to flock.
+                    Err(_) => continue, // PG down -> retry, then FAIL-CLOSED (no second lock to fall to).
                 };
                 let m = std::sync::Mutex::new(client);
                 let mut ran = false;
@@ -718,22 +850,14 @@ mod pg_tests {
                     return "advisory"; // appended under the held lock; only COMMIT failed.
                 }
             }
-            // TIER 2 — FALLBACK: the REAL shared-volume flock helper. Serialises across "instances".
-            let mut ran = false;
-            let ok = with_ledger_flock(&path_c, || {
-                let _ = crate::ledger_append_standalone(&path_c, "console.race", &detail);
-                ran = true;
-            });
-            if ok && ran {
-                "flock"
-            } else {
-                "deferred" // TIER 3 fail-closed (never reached on a writable shared volume).
-            }
+            // TIER 2 — FAIL-CLOSED: PG unreachable across the whole retry budget. REFUSE the append (deferred,
+            // NOT written, NOT via any second lock). Integrity > availability: a dropped entry beats a fork.
+            "deferred"
         };
         let append_one = std::sync::Arc::new(append_one);
 
         const N: i64 = 60;
-        let tally = std::sync::Arc::new(std::sync::Mutex::new((0usize, 0usize, 0usize))); // advisory, flock, deferred
+        let tally = std::sync::Arc::new(std::sync::Mutex::new((0usize, 0usize))); // advisory, deferred
         let handles: Vec<_> = (0..2)
             .map(|tid| {
                 let append_one = append_one.clone();
@@ -744,8 +868,7 @@ mod pg_tests {
                         let mut t = tally.lock().unwrap();
                         match tier {
                             "advisory" => t.0 += 1,
-                            "flock" => t.1 += 1,
-                            _ => t.2 += 1,
+                            _ => t.1 += 1,
                         }
                         drop(t);
                         std::thread::sleep(std::time::Duration::from_millis(8));
@@ -757,7 +880,7 @@ mod pg_tests {
         // Drive the OUTAGE mid-run: stop PG, hold it down, restart, wait ready.
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(docker(&["stop", &container]), "docker stop {container}");
-        eprintln!("[pg_outage] Postgres STOPPED — appends must now serialise via flock (no unlocked fork).");
+        eprintln!("[pg_outage] Postgres STOPPED — appends must now FAIL-CLOSED (defer), never fork.");
         std::thread::sleep(std::time::Duration::from_millis(700));
         assert!(docker(&["start", &container]), "docker start {container}");
         for _ in 0..100 {
@@ -772,13 +895,14 @@ mod pg_tests {
             h.join().unwrap();
         }
 
-        let (adv, fl, defr) = *tally.lock().unwrap();
-        eprintln!("[pg_outage] appends: advisory={adv} flock={fl} deferred={defr} (total={})", adv + fl + defr);
+        let (adv, defr) = *tally.lock().unwrap();
+        eprintln!("[pg_outage] appends: advisory={adv} deferred={defr} (total={})", adv + defr);
         let v = crate::verify_ledger_chain(&path);
         eprintln!("[pg_outage] verify: ok={} entries={} why={:?}", v.ok, v.entries, v.why);
         assert!(v.ok, "chain INTACT across the PG outage (no fork); why={:?}", v.why);
-        assert_eq!(v.entries, (2 * N) as usize, "every append landed, contiguous SHA-256 chain, no fork/drop");
-        assert!(fl > 0, "the outage exercised the flock fallback (some appends took the file lock)");
+        assert_eq!(adv + defr, (2 * N) as usize, "every append was accounted for (advisory-landed or deferred)");
+        assert_eq!(v.entries, adv, "exactly the advisory-serialised appends landed — deferred entries never wrote");
+        assert!(defr > 0, "the outage exercised the FAIL-CLOSED path (some appends were deferred, none forked)");
 
         // ── CONTRAST: the OLD unlocked path COULD fork. Two writers reading the SAME tail then both writing
         //    seq=N is what an unlocked concurrent append produces; verify DETECTS it (ok:false). We construct
