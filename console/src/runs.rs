@@ -228,6 +228,19 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))),
     };
 
+    // (1c) ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on THIS engagement
+    // must allow OPERATE (tenant_admin|tenant_operator), most-specific-wins (engagement grant > tenant grant),
+    // FAIL-CLOSED. A tenant_viewer (or a user with only a viewer override on this engagement) is DENIED here
+    // even though the tenant is visible + they passed the console-global operator gate. Community (flag OFF)
+    // => NO-OP (branch skipped, byte-identical). Cross-tenant is already refused by resolve_engagement above.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eng.id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "engagement_operator_required",
+                        "why": format!("rôle operator requis sur l'engagement #{} (grant per-engagement/tenant insuffisant — fail-closed)", eng.id)})),
+        );
+    }
+
     // (2) validation stricte de l'entrée
     let campaign = match validate_campaign(body.get("campaign").and_then(|v| v.as_str()).unwrap_or("")) {
         Ok(c) => c,

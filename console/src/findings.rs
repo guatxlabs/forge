@@ -194,6 +194,12 @@ pub(crate) async fn finding_update(
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response();
     }
+    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the isolation 404 (a cross-tenant id is
+    // already 404 via resolve_view_engagement_id => NO_ENGAGEMENT). For a VISIBLE engagement the caller's
+    // EFFECTIVE per-engagement role must allow OPERATE; a tenant_viewer is DENIED 403. Community => NO-OP.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
     let mut new_status: Option<String> = None;
     if let Some(v) = body.get("status") {
         let s = v.as_str().unwrap_or("");
@@ -319,6 +325,12 @@ pub(crate) async fn findings_bulk_status(
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
     };
     let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on the target engagement
+    // must allow OPERATE (fail-closed). A non-visible engagement resolves to NO_ENGAGEMENT => no effective
+    // role => 403 (no rows would be touched anyway). Community (flag OFF) => NO-OP (byte-identical).
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
     let (mut applied, mut skipped): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
     {
         // Le guard `store` est SCOPÉ ce bloc et LIBÉRÉ avant `attribution_login`/`append_console_ledger`
