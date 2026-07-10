@@ -71,6 +71,11 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 // `merge` des routes (build_router). Le module réutilise App + les helpers d'auth/ledger de ce fichier
 // (visibles depuis un module descendant de la racine de crate).
 mod finding_templates;
+// SAVED VIEWS (#8) — jeux de filtres sauvegardés de la vue Findings, PERSONNELS (scopés au login de
+// l'appelant). Même discipline que finding_templates : handlers/logique dans son PROPRE module ; ce
+// main.rs n'y contribue que la ligne `mod` + le `merge` des routes (build_router). Réutilise App + les
+// helpers d'auth/ledger de ce fichier (visibles depuis un module descendant de la racine de crate).
+mod saved_views;
 // Helpers "feuilles" SANS ÉTAT (crypto/hash, échappement HTML, CWE/CVSS, pagination, validateurs purs)
 // extraits de ce main.rs (Wave-2 PURE MOVE). Ré-exportés au crate root pour que `crate::<helper>`
 // (appels cross-module) et `super::<helper>` (bloc de tests inline) résolvent à l'identique.
@@ -281,6 +286,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/whoami", get(whoami))
         .route("/api/ingest", post(ingest))
         .route("/api/findings", get(findings))
+        // BULK-OPS (#8) : transition de statut de masse (validée par finding, engagement-scopée) + export
+        // CSV/JSON de la sélection. Segments STATIQUES `bulk/...` (2 segments) — pas de collision matchit
+        // avec `/api/findings/:id` (1 segment param). DÉCLARÉES AVANT `:id` par prudence (spécifique d'abord).
+        .route("/api/findings/bulk/status", post(findings_bulk_status))
+        .route("/api/findings/bulk/export", post(findings_bulk_export))
         .route("/api/findings/:id", get(finding_detail).post(finding_update))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
@@ -361,6 +371,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // (operator), POST/:id=edit (operator), DELETE/:id=delete (admin), POST/:id/apply=applique un
         // modèle en un finding de l'engagement ACTIF (isolation). Chaque mutation ledgerisée.
         .merge(finding_templates::routes())
+        // SAVED VIEWS (#8) : jeux de filtres sauvegardés de la vue Findings, PERSONNELS (scopés au login
+        // de l'appelant + engagement optionnel). Routes DANS console/src/saved_views.rs, fusionnées AVANT
+        // le fallback + le route_layer => héritent de l'auth_guard/host_guard. GET=liste (vues de
+        // l'appelant), POST=create (operator), DELETE/:id=delete (operator, propriété stricte). Ledgerisé.
+        .merge(saved_views::routes())
         // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
         // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
