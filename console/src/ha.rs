@@ -22,6 +22,11 @@
 //! (`?`→`$n`, same table on both backends).
 
 /// The atomic acquire-or-renew statement. `scope='run-worker'` is the only lease today. Placeholders
+//
+// LEASE CORE — gated on `store-postgres` (the backend HA runs on) OR `test` (the dialect-portable step is
+// exercised on SQLite by `cargo test`). The community NON-test build compiles NONE of it (it is unused
+// there — the heartbeat that drives it is PG-only), so it never becomes dead code.
+#[cfg(any(feature = "store-postgres", test))]
 /// (SQLite `?` style; the seam rewrites them to `$n` on Postgres) bind, IN ORDER:
 ///   1 me, 2 now, 3 now            — VALUES(scope, instance_id, acquired, last_seen) on a FRESH insert
 ///   4 me                          — DO UPDATE SET instance_id = me (I take/keep the lease)
@@ -43,6 +48,7 @@ RETURNING instance_id";
 /// Lease time-to-live (seconds). A lease not renewed within this window is considered EXPIRED and may be
 /// taken over by another instance. Aligned with `presence::PRESENCE_TTL_SECS` (45s) — the same
 /// "liveness window" scale used elsewhere in the console.
+#[cfg(any(feature = "store-postgres", test))]
 pub(crate) const LEASE_TTL_SECS: i64 = 45;
 
 /// Heartbeat cadence (seconds) — renew every ~TTL/3 so two consecutive missed ticks still stay within the
@@ -60,6 +66,7 @@ pub(crate) const HEARTBEAT_TICK_SECS: u64 = 15;
 /// is SOUND here even though this is a write: the upsert is IDEMPOTENT in its bound params (`me`/`now`/
 /// `cutoff` are fixed for the call), so re-running it after a transient reconnect converges to the same
 /// single row — never a duplicate (the PK is `scope`).
+#[cfg(any(feature = "store-postgres", test))]
 pub(crate) fn acquire_or_renew(store: &crate::store::Store, instance_id: &str) -> bool {
     let now = crate::now_epoch();
     let cutoff = now - LEASE_TTL_SECS;
@@ -89,11 +96,52 @@ pub(crate) fn ha_enabled(app: &crate::App) -> bool {
 
 /// Am I the leader? TRUE when HA is NOT engaged (single instance is trivially always "leader" — all work
 /// runs locally, exactly as the community build) OR when this instance currently holds the lease
-/// (`App.is_leader`, refreshed by the heartbeat). Later batches gate run-worker/reconcile/scheduler on
-/// this; this wave only surfaces it on `/health`.
+/// (`App.is_leader`, refreshed by the heartbeat). Wave B gates the boot side-effects (reconcile/populate)
+/// and the run-leader (enqueue/claim/spawn) on this predicate.
 #[cfg(feature = "store-postgres")]
 pub(crate) fn is_leader(app: &crate::App) -> bool {
     !ha_enabled(app) || app.is_leader.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+// ── PORTABLE MIRRORS (community build, no `store-postgres` feature) ───────────────────────────────
+// HA is only ever engaged on a Postgres store, so the DEFAULT/community binary compiles NONE of the HA
+// fields (`App.ha`/`is_leader`/`instance_id` don't exist). These const-folding mirrors let the SHARED
+// run-flow code (`runs::run_create` gate, `claim_and_spawn`, `reconcile_runs` scoping) reference
+// `ha::ha_enabled`/`ha::is_leader`/`ha::my_instance_id` UNCONDITIONALLY: in community they collapse to
+// "HA off / always leader / no owner id", so the compiler prunes the HA branches and the community
+// binary stays byte-identical to today (direct spawn, reconcile-all, local cancel).
+
+/// Community mirror of [`ha_enabled`] — HA is impossible without the Postgres backend, so ALWAYS false.
+#[cfg(not(feature = "store-postgres"))]
+pub(crate) fn ha_enabled(_app: &crate::App) -> bool {
+    false
+}
+
+/// Community mirror of [`is_leader`] — a single unsynchronised instance is trivially always the leader
+/// (all work runs locally, exactly as today). ALWAYS true.
+#[cfg(not(feature = "store-postgres"))]
+pub(crate) fn is_leader(_app: &crate::App) -> bool {
+    true
+}
+
+/// This instance's OWNER identity for `run_job.owner_instance`, or `None` when ownership is not tracked.
+/// `Some(instance_id)` ONLY when HA is engaged (`app.ha`) — then every run this instance spawns is stamped
+/// with its id so reconcile can owner-scope reaping. `None` when HA is OFF (single-instance / non-HA
+/// Postgres) so `owner_instance` stays NULL and reconcile reaps ALL running exactly as today. PG-only arm.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn my_instance_id(app: &crate::App) -> Option<String> {
+    if app.ha {
+        Some((*app.instance_id).clone())
+    } else {
+        None
+    }
+}
+
+/// Community mirror of [`my_instance_id`] — no HA, no owner id tracked. ALWAYS `None` (owner_instance NULL,
+/// reconcile-all preserved).
+#[cfg(not(feature = "store-postgres"))]
+pub(crate) fn my_instance_id(_app: &crate::App) -> Option<String> {
+    None
 }
 
 /// Heartbeat ticker (spawned only when HA is engaged, see `main.rs`). Every `HEARTBEAT_TICK_SECS` it
@@ -109,6 +157,16 @@ pub(crate) async fn heartbeat_loop(app: crate::App) {
         ticker.tick().await;
         let leader = {
             let store = app.store();
+            // (Fix #3) LIVENESS PAR-INSTANCE : CHAQUE réplica (leader OU non) rafraîchit SON `last_seen` dans
+            // `ha_instance` à chaque tick. C'est ce qui permet au failover-reap du leader de distinguer un
+            // owner MORT (pas de heartbeat frais) d'un pair VIVANT-MAIS-DEMOTED (flap) — et de ne JAMAIS
+            // flipper 'failed' le run d'un pair encore vivant. Upsert idempoté par la PK instance_id.
+            let now = crate::now_epoch();
+            let _ = store.execute(
+                "INSERT INTO ha_instance(instance_id, last_seen) VALUES(?, ?) \
+                 ON CONFLICT(instance_id) DO UPDATE SET last_seen = ?",
+                &crate::sql_params![app.instance_id.as_str(), now, now],
+            );
             acquire_or_renew(&store, &app.instance_id)
         };
         app.is_leader.store(leader, std::sync::atomic::Ordering::SeqCst);

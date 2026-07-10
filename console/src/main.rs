@@ -81,11 +81,13 @@ mod saved_views;
 // ET le câblage d'UN `Extension<PresenceRegistry>` (état EN MÉMOIRE, per-instance) dans build_router — donc
 // AUCUN champ ajouté à App (zéro site de construction touché). Réutilise App + le bus App.events + auth/tenancy.
 mod presence;
-// HA (#10 Wave A — foundation) — leader lease + per-instance heartbeat, PG-only + opt-in FORGE_HA, INERT
-// this wave (no consumer gates on leadership yet; only /health surfaces `leader`/`instance_id`). Compiled
-// under `store-postgres` (HA can only run on Postgres) OR `test` (the dialect-portable acquire/renew step
-// is exercised on SQLite by `cargo test`). The DEFAULT/community build compiles NONE of it — byte-identical.
-#[cfg(any(feature = "store-postgres", test))]
+// HA (#10 Wave A/B) — leader lease + heartbeat + run-leader (enqueue/claim/spawn), PG-only + opt-in
+// FORGE_HA. The MODULE is now compiled UNCONDITIONALLY because Wave B routes the SHARED run-flow through
+// its PORTABLE predicates (`ha_enabled`/`is_leader`/`my_instance_id`) — in the community build those
+// collapse to "HA off / always leader / no owner", so the run flow stays byte-identical (direct spawn,
+// reconcile-all, local cancel). The lease CORE (`acquire_or_renew`/`LEASE_*`) and the heartbeat/tick
+// stay gated inside the module (`store-postgres` / `test`), so the community build still compiles NONE of
+// the Postgres-only machinery.
 mod ha;
 // Helpers "feuilles" SANS ÉTAT (crypto/hash, échappement HTML, CWE/CVSS, pagination, validateurs purs)
 // extraits de ce main.rs (Wave-2 PURE MOVE). Ré-exportés au crate root pour que `crate::<helper>`
@@ -793,8 +795,28 @@ async fn main() {
         app.store().execute_batch(PG_SCHEMA).expect("pg schema");
     }
     ensure_default_dashboard(&app.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
-    populate_modules(&app.store());         // table `module` peuplée depuis `forge.cli modules`
-    reconcile_runs(&app.store());           // run_job 'running' orphelins (reboot console) -> 'failed'
+    // HA (#10 Wave B) — EFFETS DE BORD DE BOOT. Deux natures distinctes, traitées différemment :
+    //
+    //  (1) `populate_modules` : INCONDITIONNEL sur CHAQUE instance, à chaque boot (comme en mono-instance).
+    //      Ce n'est PAS leader-sensible : c'est un UPSERT IDEMPOTENT de la table `module` PARTAGÉE, qui ne
+    //      remet JAMAIS en cause l'intention opérateur (enabled/available_override préservés). Le gater sur
+    //      `is_leader` était un BUG : sous HA `is_leader` est FAUX au boot (le heartbeat ne le bascule
+    //      qu'APRÈS ce point), donc AUCUN réplica ne peuplait -> registre `module` VIDE -> tout run avec
+    //      sélection explicite de modules -> 400 unknown_module. On le rend donc inconditionnel.
+    //
+    //  (2) BOOT-RECONCILE (run_job 'running' orphelins d'un crash -> 'failed', killpg des pgid locaux) :
+    //      DOIT tourner APRÈS l'établissement du leadership.
+    //        - mono-instance (!ha) : au boot, ici, scope=All (killpg tous les pgid, historique byte-identique).
+    //        - HA : DIFFÉRÉ au leader-tick (cf. runs::leader_tick_loop). `is_leader` étant FAUX au boot,
+    //          on ne peut pas le faire ici ; le premier tick où CETTE instance DÉTIENT le bail exécute un
+    //          boot-reconcile OWNER-SCOPÉ de SES PROPRES runs orphelins (un leader qui redémarre-après-crash
+    //          avec un instance_id STABLE réconcilie ses propres lignes 'running' bloquées une fois le bail
+    //          réacquis). Jamais killpg un pgid cross-host.
+    populate_modules(&app.store()); // table `module` peuplée depuis `forge.cli modules` — inconditionnel
+    if !crate::ha::ha_enabled(&app) {
+        // mono-instance : reconcile au boot, scope=All (byte-identique au comportement historique).
+        reconcile_runs(&app.store(), runs::ReconcileScope::All);
+    }
     // ENGAGEMENT #1 (migration ZÉRO-PERTE) : si la table `engagement` est vide, crée #1 depuis le scope
     // serveur COURANT (scope_in/scope_mode) + le ledger COURANT. Idempotent : ne réécrit jamais un
     // engagement existant. Les lignes existantes gardent engagement_id=1 (DEFAULT posé par migrate).
@@ -835,10 +857,14 @@ async fn main() {
     #[cfg(feature = "store-postgres")]
     if app.ha {
         println!(
-            "[forge-console] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader/instance_id publiés sur /health (INERTE : aucun consumer ne gate encore sur is_leader).",
-            app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS
+            "[forge-console] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader-tick toutes les {}s (claim pending + reap failover + cancel-watch, leader-only) ; leader/instance_id publiés sur /health.",
+            app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS, crate::runs::LEADER_TICK_SECS
         );
         tokio::spawn(crate::ha::heartbeat_loop(app.clone()));
+        // RUN-LEADER (Wave B) : le tick du leader draine la file 'pending' (claim + spawn), réape les
+        // orphelins des leaders morts (failover) et exécute les cancels observés pour ses runs. Ne fait le
+        // travail QUE quand `is_leader` (cf. leader_tick_loop). Cloné AVANT que build_router ne déplace `app`.
+        tokio::spawn(crate::runs::leader_tick_loop(app.clone()));
     }
 
     // RUNNER DE SAUVEGARDE PROGRAMMÉE (fail-open) : tâche périodique qui, SI une politique
