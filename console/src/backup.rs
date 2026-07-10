@@ -734,8 +734,14 @@ pub(crate) fn tmp_nonce() -> String {
     format!("{}-{}", std::process::id(), nanos)
 }
 
-/// Kinds d'offsite FERMÉS (fail-closed : tout autre kind est rejeté avant persistance).
+/// Kinds d'offsite FERMÉS (fail-closed : tout autre kind est rejeté avant persistance). La liste par
+/// DÉFAUT (community) reste `[none, local_dir, exec]` — VALEUR INCHANGÉE, donc le build par défaut est
+/// byte-identique. Sous la feature `object-store`, `s3` (BlobStore S3/MinIO) s'ajoute — le seul chemin
+/// qui expédie l'archive chiffrée vers un objet S3 (cf. `ship_offsite`).
+#[cfg(not(feature = "object-store"))]
 pub(crate) const OFFSITE_KINDS: [&str; 3] = ["none", "local_dir", "exec"];
+#[cfg(feature = "object-store")]
+pub(crate) const OFFSITE_KINDS: [&str; 4] = ["none", "local_dir", "exec", "s3"];
 
 /// Rédige une politique de backup pour un GET : neutralise TOUTE valeur potentiellement secrète
 /// (clé matchant pass/secret/token/password/cred/key) SAUF les noms de variables d'ENV (`*_env`, qui
@@ -814,7 +820,10 @@ pub(crate) fn validate_backup_policy(incoming: &Value) -> Result<Value, String> 
     let ok = offsite.as_object().ok_or_else(|| "offsite attendu : objet {kind,...}".to_string())?;
     let kind = ok.get("kind").and_then(|v| v.as_str()).unwrap_or("none");
     if !OFFSITE_KINDS.contains(&kind) {
+        #[cfg(not(feature = "object-store"))]
         return Err(format!("offsite.kind inconnu: {kind} (attendu: none|local_dir|exec)"));
+        #[cfg(feature = "object-store")]
+        return Err(format!("offsite.kind inconnu: {kind} (attendu: none|local_dir|exec|s3)"));
     }
     if kind == "local_dir" {
         let dir = ok.get("dir").and_then(|v| v.as_str()).unwrap_or("");
@@ -833,6 +842,17 @@ pub(crate) fn validate_backup_policy(incoming: &Value) -> Result<Value, String> 
         if let Some(a) = ok.get("args") {
             if !a.is_array() {
                 return Err("offsite exec : `args` doit être un tableau d'arguments (argv fixe, aucun shell)".to_string());
+            }
+        }
+    }
+    // offsite s3 (feature `object-store` uniquement — sinon `s3` est déjà rejeté par le check OFFSITE_KINDS
+    // ci-dessus). La config S3 (endpoint/bucket/credentials) vit dans l'ENV FORGE_BLOB_S3_* (jamais dans la
+    // politique -> aucun secret persisté). Seul `key_prefix` (optionnel) est porté par la politique.
+    #[cfg(feature = "object-store")]
+    if kind == "s3" {
+        if let Some(p) = ok.get("key_prefix") {
+            if !p.is_string() {
+                return Err("offsite s3 : `key_prefix` (optionnel) doit être une chaîne".to_string());
             }
         }
     }
@@ -1191,6 +1211,12 @@ pub(crate) fn ship_offsite(offsite: &Value, archive_path: &str) -> Result<Value,
             // AUCUN shell : argv fixe. status + timeout, jamais d'interprétation de métacaractères.
             run_offsite_exec(&program, &args, timeout)
         }
+        // BLOBSTORE S3/MinIO (feature `object-store`) — PUT de l'archive CHIFFRÉE vers l'objet S3.
+        // Config/credentials via l'ENV FORGE_BLOB_S3_* (jamais dans la politique). Rapport SANS secret
+        // (bucket/clé/URL). En build community (feature OFF), cet arm n'existe pas : `s3` est déjà rejeté
+        // en amont par `validate_backup_policy` (absent de OFFSITE_KINDS) et retomberait ici sur `other`.
+        #[cfg(feature = "object-store")]
+        "s3" => crate::blob::ship_offsite_s3(offsite, archive_path),
         other => Err(format!("offsite.kind inconnu: {other}")),
     }
 }

@@ -256,6 +256,13 @@ pub(crate) use crate::state::*;
 // `App::db()`; modules migrate onto it one at a time (`App::db()` stays available for the rest).
 mod store;
 
+// BLOBSTORE SEAM (readiness-dossier #12) — store d'artefacts backend-agnostique (archive de backup
+// offsite, exports/évidence). Le build PAR DÉFAUT (community) ne compile QUE `LocalFsBlobStore`
+// (système de fichiers, AUCUNE dép nouvelle) : chemin par défaut inchangé. `S3BlobStore` (S3/MinIO) +
+// sa dép `rust-s3` vivent DERRIÈRE la feature OPT-IN `object-store` (openssl-free : sync-rustls-tls ->
+// attohttpc + rustls/ring). Référencé fully-qualified (`crate::blob::…`) — pas de glob re-export.
+mod blob;
+
 
 
 /// Construit le routeur axum complet : routes PUBLIQUES (hors auth_guard : /health, /api/login, wizard
@@ -541,6 +548,14 @@ async fn main() {
         //   vide sans --force, place db/ledger/clé (.ed25519 = 0600). Restore tracé au ledger.
         Some("restore") => {
             std::process::exit(run_restore_cli(&args[2..]));
+        }
+        // ROUND-TRIP BLOBSTORE (feature `object-store`) : forge-console blob-selftest [--key <key>]
+        //   [--no-delete]. PUT -> GET -> compare octets -> EXISTS -> (DELETE) sur le store ACTIF (S3/MinIO
+        //   si FORGE_BLOB_S3_* configuré, sinon local FORGE_BLOB_DIR). Preuve d'aller-retour sans serveur.
+        //   Arm ENTIÈREMENT gardé par la feature -> le build community (défaut) ne le connaît pas.
+        #[cfg(feature = "object-store")]
+        Some("blob-selftest") => {
+            std::process::exit(crate::blob::run_blob_selftest_cli(&args[2..]));
         }
         // VÉRIF LEDGER (lecture seule, NON INTERACTIVE, RAPIDE) : forge-console ledger verify
         //   [--ledger <path>] [--json]. Recompute la chaîne SHA-256 du ledger JSONL et exit immédiat

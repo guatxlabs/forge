@@ -26,6 +26,15 @@ encryption = ["rusqlite/bundled-sqlcipher"]
 # racines webpki-roots. N'activer que pour un déploiement Postgres (`cargo build --features store-postgres`).
 store-postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots", "dep:bytes"]
 
+# `object-store` (BlobStore S3/MinIO pour artefacts — blob.rs) — OPT-IN, OFF PAR DÉFAUT. Activée, elle
+# compile `S3BlobStore` (client `rust-s3` SYNCHRONE — colle au modèle bloquant du moteur backup, appelé
+# via spawn_blocking) + l'arm offsite `s3` + la sous-commande CLI `blob-selftest`. Le build PAR DÉFAUT
+# (sans cette feature) ne pull PAS `rust-s3` (dép `optional`) et reste openssl-free + deps par défaut
+# inchangées ; seul `LocalFsBlobStore` (système de fichiers, aucune dép) est compilé. La feature est
+# AUSSI openssl-free : `rust-s3` en `sync-rustls-tls` -> TLS via attohttpc + rustls (provider `ring`),
+# ZÉRO openssl/native-tls. N'activer que pour un offsite/artefacts S3 (`cargo build --features object-store`).
+object-store = ["dep:rust-s3"]
+
 # Wave-1 lints: only lints that are GREEN under `-D warnings` today are locked in (so CI can enforce
 # them without churn). `await_holding_lock` guards the deferred CONC-1 work (never hold a std Mutex
 # across `.await`). The other candidates were dropped this wave because they flag pre-existing,
@@ -80,6 +89,14 @@ webpki-roots = { version = "1", optional = true }
 # `bytes::BytesMut` : type du buffer de sortie de `ToSql::to_sql` — requis pour l'impl du NULL typé-neutre
 # `PgNull` (accepts=true + IsNull::Yes) qui lie un NULL quel que soit le type de colonne inféré par PG.
 bytes = { version = "1", optional = true }
+
+# BLOBSTORE S3/MinIO (feature `object-store`) — OPTIONNELLE, tirée UNIQUEMENT sous la feature. `rust-s3`
+# (lib `s3`) en `sync-rustls-tls` : client SYNCHRONE (attohttpc + maybe-async/is_sync — même modèle
+# sync/bloquant que le moteur backup, invoqué via spawn_blocking) + TLS rustls via `attohttpc/tls-rustls`
+# (provider `ring`, racines webpki — AUCUN openssl/native-tls) + `aws-creds/rustls-tls`. Path-style forcé
+# (MinIO). `default-features = false` retire la feature par défaut `use-tokio-native-tls` (async + openssl).
+# N'entre PAS dans le build par défaut (`optional`).
+rust-s3 = { version = "0.35", optional = true, default-features = false, features = ["sync-rustls-tls"] }
 
 [dev-dependencies]
 # Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste
