@@ -257,6 +257,10 @@ def build_parser():
     engage.add_argument("--mode", choices=["propose", "auto"], default="propose")
     engage.add_argument("--ledger"); engage.add_argument("--report")
     engage.add_argument("--reason"); engage.add_argument("--memory")
+    engage.add_argument("--toolspec", action="append", default=[], metavar="FILE",
+                        help="charge un ToolSpec déclaratif (JSON/YAML) et l'enregistre comme module gouverné "
+                             "AVANT le plan ; répétable. Fail-CLOSED : spec invalide -> erreur nommant le fichier. "
+                             "(voie env équivalente et fail-soft : FORGE_TOOLSPECS=<dossier>)")
 
     sc = sub.add_parser("scope-check"); sc.add_argument("target"); sc.add_argument("--scope", required=True); sc.set_defaults(fn=cmd_scope_check)
     pl = sub.add_parser("plan"); pl.add_argument("--scope", required=True); pl.add_argument("--actions"); pl.set_defaults(fn=cmd_plan)

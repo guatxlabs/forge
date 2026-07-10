@@ -1,34 +1,30 @@
-"""Modules Forge. Importer ce package enregistre les modules livrés."""
-from . import demo     # noqa: F401  (demo.fingerprint — no-op)
-from . import recon    # noqa: F401  (recon.httpx, recon.nmap)
-from . import recon_surface  # noqa: F401  (recon.subdomains/dns/js_endpoints/urls/tech — surface passive)
-from . import recon_active   # noqa: F401  (recon.content/secrets/waf — reachability active gouvernée)
-from . import web      # noqa: F401  (web.nuclei)
-from . import access_control  # noqa: F401  (access_control.idor — IDOR/BOLA 2-comptes, CWE-639 ; access_control.privesc — PrivEsc vertical, CWE-269)
-from . import ssrf     # noqa: F401  (ssrf.callback — SSRF callback-vérifié, CWE-918 ; ssrf.xspa — XSPA port-scan ; ssrf.cloud_metadata — SSRF métadonnées cloud IMDS)
-from . import auth     # noqa: F401  (auth.takeover — ATO/auth-bypass à preuve, CWE-287/640)
-from . import cors     # noqa: F401  (cors.credentials — CORS-credentials à preuve, CWE-942)
-from . import injection  # noqa: F401  (ssti.eval, path.traversal, sqli.probe — injections à preuve bénigne)
-from . import injection_probes  # noqa: F401  (nosql.probe, lucene.probe, cmdi.probe, prototype_pollution.probe — injections server-side à preuve bénigne)
-from . import httpflow  # noqa: F401  (request_smuggling.probe, cache_poisoning.probe, header_injection.probe — attaques flux/protocole HTTP à preuve bénigne)
-from . import xxe      # noqa: F401  (xxe.probe — XXE à preuve bénigne OOB/canari, CWE-611)
-from . import rfi      # noqa: F401  (rfi.probe — RFI marqueur bénin inclus, CWE-98)
-from . import clientflow  # noqa: F401  (xss.reflected, redirect.open, csrf.state_change ; xss.stored via browser — flux client à preuve)
-from . import tokenapi  # noqa: F401  (jwt.weakness, graphql.access — oracles token/API à preuve compte-opérateur)
-from . import race      # noqa: F401  (race.condition — Race/TOCTOU rafale bornée compte-opérateur, CWE-362/367)
-from . import oauth     # noqa: F401  (oauth.flow — faiblesses de flux OAuth/OIDC redirect_uri/state/PKCE, CWE-601/352/287)
-from . import rce      # noqa: F401  (rce.probe — RCE gouvernée pentest-only, plancher exploit, CWE-78)
-from . import business_logic  # noqa: F401  (business_logic.scan — scaffold semi-automatisé pentest-only, CWE-840)
-from . import origin   # noqa: F401  (origin.find — IP d'origine derrière CDN)
-from . import takeover  # noqa: F401  (subdomain.takeover — CNAME pendant vers service tiers non réclamé, CWE-350)
-from . import exposure  # noqa: F401  (framework.exposure — Spring Actuator/Next.js/Laravel surfaces exposées, CWE-200)
-from . import evasion  # noqa: F401  (evasion.xhr, evasion.turnstile, evasion.idor_intercept, evasion.discover)
-from . import msf       # noqa: F401  (msf.module — connecteur msfrpcd, opérateur opt-in)
-from . import burp      # noqa: F401  (burp.scan — connecteur REST API Burp Suite)
-from . import pentest   # noqa: F401  (network.smb/ftp/ssh, mobile.apk — classes pentest-only adossées aux connecteurs)
-from . import toolcatalog  # noqa: F401  (~15 outils OSS PRÉ-WRAPPÉS via ToolSpec : subfinder/amass/dnsx/naabu/katana/gau/gospider/feroxbuster/whatweb/wafw00f/nikto/wpscan/testssl/dalfox/sqlmap)
-from .registry import REGISTRY, register, get, kinds, Module  # noqa: F401
+"""Modules Forge — système de plugins DROP-IN (auto-découverte + FORGE_PLUGINS + ToolSpec JSON/YAML).
+
+Importer ce package ENREGISTRE tous les modules, SANS liste d'imports câblée à la main :
+  1. AUTO-DÉCOUVERTE in-tree — chaque `forge/modules/*.py` portant `@register` / `register_spec` est
+     importé automatiquement (déposer un fichier suffit ; plus AUCUNE édition ici) ;
+  2. FORGE_PLUGINS — fichiers/dossiers `.py` utilisateur (chargés APRÈS l'in-tree -> peuvent surcharger) ;
+  3. FORGE_TOOLSPECS — ToolSpecs déclaratifs JSON/YAML (zéro Python), gouvernés comme un module natif.
+
+TOUTES ces voies convergent vers le MÊME `registry.REGISTRY` + `register_spec` + le dispatch
+`Engine.execute -> roe.decide` : un plugin est gaté EXACTEMENT comme un natif (scope-guard fail-closed,
+plancher exploit, clamp de statut). Détail + politique fail-soft/fail-closed : `forge/modules/loader.py`.
+"""
+from . import loader as _loader
+
+# (1) AUTO-DÉCOUVERTE in-tree (les sous-modules importent via `from .registry import ...`, jamais le
+#     package -> aucun cycle avec les exports ci-dessous).
+_INTREE = _loader.discover_intree(__path__, __name__)
+
+# --- Exports publics (INCHANGÉS — rétro-compat de l'API du package) — LIÉS AVANT les plugins env, pour
+#     qu'un plugin utilisateur puisse importer soit `forge.modules.register`, soit `.registry.register`. ---
+from .registry import REGISTRY, register, get, kinds, Module  # noqa: E402,F401
 # Wrapper GÉNÉRIQUE d'outils externes (absorbe la propriété wrap-any-tool de Trickest/Faraday/Osmedeus) :
-# un utilisateur qui migre déclare `ToolSpec(...)` + `register_spec(spec)` pour enrober N'IMPORTE QUEL
-# outil CLI en module Forge gouverné (scope-guard, no-shell, proof-oriented, dégradation). Exposé ici.
-from .toolspec import ToolSpec, register_spec, build_argv, parse_output, ExternalToolModule  # noqa: F401
+# un utilisateur déclare `ToolSpec(...)` + `register_spec(spec)` — ou dépose un spec JSON/YAML (loader).
+from .toolspec import ToolSpec, register_spec, build_argv, parse_output, ExternalToolModule  # noqa: E402,F401
+
+# (2) FORGE_PLUGINS puis (3) FORGE_TOOLSPECS — APRÈS l'in-tree ET les exports : un plugin/spec utilisateur
+#     peut surcharger un kind natif (register écrase par kind).
+_PLUGINS = _loader.load_env_plugins()
+_TOOLSPECS = _loader.load_env_toolspecs()
+_LOADED = {"intree": _INTREE, "plugins": _PLUGINS, "toolspecs": _TOOLSPECS}
