@@ -218,6 +218,65 @@ restauration, garde-fous et expédition offsite : **[`docs/BACKUP.md`](BACKUP.md
 Restauration : `POST /api/restore` (ou CLI), passphrase obligatoire (fail-closed), manifeste `sha256`
 re-vérifié, clé `.ed25519` replacée en `0600`.
 
+### 3.3 Object-store S3/MinIO pour artefacts (offsite `s3`) — feature Cargo `object-store` (OPT-IN)
+
+Le stockage d'artefacts (archive de backup offsite, exports/évidence) passe par un **seam BlobStore**
+backend-agnostique (`console/src/blob.rs`). Le build **PAR DÉFAUT (community)** ne compile que
+`LocalFsBlobStore` (**système de fichiers**, aucune dépendance nouvelle) : le chemin par défaut (aucun
+artefact S3 configuré) est **inchangé**. L'implémentation **S3/MinIO** (`S3BlobStore`) et sa dépendance
+`rust-s3` vivent **derrière la feature Cargo `object-store`** (OFF par défaut). La feature est
+**openssl-free** : `rust-s3` en `sync-rustls-tls` → TLS via **rustls** (provider `ring`) + `attohttpc`,
+**jamais** native-tls/openssl. Le build community (feature OFF) ne pull **aucune** dép S3 et reste
+byte-identique.
+
+**Sélection runtime** : `S3BlobStore` est choisi **uniquement** si la feature est compilée **ET** l'ENV
+S3 est configuré ; sinon `LocalFsBlobStore` (racine `FORGE_BLOB_DIR`, défaut `blobs/` sibling de la base).
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `FORGE_BLOB_DIR` | racine du store local (feature OFF **ou** S3 non configuré) | `blobs/` sibling de la base |
+| `FORGE_BLOB_S3_ENDPOINT` | endpoint S3/MinIO (ex. `http://minio:9000`) — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_BUCKET` | bucket cible — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_ACCESS_KEY` | **[SECRET]** access key — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_SECRET_KEY` | **[SECRET]** secret key — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_REGION` | région SigV4 (MinIO l'ignore mais SigV4 l'exige) | `us-east-1` |
+
+Adressage **path-style** forcé (compatible MinIO). Les credentials vivent **uniquement dans l'ENV** —
+jamais en base, jamais dans la politique de backup, jamais journalisés/ledgerisés (les traces ne portent
+que `backend`/`bucket`/`key`/`url`).
+
+**Backup offsite `s3`** : sous la feature, la politique de backup accepte `offsite.kind = "s3"` (préfixe
+de clé optionnel `key_prefix`). Le scheduler PUT l'archive **chiffrée** vers le bucket S3, référencée par
+clé/URL — trace `console.backup.offsite` (kind + statut, aucun secret). Exemple de politique :
+
+```jsonc
+POST /api/backup/policy
+{ "enabled": true, "interval_secs": 86400, "retention": 7,
+  "passphrase_env": "FORGE_BACKUP_PASSPHRASE",
+  "offsite": { "kind": "s3", "key_prefix": "offsite/backups" } }
+```
+
+**Build & validation (round-trip MinIO)** :
+
+```bash
+cd console && cargo build --release --features object-store   # (Docker : --build-arg FORGE_CARGO_FEATURES=object-store)
+
+# MinIO de test + bucket
+docker run -d --rm -e MINIO_ROOT_USER=forge -e MINIO_ROOT_PASSWORD=forgepw123 \
+    -p 9000:9000 --name forge-minio minio/minio server /data
+docker run --rm --network host --entrypoint sh minio/mc -c \
+    'mc alias set l http://localhost:9000 forge forgepw123 && mc mb l/forge-artifacts'
+
+export FORGE_BLOB_S3_ENDPOINT=http://localhost:9000 FORGE_BLOB_S3_BUCKET=forge-artifacts \
+       FORGE_BLOB_S3_ACCESS_KEY=forge FORGE_BLOB_S3_SECRET_KEY=forgepw123
+# round-trip PUT→GET→EXISTS→DELETE sur le store actif (S3 ici, sinon local)
+forge-console blob-selftest --key evidence/proof.bin
+# expédie un artefact RÉEL (archive de backup chiffrée) via le producteur offsite câblé, puis GET-vérifie
+forge-console blob-selftest --file ./mon-archive.forge --key-prefix offsite/backups
+```
+
+Feature OFF (défaut), la sous-commande `blob-selftest` n'existe pas et seul le store local est disponible.
+
 ---
 
 ## 3bis. Backend Postgres (Stage 4 — HA / multi-instance)
