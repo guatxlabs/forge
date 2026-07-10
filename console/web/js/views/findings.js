@@ -1,12 +1,19 @@
 import { api, write } from '../core/api.js';
+import { withEngagement } from '../core/state.js';
 import { $, FINDING_STATUSES, SEV_BADGE, TLP_BADGE, TLP_CLASSES, TLP_KEY, esc, fmtTs, raw, safeHtml } from '../core/dom.js';
 import { downloadReport } from './reports.js';
-import { guardList, infoModal, toast } from '../core/ui.js';
+import { confirmModal, guardList, infoModal, modal, toast } from '../core/ui.js';
 
-export let F_STATE = { offset: 0, limit: 200 };
+// F_STATE.selected = ensemble (Set) des ids de findings COCHÉS (sélection multi-page persistante jusqu'à
+// « Désélectionner » ou un changement de filtre). Les bulk-ops n'agissent QUE sur ces ids, et le serveur
+// re-valide chaque id contre l'engagement actif (fail-closed : un id hors scope est ignoré/absent).
+export let F_STATE = { offset: 0, limit: 200, selected: new Set() };
 export async function loadFindings(offset = 0) {
   const host = $('#f-result'); if (!host) return;
   F_STATE.offset = offset;
+  // rafraîchit les vues sauvegardées sur un chargement « frais » (nouvelle vue / changement de filtre ou
+  // d'engagement), pas à chaque pagination — la liste est scopée à l'engagement actif côté serveur.
+  if (offset === 0) loadSavedViews();
   const qp = new URLSearchParams();
   const camp = $('#campaign') && $('#campaign').value; if (camp) qp.set('campaign', camp);
   const sev = $('#f-sev') && $('#f-sev').value; if (sev) qp.set('severity', sev);
@@ -19,16 +26,30 @@ export async function loadFindings(offset = 0) {
   if ($('#f-count')) $('#f-count').textContent = d.total + ' findings';
   if (guardList(host, rows, 'aucun finding')) return;
   const table = document.createElement('table'); table.className = 'qtable findtable';
-  table.innerHTML = `<thead><tr><th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>TLP</th><th>Outil</th><th>Date</th></tr></thead>`;
+  // en-tête : case « tout sélectionner » (page courante) + colonnes existantes.
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  const selTh = document.createElement('th'); selTh.className = 'selcol';
+  const selAll = document.createElement('input'); selAll.type = 'checkbox'; selAll.setAttribute('aria-label', 'Tout sélectionner (page)');
+  selAll.checked = rows.length > 0 && rows.every(x => F_STATE.selected.has(x.id));
+  selAll.onclick = e => { e.stopPropagation(); const on = selAll.checked; rows.forEach(x => { if (on) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); }); loadFindings(F_STATE.offset); };
+  selTh.appendChild(selAll); htr.appendChild(selTh);
+  htr.insertAdjacentHTML('beforeend', `<th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>TLP</th><th>Outil</th><th>Date</th>`);
+  thead.appendChild(htr); table.appendChild(thead);
   const tb = document.createElement('tbody');
   rows.forEach((x, i) => {
     const tr = document.createElement('tr'); tr.style.cursor = 'pointer'; tr.title = 'Cliquer pour voir le détail (evidence / PoC / fix)';
-    tr.innerHTML = safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`;
+    const cbTd = document.createElement('td'); cbTd.className = 'selcol';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = F_STATE.selected.has(x.id); cb.setAttribute('aria-label', 'Sélectionner ce finding');
+    cb.onclick = e => { e.stopPropagation(); if (cb.checked) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); updateBulkBar(); selAll.checked = rows.every(r => F_STATE.selected.has(r.id)); };
+    cbTd.appendChild(cb); tr.appendChild(cbTd);
+    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
     tr.onclick = () => openFinding(x.id);
     tb.appendChild(tr);
   });
   table.appendChild(tb);
   host.replaceChildren(table);
+  updateBulkBar();
   // pager simple offset/limit
   const pages = Math.max(1, Math.ceil(d.total / F_STATE.limit)), cur = Math.floor(offset / F_STATE.limit);
   if (pages > 1) {
@@ -113,6 +134,165 @@ function buildFindingControls(body, d) {
 if ($('#f-export-csv')) $('#f-export-csv').addEventListener('click', () => downloadReport('csv'));
 if ($('#f-export-json')) $('#f-export-json').addEventListener('click', () => downloadReport('json'));
 if ($('#f-report')) $('#f-report').addEventListener('click', () => { location.hash = 'reports'; });
+
+// =====================================================================================
+//  BULK-OPS (#8) — sélection multiple + barre d'actions de masse (transition de statut validée +
+//  export CSV/JSON de la sélection). Tout est SERVEUR + engagement-scopé fail-closed : le client ne fait
+//  qu'envoyer la LISTE d'ids cochés ; le serveur re-valide chaque id contre l'engagement actif.
+// =====================================================================================
+
+// Peuple (une fois) le sélecteur de transition de statut de masse depuis le vocabulaire validé.
+function ensureBulkStatusOptions() {
+  const sel = $('#f-bulk-status'); if (!sel || sel.dataset.filled) return;
+  FINDING_STATUSES.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+  sel.dataset.filled = '1';
+}
+
+// Reflète l'état de la sélection dans la barre d'actions (visibilité + compteur).
+function updateBulkBar() {
+  const bar = $('#f-bulk'); if (!bar) return;
+  ensureBulkStatusOptions();
+  const n = F_STATE.selected.size;
+  bar.hidden = n === 0;
+  const c = $('#f-bulk-count'); if (c) c.textContent = n + ' sélectionné(s)';
+}
+
+// Applique la transition de statut choisie aux findings sélectionnés (operator, serveur valide chaque id).
+async function bulkApplyStatus() {
+  const status = ($('#f-bulk-status') && $('#f-bulk-status').value) || '';
+  if (!status) { toast('Choisis un statut à appliquer.', 'info'); return; }
+  const ids = Array.from(F_STATE.selected);
+  if (!ids.length) { toast('Aucun finding sélectionné.', 'info'); return; }
+  const ok = await confirmModal(`Appliquer le statut « ${status} » à ${ids.length} finding(s) sélectionné(s) ?`, { title: 'Transition de masse', okText: 'Appliquer', danger: false });
+  if (!ok) return;
+  const btn = $('#f-bulk-apply'); if (btn) btn.disabled = true;
+  try {
+    const r = await write('/api/findings/bulk/status', { body: { ids, status }, auth: 'operator', engagement: true });
+    const j = r.json || {};
+    if (r.status === 403) { toast('Réservé à un compte operator.', 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    const ap = (j.applied || []).length, sk = (j.skipped || []).length;
+    toast(`Statut appliqué à ${ap} finding(s)` + (sk ? `, ${sk} hors périmètre ignoré(s)` : '') + ' (ledgerisé).', 'ok', 5000);
+    // on retire de la sélection les ids appliqués (les skippés restent cochés pour inspection).
+    (j.applied || []).forEach(id => F_STATE.selected.delete(id));
+    loadFindings(F_STATE.offset);
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// Exporte la SÉLECTION (CSV/JSON) — POST serveur, engagement-scopé, déclenche un téléchargement.
+async function bulkExport(fmt) {
+  const ids = Array.from(F_STATE.selected);
+  if (!ids.length) { toast('Aucun finding sélectionné.', 'info'); return; }
+  let r;
+  try {
+    r = await fetch(withEngagement('/api/findings/bulk/export'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: '*/*' },
+      body: JSON.stringify({ ids, format: fmt }),
+    });
+  } catch (e) { toast('Erreur réseau : ' + (e.message || e), 'bad'); return; }
+  if (!r.ok) { toast('Export indisponible (HTTP ' + r.status + ').', 'bad'); return; }
+  let blob; try { blob = await r.blob(); } catch (e) { toast('Lecture de l’export : ' + (e.message || e), 'bad'); return; }
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = objUrl; a.download = 'forge-findings-selection.' + (fmt === 'csv' ? 'csv' : 'json');
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+  toast(`Export ${fmt.toUpperCase()} de ${ids.length} finding(s) sélectionné(s).`, 'ok');
+}
+
+if ($('#f-bulk-apply')) $('#f-bulk-apply').addEventListener('click', bulkApplyStatus);
+if ($('#f-bulk-csv')) $('#f-bulk-csv').addEventListener('click', () => bulkExport('csv'));
+if ($('#f-bulk-json')) $('#f-bulk-json').addEventListener('click', () => bulkExport('json'));
+if ($('#f-bulk-clear')) $('#f-bulk-clear').addEventListener('click', () => { F_STATE.selected.clear(); loadFindings(F_STATE.offset); });
+
+// =====================================================================================
+//  SAVED VIEWS (#8) — jeux de filtres sauvegardés (PERSONNELS, scopés au login de l'appelant + engagement
+//  optionnel). « Enregistrer la vue » capture l'état de filtre courant ; sélectionner une vue le réapplique.
+// =====================================================================================
+
+// dernière liste de vues connue (pour retrouver le filtre à réappliquer sans refetch).
+let SAVED_VIEWS = [];
+
+// État de filtre COURANT de la vue Findings (severity/status/target/campaign) — objet sérialisable.
+function collectFilterState() {
+  const f = {};
+  const sev = $('#f-sev') && $('#f-sev').value; if (sev) f.severity = sev;
+  const st = $('#f-status') && $('#f-status').value; if (st) f.status = st;
+  const tg = $('#f-target') && $('#f-target').value.trim(); if (tg) f.target = tg;
+  const camp = $('#campaign') && $('#campaign').value; if (camp) f.campaign = camp;
+  return f;
+}
+
+// Réapplique un état de filtre (remet les contrôles puis recharge). Les clefs inconnues sont ignorées.
+function applyFilterState(f) {
+  f = f || {};
+  if ($('#f-sev')) $('#f-sev').value = f.severity || '';
+  if ($('#f-status')) $('#f-status').value = f.status || '';
+  if ($('#f-target')) $('#f-target').value = f.target || '';
+  // `campaign` est un sélecteur global partagé : on ne le force que s'il existe dans ses options.
+  if (f.campaign != null && $('#campaign')) { const opt = Array.from($('#campaign').options || []).some(o => o.value === f.campaign); if (opt) $('#campaign').value = f.campaign; }
+  loadFindings(0);
+}
+
+// Charge les vues de l'appelant (globales + engagement actif) et peuple le sélecteur.
+async function loadSavedViews() {
+  const sel = $('#f-views'); if (!sel) return;
+  let d;
+  try { d = await api('/saved-views'); } catch (e) { return; } // silencieux : vue optionnelle
+  SAVED_VIEWS = (d && d.views) || [];
+  const cur = sel.value;
+  sel.replaceChildren();
+  const ph = document.createElement('option'); ph.value = ''; ph.textContent = SAVED_VIEWS.length ? 'Vues sauvegardées…' : 'Aucune vue sauvegardée'; sel.appendChild(ph);
+  SAVED_VIEWS.forEach(v => { const o = document.createElement('option'); o.value = String(v.id); o.textContent = v.name + (v.engagement_id == null ? '' : ' ⚑'); sel.appendChild(o); });
+  if (SAVED_VIEWS.some(v => String(v.id) === cur)) sel.value = cur;
+  const del = $('#f-del-view'); if (del) del.hidden = !sel.value;
+}
+
+// Sauvegarde le jeu de filtres courant comme vue réutilisable (operator). Optionnel : rattacher à l'engagement.
+async function saveCurrentView() {
+  const f = collectFilterState();
+  const r = await modal({
+    title: 'Enregistrer la vue',
+    message: 'Sauvegarde le jeu de filtres courant (sévérité, statut, cible, campagne) pour le réappliquer d’un clic.',
+    fields: [
+      { name: 'name', label: 'Nom de la vue', type: 'text', required: true, placeholder: 'ex. Critiques non triés' },
+      { name: 'scope', label: 'Rattacher à l’engagement actif (sinon : globale)', type: 'checkbox', value: false },
+    ],
+    okText: 'Enregistrer',
+  });
+  if (!r) return;
+  const body = { name: String(r.name || '').trim(), filter_json: f, scope_engagement: !!r.scope };
+  const w = await write('/api/saved-views', { body, auth: 'operator', engagement: true });
+  const j = w.json || {};
+  if (w.status === 403) { toast('Réservé à un compte operator.', 'bad'); return; }
+  if (!w.ok) { toast('Échec : ' + String(j.why || j.error || w.status), 'bad'); return; }
+  toast('Vue enregistrée.', 'ok');
+  await loadSavedViews();
+  const sel = $('#f-views'); if (sel && j.view && j.view.id != null) { sel.value = String(j.view.id); const del = $('#f-del-view'); if (del) del.hidden = false; }
+}
+
+// Supprime la vue sélectionnée (operator, propriété stricte côté serveur).
+async function deleteSelectedView() {
+  const sel = $('#f-views'); const id = sel && sel.value; if (!id) { toast('Sélectionne une vue à supprimer.', 'info'); return; }
+  const v = SAVED_VIEWS.find(x => String(x.id) === String(id));
+  const ok = await confirmModal(`Supprimer la vue « ${(v && v.name) || id} » ?`, { title: 'Supprimer la vue', okText: 'Supprimer', danger: true });
+  if (!ok) return;
+  const w = await write('/api/saved-views/' + id, { method: 'DELETE', auth: 'operator' });
+  const j = w.json || {};
+  if (w.status === 403) { toast('Réservé à un compte operator.', 'bad'); return; }
+  if (!w.ok) { toast('Échec : ' + String(j.why || j.error || w.status), 'bad'); return; }
+  toast('Vue supprimée.', 'ok');
+  await loadSavedViews();
+}
+
+if ($('#f-views')) $('#f-views').addEventListener('change', () => {
+  const sel = $('#f-views'); const id = sel.value; const del = $('#f-del-view'); if (del) del.hidden = !id;
+  if (!id) return;
+  const v = SAVED_VIEWS.find(x => String(x.id) === String(id));
+  if (v) applyFilterState(v.filter_json || {});
+});
+if ($('#f-save-view')) $('#f-save-view').addEventListener('click', saveCurrentView);
+if ($('#f-del-view')) $('#f-del-view').addEventListener('click', deleteSelectedView);
 
 // =====================================================================================
 //  FINDINGS LIBRARY — modèles de findings réutilisables (livrable client type Ghostwriter).

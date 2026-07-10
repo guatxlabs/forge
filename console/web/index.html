@@ -481,6 +481,11 @@
         <button id="f-export-csv" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en CSV (secrets rédigés)">Export CSV</button>
         <button id="f-export-json" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en JSON (secrets rédigés)">Export JSON</button>
         <button id="f-report" class="k-theme" type="button" title="Ouvrir le rapport complet brandé de l'engagement actif">Rapport complet</button>
+        <select id="f-views" class="k-theme" aria-label="Vues sauvegardées" title="Appliquer un jeu de filtres sauvegardé">
+          <option value="">Vues sauvegardées…</option>
+        </select>
+        <button id="f-save-view" class="k-theme" type="button" title="Sauvegarder le jeu de filtres courant comme vue réutilisable">Enregistrer la vue</button>
+        <button id="f-del-view" class="k-theme" type="button" title="Supprimer la vue sauvegardée sélectionnée" hidden>Supprimer la vue</button>
         <select id="f-sev" aria-label="Filtre sévérité">
           <option value="">Toutes sévérités</option>
           <option value="CRITICAL">CRITICAL</option>
@@ -494,6 +499,18 @@
         </select>
         <input id="f-target" type="search" aria-label="Filtre cible" placeholder="cible…">
       </span>
+    </div>
+    <!-- BULK-OPS (#8) : barre d'actions de masse — visible dès qu'au moins un finding est coché. Transition
+         de statut validée + export CSV/JSON de la SÉLECTION (serveur, engagement-scopé fail-closed). -->
+    <div id="f-bulk" class="findbulk" hidden>
+      <span id="f-bulk-count" class="badge">0 sélectionné(s)</span>
+      <select id="f-bulk-status" class="k-theme" aria-label="Statut à appliquer à la sélection">
+        <option value="">Transition de statut…</option>
+      </select>
+      <button id="f-bulk-apply" class="k-theme" type="button" title="Appliquer le statut choisi aux findings sélectionnés (validé par finding)">Appliquer</button>
+      <button id="f-bulk-csv" class="k-theme" type="button" title="Exporter la sélection en CSV (serveur)">Export CSV</button>
+      <button id="f-bulk-json" class="k-theme" type="button" title="Exporter la sélection en JSON (serveur)">Export JSON</button>
+      <button id="f-bulk-clear" class="k-theme" type="button" title="Vider la sélection">Désélectionner</button>
     </div>
     <div id="f-result"><div class="muted">chargement…</div></div>
   </section>
