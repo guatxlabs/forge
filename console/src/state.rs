@@ -766,7 +766,8 @@ pub(crate) struct App {
     // compilée ; sinon `None` -> `store()` retombe sur SQLite (build community inchangé). Le champ
     // n'existe QUE sous la feature (struct byte-identique quand OFF). Stage 4 HA : `PgConn` bundle le
     // client + son DSN (`url`) pour que `store()` puisse le RE-ÉTABLIR après une coupure (restart/
-    // failover) — cf. `Store::postgres_reconnectable` / `pg_run`.
+    // failover) — cf. `Store::postgres_reconnectable` / `pg_run_read` (reads: reconnect+retry) /
+    // `pg_run_write` (writes/tx: reconnect-for-next-op, never auto-retry).
     #[cfg(feature = "store-postgres")]
     pub(crate) pg: Option<Arc<crate::store::PgConn>>,
     pub(crate) token_sha: Arc<String>,
