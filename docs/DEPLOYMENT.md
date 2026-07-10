@@ -356,6 +356,90 @@ conséquence (ledger par instance, ou stockage partagé assumé ; réglages d'ad
 
 ---
 
+## 3ter. SSO entreprise — OIDC natif, SAML via pont OIDC (Stage entreprise, flag-gated)
+
+Le SSO entreprise de Forge est **OIDC (OpenID Connect)** — et **rien d'autre** en natif. Comme le
+backend Postgres ([§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)) et la multi-tenance, c'est
+une feature **ENTREPRISE, séparable, runtime-gated** : le build **community (défaut)** se comporte
+**exactement** comme aujourd'hui — comptes **LOCAUX** seulement (`users` + argon2id + cookie
+`forge_session` + RBAC admin/opérateur/viewer). Tant que le flag n'est pas **engagé**, toutes les routes
+`/api/sso/*` sont **absentes** (404) et le login local est **inchangé** (byte-identique). Le SSO n'affaiblit
+jamais la surface de gouvernance/audit : il **AJOUTE** seulement un chemin de login Authorization-Code qui,
+en cas de succès, émet **LE MÊME** cookie `forge_session` que `/api/login`.
+
+### 3ter.1 Ce que Forge parle nativement : OIDC (et uniquement OIDC)
+
+| Variable | Rôle |
+|---|---|
+| `FORGE_ENTERPRISE_SSO` (truthy) **ou** clé de config par-DB `enterprise.sso` | engage le SSO OIDC (sinon community, login local seul) |
+| `FORGE_SSO_HTTP_TIMEOUT` | timeout des fetch discovery/JWKS/token (défaut `10` s) |
+
+Le provider OIDC se configure **côté admin** (route admin-gated `POST /api/sso/config`, `client_secret`
+**write-only** / rédigé, jamais renvoyé/loggé/ledgerisé) — **rien de codé en dur**, même substrat que la
+source de détection. Champs : **`issuer`**, **`client_id`** / **`client_secret`**, **`redirect_uri`** (le
+`/api/sso/callback` de cette console), **`allowed_redirect_uris`** (allowlist des cibles de retour
+post-login — le navigateur n'est **jamais** redirigé ailleurs, même discipline que `redirect.open` /
+`oauth.flow`, donc **pas d'open-redirect**), et le mapping identité (`provisioning` = `match`/`auto`,
+`user_claim` = `email`/`sub`, `default_role`).
+
+Flux **Authorization-Code + PKCE (S256)**, **fail-closed à chaque étape** : `GET /api/sso/login` construit
+l'URL authorize (state + nonce + challenge persistés server-side) et 302 vers l'IdP ; `GET
+/api/sso/callback` valide le state (one-time), échange le code contre les tokens, puis **VALIDE
+cryptographiquement l'ID token** — signature **RS256 via la JWKS de l'IdP** (kid exact ; `none`/HS\*
+rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et binding du `nonce`. La découverte
+OIDC / JWKS / token utilise le client HTTP existant : **TLS terminé en amont** (reverse-proxy) — pointer
+l'issuer sur l'endpoint interne `http://` de l'IdP (ou un proxy TLS-terminant) ; l'ID token reste **de toute
+façon** validé RS256 sur la JWKS, indépendamment du transport de fetch.
+
+**Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
+Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →
+`rbac::apply_to_user`) : les groupes de l'IdP pilotent le rôle (et les grants tenant) de l'identité, dès la
+**première** connexion (y compris pour un compte auto-provisionné). **Fail-closed / moindre privilège** :
+aucun groupe correspondant ⇒ le `default_role` configuré (jamais super-admin, non représentable dans le
+mapping). L'IdP reste ainsi **la** source de vérité des rôles, sans double-administration des comptes.
+
+### 3ter.2 IdP SAML-only : supportés via un **pont OIDC externe** (par conception)
+
+Forge n'implémente **PAS** de SAML natif en-process — **choix délibéré**, pas une lacune :
+
+- **Posture pure-Rust / openssl-free.** La pile SAML Rust (**`samael`**) tire **openssl + libxmlsec1 + une
+  toolchain C**, ce qui casserait la posture openssl-free de Forge (auth 100 % Rust, `rustls`/`ring`, jamais
+  native-tls/openssl — cf. la même discipline que le backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
+- **Surface d'attaque.** Vérifier soi-même les signatures **XML-DSig** + le **C14N exclusif** est
+  précisément la classe de foot-gun **XML-Signature-Wrapping (XSW)** — un contournement d'auth livré à
+  répétition **même par des piles SAML matures**. Forge garde son **unique** surface d'auth pure-Rust et
+  minimale plutôt que d'ajouter cette dette.
+
+**Pattern supporté : mettre un pont OIDC DEVANT Forge.** Le pont termine le SAML contre l'IdP du client et
+présente de l'**OIDC** à Forge. Forge ne parle **jamais** que l'OIDC qu'il valide déjà (RS256/JWKS,
+groups→rôles) → openssl-free préservé, **zéro nouvelle dépendance, zéro nouvelle surface d'attaque**. Ponts
+éprouvés : **Dex** (connecteur SAML), **Keycloak identity brokering** (broker l'IdP SAML du client, expose
+de l'OIDC à Forge), ou **oauth2-proxy**.
+
+```
+   IdP SAML du client                Pont OIDC (hors Forge)              Forge console
+ ┌──────────────────┐   SAML 2.0   ┌──────────────────────────┐  OIDC  ┌────────────────────┐
+ │ ADFS / Azure AD  │ ───────────▶ │ Dex (connecteur SAML)    │ ─────▶ │ /api/sso/login     │
+ │ Shibboleth / …   │ ◀─────────── │  — ou —                  │ ◀───── │ /api/sso/callback  │
+ └──────────────────┘  assertion   │ Keycloak identity broker │ authz  │ RS256/JWKS + groups│
+                                    │  — ou — oauth2-proxy     │  code  │      → rôles RBAC   │
+                                    └──────────────────────────┘        └────────────────────┘
+     libxmlsec1/XML-DSig CONFINÉ dans le pont ↑              Forge = OIDC pur, openssl-free ↑
+```
+
+Le pont porte **toute** la complexité XML/openssl ; Forge reçoit un ID token OIDC standard et applique son
+mapping `groups → rôles` inchangé. C'est la voie recommandée pour tout IdP SAML-only.
+
+### 3ter.3 Échappatoire — feature Cargo `saml` OPTIONNELLE (non construite par défaut)
+
+Si un **contrat** exige un SAML **en-process** (pas de pont possible), une future feature Cargo **`saml`**
+(backend `samael`) pourra être ajoutée — produisant une **variante de build openssl + libxmlsec1** distincte,
+le build **community restant openssl-free par défaut** (même discipline opt-in que `store-postgres` /
+`encryption`). **Non implémentée aujourd'hui** : documentée comme **disponible sur demande**, pas livrée. Le
+défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
+
+---
+
 ## 4. Contexte de build & dépendance `guatx-core`
 
 ⚠️ Le contexte de build est le **PARENT `GUATX/`**, pas `forge/` : le crate `console` dépend du sibling
