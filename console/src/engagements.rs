@@ -501,6 +501,27 @@ pub(crate) async fn engagements_update(
     if tenancy::enabled(&app) && !tenancy::engagement_visible(&app, &headers, id) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
+    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the visibility 404 (cross-tenant stays a
+    // 404, no existence leak). For a VISIBLE engagement the caller's EFFECTIVE per-engagement role (most-
+    // specific-wins) must allow the operation: ADMIN (tenant_admin) for archive/delete, OPERATE (tenant_admin|
+    // tenant_operator) for edit/activate. A tenant_viewer is DENIED 403 even though they can SEE the engagement
+    // and passed the console-global gate. Community (flag OFF) => NO-OP (branch skipped, byte-identical).
+    if tenancy::enabled(&app) {
+        let need_admin = is_delete || archiving;
+        let allowed = if need_admin {
+            tenancy::can_admin_engagement(&app, &headers, id)
+        } else {
+            tenancy::can_operate_engagement(&app, &headers, id)
+        };
+        if !allowed {
+            let (code, why) = if need_admin {
+                ("engagement_admin_required", "rôle tenant_admin requis sur cet engagement (fail-closed)")
+            } else {
+                ("engagement_operator_required", "rôle operator requis sur cet engagement (fail-closed)")
+            };
+            return (StatusCode::FORBIDDEN, Json(json!({"error": code, "why": why}))).into_response();
+        }
+    }
     // ENTERPRISE (E3 COMPLIANCE, flag-gated) WORM : un LEGAL-HOLD bloque la suppression ET l'archivage,
     // quelle que soit la rétention (hold always wins, fail-closed). INERTE (None) tant que le flag compliance
     // est OFF => community byte-identique. Ne touche que delete/archive (édition/activation non concernées).

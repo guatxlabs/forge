@@ -3198,6 +3198,15 @@ mod tests {
         ).unwrap();
     }
 
+    /// PER-ENGAGEMENT RBAC (readiness #14) : pose un grant engagement-spécifique (override tenant).
+    fn grant_engagement(app: &App, user_id: i64, eid: i64, role: &str) {
+        let db = app.db();
+        db.execute(
+            "INSERT OR REPLACE INTO engagement_grant(user_id,engagement_id,role,created) VALUES(?,?,?,datetime('now'))",
+            rusqlite::params![user_id, eid, role],
+        ).unwrap();
+    }
+
     /// Sème deux tenants (1,2), deux engagements (#1->tenant1, #2->tenant2), chacun avec un finding/
     /// runrecord/roe/run_job, et deux users (alice->tenant1, bob->tenant2). Retourne (app, alice_headers,
     /// bob_headers, fid_a, fid_b). L'app est en mode ENTERPRISE.
@@ -3369,6 +3378,83 @@ mod tests {
         // granted_tenants reflète les grants.
         assert!(tenancy::granted_tenants(&app, &alice).contains(&tenancy::DEFAULT_TENANT), "alice accède au tenant #1 (défaut)");
         assert!(tenancy::granted_tenants(&app, &bob).contains(&2) && !tenancy::granted_tenants(&app, &bob).contains(&1), "bob accède UNIQUEMENT à tenant 2");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [PER-ENGAGEMENT RBAC #14 — effective role, most-specific-wins, fail-closed] ENTERPRISE ON. Deux
+    /// engagements (#1, #3) DANS LE MÊME tenant (1). alice est tenant_operator sur le tenant => operator sur
+    /// LES DEUX par héritage. Un engagement_grant tenant_viewer sur #1 RÉTROGRADE alice à viewer sur #1
+    /// SEULEMENT (most-specific-wins) : elle reste operator sur #3. Fail-closed : carol (aucun grant) n'a
+    /// AUCUN rôle effectif. ⚠️ MUTATION-PROOF : si effective_engagement_role cessait de préférer l'override
+    /// engagement, alice pourrait opérer sur #1 -> l'assert « viewer sur #1 » passe AU ROUGE.
+    #[tokio::test]
+    async fn per_engagement_rbac_effective_role_most_specific_wins() {
+        let ledger = tmp_path("forge-test-eg-rbac");
+        let ledger2 = tmp_path("forge-test-eg-rbac2");
+        let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        // 3e engagement DANS le tenant 1 (même tenant qu'alice).
+        insert_test_engagement(&app, 3, &["a.example.com"], "grey", &ledger);
+        set_engagement_tenant(&app, 3, 1);
+        let uid_a = uid_of(&app, "alice");
+
+        // (a) héritage tenant : alice (tenant_operator sur tenant 1) opère sur #1 ET #3.
+        assert_eq!(tenancy::effective_engagement_role(&app, &alice, 1).as_deref(), Some("tenant_operator"), "alice hérite operator sur #1");
+        assert_eq!(tenancy::effective_engagement_role(&app, &alice, 3).as_deref(), Some("tenant_operator"), "alice hérite operator sur #3");
+        assert!(tenancy::can_operate_engagement(&app, &alice, 1) && tenancy::can_operate_engagement(&app, &alice, 3), "operator sur les deux (hérité)");
+        assert!(!tenancy::can_admin_engagement(&app, &alice, 1), "tenant_operator n'est PAS admin engagement");
+
+        // (b) override MOST-SPECIFIC : viewer sur #1 SEULEMENT.
+        grant_engagement(&app, uid_a, 1, "tenant_viewer");
+        assert_eq!(tenancy::effective_engagement_role(&app, &alice, 1).as_deref(), Some("tenant_viewer"), "override viewer sur #1 gagne");
+        assert!(!tenancy::can_operate_engagement(&app, &alice, 1), "viewer-on-#1 : operate DENIED (fail-closed)");
+        // #3 INCHANGÉ (toujours operator hérité) — la composition est par-engagement.
+        assert_eq!(tenancy::effective_engagement_role(&app, &alice, 3).as_deref(), Some("tenant_operator"), "#3 reste operator");
+        assert!(tenancy::can_operate_engagement(&app, &alice, 3), "operator-on-#3 : operate OK (operator sur A / viewer sur B)");
+
+        // (c) override ADMIN sur #3 : alice devient tenant_admin sur #3 uniquement.
+        grant_engagement(&app, uid_a, 3, "tenant_admin");
+        assert!(tenancy::can_admin_engagement(&app, &alice, 3), "override admin sur #3");
+        assert!(!tenancy::can_admin_engagement(&app, &alice, 1), "toujours pas admin sur #1");
+
+        // (d) FAIL-CLOSED : carol (compte activé, AUCUN grant) n'a aucun rôle effectif -> ni operate ni admin.
+        { let db = app.db(); upsert_user(&db, "carol", "operator", &hash_pw("pw")).unwrap(); }
+        let (ctok, _) = create_session(&app, uid_of(&app, "carol"));
+        let carol = bearer_headers(&ctok);
+        assert!(tenancy::effective_engagement_role(&app, &carol, 1).is_none(), "carol : aucun rôle effectif (fail-closed)");
+        assert!(!tenancy::can_operate_engagement(&app, &carol, 1) && !tenancy::can_operate_engagement(&app, &carol, 3), "carol : operate refusé partout");
+        // requête anonyme (aucune session) : jamais aucun rôle effectif.
+        assert!(tenancy::effective_engagement_role(&app, &HeaderMap::new(), 1).is_none(), "anonyme : aucun rôle effectif");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [PER-ENGAGEMENT RBAC #14 — handler wiring] ENTERPRISE ON. La mutation d'engagement (POST
+    /// /api/engagements/:id, chemin edit=operator) est GATÉE par le rôle effectif par-engagement. alice
+    /// (operator hérité) édite #1 -> OK ; après rétrogradation viewer sur #1 -> 403 engagement_operator_required,
+    /// bien qu'elle VOIE toujours #1. Preuve du câblage fail-closed (pas seulement le helper).
+    #[tokio::test]
+    async fn per_engagement_rbac_edit_handler_gate() {
+        let ledger = tmp_path("forge-test-eg-gate");
+        let ledger2 = tmp_path("forge-test-eg-gate2");
+        let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        let uid_a = uid_of(&app, "alice");
+
+        // operator hérité : édition autorisée.
+        let resp = engagements_update(State(app.clone()), conn_info(), alice.clone(), Path(1i64),
+            Json(json!({"name": "renamed-by-operator"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "operator hérité : édition OK");
+
+        // rétrogradation viewer sur #1 -> édition REFUSÉE (403), engagement toujours VISIBLE.
+        grant_engagement(&app, uid_a, 1, "tenant_viewer");
+        assert!(tenancy::engagement_visible(&app, &alice, 1), "viewer voit toujours #1");
+        let resp = engagements_update(State(app.clone()), conn_info(), alice.clone(), Path(1i64),
+            Json(json!({"name": "renamed-by-viewer"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer-on-#1 : édition refusée (403, fail-closed)");
+        { let db = app.db(); let n: String = db.query_row("SELECT name FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+          assert_ne!(n, "renamed-by-viewer", "l'engagement n'a PAS été muté par le viewer"); }
+
         let _ = std::fs::remove_file(&ledger);
         let _ = std::fs::remove_file(&ledger2);
     }

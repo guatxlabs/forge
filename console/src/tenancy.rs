@@ -294,6 +294,72 @@ pub fn resolve_create_tenant(app: &App, headers: &HeaderMap, body: &Value) -> Re
 }
 
 // =====================================================================================
+// § PER-ENGAGEMENT RBAC (readiness #14) — composable grants scoped to (user, tenant, engagement, role).
+//
+// TODAY (E1) the tenant_grant.role gates only VISIBILITY (granted_tenants) — a user with ANY grant on a
+// tenant could run/mutate every engagement of that tenant (authz was the console-GLOBAL users.role). This
+// adds a COMPOSABLE, MOST-SPECIFIC-WINS effective role PER ENGAGEMENT so a user can be OPERATOR on engagement
+// A yet only VIEWER on engagement B:
+//   1) an ENGAGEMENT-SPECIFIC grant (engagement_grant on (user, eid)) OVERRIDES everything ;
+//   2) else the user's TENANT-WIDE grant (tenant_grant on (user, tenant_of(eid))) ;
+//   3) else None => FAIL-CLOSED (no grant path => no effective role => operate/admin DENIED).
+// Community (flag OFF) => the per-engagement gate is a NO-OP (callers keep the console-global authority,
+// byte-identical). Enterprise (flag ON) => this effective role governs the engagement-scoped operator/admin
+// actions (fail-closed). The super-admin / console-admin PLATFORM surface (E1) is unchanged: cross-tenant
+// WRITE/run stays bound to native grants (a super-admin does NOT get operate on an un-granted engagement).
+// =====================================================================================
+
+/// Does an effective grant role allow engagement-scoped OPERATE (run / finding & engagement mutation)?
+/// tenant_admin | tenant_operator. Pure.
+pub(crate) fn role_allows_operate(role: &str) -> bool {
+    matches!(role, "tenant_admin" | "tenant_operator")
+}
+
+/// Does an effective grant role allow engagement-scoped ADMIN (archive / delete / grant management)?
+/// tenant_admin only. Pure.
+pub(crate) fn role_allows_admin(role: &str) -> bool {
+    role == "tenant_admin"
+}
+
+/// EFFECTIVE per-engagement role of the caller (MOST-SPECIFIC-WINS, fail-closed). See section header.
+/// Requires a VALID INDIVIDUAL session (caller_user_id) — the env-hash bootstrap / anonymous have NO grants
+/// (mirror of granted_tenants). None => no engagement-specific AND no tenant-wide grant => deny.
+pub fn effective_engagement_role(app: &App, headers: &HeaderMap, eid: i64) -> Option<String> {
+    let uid = caller_user_id(app, headers)?; // takes+releases the DB lock itself
+    let tid = tenant_of_engagement(app, eid); // takes+releases the DB lock itself (Option)
+    let store = app.store();
+    // (1) ENGAGEMENT-SPECIFIC override — most specific, wins over the tenant-wide grant.
+    if let Ok(role) = store.query_row(
+        "SELECT role FROM engagement_grant WHERE user_id = ? AND engagement_id = ?",
+        &crate::sql_params![uid, eid],
+        |r| r.get_str(0),
+    ) {
+        return Some(role);
+    }
+    // (2) TENANT-WIDE grant fallback (existing behaviour). Unknown engagement (no tenant) => None.
+    let tid = tid?;
+    store
+        .query_row(
+            "SELECT role FROM tenant_grant WHERE user_id = ? AND tenant_id = ?",
+            &crate::sql_params![uid, tid],
+            |r| r.get_str(0),
+        )
+        .ok()
+}
+
+/// FAIL-CLOSED per-engagement OPERATE capability (ENTERPRISE). No effective role => false. Consulted by the
+/// engagement-scoped mutation handlers when `enabled()` (community never calls it — global role governs).
+pub fn can_operate_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {
+    matches!(effective_engagement_role(app, headers, eid), Some(r) if role_allows_operate(&r))
+}
+
+/// FAIL-CLOSED per-engagement ADMIN capability (ENTERPRISE). No effective role or non-admin role => false.
+/// Purely grant-based (no super-admin cross-tenant WRITE bypass — E1 invariant: super-admin READS only).
+pub fn can_admin_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {
+    matches!(effective_engagement_role(app, headers, eid), Some(r) if role_allows_admin(&r))
+}
+
+// =====================================================================================
 // § SUPER-ADMIN — non-disablable, provisioning-designated, audited cross-tenant READ.
 //
 // The platform/MSSP operator needs to READ across ALL tenants. That capability is:
@@ -476,6 +542,11 @@ pub(crate) fn routes() -> Router<App> {
         .route("/api/tenants/:id", post(tenants_update))
         .route("/api/tenants/:id/grants", get(tenant_grants_list).post(tenant_grant_add))
         .route("/api/tenants/:id/grants/:login", delete(tenant_grant_remove))
+        // PER-ENGAGEMENT RBAC (readiness #14) — engagement-specific grant management (platform-admin). The
+        // `:id` param name matches the sibling `/api/engagements/:id` (main router) / `/api/engagements/:id/
+        // report` (reports router) — matchit requires the SAME param name at that position (it is `:id`).
+        .route("/api/engagements/:id/grants", get(engagement_grants_list).post(engagement_grant_add))
+        .route("/api/engagements/:id/grants/:login", delete(engagement_grant_remove))
 }
 
 /// GET /api/tenancy — the caller's tenant CONTEXT for the SPA (ANY authenticated caller; not gated to
@@ -852,4 +923,156 @@ pub(crate) async fn tenant_grant_remove(
         json!({ "actor": actor, "tenant_id": id, "login": login }),
     );
     (StatusCode::OK, Json(json!({ "ok": true, "tenant_id": id, "revoked": login }))).into_response()
+}
+
+// =====================================================================================
+// § PER-ENGAGEMENT GRANT ADMIN (readiness #14) — CRUD of engagement-specific role overrides, PLATFORM-ADMIN
+// gated (same `gate()` as tenant grants) + ledgered `console.engagement.grant|revoke`. An engagement-specific
+// grant OVERRIDES the tenant-wide grant for THAT engagement only (most-specific-wins, effective_engagement_role).
+// Removing an engagement grant simply REVERTS the user to their tenant-wide role (no last-admin guard needed —
+// the tenant still has its own last_tenant_admin protection on tenant_grant).
+// =====================================================================================
+
+/// tenant_id owning engagement `id`, or None if the engagement does not exist. Public existence probe for the
+/// grant admin routes (fail-closed 404 on None).
+fn engagement_tenant(app: &App, id: i64) -> Option<i64> {
+    let store = app.store();
+    store.query_row("SELECT tenant_id FROM engagement WHERE id=?", &crate::sql_params![id], |r| r.get_i64(0)).ok()
+}
+
+/// GET /api/engagements/:id/grants — the engagement-specific grants, the INHERITED tenant grants (of the
+/// engagement's tenant), and the computed EFFECTIVE grant per user (engagement-specific wins). Platform-admin.
+pub(crate) async fn engagement_grants_list(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>) -> Response {
+    if let Some(r) = gate(&app, &headers) {
+        return r;
+    }
+    let tid = match engagement_tenant(&app, id) {
+        Some(t) => t,
+        None => return err(StatusCode::NOT_FOUND, "unknown_engagement", format!("engagement {id} introuvable")),
+    };
+    let store = app.store();
+    // Engagement-specific overrides (login -> role).
+    let eng_grants: Vec<Value> = store
+        .query_lax(
+            "SELECT u.login, g.role, g.created FROM engagement_grant g JOIN users u ON u.id=g.user_id
+              WHERE g.engagement_id=? ORDER BY u.login",
+            &crate::sql_params![id],
+            |r| Ok(json!({"login": r.get_str(0)?, "role": r.get_str(1)?, "created": r.get_opt_str(2)?.unwrap_or_default(), "scope": "engagement"})),
+        )
+        .unwrap_or_default();
+    // Inherited tenant-wide grants (of this engagement's tenant).
+    let tenant_grants: Vec<Value> = store
+        .query_lax(
+            "SELECT u.login, g.role, g.created FROM tenant_grant g JOIN users u ON u.id=g.user_id
+              WHERE g.tenant_id=? ORDER BY u.login",
+            &crate::sql_params![tid],
+            |r| Ok(json!({"login": r.get_str(0)?, "role": r.get_str(1)?, "created": r.get_opt_str(2)?.unwrap_or_default(), "scope": "tenant"})),
+        )
+        .unwrap_or_default();
+    // EFFECTIVE (most-specific-wins) : start from the tenant grants, then override with engagement-specific.
+    let mut eff: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for g in &tenant_grants {
+        let login = g.get("login").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        eff.insert(login, json!({"login": g.get("login"), "role": g.get("role"), "source": "tenant"}));
+    }
+    for g in &eng_grants {
+        let login = g.get("login").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        eff.insert(login, json!({"login": g.get("login"), "role": g.get("role"), "source": "engagement"}));
+    }
+    let effective: Vec<Value> = eff.into_values().collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "engagement_id": id, "tenant_id": tid,
+            "grants": eng_grants, "inherited": tenant_grants, "effective": effective,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/engagements/:id/grants {login, role} — grant (or re-role) a user's ENGAGEMENT-SPECIFIC override
+/// (platform-admin). Ledgered `console.engagement.grant`. Engagement + user must exist (404, fail-closed).
+pub(crate) async fn engagement_grant_add(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Some(r) = gate(&app, &headers) {
+        return r;
+    }
+    let login = match crate::validate_login(body.get("login").and_then(|v| v.as_str()).unwrap_or("")) {
+        Ok(l) => l,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "bad_login", e),
+    };
+    let role = match valid_tenant_role(body.get("role").and_then(|v| v.as_str()).unwrap_or("")) {
+        Some(r) => r,
+        None => return err(StatusCode::BAD_REQUEST, "bad_role", "rôle invalide (tenant_admin|tenant_operator|tenant_viewer)"),
+    };
+    let actor = crate::attribution_login(&app, &headers);
+    let tid = match engagement_tenant(&app, id) {
+        Some(t) => t,
+        None => return err(StatusCode::NOT_FOUND, "unknown_engagement", format!("engagement {id} introuvable")),
+    };
+    {
+        let store = app.store();
+        let uid: i64 = match store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
+            Ok(u) => u,
+            Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
+        };
+        // one override per (user,engagement): UPDATE the role if it exists, else INSERT (two steps —
+        // unambiguous vs the table-level UNIQUE(user,engagement) ON CONFLICT IGNORE).
+        let updated = store
+            .execute("UPDATE engagement_grant SET role=? WHERE user_id=? AND engagement_id=?", &crate::sql_params![role, uid, id])
+            .unwrap_or(0);
+        if updated == 0 {
+            let _ = store.execute(
+                "INSERT INTO engagement_grant(user_id,engagement_id,role,created) VALUES(?,?,?,datetime('now'))",
+                &crate::sql_params![uid, id, role],
+            );
+        }
+    }
+    crate::append_console_ledger(
+        &app,
+        "console.engagement.grant",
+        json!({ "actor": actor, "engagement_id": id, "tenant_id": tid, "login": login, "role": role }),
+    );
+    (StatusCode::OK, Json(json!({ "ok": true, "engagement_id": id, "login": login, "role": role }))).into_response()
+}
+
+/// DELETE /api/engagements/:id/grants/:login — remove a user's ENGAGEMENT-SPECIFIC override (platform-admin).
+/// The user REVERTS to their tenant-wide role (if any). Ledgered `console.engagement.revoke`.
+pub(crate) async fn engagement_grant_remove(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((id, login)): Path<(i64, String)>,
+) -> Response {
+    if let Some(r) = gate(&app, &headers) {
+        return r;
+    }
+    let login = match crate::validate_login(&login) {
+        Ok(l) => l,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "bad_login", e),
+    };
+    let actor = crate::attribution_login(&app, &headers);
+    if engagement_tenant(&app, id).is_none() {
+        return err(StatusCode::NOT_FOUND, "unknown_engagement", format!("engagement {id} introuvable"));
+    }
+    {
+        let store = app.store();
+        let uid: i64 = match store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
+            Ok(u) => u,
+            Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
+        };
+        if store.query_row("SELECT 1 FROM engagement_grant WHERE user_id=? AND engagement_id=?", &crate::sql_params![uid, id], |_| Ok(())).is_err() {
+            return err(StatusCode::NOT_FOUND, "no_grant", format!("aucun grant per-engagement pour '{login}' sur l'engagement {id}"));
+        }
+        let _ = store.execute("DELETE FROM engagement_grant WHERE user_id=? AND engagement_id=?", &crate::sql_params![uid, id]);
+    }
+    crate::append_console_ledger(
+        &app,
+        "console.engagement.revoke",
+        json!({ "actor": actor, "engagement_id": id, "login": login }),
+    );
+    (StatusCode::OK, Json(json!({ "ok": true, "engagement_id": id, "revoked": login }))).into_response()
 }
