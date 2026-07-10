@@ -268,7 +268,7 @@ fn run_useradd_pg(url: &str, login: &str, role: &str, pw: &str) -> i32 {
     let hash = hash_pw(pw);
     let outcome = with_pg_store(url, |store| {
         store
-            .execute_batch(crate::state::PG_SCHEMA)
+            .execute_batch(crate::schema::PG_SCHEMA)
             .map_err(|e| format!("initialisation du schéma Postgres impossible: {e}"))?;
         upsert_user_store(store, login, role, &hash)
     });
@@ -498,7 +498,7 @@ fn run_seed_demo_pg(
 ) -> i32 {
     let outcome = with_pg_store(url, |store| -> Result<(i64, i64, i64, i64, i64, i64), String> {
         store
-            .execute_batch(crate::state::PG_SCHEMA)
+            .execute_batch(crate::schema::PG_SCHEMA)
             .map_err(|e| format!("initialisation du schéma Postgres impossible: {e}"))?;
 
         // IDEMPOTENCE : purge UNIQUEMENT la campagne démo (+ son run) — n'affecte aucune autre campagne.
@@ -1133,7 +1133,7 @@ fn migrate_store_core(
     //    chemin PG `ensure_schema` de chaque module (scim/sso/rbac) — sinon `scim_*`/`sso_pending`/
     //    `rbac_group_map` seraient absentes de la cible et la copie perdrait identités provisionnées + mappings
     //    d'autorisation IdP->rôle EN SILENCE. C'est ce que corrige ce bloc.
-    dst.execute_batch(crate::state::PG_SCHEMA)?;
+    dst.execute_batch(crate::schema::PG_SCHEMA)?;
     crate::scim::ensure_pg_schema(dst);
     crate::sso::ensure_pg_schema(dst);
     crate::rbac::ensure_pg_schema(dst);
@@ -1189,7 +1189,7 @@ fn migrate_store_core(
         // IDENTITY remet les séquences à zéro), soit sur une cible vide (le prochain `setval` les recale sur
         // max(id) réel) — reconverge. Aucune corruption : des séquences en avance ne produisent que des ids
         // plus grands, jamais de collision.
-        let identity = crate::state::advance_pg_identity_sequences_all(tx.store())?;
+        let identity = crate::schema::advance_pg_identity_sequences_all(tx.store())?;
         // VÉRIFICATION : source vs cible, table par table (comptes relus DANS la transaction).
         let mut mismatch = false;
         for c in counts.iter_mut() {

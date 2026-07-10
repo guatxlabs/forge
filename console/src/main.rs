@@ -251,6 +251,16 @@ pub(crate) use crate::users::*;
 mod state;
 pub(crate) use crate::state::*;
 
+// SCHÉMA DB + SEEDING (`SCHEMA`/`PG_SCHEMA`, `migrate()`, `ensure_default_*`, `populate_modules`,
+// `advance_pg_identity_sequences*`) — cluster cohésif EXTRAIT de state.rs (PURE MOVE, byte-identique).
+mod schema;
+pub(crate) use crate::schema::*;
+
+// SOUS-SYSTÈME DÉTECTION / purple-coverage (source configurable + collecte + corrélation + handlers
+// `purple_coverage`/`detection_*`) — cluster cohésif EXTRAIT de state.rs (PURE MOVE, byte-identique).
+mod detection;
+pub(crate) use crate::detection::*;
+
 // PORTABLE DB-ACCESS SEAM (Stage 0) — backend-agnostic façade over the SQLite connection whose public
 // API leaks no rusqlite type (see store.rs). `App::store()` wraps the SAME `Mutex<Connection>` as
 // `App::db()`; modules migrate onto it one at a time (`App::db()` stays available for the rest).
@@ -719,9 +729,12 @@ async fn main() {
     if token_was_provided {
         println!("[forge-console] ingest token: (fourni via env) fp=sha8:{token_fp}");
     } else {
-        // token auto-généré : l'opérateur DOIT pouvoir le récupérer une fois. On l'imprime alors en
-        // clair (sinon /api/ingest serait inutilisable), mais on signale qu'il est éphémère.
-        println!("[forge-console] ingest token (auto-généré, éphémère — pose FORGE_CONSOLE_TOKEN pour le fixer): {token}  fp=sha8:{token_fp}");
+        // token auto-généré, ÉPHÉMÈRE : on n'imprime QUE l'empreinte (comme la branche env), JAMAIS le
+        // secret en clair (fuite via logs/journald/historique terminal). Le moteur spawné le reçoit en
+        // mémoire (App.token_raw) — la boucle purple / l'ingest interne fonctionnent sans l'afficher. Pour
+        // un `/api/ingest` MANUEL reproductible, l'opérateur POSE `FORGE_CONSOLE_TOKEN=<valeur connue>`
+        // (qu'il choisit) et redémarre : la branche « fourni via env » ci-dessus s'appliquera alors.
+        println!("[forge-console] ingest token (auto-généré, éphémère) fp=sha8:{token_fp} — pose FORGE_CONSOLE_TOKEN=<valeur connue> pour le fixer et t'en servir en /api/ingest manuel");
     }
     println!("[forge-console] db: {db_path}");
     println!("[forge-console] ledger: {ledger_path}");
