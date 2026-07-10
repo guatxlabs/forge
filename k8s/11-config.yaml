@@ -1,0 +1,67 @@
+# Forge — NON-SECRET config (ConfigMap) + inert scope/ROE (#13).
+# =============================================================================================
+# Non-secret runtime knobs for the console. Secrets live in 10-secrets.example.yaml — NOTHING
+# sensitive here. Mirrors the docker-compose.yml + docker-compose.postgres.yml + docker-compose.ha.yml
+# env contract (Wave A/B/C), translated to the k8s topology.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forge-console-config
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge }
+data:
+  # Bind on all interfaces inside the pod — traffic only reaches it via the ClusterIP Service +
+  # Ingress (+ NetworkPolicy), never publicly. Port 7100 matches EXPOSE 7100 in the Dockerfile.
+  FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
+  # Enterprise store = Postgres (Wave B). FAIL-CLOSED: without a reachable FORGE_DB_URL the console
+  # refuses to boot. FORGE_DB_URL itself is injected from the forge-db Secret (see console Deployment).
+  FORGE_ENTERPRISE_STORE: "postgres"
+  # Engage HA (Wave A). Boot is FAIL-CLOSED unless the active store is Postgres. Replicas self-elect
+  # the run leader via the single-row `leader_lease` (scope='run-worker', TTL 45s) — NO separate
+  # worker Deployment: whichever replica holds the lease runs engagements; the rest serve UI/API and
+  # take over on lease expiry. `leader`/`instance_id` are published on /health.
+  FORGE_HA: "1"
+  # SQLite fallback path — LOCAL to each pod (emptyDir), UNUSED while Postgres is the active store.
+  # Kept off the shared ledger volume so N replicas never contend on one SQLite file at boot.
+  FORGE_CONSOLE_DB: "/data/db/forge-console.db"
+  # Tamper-evident engagement ledger — on the shared RWX PVC (see console Deployment + DEPLOYMENT.md
+  # §k8s for the RWX-vs-object-store / per-instance-ledger tradeoff).
+  FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
+  FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
+  # Host allowlist (anti-DNS-rebinding). Must include EVERY Host clients present through the Ingress,
+  # plus the in-cluster Service names. localhost/127.0.0.1/::1 are already allowed by default (the
+  # readiness/liveness probes send Host: localhost). REPLACE forge.example.test with your real host.
+  FORGE_CONSOLE_HOST: "forge.example.test,forge-console,forge-console.forge.svc.cluster.local,localhost,127.0.0.1"
+  FORGE_PKG_DIR: "/opt/forge"
+  FORGE_PYTHON: "python3"
+  FORGE_RUN_TIMEOUT: "900"
+  # Object-store (MinIO) endpoint + bucket (non-secret). Access/secret keys come from the
+  # forge-objectstore Secret. Only active when the image is built --features object-store.
+  FORGE_BLOB_S3_ENDPOINT: "http://forge-minio:9000"
+  FORGE_BLOB_S3_BUCKET: "forge-artifacts"
+  FORGE_BLOB_S3_REGION: "us-east-1"
+---
+# Inert scope/ROE. in_scope=[] ⇒ FAIL-CLOSED (every target refused) until an authorized ROE is
+# supplied. Replace this ConfigMap (or mount a Secret) with the real, authorized scope.json before
+# any engagement. Mirrors scope.example.json — NO real targets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forge-scope
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge }
+data:
+  scope.json: |
+    {
+      "_comment": "INERT placeholder ROE. Replace with an AUTHORIZED scope.json. in_scope empty = everything refused.",
+      "mode": "grey",
+      "in_scope": [],
+      "out_scope": [],
+      "rate": 5,
+      "allow_exploit": false,
+      "allow_destructive": false,
+      "known_creds": [],
+      "idor_targets": [],
+      "notes": "Authorized engagement only. Fill in_scope (hostname globs or CIDR) before use."
+    }

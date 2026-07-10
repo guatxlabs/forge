@@ -1,0 +1,72 @@
+# Forge — Ingress with STICKY sessions for SSE (#13).
+# =============================================================================================
+# Fronts the console replicas behind ONE hostname. SSE streams (run logs, live presence) must stay
+# pinned to a single backend for the life of the stream, so the Ingress is STICKY by cookie
+# (nginx `affinity: cookie`) — the k8s equivalent of the Caddy `lb_policy cookie` in the compose HA
+# harness. Combined with the Service-level sessionAffinity: ClientIP (40-console.yaml), a client
+# stays on one replica, which also matches the per-instance-cache / per-instance-ledger-head design.
+#
+# This example targets the INGRESS-NGINX controller. For a different controller (Traefik, HAProxy,
+# Contour) use its own sticky-session mechanism. If you have no ingress controller, an alternative
+# `Service type: LoadBalancer` with sessionAffinity: ClientIP is provided (commented) at the bottom.
+#
+# TLS: terminate at the ingress. Reference a cert Secret in `tls:` (cert-manager recommended). The
+# console validates its OWN Host allowlist (FORGE_CONSOLE_HOST) — keep the host below in sync.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forge-console
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+  annotations:
+    # --- sticky cookie affinity: pins each client to one console replica (required for SSE) ---
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: "forge_lb"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "10800"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
+    # --- SSE-friendly proxying: disable response buffering + generous read timeout for streams ---
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - forge.example.test        # REPLACE with your real host (and keep FORGE_CONSOLE_HOST in sync).
+      secretName: forge-console-tls  # a TLS Secret (e.g. issued by cert-manager).
+  rules:
+    - host: forge.example.test       # REPLACE.
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: forge-console
+                port:
+                  number: 7100
+# -----------------------------------------------------------------------------------------------
+# ALTERNATIVE (no ingress controller): a cloud LoadBalancer Service with source-IP stickiness.
+# Delete the Ingress above and uncomment this. Cookie affinity is not available at L4, so SSE
+# stickiness relies on ClientIP session affinity (coarser than cookie, but functional).
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: forge-console-lb
+#   namespace: forge
+#   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+# spec:
+#   type: LoadBalancer
+#   sessionAffinity: ClientIP
+#   sessionAffinityConfig:
+#     clientIP:
+#       timeoutSeconds: 10800
+#   externalTrafficPolicy: Local   # preserves client source IP so ClientIP affinity is meaningful.
+#   selector:
+#     app.kubernetes.io/name: console
+#   ports:
+#     - name: http
+#       port: 443
+#       targetPort: 7100

@@ -1,0 +1,17 @@
+# Forge — HA topology kustomization (#13). `kubectl apply -k k8s/` applies everything in order.
+# =============================================================================================
+# ⚠️ 10-secrets.example.yaml carries EVAL placeholders for a lab bring-up. For production, remove it
+# from `resources` and provision the three Secrets (forge-db, forge-console-auth, forge-objectstore)
+# out-of-band (SealedSecrets / ExternalSecrets / SOPS). See docs/DEPLOYMENT.md §k8s.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forge
+resources:
+  - 00-namespace.yaml
+  - 10-secrets.example.yaml   # ⚠️ EVAL ONLY — drop for prod, supply Secrets out-of-band.
+  - 11-config.yaml
+  - 20-postgres.yaml
+  - 30-minio.yaml
+  - 40-console.yaml
+  - 50-ingress.yaml
+  - 60-networkpolicies.yaml

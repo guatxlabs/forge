@@ -1,0 +1,160 @@
+# Forge — DENY-BY-DEFAULT east-west NetworkPolicies (readiness-dossier #13 CORE).
+# =============================================================================================
+# MODEL: default-deny BOTH directions for every pod in the `forge` namespace, then open ONLY the
+# least-privilege paths the topology actually needs:
+#     Ingress-controller ──▶ console:7100
+#     console ──▶ Postgres:5432
+#     console ──▶ MinIO(object-store):9000
+#     <all pods> ──▶ kube-dns:53   (name resolution)
+# Everything else is DENIED — no pod reaches an unlisted peer, no console↔console traffic (the
+# leader lease, presence, and cross-instance cache invalidation all go THROUGH Postgres, not
+# pod-to-pod; the shared ledger is a filesystem volume, not a network path), no egress to the
+# internet, no lateral movement. For a connection to pass it must be allowed on BOTH ends: the
+# source needs an egress rule AND the destination needs an ingress rule — both are provided below.
+#
+# NOTE ON PROBES: kubelet liveness/readiness probes originate from the node, not from a pod. Many
+# CNIs (Calico, Cilium) exempt host→pod health traffic from NetworkPolicy; if yours does NOT, add an
+# ingress rule to the console policy allowing 7100 from the node CIDR (ipBlock) — see the commented
+# stub in `forge-console` below. Do NOT widen it beyond the node CIDR.
+#
+# NOTE ON EXTERNAL BACKENDS: if you use MANAGED Postgres or EXTERNAL S3 instead of the in-cluster
+# StatefulSet/MinIO, replace the corresponding pod-selector egress rule with an `ipBlock` (or an
+# egress-FQDN policy, if your CNI supports it) toward the managed endpoint's CIDR + port.
+---
+# 1) DEFAULT-DENY-ALL — baseline. Empty podSelector = ALL pods in the namespace. Both policyTypes
+#    listed with NO ingress/egress rules ⇒ deny all ingress AND all egress. This is what makes the
+#    namespace deny-by-default; every rule after this is purely additive.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge }
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 2) ALLOW DNS EGRESS — every pod may resolve names against kube-dns (UDP + TCP 53). Without this,
+#    the default-deny egress would break all service discovery (console→Postgres by name, etc.).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge }
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 3) CONSOLE — the only pod with any external-ish reach. INGRESS: accept 7100 ONLY from the
+#    ingress-nginx controller namespace. EGRESS: only to Postgres:5432 and MinIO:9000 (DNS is
+#    covered by policy #2). No other ingress, no other egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: forge-console
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: console
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # From the ingress controller → console:7100. Adjust the namespace label to your controller's
+    # namespace if it is not `ingress-nginx`.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 7100
+    # --- kubelet probe stub (uncomment ONLY if your CNI does not auto-exempt host health traffic) ---
+    # - from:
+    #     - ipBlock:
+    #         cidr: 10.0.0.0/24   # REPLACE with your node CIDR — never wider.
+    #   ports:
+    #     - protocol: TCP
+    #       port: 7100
+  egress:
+    # console → Postgres:5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # console → MinIO(object-store):9000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# 4) POSTGRES — accept 5432 ONLY from console pods. No egress allowed (default-deny egress stands;
+#    Postgres initiates nothing outbound except DNS, which policy #2 grants).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: forge-postgres
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: postgres }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: console
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 5) MINIO — accept 9000 ONLY from console pods. (The :9001 admin console is intentionally NOT
+#    exposed east-west; port-forward it for admin if needed.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: forge-minio
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: minio }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: console
+      ports:
+        - protocol: TCP
+          port: 9000
