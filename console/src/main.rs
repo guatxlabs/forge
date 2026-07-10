@@ -281,7 +281,7 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/whoami", get(whoami))
         .route("/api/ingest", post(ingest))
         .route("/api/findings", get(findings))
-        .route("/api/findings/:id", get(finding_detail))
+        .route("/api/findings/:id", get(finding_detail).post(finding_update))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
         // Couverture de détection : nom canonique + alias rétro-compat /api/purple/coverage (le SPA

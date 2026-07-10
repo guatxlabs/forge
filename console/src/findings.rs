@@ -8,13 +8,51 @@
 //! …) ET les tests inline de main.rs (`super::*`) résolvent donc ces handlers INCHANGÉS.
 use crate::*;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use crate::store::Param;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::SocketAddr;
+
+// =====================================================================================
+//  VOCABULAIRES VALIDÉS (#15) — TLP 2.0 (classification/diffusion) + CYCLE DE VIE d'un finding.
+//  Contraintes APPLICATIVES (pas SQL — les colonnes restent TEXT), fail-closed à l'écriture. Partagés
+//  avec engagements.rs (validation de la classification d'engagement) via `crate::*`.
+// =====================================================================================
+
+/// Labels TLP 2.0 (FIRST.org) — jeu FERMÉ. Une valeur hors de cet ensemble est refusée (400).
+/// L'ordre = du moins au plus restrictif (CLEAR < GREEN < AMBER < AMBER+STRICT < RED).
+pub(crate) const TLP_CLASSES: [&str; 5] = ["CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED"];
+
+/// Cycle de vie d'un finding (SOC/pentest) — jeu FERMÉ pour les TRANSITIONS validées. La colonne
+/// `finding.status` reste TOLÉRANTE en LECTURE (valeurs libres héritées affichées telles quelles) ;
+/// seule une transition via l'API est contrainte à ce vocabulaire (additif, pas une migration dure).
+pub(crate) const FINDING_STATUSES: [&str; 7] =
+    ["new", "triaged", "confirmed", "remediated", "false_positive", "accepted", "wontfix"];
+
+/// Normalise + valide un label TLP (casse insensible, préfixe `TLP:` toléré, espace -> `+`). Chaîne
+/// VIDE => `Some("")` (non classifié : autorisé, le label est optionnel). Valeur non vide hors du jeu
+/// TLP => `None` (refus 400). Fonction PURE.
+pub(crate) fn norm_tlp(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Some(String::new());
+    }
+    let up = t.to_ascii_uppercase();
+    let up = up.strip_prefix("TLP:").unwrap_or(&up).trim();
+    let canon = up.replace(' ', "+");
+    if TLP_CLASSES.contains(&canon.as_str()) { Some(canon) } else { None }
+}
+
+/// Normalise + valide un statut de cycle de vie (casse insensible). `None` si hors [`FINDING_STATUSES`].
+/// Fonction PURE.
+pub(crate) fn norm_finding_status(s: &str) -> Option<String> {
+    let low = s.trim().to_ascii_lowercase();
+    if FINDING_STATUSES.contains(&low.as_str()) { Some(low) } else { None }
+}
 
 // NOTE: `rows_to_json` below is DEAD CODE that takes a raw `&Connection` (not an `App`), so it is not
 // an `app.db()` DML site — it stays on rusqlite and is left unconverted (no `App::store()` in scope).
@@ -60,7 +98,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         .unwrap_or(0);
     let (limit, offset) = paginate(&q, 200, 1000);
     let sql = format!(
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id FROM finding{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
     );
     // requête typée : `id` est un entier (rows_to_json le rendrait vide en le lisant comme String).
     // LENIENT (query_lax): un prepare échoué -> Err -> unwrap_or_default -> findings vides + total, à
@@ -79,6 +117,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
                 "status": r.get_opt_str(8)?.unwrap_or_default(),
                 "tool": r.get_opt_str(9)?.unwrap_or_default(),
                 "run_id": r.get_opt_str(10)?.unwrap_or_default(),
+                "classification": r.get_opt_str(11)?.unwrap_or_default(),
             }))
         })
         .unwrap_or_default();
@@ -91,7 +130,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     let store = app.store();
     let row = store.query_row(
-        &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id FROM finding WHERE id=? AND engagement_id={eid}"),
+        &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification FROM finding WHERE id=? AND engagement_id={eid}"),
         &crate::sql_params![id],
         |r| {
             Ok(json!({
@@ -109,6 +148,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
                 "poc": r.get_opt_str(11)?.unwrap_or_default(),
                 "fix": r.get_opt_str(12)?.unwrap_or_default(),
                 "run_id": r.get_opt_str(13)?.unwrap_or_default(),
+                "classification": r.get_opt_str(14)?.unwrap_or_default(),
             }))
         },
     );
@@ -116,6 +156,83 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
         Ok(v) => (StatusCode::OK, Json(v)),
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "finding introuvable"}))),
     }
+}
+
+/// POST /api/findings/:id {status?, classification?} — MUTE le cycle de vie et/ou la classification TLP
+/// d'un finding (OPÉRATEUR, fail-closed 403). ISOLATION : n'agit QUE si le finding appartient à
+/// l'engagement actif (un id d'un AUTRE engagement -> 404, jamais divulgué). VALIDATION fail-closed :
+/// `status` ∈ [`FINDING_STATUSES`] (transition contrainte, tolérant en lecture des valeurs héritées),
+/// `classification` ∈ TLP 2.0 (vide autorisé = non classifié). Mutation ATTRIBUÉE + LEDGERISÉE
+/// (`console.finding.update`). Au moins un champ requis (400 sinon).
+pub(crate) async fn finding_update(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    // engagement_id RÉSOLU (entier, jamais du texte client) -> inliné sans risque d'injection (parité
+    // avec les vues). L'existence est vérifiée DANS cet engagement (isolation fail-closed).
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    let store = app.store();
+    let exists = store
+        .query_row(
+            &format!("SELECT 1 FROM finding WHERE id=? AND engagement_id={eid}"),
+            &crate::sql_params![id],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response();
+    }
+    let mut new_status: Option<String> = None;
+    if let Some(v) = body.get("status") {
+        let s = v.as_str().unwrap_or("");
+        match norm_finding_status(s) {
+            Some(x) => new_status = Some(x),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_status", "why": format!("statut '{s}' invalide ({})", FINDING_STATUSES.join("|"))})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    let mut new_class: Option<String> = None;
+    if let Some(v) = body.get("classification") {
+        let s = v.as_str().unwrap_or("");
+        match norm_tlp(s) {
+            Some(x) => new_class = Some(x),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_classification", "why": format!("classification '{s}' invalide (TLP: {})", TLP_CLASSES.join("|"))})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    if new_status.is_none() && new_class.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_change", "why": "aucun changement fourni (status|classification)"}))).into_response();
+    }
+    if let Some(s) = &new_status {
+        let _ = store.execute(&format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"), &crate::sql_params![s, id]);
+    }
+    if let Some(c) = &new_class {
+        let _ = store.execute(&format!("UPDATE finding SET classification=? WHERE id=? AND engagement_id={eid}"), &crate::sql_params![c, id]);
+    }
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.finding.update", json!({
+        "actor": actor, "engagement_id": eid, "finding_id": id,
+        "status": new_status, "classification": new_class,
+    }));
+    (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "status": new_status, "classification": new_class}))).into_response()
 }
 
 pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {

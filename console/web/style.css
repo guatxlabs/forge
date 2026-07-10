@@ -581,6 +581,15 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .sevb-LOW{color:var(--sev1);background:color-mix(in srgb,var(--sev1) 16%,transparent);border:1px solid color-mix(in srgb,var(--sev1) 38%,transparent)}
 .sevb-INFO{color:var(--mut);background:var(--card2);border:1px solid var(--bd)}
 
+/* TLP 2.0 (classification/diffusion, #15) — couleurs officielles FIRST.org (fond teinté + bordure
+   lisible en thème sombre ET clair). AMBER+STRICT = teinte ambre plus soutenue que AMBER. */
+.tlpb{font-family:var(--font-mono);font-size:10px;font-weight:700;padding:2px 8px;border-radius:var(--pill);letter-spacing:.03em;white-space:nowrap;text-transform:uppercase}
+.tlpb-clear{color:var(--mut);background:var(--card2);border:1px solid var(--bd)}
+.tlpb-green{color:#2ecc71;background:color-mix(in srgb,#2ecc71 16%,transparent);border:1px solid color-mix(in srgb,#2ecc71 40%,transparent)}
+.tlpb-amber{color:#e0a100;background:color-mix(in srgb,#ffc000 16%,transparent);border:1px solid color-mix(in srgb,#ffc000 44%,transparent)}
+.tlpb-amber-strict{color:#d98a00;background:color-mix(in srgb,#ff9d00 22%,transparent);border:1px solid color-mix(in srgb,#ff9d00 52%,transparent)}
+.tlpb-red{color:#ff4d4f;background:color-mix(in srgb,#ff4d4f 16%,transparent);border:1px solid color-mix(in srgb,#ff4d4f 44%,transparent)}
+
 /* badges génériques (statut, web, exploit, destructif, verdict ROE) */
 .badge.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:color-mix(in srgb,var(--ok) 32%,transparent)}
 .badge.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent);border-color:color-mix(in srgb,var(--bad) 32%,transparent)}
@@ -693,6 +702,11 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .infobody{margin-bottom:6px}
 .findmeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .findtable td{white-space:normal}
+/* contrôles de mutation d'un finding (#15) : transition de statut + classification TLP */
+.findctl{margin-top:14px;border-top:1px dashed var(--bd);padding-top:10px}
+.findctl-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.findctl-row label{display:flex;flex-direction:column;gap:4px;font-family:var(--font-mono);font-size:11px;color:var(--mut)}
+.findctl-row select{min-width:150px}
 .mailsec{font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:14px 0 5px}
 .mailtext{background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-family:var(--font-mono);font-size:12px;color:var(--fg);white-space:pre-wrap;word-break:break-word;max-height:40vh;overflow:auto;margin:0}
 .mono{font-family:var(--font-mono)}
