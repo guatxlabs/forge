@@ -193,6 +193,7 @@ fn any_legal_hold_key(app: &App) -> Option<String> {
         Ok(v) => v,
         Err(_) => return Some(UNREADABLE.to_string()),
     };
+    drop(store);
     for (key, value) in rows {
         if matches!(value.trim(), "on" | "1" | "true" | "yes") {
             return Some(key);
@@ -232,12 +233,12 @@ pub fn retention_blocked(app: &App, engagement_id: i64) -> Option<String> {
         _ => return None, // no retention window configured => retention does not block (hold still can)
     };
     let now = crate::now_epoch();
-    let store = app.store();
+    
     // FIXED table literals (never user input) — no SQL-injection surface. roe_decision (FIX D) carries
     // per-action audit verdicts also destroyed by delete/archive; each has ts + engagement_id columns.
     for table in ["finding", "runrecord", "roe_decision"] {
         let sql = format!("SELECT ts FROM {table} WHERE engagement_id=?");
-        let rows = store.query_lax(&sql, &crate::sql_params![engagement_id], |r| r.get_opt_str(0)).unwrap_or_default();
+        let rows = app.store().query_lax(&sql, &crate::sql_params![engagement_id], |r| r.get_opt_str(0)).unwrap_or_default();
         for ts in rows {
             let ts = ts.unwrap_or_default();
             // "within retention" <=> NOT purgeable. Unparseable ts => not purgeable => within (fail-closed).
@@ -462,6 +463,7 @@ async fn policy_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
             Some(n) => crate::settings_set_store(&store, &key, &n.to_string()),
             None => crate::settings_set_store(&store, &key, ""), // empty => setting_i64 parses to None (cleared)
         };
+        drop(store);
         if let Err(e) = res {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", e);
         }
@@ -791,8 +793,8 @@ fn collect_expired_rows(app: &App, eid: i64, retention: i64, now: i64, table: &s
         _ => return (vec![], vec![]),
     };
     let sql = format!("SELECT {cols} FROM {table} WHERE engagement_id=?");
-    let store = app.store();
-    let rows = store
+    
+    let rows = app.store()
         .query_lax(&sql, &crate::sql_params![eid], |r| {
             let id: i64 = r.get_i64(0)?;
             let ts: String = r.get_opt_str(1)?.unwrap_or_default();
@@ -827,9 +829,9 @@ fn delete_rows(app: &App, table: &str, ids: &[i64]) {
     if ids.is_empty() || !matches!(table, "finding" | "runrecord") {
         return;
     }
-    let store = app.store();
+    
     for id in ids {
-        let _ = store.execute(&format!("DELETE FROM {table} WHERE id=?"), &crate::sql_params![*id]);
+        let _ = app.store().execute(&format!("DELETE FROM {table} WHERE id=?"), &crate::sql_params![*id]);
     }
 }
 
@@ -1011,6 +1013,7 @@ fn build_evidence(app: &App, eid: i64, from: Option<i64>, to: Option<i64>) -> Re
         let store = app.store();
         let nf: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![eid], |r| r.get_i64(0)).unwrap_or(0);
         let nr: i64 = store.query_row("SELECT COUNT(*) FROM runrecord WHERE engagement_id=?", &crate::sql_params![eid], |r| r.get_i64(0)).unwrap_or(0);
+        drop(store);
         (nf, nr)
     };
     let retention = resolve_retention_secs(app, eid, Some(tenant_id));
@@ -1598,6 +1601,7 @@ mod tests {
                 "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,engagement_id) VALUES(?,?,?,?,?,?,?,?,1)",
                 rusqlite::params![format!("@{}", now - 5), "c", "t", "new-finding", "LOW", "x", "", "open"],
             ).unwrap();
+            drop(db);
         }
         // sanity: chain valid before purge.
         assert!(crate::verify_ledger_chain(&path).ok, "seeded ledger must verify");
@@ -1643,6 +1647,7 @@ mod tests {
             let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=1", [], |r| r.get(0)).unwrap();
             assert_eq!(n, 1, "only the recent finding remains");
             let title: String = db.query_row("SELECT title FROM finding WHERE engagement_id=1", [], |r| r.get(0)).unwrap();
+            drop(db);
             assert_eq!(title, "new-finding");
         }
 
@@ -1752,6 +1757,7 @@ mod tests {
             // A hold on a DIFFERENT tenant (#2): only the GLOBAL any-hold-anywhere gate sees it. Pre-FIX-C
             // is_global would be false (path_b != path_a) => scoped gate misses it => purge proceeds (200).
             crate::settings_set(&db, &hold_key_tenant(2), "on").unwrap();
+            drop(db); // release before the read-back/assertions below (no DB access there)
         }
         let before = std::fs::read_to_string(&path_b).unwrap();
         let tok = admin_session(&app);
@@ -1778,8 +1784,8 @@ mod tests {
         assert!(retention_blocked(&app, 2).is_some(), "a within-retention record must block delete/archive (WORM)");
         // once it ages past retention, retention no longer blocks.
         {
-            let db = app.db();
-            db.execute("UPDATE finding SET ts=? WHERE engagement_id=2", [format!("@{}", now - 5000)]).unwrap();
+            
+            app.db().execute("UPDATE finding SET ts=? WHERE engagement_id=2", [format!("@{}", now - 5000)]).unwrap();
         }
         assert!(retention_blocked(&app, 2).is_none(), "an expired record no longer blocks delete/archive");
         // flag OFF => inert (community byte-identical) even with a fresh record.
@@ -1806,8 +1812,8 @@ mod tests {
         let now = crate::now_epoch();
         // NO finding/runrecord for #2 — ONLY a fresh roe_decision. Pre-FIX-D this returned None (unblocked).
         {
-            let db = app.db();
-            db.execute(
+            
+            app.db().execute(
                 "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES(?,?,?,?,?,?,?,?)",
                 rusqlite::params![format!("@{}", now - 5), "c", "r1", "a1", "t", "recon.http", "FIRE", 2],
             )
@@ -1819,8 +1825,8 @@ mod tests {
         );
         // once it ages past retention (and no other rows exist) it no longer blocks.
         {
-            let db = app.db();
-            db.execute("UPDATE roe_decision SET ts=? WHERE engagement_id=2", [format!("@{}", now - 5000)]).unwrap();
+            
+            app.db().execute("UPDATE roe_decision SET ts=? WHERE engagement_id=2", [format!("@{}", now - 5000)]).unwrap();
         }
         assert!(
             retention_blocked(&app, 2).is_none(),
@@ -1949,8 +1955,8 @@ mod tests {
         let tok = admin_session(&app);
         let resp = purge(State(app.clone()), bearer(&tok), Json(json!({"engagement_id": 1}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
-        let db = app.db();
-        let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE title='bad-ts'", [], |r| r.get(0)).unwrap();
+        
+        let n: i64 = app.db().query_row("SELECT COUNT(*) FROM finding WHERE title='bad-ts'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1, "malformed-ts finding retained (fail-closed), no panic");
     }
 
@@ -1973,8 +1979,8 @@ mod tests {
 
     /// Register a SECOND engagement `id` in tenant `tenant` with its OWN ledger file (isolation fixture).
     fn add_engagement(app: &App, id: i64, tenant: i64, ledger_path: &str) {
-        let db = app.db();
-        db.execute(
+        
+        app.db().execute(
             "INSERT OR IGNORE INTO engagement(id,name,status,mode,scope_json,ledger_path,tenant_id,created,updated)
              VALUES(?,?,?,?,'{}',?,?,'','')",
             rusqlite::params![id, format!("eng{id}"), "active", "grey", ledger_path, tenant],
@@ -1984,8 +1990,8 @@ mod tests {
 
     /// Insert a finding attributed to `eid`.
     fn seed_finding(app: &App, eid: i64, title: &str, ts_epoch: i64) {
-        let db = app.db();
-        db.execute(
+        
+        app.db().execute(
             "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,engagement_id) VALUES(?,?,?,?,?,?,?,?,?)",
             rusqlite::params![format!("@{ts_epoch}"), "c", "t", title, "HIGH", "x", "", "open", eid],
         )

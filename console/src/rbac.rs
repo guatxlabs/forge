@@ -314,6 +314,7 @@ pub(crate) fn resolve(app: &App, groups: &[String]) -> Resolved {
             grants.insert(tid, keep);
         }
     }
+    drop(store); // release DB lock after the read loop; only in-memory aggregation remains
     let mut tenant_grants: Vec<(i64, String)> = grants.into_iter().collect();
     tenant_grants.sort_by_key(|(t, _)| *t);
     Resolved { role, tenant_grants }
@@ -323,6 +324,10 @@ pub(crate) fn resolve(app: &App, groups: &[String]) -> Resolved {
 /// `operator` when `cap_operator` — the SCIM stance) and lands the scoped tenant grants when E1
 /// tenancy is engaged. NEVER touches a DESIGNATED super-admin login. Ledgers `console.rbac.apply`
 /// (metadata only) when something actually changed. Returns the applied role, if any.
+// ALLOW significant_drop_tightening: the block holds ONE store lock across the role UPDATE + the loop of
+// tenant_grant upserts so the whole RBAC application lands as a single atomic DB section; clippy would drop
+// the guard inside the loop (uncompilable) or between writes, splitting the atomic apply. Hold is required.
+#[allow(clippy::significant_drop_tightening)]
 pub(crate) fn apply_to_user(
     app: &App,
     user_id: i64,
@@ -606,8 +611,8 @@ mod tests {
         let resolved = Resolved { role: Some("viewer".into()), tenant_grants: vec![] };
         let applied = apply_to_user(&app, uid, "root", &resolved, false);
         assert_eq!(applied, None, "super-admin login is never re-roled by SSO/SCIM");
-        let db = app.db();
-        let role: String = db.query_row("SELECT role FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
+        
+        let role: String = app.db().query_row("SELECT role FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
         assert_eq!(role, "admin", "super-admin role left intact (fail-closed floor)");
     }
 
@@ -618,15 +623,15 @@ mod tests {
         // SSO path (cap_operator=false): admin mapping is honored.
         apply_to_user(&app, uid, "alice", &Resolved { role: Some("admin".into()), tenant_grants: vec![] }, false);
         {
-            let db = app.db();
-            let role: String = db.query_row("SELECT role FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
+            
+            let role: String = app.db().query_row("SELECT role FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
             assert_eq!(role, "admin", "SSO honors an admin group mapping");
         }
         // SCIM path (cap_operator=true): admin is clamped to operator.
         let bob = add_user(&app, "bob", "viewer");
         apply_to_user(&app, bob, "bob", &Resolved { role: Some("admin".into()), tenant_grants: vec![] }, true);
-        let db = app.db();
-        let role: String = db.query_row("SELECT role FROM users WHERE id=?", [bob], |r| r.get(0)).unwrap();
+        
+        let role: String = app.db().query_row("SELECT role FROM users WHERE id=?", [bob], |r| r.get(0)).unwrap();
         assert_eq!(role, "operator", "SCIM clamps admin -> operator (never auto-confers console admin)");
     }
 

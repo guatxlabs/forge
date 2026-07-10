@@ -2092,8 +2092,8 @@ pub(crate) async fn detection_source_set(State(app): State<App>, headers: Header
         // portable ; `datetime('now')` reste un point dialecte Stage-2). Le helper `settings_set(&Connection)`
         // est CONSERVÉ pour ses appelants boot-partagés (main.rs `settings_get` sur la conn de boot) et
         // interleaved (setup.rs `upsert_user` dans le même guard) — convertis en bloc au Stage 2.
-        let store = app.store();
-        let r = store
+        
+        let r = app.store()
             .execute(
                 "INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",

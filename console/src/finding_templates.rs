@@ -186,6 +186,7 @@ async fn ft_list(State(app): State<App>) -> Response {
         Ok(rows) => rows,
         Err(e) => return internal(e.to_string()),
     };
+    drop(store); // release DB lock before serializing the response (no DB access below)
     (StatusCode::OK, Json(json!({"templates": rows, "count": rows.len()}))).into_response()
 }
 
@@ -279,6 +280,7 @@ async fn ft_edit(
         let exists = store
             .query_row("SELECT 1 FROM finding_template WHERE id=?", &crate::sql_params![id], |_| Ok(()))
             .is_ok();
+        drop(store); // release DB lock; the existence check is a standalone read (no atomic follow-up write here)
         if !exists {
             return not_found(format!("modèle {id} introuvable"));
         }

@@ -79,6 +79,7 @@ fn effective_branding(app: &App, eid: i64) -> Value {
     let per = crate::settings_get_store(&store, &format!("branding.{eid}"))
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or_else(|| json!({}));
+    drop(store);
     let pick = |key: &str, default: &str| -> String {
         per.get(key)
             .and_then(|v| v.as_str())
@@ -287,10 +288,10 @@ fn read_engagement_runs(app: &App, eid: i64) -> Vec<Value> {
 /// Agrège les techniques ATT&CK EXERCÉES (fired=1) de l'engagement `eid` (UNIQUEMENT), groupées par
 /// identifiant MITRE : kinds, cibles, nombre de tirs. Trié par MITRE.
 fn aggregate_techniques(app: &App, eid: i64) -> Vec<Value> {
-    let store = app.store();
+    
     // LENIENT (query_lax) : prepare/ligne en erreur -> rows vide -> agrégation vide (idem l'ancien
     // double early-return `return vec![]`, dont la sortie finale était de toute façon vide).
-    let rows: Vec<(String, String, String)> = store.query_lax(
+    let rows: Vec<(String, String, String)> = app.store().query_lax(
         "SELECT mitre,kind,target FROM runrecord WHERE engagement_id=? AND fired=1 AND mitre<>''",
         &crate::sql_params![eid],
         |r| {
@@ -1097,6 +1098,7 @@ mod tests {
                 [],
             ).unwrap();
             crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            drop(db);
         }
         let (atok, _) = create_session(&app, uid_of(&app, "alice"));
         let mut q = HashMap::new();

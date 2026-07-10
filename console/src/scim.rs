@@ -802,8 +802,8 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
                 "remove" => {
                     // path like: members[value eq "42"]  → extract the id.
                     if let Some(uid) = extract_member_path_id(path).or_else(|| vals.and_then(member_id_of)) {
-                        let store = app.store();
-                        let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", &crate::sql_params![gid, uid]);
+                        
+                        let _ = app.store().execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", &crate::sql_params![gid, uid]);
                         removed += 1;
                     }
                 }
@@ -1068,6 +1068,7 @@ fn user_resource(app: &App, uid: i64) -> Option<Value> {
             },
         )
         .ok()?;
+    drop(store);
     let (login, role, disabled, created, external_id, email, given, family, display) = row;
     let mut res = json!({
         "schemas": [SCHEMA_USER],
@@ -1113,6 +1114,7 @@ fn group_resource(app: &App, gid: i64) -> Option<Value> {
             },
         )
         .ok()?;
+    drop(store);
     let mut res = json!({
         "schemas": [SCHEMA_GROUP],
         "id": gid.to_string(),
@@ -1378,8 +1380,8 @@ mod tests {
 
         // Forge user really exists, ENABLED, with the SCOPED default role (viewer — never admin).
         {
-            let db = app.db();
-            let (role, disabled): (String, i64) = db
+            
+            let (role, disabled): (String, i64) = app.db()
                 .query_row("SELECT role, disabled FROM users WHERE login=?", ["alice.corp.com"], |r| Ok((r.get(0)?, r.get(1)?)))
                 .expect("forge user created");
             assert_eq!(role, "viewer", "scoped default role, never admin");
@@ -1421,8 +1423,8 @@ mod tests {
 
         // No user was created by any of the rejected requests.
         {
-            let db = app.db();
-            let n: i64 = db.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
+            
+            let n: i64 = app.db().query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
             assert_eq!(n, 0, "no user created under failed auth");
         }
         let _ = std::fs::remove_file(&ledger);
@@ -1480,6 +1482,7 @@ mod tests {
             let disabled: i64 = db.query_row("SELECT disabled FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
             assert_eq!(disabled, 1, "user disabled");
             let sessions: i64 = db.query_row("SELECT COUNT(*) FROM session WHERE user_id=?", [uid], |r| r.get(0)).unwrap();
+            drop(db);
             assert_eq!(sessions, 0, "sessions purged");
         }
         // And the (now-purged) session no longer authenticates.
@@ -1516,6 +1519,7 @@ mod tests {
             let disabled: i64 = db.query_row("SELECT disabled FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
             assert_eq!(disabled, 1, "user disabled after delete");
             let sessions: i64 = db.query_row("SELECT COUNT(*) FROM session WHERE user_id=?", [uid], |r| r.get(0)).unwrap();
+            drop(db);
             assert_eq!(sessions, 0, "sessions purged after delete");
         }
         let _ = sess;
@@ -1545,8 +1549,8 @@ mod tests {
 
         // DB stores the SHA, never the raw token.
         {
-            let db = app.db();
-            let stored = crate::settings_get(&db, TOKEN_KEY).unwrap();
+            
+            let stored = crate::settings_get(&app.db(), TOKEN_KEY).unwrap();
             assert_eq!(stored, crate::sha_hex(&raw), "DB stores SHA of the token");
             assert_ne!(stored, raw, "DB does not store the raw token");
         }
@@ -1652,8 +1656,8 @@ mod tests {
         let on = http_raw(addr, &body_req("PUT", &format!("/scim/v2/Users/{uid}"), &put_on, &bearer_hdr("tok-f"))).await;
         assert_eq!(json_of(&on)["active"], true, "reactivated: {}", body_of(&on));
         {
-            let db = app.db();
-            let disabled: i64 = db.query_row("SELECT disabled FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
+            
+            let disabled: i64 = app.db().query_row("SELECT disabled FROM users WHERE id=?", [uid], |r| r.get(0)).unwrap();
             assert_eq!(disabled, 0, "user re-enabled");
         }
         let _ = std::fs::remove_file(&ledger);
@@ -1678,8 +1682,8 @@ mod tests {
         let r = http_raw(addr, &body_req("POST", "/scim/v2/Users", &body, &bearer_hdr("tok-sa"))).await;
         assert_eq!(parse_status(&r), 403, "SCIM cannot provision a super-admin login: {r}");
         {
-            let db = app.db();
-            let n: i64 = db.query_row("SELECT COUNT(*) FROM users WHERE login=?", ["root.corp.com"], |r| r.get(0)).unwrap();
+            
+            let n: i64 = app.db().query_row("SELECT COUNT(*) FROM users WHERE login=?", ["root.corp.com"], |r| r.get(0)).unwrap();
             assert_eq!(n, 0, "no super-admin account created via SCIM");
         }
         let _ = std::fs::remove_file(&ledger);

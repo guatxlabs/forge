@@ -189,8 +189,8 @@ pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) 
 
 /// GET /api/dashboards — liste les dashboards (ordre `position`, id). Lecture (viewer).
 pub(crate) async fn dashboards_list(State(app): State<App>) -> impl IntoResponse {
-    let store = app.store();
-    let out: Vec<Value> = store
+    
+    let out: Vec<Value> = app.store()
         .query_lax(
             "SELECT d.id, d.name, d.descr, d.position, d.created, d.updated,
                     (SELECT COUNT(*) FROM panel p WHERE p.dashboard_id=d.id) AS panels
@@ -288,13 +288,13 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
 /// GET /api/panels?dashboard_id=N — liste les panels, optionnellement filtrés par dashboard.
 /// Sans `dashboard_id` : tous les panels (rétro-compat). `dashboard_id` est lié (param), pas inliné.
 pub(crate) async fn panels_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    let store = app.store();
+    
     let (where_, args): (&str, Vec<crate::store::Param>) = match q.get("dashboard_id").and_then(|s| s.parse::<i64>().ok()) {
         Some(d) => (" WHERE dashboard_id=?", vec![crate::store::Param::Int(d)]),
         None => ("", vec![]),
     };
     let sql = format!("SELECT id,name,query,viz,position,descr,col_span,updated,dashboard_id FROM panel{where_} ORDER BY position, id");
-    let out: Vec<Value> = store
+    let out: Vec<Value> = app.store()
         .query_lax(&sql, &args, |r| {
             Ok(json!({
                 "id": r.get_i64(0)?,
@@ -392,8 +392,8 @@ pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Pat
     if !check_token(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
     }
-    let store = app.store();
-    let _ = store.execute("DELETE FROM panel WHERE id=?", &crate::sql_params![id]);
+    
+    let _ = app.store().execute("DELETE FROM panel WHERE id=?", &crate::sql_params![id]);
     (StatusCode::OK, Json(json!({"deleted": id})))
 }
 

@@ -1577,6 +1577,7 @@ mod pg_tests {
                 &sql_params!["beta", 2.5_f64, false],
             ).expect("insert beta");
             id2 = s.last_insert_id();
+            drop(s);
             assert!(id2 > id1, "second id strictly greater: {id2} > {id1}");
         }
 
@@ -1595,6 +1596,7 @@ mod pg_tests {
                 &sql_params!["beta"],
                 |r| r.get_i64(0),
             ).expect("read beta active");
+            drop(s);
             assert_eq!(active_beta, 0, "Bool(false) bound as BIGINT 0");
         }
 
@@ -1631,6 +1633,7 @@ mod pg_tests {
                 &sql_params!["nope"],
                 |r| r.get_i64(0),
             ).expect("query_opt absent");
+            drop(s);
             assert_eq!(absent, None);
         }
 
@@ -1689,6 +1692,7 @@ mod pg_tests {
                 &sql_params!["c1", "t1", "dup-title"],
                 |r| r.get_str(0),
             ).expect("read finding severity");
+            drop(s);
             assert_eq!(sev, "LOW", "DO NOTHING left the original row untouched");
         }
 
@@ -1704,8 +1708,8 @@ mod pg_tests {
             }).expect("tx commit");
         }
         {
-            let s = Store::postgres(m.lock().unwrap());
-            let cnt: i64 = s.query_row(
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap())).query_row(
                 "SELECT COUNT(*) FROM seam_auto WHERE name=?",
                 &sql_params!["committed"],
                 |r| r.get_i64(0),
@@ -1715,8 +1719,8 @@ mod pg_tests {
 
         // 8) transaction ROLLBACK — closure returns Err, the insert is undone.
         {
-            let s = Store::postgres(m.lock().unwrap());
-            let res: StoreResult<()> = s.with_tx(|tx| {
+            
+            let res: StoreResult<()> = (Store::postgres(m.lock().unwrap())).with_tx(|tx| {
                 tx.execute(
                     "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
                     &sql_params!["rolledback", 9.0_f64, 1_i64],
@@ -1726,8 +1730,8 @@ mod pg_tests {
             assert!(res.is_err(), "with_tx surfaces the closure error");
         }
         {
-            let s = Store::postgres(m.lock().unwrap());
-            let cnt: i64 = s.query_row(
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap())).query_row(
                 "SELECT COUNT(*) FROM seam_auto WHERE name=?",
                 &sql_params!["rolledback"],
                 |r| r.get_i64(0),
@@ -1785,6 +1789,7 @@ mod pg_tests {
             let eng: i64 = s.query_row("SELECT COUNT(*) FROM engagement WHERE id=1", &sql_params![], |r| r.get_i64(0)).unwrap();
             let ten: i64 = s.query_row("SELECT COUNT(*) FROM tenant WHERE id=1", &sql_params![], |r| r.get_i64(0)).unwrap();
             let modl: i64 = s.query_row("SELECT COUNT(*) FROM module WHERE kind=?", &sql_params!["recon.web"], |r| r.get_i64(0)).unwrap();
+            drop(s);
             assert_eq!((dash, eng, ten, modl), (1, 1, 1, 1), "boot seeding landed in PG");
         }
 
@@ -1805,13 +1810,14 @@ mod pg_tests {
                 &sql_params!["dash2", "second", 1_i64],
             ).expect("runtime dashboard insert (no id)");
             let new_id = s.last_insert_id();
+            drop(s);
             assert!(new_id > 1, "IDENTITY advanced past seeded id=1 (got {new_id}) — no duplicate-key collision");
         }
 
         // 2) LOGIN provisioning — upsert_user_store uses `datetime('now')` (seam rewrite) + ON CONFLICT.
         {
-            let s = Store::postgres(m.lock().unwrap());
-            let role = crate::state::upsert_user_store(&s, "admin", "admin", "argon2-hash-placeholder")
+            
+            let role = crate::state::upsert_user_store(&(Store::postgres(m.lock().unwrap())), "admin", "admin", "argon2-hash-placeholder")
                 .expect("provision admin");
             assert_eq!(role, "admin");
         }
@@ -1825,6 +1831,7 @@ mod pg_tests {
             assert_eq!((login.as_str(), role.as_str()), ("admin", "admin"), "admin login readable in PG");
             // `created` was written via datetime('now') -> CAST(CURRENT_TIMESTAMP AS TEXT): a non-empty TEXT.
             let created: String = s.query_row("SELECT created FROM users WHERE login=?", &sql_params!["admin"], |r| r.get_str(0)).unwrap();
+            drop(s);
             assert!(!created.is_empty(), "datetime('now') rewrite produced a timestamp: {created:?}");
         }
 
@@ -1871,6 +1878,7 @@ mod pg_tests {
             let rr: i64 = s.query_row("SELECT COUNT(*) FROM runrecord WHERE run_id=?", &sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
             let rd: i64 = s.query_row("SELECT COUNT(*) FROM roe_decision WHERE run_id=?", &sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
             let rj: String = s.query_row("SELECT status FROM run_job WHERE run_id=?", &sql_params!["run-1"], |r| r.get_str(0)).unwrap();
+            drop(s);
             assert_eq!((f, rr, rd), (1, 1, 1), "run produced finding/runrecord/roe_decision rows in PG");
             assert_eq!(rj, "done", "run_job upsert transitioned running->done in PG");
         }
@@ -1883,6 +1891,7 @@ mod pg_tests {
         {
             let s = Store::postgres(m.lock().unwrap());
             let v = crate::state::settings_get_store(&s, "detection_source");
+            drop(s);
             assert_eq!(v.as_deref(), Some("{\"kind\":\"none\"}"), "settings round-trip in PG");
         }
     }
@@ -1942,13 +1951,14 @@ mod pg_tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
             assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
         }
 
         // The NEXT op on the pinned store MUST reconnect once and succeed (would error without HA).
         {
-            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
-            let two: i64 = s
+            
+            let two: i64 = (Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url))
                 .query_row("SELECT 2", &sql_params![], |r| r.get_i64(0))
                 .expect("store op reconnects after the pinned session was terminated");
             assert_eq!(two, 2);
@@ -1959,8 +1969,8 @@ mod pg_tests {
         // reconnect healed only a local client), the mutex would still hold the DEAD client and this
         // no-retry store would ERROR. (A pid comparison is unreliable: PostgreSQL recycles backend pids.)
         {
-            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
-            let four: i64 = s
+            
+            let four: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
                 .query_row("SELECT 4", &sql_params![], |r| r.get_i64(0))
                 .expect("shared mutex holds the healed client (non-reconnectable store succeeds)");
             assert_eq!(four, 4);
@@ -2021,6 +2031,7 @@ mod pg_tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
             assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
         }
 
@@ -2028,8 +2039,8 @@ mod pg_tests {
         // and NOT silently reported as success. (`pg_run_write` reconnects for the NEXT op but returns the
         // ORIGINAL error without re-executing.)
         {
-            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
-            let r = s.execute(
+            
+            let r = (Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url)).execute(
                 "INSERT INTO dup_probe(tag) VALUES(?)",
                 &sql_params!["broke"],
             );
@@ -2041,8 +2052,8 @@ mod pg_tests {
         // (a retry would have produced a row) and never == 2 (a duplicate). Runs on the HEALED client that
         // `pg_run_write` swapped into the shared Mutex — a NON-reconnectable store proves the heal persisted.
         {
-            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
-            let cnt: i64 = s
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
                 .query_row(
                     "SELECT count(*) FROM dup_probe WHERE tag = ?",
                     &sql_params!["broke"],
@@ -2060,6 +2071,7 @@ mod pg_tests {
             let cnt: i64 = s
                 .query_row("SELECT count(*) FROM dup_probe WHERE tag = ?", &sql_params!["ok"], |r| r.get_i64(0))
                 .unwrap();
+            drop(s);
             assert_eq!(cnt, 1, "post-heal write landed exactly once");
         }
         let _ = pid;
@@ -2109,19 +2121,21 @@ mod pg_tests {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
+                drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
                 // Second statement on the now-dead session: pg_run_write errors (and heals for next op),
                 // the `?` bubbles the error out of the closure -> with_tx best-effort ROLLBACKs + surfaces it.
                 tx.execute("INSERT INTO tx_probe(tag) VALUES(?)", &sql_params!["second"])?;
                 Ok(())
             });
+            drop(s);
             assert!(res.is_err(), "a tx that hits a broken connection fails as a whole");
         }
 
         // NEITHER row is present: the BEGIN died with its session, no partial commit, the reconnect never
         // continued the tx. Runs on the healed client.
         {
-            let s = Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner()));
-            let cnt: i64 = s
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
                 .query_row("SELECT count(*) FROM tx_probe", &sql_params![], |r| r.get_i64(0))
                 .expect("healed client reads back the tx_probe table");
             assert_eq!(cnt, 0, "no row from the broken tx committed (whole-tx failure, no partial/duplicate)");
@@ -2194,8 +2208,8 @@ mod pg_tests {
 
         // (b) exactly N rows, none lost/duplicated.
         {
-            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
-            let cnt: i64 = s
+            
+            let cnt: i64 = (Store::postgres_reconnectable(pool.checkout(), &pool.url))
                 .query_row("SELECT count(*) FROM pool_probe", &sql_params![], |r| r.get_i64(0))
                 .expect("count pool_probe");
             assert_eq!(cnt, N as i64, "exactly N rows persisted (no lost/duplicate writes)");
@@ -2262,13 +2276,14 @@ mod pg_tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
             assert!(gone, "terminated backend {pid} did not disappear");
         }
 
         // Next checkout on the (now-dead) slot: an idempotent READ reconnects+retries and succeeds.
         {
-            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
-            let two: i64 = s
+            
+            let two: i64 = (Store::postgres_reconnectable(pool.checkout(), &pool.url))
                 .query_row("SELECT 2", &sql_params![], |r| r.get_i64(0))
                 .expect("pooled slot reconnects+retries the read after its backend was terminated");
             assert_eq!(two, 2);
@@ -2281,6 +2296,7 @@ mod pg_tests {
             let cnt: i64 = s
                 .query_row("SELECT count(*) FROM pool_heal WHERE tag=?", &sql_params!["ok"], |r| r.get_i64(0))
                 .unwrap();
+            drop(s);
             assert_eq!(cnt, 1, "post-heal write landed exactly once on the pooled slot");
         }
     }

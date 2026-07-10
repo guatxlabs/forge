@@ -96,6 +96,7 @@ pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
     {
         set.insert(t);
     }
+    drop(store);
     set
 }
 
@@ -460,6 +461,7 @@ fn all_tenant_ids(app: &App) -> HashSet<i64> {
     for t in store.query_lax("SELECT id FROM tenant", &[], |r| r.get_i64(0)).unwrap_or_default() {
         set.insert(t);
     }
+    drop(store);
     set
 }
 
@@ -684,6 +686,7 @@ pub(crate) async fn tenants_list(State(app): State<App>, headers: HeaderMap) -> 
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
+    drop(store);
     (StatusCode::OK, Json(json!({ "tenants": rows }))).into_response()
 }
 
@@ -718,6 +721,7 @@ pub(crate) async fn tenants_create(State(app): State<App>, headers: HeaderMap, J
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
                 &crate::sql_params![u, id, "tenant_admin"],
             );
+            drop(store);
             sg = true;
         }
         (id, sg)
@@ -819,6 +823,7 @@ pub(crate) async fn tenant_grants_list(State(app): State<App>, headers: HeaderMa
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
+    drop(store);
     (StatusCode::OK, Json(json!({ "tenant_id": id, "grants": rows }))).into_response()
 }
 
@@ -969,6 +974,7 @@ pub(crate) async fn engagement_grants_list(State(app): State<App>, headers: Head
             |r| Ok(json!({"login": r.get_str(0)?, "role": r.get_str(1)?, "created": r.get_opt_str(2)?.unwrap_or_default(), "scope": "tenant"})),
         )
         .unwrap_or_default();
+    drop(store);
     // EFFECTIVE (most-specific-wins) : start from the tenant grants, then override with engagement-specific.
     let mut eff: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
     for g in &tenant_grants {

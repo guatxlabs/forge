@@ -108,8 +108,8 @@ impl PresenceRegistry {
         let now = now_epoch();
         #[cfg(feature = "store-postgres")]
         if let Some(app) = &self.backend {
-            let store = app.store();
-            let _ = store.execute(
+            
+            let _ = (app.store()).execute(
                 "INSERT INTO presence(conn_id,login,role,engagement_id,instance_id,since,last_seen)
                  VALUES(?,?,?,?,?,?,?)
                  ON CONFLICT(conn_id) DO UPDATE SET login=excluded.login, role=excluded.role,
@@ -131,8 +131,8 @@ impl PresenceRegistry {
         let now = now_epoch();
         #[cfg(feature = "store-postgres")]
         if let Some(app) = &self.backend {
-            let store = app.store();
-            let _ = store.execute("UPDATE presence SET last_seen=? WHERE conn_id=?", &crate::sql_params![now, conn_id]);
+            
+            let _ = (app.store()).execute("UPDATE presence SET last_seen=? WHERE conn_id=?", &crate::sql_params![now, conn_id]);
             return;
         }
         let mut m = self.inner.lock().unwrap();
@@ -160,6 +160,7 @@ impl PresenceRegistry {
                 n += 1;
             }
         }
+        drop(m);
         n
     }
 
@@ -185,6 +186,7 @@ impl PresenceRegistry {
                 )
                 .ok();
             let _ = store.execute("DELETE FROM presence WHERE conn_id=?", &crate::sql_params![conn_id]);
+            drop(store);
             return entry;
         }
         let mut m = self.inner.lock().unwrap();

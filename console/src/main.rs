@@ -828,15 +828,17 @@ async fn main() {
             .with_tx(|tx| {
                 tx.execute("SELECT pg_advisory_xact_lock(?)", &crate::sql_params![crate::ha::BOOT_DDL_LOCK_KEY])?;
                 tx.execute_batch(PG_SCHEMA)?;
-                let s = tx.store();
-                ensure_default_dashboard(s); // dashboard #1 (rétro-compat) + rattache les panels orphelins
+                // `tx.store()` is a getter returning the tx-owned `&Store` (the transaction owns the critical
+                // section — there is no separate guard to tighten); call it inline so no aliasing binding is
+                // held past its use. Behaviour-identical to a `let s = tx.store();` alias.
+                ensure_default_dashboard(tx.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
                 // ENGAGEMENT #1 / TENANT #1 (migration ZÉRO-PERTE) — idempotents (count>0 => no-op). Sous le
                 // verrou, un seul réplica les crée ; l'autre voit count>0 et ne réinsère pas id=1.
-                ensure_default_engagement(s, &app.scope_in, &app.scope_mode, &app.ledger_path);
-                ensure_default_tenant(s);
+                ensure_default_engagement(tx.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
+                ensure_default_tenant(tx.store());
                 // Après TOUT seeding à id explicite : recale les séquences IDENTITY sur max(id) (sinon le 1er
                 // INSERT-sans-id régénère id=1 -> duplicate key). Idempotent.
-                advance_pg_identity_sequences(s);
+                advance_pg_identity_sequences(tx.store());
                 Ok::<(), crate::store::StoreError>(())
             })
             .expect("pg boot schema+seed (serialized under the DDL advisory lock)");
@@ -2979,9 +2981,9 @@ mod tests {
 
     /// Insère un engagement de test (scope_json dérivé de scope_in/mode, out_scope vide).
     fn insert_test_engagement(app: &App, id: i64, scope_in: &[&str], mode: &str, ledger: &str) {
-        let db = app.db();
+        
         let scope_json = json!({"mode": mode, "in_scope": scope_in, "out_scope": []}).to_string();
-        db.execute(
+        app.db().execute(
             "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
              VALUES(?,?,'active',?,?,?,datetime('now'),datetime('now'))",
             rusqlite::params![id, format!("eng{id}"), mode, scope_json, ledger],
@@ -3152,6 +3154,10 @@ mod tests {
     ///   (3) démarrer un run pour un TROISIÈME engagement pendant que #1 et #2 sont vivants -> 202
     ///       (aucun 409 croisé — la concurrence inter-engagement est réelle) ;
     ///   (4) le run de #3 est journalisé dans le ledger de #3 UNIQUEMENT (jamais ceux de #1/#2).
+    // ALLOW significant_drop_tightening: the fixture below holds the run_state guard across two inserts +
+    // an invariant assertion so the two simultaneous live runs are published as one atomic unit (mirrors
+    // the production promotion). Nursery-lint FP on a deliberately-atomic block.
+    #[allow(clippy::significant_drop_tightening)]
     #[tokio::test]
     async fn run_slot_is_per_engagement_not_global_fifo() {
         let ledger_a = tmp_path("forge-test-conc-A");
@@ -3499,7 +3505,7 @@ mod tests {
         let resp = engagements_update(State(app.clone()), conn_info(), alice.clone(), Path(2i64),
             Json(json!({"name": "pwned-by-A"}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "alice ne peut PAS éditer l'engagement de B (404)");
-        { let db = app.db(); let n: String = db.query_row("SELECT name FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
+        {  let n: String = app.db().query_row("SELECT name FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
           assert_ne!(n, "pwned-by-A", "l'engagement de B N'A PAS été muté par A"); }
 
         let _ = std::fs::remove_file(&ledger);
@@ -3626,7 +3632,7 @@ mod tests {
         let resp = engagements_update(State(app.clone()), conn_info(), alice.clone(), Path(1i64),
             Json(json!({"name": "renamed-by-viewer"}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer-on-#1 : édition refusée (403, fail-closed)");
-        { let db = app.db(); let n: String = db.query_row("SELECT name FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+        {  let n: String = app.db().query_row("SELECT name FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
           assert_ne!(n, "renamed-by-viewer", "l'engagement n'a PAS été muté par le viewer"); }
 
         let _ = std::fs::remove_file(&ledger);
@@ -3871,7 +3877,7 @@ mod tests {
         let e = admin_delete_user(&app, "backup", "root").unwrap_err();
         assert_eq!(e.0, StatusCode::CONFLICT); assert!(e.1.contains("super-admin"), "message super-admin: {}", e.1);
         // root reste admin activé (non muté).
-        { let db = app.db(); let (role, dis): (String, i64) = db.query_row("SELECT role, disabled FROM users WHERE login='root'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        {  let (role, dis): (String, i64) = app.db().query_row("SELECT role, disabled FROM users WHERE login='root'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
           assert_eq!(role, "admin", "root reste admin"); assert_eq!(dis, 0, "root reste activé"); }
         let _ = std::fs::remove_file(&ledger);
     }
@@ -4051,7 +4057,7 @@ mod tests {
             Json(json!({"delete": true}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK, "admin autorisé à supprimer");
         assert!(read_ledger_lines(&ledger).iter().any(|e| e["kind"] == "console.engagement.delete"), "suppression ledgerisée");
-        { let db = app.db(); assert!(db.query_row("SELECT 1 FROM engagement WHERE id=?", [new_id], |_| Ok(())).is_err(), "engagement supprimé de la base"); }
+        assert!(app.db().query_row("SELECT 1 FROM engagement WHERE id=?", [new_id], |_| Ok(())).is_err(), "engagement supprimé de la base");
 
         let _ = std::fs::remove_file(&ledger);
     }
@@ -4071,7 +4077,7 @@ mod tests {
         let resp = engagements_update(State(app.clone()), conn_info(), bearer_headers(&atok), Path(1i64),
             Json(json!({"status": "archived"}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT, "dernier engagement actif : archivage bloqué");
-        { let db = app.db(); let st: String = db.query_row("SELECT status FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+        {  let st: String = app.db().query_row("SELECT status FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
           assert_eq!(st, "active", "l'engagement reste actif (mutation refusée)"); }
 
         // supprimer #1 (défaut + dernier actif) -> 409.
@@ -4209,6 +4215,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let store = app.store();
         let job = store.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params!["run-1"], run_job_json).unwrap();
         let md = render_run_report_md(&store, "run-1", &job, None, None);
+        drop(store);
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
         assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu");
@@ -4288,6 +4295,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let custody = build_ledger_custody(&app, "alice+high_impact");
         let store = app.store();
         let html = render_run_report_html(&store, "run-1", &job, None, &custody);
+        drop(store);
         // structure & branding
         assert!(html.starts_with("<!doctype html>"), "document HTML autonome");
         assert!(html.contains("Guat<span class=\"x\">X</span>"), "branding GuatX");
@@ -4838,8 +4846,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert!(!b.contains(secret), "la réponse de sauvegarde ne DOIT jamais contenir le secret : {b}");
         assert!(b.contains("\"saved\":true"));
         {
-            let db = app.db();
-            let stored = settings_get(&db, "detection_source").expect("detection_source persisté");
+            
+            let stored = settings_get(&app.db(), "detection_source").expect("detection_source persisté");
             assert!(stored.contains("generic_http"), "config persistée");
             assert!(stored.contains(secret), "secret persisté verbatim côté serveur (jamais renvoyé)");
         }
@@ -4857,8 +4865,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let r = http_raw(addr, &post_req("/api/detection/source", &cfg2, &format!("Cookie: forge_session={tok}\r\n"))).await;
         assert_eq!(parse_status(&r), 200, "keep_secret -> 200 : {r}");
         {
-            let db = app.db();
-            let stored = settings_get(&db, "detection_source").expect("detection_source persisté");
+            
+            let stored = settings_get(&app.db(), "detection_source").expect("detection_source persisté");
             assert!(stored.contains("soc.local:9/y"), "endpoint mis à jour");
             assert!(stored.contains(secret), "secret conservé via keep_secret (write-only) : {stored}");
         }
@@ -4896,8 +4904,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = h.join(); // le panic empoisonne le Mutex
         assert!(app.db.lock().is_err(), "le Mutex doit être empoisonné");
         // db() doit malgré tout rendre une garde utilisable (into_inner).
-        let db = app.db();
-        let n: i64 = db.query_row("SELECT 1", [], |r| r.get(0)).expect("requête OK après poison");
+        
+        let n: i64 = app.db().query_row("SELECT 1", [], |r| r.get(0)).expect("requête OK après poison");
         assert_eq!(n, 1, "la connexion reste exploitable après récupération du poison");
         let _ = std::fs::remove_file(&path);
     }
@@ -5084,6 +5092,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             let (enabled, ov, web, exploit, descr): (i64, Option<i64>, i64, i64, String) = store.query_row(
                 "SELECT enabled, available_override, web_allowed, exploit, descr FROM module WHERE kind='recon.httpx'",
                 &crate::sql_params![], |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?, r.get_i64(2)?, r.get_i64(3)?, r.get_str(4)?))).unwrap();
+            drop(store);
             // INTENTION OPÉRATEUR préservée :
             assert_eq!(enabled, 0, "enabled=0 préservé au re-probe (no-clobber)");
             assert_eq!(ov, Some(0), "available_override=0 préservé au re-probe");
@@ -5099,6 +5108,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             let (enabled, ov): (i64, Option<i64>) = store.query_row(
                 "SELECT enabled, available_override FROM module WHERE kind='recon.new'", &crate::sql_params![],
                 |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?))).unwrap();
+            drop(store); // release before the assertions below (no DB access there)
             assert_eq!(enabled, 1, "nouveau module -> enabled par défaut");
             assert_eq!(ov, None, "nouveau module -> pas d'override par défaut (suit la sonde)");
         }
@@ -5398,7 +5408,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let resp = workflow_edit(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&vtok),
             Path("my-wf".into()), Json(json!({"delete": true}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        { let db = app.db(); let sv: Value = serde_json::from_str(&settings_get(&db, "workflows").unwrap()).unwrap();
+        {  let sv: Value = serde_json::from_str(&settings_get(&app.db(), "workflows").unwrap()).unwrap();
           assert!(sv.get("my-wf").is_some(), "un delete refusé ne supprime rien"); }
 
         // operator supprime son workflow -> 200 + ledger `console.workflows.delete`.
@@ -5474,7 +5484,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         // viewer -> 403 (fail-closed), rien ingéré.
         let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&vtok), Json(body.clone())).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé (fail-closed)");
-        { let db = app.db(); let n: i64 = db.query_row("SELECT COUNT(*) FROM finding", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "un refus n'ingère rien"); }
+        {  let n: i64 = app.db().query_row("SELECT COUNT(*) FROM finding", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "un refus n'ingère rien"); }
 
         // operator -> 200 : findings insérés, orientés preuve, ledgerisés.
         let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body.clone())).await;
@@ -5489,6 +5499,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             let vuln: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE status='vulnerable'", [], |r| r.get(0)).unwrap();
             assert_eq!(vuln, 0, "un import ne CONFIRME jamais (orienté preuve : jamais vulnerable)");
             let tested: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE status='tested' AND tool='nmap'", [], |r| r.get(0)).unwrap();
+            drop(db);
             assert!(tested >= 1, "nmap -> recon tested");
         }
         // ledger : console.import attribué + compteurs ; JAMAIS le contenu (filename assaini au basename).
@@ -5512,7 +5523,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let jr = resp_json(resp).await;
         assert_eq!(jr["counts"]["out_of_scope"], 1, "asset hors scope compté");
         assert_eq!(jr["ingested"].as_i64().unwrap(), 0, "asset hors scope JETÉ (rien ingéré)");
-        { let db = app.db(); let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE campaign='imp2'", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "aucun finding hors scope inséré"); }
+        {  let n: i64 = app.db().query_row("SELECT COUNT(*) FROM finding WHERE campaign='imp2'", [], |r| r.get(0)).unwrap(); assert_eq!(n, 0, "aucun finding hors scope inséré"); }
 
         // format inconnu -> 400 (grammaire fermée, fail-closed).
         let resp = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok),
