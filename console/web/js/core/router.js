@@ -3,6 +3,7 @@ import { complianceAdmin, identityAdmin, isAdmin } from './auth.js';
 import { loadCampaigns } from '../views/campaigns.js';
 import { loadCompliance } from '../views/compliance.js';
 import { loadCoverage, loadPurpleCoverage } from '../views/coverage.js';
+import { loadAttackMatrix } from '../views/attack-matrix.js';
 import { loadDashboards, refreshPanels } from '../views/dashboards.js';
 import { $, ic } from './dom.js';
 import { loadEngagements, reloadCurrentView } from '../views/engagements.js';
@@ -26,7 +27,7 @@ export const VIEWS = {
   'lc-form': 'launch', 'lc-plan': 'launch', 'lc-live': 'launch', 'lc-runs': 'launch',
   import: 'import',
   modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', 'findings-library': 'findings-library', reports: 'reports', explore: 'explore',
-  coverage: 'coverage', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
+  coverage: 'coverage', 'attack-matrix': 'attack-matrix', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
   admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
   tenants: 'tenants',
   identity: 'identity',
@@ -34,7 +35,7 @@ export const VIEWS = {
 };
 export const LOADERS = {
   overview: loadOverview, engagements: loadEngagements, launch: loadLaunch, import: loadImport, modules: loadModules, techniques: loadTechniques, workflows: loadWorkflows, findings: loadFindings, 'findings-library': loadFindingsLibrary, reports: loadReports,
-  coverage: loadCoverage, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
+  coverage: loadCoverage, 'attack-matrix': loadAttackMatrix, 'purple-coverage': loadPurpleCoverage, campaigns: loadCampaigns, roe: loadRoe, ledger: loadLedger, dashboards: loadDashboards,
   admin: loadAdmin,
   tenants: loadTenants,
   identity: loadIdentity,

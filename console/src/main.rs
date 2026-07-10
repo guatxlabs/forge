@@ -325,6 +325,8 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .route("/api/findings/:id", get(finding_detail).post(finding_update))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
+        // Matrice ATT&CK par engagement : grille tactique × technique (kill-chain), engagement-scopée.
+        .route("/api/attack-matrix", get(attack_matrix))
         // Couverture de détection : nom canonique + alias rétro-compat /api/purple/coverage (le SPA
         // interroge encore /purple/coverage — l'alias garantit qu'il ne casse pas).
         .route("/api/detection/coverage", get(purple_coverage))

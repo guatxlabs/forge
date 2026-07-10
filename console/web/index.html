@@ -117,6 +117,29 @@
 .pc-legend .pc-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .pc-legend .pc-dot.detected{background:var(--ok)} .pc-legend .pc-dot.missed{background:var(--sev4)} .pc-legend .pc-dot.unfired{background:var(--mut)}
 .pc-sub h3{font-size:13px;margin:18px 0 8px;color:var(--hd)}
+/* MATRICE ATT&CK : grille tactique × technique. Colonnes = tactiques (défilement horizontal), pile de
+   cellules-techniques par colonne. Couleur de cellule = état (détectée / exercée / non exercée). */
+.am-grid{display:flex;gap:10px;overflow-x:auto;padding:2px 0 8px;align-items:flex-start}
+.am-col{flex:0 0 172px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.am-colhead{position:sticky;top:0;display:flex;flex-direction:column;gap:2px;padding:7px 9px;border:1px solid var(--bd);border-radius:9px;background:var(--card2)}
+.am-colhead .am-ct{font-size:11px;font-weight:700;color:var(--hd);line-height:1.25}
+.am-colhead .am-cc{font-family:var(--font-mono);font-size:10px;color:var(--mut)}
+.am-empty{font-size:12px;color:var(--mut);text-align:center;padding:8px 0;border:1px dashed var(--bd);border-radius:9px}
+.am-cell{display:flex;flex-direction:column;gap:4px;padding:8px 9px;border:1px solid var(--bd);border-radius:9px;background:var(--card);cursor:pointer}
+.am-cell:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bd))}
+.am-cell:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.am-cell .am-id{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--fg)}
+.am-cell .am-name{font-size:11px;color:var(--mut);line-height:1.25}
+.am-cell .am-st{display:flex;align-items:center;gap:5px;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em}
+.am-cell .am-st .am-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%}
+.am-cell .am-meta{font-size:10px;color:var(--mut);font-family:var(--font-mono)}
+.am-cell.am-detected{border-color:color-mix(in srgb,var(--ok) 45%,var(--bd));background:color-mix(in srgb,var(--ok) 8%,var(--card))}
+.am-cell.am-detected .am-st{color:var(--ok)} .am-cell.am-detected .am-dot{background:var(--ok)}
+.am-cell.am-exercised{border-color:color-mix(in srgb,var(--warn) 45%,var(--bd));background:color-mix(in srgb,var(--warn) 8%,var(--card))}
+.am-cell.am-exercised .am-st{color:var(--warn)} .am-cell.am-exercised .am-dot{background:var(--warn)}
+.am-cell.am-none{opacity:.55} .am-cell.am-none .am-st{color:var(--mut)} .am-cell.am-none .am-dot{background:var(--mut)}
+.pc-legend .am-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.pc-legend .am-dot.detected{background:var(--ok)} .pc-legend .am-dot.exercised{background:var(--warn)} .pc-legend .am-dot.none{background:var(--mut)}
 /* ENGAGEMENT — sélecteur header (indicateur proéminent de l'espace de travail actif) */
 .eng-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--acc) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--acc) 10%,transparent);max-width:340px}
 .eng-bar .eng-ic{display:inline-flex;color:var(--acc);flex:0 0 auto}
@@ -208,6 +231,7 @@
     <a href="#reports"><svg class="ic" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg> <span>Rapport d'engagement</span></a>
     <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
     <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
+    <a href="#attack-matrix"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg> <span>Matrice ATT&amp;CK</span></a>
     <a href="#purple-coverage"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> <span>Détection purple</span></a>
     <a href="#campaigns"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/></svg> <span>Campagnes</span></a>
     <a href="#roe"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg> <span>ROE / Garde-fou</span></a>
@@ -589,6 +613,15 @@
     </div>
     <p class="muted" style="margin:0 0 10px">Par technique MITRE : nombre de runs tentés et combien ont <b>tiré</b> (déclenché un résultat). Une technique à 0 tiré = couverte mais sans détection côté cible.</p>
     <div id="cov-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- MATRICE ATT&CK — grille tactique × technique par engagement -->
+  <section id="attack-matrix" class="card span2" aria-labelledby="amh">
+    <div class="panelhead">
+      <h2 id="amh">Matrice ATT&amp;CK <span class="muted">— grille tactique × technique (par engagement)</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Vraie grille ATT&amp;CK : colonnes = <b>tactiques</b> du kill-chain, cellules = <b>techniques</b>. Couleur par état : <span class="badge ok">exercée + détectée</span> (a <b>tiré</b>), <span class="badge destr">exercée non détectée</span> (0 tir), grisée = <b>non exercée</b> (couverture manquante). Le <abbr title="Mean Time To Detect">MTTD</abbr> est surfacé sur les cellules détectées quand une source de détection le mesure. Scopé à l'engagement actif.</p>
+    <div id="am-result"><div class="muted">chargement…</div></div>
   </section>
 
   <!-- COUVERTURE DE DÉTECTION (PURPLE) — Forge red tirées vs Plume blue détectées -->
