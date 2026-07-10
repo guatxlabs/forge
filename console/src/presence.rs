@@ -193,20 +193,24 @@ impl PresenceRegistry {
         m.remove(conn_id)
     }
 
-    /// Snapshot des entrées NON périmées (GC paresseux : purge en passant les entrées dont le `last_seen`
-    /// dépasse le TTL — une connexion morte sans Drop finit par disparaître). Sous HA -> DELETE des lignes
-    /// périmées puis SELECT de TOUTES les lignes vivantes de la table PARTAGÉE (le filtre tenancy reste dans
-    /// `presence_roster`) -> le roster agrège les opérateurs de TOUS les réplicas.
+    /// Snapshot des entrées NON périmées. Le GC physique (DELETE des lignes dont `last_seen` dépasse le TTL)
+    /// N'EST PLUS fait ici : sous HA il tournait sur CHAQUE lecture `/api/presence` (amplification d'écriture
+    /// proportionnelle au trafic de lecture). Il est désormais PÉRIODIQUE (cf. `presence_gc_loop`, cadence du
+    /// heartbeat) ; le snapshot est en LECTURE SEULE et filtre les lignes périmées SUR LA LECTURE
+    /// (`WHERE last_seen >= cutoff`) -> sémantique de TTL IDENTIQUE (une entrée morte disparaît immédiatement
+    /// du roster) mais AUCUNE écriture par lecture. Sous HA -> SELECT filtré de la table PARTAGÉE (le filtre
+    /// tenancy reste dans `presence_roster`) -> le roster agrège les opérateurs de TOUS les réplicas.
+    /// Community (!ha, en mémoire) : purge paresseuse `retain` inchangée (byte-identique).
     fn snapshot(&self) -> Vec<PresenceEntry> {
         let cutoff = now_epoch() - PRESENCE_TTL_SECS;
         #[cfg(feature = "store-postgres")]
         if let Some(app) = &self.backend {
             let store = app.store();
-            let _ = store.execute("DELETE FROM presence WHERE last_seen < ?", &crate::sql_params![cutoff]);
+            // LECTURE SEULE : filtre les périmés sur la lecture (pas de DELETE ici). Le GC est périodique.
             return store
                 .query(
-                    "SELECT login, role, engagement_id, since, last_seen FROM presence",
-                    &crate::sql_params![],
+                    "SELECT login, role, engagement_id, since, last_seen FROM presence WHERE last_seen >= ?",
+                    &crate::sql_params![cutoff],
                     |r| {
                         Ok(PresenceEntry {
                             login: r.get_str(0)?,
@@ -222,6 +226,32 @@ impl PresenceRegistry {
         let mut m = self.inner.lock().unwrap();
         m.retain(|_, e| e.last_seen >= cutoff);
         m.values().cloned().collect()
+    }
+}
+
+/// GC PÉRIODIQUE de la table `presence` PARTAGÉE (HA #10, Fix write-amplification). Remplace le DELETE
+/// qui tournait sur CHAQUE lecture `/api/presence` par un DELETE de fond à la cadence du heartbeat
+/// ([`HEARTBEAT_TICK_SECS`]) : purge les lignes dont `last_seen` dépasse [`PRESENCE_TTL_SECS`] (connexions
+/// mortes sans `Drop`). Le snapshot reste correct entre deux ticks car il FILTRE déjà les périmés sur la
+/// lecture -> la sémantique de TTL est INCHANGÉE, seule l'écriture physique est amortie. LEADER-ONLY : un
+/// seul writer cluster-wide (le DELETE est idempotent, mais gate sur `is_leader` évite N réplicas écrivant
+/// la même purge). Spawné UNIQUEMENT sous HA (cf. `main.rs`) ; single-instance/community : la purge
+/// paresseuse `retain` en mémoire du snapshot suffit, cette boucle n'existe pas.
+#[cfg(feature = "store-postgres")]
+pub(crate) async fn presence_gc_loop(app: App) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(HEARTBEAT_TICK_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if !crate::ha::is_leader(&app) {
+            continue; // un seul réplica (le leader) fait la purge de fond.
+        }
+        let cutoff = now_epoch() - PRESENCE_TTL_SECS;
+        // Le guard `Store` est `!Send` et scoppé à ce bloc sync (droppé avant le prochain `.await`) ->
+        // le future reste `Send`/spawnable et ne tient aucun verrou DB à travers une suspension.
+        let store = app.store();
+        let _ = store.execute("DELETE FROM presence WHERE last_seen < ?", &crate::sql_params![cutoff]);
+        drop(store);
     }
 }
 
