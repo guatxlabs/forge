@@ -39,6 +39,19 @@ def _demo_actions(scope):
     return [Action(kind="demo.fingerprint", target=t, desc="demo") for t in tgts]
 
 
+def _register_toolspecs(args):
+    """Enregistre les ToolSpecs déclaratifs de `--toolspec FILE` (répétable) AVANT le plan. FAIL-CLOSED :
+    une spec invalide -> SystemExit avec un message NOMMANT le fichier (aucun enregistrement partiel).
+    L'enregistrement passe par `register_spec` -> le kind est gouverné à l'identique d'un module natif."""
+    from ..modules import loader as _loader
+    for f in (getattr(args, "toolspec", None) or []):
+        try:
+            kind = _loader.load_toolspec_file(f)
+            print(f"ToolSpec enregistré : {kind}  (<- {f})")
+        except _loader.SpecError as e:
+            raise SystemExit(f"forge : --toolspec invalide -> {e}")
+
+
 def cmd_plan(args):
     scope = Scope.load(args.scope)
     roe = Roe(scope)                       # pas armé : tout sera VETO ou DRY_RUN
@@ -51,6 +64,7 @@ def cmd_plan(args):
 
 
 def cmd_run(args):
+    _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = Memory(args.memory) if args.memory else None
@@ -95,6 +109,7 @@ def _workflows_path(args):
 
 
 def cmd_campaign(args):
+    _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = Memory(args.memory) if args.memory else None

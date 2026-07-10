@@ -1,0 +1,18 @@
+{
+  "kind": "recon.example_httptitle",
+  "vuln_class": "Recon",
+  "binary": "httpx",
+  "docker_image": "projectdiscovery/httpx",
+  "argv_template": ["-silent", "-title", "-u", "{target_url}"],
+  "cwe": "CWE-200",
+  "mitre": "T1595",
+  "phase": "recon",
+  "capability": "passive",
+  "attck_tactic": "Reconnaissance",
+  "parser": "lines",
+  "hit_status": "tested",
+  "hit_is_asset": false,
+  "severity": "INFO",
+  "timeout": 120,
+  "description": "EXEMPLE de ToolSpec declaratif (zero Python) — enrobe httpx pour extraire le <title>. Charge via FORGE_TOOLSPECS ou `forge run --toolspec`. Gouverne : argv fixe no-shell, scope-guard fail-closed, proof-oriented (tested)."
+}
