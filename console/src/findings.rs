@@ -79,7 +79,7 @@ pub(crate) fn rows_to_json(db: &Connection, sql: &str, args: &[String], cols: &[
     }
 }
 
-pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     // ENGAGEMENT (objet de 1re classe) : la vue ne montre QUE les findings de l'engagement actif
     // (fail-closed : un engagement ne voit JAMAIS les findings d'un autre). `engagement_id` est un
     // entier RÉSOLU (jamais du texte client) -> inliné sans risque d'injection.
@@ -98,6 +98,79 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), &params, |r| r.get_i64(0))
         .unwrap_or(0);
     let (limit, offset) = paginate(&q, 200, 1000);
+    // KEYSET (seek) pagination — OPT-IN pour les TRÈS GROS sets (P1-4). `?cursor=<opaque>` (jeton signé
+    // opaque) ou `?after_id=<int>` (commodité brute) bascule d'OFFSET vers un SEEK sur l'ordre UNIQUE +
+    // MONOTONE `id DESC` : les pages profondes ne dégradent plus (pas de skip-scan OFFSET) et, sous inserts
+    // concurrents, aucune ligne n'est SAUTÉE ni DUPLIQUÉE à la frontière (là où OFFSET décale). FAIL-CLOSED :
+    // un curseur/after_id malformé -> 400 (JAMAIS un scan de table non borné). ABSENCE des DEUX paramètres
+    // -> le chemin OFFSET ci-dessous s'exécute BYTE-IDENTIQUE (compat ascendante totale des callers actuels).
+    if q.contains_key("cursor") || q.contains_key("after_id") {
+        // Borne de seek : `None` = PREMIÈRE page keyset (aucune borne — `cursor=`/`after_id=` VIDES entrent en
+        // mode keyset depuis le haut) ; `Some(id)` = seek `id < id`. Un jeton/entier NON VIDE mais INVALIDE ->
+        // 400 FAIL-CLOSED (jamais un scan non borné). Le décodage rend un `i64` STRICTEMENT parsé, LIÉ ensuite
+        // comme `Param::Int` (aucune interpolation SQL).
+        let after: Option<i64> = if let Some(c) = q.get("cursor").filter(|c| !c.is_empty()) {
+            match decode_id_cursor(c) {
+                Some(v) => Some(v),
+                None => {
+                    drop(store);
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_cursor", "why": "curseur `cursor` malformé (jeton opaque invalide)"}))).into_response();
+                }
+            }
+        } else if let Some(a) = q.get("after_id").filter(|a| !a.is_empty()) {
+            match a.parse::<i64>().ok() {
+                Some(v) => Some(v),
+                None => {
+                    drop(store);
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_cursor", "why": "`after_id` doit être un entier"}))).into_response();
+                }
+            }
+        } else {
+            None // `cursor=`/`after_id=` vide -> première page keyset (aucune borne)
+        };
+        // Tri UNIQUE + MONOTONE `id DESC` : `id` est la clé de tri ET un tiebreaker UNIQUE (PK), donc aucun
+        // skip/dupe sur égalité de clé. La borne `id<?` (si présente) est LIÉE en paramètre — le seam traduit
+        // `?`->`$n` pour Postgres. `limit` (entier clampé par paginate) inliné comme le chemin OFFSET ; PAS d'OFFSET.
+        let (seek_cond, ks_params): (&str, Vec<Param>) = match after {
+            Some(id) => {
+                let mut p = params.clone();
+                p.push(Param::Int(id));
+                (" AND id<?", p)
+            }
+            None => ("", params.clone()),
+        };
+        let ks_sql = format!(
+            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT {limit}"
+        );
+        let rows: Vec<Value> = store
+            .query_lax(&ks_sql, &ks_params, |r| {
+                Ok(json!({
+                    "id": r.get_i64(0)?,
+                    "ts": r.get_opt_str(1)?.unwrap_or_default(),
+                    "campaign": r.get_opt_str(2)?.unwrap_or_default(),
+                    "target": r.get_opt_str(3)?.unwrap_or_default(),
+                    "title": r.get_opt_str(4)?.unwrap_or_default(),
+                    "severity": r.get_opt_str(5)?.unwrap_or_default(),
+                    "category": r.get_opt_str(6)?.unwrap_or_default(),
+                    "mitre": r.get_opt_str(7)?.unwrap_or_default(),
+                    "status": r.get_opt_str(8)?.unwrap_or_default(),
+                    "tool": r.get_opt_str(9)?.unwrap_or_default(),
+                    "run_id": r.get_opt_str(10)?.unwrap_or_default(),
+                    "classification": r.get_opt_str(11)?.unwrap_or_default(),
+                }))
+            })
+            .unwrap_or_default();
+        drop(store);
+        // next_cursor : renseigné UNIQUEMENT si la page est PLEINE (`len == limit`) — une page partielle
+        // signifie qu'il ne reste rien après. Encode l'`id` de la DERNIÈRE ligne (le plus petit, tri DESC),
+        // d'où le seek suivant reprend STRICTEMENT après (`id < ce_dernier`). null => fin de pagination.
+        let next_cursor = if rows.len() as i64 == limit {
+            rows.last().and_then(|v| v["id"].as_i64()).map(encode_id_cursor)
+        } else {
+            None
+        };
+        return Json(json!({"total": total, "limit": limit, "next_cursor": next_cursor, "findings": rows})).into_response();
+    }
     let sql = format!(
         "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
     );
@@ -123,7 +196,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         })
         .unwrap_or_default();
     drop(store);
-    Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows}))
+    Json(json!({"total": total, "limit": limit, "offset": offset, "findings": rows})).into_response()
 }
 
 pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
@@ -1057,6 +1130,210 @@ mod tests {
         let other = col(&v, ATTACK_TACTIC_OTHER).unwrap();
         assert!(tech(other, "T9999").is_some(), "id hors catalogue préservé");
 
+        let _ = std::fs::remove_file(&led);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    //  KEYSET / CURSOR PAGINATION (#P1-4) — seek pour très gros sets, offset intact
+    // -------------------------------------------------------------------------------------------
+
+    /// Petit helper : lit la liste d'ids d'une page de findings.
+    fn ids_of(b: &Value) -> Vec<i64> {
+        b["findings"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect()
+    }
+
+    /// (a) COUVERTURE : paginer TOUT le set via `?cursor` rend CHAQUE ligne EXACTEMENT une fois, dans le
+    /// même ordre que le set complet trié (`id DESC`) — zéro trou, zéro doublon — et `next_cursor` devient
+    /// null à la fin.
+    #[tokio::test]
+    async fn keyset_full_coverage_no_gaps_no_dupes() {
+        let led = tmp_ledger("ks-cov");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let mut all: Vec<i64> = Vec::new();
+        for i in 0..25 {
+            all.push(seed_finding(&app, 1, &format!("f{i}"), "new"));
+        }
+        all.sort_unstable();
+        let expected: Vec<i64> = all.iter().rev().cloned().collect(); // id DESC = ordre de référence
+
+        let mut got: Vec<i64> = Vec::new();
+        // Première page : `cursor=""` (vide) entre en mode keyset depuis le haut.
+        let mut cursor: String = String::new();
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 100, "boucle de pagination non bornée");
+            let qp = HashMap::from([
+                ("engagement".to_string(), "1".to_string()),
+                ("limit".to_string(), "7".to_string()),
+                ("cursor".to_string(), cursor.clone()),
+            ]);
+            let resp = findings(State(app.clone()), HeaderMap::new(), Query(qp)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let b = to_json(resp).await;
+            let page = ids_of(&b);
+            assert!(page.len() <= 7, "la page respecte le limit");
+            got.extend(page);
+            match b["next_cursor"].as_str() {
+                Some(c) => cursor = c.to_string(),
+                None => break,
+            }
+        }
+        assert_eq!(got, expected, "keyset couvre chaque ligne exactement une fois, dans l'ordre id DESC");
+        let mut uniq = got.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), got.len(), "aucun doublon sur l'ensemble des pages");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// (b) STABILITÉ SOUS INSERT CONCURRENT : après avoir lu la page 1, insérer de NOUVELLES lignes (ids
+    /// plus grands) NE fait PAS sauter/dupliquer les lignes d'origine via keyset — alors que le chemin
+    /// OFFSET, lui, DÉRAILLE (fenêtre décalée -> skip + dupe).
+    #[tokio::test]
+    async fn keyset_stable_under_concurrent_insert() {
+        let led = tmp_ledger("ks-conc");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let mut orig: Vec<i64> = Vec::new();
+        for i in 0..10 {
+            orig.push(seed_finding(&app, 1, &format!("o{i}"), "new"));
+        }
+
+        // Page 1 (limit 5, `cursor=""` -> mode keyset depuis le haut) — le client voit les 5 ids les plus hauts.
+        let q1 = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("limit".to_string(), "5".to_string()),
+            ("cursor".to_string(), String::new()),
+        ]));
+        let b1 = to_json(findings(State(app.clone()), HeaderMap::new(), q1).await).await;
+        let p1 = ids_of(&b1);
+        assert_eq!(p1.len(), 5);
+        let cur = b1["next_cursor"].as_str().expect("page pleine -> next_cursor présent").to_string();
+
+        // Insert concurrent de 3 lignes (ids strictement plus grands que tous les orig).
+        for i in 0..3 {
+            seed_finding(&app, 1, &format!("n{i}"), "new");
+        }
+
+        // Page 2 via CURSEUR — reprend STRICTEMENT après la position, insensible aux inserts.
+        let mut q2m = HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("limit".to_string(), "5".to_string()),
+        ]);
+        q2m.insert("cursor".to_string(), cur);
+        let b2 = to_json(findings(State(app.clone()), HeaderMap::new(), Query(q2m)).await).await;
+        let p2 = ids_of(&b2);
+
+        let mut seen = p1.clone();
+        seen.extend(p2.iter().cloned());
+        let mut seen_sorted = seen.clone();
+        seen_sorted.sort_unstable();
+        let mut orig_sorted = orig.clone();
+        orig_sorted.sort_unstable();
+        assert_eq!(seen_sorted, orig_sorted, "keyset : les 10 lignes d'origine couvertes exactement une fois malgré les inserts");
+        let mut u = seen.clone();
+        u.sort_unstable();
+        u.dedup();
+        assert_eq!(u.len(), seen.len(), "keyset : aucun doublon sous insert concurrent");
+
+        // CONTRASTE : OFFSET page 2 (offset=5) APRÈS les inserts déraille (skip + dupe) -> union != orig.
+        let qo = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("limit".to_string(), "5".to_string()),
+            ("offset".to_string(), "5".to_string()),
+        ]));
+        let bo = to_json(findings(State(app.clone()), HeaderMap::new(), qo).await).await;
+        let po = ids_of(&bo);
+        let mut off_union = p1.clone();
+        off_union.extend(po.iter().cloned());
+        off_union.sort_unstable();
+        assert_ne!(off_union, orig_sorted, "OFFSET saute/duplique sous insert concurrent (ce que keyset évite)");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// (c) FAIL-CLOSED : un curseur/after_id malformé -> 400 `bad_cursor` (JAMAIS un scan complet). Un
+    /// curseur VALIDE et un `after_id` entier restent 200.
+    #[tokio::test]
+    async fn keyset_malformed_cursor_is_400() {
+        use base64::Engine as _;
+        let led = tmp_ledger("ks-bad");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let id = seed_finding(&app, 1, "f", "new");
+
+        let enc = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        // base64 invalide, mauvaise version, entier non parsable, pas de préfixe, entier vide.
+        let bads = vec![
+            "****not-base64****".to_string(),
+            enc("f2:5"),
+            enc("f1:abc"),
+            enc("nope"),
+            enc("f1:"),
+        ];
+        for bad in &bads {
+            let q = Query(HashMap::from([
+                ("engagement".to_string(), "1".to_string()),
+                ("cursor".to_string(), bad.clone()),
+            ]));
+            let resp = findings(State(app.clone()), HeaderMap::new(), q).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "curseur malformé '{bad}' -> 400");
+            let b = to_json(resp).await;
+            assert_eq!(b["error"], "bad_cursor");
+        }
+        // after_id non entier -> 400 également.
+        let q = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("after_id".to_string(), "not-an-int".to_string()),
+        ]));
+        assert_eq!(findings(State(app.clone()), HeaderMap::new(), q).await.status(), StatusCode::BAD_REQUEST);
+
+        // Curseur VALIDE (encode l'id existant + 1 pour capter la ligne) -> 200 + la ligne.
+        let good = super::encode_id_cursor(id + 1);
+        let q = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("cursor".to_string(), good),
+        ]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert_eq!(ids_of(&b), vec![id], "curseur valide -> seek correct");
+
+        // after_id entier -> 200.
+        let q = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("after_id".to_string(), (id + 1).to_string()),
+        ]));
+        assert_eq!(findings(State(app.clone()), HeaderMap::new(), q).await.status(), StatusCode::OK);
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// (d) OFFSET INCHANGÉ : sans cursor/after_id, la forme de réponse reste `{total,limit,offset,findings}`
+    /// (avec `offset`, SANS `next_cursor`) — compat ascendante byte-identique. Le chemin keyset, lui, expose
+    /// `next_cursor` et PAS `offset`.
+    #[tokio::test]
+    async fn offset_path_shape_unchanged() {
+        let led = tmp_ledger("ks-off");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        for i in 0..3 {
+            seed_finding(&app, 1, &format!("f{i}"), "new");
+        }
+        // Chemin OFFSET (par défaut) : garde `offset`, PAS de `next_cursor`.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert!(b.get("offset").is_some(), "offset path conserve `offset`");
+        assert!(b.get("next_cursor").is_none(), "offset path n'ajoute PAS `next_cursor`");
+        assert_eq!(b["findings"].as_array().unwrap().len(), 3);
+
+        // Chemin KEYSET : expose `next_cursor` (clé présente, ici null car page partielle), PAS `offset`.
+        let q = Query(HashMap::from([
+            ("engagement".to_string(), "1".to_string()),
+            ("after_id".to_string(), "999999".to_string()),
+        ]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert!(b.get("next_cursor").is_some(), "keyset path expose la clé `next_cursor`");
+        assert!(b["next_cursor"].is_null(), "page partielle -> next_cursor null");
+        assert!(b.get("offset").is_none(), "keyset path n'expose PAS `offset`");
         let _ = std::fs::remove_file(&led);
     }
 }
