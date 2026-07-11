@@ -62,8 +62,23 @@ def _body_hash(body):
     return hashlib.sha256(_normalize_body(body).encode("utf-8", "replace")).hexdigest()
 
 
+class _ContentTypedOracle:
+    """Mixin partagé portant le seul `_fetch` renvoyant `(status, body, content_type)` — le seam
+    monkeypatché par les tests. Factorise le fetch IDENTIQUE de `IdorDifferential` et `PrivEsc` (le
+    câblage urllib partagé `Oracle._http` + normalisation du content-type). Mixin pur (hérite
+    d'`object`) : n'ajoute AUCUNE capacité, chaque oracle garde sa base et ses flags gardés par le ROE."""
+
+    @staticmethod
+    def _fetch(url, headers, timeout=15, method="GET", body=None):
+        """(status, body, content_type). content_type cadre la comparaison : deux corps de types
+        différents (html vs json) ne sont jamais « le même objet ». body peut être None.
+        Adosse le câblage urllib partagé (Oracle._http) — seam monkeypatché par les tests."""
+        st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
+        return st, txt, Oracle._content_type(h)
+
+
 @register("access_control.idor")
-class IdorDifferential(Oracle):
+class IdorDifferential(_ContentTypedOracle, Oracle):
     kind = "access_control.idor"
     exploit = True                       # accède à l'objet d'un autre user -> exige allow_exploit
     destructive = False                  # GET = lecture ; les méthodes write sont gardées (voir _is_write)
@@ -105,14 +120,6 @@ class IdorDifferential(Oracle):
     @staticmethod
     def _is_write(method):
         return method in ("POST", "PUT", "PATCH", "DELETE")
-
-    @staticmethod
-    def _fetch(url, headers, timeout=15, method="GET", body=None):
-        """(status, body, content_type). content_type cadre la comparaison : deux corps de types
-        différents (html vs json) ne sont jamais « le même objet ». body peut être None.
-        Adosse le câblage urllib partagé (Oracle._http) — seam monkeypatché par les tests."""
-        st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
-        return st, txt, Oracle._content_type(h)
 
     @staticmethod
     def _same_object(resp_a, resp_b):
@@ -223,7 +230,7 @@ class IdorDifferential(Oracle):
 #  OPÉRATEUR (T1068 / CWE-269) — NON DESTRUCTIF (lecture ; les méthodes write sont gardées destructive)
 # =================================================================================================
 @register("access_control.privesc")
-class PrivEsc(ScopeGuardedOracle):
+class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
     """Oracle d'élévation de privilège VERTICALE (function/object-level) à preuve, avec le contexte
     DEUX-COMPTES DE L'OPÉRATEUR : le compte BAS-PRIVILÈGE (accounts[0]) atteint-il une fonction/objet
     ADMIN-ONLY (accounts[1] = le compte privilégié de l'opérateur) qui DEVRAIT lui être refusé ?
@@ -260,12 +267,6 @@ class PrivEsc(ScopeGuardedOracle):
     @staticmethod
     def _is_write(method):
         return method in ("POST", "PUT", "PATCH", "DELETE")
-
-    @staticmethod
-    def _fetch(url, headers, timeout=15, method="GET", body=None):
-        """(status, body, content_type) — adosse le câblage urllib partagé (Oracle._http). Seam patché."""
-        st, txt, h = Oracle._http(url, headers=headers, timeout=timeout, method=method, data=body, maxlen=200000)
-        return st, txt, Oracle._content_type(h)
 
     def _admin_urls(self, action):
         """Fonctions/objets ADMIN-ONLY à sonder : params.admin_urls (liste) + params.admin_url (single) +
