@@ -374,21 +374,20 @@ pub(crate) fn read_fired_techniques(app: &App, eid: Option<i64>, extra_cond: Opt
     // ENGAGEMENT : `eid=Some(id)` restreint aux tirs de CET engagement (vue /purple/coverage). `None`
     // = pas de filtre engagement (run_report : le `run_id` isole déjà les records d'un seul engagement).
     // engagement_id est un entier RÉSOLU -> inliné sans risque d'injection.
-    let eng_clause = eid.map(|e| format!(" AND engagement_id={e}")).unwrap_or_default();
-    let (sql, args): (String, Vec<String>) = match extra_cond {
-        Some((col, val)) => (
-            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause} AND {col}=?"),
-            vec![val.to_string()],
-        ),
-        None => (
-            format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause}"),
-            vec![],
-        ),
+    // `engagement_id` (entier résolu) LIÉ en Param quand présent — plus d'interpolation de valeur. `{col}`
+    // reste interpolé : c'est un IDENTIFIANT de colonne FIXE (campaign|run_id) fourni par l'appelant, jamais
+    // une valeur client (non paramétrable en SQL). ORDRE des placeholders : engagement_id apparaît AVANT
+    // `AND {col}=?`, donc son Param est poussé EN PREMIER.
+    let eng_clause = if eid.is_some() { " AND engagement_id=?" } else { "" };
+    let sql = match extra_cond {
+        Some((col, _)) => format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause} AND {col}=?"),
+        None => format!("SELECT mitre, ts FROM runrecord WHERE fired=1 AND mitre<>''{eng_clause}"),
     };
     // LENIENT (query_lax) : un prepare échoué -> Err -> unwrap_or_default -> vec![] (à l'identique de
-    // l'early-return d'avant) ; une ligne malformée est ignorée (filter_map(ok)). Bind des args &String
-    // en TEXT, comme le `params_from_iter(args.iter())` d'origine.
-    let params: Vec<crate::store::Param> = args.iter().map(|s| crate::store::Param::Text(s.clone())).collect();
+    // l'early-return d'avant) ; une ligne malformée est ignorée (filter_map(ok)).
+    let mut params: Vec<crate::store::Param> = Vec::new();
+    if let Some(e) = eid { params.push(crate::store::Param::Int(e)); }
+    if let Some((_, val)) = extra_cond { params.push(crate::store::Param::Text(val.to_string())); }
     store
         .query_lax(&sql, &params, |r| {
             let mitre = r.get_opt_str(0)?.unwrap_or_default();

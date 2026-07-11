@@ -274,8 +274,12 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
         return (StatusCode::CONFLICT, Json(json!({"error": "default_protected", "why": "le dashboard par défaut (#1) ne peut pas être supprimé"})));
     }
     let store = app.store();
-    // les panels du dashboard supprimé retombent sur le défaut (jamais perdus/orphelins).
-    let _ = store.execute("UPDATE panel SET dashboard_id=1 WHERE dashboard_id=?", &crate::sql_params![id]);
+    // les panels du dashboard supprimé retombent sur le défaut (jamais perdus/orphelins). FAIL-CLOSED : un
+    // échec de la réassignation -> 500 AVANT le DELETE (sinon les panels seraient ORPHELINS pointant un
+    // dashboard supprimé, et la réponse affirmerait faussement `panels_reassigned_to:1`).
+    if let Err(e) = store.execute("UPDATE panel SET dashboard_id=1 WHERE dashboard_id=?", &crate::sql_params![id]) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})));
+    }
     match store.execute("DELETE FROM dashboard WHERE id=?", &crate::sql_params![id]) {
         Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "dashboard introuvable"}))),
         Ok(_) => (StatusCode::OK, Json(json!({"deleted": id, "panels_reassigned_to": 1}))),

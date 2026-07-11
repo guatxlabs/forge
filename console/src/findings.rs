@@ -85,15 +85,16 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     // entier RÉSOLU (jamais du texte client) -> inliné sans risque d'injection.
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     let store = app.store();
-    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
-    if let Some(s) = q.get("severity") { conds.push("severity=?".into()); args.push(s.clone()); }
-    if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
-    if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
-    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); args.push(m.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
+    // `engagement_id` (entier RÉSOLU) est LIÉ en Param (plus d'interpolation de valeur dans le SQL) : la
+    // 1re condition -> 1er placeholder, donc `eid` est le PREMIER Param, avant les filtres optionnels.
+    let (mut conds, mut params): (Vec<String>, Vec<Param>) = (vec!["engagement_id=?".into()], vec![Param::Int(eid)]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); params.push(Param::Text(c.clone())); }
+    if let Some(s) = q.get("severity") { conds.push("severity=?".into()); params.push(Param::Text(s.clone())); }
+    if let Some(s) = q.get("status") { conds.push("status=?".into()); params.push(Param::Text(s.clone())); }
+    if let Some(t) = q.get("target") { conds.push("target=?".into()); params.push(Param::Text(t.clone())); }
+    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); params.push(Param::Text(m.clone())); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); params.push(Param::Text(r.clone())); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
-    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
     let total: i64 = store
         .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), &params, |r| r.get_i64(0))
         .unwrap_or(0);
@@ -131,7 +132,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         // Tri UNIQUE + MONOTONE `id DESC` : `id` est la clé de tri ET un tiebreaker UNIQUE (PK), donc aucun
         // skip/dupe sur égalité de clé. La borne `id<?` (si présente) est LIÉE en paramètre — le seam traduit
         // `?`->`$n` pour Postgres. `limit` (entier clampé par paginate) inliné comme le chemin OFFSET ; PAS d'OFFSET.
-        let (seek_cond, ks_params): (&str, Vec<Param>) = match after {
+        let (seek_cond, mut ks_params): (&str, Vec<Param>) = match after {
             Some(id) => {
                 let mut p = params.clone();
                 p.push(Param::Int(id));
@@ -139,8 +140,10 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
             }
             None => ("", params.clone()),
         };
+        // `limit` (entier clampé par paginate) LIÉ en dernier Param (placeholder final `LIMIT ?`).
+        ks_params.push(Param::Int(limit));
         let ks_sql = format!(
-            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT {limit}"
+            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT ?"
         );
         let rows: Vec<Value> = store
             .query_lax(&ks_sql, &ks_params, |r| {
@@ -171,14 +174,18 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         };
         return Json(json!({"total": total, "limit": limit, "next_cursor": next_cursor, "findings": rows})).into_response();
     }
+    // `limit`/`offset` (entiers clampés par paginate) LIÉS en derniers Params (placeholders finaux).
+    let mut off_params = params.clone();
+    off_params.push(Param::Int(limit));
+    off_params.push(Param::Int(offset));
     let sql = format!(
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
     );
     // requête typée : `id` est un entier (rows_to_json le rendrait vide en le lisant comme String).
     // LENIENT (query_lax): un prepare échoué -> Err -> unwrap_or_default -> findings vides + total, à
     // l'identique de l'early-return d'avant ; une ligne malformée est ignorée (filter_map(ok)).
     let rows: Vec<Value> = store
-        .query_lax(&sql, &params, |r| {
+        .query_lax(&sql, &off_params, |r| {
             Ok(json!({
                 "id": r.get_i64(0)?,
                 "ts": r.get_opt_str(1)?.unwrap_or_default(),
@@ -205,8 +212,9 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     
     let row = app.store().query_row(
-        &format!("SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification FROM finding WHERE id=? AND engagement_id={eid}"),
-        &crate::sql_params![id],
+        // `engagement_id` (entier résolu) LIÉ en Param — plus d'interpolation de valeur (défense anti-régression).
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification FROM finding WHERE id=? AND engagement_id=?",
+        &crate::sql_params![id, eid],
         |r| {
             Ok(json!({
                 "id": r.get_i64(0)?,
@@ -259,8 +267,8 @@ pub(crate) async fn finding_update(
         let store = app.store();
         store
             .query_row(
-                &format!("SELECT 1 FROM finding WHERE id=? AND engagement_id={eid}"),
-                &crate::sql_params![id],
+                "SELECT 1 FROM finding WHERE id=? AND engagement_id=?",
+                &crate::sql_params![id, eid],
                 |_| Ok(()),
             )
             .is_ok()
@@ -323,7 +331,8 @@ pub(crate) async fn finding_update(
         if let Some(s) = &new_status { sets.push("status=?"); params.push(Param::Text(s.clone())); }
         if let Some(c) = &new_class { sets.push("classification=?"); params.push(Param::Text(c.clone())); }
         params.push(Param::Int(id)); // borne WHERE (>=1 SET garanti : no_change déjà rejeté 400 plus haut)
-        let sql = format!("UPDATE finding SET {} WHERE id=? AND engagement_id={eid}", sets.join(", "));
+        params.push(Param::Int(eid)); // `engagement_id` LIÉ (plus d'interpolation de valeur) — placeholder final
+        let sql = format!("UPDATE finding SET {} WHERE id=? AND engagement_id=?", sets.join(", "));
         if let Err(e) = store.execute(&sql, &params) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "db_write_failed", "why": format!("écriture du finding échouée: {e}")}))).into_response();
         }
@@ -427,8 +436,8 @@ pub(crate) async fn findings_bulk_status(
             //             (sinon un échec DB passerait pour un « non trouvé » et l'appelant croirait à un
             //             succès partiel silencieux). Chaque id est un i64 ; `eid` est un entier résolu.
             match app.store().execute(
-                &format!("UPDATE finding SET status=? WHERE id=? AND engagement_id={eid}"),
-                &crate::sql_params![status.clone(), *id],
+                "UPDATE finding SET status=? WHERE id=? AND engagement_id=?",
+                &crate::sql_params![status.clone(), *id, eid],
             ) {
                 Ok(n) if n > 0 => applied.push(*id),
                 Ok(_) => skipped.push(*id),
@@ -560,20 +569,23 @@ pub(crate) async fn runrecords(State(app): State<App>, headers: HeaderMap, Query
     // ENGAGEMENT : les runrecords de la vue sont ceux de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     
-    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
-    if let Some(t) = q.get("target") { conds.push("target=?".into()); args.push(t.clone()); }
-    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); args.push(m.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
+    // `engagement_id` (entier résolu) LIÉ en 1er Param ; `fired=1` reste un littéral fixe (aucune valeur).
+    let (mut conds, mut params): (Vec<String>, Vec<Param>) = (vec!["engagement_id=?".into()], vec![Param::Int(eid)]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); params.push(Param::Text(c.clone())); }
+    if let Some(t) = q.get("target") { conds.push("target=?".into()); params.push(Param::Text(t.clone())); }
+    if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); params.push(Param::Text(m.clone())); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); params.push(Param::Text(r.clone())); }
     if q.get("fired").map(|v| v == "1" || v == "true").unwrap_or(false) { conds.push("fired=1".into()); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 500, 2000);
+    // LIMIT/OFFSET (entiers clampés) LIÉS en derniers placeholders.
+    params.push(Param::Int(limit));
+    params.push(Param::Int(offset));
     let sql = format!(
-        "SELECT id,ts,campaign,target,kind,mitre,fired,detail,run_id FROM runrecord{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
+        "SELECT id,ts,campaign,target,kind,mitre,fired,detail,run_id FROM runrecord{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
     );
     // `fired` est un entier (0/1) — colonne réelle ; on la rend telle quelle via une requête typée.
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
-    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
     let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |r| {
             Ok(json!({
@@ -602,8 +614,8 @@ pub(crate) async fn campaigns(State(app): State<App>, headers: HeaderMap, Query(
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
     let out: Vec<Value> = app.store()
         .query_lax(
-            &format!("SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id={eid} GROUP BY campaign ORDER BY last_ts DESC"),
-            &[],
+            "SELECT campaign, COUNT(*) AS findings, MAX(ts) AS last_ts FROM finding WHERE campaign<>'' AND engagement_id=? GROUP BY campaign ORDER BY last_ts DESC",
+            &crate::sql_params![eid],
             |r| {
                 Ok(json!({
                     "campaign": r.get_str(0)?,
@@ -620,17 +632,19 @@ pub(crate) async fn roe(State(app): State<App>, headers: HeaderMap, Query(q): Qu
     // ENGAGEMENT : les décisions du garde-fou sont celles de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     
-    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
-    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); args.push(r.clone()); }
-    if let Some(v) = q.get("verdict") { conds.push("verdict=?".into()); args.push(v.clone()); }
+    // `engagement_id` (entier résolu) LIÉ en 1er Param ; filtres optionnels et LIMIT/OFFSET liés ensuite.
+    let (mut conds, mut params): (Vec<String>, Vec<Param>) = (vec!["engagement_id=?".into()], vec![Param::Int(eid)]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); params.push(Param::Text(c.clone())); }
+    if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); params.push(Param::Text(r.clone())); }
+    if let Some(v) = q.get("verdict") { conds.push("verdict=?".into()); params.push(Param::Text(v.clone())); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 500, 2000);
+    params.push(Param::Int(limit));
+    params.push(Param::Int(offset));
     let sql = format!(
-        "SELECT id,ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons FROM roe_decision{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}"
+        "SELECT id,ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons FROM roe_decision{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
     );
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
-    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
     let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |r| {
             // reasons stocké en JSON (array) — on le re-parse pour le rendre structuré au front.
@@ -658,19 +672,19 @@ pub(crate) async fn coverage(State(app): State<App>, headers: HeaderMap, Query(q
     // ENGAGEMENT : couverture ATT&CK de l'engagement actif UNIQUEMENT (engagement_id résolu, inliné).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     
-    // filtre campaign optionnel (param lié — pas d'inlining).
-    let (sql, args): (String, Vec<String>) = match q.get("campaign") {
+    // filtre campaign optionnel (param lié). `engagement_id` (entier résolu) LIÉ AUSSI : il apparaît AVANT
+    // `campaign=?` dans le SQL, donc son Param est en PREMIER (ordre des placeholders).
+    let (sql, params): (String, Vec<Param>) = match q.get("campaign") {
         Some(c) => (
-            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} AND campaign=? GROUP BY mitre ORDER BY n DESC"),
-            vec![c.clone()],
+            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id=? AND campaign=? GROUP BY mitre ORDER BY n DESC".to_string(),
+            vec![Param::Int(eid), Param::Text(c.clone())],
         ),
         None => (
-            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} GROUP BY mitre ORDER BY n DESC"),
-            vec![],
+            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id=? GROUP BY mitre ORDER BY n DESC".to_string(),
+            vec![Param::Int(eid)],
         ),
     };
     // LENIENT: prepare échoué -> Err -> unwrap_or_default -> [] (idem early-return), lignes mal formées ignorées.
-    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
     let out: Vec<Value> = app.store()
         .query_lax(&sql, &params, |row| {
             Ok(json!({
@@ -775,17 +789,17 @@ pub(crate) async fn attack_matrix(State(app): State<App>, headers: HeaderMap, Qu
     // filtres que /api/coverage, donc AUCUNE fuite cross-engagement/tenant (le catalogue de référence
     // est statique, pas des données d'un autre engagement).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    let (sql, args): (String, Vec<String>) = match q.get("campaign") {
+    // `engagement_id` (entier résolu) LIÉ, en PREMIER Param (apparaît avant `campaign=?`) ; campaign lié ensuite.
+    let (sql, params): (String, Vec<Param>) = match q.get("campaign") {
         Some(c) => (
-            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} AND campaign=? GROUP BY mitre"),
-            vec![c.clone()],
+            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id=? AND campaign=? GROUP BY mitre".to_string(),
+            vec![Param::Int(eid), Param::Text(c.clone())],
         ),
         None => (
-            format!("SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id={eid} GROUP BY mitre"),
-            vec![],
+            "SELECT mitre, COUNT(*) n, COALESCE(SUM(fired),0) f FROM runrecord WHERE mitre<>'' AND engagement_id=? GROUP BY mitre".to_string(),
+            vec![Param::Int(eid)],
         ),
     };
-    let params: Vec<Param> = args.iter().map(|s| Param::Text(s.clone())).collect();
     // exercised = techniques réellement présentes dans les run-records de CET engagement.
     let rows: Vec<(String, i64, i64)> = app.store()
         .query_lax(&sql, &params, |row| Ok((row.get_str(0)?, row.get_i64(1)?, row.get_i64(2)?)))
@@ -1424,6 +1438,40 @@ mod tests {
         assert!(b.get("next_cursor").is_some(), "keyset path expose la clé `next_cursor`");
         assert!(b["next_cursor"].is_null(), "page partielle -> next_cursor null");
         assert!(b.get("offset").is_none(), "keyset path n'expose PAS `offset`");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// BOUND engagement_id — le filtre d'isolation `engagement_id=?` LIÉ (Param) rend EXACTEMENT les mêmes
+    /// résultats que l'ancien `engagement_id={eid}` inliné : la liste `findings` d'un engagement ne contient
+    /// QUE ses propres findings (aucun cross-engagement), et `finding_detail` 404 un id d'un AUTRE engagement.
+    /// Prouve la neutralité comportementale de la conversion valeur-interpolée -> valeur-liée (Tâche B).
+    #[tokio::test]
+    async fn engagement_id_binding_isolates_identically() {
+        let led = tmp_ledger("eid-bind");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        let a1 = seed_finding(&app, 1, "a1", "new");
+        let _a2 = seed_finding(&app, 1, "a2", "new");
+        let b1 = seed_finding(&app, 2, "b1", "new");
+
+        // liste engagement 1 -> exactement SES 2 findings, aucun de l'engagement 2.
+        let q1 = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
+        let body = to_json(findings(State(app.clone()), HeaderMap::new(), q1).await).await;
+        assert_eq!(body["total"], 2, "engagement 1 voit ses 2 findings (bound eid)");
+        let titles: Vec<String> = body["findings"].as_array().unwrap().iter()
+            .map(|f| f["title"].as_str().unwrap_or("").to_string()).collect();
+        assert!(titles.contains(&"a1".to_string()) && titles.contains(&"a2".to_string()), "ses findings présents");
+        assert!(!titles.contains(&"b1".to_string()), "AUCUN finding cross-engagement (isolation liée)");
+
+        // detail : b1 (engagement 2) est INVISIBLE depuis l'engagement 1 -> 404 via engagement_id=? lié.
+        let q1b = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
+        let r = finding_detail(State(app.clone()), HeaderMap::new(), Path(b1), q1b).await.into_response();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "id d'un AUTRE engagement -> 404 (isolation liée)");
+        // detail : a1 (engagement 1) est VISIBLE depuis l'engagement 1.
+        let q1c = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
+        let r = finding_detail(State(app.clone()), HeaderMap::new(), Path(a1), q1c).await.into_response();
+        assert_eq!(r.status(), StatusCode::OK, "propre finding visible (bound eid)");
         let _ = std::fs::remove_file(&led);
     }
 }
