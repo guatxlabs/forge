@@ -1993,6 +1993,7 @@ mod tests {
             include_str!("../web/js/core/help.js"),
             include_str!("../web/js/core/ui.js"),
             include_str!("../web/js/views/admin.js"),
+            include_str!("../web/js/components/detection-source-form.js"),
         ]
         .concat();
         assert!(app.contains("function openHelp("), "openHelp() absent du front");
