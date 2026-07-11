@@ -4,6 +4,14 @@ POURQUOI : la clé privée du ledger vit sur le host Forge. Un attaquant qui roo
 la clé → il peut réécrire l'histoire ET la re-signer ; `verify()` local passerait. L'ancrage fait
 constater l'état du ledger par quelque chose que le host ne peut pas réécrire après coup.
 
+RAPPEL — défense-en-profondeur LOCALE vs cet ancrage : le ledger persiste aussi un HIGH-WATER-MARK
+sidecar `<ledger>.hwm` (cf. ledger.py) fsync'd sous le verrou d'append ; `verify()` s'en sert pour
+détecter une TRONCATURE de la queue. Le HWM relève la barre contre une troncature ACCIDENTELLE et un
+falsificateur NON-root/naïf, mais un attaquant ROOT réécrit AUSSI le HWM (il vit sur le même host).
+La protection contre un host COMPROMIS reste donc CET ancrage hors-host (WitnessAnchor + reconcile) :
+seule une contre-signature par une clé que le host ne détient pas résiste à un root. HWM et ancrage
+sont complémentaires — le premier est un garde-fou local gratuit, le second la vraie garantie.
+
 L'INTERFACE : `Anchor.anchor(checkpoint)` prend un checkpoint `{seq, head, ts}` et le fait ancrer.
   - `NullAnchor`     : no-op (défaut).
   - `WitnessAnchor`  : envoie le checkpoint à un TÉMOIN (clé distincte, autre host) qui CONTRE-SIGNE

@@ -14,6 +14,16 @@ faiblesses du ledger de Plume relevées à l'analyse :
 `verify()` recalcule la chaîne + vérifie chaque hash + chaque signature, et rapporte la PREMIÈRE
 entrée cassée. `verify_external(pubkey_hex)` permet à un tiers de vérifier sans aucun secret (Ed25519).
 
+ANTI-TRONCATURE (défense-en-profondeur, F4) : chaîner genesis->queue ne détecte PAS un DROP de la
+queue (une chaîne plus courte reste « valide » ; `_disk_tail` tolère même une dernière ligne
+corrompue). On persiste donc un HIGH-WATER-MARK (HWM) dans un sidecar `<ledger>.hwm` = {seq, hash,
+count} de la dernière entrée, écrit + fsync SOUS LE MÊME verrou flock que l'append (il ne peut donc
+pas retarder). `verify()`/`verify_external()` recoupent la queue disque contre le HWM : queue seq <
+HWM seq (ou hash HWM absent de la chaîne) => TRONCATURE. HONNÊTETÉ du modèle de menace : le HWM relève
+la barre contre une troncature ACCIDENTELLE et un falsificateur NON-root/naïf, mais un attaquant ROOT
+réécrit AUSSI le HWM — la protection complète reste l'ANCRAGE HORS-HOST (signer distant +
+WitnessAnchor/reconcile, cf. anchor.py), opt-in.
+
 MULTI-ALGOS : un MÊME ledger peut mélanger des entrées d'algos différents — le moteur Python signe
 en `ed25519` (ou `hmac-sha256` en repli), tandis que la console Rust écrit ses entrées
 `console.run.start`/`.end` en `sha256-console` (chaîne SHA-256 NON signée, `sig: ""`). `verify()` est
@@ -133,6 +143,67 @@ class Ledger:
                 continue                            # ligne corrompue/tronquée : dernier head valide gardé
         return head, seq
 
+    # --- HIGH-WATER-MARK (HWM) : défense-en-profondeur anti-TRONCATURE -------------------------------
+    # GAP fermé ici (audit F4) : sans repère externe, `verify()` chaîne genesis->queue SANS longueur
+    # attendue, et `_disk_tail` TOLÈRE une dernière ligne corrompue -> un DROP de la queue produit une
+    # chaîne plus courte mais toujours « valide ». Le HWM sidecar `<ledger>.hwm` persiste {seq, hash,
+    # count} de la dernière entrée ; il est écrit + fsync SOUS LE MÊME verrou flock que l'append (donc
+    # il ne peut pas retarder la queue). MODÈLE DE MENACE (sans sur-promesse) : relève la barre contre
+    # une troncature ACCIDENTELLE (crash/copie partielle) et un falsificateur NON-root/naïf (write au
+    # seul ledger, HWM oublié) ; NE protège PAS d'un ROOT du host (il réécrit aussi le HWM). Protection
+    # complète = ancrage hors-host (RemoteSigner + WitnessAnchor/reconcile, cf. anchor.py), opt-in.
+    @property
+    def _hwm_path(self) -> Path:
+        return Path(str(self.path) + ".hwm")
+
+    def _write_hwm(self, seq: int, h: str) -> None:
+        """Persiste le repère de queue {seq, hash, count} de façon ATOMIQUE (rename) + DURABLE (fsync).
+        Appelé SOUS le verrou flock, APRÈS le fsync du ledger, pour que le HWM ne retarde pas la queue :
+        en régime normal queue == HWM ; queue AU-DELÀ du HWM seulement sur crash ENTRE les deux fsync
+        (traité comme PLANCHER en vérif, pas égalité). Best-effort : une I/O HWM qui échoue ne DOIT PAS
+        faire échouer un append déjà durable — le prochain append recrée le HWM ; un HWM manquant/périmé
+        = check de troncature simplement sauté/planché (jamais un faux positif)."""
+        tmp = Path(str(self._hwm_path) + ".tmp")
+        payload = _canon({"seq": seq, "hash": h, "count": seq})   # count == seq (seqs contigus 1..N)
+        try:
+            with tmp.open("w", encoding="utf-8") as hf:
+                hf.write(payload)
+                hf.flush()
+                os.fsync(hf.fileno())
+            os.replace(tmp, self._hwm_path)                       # rename atomique (POSIX)
+        except OSError:                                           # HWM best-effort : ne casse pas l'append
+            try:
+                tmp.unlink(missing_ok=True)                       # py>=3.8
+            except OSError:
+                pass
+
+    def _read_hwm(self) -> "dict[str, Any] | None":
+        """Lit le sidecar HWM. Absent (1er run / ledger LEGACY) ou corrompu -> None : le check de
+        troncature est alors SAUTÉ (on ne casse JAMAIS un ledger existant dépourvu de HWM)."""
+        try:
+            raw = self._hwm_path.read_text(encoding="utf-8")
+        except OSError:                                           # FileNotFoundError inclus
+            return None
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    def _hwm_truncation_reason(self, hwm: "dict[str, Any]", tail_seq: int,
+                               seen_hashes: "set[str]") -> "str | None":
+        """Raison de TRONCATURE si la queue disque est EN-DEÇÀ du HWM, sinon None. Le HWM est un
+        PLANCHER : une queue AU-DELÀ (crash entre les deux fsync) est TOLÉRÉE tant que le hash du HWM
+        est présent dans la chaîne recalculée. HWM malformé -> None (skip, rétro-compat)."""
+        hwm_seq, hwm_hash = hwm.get("seq"), hwm.get("hash")
+        if not isinstance(hwm_seq, int) or not isinstance(hwm_hash, str):
+            return None
+        if tail_seq < hwm_seq:
+            return "ledger tronqué (seq < high-water-mark)"
+        if hwm_hash not in seen_hashes:                          # queue >= HWM seq mais head HWM absent
+            return "ledger tronqué (hash high-water-mark absent de la chaîne)"
+        return None
+
     # --- append (le seul moyen d'écrire) — flock+fsync-sérialisé ENTRE PROCESSUS ---
     # Le MÊME ledger est écrit par la console Rust (kinds `console.*`) ET le moteur Python. Un append
     # est donc rendu ATOMIQUE vis-à-vis des autres processus par un verrou consultatif EXCLUSIF
@@ -168,6 +239,9 @@ class Ledger:
                     f.write(_canon(rec) + "\n")
                     f.flush()
                     os.fsync(f.fileno())           # durable AVANT de relâcher le verrou
+                    # HWM sous LE MÊME verrou, APRÈS le fsync du ledger : le repère de queue ne peut donc
+                    # pas retarder la queue durable (anti-troncature, cf. _write_hwm). Best-effort.
+                    self._write_hwm(seq, h)
                 finally:
                     if fcntl is not None:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
@@ -195,10 +269,17 @@ class Ledger:
 
     # --- verify : recalcul intégral depuis la genèse (avec le signeur local) ---
     def verify(self) -> dict[str, Any]:
+        hwm = self._read_hwm()
         if not self.path.exists():
+            # ledger absent : troncature TOTALE si un HWM (seq>=1) atteste d'entrées passées.
+            r = self._hwm_truncation_reason(hwm, 0, set()) if hwm is not None else None
+            if r is not None:
+                return {"ok": False, "entries": 0, "broken": None, "why": r, "alg": self.alg}
             return {"ok": True, "entries": 0, "broken": None, "alg": self.alg}
         prev = GENESIS
         n = 0
+        tail_seq = 0
+        seen: set[str] = set()
         for raw in self.path.read_text(encoding="utf-8").splitlines():
             raw = raw.strip()
             if not raw:
@@ -229,14 +310,30 @@ class Ledger:
             if not signing.verify_entry(entry_alg, self.signer, h.encode("utf-8"), rec.get("sig", "")):
                 return {"ok": False, "entries": n, "broken": seq, "why": f"signature invalide ({entry_alg or '?'})", "alg": self.alg}
             prev = rec["hash"]
+            tail_seq = seq
+            seen.add(rec["hash"])
+        # ANTI-TRONCATURE : la chaîne genesis->queue est intègre, mais est-elle COMPLÈTE ? Recouper la
+        # queue contre le HWM fsync'd (cf. _write_hwm). Un HWM absent (ledger legacy) -> check sauté.
+        if hwm is not None:
+            r = self._hwm_truncation_reason(hwm, tail_seq, seen)
+            if r is not None:
+                return {"ok": False, "entries": n, "broken": tail_seq or None, "why": r, "alg": self.alg}
         return {"ok": True, "entries": n, "broken": None, "head": prev, "alg": self.alg, "pub": self.signer.public_id()}
 
     # --- verify EXTERNE : un tiers vérifie avec la seule clé publique Ed25519 (non-répudiation) ---
     def verify_external(self, pubkey_hex: str) -> dict[str, Any]:
+        # Le HWM est un sidecar LOCAL : un tiers qui a copié le `.hwm` à côté du ledger bénéficie aussi
+        # de l'anti-troncature ; s'il n'a que le ledger -> _read_hwm() None -> check simplement sauté.
+        hwm = self._read_hwm()
         if not self.path.exists():
+            r = self._hwm_truncation_reason(hwm, 0, set()) if hwm is not None else None
+            if r is not None:
+                return {"ok": False, "entries": 0, "broken": None, "why": r}
             return {"ok": True, "entries": 0}
         prev = GENESIS
         n = 0
+        tail_seq = 0
+        seen: set[str] = set()
         for raw in self.path.read_text(encoding="utf-8").splitlines():
             raw = raw.strip()
             if not raw:
@@ -270,6 +367,12 @@ class Ledger:
             if entry_alg == signing.CONSOLE_ALG and not signing.verify_console(rec.get("sig", "")):
                 return {"ok": False, "entries": n, "broken": seq, "why": "hash ou signature invalide"}
             prev = rec["hash"]
+            tail_seq = seq
+            seen.add(rec["hash"])
+        if hwm is not None:                                       # anti-troncature (cf. verify())
+            r = self._hwm_truncation_reason(hwm, tail_seq, seen)
+            if r is not None:
+                return {"ok": False, "entries": n, "broken": tail_seq or None, "why": r}
         return {"ok": True, "entries": n, "broken": None}
 
     @property

@@ -11,7 +11,11 @@ from forge.anchor import Witness, WitnessAnchor, verify_witness_receipt, reconci
 
 
 def _resign_all(ledger):
-    """Simule un host compromis : recalcule TOUTE la chaîne et la re-signe avec la clé locale."""
+    """Simule un host COMPROMIS (root) : recalcule TOUTE la chaîne, la re-signe avec la clé locale, ET
+    réécrit le sidecar HWM pour qu'il colle à la nouvelle queue. C'est précisément le résiduel documenté :
+    un attaquant root réécrit AUSSI le HWM (même host) -> verify() local (chaîne+signature+HWM) passe,
+    et SEUL le témoin hors-host (reconcile) détecte la réécriture. Sans réécrire le HWM ici, le garde
+    anti-troncature local attraperait déjà cette falsification — mais on modélise un root complet."""
     lines = ledger.path.read_text().splitlines()
     recs = [json.loads(l) for l in lines if l.strip()]
     prev = GENESIS
@@ -21,6 +25,9 @@ def _resign_all(ledger):
         rec["sig"] = ledger.signer.sign(h.encode())
         prev = h
     ledger.path.write_text("\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in recs) + "\n")
+    hwm = Path(str(ledger.path) + ".hwm")                       # root couvre ses traces : HWM recollé sur la queue
+    if hwm.exists() and recs:
+        hwm.write_text(json.dumps({"seq": recs[-1]["seq"], "hash": prev, "count": recs[-1]["seq"]}))
 
 
 class TestAnchor(unittest.TestCase):
