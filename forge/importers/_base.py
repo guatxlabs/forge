@@ -23,39 +23,22 @@ import xml.etree.ElementTree as ET
 
 from ..schema import Finding, SEVERITIES
 from .. import techniques
+from ..redact import redact_secrets as _redact_secrets
 
 # --- Rédaction de secrets ---------------------------------------------------------------------------
-_REDACTED = "«redacted»"
-
-# Chaque motif masque la VALEUR secrète en gardant le CONTEXTE (nom d'en-tête/paramètre) — un import
-# doit rester lisible pour trier, sans jamais ré-émettre le secret. Volontairement large côté sûreté
-# (mieux vaut sur-masquer qu'exfiltrer). Appliqués dans l'ordre.
-_REDACTORS = (
-    # en-têtes quasi toujours secrets : on masque tout le reste de la ligne (`.` n'inclut pas \n).
-    (re.compile(r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|"
-                r"api-key|apikey)(\s*[:=]\s*)(\S.*)"), r"\1\2" + _REDACTED),
-    # schémas de jeton portés inline (Bearer/Basic <token>).
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-=/+]{6,}"), r"\1 " + _REDACTED),
-    # paramètres secrets clé=valeur (query-string / corps / config).
-    (re.compile(r"(?i)\b(api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|id[_-]?token|"
-                r"token|secret|client[_-]?secret|password|passwd|pwd|session[_-]?id|sessionid|private[_-]?key)"
-                r"(\s*[=:]\s*)[\"']?[^\s\"'&,;]{3,}"), r"\1\2" + _REDACTED),
-    # clés cloud / JWT / clés privées PEM.
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), _REDACTED),
-    (re.compile(r"(?i)\baws_secret_access_key\b\s*[=:]\s*\S+"), "aws_secret_access_key=" + _REDACTED),
-    (re.compile(r"\beyJ[A-Za-z0-9._\-]{6,}\.[A-Za-z0-9._\-]{6,}\.[A-Za-z0-9._\-]{4,}"), _REDACTED),
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), _REDACTED),
-)
+# DÉLÉGATION à la surface UNIQUE et auditée `forge.redact` (cf. son docstring). Cette ancienne
+# implémentation locale RATAIT la plupart des tokens cloud (gh_/xox…/AIza…/sk-…/glpat-) : un secret que
+# le rapport masquait FUYAIT par ce chemin d'ingest. `redact()` garde son nom/sa signature publics
+# (make_finding, l'API `importers`, la CLI l'utilisent) mais N'est plus qu'un WRAPPER FIN qui préserve
+# le contrat de coercition local (non-`str`/vide -> `""`/`str(text)`, jamais `None`).
 
 
 def redact(text):
-    """Masque les secrets d'une chaîne (jamais None). PUR — favorise la sûreté (sur-masquage OK)."""
+    """Masque les secrets d'une chaîne (jamais None) — DÉLÈGUE à `forge.redact.redact_secrets` (surface
+    unique). PUR — favorise la sûreté (sur-masquage OK)."""
     if not text:
         return "" if text is None else str(text)
-    s = str(text)
-    for rx, repl in _REDACTORS:
-        s = rx.sub(repl, s)
-    return s
+    return _redact_secrets(str(text))
 
 
 # --- Normalisation de sévérité ----------------------------------------------------------------------

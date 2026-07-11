@@ -34,11 +34,12 @@ champ texte est passé par `redact_secrets` AVANT rendu, dans TOUS les formats (
 import csv
 import io
 import json
-import re
 import shutil
 import subprocess
 from collections import OrderedDict
 from datetime import datetime, timezone
+
+from .redact import redact_secrets as _canonical
 
 SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 SEV_RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -46,39 +47,16 @@ SEV_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 REDACT = "[REDACTED]"
 
 # --- rédaction des secrets -------------------------------------------------------------------
-# Ensemble de motifs à haut signal (formes de secrets connues) + paires clef=valeur sensibles.
-# Idempotent : réappliquer sur un texte déjà rédigé ne change rien. Ne lève jamais.
-_SECRET_PATTERNS = [
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL),
-    re.compile(r"\bA(?:KIA|SIA)[0-9A-Z]{16}\b"),                               # AWS access key id
-    re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b"),  # JWT
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"),                             # GitHub token
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{8,}\b"),                            # Slack token
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),                                # Google API key
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),                                    # OpenAI-style key
-    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),                              # GitLab PAT
-]
-_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]{8,}")
-_URL_CRED = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)([^/\s:@]+):([^/\s@]+)@")
-_KV = re.compile(
-    r"(?i)\b(password|passwd|pwd|secret|secret[_-]?key|client[_-]?secret|api[_-]?key|apikey|"
-    r"access[_-]?key|access[_-]?token|token|authorization|auth|x-api-key|cookie|set-cookie|"
-    r"private[_-]?key|session[_-]?token)\b(\s*[:=]\s*)(\"?)([^\s\"'&;,]{3,})"
-)
+# DÉLÉGATION à la surface UNIQUE et auditée `forge.redact` (cf. son docstring : trois rédacteurs
+# avaient divergé et laissaient fuir des secrets). `redact_secrets` reste un WRAPPER FIN au nom/à la
+# signature publics inchangés (les appelants de ce module — normalize/redact_finding/build_* — ne
+# bougent pas). `REDACT` (== `_canonical.REDACTED`) est conservé pour les tests et la lisibilité.
 
 
 def redact_secrets(text):
-    """Neutralise les secrets d'une chaîne (formes connues + paires clef=valeur + creds d'URL).
+    """Neutralise les secrets d'une chaîne — DÉLÈGUE à `forge.redact.redact_secrets` (surface unique).
     Renvoie l'entrée telle quelle si ce n'est pas une chaîne (int/None…). Pur, ne lève jamais."""
-    if not isinstance(text, str) or not text:
-        return text
-    s = text
-    for p in _SECRET_PATTERNS:
-        s = p.sub(REDACT, s)
-    s = _BEARER.sub("Bearer " + REDACT, s)
-    s = _URL_CRED.sub(lambda m: f"{m.group(1)}{m.group(2)}:{REDACT}@", s)
-    s = _KV.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{REDACT}", s)
-    return s
+    return _canonical(text)
 
 
 def redact_finding(f):
