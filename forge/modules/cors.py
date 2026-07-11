@@ -18,13 +18,13 @@ exploit=True (chaîne vers le vol de données cross-origin authentifiées) -> ex
 destructive=False (lecture seule). web_allowed via le ROE. Pur urllib (stdlib). Bâti sur la base
 `Oracle` (construction Finding + câblage HTTP partagés).
 """
-from .oracle import Oracle
+from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 
 
 @register("cors.credentials")
-class CorsCredentials(Oracle):
+class CorsCredentials(ScopeGuardedOracle):
     kind = "cors.credentials"
     exploit = True                       # lecture cross-origin authentifiée d'autrui -> allow_exploit
     destructive = False                  # lecture seule
@@ -54,6 +54,10 @@ class CorsCredentials(Oracle):
                 f"Access-Control-Allow-Credentials: true -> lecture cross-origin authentifiée ; sinon tested")
 
     def fire(self, action):
+        # SCOPE-GUARD fail-closed sur la cible — hors périmètre -> skipped, AUCUN réseau (la requête
+        # porterait la session victime : elle ne peut pas quitter le périmètre déclaré).
+        if not self._in_scope(action, action.target):
+            return [self._scope_refused(action)]
         origin = action.params.get("attacker_origin")
         if not origin:
             return [self.skip(

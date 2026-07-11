@@ -78,7 +78,9 @@ class _ContentTypedOracle:
 
 
 @register("access_control.idor")
-class IdorDifferential(_ContentTypedOracle, Oracle):
+class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
+    # MRO : _ContentTypedOracle (mixin object) -> ScopeGuardedOracle -> ScopeGuardMixin -> Oracle. Le
+    # scope-guard fail-closed reste EN AMONT d'Oracle (ScopeGuardMixin prime), comme pour PrivEsc.
     kind = "access_control.idor"
     exploit = True                       # accède à l'objet d'un autre user -> exige allow_exploit
     destructive = False                  # GET = lecture ; les méthodes write sont gardées (voir _is_write)
@@ -138,6 +140,9 @@ class IdorDifferential(_ContentTypedOracle, Oracle):
         return _body_hash(ba) == _body_hash(bb)
 
     def fire(self, action):
+        # SCOPE-GUARD fail-closed sur la cible primaire — hors périmètre -> skipped, AUCUN réseau.
+        if not self._in_scope(action, action.target):
+            return [self._scope_refused(action)]
         accounts = action.params.get("accounts", [])
         base_urls = list(action.params.get("urls", []))
         method = str(action.params.get("method", "GET")).upper()
@@ -177,6 +182,15 @@ class IdorDifferential(_ContentTypedOracle, Oracle):
     def _fire_read(self, action, A, B, urls):
         findings = []
         for url in urls:
+            # SCOPE-GUARD PAR-URL fail-closed — une URL (souvent une IDOR chaînée/énumérée) hors
+            # périmètre : AUCUN I/O vers elle (le matériel secret ne peut pas quitter le périmètre).
+            if not self._in_scope(action, url):
+                findings.append(self.degraded(
+                    target=url,
+                    title="IDOR non testé — URL hors périmètre (scope-guard fail-closed)",
+                    evidence="Cette URL n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
             ra = self._fetch(url, A.get("headers", {}))
             rb = self._fetch(url, B.get("headers", {}))
             ru = self._fetch(url, {})
@@ -204,6 +218,14 @@ class IdorDifferential(_ContentTypedOracle, Oracle):
         body = action.params.get("body")
         findings = []
         for url in urls:
+            # SCOPE-GUARD PAR-URL fail-closed — jamais d'écriture vers une URL hors périmètre.
+            if not self._in_scope(action, url):
+                findings.append(self.degraded(
+                    target=url,
+                    title="IDOR write non testé — URL hors périmètre (scope-guard fail-closed)",
+                    evidence="Cette URL n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
             before = self._fetch(url, A.get("headers", {}), method="GET")
             wb = self._fetch(url, B.get("headers", {}), method=method, body=body)
             after = self._fetch(url, A.get("headers", {}), method="GET")

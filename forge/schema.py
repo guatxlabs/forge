@@ -127,6 +127,13 @@ class Finding:
     ts: str = field(default_factory=_now)
 
     def __post_init__(self):
+        # 0) STATUT — validation SCHEMA-ENFORCED (la discipline de preuve n'est plus une simple
+        #    convention). Un statut inconnu (typo/plugin hostile/valeur forgée) est ramené fail-closed à
+        #    'tested' : jamais de statut arbitraire dans le ledger SIGNÉ ni le rapport. La promotion vers
+        #    'vulnerable' (proof-implying) reste gardée EN AMONT par `Module.finding` (elle n'est atteignable
+        #    que via le chemin de preuve sanctionné, cf. `Oracle.proof(proven=True)` / marqueur `_proven`).
+        if self.status not in STATUSES:
+            self.status = "tested"
         # 1) CWE dédié : si non fourni, le dériver de `category` (rétro-compat avec les modules qui
         #    n'utilisaient que `category="CWE-639"`). `category` n'est jamais modifié.
         if not self.cwe:

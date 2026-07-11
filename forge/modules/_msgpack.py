@@ -75,17 +75,30 @@ def _pack_str(raw):
     return b"\xdb" + struct.pack(">I", n) + raw
 
 
+_MAX_DEPTH = 32                  # profondeur d'imbrication max (anti stack-exhaustion : \x91\x91… )
+
+
 def mp_unpack(data):
-    """Décode UN objet msgpack ; renvoie l'objet (les bin/str -> str utf-8 best-effort)."""
-    obj, _ = _unpack_at(data, 0)
-    return obj
+    """Décode UN objet msgpack ; renvoie l'objet (les bin/str -> str utf-8 best-effort).
+
+    ROBUSTESSE (trames msfrpcd hostiles/tronquées) : toute anomalie de décodage — trame tronquée
+    (`IndexError`), longueur/entier illisible (`struct.error`), imbrication excessive (`RecursionError`
+    ou dépassement de `_MAX_DEPTH`) — est convertie en `ValueError` (le SEUL type que les handlers de
+    `msf.py` interceptent). Comportement INCHANGÉ pour toute trame valide."""
+    try:
+        obj, _ = _unpack_at(data, 0, 0)
+        return obj
+    except (IndexError, struct.error, RecursionError) as e:
+        raise ValueError(f"msgpack: trame malformée ({type(e).__name__})") from e
 
 
 def _read_str(data, i, n):
     return data[i:i + n].decode("utf-8", "replace"), i + n
 
 
-def _unpack_at(data, i):  # noqa: C901  (un dispatch msgpack est intrinsèquement long mais plat)
+def _unpack_at(data, i, depth=0):  # noqa: C901  (un dispatch msgpack est intrinsèquement long mais plat)
+    if depth > _MAX_DEPTH:
+        raise ValueError(f"msgpack: imbrication trop profonde (> {_MAX_DEPTH})")
     b = data[i]
     i += 1
     if b == 0xC0:
@@ -99,9 +112,9 @@ def _unpack_at(data, i):  # noqa: C901  (un dispatch msgpack est intrinsèquemen
     if b >= 0xE0:                                 # negative fixint
         return b - 0x100, i
     if 0x80 <= b <= 0x8F:                         # fixmap
-        return _unpack_map(data, i, b & 0x0F)
+        return _unpack_map(data, i, b & 0x0F, depth)
     if 0x90 <= b <= 0x9F:                         # fixarray
-        return _unpack_array(data, i, b & 0x0F)
+        return _unpack_array(data, i, b & 0x0F, depth)
     if 0xA0 <= b <= 0xBF:                         # fixstr
         return _read_str(data, i, b & 0x1F)
     if b == 0xCC:
@@ -135,31 +148,31 @@ def _unpack_at(data, i):  # noqa: C901  (un dispatch msgpack est intrinsèquemen
         return _read_str(data, i + 4, n)
     if b == 0xDC:                                 # array16
         n = struct.unpack(">H", data[i:i + 2])[0]
-        return _unpack_array(data, i + 2, n)
+        return _unpack_array(data, i + 2, n, depth)
     if b == 0xDD:                                 # array32
         n = struct.unpack(">I", data[i:i + 4])[0]
-        return _unpack_array(data, i + 4, n)
+        return _unpack_array(data, i + 4, n, depth)
     if b == 0xDE:                                 # map16
         n = struct.unpack(">H", data[i:i + 2])[0]
-        return _unpack_map(data, i + 2, n)
+        return _unpack_map(data, i + 2, n, depth)
     if b == 0xDF:                                 # map32
         n = struct.unpack(">I", data[i:i + 4])[0]
-        return _unpack_map(data, i + 4, n)
+        return _unpack_map(data, i + 4, n, depth)
     raise ValueError(f"msgpack: octet de tête inattendu 0x{b:02x}")
 
 
-def _unpack_array(data, i, n):
+def _unpack_array(data, i, n, depth=0):
     out = []
     for _ in range(n):
-        v, i = _unpack_at(data, i)
+        v, i = _unpack_at(data, i, depth + 1)
         out.append(v)
     return out, i
 
 
-def _unpack_map(data, i, n):
+def _unpack_map(data, i, n, depth=0):
     out = {}
     for _ in range(n):
-        k, i = _unpack_at(data, i)
-        v, i = _unpack_at(data, i)
+        k, i = _unpack_at(data, i, depth + 1)
+        v, i = _unpack_at(data, i, depth + 1)
         out[k] = v
     return out, i

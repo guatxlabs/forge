@@ -658,7 +658,7 @@ class TestSessionSecrecy(unittest.TestCase):
         cap = self._Capture()
         scope = Scope({"in_scope": ["app.test"]})
         store = SessionStore(scope, default={"bearer": SECRET})
-        with patch("urllib.request.urlopen", cap), sessionmod.using(store):
+        with patch("forge.modules.oracle.Oracle._raw_open", cap), sessionmod.using(store):
             findings = []
             findings += NoSqlProbe().fire(Action("nosql.probe", "https://app.test/api",
                                                  params={"param": "user", "in_scope": ["app.test"]}))

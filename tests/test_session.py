@@ -150,7 +150,8 @@ class TestOracleHttpInjection(unittest.TestCase):
     def test_attaches_only_in_scope(self):
         store = SessionStore(self._scope(), default={"cookies": f"sid={SECRET}"})
         cap = _Capture()
-        with patch("urllib.request.urlopen", cap), sessionmod.using(store):
+        # le seam réseau des oracles est `Oracle._raw_open` (opener no-follow), PAS `urlopen`.
+        with patch("forge.modules.oracle.Oracle._raw_open", cap), sessionmod.using(store):
             Oracle._http("https://app.test/obj")                 # in-scope
             Oracle._http("https://collector.test/seen")          # hors-scope (ex: collecteur SSRF)
         self.assertIn(SECRET, cap.values_for("https://app.test/obj"))
@@ -159,14 +160,14 @@ class TestOracleHttpInjection(unittest.TestCase):
     def test_caller_header_wins_over_session(self):
         store = SessionStore(self._scope(), default={"cookies": "sid=session"})
         cap = _Capture()
-        with patch("urllib.request.urlopen", cap), sessionmod.using(store):
+        with patch("forge.modules.oracle.Oracle._raw_open", cap), sessionmod.using(store):
             Oracle._http("https://app.test/obj", headers={"Cookie": "caller=1"})
         self.assertIn("caller=1", cap.values_for("https://app.test/obj"))
         self.assertNotIn("sid=session", cap.values_for("https://app.test/obj"))
 
     def test_noop_without_bound_store(self):
         cap = _Capture()
-        with patch("urllib.request.urlopen", cap):               # AUCUN store lié
+        with patch("forge.modules.oracle.Oracle._raw_open", cap):  # AUCUN store lié
             Oracle._http("https://app.test/obj", headers={"X-Caller": "1"})
         vals = cap.values_for("https://app.test/obj")
         self.assertIn("1", vals)

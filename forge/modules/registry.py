@@ -50,7 +50,17 @@ class Module:
         raise NotImplementedError
 
     @staticmethod
-    def finding(**kw):
+    def finding(_proven=False, **kw):
+        """Construit un Finding. GARDE-FOU DE PREUVE (schema-enforced) : le statut proof-implying
+        'vulnerable' n'est atteignable QUE via le chemin de preuve SANCTIONNÉ — `Oracle.proof(proven=True)`
+        (qui pose `_proven=True`) ou un émetteur in-tree qui ATTESTE explicitement sa preuve concrète
+        (`_proven=True`). Un appelant GÉNÉRIQUE/plugin qui poserait `status='vulnerable'` SANS ce marqueur
+        est ramené fail-closed à 'tested' : impossible de forger un finding « prouvé » dans le ledger SIGNÉ
+        ni le rapport en court-circuitant le clamp « pas de preuve => tested ». Les autres statuts passent
+        au validateur du schema (statut inconnu -> 'tested'). Comportement inchangé pour les preuves
+        légitimes (elles portent toutes `_proven=True`)."""
+        if not _proven and kw.get("status") == "vulnerable":
+            kw["status"] = "tested"
         return Finding(**kw)
 
     def tool_failed(self, action, rc, out, err, tool, category="recon"):
