@@ -12,3 +12,23 @@ metadata:
     app.kubernetes.io/part-of: forge
     # Stamped so ingress/DNS NetworkPolicies can select this namespace by its well-known label.
     kubernetes.io/metadata.name: forge
+    # --- Pod Security Admission (MEDIUM-2) ---------------------------------------------------
+    # ENFORCE = baseline, WARN/AUDIT = restricted. Rationale (deliberate, keeps `apply -k` green):
+    #   * console + minio are authored to satisfy the FULL `restricted` profile (runAsNonRoot,
+    #     drop ALL caps, seccomp RuntimeDefault, no privilege escalation).
+    #   * postgres runs the official postgres:16 image. It is hardened here (drop ALL caps,
+    #     no-priv-escalation, seccomp RuntimeDefault, runAsUser 999) but we deliberately do NOT
+    #     stamp `runAsNonRoot: true` on it (kept minimal per the store's ops contract). Under a
+    #     `restricted` ENFORCE that omission would REJECT the postgres pod at admission and break
+    #     `kubectl apply -k k8s/`. So we enforce `baseline` (which postgres satisfies) and keep
+    #     `restricted` as WARN + AUDIT so any regression away from the restricted posture on the
+    #     console/minio tiers is surfaced (as a warning / audit-log entry) without blocking apply.
+    # To tighten to `restricted` ENFORCE later: add `runAsNonRoot: true` to 20-postgres.yaml's pod
+    # securityContext (postgres already runs as uid 999 here, so it will then pass), then flip the
+    # enforce line below to `restricted`.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

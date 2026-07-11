@@ -53,11 +53,28 @@ spec:
         app.kubernetes.io/part-of: forge
         app.kubernetes.io/name: minio
     spec:
+      # --- Pod-level securityContext (MEDIUM-1) ------------------------------------------------
+      # MinIO is a static Go binary that binds high ports (9000/9001 > 1024) and only writes /data
+      # (owned via fsGroup) — it needs neither root nor any capability. Verified: it reaches
+      # "API: http://…:9000 … Online" as uid 1000 with ALL caps dropped + no-new-privileges.
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
         fsGroup: 1000
       containers:
         - name: minio
-          image: minio/minio:latest
+          # MEDIUM-3: pinned to a specific released tag (was the floating `:latest`). Every other
+          # image in the repo is pinned; match that. ⚠️ VERIFY / pin-by-digest for prod:
+          #   minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          # (digest of RELEASE.2025-09-07T16-13-09Z as published on Docker Hub at pin time).
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+          # --- Container hardening (MEDIUM-1) ---------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           args: ["server", "/data", "--console-address", ":9001"]
           ports:
             - name: s3
