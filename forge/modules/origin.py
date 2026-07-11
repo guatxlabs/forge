@@ -162,6 +162,7 @@ class OriginFind(Module):
             # DÉGRADATION : verif non concluante par outil indisponible -> `status='skipped'`.
             tool_ko = (rc2 != 0 and not verified)
             findings.append(self.finding(
+                _proven=bool(verified),                  # PREUVE concrète (host-header check confirmé)
                 target=ip,
                 title=("Origine exposée derrière CDN (VÉRIFIÉE) — bypass WAF" if verified
                        else "IP hors-CDN — verif non concluante: httpx indisponible/timeout" if tool_ko

@@ -337,7 +337,7 @@ class TestJwtSessionSecrecy(unittest.TestCase):
                 seen.append(" ".join(str(v) for v in req.headers.values()))
                 raise urllib.error.URLError("captured (no network in test)")
 
-        with patch("urllib.request.urlopen", _Cap()), sessionmod.using(_bound(jwt)):
+        with patch("forge.modules.oracle.Oracle._raw_open", _Cap()), sessionmod.using(_bound(jwt)):
             f = JwtWeakness().fire(Action("jwt.weakness", self.TGT,
                                           params={"self_marker": SELF, "in_scope": ["app.test"]}))
         # des requêtes ont bien été émises (jetons forgés attachés) mais le réseau lève -> skipped.
@@ -482,7 +482,7 @@ class TestGraphqlSessionSecrecy(unittest.TestCase):
 
         params = {"b_marker": "SECRET-object-B", "query": 'query{node(id:"B"){f}}',
                   "in_scope": ["app.test"]}
-        with patch("urllib.request.urlopen", _Cap()), sessionmod.using(_bound_a()):
+        with patch("forge.modules.oracle.Oracle._raw_open", _Cap()), sessionmod.using(_bound_a()):
             f = GraphqlAccess().fire(Action("graphql.access", self.TGT, params=params))
         # la session du compte A a bien été attachée à AU MOINS une requête in-scope (introspection).
         self.assertTrue(any(GQL_SECRET in v for v in seen),

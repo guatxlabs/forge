@@ -231,6 +231,7 @@ class OAuthFlow(ClientFlowOracle):
         else:
             r_title = "OAuth redirect_uri non confirmé — destination non attaquant-contrôlée (pas de verdict aveugle)"
         findings.append(self.finding(
+            _proven=bool(redir_proven),                  # PREUVE concrète (contrôlable ET chaînable)
             target=action.target, title=r_title, severity=("HIGH" if redir_proven else "INFO"),
             category="CWE-601", cwe="CWE-601", mitre=self.mitre, fix=self.fix,
             status=("vulnerable" if redir_proven else "tested"), tool=self.tool,
@@ -252,6 +253,7 @@ class OAuthFlow(ClientFlowOracle):
             severity=("HIGH" if state_proven else "INFO"),
             category="CWE-352", cwe="CWE-352", mitre=self.mitre, fix=self.fix,
             status=("vulnerable" if state_proven else "tested"), tool=self.tool,
+            _proven=bool(state_proven),                  # PREUVE concrète (code émis sans state)
             evidence=(f"requête d'autorisation SANS `state` -> code_émis={code_issued} ({code_where or '—'}) ; "
                       f"client_valide_state={p.get('client_validates_state')} ; sans liaison anti-CSRF "
                       f"(state ni PKCE), un code émis = CSRF sur le flux OAuth (CWE-352) ; flux de l'opérateur ; "
@@ -270,6 +272,7 @@ class OAuthFlow(ClientFlowOracle):
             severity=("MEDIUM" if pkce_proven else "INFO"),
             category="CWE-287", cwe="CWE-287", mitre=self.mitre, fix=self.fix,
             status=("vulnerable" if pkce_proven else "tested"), tool=self.tool,
+            _proven=bool(pkce_proven),                   # PREUVE concrète (code émis sans PKCE, client public)
             evidence=(f"requête d'autorisation SANS `code_challenge` -> code_émis={code_issued} "
                       f"({code_where or '—'}) ; public_client={p.get('public_client')} ; "
                       f"pkce_enforced={p.get('pkce_enforced')} ; un code émis sans PKCE pour un client public = "

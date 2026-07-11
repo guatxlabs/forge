@@ -19,13 +19,13 @@ reset). web_allowed via le ROE. Bâti sur la base `Oracle` (Finding + HTTP + cur
 """
 import urllib.parse
 
-from .oracle import Oracle
+from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 
 
 @register("auth.takeover")
-class AuthTakeover(Oracle):
+class AuthTakeover(ScopeGuardedOracle):
     kind = "auth.takeover"
     exploit = True                       # obtient la session/identité d'autrui -> allow_exploit
     destructive = True                   # un reset/forge de credential MUTE le compte victime -> allow_destructive
@@ -58,6 +58,9 @@ class AuthTakeover(Oracle):
                 f"-> takeover ; sinon tested")
 
     def fire(self, action):
+        # SCOPE-GUARD fail-closed sur la cible primaire — hors périmètre -> skipped, AUCUN réseau.
+        if not self._in_scope(action, action.target):
+            return [self._scope_refused(action)]
         p = action.params
         whoami = p.get("whoami_url")
         victim = p.get("victim_marker")
@@ -69,10 +72,19 @@ class AuthTakeover(Oracle):
                           "(identifiant unique de la victime attendu dans le whoami). "
                           "Optionnel : params.bypass (étape de bypass), params.attacker_marker."),
                 poc=self.dry(action))]
+        # SCOPE-GUARD PAR-URL fail-closed — whoami/bypass sont des URL dérivées de params : on ne tire
+        # (et surtout on n'attache la session attaquant) que si elles sont IN-SCOPE.
+        bp = p.get("bypass")
+        for u in (whoami, (bp or {}).get("url")):
+            if u and not self._in_scope(action, u):
+                return [self.degraded(
+                    target=u,
+                    title="ATO non testé — URL (whoami/bypass) hors périmètre (scope-guard fail-closed)",
+                    evidence="L'URL whoami/bypass n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action))]
         # le flag destructif réel suit le flux : un GET-only n'est pas destructif, un reset l'est.
         # On NE modifie PAS self.destructive (déclaration de capacité, lue par le ROE avant fire) — c'est
         # le module qui est gardé `destructive=True` par prudence (un reset MUTE la victime).
-        bp = p.get("bypass")
         if bp and bp.get("url"):
             self._fetch(bp["url"], headers=bp.get("headers", {}),
                         method=str(bp.get("method", "POST")).upper(),

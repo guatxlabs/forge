@@ -443,6 +443,7 @@ class MsfModule(Module):
                 shost = (sinfo.get("session_host") or sinfo.get("target_host")
                          if isinstance(sinfo, dict) else None) or action.target
                 return [self.finding(
+                    _proven=True,                        # PREUVE concrète : session (shell) ouverte
                     target=action.target, title=f"MSF exploit RÉUSSI: {name} (session {sid})",
                     severity=sev, category="msf", cwe=cwe, mitre=mitre, status="vulnerable",
                     tool=f"msfrpcd:{name}",
@@ -463,6 +464,7 @@ class MsfModule(Module):
             verdict, code, msg = self._confirm_via_results(action, cfg, token, uuid)
             if verdict == "vulnerable":
                 return [self.finding(
+                    _proven=True,                        # PREUVE concrète : CheckCode=vulnerable du module
                     target=action.target, title=f"MSF {mtype} CONFIRMÉ vulnérable: {name}",
                     severity=_SEV_SCANNER_CONFIRMED, category="msf", cwe=cwe, mitre=mitre,
                     status="vulnerable", tool=f"msfrpcd:{name}",

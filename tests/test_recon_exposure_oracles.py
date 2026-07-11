@@ -426,7 +426,7 @@ class TestSessionSecrecy(unittest.TestCase):
         cap = self._Capture()
         scope = Scope({"in_scope": ["app.test"]})
         store = SessionStore(scope, default={"bearer": self.SECRET})
-        with patch("urllib.request.urlopen", cap), sessionmod.using(store):
+        with patch("forge.modules.oracle.Oracle._raw_open", cap), sessionmod.using(store):
             f = FrameworkExposure().fire(Action("framework.exposure", "app.test",
                                                 params={"in_scope": ["app.test"]}))
         self.assertTrue(any(self.SECRET in v for v in cap.seen),

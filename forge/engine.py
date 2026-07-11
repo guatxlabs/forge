@@ -43,6 +43,11 @@ _SCOPE_INJECT_KINDS = frozenset({
     # fail-closed chaque asset découvert avant d'émettre un finding (jamais un asset hors périmètre).
     "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",
     "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",
+    # ORACLES à VÉRIFICATION qui sondent des URL DÉRIVÉES de params (urls/whoami/bypass/admin_urls,
+    # IDs énumérés, cible d'origine) : le périmètre injecté active leur scope-guard PAR-URL fail-closed
+    # (ScopeGuardedOracle) pour qu'aucune requête — ni le matériel de session gouverné qu'elle porte —
+    # ne parte vers une URL hors périmètre. Sans injection, `_scope` serait permissif (enforce=False).
+    "access_control.idor", "access_control.privesc", "auth.takeover", "cors.credentials",
 })
 
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour

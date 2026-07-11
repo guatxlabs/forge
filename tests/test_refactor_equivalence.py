@@ -328,9 +328,11 @@ class TestSharedHttpWiring(unittest.TestCase):
     """Oracle._http + chaque `_fetch` réel : forme du tuple exacte sur succès / HTTPError / transport."""
 
     def _with_urlopen(self, fn):
-        orig = urllib.request.urlopen
-        urllib.request.urlopen = fn
-        self.addCleanup(lambda: setattr(urllib.request, "urlopen", orig))
+        # le câblage HTTP des oracles ouvre le réseau via `Oracle._raw_open` (opener no-follow), PAS
+        # via `urllib.request.urlopen` -> on monkeypatch ce seam (une 3xx serait sinon suivie à l'aveugle).
+        orig = Oracle._raw_open
+        Oracle._raw_open = staticmethod(fn)
+        self.addCleanup(lambda: setattr(Oracle, "_raw_open", orig))
 
     def test_success_shapes(self):
         self._with_urlopen(lambda req, timeout=15: _FakeResp(200, '{"a":1}', {"Content-Type": "application/json; charset=utf-8"}))

@@ -836,7 +836,7 @@ class TestSessionSecrecy(unittest.TestCase):
         cap = self._Capture()
         scope = Scope({"in_scope": ["app.test"]})
         store = SessionStore(scope, default={"bearer": self.SECRET})
-        with patch("urllib.request.urlopen", cap), sessionmod.using(store):
+        with patch("forge.modules.oracle.Oracle._raw_open", cap), sessionmod.using(store):
             f = RfiProbe().fire(Action("rfi.probe", "https://app.test/index.php",
                                        params={"param": "page", "marker_url": "https://op.test/m.txt",
                                                "marker": "MARKER_X", "in_scope": ["app.test"]}))

@@ -16,7 +16,11 @@ garanties DURES :
   (2) SCOPE-GUARDÉ — une session n'est attachée QU'AUX requêtes dont l'hôte est IN-SCOPE (le scope ROE
       fait foi). `headers_for(url)` renvoie {} pour toute URL hors-scope : le matériel secret ne peut
       PHYSIQUEMENT pas quitter le périmètre déclaré — même vers une URL dérivée à runtime par un module
-      (un collecteur SSRF, une redirection, un asset découvert).
+      (un collecteur SSRF, un asset découvert). Les REDIRECTIONS HTTP ne peuvent pas non plus exfiltrer
+      le secret : le seam de fetch des oracles (`Oracle._http`) NE SUIT PAS les redirections par défaut ;
+      le suivi est opt-in et scope-checké (chaque saut re-validé, arrêt au 1er `Location` hors périmètre,
+      matériel secret RETIRÉ sur tout saut cross-origin) — jamais un re-post aveugle des en-têtes vers
+      l'hôte de destination.
   (3) OFFLINE-SAFE — sans session configurée, le store est INERTE (headers_for -> {}), no-op total :
       zéro changement de comportement, la suite offline reste verte.
 

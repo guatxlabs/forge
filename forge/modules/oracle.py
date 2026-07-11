@@ -18,11 +18,14 @@ Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed 
 chaque module concret et restent gardés par le ROE.
 """
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ._scopeguard import ScopeGuardMixin
 from .registry import Module
 from .. import session as _session
+
+_MAX_REDIRECTS = 5               # borne du suivi de redirection scope-checké opt-in (anti-boucle)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -30,10 +33,39 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     telle quelle (HTTPError avec le header Location intact). Indispensable à l'oracle open-redirect
     (lire la cible de redirection SANS émettre de requête vers l'hôte attaquant hors-scope) et,
     plus généralement, garde-fou de SÛRETÉ : une redirection vers un hôte hors périmètre ne doit
-    JAMAIS être suivie automatiquement (le scope-guard resterait aveugle à l'I/O sortante)."""
+    JAMAIS être suivie automatiquement (le scope-guard resterait aveugle à l'I/O sortante). C'est le
+    comportement PAR DÉFAUT de tout fetch d'oracle (`_http(follow_redirects=False)`)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401,N802
         return None
+
+
+def _host_of(url):
+    """Hôte (lowercase) d'une URL, '' si illisible. Ne lève jamais."""
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except Exception:            # noqa: BLE001
+        return ""
+
+
+def _redirect_target(cur_url, location, store):
+    """URL absolue du PROCHAIN saut de redirection SI le suivi est autorisé, sinon None (fail-closed).
+
+    Refuse (None -> la 3xx remonte telle quelle, AUCUNE requête vers la cible) si :
+      - pas de `Location` ou schéma non http(s) ;
+      - AUCUN périmètre gouverné lié (dev/test/offline) — on ne suit jamais à l'aveugle ;
+      - destination HORS périmètre — le matériel secret et le réseau ne peuvent PHYSIQUEMENT pas
+        quitter le périmètre déclaré, même via une redirection dérivée à runtime (c'était la faille :
+        un hôte in-scope 302-ant vers 127.0.0.1/interne recevait sinon la session gouvernée)."""
+    if not location:
+        return None
+    nxt = urllib.parse.urljoin(cur_url, str(location))
+    if not nxt.lower().startswith(("http://", "https://")):
+        return None
+    scope = getattr(store, "scope", None) if store is not None else None
+    if scope is None or not scope.is_in_scope(nxt):
+        return None
+    return nxt
 
 
 class Oracle(Module):
@@ -53,6 +85,7 @@ class Oracle(Module):
         tool=self.tool, fix (self.fix par défaut, override par argument). `proven` applique le contrat :
         True -> status='vulnerable', False -> status='tested' (jamais vulnerable sans preuve)."""
         return self.finding(
+            _proven=bool(proven),                        # marqueur de PREUVE sanctionné (cf. Module.finding)
             target=target, title=title, severity=severity,
             category=self.cwe, cwe=self.cwe, mitre=self.mitre,
             fix=self.fix if fix is None else fix,
@@ -68,10 +101,20 @@ class Oracle(Module):
             category=self.cwe, status="tested", tool=self.tool,
             evidence=evidence, poc=poc)
 
+    # --- seam réseau bas-niveau : UN SEUL saut, SANS suivi auto de redirection ---
+    @staticmethod
+    def _raw_open(req, timeout=15):
+        """Ouvre UNE requête via un opener local `_NoRedirect` : AUCUNE redirection n'est suivie
+        automatiquement (une 3xx remonte en `HTTPError`, `Location` intact). C'est le POINT DE PATCH
+        RÉSEAU unique des tests (au lieu de `urlopen`) ET le garde-fou de sûreté : le suivi de
+        redirection est TOUJOURS explicite et scope-checké dans `_http`, jamais délégué à urllib à
+        l'aveugle (qui re-poste les en-têtes — dont le matériel de session — vers l'hôte cible)."""
+        return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
     # --- câblage HTTP partagé (les `_fetch` concrets adaptent la forme du tuple retourné) ---
     @staticmethod
     def _http(url, *, headers=None, timeout=15, method="GET", data=None, maxlen=200000,
-              follow_redirects=True):
+              follow_redirects=False):
         """Requête urllib partagée -> (status, body, resp_headers).
 
         - succès        : (r.status, corps décodé tronqué à maxlen, r.headers) ;
@@ -79,37 +122,62 @@ class Oracle(Module):
         - erreur transport (réseau hostile) : (None, "", None) — on ne crashe jamais.
         Chaque oracle en dérive sa propre forme (content-type, dict d'en-têtes…) dans son `_fetch`.
 
-        `follow_redirects` (défaut True — inchangé pour tous les oracles existants) : à False, on
-        installe le handler `_NoRedirect` (opener local, sans toucher l'état global `urlopen`) — une
-        3xx remonte alors comme HTTPError et son header `Location` est renvoyé tel quel. C'est requis
-        par l'oracle open-redirect (lire la cible SANS suivre la redirection vers un hôte attaquant
-        potentiellement hors-scope — garde-fou de sûreté : pas d'I/O implicite hors périmètre).
+        `follow_redirects` — DÉFAUT False (garde-fou de SÛRETÉ) : une 3xx N'EST PAS suivie et remonte
+        telle quelle (HTTPError, `Location` intact — ce que lisent les oracles open-redirect/OAuth/
+        cache-poison). En suivant à l'aveugle, urllib RE-POSTERAIT les en-têtes de la requête — dont le
+        matériel de session SECRET — vers l'hôte de destination : un hôte in-scope 302-ant vers
+        127.0.0.1/interne exfiltrerait ainsi cookie/Authorization gouvernés HORS périmètre. Le suivi est
+        donc OPT-IN et scope-checké : à True, chaque saut est re-validé (`_redirect_target` — arrêt au
+        1er `Location` HORS périmètre ou sans scope gouverné lié) et, sur un saut CROSS-ORIGIN, le
+        matériel secret de l'appelant (Cookie/Authorization) est RETIRÉ avant de re-tirer ; la session
+        gouvernée est re-fusionnée scope-guardée POUR LE NOUVEL hôte (jamais celle de l'hôte précédent).
 
         SESSION GOUVERNÉE : si un `SessionStore` est lié (par le moteur autour de fire()), le matériel
-        d'authentification SECRET applicable à `url` — et UNIQUEMENT si `url` est IN-SCOPE (scope-guard
-        du store) — est fusionné SOUS les en-têtes de l'appelant dans la requête sortante. Il n'est
-        JAMAIS renvoyé ni exposé : l'appelant bâtit ses PoC depuis SES propres en-têtes (`_curl`), pas
-        depuis la requête. Sans store lié (dev/test/offline) -> aucune modification (byte-à-byte)."""
-        req_headers = dict(headers or {})
-        store = _session.current()
-        if store is not None:                        # scope-guard PAR-URL : {} si url hors-scope
-            for k, v in store.headers_for(url).items():
-                req_headers.setdefault(k, v)         # les en-têtes explicites de l'appelant priment
+        d'authentification SECRET applicable à l'URL COURANTE — et UNIQUEMENT si elle est IN-SCOPE
+        (scope-guard du store) — est fusionné SOUS les en-têtes de l'appelant dans la requête sortante.
+        Il n'est JAMAIS renvoyé ni exposé : l'appelant bâtit ses PoC depuis SES propres en-têtes
+        (`_curl`), pas depuis la requête. Sans store lié (dev/test/offline) -> aucun matériel injecté."""
+        caller_headers = dict(headers or {})
         payload = data.encode("utf-8") if isinstance(data, str) else data
-        req = urllib.request.Request(url, headers=req_headers, method=method, data=payload)
-        # opener local no-follow (n'altère PAS le seam global `urllib.request.urlopen`, que les tests
-        # monkeypatchent pour le chemin follow_redirects=True) ; sinon on garde `urlopen` tel quel.
-        _open = urllib.request.urlopen if follow_redirects else urllib.request.build_opener(_NoRedirect).open
-        try:
-            with _open(req, timeout=timeout) as r:
-                return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
-        except urllib.error.HTTPError as e:
+        store = _session.current()
+        cur_url, cur_method, cur_payload = url, method, payload
+        for _hop in range(_MAX_REDIRECTS + 1):
+            req_headers = dict(caller_headers)
+            if store is not None:                    # scope-guard PAR-URL : {} si url courante hors-scope
+                for k, v in store.headers_for(cur_url).items():
+                    req_headers.setdefault(k, v)     # les en-têtes explicites de l'appelant priment
+            req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
             try:
-                return e.code, "", e.headers
-            except Exception:            # noqa: BLE001
-                return e.code, "", None
-        except Exception:                # noqa: BLE001  (réseau hostile : on ne crashe pas)
-            return None, "", None
+                with Oracle._raw_open(req, timeout=timeout) as r:
+                    return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
+            except urllib.error.HTTPError as e:
+                # une 3xx remonte ici (opener no-follow). Suivi SCOPE-CHECKÉ opt-in uniquement.
+                if follow_redirects and 300 <= e.code < 400:
+                    loc = None
+                    try:
+                        loc = e.headers.get("Location")
+                    except Exception:            # noqa: BLE001
+                        loc = None
+                    nxt = _redirect_target(cur_url, loc, store)
+                    if nxt is not None:
+                        if _host_of(nxt) != _host_of(cur_url):
+                            # saut CROSS-ORIGIN : on NE re-poste JAMAIS le secret de l'appelant vers le
+                            # nouvel hôte ; la session gouvernée du nouvel hôte (scope-guardée) sera
+                            # re-fusionnée au tour suivant via headers_for(nxt).
+                            caller_headers = {k: v for k, v in caller_headers.items()
+                                              if k.lower() not in ("cookie", "authorization")}
+                        if e.code not in (307, 308):         # 301/302/303 -> GET sans corps (convention)
+                            cur_method, cur_payload = "GET", None
+                        cur_url = nxt
+                        continue
+                # pas de suivi (défaut, hors-scope, sans scope lié, ou budget épuisé) : 3xx telle quelle.
+                try:
+                    return e.code, "", e.headers
+                except Exception:            # noqa: BLE001
+                    return e.code, "", None
+            except Exception:                # noqa: BLE001  (réseau hostile : on ne crashe pas)
+                return None, "", None
+        return None, "", None                # budget de redirections épuisé (défense en profondeur)
 
     # --- fetch (status, body) PARTAGÉ (seam `_fetch` monkeypatché par les tests) ---
     @classmethod

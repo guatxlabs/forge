@@ -180,6 +180,34 @@ def _resolve_token(tok, ctx):
     return "".join(out)
 
 
+# Tokens de gabarit dont la valeur EST la cible POSITIONNELLE (pas un flag type `-u{target}`) : leur
+# résolution est susceptible d'injection d'argument si la cible commence par `-`/`--`.
+_POSITIONAL_TARGET_TOKENS = ("{target}", "{target_host}", "{target_url}")
+
+
+def unsafe_positional_target(spec, target, params=None):
+    """Renvoie la 1re valeur de cible POSITIONNELLE résolue commençant par `-` (risque d'injection
+    d'argument : l'outil enveloppé pourrait la lire comme une OPTION et non comme un opérande), sinon
+    None. Un token cible positionnel est un token ÉGAL à `{target}`/`{target_host}`/`{target_url}`
+    (un `-u{target}` est un flag+valeur, pas un positionnel). Pur, ne lève jamais. Sert de garde-fou
+    fail-closed AVANT tout lancement de processus (cf. `ExternalToolModule.fire`)."""
+    ctx = {"target": target, "params": params or {}}
+
+    def _scan(tokens):
+        for t in tokens:
+            if isinstance(t, (list, tuple)):
+                r = _scan(t)
+                if r is not None:
+                    return r
+            elif isinstance(t, str) and t.strip() in _POSITIONAL_TARGET_TOKENS:
+                val = _resolve_placeholder(t.strip()[1:-1], ctx)   # corps du placeholder (sans les {})
+                if isinstance(val, str) and val.startswith("-"):
+                    return val
+        return None
+
+    return _scan(spec.argv_template)
+
+
 def build_argv(spec, target, params=None):
     """Construit l'argv FIXE (list[str]) à partir du gabarit du spec — SANS SHELL. Chaque placeholder
     devient un/des élément(s) d'argv distinct(s) ; une cible avec métacaractères shell reste UN élément.
@@ -307,6 +335,18 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                 action, status="skipped",
                 title=f"{self.kind} non exécuté — cible hors périmètre (scope-guard fail-closed)",
                 evidence="La cible n'appartient pas au périmètre in-scope ; aucun processus lancé (fail-closed).")]
+        # (1b) ANTI-INJECTION D'ARGUMENT — une cible POSITIONNELLE résolue commençant par `-`/`--`
+        # pourrait être interprétée comme une OPTION par l'outil enveloppé. Refus fail-closed (aucun
+        # processus lancé) : la tokenisation no-shell empêche l'injection SHELL, ce garde-fou ferme
+        # l'injection d'ARGUMENT (option smuggling).
+        bad = unsafe_positional_target(s, action.target, action.params)
+        if bad is not None:
+            return [self._mk(
+                action, status="skipped",
+                title=f"{self.kind} non exécuté — cible positionnelle ambiguë (anti-injection d'argument)",
+                evidence=(f"La cible positionnelle résolue {bad!r} commence par '-' et pourrait être lue "
+                          f"comme une option par '{s.binary}'. Refusé fail-closed (aucun processus lancé) ; "
+                          f"fournir un schéma explicite (http://) ou passer la cible via un flag dédié."))]
         # (2) PLANCHER EXPLOIT (défense en profondeur) — classe exploit + scope lié + opt-in non armé -> refus.
         if s.exploit:
             scope, armed = self._bound_allow_exploit()
