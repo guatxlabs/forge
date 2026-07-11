@@ -34,6 +34,7 @@ import re
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .. import techniques
+from ..redact import redact_secrets as _redact_secrets
 from ..roe import Scope
 
 
@@ -65,23 +66,20 @@ _NEXT_DATA_RX = re.compile(
 _NEXT_RUNTIME_KEYS = ("serverRuntimeConfig", "runtimeConfig", "publicRuntimeConfig", "env")
 
 # --- rédaction de secrets (valeurs jamais restituées dans l'evidence) -------------------------------
-# clés dont la VALEUR est un secret -> rédigée. On garde le NOM de la clé (preuve d'exposition).
-_SECRET_KEY_RX = re.compile(
-    r'(?i)("?(?:pass(?:word)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|'
-    r'client[_-]?secret|aws[_-]?secret|db[_-]?password|connection[_-]?string|authorization|'
-    r'bearer|credential|app[_-]?key)"?\s*[:=]\s*)("?)([^"\'\s,}&]{3,})(\2)')
-_PRIVKEY_RX = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----',
-                         re.I | re.S)
+# DÉLÉGATION à la surface UNIQUE et auditée `forge.redact` (cf. son docstring). L'ancienne
+# implémentation locale était la PIRE des trois : privkey + KV seulement (aucun token cloud ni JWT) ET
+# une regex PEM `[A-Z ]*` qui ratait un type contenant un CHIFFRE (ex `EC2 PRIVATE KEY`) — de vrais
+# secrets FUYAIENT dans l'evidence Actuator-env. `_redact` garde son nom/sa signature (appelée partout
+# dans `fire`/`_next_data_leak`) mais N'est plus qu'un WRAPPER FIN préservant le contrat local
+# (falsy -> `""`).
 
 
 def _redact(text):
-    """Remplace toute valeur de secret par `<redacted-secret>` (le NOM de la clé est conservé) et masque
-    les blocs de clé privée. Pur, ne lève jamais : l'evidence prouve l'exposition SANS livrer le secret."""
+    """Rédige toute valeur de secret de l'evidence — DÉLÈGUE à `forge.redact.redact_secrets` (surface
+    unique). Pur, ne lève jamais : l'evidence prouve l'exposition SANS livrer le secret (falsy -> `""`)."""
     if not text:
         return ""
-    out = _PRIVKEY_RX.sub("-----BEGIN PRIVATE KEY----- <redacted-secret> -----END PRIVATE KEY-----", str(text))
-    out = _SECRET_KEY_RX.sub(r"\1\2<redacted-secret>\4", out)
-    return out
+    return _redact_secrets(str(text))
 
 
 @register("framework.exposure")
