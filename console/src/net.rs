@@ -10,7 +10,89 @@
 use crate::*;
 
 use serde_json::Value;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+
+/// Escape-hatch env : autorise les fetches d'INTÉGRATION de la console à joindre une cible interne/privée
+/// (SIEM/IdP on-prem légitime sur un réseau privé). Absent/faux => la deny-list SSRF ci-dessous s'applique.
+pub(crate) const ALLOW_INTERNAL_INTEGRATIONS_ENV: &str = "FORGE_ALLOW_INTERNAL_INTEGRATIONS";
+
+/// Deny-list SSRF (defense-in-depth) pour les fetches SERVEUR PROPRES À LA CONSOLE — c.-à-d. les URLs
+/// CONFIGURÉES PAR UN ADMIN que la console va chercher elle-même : sources de détection (detection.rs
+/// `rust_http_collect`/`http_get_blocking`) et endpoints OIDC discovery / JWKS / token (sso.rs).
+///
+/// PÉRIMÈTRE — FETCHES D'INTÉGRATION UNIQUEMENT. Cette garde NE DOIT PAS s'appliquer aux fetches de CIBLE
+/// scope-guardés du MOTEUR (oracles/outils) : ceux-ci tournent dans le moteur Python (`forge.cli campaign …`,
+/// spawné par runs_proc::claim_and_spawn) et joignent LÉGITIMEMENT des hôtes internes EN SCOPE pendant un
+/// engagement — c'est précisément le rôle de l'outil, et le scope-guard du moteur en reste seul juge. La
+/// console Rust n'effectue JAMAIS ces fetches de cible elle-même : tout appelant de `http_get_blocking` /
+/// du POST OIDC de sso.rs est un fetch d'intégration piloté par la config, donc les garder ici ne peut pas
+/// toucher les cibles du moteur.
+///
+/// Refuse loopback, link-local (dont métadonnées cloud 169.254.169.254 & fd00:ec2::254 IMDSv6), RFC1918,
+/// RFC4193 ULA (fc00::/7) et l'adresse « unspecified » — SAUF si `FORGE_ALLOW_INTERNAL_INTEGRATIONS`=1.
+/// Renvoie la raison du refus (`Some`) ou `None` si l'IP est publique/autorisée.
+pub(crate) fn integration_ip_denied(ip: &IpAddr) -> Option<&'static str> {
+    // Réduit un IPv6 mappé/compatible-IPv4 (::ffff:169.254.169.254, ::a.b.c.d) à sa forme v4 pour qu'une
+    // adresse interne encapsulée en v6 ne contourne pas les tests v4.
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() {
+                Some("0.0.0.0/unspecified")
+            } else if v4.is_loopback() {
+                Some("loopback 127.0.0.0/8")
+            } else if v4.is_link_local() {
+                Some("link-local/metadata 169.254.0.0/16")
+            } else if v4.is_private() {
+                Some("RFC1918 privé (10/8, 172.16/12, 192.168/16)")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() {
+                Some("::/unspecified")
+            } else if v6.is_loopback() {
+                Some("loopback ::1")
+            } else {
+                let seg0 = v6.segments()[0];
+                if (seg0 & 0xfe00) == 0xfc00 {
+                    Some("RFC4193 ULA fc00::/7 (dont fd00:ec2::254 IMDSv6)")
+                } else if (seg0 & 0xffc0) == 0xfe80 {
+                    Some("link-local fe80::/10")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Garde fail-closed d'une cible d'INTÉGRATION résolue. Vérifie l'adresse EXACTE que l'on s'apprête à
+/// contacter (resolve-then-check-then-connect la MÊME `addr` => neutralise le DNS-rebinding POUR CETTE
+/// connexion : le contrôle porte sur l'IP effectivement connectée, pas sur un 2e lookup). No-op si
+/// l'escape-hatch env est posé. Renvoie `Err(raison)` pour refuser. À appeler AVANT `connect_timeout`.
+/// La décision de refus PURE est déléguée à `reject_internal_addr` (testable sans toucher l'env global).
+pub(crate) fn guard_integration_addr(addr: &SocketAddr) -> Result<(), String> {
+    if crate::env_flag_enabled(ALLOW_INTERNAL_INTEGRATIONS_ENV) {
+        return Ok(());
+    }
+    reject_internal_addr(addr)
+}
+
+/// Décision de refus PURE (SANS lecture d'env) : `Err(raison)` si l'adresse est interne/privée/métadonnées,
+/// `Ok(())` sinon. Séparée de l'escape-hatch env pour que la deny-list soit testable de façon déterministe
+/// (sans muter la variable d'environnement process-globale, source de flakiness inter-tests).
+pub(crate) fn reject_internal_addr(addr: &SocketAddr) -> Result<(), String> {
+    match integration_ip_denied(&addr.ip()) {
+        Some(reason) => Err(format!(
+            "deny-list SSRF : fetch d'intégration console vers cible interne {} refusé ({reason}) ; \
+             poser {ALLOW_INTERNAL_INTEGRATIONS_ENV}=1 pour autoriser une cible privée on-prem",
+            addr.ip()
+        )),
+        None => Ok(()),
+    }
+}
 
 /// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici (le client TCP brut ne fait
 /// pas de TLS — un endpoint mTLS passe par un kind délégué au collecteur Python).
@@ -76,6 +158,10 @@ pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, a
         .map_err(|e| format!("résolution {host}:{port} échouée: {e}"))?
         .next()
         .ok_or_else(|| format!("aucune adresse pour {host}:{port}"))?;
+    // SSRF defense-in-depth (INTÉGRATION console) : cet appelant est un fetch d'URL CONFIGURÉE (source de
+    // détection / OIDC), jamais une cible scope-guardée du moteur — on refuse donc loopback/link-local/
+    // métadonnées/RFC1918/ULA sur l'IP RÉSOLUE que l'on va connecter (anti-DNS-rebinding), sauf escape-hatch.
+    guard_integration_addr(&addr)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connexion {addr} échouée: {e}"))?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
@@ -153,4 +239,65 @@ pub(crate) fn dechunk(body: &[u8]) -> String {
         rest = if end + 2 <= rest.len() { &rest[end + 2..] } else { &[] };
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::{guard_integration_addr, integration_ip_denied, reject_internal_addr};
+    use std::net::{IpAddr, SocketAddr};
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+    fn sa(s: &str) -> SocketAddr {
+        SocketAddr::new(ip(s), 80)
+    }
+
+    /// La matrice de deny-list (fonction PURE, sans env) : métadonnées cloud / loopback / RFC1918 / ULA /
+    /// link-local / unspecified sont refusés ; un hôte public est autorisé. Couvre aussi les IPv6 mappés-v4
+    /// (::ffff:… ne doit pas contourner les tests v4).
+    #[test]
+    fn deny_list_matrix() {
+        // REFUSÉS.
+        assert!(integration_ip_denied(&ip("169.254.169.254")).is_some(), "métadonnées cloud IMDSv4");
+        assert!(integration_ip_denied(&ip("127.0.0.1")).is_some(), "loopback");
+        assert!(integration_ip_denied(&ip("10.0.0.5")).is_some(), "RFC1918 10/8");
+        assert!(integration_ip_denied(&ip("172.16.9.9")).is_some(), "RFC1918 172.16/12");
+        assert!(integration_ip_denied(&ip("192.168.1.1")).is_some(), "RFC1918 192.168/16");
+        assert!(integration_ip_denied(&ip("0.0.0.0")).is_some(), "unspecified");
+        assert!(integration_ip_denied(&ip("::1")).is_some(), "loopback v6");
+        assert!(integration_ip_denied(&ip("fd00:ec2::254")).is_some(), "ULA / IMDSv6");
+        assert!(integration_ip_denied(&ip("fe80::1")).is_some(), "link-local v6");
+        assert!(integration_ip_denied(&ip("::ffff:169.254.169.254")).is_some(), "v4-mapped métadonnées");
+        assert!(integration_ip_denied(&ip("::ffff:127.0.0.1")).is_some(), "v4-mapped loopback");
+        // AUTORISÉS (publics).
+        assert!(integration_ip_denied(&ip("8.8.8.8")).is_none(), "public v4 autorisé");
+        assert!(integration_ip_denied(&ip("1.1.1.1")).is_none(), "public v4 autorisé");
+        assert!(integration_ip_denied(&ip("2606:4700:4700::1111")).is_none(), "public v6 autorisé");
+    }
+
+    /// La garde d'intégration RÉELLE (`reject_internal_addr`, décision PURE utilisée par http_get_blocking /
+    /// le POST OIDC) refuse une cible interne (métadonnées / loopback / RFC1918) et autorise un hôte public.
+    /// Le message d'erreur porte la deny-list (ce qui remonte au fetch de source de détection / OIDC).
+    /// PUR (sans env) => déterministe et sans course inter-tests.
+    #[test]
+    fn integration_guard_rejects_internal_allows_public() {
+        let e = reject_internal_addr(&sa("169.254.169.254")).unwrap_err();
+        assert!(e.contains("deny-list SSRF"), "message deny-list attendu, obtenu: {e}");
+        assert!(reject_internal_addr(&sa("127.0.0.1")).is_err(), "loopback refusé");
+        assert!(reject_internal_addr(&sa("10.1.2.3")).is_err(), "RFC1918 refusé");
+        assert!(reject_internal_addr(&sa("8.8.8.8")).is_ok(), "public autorisé");
+    }
+
+    /// L'ESCAPE-HATCH `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` fait passer une cible interne via la garde
+    /// complète `guard_integration_addr` (SIEM/IdP privé on-prem légitime). On POSE la var et on la laisse
+    /// posée : c'est l'état DÉSIRÉ par tout le binaire de test (les mocks OIDC loopback des tests SSO en
+    /// dépendent), donc AUCUN test ne l'unset -> pas de course sur l'env process-global. La direction
+    /// « refus par défaut » est prouvée par `reject_internal_addr` (pur) ci-dessus.
+    #[test]
+    fn escape_hatch_env_allows_internal() {
+        crate::testutil::allow_internal_integrations_once(); // pose la var UNE fois (jamais unset)
+        assert!(guard_integration_addr(&sa("169.254.169.254")).is_ok(), "escape-hatch autorise métadonnées");
+        assert!(guard_integration_addr(&sa("10.1.2.3")).is_ok(), "escape-hatch autorise RFC1918");
+    }
 }

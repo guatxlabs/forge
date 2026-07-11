@@ -1138,6 +1138,69 @@ mod tests {
         a
     }
 
+    /// [2b] try_create_session PROPAGE l'échec d'écriture au lieu de l'avaler : si la table `session` est
+    /// absente, l'INSERT échoue -> `Err` (aucun token non persisté rendu). Le handler /api/login le remonte
+    /// en 500 (plus de faux-200 avec un token mort qui serait rejeté au 1er usage).
+    #[tokio::test]
+    async fn create_session_write_failure_propagates() {
+        let path = tmp_path("forge-test-session-propagate");
+        let app = test_app(&path);
+        { let db = app.db(); upsert_user(&db, "sessu", "operator", &hash_pw("pw")).unwrap(); }
+        let uid = uid_of(&app, "sessu");
+        assert!(try_create_session(&app, uid).is_ok(), "nominal -> session persistée (Ok)");
+        // casse l'écriture : sans table `session`, l'INSERT échoue -> Err doit remonter.
+        { let db = app.db(); db.execute_batch("DROP TABLE session").unwrap(); }
+        assert!(try_create_session(&app, uid).is_err(), "INSERT échoué -> Err (pas de faux-succès)");
+        // bout-en-bout : login avec de BONS identifiants mais persistance impossible -> 500, pas 200.
+        let r = login(State(app.clone()), Json(json!({"login": "sessu", "password": "pw"}))).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "login -> 500 sur échec de persistance de session");
+        let b = resp_json(r).await;
+        assert_eq!(b["error"], "session_persist_failed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [3] Lockout du login local après N échecs, SANS fuite d'existence de compte. (a) N échecs sur un
+    /// compte EXISTANT -> 401 ; (b) seuil franchi -> verrou : MÊME le BON mot de passe est refusé ; (c)
+    /// ANTI-ÉNUMÉRATION : un login INEXISTANT verrouillé par le même martelage renvoie un 401 BYTE-IDENTIQUE
+    /// au compte existant verrouillé (indistinguables) ; (d) un compte sain non martelé se connecte (200).
+    #[tokio::test]
+    async fn login_lockout_triggers_without_user_enumeration() {
+        async fn attempt(app: &App, login_name: &str, pw: &str) -> (StatusCode, Value) {
+            let r = login(State(app.clone()), Json(json!({"login": login_name, "password": pw}))).await;
+            let st = r.status();
+            (st, resp_json(r).await)
+        }
+        let path = tmp_path("forge-test-login-lockout");
+        let app = test_app(&path);
+        { let db = app.db(); upsert_user(&db, "lockknownx", "operator", &hash_pw("goodpw")).unwrap(); }
+
+        // (a) N échecs sur un compte existant -> chacun 401 invalid_credentials.
+        for _ in 0..LOGIN_MAX_FAILS {
+            let (st, b) = attempt(&app, "lockknownx", "wrong").await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            assert_eq!(b["error"], "invalid_credentials");
+        }
+        // (b) seuil franchi -> verrou : le BON mot de passe est désormais refusé (le lockout mord).
+        let (st_known, b_known) = attempt(&app, "lockknownx", "goodpw").await;
+        assert_eq!(st_known, StatusCode::UNAUTHORIZED, "compte verrouillé : bon mdp refusé");
+        assert_eq!(b_known["error"], "invalid_credentials");
+
+        // (c) verrouiller un login INEXISTANT par le même martelage -> réponse IDENTIQUE (pas d'oracle).
+        for _ in 0..LOGIN_MAX_FAILS {
+            let _ = attempt(&app, "lockunknownx", "wrong").await;
+        }
+        let (st_unknown, b_unknown) = attempt(&app, "lockunknownx", "whatever").await;
+        assert_eq!(st_unknown, st_known, "verrouillé inconnu == verrouillé connu (statut)");
+        assert_eq!(b_unknown, b_known, "verrouillé inconnu == verrouillé connu (corps) — indistinguable");
+
+        // (d) un AUTRE compte, non martelé, se connecte normalement (pas de lock-out collatéral).
+        { let db = app.db(); upsert_user(&db, "freshuserx", "viewer", &hash_pw("okpw")).unwrap(); }
+        let (st_ok, b_ok) = attempt(&app, "freshuserx", "okpw").await;
+        assert_eq!(st_ok, StatusCode::OK, "compte sain -> login 200");
+        assert!(b_ok.get("token").is_some(), "token émis pour le compte sain");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// [HIGH] gen_token : entropie CSPRNG -> non tous-zeros, longueur fixe, valeurs distinctes.
     #[test]
     fn gen_token_is_random_not_zero() {

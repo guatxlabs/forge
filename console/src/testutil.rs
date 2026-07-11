@@ -21,6 +21,17 @@ use serde_json::Value;
             .unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Engage l'escape-hatch SSRF (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) UNE SEULE FOIS pour TOUT le
+    /// binaire de test (`Once` => pas de course set_var/getenv). Les mocks OIDC des tests SSO bindent
+    /// 127.0.0.1 (cibles loopback LÉGITIMEMENT internes) ; la garde d'intégration les refuserait sinon.
+    /// On ne l'unset JAMAIS : c'est l'état partagé DÉSIRÉ (aucun test n'attend le refus PAR l'env — le
+    /// refus est prouvé par les fonctions PURES `reject_internal_addr`/`integration_ip_denied`). En
+    /// production la garde reste pleinement active (ce helper n'existe qu'en `#[cfg(test)]`).
+    pub(crate) fn allow_internal_integrations_once() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| std::env::set_var(crate::ALLOW_INTERNAL_INTEGRATIONS_ENV, "1"));
+    }
+
     pub(crate) fn tmp_path(name: &str) -> String {
         let mut p = std::env::temp_dir();
         let uniq = format!("{}-{}-{}", name, std::process::id(),

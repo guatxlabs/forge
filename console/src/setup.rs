@@ -17,6 +17,79 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+// =====================================================================================
+// ANTI-BRUTE-FORCE du login local (LOW / defense-in-depth) — verrou par compte à seuil.
+//
+// ANTI-ÉNUMÉRATION : la clé de throttle est LE LOGIN SOUMIS, indépendamment de l'existence du compte.
+// Un login inconnu et un login existant-mais-verrouillé sont throttlés par le MÊME mécanisme et renvoient
+// EXACTEMENT la même réponse 401 générique => un compte verrouillé est INDISTINGUABLE d'un compte inconnu
+// (l'attaquant contrôle lui-même l'état de verrou en martelant n'importe quelle chaîne). La vérification
+// argon2 reste à timing uniforme (hash réel/factice) sur le chemin NON verrouillé ; sur le chemin
+// verrouillé on rejette après un délai FIXE (uniforme), sans court-circuit révélateur de l'existence.
+// État EN MÉMOIRE (propriété du déploiement, pas d'une requête) ; fail-closed (verrou empoisonné => on
+// throttle quand même). Reset sur login réussi ; le verrou expire (pas de lock-out permanent des légitimes).
+// =====================================================================================
+
+pub(crate) const LOGIN_MAX_FAILS: u32 = 5; // échecs consécutifs dans la fenêtre avant verrou (pub(crate) : lu par les tests)
+const LOGIN_FAIL_WINDOW: Duration = Duration::from_secs(300); // la série d'échecs se périme après 5 min sans échec
+const LOGIN_LOCKOUT: Duration = Duration::from_secs(300); // durée du verrou une fois déclenché
+const LOGIN_LOCK_DELAY: Duration = Duration::from_millis(700); // délai UNIFORME appliqué à un rejet verrouillé
+
+struct LoginAttempt {
+    fails: u32,
+    first_fail: Instant,      // ancre de fenêtre : 1er échec de la série courante
+    locked_until: Option<Instant>, // posé au franchissement du seuil : rejet jusqu'à cet instant
+}
+
+fn login_attempts() -> &'static Mutex<HashMap<String, LoginAttempt>> {
+    static M: OnceLock<Mutex<HashMap<String, LoginAttempt>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `true` si `key` (login soumis) est ACTUELLEMENT verrouillé -> la requête doit être rejetée uniformément
+/// SANS même tenter argon2. Expire au passage un verrou/fenêtre périmé (ne pas verrouiller les légitimes
+/// pour toujours). Travail indépendant de l'existence du compte (clé = login soumis).
+fn login_is_locked(key: &str, now: Instant) -> bool {
+    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(a) = map.get_mut(key) {
+        if let Some(until) = a.locked_until {
+            if now < until {
+                return true;
+            }
+            map.remove(key); // verrou expiré -> on oublie la série (reset)
+        } else if now.duration_since(a.first_fail) > LOGIN_FAIL_WINDOW {
+            map.remove(key); // fenêtre écoulée sans verrou -> on oublie
+        }
+    }
+    false
+}
+
+/// Enregistre un échec pour `key` ; déclenche le verrou au franchissement du seuil dans la fenêtre. Appelé
+/// UNIQUEMENT sur un vrai échec d'identifiants (compte existant OU non — même espace de clés).
+fn login_note_failure(key: &str, now: Instant) {
+    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    let a = map.entry(key.to_string()).or_insert(LoginAttempt { fails: 0, first_fail: now, locked_until: None });
+    if now.duration_since(a.first_fail) > LOGIN_FAIL_WINDOW {
+        a.fails = 0; // série périmée -> nouvelle fenêtre
+        a.first_fail = now;
+        a.locked_until = None;
+    }
+    a.fails += 1;
+    if a.fails >= LOGIN_MAX_FAILS {
+        a.locked_until = Some(now + LOGIN_LOCKOUT);
+    }
+    drop(map); // relâche le verrou explicitement (tightening : la section critique s'arrête ici)
+}
+
+/// Efface la série d'échecs d'un login après une authentification RÉUSSIE.
+fn login_clear(key: &str) {
+    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(key);
+}
 
 /// POST /api/login {login,password} -> pose une session COURTE (cookie + bearer renvoyés).
 /// Vérifie le couple contre la table `users` (argon2id), refuse un compte désactivé. Réponse 200 :
@@ -30,6 +103,14 @@ pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Re
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if login_in.is_empty() || password.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "login et password requis"}))).into_response();
+    }
+    let now = Instant::now();
+    // THROTTLE anti-brute-force — clé = login SOUMIS (existence-agnostique). Si verrouillé : rejet avec un
+    // délai UNIFORME et la MÊME réponse 401 générique que tout autre échec (aucun signal « verrouillé »
+    // distinct, aucun oracle d'existence — le verrou s'applique aussi aux logins inconnus). Fail-closed.
+    if login_is_locked(login_in, now) {
+        tokio::time::sleep(LOGIN_LOCK_DELAY).await;
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
     // lookup compte. On vérifie TOUJOURS le hash (même si compte introuvable : timing uniforme via un
     // hash factice) pour limiter l'oracle d'énumération de login.
@@ -51,9 +132,16 @@ pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Re
     };
     let ok = verify_pw(password, &reference) && user_id >= 0 && disabled == 0;
     if !ok {
+        // Échec réel -> compte la tentative (existant OU non : même clé) ; peut déclencher le verrou.
+        login_note_failure(login_in, now);
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
-    let (token, expires) = create_session(&app, user_id);
+    login_clear(login_in); // succès -> reset la série d'échecs de ce login
+    // Session persistée AVANT de renvoyer un succès : un échec d'écriture -> 500 (pas de token non persisté).
+    let (token, expires) = match try_create_session(&app, user_id) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
+    };
     let ttl = session_ttl_secs();
     let cookie = session_cookie(&token, ttl);
     (
@@ -163,8 +251,12 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
         app.reload_detection_source();
     }
     app.bump_cache_epoch(); // B6 (HA): 1er admin (auth gate) + éventuelle detection_source -> invalide les pairs
-    // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin.
-    let (token, expires) = create_session(&app, user_id);
+    // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin. Échec d'écriture de
+    // session -> 500 (le compte admin EST provisionné ; l'opérateur se connectera via /api/login).
+    let (token, expires) = match try_create_session(&app, user_id) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
+    };
     let ttl = session_ttl_secs();
     let cookie = session_cookie(&token, ttl);
     // ledger : provision attribuée au nouvel admin. JAMAIS le mot de passe/hash (login + booléens seuls).
