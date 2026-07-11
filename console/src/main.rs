@@ -132,6 +132,11 @@ mod rbac;
 // the chain stays verifiable — NEVER a silent delete. Wired as its OWN module (this line + one route merge +
 // one SPA flag + a flag-gated delete guard). See COMMUNITY_VS_ENTERPRISE.md + forge/compliance_signer.py.
 mod compliance;
+// Sous-modules E3 COMPLIANCE extraits de compliance.rs (PURE MOVE, corps identiques) : math pure
+// policy/WORM/retention + parsing timestamp (compliance_policy) ; export/rendu evidence + helpers de
+// purge (compliance_evidence). Les handlers HTTP restent dans compliance.rs et appellent ces modules.
+mod compliance_policy;
+mod compliance_evidence;
 // SAUVEGARDE / RESTAURATION CHIFFRÉE (+ politique/scheduler offsite, /api/backup*, /api/restore) et
 // MIGRATION / CHIFFREMENT AU REPOS — deux sous-systèmes cohésifs déplacés hors de main.rs (PURE MOVE,
 // Wave 2). Re-exportés `pub(crate)` à la racine de crate pour que le module de tests (`super::*`) ET les
