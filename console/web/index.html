@@ -370,6 +370,10 @@
         <select id="f-status" aria-label="Filtre statut">
           <option value="">Tous statuts</option>
         </select>
+        <select id="f-assignee" aria-label="Filtre propriétaire (assignee)" title="Filtrer par propriétaire">
+          <option value="">Tous propriétaires</option>
+          <option value="unassigned">Non assigné</option>
+        </select>
         <input id="f-target" type="search" aria-label="Filtre cible" placeholder="cible…">
       </span>
     </div>
@@ -381,6 +385,11 @@
         <option value="">Transition de statut…</option>
       </select>
       <button id="f-bulk-apply" class="k-theme" type="button" title="Appliquer le statut choisi aux findings sélectionnés (validé par finding)">Appliquer</button>
+      <select id="f-bulk-assignee" class="k-theme" aria-label="Propriétaire à assigner à la sélection" title="Assigner un propriétaire à la sélection (grant-scopé)">
+        <option value="">Assigner à…</option>
+        <option value="__none__">(désassigner)</option>
+      </select>
+      <button id="f-bulk-assign" class="k-theme" type="button" title="Assigner le propriétaire choisi aux findings sélectionnés (grant-scopé, serveur)">Assigner</button>
       <button id="f-bulk-csv" class="k-theme" type="button" title="Exporter la sélection en CSV (serveur)">Export CSV</button>
       <button id="f-bulk-json" class="k-theme" type="button" title="Exporter la sélection en JSON (serveur)">Export JSON</button>
       <button id="f-bulk-clear" class="k-theme" type="button" title="Vider la sélection">Désélectionner</button>

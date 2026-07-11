@@ -363,6 +363,40 @@ pub fn can_operate_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool 
     matches!(effective_engagement_role(app, headers, eid), Some(r) if role_allows_operate(&r))
 }
 
+/// Does the EXPLICIT user `user_id` have ANY effective grant on engagement `eid` — i.e. are they a
+/// legitimate ASSIGNEE/OWNER candidate for a finding in that engagement? MOST-SPECIFIC-WINS like
+/// effective_engagement_role, but keyed by a caller-supplied user_id (the target assignee) instead of the
+/// session identity. ENTERPRISE semantics — the caller gates on `enabled()` before consulting this (in
+/// COMMUNITY there are no grants and the global role governs, so this is never called). An
+/// engagement-specific grant OR the tenant-wide grant on the engagement's tenant qualifies. FAIL-CLOSED:
+/// no grant / unknown engagement => false (you can only assign to someone who is actually on the engagement).
+pub fn user_has_engagement_grant(app: &App, user_id: i64, eid: i64) -> bool {
+    let tid = tenant_of_engagement(app, eid); // acquires+releases the DB lock itself (Option)
+    let store = app.store();
+    // (1) ENGAGEMENT-SPECIFIC grant — most specific.
+    if store
+        .query_row(
+            "SELECT 1 FROM engagement_grant WHERE user_id = ? AND engagement_id = ?",
+            &crate::sql_params![user_id, eid],
+            |_| Ok(()),
+        )
+        .is_ok()
+    {
+        return true;
+    }
+    // (2) TENANT-WIDE grant on the engagement's tenant. Unknown engagement (no tenant) => false.
+    match tid {
+        Some(t) => store
+            .query_row(
+                "SELECT 1 FROM tenant_grant WHERE user_id = ? AND tenant_id = ?",
+                &crate::sql_params![user_id, t],
+                |_| Ok(()),
+            )
+            .is_ok(),
+        None => false,
+    }
+}
+
 /// FAIL-CLOSED per-engagement ADMIN capability (ENTERPRISE). No effective role or non-admin role => false.
 /// Purely grant-based (no super-admin cross-tenant WRITE bypass — E1 invariant: super-admin READS only).
 pub fn can_admin_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {

@@ -94,6 +94,18 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     if let Some(t) = q.get("target") { conds.push("target=?".into()); params.push(Param::Text(t.clone())); }
     if let Some(m) = q.get("mitre") { conds.push("mitre=?".into()); params.push(Param::Text(m.clone())); }
     if let Some(r) = q.get("run_id") { conds.push("run_id=?".into()); params.push(Param::Text(r.clone())); }
+    // OWNERSHIP FILTER (P1-4) : `?assignee=unassigned` -> findings SANS propriétaire (assignee IS NULL) ;
+    // `?assignee=<user_id>` -> findings de CE propriétaire (valeur LIÉE en Param — pas d'interpolation, pas
+    // d'injection). Une valeur non entière et non "unassigned" est IGNORÉE (best-effort, comme les autres
+    // filtres) plutôt que de renvoyer une erreur — les saved-views peuvent ainsi filtrer par owner sans risque.
+    if let Some(a) = q.get("assignee") {
+        if a == "unassigned" {
+            conds.push("assignee IS NULL".into());
+        } else if let Ok(uid) = a.parse::<i64>() {
+            conds.push("assignee=?".into());
+            params.push(Param::Int(uid));
+        }
+    }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
     let total: i64 = store
         .query_row(&format!("SELECT COUNT(*) FROM finding{where_}"), &params, |r| r.get_i64(0))
@@ -142,8 +154,11 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         };
         // `limit` (entier clampé par paginate) LIÉ en dernier Param (placeholder final `LIMIT ?`).
         ks_params.push(Param::Int(limit));
+        // `assignee` (user_id, nullable) + login résolu via sous-requête CORRÉLÉE (pas de JOIN -> aucune
+        // ambiguïté sur `id`, ORDER/LIMIT/keyset INCHANGÉS). Portable SQLite+PG. NULL -> assignee null +
+        // assignee_login null (non assigné).
         let ks_sql = format!(
-            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT ?"
+            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT ?"
         );
         let rows: Vec<Value> = store
             .query_lax(&ks_sql, &ks_params, |r| {
@@ -160,6 +175,8 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
                     "tool": r.get_opt_str(9)?.unwrap_or_default(),
                     "run_id": r.get_opt_str(10)?.unwrap_or_default(),
                     "classification": r.get_opt_str(11)?.unwrap_or_default(),
+                    "assignee": r.get_opt_i64(12)?,
+                    "assignee_login": r.get_opt_str(13)?,
                 }))
             })
             .unwrap_or_default();
@@ -179,7 +196,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     off_params.push(Param::Int(limit));
     off_params.push(Param::Int(offset));
     let sql = format!(
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification FROM finding{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
     );
     // requête typée : `id` est un entier (rows_to_json le rendrait vide en le lisant comme String).
     // LENIENT (query_lax): un prepare échoué -> Err -> unwrap_or_default -> findings vides + total, à
@@ -199,6 +216,8 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
                 "tool": r.get_opt_str(9)?.unwrap_or_default(),
                 "run_id": r.get_opt_str(10)?.unwrap_or_default(),
                 "classification": r.get_opt_str(11)?.unwrap_or_default(),
+                "assignee": r.get_opt_i64(12)?,
+                "assignee_login": r.get_opt_str(13)?,
             }))
         })
         .unwrap_or_default();
@@ -213,7 +232,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     
     let row = app.store().query_row(
         // `engagement_id` (entier résolu) LIÉ en Param — plus d'interpolation de valeur (défense anti-régression).
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification FROM finding WHERE id=? AND engagement_id=?",
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding WHERE id=? AND engagement_id=?",
         &crate::sql_params![id, eid],
         |r| {
             Ok(json!({
@@ -232,6 +251,8 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
                 "fix": r.get_opt_str(12)?.unwrap_or_default(),
                 "run_id": r.get_opt_str(13)?.unwrap_or_default(),
                 "classification": r.get_opt_str(14)?.unwrap_or_default(),
+                "assignee": r.get_opt_i64(15)?,
+                "assignee_login": r.get_opt_str(16)?,
             }))
         },
     );
@@ -343,6 +364,163 @@ pub(crate) async fn finding_update(
         "status": new_status, "classification": new_class,
     }));
     (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "status": new_status, "classification": new_class}))).into_response()
+}
+
+// =====================================================================================
+//  OWNERSHIP (readiness P1-4) — pointeur LÉGER d'assignation (`finding.assignee` = user_id) + bulk-assign.
+//  PAS un moteur de workflow : juste « qui possède ce finding ». GRANT-SCOPED des DEUX CÔTÉS (enterprise) :
+//  l'appelant doit OPÉRER l'engagement ET l'assigné (non-null) doit avoir un grant sur CE MÊME engagement.
+// =====================================================================================
+
+/// GET /api/findings/assignable — l'ensemble des utilisateurs ASSIGNABLES sur l'engagement ACTIF (le jeu
+/// légitime de propriétaires pour le sélecteur d'assignation). Alimente l'UI d'assignation ; l'action
+/// d'assigner reste OPÉRATEUR (gate serveur). ENTERPRISE : UNIQUEMENT les users détenant un grant
+/// (engagement-spécifique OU tenant-wide) sur l'engagement actif — le MÊME jeu que `resolve_assignee` valide
+/// (fail-closed : caller sans grant -> NO_ENGAGEMENT -> liste vide). COMMUNITY : tous les users actifs (aucun
+/// grant n'existe). Divulgation minimale (id + login) nécessaire à la fonctionnalité. Réponse
+/// `{engagement_id, users:[{id,login}]}`.
+pub(crate) async fn findings_assignable(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // `tenancy::enabled` acquiert LUI-MÊME le Mutex de connexion (settings) — l'appeler AVANT de tenir le
+    // guard `store` ci-dessous, sinon auto-deadlock du thread (le même verrou repris de façon réentrante).
+    let ent = tenancy::enabled(&app);
+    let store = app.store();
+    let users: Vec<Value> = if ent {
+        // Union grant engagement-spécifique + grant tenant-wide (tenant résolu par sous-requête). `eid` LIÉ.
+        store
+            .query_lax(
+                "SELECT u.id, u.login FROM users u WHERE u.disabled=0 AND (
+                    EXISTS(SELECT 1 FROM engagement_grant g WHERE g.user_id=u.id AND g.engagement_id=?)
+                    OR EXISTS(SELECT 1 FROM tenant_grant tg WHERE tg.user_id=u.id AND tg.tenant_id=(SELECT tenant_id FROM engagement WHERE id=?))
+                 ) ORDER BY u.login",
+                &crate::sql_params![eid, eid],
+                |r| Ok(json!({"id": r.get_i64(0)?, "login": r.get_str(1)?})),
+            )
+            .unwrap_or_default()
+    } else {
+        store
+            .query_lax(
+                "SELECT id, login FROM users WHERE disabled=0 ORDER BY login",
+                &[],
+                |r| Ok(json!({"id": r.get_i64(0)?, "login": r.get_str(1)?})),
+            )
+            .unwrap_or_default()
+    };
+    drop(store);
+    Json(json!({"engagement_id": eid, "users": users})).into_response()
+}
+
+/// Parse + VALIDE le champ `assignee` d'une requête d'assignation contre l'engagement `eid`, GRANT-SCOPÉ
+/// fail-closed. Retourne `Ok(Some(uid))` (assigner) / `Ok(None)` (désassigner) ou `Err((status, json))` prêt
+/// à renvoyer. Règles :
+///   - clé ABSENTE          -> 400 (l'assignation doit être EXPLICITE) ;
+///   - `null` JSON          -> `Ok(None)` — EFFACE le propriétaire (désassignation) ;
+///   - entier JSON user_id   -> l'utilisateur doit EXISTER et ne pas être désactivé (sinon 400) ET, quand la
+///     tenancy est ACTIVÉE, détenir un grant sur `eid` (sinon 403 — on n'assigne qu'à quelqu'un réellement sur
+///     l'engagement). En COMMUNITY le contrôle de grant est un NO-OP (aucun grant n'existe) : seule l'existence
+///     est requise (permissif/sain, comme le reste) ;
+///   - toute autre valeur    -> 400.
+fn resolve_assignee(app: &App, eid: i64, body: &Value) -> Result<Option<i64>, (StatusCode, Value)> {
+    let v = match body.get("assignee") {
+        Some(v) => v,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "bad_request", "why": "champ 'assignee' requis (user_id entier, ou null pour désassigner)"}),
+            ))
+        }
+    };
+    if v.is_null() {
+        return Ok(None); // désassignation explicite
+    }
+    let uid = match v.as_i64() {
+        Some(n) => n,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                json!({"error": "bad_assignee", "why": "'assignee' doit être un entier (user_id) ou null"}),
+            ))
+        }
+    };
+    // L'assigné doit EXISTER et être actif (sain en community ET enterprise — jamais un propriétaire fantôme).
+    let exists = {
+        let store = app.store();
+        store
+            .query_row("SELECT 1 FROM users WHERE id=? AND disabled=0", &crate::sql_params![uid], |_| Ok(()))
+            .is_ok()
+    };
+    if !exists {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            json!({"error": "unknown_assignee", "why": format!("utilisateur {uid} inconnu ou désactivé")}),
+        ));
+    }
+    // ENTERPRISE : l'assigné doit AUSSI être sur CET engagement (grant-scopé des deux côtés). Community => no-op.
+    if tenancy::enabled(app) && !tenancy::user_has_engagement_grant(app, uid, eid) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            json!({"error": "assignee_not_on_engagement", "why": format!("l'utilisateur {uid} n'a pas de grant sur cet engagement (fail-closed)")}),
+        ));
+    }
+    Ok(Some(uid))
+}
+
+/// POST /api/findings/:id/assign {assignee: <user_id|null>} — DÉFINIT/EFFACE le propriétaire (assignee) d'un
+/// finding (OPÉRATEUR, fail-closed 403). ISOLATION : n'agit QUE sur un finding de l'engagement ACTIF (un id
+/// d'un AUTRE engagement -> 404, jamais divulgué). GRANT-SCOPÉ DES DEUX CÔTÉS (enterprise) : l'appelant doit
+/// OPÉRER l'engagement ET l'assigné (non-null) doit détenir un grant sur ce MÊME engagement (resolve_assignee).
+/// Écriture MATCHÉE -> 500 sur Err AVANT le ledger (pas de fausse attestation) ; ledger `console.finding.assign`
+/// {finding_id, assignee, by} UNIQUEMENT en cas de succès.
+pub(crate) async fn finding_assign(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    // engagement_id RÉSOLU (entier, jamais du texte client). L'existence est vérifiée DANS cet engagement
+    // (isolation fail-closed) — un id d'un AUTRE engagement est 404, jamais assigné (pas de cross-engagement).
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    let exists = {
+        let store = app.store();
+        store
+            .query_row("SELECT 1 FROM finding WHERE id=? AND engagement_id=?", &crate::sql_params![id, eid], |_| Ok(()))
+            .is_ok()
+    };
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response();
+    }
+    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
+    let assignee = match resolve_assignee(&app, eid, &body) {
+        Ok(a) => a,
+        Err((s, j)) => return (s, Json(j)).into_response(),
+    };
+    // ÉCRITURE FAIL-CLOSED : le guard `store` est SCOPÉ + LIBÉRÉ avant attribution_login/append_console_ledger
+    // (anti auto-deadlock). On MATCHE le Result : échec (lock/disque/pg) -> 500 typé, SANS ledger (pas de
+    // divergence ledger↔DB). `assignee` LIÉ en Param (Int ou Null) — aucune interpolation de valeur.
+    {
+        let store = app.store();
+        let assignee_param = match assignee { Some(u) => Param::Int(u), None => Param::Null };
+        if let Err(e) = store.execute(
+            "UPDATE finding SET assignee=? WHERE id=? AND engagement_id=?",
+            &[assignee_param, Param::Int(id), Param::Int(eid)],
+        ) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "db_write_failed", "why": format!("écriture du finding échouée: {e}")}))).into_response();
+        }
+    }
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.finding.assign", json!({
+        "by": actor, "engagement_id": eid, "finding_id": id, "assignee": assignee,
+    }));
+    (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "assignee": assignee}))).into_response()
 }
 
 // =====================================================================================
@@ -468,6 +646,76 @@ pub(crate) async fn findings_bulk_status(
     }
     (StatusCode::OK, Json(json!({
         "ok": true, "status": status, "engagement_id": eid,
+        "applied": applied, "skipped": skipped,
+        "applied_count": applied.len(), "skipped_count": skipped.len(),
+    }))).into_response()
+}
+
+/// POST /api/findings/bulk/assign {ids:[i64], assignee:<user_id|null>} — DÉFINIT/EFFACE le propriétaire d'un
+/// LOT de findings (OPÉRATEUR, fail-closed 403). VALIDATION fail-closed AVANT toute écriture : l'assigné
+/// (resolve_assignee) doit exister + (enterprise) détenir un grant sur l'engagement, sinon 400/403 et AUCUNE
+/// mutation. ISOLATION : chaque UPDATE est confiné à l'engagement ACTIF (`engagement_id=?`) — un id d'un AUTRE
+/// engagement (ou inexistant) est SKIPPÉ (0 ligne), jamais assigné. On CLASSE selon le Result (Ok(n>0)=applied,
+/// Ok(0)=skipped, Err=errored -> 500, jamais confondu avec un skip). ATTRIBUÉ + LEDGERISÉ
+/// (`console.finding.bulk_assign`) — `applied` ne reflète QUE des mutations réellement durables.
+pub(crate) async fn findings_bulk_assign(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let ids = match parse_ids(&body) {
+        Ok(v) => v,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
+    };
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
+    // VALIDATION de l'assigné AVANT toute écriture (fail-closed : un assigné invalide/hors-grant ne mute rien).
+    let assignee = match resolve_assignee(&app, eid, &body) {
+        Ok(a) => a,
+        Err((s, j)) => return (s, Json(j)).into_response(),
+    };
+    let (mut applied, mut skipped, mut errored): (Vec<i64>, Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new(), Vec::new());
+    {
+        // Guard `store` SCOPÉ ce bloc et LIBÉRÉ avant attribution_login/append_console_ledger (anti auto-deadlock).
+        for id in &ids {
+            let assignee_param = match assignee { Some(u) => Param::Int(u), None => Param::Null };
+            match app.store().execute(
+                "UPDATE finding SET assignee=? WHERE id=? AND engagement_id=?",
+                &[assignee_param, Param::Int(*id), Param::Int(eid)],
+            ) {
+                Ok(n) if n > 0 => applied.push(*id),
+                Ok(_) => skipped.push(*id),
+                Err(_) => errored.push(*id),
+            }
+        }
+    }
+    let actor = attribution_login(&app, &headers);
+    let mut detail = json!({
+        "by": actor, "engagement_id": eid, "assignee": assignee,
+        "applied": applied, "skipped": skipped,
+    });
+    if !errored.is_empty() {
+        detail.as_object_mut().unwrap().insert("errored".into(), json!(errored));
+    }
+    append_console_ledger(&app, "console.finding.bulk_assign", detail);
+    if !errored.is_empty() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false, "error": "db_write_failed", "assignee": assignee, "engagement_id": eid,
+            "applied": applied, "skipped": skipped, "errored": errored,
+            "applied_count": applied.len(), "skipped_count": skipped.len(), "errored_count": errored.len(),
+        }))).into_response();
+    }
+    (StatusCode::OK, Json(json!({
+        "ok": true, "assignee": assignee, "engagement_id": eid,
         "applied": applied, "skipped": skipped,
         "applied_count": applied.len(), "skipped_count": skipped.len(),
     }))).into_response()
@@ -1472,6 +1720,282 @@ mod tests {
         let q1c = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
         let r = finding_detail(State(app.clone()), HeaderMap::new(), Path(a1), q1c).await.into_response();
         assert_eq!(r.status(), StatusCode::OK, "propre finding visible (bound eid)");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    //  OWNERSHIP (P1-4) — assign / bulk-assign : grant-scopé, isolé par engagement, ledgerisé
+    // -------------------------------------------------------------------------------------------
+
+    fn assignee_of(app: &App, id: i64) -> Option<i64> {
+        let db = app.db();
+        db.query_row("SELECT assignee FROM finding WHERE id=?", [id], |r| r.get::<_, Option<i64>>(0)).unwrap()
+    }
+    fn seed_user(app: &App, login: &str, role: &str) -> i64 {
+        {
+            let db = app.db();
+            upsert_user(&db, login, role, &hash_pw("pw")).unwrap();
+        }
+        uid_of(app, login)
+    }
+    fn q_eng(eid: &str) -> Query<HashMap<String, String>> {
+        Query(HashMap::from([("engagement".to_string(), eid.to_string())]))
+    }
+
+    /// ASSIGN (community) : operator assigne un finding à un user (persistance colonne + ledger
+    /// `console.finding.assign`), puis DÉSASSIGNE (assignee:null). Viewer -> 403 (aucune mutation).
+    #[tokio::test]
+    async fn assign_persists_unassign_and_ledgered() {
+        let led = tmp_ledger("assign");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (vtok, otok) = seed_roles(&app);
+        let bob = seed_user(&app, "bob", "viewer");
+
+        // viewer -> 403, aucune mutation.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&vtok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": bob}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(assignee_of(&app, f1), None, "403 ne mute rien");
+
+        // operator assigne à bob.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": bob}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = to_json(r).await;
+        assert_eq!(b["assignee"], bob);
+        assert_eq!(assignee_of(&app, f1), Some(bob), "assignation persistée");
+        let last = read_ledger_lines(&led).pop().unwrap();
+        assert_eq!(last["kind"], "console.finding.assign");
+        assert_eq!(last["detail"]["assignee"], bob);
+        assert_eq!(last["detail"]["finding_id"], f1);
+
+        // détail : assignee + login résolu.
+        let d = finding_detail(State(app.clone()), HeaderMap::new(), Path(f1), q_eng("1")).await.into_response();
+        let dj = to_json(d).await;
+        assert_eq!(dj["assignee"], bob);
+        assert_eq!(dj["assignee_login"], "bob");
+
+        // désassignation (null).
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": null}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(assignee_of(&app, f1), None, "désassigné");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ASSIGN : champ absent -> 400 ; assigné inconnu -> 400 (aucune mutation).
+    #[tokio::test]
+    async fn assign_bad_and_unknown_user_400() {
+        let led = tmp_ledger("assign-bad");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+
+        // champ 'assignee' absent -> 400.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({}))).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // user inexistant -> 400, aucune mutation.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": 99999}))).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(assignee_of(&app, f1), None, "assigné inconnu ne mute rien");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ASSIGN : ISOLATION — un finding d'un AUTRE engagement -> 404 (jamais assigné, pas de cross-engagement).
+    #[tokio::test]
+    async fn assign_cross_engagement_is_404() {
+        let led = tmp_ledger("assign-xeng");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        let fx = seed_finding(&app, 2, "fx", "new"); // AUTRE engagement
+        let (_v, otok) = seed_roles(&app);
+        let bob = seed_user(&app, "bob", "viewer");
+
+        // engagement actif #1, cible fx (#2) -> 404, intouché.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(fx), q_eng("1"),
+            Json(json!({"assignee": bob}))).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "id d'un AUTRE engagement -> 404");
+        assert_eq!(assignee_of(&app, fx), None, "finding cross-engagement INTOUCHÉ");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ASSIGN — INJECTION D'ÉCHEC : trigger BEFORE UPDATE ABORT -> 500 `db_write_failed`, AUCUN ledger,
+    /// finding intouché (régression anti write-avalé).
+    #[tokio::test]
+    async fn assign_db_failure_500_and_no_ledger() {
+        let led = tmp_ledger("assign-fail");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+        let bob = seed_user(&app, "bob", "viewer");
+        {
+            let db = app.db();
+            db.execute_batch("CREATE TRIGGER t_block_upd BEFORE UPDATE ON finding BEGIN SELECT RAISE(ABORT,'boom'); END;")
+                .unwrap();
+        }
+        let before = read_ledger_lines(&led).len();
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": bob}))).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(to_json(r).await["error"], "db_write_failed");
+        assert_eq!(assignee_of(&app, f1), None, "aucune mutation");
+        assert_eq!(read_ledger_lines(&led).len(), before, "un échec d'écriture NE ledgerise PAS");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// BULK ASSIGN : applique aux ids DE L'ENGAGEMENT et SKIP ceux d'un autre (isolation), ledgerisé.
+    #[tokio::test]
+    async fn bulk_assign_applies_to_given_ids_only() {
+        let led = tmp_ledger("bulk-assign");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let f2 = seed_finding(&app, 1, "f2", "new");
+        let fx = seed_finding(&app, 2, "fx-other", "new");
+        let (_v, otok) = seed_roles(&app);
+        let bob = seed_user(&app, "bob", "viewer");
+
+        let r = findings_bulk_assign(State(app.clone()), peer(), bearer(&otok), q_eng("1"),
+            Json(json!({"ids": [f1, f2, fx, 9999], "assignee": bob}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = to_json(r).await;
+        let applied: Vec<i64> = b["applied"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+        assert_eq!(applied, vec![f1, f2], "seuls les findings de l'engagement actif");
+        assert_eq!(assignee_of(&app, f1), Some(bob));
+        assert_eq!(assignee_of(&app, f2), Some(bob));
+        assert_eq!(assignee_of(&app, fx), None, "finding d'un AUTRE engagement INTOUCHÉ");
+        assert_eq!(read_ledger_lines(&led).pop().unwrap()["kind"], "console.finding.bulk_assign");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// FILTER : `?assignee=<uid>` rend les findings de ce propriétaire ; `?assignee=unassigned` rend les
+    /// non assignés — chacun le bon sous-ensemble.
+    #[tokio::test]
+    async fn filter_by_assignee() {
+        let led = tmp_ledger("filter-assignee");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let f2 = seed_finding(&app, 1, "f2", "new");
+        let _f3 = seed_finding(&app, 1, "f3", "new"); // reste non assigné
+        let (_v, otok) = seed_roles(&app);
+        let bob = seed_user(&app, "bob", "viewer");
+
+        // assigne f1 et f2 à bob.
+        for f in [f1, f2] {
+            let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f), q_eng("1"),
+                Json(json!({"assignee": bob}))).await;
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        // filtre par bob -> f1,f2.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string()), ("assignee".to_string(), bob.to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        let ids: Vec<i64> = b["findings"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert_eq!(b["total"], 2);
+        assert!(ids.contains(&f1) && ids.contains(&f2) && !ids.contains(&_f3), "filtre owner exact");
+        // filtre unassigned -> seulement f3.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string()), ("assignee".to_string(), "unassigned".to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert_eq!(b["total"], 1, "un seul non assigné");
+        assert_eq!(b["findings"][0]["id"], _f3);
+        let _ = std::fs::remove_file(&led);
+    }
+
+    fn seed_tenant_grant(app: &App, uid: i64, tid: i64, role: &str) {
+        let db = app.db();
+        db.execute(
+            "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
+            rusqlite::params![uid, tid, role],
+        )
+        .unwrap();
+    }
+
+    /// ENTERPRISE (tenancy ON) : GRANT-SCOPÉ DES DEUX CÔTÉS. L'appelant operator (grant tenant) peut assigner
+    /// à un user QUI A un grant sur l'engagement, mais est REJETÉ (403) pour un user SANS grant. Prouve que
+    /// `resolve_assignee` gate l'assigné sur l'engagement (on n'assigne qu'à quelqu'un réellement dessus).
+    #[tokio::test]
+    async fn assign_grant_scoped_enterprise() {
+        let led = tmp_ledger("assign-ent");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A"); // tenant_id défaut = 1
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        {
+            let db = app.db();
+            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        }
+        // caller operator (rôle global operator + grant tenant_operator sur tenant 1 => voit+opère eng 1).
+        let (_v, otok) = seed_roles(&app);
+        seed_tenant_grant(&app, uid_of(&app, "oo"), 1, "tenant_operator");
+        // assigné AVEC grant sur le tenant 1.
+        let insider = seed_user(&app, "insider", "viewer");
+        seed_tenant_grant(&app, insider, 1, "tenant_viewer");
+        // assigné SANS aucun grant.
+        let outsider = seed_user(&app, "outsider", "viewer");
+
+        // assigné hors-grant -> 403, aucune mutation.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": outsider}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "assigné sans grant sur l'engagement -> 403");
+        assert_eq!(assignee_of(&app, f1), None, "hors-grant ne mute rien");
+
+        // assigné avec grant -> OK.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": insider}))).await;
+        assert_eq!(r.status(), StatusCode::OK, "assigné avec grant sur l'engagement -> OK");
+        assert_eq!(assignee_of(&app, f1), Some(insider));
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ENTERPRISE : un operator SANS grant sur l'engagement ne peut PAS assigner (can_operate_engagement
+    /// fail-closed -> 403), même s'il est operator global.
+    #[tokio::test]
+    async fn assign_caller_without_engagement_grant_403() {
+        let led = tmp_ledger("assign-nocaller");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        {
+            let db = app.db();
+            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        }
+        let (_v, otok) = seed_roles(&app); // operator global, MAIS aucun grant tenant/engagement
+        let bob = seed_user(&app, "bob", "viewer");
+        seed_tenant_grant(&app, bob, 1, "tenant_viewer");
+
+        // sans grant, l'engagement #1 n'est même pas visible -> 404 (isolation) plutôt que d'exposer.
+        let r = finding_assign(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"assignee": bob}))).await;
+        assert!(
+            r.status() == StatusCode::NOT_FOUND || r.status() == StatusCode::FORBIDDEN,
+            "operator sans grant sur l'engagement ne peut pas assigner (404/403 fail-closed), got {}",
+            r.status()
+        );
+        assert_eq!(assignee_of(&app, f1), None, "aucune mutation");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ASSIGNABLE (community) : liste les users actifs assignables + NE DEADLOCK PAS (le handler calcule
+    /// tenancy::enabled AVANT de tenir le guard `store`, sinon reprise réentrante du Mutex -> figé).
+    #[tokio::test]
+    async fn assignable_lists_users_no_deadlock() {
+        let led = tmp_ledger("assignable");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_user(&app, "bob", "viewer");
+        seed_user(&app, "carol", "viewer");
+        let r = findings_assignable(State(app.clone()), HeaderMap::new(), q_eng("1")).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = to_json(r).await;
+        let logins: Vec<String> = b["users"].as_array().unwrap().iter().map(|u| u["login"].as_str().unwrap().to_string()).collect();
+        assert!(logins.contains(&"bob".to_string()) && logins.contains(&"carol".to_string()), "users assignables listés");
         let _ = std::fs::remove_file(&led);
     }
 }

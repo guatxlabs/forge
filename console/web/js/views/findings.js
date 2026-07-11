@@ -13,11 +13,13 @@ export async function loadFindings(offset = 0) {
   F_STATE.offset = offset;
   // rafraîchit les vues sauvegardées sur un chargement « frais » (nouvelle vue / changement de filtre ou
   // d'engagement), pas à chaque pagination — la liste est scopée à l'engagement actif côté serveur.
-  if (offset === 0) loadSavedViews();
+  if (offset === 0) { loadSavedViews(); loadAssignableUsers(); }
   const qp = new URLSearchParams();
   const camp = $('#campaign') && $('#campaign').value; if (camp) qp.set('campaign', camp);
   const sev = $('#f-sev') && $('#f-sev').value; if (sev) qp.set('severity', sev);
   const st = $('#f-status') && $('#f-status').value; if (st) qp.set('status', st);
+  // OWNERSHIP (P1-4) : filtre par propriétaire — `unassigned` (assignee IS NULL) ou un user_id ; lié serveur.
+  const asg = $('#f-assignee') && $('#f-assignee').value; if (asg) qp.set('assignee', asg);
   const tg = $('#f-target') && $('#f-target').value.trim(); if (tg) qp.set('target', tg);
   qp.set('limit', F_STATE.limit); qp.set('offset', offset);
   let d;
@@ -34,7 +36,7 @@ export async function loadFindings(offset = 0) {
   selAll.checked = rows.length > 0 && rows.every(x => F_STATE.selected.has(x.id));
   selAll.onclick = e => { e.stopPropagation(); const on = selAll.checked; rows.forEach(x => { if (on) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); }); loadFindings(F_STATE.offset); };
   selTh.appendChild(selAll); htr.appendChild(selTh);
-  htr.insertAdjacentHTML('beforeend', `<th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>TLP</th><th>Outil</th><th>Date</th>`);
+  htr.insertAdjacentHTML('beforeend', `<th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>TLP</th><th>Proprio</th><th>Outil</th><th>Date</th>`);
   thead.appendChild(htr); table.appendChild(thead);
   const tb = document.createElement('tbody');
   rows.forEach((x, i) => {
@@ -43,7 +45,7 @@ export async function loadFindings(offset = 0) {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = F_STATE.selected.has(x.id); cb.setAttribute('aria-label', 'Sélectionner ce finding');
     cb.onclick = e => { e.stopPropagation(); if (cb.checked) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); updateBulkBar(); selAll.checked = rows.every(r => F_STATE.selected.has(r.id)); };
     cbTd.appendChild(cb); tr.appendChild(cbTd);
-    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
+    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.assignee_login || '—'}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
     tr.onclick = () => openFinding(x.id);
     tb.appendChild(tr);
   });
@@ -77,7 +79,54 @@ export async function openFinding(id) {
     sec('PoC', d.poc);
     sec('Correctif suggéré', d.fix);
     buildFindingControls(body, d);
+    buildAssignControl(body, d);
   });
+}
+
+// Contrôle de PROPRIÉTÉ (P1-4) : assigne/désassigne le finding (operator, GRANT-SCOPÉ serveur). Le
+// sélecteur est peuplé depuis le jeu ASSIGNABLE (users réellement sur l'engagement actif) ; l'assigné
+// courant est toujours proposé, marqué « hors périmètre » s'il n'est plus assignable. Endpoint dédié
+// POST /api/findings/:id/assign (distinct du cycle de vie/TLP). Aucune modale navigateur.
+function buildAssignControl(body, d) {
+  const el = (t, cls) => { const n = document.createElement(t); if (cls) n.className = cls; return n; };
+  const wrap = el('div', 'findctl');
+  const h = el('div', 'mailsec'); h.textContent = 'Propriétaire (assignee, operator)'; wrap.appendChild(h);
+  const row = el('div', 'findctl-row');
+  const lbl = el('label'); lbl.textContent = 'Assigné à';
+  const sel = el('select'); sel.setAttribute('aria-label', 'Propriétaire du finding');
+  const optNone = el('option'); optNone.value = ''; optNone.textContent = '(non assigné)'; sel.appendChild(optNone);
+  let hasCur = false;
+  ASSIGNABLE.forEach(u => {
+    const o = el('option'); o.value = String(u.id); o.textContent = u.login;
+    if (d.assignee != null && Number(u.id) === Number(d.assignee)) { o.selected = true; hasCur = true; }
+    sel.appendChild(o);
+  });
+  // l'assigné courant hors du jeu assignable reste proposé (marqué), pour ne pas le perdre à l'ouverture.
+  if (d.assignee != null && !hasCur) {
+    const o = el('option'); o.value = String(d.assignee); o.textContent = (d.assignee_login || ('#' + d.assignee)) + ' (hors périmètre)'; o.selected = true; sel.appendChild(o);
+  }
+  lbl.appendChild(sel); row.appendChild(lbl);
+  const save = el('button'); save.type = 'button'; save.className = 'k-theme'; save.textContent = 'Assigner';
+  save.onclick = async () => {
+    const v = sel.value;
+    const assignee = v === '' ? null : Number(v);
+    const cur = d.assignee == null ? null : Number(d.assignee);
+    if (assignee === cur) { toast('Aucun changement.', 'info'); return; }
+    save.disabled = true;
+    try {
+      const r = await write('/api/findings/' + d.id + '/assign', { body: { assignee }, auth: 'operator', engagement: true });
+      const j = r.json || {};
+      if (r.status === 403) { toast('Réservé à un compte operator (ou assigné hors périmètre de l’engagement).', 'bad'); return; }
+      if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+      toast('Propriétaire mis à jour (ledgerisé).', 'ok');
+      d.assignee = assignee;
+      loadFindings(F_STATE.offset);
+    } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+    finally { save.disabled = false; }
+  };
+  row.appendChild(save);
+  wrap.appendChild(row);
+  body.appendChild(wrap);
 }
 
 // Contrôles de MUTATION d'un finding (#15) : transition de cycle de vie (statut validé) + classification
@@ -128,7 +177,7 @@ function buildFindingControls(body, d) {
   wrap.appendChild(row);
   body.appendChild(wrap);
 }
-['f-sev', 'f-status', 'f-target'].forEach(idp => { const el = $('#' + idp); if (el) el.addEventListener(idp === 'f-target' ? 'input' : 'change', () => loadFindings(0)); });
+['f-sev', 'f-status', 'f-assignee', 'f-target'].forEach(idp => { const el = $('#' + idp); if (el) el.addEventListener(idp === 'f-target' ? 'input' : 'change', () => loadFindings(0)); });
 // EXPORT depuis Findings : CSV / JSON de l'engagement ACTIF (secrets rédigés serveur) + accès au
 // rapport complet brandé (vue #reports). downloadReport() est défini plus bas (déclaration hoistée).
 if ($('#f-export-csv')) $('#f-export-csv').addEventListener('click', () => downloadReport('csv'));
@@ -200,7 +249,51 @@ async function bulkExport(fmt) {
   toast(`Export ${fmt.toUpperCase()} de ${ids.length} finding(s) sélectionné(s).`, 'ok');
 }
 
+// OWNERSHIP (P1-4) — jeu des utilisateurs ASSIGNABLES sur l'engagement actif (grant-scopé serveur). Peuple
+// le filtre `#f-assignee` ET le sélecteur de bulk-assign `#f-bulk-assignee` (conserve leurs options statiques).
+let ASSIGNABLE = [];
+async function loadAssignableUsers() {
+  let d;
+  try { d = await api('/findings/assignable'); } catch (e) { return; } // silencieux : optionnel
+  ASSIGNABLE = (d && d.users) || [];
+  // repeuple un select en conservant ses `keep` premières options statiques, en restaurant la sélection.
+  const fill = (sel, keep) => {
+    if (!sel) return;
+    const cur = sel.value;
+    while (sel.options.length > keep) sel.remove(keep);
+    ASSIGNABLE.forEach(u => { const o = document.createElement('option'); o.value = String(u.id); o.textContent = u.login; sel.appendChild(o); });
+    if (Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
+  };
+  fill($('#f-assignee'), 2);      // « Tous propriétaires » + « Non assigné »
+  fill($('#f-bulk-assignee'), 2); // « Assigner à… » + « (désassigner) »
+}
+
+// Assigne le propriétaire choisi aux findings sélectionnés (operator, serveur valide chaque id + le grant).
+async function bulkAssign() {
+  const sel = $('#f-bulk-assignee'); const v = (sel && sel.value) || '';
+  if (!v) { toast('Choisis un propriétaire (ou « désassigner »).', 'info'); return; }
+  const ids = Array.from(F_STATE.selected);
+  if (!ids.length) { toast('Aucun finding sélectionné.', 'info'); return; }
+  const assignee = v === '__none__' ? null : Number(v);
+  const who = v === '__none__' ? '' : ((sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].textContent) || v);
+  const ok = await confirmModal(`${assignee == null ? 'Désassigner' : 'Assigner à « ' + who + ' »'} ${ids.length} finding(s) sélectionné(s) ?`, { title: 'Assignation de masse', okText: 'Assigner', danger: false });
+  if (!ok) return;
+  const btn = $('#f-bulk-assign'); if (btn) btn.disabled = true;
+  try {
+    const r = await write('/api/findings/bulk/assign', { body: { ids, assignee }, auth: 'operator', engagement: true });
+    const j = r.json || {};
+    if (r.status === 403) { toast('Réservé à un compte operator (ou assigné hors périmètre).', 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    const ap = (j.applied || []).length, sk = (j.skipped || []).length;
+    toast(`Propriétaire appliqué à ${ap} finding(s)` + (sk ? `, ${sk} hors périmètre ignoré(s)` : '') + ' (ledgerisé).', 'ok', 5000);
+    (j.applied || []).forEach(id => F_STATE.selected.delete(id));
+    loadFindings(F_STATE.offset);
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
 if ($('#f-bulk-apply')) $('#f-bulk-apply').addEventListener('click', bulkApplyStatus);
+if ($('#f-bulk-assign')) $('#f-bulk-assign').addEventListener('click', bulkAssign);
 if ($('#f-bulk-csv')) $('#f-bulk-csv').addEventListener('click', () => bulkExport('csv'));
 if ($('#f-bulk-json')) $('#f-bulk-json').addEventListener('click', () => bulkExport('json'));
 if ($('#f-bulk-clear')) $('#f-bulk-clear').addEventListener('click', () => { F_STATE.selected.clear(); loadFindings(F_STATE.offset); });
@@ -218,6 +311,7 @@ function collectFilterState() {
   const f = {};
   const sev = $('#f-sev') && $('#f-sev').value; if (sev) f.severity = sev;
   const st = $('#f-status') && $('#f-status').value; if (st) f.status = st;
+  const asg = $('#f-assignee') && $('#f-assignee').value; if (asg) f.assignee = asg;
   const tg = $('#f-target') && $('#f-target').value.trim(); if (tg) f.target = tg;
   const camp = $('#campaign') && $('#campaign').value; if (camp) f.campaign = camp;
   return f;
@@ -228,6 +322,9 @@ function applyFilterState(f) {
   f = f || {};
   if ($('#f-sev')) $('#f-sev').value = f.severity || '';
   if ($('#f-status')) $('#f-status').value = f.status || '';
+  // `assignee` : la valeur ne « colle » que si son option existe (jeu ASSIGNABLE déjà chargé à l'init de la
+  // vue). 'unassigned' est une option statique toujours présente ; un user_id l'est après loadAssignableUsers.
+  if ($('#f-assignee')) $('#f-assignee').value = f.assignee || '';
   if ($('#f-target')) $('#f-target').value = f.target || '';
   // `campaign` est un sélecteur global partagé : on ne le force que s'il existe dans ses options.
   if (f.campaign != null && $('#campaign')) { const opt = Array.from($('#campaign').options || []).some(o => o.value === f.campaign); if (opt) $('#campaign').value = f.campaign; }

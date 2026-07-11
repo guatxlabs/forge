@@ -353,7 +353,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // avec `/api/findings/:id` (1 segment param). DÉCLARÉES AVANT `:id` par prudence (spécifique d'abord).
         .route("/api/findings/bulk/status", post(findings_bulk_status))
         .route("/api/findings/bulk/export", post(findings_bulk_export))
+        // OWNERSHIP (P1-4) : bulk-assign (segments STATIQUES `bulk/assign`) + single-assign (`:id/assign`) +
+        // jeu des assignables (`assignable`, statique — pas de collision matchit avec `:id`).
+        .route("/api/findings/bulk/assign", post(findings_bulk_assign))
+        .route("/api/findings/assignable", get(findings_assignable))
         .route("/api/findings/:id", get(finding_detail).post(finding_update))
+        .route("/api/findings/:id/assign", post(finding_assign))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
         // Matrice ATT&CK par engagement : grille tactique × technique (kill-chain), engagement-scopée.
