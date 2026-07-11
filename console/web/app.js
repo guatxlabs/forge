@@ -16,7 +16,7 @@ import './js/views/campaigns.js';
 import './js/views/roe.js';
 import './js/views/ledger.js';
 import './js/views/overview.js';
-import './js/views/launch.js';
+import './js/views/launch/index.js';
 import './js/views/engagements.js';
 import './js/views/tenancy.js';
 import './js/views/identity.js';

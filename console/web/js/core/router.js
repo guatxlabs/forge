@@ -11,7 +11,7 @@ import { loadFindings } from '../views/findings.js';
 import { loadFindingsLibrary } from '../views/findings-library.js';
 import { loadIdentity } from '../views/identity.js';
 import { loadImport } from '../views/import.js';
-import { loadLaunch } from '../views/launch.js';
+import { loadLaunch } from '../views/launch/index.js';
 import { loadLedger } from '../views/ledger.js';
 import { loadModules } from '../views/modules.js';
 import { loadOverview } from '../views/overview.js';
