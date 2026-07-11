@@ -469,3 +469,212 @@ pub(crate) fn run_migrate_cli(args: &[String]) -> i32 {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::*;
+
+    /// [MIGRATION plaintext] copie COHÉRENTE (VACUUM INTO) + upgrade EN PLACE : la cible reçoit les
+    /// colonnes additives (cwe) et les tables neuves (settings) via SCHEMA+migrate(), la donnée
+    /// source survit, le ledger + la clé voyagent, et le ledger cible reste VÉRIFIABLE (chaîne
+    /// SHA-256 continue avec l'entrée `console.migrate`).
+    #[test]
+    fn migrate_plaintext_copies_and_upgrades_schema() {
+        let src_dir = tmp_dir("forge-mig-src");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        // ledger source (2 entrées chaînées) + clé de signature .ed25519.
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
+        ledger_append_standalone(&src_ledger, "action.recon", &json!({"a": 2})).unwrap();
+        std::fs::write(format!("{src_ledger}.ed25519"), b"fake-ed25519-key-32-bytes-xxxxxx").unwrap();
+
+        let to = tmp_path("forge-mig-to.db");
+        let target_ledger = tmp_path("forge-mig-to.jsonl");
+        let opts = MigrateOpts {
+            from: src_dir.clone(),
+            to: to.clone(),
+            ledger: Some(target_ledger.clone()),
+            verify: true,
+            encrypt: false,
+            key_env: None,
+            actor: "test".to_string(),
+        };
+        let report = run_migration(&opts).expect("migration doit réussir");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["encrypted"], false, "build par défaut -> copie en clair");
+        assert_eq!(report["verify"]["ok"], true, "ledger source intact -> verify ok");
+
+        // 1) schéma UPGRADÉ en place : colonne additive `cwe` présente, donnée source préservée.
+        let dst = Connection::open(&to).expect("open target");
+        let cwe: String = dst
+            .query_row("SELECT cwe FROM finding WHERE id=1", [], |r| r.get(0))
+            .expect("colonne cwe ajoutée par migrate()");
+        assert_eq!(cwe, "", "cwe = DEFAULT '' sur une ligne migrée");
+        let title: String = dst.query_row("SELECT title FROM finding WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "old-finding", "la donnée source survit à la copie");
+        // 2) table neuve `settings` créée par SCHEMA sur la cible (absente de la source ancienne).
+        let n: i64 = dst.query_row("SELECT count(*) FROM settings", [], |r| r.get(0)).expect("table settings créée");
+        assert_eq!(n, 0);
+
+        // 3) ledger + clé copiés ; ledger cible VÉRIFIABLE (2 source + 1 console.migrate = 3, intègre).
+        assert_eq!(report["ledger_copied"], true);
+        assert_eq!(report["key_copied"], true);
+        assert!(std::path::Path::new(&format!("{target_ledger}.ed25519")).exists(), "clé .ed25519 copiée");
+        let v = verify_ledger_chain(&target_ledger);
+        assert!(v.ok, "ledger cible doit rester intègre après l'append console.migrate");
+        assert_eq!(v.entries, 3, "2 entrées source + 1 entrée de migration");
+        let last = read_ledger_lines(&target_ledger).pop().unwrap();
+        assert_eq!(last["kind"], "console.migrate", "la migration est tracée au ledger cible");
+        assert_eq!(last["detail"]["encrypted"], false);
+
+        drop(dst);
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
+        let _ = std::fs::remove_file(&target_ledger);
+        let _ = std::fs::remove_file(format!("{target_ledger}.ed25519"));
+    }
+
+    /// [MIGRATION --verify] passe sur un ledger INTACT et ABORTE (aucune écriture cible) sur un ledger
+    /// ALTÉRÉ (une entrée tamperée casse le recompute de hash).
+    #[test]
+    fn migrate_verify_passes_intact_aborts_on_tamper() {
+        // --- cas INTACT : verify ok, migration réussit. ---
+        let src_dir = tmp_dir("forge-mig-verify-ok");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        for i in 0..4 {
+            ledger_append_standalone(&src_ledger, "console.test", &json!({"i": i, "msg": "événement"})).unwrap();
+        }
+        let to_ok = tmp_path("forge-mig-verify-ok-to.db");
+        let led_ok = tmp_path("forge-mig-verify-ok-to.jsonl");
+        let ok_opts = MigrateOpts {
+            from: src_dir.clone(), to: to_ok.clone(), ledger: Some(led_ok.clone()),
+            verify: true, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        let r = run_migration(&ok_opts).expect("ledger intact -> migration réussit");
+        assert_eq!(r["verify"]["ok"], true);
+        assert!(std::path::Path::new(&to_ok).exists(), "cible écrite quand le ledger est intact");
+
+        // --- cas ALTÉRÉ : on tampere une entrée -> verify échoue -> ABORT avant toute écriture. ---
+        let src_dir2 = tmp_dir("forge-mig-verify-tamper");
+        let src_db2 = format!("{src_dir2}/forge-console.db");
+        seed_old_source_db(&src_db2);
+        let src_ledger2 = format!("{src_dir2}/engagement.jsonl");
+        for i in 0..4 {
+            ledger_append_standalone(&src_ledger2, "console.test", &json!({"i": i, "msg": "événement"})).unwrap();
+        }
+        // altère le CONTENU d'une entrée sans recalculer son hash -> "hash recalculé != stocké".
+        let tampered = std::fs::read_to_string(&src_ledger2).unwrap().replacen("événement", "ALTÉRÉ", 1);
+        std::fs::write(&src_ledger2, tampered).unwrap();
+        // pré-condition : la vérif détecte bien la rupture.
+        let vchk = verify_ledger_chain(&src_ledger2);
+        assert!(!vchk.ok && vchk.exists, "le ledger tamperé doit être détecté comme rompu");
+
+        let to_bad = tmp_path("forge-mig-verify-tamper-to.db");
+        let bad_opts = MigrateOpts {
+            from: src_dir2.clone(), to: to_bad.clone(), ledger: Some(tmp_path("forge-mig-tamper-to.jsonl")),
+            verify: true, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        let err = run_migration(&bad_opts).expect_err("ledger rompu -> migration AVORTÉE");
+        assert!(err.contains("AVORTÉE"), "message d'abort explicite: {err}");
+        assert!(!std::path::Path::new(&to_bad).exists(), "AUCUNE écriture cible sur abort (verify avant copie)");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&src_dir2);
+        let _ = std::fs::remove_file(&to_ok);
+        let _ = std::fs::remove_file(&led_ok);
+        let _ = std::fs::remove_file(format!("{led_ok}.ed25519"));
+    }
+
+    /// [MIGRATION clé] la clé de signature `.ed25519` voyage AVEC le ledger, en mode 0600 FORCÉ
+    /// (même si la source est plus permissive) — sinon la chaîne signée devient invérifiable.
+    #[cfg(unix)]
+    #[test]
+    fn migrate_copies_ed25519_key_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let src_dir = tmp_dir("forge-mig-key");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let src_ledger = format!("{src_dir}/engagement.jsonl");
+        ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
+        // clé source DÉLIBÉRÉMENT en 0644 -> prouve que la copie FORCE 0600 (pas un simple héritage).
+        let src_key = format!("{src_ledger}.ed25519");
+        std::fs::write(&src_key, b"raw-ed25519-private-key-32-bytes").unwrap();
+        std::fs::set_permissions(&src_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let to = tmp_path("forge-mig-key-to.db");
+        let target_ledger = tmp_path("forge-mig-key-to.jsonl");
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: to.clone(), ledger: Some(target_ledger.clone()),
+            verify: false, encrypt: false, key_env: None, actor: "test".to_string(),
+        };
+        run_migration(&opts).expect("migration ok");
+
+        let dst_key = format!("{target_ledger}.ed25519");
+        assert!(std::path::Path::new(&dst_key).exists(), "clé .ed25519 copiée dans le dossier ledger cible");
+        let mode = std::fs::metadata(&dst_key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "la clé doit être 0600 (secret de signature)");
+        // contenu identique (la clé est le même secret).
+        assert_eq!(std::fs::read(&dst_key).unwrap(), b"raw-ed25519-private-key-32-bytes");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
+        let _ = std::fs::remove_file(&target_ledger);
+        let _ = std::fs::remove_file(&dst_key);
+    }
+
+    /// [MIGRATION chiffrement — build par défaut] `--encrypt` sans la feature `encryption` renvoie une
+    /// ERREUR CLAIRE (jamais un faux succès en clair). Ce test n'existe QUE dans le build par défaut.
+    #[cfg(not(feature = "encryption"))]
+    #[test]
+    fn migrate_encrypt_without_feature_errors_clearly() {
+        let src_dir = tmp_dir("forge-mig-noenc");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: tmp_path("forge-mig-noenc-to.db"), ledger: None,
+            verify: false, encrypt: true, key_env: Some("FORGE_TEST_KEY".to_string()), actor: "test".to_string(),
+        };
+        let err = run_migration(&opts).expect_err("encrypt sans feature -> erreur");
+        assert!(err.contains("NON compilé") || err.contains("features encryption"),
+            "message doit dire que le chiffrement n'est pas compilé: {err}");
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
+    /// [MIGRATION chiffrement — build chiffré] plaintext -> SQLCipher -> relecture avec la clé. GARDÉ
+    /// derrière `#[cfg(feature="encryption")]` : SKIP (non compilé) dans la suite par défaut, pour ne
+    /// PAS faire dépendre celle-ci de SQLCipher/openssl. Exécuté seulement via `--features encryption`.
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn migrate_encrypted_roundtrip_reads_back_with_key() {
+        let src_dir = tmp_dir("forge-mig-enc");
+        let src_db = format!("{src_dir}/forge-console.db");
+        seed_old_source_db(&src_db);
+        let to = tmp_path("forge-mig-enc-to.db");
+        std::env::set_var("FORGE_TEST_ENC_KEY", "correct horse battery staple");
+        let opts = MigrateOpts {
+            from: src_dir.clone(), to: to.clone(), ledger: Some(tmp_path("forge-mig-enc-to.jsonl")),
+            verify: false, encrypt: true, key_env: Some("FORGE_TEST_ENC_KEY".to_string()), actor: "test".to_string(),
+        };
+        let report = run_migration(&opts).expect("migration chiffrée doit réussir");
+        assert_eq!(report["encrypted"], true);
+
+        // relecture AVEC la bonne clé -> lisible ; la donnée source a survécu.
+        let dst = Connection::open(&to).unwrap();
+        dst.pragma_update(None, "key", "correct horse battery staple").unwrap();
+        let title: String = dst.query_row("SELECT title FROM finding WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "old-finding");
+
+        // relecture SANS clé -> illisible (preuve que la base est bien chiffrée au repos).
+        let bad = Connection::open(&to).unwrap();
+        assert!(bad.query_row("SELECT count(*) FROM finding", [], |r| r.get::<_, i64>(0)).is_err(),
+            "sans PRAGMA key, une base chiffrée est illisible");
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_file(&to);
+    }
+}
