@@ -84,14 +84,10 @@ pub fn enabled(app: &App) -> bool {
 // RESPONSE HELPERS
 // ============================================================================================
 
-pub(crate) fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
-    crate::error::ApiError::new(status, code, why).into_response()
-}
-
-/// Flag OFF => 404 not_found (no compliance surface at all — byte-identical community).
-fn disabled() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
-}
+// `err` / `disabled` sont consolidés dans `common` (corps byte-identiques à tenancy/sso/scim — dedup Wave).
+// Re-export `pub(crate)` de `err` : `crate::compliance::err` reste valide (compliance_evidence.rs l'importe).
+pub(crate) use crate::common::err;
+use crate::common::disabled;
 
 /// Common gate: enterprise engaged + admin session. Returns the short-circuit Response, or None to proceed.
 fn gate(app: &App, headers: &HeaderMap) -> Option<Response> {

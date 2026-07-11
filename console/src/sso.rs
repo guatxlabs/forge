@@ -151,15 +151,8 @@ fn load_config(app: &App) -> Option<SsoConfig> {
     })
 }
 
-/// Standard typed-error response (shared substrate; byte-identical `{"error","why"}`). Never a secret.
-fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
-    crate::error::ApiError::new(status, code, why).into_response()
-}
-
-/// Flag-OFF response: the route behaves as ABSENT (community build shows no SSO surface).
-fn disabled() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
-}
+// `err` / `disabled` consolidés dans `common` (corps + signatures byte-identiques à compliance/scim — dedup Wave).
+use crate::common::{disabled, err};
 
 // ============================================================================================
 // ROUTES
