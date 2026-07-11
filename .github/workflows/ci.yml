@@ -39,10 +39,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout forge
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
@@ -65,14 +65,14 @@ jobs:
       # forge sous ./forge pour reconstituer la disposition relative attendue
       # par `path = "../../core"` (console/ -> ../../core).
       - name: Checkout forge
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           path: forge
 
       # Le crate sibling guatx-core. Tant qu'il n'est pas un repo public séparé,
       # remplacer ce checkout par une copie monorepo (ou un git dep dans Cargo.toml).
       - name: Checkout core (guatx-core)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: ${{ github.repository_owner }}/core
           ref: main
@@ -93,13 +93,13 @@ jobs:
           fi
 
       - name: Setup Rust toolchain (pinné)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
         with:
           toolchain: "1.96.0"
           components: clippy
 
       - name: Cache cargo (registry + target)
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -118,7 +118,7 @@ jobs:
         run: cargo build --release --locked --verbose
 
       - name: Upload artefact (binaire console)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: forge-console
           path: forge/console/target/release/forge-console
@@ -151,12 +151,12 @@ jobs:
           --health-retries 5
     steps:
       - name: Checkout forge
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           path: forge
 
       - name: Checkout core (guatx-core)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: ${{ github.repository_owner }}/core
           ref: main
@@ -175,13 +175,13 @@ jobs:
           fi
 
       - name: Setup Rust toolchain (pinné)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
         with:
           toolchain: "1.96.0"
           components: clippy
 
       - name: Cache cargo (registry + target)
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -206,3 +206,62 @@ jobs:
       - name: cargo build --release (feature store-postgres)
         working-directory: forge/console
         run: cargo build --release --locked --features store-postgres --verbose
+
+  # ---------------------------------------------------------------------------
+  # Security — supply-chain + secret hygiene (LOW-1). Independent gate: runs in parallel with the
+  # build/test jobs and never gates their logic. Two checks:
+  #   1) cargo-audit  — RustSec advisory scan of the console crate's locked dep tree (--deny warnings
+  #      => unmaintained/yanked/vuln advisories FAIL the job). Reads console/Cargo.lock only (path dep
+  #      ../../core is skipped by cargo-audit — no build, no core checkout needed).
+  #   2) gitleaks     — secret scan of the tree + history. An ephemeral config (written below, NOT
+  #      committed) extends the default ruleset and ALLOWLISTS k8s/10-secrets.example.yaml, whose
+  #      documented eval placeholders (all-zero token, `forge`/`forgeadminsecret`) are non-secret by
+  #      design — so the scan flags REAL leaks without false-positiving on the eval template.
+  # (The Python engine is stdlib-only — zero third-party deps — so there is no pip dependency tree to
+  #  audit; the Rust crate is the only supply-chain surface, covered by cargo-audit above.)
+  # ---------------------------------------------------------------------------
+  security:
+    name: security (cargo-audit + gitleaks)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan past commits, not just the tip.
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit (console crate — deny warnings)
+        working-directory: console
+        run: cargo audit --deny warnings
+
+      # Ephemeral gitleaks config (runner-only, never committed) — extends defaults + allowlists the
+      # documented eval secrets template so it cannot cause a false positive.
+      - name: Write gitleaks config (allowlist eval template)
+        run: |
+          cat > "$GITHUB_WORKSPACE/.gitleaks-ci.toml" <<'EOF'
+          title = "forge CI gitleaks config"
+          [extend]
+          useDefault = true
+          [allowlist]
+          description = "Documented eval placeholder secrets — non-secret by design (see k8s/10-secrets.example.yaml header)."
+          paths = [
+            '''k8s/10-secrets\.example\.yaml''',
+          ]
+          EOF
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          # gitleaks core reads GITLEAKS_CONFIG for the --config path (honored through the action).
+          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks-ci.toml
+          # NOTE: gitleaks-action is free for personal accounts; GitHub ORGANIZATIONS must set the
+          # GITLEAKS_LICENSE secret. If this repo lives under an org, add that secret here.

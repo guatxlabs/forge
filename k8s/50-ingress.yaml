@@ -29,6 +29,23 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # --- Transport + response security headers (LOW-3) --------------------------------------------
+    # Force HTTPS: any http:// request is 308-redirected to https:// by the controller.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Response hardening headers, applied to every response on this Ingress. `more_set_headers` (from
+    # the headers-more module bundled in ingress-nginx) sets them even on non-2xx, and replaces rather
+    # than appends. HSTS pins HTTPS for 2y incl. subdomains; frame-ancestors 'none' + X-Frame-Options
+    # DENY block clickjacking; nosniff stops MIME-sniffing; Referrer-Policy limits referrer leakage.
+    # ⚠️ configuration-snippet requires the controller to run with `allow-snippet-annotations: true`
+    #    (ingress-nginx >= v1.9 defaults it to false). If snippets are disabled in your controller,
+    #    move these to the controller ConfigMap (`hsts: "true"`, `custom-http-errors`, etc.) instead.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+      more_set_headers "Content-Security-Policy: frame-ancestors 'none'";
 spec:
   ingressClassName: nginx
   tls:

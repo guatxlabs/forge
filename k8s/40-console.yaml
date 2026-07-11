@@ -85,10 +85,38 @@ spec:
           # REPLACE with your registry ref of the store-postgres (+object-store) image.
           image: forge-console:0.0.1
           imagePullPolicy: IfNotPresent
+          # --- Container hardening (MEDIUM-1) -------------------------------------------------
+          # readOnlyRootFilesystem: true — nothing writes the image rootfs at runtime once the
+          # writable seams below are mounted. The console binary writes ONLY to /data/* (mounted
+          # volumes); the python tool layer (weasyprint PDF rendering, nuclei/httpx/subfinder runs)
+          # writes to $TMPDIR and $HOME — both redirected to emptyDir mounts (/tmp, /home/forge)
+          # with HOME/XDG/TMPDIR env below. The emptyDirs are group-owned via the pod fsGroup:1000,
+          # so uid 1000 can write them regardless of the image's baked-in home ownership.
+          # ⚠️ RESIDUAL VERIFICATION (no cluster available at authoring time): smoke-test
+          #   `?format=pdf` (weasyprint → fontconfig cache under $XDG_CACHE_HOME) and a nuclei run
+          #   (first run syncs templates into $HOME/nuclei-templates). If a tool needs a writable
+          #   path outside /tmp and /home/forge, add an emptyDir for it rather than reverting RO-root.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: http
               containerPort: 7100
           env:
+            # Redirect all runtime scratch/cache/config to the writable emptyDir seams (required by
+            # readOnlyRootFilesystem: true). HOME → /home/forge emptyDir; TMPDIR → /tmp emptyDir.
+            - name: HOME
+              value: /home/forge
+            - name: TMPDIR
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /home/forge/.cache    # weasyprint/fontconfig font cache lives here.
+            - name: XDG_CONFIG_HOME
+              value: /home/forge/.config    # nuclei/httpx config lives here.
             # Per-pod identity → lease holder key. fieldRef metadata.name is UNIQUE per replica, so
             # each replica has a distinct FORGE_INSTANCE_ID (a static value would collide — exactly
             # the bug to avoid). This is the k8s equivalent of the compose HOSTNAME fallback.
@@ -130,6 +158,10 @@ spec:
             - name: scope       # inert ROE (read-only).
               mountPath: /data/scope
               readOnly: true
+            - name: tmp         # writable scratch (readOnlyRootFilesystem) — tool downloads, temp PDF.
+              mountPath: /tmp
+            - name: home        # writable $HOME — nuclei/httpx config+templates, fontconfig cache.
+              mountPath: /home/forge
           # /health is PUBLIC (outside auth_guard) and ALWAYS 200 when the HTTP router is live (it
           # returns db:"degraded" without failing on a transient DB blip). Host: localhost is in the
           # default anti-DNS-rebinding allowlist, so the probe is accepted (kubelet would otherwise
@@ -161,6 +193,10 @@ spec:
             limits: { cpu: "1000m", memory: "512Mi" }
       volumes:
         - name: db
+          emptyDir: {}
+        - name: tmp          # ephemeral scratch for readOnlyRootFilesystem (per-pod).
+          emptyDir: {}
+        - name: home         # ephemeral writable $HOME for readOnlyRootFilesystem (per-pod).
           emptyDir: {}
         - name: ledger
           persistentVolumeClaim:

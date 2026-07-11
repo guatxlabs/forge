@@ -44,11 +44,30 @@ spec:
         app.kubernetes.io/part-of: forge
         app.kubernetes.io/name: postgres
     spec:
+      # --- Pod-level securityContext (MEDIUM-1) ------------------------------------------------
+      # We do NOT set runAsNonRoot: true (kept off per the task's postgres contract), BUT we DO pin
+      # runAsUser/runAsGroup to 999 (the `postgres` uid/gid baked into the official image). This is
+      # REQUIRED for correctness, not cosmetics: with `capabilities.drop: [ALL]` the container has no
+      # CAP_CHOWN/CAP_FOWNER/CAP_SETUID, so the official entrypoint's root branch (chown PGDATA +
+      # `gosu postgres`) FAILS ("chown/chmod: Operation not permitted"). Empirically verified:
+      #   root + drop ALL           -> entrypoint aborts before initdb (chown /pgdata denied)
+      #   runAsUser 999 + drop ALL  -> reaches "database system is ready to accept connections"
+      # Running directly as uid 999 skips the root chown/gosu path entirely; fsGroup 999 makes the
+      # PVC group-writable so initdb can create $PGDATA. This keeps caps fully dropped AND boots.
       securityContext:
+        runAsUser: 999
+        runAsGroup: 999
         fsGroup: 999   # postgres group in the official image — lets it own the PVC data dir.
       containers:
         - name: postgres
           image: postgres:16
+          # --- Container hardening (MEDIUM-1) ---------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]   # postgres needs no added caps (runs as uid 999, binds 5432 > 1024).
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: postgres
               containerPort: 5432
