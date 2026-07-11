@@ -144,6 +144,8 @@ mod compliance_evidence;
 // … depuis compliance) continuent de les résoudre inchangés. `dbmigrate::copy_ledger_and_key` référence
 // `crate::backup::backup_write_atomic` (dépendance croisée volontaire — même trio base+ledger+clé).
 mod backup;
+mod backup_crypto;
+mod backup_sched;
 mod dbmigrate;
 pub(crate) use crate::backup::*;
 pub(crate) use crate::dbmigrate::*;
