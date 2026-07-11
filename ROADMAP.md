@@ -61,10 +61,14 @@
 
 ## Backlog (owner input needed)
 
-These are the ONLY open items. Both are blocked on a product/infra decision, not on engineering — nothing else in the roadmap, the readiness dossier, or the two audits is unresolved.
+- **Nothing open.** The two previously-open items shipped (see below). No roadmap / readiness / audit item is unresolved except the deliberately accepted-as-is items.
 
-- **KMS/HSM-backed signing key (readiness Phase 3, audit SEC-KMS).** The signer seam is ready (`CallableComplianceSigner`/`RemoteSigner`, off-host key, re-verifies its own signature); only a concrete backend driver is missing. **Decision needed:** AWS-KMS vs PKCS#11 (HSM) vs GCP-KMS. Also closes the F4 audit residual (host-root audit-integrity) when paired with a witness anchor.
-- **Bulk-assign / finding ownership (readiness P1-4 second half).** Saved-views, keyset pagination, bulk status + bulk export already shipped; bulk-*assign* is deferred because there is no assignee/owner model yet. **Decision needed:** do findings get an owner/assignee concept (and its UI), or is this out of scope?
+### Shipped (were the last two owner-decision items)
+- **KMS/HSM key custody — DONE (`d7fb893`).** Concrete **PKCS#11 signer** (`Pkcs11Signer`, Ed25519/`CKM_EDDSA`, subclass of `RemoteSigner` → re-verifies its own signature, no local fallback), opt-in (`FORGE_LEDGER_SIGNER=pkcs11`), optional dep (`pip install 'forge[pkcs11]'` — default stays stdlib-only, `LocalFileSigner` byte-identical). SoftHSM2 dev/CI, HSM/CloudHSM/cloud-KMS-via-PKCS#11 prod. Chosen over AWS-KMS because the ledger is Ed25519 and AWS-KMS can't sign Ed25519; generic exec-signer covers GCP-KMS/custom. Closes the F4 audit residual (off-host key) when paired with `WitnessAnchor`. Docs: [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md).
+- **Finding ownership — DONE (`6723dab`).** Nullable `finding.assignee`; grant-scoped single + bulk assign (caller must operate the engagement; assignee must hold a grant on it), ledgered `console.finding.assign`; assignee shown in the findings view + filterable via saved-views. Deliberately an ownership pointer, **not** a finding-triage lifecycle state machine (see Possible next).
+
+## Possible next (not scheduled — product decision)
+- **Finding-triage workflow.** Forge is already a workflow engine on the *execution* axis (planner + iterative plan→observe→replan campaign over an `EngagementGraph` + governance state machine + `workflows.js`). It is NOT a *finding-triage* workflow: a lifecycle over findings (e.g. new→triaging→retesting→reported→closed) with allowed transitions, ownership routing, and notifications. The substrate exists (`status`, `assignee`, ledger, SSE event bus, saved-views, presence) — this is the natural next feature if a triage lifecycle is wanted.
 
 ## Accepted as-is (deliberate, not backlog)
 
