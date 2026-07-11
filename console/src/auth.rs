@@ -430,6 +430,18 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
     (token, expires)
 }
 
+/// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis (`HttpOnly`,
+/// `SameSite=Strict`, `Path=/`, `Max-Age=<ttl>`) ET `Secure` PAR DÉFAUT — le déploiement documenté
+/// (DEPLOYMENT.md) termine la TLS en amont (reverse-proxy), donc le cookie de session ne doit jamais
+/// transiter en clair. FAIL-CLOSED : `Secure` est posé sauf si l'affordance de dev HTTP local est
+/// explicitement engagée via `FORGE_COOKIE_INSECURE` (accès direct http://127.0.0.1:7100 du 1er
+/// déploiement — les navigateurs modernes traitent localhost comme contexte sûr, mais l'opt-out reste
+/// disponible pour un proxy non-TLS). Un flag mal orthographié => Secure conservé (jamais un fail-open).
+pub(crate) fn session_cookie(token: &str, ttl: i64) -> String {
+    let secure = if crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "" } else { "; Secure" };
+    format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}{secure}")
+}
+
 /// Anti-DNS-rebinding : l'en-tête Host doit être NON VIDE et présent dans l'allowlist.
 /// FAIL-CLOSED : un Host absent/vide est REFUSÉ (avant, il passait — fail-open exploitable par un
 /// client qui omet/efface Host pour contourner le filtre anti-rebinding). 421 dans tous les cas non

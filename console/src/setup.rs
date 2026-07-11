@@ -55,7 +55,7 @@ pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Re
     }
     let (token, expires) = create_session(&app, user_id);
     let ttl = session_ttl_secs();
-    let cookie = format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}");
+    let cookie = session_cookie(&token, ttl);
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -166,7 +166,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
     // session immédiate -> le navigateur atterrit connecté en tant que nouvel admin.
     let (token, expires) = create_session(&app, user_id);
     let ttl = session_ttl_secs();
-    let cookie = format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}");
+    let cookie = session_cookie(&token, ttl);
     // ledger : provision attribuée au nouvel admin. JAMAIS le mot de passe/hash (login + booléens seuls).
     append_console_ledger(&app, "console.setup.provision", json!({
         "actor": login,
