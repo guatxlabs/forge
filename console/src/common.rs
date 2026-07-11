@@ -6,7 +6,9 @@
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use serde_json::Value;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -35,6 +37,19 @@ pub(crate) fn gen_token() -> String {
     let mut b = [0u8; 16];
     getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer un token faible");
     hex(&b)
+}
+
+/// Réponse d'erreur typée standard (substrat partagé ; `{"error","why"}` byte-identique). Jamais un secret.
+/// Consolidée depuis compliance/tenancy/sso (corps + signatures IDENTIQUES — dedup Wave, comportement inchangé).
+/// `impl Into<String>` : accepte `&'static str`, `String`, ou `format!(...)` comme les définitions locales d'origine.
+pub(crate) fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
+    crate::error::ApiError::new(status, code, why).into_response()
+}
+
+/// Réponse flag-OFF : la route se comporte comme ABSENTE (build community => 404 `not_found`, byte-identique).
+/// Consolidée depuis compliance/sso/scim (corps IDENTIQUES — dedup Wave, comportement inchangé).
+pub(crate) fn disabled() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
 /// Extrait un identifiant CWE canonique ('CWE-639') d'une chaîne arbitraire ('cwe_639', 'CWE 639',

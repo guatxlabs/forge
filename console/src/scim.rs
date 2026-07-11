@@ -102,11 +102,9 @@ fn scim_err(status: StatusCode, detail: impl Into<String>, scim_type: Option<&st
     scim_json(status, body)
 }
 
-/// Flag-OFF response: the route behaves as ABSENT (community build shows NO SCIM surface). Plain 404 JSON
-/// (NOT a SCIM error envelope — the endpoint does not exist in community).
-fn disabled() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
-}
+// `disabled` consolidé dans `common` (corps byte-identique à compliance/sso — dedup Wave). `cfg_err` reste
+// local (nom distinct — hors périmètre de ce dedup exact-copy).
+use crate::common::disabled;
 
 /// Admin-config typed error (shared substrate; byte-identical `{"error","why"}`) — never a secret.
 fn cfg_err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {

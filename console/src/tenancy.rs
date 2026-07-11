@@ -645,9 +645,8 @@ fn valid_tenant_role(r: &str) -> Option<&'static str> {
     }
 }
 
-fn err(status: StatusCode, code: &'static str, why: impl Into<String>) -> Response {
-    crate::error::ApiError::new(status, code, why).into_response()
-}
+// `err` consolidé dans `common` (corps + signature byte-identiques à compliance/sso — dedup Wave).
+use crate::common::err;
 
 /// Common gate for every tenant-admin route: enterprise engaged + platform-admin. Returns the error
 /// Response to short-circuit with, or None to proceed. Fail-closed.
