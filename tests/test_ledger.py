@@ -400,5 +400,116 @@ class TestDowngradeAttack(unittest.TestCase):
         self.assertEqual(seqs, list(range(1, 2 * n_each + 1)), "seq strictement contigus 1..N")
 
 
+class TestTruncationHWM(unittest.TestCase):
+    """RÉGRESSION sûreté (audit F4) — TRONCATURE de la queue détectée par le HIGH-WATER-MARK sidecar.
+
+    GAP fermé : `verify()` chaîne genesis->queue sans LONGUEUR attendue et `_disk_tail` tolère une
+    dernière ligne corrompue -> dropper les dernières lignes donne une chaîne plus courte mais toujours
+    « valide ». Le HWM `<ledger>.hwm` (fsync'd sous le verrou d'append) persiste {seq, hash, count} de
+    la queue ; `verify()` recoupe la queue disque contre lui. Modèle de menace honnête : arrête une
+    troncature ACCIDENTELLE + un falsificateur NON-root/naïf ; un ROOT réécrit aussi le HWM (résiduel
+    documenté -> ancrage hors-host)."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="forge-hwm-"))
+        self.path = self.dir / "l.jsonl"
+        self.hwm = Path(str(self.path) + ".hwm")
+
+    def _seed(self, n=6):
+        led = Ledger(self.path, key=b"k" * 32)
+        for i in range(n):
+            led.append("roe.decision", {"i": i})
+        return led
+
+    def test_truncation_detected_and_gap_proven_nonvacuous(self):
+        # cœur du fix : append N -> tronque à N-2 lignes -> verify() DOIT rapporter ok:false (troncature).
+        # NON-VACUITÉ : sans le HWM (comportement PRÉ-fix), la même chaîne tronquée passe ok:true -> on
+        # prouve à la fois que le gap EXISTAIT et que le HWM est ce qui le ferme.
+        self._seed(6)
+        lines = self.path.read_text().splitlines()
+        self.assertEqual(len(lines), 6)
+        self.path.write_text("\n".join(lines[:-2]) + "\n")            # drop des 2 dernières entrées
+
+        saved = self.hwm.read_text()
+        self.hwm.unlink()                                             # simule un ledger SANS HWM (pré-fix)
+        v_pre = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v_pre["ok"], "pré-fix : la troncature passait inaperçue (gap non-vacuous)")
+        self.assertEqual(v_pre["entries"], 4)
+
+        self.hwm.write_text(saved)                                    # HWM présent (post-fix)
+        v_post = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertFalse(v_post["ok"], "troncature acceptée -> ledger tronquable (régression)")
+        self.assertIn("tronqué", v_post["why"])
+        self.assertIn("high-water-mark", v_post["why"])
+
+    def test_total_deletion_of_ledger_detected_via_hwm(self):
+        # troncature TOTALE : le fichier ledger disparaît mais le HWM atteste d'entrées passées -> ok:false
+        self._seed(3)
+        self.assertTrue(self.hwm.exists())
+        self.path.unlink()
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertFalse(v["ok"]); self.assertIn("tronqué", v["why"])
+
+    def test_hwm_hash_mismatch_detected(self):
+        # queue seq >= HWM seq mais hash HWM ABSENT de la chaîne (queue réécrite/forgée) -> détecté
+        self._seed(4)
+        hwm = json.loads(self.hwm.read_text())
+        hwm["hash"] = "f" * 64                                        # head HWM introuvable dans la chaîne
+        self.hwm.write_text(json.dumps(hwm))
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertFalse(v["ok"]); self.assertIn("high-water-mark", v["why"])
+
+    def test_legacy_ledger_without_hwm_still_verifies(self):
+        # RÉTRO-COMPAT : un ledger existant DÉPOURVU de HWM (legacy / 1er run) vérifie ok, check sauté.
+        self._seed(3)
+        self.hwm.unlink()
+        self.assertFalse(self.hwm.exists())
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v); self.assertEqual(v["entries"], 3)
+
+    def test_corrupt_hwm_does_not_break_verify(self):
+        # un HWM corrompu/illisible -> None -> check sauté (jamais un faux positif ni une exception)
+        self._seed(3)
+        self.hwm.write_text("{ pas du json")
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v)
+
+    def test_hwm_written_under_lock_and_roundtrips(self):
+        # le HWM est écrit à CHAQUE append (sous le verrou) : après N appends il pointe la queue exacte,
+        # et un verify normal round-trip ok.
+        led = self._seed(5)
+        self.assertTrue(self.hwm.exists())
+        hwm = json.loads(self.hwm.read_text())
+        self.assertEqual(hwm["seq"], 5)
+        self.assertEqual(hwm["hash"], led.head)
+        self.assertEqual(hwm["count"], 5)
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v); self.assertEqual(v["entries"], 5)
+
+    def test_tail_ahead_of_hwm_is_floor_not_false_positive(self):
+        # PLANCHER : un crash ENTRE le fsync du ledger et celui du HWM laisse la queue AU-DELÀ du HWM.
+        # Ce n'est PAS une troncature -> verify() DOIT rester ok (le HWM est un plancher, pas une égalité).
+        led = self._seed(4)
+        stale = self.hwm.read_text()                                 # HWM au seq 4
+        led.append("finding", {"t": "post-crash"})                   # seq 5 durable sur le ledger
+        self.hwm.write_text(stale)                                   # HWM resté à 4 (crash avant son fsync)
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(v["ok"], v)                                  # queue(5) >= HWM(4) + hash(4) présent
+        self.assertEqual(v["entries"], 5)
+
+    @unittest.skipUnless(signing._HAVE_ED, "cryptography/Ed25519 indisponible")
+    def test_external_verify_also_detects_truncation(self):
+        # l'anti-troncature s'applique aussi à verify_external quand le sidecar HWM est présent
+        led = Ledger(self.path)                                      # ed25519
+        for i in range(5):
+            led.append("finding", {"i": i})
+        pub = led.public_id().split(":", 1)[1]
+        self.assertTrue(led.verify_external(pub)["ok"])              # complet -> ok
+        lines = self.path.read_text().splitlines()
+        self.path.write_text("\n".join(lines[:-2]) + "\n")           # drop la queue, HWM intact
+        v = led.verify_external(pub)
+        self.assertFalse(v["ok"]); self.assertIn("tronqué", v["why"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

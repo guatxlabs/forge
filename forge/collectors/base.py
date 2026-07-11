@@ -337,6 +337,14 @@ class Collector:
         return rows if isinstance(rows, list) else []
 
     # ---- API sûre (NE LÈVE JAMAIS) : voie collecteur ----
+    # MODÈLE DE MENACE (F6 — risque ACCEPTÉ, pas un bug) : l'entrée d'un collecteur est TRUSTED et
+    # FAIL-OPEN PAR CONCEPTION. Ce flux alimente UNIQUEMENT le REPORTING / la mesure de couverture
+    # (detections observées, gaps) — il ne PORTE JAMAIS une décision de FIRE : scope, ROE et ledger
+    # restent fail-CLOSED sur leurs propres gardes. Conséquence : une entrée collecteur EMPOISONNÉE
+    # (source hostile, données forgées) peut au pire FABRIQUER de la couverture ou MASQUER un gap dans
+    # un rapport — jamais provoquer une action offensive erronée. On avale donc l'exception (couverture
+    # dégradée -> [] + `error` lisible via doctor/error_detail) plutôt que de crasher l'appelant. Si un
+    # jour un collecteur venait à GATER une décision, ce fail-open devrait redevenir fail-closed.
     def fetch(self, since):
         try:
             rows = self.collect_strict(since)
