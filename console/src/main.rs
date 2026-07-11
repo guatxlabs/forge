@@ -206,6 +206,20 @@ pub(crate) use crate::planning::*;
 // `run_job_json`) ET les tests inline (`super::*`) résolvent ces handlers/helpers INCHANGÉS.
 mod runs;
 pub(crate) use crate::runs::*;
+// RUN-LIFECYCLE (suite, PURE MOVE) — god-file `runs.rs` scindé en modules cohésifs, tous re-exportés
+// `pub(crate)` à la racine (mêmes résolutions `crate::*`/`super::*` INCHANGÉES) : `runs_proc` (supervision
+// de process OS : spawn_setsid/kill_group/purge_stale_run_dirs/push_run_log/claim_and_spawn/
+// spawn_supervisor), `runs_ha` (HA/leader : reconcile_runs/ReconcileScope/reap_dead_leader_runs/
+// RunReservation/reserve_engagement_slot/RunSpawnSpec/enqueue_pending/claim_run_running/
+// unclaim_running_on_failure/run_cancel_ha/LEADER_TICK_SECS/leader_tick_loop/cancel_watch_tick/
+// claim_pending_tick), `runs_validate` (validation params : validate_module_params/validate_modules/
+// high_impact_modules/high_impact_gate).
+mod runs_proc;
+pub(crate) use crate::runs_proc::*;
+mod runs_ha;
+pub(crate) use crate::runs_ha::*;
+mod runs_validate;
+pub(crate) use crate::runs_validate::*;
 // ENGAGEMENT (objet de 1re classe) : CRUD gouverné + audité (engagements_list/create/update +
 // engagement_do_update/engagement_do_delete) + la résolution de scope/engagement partagée par le run flow
 // et les vues (host_in_server_scope/host_in_scope_list/resolve_engagement/resolve_view_engagement_id/
@@ -883,7 +897,7 @@ async fn main() {
     //   - HA : DIFFÉRÉ au leader-tick (is_leader est FAUX au boot ; cf. runs::leader_tick_loop) — boot-
     //     reconcile OWNER-SCOPÉ des propres orphelins une fois le bail acquis, jamais killpg cross-host.
     if !crate::ha::ha_enabled(&app) {
-        reconcile_runs(&app.store(), runs::ReconcileScope::All);
+        reconcile_runs(&app.store(), runs_ha::ReconcileScope::All);
     }
 
     // Cache faisant autorité de la gate d'auth : engagée si hash env OU compte activé en base. À
@@ -915,13 +929,13 @@ async fn main() {
     if app.ha {
         println!(
             "[forge-console] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader-tick toutes les {}s (claim pending + reap failover + cancel-watch, leader-only) ; leader/instance_id publiés sur /health.",
-            app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS, crate::runs::LEADER_TICK_SECS
+            app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS, crate::runs_ha::LEADER_TICK_SECS
         );
         tokio::spawn(crate::ha::heartbeat_loop(app.clone()));
         // RUN-LEADER (Wave B) : le tick du leader draine la file 'pending' (claim + spawn), réape les
         // orphelins des leaders morts (failover) et exécute les cancels observés pour ses runs. Ne fait le
         // travail QUE quand `is_leader` (cf. leader_tick_loop). Cloné AVANT que build_router ne déplace `app`.
-        tokio::spawn(crate::runs::leader_tick_loop(app.clone()));
+        tokio::spawn(crate::runs_ha::leader_tick_loop(app.clone()));
         // CACHE-INVALIDATION CROSS-INSTANCE (Wave C, B6) : chaque réplica poll `settings.cache_epoch` et
         // recharge ses caches locaux (detection_source / auth_required) quand un PAIR l'a bumpé (mutation
         // detection-source / user create-disable-role-delete). Tourne sur CHAQUE instance (pas seulement le
