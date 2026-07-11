@@ -1,6 +1,6 @@
 import { api, write } from '../core/api.js';
 import { withEngagement } from '../core/state.js';
-import { $, FINDING_STATUSES, SEV_BADGE, TLP_BADGE, TLP_CLASSES, TLP_KEY, esc, fmtTs, raw, safeHtml } from '../core/dom.js';
+import { $, FINDING_STATUSES, SEV_BADGE, TLP_BADGE, TLP_CLASSES, TLP_KEY, TRIAGE_BADGE, TRIAGE_NEXT, TRIAGE_STATES, esc, fmtTs, raw, safeHtml } from '../core/dom.js';
 import { downloadReport } from './reports.js';
 import { confirmModal, guardList, infoModal, modal, toast } from '../core/ui.js';
 
@@ -13,13 +13,15 @@ export async function loadFindings(offset = 0) {
   F_STATE.offset = offset;
   // rafraîchit les vues sauvegardées sur un chargement « frais » (nouvelle vue / changement de filtre ou
   // d'engagement), pas à chaque pagination — la liste est scopée à l'engagement actif côté serveur.
-  if (offset === 0) { loadSavedViews(); loadAssignableUsers(); }
+  if (offset === 0) { loadSavedViews(); loadAssignableUsers(); ensureTriageOptions(); }
   const qp = new URLSearchParams();
   const camp = $('#campaign') && $('#campaign').value; if (camp) qp.set('campaign', camp);
   const sev = $('#f-sev') && $('#f-sev').value; if (sev) qp.set('severity', sev);
   const st = $('#f-status') && $('#f-status').value; if (st) qp.set('status', st);
   // OWNERSHIP (P1-4) : filtre par propriétaire — `unassigned` (assignee IS NULL) ou un user_id ; lié serveur.
   const asg = $('#f-assignee') && $('#f-assignee').value; if (asg) qp.set('assignee', asg);
+  // TRIAGE : filtre par état du cycle de triage (validé serveur ; valeur hors vocabulaire ignorée).
+  const tri = $('#f-triage') && $('#f-triage').value; if (tri) qp.set('triage', tri);
   const tg = $('#f-target') && $('#f-target').value.trim(); if (tg) qp.set('target', tg);
   qp.set('limit', F_STATE.limit); qp.set('offset', offset);
   let d;
@@ -36,7 +38,7 @@ export async function loadFindings(offset = 0) {
   selAll.checked = rows.length > 0 && rows.every(x => F_STATE.selected.has(x.id));
   selAll.onclick = e => { e.stopPropagation(); const on = selAll.checked; rows.forEach(x => { if (on) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); }); loadFindings(F_STATE.offset); };
   selTh.appendChild(selAll); htr.appendChild(selTh);
-  htr.insertAdjacentHTML('beforeend', `<th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>TLP</th><th>Proprio</th><th>Outil</th><th>Date</th>`);
+  htr.insertAdjacentHTML('beforeend', `<th>#</th><th>Sév.</th><th>Cible</th><th>Titre</th><th>ATT&CK</th><th>Statut</th><th>Triage</th><th>TLP</th><th>Proprio</th><th>Outil</th><th>Date</th>`);
   thead.appendChild(htr); table.appendChild(thead);
   const tb = document.createElement('tbody');
   rows.forEach((x, i) => {
@@ -45,7 +47,7 @@ export async function loadFindings(offset = 0) {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = F_STATE.selected.has(x.id); cb.setAttribute('aria-label', 'Sélectionner ce finding');
     cb.onclick = e => { e.stopPropagation(); if (cb.checked) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); updateBulkBar(); selAll.checked = rows.every(r => F_STATE.selected.has(r.id)); };
     cbTd.appendChild(cb); tr.appendChild(cbTd);
-    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.assignee_login || '—'}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
+    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TRIAGE_BADGE(x.triage))}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.assignee_login || '—'}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
     tr.onclick = () => openFinding(x.id);
     tb.appendChild(tr);
   });
@@ -67,7 +69,7 @@ export async function openFinding(id) {
   try { d = await api('/findings/' + id); } catch (e) { toast('Détail finding : ' + e.message, 'bad'); return; }
   infoModal(d.title || ('Finding #' + id), body => {
     const meta = document.createElement('div'); meta.className = 'findmeta';
-    meta.innerHTML = safeHtml`${raw(SEV_BADGE(d.severity))} <span class="badge">${d.status}</span> ${raw(TLP_BADGE(d.classification))} <code>${d.mitre}</code> <span class="muted">${d.category}</span>`;
+    meta.innerHTML = safeHtml`${raw(SEV_BADGE(d.severity))} <span class="badge">${d.status}</span> ${raw(TRIAGE_BADGE(d.triage))} ${raw(TLP_BADGE(d.classification))} <code>${d.mitre}</code> <span class="muted">${d.category}</span>`;
     body.appendChild(meta);
     const kv = document.createElement('dl'); kv.className = 'kvdetail';
     [['Campagne', d.campaign], ['Cible', d.target], ['Outil', d.tool], ['Run', d.run_id], ['Date', fmtTs(d.ts)]].forEach(([k, v]) => {
@@ -79,8 +81,53 @@ export async function openFinding(id) {
     sec('PoC', d.poc);
     sec('Correctif suggéré', d.fix);
     buildFindingControls(body, d);
+    buildTriageControl(body, d);
     buildAssignControl(body, d);
   });
+}
+
+// Contrôle de TRIAGE (machine à états gouvernée) : ne propose QUE les transitions AUTORISÉES depuis l'état
+// COURANT (miroir client TRIAGE_NEXT — le SERVEUR reste l'autorité et re-valide, 409 si illégal). L'état de
+// triage est INDÉPENDANT du statut de PREUVE (cf. buildFindingControls) : cette transition n'écrit que
+// `triage`. Endpoint dédié POST /api/findings/:id/triage. Aucune modale navigateur.
+function buildTriageControl(body, d) {
+  const el = (t, cls) => { const n = document.createElement(t); if (cls) n.className = cls; return n; };
+  const cur = TRIAGE_STATES.includes(String(d.triage || '')) ? String(d.triage) : 'new';
+  const next = TRIAGE_NEXT(cur);
+  const wrap = el('div', 'findctl');
+  const h = el('div', 'mailsec'); h.textContent = 'Triage (cycle de vie gouverné, operator)'; wrap.appendChild(h);
+  const row = el('div', 'findctl-row');
+  const state = el('div'); state.className = 'trib trib-' + cur; state.textContent = cur.replace(/_/g, ' ');
+  const stLbl = el('label'); stLbl.textContent = 'État courant'; stLbl.appendChild(state); row.appendChild(stLbl);
+  if (!next.length) {
+    // État TERMINAL/sans transition sortante dans la matrice : aucune action possible (fail-closed côté UI).
+    const info = el('div', 'muted'); info.textContent = 'Aucune transition disponible depuis cet état.'; row.appendChild(info);
+    wrap.appendChild(row); body.appendChild(wrap); return;
+  }
+  const toLbl = el('label'); toLbl.textContent = 'Transition vers';
+  const sel = el('select'); sel.setAttribute('aria-label', 'Transition de triage');
+  next.forEach(s => { const o = el('option'); o.value = s; o.textContent = s.replace(/_/g, ' '); sel.appendChild(o); });
+  toLbl.appendChild(sel); row.appendChild(toLbl);
+  const save = el('button'); save.type = 'button'; save.className = 'k-theme'; save.textContent = 'Transitionner';
+  save.onclick = async () => {
+    const to = sel.value;
+    if (!to) { toast('Choisis un état cible.', 'info'); return; }
+    save.disabled = true;
+    try {
+      const r = await write('/api/findings/' + d.id + '/triage', { body: { to }, auth: 'operator', engagement: true });
+      const j = r.json || {};
+      if (r.status === 403) { toast('Réservé à un compte operator sur cet engagement.', 'bad'); return; }
+      if (r.status === 409) { toast('Transition refusée (état courant modifié). États permis : ' + String((j.allowed || []).join(', ')), 'bad', 6000); return; }
+      if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+      toast('Triage : ' + esc(cur) + ' → ' + esc(to) + ' (ledgerisé).', 'ok');
+      d.triage = to;
+      loadFindings(F_STATE.offset);
+    } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+    finally { save.disabled = false; }
+  };
+  row.appendChild(save);
+  wrap.appendChild(row);
+  body.appendChild(wrap);
 }
 
 // Contrôle de PROPRIÉTÉ (P1-4) : assigne/désassigne le finding (operator, GRANT-SCOPÉ serveur). Le
@@ -177,7 +224,7 @@ function buildFindingControls(body, d) {
   wrap.appendChild(row);
   body.appendChild(wrap);
 }
-['f-sev', 'f-status', 'f-assignee', 'f-target'].forEach(idp => { const el = $('#' + idp); if (el) el.addEventListener(idp === 'f-target' ? 'input' : 'change', () => loadFindings(0)); });
+['f-sev', 'f-status', 'f-assignee', 'f-triage', 'f-target'].forEach(idp => { const el = $('#' + idp); if (el) el.addEventListener(idp === 'f-target' ? 'input' : 'change', () => loadFindings(0)); });
 // EXPORT depuis Findings : CSV / JSON de l'engagement ACTIF (secrets rédigés serveur) + accès au
 // rapport complet brandé (vue #reports). downloadReport() est défini plus bas (déclaration hoistée).
 if ($('#f-export-csv')) $('#f-export-csv').addEventListener('click', () => downloadReport('csv'));
@@ -197,13 +244,53 @@ function ensureBulkStatusOptions() {
   sel.dataset.filled = '1';
 }
 
+// Peuple (une fois) les sélecteurs de triage — filtre `#f-triage` (tous les états) + bulk `#f-bulk-triage`
+// (états cibles). Miroir client de TRIAGE_STATES ; le serveur valide chaque transition par finding.
+function ensureTriageOptions() {
+  const f = $('#f-triage');
+  if (f && !f.dataset.filled) {
+    TRIAGE_STATES.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s.replace(/_/g, ' '); f.appendChild(o); });
+    f.dataset.filled = '1';
+  }
+  const b = $('#f-bulk-triage');
+  if (b && !b.dataset.filled) {
+    TRIAGE_STATES.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = 'triage → ' + s.replace(/_/g, ' '); b.appendChild(o); });
+    b.dataset.filled = '1';
+  }
+}
+
 // Reflète l'état de la sélection dans la barre d'actions (visibilité + compteur).
 function updateBulkBar() {
   const bar = $('#f-bulk'); if (!bar) return;
   ensureBulkStatusOptions();
+  ensureTriageOptions();
   const n = F_STATE.selected.size;
   bar.hidden = n === 0;
   const c = $('#f-bulk-count'); if (c) c.textContent = n + ' sélectionné(s)';
+}
+
+// Transitionne les findings sélectionnés vers l'état de triage choisi (operator). Le serveur valide CHAQUE
+// finding contre la matrice depuis SON état courant : les transitions illégales sont IGNORÉES (skipped), les
+// légales appliquées. Réponse applied/skipped comme bulk-status.
+async function bulkTriage() {
+  const to = ($('#f-bulk-triage') && $('#f-bulk-triage').value) || '';
+  if (!to) { toast('Choisis un état de triage cible.', 'info'); return; }
+  const ids = Array.from(F_STATE.selected);
+  if (!ids.length) { toast('Aucun finding sélectionné.', 'info'); return; }
+  const ok = await confirmModal(`Transitionner ${ids.length} finding(s) vers le triage « ${to.replace(/_/g, ' ')} » ? Les transitions illégales seront ignorées.`, { title: 'Triage de masse', okText: 'Transitionner', danger: false });
+  if (!ok) return;
+  const btn = $('#f-bulk-triage-apply'); if (btn) btn.disabled = true;
+  try {
+    const r = await write('/api/findings/bulk/triage', { body: { ids, to }, auth: 'operator', engagement: true });
+    const j = r.json || {};
+    if (r.status === 403) { toast('Réservé à un compte operator sur cet engagement.', 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
+    const ap = (j.applied || []).length, sk = (j.skipped || []).length;
+    toast(`Triage appliqué à ${ap} finding(s)` + (sk ? `, ${sk} ignoré(s) (transition illégale ou hors périmètre)` : '') + ' (ledgerisé).', 'ok', 6000);
+    (j.applied || []).forEach(id => F_STATE.selected.delete(id));
+    loadFindings(F_STATE.offset);
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 // Applique la transition de statut choisie aux findings sélectionnés (operator, serveur valide chaque id).
@@ -294,6 +381,7 @@ async function bulkAssign() {
 
 if ($('#f-bulk-apply')) $('#f-bulk-apply').addEventListener('click', bulkApplyStatus);
 if ($('#f-bulk-assign')) $('#f-bulk-assign').addEventListener('click', bulkAssign);
+if ($('#f-bulk-triage-apply')) $('#f-bulk-triage-apply').addEventListener('click', bulkTriage);
 if ($('#f-bulk-csv')) $('#f-bulk-csv').addEventListener('click', () => bulkExport('csv'));
 if ($('#f-bulk-json')) $('#f-bulk-json').addEventListener('click', () => bulkExport('json'));
 if ($('#f-bulk-clear')) $('#f-bulk-clear').addEventListener('click', () => { F_STATE.selected.clear(); loadFindings(F_STATE.offset); });
@@ -312,6 +400,7 @@ function collectFilterState() {
   const sev = $('#f-sev') && $('#f-sev').value; if (sev) f.severity = sev;
   const st = $('#f-status') && $('#f-status').value; if (st) f.status = st;
   const asg = $('#f-assignee') && $('#f-assignee').value; if (asg) f.assignee = asg;
+  const tri = $('#f-triage') && $('#f-triage').value; if (tri) f.triage = tri;
   const tg = $('#f-target') && $('#f-target').value.trim(); if (tg) f.target = tg;
   const camp = $('#campaign') && $('#campaign').value; if (camp) f.campaign = camp;
   return f;
@@ -325,6 +414,8 @@ function applyFilterState(f) {
   // `assignee` : la valeur ne « colle » que si son option existe (jeu ASSIGNABLE déjà chargé à l'init de la
   // vue). 'unassigned' est une option statique toujours présente ; un user_id l'est après loadAssignableUsers.
   if ($('#f-assignee')) $('#f-assignee').value = f.assignee || '';
+  // `triage` : options statiques peuplées à l'init de la vue (ensureTriageOptions) — la valeur « colle ».
+  if ($('#f-triage')) { ensureTriageOptions(); $('#f-triage').value = f.triage || ''; }
   if ($('#f-target')) $('#f-target').value = f.target || '';
   // `campaign` est un sélecteur global partagé : on ne le force que s'il existe dans ses options.
   if (f.campaign != null && $('#campaign')) { const opt = Array.from($('#campaign').options || []).some(o => o.value === f.campaign); if (opt) $('#campaign').value = f.campaign; }
@@ -390,6 +481,25 @@ if ($('#f-views')) $('#f-views').addEventListener('change', () => {
 });
 if ($('#f-save-view')) $('#f-save-view').addEventListener('click', saveCurrentView);
 if ($('#f-del-view')) $('#f-del-view').addEventListener('click', deleteSelectedView);
+
+// TRIAGE LIVE (SSE) — flux `/api/findings/events` (topic serveur FINDINGS_TOPIC) : quand un AUTRE opérateur
+// transitionne un finding, on recharge la liste EN DIRECT (débouncé). On ne recharge QUE si la vue Findings
+// est visible (offsetParent non nul), pour ne pas fetch inutilement depuis une autre vue. Le cookie de
+// session est porté automatiquement (EventSource same-origin) ; EventSource re-tente seul en cas de coupure.
+(function initTriageLive() {
+  const host = $('#f-result'); if (!host || typeof EventSource === 'undefined') return;
+  let timer = null;
+  const refresh = () => {
+    if (host.offsetParent === null) return; // vue non visible -> pas de fetch
+    clearTimeout(timer);
+    timer = setTimeout(() => loadFindings(F_STATE.offset), 250); // débounce léger (rafales)
+  };
+  try {
+    const es = new EventSource('/api/findings/events');
+    es.addEventListener('finding', refresh);
+    es.onerror = () => { /* EventSource re-tente seul ; le prochain chargement rattrapera l'état */ };
+  } catch (e) { /* SSE indisponible : la vue reste utilisable (refresh manuel/actions) */ }
+})();
 
 // =====================================================================================
 //  FINDINGS LIBRARY — modèles de findings réutilisables (livrable client type Ghostwriter).

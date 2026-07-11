@@ -77,3 +77,26 @@ export const TLP_KEY = s => { const u = String(s == null ? '' : s).toUpperCase()
 export const TLP_BADGE = s => { const k = TLP_KEY(s); if (!k) return ''; const cls = k.replace('+', '-').toLowerCase(); return `<span class="tlpb tlpb-${cls}" title="Traffic Light Protocol 2.0 — TLP:${esc(k)}">TLP:${esc(k)}</span>`; };
 // Vocabulaire de cycle de vie d'un finding (#15) — miroir du serveur (findings.rs::FINDING_STATUSES).
 export const FINDING_STATUSES = ['new', 'triaged', 'confirmed', 'remediated', 'false_positive', 'accepted', 'wontfix'];
+
+// TRIAGE WORKFLOW — état du cycle de TRIAGE, SÉPARÉ du `status` (statut de PREUVE). Miroir UX du serveur
+// (findings.rs::TRIAGE_STATES / TRIAGE_TRANSITIONS) : le client ne l'utilise QUE pour n'offrir que les
+// transitions permises ; le SERVEUR reste l'autorité et RE-VALIDE chaque transition (fail-closed 409).
+export const TRIAGE_STATES = ['new', 'triaging', 'confirmed', 'false_positive', 'duplicate', 'resolved', 'reopened'];
+export const TRIAGE_TRANSITIONS = {
+  new: ['triaging', 'false_positive', 'duplicate'],
+  triaging: ['confirmed', 'false_positive', 'duplicate'],
+  confirmed: ['resolved', 'false_positive'],
+  false_positive: ['triaging'],
+  duplicate: ['triaging'],
+  resolved: ['reopened'],
+  reopened: ['triaging', 'confirmed', 'resolved'],
+};
+// États atteignables depuis `from` (vide si inconnu — fail-closed, comme le serveur).
+export const TRIAGE_NEXT = from => TRIAGE_TRANSITIONS[String(from || '')] || [];
+// Badge de TRIAGE (classe .trib-<état>) — VISUELLEMENT DISTINCT du badge de statut de PREUVE (.badge) et
+// de sévérité (.sevb) pour ne pas les confondre. Libellé lisible (underscore -> espace). Escapé.
+export const TRIAGE_BADGE = s => {
+  const k = String(s == null ? '' : s).toLowerCase();
+  const key = TRIAGE_STATES.includes(k) ? k : 'new';
+  return `<span class="trib trib-${key}" title="Cycle de triage (indépendant du statut de preuve)">${esc(key.replace(/_/g, ' '))}</span>`;
+};
