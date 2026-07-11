@@ -2,10 +2,12 @@
 
 ## In progress
 
-- Nothing mid-flight. The Postgres program, its HA/object-store/k8s follow-on, and the UI/UX backlog have all shipped (see below). Working tree is clean.
+- Nothing mid-flight. Working tree clean. The Postgres/HA program, the UI/UX backlog, the readiness dossier, the **senior code-quality audit** ([`docs/AUDIT.md`](docs/AUDIT.md)) and the **security audit** ([`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md)) have all shipped. Only two items remain, both blocked on an owner decision — see **Backlog (owner input needed)**.
 
 ## Recently shipped
 
+- **Security audit (pentest / purple / DevSecOps) + remediation** — see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md). All HIGH/MEDIUM/LOW exploitable findings fixed: scope-guard redirect bypass + session-secret exfil (`a9678d3`), cross-tenant run IDOR (`5504f5d`), SSO/SCIM hardening (`40ff5dd`), proof-discipline schema-enforcement (`a9678d3`), SSRF deny-list + child-reap + observable audit drops + login lockout (`e1b649e`), ledger truncation high-water-mark (`0d127ee`), k8s/CI hardening (`855c3d1`). Two residual risks accepted + documented (host-root audit integrity → opt-in off-host signer/witness; collector fail-open → reporting-only).
+- **Senior code-quality audit + refactor** — see [`docs/AUDIT.md`](docs/AUDIT.md). God-files split behavior-neutral: `launch.js`/`admin.js` → packages (`92759d1`), `runs.rs` → proc/ha/validate (`ac568bd`), `cli.rs` → `cli/` + `compliance.rs` → policy/evidence (`73eaea6`), `state.rs` → schema/detection (`66ae602`), `backup.rs` → crypto/sched (`bcfbf39`), `main()` → dispatch/serve + test redistribution (`bc0244b`), `msf.py` → `_msgpack` (`ab06a3a`); Python mypy on the core (`41c44b4`); canonical secret redaction closing a token leak (`adbf6de`); enterprise swallowed-writes fail-closed + SQL value binding (`6216c70`); `rand_hex`/`err` dedup (`a52e117`).
 - **Codebase-quality pass** — `main.rs` decomposed into ~20 focused modules; CONC-1 made cancellation-safe; CSP added; `app.js` split into ES modules. The structural/quality work is done.
 - **UI/UX fixes from real usage (2026-07-08/09)** — the full backlog is shipped and browser-validated (commits `2078547`, `4f2ed3b`, `270bc01`). See UI/UX → Done.
 - **Postgres program — DELIVERED end-to-end** — the staged plan below is complete: backend enabled (`9e10c67`), governed migrator (`d48ab4b`), HA/ops (`1118f3b`), connection pool + `RETURNING` ids (`e188e2b`). `FORGE_ENTERPRISE_STORE=postgres` runs the whole app, not just the seam.
@@ -56,3 +58,16 @@
 
 - **`significant_drop_tightening` clippy lint — RESOLVED / ENABLED** (`3c7a5c4`). The lint is on; the remaining legitimate lock-hold sites (atomic check-then-act blocks) carry a scoped `#[allow]` with a rationale.
 - **`last_insert_id()` session-scoping — RESOLVED** via `Store::execute_returning_id` (`e188e2b`): `RETURNING id` on Postgres in one round-trip, `last_insert_rowid()` on the held SQLite connection — no `lastval()`/session dependency, safe on a pooled backend.
+
+## Backlog (owner input needed)
+
+These are the ONLY open items. Both are blocked on a product/infra decision, not on engineering — nothing else in the roadmap, the readiness dossier, or the two audits is unresolved.
+
+- **KMS/HSM-backed signing key (readiness Phase 3, audit SEC-KMS).** The signer seam is ready (`CallableComplianceSigner`/`RemoteSigner`, off-host key, re-verifies its own signature); only a concrete backend driver is missing. **Decision needed:** AWS-KMS vs PKCS#11 (HSM) vs GCP-KMS. Also closes the F4 audit residual (host-root audit-integrity) when paired with a witness anchor.
+- **Bulk-assign / finding ownership (readiness P1-4 second half).** Saved-views, keyset pagination, bulk status + bulk export already shipped; bulk-*assign* is deferred because there is no assignee/owner model yet. **Decision needed:** do findings get an owner/assignee concept (and its UI), or is this out of scope?
+
+## Accepted as-is (deliberate, not backlog)
+
+- **`main.rs` router-integration tests (~25) stay in `main.rs`.** The code-quality audit redistributed the cleanly-homed tests (backup/dbmigrate/cli); the remaining ones drive `build_router` end-to-end through a shared helper web — they are genuine main.rs integration tests, not misplaced unit tests. Moving them would be artificial. (A `tests/` integration dir is awkward for a binary crate.)
+- **Best-effort `let _ = store.execute(...)` sites** (presence heartbeat/GC, session GC, HA heartbeat, SCIM group membership best-effort, background run-cancel) are intentional fail-soft with no audit attestation — left as-is by design. The audit-bearing swallowed-writes were all fixed.
+- **SQLite/Postgres path duplication** (a few `_pg`/`_store` variants) — collapsing onto the seam is a larger effort with no correctness gain; deferred, low priority.
