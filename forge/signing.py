@@ -224,7 +224,7 @@ def verify_entry(alg, signer, data: bytes, sig_hex: str) -> bool:
 # Enterprise engagement flag — MUST match console/src/compliance.rs::enabled (env source).
 ENTERPRISE_COMPLIANCE_FLAG = "FORGE_ENTERPRISE_COMPLIANCE"
 # Config/env keys for selecting + configuring the ledger signer.
-LEDGER_SIGNER_ENV = "FORGE_LEDGER_SIGNER"                      # local | kms | hsm | http | remote | exec
+LEDGER_SIGNER_ENV = "FORGE_LEDGER_SIGNER"                      # local | kms | hsm | http | remote | exec | pkcs11
 _SIGNER_ENDPOINT_ENV = "FORGE_LEDGER_SIGNER_ENDPOINT"
 _SIGNER_CREDENTIAL_ENV = "FORGE_LEDGER_SIGNER_CREDENTIAL"
 _SIGNER_PUBKEY_ENV = "FORGE_LEDGER_SIGNER_PUBKEY"
@@ -234,7 +234,7 @@ _SIGNER_TIMEOUT_ENV = "FORGE_LEDGER_SIGNER_TIMEOUT"
 # Config keys treated as SECRET (never surface their value) — endpoint/argv can embed creds too.
 _SIGNER_SECRET_KEYS = frozenset({
     "endpoint", "url", "credential", "token", "secret", "password", "api_key", "apikey",
-    "authorization", "auth", "argv", "command",
+    "authorization", "auth", "argv", "command", "pin",
 })
 # Config keys safe to surface in a redacted view (all NON-secret; `pubkey` is a PUBLIC key).
 _SIGNER_PUBLIC_KEYS = frozenset({"mode", "alg", "pubkey", "pubkey_hex", "public_key", "timeout"})
@@ -467,6 +467,8 @@ def _resolve_signer_config(config, env):
             pass
     if mode in ("exec", "command"):
         cfg["argv"] = env.get(_SIGNER_ARGV_ENV)
+    elif mode == "pkcs11":
+        pass  # PKCS#11 params live in dedicated FORGE_LEDGER_PKCS11_* env, read by signing_pkcs11 (lazy)
     else:
         ep = env.get(_SIGNER_ENDPOINT_ENV)
         if ep:
@@ -484,9 +486,10 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
     DEFAULT (community): mode 'local' → `LocalFileSigner` (the on-disk `<base>.ed25519` key), BYTE-IDENTICAL
     to `make_signer`. This is what runs when nothing is configured — the community build is unchanged.
 
-    ENTERPRISE: mode 'kms'/'hsm'/'http'/'remote'/'exec' → a `RemoteSigner`, selected by `config` (a settings
-    dict) or by env (`FORGE_LEDGER_SIGNER` + `FORGE_LEDGER_SIGNER_*`). Gated by the enterprise flag
-    `FORGE_ENTERPRISE_COMPLIANCE`.
+    ENTERPRISE: mode 'kms'/'hsm'/'http'/'remote'/'exec'/'pkcs11' → a `RemoteSigner` (a `Pkcs11Signer` for
+    'pkcs11'), selected by `config` (a settings dict) or by env (`FORGE_LEDGER_SIGNER` + `FORGE_LEDGER_SIGNER_*`
+    / `FORGE_LEDGER_PKCS11_*`). Gated by the enterprise flag `FORGE_ENTERPRISE_COMPLIANCE`. The 'pkcs11' driver
+    (Ed25519/CKM_EDDSA, off-host key custody) is LAZY: `python-pkcs11` is only imported when it is selected.
 
     FAIL-CLOSED: a remote signer requested WITHOUT the enterprise flag is REFUSED (RemoteSignerError) — Forge
     never silently downgrades a remote-signer intent to the local key. The refusal message carries NO secret."""
@@ -500,7 +503,10 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
     # --- enterprise remote signer (flag-gated) ---
     if not enterprise_signer_enabled(env):
         raise RemoteSignerError(
-            "signeur distant (KMS/HSM/exec) demandé mais l'entreprise COMPLIANCE n'est pas activée "
+            "signeur distant (KMS/HSM/exec/pkcs11) demandé mais l'entreprise COMPLIANCE n'est pas activée "
             f"({ENTERPRISE_COMPLIANCE_FLAG}=1) — repli LOCAL refusé (fail-closed, open-core)"
         )
+    if mode == "pkcs11":
+        from . import signing_pkcs11   # LAZY: python-pkcs11 only imported when the operator selects pkcs11
+        return signing_pkcs11.build_pkcs11_signer(cfg, env=env)
     return build_remote_signer(cfg)

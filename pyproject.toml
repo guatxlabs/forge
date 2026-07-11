@@ -6,6 +6,14 @@ license = "AGPL-3.0-only"
 requires-python = ">=3.9"
 dependencies = []   # coeur pur-stdlib (comme secpipe). Les modules réels (P2) ajouteront des deps optionnelles.
 
+# --- OPTIONAL extras — NEVER pulled into the zero-runtime-dep default engine ---
+# `pkcs11`: off-host ledger key custody via a PKCS#11 token (Ed25519/CKM_EDDSA) — SoftHSM2 dev/CI, any
+# HSM / AWS CloudHSM / cloud-KMS-via-PKCS#11 prod. Opt-in ONLY: install with `pip install 'forge[pkcs11]'`
+# and select it via `FORGE_LEDGER_SIGNER=pkcs11`. The default engine imports nothing from here. See
+# docs/KEY_CUSTODY.md. (`cryptography` is Forge's existing optional Ed25519 provider, not re-declared here.)
+[project.optional-dependencies]
+pkcs11 = ["python-pkcs11>=0.7"]
+
 [project.scripts]
 # `pip install -e .` met l'exécutable `forge` sur le PATH -> `forge <commande>`
 # (équivalent à `python3 -m forge.cli <commande>`). Voir README (Install).

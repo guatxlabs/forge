@@ -55,9 +55,22 @@ crypto trouvé. Deux risques résiduels **assumés et documentés** (voir §4).
 - **F4 — intégrité d'audit vs compromission host-root (par défaut).** La clé Ed25519 est co-localisée avec
   l'écrivain (`LocalFileSigner`) et l'anchor par défaut est `NullAnchor`. Un attaquant **root sur l'hôte** lit
   la clé, réécrit/re-signe/re-chaîne l'historique (et le HWM) → `verify` local passe. Le HWM ferme la
-  **troncature accidentelle** et un tampering **non-root/naïf** ; la protection **complète** contre host-root
-  reste l'**opt-in** : signer off-host (`RemoteSigner`, clé hors process, re-vérifie sa propre signature) +
-  `WitnessAnchor`/`reconcile` (checkpoint off-host). C'est dans le threat model documenté (`anchor.py`).
+  **troncature accidentelle** et un tampering **non-root/naïf**.
+  **➜ Résiduel désormais FERMABLE (opt-in, livré).** La custody off-host est disponible et se ferme en
+  activant **deux** contrôles opt-in :
+  1. **Clé hors-host** — soit le **signeur PKCS#11** (`FORGE_LEDGER_SIGNER=pkcs11`, Ed25519/`CKM_EDDSA` sur
+     SoftHSM2 dev/CI, HSM / AWS CloudHSM / KMS-via-PKCS#11 prod ; `forge/signing_pkcs11.py::Pkcs11Signer`,
+     sous-classe de `RemoteSigner` → même re-vérification fail-closed, jamais de repli local), soit le signeur
+     **exec** générique vers un KMS Ed25519 (GCP-KMS via `gcloud kms asymmetric-sign`). La clé privée vit sur
+     le token : host-root ne peut plus l'**exfiltrer**. Dépendance **optionnelle** (`pip install 'forge[pkcs11]'`) ;
+     le moteur par défaut reste stdlib-only, `LocalFileSigner` byte-identique.
+  2. **Ancre off-host** — `WitnessAnchor`/`reconcile` (checkpoint contre-signé par une clé que le host ne détient
+     pas → détecte une réécriture même re-signée).
+
+  **Les deux sont nécessaires** : la clé hors-host stoppe l'exfiltration, le témoin détecte une réécriture
+  future re-signée ; ensemble, forger l'audit exige de compromettre l'hôte Forge **ET** le témoin **ET** le HSM.
+  Reste **opt-in par design** (open-core : défaut local + `NullAnchor`, byte-identique et sans dépendance) —
+  à **activer** explicitement. Détails + setup : `docs/KEY_CUSTODY.md` ; threat model : `anchor.py`.
 - **F6 — collecteurs de détection fail-open (par design).** L'entrée collector (SIEM/logs) est de confiance et
   fail-open ; elle alimente **le reporting/la mesure de couverture uniquement**, jamais une décision de FIRE
   (scope/ROE/ledger restent fail-closed). Une entrée empoisonnée peut au pire fabriquer de la couverture /
@@ -73,7 +86,7 @@ crypto trouvé. Deux risques résiduels **assumés et documentés** (voir §4).
 - **No-shell partout** : argv tokenisé (`shell=False`), pas d'`eval`/`exec`/`pickle`/`os.system`.
 - **Path-traversal fermé** : `blob.safe_join` (anti `..`/absolu/NUL), backup restore sans zip-slip (in-memory, noms fixes).
 - **Backup crypto sain** : XChaCha20-Poly1305, nonce+salt CSPRNG **par archive** (pas de réuse), argon2id, header en AAD, clé zeroizée/0600.
-- **Ledger anti-downgrade** : liaison alg↔kind bloque downgrade ET relabel, dans `verify` et `verify_external` ; `RemoteSigner` fail-closed re-vérifie sa signature.
+- **Ledger anti-downgrade** : liaison alg↔kind bloque downgrade ET relabel, dans `verify` et `verify_external` ; `RemoteSigner`/`Pkcs11Signer` fail-closed re-vérifient leur signature contre la clé publique (jamais de repli local).
 - **AuthN/Z** : compares constant-time (`subtle`), CSPRNG panic-on-failure, tenant sentinel `NO_ENGAGEMENT=-1` deny-by-default, RBAC par-engagement most-specific-wins, host-guard fail-closed anti-rebinding, admin sans fallback env-hash, accès super-admin ledgerisé.
 - **OIDC** : RS256 hard-pinné (rejette `none`/HS*), `kid` fail-closed, iss/aud/exp + nonce constant-time, PKCE-S256, redirect_uri allowlist exacte.
 - **Supply-chain / infra** : openssl-free (rustls/ring), moteur Python **zéro dép runtime**, Dockerfile multi-stage non-root (uid 10001) + tools SHA256-vérifiés, `.dockerignore` couvre secrets/clés, compose bind `127.0.0.1`, NetworkPolicies deny-by-default, aucun secret commité.
