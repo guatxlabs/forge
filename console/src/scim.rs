@@ -736,10 +736,13 @@ async fn groups_create(State(app): State<App>, headers: HeaderMap, body: Bytes) 
             Err(e) => return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None),
         }
     };
-    // Apply any initial members.
+    // Apply any initial members. FAIL-CLOSED (F8): a guard/write failure aborts BEFORE the ledger so a
+    // `console.scim.group.create` is never emitted for a mutation that did not land.
     let member_ids = member_ids_from_resource(&res);
     for uid in &member_ids {
-        add_member(&app, gid, *uid, &role);
+        if let Err(e) = add_member(&app, gid, *uid, &role) {
+            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("member add failed: {e}"), None);
+        }
     }
     crate::append_console_ledger(
         &app,
@@ -800,7 +803,9 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
             let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid]);
         }
         for uid in members.iter().filter_map(member_id_of) {
-            add_member(&app, gid, uid, &role);
+            if let Err(e) = add_member(&app, gid, uid, &role) {
+                return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("member add failed: {e}"), None);
+            }
             added += 1;
         }
     }
@@ -814,11 +819,15 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
                 "add" | "replace" => {
                     if let Some(arr) = vals.and_then(|v| v.as_array()) {
                         for uid in arr.iter().filter_map(member_id_of) {
-                            add_member(&app, gid, uid, &role);
+                            if let Err(e) = add_member(&app, gid, uid, &role) {
+                                return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("member add failed: {e}"), None);
+                            }
                             added += 1;
                         }
                     } else if let Some(uid) = vals.and_then(member_id_of) {
-                        add_member(&app, gid, uid, &role);
+                        if let Err(e) = add_member(&app, gid, uid, &role) {
+                            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("member add failed: {e}"), None);
+                        }
                         added += 1;
                     }
                 }
@@ -881,7 +890,14 @@ async fn group_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path
 /// Add a user to a group and apply the group's SCOPED role. Bounded: only viewer|operator, and only to a
 /// SCIM-managed user whose current role is NOT admin (SCIM never touches a local admin's role, and never
 /// elevates to admin/super-admin). When enterprise tenancy is engaged, also land a scoped tenant_grant.
-fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
+///
+/// FAIL-CLOSED (SCIM F7/F8). F8: applies `guard_superadmin_user_mutation` (a designated super-admin is
+/// never re-roled by SCIM) and PROPAGATES write errors (`Result`) so the caller can refuse to ledger a
+/// mutation that never landed (no ledger↔DB divergence — mirrors the other SCIM write paths' hardening).
+/// F7: SCOPES membership to SCIM-PROVISIONED users only — a `user_id` with no `scim_user` row is IGNORED
+/// (never inserted into `scim_group_member`), so `Groups/:id` can never disclose a local account's login.
+#[allow(clippy::significant_drop_tightening)]
+fn add_member(app: &App, gid: i64, uid: i64, role: &str) -> Result<(), String> {
     // Resolve enterprise state + this group's CONFIGURABLE tenant grant BEFORE taking the db guard below.
     // Both read the db mutex; computing them up front avoids re-locking the (non-reentrant) guard while it
     // is held (`app.db()` returns a MutexGuard). `mapped_grant` (clamped to tenant_operator for SCIM) comes
@@ -899,11 +915,33 @@ fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
         None
     };
 
+    // Resolve the target login + SCIM-provisioned status in a SHORT-LIVED store scope, dropped BEFORE the
+    // super-admin guard (which re-locks the store internally — the guard MUST run outside any held guard).
+    let (login, is_scim): (Option<String>, bool) = {
+        let store = app.store();
+        let login = store.query_row("SELECT login FROM users WHERE id=?", &crate::sql_params![uid], |r| r.get_str(0)).ok();
+        let is_scim = store
+            .query_row("SELECT 1 FROM scim_user WHERE user_id=?", &crate::sql_params![uid], |_| Ok(()))
+            .is_ok();
+        (login, is_scim)
+    };
+    // F8 — designated super-admin protection (fail-closed). A SCIM group can never re-role a super-admin.
+    if let Some(l) = &login {
+        crate::tenancy::guard_superadmin_user_mutation(app, l, false, Some(role), false)?;
+    }
+    // F7 — membership is SCIM-scoped: a non-provisioned (local) account is never added to a SCIM group and
+    // therefore never disclosed through the group's members list.
+    if !is_scim {
+        return Ok(());
+    }
+
     let store = app.store();
-    let _ = store.execute(
-        "INSERT INTO scim_group_member(group_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING",
-        &crate::sql_params![gid, uid],
-    );
+    store
+        .execute(
+            "INSERT INTO scim_group_member(group_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING",
+            &crate::sql_params![gid, uid],
+        )
+        .map_err(|e| format!("add member failed: {e}"))?;
     // Only re-role SCIM-managed, non-admin accounts (never elevate to admin/super-admin).
     let managed_nonadmin: bool = store
         .query_row(
@@ -913,21 +951,26 @@ fn add_member(app: &App, gid: i64, uid: i64, role: &str) {
         )
         .is_ok();
     if managed_nonadmin && (role == "viewer" || role == "operator") {
-        let _ = store.execute("UPDATE users SET role=? WHERE id=?", &crate::sql_params![role, uid]);
+        store
+            .execute("UPDATE users SET role=? WHERE id=?", &crate::sql_params![role, uid])
+            .map_err(|e| format!("re-role failed: {e}"))?;
         // Scoped tenant-grant when tenancy is engaged: the group's mapped grant (clamped to tenant_operator
         // — never tenant_admin via SCIM) if configured, else the default tenant #1 grant derived from role.
         if tenancy_on {
             let (tid, trole) = mapped_grant.clone().unwrap_or_else(|| {
                 (1i64, if role == "operator" { "tenant_operator".to_string() } else { "tenant_viewer".to_string() })
             });
-            let _ = store.execute(
-                "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
-                 VALUES(?,?,?,datetime('now'))
-                 ON CONFLICT(user_id,tenant_id) DO UPDATE SET role=excluded.role",
-                &crate::sql_params![uid, tid, trole],
-            );
+            store
+                .execute(
+                    "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
+                     VALUES(?,?,?,datetime('now'))
+                     ON CONFLICT(user_id,tenant_id) DO UPDATE SET role=excluded.role",
+                    &crate::sql_params![uid, tid, trole],
+                )
+                .map_err(|e| format!("tenant grant failed: {e}"))?;
         }
     }
+    Ok(())
 }
 
 // ============================================================================================
@@ -1133,9 +1176,15 @@ fn group_resource(app: &App, gid: i64) -> Option<Value> {
     let (display, external_id): (String, String) = store
         .query_row("SELECT display_name, external_id FROM scim_group WHERE id=?", &crate::sql_params![gid], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
         .ok()?;
+    // F7 (defence in depth): JOIN `scim_user` so ONLY SCIM-provisioned members are disclosed — a local
+    // (non-SCIM) account can never be surfaced through a group's members list, even if a stale
+    // `scim_group_member` row exists (mirrors `users_list`, which already JOINs `scim_user`).
     let members: Vec<Value> = store
         .query_lax(
-            "SELECT u.id, u.login FROM scim_group_member m JOIN users u ON u.id=m.user_id WHERE m.group_id=? ORDER BY u.id",
+            "SELECT u.id, u.login FROM scim_group_member m \
+             JOIN users u ON u.id=m.user_id \
+             JOIN scim_user s ON s.user_id=u.id \
+             WHERE m.group_id=? ORDER BY u.id",
             &crate::sql_params![gid],
             |r| {
                 let id: i64 = r.get_i64(0)?;
@@ -1720,7 +1769,97 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------------------------------
-    // 9) UNIT — pure helpers.
+    // 9) SCIM F7 — a group's members list NEVER discloses a local (non-SCIM) account, and a non-SCIM
+    //    user is never added to a SCIM group (membership is SCIM-scoped).
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn group_members_does_not_disclose_local_account() {
+        let ledger = tmp_path("scim-f7-ledger");
+        let app = scim_test_app(&ledger);
+        engage_flag(&app);
+        set_token(&app, "tok-f7");
+        // A LOCAL (non-SCIM) admin — must never surface through a SCIM group members list.
+        let local_uid: i64 = {
+            let db = app.db();
+            let hash = crate::hash_pw("localpw");
+            crate::upsert_user(&db, "localadmin", "admin", &hash).unwrap();
+            db.query_row("SELECT id FROM users WHERE login=?", ["localadmin"], |r| r.get(0)).unwrap()
+        };
+        let addr = serve(app.clone()).await;
+        // Provision a genuine SCIM user (gets a scim_user row).
+        let cr = http_raw(
+            addr,
+            &body_req("POST", "/scim/v2/Users", &scim_user_body("scimuser@corp.com", true, "ext-s"), &bearer_hdr("tok-f7")),
+        )
+        .await;
+        assert_eq!(parse_status(&cr), 201, "scim user created: {cr}");
+        let scim_uid = json_of(&cr)["id"].as_str().unwrap().to_string();
+        // Create a group whose members include BOTH the local admin and the SCIM user.
+        let gbody = json!({
+            "schemas": [SCHEMA_GROUP],
+            "displayName": "Forge Readers",
+            "members": [{ "value": local_uid.to_string() }, { "value": scim_uid }],
+        })
+        .to_string();
+        let gr = http_raw(addr, &body_req("POST", "/scim/v2/Groups", &gbody, &bearer_hdr("tok-f7"))).await;
+        assert_eq!(parse_status(&gr), 201, "group created: {gr}");
+        // The local (non-SCIM) admin must NOT appear; the SCIM member does.
+        assert!(!body_of(&gr).contains("localadmin"), "local admin login must NOT be disclosed: {}", body_of(&gr));
+        assert!(body_of(&gr).contains("scimuser.corp.com"), "SCIM member disclosed: {}", body_of(&gr));
+        // The local admin's role is untouched, and it was never inserted into scim_group_member.
+        {
+            let db = app.db();
+            let role: String = db.query_row("SELECT role FROM users WHERE id=?", [local_uid], |r| r.get(0)).unwrap();
+            let n: i64 = db.query_row("SELECT COUNT(*) FROM scim_group_member WHERE user_id=?", [local_uid], |r| r.get(0)).unwrap();
+            drop(db);
+            assert_eq!(role, "admin", "local admin role untouched by SCIM");
+            assert_eq!(n, 0, "non-SCIM user never added to a SCIM group");
+        }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 10) SCIM F8 — add_member is guarded against mutating a designated super-admin; the op fails BEFORE
+    //     ledgering and the super-admin's role is never downgraded.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn group_add_member_guards_superadmin() {
+        let ledger = tmp_path("scim-f8-ledger");
+        let app = scim_test_app(&ledger);
+        engage_flag(&app);
+        set_token(&app, "tok-f8");
+        let sa_uid: i64 = {
+            let db = app.db();
+            crate::settings_set(&db, "enterprise.superadmin", "super.admin").unwrap();
+            let hash = crate::hash_pw("sapw");
+            crate::upsert_user(&db, "super.admin", "admin", &hash).unwrap();
+            db.query_row("SELECT id FROM users WHERE login=?", ["super.admin"], |r| r.get(0)).unwrap()
+        };
+        let addr = serve(app.clone()).await;
+        let before = crate::read_ledger_lines(&ledger).len();
+        // "Forge Operators" -> operator role; adding the super-admin must be guarded (op fails).
+        let gbody = json!({
+            "schemas": [SCHEMA_GROUP],
+            "displayName": "Forge Operators",
+            "members": [{ "value": sa_uid.to_string() }],
+        })
+        .to_string();
+        let gr = http_raw(addr, &body_req("POST", "/scim/v2/Groups", &gbody, &bearer_hdr("tok-f8"))).await;
+        assert_eq!(parse_status(&gr), 500, "super-admin member add is guarded (op fails): {gr}");
+        {
+            let db = app.db();
+            let role: String = db.query_row("SELECT role FROM users WHERE id=?", [sa_uid], |r| r.get(0)).unwrap();
+            drop(db);
+            assert_eq!(role, "admin", "super-admin role NEVER downgraded by SCIM group");
+        }
+        // No group.create ledger for the aborted op (guard fired before ledgering).
+        let lines = crate::read_ledger_lines(&ledger);
+        assert_eq!(lines.len(), before, "guarded op does not ledger a mutation");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 11) UNIT — pure helpers.
     // ------------------------------------------------------------------------------------------------
     #[test]
     fn unit_helpers() {

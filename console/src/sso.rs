@@ -53,6 +53,9 @@ const CFG_KEY: &str = "sso.config";
 const SCOPES: &str = "openid email profile";
 /// Lifetime of a pending-auth row (state/nonce/verifier) — short-lived, one-time. Purged on expiry.
 const PENDING_TTL_SECS: i64 = 600;
+/// Name of the browser-binding cookie carrying the OAuth `state` (SSO F2 login-CSRF defence). Set at
+/// `login_start`, required to match the returned `state` at `callback`, then cleared.
+const STATE_COOKIE: &str = "forge_sso_state";
 
 // ============================================================================================
 // FLAG — is enterprise OIDC SSO ENGAGED? Community default = OFF (local login only, byte-identical).
@@ -103,6 +106,10 @@ struct SsoConfig {
     default_role: String,
     /// Which claim maps to the Forge login: `email` (default) or `sub`.
     user_claim: String,
+    /// When the login key is derived from `email`, REQUIRE the ID token's `email_verified` to be true
+    /// (fail-closed anti-collision — an IdP with unverified/mutable email must not let an attacker collide
+    /// with a privileged local login). Default `true`; an admin can opt out only deliberately.
+    require_email_verified: bool,
 }
 
 /// Load + validate the stored config. Returns `None` (UNCONFIGURED) if issuer/client_id/client_secret/
@@ -128,6 +135,9 @@ fn load_config(app: &App) -> Option<SsoConfig> {
     let provisioning = v.get("provisioning").and_then(|x| x.as_str()).unwrap_or("match").to_string();
     let default_role = v.get("default_role").and_then(|x| x.as_str()).unwrap_or("viewer").to_string();
     let user_claim = v.get("user_claim").and_then(|x| x.as_str()).unwrap_or("email").to_string();
+    // Default TRUE (fail-closed): absent/malformed => require email_verified. Only an explicit `false`
+    // (bool) opts out.
+    let require_email_verified = v.get("require_email_verified").and_then(|x| x.as_bool()).unwrap_or(true);
     Some(SsoConfig {
         issuer,
         client_id,
@@ -137,6 +147,7 @@ fn load_config(app: &App) -> Option<SsoConfig> {
         provisioning,
         default_role,
         user_claim,
+        require_email_verified,
     })
 }
 
@@ -235,13 +246,28 @@ async fn login_start(State(app): State<App>, Query(q): Query<HashMap<String, Str
         pct_encode(&nonce),
         pct_encode(&challenge),
     );
-    (StatusCode::FOUND, [(header::LOCATION, authorize)], "redirecting to identity provider").into_response()
+    // BIND `state` to THIS browser (login-CSRF / session-fixation defence, SSO F2): a short-lived
+    // HttpOnly cookie carrying the state. `SameSite=Lax` (NOT Strict) so it survives the top-level GET
+    // the IdP uses to redirect back to /callback; `Secure` by default (opt-out via FORGE_COOKIE_INSECURE
+    // for local plain-HTTP dev). The callback requires cookie == returned `state` before consuming the
+    // pending entry — a forged callback in a victim's browser (which never started this flow) has no
+    // matching cookie and is rejected (fail-closed).
+    let state_cookie = format!(
+        "{STATE_COOKIE}={state}; HttpOnly; SameSite=Lax; Path=/api/sso; Max-Age={PENDING_TTL_SECS}{}",
+        if crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "" } else { "; Secure" }
+    );
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, authorize), (header::SET_COOKIE, state_cookie)],
+        "redirecting to identity provider",
+    )
+        .into_response()
 }
 
 /// GET /api/sso/callback?code=&state= — finish the flow. Validates state (server-side, one-time),
 /// exchanges the code (with the PKCE verifier) for tokens, validates the ID token, maps to a Forge user,
 /// issues the `forge_session` cookie and 302s to the (re-validated) allowlisted return target.
-async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     if !enabled(&app) {
         return disabled();
     }
@@ -257,6 +283,14 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
     let code = q.get("code").map(|s| s.as_str()).unwrap_or("");
     if state.is_empty() || code.is_empty() {
         return err(StatusCode::BAD_REQUEST, "bad_request", "missing code or state");
+    }
+
+    // BROWSER BINDING (SSO F2): the state cookie set at login_start MUST be present AND equal the returned
+    // `state`. Absent or mismatched => reject BEFORE consuming the pending entry (fail-closed anti login-CSRF
+    // / session-fixation — a callback replayed into a browser that never initiated this flow has no cookie).
+    let cookie_state = cookie_value(&headers, STATE_COOKIE).unwrap_or_default();
+    if cookie_state.is_empty() || !crate::ct_eq_str(&cookie_state, state) {
+        return err(StatusCode::FORBIDDEN, "state_binding_failed", "missing or mismatched state cookie");
     }
 
     // STATE validation: look up + CONSUME the pending row (one-time use, anti-replay). Missing => reject.
@@ -309,7 +343,7 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
         Ok(Err(e)) => return err(StatusCode::BAD_GATEWAY, "jwks_fetch_failed", e),
         Err(_) => return err(StatusCode::BAD_GATEWAY, "jwks_fetch_failed", "jwks task join error"),
     };
-    let (sub, email, groups) = match validate_id_token(&cfg, &pend.nonce, id_token, &jwks) {
+    let (sub, email, email_verified, groups) = match validate_id_token(&cfg, &pend.nonce, id_token, &jwks) {
         Ok(x) => x,
         Err(e) => return err(StatusCode::FORBIDDEN, "invalid_id_token", e),
     };
@@ -323,7 +357,7 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
 
     // Map the OIDC identity to a Forge user (match existing or auto-provision per config). A new account
     // is provisioned with the group-resolved role (fallback = configured default).
-    let (user_id, login, provisioned) = match map_user(&app, &cfg, &sub, &email, &provision_role) {
+    let (user_id, login, provisioned) = match map_user(&app, &cfg, &sub, &email, email_verified, &provision_role) {
         Ok(x) => x,
         Err(e) => return err(StatusCode::FORBIDDEN, "user_mapping_failed", e),
     };
@@ -332,20 +366,64 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
         app.recompute_auth_required();
         app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SSO JIT-provisioned account)
     }
+    // F6 — this account's role is SSO-owned once SSO JIT-provisions it OR its groups confer a role. The
+    // marker bounds the fail-closed downgrade below to accounts SSO controls (never a local/non-SSO admin).
+    if provisioned || resolved.role.is_some() {
+        let store = app.store();
+        mark_sso_managed(&store, user_id);
+    }
     // Sync the account's role + tenant grants to what its groups confer (fail-closed least privilege; a
     // designated super-admin login is never touched). `cap_operator=false`: an admin-configured group ->
     // admin mapping is honored for an interactive SSO login. No matching group => role stays as-is.
     crate::rbac::apply_to_user(&app, user_id, &login, &resolved, false);
+
+    // F6 — STALE-PRIVILEGE DE-PROVISIONING (fail-closed): the IdP asserted a groups claim on this login but
+    // NONE mapped to a role (e.g. an admin group was removed at the IdP). `apply_to_user` leaves the role
+    // untouched in that case, which would strand a stale elevated role. So DOWNGRADE the account to the
+    // configured default role — but ONLY when (a) the account is SSO-managed (never a local admin who never
+    // logged in via SSO), (b) it is not a designated super-admin, and (c) this strictly LOWERS privilege
+    // (never an accidental upgrade). No groups claim at all => leave the role as-is (the IdP asserted nothing).
+    if resolved.role.is_none() && !groups.is_empty() && !crate::tenancy::is_superadmin_login(&app, &login) {
+        let default_role = crate::validate_role(&cfg.default_role).unwrap_or_else(|_| "viewer".to_string());
+        let downgrade: Option<String> = {
+            let store = app.store();
+            if is_sso_managed(&store, user_id) {
+                let current: String = store
+                    .query_row("SELECT role FROM users WHERE id=?", &crate::sql_params![user_id], |r| r.get_str(0))
+                    .unwrap_or_default();
+                if crate::role_rank(&current) > crate::role_rank(&default_role)
+                    && store
+                        .execute("UPDATE users SET role=? WHERE id=?", &crate::sql_params![&default_role, user_id])
+                        .is_ok()
+                {
+                    Some(current)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(from) = downgrade {
+            crate::append_console_ledger(
+                &app,
+                "console.sso.downgrade",
+                json!({ "login": login, "from": from, "to": default_role, "reason": "no_mapped_group" }),
+            );
+        }
+    }
 
     // Re-validate the stored return target (defence in depth) before redirecting the browser.
     if !redirect_allowed(&cfg, &pend.return_to) {
         return err(StatusCode::FORBIDDEN, "redirect_not_allowed", "return_to is not in the allowlist");
     }
 
-    // Issue THE SAME session cookie the local /api/login issues (HttpOnly, SameSite=Strict).
+    // Issue THE SAME session cookie the local /api/login issues (HttpOnly, SameSite=Strict, Secure).
     let (token, _expires) = crate::create_session(&app, user_id);
     let ttl = crate::session_ttl_secs();
-    let cookie = format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}");
+    let cookie = crate::session_cookie(&token, ttl);
+    // Clear the one-time state-binding cookie now that the flow completed (hygiene).
+    let clear_state = format!("{STATE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/api/sso; Max-Age=0");
 
     // Ledger the login — NEVER the id/access token, the code, or the client_secret. `sub` is an opaque
     // identifier (needed for attribution), not a secret.
@@ -362,7 +440,11 @@ async fn callback(State(app): State<App>, Query(q): Query<HashMap<String, String
 
     (
         StatusCode::FOUND,
-        [(header::SET_COOKIE, cookie), (header::LOCATION, pend.return_to)],
+        axum::response::AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::SET_COOKIE, clear_state),
+            (header::LOCATION, pend.return_to),
+        ]),
         "authenticated",
     )
         .into_response()
@@ -421,6 +503,8 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
     if crate::validate_role(&default_role).is_err() {
         return err(StatusCode::BAD_REQUEST, "bad_default_role", "default_role must be viewer|operator|admin");
     }
+    // Fail-closed default: require email_verified unless the admin explicitly sends `false`.
+    let require_email_verified = body.get("require_email_verified").and_then(|v| v.as_bool()).unwrap_or(true);
 
     // client_secret is WRITE-ONLY: keep the existing one if the request omits it.
     let existing_secret = load_config(&app).map(|c| c.client_secret).unwrap_or_default();
@@ -443,6 +527,7 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
         "provisioning": provisioning,
         "default_role": default_role,
         "user_claim": user_claim,
+        "require_email_verified": require_email_verified,
     });
     {
         let store = app.store();
@@ -463,6 +548,7 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
             "redirect_uri": redirect_uri,
             "allowed_redirect_uris": allowed.len(),
             "provisioning": provisioning,
+            "require_email_verified": require_email_verified,
             "client_secret_set": !secret.is_empty(),
         }),
     );
@@ -500,7 +586,7 @@ fn validate_id_token(
     expected_nonce: &str,
     token: &str,
     jwks: &Value,
-) -> Result<(String, String, Vec<String>), String> {
+) -> Result<(String, String, bool, Vec<String>), String> {
     use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
     // Header: enforce RS256 (asymmetric, JWKS). Reject `none`/HS* to prevent alg-confusion downgrades.
@@ -529,10 +615,18 @@ fn validate_id_token(
         return Err("id token missing sub".to_string());
     }
     let email = claims.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // `email_verified` — OIDC allows either a JSON bool `true` or the STRING `"true"` (some IdPs emit the
+    // latter). Anything else (absent, false, "false", other) => NOT verified (fail-closed). Consumed by
+    // `map_user` when the login key is derived from email (anti-collision, finding SSO F1).
+    let email_verified = match claims.get("email_verified") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    };
     // OIDC `groups` claim (array of strings, or a single string) — feeds the advanced-RBAC group mapping.
     // Absent/malformed => empty => the identity keeps its least-privilege default (fail-closed).
     let groups = crate::rbac::groups_from_claims(&claims);
-    Ok((sub, email, groups))
+    Ok((sub, email, email_verified, groups))
 }
 
 /// Select the RSA signing key `(n, e)` from a JWKS. With a `kid` in the token header, require an EXACT
@@ -573,14 +667,19 @@ fn select_jwk(jwks: &Value, kid: Option<&str>) -> Result<(String, String), Strin
 /// missing account is rejected (fail-closed). In `auto` mode a missing account is provisioned with the
 /// supplied `provision_role` (the group-resolved role, else the configured default) and an UNUSABLE local
 /// password (SSO-only — no argon2 preimage is ever known). `provision_role` is re-validated (fail-closed).
-fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, provision_role: &str) -> Result<(i64, String, bool), String> {
-    let raw = if cfg.user_claim == "sub" {
-        sub
-    } else if !email.is_empty() {
-        email
-    } else {
-        sub
-    };
+fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, email_verified: bool, provision_role: &str) -> Result<(i64, String, bool), String> {
+    // The login key is `sub` when configured; otherwise `email` if present, else `sub` as a last resort.
+    let use_email_key = cfg.user_claim != "sub" && !email.is_empty();
+    // FAIL-CLOSED anti-collision (SSO F1): when the login key comes from `email`, the ID token MUST assert
+    // `email_verified: true` — an IdP that permits unverified/mutable email could otherwise let an attacker
+    // collide with a privileged local login. Configurable, defaults to required. `sub`-keyed mapping is a
+    // stable opaque identifier and is exempt (no email in the login key).
+    if use_email_key && cfg.require_email_verified && !email_verified {
+        return Err(format!(
+            "email '{email}' is not verified by the IdP (email_verified != true) — refusing to map by email (fail-closed)"
+        ));
+    }
+    let raw = if use_email_key { email } else { sub };
     let login = sanitize_login(raw)?;
 
     // Existing account?
@@ -697,7 +796,9 @@ fn ensure_schema(store: &crate::store::Store) {
                token_endpoint TEXT NOT NULL,
                jwks_uri TEXT NOT NULL,
                created BIGINT NOT NULL,
-               expires BIGINT NOT NULL);",
+               expires BIGINT NOT NULL);
+             CREATE TABLE IF NOT EXISTS sso_managed(
+               user_id BIGINT PRIMARY KEY);",
         );
         let _ = store.execute("DELETE FROM sso_pending WHERE expires <= ?", &crate::sql_params![crate::now_epoch()]);
         return;
@@ -711,9 +812,27 @@ fn ensure_schema(store: &crate::store::Store) {
            token_endpoint TEXT NOT NULL,
            jwks_uri TEXT NOT NULL,
            created INTEGER NOT NULL,
-           expires INTEGER NOT NULL);",
+           expires INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS sso_managed(
+           user_id INTEGER PRIMARY KEY);",
     );
     let _ = store.execute("DELETE FROM sso_pending WHERE expires <= ?", &crate::sql_params![crate::now_epoch()]);
+}
+
+/// Mark `user_id` as SSO-managed (its role is authoritatively driven by the IdP group mapping). Idempotent.
+/// Used to bound the F6 privilege-downgrade to accounts SSO owns (never a local/non-SSO admin).
+fn mark_sso_managed(store: &crate::store::Store, user_id: i64) {
+    let _ = store.execute(
+        "INSERT INTO sso_managed(user_id) VALUES(?) ON CONFLICT DO NOTHING",
+        &crate::sql_params![user_id],
+    );
+}
+
+/// Is `user_id` an SSO-managed account (role owned by the IdP group mapping)?
+fn is_sso_managed(store: &crate::store::Store, user_id: i64) -> bool {
+    store
+        .query_row("SELECT 1 FROM sso_managed WHERE user_id=?", &crate::sql_params![user_id], |_| Ok(()))
+        .is_ok()
 }
 
 /// PG-ONLY — crée la table enterprise SSO `sso_pending` sur la CIBLE Postgres pour le migrateur de données
@@ -777,7 +896,56 @@ fn discover_blocking(issuer: String, timeout: Duration) -> Result<Discovery, Str
     if authorization_endpoint.is_empty() || token_endpoint.is_empty() || jwks_uri.is_empty() {
         return Err("discovery missing authorization_endpoint/token_endpoint/jwks_uri".to_string());
     }
+    // SSRF / client_secret-exfil defence (SSO F5): PIN every discovered endpoint to the SAME ORIGIN
+    // (scheme+host+port) as the VALIDATED issuer. A hostile or redirected discovery document could
+    // otherwise steer the client_secret token POST, the JWKS fetch, or the browser authorize redirect to
+    // an attacker-controlled or internal target. Same-origin required — fail-closed on any cross-origin.
+    let issuer_origin = origin_of(&issuer)
+        .ok_or_else(|| format!("configured issuer '{issuer}' has no parseable http(s) origin"))?;
+    for (name, ep) in [
+        ("token_endpoint", &token_endpoint),
+        ("jwks_uri", &jwks_uri),
+        ("authorization_endpoint", &authorization_endpoint),
+    ] {
+        match origin_of(ep) {
+            Some(o) if o == issuer_origin => {}
+            _ => {
+                return Err(format!(
+                    "discovery {name} '{ep}' is not same-origin as the issuer '{issuer}' (rejected — anti-SSRF)"
+                ))
+            }
+        }
+    }
     Ok(Discovery { authorization_endpoint, token_endpoint, jwks_uri })
+}
+
+/// Parse the ORIGIN `(scheme, host_lowercased, port)` of an http(s) URL, normalising the default port
+/// (80 for http, 443 for https) so `http://h` and `http://h:80` compare equal. Returns `None` for a
+/// non-http(s) or malformed URL (caller treats that as a mismatch → fail-closed).
+fn origin_of(url: &str) -> Option<(String, String, u16)> {
+    let (scheme, default_port, rest) = match url.split_once("://") {
+        Some(("https", r)) => ("https".to_string(), 443u16, r),
+        Some(("http", r)) => ("http".to_string(), 80u16, r),
+        _ => return None,
+    };
+    // Authority = up to the first '/', '?' or '#'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return None;
+    }
+    // Strip any userinfo (never expected here, but never let it spoof the host component).
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => {
+            let parsed: u16 = p.parse().ok()?;
+            (h, parsed)
+        }
+        None => (hostport, default_port),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme, host.to_ascii_lowercase(), port))
 }
 
 /// Fetch the JWKS document. Blocking — call via `spawn_blocking`.
@@ -851,6 +1019,21 @@ fn rand_hex(nbytes: usize) -> String {
     let mut b = vec![0u8; nbytes];
     getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) unavailable — refusing to emit a weak SSO secret");
     b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+/// Read a named cookie's value from the request `Cookie` header (first match). `None` if absent/empty.
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())?;
+    let want = format!("{name}=");
+    for part in raw.split(';') {
+        let p = part.trim();
+        if let Some(val) = p.strip_prefix(&want) {
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// PKCE S256 code_challenge = base64url-nopad(SHA-256(code_verifier)).
@@ -1072,18 +1255,67 @@ byHb5g3JqJSE6WJSuyEQrUob
         crate::settings_set(&db, CFG_KEY, &cfg.to_string()).unwrap();
     }
 
-    /// Forge an ID token (RS256) with `pem`, embedding the given claims.
+    /// Forge an ID token (RS256) with `pem`, embedding the given claims (incl. `email_verified`).
     #[allow(clippy::too_many_arguments)]
-    fn make_id_token(pem: &str, kid: &str, iss: &str, aud: &str, sub: &str, email: &str, nonce: &str, exp_offset: i64) -> String {
+    fn make_id_token(pem: &str, kid: &str, iss: &str, aud: &str, sub: &str, email: &str, email_verified: bool, nonce: &str, exp_offset: i64) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(kid.to_string());
         let now = crate::now_epoch();
         let claims = json!({
-            "iss": iss, "aud": aud, "sub": sub, "email": email, "nonce": nonce,
+            "iss": iss, "aud": aud, "sub": sub, "email": email, "email_verified": email_verified, "nonce": nonce,
             "exp": now + exp_offset, "iat": now
         });
         let key = EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key");
         encode(&header, &claims, &key).expect("sign")
+    }
+
+    /// Forge an ID token carrying a `groups` claim (feeds advanced RBAC — used by the F6 downgrade test).
+    #[allow(clippy::too_many_arguments)]
+    fn make_id_token_groups(pem: &str, kid: &str, iss: &str, aud: &str, sub: &str, email: &str, email_verified: bool, nonce: &str, exp_offset: i64, groups: &[&str]) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        let now = crate::now_epoch();
+        let claims = json!({
+            "iss": iss, "aud": aud, "sub": sub, "email": email, "email_verified": email_verified,
+            "nonce": nonce, "groups": groups, "exp": now + exp_offset, "iat": now
+        });
+        let key = EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key");
+        encode(&header, &claims, &key).expect("sign")
+    }
+
+    /// Spawn a mock OIDC IdP whose discovery document advertises a CROSS-ORIGIN `token_endpoint` (SSO F5).
+    /// The issuer/jwks/authorize are same-origin; only token_endpoint points elsewhere (port 1) so the
+    /// same-origin pin must reject it. Returns the issuer base URL.
+    async fn spawn_mock_idp_crossorigin() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock idp x-origin");
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let discovery = json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": "http://127.0.0.1:1/token", // DIFFERENT origin -> must be rejected
+            "jwks_uri": format!("{base}/jwks"),
+        })
+        .to_string();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    discovery.len(),
+                    discovery
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        base
     }
 
     /// Spawn a mock OIDC IdP. Serves discovery + JWKS (GOOD key) statically; `/token` returns whatever
@@ -1155,14 +1387,27 @@ byHb5g3JqJSE6WJSuyEQrUob
         addr
     }
 
-    /// Drive login -> parse state+nonce from the authorize redirect -> return (state, nonce).
+    /// Drive login -> parse state+nonce from the authorize redirect -> return (state, nonce, loc). Also
+    /// asserts login_start bound the state to a browser cookie (SSO F2).
     async fn start_login(addr: SocketAddr, return_to: &str) -> (String, String, String) {
         let r = http_raw(addr, &get_req(&format!("/api/sso/login?return_to={}", pct_encode(return_to)), "")).await;
         assert_eq!(parse_status(&r), 302, "login should 302 to the IdP: {r}");
         let loc = header_val(&r, "location").expect("Location header on login");
         let state = qparam(&loc, "state").expect("state in authorize url");
         let nonce = qparam(&loc, "nonce").expect("nonce in authorize url");
+        // F2: login_start must set the HttpOnly state-binding cookie == the authorize `state`.
+        let sc = header_val(&r, "set-cookie").expect("state cookie on login_start");
+        assert!(sc.contains(&format!("{STATE_COOKIE}={state}")), "state cookie carries state: {sc}");
+        assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Lax"), "state cookie hardened: {sc}");
         (state, nonce, loc)
+    }
+
+    /// A callback GET carrying the browser state-binding cookie (as a real browser would after login_start).
+    fn callback_req(state: &str, code: &str) -> String {
+        get_req(
+            &format!("/api/sso/callback?code={code}&state={state}"),
+            &format!("Cookie: {STATE_COOKIE}={state}\r\n"),
+        )
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -1183,16 +1428,16 @@ byHb5g3JqJSE6WJSuyEQrUob
         assert!(loc.contains("code_challenge_method=S256"), "PKCE S256: {loc}");
         assert!(loc.contains("client_id=forge-client"), "client_id present: {loc}");
 
-        // IdP returns an ID token bound to OUR nonce, aud, issuer.
-        let idt = make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "oidc-sub-123", "Alice@Corp.com", &nonce, 3600);
+        // IdP returns an ID token bound to OUR nonce, aud, issuer (email verified -> email mapping allowed).
+        let idt = make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "oidc-sub-123", "Alice@Corp.com", true, &nonce, 3600);
         *slot.lock().unwrap() = idt;
 
-        let r = http_raw(addr, &get_req(&format!("/api/sso/callback?code=authz-code&state={state}"), "")).await;
+        let r = http_raw(addr, &callback_req(&state, "authz-code")).await;
         assert_eq!(parse_status(&r), 302, "valid callback should 302: {r}");
         assert_eq!(header_val(&r, "location").as_deref(), Some("http://localhost/app"), "redirect to allowlisted target");
         let tok = cookie_token(&r).expect("forge_session cookie issued");
         let sc = header_val(&r, "set-cookie").unwrap();
-        assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict"), "hardened cookie: {sc}");
+        assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict") && sc.contains("Secure"), "hardened cookie: {sc}");
 
         // The session identifies the mapped user (email 'Alice@Corp.com' -> login 'alice.corp.com', operator).
         let w = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={tok}\r\n"))).await;
@@ -1222,8 +1467,8 @@ byHb5g3JqJSE6WJSuyEQrUob
         engage_flag(&app);
         set_config(&app, "http://idp.invalid", vec!["http://localhost/app"], "auto", "viewer", "email");
         let addr = serve(app).await;
-        // callback with a state that was never issued -> 403, no cookie.
-        let r = http_raw(addr, &get_req("/api/sso/callback?code=c&state=deadbeefdoesnotexist", "")).await;
+        // callback with a state that was never issued (but a matching binding cookie) -> 403, no cookie.
+        let r = http_raw(addr, &callback_req("deadbeefdoesnotexist", "c")).await;
         assert_eq!(parse_status(&r), 403, "unknown state -> 403: {r}");
         assert!(body_of(&r).contains("invalid_state"), "reason: {}", body_of(&r));
         assert!(cookie_token(&r).is_none(), "no session on state mismatch");
@@ -1243,9 +1488,9 @@ byHb5g3JqJSE6WJSuyEQrUob
         let addr = serve(app).await;
         let (state, _nonce, _) = start_login(addr, "http://localhost/app").await;
         // ID token carries the WRONG nonce.
-        let idt = make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-x", "u@x.com", "not-the-nonce", 3600);
+        let idt = make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-x", "u@x.com", true, "not-the-nonce", 3600);
         *slot.lock().unwrap() = idt;
-        let r = http_raw(addr, &get_req(&format!("/api/sso/callback?code=c&state={state}"), "")).await;
+        let r = http_raw(addr, &callback_req(&state, "c")).await;
         assert_eq!(parse_status(&r), 403, "nonce mismatch -> 403: {r}");
         assert!(body_of(&r).contains("invalid_id_token"), "reason: {}", body_of(&r));
         assert!(cookie_token(&r).is_none());
@@ -1265,9 +1510,9 @@ byHb5g3JqJSE6WJSuyEQrUob
         let addr = serve(app).await;
         let (state, nonce, _) = start_login(addr, "http://localhost/app").await;
         // aud is some OTHER client.
-        let idt = make_id_token(GOOD_PEM, KID, &issuer, "someone-else", "sub-x", "u@x.com", &nonce, 3600);
+        let idt = make_id_token(GOOD_PEM, KID, &issuer, "someone-else", "sub-x", "u@x.com", true, &nonce, 3600);
         *slot.lock().unwrap() = idt;
-        let r = http_raw(addr, &get_req(&format!("/api/sso/callback?code=c&state={state}"), "")).await;
+        let r = http_raw(addr, &callback_req(&state, "c")).await;
         assert_eq!(parse_status(&r), 403, "aud mismatch -> 403: {r}");
         assert!(body_of(&r).contains("invalid_id_token"), "reason: {}", body_of(&r));
         assert!(cookie_token(&r).is_none());
@@ -1287,9 +1532,9 @@ byHb5g3JqJSE6WJSuyEQrUob
         let addr = serve(app).await;
         let (state, nonce, _) = start_login(addr, "http://localhost/app").await;
         // Signed with ROGUE key but claims KID=test-key-1 (which the JWKS maps to the GOOD key) -> sig fails.
-        let idt = make_id_token(ROGUE_PEM, KID, &issuer, "forge-client", "sub-x", "u@x.com", &nonce, 3600);
+        let idt = make_id_token(ROGUE_PEM, KID, &issuer, "forge-client", "sub-x", "u@x.com", true, &nonce, 3600);
         *slot.lock().unwrap() = idt;
-        let r = http_raw(addr, &get_req(&format!("/api/sso/callback?code=c&state={state}"), "")).await;
+        let r = http_raw(addr, &callback_req(&state, "c")).await;
         assert_eq!(parse_status(&r), 403, "bad signature -> 403: {r}");
         assert!(body_of(&r).contains("invalid_id_token"), "reason: {}", body_of(&r));
         assert!(cookie_token(&r).is_none());
@@ -1405,7 +1650,174 @@ byHb5g3JqJSE6WJSuyEQrUob
     }
 
     // ------------------------------------------------------------------------------------------------
-    // 9) UNIT — sanitize_login / redirect_allowed / pct_encode / code_challenge edge cases.
+    // 9) SSO F1 — email-keyed mapping requires email_verified. false => reject; true => accept.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn email_verified_gates_email_mapping() {
+        let ledger = tmp_path("sso-ev-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "operator", "email");
+        let addr = serve(app.clone()).await;
+
+        // email_verified == false -> refuse to map by email (fail-closed anti-collision).
+        let (s1, n1, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-a", "alice@corp.com", false, &n1, 3600);
+        let r1 = http_raw(addr, &callback_req(&s1, "c")).await;
+        assert_eq!(parse_status(&r1), 403, "unverified email -> 403: {r1}");
+        assert!(body_of(&r1).contains("user_mapping_failed"), "reason: {}", body_of(&r1));
+        assert!(cookie_token(&r1).is_none(), "no session for unverified email");
+
+        // email_verified == true -> accepted, session issued.
+        let (s2, n2, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-a", "alice@corp.com", true, &n2, 3600);
+        let r2 = http_raw(addr, &callback_req(&s2, "c")).await;
+        assert_eq!(parse_status(&r2), 302, "verified email -> 302: {r2}");
+        assert!(cookie_token(&r2).is_some(), "session issued for verified email");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 10) SSO F1 — `sub`-keyed mapping is EXEMPT (email_verified irrelevant; sub is a stable identifier).
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn sub_mapping_bypasses_email_verified() {
+        let ledger = tmp_path("sso-sub-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "sub");
+        let addr = serve(app.clone()).await;
+        let (s, n, _) = start_login(addr, "http://localhost/app").await;
+        // Email present but UNVERIFIED — irrelevant because the login key is `sub`.
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-z", "x@x.com", false, &n, 3600);
+        let r = http_raw(addr, &callback_req(&s, "c")).await;
+        assert_eq!(parse_status(&r), 302, "sub mapping ok despite unverified email: {r}");
+        assert!(cookie_token(&r).is_some());
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 11) SSO F2 — the callback requires the browser state-binding cookie. Absent/mismatched => reject.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn state_cookie_mismatch_is_rejected() {
+        let ledger = tmp_path("sso-f2-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "email");
+        let addr = serve(app.clone()).await;
+        let (state, nonce, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sub-x", "u@x.com", true, &nonce, 3600);
+
+        // WRONG cookie value -> reject BEFORE consuming the pending state (fail-closed anti login-CSRF).
+        let bad = get_req(
+            &format!("/api/sso/callback?code=c&state={state}"),
+            &format!("Cookie: {STATE_COOKIE}=not-the-state\r\n"),
+        );
+        let r = http_raw(addr, &bad).await;
+        assert_eq!(parse_status(&r), 403, "state cookie mismatch -> 403: {r}");
+        assert!(body_of(&r).contains("state_binding_failed"), "reason: {}", body_of(&r));
+        assert!(cookie_token(&r).is_none(), "no session on state-binding failure");
+
+        // ABSENT cookie -> reject too (the pending state is still intact, so a bound retry would work).
+        let absent = http_raw(addr, &get_req(&format!("/api/sso/callback?code=c&state={state}"), "")).await;
+        assert_eq!(parse_status(&absent), 403, "absent state cookie -> 403: {absent}");
+        assert!(body_of(&absent).contains("state_binding_failed"), "reason: {}", body_of(&absent));
+
+        // The correctly-bound callback still succeeds (the pending entry was never consumed above).
+        let ok = http_raw(addr, &callback_req(&state, "c")).await;
+        assert_eq!(parse_status(&ok), 302, "bound callback succeeds: {ok}");
+        assert!(cookie_token(&ok).is_some());
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 12) SSO F5 — a discovery doc whose token_endpoint is CROSS-ORIGIN to the issuer is rejected.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn crossorigin_discovery_endpoint_is_rejected() {
+        let ledger = tmp_path("sso-f5-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let issuer = spawn_mock_idp_crossorigin().await;
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "email");
+        let addr = serve(app).await;
+        let r = http_raw(
+            addr,
+            &get_req(&format!("/api/sso/login?return_to={}", pct_encode("http://localhost/app")), ""),
+        )
+        .await;
+        assert_eq!(parse_status(&r), 502, "cross-origin discovery -> 502: {r}");
+        assert!(body_of(&r).contains("discovery_failed"), "reason: {}", body_of(&r));
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 13) SSO F6 — a stale SSO admin is downgraded when its IdP group no longer confers the role. A
+    //     local (non-SSO) admin is untouched (downgrade is scoped by user_id to SSO-managed accounts).
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn stale_admin_is_downgraded_on_group_removal() {
+        let ledger = tmp_path("sso-f6-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        // sub-keyed (no email_verified concern), auto-provision, default viewer.
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "sub");
+        // Force the rbac_group_map table to exist (resolve side-effect), then map forge-admins -> admin.
+        let _ = crate::rbac::resolve(&app, &["seed".to_string()]);
+        // A LOCAL admin that never logs in via SSO -> must stay admin (never SSO-managed).
+        let hash = crate::hash_pw("localpw");
+        {
+            let db = app.db();
+            db.execute(
+                "INSERT INTO rbac_group_map(idp_group,role,tenant_id,tenant_role,created) VALUES('forge-admins','admin',NULL,NULL,0)",
+                [],
+            )
+            .unwrap();
+            crate::upsert_user(&db, "root", "admin", &hash).unwrap();
+            drop(db);
+        }
+        let addr = serve(app.clone()).await;
+
+        // Login 1: groups=[forge-admins] -> provisioned as admin (SSO-managed).
+        let (s1, n1, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token_groups(GOOD_PEM, KID, &issuer, "forge-client", "user-1", "", false, &n1, 3600, &["forge-admins"]);
+        let r1 = http_raw(addr, &callback_req(&s1, "c")).await;
+        assert_eq!(parse_status(&r1), 302, "login1 -> 302: {r1}");
+        let t1 = cookie_token(&r1).unwrap();
+        let w1 = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={t1}\r\n"))).await;
+        assert!(body_of(&w1).contains("\"role\":\"admin\""), "login1 confers admin: {}", body_of(&w1));
+
+        // Login 2: groups=[some-other] (present but no match) -> DOWNGRADE to viewer (fail-closed).
+        let (s2, n2, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token_groups(GOOD_PEM, KID, &issuer, "forge-client", "user-1", "", false, &n2, 3600, &["some-other-group"]);
+        let r2 = http_raw(addr, &callback_req(&s2, "c")).await;
+        assert_eq!(parse_status(&r2), 302, "login2 -> 302: {r2}");
+        let t2 = cookie_token(&r2).unwrap();
+        let w2 = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={t2}\r\n"))).await;
+        assert!(body_of(&w2).contains("\"role\":\"viewer\""), "stale admin downgraded to viewer: {}", body_of(&w2));
+
+        // The local admin (never SSO-managed) is untouched.
+        let root_role: String = {
+            let db = app.db();
+            db.query_row("SELECT role FROM users WHERE login='root'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(root_role, "admin", "local (non-SSO) admin must NOT be downgraded");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 14) UNIT — sanitize_login / redirect_allowed / pct_encode / code_challenge / origin_of edge cases.
     // ------------------------------------------------------------------------------------------------
     #[test]
     fn unit_helpers() {
@@ -1421,6 +1833,7 @@ byHb5g3JqJSE6WJSuyEQrUob
             provisioning: "match".into(),
             default_role: "viewer".into(),
             user_claim: "email".into(),
+            require_email_verified: true,
         };
         assert!(redirect_allowed(&cfg, "http://localhost/app"), "exact allowlist match");
         assert!(redirect_allowed(&cfg, "/dashboard"), "safe same-origin relative");
@@ -1433,5 +1846,12 @@ byHb5g3JqJSE6WJSuyEQrUob
             code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+        // origin_of: default-port normalisation + cross-origin discrimination (SSO F5 substrate).
+        assert_eq!(origin_of("http://idp.example/x"), origin_of("http://idp.example:80/y"), "http default port");
+        assert_eq!(origin_of("https://idp.example/a"), origin_of("https://idp.example:443/b"), "https default port");
+        assert_ne!(origin_of("http://idp.example/x"), origin_of("http://evil.example/x"), "different host");
+        assert_ne!(origin_of("http://idp.example/x"), origin_of("http://idp.example:8443/x"), "different port");
+        assert_ne!(origin_of("http://idp.example/x"), origin_of("https://idp.example/x"), "different scheme");
+        assert!(origin_of("ftp://idp.example").is_none(), "non-http(s) => None");
     }
 }
