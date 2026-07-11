@@ -374,6 +374,9 @@
           <option value="">Tous propriétaires</option>
           <option value="unassigned">Non assigné</option>
         </select>
+        <select id="f-triage" aria-label="Filtre triage" title="Filtrer par état de triage">
+          <option value="">Tous triages</option>
+        </select>
         <input id="f-target" type="search" aria-label="Filtre cible" placeholder="cible…">
       </span>
     </div>
@@ -390,6 +393,10 @@
         <option value="__none__">(désassigner)</option>
       </select>
       <button id="f-bulk-assign" class="k-theme" type="button" title="Assigner le propriétaire choisi aux findings sélectionnés (grant-scopé, serveur)">Assigner</button>
+      <select id="f-bulk-triage" class="k-theme" aria-label="État de triage à appliquer à la sélection" title="Transitionner la sélection vers cet état de triage (validé par finding côté serveur)">
+        <option value="">Triage vers…</option>
+      </select>
+      <button id="f-bulk-triage-apply" class="k-theme" type="button" title="Transitionner les findings sélectionnés vers l'état de triage choisi (les transitions illégales sont ignorées, serveur)">Triage</button>
       <button id="f-bulk-csv" class="k-theme" type="button" title="Exporter la sélection en CSV (serveur)">Export CSV</button>
       <button id="f-bulk-json" class="k-theme" type="button" title="Exporter la sélection en JSON (serveur)">Export JSON</button>
       <button id="f-bulk-clear" class="k-theme" type="button" title="Vider la sélection">Désélectionner</button>

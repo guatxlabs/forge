@@ -357,8 +357,13 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // jeu des assignables (`assignable`, statique — pas de collision matchit avec `:id`).
         .route("/api/findings/bulk/assign", post(findings_bulk_assign))
         .route("/api/findings/assignable", get(findings_assignable))
+        // TRIAGE WORKFLOW : bulk-triage (segments STATIQUES `bulk/triage`) + flux SSE des transitions
+        // (`events`, statique — pas de collision matchit avec `:id`) + single-triage (`:id/triage`).
+        .route("/api/findings/bulk/triage", post(findings_bulk_triage))
+        .route("/api/findings/events", get(finding_events))
         .route("/api/findings/:id", get(finding_detail).post(finding_update))
         .route("/api/findings/:id/assign", post(finding_assign))
+        .route("/api/findings/:id/triage", post(finding_triage))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
         // Matrice ATT&CK par engagement : grille tactique × technique (kill-chain), engagement-scopée.

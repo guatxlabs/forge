@@ -11,12 +11,17 @@ use crate::*;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use crate::store::Param;
+use futures_util::Stream;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::sync::broadcast;
 
 // =====================================================================================
 //  VOCABULAIRES VALIDÉS (#15) — TLP 2.0 (classification/diffusion) + CYCLE DE VIE d'un finding.
@@ -54,6 +59,70 @@ pub(crate) fn norm_finding_status(s: &str) -> Option<String> {
     let low = s.trim().to_ascii_lowercase();
     if FINDING_STATUSES.contains(&low.as_str()) { Some(low) } else { None }
 }
+
+// =====================================================================================
+//  TRIAGE WORKFLOW — machine à états GOUVERNÉE du CYCLE DE TRIAGE, distincte du `status` (statut de
+//  PREUVE : tested/vulnerable/…). Les DEUX champs sont INDÉPENDANTS : une transition de triage n'altère
+//  JAMAIS `status`, et réciproquement. La matrice de transitions est FERMÉE (fail-closed) : tout couple
+//  (from, to) hors table est REFUSÉ. UNIQUE source de vérité serveur ; le client en a un miroir UX mais
+//  le serveur RE-VALIDE systématiquement.
+// =====================================================================================
+
+/// États du cycle de TRIAGE d'un finding — jeu FERMÉ. `new` est l'état initial (DEFAULT en base ; les
+/// findings hérités sont backfillés à `new` par la migration). Distinct de [`FINDING_STATUSES`].
+pub(crate) const TRIAGE_STATES: [&str; 7] =
+    ["new", "triaging", "confirmed", "false_positive", "duplicate", "resolved", "reopened"];
+
+/// MATRICE FERMÉE des transitions AUTORISÉES `(from -> &[to])`. TABLE UNIQUE, revue en un coup d'œil :
+///   new            -> triaging | false_positive | duplicate
+///   triaging       -> confirmed | false_positive | duplicate
+///   confirmed      -> resolved | false_positive
+///   false_positive -> triaging            (réouverture)
+///   duplicate      -> triaging            (réouverture)
+///   resolved       -> reopened
+///   reopened       -> triaging | confirmed | resolved
+/// Tout couple ABSENT de cette table est REFUSÉ (fail-closed). Le endpoint de transition valide
+/// `(current, to) ∈ matrice` AVANT toute écriture.
+pub(crate) const TRIAGE_TRANSITIONS: &[(&str, &[&str])] = &[
+    ("new", &["triaging", "false_positive", "duplicate"]),
+    ("triaging", &["confirmed", "false_positive", "duplicate"]),
+    ("confirmed", &["resolved", "false_positive"]),
+    ("false_positive", &["triaging"]),
+    ("duplicate", &["triaging"]),
+    ("resolved", &["reopened"]),
+    ("reopened", &["triaging", "confirmed", "resolved"]),
+];
+
+/// Normalise (trim + casse insensible) + valide un état de triage. `None` si hors [`TRIAGE_STATES`]. PURE.
+pub(crate) fn norm_triage(s: &str) -> Option<String> {
+    let low = s.trim().to_ascii_lowercase();
+    if TRIAGE_STATES.contains(&low.as_str()) { Some(low) } else { None }
+}
+
+/// Les états ATTEIGNABLES depuis `from` selon la matrice fermée (slice VIDE si `from` inconnu — fail-closed :
+/// un état hérité/hors-vocabulaire n'autorise AUCUNE transition). PURE.
+pub(crate) fn triage_next(from: &str) -> &'static [&'static str] {
+    for (f, tos) in TRIAGE_TRANSITIONS {
+        if *f == from {
+            return tos;
+        }
+    }
+    &[]
+}
+
+/// Vrai ssi `(from -> to)` ∈ matrice. Fail-closed (états inconnus => false). PURE.
+pub(crate) fn triage_allows(from: &str, to: &str) -> bool {
+    triage_next(from).contains(&to)
+}
+
+/// `run_id` synthétique porté par les events de TRIAGE sur le bus SSE partagé (`App.events`, typé pour les
+/// runs). Hors de l'espace des vrais run_id (préfixe `__`, cf. `presence::PRESENCE_TOPIC`) : `run_sse` et
+/// `presence_events` filtrent sur LEUR topic et n'y toucheront jamais, et `finding_events` ne remonte QUE
+/// les events dont `run_id == FINDINGS_TOPIC` (topics disjoints). Réutilise le bus existant (pas de 2e canal).
+pub(crate) const FINDINGS_TOPIC: &str = "__findings__";
+
+/// Cadence (s) du heartbeat/keep-alive du flux SSE de triage (parité avec le heartbeat de présence).
+const FINDINGS_SSE_TICK_SECS: u64 = 20;
 
 // NOTE: `rows_to_json` below is DEAD CODE that takes a raw `&Connection` (not an `App`), so it is not
 // an `app.db()` DML site — it stays on rusqlite and is left unconverted (no `App::store()` in scope).
@@ -104,6 +173,16 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         } else if let Ok(uid) = a.parse::<i64>() {
             conds.push("assignee=?".into());
             params.push(Param::Int(uid));
+        }
+    }
+    // TRIAGE FILTER : `?triage=<state>` -> findings dans CET état de triage. La valeur est NORMALISÉE +
+    // VALIDÉE contre la matrice ([`TRIAGE_STATES`]) puis LIÉE en Param (pas d'interpolation, pas d'injection).
+    // Une valeur hors vocabulaire est IGNORÉE (best-effort, comme le filtre assignee) — les saved-views
+    // filtrent par état sans risque.
+    if let Some(t) = q.get("triage") {
+        if let Some(norm) = norm_triage(t) {
+            conds.push("triage=?".into());
+            params.push(Param::Text(norm));
         }
     }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
@@ -158,7 +237,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
         // ambiguïté sur `id`, ORDER/LIMIT/keyset INCHANGÉS). Portable SQLite+PG. NULL -> assignee null +
         // assignee_login null (non assigné).
         let ks_sql = format!(
-            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT ?"
+            "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee),triage FROM finding{where_}{seek_cond} ORDER BY id DESC LIMIT ?"
         );
         let rows: Vec<Value> = store
             .query_lax(&ks_sql, &ks_params, |r| {
@@ -177,6 +256,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
                     "classification": r.get_opt_str(11)?.unwrap_or_default(),
                     "assignee": r.get_opt_i64(12)?,
                     "assignee_login": r.get_opt_str(13)?,
+                    "triage": r.get_opt_str(14)?.unwrap_or_else(|| "new".into()),
                 }))
             })
             .unwrap_or_default();
@@ -196,7 +276,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
     off_params.push(Param::Int(limit));
     off_params.push(Param::Int(offset));
     let sql = format!(
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,tool,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee),triage FROM finding{where_} ORDER BY id DESC LIMIT ? OFFSET ?"
     );
     // requête typée : `id` est un entier (rows_to_json le rendrait vide en le lisant comme String).
     // LENIENT (query_lax): un prepare échoué -> Err -> unwrap_or_default -> findings vides + total, à
@@ -218,6 +298,7 @@ pub(crate) async fn findings(State(app): State<App>, headers: HeaderMap, Query(q
                 "classification": r.get_opt_str(11)?.unwrap_or_default(),
                 "assignee": r.get_opt_i64(12)?,
                 "assignee_login": r.get_opt_str(13)?,
+                "triage": r.get_opt_str(14)?.unwrap_or_else(|| "new".into()),
             }))
         })
         .unwrap_or_default();
@@ -232,7 +313,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
     
     let row = app.store().query_row(
         // `engagement_id` (entier résolu) LIÉ en Param — plus d'interpolation de valeur (défense anti-régression).
-        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee) FROM finding WHERE id=? AND engagement_id=?",
+        "SELECT id,ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,classification,assignee,(SELECT login FROM users u WHERE u.id=finding.assignee),triage FROM finding WHERE id=? AND engagement_id=?",
         &crate::sql_params![id, eid],
         |r| {
             Ok(json!({
@@ -253,6 +334,7 @@ pub(crate) async fn finding_detail(State(app): State<App>, headers: HeaderMap, P
                 "classification": r.get_opt_str(14)?.unwrap_or_default(),
                 "assignee": r.get_opt_i64(15)?,
                 "assignee_login": r.get_opt_str(16)?,
+                "triage": r.get_opt_str(17)?.unwrap_or_else(|| "new".into()),
             }))
         },
     );
@@ -524,6 +606,165 @@ pub(crate) async fn finding_assign(
 }
 
 // =====================================================================================
+//  TRIAGE WORKFLOW — transition GOUVERNÉE du cycle de triage (machine à états fermée fail-closed). Le
+//  champ `triage` est INDÉPENDANT de `status` (statut de PREUVE) : une transition n'écrit QUE `triage`.
+//  Les DEUX endpoints (single + bulk) sont OPÉRATEUR + engagement-scopés fail-closed, ledgerisés, et
+//  émettent un event SSE (`FINDINGS_TOPIC`) — les autres opérateurs voient la transition EN DIRECT.
+// =====================================================================================
+
+/// Lit l'état de triage COURANT d'un finding CONFINÉ à l'engagement `eid` (sert aussi de test d'existence :
+/// `None` = introuvable / cross-engagement). Un `triage` NULL hérité est normalisé en `new` (état initial).
+/// Guard `store` scopé + libéré immédiatement (anti auto-deadlock). PURE lecture.
+fn current_triage(app: &App, id: i64, eid: i64) -> Option<String> {
+    let store = app.store();
+    // `.ok()` : Err (row introuvable / cross-engagement) -> None (test d'existence fail-closed).
+    store
+        .query_row(
+            "SELECT triage FROM finding WHERE id=? AND engagement_id=?",
+            &crate::sql_params![id, eid],
+            |r| Ok(r.get_opt_str(0)?.unwrap_or_else(|| "new".into())),
+        )
+        .ok()
+}
+
+/// Réponse 409 CONFLICT normalisée pour une transition ILLÉGALE : rappelle l'état COURANT + les états
+/// ATTEIGNABLES (dérivés de la matrice fermée) pour guider l'appelant. PURE.
+fn illegal_transition(current: &str, to: &str) -> (StatusCode, Value) {
+    (
+        StatusCode::CONFLICT,
+        json!({
+            "error": "illegal_transition",
+            "why": format!("transition de triage '{current}' -> '{to}' non autorisée (matrice fermée)"),
+            "current": current,
+            "allowed": triage_next(current),
+        }),
+    )
+}
+
+/// POST /api/findings/:id/triage {to:<state>} — TRANSITIONNE le cycle de triage d'UN finding (OPÉRATEUR,
+/// fail-closed 403). ISOLATION : n'agit QUE sur un finding de l'engagement ACTIF (un id d'un AUTRE
+/// engagement -> 404, jamais divulgué). VALIDATION fail-closed : `to` ∈ [`TRIAGE_STATES`] (sinon 400) ET
+/// `(current, to) ∈ TRIAGE_TRANSITIONS` (sinon 409, AUCUNE écriture — la réponse rappelle l'état courant +
+/// les états atteignables). Le `status` de PREUVE n'est JAMAIS touché (champs indépendants). Écriture MATCHÉE
+/// -> 500 sur Err AVANT le ledger (pas de fausse attestation) ; sur succès : ledger `console.finding.triage`
+/// {finding_id, from, to, by} PUIS event SSE sur `FINDINGS_TOPIC` (temps réel).
+pub(crate) async fn finding_triage(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // ÉTAT COURANT + existence DANS l'engagement (fail-closed) : un id d'un AUTRE engagement -> 404.
+    let current = match current_triage(&app, id, eid) {
+        Some(c) => c,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response(),
+    };
+    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
+    // Cible VALIDÉE contre le vocabulaire (400 si absente/hors jeu) — AVANT le check de matrice.
+    let to = match body.get("to").and_then(|v| v.as_str()) {
+        Some(s) => match norm_triage(s) {
+            Some(x) => x,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_triage", "why": format!("état de triage '{s}' invalide ({})", TRIAGE_STATES.join("|"))})),
+                )
+                    .into_response()
+            }
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "champ 'to' requis (état de triage cible)"}))).into_response(),
+    };
+    // MATRICE FERMÉE : transition non autorisée -> 409, AUCUNE écriture (fail-closed, server-authoritative).
+    if !triage_allows(&current, &to) {
+        let (s, j) = illegal_transition(&current, &to);
+        return (s, Json(j)).into_response();
+    }
+    // ÉCRITURE FAIL-CLOSED : guard `store` scopé + libéré avant attribution/ledger (anti auto-deadlock). On
+    // MATCHE le Result -> 500 SANS ledger si l'écriture échoue (pas de divergence ledger↔DB). `to` LIÉ en Param.
+    {
+        let store = app.store();
+        if let Err(e) = store.execute(
+            "UPDATE finding SET triage=? WHERE id=? AND engagement_id=?",
+            &crate::sql_params![to.clone(), id, eid],
+        ) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "db_write_failed", "why": format!("écriture du finding échouée: {e}")}))).into_response();
+        }
+    }
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.finding.triage", json!({
+        "by": actor, "engagement_id": eid, "finding_id": id, "from": current, "to": to,
+    }));
+    // EVENT SSE (temps réel) — émis APRÈS un succès durable, guard `store` déjà libéré (aucun verrou tenu à
+    // travers l'envoi : `broadcast::Sender::send` ne re-verrouille pas le Mutex de connexion -> pas de deadlock).
+    let _ = app.events.send(RunEvent {
+        run_id: FINDINGS_TOPIC.to_string(),
+        kind: "finding.triage".to_string(),
+        payload: json!({"finding_id": id, "from": current, "to": to, "engagement": eid, "by": actor}),
+    });
+    (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "from": current, "to": to}))).into_response()
+}
+
+/// GET /api/findings/events — flux SSE des transitions de TRIAGE (temps réel : les autres opérateurs voient
+/// la transition en direct). Réutilise le bus `App.events` (topic `FINDINGS_TOPIC`) — même patron que
+/// `presence_events`, sans registre ni guard (aucune présence à suivre). Chaque event = signal « une
+/// transition a eu lieu -> re-fetch la liste ». Un `sync` initial amorce le client ; un débordement de buffer
+/// (Lagged) demande une resync ; la fermeture du bus termine le flux.
+pub(crate) async fn finding_events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = app.events.subscribe();
+    let mut ticker = tokio::time::interval(Duration::from_secs(FINDINGS_SSE_TICK_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stream = futures_util::stream::unfold(
+        (rx, ticker, false),
+        move |(mut rx, mut ticker, mut synced)| async move {
+            if !synced {
+                synced = true;
+                let ev = Event::default()
+                    .event("finding")
+                    .json_data(json!({"event": "sync"}))
+                    .unwrap_or_else(|_| Event::default().comment("sync"));
+                return Some((Ok(ev), (rx, ticker, synced)));
+            }
+            loop {
+                tokio::select! {
+                    r = rx.recv() => match r {
+                        Ok(ev) if ev.run_id == FINDINGS_TOPIC => {
+                            let ev2 = Event::default()
+                                .event("finding")
+                                .json_data(&ev.payload)
+                                .unwrap_or_else(|_| Event::default().comment("finding"));
+                            return Some((Ok(ev2), (rx, ticker, synced)));
+                        }
+                        Ok(_) => continue, // event d'un run / de présence — pas du triage
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let ev = Event::default()
+                                .event("finding")
+                                .json_data(json!({"event": "resync"}))
+                                .unwrap_or_else(|_| Event::default().comment("resync"));
+                            return Some((Ok(ev), (rx, ticker, synced)));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    },
+                    _ = ticker.tick() => {
+                        return Some((Ok(Event::default().comment("hb")), (rx, ticker, synced)));
+                    }
+                }
+            }
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(FINDINGS_SSE_TICK_SECS)).text("keep-alive"))
+}
+
+// =====================================================================================
 //  BULK-OPS (#8) — opérations de MASSE sur des findings SÉLECTIONNÉS (ids). TENANT/ENGAGEMENT-SCOPED
 //  FAIL-CLOSED : chaque id est confiné à l'engagement ACTIF (`engagement_id={eid}`) — un id d'un AUTRE
 //  engagement n'est JAMAIS muté ni exporté (il est simplement SKIPPÉ / absent du résultat, jamais divulgué).
@@ -716,6 +957,104 @@ pub(crate) async fn findings_bulk_assign(
     }
     (StatusCode::OK, Json(json!({
         "ok": true, "assignee": assignee, "engagement_id": eid,
+        "applied": applied, "skipped": skipped,
+        "applied_count": applied.len(), "skipped_count": skipped.len(),
+    }))).into_response()
+}
+
+/// POST /api/findings/bulk/triage {ids:[i64], to:<state>} — TRANSITIONNE un LOT de findings vers l'état
+/// `to` (OPÉRATEUR, fail-closed 403). VALIDATION fail-closed : `to` ∈ [`TRIAGE_STATES`] (sinon 400, AUCUNE
+/// mutation). PER-FINDING : chaque finding est transitionné DEPUIS SON état COURANT — la transition est
+/// validée finding par finding contre la matrice fermée. ISOLATION : chaque accès est confiné à l'engagement
+/// ACTIF (`engagement_id=?`). CLASSEMENT :
+///   - id d'un AUTRE engagement / inexistant      -> SKIPPÉ (introuvable) ;
+///   - transition ILLÉGALE depuis l'état courant   -> SKIPPÉ (fail-closed, jamais appliqué) ;
+///   - transition légale + UPDATE Ok(n>0)          -> APPLIQUÉ ;
+///   - UPDATE Err (lock/disque/pg)                 -> ERRORED -> 500 (jamais confondu avec un skip).
+///
+/// Le `status` de PREUVE n'est JAMAIS touché. ATTRIBUÉ + LEDGERISÉ (`console.finding.bulk_triage`) — `applied`
+/// ne reflète QUE des mutations durables ; un event SSE (`FINDINGS_TOPIC`) est émis si ≥1 finding appliqué.
+pub(crate) async fn findings_bulk_triage(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j).into_response();
+    }
+    // VALIDATION de la cible AVANT toute écriture (fail-closed : un état invalide ne mute rien).
+    let to = match body.get("to").and_then(|v| v.as_str()) {
+        Some(s) => match norm_triage(s) {
+            Some(x) => x,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_triage", "why": format!("état de triage '{s}' invalide ({})", TRIAGE_STATES.join("|"))})),
+                )
+                    .into_response()
+            }
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "champ 'to' requis (état de triage cible)"}))).into_response(),
+    };
+    let ids = match parse_ids(&body) {
+        Ok(v) => v,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
+    };
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
+    }
+    let (mut applied, mut skipped, mut errored): (Vec<i64>, Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new(), Vec::new());
+    for id in &ids {
+        // État courant PER-FINDING (confiné à l'engagement) : introuvable ou transition illégale -> SKIP.
+        let current = match current_triage(&app, *id, eid) {
+            Some(c) => c,
+            None => { skipped.push(*id); continue; }
+        };
+        if !triage_allows(&current, &to) {
+            skipped.push(*id); // transition illégale depuis l'état courant -> ignorée (fail-closed)
+            continue;
+        }
+        // Guard `store` SCOPÉ à ce statement (temporaire libéré aussitôt) — anti auto-deadlock.
+        match app.store().execute(
+            "UPDATE finding SET triage=? WHERE id=? AND engagement_id=?",
+            &crate::sql_params![to.clone(), *id, eid],
+        ) {
+            Ok(n) if n > 0 => applied.push(*id),
+            Ok(_) => skipped.push(*id),
+            Err(_) => errored.push(*id),
+        }
+    }
+    let actor = attribution_login(&app, &headers);
+    let mut detail = json!({
+        "by": actor, "engagement_id": eid, "to": to,
+        "applied": applied, "skipped": skipped,
+    });
+    if !errored.is_empty() {
+        detail.as_object_mut().unwrap().insert("errored".into(), json!(errored));
+    }
+    append_console_ledger(&app, "console.finding.bulk_triage", detail);
+    // EVENT SSE (temps réel) — UNIQUEMENT si ≥1 transition durable (guard `store` déjà libéré).
+    if !applied.is_empty() {
+        let _ = app.events.send(RunEvent {
+            run_id: FINDINGS_TOPIC.to_string(),
+            kind: "finding.triage".to_string(),
+            payload: json!({"finding_ids": applied, "to": to, "engagement": eid, "by": actor}),
+        });
+    }
+    if !errored.is_empty() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "ok": false, "error": "db_write_failed", "to": to, "engagement_id": eid,
+            "applied": applied, "skipped": skipped, "errored": errored,
+            "applied_count": applied.len(), "skipped_count": skipped.len(), "errored_count": errored.len(),
+        }))).into_response();
+    }
+    (StatusCode::OK, Json(json!({
+        "ok": true, "to": to, "engagement_id": eid,
         "applied": applied, "skipped": skipped,
         "applied_count": applied.len(), "skipped_count": skipped.len(),
     }))).into_response()
@@ -1996,6 +2335,287 @@ mod tests {
         let b = to_json(r).await;
         let logins: Vec<String> = b["users"].as_array().unwrap().iter().map(|u| u["login"].as_str().unwrap().to_string()).collect();
         assert!(logins.contains(&"bob".to_string()) && logins.contains(&"carol".to_string()), "users assignables listés");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    //  TRIAGE WORKFLOW — machine à états gouvernée : transition légale (persist + ledger + SSE),
+    //  transition illégale (409, aucune écriture), isolation, write-failure, indépendance vs `status`.
+    // -------------------------------------------------------------------------------------------
+
+    fn triage_of(app: &App, id: i64) -> String {
+        let db = app.db();
+        db.query_row("SELECT triage FROM finding WHERE id=?", [id], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    }
+    /// Force l'état de triage EN BASE (bypass matrice) — SEEDING pour tester des transitions depuis un état
+    /// arbitraire. N'utilise PAS l'API (donc pas de validation) : uniquement pour préparer les fixtures.
+    fn set_triage(app: &App, id: i64, state: &str) {
+        let db = app.db();
+        db.execute("UPDATE finding SET triage=? WHERE id=?", rusqlite::params![state, id]).unwrap();
+    }
+
+    /// PURE : la matrice fermée autorise EXACTEMENT les transitions spécifiées, rien d'autre (fail-closed).
+    #[test]
+    fn triage_matrix_is_closed() {
+        assert!(triage_allows("new", "triaging"));
+        assert!(triage_allows("new", "false_positive"));
+        assert!(triage_allows("new", "duplicate"));
+        assert!(triage_allows("triaging", "confirmed"));
+        assert!(triage_allows("confirmed", "resolved"));
+        assert!(triage_allows("confirmed", "false_positive"));
+        assert!(triage_allows("false_positive", "triaging"));
+        assert!(triage_allows("duplicate", "triaging"));
+        assert!(triage_allows("resolved", "reopened"));
+        assert!(triage_allows("reopened", "triaging"));
+        assert!(triage_allows("reopened", "confirmed"));
+        assert!(triage_allows("reopened", "resolved"));
+        // Rejets représentatifs (fail-closed) :
+        assert!(!triage_allows("new", "resolved"), "raccourci interdit");
+        assert!(!triage_allows("new", "confirmed"), "saut d'étape interdit");
+        assert!(!triage_allows("resolved", "confirmed"), "resolved -> confirmed interdit");
+        assert!(!triage_allows("confirmed", "duplicate"), "confirmed -> duplicate interdit");
+        assert!(!triage_allows("new", "new"), "self-transition interdite");
+        assert!(!triage_allows("bogus", "triaging"), "état inconnu -> aucune transition");
+    }
+
+    /// LEGAL (community) : operator transitionne new -> triaging. Persistance colonne `triage`, `status` de
+    /// PREUVE INCHANGÉ (indépendance), ledger `console.finding.triage` {from,to}, ET event SSE sur le bus.
+    /// Viewer -> 403 (aucune mutation).
+    #[tokio::test]
+    async fn triage_legal_persists_ledgered_and_sse() {
+        let led = tmp_ledger("triage-ok");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "triaged"); // status de PREUVE = "triaged"
+        let (vtok, otok) = seed_roles(&app);
+
+        // viewer -> 403, aucune mutation.
+        let r = finding_triage(State(app.clone()), peer(), bearer(&vtok), Path(f1), q_eng("1"),
+            Json(json!({"to": "triaging"}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(triage_of(&app, f1), "new", "403 ne mute rien");
+
+        // s'abonne au bus AVANT la transition (broadcast : seuls les messages postérieurs sont reçus).
+        let mut rx = app.events.subscribe();
+
+        // operator : new -> triaging.
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"to": "triaging"}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = to_json(r).await;
+        assert_eq!(b["from"], "new");
+        assert_eq!(b["to"], "triaging");
+        assert_eq!(triage_of(&app, f1), "triaging", "triage persisté");
+        assert_eq!(status_of(&app, f1), "triaged", "le status de PREUVE est INDÉPENDANT — jamais touché");
+
+        // ledger : console.finding.triage {from:new, to:triaging}.
+        let last = read_ledger_lines(&led).pop().unwrap();
+        assert_eq!(last["kind"], "console.finding.triage");
+        assert_eq!(last["detail"]["from"], "new");
+        assert_eq!(last["detail"]["to"], "triaging");
+        assert_eq!(last["detail"]["finding_id"], f1);
+
+        // event SSE émis sur le bus (topic FINDINGS_TOPIC, kind finding.triage).
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+            .expect("event SSE reçu avant timeout").expect("event SSE valide");
+        assert_eq!(ev.run_id, FINDINGS_TOPIC);
+        assert_eq!(ev.kind, "finding.triage");
+        assert_eq!(ev.payload["to"], "triaging");
+        assert_eq!(ev.payload["finding_id"], f1);
+
+        // détail : triage exposé.
+        let d = finding_detail(State(app.clone()), HeaderMap::new(), Path(f1), q_eng("1")).await.into_response();
+        assert_eq!(to_json(d).await["triage"], "triaging");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ILLEGAL : new -> resolved (hors matrice) -> 409, AUCUNE écriture, AUCUN ledger. La réponse rappelle
+    /// l'état courant + les états atteignables (guidage). Le `status` de PREUVE reste intact.
+    #[tokio::test]
+    async fn triage_illegal_409_no_write_no_ledger() {
+        let led = tmp_ledger("triage-illegal");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+        let before = read_ledger_lines(&led).len();
+
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"to": "resolved"}))).await;
+        assert_eq!(r.status(), StatusCode::CONFLICT, "transition illégale -> 409");
+        let b = to_json(r).await;
+        assert_eq!(b["error"], "illegal_transition");
+        assert_eq!(b["current"], "new");
+        let allowed: Vec<String> = b["allowed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(allowed.contains(&"triaging".to_string()) && !allowed.contains(&"resolved".to_string()), "états atteignables rappelés");
+        assert_eq!(triage_of(&app, f1), "new", "409 ne mute rien");
+        assert_eq!(read_ledger_lines(&led).len(), before, "une transition illégale NE ledgerise PAS");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// BAD TARGET : `to` absent -> 400 ; `to` hors vocabulaire -> 400 (aucune mutation, aucun ledger).
+    #[tokio::test]
+    async fn triage_bad_target_400() {
+        let led = tmp_ledger("triage-bad");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({}))).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "'to' absent -> 400");
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"to": "bogus"}))).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "'to' hors vocabulaire -> 400");
+        assert_eq!(triage_of(&app, f1), "new", "aucune mutation");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ISOLATION : un finding d'un AUTRE engagement -> 404 (jamais transitionné, pas de cross-engagement).
+    #[tokio::test]
+    async fn triage_cross_engagement_404() {
+        let led = tmp_ledger("triage-xeng");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        let fx = seed_finding(&app, 2, "fx", "new"); // AUTRE engagement
+        let (_v, otok) = seed_roles(&app);
+
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(fx), q_eng("1"),
+            Json(json!({"to": "triaging"}))).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "id d'un AUTRE engagement -> 404");
+        assert_eq!(triage_of(&app, fx), "new", "finding cross-engagement INTOUCHÉ");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// INJECTION D'ÉCHEC : trigger BEFORE UPDATE ABORT -> 500 `db_write_failed`, AUCUN ledger, triage intouché.
+    #[tokio::test]
+    async fn triage_db_failure_500_and_no_ledger() {
+        let led = tmp_ledger("triage-fail");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let (_v, otok) = seed_roles(&app);
+        {
+            let db = app.db();
+            db.execute_batch("CREATE TRIGGER t_block_upd BEFORE UPDATE ON finding BEGIN SELECT RAISE(ABORT,'boom'); END;").unwrap();
+        }
+        let before = read_ledger_lines(&led).len();
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"to": "triaging"}))).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(to_json(r).await["error"], "db_write_failed");
+        assert_eq!(triage_of(&app, f1), "new", "aucune mutation");
+        assert_eq!(read_ledger_lines(&led).len(), before, "un échec d'écriture NE ledgerise PAS");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// BULK : applique UNIQUEMENT les transitions LÉGALES depuis l'état courant de chaque finding ; SKIP les
+    /// illégales et les ids d'un autre engagement. Ledgerisé (`console.finding.bulk_triage`).
+    #[tokio::test]
+    async fn bulk_triage_applies_only_legal() {
+        let led = tmp_ledger("bulk-triage");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        let f1 = seed_finding(&app, 1, "f1", "new"); // new -> triaging LÉGAL
+        let f2 = seed_finding(&app, 1, "f2", "new");
+        set_triage(&app, f2, "confirmed"); // confirmed -> triaging ILLÉGAL -> skip
+        let fx = seed_finding(&app, 2, "fx", "new"); // AUTRE engagement -> skip
+        let (_v, otok) = seed_roles(&app);
+
+        let r = findings_bulk_triage(State(app.clone()), peer(), bearer(&otok), q_eng("1"),
+            Json(json!({"ids": [f1, f2, fx, 9999], "to": "triaging"}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = to_json(r).await;
+        let applied: Vec<i64> = b["applied"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+        let skipped: Vec<i64> = b["skipped"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+        assert_eq!(applied, vec![f1], "seule la transition LÉGALE est appliquée");
+        assert!(skipped.contains(&f2), "transition illégale (confirmed->triaging) SKIPPÉE");
+        assert!(skipped.contains(&fx), "finding d'un AUTRE engagement SKIPPÉ");
+        assert_eq!(triage_of(&app, f1), "triaging");
+        assert_eq!(triage_of(&app, f2), "confirmed", "illégal -> intouché");
+        assert_eq!(triage_of(&app, fx), "new", "cross-engagement -> intouché");
+        assert_eq!(read_ledger_lines(&led).pop().unwrap()["kind"], "console.finding.bulk_triage");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// FILTER : `?triage=<state>` rend EXACTEMENT le sous-ensemble dans cet état. Valeur bornée en Param.
+    #[tokio::test]
+    async fn filter_by_triage() {
+        let led = tmp_ledger("filter-triage");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        let f2 = seed_finding(&app, 1, "f2", "new");
+        let _f3 = seed_finding(&app, 1, "f3", "new"); // reste 'new'
+        let (_v, otok) = seed_roles(&app);
+        for f in [f1, f2] {
+            let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f), q_eng("1"),
+                Json(json!({"to": "triaging"}))).await;
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        // filtre triaging -> f1,f2.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string()), ("triage".to_string(), "triaging".to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert_eq!(b["total"], 2);
+        let ids: Vec<i64> = b["findings"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert!(ids.contains(&f1) && ids.contains(&f2) && !ids.contains(&_f3), "filtre triage exact");
+        // filtre new -> seulement f3.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string()), ("triage".to_string(), "new".to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert_eq!(b["total"], 1);
+        assert_eq!(b["findings"][0]["id"], _f3);
+        // valeur hors vocabulaire -> filtre IGNORÉ (best-effort) : tous les findings.
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string()), ("triage".to_string(), "bogus".to_string())]));
+        let b = to_json(findings(State(app.clone()), HeaderMap::new(), q).await).await;
+        assert_eq!(b["total"], 3, "valeur invalide -> filtre ignoré (aucune injection, aucun 500)");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// MIGRATE additif + idempotent : les findings existants héritent de `triage='new'` (DEFAULT backfill) ;
+    /// rejouer `migrate()` ne panique pas et la colonne reste présente/valide.
+    #[test]
+    fn triage_migrate_default_new_and_idempotent() {
+        let led = tmp_ledger("triage-migrate");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new"); // inséré sans `triage` -> DEFAULT 'new'
+        assert_eq!(triage_of(&app, f1), "new", "finding existant backfillé à 'new'");
+        // rejouer migrate (idempotent : ADD COLUMN error-ignored) -> pas de panic, colonne toujours là.
+        {
+            let db = app.db();
+            crate::migrate(&db);
+            crate::migrate(&db);
+        }
+        assert_eq!(triage_of(&app, f1), "new", "triage préservé après re-migration");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// ENTERPRISE (tenancy ON) : un operator SANS grant sur l'engagement ne peut PAS transitionner (fail-closed
+    /// : l'engagement n'est même pas visible -> 404/403), et le finding reste intouché.
+    #[tokio::test]
+    async fn triage_caller_without_engagement_grant_denied() {
+        let led = tmp_ledger("triage-nocaller");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let f1 = seed_finding(&app, 1, "f1", "new");
+        {
+            let db = app.db();
+            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        }
+        let (_v, otok) = seed_roles(&app); // operator global, MAIS aucun grant tenant/engagement
+        let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),
+            Json(json!({"to": "triaging"}))).await;
+        assert!(
+            r.status() == StatusCode::NOT_FOUND || r.status() == StatusCode::FORBIDDEN,
+            "operator sans grant sur l'engagement ne peut pas transitionner (404/403 fail-closed), got {}",
+            r.status()
+        );
+        assert_eq!(triage_of(&app, f1), "new", "aucune mutation");
         let _ = std::fs::remove_file(&led);
     }
 }
