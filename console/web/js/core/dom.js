@@ -17,7 +17,7 @@ export const fmtTs = t => {                                   // ts Forge = cha�
 // sévérités Forge = chaînes (CRITICAL/HIGH/MEDIUM/LOW/INFO). On les normalise pour les classes CSS.
 export const SEVKEY = s => { const u = String(s || '').toUpperCase(); return ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'].includes(u) ? u : 'INFO'; };
 export const SEVRANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0 };
-export const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+export const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // --- icônes SVG inline (zéro caractère non-ASCII dans l'UI ; héritent la couleur via currentColor) ---
 export const ICONS = {
   home: '<path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/>',

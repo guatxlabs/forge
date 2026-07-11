@@ -1,7 +1,7 @@
 import { OPERATOR_SECRET, api, setOperatorSecret, write } from '../core/api.js';
 import { editing } from './dashboards.js';
 import { $, esc, raw } from '../core/dom.js';
-import { followRun, loadRuns } from './launch.js';
+import { followRun, loadRuns } from './launch/index.js';
 import { activeEngagement } from '../core/state.js';
 import { confirmModal, guardList, modal, toast } from '../core/ui.js';
 

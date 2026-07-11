@@ -1,9 +1,9 @@
-import { detectionSourceForm } from '../views/admin.js';
+import { detectionSourceForm } from '../components/detection-source-form.js';
 import { api, setOperatorSecret } from './api.js';
 import { loadCampaigns } from '../views/campaigns.js';
 import { $ } from './dom.js';
 import { loadEngagementSelector } from '../views/engagements.js';
-import { lcStopLive } from '../views/launch.js';
+import { lcStopLive } from '../views/launch/index.js';
 import { loadStatuses } from '../views/overview.js';
 import { route } from './router.js';
 import { loadTenancyContext } from '../views/tenancy.js';

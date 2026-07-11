@@ -1,7 +1,7 @@
 import { OPERATOR_SECRET, adminApi, api, write } from '../core/api.js';
 import { isAdmin } from '../core/auth.js';
 import { $, esc } from '../core/dom.js';
-import { renderLaunchModules } from './launch.js';
+import { renderLaunchModules } from './launch/index.js';
 import { loadModules } from './modules.js';
 import { ENGAGEMENTS, activeEngagement } from '../core/state.js';
 import { emptyState, modal, toast } from '../core/ui.js';

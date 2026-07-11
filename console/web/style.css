@@ -897,3 +897,165 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .login-sso-sep::before,.login-sso-sep::after{content:"";flex:1;height:1px;background:var(--bd)}
 .login-sso-btn{background:var(--card2);color:var(--fg);border:1px solid var(--bd)}
 .login-sso-btn:hover{border-color:var(--acc)}
+
+/* ===================================================================================== */
+/* Launch (C2) — déplacé depuis le bloc <style> inline de index.html (identique au verbatim).
+   CSP : style-src autorise déjà 'unsafe-inline' pour les styles d'élément ; servir ces règles
+   depuis la feuille externe 'self' est strictement plus sûr (aucun <style> inline requis). */
+/* ===================================================================================== */
+/* Lancement C2 — styles locaux (réutilisent les variables de thème) */
+.lc-lbl{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+.lc-modblock{display:flex;flex-direction:column;gap:8px}
+.lc-modlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.lc-modbulk{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lc-modbulk .k-theme{padding:3px 8px;font-size:11px}
+.lc-modopt{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);font-size:13px;cursor:pointer;min-width:0}
+.lc-modopt input{flex:0 0 auto}
+.lc-modopt .lc-modname{font-family:var(--font-mono);font-size:12px;min-width:0;flex:1 1 auto;overflow-wrap:anywhere;word-break:break-word}
+.lc-modopt.disabled{opacity:.55;cursor:not-allowed}
+.lc-modopt.disabled input{cursor:not-allowed}
+/* outil absent du host : indispo neutre (distinct d'une désactivation admin) */
+.lc-modopt.unavail .lc-clionly{color:var(--mut)}
+.lc-modopt .lc-clionly{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--sev3);white-space:normal;overflow-wrap:anywhere;text-align:right}
+/* module a fort impact debloque par l'opt-in : liseré danger, mention « fort impact » */
+.lc-modopt.hi-armed{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));background:color-mix(in srgb,var(--sev4) 7%,var(--card))}
+.lc-modopt.hi-armed .lc-clionly{color:var(--sev4)}
+/* ZONE DANGER — opt-in fort impact (defaut OFF, visuellement distincte) */
+.lc-danger{display:flex;flex-direction:column;gap:9px;margin:6px 0 2px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--sev4) 42%,var(--bd));border-radius:11px;background:color-mix(in srgb,var(--sev4) 8%,transparent)}
+.lc-danger-head{display:flex;align-items:center;gap:9px}
+.lc-danger-head .lc-dot{flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--sev4);box-shadow:0 0 0 4px color-mix(in srgb,var(--sev4) 22%,transparent)}
+.lc-danger-head label{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;cursor:pointer;margin:0}
+.lc-danger-head .lc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--sev4);border:1px solid color-mix(in srgb,var(--sev4) 40%,transparent);border-radius:6px;padding:2px 7px}
+.lc-danger-body{display:none;flex-direction:column;gap:9px}
+.lc-danger.on .lc-danger-body{display:flex}
+.lc-danger.on{border-color:color-mix(in srgb,var(--sev4) 70%,var(--bd));background:color-mix(in srgb,var(--sev4) 13%,transparent)}
+.lc-danger-reqs{font-size:12px;font-family:var(--font-mono);color:var(--mut)}
+.lc-danger-reqs .req{display:inline-flex;align-items:center;gap:4px;margin-right:12px;white-space:nowrap}
+.lc-danger-reqs .req.ok{color:var(--ok)}
+.lc-danger-reqs .req.miss{color:var(--sev4)}
+/* recap double-confirmation (modale) */
+.lc-hiconf{display:flex;flex-direction:column;gap:10px}
+.lc-hiconf dl{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:0;font-size:13px}
+.lc-hiconf dt{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.lc-hiconf dd{margin:0;font-family:var(--font-mono);font-size:12px;word-break:break-word}
+.lc-hiconf .lc-hichips{display:flex;flex-wrap:wrap;gap:6px}
+.lc-hiconf .lc-hichips .badge{font-size:11px}
+.lc-warn{font-size:12px;padding:9px 11px;border-radius:10px;background:color-mix(in srgb,var(--sev2) 12%,transparent);border:1px solid color-mix(in srgb,var(--sev2) 34%,transparent);color:var(--fg)}
+.lc-warn.bad{background:color-mix(in srgb,var(--sev4) 12%,transparent);border-color:color-mix(in srgb,var(--sev4) 38%,transparent)}
+.lc-log{font-family:var(--font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--card2);border:1px solid var(--bd);border-radius:10px;padding:12px;max-height:420px;overflow:auto;margin:0}
+.lc-log .lcl{display:block}
+.lc-log .lcl-stderr{color:var(--sev3)}
+.lc-log .lcl-system{color:var(--acc);font-style:italic}
+.lc-log .lcl-status{color:var(--mut);border-top:1px dashed var(--bd);margin-top:4px;padding-top:4px}
+.roecount.errors{border-color:color-mix(in srgb,var(--sev4) 35%,var(--bd))} .roecount.errors .rcn{color:var(--sev4)}
+/* params specifiques par module (revele quand le module est coche) */
+.lc-modopt.has-params{flex-direction:column;align-items:stretch}
+.lc-modopt .lc-modtop{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
+.lc-modparams{display:none;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--bd)}
+.lc-modopt.params-open .lc-modparams{display:flex}
+.lc-modparams .lc-pf{display:flex;flex-direction:column;gap:3px}
+.lc-modparams .lc-pf>span{font-size:10px;font-family:var(--font-mono);color:var(--mut)}
+.lc-modparams input,.lc-modparams select{background:var(--card2);border:1px solid var(--bd);border-radius:7px;color:var(--fg);padding:5px 8px;font-size:12px;font-family:var(--font-mono)}
+/* scope-check : champ cible -> badge in/out scope + mode/flags (lecture pure) */
+.lc-scope{display:flex;flex-direction:column;gap:8px;margin:0 0 14px;padding:11px 13px;border:1px solid var(--bd);border-radius:10px;background:var(--card2)}
+.lc-scope-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.lc-scope-row input{flex:1 1 220px;background:var(--card);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:7px 10px;font-size:13px;font-family:var(--font-mono)}
+.lc-scope-out{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+.lc-scope-flags{font-family:var(--font-mono);font-size:11px;color:var(--mut)}
+.badge.inscope{background:color-mix(in srgb,var(--ok) 16%,transparent);border:1px solid color-mix(in srgb,var(--ok) 40%,transparent);color:var(--fg)}
+.badge.outscope{background:color-mix(in srgb,var(--sev4) 14%,transparent);border:1px solid color-mix(in srgb,var(--sev4) 42%,transparent);color:var(--fg)}
+/* dry-plan : verdicts par action + cases d'approbation RECON */
+.lc-plantbl{width:100%;border-collapse:collapse;font-size:12px}
+.lc-plantbl th,.lc-plantbl td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--bd);vertical-align:top}
+.lc-plantbl th{color:var(--mut);font-weight:600;font-size:11px}
+.lc-plantbl td.lc-pline{font-family:var(--font-mono);font-size:11px;color:var(--mut);word-break:break-word}
+.lc-plantbl td.lc-papprove{white-space:nowrap}
+.lc-planhint{font-size:12px;color:var(--mut);margin:0 0 8px}
+.lc-planout{font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:var(--card2);border:1px solid var(--bd);border-radius:9px;padding:9px 11px;max-height:200px;overflow:auto;margin:8px 0 0;color:var(--mut)}
+.lc-planactions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.lc-report{font-family:var(--font-mono);font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+/* PURPLE — matrice de détection ATT&CK (VERT=détecté / ROUGE=raté / GRIS=non-tiré) */
+.pc-band{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;padding:11px 13px;border:1px solid var(--bd);border-radius:11px;background:var(--card2)}
+.pc-band .pc-rate{font-size:22px;font-weight:800;line-height:1;font-family:var(--font-mono)}
+.pc-band .pc-sub{font-size:12px;color:var(--mut)}
+.pc-band .pc-sep{width:1px;align-self:stretch;background:var(--bd);margin:0 2px}
+.pc-band .pc-mttd b{font-family:var(--font-mono)}
+/* bandeau FAIL-OPEN lisible : mesure impossible, on n'invente aucun « détecté » */
+.pc-failopen{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;padding:11px 13px;border:1px solid color-mix(in srgb,var(--sev3) 42%,var(--bd));border-radius:11px;background:color-mix(in srgb,var(--sev3) 9%,transparent)}
+.pc-failopen .pc-fo-head{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:var(--sev3)}
+.pc-failopen .pc-fo-head .pc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;border:1px solid color-mix(in srgb,var(--sev3) 40%,transparent);border-radius:6px;padding:2px 7px}
+.pc-failopen .pc-fo-detail{font-size:12px;color:var(--mut)}
+.pc-failopen .pc-fo-detail code{font-family:var(--font-mono);color:var(--fg)}
+/* bandeau AUTONOME (standalone) : AUCUNE source de détection configurée — état NEUTRE (pas une panne) */
+.pc-standalone{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;padding:11px 13px;border:1px solid var(--bd);border-radius:11px;background:var(--card2)}
+.pc-standalone .pc-so-head{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:var(--fg)}
+.pc-standalone .pc-so-head .ic{color:var(--mut)}
+.pc-standalone .pc-so-head .pc-dtag{margin-left:auto;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--bd);border-radius:6px;padding:2px 7px;color:var(--mut)}
+.pc-standalone .pc-so-detail{font-size:12px;color:var(--mut);line-height:1.5}
+/* matrice de tuiles : une par technique, couleur = état de détection */
+.pc-matrix{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:9px}
+.pc-tile{display:flex;flex-direction:column;gap:5px;padding:10px 11px;border:1px solid var(--bd);border-radius:10px;background:var(--card);cursor:pointer}
+.pc-tile:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bd))}
+.pc-tile .pc-mitre{font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--fg)}
+.pc-tile .pc-state{display:flex;align-items:center;gap:6px;font-size:11px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em}
+.pc-tile .pc-state .pc-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}
+.pc-tile .pc-meta{font-size:11px;color:var(--mut);font-family:var(--font-mono)}
+.pc-tile.detected{border-color:color-mix(in srgb,var(--ok) 45%,var(--bd));background:color-mix(in srgb,var(--ok) 8%,var(--card))}
+.pc-tile.detected .pc-state{color:var(--ok)} .pc-tile.detected .pc-dot{background:var(--ok)}
+.pc-tile.missed{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));background:color-mix(in srgb,var(--sev4) 8%,var(--card))}
+.pc-tile.missed .pc-state{color:var(--sev4)} .pc-tile.missed .pc-dot{background:var(--sev4)}
+.pc-tile.unfired{opacity:.7} .pc-tile.unfired .pc-state{color:var(--mut)} .pc-tile.unfired .pc-dot{background:var(--mut)}
+.pc-legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 10px;font-size:12px;color:var(--mut)}
+.pc-legend .pc-lg{display:inline-flex;align-items:center;gap:6px}
+.pc-legend .pc-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.pc-legend .pc-dot.detected{background:var(--ok)} .pc-legend .pc-dot.missed{background:var(--sev4)} .pc-legend .pc-dot.unfired{background:var(--mut)}
+.pc-sub h3{font-size:13px;margin:18px 0 8px;color:var(--hd)}
+/* MATRICE ATT&CK : grille tactique × technique. Colonnes = tactiques (défilement horizontal), pile de
+   cellules-techniques par colonne. Couleur de cellule = état (détectée / exercée / non exercée). */
+.am-grid{display:flex;gap:10px;overflow-x:auto;padding:2px 0 8px;align-items:flex-start}
+.am-col{flex:0 0 172px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.am-colhead{position:sticky;top:0;display:flex;flex-direction:column;gap:2px;padding:7px 9px;border:1px solid var(--bd);border-radius:9px;background:var(--card2)}
+.am-colhead .am-ct{font-size:11px;font-weight:700;color:var(--hd);line-height:1.25}
+.am-colhead .am-cc{font-family:var(--font-mono);font-size:10px;color:var(--mut)}
+.am-empty{font-size:12px;color:var(--mut);text-align:center;padding:8px 0;border:1px dashed var(--bd);border-radius:9px}
+.am-cell{display:flex;flex-direction:column;gap:4px;padding:8px 9px;border:1px solid var(--bd);border-radius:9px;background:var(--card);cursor:pointer}
+.am-cell:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bd))}
+.am-cell:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.am-cell .am-id{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--fg)}
+.am-cell .am-name{font-size:11px;color:var(--mut);line-height:1.25}
+.am-cell .am-st{display:flex;align-items:center;gap:5px;font-size:10px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em}
+.am-cell .am-st .am-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%}
+.am-cell .am-meta{font-size:10px;color:var(--mut);font-family:var(--font-mono)}
+.am-cell.am-detected{border-color:color-mix(in srgb,var(--ok) 45%,var(--bd));background:color-mix(in srgb,var(--ok) 8%,var(--card))}
+.am-cell.am-detected .am-st{color:var(--ok)} .am-cell.am-detected .am-dot{background:var(--ok)}
+.am-cell.am-exercised{border-color:color-mix(in srgb,var(--warn) 45%,var(--bd));background:color-mix(in srgb,var(--warn) 8%,var(--card))}
+.am-cell.am-exercised .am-st{color:var(--warn)} .am-cell.am-exercised .am-dot{background:var(--warn)}
+.am-cell.am-none{opacity:.55} .am-cell.am-none .am-st{color:var(--mut)} .am-cell.am-none .am-dot{background:var(--mut)}
+.pc-legend .am-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.pc-legend .am-dot.detected{background:var(--ok)} .pc-legend .am-dot.exercised{background:var(--warn)} .pc-legend .am-dot.none{background:var(--mut)}
+/* ENGAGEMENT — sélecteur header (indicateur proéminent de l'espace de travail actif) */
+.eng-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--acc) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--acc) 10%,transparent);max-width:340px}
+.eng-bar .eng-ic{display:inline-flex;color:var(--acc);flex:0 0 auto}
+.eng-bar .eng-ic .ic{width:15px;height:15px}
+.eng-select{background:transparent;border:0;color:var(--fg);font-weight:650;font-size:13px;max-width:230px;padding:3px 2px;cursor:pointer}
+.eng-select:focus{outline:none}
+.eng-new{padding:3px 6px;line-height:1}.eng-new .ic{width:15px;height:15px}
+.eng-bar.archived{border-color:color-mix(in srgb,var(--sev3) 50%,var(--bd));background:color-mix(in srgb,var(--sev3) 10%,transparent)}
+.eng-bar.archived .eng-ic{color:var(--sev3)}
+/* TENANT — sélecteur header (ENTERPRISE, flag-gated). Masqué par défaut (community) ; le SPA le dé-masque
+   uniquement quand /api/tenancy renvoie enabled=true. Posé AVANT #eng-bar : hiérarchie tenant → engagement. */
+.tenant-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--sev2,#a06) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--sev2,#a06) 10%,transparent);max-width:300px}
+.tenant-bar .tenant-ic{display:inline-flex;color:var(--sev2,#a06);flex:0 0 auto}
+.tenant-bar .tenant-ic .ic{width:15px;height:15px}
+.tenant-select{background:transparent;border:0;color:var(--fg);font-weight:650;font-size:13px;max-width:210px;padding:3px 2px;cursor:pointer}
+.tenant-select:focus{outline:none}
+/* vue #tenants — panneau de grants inline (sous la ligne du tenant) */
+.tn-grants-row>td{background:color-mix(in srgb,var(--acc) 5%,transparent);padding:4px 10px}
+.tn-grants{padding:6px 2px}
+.tn-grants-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}
+/* vue #engagements */
+.eg-active-row{background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.eg-actions{display:flex;flex-wrap:wrap;gap:6px}
+.eg-actions button{font-size:12px;padding:4px 9px}
+.eg-actions button.danger{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));color:var(--sev4)}
+.eg-actions button.danger:hover:not(:disabled){background:color-mix(in srgb,var(--sev4) 12%,transparent)}
