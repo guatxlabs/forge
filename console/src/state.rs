@@ -603,11 +603,50 @@ pub(crate) fn check_token(app: &App, headers: &HeaderMap) -> bool {
 // réutilisent les garde-fous existants (host_in_server_scope, validate_*, scope FORCÉ allow_*=false).
 // ===========================================================================================
 
+/// L'engagement_id PROPRIÉTAIRE d'un run (run_job.engagement_id), ou None si le run_id est inconnu.
+/// SOURCE UNIQUE de la résolution run→engagement pour les gardes de tenancy des routes run-keyed. `run_log`
+/// ne PORTE PAS de colonne engagement_id : une lecture de logs résout donc son propriétaire via `run_job`
+/// (run_log.run_id == run_job.run_id) — IDENTIQUE au JOIN run_log→run_job ON run_log.run_id=run_job.run_id.
+pub(crate) fn owning_engagement_of_run(app: &App, run_id: &str) -> Option<i64> {
+    let store = app.store();
+    store
+        .query_row("SELECT engagement_id FROM run_job WHERE run_id=?", &crate::sql_params![run_id], |r| r.get_i64(0))
+        .ok()
+}
+
+/// GARDE FAIL-CLOSED (ENTERPRISE, flag-gated) d'une LECTURE run-keyed (detail/report/logs/sse). Résout
+/// l'engagement PROPRIÉTAIRE du run (owning_engagement_of_run) et vérifie `tenancy::engagement_visible` —
+/// la MÊME helper que `engagement_report` (reports.rs). Community (flag OFF) => retour IMMÉDIAT `None`
+/// (aucune requête, comportement mono-tenant BYTE-IDENTIQUE). Enterprise (flag ON) => `Some(404)` quand le
+/// run n'est PAS visible du caller : run inconnu (propriétaire None) OU engagement d'un tenant non accordé.
+/// 404 — JAMAIS 403 — sur une LECTURE : un run_id cross-tenant est INDISTINGUABLE d'un run inexistant (pas
+/// d'oracle d'existence). Les mêmes octets `{"error":"unknown_run"}` que la branche « run inconnu » existante.
+pub(crate) fn run_read_denied(app: &App, headers: &HeaderMap, run_id: &str) -> Option<Response> {
+    if !crate::tenancy::enabled(app) {
+        return None; // community — no-op, byte-identical single-tenant behaviour
+    }
+    let visible = matches!(
+        owning_engagement_of_run(app, run_id),
+        Some(eid) if crate::tenancy::engagement_visible(app, headers, eid)
+    );
+    if visible {
+        None
+    } else {
+        Some((StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response())
+    }
+}
+
 /// GET /api/runs/:id/report — rend en markdown un rapport d'engagement pour CE run, à partir des
 /// données stockées côté console (run_job + findings + roe_decision pour le run_id). Miroir Rust de
 /// `forge.report.build_report` (synthèse, findings, transparence ROE). LECTURE (viewer).
-/// 404 si le run_id est inconnu de run_job.
-pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+/// 404 si le run_id est inconnu de run_job — OU (enterprise) si le run appartient à un tenant non accordé.
+pub(crate) async fn run_report(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    // ISOLATION CROSS-TENANT (ENTERPRISE, fail-closed) : le rapport d'un run appartenant à un engagement
+    // d'un tenant NON accordé au caller est indisponible -> 404 (mêmes octets que « run inconnu » : ni
+    // existence ni données divulguées). No-op en community (engagement_visible => true).
+    if let Some(deny) = run_read_denied(&app, &headers, &id) {
+        return deny;
+    }
     // format : md (DÉFAUT — rétro-compat), html (livrable client brandé), pdf (si outil dispo).
     let format = q.get("format").map(|s| s.as_str()).unwrap_or("md");
     // le run doit exister (sinon 404, comme run_detail). Le verrou DB est confiné dans ce bloc :
@@ -622,8 +661,9 @@ pub(crate) async fn run_report(State(app): State<App>, Path(id): Path<String>, Q
                 Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
             }
         };
-        // PURPLE : techniques TIRÉES par CE run (red) — lues après relâche du verrou. Le `run_id`
-        // isole déjà les records d'un seul engagement -> pas de filtre engagement additionnel (None).
+        // PURPLE : techniques TIRÉES par CE run (red) — lues après relâche du verrou. Le filtre est le
+        // `run_id` lui-même (un run appartient à un seul engagement) ; le CONTRÔLE D'ACCÈS cross-tenant
+        // n'est PAS assuré par ce filtre mais par la garde `run_read_denied` en tête de handler (ci-dessus).
         let fired = read_fired_techniques(&app, None, Some(("run_id", &id)));
         (job, fired)
     };

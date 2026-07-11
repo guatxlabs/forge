@@ -388,6 +388,23 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
+    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — un cancel est une ÉCRITURE CROSS-TENANT-CAPABLE (DoS
+    // sur l'op en cours d'un AUTRE tenant). Le check_operator console-GLOBAL ci-dessus ne suffit pas : le
+    // caller doit AUSSI avoir OPERATE sur l'engagement PROPRIÉTAIRE du run (most-specific-wins, fail-closed —
+    // même garde que run_create/finding_update). Community (flag OFF) => NO-OP (branche ignorée, byte-
+    // identique). Run inconnu (propriétaire None) => non gardé ici : la branche unknown_run 404 plus bas s'en
+    // charge (aucune fuite au-delà de ce que run_detail expose déjà). Non autorisé => 403.
+    if tenancy::enabled(&app) {
+        if let Some(eid) = owning_engagement_of_run(&app, &id) {
+            if !tenancy::can_operate_engagement(&app, &headers, eid) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "engagement_operator_required",
+                        "why": format!("rôle operator requis sur l'engagement #{eid} propriétaire du run (grant per-engagement/tenant insuffisant — fail-closed)")})),
+                );
+            }
+        }
+    }
     // Recherche du run vivant par run_id (GLOBAL-unique) parmi TOUS les engagements : `current` est
     // maintenant indexé par engagement_id, donc on balaie les valeurs. On ne cible que le pgid du run
     // demandé ; les slots des autres engagements ne sont ni lus ni modifiés (le kill ne vise que ce run).
@@ -480,20 +497,30 @@ pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(
     Json(Value::Array(out))
 }
 
-/// GET /api/runs/:id — détail d'un run. Lecture (viewer).
-pub(crate) async fn run_detail(State(app): State<App>, Path(id): Path<String>) -> impl IntoResponse {
+/// GET /api/runs/:id — détail d'un run. Lecture (viewer). ISOLATION cross-tenant (enterprise, fail-closed) :
+/// un run d'un tenant non accordé => 404 (indistinguable d'un run inconnu — pas d'oracle d'existence).
+pub(crate) async fn run_detail(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(deny) = run_read_denied(&app, &headers, &id) {
+        return deny;
+    }
     let store = app.store();
     let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?");
     // query_row rend Err(NoRows) sur résultat vide (miroir de QueryReturnedNoRows) -> branche 404 inchangée.
     match store.query_row(&sql, &crate::sql_params![&id], run_job_json) {
-        Ok(v) => (StatusCode::OK, Json(v)),
-        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))),
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_run"}))).into_response(),
     }
 }
 
 /// GET /api/runs/:id/logs?after=ID — lignes de log d'un run (fallback polling de SSE).
 /// `after` (id de ligne) permet l'incrémental ; renvoie {last_id, lines:[{id,ts,stream,line}]}.
-pub(crate) async fn run_logs(State(app): State<App>, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+/// ISOLATION cross-tenant (enterprise, fail-closed) : `run_log` n'a pas de colonne engagement_id, donc la
+/// garde résout le propriétaire via run_job (== JOIN run_log→run_job) ; un run d'un tenant non accordé => 404
+/// (aucune ligne de stdout/stderr brut d'un autre tenant ne fuit).
+pub(crate) async fn run_logs(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if let Some(deny) = run_read_denied(&app, &headers, &id) {
+        return deny;
+    }
     let after = q.get("after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(2000).clamp(1, 5000);
     
@@ -516,13 +543,18 @@ pub(crate) async fn run_logs(State(app): State<App>, Path(id): Path<String>, Que
         .into_iter()
         .map(|(lid, v)| { if lid > last { last = lid; } v })
         .collect();
-    Json(json!({"last_id": last, "lines": lines}))
+    Json(json!({"last_id": last, "lines": lines})).into_response()
 }
 
 /// GET /api/runs/:id/events — flux SSE des lignes de log + transitions de statut d'un run.
 /// Events : `log` ({stream,line}) et `status` ({status,exit_code?}). Fallback : /api/runs/:id/logs.
 /// Diffuse les events broadcast filtrés sur run_id. Termine quand le statut devient terminal.
-pub(crate) async fn run_sse(State(app): State<App>, Path(id): Path<String>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+pub(crate) async fn run_sse(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    // ISOLATION cross-tenant (enterprise, fail-closed) : la garde s'exécute AVANT d'ouvrir le flux — un run
+    // d'un tenant non accordé => 404, aucun event live d'un autre tenant n'est jamais diffusé. No-op community.
+    if let Some(deny) = run_read_denied(&app, &headers, &id) {
+        return deny;
+    }
     let rx = app.events.subscribe();
     let stream = futures_util::stream::unfold((rx, id, false), |(mut rx, id, mut done)| async move {
         if done {
@@ -538,7 +570,10 @@ pub(crate) async fn run_sse(State(app): State<App>, Path(id): Path<String>) -> S
                         }
                     }
                     let event = Event::default().event(ev.kind.clone()).json_data(&ev.payload).unwrap_or_else(|_| Event::default().comment("bad"));
-                    return Some((Ok(event), (rx, id, done)));
+                    // `Infallible` explicite : le handler renvoie désormais `Response` (au lieu de
+                    // `Sse<impl Stream<Item=Result<Event, Infallible>>>`), donc plus rien ne pinne l'erreur du
+                    // stream -> on l'annote ici (le flux SSE est infaillible : aucune branche ne produit Err).
+                    return Some((Ok::<Event, Infallible>(event), (rx, id, done)));
                 }
                 Ok(_) => continue, // évènement d'un autre run
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -554,5 +589,227 @@ pub(crate) async fn run_sse(State(app): State<App>, Path(id): Path<String>) -> S
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive")).into_response()
+}
+
+// =====================================================================================
+// TESTS — ISOLATION CROSS-TENANT des routes RUN-KEYED (IDOR fix). Vérifient les 3 propriétés exigées :
+//   (a) ENTERPRISE ON : un caller accordé UNIQUEMENT sur l'engagement A obtient 404 sur detail/report/logs
+//       (SSE identique — même garde en tête) d'un run appartenant à l'engagement B, et 403 sur cancel de B.
+//   (b) le PROPRIÉTAIRE (accordé sur B) passe la garde (200 en lecture ; cancel non-403 -> 409 not_running).
+//   (c) COMMUNITY (flag OFF) : TOUTES les routes se comportent EXACTEMENT comme avant (aucune régression).
+// =====================================================================================
+#[cfg(test)]
+mod idor_tenancy_tests {
+    use super::*;
+    use crate::testutil::{bearer_headers, resp_json, uid_of};
+    use rusqlite::Connection;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Mutex as AsyncMutex;
+
+    fn test_app() -> App {
+        let conn = Connection::open_in_memory().expect("mem db");
+        conn.execute_batch(crate::SCHEMA).expect("schema");
+        crate::migrate(&conn);
+        let (events, _) = broadcast::channel::<crate::RunEvent>(64);
+        App {
+            db: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "store-postgres")]
+            pg: None,
+            #[cfg(feature = "store-postgres")]
+            ha: false,
+            #[cfg(feature = "store-postgres")]
+            instance_id: Arc::new("test-instance".into()),
+            #[cfg(feature = "store-postgres")]
+            is_leader: Arc::new(AtomicBool::new(true)),
+            db_path: Arc::new(":memory:".into()),
+            token_sha: Arc::new(crate::sha_hex("t")),
+            token_raw: Arc::new("t".into()),
+            user: Arc::new("forge".into()),
+            pass_hash: Arc::new(String::new()),
+            auth_required: Arc::new(AtomicBool::new(false)),
+            operator_hash: Arc::new(String::new()),
+            allowed_hosts: Arc::new(vec!["localhost".into()]),
+            ledger_path: Arc::new(String::new()),
+            pkg_dir: Arc::new("..".into()),
+            python: Arc::new("python3".into()),
+            scope_in: Arc::new(vec![]),
+            scope_mode: Arc::new("grey".into()),
+            detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
+            run_timeout_secs: 1800,
+            run_state: Arc::new(AsyncMutex::new(RunState { current: HashMap::new() })),
+            run_reservations: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            events,
+            ledger_lock: Arc::new(Mutex::new(crate::LedgerHead::default())),
+        }
+    }
+
+    /// Engagement `id` appartenant au tenant `tid`, actif. Sème aussi la ligne `tenant` correspondante.
+    fn seed_engagement(app: &App, id: i64, tid: i64) {
+        let db = app.db();
+        db.execute(
+            "INSERT INTO tenant(id,name,status,created,updated) VALUES(?,?, 'active',datetime('now'),datetime('now'))
+             ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![tid, format!("tenant-{tid}")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,tenant_id,created,updated)
+             VALUES(?,?, 'active','grey','{\"in_scope\":[\"a.example.com\"]}','',?,datetime('now'),datetime('now'))",
+            rusqlite::params![id, format!("eng-{id}"), tid],
+        )
+        .unwrap();
+        drop(db); // relâche le guard DB tôt (clippy::significant_drop_tightening)
+    }
+
+    /// run_job `run_id` appartenant à l'engagement `eid`, statut `status`. Sème une ligne de log associée.
+    fn seed_run(app: &App, run_id: &str, eid: i64, status: &str) {
+        let db = app.db();
+        db.execute(
+            "INSERT INTO run_job(run_id,campaign,ts,status,engagement_id) VALUES(?,?,datetime('now'),?,?)",
+            rusqlite::params![run_id, "camp", status, eid],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO run_log(run_id,ts,stream,line) VALUES(?,datetime('now'),'stdout','SECRET-B-LOG-LINE')",
+            rusqlite::params![run_id],
+        )
+        .unwrap();
+        drop(db); // relâche le guard DB tôt (clippy::significant_drop_tightening)
+    }
+
+    /// Crée un compte + session ; accorde `role` sur le tenant `tid`. Renvoie le token de session.
+    fn user_with_tenant_grant(app: &App, login: &str, console_role: &str, tid: i64, tenant_role: &str) -> String {
+        {
+            let db = app.db();
+            crate::upsert_user(&db, login, console_role, &crate::hash_pw("pw")).unwrap();
+            db.execute(
+                "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
+                 SELECT id,?,?,datetime('now') FROM users WHERE login=?",
+                rusqlite::params![tid, tenant_role, login],
+            )
+            .unwrap();
+        }
+        let (tok, _) = create_session(app, uid_of(app, login));
+        tok
+    }
+
+    fn enable_tenancy(app: &App) {
+        let db = app.db();
+        crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+    }
+    fn disable_tenancy(app: &App) {
+        let db = app.db();
+        db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap();
+    }
+
+    fn q_fmt(fmt: &str) -> Query<HashMap<String, String>> {
+        let mut m = HashMap::new();
+        m.insert("format".to_string(), fmt.to_string());
+        Query(m)
+    }
+
+    /// (a) ENTERPRISE ON — un caller accordé UNIQUEMENT sur A obtient 404 sur detail/report/logs d'un run de B,
+    /// et 403 sur cancel de B ; AUCUNE donnée de B (log brut, run_id) ne fuit dans le corps.
+    #[tokio::test]
+    async fn cross_tenant_run_reads_are_404_and_cancel_is_403() {
+        let app = test_app();
+        seed_engagement(&app, 1, 1); // engagement A -> tenant 1
+        seed_engagement(&app, 2, 2); // engagement B -> tenant 2
+        seed_run(&app, "run-B", 2, "running");
+        enable_tenancy(&app);
+        // alice : operator console + grant tenant_operator sur le tenant 1 UNIQUEMENT (rien sur le tenant 2).
+        let atok = user_with_tenant_grant(&app, "alice", "operator", 1, "tenant_operator");
+        let h = bearer_headers(&atok);
+
+        // detail -> 404 (indistinguable d'un run inconnu).
+        let r = run_detail(State(app.clone()), h.clone(), Path("run-B".into())).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "detail cross-tenant -> 404");
+        let body = resp_json(r).await;
+        assert_eq!(body["error"], "unknown_run", "aucune existence divulguée");
+
+        // report -> 404, aucune donnée de B.
+        let r = run_report(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("md")).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "report cross-tenant -> 404");
+
+        // logs -> 404, la ligne brute SECRET-B-LOG-LINE ne fuit jamais.
+        let r = run_logs(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("")).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "logs cross-tenant -> 404");
+        let txt = serde_json::to_string(&resp_json(r).await).unwrap();
+        assert!(!txt.contains("SECRET-B-LOG-LINE"), "stdout brut de B ne fuit pas");
+
+        // sse -> 404 (garde AVANT ouverture du flux).
+        let r = run_sse(State(app.clone()), h.clone(), Path("run-B".into())).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "sse cross-tenant -> 404");
+
+        // cancel (ÉCRITURE) -> 403 (autorisation par-engagement refusée).
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let r = run_cancel(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Path("run-B".into())).await;
+        let resp = r.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "cancel cross-tenant -> 403");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "engagement_operator_required");
+    }
+
+    /// (b) ENTERPRISE ON — le PROPRIÉTAIRE (accordé sur B) passe la garde : 200 en lecture ; cancel non-403.
+    #[tokio::test]
+    async fn owner_of_run_still_authorized() {
+        let app = test_app();
+        seed_engagement(&app, 2, 2);
+        seed_run(&app, "run-B", 2, "running");
+        enable_tenancy(&app);
+        let btok = user_with_tenant_grant(&app, "bob", "operator", 2, "tenant_operator");
+        let h = bearer_headers(&btok);
+
+        let r = run_detail(State(app.clone()), h.clone(), Path("run-B".into())).await;
+        assert_eq!(r.status(), StatusCode::OK, "detail par le propriétaire -> 200");
+
+        let r = run_report(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("md")).await;
+        assert_eq!(r.status(), StatusCode::OK, "report par le propriétaire -> 200");
+
+        let r = run_logs(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("")).await;
+        assert_eq!(r.status(), StatusCode::OK, "logs par le propriétaire -> 200");
+        let txt = serde_json::to_string(&resp_json(r).await).unwrap();
+        assert!(txt.contains("SECRET-B-LOG-LINE"), "le propriétaire voit bien ses logs");
+
+        // cancel : la garde per-engagement PASSE (non-403). Sans process vivant -> 409 not_running (preuve
+        // que l'autorisation a été accordée et que le flux a atteint la logique de cancel).
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let r = run_cancel(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Path("run-B".into())).await;
+        let resp = r.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "cancel autorisé -> pas de run vivant -> 409");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "not_running", "authz passée : on atteint la logique cancel");
+    }
+
+    /// (c) COMMUNITY (flag OFF) — le MÊME caller « étranger » accède à TOUT (aucune régression) : la garde est
+    /// un NO-OP byte-identique. detail/report/logs -> 200 ; cancel -> 409 not_running (jamais 403).
+    #[tokio::test]
+    async fn community_flag_off_no_regression() {
+        let app = test_app();
+        seed_engagement(&app, 1, 1);
+        seed_engagement(&app, 2, 2);
+        seed_run(&app, "run-B", 2, "running");
+        // tenancy VOLONTAIREMENT non activée (community). alice n'a AUCUN grant — sans effet en community.
+        let atok = user_with_tenant_grant(&app, "alice", "operator", 1, "tenant_operator");
+        disable_tenancy(&app); // s'assure que le flag est OFF
+        let h = bearer_headers(&atok);
+
+        let r = run_detail(State(app.clone()), h.clone(), Path("run-B".into())).await;
+        assert_eq!(r.status(), StatusCode::OK, "community: detail servi (no-op)");
+        let r = run_report(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("md")).await;
+        assert_eq!(r.status(), StatusCode::OK, "community: report servi (no-op)");
+        let r = run_logs(State(app.clone()), h.clone(), Path("run-B".into()), q_fmt("")).await;
+        assert_eq!(r.status(), StatusCode::OK, "community: logs servis (no-op)");
+        let r = run_sse(State(app.clone()), h.clone(), Path("run-B".into())).await;
+        // SSE community : la garde ne court-circuite pas -> flux ouvert (200 OK, content-type event-stream).
+        assert_eq!(r.status(), StatusCode::OK, "community: sse ouvert (no-op)");
+
+        // cancel en community : gouverné par check_operator SEUL -> pas de 403 per-engagement -> 409 not_running.
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let r = run_cancel(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Path("run-B".into())).await;
+        let resp = r.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "community: cancel -> 409 not_running (jamais 403)");
+    }
 }
