@@ -53,6 +53,19 @@ pub(crate) fn kill_group(pgid: i32) {
     let _ = pgid;
 }
 
+/// Reaping FAIL-SAFE d'un enfant moteur DÉJÀ spawné dont le bookkeeping post-spawn a ÉCHOUÉ — garantit
+/// AUCUN orphelin ni faux-succès. `kill_on_drop(true)` ne SIGKILL que le PID direct (pas le GROUPE setsid,
+/// donc pas les petits-enfants) et laisse scope.json/targets.json sur disque : on nettoie explicitement.
+/// Ordre : (1) SIGTERM du GROUPE entier via `kill_group` TANT QU'on connaît le pgid, (2) SIGKILL du PID
+/// direct + `wait().await` pour RÉCOLTER le zombie de façon DÉTERMINISTE (pas de zombie résiduel), (3)
+/// suppression du dir temp du run. Async car `wait` est awaité — on tourne déjà dans le handler async.
+async fn reap_orphaned_spawn(pgid: i32, mut child: tokio::process::Child, run_dir: &std::path::Path) {
+    kill_group(pgid);
+    let _ = child.start_kill();
+    let _ = child.wait().await; // récolte l'enfant (plus d'orphelin NI de zombie)
+    let _ = std::fs::remove_dir_all(run_dir);
+}
+
 /// Supprime les répertoires temporaires `forge-run-*` (scope.json/targets.json par run) restés dans
 /// le tempdir après une interruption (crash/reboot console) — best-effort, jamais fatal.
 pub(crate) fn purge_stale_run_dirs() {
@@ -237,15 +250,15 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     //     a déjà eu lieu ; ré-INSÉRER 'running' post-spawn rejouerait la garde d'unicité pour rien).
     //   - MONO-INSTANCE (!ha) : chemin HISTORIQUE byte-identique — INSERT 'running' + pid, owner NULL,
     //     `ON CONFLICT(run_id) DO UPDATE` (la ligne n'existe jamais d'avance en mono-instance : INSERT neuf).
-    if ha {
+    let write_res = if ha {
         let store = app.store();
-        let _ = store.execute(
+        store.execute(
             "UPDATE run_job SET pid=?, started=datetime('now') WHERE run_id=?",
             &crate::sql_params![pgid, run_id],
-        );
+        )
     } else {
         let store = app.store();
-        let _ = store.execute(
+        store.execute(
             "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id,owner_instance)
              VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'),?,?)
              ON CONFLICT(run_id) DO UPDATE SET status='running', pid=excluded.pid, started=excluded.started, owner_instance=excluded.owner_instance",
@@ -256,7 +269,17 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
                 spec.eng_id,
                 owner.clone()
             ],
-        );
+        )
+    };
+    // FAIL-SAFE (swallowed-write hardening) : l'écriture d'appartenance/de ligne post-spawn a échoué. Le
+    // process moteur est DÉJÀ spawné et détaché (setsid) : un simple 500 ici ORPHELINERAIT l'enfant (et son
+    // groupe) + laisserait scope.json/targets.json sur disque, tout en signalant faussement l'échec. On TUE
+    // le groupe de process fraîchement spawné, on RÉCOLTE l'enfant et on nettoie le dir AVANT de renvoyer
+    // l'erreur — puis on un-claime la ligne HA 'running'. Aucun orphelin, aucun faux-succès.
+    if let Err(e) = write_res {
+        reap_orphaned_spawn(pgid, child, &run_dir).await;
+        unclaim_running_on_failure(app, run_id, ha); // HA : la ligne 'running' claimée pré-spawn -> 'failed'
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "ownership_write_failed", "why": e.to_string()})));
     }
     // ledger : acte de lancement (qui/quoi/quand). L'opt-in haut-impact honoré est journalisé explicitement.
     if spec.high_impact {
@@ -387,5 +410,41 @@ pub(crate) fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_i
         // nettoyage du dir temp (scope/targets) — best-effort.
         let _ = std::fs::remove_dir_all(&run_dir);
     });
+}
+
+#[cfg(all(test, unix))]
+mod reap_tests {
+    use super::{reap_orphaned_spawn, spawn_setsid};
+
+    /// `libc::kill(pid, 0)` == -1 avec ESRCH => le PID n'existe PLUS (ni vivant, ni zombie non récolté).
+    fn process_gone(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == -1 && *libc::__errno_location() == libc::ESRCH }
+    }
+
+    /// Reproduit le chemin d'échec d'écriture post-spawn de `claim_and_spawn` : un enfant est spawné dans
+    /// son PROPRE groupe de session (setsid, comme le moteur), puis `reap_orphaned_spawn` doit le TUER, le
+    /// RÉCOLTER (pas d'orphelin/zombie) et SUPPRIMER son dir temp. Prouve qu'un 500 post-spawn ne laisse
+    /// aucun process détaché ni fichier scope/targets derrière lui.
+    #[tokio::test]
+    async fn reap_kills_group_and_removes_dir() {
+        let run_dir = std::env::temp_dir().join(format!("forge-run-test-reap-{}", std::process::id()));
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("scope.json"), b"{}").unwrap();
+
+        // enfant longue durée dans un nouveau groupe de session — mime le spawn moteur (sans shell).
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("60").kill_on_drop(true);
+        spawn_setsid(&mut cmd);
+        let child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("pid") as i32;
+        let pgid = pid; // setsid => PID == PGID (cf. claim_and_spawn).
+        assert!(!process_gone(pid), "l'enfant doit être vivant avant le reap");
+
+        reap_orphaned_spawn(pgid, child, &run_dir).await;
+
+        // Récolté de façon déterministe (wait().await) : le PID a disparu, pas d'orphelin ni de zombie.
+        assert!(process_gone(pid), "l'enfant doit être tué ET récolté (aucun orphelin)");
+        assert!(!run_dir.exists(), "le dir temp du run (scope/targets) doit être supprimé");
+    }
 }
 

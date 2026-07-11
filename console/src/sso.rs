@@ -419,7 +419,11 @@ async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<Ha
     }
 
     // Issue THE SAME session cookie the local /api/login issues (HttpOnly, SameSite=Strict, Secure).
-    let (token, _expires) = crate::create_session(&app, user_id);
+    // Propagate a session-persist failure as 500 rather than handing out a non-persisted (dead) token.
+    let (token, _expires) = match crate::try_create_session(&app, user_id) {
+        Ok(t) => t,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "session_persist_failed", format!("could not persist session: {e}")),
+    };
     let ttl = crate::session_ttl_secs();
     let cookie = crate::session_cookie(&token, ttl);
     // Clear the one-time state-binding cookie now that the flow completed (hygiene).
@@ -978,6 +982,11 @@ fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Dura
         .map_err(|e| format!("resolve {host}:{port} failed: {e}"))?
         .next()
         .ok_or_else(|| format!("no address for {host}:{port}"))?;
+    // SSRF defense-in-depth (CONSOLE integration): the OIDC token endpoint is an admin/discovery-configured
+    // URL the console fetches itself — NOT an engine scope-guarded target. Reject internal/metadata/private
+    // targets on the RESOLVED connect IP (anti-DNS-rebinding), unless the escape hatch is set. Same guard as
+    // the GET client so discovery/JWKS (via http_get_blocking) and this token POST are covered identically.
+    crate::guard_integration_addr(&addr)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {addr} failed: {e}"))?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
@@ -1198,6 +1207,9 @@ byHb5g3JqJSE6WJSuyEQrUob
     /// App backed by an in-memory DB (mirrors crate::tests::test_app; that helper is in a sibling module,
     /// not reachable here). Fields are crate-private but visible to this descendant module.
     fn sso_test_app(ledger_path: &str) -> App {
+        // Les mocks OIDC de ces tests bindent 127.0.0.1 -> la garde SSRF d'intégration les refuserait.
+        // On engage l'escape-hatch (comme un IdP privé on-prem légitime) UNE fois pour tout le binaire.
+        crate::testutil::allow_internal_integrations_once();
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
         let (events, _) = broadcast::channel::<crate::RunEvent>(64);

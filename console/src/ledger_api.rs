@@ -246,9 +246,11 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
     // de la chaîne SHA-256 (verify inchangé). Single-instance (!ha) : `with_ledger_lock` est un pass-through
     // et le verrou in-proc + le cache O(1) restent autoritatifs, byte-identique à avant.
     // Fire-and-forget console-ledger helper (63 governed call sites). Under a FAIL-CLOSED outage the append
-    // is REFUSED; `with_ledger_lock` already logs it loudly, and the governing action is itself failing
-    // (store()=PG is down), so we explicitly discard the `Result` here. Single-instance: always `Ok`.
-    let _ = crate::ha::with_ledger_lock(app, path, || {
+    // is REFUSED (PG advisory lock unreachable). F5 OBSERVABILITY: a DROPPED audit entry must never be
+    // SILENT — we log the `kind` + reason at error level here so a lost governed-action attestation is
+    // visible in the console logs (call-site ergonomics unchanged: this fn still returns `()`).
+    // Single-instance: `with_ledger_lock` is a pass-through -> always `Ok`.
+    if let Err(e) = crate::ha::with_ledger_lock(app, path, || {
         if crate::ha::ha_enabled(app) {
             // Un pair a pu écrire dans le fichier partagé -> notre (prev,seq) en cache est périmé. On force
             // une relecture de la tête depuis le disque SOUS le verrou consultatif (single writer garanti).
@@ -286,19 +288,33 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
         }
         use std::io::Write;
         // n'avance le head EN CACHE que si l'écriture disque réussit (sinon on relira au prochain append).
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à un
-            // crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
-            if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
-                head.prev = hash;
-                head.seq = seq;
-            } else {
-                head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(mut f) => {
+                // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à
+                // un crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
+                if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
+                    head.prev = hash;
+                    head.seq = seq;
+                } else {
+                    head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
+                    // F5 OBSERVABILITY : l'écriture/fsync disque a échoué -> l'entrée est PERDUE. On la rend
+                    // visible (kind + raison) au lieu de la laisser tomber silencieusement.
+                    eprintln!("[forge-console] LEDGER DROP — append écrit/fsync échoué pour '{path}' \
+                               (kind={kind}) : entrée d'audit PERDUE (écriture disque partielle/échouée)");
+                }
             }
-        } else {
-            head.loaded = false;
+            Err(e) => {
+                head.loaded = false;
+                eprintln!("[forge-console] LEDGER DROP — ouverture '{path}' impossible (kind={kind}) : \
+                           {e} — entrée d'audit PERDUE");
+            }
         }
-    });
+    }) {
+        // FAIL-CLOSED outage (PG advisory lock unreachable across the retry budget). `with_ledger_lock`
+        // already logged the outage; here we ADD the `kind` of the specific dropped entry so the lost
+        // attestation is traceable, not just "an append failed somewhere".
+        eprintln!("[forge-console] LEDGER DROP — entrée d'audit REFUSÉE (kind={kind}) : {e}");
+    }
 }
 
 /// Routes du sous-système ledger — GET /api/ledger (liste paginée) + GET /api/ledger/verify

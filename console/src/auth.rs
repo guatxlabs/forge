@@ -409,9 +409,11 @@ pub(crate) async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl I
     }
 }
 
-/// Crée une session pour `user_id` (token EN CLAIR renvoyé à l'appelant, SHA-256 persisté). Retourne
-/// (token_clair, expires_epoch). Purge en passant les sessions expirées de l'utilisateur (best-effort).
-pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
+/// Crée une session pour `user_id` en PROPAGEANT l'échec d'écriture. Retourne (token_clair, expires_epoch)
+/// UNIQUEMENT si l'INSERT de session a réussi ; sinon `Err` — l'appelant DOIT refuser le login (500) plutôt
+/// que de rendre un token qui n'est PAS persisté (faux-succès : le token serait rejeté au 1er usage). La
+/// purge des sessions expirées reste best-effort (son échec ne compromet pas la nouvelle session).
+pub(crate) fn try_create_session(app: &App, user_id: i64) -> crate::store::StoreResult<(String, i64)> {
     let token = gen_session_token();
     let token_sha = sha_hex(&token);
     let now = now_epoch();
@@ -421,13 +423,23 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
     // OR REPLACE -> ON CONFLICT DO UPDATE (portable PG). Équivalent EXACT ici : `session` = (token_sha PK,
     // user_id, created, expires) — l'INSERT liste TOUTES les colonnes, aucun trigger DELETE ni FK ON DELETE
     // CASCADE ne dépend de la ligne, donc le DELETE-then-INSERT d'OR REPLACE et le UPDATE ciblé coïncident.
-    let _ = store.execute(
+    // L'écriture n'est PLUS avalée : un échec (store indisponible) remonte au caller (login/SSO -> 500).
+    store.execute(
         "INSERT INTO session(token_sha,user_id,created,expires) VALUES(?,?,?,?)
          ON CONFLICT(token_sha) DO UPDATE SET user_id=excluded.user_id, created=excluded.created, expires=excluded.expires",
         &crate::sql_params![token_sha, user_id, now, expires],
-    );
+    )?;
     drop(store);
-    (token, expires)
+    Ok((token, expires))
+}
+
+/// Variante infaillible RÉSERVÉE AUX TESTS (le store SQLite in-memory ne peut pas échouer sur cet INSERT).
+/// Le code de PRODUCTION (login, setup, SSO) utilise `try_create_session` et gère l'échec en 500 — ne PAS
+/// l'appeler hors tests. `#[cfg(test)]` : non émise dans le build de prod (sinon dead_code) ; `pub(crate)`
+/// car de nombreux modules de test la référencent via `crate::create_session`.
+#[cfg(test)]
+pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
+    try_create_session(app, user_id).expect("create_session: INSERT session échoué (in-memory ne devrait jamais échouer)")
 }
 
 /// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis (`HttpOnly`,
