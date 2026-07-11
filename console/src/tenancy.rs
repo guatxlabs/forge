@@ -125,15 +125,21 @@ pub fn engagement_visible(app: &App, headers: &HeaderMap, eid: i64) -> bool {
     }
 }
 
-/// SQL-safe CSV of the granted tenant ids (all i64 — safe to inline). Empty set => "-1" (a tenant id
-/// no row has), so `tenant_id IN (-1)` matches nothing (fail-closed).
-fn tenants_csv(granted: &HashSet<i64>) -> String {
-    if granted.is_empty() {
-        return NO_ENGAGEMENT.to_string();
-    }
-    let mut ids: Vec<i64> = granted.iter().copied().collect();
-    ids.sort_unstable(); // deterministic SQL
-    ids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+/// Placeholder list + BOUND Params for an `IN (...)` over the granted tenant ids (all i64). Returns
+/// (`"?,?,…"`, `[Param::Int(id), …]`) so the ids reach SQL as BOUND parameters, never string-interpolated
+/// (no future-regression injection surface even though i64s are non-injectable today). Empty set => `IN (?)`
+/// bound to `NO_ENGAGEMENT` (-1, a tenant id no row has) => matches nothing (fail-closed) — semantically
+/// identical to the previous `IN (-1)`. Ids are sorted for a deterministic statement (stable prepared-plan
+/// cache) even though binding makes ordering irrelevant to correctness.
+fn tenants_in_bind(granted: &HashSet<i64>) -> (String, Vec<crate::store::Param>) {
+    let mut ids: Vec<i64> = if granted.is_empty() {
+        vec![NO_ENGAGEMENT]
+    } else {
+        granted.iter().copied().collect()
+    };
+    ids.sort_unstable();
+    let placeholders = vec!["?"; ids.len()].join(",");
+    (placeholders, ids.into_iter().map(crate::store::Param::Int).collect())
 }
 
 /// ENTERPRISE resolution of the engagement id for a VIEW/READ (fail-closed). Called ONLY when enabled().
@@ -164,19 +170,19 @@ pub fn view_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>
     }
     // Default resolution — prefer the caller's OWN tenants (never audited: it is their own data).
     if !native.is_empty() {
-        let csv = tenants_csv(&native);
+        let (ph, tparams) = tenants_in_bind(&native);
         let own = {
             let store = app.store();
             store
                 .query_row(
-                    &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
-                    &[],
+                    &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({ph}) ORDER BY id DESC LIMIT 1"),
+                    &tparams,
                     |r| r.get_i64(0),
                 )
                 .or_else(|_| {
                     store.query_row(
-                        &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id DESC LIMIT 1"),
-                        &[],
+                        &format!("SELECT id FROM engagement WHERE tenant_id IN ({ph}) ORDER BY id DESC LIMIT 1"),
+                        &tparams,
                         |r| r.get_i64(0),
                     )
                 })
@@ -226,18 +232,18 @@ pub fn run_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>)
             Err(format!("engagement {id} introuvable"))
         };
     }
-    let csv = tenants_csv(&granted);
+    let (ph, tparams) = tenants_in_bind(&granted);
     let store = app.store();
     store
         .query_row(
-            &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
-            &[],
+            &format!("SELECT id FROM engagement WHERE status='active' AND tenant_id IN ({ph}) ORDER BY id LIMIT 1"),
+            &tparams,
             |r| r.get_i64(0),
         )
         .or_else(|_| {
             store.query_row(
-                &format!("SELECT id FROM engagement WHERE tenant_id IN ({csv}) ORDER BY id LIMIT 1"),
-                &[],
+                &format!("SELECT id FROM engagement WHERE tenant_id IN ({ph}) ORDER BY id LIMIT 1"),
+                &tparams,
                 |r| r.get_i64(0),
             )
         })
@@ -249,10 +255,12 @@ fn engagement_in(app: &App, eid: i64, granted: &HashSet<i64>) -> bool {
     matches!(tenant_of_engagement(app, eid), Some(tid) if granted.contains(&tid))
 }
 
-/// ENTERPRISE SQL WHERE-fragment restricting an engagement listing to the caller's granted tenants.
-/// Community => None (no filter, byte-identical listing). Enterprise => `Some("e.tenant_id IN (...)")`
-/// (empty grant => `e.tenant_id IN (-1)` => zero rows). `alias` is the `engagement` table alias in the query.
-pub fn list_filter_sql(app: &App, headers: &HeaderMap, alias: &str) -> Option<String> {
+/// ENTERPRISE SQL WHERE-fragment restricting an engagement listing to the caller's granted tenants, plus
+/// the BOUND Params for it. Community => None (no filter, byte-identical listing). Enterprise =>
+/// `Some(("e.tenant_id IN (?,?,…)", [Param::Int(id), …]))` — the tenant ids are BOUND, never string-
+/// interpolated (empty grant => `IN (?)` bound to -1 => zero rows, fail-closed). `alias` is the `engagement`
+/// table alias in the query; the caller MUST bind the returned Params in the query's placeholder order.
+pub fn list_filter_sql(app: &App, headers: &HeaderMap, alias: &str) -> Option<(String, Vec<crate::store::Param>)> {
     if !enabled(app) {
         return None;
     }
@@ -264,7 +272,8 @@ pub fn list_filter_sql(app: &App, headers: &HeaderMap, alias: &str) -> Option<St
         return None;
     }
     let granted = granted_tenants(app, headers);
-    Some(format!("{alias}.tenant_id IN ({})", tenants_csv(&granted)))
+    let (ph, params) = tenants_in_bind(&granted);
+    Some((format!("{alias}.tenant_id IN ({ph})"), params))
 }
 
 /// ENTERPRISE resolution of the tenant a NEWLY-created engagement lands in (fail-closed): the caller can
@@ -589,19 +598,19 @@ pub(crate) async fn tenancy_context(State(app): State<App>, headers: HeaderMap) 
 }
 
 /// The tenants the caller may SEE in the SPA selector. `granted == None` => super-admin => ALL tenants;
-/// `Some(set)` => exactly the granted tenants (empty set => `id IN (-1)` => zero rows, fail-closed). Pure
-/// read; ids are i64 (safe to inline in SQL). Ordered by id for a deterministic selector.
+/// `Some(set)` => exactly the granted tenants (empty set => `id IN (?)` bound to -1 => zero rows, fail-closed).
+/// Pure read; the tenant ids are BOUND Params (never string-interpolated). Ordered by id for a deterministic selector.
 fn accessible_tenants(app: &App, granted: &Option<HashSet<i64>>) -> Vec<Value> {
     let store = app.store();
-    let sql = match granted {
-        None => "SELECT id, name, status FROM tenant ORDER BY id".to_string(),
-        Some(set) => format!(
-            "SELECT id, name, status FROM tenant WHERE id IN ({}) ORDER BY id",
-            tenants_csv(set)
-        ),
+    let (sql, params): (String, Vec<crate::store::Param>) = match granted {
+        None => ("SELECT id, name, status FROM tenant ORDER BY id".to_string(), Vec::new()),
+        Some(set) => {
+            let (ph, p) = tenants_in_bind(set);
+            (format!("SELECT id, name, status FROM tenant WHERE id IN ({ph}) ORDER BY id"), p)
+        }
     };
     store
-        .query_lax(&sql, &[], |r| {
+        .query_lax(&sql, &params, |r| {
             Ok(json!({
                 "id": r.get_i64(0)?,
                 "name": r.get_str(1)?,
@@ -717,10 +726,15 @@ pub(crate) async fn tenants_create(State(app): State<App>, headers: HeaderMap, J
         let uid: Option<i64> = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&actor], |r| r.get_i64(0)).ok();
         let mut sg = false;
         if let Some(u) = uid {
-            let _ = store.execute(
+            // FAIL-CLOSED : l'auto-grant tenant_admin garantit le ≥1 admin du nouveau tenant. Un échec silencieux
+            // laisserait un tenant SANS admin tout en renvoyant `self_grant_admin:true` + un ledger l'attestant
+            // (fausse attestation). On MATCHE le Result -> 500 AVANT le ledger.
+            if let Err(e) = store.execute(
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
                 &crate::sql_params![u, id, "tenant_admin"],
-            );
+            ) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "grant_failed", format!("auto-grant admin du tenant échoué: {e}"));
+            }
             drop(store);
             sg = true;
         }
@@ -777,12 +791,20 @@ pub(crate) async fn tenants_update(
                 return err(StatusCode::CONFLICT, "last_active_tenant", "impossible : dernier tenant actif (archivage refusé, fail-closed)");
             }
         }
-        if let Some(n) = &new_name {
-            let _ = store.execute("UPDATE tenant SET name=?, updated=datetime('now') WHERE id=?", &crate::sql_params![n, id]);
+        // ÉCRITURE ATOMIQUE + FAIL-CLOSED (même classe que finding_update) : un SEUL UPDATE porte name et/ou
+        // status -> aucun état partiel. On MATCHE le Result : un échec (lock/disque/pg) -> 500 AVANT le ledger
+        // (sinon la piste tamper-evident attesterait un rename/archive jamais appliqué + faux `ok:true`).
+        // >=1 SET garanti (no_change déjà rejeté 400 plus haut).
+        let mut sets: Vec<&str> = Vec::new();
+        let mut params: Vec<crate::store::Param> = Vec::new();
+        if let Some(n) = &new_name { sets.push("name=?"); params.push(crate::store::Param::Text(n.clone())); }
+        if let Some(s) = &new_status { sets.push("status=?"); params.push(crate::store::Param::Text(s.clone())); }
+        params.push(crate::store::Param::Int(id));
+        let sql = format!("UPDATE tenant SET {}, updated=datetime('now') WHERE id=?", sets.join(", "));
+        if let Err(e) = store.execute(&sql, &params) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "update_failed", format!("écriture du tenant échouée: {e}"));
         }
-        if let Some(s) = &new_status {
-            let _ = store.execute("UPDATE tenant SET status=?, updated=datetime('now') WHERE id=?", &crate::sql_params![s, id]);
-        }
+        drop(store); // libère le guard avant le calcul de `action` (qui ne touche pas la DB) ; clippy tightening
         if new_status.as_deref() == Some("archived") {
             "archive"
         } else if new_status.as_deref() == Some("active") && cur_status == "archived" {
@@ -857,15 +879,20 @@ pub(crate) async fn tenant_grant_add(
             Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
         };
         // one grant per (user,tenant): UPDATE the role if it exists, else INSERT (two steps — unambiguous
-        // vs the table-level ON CONFLICT IGNORE constraint).
-        let updated = store
-            .execute("UPDATE tenant_grant SET role=? WHERE user_id=? AND tenant_id=?", &crate::sql_params![role, uid, id])
-            .unwrap_or(0);
+        // vs the table-level ON CONFLICT IGNORE constraint). FAIL-CLOSED : on MATCHE chaque écriture -> un
+        // échec (lock/disque/pg) rend 500 AVANT le ledger (sinon `console.tenant.grant` attesterait un grant
+        // jamais appliqué + faux `ok:true`).
+        let updated = match store.execute("UPDATE tenant_grant SET role=? WHERE user_id=? AND tenant_id=?", &crate::sql_params![role, uid, id]) {
+            Ok(n) => n,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "grant_failed", format!("écriture du grant échouée: {e}")),
+        };
         if updated == 0 {
-            let _ = store.execute(
+            if let Err(e) = store.execute(
                 "INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
                 &crate::sql_params![uid, id, role],
-            );
+            ) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "grant_failed", format!("écriture du grant échouée: {e}"));
+            }
         }
     }
     crate::append_console_ledger(
@@ -920,7 +947,11 @@ pub(crate) async fn tenant_grant_remove(
                 );
             }
         }
-        let _ = store.execute("DELETE FROM tenant_grant WHERE user_id=? AND tenant_id=?", &crate::sql_params![uid, id]);
+        // FAIL-CLOSED : un échec du DELETE -> 500 AVANT le ledger (sinon `console.tenant.revoke` attesterait
+        // un retrait de grant jamais appliqué + faux `ok:true`).
+        if let Err(e) = store.execute("DELETE FROM tenant_grant WHERE user_id=? AND tenant_id=?", &crate::sql_params![uid, id]) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "revoke_failed", format!("retrait du grant échoué: {e}"));
+        }
     }
     crate::append_console_ledger(
         &app,
@@ -1027,15 +1058,20 @@ pub(crate) async fn engagement_grant_add(
             Err(_) => return err(StatusCode::NOT_FOUND, "unknown_user", format!("compte '{login}' introuvable")),
         };
         // one override per (user,engagement): UPDATE the role if it exists, else INSERT (two steps —
-        // unambiguous vs the table-level UNIQUE(user,engagement) ON CONFLICT IGNORE).
-        let updated = store
-            .execute("UPDATE engagement_grant SET role=? WHERE user_id=? AND engagement_id=?", &crate::sql_params![role, uid, id])
-            .unwrap_or(0);
+        // unambiguous vs the table-level UNIQUE(user,engagement) ON CONFLICT IGNORE). FAIL-CLOSED : on MATCHE
+        // chaque écriture -> 500 AVANT le ledger (sinon `console.engagement.grant` attesterait un override
+        // jamais appliqué + faux `ok:true`).
+        let updated = match store.execute("UPDATE engagement_grant SET role=? WHERE user_id=? AND engagement_id=?", &crate::sql_params![role, uid, id]) {
+            Ok(n) => n,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "grant_failed", format!("écriture du grant échouée: {e}")),
+        };
         if updated == 0 {
-            let _ = store.execute(
+            if let Err(e) = store.execute(
                 "INSERT INTO engagement_grant(user_id,engagement_id,role,created) VALUES(?,?,?,datetime('now'))",
                 &crate::sql_params![uid, id, role],
-            );
+            ) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "grant_failed", format!("écriture du grant échouée: {e}"));
+            }
         }
     }
     crate::append_console_ledger(
@@ -1073,7 +1109,11 @@ pub(crate) async fn engagement_grant_remove(
         if store.query_row("SELECT 1 FROM engagement_grant WHERE user_id=? AND engagement_id=?", &crate::sql_params![uid, id], |_| Ok(())).is_err() {
             return err(StatusCode::NOT_FOUND, "no_grant", format!("aucun grant per-engagement pour '{login}' sur l'engagement {id}"));
         }
-        let _ = store.execute("DELETE FROM engagement_grant WHERE user_id=? AND engagement_id=?", &crate::sql_params![uid, id]);
+        // FAIL-CLOSED : un échec du DELETE -> 500 AVANT le ledger (sinon `console.engagement.revoke`
+        // attesterait un retrait d'override jamais appliqué + faux `ok:true`).
+        if let Err(e) = store.execute("DELETE FROM engagement_grant WHERE user_id=? AND engagement_id=?", &crate::sql_params![uid, id]) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "revoke_failed", format!("retrait de l'override échoué: {e}"));
+        }
     }
     crate::append_console_ledger(
         &app,
@@ -1081,4 +1121,34 @@ pub(crate) async fn engagement_grant_remove(
         json!({ "actor": actor, "engagement_id": id, "login": login }),
     );
     (StatusCode::OK, Json(json!({ "ok": true, "engagement_id": id, "revoked": login }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// `tenants_in_bind` (Tâche B — `IN (...)` LIÉ) : le nombre de placeholders `?` DOIT égaler le nombre de
+    /// Params. Un off-by-one = erreur de bind à l'exécution (la garantie clé quand on remplace un CSV inliné
+    /// par des paramètres liés). Empty grant -> `?` UNIQUE lié à NO_ENGAGEMENT (-1) => zéro ligne (fail-closed),
+    /// équivalent EXACT à l'ancien `IN (-1)` inliné. Ids dédupliqués/triés => statement déterministe.
+    #[test]
+    fn tenants_in_bind_placeholder_count_matches_params() {
+        for ids in [vec![], vec![7i64], vec![3i64, 1, 9]] {
+            let set: HashSet<i64> = ids.iter().copied().collect();
+            let (ph, params) = tenants_in_bind(&set);
+            assert_eq!(ph.matches('?').count(), params.len(), "un ? par Param (pas d'off-by-one)");
+            assert!(!params.is_empty(), "au moins un Param lié (jamais un IN () vide)");
+            // chaque Param est un entier (jamais du texte) — non-injectable par construction.
+            assert!(params.iter().all(|p| matches!(p, crate::store::Param::Int(_))), "tenant ids liés en Int");
+        }
+        // empty -> EXACTEMENT un placeholder lié à NO_ENGAGEMENT (fail-closed, équivalent à `IN (-1)`).
+        let (ph, params) = tenants_in_bind(&HashSet::new());
+        assert_eq!(ph, "?");
+        assert_eq!(params, vec![crate::store::Param::Int(NO_ENGAGEMENT)]);
+        // non vide -> autant de `?` que d'ids distincts, séparés par des virgules.
+        let (ph3, params3) = tenants_in_bind(&HashSet::from([5i64, 2, 8]));
+        assert_eq!(ph3, "?,?,?");
+        assert_eq!(params3.len(), 3);
+    }
 }

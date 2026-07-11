@@ -224,9 +224,10 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
     // ENTERPRISE (flag-gated) : la liste ne montre QUE les engagements des tenants accordés au caller.
     // Community => aucun filtre (WHERE vide) : SQL byte-identique à l'historique. Un grant vide => la
     // clause `e.tenant_id IN (-1)` ne matche rien (fail-closed).
-    let where_clause = match tenancy::list_filter_sql(app, headers, "e") {
-        Some(cond) => format!(" WHERE {cond}"),
-        None => String::new(),
+    // ENTERPRISE : la clause de filtre porte des tenant_ids LIÉS (Params) — plus d'interpolation de valeur.
+    let (where_clause, tparams): (String, Vec<crate::store::Param>) = match tenancy::list_filter_sql(app, headers, "e") {
+        Some((cond, params)) => (format!(" WHERE {cond}"), params),
+        None => (String::new(), Vec::new()),
     };
     // ENTERPRISE (flag-gated) : n'expose `tenant_id` par engagement QUE sous le flag — le SPA en a besoin
     // pour la hiérarchie tenant → engagement (filtrage du sélecteur par tenant actif). Community => champ
@@ -239,7 +240,7 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
                 (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
                 e.tenant_id, e.classification
          FROM engagement e{where_clause} ORDER BY e.id",
-    ), &[], |r| {
+    ), &tparams, |r| {
         let tenant_id = r.get_i64(7)?;
         let mut o = json!({
             "id": r.get_i64(0)?,
@@ -332,8 +333,13 @@ pub(crate) async fn engagements_create(
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response(),
         };
         // ENTERPRISE : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
+        // FAIL-CLOSED : un échec de ce rattachement laisserait l'engagement dans le tenant #1 par défaut (mauvais
+        // tenant) tout en renvoyant `ok:true` + un ledger `console.engagement.create` (fausse attestation). On
+        // MATCHE -> 500 AVANT tout ledger.
         if let Some(t) = target_tenant {
-            let _ = store.execute("UPDATE engagement SET tenant_id=? WHERE id=?", &crate::sql_params![t, id]);
+            if let Err(e) = store.execute("UPDATE engagement SET tenant_id=? WHERE id=?", &crate::sql_params![t, id]) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": format!("rattachement du tenant échoué: {e}")}))).into_response();
+            }
         }
         id
     };
@@ -342,7 +348,11 @@ pub(crate) async fn engagements_create(
     let ledger_path = derive_engagement_ledger_path(&app, id, target_tenant.unwrap_or(tenancy::DEFAULT_TENANT));
     {
         let store = app.store();
-        let _ = store.execute("UPDATE engagement SET ledger_path=? WHERE id=?", &crate::sql_params![&ledger_path, id]);
+        // FAIL-CLOSED : sans ce ledger_path posé, les appends ultérieurs de l'engagement divergeraient du chemin
+        // dérivé. Un échec -> 500 AVANT la genèse du ledger dédié (pas de ledger écrit sur un état DB incohérent).
+        if let Err(e) = store.execute("UPDATE engagement SET ledger_path=? WHERE id=?", &crate::sql_params![&ledger_path, id]) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": format!("écriture du ledger_path échouée: {e}")}))).into_response();
+        }
     }
     // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
     append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
@@ -484,15 +494,24 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
         })
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
     }
+    // FAIL-CLOSED + ATOMIQUE (with_tx) : la cascade de suppression est tout-ou-rien. Un échec en cours ->
+    // ROLLBACK + 500 AVANT le ledger console `console.engagement.delete` (sinon il attesterait une suppression
+    // partielle/inexistante — findings supprimés mais ligne engagement restante, ou l'inverse). L'entrée FINALE
+    // du ledger DÉDIÉ écrite plus haut (audit du fichier) est préservée intentionnellement.
     {
         let store = app.store();
-        let _ = store.execute("DELETE FROM finding WHERE engagement_id=?", &crate::sql_params![id]);
-        let _ = store.execute("DELETE FROM runrecord WHERE engagement_id=?", &crate::sql_params![id]);
-        let _ = store.execute("DELETE FROM roe_decision WHERE engagement_id=?", &crate::sql_params![id]);
-        let _ = store.execute("DELETE FROM run_job WHERE engagement_id=?", &crate::sql_params![id]);
-        let _ = store.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![technique_selection_key(id)]);
-        let _ = store.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![workflows_key(id)]);
-        let _ = store.execute("DELETE FROM engagement WHERE id=?", &crate::sql_params![id]);
+        if let Err(e) = store.with_tx(|tx| {
+            tx.execute("DELETE FROM finding WHERE engagement_id=?", &crate::sql_params![id])?;
+            tx.execute("DELETE FROM runrecord WHERE engagement_id=?", &crate::sql_params![id])?;
+            tx.execute("DELETE FROM roe_decision WHERE engagement_id=?", &crate::sql_params![id])?;
+            tx.execute("DELETE FROM run_job WHERE engagement_id=?", &crate::sql_params![id])?;
+            tx.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![technique_selection_key(id)])?;
+            tx.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![workflows_key(id)])?;
+            tx.execute("DELETE FROM engagement WHERE id=?", &crate::sql_params![id])?;
+            Ok(())
+        }) {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("suppression de l'engagement échouée: {e}")));
+        }
     }
     append_console_ledger(app, "console.engagement.delete", json!({
         "actor": actor, "engagement_id": id, "findings": findings, "runs": runs,

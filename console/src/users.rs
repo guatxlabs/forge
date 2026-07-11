@@ -161,10 +161,14 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
         let purge = disabling || downgrade || reset_pw;
         if purge {
             // effet IMMÉDIAT : révoque toutes les sessions actives du compte (même mutex que l'update).
-            let _ = store.execute(
+            // FAIL-CLOSED : la purge est une révocation de sécurité — un échec silencieux laisserait des
+            // sessions VIVANTES sur un compte désactivé/rétrogradé tout en ledgerisant `sessions_purged:true`
+            // (fausse attestation). On MATCHE le Result -> 500 typé AVANT le ledger (les UPDATE ci-dessus,
+            // déjà `?`-vérifiés, sont durables : un retry re-purge idempotemment).
+            store.execute(
                 "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
                 &crate::sql_params![&target_login],
-            );
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("purge des sessions échouée: {e}")))?;
             drop(store);
         }
         (purge, eff_role, eff_disabled)
@@ -206,10 +210,12 @@ pub(crate) fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> R
             return Err((StatusCode::CONFLICT, "impossible de supprimer le dernier admin activé (fail-closed)".into()));
         }
         // révoque les sessions AVANT la suppression de la ligne (effet immédiat + pas d'orphelin).
-        let _ = store.execute(
+        // FAIL-CLOSED : un échec de la purge -> 500 typé AVANT le DELETE users (donc rien n'est supprimé,
+        // aucun état partiel) et AVANT le ledger. Un retry re-purge puis supprime idempotemment.
+        store.execute(
             "DELETE FROM session WHERE user_id=(SELECT id FROM users WHERE login=?)",
             &crate::sql_params![&target_login],
-        );
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("purge des sessions échouée: {e}")))?;
         store.execute("DELETE FROM users WHERE login=?", &crate::sql_params![&target_login])
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("suppression échouée: {e}")))?;
     }

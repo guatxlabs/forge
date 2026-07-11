@@ -582,7 +582,11 @@ pub(crate) fn enqueue_pending(app: &App, spec: &RunSpawnSpec) -> (StatusCode, Js
     let spec_json = spec.to_value().to_string();
     {
         let store = app.store();
-        let _ = store.execute(
+        // FAIL-CLOSED : on MATCHE le Result de l'enqueue. `Ok(_)` (y compris ON CONFLICT DO NOTHING -> 0 ligne,
+        // enqueue idempotent d'un run_id déjà en file) -> 202 pending BYTE-IDENTIQUE. `Err` (lock/disque/pg) ->
+        // 500 : sans ça, on renverrait un faux 202 « pending » alors que RIEN n'a été mis en file (le leader
+        // ne claimera jamais un run inexistant, et l'appelant croirait son run accepté).
+        if let Err(e) = store.execute(
             "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id,owner_instance,spawn_spec)
              VALUES(?,?,datetime('now'),'pending',?,-1,?,?,?,?,'',?,NULL,?)
              ON CONFLICT(run_id) DO NOTHING",
@@ -593,7 +597,9 @@ pub(crate) fn enqueue_pending(app: &App, spec: &RunSpawnSpec) -> (StatusCode, Js
                 spec.eng_id,
                 spec_json.as_str()
             ],
-        );
+        ) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "enqueue_failed", "why": format!("mise en file du run échouée: {e}")})));
+        }
     }
     (StatusCode::ACCEPTED, Json(json!({"run_id": spec.run_id, "status": "pending", "campaign": spec.campaign, "mode": spec.mode, "high_impact": spec.high_impact, "auto_pentest": spec.auto_pentest})))
 }
@@ -1515,15 +1521,19 @@ pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(
     // ENGAGEMENT : liste des runs de l'engagement actif UNIQUEMENT (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     
-    let (mut conds, mut args): (Vec<String>, Vec<String>) = (vec![format!("engagement_id={eid}")], vec![]);
-    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); args.push(c.clone()); }
-    if let Some(s) = q.get("status") { conds.push("status=?".into()); args.push(s.clone()); }
+    // `engagement_id` (entier résolu) LIÉ en 1er Param ; RUN_JOB_COLS est une const de colonnes FIXES
+    // (identifiants, non paramétrables). LIMIT/OFFSET (entiers clampés) LIÉS en derniers placeholders.
+    let (mut conds, mut params): (Vec<String>, Vec<crate::store::Param>) =
+        (vec!["engagement_id=?".into()], vec![crate::store::Param::Int(eid)]);
+    if let Some(c) = q.get("campaign") { conds.push("campaign=?".into()); params.push(crate::store::Param::Text(c.clone())); }
+    if let Some(s) = q.get("status") { conds.push("status=?".into()); params.push(crate::store::Param::Text(s.clone())); }
     let where_ = format!(" WHERE {}", conds.join(" AND "));
     let (limit, offset) = paginate(&q, 100, 1000);
-    let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job{where_} ORDER BY id DESC LIMIT {limit} OFFSET {offset}");
+    params.push(crate::store::Param::Int(limit));
+    params.push(crate::store::Param::Int(offset));
+    let sql = format!("SELECT {RUN_JOB_COLS} FROM run_job{where_} ORDER BY id DESC LIMIT ? OFFSET ?");
     // query_lax reproduit `query_map(..).filter_map(|r| r.ok())` (lignes malformées ignorées) ; une erreur
     // de prepare/bind PROPAGE (Err) -> unwrap_or_default() rend `[]`, identique à l'ancien `Err(_) => []`.
-    let params: Vec<crate::store::Param> = args.iter().map(|s| crate::store::Param::from(s.as_str())).collect();
     let out: Vec<Value> = app.store().query_lax(&sql, &params, run_job_json).unwrap_or_default();
     Json(Value::Array(out))
 }

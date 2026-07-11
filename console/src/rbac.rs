@@ -344,24 +344,31 @@ pub(crate) fn apply_to_user(
     let mut n_grants = 0usize;
     {
         let store = app.store();
+        // FAIL-CLOSED (attestation honnête) : ce n'est PAS un handler HTTP (pas de statut à renvoyer) mais il
+        // ledgerise `console.rbac.apply`. On n'ATTESTE une mutation (applied_role / n_grants -> ledger) QUE si
+        // l'écriture a réellement réussi : un échec silencieux ne doit jamais faire ledgeriser un re-role /
+        // grant jamais appliqué (divergence ledger↔DB). Fail-safe : un échec transitoire laisse le rôle/grant
+        // courant (le login SSO/SCIM continue), simplement NON attesté (rien de faux dans la piste).
         if let Some(r) = &resolved.role {
             let role = clamp_role(r, cap_operator);
-            let _ = store.execute(
+            if store.execute(
                 "UPDATE users SET role=? WHERE id=?",
                 &crate::sql_params![role.clone(), user_id],
-            );
-            applied_role = Some(role);
+            ).is_ok() {
+                applied_role = Some(role);
+            }
         }
         if tenancy_on {
             for (tid, trole) in &resolved.tenant_grants {
                 let trole = clamp_tenant_role(trole, cap_operator);
-                let _ = store.execute(
+                if store.execute(
                     "INSERT INTO tenant_grant(user_id,tenant_id,role,created)
                      VALUES(?,?,?,datetime('now'))
                      ON CONFLICT(user_id,tenant_id) DO UPDATE SET role=excluded.role",
                     &crate::sql_params![user_id, *tid, trole],
-                );
-                n_grants += 1;
+                ).is_ok() {
+                    n_grants += 1;
+                }
             }
         }
     }

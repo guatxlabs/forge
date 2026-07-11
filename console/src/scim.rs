@@ -462,7 +462,10 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
             Err(e) => return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None),
         };
         let now = crate::now_epoch();
-        let _ = store.execute(
+        // FAIL-CLOSED : la ligne scim_user (mapping IdP) est ce qui rend le compte SCIM-managed. Un échec
+        // silencieux laisserait un users sans mapping tout en renvoyant 201 Created + un ledger
+        // `console.scim.user.create` (fausse attestation). On MATCHE -> 500 AVANT le ledger.
+        if let Err(e) = store.execute(
             "INSERT INTO scim_user(user_id,external_id,email,given_name,family_name,display_name,created,updated)
              VALUES(?,?,?,?,?,?,?,?)",
             &crate::sql_params![
@@ -475,7 +478,10 @@ async fn users_create(State(app): State<App>, headers: HeaderMap, body: Bytes) -
                 now,
                 now
             ],
-        );
+        ) {
+            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"), None);
+        }
+        drop(store); // libère le guard avant de sortir du bloc (pas de contention inutile ; clippy tightening)
         id
     };
     // A new ENABLED account changes the auth-gate DB state (mirror the account-CRUD discipline).
@@ -575,11 +581,18 @@ async fn user_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<
     }
     {
         let store = app.store();
-        // Disable + purge sessions + drop mapping under ONE db guard (atomic).
-        let _ = store.execute("UPDATE users SET disabled=1 WHERE id=?", &crate::sql_params![uid]);
-        let _ = store.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid]);
-        let _ = store.execute("DELETE FROM scim_user WHERE user_id=?", &crate::sql_params![uid]);
-        let _ = store.execute("DELETE FROM scim_group_member WHERE user_id=?", &crate::sql_params![uid]);
+        // Disable + purge sessions + drop mapping ATOMIQUEMENT (with_tx : tout-ou-rien). FAIL-CLOSED : un
+        // échec en cours de séquence -> ROLLBACK + 500 AVANT le ledger (pas d'état partiel : un compte
+        // désactivé mais mapping intact, ou des sessions non purgées, tout en ledgerisant la de-provision).
+        if let Err(e) = store.with_tx(|tx| {
+            tx.execute("UPDATE users SET disabled=1 WHERE id=?", &crate::sql_params![uid])?;
+            tx.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid])?;
+            tx.execute("DELETE FROM scim_user WHERE user_id=?", &crate::sql_params![uid])?;
+            tx.execute("DELETE FROM scim_group_member WHERE user_id=?", &crate::sql_params![uid])?;
+            Ok(())
+        }) {
+            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("de-provision failed: {e}"), None);
+        }
     }
     app.recompute_auth_required();
     app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SCIM account deprovisioned)
@@ -611,37 +624,47 @@ fn apply_update(app: &App, uid: i64, attrs: &UserAttrs) -> Response {
         return scim_err(StatusCode::FORBIDDEN, "protected super-admin cannot be modified via SCIM", Some("mutability"));
     }
 
-    let mut purged = false;
-    let mut now_disabled = was_disabled;
-    {
+    // FAIL-CLOSED + ATOMIQUE (with_tx) : disable + purge + updates d'attributs tout-ou-rien. Un échec ->
+    // ROLLBACK + 500 AVANT le ledger `console.scim.user.update` (sinon il attesterait un patch / une
+    // désactivation / une purge de sessions jamais appliqués). `now_disabled`/`purged` (dérivés de l'INPUT,
+    // pas du résultat d'écriture) sont retournés par la closure -> reflètent l'état RÉELLEMENT commité.
+    let (now_disabled, purged) = {
         let store = app.store();
-        if let Some(active) = attrs.active {
-            let disabled = !active;
-            let _ = store.execute("UPDATE users SET disabled=? WHERE id=?", &crate::sql_params![disabled as i64, uid]);
-            now_disabled = disabled;
-            // DISABLING (or a de-provision) must revoke access IMMEDIATELY → purge sessions.
-            if disabled {
-                let _ = store.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid]);
-                purged = true;
+        match store.with_tx(|tx| {
+            let mut now_disabled = was_disabled;
+            let mut purged = false;
+            if let Some(active) = attrs.active {
+                let disabled = !active;
+                tx.execute("UPDATE users SET disabled=? WHERE id=?", &crate::sql_params![disabled as i64, uid])?;
+                now_disabled = disabled;
+                // DISABLING (or a de-provision) must revoke access IMMEDIATELY → purge sessions.
+                if disabled {
+                    tx.execute("DELETE FROM session WHERE user_id=?", &crate::sql_params![uid])?;
+                    purged = true;
+                }
             }
+            let now = crate::now_epoch();
+            if let Some(v) = &attrs.external_id {
+                tx.execute("UPDATE scim_user SET external_id=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid])?;
+            }
+            if let Some(v) = &attrs.email {
+                tx.execute("UPDATE scim_user SET email=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid])?;
+            }
+            if let Some(v) = &attrs.given {
+                tx.execute("UPDATE scim_user SET given_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid])?;
+            }
+            if let Some(v) = &attrs.family {
+                tx.execute("UPDATE scim_user SET family_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid])?;
+            }
+            if let Some(v) = &attrs.display {
+                tx.execute("UPDATE scim_user SET display_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid])?;
+            }
+            Ok((now_disabled, purged))
+        }) {
+            Ok(v) => v,
+            Err(e) => return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("update failed: {e}"), None),
         }
-        let now = crate::now_epoch();
-        if let Some(v) = &attrs.external_id {
-            let _ = store.execute("UPDATE scim_user SET external_id=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
-        }
-        if let Some(v) = &attrs.email {
-            let _ = store.execute("UPDATE scim_user SET email=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
-        }
-        if let Some(v) = &attrs.given {
-            let _ = store.execute("UPDATE scim_user SET given_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
-        }
-        if let Some(v) = &attrs.family {
-            let _ = store.execute("UPDATE scim_user SET family_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
-        }
-        if let Some(v) = &attrs.display {
-            let _ = store.execute("UPDATE scim_user SET display_name=?, updated=? WHERE user_id=?", &crate::sql_params![v, now, uid]);
-        }
-    }
+    };
     app.recompute_auth_required();
     app.bump_cache_epoch(); // B6 (HA): invalidate peers' auth_required cache (SCIM account patched)
     crate::append_console_ledger(
@@ -841,8 +864,15 @@ async fn group_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path
         if store.query_row("SELECT 1 FROM scim_group WHERE id=?", &crate::sql_params![gid], |_| Ok(())).is_err() {
             return scim_err(StatusCode::NOT_FOUND, "group not found", None);
         }
-        let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid]);
-        let _ = store.execute("DELETE FROM scim_group WHERE id=?", &crate::sql_params![gid]);
+        // FAIL-CLOSED + ATOMIQUE : membres + groupe supprimés tout-ou-rien. Un échec -> ROLLBACK + 500 AVANT
+        // le ledger `console.scim.group.delete` (sinon il attesterait une suppression jamais appliquée).
+        if let Err(e) = store.with_tx(|tx| {
+            tx.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid])?;
+            tx.execute("DELETE FROM scim_group WHERE id=?", &crate::sql_params![gid])?;
+            Ok(())
+        }) {
+            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete failed: {e}"), None);
+        }
     }
     crate::append_console_ledger(&app, "console.scim.group.delete", json!({ "actor": "scim", "group_id": gid }));
     (StatusCode::NO_CONTENT, ()).into_response()
@@ -1712,5 +1742,46 @@ mod tests {
         // PATCH value-object form (Okta deprovision).
         let doc = json!({"Operations":[{"op":"replace","value":{"active":false}}]});
         assert_eq!(UserAttrs::from_patch(&doc).active, Some(false));
+    }
+
+    /// FAIL-CLOSED (user_delete de-provision — écriture avalée corrigée) — INJECTION D'ÉCHEC : un trigger
+    /// `BEFORE DELETE ON scim_user RAISE(ABORT)` fait ÉCHOUER la séquence de de-provision (`with_tx`). Le
+    /// handler DOIT alors : (a) renvoyer 500 (PAS un faux 204), (b) N'ÉCRIRE AUCUNE entrée ledger
+    /// `console.scim.user.delete` (anti divergence ledger↔DB — la piste tamper-evident ne doit jamais
+    /// attester une de-provision qui n'a pas eu lieu), (c) laisser le compte INTOUCHÉ (ROLLBACK : toujours
+    /// SCIM-managed, NON désactivé). Régression directe du write avalé (`let _ = store.execute`).
+    #[tokio::test]
+    async fn user_delete_db_failure_500_and_no_ledger() {
+        let ledger = tmp_path("scim-del-fail-ledger");
+        let app = scim_test_app(&ledger);
+        engage_flag(&app);
+        set_token(&app, "scim-secret-token-value");
+        let addr = serve(app.clone()).await;
+        // provisionne un user SCIM (mapping scim_user présent) via le vrai chemin POST.
+        let body = scim_user_body("Bob@Corp.com", true, "okta-bob");
+        let r = http_raw(addr, &body_req("POST", "/scim/v2/Users", &body, &bearer_hdr("scim-secret-token-value"))).await;
+        assert_eq!(parse_status(&r), 201, "seed create doit 201: {r}");
+        let uid: i64 = app.db().query_row("SELECT id FROM users WHERE login=?", ["bob.corp.com"], |r| r.get(0)).unwrap();
+        // injecte l'échec d'ÉCRITURE : tout DELETE de scim_user est ABORTé (les SELECT/existence restent OK).
+        app.db().execute_batch(
+            "CREATE TRIGGER t_block_del_scim BEFORE DELETE ON scim_user BEGIN SELECT RAISE(ABORT,'boom'); END;"
+        ).unwrap();
+        let before = crate::read_ledger_lines(&ledger).len();
+
+        let r = http_raw(addr, &body_req("DELETE", &format!("/scim/v2/Users/{uid}"), "", &bearer_hdr("scim-secret-token-value"))).await;
+        assert_eq!(parse_status(&r), 500, "de-provision échouée -> 500 (PAS un faux 204): {r}");
+
+        // (b) aucune entrée ledger ajoutée (ne ledgerise PAS une de-provision non appliquée).
+        let lines = crate::read_ledger_lines(&ledger);
+        assert_eq!(lines.len(), before, "un échec d'écriture NE ledgerise PAS");
+        if let Some(last) = lines.last() {
+            assert_ne!(last["kind"], "console.scim.user.delete", "aucune attestation de de-provision");
+        }
+        // (c) ROLLBACK : le compte reste SCIM-managed ET non désactivé (aucune mutation partielle).
+        let (disabled, mapped): (i64, i64) = app.db().query_row(
+            "SELECT u.disabled, (SELECT COUNT(*) FROM scim_user s WHERE s.user_id=u.id) FROM users u WHERE u.id=?",
+            [uid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(disabled, 0, "ROLLBACK : compte NON désactivé");
+        assert_eq!(mapped, 1, "ROLLBACK : mapping scim_user intact (toujours SCIM-managed)");
     }
 }

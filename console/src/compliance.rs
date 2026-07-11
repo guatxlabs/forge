@@ -756,9 +756,15 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
     head.loaded = false;
     drop(head);
 
-    // 10) delete the archived (expired) findings/runrecords rows.
-    delete_rows(&app, "finding", &del_finding_ids);
-    delete_rows(&app, "runrecord", &del_run_ids);
+    // 10) delete the archived (expired) findings/runrecords rows. FAIL-CLOSED : the ledger was ALREADY
+    // re-anchored above attesting `purged_findings`/`purged_runrecords` — a silent delete failure would
+    // diverge ledger↔DB. On Err, surface 500 (the encrypted archive is safe on disk; a retry re-runs the
+    // idempotent DELETE-by-id). No new ledger entry is written on this error path.
+    if let Err(e) = delete_rows(&app, "finding", &del_finding_ids)
+        .and_then(|_| delete_rows(&app, "runrecord", &del_run_ids))
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "purge_delete_failed", format!("{e} (archive preserved at {archive_path})"));
+    }
 
     // 11) verify the re-anchored ledger under the EXISTING verifier (must stay OK).
     let v = crate::verify_ledger_chain(&ledger_path);
@@ -824,15 +830,22 @@ fn collect_expired_rows(app: &App, eid: i64, retention: i64, now: i64, table: &s
     (arch, ids)
 }
 
-/// Delete rows by id from a FIXED table (finding|runrecord). Ids are i64 (safe to inline). No-op on empty.
-fn delete_rows(app: &App, table: &str, ids: &[i64]) {
+/// Delete rows by id from a FIXED table (finding|runrecord), ATOMICALLY (with_tx : all-or-nothing).
+/// Returns the number of rows deleted, or `Err` if any delete failed (rolled back). The caller MUST
+/// surface an `Err` (the WORM purge already re-anchored its ledger attesting these counts, so a silent
+/// failure would diverge ledger↔DB). `{table}` is a FIXED literal identifier from the allowlist below
+/// (never user input) — column/table names can't be bound in SQL; the `id` VALUE is a BOUND Param.
+fn delete_rows(app: &App, table: &str, ids: &[i64]) -> crate::store::StoreResult<usize> {
     if ids.is_empty() || !matches!(table, "finding" | "runrecord") {
-        return;
+        return Ok(0);
     }
-    
-    for id in ids {
-        let _ = app.store().execute(&format!("DELETE FROM {table} WHERE id=?"), &crate::sql_params![*id]);
-    }
+    app.store().with_tx(|tx| {
+        let mut n = 0usize;
+        for id in ids {
+            n += tx.execute(&format!("DELETE FROM {table} WHERE id=?"), &crate::sql_params![*id])?;
+        }
+        Ok(n)
+    })
 }
 
 // ============================================================================================
@@ -2144,5 +2157,43 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap_or(json!({}))
+    }
+
+    /// FAIL-CLOSED (delete_rows — écriture avalée corrigée) — INJECTION D'ÉCHEC : un trigger
+    /// `BEFORE DELETE ON finding RAISE(ABORT)` fait ÉCHOUER la suppression des lignes expirées (le ledger
+    /// est déjà ré-ancré, attestant `purged_findings`). Le handler purge DOIT alors renvoyer 500
+    /// `purge_delete_failed` (PAS un faux 200 « purgé ») et la ligne expirée DOIT rester (with_tx ROLLBACK —
+    /// aucune suppression partielle). Sans le fix, l'ancien `let _ = execute` avalait l'échec et renvoyait 200.
+    #[tokio::test]
+    async fn purge_delete_failure_500_and_rows_intact() {
+        let path = tmp_path("comp-purge-delfail");
+        let app = test_app(&path);
+        engage(&app);
+        let now = crate::now_epoch();
+        seed_ledger(&path, now, 3, 1_000_000, 2, 5);
+        {
+            let db = app.db();
+            crate::settings_set(&db, &ret_key_global(), "100").unwrap();
+            crate::settings_set(&db, "compliance.archive_key", "correct horse").unwrap();
+            db.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,engagement_id) VALUES(?,?,?,?,?,?,?,?,1)",
+                rusqlite::params![format!("@{}", now - 1_000_000), "c", "t", "old-finding", "HIGH", "x", "", "open"],
+            ).unwrap();
+            // injecte l'échec d'ÉCRITURE : tout DELETE de finding est ABORTé (lectures + archivage restent OK).
+            db.execute_batch("CREATE TRIGGER t_block_del_finding BEFORE DELETE ON finding BEGIN SELECT RAISE(ABORT,'boom'); END;").unwrap();
+            drop(db);
+        }
+        let tok = admin_session(&app);
+        let resp = purge(State(app.clone()), bearer(&tok), Json(json!({"engagement_id": 1}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "delete échoué -> 500 (PAS un faux 200)");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "purge_delete_failed", "erreur typée (anti false-200)");
+        // with_tx ROLLBACK : la ligne expirée reste (aucune suppression partielle silencieuse).
+        {
+            let db = app.db();
+            let n: i64 = db.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=1 AND title='old-finding'", [], |r| r.get(0)).unwrap();
+            drop(db);
+            assert_eq!(n, 1, "la ligne expirée RESTE (delete rollback, pas de suppression partielle)");
+        }
     }
 }
