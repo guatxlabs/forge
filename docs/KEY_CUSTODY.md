@@ -144,6 +144,96 @@ the raw signature as hex). Same fail-closed re-verify applies: a signature that 
 
 ---
 
+## HA key custody (Kubernetes) — keep the private key OFF the shared ledger volume
+
+> **Audit finding F1 (deployment).** In HA the tamper-evident ledger is a **file** on a **shared
+> ReadWriteMany PVC** (`forge-ledger`, mounted at `/data/ledger` by every replica — see
+> `k8s/40-console.yaml`). The community `LocalFileSigner` writes its **private** key next to the ledger
+> as `<ledger>.ed25519` (0600). On that RWX volume, a `0600` perms bit is **not** an isolation boundary:
+> **any pod or sidecar** that mounts the same PVC, and **any PVC snapshot/backup**, yields the raw
+> Ed25519 signing key — with which an attacker can mint arbitrary forge ledger entries. The
+> perms-only local key is fine for a single-tenant host; it is **not** fine on a shared multi-writer
+> volume. Move the key **off** that volume. Two supported patterns, safer one first:
+
+### Pattern 1 (PREFERRED for HA / multi-tenant) — off-host signer, key on no pod volume at all
+
+Use the **PKCS#11 signer** (`FORGE_LEDGER_SIGNER=pkcs11`, documented above) or the generic **exec
+signer** to an off-host KMS. The private key lives on an HSM/token and **never touches any pod volume** —
+so neither the RWX PVC, a snapshot, nor a co-mounted sidecar ever sees it. This is the recommended HA
+posture and also the control that closes the F4 host-root residual (below).
+
+k8s wiring (opt-in block in `k8s/40-console.yaml`; PIN/module via the `forge-ledger-pkcs11` Secret —
+placeholder in `k8s/10-secrets.example.yaml`, EVAL-ONLY, applied explicitly):
+
+```yaml
+env:
+  - name: FORGE_ENTERPRISE_COMPLIANCE
+    value: "1"
+  - name: FORGE_LEDGER_SIGNER
+    value: pkcs11
+  - name: FORGE_LEDGER_PKCS11_MODULE
+    valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_MODULE } }
+  - name: FORGE_LEDGER_PKCS11_TOKEN_LABEL
+    valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_TOKEN_LABEL } }
+  - name: FORGE_LEDGER_PKCS11_KEY_LABEL
+    valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_KEY_LABEL } }
+  - name: FORGE_LEDGER_PKCS11_PIN
+    valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_PIN } }
+```
+
+Needs a `store-postgres` image built with the `pkcs11` extra and a PKCS#11 provider `.so` present in the
+container (baked in or via a sidecar). No key Secret is created; the RWX PVC then holds **only** the
+ledger JSONL projection.
+
+### Pattern 2 (FALLBACK) — local signer, key as a read-only Secret NOT on the RWX PVC
+
+If you must keep the **local** signer under HA (e.g. no HSM available), decouple the key **path** from the
+ledger path with **`FORGE_LEDGER_KEY`** and supply the key as a **dedicated read-only Secret** rather than
+letting it be written onto `/data/ledger`:
+
+1. **Pre-generate** the Ed25519 key out-of-band (do not let the pod auto-create it on the shared volume):
+
+   ```bash
+   python3 -c 'from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as K; \
+               import base64; print(base64.b64encode(K.generate().private_bytes_raw()).decode())'
+   # → base64 of the raw 32-byte private key; put it in Secret forge-ledger-key, data.forge.ed25519
+   ```
+
+2. Provide it as Secret **`forge-ledger-key`** (placeholder in `k8s/10-secrets.example.yaml`), mounted
+   **read-only** at a path, and point **`FORGE_LEDGER_KEY`** at that mount (opt-in block in
+   `k8s/40-console.yaml`):
+
+   ```yaml
+   env:
+     - name: FORGE_LEDGER_KEY
+       value: /etc/forge/ledger-key/forge.ed25519      # read-only Secret mount, NOT /data/ledger
+   volumeMounts:
+     - name: ledger-key
+       mountPath: /etc/forge/ledger-key
+       readOnly: true                                   # signer READS the key; never rewrites it
+   volumes:
+     - name: ledger-key
+       secret:
+         secretName: forge-ledger-key
+         defaultMode: 0400
+         items: [ { key: forge.ed25519, path: forge.ed25519 } ]
+   ```
+
+`FORGE_LEDGER_KEY` makes the signer read the key **from the read-only mount** instead of writing/reading
+`<ledger>.ed25519` on the RWX PVC. Because the mount is read-only and the key pre-exists, it is **read, not
+rewritten** — the private key is **never** placed on the shared `forge-ledger` volume, which then carries
+only `engagement.jsonl` + the high-water-mark. Rotate by replacing the Secret and re-anchoring (publish the
+new public key to your auditors/witness).
+
+**Residual for Pattern 2.** The key still lands in a k8s **Secret** (etcd) and is present in the pod's
+tmpfs mount — so cluster-admin / etcd access still reaches it. Pattern 2 removes the *shared-volume /
+snapshot* exposure (F1), not the trust in the k8s secret store; for the stronger property (key on no pod
+volume at all, host-root can't exfiltrate) use **Pattern 1**. Both keep `runAsNonRoot`,
+`readOnlyRootFilesystem`, and the deny-by-default NetworkPolicies intact; the key Secret and the PKCS#11
+Secret are **opt-in** (not in the default `kubectl apply -k k8s/` path).
+
+See `docs/DEPLOYMENT.md` §3bis.6 (HA on Kubernetes) for the surrounding topology.
+
 ## How this closes the F4 host-root residual
 
 F4 says: with the key on-host and the default `NullAnchor`, a **host-root** attacker can rewrite and

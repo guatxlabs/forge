@@ -90,6 +90,7 @@ crypto trouvé. Deux risques résiduels **assumés et documentés** (voir §4).
 - **AuthN/Z** : compares constant-time (`subtle`), CSPRNG panic-on-failure, tenant sentinel `NO_ENGAGEMENT=-1` deny-by-default, RBAC par-engagement most-specific-wins, host-guard fail-closed anti-rebinding, admin sans fallback env-hash, accès super-admin ledgerisé.
 - **OIDC** : RS256 hard-pinné (rejette `none`/HS*), `kid` fail-closed, iss/aud/exp + nonce constant-time, PKCE-S256, redirect_uri allowlist exacte.
 - **Supply-chain / infra** : openssl-free (rustls/ring), moteur Python **zéro dép runtime**, Dockerfile multi-stage non-root (uid 10001) + tools SHA256-vérifiés, `.dockerignore` couvre secrets/clés, compose bind `127.0.0.1`, NetworkPolicies deny-by-default, aucun secret commité.
+- **Portabilité — pas de lock-in IdP ni secret-store (vérifié, question du propriétaire).** Forge n'est **PAS** verrouillé sur **Authentik** ni ne **requiert Vault** : `grep -rin 'authentik'` = **0** et `grep -rin 'vault'` = **0** occurrence dans tout le code et la doc. Le SSO est **OIDC standard** (n'importe quel IdP conforme — Keycloak, Dex, Authentik, Azure AD, oauth2-proxy…, cf. `DEPLOYMENT.md §3ter`), et les secrets se fournissent par **n'importe quel mécanisme k8s** (SealedSecrets / ExternalSecrets / SOPS / `kubectl create secret` — Vault *possible* mais **jamais requis**), la clé de ledger par PKCS#11/HSM **ou** un Secret k8s (§7/F1). Aucune dépendance à un produit tiers propriétaire.
 
 ## 6. Validation à la clôture (`e1b649e`)
 
@@ -98,3 +99,21 @@ crypto trouvé. Deux risques résiduels **assumés et documentés** (voir §4).
 - `cargo tree -e no-dev | grep -iE 'openssl|native-tls'` = **vide** (défaut + features)
 - `kubectl kustomize k8s/` rend ; kubeconform **17/17 valid** ; actionlint clean
 - clippy propre (1 warning doc préexistant) · community build byte-identical · `../core`/`../soc` jamais touchés
+
+## 7. Round durcissement déploiement — custody clé ledger HA + transport SSO (2026-07-13, HEAD `fcc0be1`)
+
+> Round de suivi ciblé sur le **déploiement HA** (k8s) et le **transport SSO**. **Note de numérotation** :
+> les IDs **F1/F2/F3 ci-dessous sont propres à ce round** et **distincts** des F1/F2/F3 des §1–2 (audit
+> du 2026-07-11) — même préfixe, périmètre différent. Ton honnête : F1 était un durcissement de posture
+> HA (clé perms-only sur volume partagé), pas une exfiltration reproduite ; F3 est une **exigence de
+> déploiement documentée**, pas un bug de code.
+
+| ID | Finding | Résolution | Réf |
+|----|---------|-----------|-----|
+| **F1** | **Clé de signature du ledger sur le volume RWX partagé en HA.** Le signeur local écrit sa **clé privée** Ed25519 en `<ledger>.ed25519` (perms-only 0600, plaintext) **sur le PVC `ReadWriteMany` `forge-ledger`** monté par tous les réplicas. Sur un volume partagé le `0600` n'isole pas : **tout pod/sidecar** montant le PVC, ou un **snapshot** de PVC, lit la clé privée brute → capacité de **forger des entrées de ledger signées**. | Découplage du **chemin** de clé via **`FORGE_LEDGER_KEY`** + pattern k8s de custody, deux options opt-in : **(préféré) signeur off-host PKCS#11** (`FORGE_LEDGER_SIGNER=pkcs11` — clé sur **aucun** volume de pod) ; **(repli) clé en Secret dédié `forge-ledger-key` monté read-only**, hors du PVC RWX (lue, jamais réécrite). Le PVC ne porte plus que la **projection JSONL**. Secrets **opt-in** (hors `kubectl apply -k` par défaut) ; `runAsNonRoot`/`readOnlyRootFilesystem`/NetworkPolicies intacts. | `k8s/40-console.yaml`, `k8s/10-secrets.example.yaml`, `docs/KEY_CUSTODY.md §HA`, `docs/DEPLOYMENT.md §3bis.6` |
+| **F2** | **Écriture de la clé ledger non atomique / perms posées après le contenu** (fenêtre où la clé fraîche est lisible avant `chmod`, et écriture non fail-closed). | **Perms 0600 atomiques, fail-closed** à la création de la clé ledger (« ledger-key atomic perms »). *(Correctif Python — commit de l'agent parallèle sur `forge/signing.py`, disjoint de ce round déploiement.)* | `forge/signing.py` |
+| **F3** | **Transport SSO en clair.** Le fetcher OIDC intégré du console est **HTTP-only** : discovery, JWKS **et** l'échange de token **rejettent `https://`** (`net.rs` / `sso.rs`). Au callback la console POST le **`client_secret`** (Basic) + le **`code`** vers le token endpoint de l'IdP **en HTTP clair** → interceptables si le hop n'est pas protégé. | **Exigence de TLS d'egress documentée en évidence** (§3ter.1, callout ⚠️) : joindre les endpoints token/JWKS de l'IdP via **TLS terminé par un proxy d'egress** (Envoy/nginx/`ghostunnel`/`stunnel`), **mTLS service-mesh** (Istio/Linkerd) ou **oauth2-proxy** ; un issuer `https://` **exige** un tel proxy aujourd'hui. Défense en profondeur **déjà en place** : `client_secret` write-only **jamais loggé/ledgerisé**, **deny-list SSRF** (`guard_integration_addr`) sur l'IP résolue, discovery **pinné à l'origine de l'issuer**. **Client rustls natif = évolution future** (`console/src`, hors périmètre). | `docs/DEPLOYMENT.md §3ter.1` (⚠️ Transport SSO) |
+
+**Portabilité (question du propriétaire) — voir §5, dernier point :** Forge n'est **ni Authentik-locked ni Vault-required** (0 occurrence de chaque dans code+docs). SSO = OIDC standard ; secrets = tout mécanisme k8s ; clé ledger = PKCS#11/HSM **ou** Secret k8s.
+
+**Validation de ce round (`fcc0be1` + patch) :** `kubectl kustomize k8s/` rend **17 ressources** ; `kubeconform -strict` **17/17 Valid** (0 invalide) ; les Secrets d'éval `forge-ledger-key`/`forge-ledger-pkcs11` **absents** du render par défaut (opt-in) ; Deployment console conserve `runAsNonRoot` + `readOnlyRootFilesystem` + mount clé `readOnly:true` (opt-in) ; `../core`/`../soc` non touchés ; forge-only, pas de `git add -A`.

@@ -495,6 +495,25 @@ par ordre de robustesse d'audit :
    sur MinIO/S3 via le seam `object-store` (`FORGE_BLOB_S3_*`), déchargeant le volume partagé du gros
    binaire. Orthogonal au choix ledger : combinable avec (1) ou (2).
 
+**Clé de signature du ledger — HORS du volume partagé (audit F1).** ⚠️ Le PVC RWX `forge-ledger` ne doit
+porter que la **projection JSONL** du ledger (`engagement.jsonl` + high-water-mark), **jamais la clé de
+signature**. Par défaut le signeur **local** écrit sa **clé privée** Ed25519 en `<ledger>.ed25519` (0600)
+**à côté** du ledger — donc **sur ce volume partagé**, où le `0600` n'est **pas** une frontière
+d'isolation : tout pod/sidecar montant le même PVC, ou un **snapshot** du PVC, lit la clé privée brute (→
+forge d'entrées de ledger). Acceptable en mono-tenant lab ; **pas** en HA/multi-tenant. Deux patterns
+supportés, opt-in (les deux préservent `runAsNonRoot`/`readOnlyRootFilesystem` + les NetworkPolicies
+deny-by-default ; leurs Secrets ne sont **pas** dans le `kubectl apply -k k8s/` par défaut) :
+
+1. **(préféré) Signeur off-host PKCS#11** (`FORGE_LEDGER_SIGNER=pkcs11`) — la clé vit sur un HSM/token et
+   ne touche **aucun** volume de pod. Bloc env opt-in dans `k8s/40-console.yaml` ; module + PIN via le
+   Secret `forge-ledger-pkcs11`.
+2. **(repli) Clé en Secret monté read-only** — pré-générer la clé Ed25519 hors-bande, la fournir via le
+   Secret dédié `forge-ledger-key` **monté en lecture seule**, et pointer **`FORGE_LEDGER_KEY`** dessus
+   (bloc opt-in `k8s/40-console.yaml`). La clé est **lue, pas réécrite** → elle n'atterrit **jamais** sur
+   le PVC `forge-ledger` partagé.
+
+Détail complet, wiring k8s et rotation : **[`docs/KEY_CUSTODY.md` §HA key custody](KEY_CUSTODY.md#ha-key-custody-kubernetes--keep-the-private-key-off-the-shared-ledger-volume)**.
+
 **Postgres — managé recommandé en prod.** `k8s/20-postgres.yaml` fournit un **StatefulSet single-replica +
 Service headless + PVC RWO** pour le **test/dev**. En **prod, préférer un Postgres managé/opéré** (RDS,
 Cloud SQL, CloudNativePG/Crunchy) : un Postgres mono-pod ne rend pas la stack HA (backups, failover, PITR
@@ -566,10 +585,46 @@ Flux **Authorization-Code + PKCE (S256)**, **fail-closed à chaque étape** : `G
 l'URL authorize (state + nonce + challenge persistés server-side) et 302 vers l'IdP ; `GET
 /api/sso/callback` valide le state (one-time), échange le code contre les tokens, puis **VALIDE
 cryptographiquement l'ID token** — signature **RS256 via la JWKS de l'IdP** (kid exact ; `none`/HS\*
-rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et binding du `nonce`. La découverte
-OIDC / JWKS / token utilise le client HTTP existant : **TLS terminé en amont** (reverse-proxy) — pointer
-l'issuer sur l'endpoint interne `http://` de l'IdP (ou un proxy TLS-terminant) ; l'ID token reste **de toute
-façon** validé RS256 sur la JWKS, indépendamment du transport de fetch.
+rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et binding du `nonce`.
+
+> #### ⚠️ Transport SSO — TLS d'egress OBLIGATOIRE (audit F3)
+>
+> **Le fetcher OIDC intégré du console est HTTP-only.** Discovery, JWKS **et** l'échange de token passent
+> par le client HTTP interne de la console, qui **REJETTE `https://`** (`http_get_blocking` :
+> « HTTPS non géré nativement par le fetcher intégré » ; `http_post_form_blocking` :
+> « token endpoint must be http:// (TLS terminated upstream) »). **Un issuer `https://` exige donc
+> aujourd'hui un proxy TLS d'egress** — la console ne parle pas TLS elle-même sur ce chemin.
+>
+> **Conséquence à connaître.** Au callback, la console POST vers le **token endpoint** de l'IdP le
+> **`client_secret`** (`Authorization: Basic`, client_secret_basic) **et** le **`code`** d'autorisation.
+> Ce POST partant en **HTTP clair**, ce hop **doit** être protégé au transport : soit l'IdP est joint via
+> **TLS terminé par un proxy d'egress**, soit il vit sur un **segment interne de confiance**. Sans cela,
+> `client_secret` + `code` transitent en clair et sont interceptables sur le réseau.
+>
+> **Ce qui protège déjà (défense en profondeur, indépendant du transport) :**
+> - le **`client_secret` est write-only** — jamais renvoyé, **jamais loggé, jamais ledgerisé** (rédigé) ;
+> - la **deny-list SSRF** console (`guard_integration_addr`) bloque loopback / link-local
+>   (169.254.169.254) / RFC1918 / ULA / unspecified sur l'**IP résolue** de connexion (anti-DNS-rebinding),
+>   pour discovery, JWKS **et** le POST token — sauf escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS` ;
+> - les endpoints discovery (`token`/`jwks`/`authorization`) sont **pinnés à l'origine de l'issuer**
+>   (anti-SSRF, un document de discovery hostile ne peut pas rediriger ailleurs) ;
+> - l'**ID token reste validé RS256/JWKS** quel que soit le transport de fetch — mais cela garantit
+>   l'**intégrité** du token, **pas la confidentialité** du `client_secret`/`code` sur le fil. D'où
+>   l'exigence de TLS d'egress ci-dessus.
+>
+> **Patterns recommandés (choisir un) :**
+> - **proxy TLS-terminant d'egress** devant l'IdP — un Envoy/nginx/`ghostunnel`/`stunnel` (sidecar ou
+>   service) qui écoute en `http://` côté console et **fait le TLS** vers l'IdP `https://`. Pointer alors
+>   `issuer` sur l'endpoint `http://` local du proxy ;
+> - **service-mesh mTLS** (Istio / Linkerd) — le sidecar chiffre le hop console→IdP de façon transparente ;
+> - **oauth2-proxy** (déjà recommandé comme pont pour les IdP SAML, §3ter.2) placé devant, qui gère le TLS
+>   amont vers l'IdP ;
+> - à défaut, un **IdP sur segment interne de confiance** (réseau isolé, pas d'écoute possible).
+>
+> **Amélioration future (hors périmètre de ce durcissement).** Un client **rustls** natif dans le fetcher
+> du console (`console/src`) supprimerait cette contrainte en parlant `https://` directement, tout en
+> gardant la posture openssl-free (rustls/ring). Noté comme évolution possible ; **non implémenté**
+> aujourd'hui — la recommandation reste le proxy TLS d'egress.
 
 **Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
 Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →
