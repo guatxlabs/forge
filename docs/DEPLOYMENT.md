@@ -1,7 +1,8 @@
 # Forge — Déploiement self-service (runbook) & empreinte
 
 > 🧭 [Documentation Forge](README.md) · Voir aussi : [Installation](INSTALLATION.md) ·
-> [Premier déploiement (wizard)](FIRST_DEPLOYMENT.md) · [Configuration](CONFIGURATION.md)
+> [Premier déploiement (wizard)](FIRST_DEPLOYMENT.md) · [Configuration](CONFIGURATION.md) ·
+> [**Upgrade / migration / backup (runbook)**](UPGRADE.md)
 
 > **Usage AUTORISÉ uniquement.** Forge reste **INERTE par défaut** (`in_scope` vide = tout refusé).
 > Rien de ce runbook n'arme quoi que ce soit : l'opérateur arme chaque couche consciemment (cf. la
@@ -197,6 +198,12 @@ docker run --rm \
 Le wizard propose aussi un **import pré-provision** (`POST /api/setup/migrate`), **opt-in** et réservé
 au pré-déploiement (désactivé par défaut : `FORGE_ALLOW_API_MIGRATE` + `FORGE_CONSOLE_IMPORT_DIR`) ; la
 voie CLI ci-dessus reste l'UX documentée.
+
+**Mettre à jour une console DÉJÀ déployée** (bump de schéma après un `docker pull` d'une image plus
+récente) → **une seule commande fail-closed** `forge-console upgrade` : snapshot pré-upgrade **chiffré** →
+`migrate` additif → vérif schéma/ledger/santé → **rollback automatique** au moindre échec. Voir le runbook
+dédié **[`docs/UPGRADE.md`](UPGRADE.md)** (SQLite solo, Postgres, HA rolling-upgrade, drill de restore).
+La version de schéma est visible via `forge-console status` et le champ `schema_version` de `/health`.
 
 ### 3.2 Sauvegardes chiffrées + programmation + offsite
 

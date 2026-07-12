@@ -304,6 +304,40 @@ CREATE TABLE IF NOT EXISTS presence(
   engagement_id BIGINT, instance_id TEXT, since BIGINT, last_seen BIGINT);
 ";
 
+// SCHEMA VERSION STAMP — version LOGIQUE du schéma DB, persistée dans `settings` (clé
+// `schema_version`). MONOTONE : on l'INCRÉMENTE à chaque fois qu'un nouveau lot d'ALTER/CREATE
+// additifs est ajouté à `migrate()` (source de vérité unique du DDL applicatif). `migrate()` la
+// TAMPONNE (upsert) après avoir appliqué les migrations ; le boot Postgres la tamponne aussi après
+// `PG_SCHEMA`+seed. Elle rend « à quelle version est cette base ? » RÉPONDABLE — base des upgrades sûrs
+// (`forge-console status` / `upgrade` / `/health`). ADDITIVE : une base ANTÉRIEURE (clé absente) lit
+// `None` et se voit tamponnée au 1er boot suivant la mise à jour (rétro-compat, jamais de valeur inventée).
+pub(crate) const SCHEMA_VERSION: i64 = 1;
+/// Clé de la table `settings` portant la version de schéma persistée (cf. [`SCHEMA_VERSION`]).
+pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
+
+/// Lit la version de schéma persistée depuis `settings` via le seam (`None` si absente/illisible —
+/// base ANTÉRIEURE au stamp, jamais une valeur inventée). Utilisée par `/health` et `forge-console status`.
+pub(crate) fn read_schema_version(store: &crate::store::Store) -> Option<i64> {
+    crate::settings_get_store(store, SCHEMA_VERSION_KEY).and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Lit la version de schéma persistée depuis une connexion SQLite brute (contexte CLI hors seam :
+/// `status`/`upgrade` ouvrent leur propre `Connection`). `None` si absente/illisible (base ANTÉRIEURE).
+pub(crate) fn read_schema_version_conn(db: &Connection) -> Option<i64> {
+    crate::settings_get(db, SCHEMA_VERSION_KEY).and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// TAMPONNE la version de schéma COURANTE ([`SCHEMA_VERSION`]) dans `settings` via le seam (upsert
+/// idempotent, horodaté). Appelée par le boot Postgres après `PG_SCHEMA`+seed (le chemin SQLite est
+/// tamponné par `migrate()` lui-même, sur la connexion brute). No-op silencieux si l'écriture échoue
+/// (fail-soft : un stamp manquant sera re-tenté au prochain boot ; il ne casse jamais l'amorçage).
+/// Appelée UNIQUEMENT depuis le boot Postgres (feature-gated) ; en build community (SQLite seul) c'est
+/// `migrate()` qui tamponne sur la connexion brute -> cette fn est alors inutilisée (allow dead_code).
+#[cfg_attr(not(feature = "store-postgres"), allow(dead_code))]
+pub(crate) fn stamp_schema_version(store: &crate::store::Store) {
+    let _ = crate::settings_set_store(store, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string());
+}
+
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
 /// (base ancienne ou re-boot) SQLite renvoie une erreur qu'on absorbe. Idempotent.
 pub(crate) fn migrate(db: &Connection) {
@@ -495,6 +529,12 @@ pub(crate) fn migrate(db: &Connection) {
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_run_job_running_per_engagement ON run_job(engagement_id) WHERE status='running'",
         [],
     );
+    // SCHEMA VERSION STAMP : après avoir appliqué TOUTES les migrations additives ci-dessus (et créé la
+    // table `settings`), on tamponne la version LOGIQUE courante ([`SCHEMA_VERSION`]). Upsert idempotent
+    // (settings PK sur `key`) -> re-tamponné à chaque boot, sans doublon. C'est CE stamp que lisent
+    // `/health`, `forge-console status` et le flux `upgrade` pour répondre « à quelle version est la base ».
+    // fail-soft : une écriture échouée (base en lecture seule improbable ici) ne casse pas l'amorçage.
+    let _ = crate::settings_set(db, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string());
 }
 
 /// Garantit l'existence du dashboard par défaut (id=1) — rétro-compat : la colonne `panel.dashboard_id`

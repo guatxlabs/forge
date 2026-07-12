@@ -18,6 +18,8 @@ use serde_json::Value;
 mod ledger;
 mod read;
 mod seed;
+mod status;
+mod upgrade;
 mod user;
 #[cfg(feature = "store-postgres")]
 mod migrate_store;
@@ -25,6 +27,8 @@ mod migrate_store;
 pub(crate) use ledger::*;
 pub(crate) use read::*;
 pub(crate) use seed::*;
+pub(crate) use status::*;
+pub(crate) use upgrade::*;
 pub(crate) use user::*;
 #[cfg(feature = "store-postgres")]
 pub(crate) use migrate_store::*;
