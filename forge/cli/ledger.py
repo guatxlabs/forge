@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Commandes ledger de la CLI Forge : `ledger verify|pubkey|keygen`. Extrait de l'ancien
 `forge/cli.py` (pur déplacement, comportement inchangé)."""
-from pathlib import Path
-
 from ..ledger import Ledger
 from .. import signing
 
@@ -51,7 +49,7 @@ def cmd_ledger_keygen(args):
     if not signing._HAVE_ED:
         print("# 'cryptography' absent — impossible de générer une clé Ed25519 (repli HMAC seul)")
         return 1
-    kp = Path(str(args.ledger) + ".ed25519")
+    kp = signing.ledger_key_path(args.ledger)   # honours FORGE_LEDGER_KEY (off the shared ledger volume)
     if kp.exists() and not args.force:
         print(f"# clé déjà présente : {kp}")
         print("# --force requis pour ROTATION (invalide les signatures ed25519 déjà écrites)")

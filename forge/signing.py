@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import portability
@@ -100,31 +101,120 @@ class LocalFileSigner(Ed25519Signer):
         return cls(_load_or_make_ed25519_priv(base_path))
 
 
+# Env var redirecting the ledger signing key OFF the (in HA, SHARED RWX) ledger volume — see `ledger_key_path`.
+LEDGER_KEY_PATH_ENV = "FORGE_LEDGER_KEY"
+
+
+class LedgerKeyProtectionError(RuntimeError):
+    """FAIL-CLOSED: the ledger's PRIVATE key / secret file could not be created with owner-only (0600)
+    permissions ATOMICALLY (no readable window). A signer that cannot protect its private key MUST NOT
+    proceed — rather than leave key material at the process umask (0644/0664 → group/world-readable),
+    creation aborts and no key is left behind. Raised only for private-key material on POSIX; see
+    `_atomic_write_secret` for the documented non-POSIX (Windows) degradation."""
+
+
+def ledger_key_path(base_path) -> Path:
+    """Resolve the on-disk path of the ledger's Ed25519 PRIVATE key.
+
+    Default (back-compat): the `<base>.ed25519` sibling of the ledger. If `FORGE_LEDGER_KEY` is set
+    (non-empty) the key lives at THAT path instead — letting ops mount it on a per-pod / read-only
+    k8s-Secret path OFF the shared RWX ledger volume (HA). UNSET ⇒ byte-identical to previous behaviour."""
+    env = os.environ.get(LEDGER_KEY_PATH_ENV)
+    if env:
+        return Path(env)
+    return Path(str(base_path) + ".ed25519")
+
+
+def _atomic_write_secret(path: Path, data: bytes, *, replace: bool = False) -> None:
+    """Write PRIVATE-key / secret `data` to `path` so the file NEVER exists at a mode wider than 0600
+    (no readable window) — FAIL-CLOSED if that cannot be guaranteed.
+
+    POSIX: the file is born owner-only. First creation uses `os.open(..., O_WRONLY|O_CREAT|O_EXCL, 0o600)`
+    (the inode is created already restricted — never observable at the umask 0644/0664); an explicit
+    rotation (`replace=True`) writes a fresh 0600 temp in the SAME dir then `os.replace()` (atomic swap,
+    still never a wider window). `os.fchmod(fd, 0o600)` then forces exactly 0600 regardless of umask.
+    If the secure create / chmod / write fails, `LedgerKeyProtectionError` is raised and no key is left
+    behind (any partial file is unlinked) — we NEVER fall back to a umask-perms key. NON-POSIX (Windows):
+    POSIX modes are not expressible, so we write then best-effort restrict and accept the DOCUMENTED
+    caveat that a hard 0600 guarantee is unavailable on that platform (see docs/KEY_CUSTODY.md)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not portability.is_posix():
+        # Non-POSIX: no owner-only mode. Best-effort + documented caveat (never silently claim 0600).
+        path.write_bytes(data)
+        portability.restrict_file_permissions(path)
+        return
+    if replace:
+        # explicit rotation: atomic overwrite via a 0600 temp in the SAME directory + os.replace
+        fd, tmp = tempfile.mkstemp(prefix=".ed25519-", dir=str(path.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, str(path))
+        except OSError as e:
+            try:
+                os.close(fd)          # no-op if fdopen already took/closed it
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise LedgerKeyProtectionError(
+                f"rotation de la clé du ledger impossible en 0600 atomique ({type(e).__name__})"
+            ) from e
+        return
+    # first creation: O_EXCL guarantees WE create it at 0600 (fail-closed if it raced into existence)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as e:
+        raise LedgerKeyProtectionError(
+            f"création de la clé du ledger impossible en 0600 atomique ({type(e).__name__})"
+        ) from e
+    try:
+        os.fchmod(fd, 0o600)          # force exactly 0600 regardless of umask (belt-and-suspenders)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        try:
+            os.close(fd)              # no-op if fdopen already took/closed it
+        except OSError:
+            pass
+        try:
+            os.unlink(str(path))      # never leave a key at umask perms — fail-closed
+        except OSError:
+            pass
+        raise LedgerKeyProtectionError(
+            f"écriture sécurisée de la clé du ledger impossible ({type(e).__name__})"
+        ) from e
+
+
 def _load_or_make_ed25519_priv(base_path):
-    """Load the on-disk Ed25519 private key `<base>.ed25519` (0600), creating a fresh one on first use.
-    Single source of truth for the COMMUNITY default ledger key — shared by `make_signer` and
-    `LocalFileSigner.from_base_path` so both are provably byte-identical."""
-    kp = Path(str(base_path) + ".ed25519")
+    """Load the on-disk Ed25519 private key (`<base>.ed25519`, or `FORGE_LEDGER_KEY` if set), creating a
+    fresh one on first use. Single source of truth for the COMMUNITY default ledger key — shared by
+    `make_signer` and `LocalFileSigner.from_base_path` so both are provably byte-identical.
+
+    A PRE-EXISTING key is READ ONLY — never rewritten or chmod'd — so an operator-provisioned key on a
+    READ-ONLY mount (k8s Secret) works and is never clobbered. A fresh key is created ATOMICALLY at 0600
+    (no readable window) and FAIL-CLOSED (raises `LedgerKeyProtectionError` rather than leave it readable)."""
+    kp = ledger_key_path(base_path)
     if kp.exists():
-        return Ed25519PrivateKey.from_private_bytes(kp.read_bytes())
+        return Ed25519PrivateKey.from_private_bytes(kp.read_bytes())   # READ ONLY — never rewrite a provisioned key
     priv = Ed25519PrivateKey.generate()
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    kp.write_bytes(priv.private_bytes_raw())
-    portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
+    _atomic_write_secret(kp, priv.private_bytes_raw())
     return priv
 
 
 def _load_or_make_secret(path) -> bytes:
-    env = os.environ.get("FORGE_LEDGER_KEY")
-    if env:
-        return env.encode("utf-8")
-    kp = Path(path)
+    """HMAC fallback secret (pure-stdlib, `cryptography` absent). `FORGE_LEDGER_KEY`, if set, redirects
+    the key file to THAT path (same as the Ed25519 case) instead of `path` (`<base>.key`). A pre-existing
+    file is READ ONLY; a fresh secret is created ATOMICALLY at 0600, fail-closed."""
+    env = os.environ.get(LEDGER_KEY_PATH_ENV)
+    kp = Path(env) if env else Path(path)
     if kp.exists():
         return kp.read_bytes()
     key = secrets.token_bytes(32)
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    kp.write_bytes(key)
-    portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
+    _atomic_write_secret(kp, key)
     return key
 
 
@@ -139,17 +229,17 @@ def make_signer(base_path, prefer_ed25519=True) -> Signer:
 
 
 def generate_ed25519_keypair(base_path) -> "Ed25519Signer":
-    """Crée (ou ROTATIONNE si déjà présente) DÉLIBÉRÉMENT une clé privée Ed25519 dans
-    `<base>.ed25519` (0600) et retourne le signeur. À l'inverse de `make_signer` (auto-gen paresseux
-    au premier usage), c'est une action opérateur EXPLICITE. Lève `RuntimeError` si `cryptography`
-    est absent (pas d'asymétrique disponible → seul le repli HMAC existe)."""
+    """Crée (ou ROTATIONNE si déjà présente) DÉLIBÉRÉMENT une clé privée Ed25519 dans `<base>.ed25519`
+    (ou `FORGE_LEDGER_KEY` si défini), écrite ATOMIQUEMENT en 0600 (jamais de fenêtre lisible),
+    fail-closed, et retourne le signeur. À l'inverse de `make_signer` (auto-gen paresseux au premier
+    usage), c'est une action opérateur EXPLICITE. Lève `RuntimeError` si `cryptography` est absent
+    (pas d'asymétrique disponible → seul le repli HMAC existe)."""
     if not _HAVE_ED:
         raise RuntimeError("cryptography absent — Ed25519 indisponible (repli HMAC uniquement)")
-    kp = Path(str(base_path) + ".ed25519")
+    kp = ledger_key_path(base_path)
     priv = Ed25519PrivateKey.generate()
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    kp.write_bytes(priv.private_bytes_raw())
-    portability.restrict_file_permissions(kp)   # 0600 sur POSIX ; no-op best-effort sur Windows
+    # explicit operator rotation → atomic 0600 overwrite (never a readable window), fail-closed
+    _atomic_write_secret(kp, priv.private_bytes_raw(), replace=True)
     return Ed25519Signer(priv)
 
 
