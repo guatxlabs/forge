@@ -515,9 +515,15 @@ mod tests {
         assert_eq!(cwe, "", "cwe = DEFAULT '' sur une ligne migrée");
         let title: String = dst.query_row("SELECT title FROM finding WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(title, "old-finding", "la donnée source survit à la copie");
-        // 2) table neuve `settings` créée par SCHEMA sur la cible (absente de la source ancienne).
+        // 2) table neuve `settings` créée par SCHEMA sur la cible ET TAMPONNÉE par migrate() : la source
+        //    ancienne n'avait ni la table ni de réglage, donc la cible contient UNIQUEMENT le stamp
+        //    `schema_version` (== SCHEMA_VERSION) posé par migrate() après les ALTER additifs.
         let n: i64 = dst.query_row("SELECT count(*) FROM settings", [], |r| r.get(0)).expect("table settings créée");
-        assert_eq!(n, 0);
+        assert_eq!(n, 1, "seul le stamp schema_version est présent après migrate()");
+        let sv: String = dst
+            .query_row("SELECT value FROM settings WHERE key='schema_version'", [], |r| r.get(0))
+            .expect("schema_version tamponnée par migrate()");
+        assert_eq!(sv, crate::schema::SCHEMA_VERSION.to_string(), "stamp == SCHEMA_VERSION");
 
         // 3) ledger + clé copiés ; ledger cible VÉRIFIABLE (2 source + 1 console.migrate = 3, intègre).
         assert_eq!(report["ledger_copied"], true);

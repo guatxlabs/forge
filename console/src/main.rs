@@ -315,6 +315,12 @@ async fn health(axum::extract::State(app): axum::extract::State<App>) -> Json<Va
         "version": forge_version(),
         "db": if db_ok { "ok" } else { "degraded" },
     });
+    // SCHEMA VERSION (ADDITIF) : version LOGIQUE de la base (settings.schema_version), tamponnée par
+    // migrate()/le boot PG. Répond « à quelle version est cette base » — base de l'upgrade sûr. Omis
+    // (jamais `null`) sur une base ANTÉRIEURE au stamp (clé absente) : additif, ne casse aucun consommateur.
+    if let Some(sv) = crate::schema::read_schema_version(&app.store()) {
+        body["schema_version"] = json!(sv);
+    }
     // HA (#10 Wave A) — ADDITIVE `leader`/`instance_id`. PG-only (feature-gated): the community build does
     // not compile this arm, so its `/health` stays `{status, version, db}` byte-identical. In the Postgres
     // build a SINGLE instance (FORGE_HA unset) reports `leader:true` (ha::is_leader short-circuits); under HA
@@ -621,6 +627,20 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
         Some("ledger") => {
             Some(run_ledger_cli(&args[2..]))
         }
+        // ÉTAT (lecture seule, NON INTERACTIF, RAPIDE) : forge-console status [--db <path>]
+        //   [--ledger <path>] [--json]. Imprime version, VERSION DE SCHÉMA persistée, backend actif,
+        //   base RÉDIGÉE, tête de ledger vérifiée — SANS démarrer le serveur. Base d'un upgrade sûr.
+        Some("status") => {
+            Some(run_status_cli(&args[2..]))
+        }
+        // UPGRADE SÛR EN UNE COMMANDE (fail-closed avec rollback) : forge-console upgrade
+        //   --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
+        //   [--to <postgres-url>] [--force] [--dry-run]. Snapshot pré-upgrade CHIFFRÉ (moteur backup
+        //   audité) -> migrate additif (+ migration de store si --to) -> vérif schéma/ledger/santé ->
+        //   RESTORE (rollback à l'état exact d'avant) sur tout échec. Idempotent ; --dry-run ne mute rien.
+        Some("upgrade") => {
+            Some(run_upgrade_cli(&args[2..]))
+        }
         _ => None,
     }
 }
@@ -914,6 +934,10 @@ async fn serve() {
                 // Après TOUT seeding à id explicite : recale les séquences IDENTITY sur max(id) (sinon le 1er
                 // INSERT-sans-id régénère id=1 -> duplicate key). Idempotent.
                 advance_pg_identity_sequences(tx.store());
+                // SCHEMA VERSION STAMP (parité avec la branche SQLite où `migrate()` tamponne) : le backend
+                // Postgres applique `PG_SCHEMA` (colonnes de migrate déjà fusionnées) sans passer par
+                // `migrate()`, donc on tamponne ICI, sous le même verrou DDL, après le schéma+seed.
+                crate::schema::stamp_schema_version(tx.store());
                 Ok::<(), crate::store::StoreError>(())
             })
             .expect("pg boot schema+seed (serialized under the DDL advisory lock)");
@@ -4897,6 +4921,18 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         // alias canonique /api/detection/coverage : même contrat 200 autonome.
         let r2 = http_raw(addr, &get_req("/api/detection/coverage", "")).await;
         assert_eq!(parse_status(&r2), 200, "alias /api/detection/coverage 200 en autonome : {r2}");
+    }
+
+    /// [/health SCHEMA VERSION] Après `migrate()` (qui TAMPONNE `settings.schema_version`), le handler
+    /// /health SURFACE `schema_version == SCHEMA_VERSION` (en plus de status/version/db). ADDITIF : la
+    /// forme historique {status, version, db} est préservée ; on ajoute seulement le champ tamponné.
+    #[tokio::test]
+    async fn health_surfaces_stamped_schema_version() {
+        let app = test_app(&tmp_path("health-schema-version-ledger"));
+        { let db = app.db(); migrate(&db); } // tamponne settings.schema_version
+        let Json(body) = health(axum::extract::State(app)).await;
+        assert_eq!(body["status"], json!("ok"), "forme historique préservée");
+        assert_eq!(body["schema_version"], json!(crate::schema::SCHEMA_VERSION), "/health surface la version tamponnée");
     }
 
     // =============================================================================================
