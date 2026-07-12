@@ -19,6 +19,12 @@
 # instance-ledger-vs-object-store decision — the console serializes its OWN appends per-instance, so
 # a shared file across replicas relies on RWX + accepting the concurrent-append caveat; for a strict
 # multi-writer audit chain prefer a per-instance ledger (StatefulSet + RWO-per-pod) instead.
+# ⚠️ KEY CUSTODY (audit F1): this shared PVC must carry ONLY the ledger JSONL projection
+# (engagement.jsonl + high-water-mark), NOT the Ed25519 signing key. By default the LOCAL signer writes
+# its private key to `<ledger>.ed25519` next to the ledger — i.e. ONTO this RWX volume, where any pod/
+# sidecar mounting it (or a PVC snapshot) can read the raw signing key. In HA/multi-tenant move the key
+# OFF this volume: (preferred) the off-host PKCS#11 signer, or (fallback) a read-only Secret-mounted key
+# via FORGE_LEDGER_KEY. See the opt-in blocks on the Deployment below + docs/KEY_CUSTODY.md §HA.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -147,6 +153,34 @@ spec:
             - name: FORGE_BLOB_S3_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: forge-objectstore, key: FORGE_BLOB_S3_SECRET_KEY }
+            # --- HA LEDGER KEY CUSTODY (audit F1) — pick ONE, both OPT-IN ------------------------
+            # By DEFAULT (nothing uncommented) the LOCAL signer writes its Ed25519 key to
+            # `<ledger>.ed25519` on the SHARED forge-ledger RWX PVC (mounted at /data/ledger) — i.e.
+            # the raw signing key sits on a volume every replica/sidecar/snapshot can read. That is
+            # acceptable ONLY for single-tenant lab use. For HA/multi-tenant, uncomment ONE option
+            # AND provision its Secret out-of-band (or, for lab, apply 10-secrets.example.yaml).
+            #
+            # OPTION A (PREFERRED) — OFF-HOST PKCS#11 signer: the private key NEVER touches any pod
+            # volume (lives on an HSM/token). Requires a store-postgres image built with the pkcs11
+            # extra and a PKCS#11 provider `.so` reachable in the container. PIN is env-only (secret).
+            # - name: FORGE_ENTERPRISE_COMPLIANCE
+            #   value: "1"
+            # - name: FORGE_LEDGER_SIGNER
+            #   value: pkcs11
+            # - name: FORGE_LEDGER_PKCS11_MODULE
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_MODULE } }
+            # - name: FORGE_LEDGER_PKCS11_TOKEN_LABEL
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_TOKEN_LABEL } }
+            # - name: FORGE_LEDGER_PKCS11_KEY_LABEL
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_KEY_LABEL } }
+            # - name: FORGE_LEDGER_PKCS11_PIN
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_PIN } }
+            #
+            # OPTION B (FALLBACK) — LOCAL signer with the key on a READ-ONLY Secret mount, NOT on the
+            # RWX ledger PVC. FORGE_LEDGER_KEY points at the read-only mount (volume `ledger-key`
+            # below); the pre-generated key is READ (not rewritten) so it never lands on /data/ledger.
+            # - name: FORGE_LEDGER_KEY
+            #   value: /etc/forge/ledger-key/forge.ed25519
           envFrom:
             - configMapRef:
                 name: forge-console-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
@@ -162,6 +196,12 @@ spec:
               mountPath: /tmp
             - name: home        # writable $HOME — nuclei/httpx config+templates, fontconfig cache.
               mountPath: /home/forge
+            # OPT-IN (audit F1, OPTION B): read-only ledger signing key, OFF the shared RWX PVC.
+            # Uncomment together with the FORGE_LEDGER_KEY env above and the `ledger-key` volume below.
+            # readOnly:true keeps the key immutable to the pod (the local signer READS it, never rewrites).
+            # - name: ledger-key
+            #   mountPath: /etc/forge/ledger-key
+            #   readOnly: true
           # /health is PUBLIC (outside auth_guard) and ALWAYS 200 when the HTTP router is live (it
           # returns db:"degraded" without failing on a transient DB blip). Host: localhost is in the
           # default anti-DNS-rebinding allowlist, so the probe is accepted (kubelet would otherwise
@@ -201,6 +241,17 @@ spec:
         - name: ledger
           persistentVolumeClaim:
             claimName: forge-ledger
+        # OPT-IN (audit F1, OPTION B): the pre-generated Ed25519 key as a dedicated read-only Secret,
+        # so it is NOT written to / readable from the shared forge-ledger RWX PVC. defaultMode 0400 =
+        # owner-read-only (uid 1000 via fsGroup). Uncomment with the volumeMount + env above, and
+        # provision Secret `forge-ledger-key` out-of-band (or apply 10-secrets.example.yaml for lab).
+        # - name: ledger-key
+        #   secret:
+        #     secretName: forge-ledger-key
+        #     defaultMode: 0400
+        #     items:
+        #       - key: forge.ed25519
+        #         path: forge.ed25519
         - name: scope
           configMap:
             name: forge-scope
