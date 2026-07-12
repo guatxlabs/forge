@@ -30,6 +30,15 @@ engagements/
 forge-console.db
 forge-console-*.db
 
+# --- Snapshots/backups chiffrés (backup, restore, snapshot pré-upgrade) -------
+# Les archives .forge contiennent la base + le ledger CHIFFRÉS d'un engagement réel
+# (dont les snapshots `pre-upgrade-<ver>-<epoch>.forge` écrits par `upgrade`). Le
+# backup-dir par défaut est le dossier de la base -> ces fichiers peuvent apparaître
+# à côté de console/ ; ils ne doivent JAMAIS être suivis. (Le Dockerfile.dockerignore
+# les exclut déjà côté image ; on ferme ici la même fuite côté git.)
+*.forge
+backups/
+
 # --- Rapports générés (contiennent cibles/findings réels) --------------------
 *.report.md
 rapport.md

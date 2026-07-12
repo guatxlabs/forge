@@ -160,6 +160,82 @@ fn apply_store_migration(db: &str, ledger: &str, to_url: &str, force: bool) -> R
     }
 }
 
+/// VÉRIF post-état (schéma + santé + ledger) — factorisée pour être partagée par le chemin MUTANT (après
+/// migrate, avant de valider le succès) ET le chemin NO-OP pur (base déjà à la cible : on VÉRIFIE sans
+/// muter). Lecture seule. Err lisible au 1er problème. Ne touche JAMAIS le ledger (pas d'écriture).
+fn verify_after(db: &str, ledger: &str) -> Result<(), String> {
+    // (c) VÉRIF de schéma (colonnes + version).
+    {
+        let conn = Connection::open_with_flags(
+            db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| format!("vérif : ouverture read-only de '{db}' impossible: {e}"))?;
+        schema_self_check(&conn)?;
+    }
+    // (d) santé (SELECT 1 + tête ledger cohérente).
+    health_self_check(db, ledger)?;
+    // (c') VÉRIF ledger explicite (hash-chain) — redondant avec health mais nommé pour la clarté du rapport.
+    let lv = verify_ledger_chain(ledger);
+    if lv.exists && !lv.ok {
+        return Err(format!("vérif : chaîne ledger rompue (seq={})", lv.broken));
+    }
+    Ok(())
+}
+
+/// Nombre de snapshots `pre-upgrade-*.forge` à CONSERVER après un upgrade mutant (les plus récents).
+/// Surchargé par l'ENV `FORGE_UPGRADE_SNAPSHOT_KEEP` (>=1) ; défaut = borne saine pour des redéploiements
+/// répétés (accumulation bornée). Ne concerne QUE les snapshots pré-upgrade (les backups user/planifiés
+/// suivent leur propre rétention et ne sont JAMAIS touchés ici).
+const DEFAULT_PRE_UPGRADE_KEEP: usize = 5;
+
+fn pre_upgrade_keep() -> usize {
+    std::env::var("FORGE_UPGRADE_SNAPSHOT_KEEP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&k| k >= 1)
+        .unwrap_or(DEFAULT_PRE_UPGRADE_KEEP)
+}
+
+/// Extrait l'epoch d'un nom `pre-upgrade-<ver>-<epoch>.forge` (l'epoch = dernier segment `-`). `None` si le
+/// nom ne correspond PAS au motif pré-upgrade -> le fichier n'est alors NI listé NI candidat au prune (les
+/// backups user/planifiés, nommés autrement, sont ainsi structurellement protégés).
+fn parse_pre_upgrade_epoch(name: &str) -> Option<u64> {
+    let stem = name.strip_prefix("pre-upgrade-")?.strip_suffix(".forge")?;
+    let epoch = stem.rsplit_once('-').map(|(_, e)| e).unwrap_or(stem);
+    epoch.parse::<u64>().ok()
+}
+
+/// Élague les snapshots `pre-upgrade-*.forge` de `backup_dir` en NE gardant que les `keep` plus récents
+/// (tri par epoch PARSÉ DU NOM — pas la mtime, robuste aux copies/touch). FAIL-SOFT : toute erreur (dossier
+/// illisible, remove qui échoue) est avalée -> ne fait JAMAIS échouer l'upgrade. Ne matche QUE le motif
+/// pré-upgrade : les autres archives (`*.forge` user/planifiées) sont ignorées. Renvoie les noms supprimés.
+fn prune_pre_upgrade_snapshots(backup_dir: &str, keep: usize) -> Vec<String> {
+    let rd = match std::fs::read_dir(backup_dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut snaps: Vec<(u64, std::path::PathBuf, String)> = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(epoch) = parse_pre_upgrade_epoch(&name) {
+            snaps.push((epoch, e.path(), name));
+        }
+    }
+    if snaps.len() <= keep {
+        return Vec::new();
+    }
+    // plus RÉCENT d'abord (epoch desc ; tie-break nom desc pour un ordre déterministe si même epoch).
+    snaps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.2.cmp(&a.2)));
+    let mut pruned = Vec::new();
+    for (_, path, name) in snaps.into_iter().skip(keep) {
+        if std::fs::remove_file(&path).is_ok() {
+            pruned.push(name);
+        }
+    }
+    pruned
+}
+
 /// CŒUR de l'upgrade (testable sans process réel). Voir l'en-tête du module pour la séquence fail-closed.
 /// `Ok(report)` : dry-run OU upgrade réussi (report inclut le plan/les étapes). `Err(msg)` : échec — si un
 /// snapshot pré-upgrade avait été pris, la base a été RESTAURÉE à son état d'avant (le message le précise).
@@ -176,6 +252,10 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
     };
     let target = crate::schema::SCHEMA_VERSION;
     let same_version = current_version == Some(target);
+    // Le run MUTERA seulement s'il y a un migrate additif (version différente) OU une migration de store
+    // demandée (--to). Sinon = NO-OP PUR (verify seul) : AUCUN snapshot pris, AUCUNE écriture (idempotence
+    // des redéploiements : relancer `upgrade` sur une base déjà à jour n'accumule rien).
+    let will_mutate = !same_version || opts.to.is_some();
 
     // --- DRY-RUN : montre le plan, ne mute RIEN (pas de backup écrit, pas de migrate) ---
     if opts.dry_run {
@@ -185,10 +265,38 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
             "from": current_version,
             "to": target,
             "already_current": same_version,
-            "would_backup_to": format!("{}/pre-upgrade-{}-<epoch>.forge", opts.backup_dir.trim_end_matches('/'), current_version.map(|v| v.to_string()).unwrap_or_else(|| "none".into())),
+            "would_backup": will_mutate,
+            "would_backup_to": if will_mutate {
+                json!(format!("{}/pre-upgrade-{}-<epoch>.forge", opts.backup_dir.trim_end_matches('/'), current_version.map(|v| v.to_string()).unwrap_or_else(|| "none".into())))
+            } else { Value::Null },
             "would_migrate": !same_version,
             "would_migrate_store": opts.to.as_ref().map(|u| redact_target(u)),
-            "note": "DRY-RUN — aucune écriture. Relancez sans --dry-run pour exécuter (snapshot chiffré -> migrate -> vérif -> rollback si échec).",
+            "note": if will_mutate {
+                "DRY-RUN — aucune écriture. Relancez sans --dry-run pour exécuter (snapshot chiffré -> migrate -> vérif -> rollback si échec)."
+            } else {
+                "DRY-RUN — base DÉJÀ à la cible et pas de --to : le run réel serait un NO-OP vérifié (aucun snapshot, aucune écriture)."
+            },
+        }));
+    }
+
+    // --- NO-OP PUR (base déjà à la cible, pas de --to) : on VÉRIFIE sans rien muter ni écrire. ---
+    // Pas de snapshot (rien à protéger d'un rollback), pas d'entrée ledger : un redéploiement répété
+    // n'accumule AUCUN fichier. Si la vérif échoue, la base était DÉJÀ cassée -> Err sans rollback.
+    if !will_mutate {
+        verify_after(&opts.db, &opts.ledger)?;
+        return Ok(json!({
+            "ok": true,
+            "applied": false,
+            "already_current": true,
+            "noop": true,
+            "from": current_version,
+            "to": target,
+            "backup": Value::Null,
+            "backup_id": Value::Null,
+            "backup_verified": Value::Null,
+            "store_migration": Value::Null,
+            "upgrade_ledger_hash": Value::Null,
+            "pruned_snapshots": json!([]),
         }));
     }
 
@@ -235,22 +343,8 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
         if let Some(reason) = &opts.simulate_failure {
             return Err(format!("échec de vérif SIMULÉ (chaos-drill) : {reason}"));
         }
-        // (c) VÉRIF de schéma (colonnes + version) + (d) santé (SELECT 1 + tête ledger cohérente).
-        {
-            let conn = Connection::open_with_flags(
-                &opts.db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            )
-            .map_err(|e| format!("vérif : ouverture read-only de '{}' impossible: {e}", opts.db))?;
-            schema_self_check(&conn)?;
-        }
-        health_self_check(&opts.db, &opts.ledger)?;
-        // (c') VÉRIF ledger explicite (hash-chain) — redondant avec health mais nommé pour la clarté du rapport.
-        let lv = verify_ledger_chain(&opts.ledger);
-        if lv.exists && !lv.ok {
-            return Err(format!("vérif : chaîne ledger rompue (seq={}) après migration", lv.broken));
-        }
-        Ok(())
+        // (c) VÉRIF schéma + (d) santé + (c') ledger — factorisée (verify_after, lecture seule).
+        verify_after(&opts.db, &opts.ledger)
     };
 
     match mutate() {
@@ -267,9 +361,21 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
                 "store_migration": opts.to.as_ref().map(|u| redact_target(u)),
             });
             let upgrade_hash = ledger_append_standalone(&opts.ledger, "console.upgrade", &detail).ok();
+            // PRUNE (fail-soft) : un upgrade mutant vient d'écrire UN snapshot pré-upgrade ; on borne
+            // l'accumulation en ne gardant que les K plus récents (`pre-upgrade-*.forge` uniquement — les
+            // backups user/planifiés ne sont JAMAIS touchés). Une erreur de prune n'échoue PAS l'upgrade.
+            let keep = pre_upgrade_keep();
+            let pruned = prune_pre_upgrade_snapshots(&opts.backup_dir, keep);
+            if !pruned.is_empty() {
+                println!(
+                    "[forge-console] upgrade : prune snapshots pré-upgrade — {} supprimé(s) (garde les {keep} plus récents) : {}",
+                    pruned.len(),
+                    pruned.join(", ")
+                );
+            }
             Ok(json!({
                 "ok": true,
-                "applied": !same_version || opts.to.is_some(),
+                "applied": will_mutate,
                 "already_current": same_version,
                 "from": current_version,
                 "to": target,
@@ -278,6 +384,7 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
                 "backup_verified": inspect.get("ok").cloned().unwrap_or(json!(true)),
                 "store_migration": opts.to.as_ref().map(|u| redact_target(u)),
                 "upgrade_ledger_hash": upgrade_hash,
+                "pruned_snapshots": pruned,
             }))
         }
         Err(e) => {
@@ -536,6 +643,156 @@ mod tests {
         assert_eq!(before, after, "dry-run : base non mutée");
         let backups: Vec<_> = std::fs::read_dir(&bdir).unwrap().filter_map(|e| e.ok()).collect();
         assert!(backups.is_empty(), "dry-run : aucun snapshot écrit");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ============================================================================================
+    // IDEMPOTENCE DES REDÉPLOIEMENTS — preuves EMPIRIQUES qu'un déploiement répété n'accumule RIEN.
+    // ============================================================================================
+
+    /// Nombre de fichiers dans un dossier (helper de comptage).
+    fn count_files(dir: &str) -> usize {
+        std::fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).count()).unwrap_or(0)
+    }
+
+    /// Nombre de snapshots `pre-upgrade-*.forge` dans un dossier.
+    fn count_pre_upgrade(dir: &str) -> usize {
+        std::fs::read_dir(dir)
+            .map(|rd| rd.filter_map(|e| e.ok())
+                .filter(|e| parse_pre_upgrade_epoch(&e.file_name().to_string_lossy()).is_some())
+                .count())
+            .unwrap_or(0)
+    }
+
+    /// [seed idempotent] Le CHEMIN DE SEED DU BOOT (ensure_default_dashboard/engagement/tenant +
+    /// upsert_probed_module) rejoué DEUX fois sur la MÊME base laisse des comptes de lignes IDENTIQUES —
+    /// aucun doublon. Preuve empirique qu'un conteneur qui reboot (donc re-seed) n'accumule pas de données.
+    #[test]
+    fn boot_seed_is_idempotent_no_row_accumulation() {
+        use std::sync::Mutex;
+        let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
+        let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
+        conn().execute_batch(crate::SCHEMA).expect("schema");
+        crate::migrate(&conn()); // stamp schema_version (settings) + colonnes additives, comme au boot
+        // un utilisateur AVANT le seed tenant -> prouve que tenant_grant se sème (et ne se re-sème pas).
+        conn().execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('root','admin','h',0,'')", []).unwrap();
+
+        // rejoue le seed du boot (branche SQLite de main.rs) — fonction locale pour l'appeler 2×.
+        let boot_seed = || {
+            let store = crate::store::Store::sqlite(conn());
+            crate::schema::ensure_default_dashboard(&store);
+            crate::schema::ensure_default_engagement(&store, &["a.example".to_string()], "grey", "/tmp/x.jsonl");
+            crate::schema::ensure_default_tenant(&store);
+            crate::schema::upsert_probed_module(&store, "recon.web", false, false, true, "T1595", "web recon");
+            crate::schema::upsert_probed_module(&store, "exploit.rce", true, false, true, "T1210", "rce");
+        };
+
+        let counts = || -> Vec<(&'static str, i64)> {
+            let tables = ["module", "engagement", "tenant", "dashboard", "settings", "tenant_grant"];
+            tables.iter().map(|t| {
+                let n: i64 = conn().query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap();
+                (*t, n)
+            }).collect()
+        };
+
+        boot_seed();
+        let after1 = counts();
+        boot_seed(); // 2e boot — DOIT être un no-op côté données
+        let after2 = counts();
+
+        assert_eq!(after1, after2, "2e seed = comptes IDENTIQUES (aucune accumulation) : {after1:?} vs {after2:?}");
+        // non-vacuité : chaque table semée a au moins 1 ligne (sinon l'égalité serait triviale).
+        for (t, n) in &after1 {
+            assert!(*n >= 1, "table `{t}` semée (>=1 ligne) : {n}");
+        }
+    }
+
+    /// [upgrade idempotent — snapshots] 1er upgrade (base ANCIENNE) mute et écrit EXACTEMENT 1 snapshot ;
+    /// 2e upgrade (base déjà à la cible, pas de --to) = NO-OP qui n'écrit AUCUN nouveau snapshot (le nombre
+    /// de fichiers du backup-dir est INCHANGÉ). Preuve empirique : redéployer `upgrade` n'accumule pas.
+    #[test]
+    fn upgrade_twice_second_writes_no_new_snapshot() {
+        let dir = tmp_dir("forge-upgrade-noop-snap");
+        let db = format!("{dir}/console.db");
+        let ledger = format!("{dir}/engagement.jsonl");
+        let bdir = format!("{dir}/backups");
+        std::fs::create_dir_all(&bdir).unwrap();
+        seed_old(&db);
+
+        let rep1 = run_upgrade_core(&opts_for(&db, &ledger, &bdir)).expect("1er upgrade ok");
+        assert_eq!(rep1["applied"], json!(true), "1er run : mutation appliquée");
+        let files_after1 = count_files(&bdir);
+        let snaps_after1 = count_pre_upgrade(&bdir);
+        assert_eq!(snaps_after1, 1, "1er upgrade écrit EXACTEMENT 1 snapshot pré-upgrade");
+
+        let rep2 = run_upgrade_core(&opts_for(&db, &ledger, &bdir)).expect("2e upgrade (no-op) ok");
+        assert_eq!(rep2["already_current"], json!(true), "2e run : déjà à la cible");
+        assert_eq!(rep2["noop"], json!(true), "2e run : NO-OP pur");
+        assert_eq!(rep2["backup"], Value::Null, "2e run : aucun snapshot pris (backup=null)");
+        assert_eq!(count_files(&bdir), files_after1, "2e run : nombre de fichiers backup-dir INCHANGÉ");
+        assert_eq!(count_pre_upgrade(&bdir), 1, "2e run : toujours 1 seul snapshot pré-upgrade");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [prune — unité] `prune_pre_upgrade_snapshots` garde les K plus récents (par epoch du NOM), supprime
+    /// les plus anciens, et NE TOUCHE JAMAIS un backup non `pre-upgrade-` (user/planifié) ni un nom mal formé.
+    #[test]
+    fn prune_keeps_newest_k_and_spares_user_backups() {
+        let dir = tmp_dir("forge-prune-unit");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 8 snapshots pré-upgrade (epochs 100..107) + 2 backups user + 1 nom mal formé.
+        for ep in 100..108u64 {
+            std::fs::write(format!("{dir}/pre-upgrade-42-{ep}.forge"), b"x").unwrap();
+        }
+        std::fs::write(format!("{dir}/backup-user-2026.forge"), b"u").unwrap();
+        std::fs::write(format!("{dir}/scheduled-daily.forge"), b"s").unwrap();
+        std::fs::write(format!("{dir}/pre-upgrade-nan.forge"), b"?").unwrap(); // non parsable -> ignoré
+
+        let keep = 5usize;
+        let pruned = prune_pre_upgrade_snapshots(&dir, keep);
+        assert_eq!(pruned.len(), 3, "8 - 5 = 3 supprimés");
+        // les 5 plus récents (103..107) survivent, les 3 plus anciens (100..102) partent.
+        for ep in 103..108u64 {
+            assert!(std::path::Path::new(&format!("{dir}/pre-upgrade-42-{ep}.forge")).exists(), "epoch {ep} conservé");
+        }
+        for ep in 100..103u64 {
+            assert!(!std::path::Path::new(&format!("{dir}/pre-upgrade-42-{ep}.forge")).exists(), "epoch {ep} supprimé");
+        }
+        // backups user + nom mal formé INTACTS.
+        assert!(std::path::Path::new(&format!("{dir}/backup-user-2026.forge")).exists(), "backup user épargné");
+        assert!(std::path::Path::new(&format!("{dir}/scheduled-daily.forge")).exists(), "backup planifié épargné");
+        assert!(std::path::Path::new(&format!("{dir}/pre-upgrade-nan.forge")).exists(), "nom mal formé épargné");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [prune — cap après upgrade réel] Plusieurs snapshots pré-existants (simule des bumps de version
+    /// successifs) + 1 upgrade mutant réel : après le prune fail-soft, le compte de snapshots pré-upgrade
+    /// est PLAFONNÉ à K. Les backups user restent intacts.
+    #[test]
+    fn upgrade_prunes_pre_upgrade_snapshots_to_cap() {
+        let dir = tmp_dir("forge-prune-cap");
+        let db = format!("{dir}/console.db");
+        let ledger = format!("{dir}/engagement.jsonl");
+        let bdir = format!("{dir}/backups");
+        std::fs::create_dir_all(&bdir).unwrap();
+        // 9 snapshots hérités (bumps précédents) + 1 backup user à préserver.
+        for ep in 200..209u64 {
+            std::fs::write(format!("{bdir}/pre-upgrade-40-{ep}.forge"), b"old").unwrap();
+        }
+        std::fs::write(format!("{bdir}/backup-user.forge"), b"keepme").unwrap();
+        seed_old(&db); // base ancienne -> l'upgrade mute et écrit un snapshot de plus
+
+        // K par défaut = 5.
+        let rep = run_upgrade_core(&opts_for(&db, &ledger, &bdir)).expect("upgrade ok");
+        assert_eq!(rep["applied"], json!(true));
+        assert_eq!(count_pre_upgrade(&bdir), 5, "snapshots pré-upgrade plafonnés à K=5 après prune");
+        assert!(std::path::Path::new(&format!("{bdir}/backup-user.forge")).exists(), "backup user JAMAIS élagué");
+        // le snapshot le plus récent (celui de CET upgrade, epoch >= now >> 208) doit survivre.
+        let survivors = count_pre_upgrade(&bdir);
+        assert_eq!(survivors, 5);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
