@@ -3,6 +3,9 @@ import { $ } from '../../core/dom.js';
 import { MODULES } from '../modules.js';
 import { guardList } from '../../core/ui.js';
 
+// FALLBACK statique — utilisé UNIQUEMENT quand le moteur ne sert pas de `params_schema` pour le module
+// (ex : modules d'évasion browser-automation, dont le schéma vit côté client). Les modules qui déclarent
+// un `params_schema` (natifs nmap/nuclei, wrappers ToolSpec) sont rendus DYNAMIQUEMENT depuis ce schéma.
 export const MODULE_PARAMS = {
   'evasion.xhr': [
     { name: 'types', type: 'list', label: 'types (séparés par virgule)', placeholder: 'xhr, fetch, document' },
@@ -15,6 +18,28 @@ export const MODULE_PARAMS = {
     { name: 'tab', type: 'text', label: 'tab (onglet browser)', placeholder: 'default' },
   ],
 };
+
+// Convertit un `params_schema` SERVI par le moteur ({name,type,label,flag,allowed?,default?}) vers la
+// forme de champ interne consommée par le renderer ({name,type,label,options,value,placeholder}). Un
+// descripteur `select` dérive ses `options` de `allowed` ; `default` -> valeur pré-remplie ; un `flag`
+// mappé enrichit le placeholder (indication du drapeau CLI). Pur, tolérant (schéma vide -> []).
+export function schemaFields(schema) {
+  return (Array.isArray(schema) ? schema : []).filter(d => d && d.name).map(d => {
+    const f = { name: d.name, type: d.type || 'text', label: d.label || d.name };
+    if (d.type === 'select') f.options = (d.allowed || []).map(v => ({ value: String(v), label: String(v) }));
+    if (d.default != null) f.value = d.default;
+    if (d.flag) f.placeholder = d.type === 'list' ? `${d.flag ? '' : ''}tokens séparés par virgule` : (f.placeholder || '');
+    return f;
+  });
+}
+
+// Champs de params EFFECTIFS d'un module : le `params_schema` servi par le moteur PRIME (source unique) ;
+// à défaut (aucun schéma servi), on retombe sur le map statique MODULE_PARAMS (modules d'évasion).
+export function fieldsFor(m) {
+  const served = schemaFields(m && m.params_schema);
+  if (served.length) return served;
+  return MODULE_PARAMS[m && m.kind] || null;
+}
 
 // rendu de la liste de modules dans le formulaire : web_allowed=1 -> case cochable ;
 // exploit|destructive -> GRISÉE par défaut + mention « CLI/opérateur — activer l'opt-in ».
@@ -55,7 +80,7 @@ export function renderLaunchModules() {
     // ou dont l'outil est absent du host.
     const allowed = !disabledByAdmin && !disabledByAbsent && ((!!m.web_allowed && !highImpact) || (highImpact && hiOn));
     const armedHi = highImpact && allowed;   // module à fort impact débloqué par l'opt-in
-    const specs = (allowed && MODULE_PARAMS[m.kind]) || null;
+    const specs = (allowed && fieldsFor(m)) || null;
     const lab = document.createElement('label');
     lab.className = 'lc-modopt' + (allowed ? '' : ' disabled') + (disabledByAbsent ? ' unavail' : '') + (armedHi ? ' hi-armed' : '') + (specs ? ' has-params' : '');
     // ligne du haut : case + nom (+ mention bloquée / fort impact)

@@ -1784,7 +1784,7 @@ mod pg_tests {
             crate::schema::ensure_default_engagement(&s, &["a.example.com".to_string()], "grey", &eng_ledger.to_string_lossy());
             crate::schema::ensure_default_tenant(&s);
             // module catalog (populate_modules spawns python; here we seed one row via the shared upsert).
-            crate::schema::upsert_probed_module(&s, "recon.web", false, false, true, "T1595", "web recon");
+            crate::schema::upsert_probed_module(&s, "recon.web", false, false, true, "T1595", "web recon", "[]", "[]");
         }
         {
             let s = Store::postgres(m.lock().unwrap());

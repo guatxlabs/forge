@@ -31,13 +31,16 @@ pub(crate) fn modules_catalog(store: &crate::store::Store) -> Vec<Value> {
     // LENIENT read (`query_lax`) reproduces the pre-seam `query_map(..).filter_map(|r| r.ok())`
     // byte-for-byte: a malformed row is skipped, a prepare error yields an empty catalogue.
     store.query_lax(
-        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override \
+        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override,params_schema \
          FROM module ORDER BY kind",
         &[],
         |r| {
             let probed = r.get_i64(3)? != 0;
             let enabled = r.get_i64(7)? != 0;
             let override_bool: Option<bool> = r.get_opt_i64(8)?.map(|v| v != 0);
+            // params_schema : JSON stocké (liste de descripteurs) -> re-parsé pour l'UI ; illisible => [].
+            let params_schema: Value = serde_json::from_str(&r.get_opt_str(9)?.unwrap_or_default())
+                .unwrap_or_else(|_| json!([]));
             Ok(json!({
                 "kind": r.get_str(0)?,
                 "exploit": r.get_i64(1)? != 0,
@@ -49,6 +52,7 @@ pub(crate) fn modules_catalog(store: &crate::store::Store) -> Vec<Value> {
                 "enabled": enabled,                  // intention opérateur : connecteur (dés)installé
                 "available_override": match override_bool { Some(b) => Value::Bool(b), None => Value::Null },
                 "effective_available": module_effectively_available(enabled, override_bool, probed),
+                "params_schema": params_schema,      // schéma servi à l'UI (formulaire dynamique)
             }))
         },
     )

@@ -78,6 +78,7 @@ class ToolSpec:
         "attck_tactic", "proof_required", "bug_bounty_eligible", "exploit", "destructive", "cls",
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
+        "params_schema", "flag_allowlist",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -85,7 +86,7 @@ class ToolSpec:
                  bug_bounty_eligible=False, exploit=False, destructive=False, cls="", depends_on=(),
                  tools=(), docker_image="", prefer_docker=False, timeout=300, parser="lines",
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
-                 hit_is_asset=None, tool_name="", description=""):
+                 hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=()):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -113,6 +114,15 @@ class ToolSpec:
         self.hit_is_asset = hit_is_asset
         self.tool_name = tool_name or binary
         self.description = description
+        # SCHÉMA DE PARAMS (source unique servie à l'UI) : tuple de descripteurs
+        #   {name, type in (text|number|select|list|flag), label, flag (drapeau CLI mappé), allowed?, default?}
+        # ADDITIF : consommé par `forge modules --json` (→ console → formulaire dynamique). N'élargit
+        # AUCUNE capacité : les valeurs restent des ÉLÉMENTS d'argv (no-shell), et un `{args}` custom est
+        # borné par `flag_allowlist` (tout flag hors liste est REFUSÉ fail-closed, aucun processus lancé).
+        self.params_schema = tuple(params_schema)
+        # ALLOWLIST de drapeaux pour `{args}`/extra_args : ensemble EXACT des flags (`-x`/`--x`) qu'un
+        # opérateur peut passer en argument libre. Vide => aucun extra_arg drapeau accepté (fail-closed).
+        self.flag_allowlist = tuple(flag_allowlist)
 
     @property
     def asset_hits(self):
@@ -208,14 +218,89 @@ def unsafe_positional_target(spec, target, params=None):
     return _scan(spec.argv_template)
 
 
+# =================================================================================================
+#  EXTRA_ARGS / `{args}` — arguments libres GOUVERNÉS par une allowlist de drapeaux (fail-closed)
+# =================================================================================================
+def _looks_like_flag(tok):
+    """True si le token RESSEMBLE à un drapeau CLI (`-x`/`--x`) — donc soumis à l'allowlist. Un `-`
+    seul ou une valeur ordinaire (port/wordlist/nom de script) n'y ressemble pas. Ne lève jamais."""
+    t = str(tok)
+    return len(t) >= 2 and t.startswith("-")
+
+
+def check_extra_args(extra, allowlist):
+    """Valide `extra_args` (arguments libres de l'opérateur) contre une allowlist de drapeaux. FAIL-CLOSED.
+
+    Contrat (source unique, partagée par les wrappers ToolSpec ET les modules natifs nmap/nuclei) :
+      - `extra` absent/None                        -> (None, [])            : no-op (byte-identique au défaut).
+      - `extra` PAS une liste/tuple                -> (raison, [])          : REFUS (doit être une LISTE de
+                                                                              tokens déjà séparés — jamais une
+                                                                              chaîne shell-splittée).
+      - un élément non-string ou porteur d'un NUL  -> (raison, [])          : REFUS.
+      - un token RESSEMBLANT à un drapeau (`-x`)   -> DOIT être EXACTEMENT dans `allowlist`, sinon REFUS.
+        (la forme `--flag=val` n'est jamais dans l'allowlist -> REFUSÉE : imposer `--flag val` en 2 tokens ;
+        ferme AUSSI l'injection d'argument — un token-valeur commençant par `-` est un drapeau non listé
+        => refusé, comme `unsafe_positional_target` le fait pour la cible positionnelle.)
+    Retourne `(reason_or_None, tokens)`. `tokens` n'est JAMAIS renvoyé si une raison est présente ([]).
+    Pur, ne lève jamais. Chaque token validé reste UN SEUL élément d'argv (no-shell)."""
+    if extra is None:
+        return None, []
+    if not isinstance(extra, (list, tuple)):
+        return ("extra_args doit être une LISTE de tokens déjà séparés (pas une chaîne, "
+                "jamais de découpe shell)"), []
+    allow = set(allowlist or ())
+    tokens = []
+    for el in extra:
+        if not isinstance(el, str):
+            return (f"token extra_args non-string refusé: {el!r}"), []
+        if "\x00" in el:
+            return "token extra_args contient un octet NUL (refusé)", []
+        if _looks_like_flag(el) and el not in allow:
+            return (f"drapeau '{el}' hors allowlist — refusé fail-closed (aucun processus lancé) ; "
+                    f"utiliser un flag autorisé ou la forme `--flag val` en deux tokens"), []
+        tokens.append(el)
+    return None, tokens
+
+
+_SAFE_VALUE_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9,._:/*-]*$")
+
+
+def safe_value(val):
+    """True si `val` est une VALEUR d'argv sûre à passer à un drapeau : chaîne non vide, ne COMMENCE PAS
+    par '-' (anti option-smuggling), caractères bornés (alphanum + `, . _ : / * -`). Sert aux modules
+    NATIFS (nmap/nuclei) à valider les valeurs de params mappées à un flag (ports/scripts/…) — une valeur
+    hostile (`-oN`, métacaractère shell) est REJETÉE. Pur, ne lève jamais."""
+    return bool(isinstance(val, str) and val and _SAFE_VALUE_RX.match(val))
+
+
+def unsafe_extra_args(spec, params=None):
+    """Garde-fou fail-closed AVANT tout lancement : renvoie la RAISON de refus si `params['extra_args']`
+    contient un token invalide/non-allowlisté pour ce spec, sinon None. Adosse `check_extra_args` à la
+    `flag_allowlist` du spec (vide => tout extra_arg drapeau est refusé). Pur, ne lève jamais."""
+    reason, _ = check_extra_args((params or {}).get("extra_args"), spec.flag_allowlist)
+    return reason
+
+
+def _safe_extra_tokens(allowlist, params):
+    """Tokens extra_args VALIDÉS (list[str]) à insérer dans l'argv, ou [] si absent/INVALIDE. build_argv
+    ne lève jamais : c'est le garde-fou de fire() (`unsafe_extra_args`) qui REFUSE le lancement avant que
+    ces tokens ne comptent. Ici on ne fait qu'EXPANDRE ce qui est déjà prouvé sûr."""
+    _, tokens = check_extra_args((params or {}).get("extra_args"), allowlist)
+    return tokens
+
+
 def build_argv(spec, target, params=None):
     """Construit l'argv FIXE (list[str]) à partir du gabarit du spec — SANS SHELL. Chaque placeholder
     devient un/des élément(s) d'argv distinct(s) ; une cible avec métacaractères shell reste UN élément.
     Un GROUPE (token itérable) est tout-ou-rien : abandonné en bloc si un placeholder requis manque
-    (évite un flag orphelin). Pur, ne lève jamais."""
+    (évite un flag orphelin). Le token spécial `{args}` s'EXPAND en les tokens extra_args VALIDÉS
+    (allowlist du spec) — chaque élément reste UN argv distinct, jamais shell-splitté. Pur, ne lève jamais."""
     ctx = {"target": target, "params": params or {}}
     argv = []
     for elem in spec.argv_template:
+        if isinstance(elem, str) and elem.strip() == "{args}":  # EXPANSION extra_args gouvernée
+            argv.extend(_safe_extra_tokens(spec.flag_allowlist, params))
+            continue
         if isinstance(elem, (list, tuple)):                   # GROUPE tout-ou-rien
             resolved = [_resolve_token(t, ctx) for t in elem]
             if any(r is None for r in resolved):
@@ -347,6 +432,16 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                 evidence=(f"La cible positionnelle résolue {bad!r} commence par '-' et pourrait être lue "
                           f"comme une option par '{s.binary}'. Refusé fail-closed (aucun processus lancé) ; "
                           f"fournir un schéma explicite (http://) ou passer la cible via un flag dédié."))]
+        # (1c) EXTRA_ARGS GOUVERNÉS — un argument libre (`{args}`/params.extra_args) doit être une LISTE
+        # de tokens et chaque drapeau (`-x`) DOIT être dans l'allowlist du spec. Un flag hors liste (ex
+        # `-oN`, `--script=<rce>`) ou une chaîne non-liste est REFUSÉ fail-closed (aucun processus lancé) :
+        # ni le shell (argv fixe) ni l'injection d'argument (allowlist stricte) ne peuvent passer.
+        bad_extra = unsafe_extra_args(s, action.params)
+        if bad_extra is not None:
+            return [self._mk(
+                action, status="skipped",
+                title=f"{self.kind} non exécuté — argument libre refusé (allowlist de drapeaux fail-closed)",
+                evidence=(f"extra_args refusé : {bad_extra}. Aucun processus lancé (fail-closed)."))]
         # (2) PLANCHER EXPLOIT (défense en profondeur) — classe exploit + scope lié + opt-in non armé -> refus.
         if s.exploit:
             scope, armed = self._bound_allow_exploit()
@@ -444,6 +539,8 @@ def make_module(spec):
         "spec": spec, "kind": spec.kind, "exploit": bool(spec.exploit),
         "destructive": bool(spec.destructive), "mitre": spec.mitre, "cwe": spec.cwe,
         "_toolname": spec.tool_name,
+        # SCHÉMA de params servi à l'UI (via `forge modules --json`) + allowlist de drapeaux extra_args.
+        "PARAMS_SCHEMA": list(spec.params_schema), "FLAG_ALLOWLIST": tuple(spec.flag_allowlist),
         "description": spec.description or (
             f"Wrapper gouverné de l'outil externe '{spec.binary}' ({spec.vuln_class}) — argv fixe "
             f"no-shell, scope-guard fail-closed, proof-oriented (reported_by_tool), dégrade si absent."),
