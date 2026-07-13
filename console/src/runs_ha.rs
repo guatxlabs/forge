@@ -225,6 +225,7 @@ pub(crate) struct RunSpawnSpec {
     pub(crate) selection: Value,              // technique_selection résolue
     pub(crate) disabled_modules: Vec<String>,
     pub(crate) body_targets: Value,           // body["targets"] d'origine (colonne run_job.targets + ledger)
+    pub(crate) rate: Option<i64>,             // débit req/s OPT-IN (override per-run) : None => défaut 5, byte-identique
 }
 
 impl RunSpawnSpec {
@@ -238,7 +239,7 @@ impl RunSpawnSpec {
             "exhaustive": self.exhaustive, "auto_pentest": self.auto_pentest, "reason": self.reason,
             "arm": self.arm, "high_impact": self.high_impact, "started_by": self.started_by,
             "actor": self.actor, "selection": self.selection, "disabled_modules": self.disabled_modules,
-            "body_targets": self.body_targets,
+            "body_targets": self.body_targets, "rate": self.rate,
         })
     }
 
@@ -269,6 +270,7 @@ impl RunSpawnSpec {
             selection: v.get("selection").cloned().unwrap_or_else(|| json!({})),
             disabled_modules: scope_json_list(v, "disabled_modules"),
             body_targets: v.get("body_targets").cloned().unwrap_or_else(|| json!([])),
+            rate: v.get("rate").and_then(|x| x.as_i64()),
         })
     }
 }
@@ -594,7 +596,7 @@ mod wave_b_tests {
             module_params: serde_json::json!({}), mode: "propose".into(), budget: None, exhaustive: false,
             auto_pentest: false, reason: String::new(), arm: false, high_impact: false,
             started_by: "op".into(), actor: "op".into(), selection: serde_json::json!({}),
-            disabled_modules: vec![], body_targets: serde_json::json!([]),
+            disabled_modules: vec![], body_targets: serde_json::json!([]), rate: None,
         }
     }
 
@@ -625,6 +627,7 @@ mod wave_b_tests {
             selection: serde_json::json!({"profile": "bug_bounty", "categories": {"idor": true}, "techniques": {}}),
             disabled_modules: vec!["sqlmap".into()],
             body_targets: serde_json::json!(["a.example.com", "b.example.com"]),
+            rate: Some(25),
         };
         let round = RunSpawnSpec::from_value(&spec.to_value()).expect("reconstruct");
         assert_eq!(round.run_id, spec.run_id);
@@ -648,6 +651,7 @@ mod wave_b_tests {
         assert_eq!(round.selection, spec.selection);
         assert_eq!(round.disabled_modules, spec.disabled_modules);
         assert_eq!(round.body_targets, spec.body_targets);
+        assert_eq!(round.rate, spec.rate);
         // blob corrompu -> None (le leader marque failed et passe au suivant).
         assert!(RunSpawnSpec::from_value(&serde_json::json!({"garbage": 1})).is_none(), "spec sans run_id/eng_id => None");
     }

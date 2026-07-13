@@ -36,6 +36,7 @@ from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
 from .. import runner
 from .. import techniques
+from ..challenge import looks_like_challenge
 
 _MISSING = object()                      # sentinelle : placeholder requis manquant -> token abandonné
 _MAX_HITS = 200                          # borne le nombre de findings émis par exécution (anti-flood)
@@ -480,10 +481,14 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         if findings:
             return findings
         # Aucun hit : outil exécuté sans résultat. rc!=0 sans hit -> finding d'échec traçable (tested INFO).
+        # RATE-LIMIT / WAF : une sortie portant une signature de challenge (429/WAF) est SIGNALÉE dans le
+        # titre (au lieu d'un « aucun hit » trompeur) — l'opérateur voit que le scan a été throttlé/bloqué.
         if rc != 0:
+            blocked = looks_like_challenge(None, (out or "") + " " + (err or ""))
+            note = " — rate-limited/WAF détecté dans la sortie" if blocked else ", aucun hit exploitable"
             return [self._mk(
                 action, status="tested",
-                title=f"{self.kind} — {s.binary} rc={rc}, aucun hit exploitable",
+                title=f"{self.kind} — {s.binary} rc={rc}{note}",
                 evidence=((err or out) or f"rc={rc}").strip()[:500])]
         return [self._mk(
             action, status="tested", title=f"{self.kind} — {s.tool_name}: aucun hit",

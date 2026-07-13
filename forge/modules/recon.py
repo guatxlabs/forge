@@ -8,6 +8,18 @@ from .. import runner
 from .toolspec import check_extra_args, safe_value
 
 
+def _rate_flag(params):
+    """Débit req/s (entier positif) depuis params['rate'], ou None (aucun drapeau -> byte-identique au
+    défaut). Le débit n'est PRÉSENT que si l'opérateur l'a fixé (module_params) — jamais injecté par
+    défaut sur les outils natifs. Ne lève jamais."""
+    r = (params or {}).get("rate")
+    try:
+        n = int(r)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 @register("recon.httpx")
 class HttpxFingerprint(Module):
     kind = "recon.httpx"
@@ -17,14 +29,18 @@ class HttpxFingerprint(Module):
     BIN, IMG = "httpx", "projectdiscovery/httpx"
     available = property(lambda self: runner.available("httpx", "projectdiscovery/httpx", prefer_docker=True))
 
-    def _args(self, target):
-        return ["-u", target, "-silent", "-status-code", "-title", "-tech-detect", "-json", "-no-color"]
+    def _args(self, action):
+        argv = ["-u", action.target, "-silent", "-status-code", "-title", "-tech-detect", "-json", "-no-color"]
+        rate = _rate_flag(action.params)                 # débit -> -rl <n> (opt-in ; absent = rien)
+        if rate is not None:
+            argv += ["-rl", str(rate)]
+        return argv
 
     def dry(self, action):
-        return runner.cmdline(self.BIN, self.IMG, self._args(action.target), prefer_docker=True)
+        return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
     def fire(self, action):
-        rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action.target), timeout=60, prefer_docker=True)
+        rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action), timeout=60, prefer_docker=True)
         failed = self.tool_failed(action, rc, out, err, "httpx")
         if failed:
             return [failed]
@@ -90,6 +106,9 @@ class NmapServices(Module):
                     argv.append(f"-T{t}")
             except (TypeError, ValueError):
                 pass
+        rate = _rate_flag(p)                              # débit -> --max-rate <n> (opt-in ; absent = rien)
+        if rate is not None:
+            argv += ["--max-rate", str(rate)]
         _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)  # tokens VALIDÉS (fire gate en amont)
         argv += extra
         argv.append(action.target)                            # cible en POSITIONNEL (dernier)

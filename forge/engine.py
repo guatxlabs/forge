@@ -18,6 +18,7 @@ from .graph import EngagementGraph
 from . import modules as mods
 from . import purple
 from . import session
+from . import throttle
 
 if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
     from collections.abc import Callable, Iterable
@@ -50,9 +51,31 @@ _SCOPE_INJECT_KINDS = frozenset({
     "access_control.idor", "access_control.privesc", "auth.takeover", "cors.credentials",
 })
 
+def _oracle_rate_kinds():
+    """Kinds à HTTP-oracle (sous-classes `Oracle`) : leur trafic sortant passe par `Oracle._http` et
+    respecte donc le THROTTLE du scope (rate). DÉRIVÉ du registre — aucune liste à maintenir à la main
+    (un nouvel oracle @register est couvert automatiquement). Ne lève jamais (registre indisponible -> ∅)."""
+    try:
+        from .modules.oracle import Oracle
+        return frozenset(k for k in mods.kinds() if isinstance(mods.get(k), Oracle))
+    except Exception:                                        # noqa: BLE001
+        return frozenset()
+
+
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour
-# que le module borne son trafic (ex: ffuf -rate). Additif (setdefault) : n'écrase jamais un param posé.
-_RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"})
+# que le module borne son trafic. Deux familles : (1) les modules de découverte active qui passent `rate`
+# à leur outil (ex: ffuf -rate) ; (2) TOUS les oracles à HTTP (`Oracle._http`) qui respectent le throttle
+# min-interval du moteur. Additif (setdefault) : n'écrase jamais un param posé. rate<=0/absent => no-op.
+_RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"}) | _oracle_rate_kinds()
+
+# Kinds d'OUTILS (natifs + wrappers) dont un DRAPEAU CLI de débit est piloté par `rate` (nmap --max-rate,
+# nuclei -rl, httpx -rl, naabu -rate, masscan --rate, feroxbuster --rate-limit, sqlmap/wfuzz/dalfox/
+# gobuster --delay dérivé). Le débit y est injecté UNIQUEMENT sur override EXPLICITE (`scope.rate_explicit`)
+# -> sans override, aucun drapeau n'est ajouté (argv BYTE-IDENTIQUE au défaut ; masscan garde --rate 1000).
+_RATE_FLAG_KINDS = frozenset({
+    "recon.nmap", "web.nuclei", "recon.httpx", "recon.naabu", "recon.masscan", "recon.feroxbuster",
+    "sqli.sqlmap", "fuzz.wfuzz", "xss.dalfox", "recon.gobuster_dns",
+})
 
 
 class Verdict(enum.Enum):
@@ -210,8 +233,16 @@ class Engine:
             # attachent le matériel d'auth SECRET aux requêtes IN-SCOPE via les chokepoints HTTP partagés.
             # Rien de secret ne transite par les findings ni le ledger (le matériel n'est que dans la
             # requête sortante). Le contexte est restauré en sortie même en cas d'exception.
-            with session.using(self.sessions):
+            # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
+            # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
+            # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
+            with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions):
                 raw = module.fire(action) or []
+            # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur
+            # « rate-limited » (au lieu d'empties silencieux) dans les raisons de la décision (anti-masquage).
+            if _bucket is not None and getattr(_bucket, "blocked", 0):
+                decision.reasons = list(decision.reasons) + [
+                    f"rate-limited: {_bucket.blocked} réponse(s) 429/WAF après back-off (débit {_bucket.rate:g}/s)"]
             new = []
             for f in raw:
                 if self.memory is not None and not self.memory.store(f):
@@ -335,6 +366,24 @@ class Engine:
                 a.params.setdefault("out_scope", self.scope.out_scope)
             if a.kind in _RATE_LIMITED_KINDS:                # débit ROE -> borne le trafic actif du module
                 a.params.setdefault("rate", self.scope.rate)
+            elif getattr(self.scope, "rate_explicit", False) and a.kind in _RATE_FLAG_KINDS:
+                # OUTIL avec drapeau de débit : injecté SEULEMENT sur override explicite (byte-identique sinon)
+                a.params.setdefault("rate", self.scope.rate)
+
+        # DÉRIVÉES D'UNITÉ du débit (pour les wrappers dont le drapeau est un DÉLAI par requête, pas un
+        # req/s : sqlmap/wfuzz `--delay/-s` en secondes, dalfox `--delay` en ms, gobuster `--delay` en
+        # durée Go). Calculées depuis `rate` (req/s) UNIQUEMENT si présent+positif ; setdefault (n'écrase
+        # rien). Absent => aucune dérivée => les groupes `{param:rate_delay_*}` sont abandonnés (byte-identique).
+        for a in actions:
+            r = a.params.get("rate")
+            try:
+                rf = float(r)
+            except (TypeError, ValueError):
+                rf = 0.0
+            if rf > 0:
+                a.params.setdefault("rate_delay_s", f"{1.0 / rf:.3f}")
+                a.params.setdefault("rate_delay_ms", str(max(1, round(1000.0 / rf))))
+                a.params.setdefault("rate_delay_dur", f"{max(1, round(1000.0 / rf))}ms")
         return actions
 
     def campaign(self, targets: list[Target], brain: Any, planner: Planner,

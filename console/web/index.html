@@ -156,6 +156,10 @@
         <label style="flex:0 0 auto"><span class="lc-lbl">Budget (optionnel)</span>
           <input id="lc-budget" type="number" min="0" step="1" placeholder="∞" style="width:110px">
         </label>
+        <label style="flex:0 0 auto" title="Débit req/s (optionnel) : throttle les oracles HTTP + passe le drapeau de débit aux outils (nmap --max-rate, nuclei -rl, masscan --rate…). Vide = défaut (aucun drapeau de débit ajouté).">
+          <span class="lc-lbl">Débit req/s (optionnel)</span>
+          <input id="lc-rate" type="number" min="1" step="1" placeholder="illimité" style="width:110px">
+        </label>
       </div>
       <label><span class="lc-lbl">Cibles (une par ligne — hostname ou IP/CIDR, ⊆ scope serveur)</span>
         <textarea id="lc-targets" rows="3" spellcheck="false" placeholder="guatx.com&#10;192.0.2.0/24"></textarea>

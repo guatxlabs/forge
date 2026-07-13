@@ -65,6 +65,11 @@ export async function submitRun(e) {
   // params spécifiques par module : { kind: {...} } — uniquement pour les modules cochés (⊆ modules[]).
   const moduleParams = collectModuleParams();
   if (Object.keys(moduleParams).length) body.module_params = moduleParams;
+  // DÉBIT (rate-limit) OPT-IN : si renseigné (>0), thread top-level `rate`. Le serveur l'écrit dans
+  // scope.json (throttle des oracles HTTP) et pose `rate_explicit` -> le moteur ajoute les drapeaux de
+  // débit aux outils (nmap --max-rate, nuclei -rl, masscan --rate…). Vide => rien (byte-identique).
+  const rateRaw = ($('#lc-rate') && $('#lc-rate').value || '').trim();
+  if (rateRaw !== '') { const rn = Number(rateRaw); if (!Number.isNaN(rn) && rn > 0) body.rate = Math.floor(rn); }
   const budgetRaw = ($('#lc-budget') && $('#lc-budget').value || '').trim();
   if (budgetRaw !== '') { const b = Number(budgetRaw); if (!Number.isNaN(b)) body.budget = b; }
   if (reason) body.reason = reason.slice(0, 200);
