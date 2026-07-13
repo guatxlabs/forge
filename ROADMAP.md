@@ -70,6 +70,21 @@
 ## Possible next (not scheduled — product decision)
 - **Finding-triage workflow.** Forge is already a workflow engine on the *execution* axis (planner + iterative plan→observe→replan campaign over an `EngagementGraph` + governance state machine + `workflows.js`). It is NOT a *finding-triage* workflow: a lifecycle over findings (e.g. new→triaging→retesting→reported→closed) with allowed transitions, ownership routing, and notifications. The substrate exists (`status`, `assignee`, ledger, SSE event bus, saved-views, presence) — this is the natural next feature if a triage lifecycle is wanted.
 
+## Operator experience (UX) — UI-first, "one docker compose up"
+
+Goal (owner-driven): a red-teamer does **everything in the web UI** — no hand-edited JSON, no CLI pre-steps, no plaintext `.env` next to the app.
+
+### Shipped
+- **Zero-pre-step onboarding** (`55b5d03`) — `docker compose up` with NO host files → the wizard (5 steps) creates the admin AND sets the first engagement's scope/ROE in the browser. Mounted `scope.json` is now optional; no `useradd`.
+- **Rename `forge-console` → `forge`** (`cb55511`) — the app IS the console/UI; binary + compose service + image + k8s + docs all `forge` (DB `forge.db`). `docker compose exec forge forge <cmd>`.
+
+### Planned (in build order)
+- **Rich per-run tool arguments in the UI** — many tools (nmap, fuzzers, nuclei, ffuf…) are heavily parameterized; the operator must be able to launch a **fully-custom nmap / fuzz** (rules, scripts, many args) from the UI, not a fixed argv template. Needs: a per-tool params→argv schema + a UI form + a safe custom-flag path (allowlist / no shell-injection). ToolSpec `argv_template` + `action.params` are the substrate.
+- **Rate-limit awareness & control** — real findings come after many tool iterations, often blocked by rate limits. Needs: `scope.rate` → propagate to the wrapped tools (nmap `--max-rate`/`-T`, ffuf `-rate`, nuclei `-rl`, httpx `-rl`, sqlmap `--delay`), an engine throttle, and **429/WAF detection → back-off** surfaced in the run.
+- **Tool/plugin install from the UI** (P4) — `POST /api/tools` (admin-gated, ledgered) taking a ToolSpec JSON (or, high-trust, a `.py` plugin) → server-managed dir + hot-reload. The ToolSpec loader/`register_spec` already exist; needs the endpoint + a form.
+- **In-UI governed `forge` command console** (P5) — an admin-only, **allowlisted** command runner (`status`/`upgrade`/`ledger verify`/…, no free-form shell), output streamed like runs — removes `docker compose exec` for common ops.
+- **Secrets without a plaintext `.env`** (P6) — `*_FILE` env indirection (Docker/k8s secrets) + UI write-only settings for token/backup-passphrase/connector creds (detection & SSO secrets are already UI write-only). "The key shouldn't sit next to the door."
+
 ## Accepted as-is (deliberate, not backlog)
 
 - **`main.rs` router-integration tests (~25) stay in `main.rs`.** The code-quality audit redistributed the cleanly-homed tests (backup/dbmigrate/cli); the remaining ones drive `build_router` end-to-end through a shared helper web — they are genuine main.rs integration tests, not misplaced unit tests. Moving them would be artificial. (A `tests/` integration dir is awkward for a binary crate.)
