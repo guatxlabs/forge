@@ -163,6 +163,9 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         other => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_mode", "why": format!("mode '{other}' invalide (propose|auto)")}))),
     };
     let budget = body.get("budget").and_then(|v| v.as_f64());
+    // DÉBIT (rate-limit) OPT-IN per-run : entier positif -> écrit dans scope.json (throttle oracle +
+    // drapeaux de débit des outils). Absent/invalide/<=0 => None => défaut 5 (byte-identique). Borné.
+    let rate: Option<i64> = body.get("rate").and_then(|v| v.as_i64()).filter(|n| *n > 0 && *n <= 100_000);
     let exhaustive = body.get("exhaustive").and_then(|v| v.as_bool()).unwrap_or(false);
     // --auto-pentest : MODE PENTEST AUTOMATISÉ — balaie TOUTES les techniques ACTIVÉES du scope à
     // travers la surface découverte (recon -> chaînage -> oracles), gouverné À L'IDENTIQUE d'un run
@@ -220,6 +223,7 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         selection,
         disabled_modules,
         body_targets: body.get("targets").cloned().unwrap_or(json!([])),
+        rate,
     };
 
     // ─── BRANCHEMENT RUN-LEADER (HA #10 Wave B) ──────────────────────────────────────────────────────

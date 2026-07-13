@@ -60,6 +60,12 @@ class NucleiScan(Module):
         tags = p.get("tags")
         if tags is not None and safe_value(str(tags)):
             argv += ["-tags", str(tags)]
+        try:                                              # débit -> -rl <n> (opt-in ; absent = rien)
+            rl = int(p.get("rate"))
+            if rl > 0:
+                argv += ["-rl", str(rl)]
+        except (TypeError, ValueError):
+            pass
         _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)  # tokens VALIDÉS (fire gate en amont)
         argv += extra
         argv += ["-jsonl", "-silent", "-no-color"]

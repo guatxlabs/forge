@@ -164,7 +164,10 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
         "mode": spec.eng_mode,
         "in_scope": spec.targets,
         "out_scope": spec.eng_scope_out,
-        "rate": 5,
+        // DÉBIT : override per-run si fourni (throttle oracle + drapeaux de débit outils), sinon défaut 5.
+        // `rate_explicit` gate l'ajout des drapeaux CLI aux sous-process (byte-identique sans override).
+        "rate": spec.rate.unwrap_or(5),
+        "rate_explicit": spec.rate.is_some(),
         "allow_exploit": spec.high_impact,
         "allow_destructive": spec.high_impact,
         "known_creds": [],

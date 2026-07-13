@@ -24,8 +24,37 @@ import urllib.request
 from ._scopeguard import ScopeGuardMixin
 from .registry import Module
 from .. import session as _session
+from .. import throttle as _throttle
 
 _MAX_REDIRECTS = 5               # borne du suivi de redirection scope-checké opt-in (anti-boucle)
+_MAX_BACKOFF = 3                 # borne des ré-essais 429/503 (back-off exponentiel, JAMAIS infini)
+_BACKOFF_BASE = 0.5             # délai initial du back-off (s) si pas de Retry-After
+_BACKOFF_CAP = 8.0             # plafond du délai de back-off / d'un Retry-After honoré (s)
+
+
+def _is_throttled(err):
+    """True si une HTTPError est une réponse de THROTTLING/WAF (429 Too Many Requests / 503). Ne lève jamais."""
+    try:
+        return err.code in (429, 503)
+    except Exception:            # noqa: BLE001
+        return False
+
+
+def _retry_after(err, fallback):
+    """Délai de back-off (s) : `Retry-After` (secondes entières) s'il est lisible, sinon `fallback`.
+    Une date HTTP (format non-numérique) est ignorée -> fallback. Borné à `_BACKOFF_CAP`. Ne lève jamais."""
+    ra = None
+    try:
+        ra = err.headers.get("Retry-After")
+    except Exception:            # noqa: BLE001
+        ra = None
+    delay = fallback
+    if ra:
+        try:
+            delay = float(int(str(ra).strip()))
+        except (TypeError, ValueError):
+            delay = fallback
+    return max(0.0, min(delay, _BACKOFF_CAP))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -140,43 +169,61 @@ class Oracle(Module):
         caller_headers = dict(headers or {})
         payload = data.encode("utf-8") if isinstance(data, str) else data
         store = _session.current()
+        bucket = _throttle.current()             # THROTTLE lié par l'engine autour de fire() ; None => no-op
         cur_url, cur_method, cur_payload = url, method, payload
         for _hop in range(_MAX_REDIRECTS + 1):
             req_headers = dict(caller_headers)
             if store is not None:                    # scope-guard PAR-URL : {} si url courante hors-scope
                 for k, v in store.headers_for(cur_url).items():
                     req_headers.setdefault(k, v)     # les en-têtes explicites de l'appelant priment
-            req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
-            try:
-                with Oracle._raw_open(req, timeout=timeout) as r:
-                    return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
-            except urllib.error.HTTPError as e:
-                # une 3xx remonte ici (opener no-follow). Suivi SCOPE-CHECKÉ opt-in uniquement.
-                if follow_redirects and 300 <= e.code < 400:
-                    loc = None
-                    try:
-                        loc = e.headers.get("Location")
-                    except Exception:            # noqa: BLE001
-                        loc = None
-                    nxt = _redirect_target(cur_url, loc, store)
-                    if nxt is not None:
-                        if _host_of(nxt) != _host_of(cur_url):
-                            # saut CROSS-ORIGIN : on NE re-poste JAMAIS le secret de l'appelant vers le
-                            # nouvel hôte ; la session gouvernée du nouvel hôte (scope-guardée) sera
-                            # re-fusionnée au tour suivant via headers_for(nxt).
-                            caller_headers = {k: v for k, v in caller_headers.items()
-                                              if k.lower() not in ("cookie", "authorization")}
-                        if e.code not in (307, 308):         # 301/302/303 -> GET sans corps (convention)
-                            cur_method, cur_payload = "GET", None
-                        cur_url = nxt
-                        continue
-                # pas de suivi (défaut, hors-scope, sans scope lié, ou budget épuisé) : 3xx telle quelle.
+            # BACK-OFF 429/503 borné : re-tente la MÊME requête après Retry-After / back-off exponentiel,
+            # SANS consommer un hop de redirection. Le throttle (min-interval) s'applique avant CHAQUE tir.
+            backoff_left, backoff_delay, e = _MAX_BACKOFF, _BACKOFF_BASE, None
+            while True:
+                if bucket is not None:
+                    bucket.wait()                    # respect du débit (rate) avant chaque requête sortante
+                req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
                 try:
-                    return e.code, "", e.headers
+                    with Oracle._raw_open(req, timeout=timeout) as r:
+                        return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
+                except urllib.error.HTTPError as he:
+                    e = he
+                    if backoff_left > 0 and _is_throttled(he):
+                        _throttle._sleep(_retry_after(he, backoff_delay))   # attendre (Retry-After ou exp)
+                        backoff_left -= 1
+                        backoff_delay = min(backoff_delay * 2, _BACKOFF_CAP)
+                        continue                     # RE-tente (budget borné : jamais infini)
+                    break                            # succès impossible : gérer redirection/throttling ci-dessous
+                except Exception:                # noqa: BLE001  (réseau hostile : on ne crashe pas)
+                    return None, "", None
+            # e est une HTTPError (3xx no-follow, ou 4xx/5xx dont un 429/503 persistant après back-off).
+            if follow_redirects and 300 <= e.code < 400:
+                loc = None
+                try:
+                    loc = e.headers.get("Location")
                 except Exception:            # noqa: BLE001
-                    return e.code, "", None
-            except Exception:                # noqa: BLE001  (réseau hostile : on ne crashe pas)
-                return None, "", None
+                    loc = None
+                nxt = _redirect_target(cur_url, loc, store)
+                if nxt is not None:
+                    if _host_of(nxt) != _host_of(cur_url):
+                        # saut CROSS-ORIGIN : on NE re-poste JAMAIS le secret de l'appelant vers le
+                        # nouvel hôte ; la session gouvernée du nouvel hôte (scope-guardée) sera
+                        # re-fusionnée au tour suivant via headers_for(nxt).
+                        caller_headers = {k: v for k, v in caller_headers.items()
+                                          if k.lower() not in ("cookie", "authorization")}
+                    if e.code not in (307, 308):         # 301/302/303 -> GET sans corps (convention)
+                        cur_method, cur_payload = "GET", None
+                    cur_url = nxt
+                    continue
+            # THROTTLING PERSISTANT (429/503 après back-off) : marque le bucket -> l'engine surface un
+            # marqueur « rate-limited » au run (au lieu d'empties silencieux). Puis la réponse telle quelle.
+            if _is_throttled(e) and bucket is not None:
+                bucket.mark_blocked()
+            # pas de suivi (défaut, hors-scope, sans scope lié, ou budget épuisé) : réponse telle quelle.
+            try:
+                return e.code, "", e.headers
+            except Exception:            # noqa: BLE001
+                return e.code, "", None
         return None, "", None                # budget de redirections épuisé (défense en profondeur)
 
     # --- fetch (status, body) PARTAGÉ (seam `_fetch` monkeypatché par les tests) ---

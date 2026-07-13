@@ -56,7 +56,7 @@ CATALOG_SPECS = [
         description="Résolution/énumération DNS (dnsx) — enregistrements A/hosts, assets re-validés scope."),
     ToolSpec(
         kind="recon.naabu", vuln_class="PortScan", binary="naabu",
-        argv_template=("-silent", "-host", "{target_host}"),
+        argv_template=("-silent", "-host", "{target_host}", ("-rate", "{param:rate}")),
         mitre="T1046", phase="recon", capability="active", attck_tactic="Discovery",
         depends_on=(), docker_image="projectdiscovery/naabu", parser="lines",
         hit_status="tested", severity="INFO",
@@ -83,7 +83,8 @@ CATALOG_SPECS = [
         description="Crawler web (gospider) — URLs découvertes, re-validées scope fail-closed."),
     ToolSpec(
         kind="recon.feroxbuster", vuln_class="ContentDiscovery", binary="feroxbuster",
-        argv_template=("--silent", "-u", "{target_url}", ("-w", "{param:wordlist}")),
+        argv_template=("--silent", "-u", "{target_url}", ("-w", "{param:wordlist}"),
+                       ("--rate-limit", "{param:rate}")),
         mitre="T1595.003", phase="recon", capability="active", attck_tactic="Reconnaissance",
         depends_on=("recon.httpx",), parser="regex", parser_regex=r"https?://\S+",
         hit_status="tested", severity="INFO",
@@ -132,7 +133,7 @@ CATALOG_SPECS = [
     ToolSpec(
         kind="xss.dalfox", vuln_class="XSS", binary="dalfox",
         argv_template=("url", "{target_url}", "--only-poc", "--silence",
-                       ("-p", "{param:param}")),
+                       ("-p", "{param:param}"), ("--delay", "{param:rate_delay_ms}")),
         cwe="CWE-79", mitre="T1059", phase="access", capability="active", attck_tactic="Execution",
         depends_on=("recon.js_endpoints",), parser="regex", parser_regex=r"(?m)^\[POC\].*$",
         hit_status="reported_by_tool", severity="LOW", hit_is_asset=False,
@@ -142,7 +143,8 @@ CATALOG_SPECS = [
     ToolSpec(
         kind="sqli.sqlmap", vuln_class="SQLi", binary="sqlmap",
         argv_template=("-u", "{target_url}", "--batch",
-                       ("--level", "{param:level:1}"), ("--risk", "{param:risk:1}")),
+                       ("--level", "{param:level:1}"), ("--risk", "{param:risk:1}"),
+                       ("--delay", "{param:rate_delay_s}")),
         cwe="CWE-89", mitre="T1190", phase="exploit", capability="exploit", attck_tactic="Initial Access",
         exploit=True, depends_on=("recon.js_endpoints",),
         parser="regex", parser_regex=r"(?im)^.*(Parameter: .*|.* is vulnerable|back-end DBMS: .*)$",
@@ -155,7 +157,7 @@ CATALOG_SPECS = [
     #   un jeton-asset -> on l'attribue à la cible, pas de faux asset). NON destructif (scan SYN).
     ToolSpec(
         kind="recon.masscan", vuln_class="PortScan", binary="masscan",
-        argv_template=("-p1-65535", "--rate", "1000", "{target_host}"),
+        argv_template=("-p1-65535", "--rate", "{param:rate:1000}", "{target_host}"),
         mitre="T1046", phase="recon", capability="active", attck_tactic="Discovery",
         depends_on=(), docker_image="ilyaglow/masscan", parser="regex",
         parser_regex=r"(?im)^Discovered open port \d+/\w+ on \S+.*$",
@@ -169,7 +171,8 @@ CATALOG_SPECS = [
     #   PAR L'UTILISATEUR (groupe optionnel tout-ou-rien) — aucun chemin machine-spécifique en dur.
     ToolSpec(
         kind="recon.gobuster_dns", vuln_class="SubdomainEnum", binary="gobuster",
-        argv_template=("dns", "-q", "-d", "{target_host}", ("-w", "{param:wordlist}")),
+        argv_template=("dns", "-q", "-d", "{target_host}", ("-w", "{param:wordlist}"),
+                       ("--delay", "{param:rate_delay_dur}")),
         mitre="T1590.002", phase="recon", capability="active", attck_tactic="Reconnaissance",
         depends_on=(), docker_image="ghcr.io/oj/gobuster", parser="regex",
         parser_regex=r"(?im)^Found:\s+(\S+)",
@@ -197,7 +200,8 @@ CATALOG_SPECS = [
     #   L'UTILISATEUR (groupe optionnel) — pas de chemin en dur. NON-exploit, NON-destructif.
     ToolSpec(
         kind="fuzz.wfuzz", vuln_class="Fuzzing", binary="wfuzz",
-        argv_template=("--hc", "404", ("-w", "{param:wordlist}"), "-u", "{target_url}/FUZZ"),
+        argv_template=("--hc", "404", ("-w", "{param:wordlist}"), ("-s", "{param:rate_delay_s}"),
+                       "-u", "{target_url}/FUZZ"),
         mitre="T1595", phase="recon", capability="active", attck_tactic="Reconnaissance",
         depends_on=("recon.httpx",), docker_image="ghcr.io/xmendez/wfuzz", parser="regex",
         parser_regex=r"(?im)^\d{6,}:\s+\d+\s+.*$",
