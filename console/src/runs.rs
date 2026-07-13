@@ -151,6 +151,11 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         Ok(m) => m,
         Err(e) => return e.into_parts(),
     };
+    // DÉFENSE EN PROFONDEUR : echo server-side de l'allowlist de drapeaux (un /api/run crafté ne peut pas
+    // injecter un flag interdit dans extra_args, même si le moteur Python le re-refuserait). Fail-closed.
+    if let Err(e) = validate_extra_args(&app, &module_params) {
+        return e.into_parts();
+    }
 
     let mode = match body.get("mode").and_then(|v| v.as_str()).unwrap_or("propose") {
         "auto" => "auto",

@@ -684,8 +684,8 @@ mod tests {
             crate::schema::ensure_default_dashboard(&store);
             crate::schema::ensure_default_engagement(&store, &["a.example".to_string()], "grey", "/tmp/x.jsonl");
             crate::schema::ensure_default_tenant(&store);
-            crate::schema::upsert_probed_module(&store, "recon.web", false, false, true, "T1595", "web recon");
-            crate::schema::upsert_probed_module(&store, "exploit.rce", true, false, true, "T1210", "rce");
+            crate::schema::upsert_probed_module(&store, "recon.web", false, false, true, "T1595", "web recon", "[]", "[]");
+            crate::schema::upsert_probed_module(&store, "exploit.rce", true, false, true, "T1210", "rce", "[]", "[]");
         };
 
         let counts = || -> Vec<(&'static str, i64)> {

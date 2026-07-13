@@ -4398,6 +4398,48 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = std::fs::remove_file(&path);
     }
 
+    /// [FEATURE A — extra_args echo] validate_extra_args ENFORCE l'allowlist de drapeaux server-side
+    /// (défense en profondeur) : un flag hors liste -> 400 extra_arg_not_allowlisted ; un token-valeur
+    /// (ne commençant pas par '-') passe ; extra_args non-liste -> 400 bad_extra_args ; absent -> OK.
+    #[test]
+    fn validate_extra_args_enforces_allowlist() {
+        let path = tmp_path("forge-test-extra-args");
+        let app = test_app(&path);
+        {
+            let store = app.store();
+            // module nmap-like avec allowlist {-p, --max-rate}.
+            upsert_probed_module(&store, "recon.nmap", false, false, true, "T1046", "nmap",
+                                 "[]", "[\"-p\",\"--max-rate\"]");
+        }
+        let mk = |v: serde_json::Value| -> serde_json::Map<String, serde_json::Value> {
+            let mut m = serde_json::Map::new();
+            m.insert("recon.nmap".into(), v);
+            m
+        };
+        // flag autorisé + valeur -> OK.
+        assert!(validate_extra_args(&app, &mk(json!({"extra_args": ["--max-rate", "50"]}))).is_ok());
+        // flag hors allowlist -> 400 extra_arg_not_allowlisted.
+        let err = validate_extra_args(&app, &mk(json!({"extra_args": ["-oN", "/tmp/x"]}))).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "extra_arg_not_allowlisted");
+        // la forme --flag=val n'est jamais dans l'allowlist -> refusée.
+        let err = validate_extra_args(&app, &mk(json!({"extra_args": ["--max-rate=50"]}))).unwrap_err();
+        assert_eq!(err.code, "extra_arg_not_allowlisted");
+        // extra_args non-liste -> 400 bad_extra_args.
+        let err = validate_extra_args(&app, &mk(json!({"extra_args": "-p 80"}))).unwrap_err();
+        assert_eq!(err.code, "bad_extra_args");
+        // token non-string -> 400.
+        let err = validate_extra_args(&app, &mk(json!({"extra_args": [123]}))).unwrap_err();
+        assert_eq!(err.code, "bad_extra_args");
+        // pas d'extra_args -> OK (no-op).
+        assert!(validate_extra_args(&app, &mk(json!({"ports": "80"}))).is_ok());
+        // module inconnu -> allowlist vide -> tout flag refusé (fail-closed).
+        let mut unk = serde_json::Map::new();
+        unk.insert("recon.unknown".into(), json!({"extra_args": ["-p"]}));
+        assert_eq!(validate_extra_args(&app, &unk).unwrap_err().code, "extra_arg_not_allowlisted");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// [connecteur no-clobber] upsert_probed_module (chemin populate_modules) : un DISABLE manuel
     /// (enabled=0 + available_override=0 + web_allowed=0) SURVIT à un re-probe qui met à jour les
     /// champs sondés (exploit/available/mitre/descr). Régression : le refresh ne doit JAMAIS écraser
@@ -4409,11 +4451,11 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         {
             let store = app.store();
             // 1er probe : module recon dispo.
-            upsert_probed_module(&store, "recon.httpx", false, false, true, "", "recon httpx");
+            upsert_probed_module(&store, "recon.httpx", false, false, true, "", "recon httpx", "[]", "[]");
             // l'admin DÉSACTIVE le connecteur + masque + retire du web (intention opérateur).
             store.execute("UPDATE module SET enabled=0, available_override=0, web_allowed=0 WHERE kind='recon.httpx'", &crate::sql_params![]).unwrap();
             // re-probe (nouvelle version : gagne une capacité exploit, sonde toujours dispo, descr changée).
-            upsert_probed_module(&store, "recon.httpx", true, false, true, "T1190", "recon httpx v2");
+            upsert_probed_module(&store, "recon.httpx", true, false, true, "T1190", "recon httpx v2", "[]", "[]");
             let (enabled, ov, web, exploit, descr): (i64, Option<i64>, i64, i64, String) = store.query_row(
                 "SELECT enabled, available_override, web_allowed, exploit, descr FROM module WHERE kind='recon.httpx'",
                 &crate::sql_params![], |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?, r.get_i64(2)?, r.get_i64(3)?, r.get_str(4)?))).unwrap();
@@ -4429,7 +4471,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         // un NOUVEAU module hérite des DEFAULT enabled=1 / override=NULL.
         {
             let store = app.store();
-            upsert_probed_module(&store, "recon.new", false, false, true, "", "neuf");
+            upsert_probed_module(&store, "recon.new", false, false, true, "", "neuf", "[]", "[]");
             let (enabled, ov): (i64, Option<i64>) = store.query_row(
                 "SELECT enabled, available_override FROM module WHERE kind='recon.new'", &crate::sql_params![],
                 |r| Ok((r.get_i64(0)?, r.get_opt_i64(1)?))).unwrap();

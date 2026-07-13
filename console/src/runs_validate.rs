@@ -54,6 +54,45 @@ pub(crate) fn validate_module_params(
     Ok(out)
 }
 
+/// DÉFENSE EN PROFONDEUR (echo de l'allowlist Python) : valide les `extra_args` par-module d'un
+/// /api/run contre l'ALLOWLIST DE DRAPEAUX du module (colonne `module.flag_allowlist`, sondée depuis le
+/// registre Python). Un /api/run CRAFTÉ (contournant l'UI) ne peut donc PAS injecter un drapeau interdit
+/// même si le moteur Python le re-refuserait de toute façon (fail-closed à deux couches). Règles :
+///   - `extra_args` absent -> ignoré (no-op, byte-identique au défaut) ;
+///   - `extra_args` PAS une liste -> 400 (doit être une liste de tokens déjà séparés) ;
+///   - un token non-string -> 400 ;
+///   - un token RESSEMBLANT à un drapeau (`-x`/`--x`) HORS de l'allowlist du module -> 400.
+/// Un module inconnu / sans allowlist => allowlist vide => tout drapeau libre est refusé (fail-closed).
+pub(crate) fn validate_extra_args(app: &App, module_params: &serde_json::Map<String, Value>) -> Result<(), error::ApiError> {
+    for (kind, params) in module_params {
+        let extra = match params.get("extra_args") {
+            None | Some(Value::Null) => continue,
+            Some(v) => v,
+        };
+        let arr = match extra.as_array() {
+            Some(a) => a,
+            None => return Err(error::ApiError::bad("bad_extra_args", format!("extra_args de '{kind}' doit être une liste de tokens déjà séparés"))),
+        };
+        // allowlist du module (JSON stocké) ; absente/illisible => vide (fail-closed : tout flag refusé).
+        let allow: Vec<String> = app.store().query_row(
+            "SELECT flag_allowlist FROM module WHERE kind=?",
+            &crate::sql_params![kind.as_str()],
+            |r| r.get_str(0),
+        ).ok().and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default();
+        let allowset: std::collections::HashSet<&str> = allow.iter().map(|s| s.as_str()).collect();
+        for t in arr {
+            let s = match t.as_str() {
+                Some(s) => s,
+                None => return Err(error::ApiError::bad("bad_extra_args", format!("token extra_args de '{kind}' doit être une chaîne"))),
+            };
+            if s.starts_with('-') && !allowset.contains(s) {
+                return Err(error::ApiError::bad("extra_arg_not_allowlisted", format!("drapeau '{s}' hors allowlist du module '{kind}' — refusé fail-closed")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Vérifie qu'un module demandé existe (kinds connus), est web_allowed=1, et N'EST NI exploit NI
 /// destructive (PLANCHER EXPLOIT). 400 sinon. Liste vide => OK (le planner choisira tout seul, et le
 /// scope force allow_*=false de toute façon).

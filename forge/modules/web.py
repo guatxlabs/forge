@@ -10,6 +10,7 @@ import json
 from .registry import register, Module
 from .. import runner
 from .. import techniques
+from .toolspec import check_extra_args, safe_value
 
 
 @register("web.nuclei")
@@ -17,12 +18,24 @@ class NucleiScan(Module):
     kind = "web.nuclei"
     exploit = False
     mitre = techniques.mitre_for("web.nuclei")   # source de vérité : forge/techniques.py
-    description = "Scan de vulnérabilités par templates nuclei (medium/high/critical)."
+    description = ("Scan de vulnérabilités par templates nuclei (medium/high/critical par défaut). "
+                   "Params UI : severity (allow-listée), templates (-t), tags (-tags), extra_args (allowlist).")
     BIN, IMG = "nuclei", "projectdiscovery/nuclei"
     available = property(lambda self: runner.available("nuclei", "projectdiscovery/nuclei", prefer_docker=True))
     _SEV = {"info": "INFO", "low": "LOW", "medium": "MEDIUM", "high": "HIGH", "critical": "CRITICAL"}
     _ALLOWED_SEV = ("info", "low", "medium", "high", "critical")
     _DEFAULT_SEV = "medium,high,critical"
+    # SCHÉMA servi à l'UI (source unique) — rendu dynamiquement par modules-form.js via `forge modules --json`.
+    PARAMS_SCHEMA = [
+        {"name": "severity", "type": "select", "label": "severity (filtre templates)", "flag": "-severity",
+         "allowed": ["info", "low", "medium", "high", "critical"]},
+        {"name": "templates", "type": "text", "label": "templates (-t, ex cves/ ou http/…)", "flag": "-t"},
+        {"name": "tags", "type": "text", "label": "tags (-tags, ex cve,rce)", "flag": "-tags"},
+        {"name": "extra_args", "type": "list", "label": "extra args (allowlist de drapeaux)", "flag": ""},
+    ]
+    # ALLOWLIST des drapeaux acceptés en argument libre (extra_args) — tout flag hors liste est REFUSÉ.
+    FLAG_ALLOWLIST = ("-severity", "-t", "-tags", "-etags", "-itags", "-rl", "-c", "-timeout",
+                      "-retries", "-silent", "-jsonl", "-no-color", "-nc")
 
     def _severity(self, action):
         """Niveaux de sévérité (param UI/console `severity`), filtrés contre la liste blanche nuclei.
@@ -38,17 +51,37 @@ class NucleiScan(Module):
         levels = [s for s in wanted if s in self._ALLOWED_SEV]
         return ",".join(levels) if levels else self._DEFAULT_SEV
 
-    def _args(self, target, severity=None):
-        return ["-u", target, "-severity", severity or self._DEFAULT_SEV,
-                "-jsonl", "-silent", "-no-color"]
+    def _args(self, action):
+        p = action.params or {}
+        argv = ["-u", action.target, "-severity", self._severity(action)]
+        templates = p.get("templates")
+        if templates is not None and safe_value(str(templates)):
+            argv += ["-t", str(templates)]
+        tags = p.get("tags")
+        if tags is not None and safe_value(str(tags)):
+            argv += ["-tags", str(tags)]
+        _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)  # tokens VALIDÉS (fire gate en amont)
+        argv += extra
+        argv += ["-jsonl", "-silent", "-no-color"]
+        return argv
 
     def dry(self, action):
-        return runner.cmdline(self.BIN, self.IMG, self._args(action.target, self._severity(action)),
-                              prefer_docker=True)
+        return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
+
+    def _refuse(self, action, reason):
+        return [self.finding(
+            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
+            category="nuclei", status="skipped", tool="nuclei",
+            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
 
     def fire(self, action):
-        rc, out, err = runner.tool(self.BIN, self.IMG,
-                                   self._args(action.target, self._severity(action)),
+        p = action.params or {}
+        if str(action.target).startswith("-"):
+            return self._refuse(action, "cible positionnelle ambiguë (commence par '-')")
+        bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return self._refuse(action, f"argument libre refusé ({bad_extra})")
+        rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action),
                                    timeout=600, prefer_docker=True)
         # Parser stdout d'ABORD : nuclei peut sortir rc!=0 sur condition bénigne tout en ayant
         # émis du JSONL valide. On ne renvoie le finding d'échec QUE si aucune ligne ne parse.
