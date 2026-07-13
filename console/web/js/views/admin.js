@@ -9,16 +9,18 @@
 import { $ } from '../core/dom.js';
 import { adminCreateUser, loadAdminUsers } from './admin/users.js';
 import { loadAdminConnectors } from './admin/connectors.js';
+import { loadAddTool } from './admin/addtool.js';
 import { loadAdminDetection } from './admin/detection.js';
 import { backupCreate, backupRestore, loadAdminBackup } from './admin/backup.js';
 
-// Vue #admin : charge comptes, connecteurs, source de détection ET sauvegarde (gouvernées, meme role admin).
-export function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAdminDetection(); loadAdminBackup(); }
+// Vue #admin : charge comptes, connecteurs, AJOUT D'OUTIL, source de détection ET sauvegarde (meme role admin).
+export function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAddTool(); loadAdminDetection(); loadAdminBackup(); }
 
 // --- Câblage des actions de la vue #admin (les handlers vivent dans les modules de domaine) ---
 if ($('#admin-new')) $('#admin-new').addEventListener('click', adminCreateUser);
 if ($('#admin-reload')) $('#admin-reload').addEventListener('click', loadAdminUsers);
 if ($('#admin-conn-reload')) $('#admin-conn-reload').addEventListener('click', loadAdminConnectors);
+if ($('#admin-addtool-reload')) $('#admin-addtool-reload').addEventListener('click', loadAddTool);
 if ($('#admin-det-reload')) $('#admin-det-reload').addEventListener('click', loadAdminDetection);
 if ($('#bk-create')) $('#bk-create').addEventListener('click', backupCreate);
 if ($('#bk-restore')) $('#bk-restore').addEventListener('click', backupRestore);

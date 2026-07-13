@@ -1071,3 +1071,26 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .eg-actions button{font-size:12px;padding:4px 9px}
 .eg-actions button.danger{border-color:color-mix(in srgb,var(--sev4) 45%,var(--bd));color:var(--sev4)}
 .eg-actions button.danger:hover:not(:disabled){background:color-mix(in srgb,var(--sev4) 12%,transparent)}
+
+/* ===== Administration — ajouter un outil (add a tool from the UI) ===== */
+.at-form{display:flex;flex-direction:column;gap:12px}
+.at-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.at-field{display:flex;flex-direction:column;gap:4px}
+.at-lab{font-family:var(--font-mono);font-size:11px;color:var(--mut)}
+.at-inp{background:var(--card2);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:7px 10px;font-size:13px;font-family:var(--font-mono);width:100%}
+.at-inp:focus{outline:none;border-color:var(--acc)}
+textarea.at-inp{resize:vertical;min-height:38px}
+.at-listhead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px}
+.at-list{display:flex;flex-direction:column;gap:6px}
+.at-add{font-size:12px;padding:4px 10px;white-space:nowrap}
+.at-row{display:flex;gap:6px;align-items:center}
+.at-row .at-inp{flex:1}
+.at-prow{display:grid;grid-template-columns:1.2fr .8fr 1.2fr 1fr 1.4fr auto;gap:6px;align-items:center}
+.at-rm{padding:4px 9px;font-size:12px}
+.at-toggles{display:flex;flex-wrap:wrap;gap:16px}
+.at-chk{display:inline-flex;align-items:center;gap:4px;font-size:13px;color:var(--fg);cursor:pointer}
+.at-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.at-note{font-size:12px}
+.at-existing{margin-top:14px;border-top:1px solid var(--bd);padding-top:12px}
+.at-h3{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 8px;font-weight:600}
+@media(max-width:720px){.at-prow{grid-template-columns:1fr 1fr auto}}

@@ -41,6 +41,8 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
   chaînage, découverte backée par évasion.
 - **[Catalogue de modules](MODULES.md)** — les 31 modules livrés : `kind`, capacité (exploit/destructif),
   technique ATT&CK, description, dépendance.
+- **[Ajouter votre propre outil (depuis l'UI)](TOOLS.md)** — déclarer un outil CLI gouverné (ToolSpec
+  déclaratif : binaire + argv no-shell + allowlist + params) sans éditer de fichier ni recompiler.
 
 ### 2. Déployer & exploiter
 
