@@ -306,7 +306,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
 /// POST /api/setup/migrate — PUBLIC mais PRÉ-PROVISION UNIQUEMENT (409 dès que `provisioned()`).
 /// Lance la MÊME migration que la sous-commande CLI depuis une source POINTÉE (chemins serveur), et
 /// renvoie le rapport (dont le résultat de vérification du ledger). VOIE MINIMALE : l'UX documentée
-/// primaire reste `forge-console migrate` dans un conteneur one-shot ; cet endpoint dépanne le wizard.
+/// primaire reste `forge migrate` dans un conteneur one-shot ; cet endpoint dépanne le wizard.
 /// Corps : {from:<dir|db>, to:<db>, ledger?:<path>, verify?:bool, encrypt?:bool, key_env?:<ENVVAR>}.
 /// Le chiffrement exige la feature `encryption` (400 clair sinon). ZÉRO défaut : `from`/`to` requis.
 pub(crate) async fn setup_migrate(State(app): State<App>, Json(body): Json<Value>) -> Response {
@@ -324,14 +324,14 @@ pub(crate) async fn setup_migrate(State(app): State<App>, Json(body): Json<Value
     }
     // COUCHE 1 — OPT-IN : la migration via API est DÉSACTIVÉE par défaut (CLI-seule). Sans le flag,
     // on refuse AVANT toute I/O -> retire la primitive d'écriture/suppression de fichier non-auth du
-    // déploiement par défaut. La voie CLI (`forge-console migrate …`, invocation locale de confiance)
+    // déploiement par défaut. La voie CLI (`forge migrate …`, invocation locale de confiance)
     // reste pleinement fonctionnelle et NON restreinte (ce garde-fou ne touche QUE cet endpoint web).
     if !env_flag_enabled("FORGE_ALLOW_API_MIGRATE") {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({
                 "error": "api_migrate_disabled",
-                "why": "migration via API désactivée — utiliser la CLI `forge-console migrate …` (poser FORGE_ALLOW_API_MIGRATE=1 pour ouvrir l'endpoint web)"
+                "why": "migration via API désactivée — utiliser la CLI `forge migrate …` (poser FORGE_ALLOW_API_MIGRATE=1 pour ouvrir l'endpoint web)"
             })),
         )
             .into_response();

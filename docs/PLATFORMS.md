@@ -61,7 +61,7 @@ L'override d'environnement **l'emporte toujours** ; seuls les DÉFAUTS sont per-
 | **Config** (moteur) | `FORGE_CONFIG_DIR` | `$XDG_CONFIG_HOME/forge` sinon `~/.config/forge` | `%APPDATA%\forge` (repli `~/AppData/Roaming/forge`) |
 | **Données** (ledger, mémoire, index) | `FORGE_DATA_DIR` | `$XDG_DATA_HOME/forge` sinon `~/.local/share/forge` | `%LOCALAPPDATA%\forge` (repli `~/AppData/Local/forge`) |
 | **Temp** (plans de run, rapports, staging import — console) | `TMPDIR`/`TMP`/`TEMP` (via `std::env::temp_dir()`) | `/tmp` (ou `$TMPDIR`) | `%TEMP%` |
-| **Base console** | `FORGE_CONSOLE_DB` | `forge-console.db` (relatif au cwd) | idem |
+| **Base console** | `FORGE_CONSOLE_DB` | `forge.db` (relatif au cwd) | idem |
 
 `config_dir()` / `data_dir()` retournent un `pathlib.Path` ; `create=True` fait le `mkdir(parents,
 exist_ok)`. Voir [`CONFIGURATION.md`](CONFIGURATION.md) pour la table exhaustive des variables.

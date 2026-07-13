@@ -104,7 +104,7 @@ CIDR/IP — une IP `out_scope` ne se contourne pas via une URL ou un `host:port`
   (`FORGE_DETECTION_SOURCE`) ; les passphrases de backup/migration par `--passphrase-env`/`--key-env`
   (jamais `--flag`) — pas de fuite via `ps`/historique shell.
 - **Hashes de mots de passe** : **argon2id** (jamais en clair), sel aléatoire, comparaison en temps
-  constant. `forge-console hashpw`/`hashpw-operator`.
+  constant. `forge hashpw`/`hashpw-operator`.
 - **CSPRNG** : tokens de session (256 bits via `getrandom`, panic si l'entropie manque plutôt que
   générer un token faible) ; sels/nonces de backup via le CSPRNG de l'OS.
 

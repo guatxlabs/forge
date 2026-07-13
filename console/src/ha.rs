@@ -308,7 +308,7 @@ pub(crate) fn with_ledger_lock(
     // to proceed as if audited. The tamper-evident chain stays contiguous & /api/ledger/verify stays {ok:true}.
     drop(slot); // `f` never ran; the closure is dropped without being invoked.
     eprintln!(
-        "[forge-console] LEDGER TEMPORARILY UNAVAILABLE — Postgres advisory lock unreachable for '{path}' \
+        "[forge] LEDGER TEMPORARILY UNAVAILABLE — Postgres advisory lock unreachable for '{path}' \
          after the retry budget; audit entry REFUSED (integrity > availability, no unlocked/disjoint fork)."
     );
     Err(LedgerUnavailable { path: path.to_string() })

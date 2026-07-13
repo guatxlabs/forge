@@ -13,7 +13,7 @@ GUATX/
                   à étendre (auth/host-guard, query-exec). RIEN d'offensif n'y descend.
   plume/          Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
   forge/          Forge (rouge, PRIVÉ) : moteur Python (gate ROE, ledger, modules, évasion...) +
-    console/      forge-console (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
+    console/      forge (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
 ```
 **Frontière public/privé** (décidée) : `core/` **public neutre** + `plume/` **public** (bleu) +
 `forge/` **privé** (rouge). Comme Plume (public) doit pouvoir dépendre de `core`, **`core` DOIT être

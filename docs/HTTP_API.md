@@ -3,7 +3,7 @@
 > [Sommaire](README.md) · Voir aussi : [Référence CLI](CLI.md) · [Configuration](CONFIGURATION.md) ·
 > [Modèle de sécurité](SECURITY_MODEL.md)
 
-La console (`forge-console`) expose l'API et le SPA sur `FORGE_CONSOLE_ADDR` (défaut
+La console (`forge`) expose l'API et le SPA sur `FORGE_CONSOLE_ADDR` (défaut
 `127.0.0.1:7100`). **Toutes** les routes passent sous **`host_guard`** (anti-DNS-rebinding : `Host`
 hors allowlist ⇒ **421**). La plupart passent aussi sous **`auth_guard`** (gate d'auth engagée dès
 qu'un hash env est posé OU qu'un compte activé existe en base).
@@ -30,7 +30,7 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `POST /api/login` | public | Ouvre une **session individuelle** (compte). Corps `{login, password}` → cookie `forge_session` (HttpOnly, SameSite=Strict) + token. |
 | `GET /api/setup/state` | public | État du 1er déploiement : `{provisioned, needs_setup, capabilities:{sqlcipher}}`. Sondé par le SPA au boot. |
 | `POST /api/setup` | public, **auto-désactivante** | Wizard : crée le 1er admin (+ `operator_policy`/`detection_source`/`session_ttl` optionnels). **409** dès qu'un admin activé existe. Ledger `console.setup.provision`. Voir [Premier déploiement](FIRST_DEPLOYMENT.md). |
-| `POST /api/setup/migrate` | public, **pré-provision** | Migration pilotée depuis le wizard (chemins serveur). **403** sans `FORGE_ALLOW_API_MIGRATE` ; **409** une fois provisionné. UX primaire = CLI `forge-console migrate`. |
+| `POST /api/setup/migrate` | public, **pré-provision** | Migration pilotée depuis le wizard (chemins serveur). **403** sans `FORGE_ALLOW_API_MIGRATE` ; **409** une fois provisionné. UX primaire = CLI `forge migrate`. |
 
 ---
 

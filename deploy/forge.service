@@ -1,28 +1,28 @@
 # Forge console — unité systemd EXEMPLE (déploiement natif, sans Docker).
 # =============================================================================
 #
-# Usage AUTORISÉ uniquement. Cette unité fait tourner le binaire `forge-console`
+# Usage AUTORISÉ uniquement. Cette unité fait tourner le binaire `forge`
 # en service durci. Forge reste INERTE par défaut (in_scope vide = tout refusé) :
 # le durcissement systemd ci-dessous N'AFFAIBLIT AUCUN garde-fou applicatif, il
 # RENFORCE l'isolation du process (least-privilege, cohérent avec l'ethos sûreté).
 #
 # Installation :
 #   1) Compiler la console        : (depuis GUATX/forge/console) cargo build --release
-#      puis installer le binaire   : install -m0755 target/release/forge-console /usr/local/bin/
+#      puis installer le binaire   : install -m0755 target/release/forge /usr/local/bin/
 #   2) Installer le package python : copier forge/forge/ sous /opt/forge/forge (FORGE_PKG_DIR)
 #                                     + forge/console/web sous /opt/forge/console/web
 #   3) Créer l'utilisateur système : useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
-#   4) Créer l'env-file SECRET     : /etc/forge/forge-console.env  (chmod 0600, root:forge)
+#   4) Créer l'env-file SECRET     : /etc/forge/forge.env  (chmod 0600, root:forge)
 #      contenant AU MOINS les hashes argon2id (jamais en clair, jamais committé) :
-#        FORGE_CONSOLE_PASS_HASH=...        (forge-console hashpw <pw>)
-#        FORGE_CONSOLE_OPERATOR_HASH=...    (forge-console hashpw-operator <pw>)
+#        FORGE_CONSOLE_PASS_HASH=...        (forge hashpw <pw>)
+#        FORGE_CONSOLE_OPERATOR_HASH=...    (forge hashpw-operator <pw>)
 #        FORGE_CONSOLE_TOKEN=...            (bearer d'ingestion ; sinon généré au boot)
 #        # FORGE_BROWSER_URL / MSF_RPC_* / BURP_API_* selon les services pilotés
 #   5) Données persistées          : /var/lib/forge/{db,ledger,scope}  (owner forge)
 #      Remplir /var/lib/forge/scope/scope.json AVEC AUTORISATION (sinon INERTE).
-#   6) systemctl daemon-reload && systemctl enable --now forge-console
+#   6) systemctl daemon-reload && systemctl enable --now forge
 #
-# Copier ce fichier vers /etc/systemd/system/forge-console.service avant enable.
+# Copier ce fichier vers /etc/systemd/system/forge.service avant enable.
 
 [Unit]
 Description=Forge red-team console (ROE fail-closed + ledger tamper-evident)
@@ -38,7 +38,7 @@ Group=forge
 # --- Environnement -----------------------------------------------------------
 # Bind loopback par défaut : exposer via reverse-proxy (auth + Host-allowlist) seulement.
 Environment=FORGE_CONSOLE_ADDR=127.0.0.1:7100
-Environment=FORGE_CONSOLE_DB=/var/lib/forge/db/forge-console.db
+Environment=FORGE_CONSOLE_DB=/var/lib/forge/db/forge.db
 Environment=FORGE_CONSOLE_LEDGER=/var/lib/forge/ledger/engagement.jsonl
 Environment=FORGE_CONSOLE_SCOPE=/var/lib/forge/scope/scope.json
 Environment=FORGE_CONSOLE_WEB=/opt/forge/console/web
@@ -48,13 +48,13 @@ Environment=FORGE_RUN_TIMEOUT=900
 Environment=PYTHONPATH=/opt/forge
 Environment=PYTHONUNBUFFERED=1
 # Secrets (hashes argon2id, token, URLs des services pilotés) — fichier 0600 hors VCS.
-EnvironmentFile=/etc/forge/forge-console.env
+EnvironmentFile=/etc/forge/forge.env
 # Boucle purple (mesure de couverture de détection Plume — laisser commenté = OFF/fail-open lisible) :
 # cf. docs/PURPLE_PREREQS.md
 #Environment=PLUME_URL=http://plume-internal:PORT   # bascule ON la boucle purple (http:// interne uniquement)
 #Environment=PLUME_TOKEN=BASE64_USER_COLON_PASS     # SECRET — Basic auth vers Plume (préférer l'EnvironmentFile 0600)
 
-ExecStart=/usr/local/bin/forge-console
+ExecStart=/usr/local/bin/forge
 WorkingDirectory=/opt/forge
 
 # Redémarrage résilient sans flapping.

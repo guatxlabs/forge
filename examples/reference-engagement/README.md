@@ -49,15 +49,15 @@ make demo            # -> http://127.0.0.1:7100
 make demo-purple     # boots tools/mock_plume.py + console with PLUME_URL set
 ```
 
-Under the hood `make demo` runs `forge-console seed-demo --dir examples/reference-engagement`,
+Under the hood `make demo` runs `forge seed-demo --dir examples/reference-engagement`,
 which ingests these fixtures **directly into the SQLite DB** (`FORGE_CONSOLE_DB`, default
-`forge-console-demo.db`) — no server round-trip, no network. It is **idempotent**: re-running only
+`forge-demo.db`) — no server round-trip, no network. It is **idempotent**: re-running only
 touches the `acme-lab` demo campaign and never any real engagement data in the same DB.
 
 You can also seed manually and point at any DB:
 
 ```bash
-FORGE_CONSOLE_DB=my.db console/target/release/forge-console seed-demo --dir examples/reference-engagement
+FORGE_CONSOLE_DB=my.db console/target/release/forge seed-demo --dir examples/reference-engagement
 ```
 
 ## Safety

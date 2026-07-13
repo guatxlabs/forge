@@ -15,7 +15,7 @@
 # NOTE ON PROBES: kubelet liveness/readiness probes originate from the node, not from a pod. Many
 # CNIs (Calico, Cilium) exempt host→pod health traffic from NetworkPolicy; if yours does NOT, add an
 # ingress rule to the console policy allowing 7100 from the node CIDR (ipBlock) — see the commented
-# stub in `forge-console` below. Do NOT widen it beyond the node CIDR.
+# stub in `forge` below. Do NOT widen it beyond the node CIDR.
 #
 # NOTE ON EXTERNAL BACKENDS: if you use MANAGED Postgres or EXTERNAL S3 instead of the in-cluster
 # StatefulSet/MinIO, replace the corresponding pod-selector egress rule with an `ipBlock` (or an
@@ -68,7 +68,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: forge-console
+  name: forge
   namespace: forge
   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
 spec:

@@ -11,7 +11,7 @@ Trois artefacts couplés voyagent **ensemble** :
 
 | Artefact | Fichier (défaut) | Rôle |
 |----------|------------------|------|
-| Base SQLite | `forge-console.db` | findings / runs / ROE / comptes / settings |
+| Base SQLite | `forge.db` | findings / runs / ROE / comptes / settings |
 | Ledger d'engagement | `engagement.jsonl` | chaîne SHA-256 **tamper-evident** des mutations |
 | **Clé de signature** | `engagement.jsonl.ed25519` | secret Ed25519 (0600) qui **signe** les entrées du ledger |
 
@@ -27,16 +27,16 @@ tracée** au ledger cible (entrée `console.migrate`, chaîne SHA-256 continue).
 
 ---
 
-## UX primaire : la sous-commande `forge-console migrate`
+## UX primaire : la sous-commande `forge migrate`
 
 ```
-forge-console migrate --from <dir|db> --to <db> [--ledger <path>] [--verify]
+forge migrate --from <dir|db> --to <db> [--ledger <path>] [--verify]
                       [--encrypt --key-env <ENVVAR>]
 ```
 
 | Flag | Sens |
 |------|------|
-| `--from <dir\|db>` | Source. Un **dossier** ⇒ `{dir}/forge-console.db` + `{dir}/engagement.jsonl`. Un **fichier `.db`** ⇒ ce fichier + son sibling `engagement.jsonl`. |
+| `--from <dir\|db>` | Source. Un **dossier** ⇒ `{dir}/forge.db` + `{dir}/engagement.jsonl`. Un **fichier `.db`** ⇒ ce fichier + son sibling `engagement.jsonl`. |
 | `--to <db>` | Base **cible** (ne doit pas préexister — `VACUUM INTO` refuse d'écraser). |
 | `--ledger <path>` | Ledger **cible** (défaut : `engagement.jsonl` à côté de `--to`). La clé `.ed25519` est copiée à côté, en 0600. |
 | `--verify` | Recompute la chaîne SHA-256 du **ledger source** et **AVORTE** (aucune écriture) sur une rupture. |
@@ -52,7 +52,7 @@ Codes de sortie : `0` OK · `1` échec migration/vérification · `2` erreur d'u
 Contexte : la console tournait sous systemd avec, disons :
 
 ```
-/var/lib/forge/forge-console.db
+/var/lib/forge/forge.db
 /var/lib/forge/engagement.jsonl
 /var/lib/forge/engagement.jsonl.ed25519   # 0600
 ```
@@ -61,14 +61,14 @@ Cible Docker (cf. `docker-compose.yml`) : volumes montés
 `forge-db:/data/db` et `forge-ledger:/data/ledger`, avec
 
 ```
-FORGE_CONSOLE_DB:     /data/db/forge-console.db
+FORGE_CONSOLE_DB:     /data/db/forge.db
 FORGE_CONSOLE_LEDGER: /data/ledger/engagement.jsonl
 ```
 
 ### 1. Arrêter la console source (cohérence)
 
 ```bash
-sudo systemctl stop forge-console
+sudo systemctl stop forge
 ```
 
 Arrêter garantit une copie **cohérente** (pas d'écriture concurrente). `migrate` ouvre malgré tout
@@ -77,24 +77,24 @@ la source en lecture seule, mais un arrêt propre évite tout WAL en vol.
 ### 2. Vérifier + migrer dans un conteneur one-shot
 
 Montez le dossier source **en lecture seule** et les volumes cible, puis lancez `migrate`. La même
-image `forge-console` sert de conteneur jetable (`--rm`) :
+image `forge` sert de conteneur jetable (`--rm`) :
 
 ```bash
 docker run --rm \
   -v /var/lib/forge:/src:ro \
   -v forge-db:/data/db \
   -v forge-ledger:/data/ledger \
-  forge-console:0.0.1 \
-  forge-console migrate \
+  forge:0.0.1 \
+  forge migrate \
     --from   /src \
-    --to     /data/db/forge-console.db \
+    --to     /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl \
     --verify
 ```
 
 Ce que fait la commande, dans l'ordre :
 
-1. ouvre `/src/forge-console.db` **en lecture seule** ;
+1. ouvre `/src/forge.db` **en lecture seule** ;
 2. `--verify` : recompute la chaîne SHA-256 de `/src/engagement.jsonl` ; **AVORTE** si rompue
    (rien n'est écrit côté cible) ;
 3. copie la base par `VACUUM INTO` (copie cohérente, compatible source read-only) ;
@@ -110,7 +110,7 @@ Sortie : un rapport JSON (`ok`, `source_db`, `target_db`, `target_ledger`, `encr
 ### 3. Démarrer la cible et re-vérifier
 
 ```bash
-docker compose up -d forge-console
+docker compose up -d forge
 ```
 
 Puis, une fois la console up :
@@ -155,9 +155,9 @@ variable via `--key-env` :
 ```bash
 export FORGE_DB_KEY='une-passphrase-forte-et-secrete'
 
-forge-console migrate \
+forge migrate \
   --from   /var/lib/forge \
-  --to     /data/db/forge-console.db \
+  --to     /data/db/forge.db \
   --ledger /data/ledger/engagement.jsonl \
   --verify \
   --encrypt --key-env FORGE_DB_KEY
@@ -181,8 +181,8 @@ Sous Docker, injectez la clé par l'environnement (ex. Docker secret monté en v
 ```yaml
 # extrait docker-compose.override.yml (image compilée --features encryption)
 services:
-  forge-console:
-    image: forge-console:0.0.1-encryption
+  forge:
+    image: forge:0.0.1-encryption
     environment:
       FORGE_DB_KEY: ${FORGE_DB_KEY}   # depuis un secret, jamais commité
 ```
@@ -210,7 +210,7 @@ Un endpoint **public mais pré-provision** existe pour piloter la même migratio
 ```bash
 curl -s -X POST http://127.0.0.1:7100/api/setup/migrate \
   -H 'Content-Type: application/json' \
-  -d '{"from":"/src","to":"/data/db/forge-console.db",
+  -d '{"from":"/src","to":"/data/db/forge.db",
        "ledger":"/data/ledger/engagement.jsonl","verify":true}' | jq
 ```
 

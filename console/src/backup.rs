@@ -47,7 +47,7 @@ pub(crate) fn backup_build_archive(
         );
     }
     let mut manifest = json!({
-        "kind": "forge-console-backup",
+        "kind": "forge-backup",
         "schema": BACKUP_SCHEMA_VERSION,
         "cipher": "xchacha20poly1305",
         "kdf": "argon2id",
@@ -249,7 +249,7 @@ pub(crate) fn run_backup(opts: &BackupOpts) -> Result<Value, String> {
 pub(crate) struct RestoreOpts {
     pub(crate) input: String,           // archive chiffrée à lire
     pub(crate) passphrase: String,      // passphrase EN CLAIR (déjà lue depuis l'ENV)
-    pub(crate) to: Option<String>,      // base cible (défaut : FORGE_CONSOLE_DB / forge-console.db)
+    pub(crate) to: Option<String>,      // base cible (défaut : FORGE_CONSOLE_DB / forge.db)
     pub(crate) ledger: Option<String>,  // ledger cible (défaut : sibling engagement.jsonl de la base)
     pub(crate) force: bool,             // autorise l'écrasement d'un install existant NON VIDE
     pub(crate) actor: String,           // attribution ledger ("cli:restore")
@@ -382,27 +382,27 @@ pub(crate) fn read_passphrase_env(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|v| !v.is_empty())
 }
 
-/// `forge-console backup --out <archive> --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>]`
+/// `forge backup --out <archive> --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>]`
 /// Sauvegarde CHIFFRÉE (obligatoire) de la base + ledger + clé. Codes : 0 OK, 1 échec, 2 usage.
 pub(crate) fn run_backup_cli(args: &[String]) -> i32 {
     let out = match cli_opt(args, "out") {
         Some(o) if !o.is_empty() => o,
         _ => {
-            eprintln!("usage: forge-console backup --out <archive> --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>]");
+            eprintln!("usage: forge backup --out <archive> --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>]");
             return 2;
         }
     };
     let pass_env = match cli_opt(args, "passphrase-env") {
         Some(e) if !e.is_empty() => e,
         _ => {
-            eprintln!("[forge-console] backup: --passphrase-env <ENVVAR> requis (la passphrase est lue depuis cette variable d'ENV, jamais en argv)");
+            eprintln!("[forge] backup: --passphrase-env <ENVVAR> requis (la passphrase est lue depuis cette variable d'ENV, jamais en argv)");
             return 2;
         }
     };
     let passphrase = match read_passphrase_env(&pass_env) {
         Some(p) => p,
         None => {
-            eprintln!("[forge-console] backup: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
+            eprintln!("[forge] backup: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
             return 2;
         }
     };
@@ -419,40 +419,40 @@ pub(crate) fn run_backup_cli(args: &[String]) -> i32 {
         Ok(report) => {
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into()));
             println!(
-                "[forge-console] backup: OK — archive chiffrée écrite ({} octets) : {}",
+                "[forge] backup: OK — archive chiffrée écrite ({} octets) : {}",
                 report.get("archive_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
                 opts.out
             );
             0
         }
         Err(e) => {
-            eprintln!("[forge-console] backup: {e}");
+            eprintln!("[forge] backup: {e}");
             1
         }
     }
 }
 
-/// `forge-console restore --in <archive> --passphrase-env <ENVVAR> [--to <db>] [--ledger <path>] [--force]`
+/// `forge restore --in <archive> --passphrase-env <ENVVAR> [--to <db>] [--ledger <path>] [--force]`
 /// Restauration CHIFFRÉE (déchiffre, vérifie sha256+ledger, place db/ledger/clé). Codes : 0 OK, 1 échec, 2 usage.
 pub(crate) fn run_restore_cli(args: &[String]) -> i32 {
     let input = match cli_opt(args, "in") {
         Some(i) if !i.is_empty() => i,
         _ => {
-            eprintln!("usage: forge-console restore --in <archive> --passphrase-env <ENVVAR> [--to <db>] [--ledger <path>] [--force]");
+            eprintln!("usage: forge restore --in <archive> --passphrase-env <ENVVAR> [--to <db>] [--ledger <path>] [--force]");
             return 2;
         }
     };
     let pass_env = match cli_opt(args, "passphrase-env") {
         Some(e) if !e.is_empty() => e,
         _ => {
-            eprintln!("[forge-console] restore: --passphrase-env <ENVVAR> requis (passphrase lue depuis l'ENV, jamais en argv)");
+            eprintln!("[forge] restore: --passphrase-env <ENVVAR> requis (passphrase lue depuis l'ENV, jamais en argv)");
             return 2;
         }
     };
     let passphrase = match read_passphrase_env(&pass_env) {
         Some(p) => p,
         None => {
-            eprintln!("[forge-console] restore: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
+            eprintln!("[forge] restore: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
             return 2;
         }
     };
@@ -468,7 +468,7 @@ pub(crate) fn run_restore_cli(args: &[String]) -> i32 {
         Ok(report) => {
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into()));
             println!(
-                "[forge-console] restore: OK — {} -> base {} (ledger {})",
+                "[forge] restore: OK — {} -> base {} (ledger {})",
                 opts.input,
                 report.get("db").and_then(|x| x.as_str()).unwrap_or(""),
                 report.get("ledger").and_then(|x| x.as_str()).unwrap_or("")
@@ -476,7 +476,7 @@ pub(crate) fn run_restore_cli(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("[forge-console] restore: {e}");
+            eprintln!("[forge] restore: {e}");
             1
         }
     }
@@ -958,7 +958,7 @@ mod tests {
     /// Sème une source d'engagement complète : base (schéma ancien, 1 finding), ledger chaîné à
     /// `entries` entrées, et une clé de signature `.ed25519`. Renvoie (db, ledger, key).
     fn seed_backup_source(dir: &str, entries: usize) -> (String, String, String) {
-        let db = format!("{dir}/forge-console.db");
+        let db = format!("{dir}/forge.db");
         seed_old_source_db(&db);
         let ledger = format!("{dir}/engagement.jsonl");
         for i in 0..entries {
@@ -973,7 +973,7 @@ mod tests {
     /// la base sur disque en read-only + VACUUM INTO). Sème un admin, une base au SCHEMA courant, un
     /// ledger chaîné (1 entrée) et une clé .ed25519. Renvoie (app, db_path, ledger_path, admin_token).
     fn test_app_disk(dir: &str) -> (App, String, String, String) {
-        let db_path = format!("{dir}/forge-console.db");
+        let db_path = format!("{dir}/forge.db");
         let ledger = format!("{dir}/engagement.jsonl");
         let conn = Connection::open(&db_path).expect("open disk db");
         conn.execute_batch(SCHEMA).expect("schema");
@@ -1062,7 +1062,7 @@ mod tests {
 
         // restore dans un dossier NEUF (aucun écrasement).
         let to_dir = tmp_dir("forge-bk-rt-to");
-        let to_db = format!("{to_dir}/forge-console.db");
+        let to_db = format!("{to_dir}/forge.db");
         let to_ledger = format!("{to_dir}/engagement.jsonl");
         let ropts = RestoreOpts {
             input: out.clone(), passphrase: pass.to_string(), to: Some(to_db.clone()),
@@ -1189,7 +1189,7 @@ mod tests {
         let db = b"fausse-base-sqlite-pour-le-test".to_vec();
         // manifest annonçant un sha256 VOLONTAIREMENT faux pour db.sqlite.
         let bad_manifest = json!({
-            "kind": "forge-console-backup", "schema": BACKUP_SCHEMA_VERSION,
+            "kind": "forge-backup", "schema": BACKUP_SCHEMA_VERSION,
             "files": {"db.sqlite": {"sha256": "0".repeat(64), "size": db.len()}}
         });
         let mb = serde_json::to_vec_pretty(&bad_manifest).unwrap();
@@ -1226,7 +1226,7 @@ mod tests {
 
         // install cible PRÉ-EXISTANT et NON VIDE.
         let to_dir = tmp_dir("forge-bk-clob-to");
-        let to_db = format!("{to_dir}/forge-console.db");
+        let to_db = format!("{to_dir}/forge.db");
         let to_ledger = format!("{to_dir}/engagement.jsonl");
         let sentinel = b"NE-PAS-ECRASER-existant".to_vec();
         std::fs::write(&to_db, &sentinel).unwrap();
@@ -1272,7 +1272,7 @@ mod tests {
         }).expect("backup ok");
 
         let to_dir = tmp_dir("forge-bk-perm-to");
-        let to_db = format!("{to_dir}/forge-console.db");
+        let to_db = format!("{to_dir}/forge.db");
         let to_ledger = format!("{to_dir}/engagement.jsonl");
         run_restore(&RestoreOpts {
             input: out.clone(), passphrase: pass.to_string(), to: Some(to_db),

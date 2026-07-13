@@ -984,7 +984,7 @@ fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Dura
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     let mut req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-console-sso\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-sso\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if !basic_b64.is_empty() {

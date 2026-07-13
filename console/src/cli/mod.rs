@@ -34,7 +34,7 @@ pub(crate) use user::*;
 pub(crate) use migrate_store::*;
 
 // =====================================================================================
-// Parité LECTURE en ligne de commande — `forge-console findings|roe|coverage|query`.
+// Parité LECTURE en ligne de commande — `forge findings|roe|coverage|query`.
 //
 // Réutilise la connexion SQLite en READ-ONLY (SQLITE_OPEN_READ_ONLY, défense en profondeur :
 // même un bug ne peut pas muter la base depuis ces sous-commandes) et, pour `query`, le compilateur
@@ -44,7 +44,7 @@ pub(crate) use migrate_store::*;
 
 /// Chemin de la base lue par les sous-commandes CLI (idem boot : $FORGE_CONSOLE_DB sinon défaut).
 pub(crate) fn cli_db_path() -> String {
-    std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge-console.db".to_string())
+    std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge.db".to_string())
 }
 
 /// Ouvre la base en READ-ONLY pour les lectures CLI. Renvoie None (et journalise) si l'ouverture
@@ -59,7 +59,7 @@ pub(crate) fn cli_open_ro(db_path: &str) -> Option<Connection> {
             Some(c)
         }
         Err(e) => {
-            eprintln!("[forge-console] lecture CLI: ouverture read-only de '{db_path}' impossible: {e}");
+            eprintln!("[forge] lecture CLI: ouverture read-only de '{db_path}' impossible: {e}");
             None
         }
     }
@@ -82,7 +82,7 @@ pub(crate) fn cli_flag(args: &[String], name: &str) -> bool {
 // connexion (elles court-circuitent l'App, qui n'existe pas hors du chemin HTTP). Quand le backend
 // enterprise Postgres est sélectionné (FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL) ET que la
 // feature `store-postgres` est compilée, elles se connectent à Postgres et exécutent leur DML/DDL À
-// TRAVERS LE SEAM (`Store::postgres`), pour que `forge-console useradd`/`seed-demo`/lectures marchent
+// TRAVERS LE SEAM (`Store::postgres`), pour que `forge useradd`/`seed-demo`/lectures marchent
 // sur un déploiement PG — la gate de démarrage fail-closée ne bloque QUE le serveur, pas le
 // provisioning CLI de la base PG en amont. Hors de ce cas (et TOUJOURS en community, blocs non
 // compilés) : SQLite EXACTEMENT comme avant (byte-identique). Tout ce bloc PG est gardé par la feature.
@@ -96,7 +96,7 @@ pub(crate) fn cli_pg_url() -> Option<String> {
     if std::env::var("FORGE_ENTERPRISE_STORE").as_deref() == Ok("postgres") {
         match std::env::var("FORGE_DB_URL") {
             Ok(u) if !u.is_empty() => return Some(u),
-            _ => eprintln!("[forge-console] FORGE_ENTERPRISE_STORE=postgres mais FORGE_DB_URL absent/vide — repli SQLite"),
+            _ => eprintln!("[forge] FORGE_ENTERPRISE_STORE=postgres mais FORGE_DB_URL absent/vide — repli SQLite"),
         }
     }
     None

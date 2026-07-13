@@ -55,7 +55,7 @@ pub(crate) fn check_basic(app: &App, b64: &str) -> bool {
 // FAIL-CLOSED : si `operator_hash` est vide (non configuré), AUCUN endpoint C2 n'est ouvert — 403,
 // même quand le viewer tourne en mode dev-open (pass_hash vide). check_operator NE consulte JAMAIS
 // pass_hash/token : l'authz C2 est totalement découplée de l'auth viewer. Sous-commande pour le
-// hash : `forge-console hashpw-operator <mot de passe>`.
+// hash : `forge hashpw-operator <mot de passe>`.
 
 /// Preuve opérateur par HASH ENV (rétro-compat) : vrai seulement si `operator_hash` est configuré ET
 /// que l'en-tête `X-Forge-Operator` correspond. Vide => toujours faux (fail-closed). Aucune

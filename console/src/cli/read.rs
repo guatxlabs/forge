@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console findings|roe|coverage|query` — parité LECTURE CLI (PURE MOVE depuis cli.rs).
+//! `forge findings|roe|coverage|query` — parité LECTURE CLI (PURE MOVE depuis cli.rs).
 use crate::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -103,7 +103,7 @@ pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
             let soql = match soql {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    eprintln!("usage: forge-console query --soql '<pipeline soql>' [--json]");
+                    eprintln!("usage: forge query --soql '<pipeline soql>' [--json]");
                     return 2;
                 }
             };
@@ -125,7 +125,7 @@ pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
                     0
                 }
                 Err((_, e)) => {
-                    eprintln!("[forge-console] query: SOQL invalide: {e}");
+                    eprintln!("[forge] query: SOQL invalide: {e}");
                     2
                 }
             }
@@ -198,7 +198,7 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
                 let soql = match soql {
                     Some(s) if !s.is_empty() => s,
                     _ => {
-                        eprintln!("usage: forge-console query --soql '<pipeline soql>' [--json]");
+                        eprintln!("usage: forge query --soql '<pipeline soql>' [--json]");
                         return 2;
                     }
                 };
@@ -221,7 +221,7 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
                         0
                     }
                     Err((_, e)) => {
-                        eprintln!("[forge-console] query: SOQL invalide: {e}");
+                        eprintln!("[forge] query: SOQL invalide: {e}");
                         2
                     }
                 }
@@ -232,7 +232,7 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
     match outcome {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[forge-console] lecture CLI (Postgres): {e}");
+            eprintln!("[forge] lecture CLI (Postgres): {e}");
             2
         }
     }
@@ -244,7 +244,7 @@ pub(crate) fn cli_query_rows(conn: &Connection, sql: &str, params: &[String], co
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[forge-console] lecture CLI: requête invalide: {e}");
+            eprintln!("[forge] lecture CLI: requête invalide: {e}");
             return vec![];
         }
     };

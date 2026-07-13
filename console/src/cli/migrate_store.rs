@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console migrate-store` — migrateur gouverné SQLite -> Postgres (PURE MOVE depuis cli.rs).
+//! `forge migrate-store` — migrateur gouverné SQLite -> Postgres (PURE MOVE depuis cli.rs).
 // ===========================================================================================
-// `forge-console migrate-store` (feature `store-postgres`) — MIGRATEUR DE DONNÉES GOUVERNÉ
+// `forge migrate-store` (feature `store-postgres`) — MIGRATEUR DE DONNÉES GOUVERNÉ
 // SQLite -> Postgres. Copie CHAQUE table du backend SQLite (source) vers un Postgres (cible) À
 // TRAVERS LE SEAM (`Store`), en PRÉSERVANT les ids exacts et le typage par cellule (int/real/text/
 // blob/null ; bool=0/1), en ORDRE de dépendance FK (parents avant enfants), puis RECALE toutes les
@@ -336,7 +336,7 @@ fn print_migration_counts(report: &MigrationReport) {
     print_table(&columns, &rows);
 }
 
-/// `forge-console migrate-store --to <postgres-url> [--from <sqlite-path>] [--dry-run] [--force]
+/// `forge migrate-store --to <postgres-url> [--from <sqlite-path>] [--dry-run] [--force]
 ///   [--ledger <path>]` — migrateur gouverné SQLite -> Postgres (feature `store-postgres`).
 /// Codes de sortie : 0 = OK ; 1 = refus de gouvernance (cible non vide sans `--force`) OU comptes
 /// discordants (rollback) ; 2 = usage / connexion / schéma ; 3 = migration COMMITTÉE mais checkpoint
@@ -346,7 +346,7 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     let to_url = match cli_opt(args, "to").filter(|s| !s.is_empty()) {
         Some(u) => u,
         None => {
-            eprintln!("usage: forge-console migrate-store --to <postgres-url> [--from <sqlite-path>] [--dry-run] [--force] [--ledger <path>]");
+            eprintln!("usage: forge migrate-store --to <postgres-url> [--from <sqlite-path>] [--dry-run] [--force] [--ledger <path>]");
             eprintln!("  Migre le backend SQLite (source) vers Postgres (cible), ids + typage préservés,");
             eprintln!("  ordre FK, recalage IDENTITY, vérif des comptes, checkpoint ledger signé. `--dry-run`");
             eprintln!("  n'écrit RIEN. Sans `--force`, refuse d'écraser une cible non vide (idempotence).");
@@ -362,7 +362,7 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
         .unwrap_or_else(|| "engagement.jsonl".to_string());
 
     let dest_redacted = redact_pg_url(&to_url);
-    eprintln!("[forge-console] migrate-store: source SQLite='{from}' -> cible PG='{dest_redacted}'{}{}",
+    eprintln!("[forge] migrate-store: source SQLite='{from}' -> cible PG='{dest_redacted}'{}{}",
         if dry_run { "  [DRY-RUN]" } else { "" },
         if force { "  [--force]" } else { "" });
 
@@ -383,19 +383,19 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     let report = match outcome {
         Ok(Ok(Some(r))) => r,
         Ok(Ok(None)) => {
-            eprintln!("[forge-console] migrate-store: REFUSÉ — la cible contient déjà des données.");
+            eprintln!("[forge] migrate-store: REFUSÉ — la cible contient déjà des données.");
             eprintln!("  Relance avec --force pour ÉCRASER (TRUNCATE ... RESTART IDENTITY des tables cibles),");
             eprintln!("  ou --dry-run pour inspecter sans écrire. Aucune donnée n'a été touchée.");
             return 1;
         }
         Ok(Err(e)) => {
             // Inclut le rollback sur comptes discordants (message "row-count mismatch: ...").
-            eprintln!("[forge-console] migrate-store: ÉCHEC — {e}");
+            eprintln!("[forge] migrate-store: ÉCHEC — {e}");
             let es = e.to_string();
             return if es.contains("row-count mismatch") { 1 } else { 2 };
         }
         Err(e) => {
-            eprintln!("[forge-console] migrate-store: {e}");
+            eprintln!("[forge] migrate-store: {e}");
             return 2;
         }
     };
@@ -405,16 +405,16 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     let migrated_order: Vec<String> = report.counts.iter().map(|c| c.table.clone()).collect();
 
     // Rapport lisible : ordre FK + tableau de comptes + recalage des séquences.
-    println!("[forge-console] migrate-store: ordre FK (parents -> enfants) :");
+    println!("[forge] migrate-store: ordre FK (parents -> enfants) :");
     println!("  {}", migrated_order.join(" -> "));
     if dry_run {
-        println!("[forge-console] migrate-store [DRY-RUN] : lignes QUI SERAIENT copiées (source) vs cible actuelle :");
+        println!("[forge] migrate-store [DRY-RUN] : lignes QUI SERAIENT copiées (source) vs cible actuelle :");
     } else {
-        println!("[forge-console] migrate-store : vérification des comptes (source == cible) :");
+        println!("[forge] migrate-store : vérification des comptes (source == cible) :");
     }
     print_migration_counts(&report);
     if !dry_run && !report.identity.is_empty() {
-        println!("[forge-console] migrate-store : séquences IDENTITY recalées (table.colonne -> valeur) :");
+        println!("[forge] migrate-store : séquences IDENTITY recalées (table.colonne -> valeur) :");
         for (t, c, v) in &report.identity {
             println!("  {t}.{c} -> {v}");
         }
@@ -441,17 +441,17 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     let checkpoint = crate::dbmigrate::ledger_append_standalone(&ledger_path, "console.store.migrate", &detail);
     match &checkpoint {
         Ok(hash) => {
-            println!("[forge-console] migrate-store : checkpoint ledger '{ledger_path}' (console.store.migrate) signé, hash={hash}");
+            println!("[forge] migrate-store : checkpoint ledger '{ledger_path}' (console.store.migrate) signé, hash={hash}");
         }
         Err(e) => {
-            eprintln!("[forge-console] migrate-store: AVERTISSEMENT — écriture du checkpoint ledger échouée: {e}");
+            eprintln!("[forge] migrate-store: AVERTISSEMENT — écriture du checkpoint ledger échouée: {e}");
         }
     }
 
     if dry_run {
         // DRY-RUN : AUCUNE donnée committée -> un échec de checkpoint n'a rien à « rendre invérifiable ».
         // On le signale (ci-dessus) mais on sort 0 : rien n'a été migré, il n'y a pas de succès à trahir.
-        println!("[forge-console] migrate-store [DRY-RUN] terminé — AUCUNE écriture dans la cible.");
+        println!("[forge] migrate-store [DRY-RUN] terminé — AUCUNE écriture dans la cible.");
         return 0;
     }
 
@@ -460,10 +460,10 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     // pas auditable : on sort NON-ZÉRO (3, distinct de 1=gouvernance/mismatch et 2=usage/connexion) pour
     // que l'orchestrateur/CI le traite comme un échec et exige la ré-émission manuelle du checkpoint.
     if checkpoint.is_err() {
-        eprintln!("[forge-console] migrate-store: ÉCHEC GOUVERNANCE — {} ligne(s) migrée(s) et COMMITTÉE(s), mais le checkpoint ledger signé n'a PAS pu être écrit (ci-dessus). La migration N'EST PAS auditable ; exit non-zéro. Vérifie l'accessibilité/permissions du ledger '{ledger_path}' puis ré-émets le checkpoint console.store.migrate.", report.total_rows);
+        eprintln!("[forge] migrate-store: ÉCHEC GOUVERNANCE — {} ligne(s) migrée(s) et COMMITTÉE(s), mais le checkpoint ledger signé n'a PAS pu être écrit (ci-dessus). La migration N'EST PAS auditable ; exit non-zéro. Vérifie l'accessibilité/permissions du ledger '{ledger_path}' puis ré-émets le checkpoint console.store.migrate.", report.total_rows);
         return 3;
     }
 
-    println!("[forge-console] migrate-store terminé — {} ligne(s) migrée(s), comptes vérifiés.", report.total_rows);
+    println!("[forge] migrate-store terminé — {} ligne(s) migrée(s), comptes vérifiés.", report.total_rows);
     0
 }

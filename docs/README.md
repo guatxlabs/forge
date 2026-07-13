@@ -77,7 +77,7 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
   `FORGE_TOOLS_PROFILE`, knobs opérateur/détection/backup) **et** de toutes les clés de la table
   `settings` (nom, sens, défaut, exemple, configurable au déploiement vs dans l'UI).
 - **[Référence CLI](CLI.md)** — toutes les sous-commandes `forge` (`python -m forge.cli`) et
-  `forge-console`, avec leurs flags.
+  `forge`, avec leurs flags.
 - **[Référence API HTTP](HTTP_API.md)** — toutes les routes de la console (méthode, auth requise,
   objet).
 

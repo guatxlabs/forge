@@ -36,13 +36,13 @@ valide n'est présentée. Se connecter via `POST /api/login`, ou présenter Basi
 
 ### HTTP 403 « operator_required » sur `/api/run`
 Le rôle **opérateur** n'est pas provisionné (C2 fermé, fail-closed) **ou** la preuve/le source-CIDR
-échoue. Provisionner : `forge-console useradd <login> operator` (ou `FORGE_CONSOLE_OPERATOR_HASH` +
+échoue. Provisionner : `forge useradd <login> operator` (ou `FORGE_CONSOLE_OPERATOR_HASH` +
 en-tête `X-Forge-Operator`). Si `operator_policy.source_cidrs` est configuré, vérifier que l'IP
 client (ou le dernier hop XFF, si `trusted_proxy` est correct) tombe dans un CIDR.
 
 ### HTTP 403 « admin_required »
 L'administration exige une **session admin** (aucun repli par secret partagé). Se connecter avec un
-compte admin. Créer le premier : le [wizard](FIRST_DEPLOYMENT.md) ou `forge-console useradd <login> admin`.
+compte admin. Créer le premier : le [wizard](FIRST_DEPLOYMENT.md) ou `forge useradd <login> admin`.
 
 ### HTTP 400 « out_of_scope » au lancement d'un run
 La cible n'est pas dans le **scope serveur** (`FORGE_CONSOLE_SCOPE`). Le C2-light refuse **avant** le
@@ -89,8 +89,8 @@ n'indique **pas** un SOC lent. Explication complète : [`MTTD.md`](MTTD.md).
 
 ### Le conteneur est `unhealthy`
 Le healthcheck fait un vrai `GET /health` attendant 200. Vérifier les logs
-(`docker logs forge-console`) — souvent un **scope monté comme répertoire** (voir ci-dessous) ou un
-bind qui a échoué. `docker inspect --format '{{.State.Health.Status}}' forge-console`.
+(`docker logs forge`) — souvent un **scope monté comme répertoire** (voir ci-dessous) ou un
+bind qui a échoué. `docker inspect --format '{{.State.Health.Status}}' forge`.
 
 ### « FATAL: /data/scope/scope.json est un REPERTOIRE, pas un fichier »
 La **pré-étape scope a été oubliée** : Docker crée un répertoire vide quand `./scope.json` est absent
@@ -108,7 +108,7 @@ Fournir la bonne clé par l'ENV (jamais en argv). Sur un build **par défaut** (
 ### `forge ledger verify` échoue après une migration
 La clé `.ed25519` **n'a pas voyagé** avec le ledger. Les signatures Ed25519 ne sont vérifiables que
 par leur clé de signature sibling. Refaire la migration en s'assurant que
-`engagement.jsonl.ed25519` est présent côté source ; `forge-console migrate` la copie
+`engagement.jsonl.ed25519` est présent côté source ; `forge migrate` la copie
 automatiquement en `0600`. `GET /api/ledger/verify` (chaîne, `sig_checked:false`) peut être OK côté
 console alors que la **signature** échoue côté moteur — c'est le symptôme. Voir
 [`MIGRATION.md`](MIGRATION.md).

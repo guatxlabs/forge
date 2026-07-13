@@ -1,6 +1,6 @@
 # Forge — HA (#10 Wave A) load-balancer config (Caddy v2), used ONLY under docker-compose.ha.yml.
 # =============================================================================================
-# Fronts N `forge-console` replicas (Docker DNS `forge-console` round-robins to the replica IPs)
+# Fronts N `forge` replicas (Docker DNS `forge` round-robins to the replica IPs)
 # behind ONE published endpoint. SSE endpoints (run logs, presence) must stay pinned to a single
 # backend for the life of the stream, so the balancer is STICKY by cookie (`lb_policy cookie`):
 # once a client is assigned a backend, a `lb` cookie keeps it there. Active health checks GET
@@ -11,11 +11,11 @@
 # HOST-ALLOWLIST NOTE: the console runs an anti-DNS-rebinding host guard (421 on an unknown Host).
 # Caddy's reverse_proxy PRESERVES the client Host for proxied traffic (so client `Host: localhost`
 # / `127.0.0.1` are accepted by the default allowlist), but Caddy's ACTIVE health probe sends
-# `Host: forge-console:7100` (the upstream address). The HA compose therefore sets
-# FORGE_CONSOLE_HOST=forge-console so the probe is accepted (200) instead of 421 — otherwise every
+# `Host: forge:7100` (the upstream address). The HA compose therefore sets
+# FORGE_CONSOLE_HOST=forge so the probe is accepted (200) instead of 421 — otherwise every
 # backend would be marked unhealthy and the LB would 502.
 :80 {
-	reverse_proxy forge-console:7100 {
+	reverse_proxy forge:7100 {
 		lb_policy cookie
 		health_uri /health
 		health_interval 5s

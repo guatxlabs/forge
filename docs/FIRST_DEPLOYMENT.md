@@ -61,12 +61,12 @@ La source de détection est **rechargée à chaud** si fournie.
 
 Pour un déploiement automatisé, poser dans `.env` / l'EnvironmentFile :
 
-- `FORGE_CONSOLE_PASS_HASH` (hash argon2id viewer via `forge-console hashpw`),
-- `FORGE_CONSOLE_OPERATOR_HASH` (hash argon2id opérateur via `forge-console hashpw-operator`),
+- `FORGE_CONSOLE_PASS_HASH` (hash argon2id viewer via `forge hashpw`),
+- `FORGE_CONSOLE_OPERATOR_HASH` (hash argon2id opérateur via `forge hashpw-operator`),
 - `FORGE_CONSOLE_TOKEN` (bearer d'ingestion).
 
 L'état bascule alors `provisioned:true` sans wizard. Pour un **compte admin individuel** en headless :
-`forge-console useradd <login> admin` (mot de passe sur STDIN). Voir [Configuration §1.2](CONFIGURATION.md#12-console--secrets-dauthentification--rbac).
+`forge useradd <login> admin` (mot de passe sur STDIN). Voir [Configuration §1.2](CONFIGURATION.md#12-console--secrets-dauthentification--rbac).
 
 ## Après le wizard — RBAC
 

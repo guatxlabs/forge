@@ -599,7 +599,7 @@
       <h3 class="id-h3">Fournisseur OIDC (SSO) <span id="id-oidc-secret-badge" class="badge"></span></h3>
       <form id="id-oidc-form" class="id-form" autocomplete="off">
         <label class="login-f"><span>Issuer (URL du provider)</span><input id="id-oidc-issuer" type="url" placeholder="http://idp.interne/realms/forge" required></label>
-        <label class="login-f"><span>client_id</span><input id="id-oidc-clientid" type="text" placeholder="forge-console" required></label>
+        <label class="login-f"><span>client_id</span><input id="id-oidc-clientid" type="text" placeholder="forge" required></label>
         <label class="login-f"><span>client_secret <span class="muted">(write-only — laisser vide pour conserver)</span></span><input id="id-oidc-secret" type="password" placeholder="•••••• (inchangé si vide)" autocomplete="new-password"></label>
         <label class="login-f"><span>redirect_uri (callback console)</span><input id="id-oidc-redirect" type="url" placeholder="http://console.interne/api/sso/callback" required></label>
         <label class="login-f"><span>Redirections post-login autorisées (allowlist, une par ligne)</span><textarea id="id-oidc-allow" rows="2" placeholder="/&#10;http://console.interne/"></textarea></label>

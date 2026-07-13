@@ -32,13 +32,13 @@ pub(crate) struct MigrateOpts {
     pub(crate) actor: String,           // attribution ledger ("cli:migrate" | "api:setup/migrate")
 }
 
-/// Résout (source_db, source_ledger) depuis `--from`. Un DOSSIER -> {dir}/forge-console.db +
+/// Résout (source_db, source_ledger) depuis `--from`. Un DOSSIER -> {dir}/forge.db +
 /// {dir}/engagement.jsonl (convention d'install). Un FICHIER -> le fichier .db + son sibling
 /// engagement.jsonl (même dossier). Aucune invention : si le ledger n'existe pas, la copie le note.
 pub(crate) fn resolve_migrate_source(from: &str) -> (String, String) {
     let p = std::path::Path::new(from);
     if p.is_dir() {
-        let db = p.join("forge-console.db");
+        let db = p.join("forge.db");
         let led = p.join("engagement.jsonl");
         (db.to_string_lossy().into_owned(), led.to_string_lossy().into_owned())
     } else {
@@ -84,12 +84,12 @@ pub(crate) fn env_flag_enabled(name: &str) -> bool {
 /// Racine autorisée pour l'import/export via API (allowlist anti-traversal). Par défaut : le DOSSIER
 /// parent de la base console ($FORGE_CONSOLE_DB — la racine de données), surchargeable explicitement
 /// par $FORGE_CONSOLE_IMPORT_DIR (dossier de staging dédié). Un chemin de base relatif sans parent
-/// (défaut `forge-console.db`) => `.` (cwd de la console). N'affecte QUE la frontière API.
+/// (défaut `forge.db`) => `.` (cwd de la console). N'affecte QUE la frontière API.
 pub(crate) fn api_migrate_base_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var("FORGE_CONSOLE_IMPORT_DIR").ok().filter(|s| !s.is_empty()) {
         return std::path::PathBuf::from(d);
     }
-    let db = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge-console.db".to_string());
+    let db = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge.db".to_string());
     std::path::Path::new(&db)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -407,7 +407,7 @@ pub(crate) fn apply_db_key_on_boot(conn: &Connection) {
     }
 }
 
-/// `forge-console migrate --from <dir|db> --to <db> [--ledger <path>] [--verify]
+/// `forge migrate --from <dir|db> --to <db> [--ledger <path>] [--verify]
 ///                        [--encrypt --key-env <ENVVAR>]`
 /// Migre un install Forge existant vers une base cible. UX PRIMAIRE (documentée) : lancée dans un
 /// conteneur one-shot au 1er déploiement Docker. Codes : 0 OK, 1 échec migration/vérif, 2 usage.
@@ -415,25 +415,25 @@ pub(crate) fn run_migrate_cli(args: &[String]) -> i32 {
     let from = match cli_opt(args, "from") {
         Some(f) if !f.is_empty() => f,
         _ => {
-            eprintln!("usage: forge-console migrate --from <dir|db> --to <db> [--ledger <path>] [--verify] [--encrypt --key-env <ENVVAR>]");
+            eprintln!("usage: forge migrate --from <dir|db> --to <db> [--ledger <path>] [--verify] [--encrypt --key-env <ENVVAR>]");
             return 2;
         }
     };
     let to = match cli_opt(args, "to") {
         Some(t) if !t.is_empty() => t,
         _ => {
-            eprintln!("[forge-console] migrate: --to <db> requis");
+            eprintln!("[forge] migrate: --to <db> requis");
             return 2;
         }
     };
     let encrypt = cli_flag(args, "encrypt");
     let key_env = cli_opt(args, "key-env");
     if encrypt && !cfg!(feature = "encryption") {
-        eprintln!("[forge-console] migrate: --encrypt demandé mais ce build n'inclut PAS le chiffrement au repos (recompiler avec `--features encryption`)");
+        eprintln!("[forge] migrate: --encrypt demandé mais ce build n'inclut PAS le chiffrement au repos (recompiler avec `--features encryption`)");
         return 2;
     }
     if encrypt && key_env.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
-        eprintln!("[forge-console] migrate: --encrypt exige --key-env <ENVVAR> (nom de la variable d'ENV portant la clé)");
+        eprintln!("[forge] migrate: --encrypt exige --key-env <ENVVAR> (nom de la variable d'ENV portant la clé)");
         return 2;
     }
     let opts = MigrateOpts {
@@ -450,13 +450,13 @@ pub(crate) fn run_migrate_cli(args: &[String]) -> i32 {
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into()));
             if let Some(v) = report.get("verify").filter(|v| !v.is_null()) {
                 println!(
-                    "[forge-console] migrate: ledger source vérifié — ok={}, entries={}",
+                    "[forge] migrate: ledger source vérifié — ok={}, entries={}",
                     v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
                     v.get("entries").and_then(|x| x.as_u64()).unwrap_or(0)
                 );
             }
             println!(
-                "[forge-console] migrate: OK — {} -> {} (ledger cible: {})",
+                "[forge] migrate: OK — {} -> {} (ledger cible: {})",
                 report.get("source_db").and_then(|x| x.as_str()).unwrap_or(""),
                 opts.to,
                 report.get("target_ledger").and_then(|x| x.as_str()).unwrap_or("")
@@ -464,7 +464,7 @@ pub(crate) fn run_migrate_cli(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("[forge-console] migrate: {e}");
+            eprintln!("[forge] migrate: {e}");
             1
         }
     }
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn migrate_plaintext_copies_and_upgrades_schema() {
         let src_dir = tmp_dir("forge-mig-src");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         // ledger source (2 entrées chaînées) + clé de signature .ed25519.
         let src_ledger = format!("{src_dir}/engagement.jsonl");
@@ -549,7 +549,7 @@ mod tests {
     fn migrate_verify_passes_intact_aborts_on_tamper() {
         // --- cas INTACT : verify ok, migration réussit. ---
         let src_dir = tmp_dir("forge-mig-verify-ok");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         let src_ledger = format!("{src_dir}/engagement.jsonl");
         for i in 0..4 {
@@ -567,7 +567,7 @@ mod tests {
 
         // --- cas ALTÉRÉ : on tampere une entrée -> verify échoue -> ABORT avant toute écriture. ---
         let src_dir2 = tmp_dir("forge-mig-verify-tamper");
-        let src_db2 = format!("{src_dir2}/forge-console.db");
+        let src_db2 = format!("{src_dir2}/forge.db");
         seed_old_source_db(&src_db2);
         let src_ledger2 = format!("{src_dir2}/engagement.jsonl");
         for i in 0..4 {
@@ -603,7 +603,7 @@ mod tests {
     fn migrate_copies_ed25519_key_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
         let src_dir = tmp_dir("forge-mig-key");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         let src_ledger = format!("{src_dir}/engagement.jsonl");
         ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn migrate_encrypt_without_feature_errors_clearly() {
         let src_dir = tmp_dir("forge-mig-noenc");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         let opts = MigrateOpts {
             from: src_dir.clone(), to: tmp_path("forge-mig-noenc-to.db"), ledger: None,
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn migrate_encrypted_roundtrip_reads_back_with_key() {
         let src_dir = tmp_dir("forge-mig-enc");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         let to = tmp_path("forge-mig-enc-to.db");
         std::env::set_var("FORGE_TEST_ENC_KEY", "correct horse battery staple");

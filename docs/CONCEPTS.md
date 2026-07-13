@@ -74,7 +74,7 @@ Propriétés :
 hors-host (`forge/anchor.py` : témoin co-signataire distant + `reconcile` qui détecte une réécriture
 re-signée localement) est la dernière étape ; l'architecture asymétrique le permet déjà.
 
-Commandes : `forge ledger verify|pubkey|keygen` ([CLI](CLI.md)) · `forge-console ledger verify`
+Commandes : `forge ledger verify|pubkey|keygen` ([CLI](CLI.md)) · `forge ledger verify`
 (chaîne seule, rapide) · `GET /api/ledger/verify` (côté console, sans clé privée).
 
 ---

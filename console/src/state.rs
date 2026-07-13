@@ -118,7 +118,7 @@ pub(crate) fn module_effectively_available(enabled: bool, available_override: Op
 /// indépendamment du cwd — sans ça, le défaut relatif `"web"` est servi en 0 octet quand la console
 /// est lancée hors `console/` (seul index.html survit via include_str!). Ordre de priorité :
 ///   1) $FORGE_CONSOLE_WEB s'il est posé (override explicite de l'opérateur) ;
-///   2) <dir-du-binaire>/web et <dir-du-binaire>/../web (cas `./target/{debug,release}/forge-console`
+///   2) <dir-du-binaire>/web et <dir-du-binaire>/../web (cas `./target/{debug,release}/forge`
 ///      lancé de n'importe où : les assets sont copiés/symlinkés à côté, ou restent dans console/web) ;
 ///   3) $FORGE_PKG_DIR/console/web puis ./console/web puis ./web (cas lancé depuis console/ ou la racine) ;
 ///   4) repli `"web"` (comportement historique, lancé depuis console/).
@@ -133,10 +133,10 @@ pub(crate) fn resolve_web_dir() -> String {
         if let Some(dir) = exe.parent() {
             // assets copiés/symlinkés à côté du binaire (déploiement)
             candidates.push(dir.join("web"));
-            // ./console/target/{debug,release}/forge-console -> remonter au crate console/, puis web/
+            // ./console/target/{debug,release}/forge -> remonter au crate console/, puis web/
             // (target/release -> target -> console -> console/web)
             candidates.push(dir.join("..").join("..").join("web"));
-            // tolérance si le binaire est une marche plus haut (target/forge-console)
+            // tolérance si le binaire est une marche plus haut (target/forge)
             candidates.push(dir.join("..").join("web"));
         }
     }
@@ -171,7 +171,7 @@ pub(crate) fn load_server_scope(pkg_dir: &str) -> (Vec<String>, String) {
             (in_scope, mode)
         }
         None => {
-            eprintln!("[forge-console] scope serveur introuvable ({path}) — C2 fail-closed (aucune cible lançable)");
+            eprintln!("[forge] scope serveur introuvable ({path}) — C2 fail-closed (aucune cible lançable)");
             (vec![], "grey".to_string())
         }
     }

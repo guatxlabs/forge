@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console upgrade` — flux d'UPGRADE SÛR EN UNE COMMANDE, fail-closed avec rollback.
+//! `forge upgrade` — flux d'UPGRADE SÛR EN UNE COMMANDE, fail-closed avec rollback.
 // ===========================================================================================
-// `forge-console upgrade --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
+// `forge upgrade --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
 //   [--to <postgres-url>] [--force] [--dry-run]`
 //
 // SÉQUENCE FAIL-CLOSED (jamais de base à moitié migrée) :
@@ -368,7 +368,7 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
             let pruned = prune_pre_upgrade_snapshots(&opts.backup_dir, keep);
             if !pruned.is_empty() {
                 println!(
-                    "[forge-console] upgrade : prune snapshots pré-upgrade — {} supprimé(s) (garde les {keep} plus récents) : {}",
+                    "[forge] upgrade : prune snapshots pré-upgrade — {} supprimé(s) (garde les {keep} plus récents) : {}",
                     pruned.len(),
                     pruned.join(", ")
                 );
@@ -404,7 +404,7 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
                     "UPGRADE ÉCHOUÉ : {e}. ROLLBACK EFFECTUÉ — base/ledger restaurés à l'état pré-upgrade depuis '{backup_out}' (snapshot vérifié). Aucune base à moitié migrée."
                 )),
                 Err(re) => Err(format!(
-                    "UPGRADE ÉCHOUÉ : {e}. ⚠️ ROLLBACK AUSSI ÉCHOUÉ : {re}. Le snapshot pré-upgrade chiffré est à '{backup_out}' — restaurez manuellement : `forge-console restore --in '{backup_out}' --passphrase-env <ENV> --to '{}' --ledger '{}' --force`.",
+                    "UPGRADE ÉCHOUÉ : {e}. ⚠️ ROLLBACK AUSSI ÉCHOUÉ : {re}. Le snapshot pré-upgrade chiffré est à '{backup_out}' — restaurez manuellement : `forge restore --in '{backup_out}' --passphrase-env <ENV> --to '{}' --ledger '{}' --force`.",
                     opts.db, opts.ledger
                 )),
             }
@@ -425,7 +425,7 @@ fn redact_target(url: &str) -> String {
     out
 }
 
-/// `forge-console upgrade --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
+/// `forge upgrade --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
 ///   [--to <postgres-url>] [--force] [--dry-run]`. Codes : 0 = OK (ou dry-run), 1 = échec (rollback effectué
 ///   si applicable), 2 = usage (passphrase/args).
 pub(crate) fn run_upgrade_cli(args: &[String]) -> i32 {
@@ -451,7 +451,7 @@ pub(crate) fn run_upgrade_cli(args: &[String]) -> i32 {
         let pass_env = match cli_opt(args, "passphrase-env").filter(|s| !s.is_empty()) {
             Some(e) => e,
             None => {
-                eprintln!("usage: forge-console upgrade --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>] [--backup-dir <dir>] [--to <postgres-url>] [--force] [--dry-run]");
+                eprintln!("usage: forge upgrade --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>] [--backup-dir <dir>] [--to <postgres-url>] [--force] [--dry-run]");
                 eprintln!("  --passphrase-env est REQUIS (hors --dry-run) : le snapshot pré-upgrade chiffré en dépend (passphrase lue depuis cette ENV, jamais en argv).");
                 return 2;
             }
@@ -459,7 +459,7 @@ pub(crate) fn run_upgrade_cli(args: &[String]) -> i32 {
         match read_passphrase_env(&pass_env) {
             Some(p) => p,
             None => {
-                eprintln!("[forge-console] upgrade: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
+                eprintln!("[forge] upgrade: passphrase absente — la variable d'ENV '{pass_env}' est vide ou non définie (fail-closed)");
                 return 2;
             }
         }
@@ -481,18 +481,18 @@ pub(crate) fn run_upgrade_cli(args: &[String]) -> i32 {
         Ok(report) => {
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into()));
             if opts.dry_run {
-                println!("[forge-console] upgrade [DRY-RUN] : plan affiché — aucune écriture.");
+                println!("[forge] upgrade [DRY-RUN] : plan affiché — aucune écriture.");
             } else if report.get("already_current").and_then(|v| v.as_bool()).unwrap_or(false)
                 && opts.to.is_none()
             {
-                println!("[forge-console] upgrade : DÉJÀ à la version cible (schema_version={}) — no-op vérifié, aucun changement.", crate::schema::SCHEMA_VERSION);
+                println!("[forge] upgrade : DÉJÀ à la version cible (schema_version={}) — no-op vérifié, aucun changement.", crate::schema::SCHEMA_VERSION);
             } else {
-                println!("[forge-console] upgrade : OK — base à schema_version={}, snapshot pré-upgrade conservé, ledger tracé.", crate::schema::SCHEMA_VERSION);
+                println!("[forge] upgrade : OK — base à schema_version={}, snapshot pré-upgrade conservé, ledger tracé.", crate::schema::SCHEMA_VERSION);
             }
             0
         }
         Err(e) => {
-            eprintln!("[forge-console] upgrade: {e}");
+            eprintln!("[forge] upgrade: {e}");
             1
         }
     }
