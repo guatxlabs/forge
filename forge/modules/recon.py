@@ -8,6 +8,14 @@ from .. import runner
 from .toolspec import check_extra_args, safe_value
 
 
+def _path_argval(val):
+    """True si `val` est une valeur de CHEMIN/EXTENSION sûre à passer à un drapeau (-path/-e) : chaîne
+    non vide, ne COMMENCE PAS par '-' (anti option-smuggling), sans NUL ni espace. AUTORISE '/' et '.'
+    en tête (chemins `/admin`, extensions `.php`) que `safe_value` refuserait. Pur, ne lève jamais."""
+    s = str(val) if val is not None else ""
+    return bool(s) and not s.startswith("-") and "\x00" not in s and not any(c.isspace() for c in s)
+
+
 def _rate_flag(params):
     """Débit req/s (entier positif) depuis params['rate'], ou None (aucun drapeau -> byte-identique au
     défaut). Le débit n'est PRÉSENT que si l'opérateur l'a fixé (module_params) — jamais injecté par
@@ -25,21 +33,63 @@ class HttpxFingerprint(Module):
     kind = "recon.httpx"
     exploit = False
     mitre = "T1595"
-    description = "Fingerprint HTTP (httpx) : status, titre, techno détectées."
+    description = ("Fingerprint HTTP (httpx) : status, titre, techno détectées. Params UI : threads "
+                   "(-threads), rate (-rl), status-codes (-mc), paths (-path), extra_args (allowlist). "
+                   "Défaut inchangé quand rien n'est fourni.")
     BIN, IMG = "httpx", "projectdiscovery/httpx"
     available = property(lambda self: runner.available("httpx", "projectdiscovery/httpx", prefer_docker=True))
 
+    # SCHÉMA servi à l'UI (source unique) — rendu dynamiquement par modules-form.js via `forge modules --json`.
+    PARAMS_SCHEMA = [
+        {"name": "threads", "type": "number", "label": "threads (-threads)", "flag": "-threads"},
+        {"name": "rate", "type": "number", "label": "rate-limit (-rl req/s)", "flag": "-rl"},
+        {"name": "status_codes", "type": "text", "label": "codes filtrés (-mc, ex 200,301)", "flag": "-mc"},
+        {"name": "paths", "type": "text", "label": "chemins probés (-path, ex /,/admin)", "flag": "-path"},
+        {"name": "extra_args", "type": "list", "label": "extra args (allowlist de drapeaux)", "flag": ""},
+    ]
+    # ALLOWLIST des drapeaux acceptés en argument libre (extra_args) — tout flag hors liste est REFUSÉ.
+    # EXCLUS : -o/-output (écriture fichier), -sr/-srd (store-response dans un dossier), -proxy/-http-proxy
+    # (exfil), -config (lecture fichier de config arbitraire).
+    FLAG_ALLOWLIST = ("-rl", "-t", "-threads", "-mc", "-fc", "-path", "-status-code", "-title",
+                      "-tech-detect", "-server", "-cl", "-follow-redirects", "-fr", "-timeout",
+                      "-retries", "-x", "-silent", "-no-color", "-json")
+
     def _args(self, action):
+        p = action.params or {}
         argv = ["-u", action.target, "-silent", "-status-code", "-title", "-tech-detect", "-json", "-no-color"]
-        rate = _rate_flag(action.params)                 # débit -> -rl <n> (opt-in ; absent = rien)
+        threads = p.get("threads")
+        if threads not in (None, "") and safe_value(str(threads)):
+            argv += ["-threads", str(threads)]
+        rate = _rate_flag(p)                              # débit -> -rl <n> (opt-in ; absent = rien)
         if rate is not None:
             argv += ["-rl", str(rate)]
+        codes = p.get("status_codes")
+        if codes is not None and safe_value(str(codes)):
+            argv += ["-mc", str(codes)]
+        paths = p.get("paths")
+        # un chemin peut légitimement commencer par '/' (rejeté par safe_value) : on garde le garde-fou
+        # ESSENTIEL (anti option-smuggling : refus si commence par '-', NUL ou espace) mais on autorise '/'.
+        if _path_argval(paths):
+            argv += ["-path", str(paths)]
+        _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)  # tokens VALIDÉS (fire gate en amont)
+        argv += extra
         return argv
 
     def dry(self, action):
         return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
+    def _refuse(self, action, reason):
+        return [self.finding(
+            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
+            category="recon", mitre="T1595", status="skipped", tool="httpx",
+            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
+
     def fire(self, action):
+        p = action.params or {}
+        # EXTRA_ARGS gouvernés : un drapeau libre hors allowlist (ou non-liste) -> refus fail-closed.
+        bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return self._refuse(action, f"argument libre refusé ({bad_extra})")
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action), timeout=60, prefer_docker=True)
         failed = self.tool_failed(action, rc, out, err, "httpx")
         if failed:

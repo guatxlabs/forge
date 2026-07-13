@@ -328,7 +328,7 @@ class TestSqliProbeOracle(unittest.TestCase):
         def fake(url, headers=None, timeout=15, method="GET", data=None):
             return (200, "STATIC-benign")
 
-        def run(url, param, method, timeout):
+        def run(url, param, method, timeout, opts=None):
             return (0, "Parameter 'id' is vulnerable. ... back-end DBMS: MySQL", "")
         f = self._fire(fake, params={"sqlmap": True},
                        sqlmap_available=lambda: True, sqlmap_run=run)

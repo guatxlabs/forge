@@ -43,6 +43,8 @@ import tempfile
 
 from .registry import register
 from .recon_surface import PassiveSurface, _host_only
+from .toolspec import check_extra_args, safe_value
+from .recon import _path_argval
 from .. import runner
 from .. import techniques
 
@@ -71,11 +73,29 @@ class ContentDiscovery(PassiveSurface):
     tool = "forge/modules/recon_active.py:recon.content"
     category = "recon"
     description = ("Découverte ACTIVE de contenu/routes web via ffuf (chemins candidats) — "
-                   "scope-locked, rate-limité, lecture seule. ffuf absent -> skipped (T1595.003).")
+                   "scope-locked, rate-limité, lecture seule. Params UI : wordlist, threads, rate, "
+                   "extensions (-e), match_codes (-mc), timeout, extra_args (allowlist). "
+                   "ffuf absent -> skipped (T1595.003).")
     BIN, IMG = "ffuf", None                                  # binaire LOCAL seul (docker ne monte pas la wordlist)
     # codes de statut « intéressants » (route existante/protégée) — pas 404/400.
     MATCH_CODES = "200,201,202,203,204,301,302,307,308,401,403,405,500"
     MAX_ROUTES = 300                                         # borne le nombre de findings par-route
+    # SCHÉMA servi à l'UI — rendu par modules-form.js via `forge modules --json`.
+    PARAMS_SCHEMA = [
+        {"name": "wordlist", "type": "text", "label": "wordlist (-w, chemin ; sinon paths par défaut)", "flag": "-w"},
+        {"name": "threads", "type": "number", "label": "threads (-t ; sinon <= rate, plafond 40)", "flag": "-t"},
+        {"name": "rate", "type": "number", "label": "rate (-rate req/s ; injecté par le ROE)", "flag": "-rate"},
+        {"name": "extensions", "type": "text", "label": "extensions (-e, ex .php,.bak)", "flag": "-e"},
+        {"name": "match_codes", "type": "text", "label": "codes acceptés (-mc, ex 200,301,403)", "flag": "-mc"},
+        {"name": "timeout", "type": "number", "label": "timeout global sous-processus (s)", "flag": ""},
+        {"name": "extra_args", "type": "list", "label": "extra args ffuf (allowlist de drapeaux)", "flag": ""},
+    ]
+    # ALLOWLIST des drapeaux ffuf acceptés en argument libre — tout flag hors liste est REFUSÉ.
+    # EXCLUS : -o/-of/-debug-log (écriture fichier), -x/-replay-proxy (proxy exfil), -config (lecture
+    # fichier arbitraire), -w (la wordlist passe par params.wordlist, valeur discrète pas un drapeau).
+    FLAG_ALLOWLIST = ("-mc", "-fc", "-ms", "-fs", "-mw", "-fw", "-ml", "-fl", "-mr", "-fr", "-e",
+                      "-t", "-rate", "-timeout", "-p", "-recursion", "-recursion-depth", "-c", "-s",
+                      "-H", "-X", "-ac", "-ic")
     # seuil de « challenge en nappe » : nb MIN de chemins distincts tous en code de blocage pour conclure
     # à un challenge/WAF (≠ une route protégée isolée qui, elle, est une découverte légitime).
     BLANKET_CHALLENGE_MIN = 3
@@ -95,12 +115,18 @@ class ContentDiscovery(PassiveSurface):
         return runner.available(ContentDiscovery.BIN, None)
 
     @staticmethod
-    def _run_ffuf(url, wordlist, rate, threads, timeout):
+    def _run_ffuf(url, wordlist, rate, threads, timeout, match_codes=None, extensions="", extra=()):
         """Seam sous-processus SANS shell (comme web.nuclei) : construit la liste d'args ffuf et
-        l'exécute via runner.tool. Renvoie (rc, stdout, stderr). Patchable par les tests (aucun binaire)."""
+        l'exécute via runner.tool. Renvoie (rc, stdout, stderr). Patchable par les tests (aucun binaire).
+        `match_codes` (défaut MATCH_CODES), `extensions` (-e) et `extra` (drapeaux VALIDÉS) sont OPTIONNELS
+        -> argv BYTE-IDENTIQUE au défaut quand ils sont absents."""
+        mc = match_codes if (match_codes and safe_value(str(match_codes))) else ContentDiscovery.MATCH_CODES
         args = ["-u", url.rstrip("/") + "/FUZZ", "-w", str(wordlist) + ":FUZZ",
-                "-mc", ContentDiscovery.MATCH_CODES, "-rate", str(int(rate)), "-t", str(int(threads)),
-                "-timeout", "10", "-json", "-s", "-noninteractive"]
+                "-mc", str(mc), "-rate", str(int(rate)), "-t", str(int(threads))]
+        if extensions and _path_argval(extensions):     # extensions type `.php,.bak` (leading '.') autorisées
+            args += ["-e", str(extensions)]
+        args += list(extra or ())
+        args += ["-timeout", "10", "-json", "-s", "-noninteractive"]
         return runner.tool(ContentDiscovery.BIN, None, args, timeout=timeout)
 
     def _rate(self, action):
@@ -111,7 +137,13 @@ class ContentDiscovery(PassiveSurface):
             return 10
 
     def _threads(self, action):
-        """Concurrence bornée (<= débit, plafond 40) — pas de flood."""
+        """Concurrence bornée (plafond 40) — override explicite `params.threads`, sinon <= débit (pas de flood)."""
+        t = action.params.get("threads")
+        if t not in (None, ""):
+            try:
+                return max(1, min(int(t), 40))
+            except (TypeError, ValueError):
+                pass
         return max(1, min(self._rate(action), 40))
 
     def _timeout(self, action):
@@ -152,10 +184,17 @@ class ContentDiscovery(PassiveSurface):
             return [self._skipped(target, "recon.content non exécuté — ffuf indisponible (dégradation)",
                                   "Le binaire ffuf est absent ; aucune découverte de contenu possible. "
                                   "Installer ffuf (binaire local) pour activer ce module.", self.dry(action))]
+        # EXTRA_ARGS gouvernés : un drapeau ffuf libre hors allowlist (ou non-liste) -> refus fail-closed.
+        bad_extra, extra = check_extra_args(action.params.get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return [self._skipped(target, f"recon.content non exécuté — argument libre refusé ({bad_extra})",
+                                  "Aucun processus lancé (fail-closed).", self.dry(action))]
         wl, n_paths, is_tmp = self._wordlist(action)
         try:
             rc, out, err = self._run_ffuf(self._url(target), wl, self._rate(action),
-                                          self._threads(action), self._timeout(action))
+                                          self._threads(action), self._timeout(action),
+                                          match_codes=action.params.get("match_codes"),
+                                          extensions=action.params.get("extensions", ""), extra=extra)
         finally:
             if is_tmp:
                 try:

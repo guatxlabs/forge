@@ -159,9 +159,9 @@ class TestContentDiscovery(unittest.TestCase):
     ]})
 
     def _fire(self, params, ffuf_out="", rc=0, available=True, capture=None):
-        def run(url, wordlist, rate, threads, timeout):
+        def run(url, wordlist, rate, threads, timeout, **kw):
             if capture is not None:
-                capture.update(url=url, wordlist=wordlist, rate=rate, threads=threads, timeout=timeout)
+                capture.update(url=url, wordlist=wordlist, rate=rate, threads=threads, timeout=timeout, **kw)
             return (rc, ffuf_out, "")
         r_av = _patch(ContentDiscovery, "_tool_available", lambda: available)
         r_run = _patch(ContentDiscovery, "_run_ffuf", run)

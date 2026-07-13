@@ -261,7 +261,7 @@ class TestReconEmitsChallengeMarker(unittest.TestCase):
     def _content_fire(self, ffuf_out, rc=0, params=None):
         r_av = _patch(ContentDiscovery, "_tool_available", lambda: True)
         r_run = _patch(ContentDiscovery, "_run_ffuf",
-                       lambda url, wordlist, rate, threads, timeout: (rc, ffuf_out, ""))
+                       lambda url, wordlist, rate, threads, timeout, **kw: (rc, ffuf_out, ""))
         try:
             return ContentDiscovery().fire(Action("recon.content", "app.test",
                                                   params=params or {"in_scope": ["app.test"]}))
