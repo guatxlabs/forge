@@ -9,18 +9,21 @@
 # Le `context: .` ci-dessous est résolu relativement à CE fichier compose, donc
 # `forge/` ; on remonte d'un cran (`..`) pour englober `core/` ET `forge/`.
 #
-# Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le scope/ROE,
-# le ledger et la DB sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret
-# n'est en clair ici : les hashes/tokens viennent de `forge/.env` (gitignored).
+# Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le ledger et la DB
+# sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret n'est en clair ici : les
+# hashes/tokens viennent de `forge/.env` (gitignored).
 #
-# ⚠️ PRÉ-ÉTAPE OBLIGATOIRE avant `up` : créer le fichier scope.json (bind-mount d'un FICHIER) —
-#   sinon Docker crée un RÉPERTOIRE vide ./scope.json à sa place, que la console ne peut pas lire.
+# ZÉRO PRÉ-ÉTAPE : `docker compose -f forge/docker-compose.yml up -d --build` fonctionne SANS
+#   créer le moindre fichier hôte. Aucun scope.json n'est monté par défaut → le scope serveur est
+#   ABSENT au boot → la console démarre proprement (fail-closed : in_scope vide = rien lançable) et
+#   vous atterrissez sur l'ASSISTANT de 1er déploiement dans le navigateur (http://127.0.0.1:7100).
+#   L'assistant crée l'admin PUIS définit le PÉRIMÈTRE (ROE) de l'engagement #1 — aucun JSON, aucune
+#   CLI. Le scope/ROE vit ensuite dans la DB (persistée via le volume forge-db) et s'édite dans l'UI
+#   (Engagements → éditeur de scope). Les runs appliquent le scope de l'ENGAGEMENT, jamais un fichier.
 #
-#       cp scope.example.json scope.json    # depuis forge/, puis éditer AVEC AUTORISATION
-#
-#   scope.example.json (in_scope vide = INERTE) est committé ; scope.json reste gitignored.
-#   Filet de sécurité : l'entrypoint ci-dessous ÉCHOUE BRUYAMMENT si le chemin monté est un
-#   répertoire, et bascule sur le scope.example.json embarqué (INERTE) si scope.json manque/vide.
+#   OPTIONNEL — amorcer l'engagement #1 depuis un fichier hôte (au lieu de l'assistant) : décommenter
+#   le bind `./scope.json:/data/scope/scope.json:ro` dans `volumes:` plus bas et créer ce fichier
+#   AVEC AUTORISATION (`cp scope.example.json scope.json`, puis éditer). Absent = l'assistant s'en charge.
 # Env (secrets, connecteurs, boucle purple) : cf. `.env.example` à la racine + Dockerfile.
 #
 # SERVICES OPTIONNELS = derrière des PROFILES → un `docker compose up` NU démarre la CONSOLE SEULE
@@ -53,27 +56,10 @@ services:
     image: forge-console:0.0.1
     container_name: forge-console
     restart: unless-stopped
-    # Garde scope fail-loud : conserve tini en PID1 (reaping), puis lance forge-console APRÈS avoir
-    # vérifié le scope monté. ÉCHOUE BRUYAMMENT si Docker a créé un répertoire à la place du fichier
-    # scope.json (pré-étape oubliée) ; sinon bascule sur le scope.example.json embarqué (INERTE) quand
-    # scope.json manque ou est vide. Aucun `$` dans le script (pas d'interpolation compose).
-    entrypoint:
-      - /usr/bin/tini
-      - --
-      - /bin/sh
-      - -c
-      - |
-        if [ -d /data/scope/scope.json ]; then
-          echo "[forge-console] FATAL: /data/scope/scope.json est un REPERTOIRE, pas un fichier." >&2
-          echo "[forge-console] Docker le cree ainsi quand ./scope.json est absent sur l'hote." >&2
-          echo "[forge-console] Pre-etape: 'cp scope.example.json scope.json' dans forge/ (editer AVEC AUTORISATION) avant 'docker compose up'." >&2
-          exit 1
-        fi
-        if [ ! -s /data/scope/scope.json ]; then
-          echo "[forge-console] WARN: /data/scope/scope.json absent/vide -> repli sur scope.example.json embarque (INERTE: in_scope vide = tout refuse)." >&2
-          export FORGE_CONSOLE_SCOPE=/opt/forge/scope.example.json
-        fi
-        exec forge-console
+    # ENTRYPOINT/CMD hérités de l'image (Dockerfile) : tini en PID1 (reaping) + `forge-console`. AUCUN
+    # override ici : le scope serveur est OPTIONNEL. S'il est absent (aucun bind scope.json), la console
+    # démarre proprement en fail-closed (load_server_scope -> in_scope vide, rien lançable) et l'assistant
+    # web définit le périmètre de l'engagement #1. Pas de pré-étape, pas de fichier hôte requis.
     # Secrets & overrides d'env : token bearer, hashes argon2id viewer/opérateur,
     # URLs des services pilotés. Fichier gitignored (cf. .gitignore : *.env).
     # Créer forge/.env à partir des variables documentées dans le Dockerfile.
@@ -143,12 +129,14 @@ services:
       # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
       - "127.0.0.1:7100:7100"
     volumes:
-      # Persistance hors cycle de vie du conteneur.
+      # Persistance hors cycle de vie du conteneur (dont le scope/ROE de l'engagement #1, stocké en DB).
       - forge-db:/data/db
       - forge-ledger:/data/ledger
-      # Scope/ROE ACTIF monté en lecture seule depuis l'hôte (autorisation d'engagement).
-      # Remplir ./scope.json AVEC AUTORISATION ; vide/absent = INERTE (fail-closed).
-      - ./scope.json:/data/scope/scope.json:ro
+      # PÉRIMÈTRE (ROE) : PAR DÉFAUT non monté → aucun fichier hôte requis. L'engagement #1 démarre avec un
+      # scope VIDE (fail-closed) et l'assistant web (ou l'éditeur d'engagement) le renseigne — persisté en DB.
+      # OPTIONNEL : pour amorcer #1 depuis un fichier hôte AVEC AUTORISATION, décommenter la ligne suivante
+      # et créer forge/scope.json (`cp scope.example.json scope.json`, puis éditer). Absent = fail-closed.
+      # - ./scope.json:/data/scope/scope.json:ro
     networks:
       - forge-net
     # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et

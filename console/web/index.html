@@ -774,7 +774,7 @@
       <div class="login-sso-sep"><span>ou</span></div>
       <button id="login-sso-btn" type="button" class="login-btn login-sso-btn">Se connecter avec le SSO</button>
     </div>
-    <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Comptes provisionnés côté serveur (<code>forge-console useradd</code>).</p>
+    <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Au 1er lancement, l'<b>assistant de déploiement</b> crée le compte administrateur (aucune CLI) ; les comptes suivants se créent dans <b>Administration</b>.</p>
   </form>
 </div>
 <!-- WIZARD 1er DÉPLOIEMENT (self-deploy) — affiché quand GET /api/setup/state répond needs_setup:true
@@ -791,6 +791,7 @@
       <li class="setup-step" data-step="2"><span class="setup-step-n">2</span><span class="setup-step-l">Chiffrement</span></li>
       <li class="setup-step" data-step="3"><span class="setup-step-n">3</span><span class="setup-step-l">Détection</span></li>
       <li class="setup-step" data-step="4"><span class="setup-step-n">4</span><span class="setup-step-l">Opérateur</span></li>
+      <li class="setup-step" data-step="5"><span class="setup-step-n">5</span><span class="setup-step-l">Périmètre</span></li>
     </ol>
 
     <!-- STEP 1 — compte admin (SEULS champs requis) -->
@@ -824,6 +825,25 @@
       <small class="fhint">Restreint l'armement aux IP sources listées (CIDR). Vide = aucune restriction d'origine réseau. N'affecte que l'opérateur, pas la lecture.</small>
       <label class="login-f setup-toggle"><span>Approbation requise pour le haut-impact</span><input id="su-op-approval" type="checkbox"></label>
       <small class="fhint">Si activé, un lancement à <b>fort impact</b> (exploit / destructif) exige une étape d'approbation en plus de l'opt-in armer + raison + secret.</small>
+    </div>
+
+    <!-- STEP 5 — périmètre (ROE) de l'engagement #1. OPTIONNEL : mêmes champs que l'éditeur d'engagement
+         (mode + in-scope/out-of-scope, une entrée par ligne). Vide = engagement #1 en scope VIDE (fail-closed :
+         rien n'est lançable tant qu'un in-scope n'est pas défini) ; réglable ensuite dans Engagements. -->
+    <div class="setup-panel" data-panel="5">
+      <div class="setup-note muted">Périmètre autorisé (ROE) de l'engagement #1. <b>Optionnel</b> — laissez vide pour le définir plus tard dans <b>Engagements → éditeur de scope</b>. Un scope vide est <b>fail-closed</b> : aucune cible n'est lançable tant qu'un in-scope n'est pas renseigné. Le serveur valide chaque entrée (host / <code>*.wildcard</code> / CIDR).</div>
+      <label class="login-f"><span>Mode d'engagement</span>
+        <select id="su-scope-mode">
+          <option value="grey" selected>grey</option>
+          <option value="white">white</option>
+          <option value="black">black</option>
+        </select>
+        <small class="fhint">Posture de l'engagement (white = boîte blanche, grey = mixte, black = boîte noire). Modifiable plus tard.</small>
+      </label>
+      <label class="login-f"><span>In-scope (une entrée par ligne — host / <code>*.wildcard</code> / CIDR)</span><textarea id="su-scope-in" rows="3" spellcheck="false" placeholder="app.example.com&#10;*.example.com&#10;10.0.0.0/8"></textarea></label>
+      <small class="fhint">Cibles AUTORISÉES. Chaque run est pré-filtré contre cette liste (scope-guard fail-closed). Vide = rien n'est lançable.</small>
+      <label class="login-f"><span>Out-of-scope (optionnel — une entrée par ligne)</span><textarea id="su-scope-out" rows="2" spellcheck="false" placeholder="admin.example.com"></textarea></label>
+      <small class="fhint">Exclusions explicites : une cible out-of-scope est refusée même si elle matche l'in-scope.</small>
     </div>
 
     <div id="setup-err" class="login-err" role="alert" hidden></div>

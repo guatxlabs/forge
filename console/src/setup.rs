@@ -184,14 +184,18 @@ pub(crate) async fn setup_state(State(app): State<App>) -> impl IntoResponse {
 }
 
 /// POST /api/setup — PUBLIC mais AUTO-DÉSACTIVANTE : 409 dès que `provisioned()` est vrai. Corps :
-///   {admin_login, admin_password, session_ttl?, operator_policy?, detection_source?}
+///   {admin_login, admin_password, session_ttl?, operator_policy?, detection_source?, scope_json?}
 /// Valide le login (validate_login) et exige un mot de passe non vide (parité admin_create_user), hash
 /// argon2id (hash_pw), upsert du compte role="admin". `operator_policy`/`detection_source` sont stockés
 /// VERBATIM dans `settings` UNIQUEMENT s'ils sont fournis (objets JSON) — sinon rien (aucun défaut).
-/// `session_ttl` (entier positif) est persisté comme substrat de config s'il est fourni. Recalcule la
-/// gate d'auth (un admin activé existe désormais), ouvre une session (cookie forge_session) pour que le
-/// navigateur atterrisse connecté, et ledgerise `console.setup.provision` (attribution = le login admin ;
-/// JAMAIS le mot de passe ni le hash).
+/// `session_ttl` (entier positif) est persisté comme substrat de config s'il est fourni. `scope_json`
+/// (PÉRIMÈTRE/ROE, objet {mode?, in_scope?, out_scope?}) est OPTIONNEL : validé VERBATIM via
+/// `validate_engagement_scope` (invalide -> 400, AUCUN provisioning : fail-closed) puis écrit dans
+/// l'engagement #1 par le MÊME chemin de mise à jour validé que l'éditeur d'engagement
+/// (`engagement_do_update`). Absent = engagement #1 garde son scope VIDE (fail-closed, réglable ensuite
+/// dans l'UI). Recalcule la gate d'auth (un admin activé existe désormais), ouvre une session (cookie
+/// forge_session) pour que le navigateur atterrisse connecté, et ledgerise `console.setup.provision`
+/// (attribution = le login admin ; JAMAIS le mot de passe ni le hash).
 pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Value>) -> Response {
     // AUTO-DÉSACTIVANTE : une console déjà provisionnée ne peut plus être (re)provisionnée anonymement.
     if app.provisioned() {
@@ -211,6 +215,16 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
     let password = gs(&body, "admin_password");
     if password.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_password", "why": "mot de passe vide refusé"}))).into_response();
+    }
+    // PÉRIMÈTRE (ROE) OPTIONNEL — validé AVANT toute écriture (fail-closed : un ROE invalide n'entraîne
+    // AUCUN provisioning). `scope_json` (objet {mode?, in_scope?, out_scope?}) passe par la MÊME validation
+    // pure que l'éditeur d'engagement ; invalide -> 400. Absent/non-objet -> engagement #1 garde son scope
+    // VIDE (rien lançable tant que l'opérateur ne le renseigne pas dans l'UI).
+    let scope_provided = body.get("scope_json").map(|v| v.is_object()).unwrap_or(false);
+    if scope_provided {
+        if let Err(e) = validate_engagement_scope(body.get("scope_json").unwrap()) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_scope", "why": e}))).into_response();
+        }
     }
     // argon2id est coûteux -> hash HORS mutex DB (ne pas geler l'API pendant le KDF).
     let hash = hash_pw(&password);
@@ -243,6 +257,19 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
     if user_id < 0 {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "provision_failed", "why": "compte introuvable après création"}))).into_response();
     }
+    // PÉRIMÈTRE (ROE) : écrit dans l'engagement #1 par le MÊME chemin validé/atomique/ledgerisé que
+    // l'éditeur d'engagement (`engagement_do_update` -> validate_engagement_scope + UPDATE + ledger
+    // console.engagement.edit). Hors du bloc `store` ci-dessus (engagement_do_update prend son propre
+    // verrou DB — éviter un double-lock). Le scope a déjà été validé plus haut (fail-closed) ; un échec
+    // ici ne peut venir que de l'absence de l'engagement #1 ou d'une I/O DB -> 500 typé.
+    let mut scope_set = false;
+    if scope_provided {
+        let upd = json!({"scope_json": body.get("scope_json").cloned().unwrap_or_else(|| json!({}))});
+        match engagement_do_update(&app, 1, &login, &upd) {
+            Ok(_) => scope_set = true,
+            Err((code, why)) => return (code, Json(json!({"error": "scope_write_failed", "why": why}))).into_response(),
+        }
+    }
     // la gate d'auth s'engage : un admin activé existe désormais (état DB fait autorité).
     app.recompute_auth_required();
     // la source de détection a pu être écrite dans settings -> recharge le cache (sinon la couverture
@@ -266,6 +293,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
         "operator_policy_set": op_set,
         "detection_source_set": det_set,
         "session_ttl_set": ttl_set,
+        "scope_set": scope_set,
     }));
     (
         StatusCode::OK,
