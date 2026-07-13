@@ -18,9 +18,9 @@
 #   4) MIGRATION des données SQLite existantes (Stage 3) — AVANT le 1er run Postgres, si tu avais déjà des
 #      données SQLite à conserver, lance le migrateur gouverné (one-shot) :
 #        docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
-#          --profile postgres run --rm --entrypoint forge-console forge-console \
+#          --profile postgres run --rm --entrypoint forge forge \
 #          migrate-store --to "postgres://forge:forge@postgres:5432/forge" \
-#          --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl
+#          --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl
 #      (dry-run d'abord en ajoutant `--dry-run` ; `--force` pour écraser une cible non vide.)
 #
 # Credentials : défauts d'ÉVAL (forge/forge). En PROD, poser FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB
@@ -29,7 +29,7 @@
 name: forge
 
 services:
-  forge-console:
+  forge:
     build:
       args:
         # Recompile la console AVEC le backend Postgres (TLS rustls/ring — openssl-free). L'image

@@ -83,7 +83,7 @@ sans rien écrire.
 
 > ℹ️ **La console vivante tient déjà la base ouverte.** Un swap **en place** remplace
 > `db.sqlite`/ledger/clé sous une connexion SQLite active : il **exige un redémarrage** de la
-> console (`docker restart` / `systemctl restart forge-console`) pour charger l'état restauré. Tant
+> console (`docker restart` / `systemctl restart forge`) pour charger l'état restauré. Tant
 > que ce n'est pas fait, l'API répond `restart_required: true` avec une note de maintenance.
 
 ---
@@ -96,12 +96,12 @@ La passphrase est lue **uniquement depuis une variable d'ENV** (jamais en `argv`
 ```bash
 # Sauvegarde CHIFFRÉE (argon2id + XChaCha20-Poly1305)
 export FORGE_BK_PASS='une-passphrase-forte-et-unique'
-forge-console backup --out /backups/forge-$(date +%s).forge --passphrase-env FORGE_BK_PASS \
-    [--db forge-console.db] [--ledger engagement.jsonl]
+forge backup --out /backups/forge-$(date +%s).forge --passphrase-env FORGE_BK_PASS \
+    [--db forge.db] [--ledger engagement.jsonl]
 
 # Restauration : déchiffre, vérifie sha256 + chaîne ledger, refuse d'écraser sans --force
-forge-console restore --in /backups/forge-XXXX.forge --passphrase-env FORGE_BK_PASS \
-    [--to forge-console.db] [--ledger engagement.jsonl] [--force]
+forge restore --in /backups/forge-XXXX.forge --passphrase-env FORGE_BK_PASS \
+    [--to forge.db] [--ledger engagement.jsonl] [--force]
 ```
 
 Codes de sortie : `0` OK, `1` échec, `2` usage.
@@ -116,11 +116,11 @@ docker run --rm \
   -e FORGE_BK_PASS="$FORGE_BK_PASS" \
   -v forge_data:/data \
   -v "$PWD/backups:/backups" \
-  forge-console \
-  forge-console backup \
+  forge \
+  forge backup \
     --out /backups/forge-$(date +%Y%m%d-%H%M%S).forge \
     --passphrase-env FORGE_BK_PASS \
-    --db /data/forge-console.db \
+    --db /data/forge.db \
     --ledger /data/engagement.jsonl
 ```
 
@@ -196,9 +196,9 @@ et planifiez la sous-commande CLI. Exemple systemd-timer :
 [Service]
 Type=oneshot
 Environment=FORGE_BK_PASS=%I
-ExecStart=/usr/local/bin/forge-console backup \
+ExecStart=/usr/local/bin/forge backup \
   --out /data/backups/forge-%%Y%%m%%d.forge --passphrase-env FORGE_BK_PASS \
-  --db /data/forge-console.db --ledger /data/engagement.jsonl
+  --db /data/forge.db --ledger /data/engagement.jsonl
 
 # /etc/systemd/system/forge-backup.timer
 [Timer]

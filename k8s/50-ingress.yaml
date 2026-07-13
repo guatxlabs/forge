@@ -15,7 +15,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: forge-console
+  name: forge
   namespace: forge
   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
   annotations:
@@ -51,7 +51,7 @@ spec:
   tls:
     - hosts:
         - forge.example.test        # REPLACE with your real host (and keep FORGE_CONSOLE_HOST in sync).
-      secretName: forge-console-tls  # a TLS Secret (e.g. issued by cert-manager).
+      secretName: forge-tls  # a TLS Secret (e.g. issued by cert-manager).
   rules:
     - host: forge.example.test       # REPLACE.
       http:
@@ -60,7 +60,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: forge-console
+                name: forge
                 port:
                   number: 7100
 # -----------------------------------------------------------------------------------------------
@@ -71,7 +71,7 @@ spec:
 # apiVersion: v1
 # kind: Service
 # metadata:
-#   name: forge-console-lb
+#   name: forge-lb
 #   namespace: forge
 #   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
 # spec:

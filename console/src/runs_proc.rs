@@ -80,7 +80,7 @@ pub(crate) fn purge_stale_run_dirs() {
             }
         }
         if purged > 0 {
-            println!("[forge-console] reconcile: {purged} dir(s) temp forge-run-* purgé(s)");
+            println!("[forge] reconcile: {purged} dir(s) temp forge-run-* purgé(s)");
         }
     }
 }

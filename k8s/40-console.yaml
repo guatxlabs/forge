@@ -2,7 +2,7 @@
 # =============================================================================================
 # IMAGE: build the console with the Postgres store (and object-store, if used) feature ON:
 #     docker build -f Dockerfile --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
-#         -t <registry>/forge-console:0.0.1 ..
+#         -t <registry>/forge:0.0.1 ..
 # The DEFAULT (community) image is SQLite-only and will FAIL-CLOSED under FORGE_HA=1 — you MUST use
 # a store-postgres image here. Push it and set the `image:` below to your registry ref.
 #
@@ -44,7 +44,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: forge-console
+  name: forge
   namespace: forge
   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
 spec:
@@ -63,7 +63,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: forge-console
+  name: forge
   namespace: forge
   labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
 spec:
@@ -87,9 +87,9 @@ spec:
         runAsUser: 1000     # `forge` user in the image (Dockerfile: USER forge).
         fsGroup: 1000       # own the RWX ledger mount.
       containers:
-        - name: forge-console
+        - name: forge
           # REPLACE with your registry ref of the store-postgres (+object-store) image.
-          image: forge-console:0.0.1
+          image: forge:0.0.1
           imagePullPolicy: IfNotPresent
           # --- Container hardening (MEDIUM-1) -------------------------------------------------
           # readOnlyRootFilesystem: true — nothing writes the image rootfs at runtime once the
@@ -139,13 +139,13 @@ spec:
             # Console auth secrets (ingest bearer + argon2id hashes). Stable across replicas.
             - name: FORGE_CONSOLE_TOKEN
               valueFrom:
-                secretKeyRef: { name: forge-console-auth, key: FORGE_CONSOLE_TOKEN }
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_TOKEN }
             - name: FORGE_CONSOLE_PASS_HASH
               valueFrom:
-                secretKeyRef: { name: forge-console-auth, key: FORGE_CONSOLE_PASS_HASH }
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_PASS_HASH }
             - name: FORGE_CONSOLE_OPERATOR_HASH
               valueFrom:
-                secretKeyRef: { name: forge-console-auth, key: FORGE_CONSOLE_OPERATOR_HASH }
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_OPERATOR_HASH }
             # S3/MinIO creds (SECRET) — only consumed when the image is built --features object-store.
             - name: FORGE_BLOB_S3_ACCESS_KEY
               valueFrom:
@@ -183,7 +183,7 @@ spec:
             #   value: /etc/forge/ledger-key/forge.ed25519
           envFrom:
             - configMapRef:
-                name: forge-console-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
+                name: forge-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
           volumeMounts:
             - name: db          # local SQLite fallback (unused under Postgres) — per-pod, NOT shared.
               mountPath: /data/db

@@ -58,16 +58,16 @@ Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dé
 ```sh
 cd GUATX
 # full (défaut)
-docker build -f forge/Dockerfile -t forge-console:0.0.1 .
+docker build -f forge/Dockerfile -t forge:0.0.1 .
 # mini
-docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge-console:0.0.1-mini .
+docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge:0.0.1-mini .
 
-docker run -d --name forge-console \
+docker run -d --name forge \
   -p 127.0.0.1:7100:7100 \
   -v forge-db:/data/db -v forge-ledger:/data/ledger \
   -v "$PWD/forge/scope.json:/data/scope/scope.json:ro" \
   --env-file forge/.env \
-  forge-console:0.0.1
+  forge:0.0.1
 ```
 
 > Bind **loopback uniquement** (`127.0.0.1:7100`). N'exposer publiquement qu'à travers un
@@ -96,19 +96,19 @@ Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés)
 
 ### 1.4 Natif / systemd (sans Docker)
 
-Unité durcie fournie : [`deploy/forge-console.service`](../deploy/forge-console.service)
+Unité durcie fournie : [`deploy/forge.service`](../deploy/forge.service)
 (`NoNewPrivileges`, `ProtectSystem=strict`, `CapabilityBoundingSet=`, seccomp `@system-service`…).
 Le durcissement systemd **n'affaiblit aucun garde-fou applicatif**, il renforce l'isolation du process.
 
 ```sh
 cd GUATX/forge/console && cargo build --release            # binaire offline depuis le cache cargo
-sudo install -m0755 target/release/forge-console /usr/local/bin/
+sudo install -m0755 target/release/forge /usr/local/bin/
 sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
 sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
 sudo mkdir -p /var/lib/forge/{db,ledger,scope}                      # remplir scope/scope.json AVEC AUTORISATION
-sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge-console.env   # y mettre les hashes argon2id
-sudo cp deploy/forge-console.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now forge-console
+sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge.env   # y mettre les hashes argon2id
+sudo cp deploy/forge.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now forge
 ```
 
 Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans aucune dépendance pip**.
@@ -121,13 +121,13 @@ chiffrement au repos, compiler la console avec la feature `encryption` puis four
 ```sh
 # 1) image chiffrée (feature Cargo -> backend crypto SQLCipher)
 cd GUATX/forge/console && cargo build --release --features encryption
-#    (Docker : construire une image taguée forge-console:0.0.1-encryption avec cette feature)
+#    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
 
 # 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)
 #    extrait docker-compose.override.yml :
 #      services:
-#        forge-console:
-#          image: forge-console:0.0.1-encryption
+#        forge:
+#          image: forge:0.0.1-encryption
 #          environment:
 #            FORGE_DB_KEY: ${FORGE_DB_KEY}     # [SECRET] depuis .env/docker secret, JAMAIS commité
 ```
@@ -167,7 +167,7 @@ détection** : tout se provisionne **depuis le navigateur** au premier accès.
    se ferme définitivement.
 
 **Provisioning headless** (sans navigateur) : poser `FORGE_CONSOLE_PASS_HASH` /
-`FORGE_CONSOLE_OPERATOR_HASH` (hashes argon2id via `forge-console hashpw` / `hashpw-operator`) et
+`FORGE_CONSOLE_OPERATOR_HASH` (hashes argon2id via `forge hashpw` / `hashpw-operator`) et
 `FORGE_CONSOLE_TOKEN` dans `.env`/l'EnvironmentFile — l'`state` bascule alors `provisioned:true` sans wizard.
 
 **RBAC/administration après boot** : gestion des comptes via `/api/users` (admin) ; **Basic** = viewer
@@ -189,8 +189,8 @@ signature `.ed25519`** (sinon la chaîne signée devient invérifiable). Runbook
 # UX primaire : conteneur one-shot au 1er déploiement (source ouverte READ-ONLY, jamais mutée)
 docker run --rm \
   -v /ancien/forge:/import:ro -v forge-db:/data/db -v forge-ledger:/data/ledger \
-  forge-console:0.0.1 \
-  forge-console migrate --from /import --to /data/db/forge-console.db \
+  forge:0.0.1 \
+  forge migrate --from /import --to /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --verify
 # chiffrer au passage (image `encryption`) : ... --encrypt --key-env FORGE_DB_KEY   (clé via ENV, jamais argv)
 ```
@@ -200,10 +200,10 @@ au pré-déploiement (désactivé par défaut : `FORGE_ALLOW_API_MIGRATE` + `FOR
 voie CLI ci-dessus reste l'UX documentée.
 
 **Mettre à jour une console DÉJÀ déployée** (bump de schéma après un `docker pull` d'une image plus
-récente) → **une seule commande fail-closed** `forge-console upgrade` : snapshot pré-upgrade **chiffré** →
+récente) → **une seule commande fail-closed** `forge upgrade` : snapshot pré-upgrade **chiffré** →
 `migrate` additif → vérif schéma/ledger/santé → **rollback automatique** au moindre échec. Voir le runbook
 dédié **[`docs/UPGRADE.md`](UPGRADE.md)** (SQLite solo, Postgres, HA rolling-upgrade, drill de restore).
-La version de schéma est visible via `forge-console status` et le champ `schema_version` de `/health`.
+La version de schéma est visible via `forge status` et le champ `schema_version` de `/health`.
 
 ### 3.2 Sauvegardes chiffrées + programmation + offsite
 
@@ -277,9 +277,9 @@ docker run --rm --network host --entrypoint sh minio/mc -c \
 export FORGE_BLOB_S3_ENDPOINT=http://localhost:9000 FORGE_BLOB_S3_BUCKET=forge-artifacts \
        FORGE_BLOB_S3_ACCESS_KEY=forge FORGE_BLOB_S3_SECRET_KEY=forgepw123
 # round-trip PUT→GET→EXISTS→DELETE sur le store actif (S3 ici, sinon local)
-forge-console blob-selftest --key evidence/proof.bin
+forge blob-selftest --key evidence/proof.bin
 # expédie un artefact RÉEL (archive de backup chiffrée) via le producteur offsite câblé, puis GET-vérifie
-forge-console blob-selftest --file ./mon-archive.forge --key-prefix offsite/backups
+forge blob-selftest --file ./mon-archive.forge --key-prefix offsite/backups
 ```
 
 Feature OFF (défaut), la sous-commande `blob-selftest` n'existe pas et seul le store local est disponible.
@@ -311,7 +311,7 @@ community échoue au boot avec un message clair « rebuild with `--features stor
 cd console && cargo build --release --features store-postgres
 FORGE_ENTERPRISE_STORE=postgres \
 FORGE_DB_URL='postgres://forge:forge@db.internal:5432/forge' \
-  ./target/release/forge-console
+  ./target/release/forge
 ```
 
 **docker-compose** — un override ADDITIF (`docker-compose.postgres.yml`) recompile l'image avec la
@@ -338,22 +338,22 @@ ligne à ligne** avec ROLLBACK sur écart, **checkpoint ledger signé**) :
 
 ```sh
 # dry-run d'abord (n'écrit RIEN) — inspecte ce qui SERAIT copié
-forge-console migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
-  --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl --dry-run
+forge migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl --dry-run
 # puis la vraie migration (--force pour écraser une cible non vide)
-forge-console migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
-  --from /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl
+forge migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl
 ```
 
 Codes de sortie : `0` OK · `1` refus de gouvernance (cible non vide sans `--force`) ou écart de comptes
 (rollback) · `2` usage/connexion/schéma · **`3` migration committée mais checkpoint ledger non écrit**
 (gouvernance : une migration sans son checkpoint tamper-evident ne rapporte **jamais** un succès — à
 traiter comme un échec, ré-émettre le checkpoint). En Docker, lancer via un conteneur one-shot
-`run --rm --entrypoint forge-console … migrate-store …` (cf. `docker-compose.postgres.yml`).
+`run --rm --entrypoint forge … migrate-store …` (cf. `docker-compose.postgres.yml`).
 
 ### 3bis.3 Sauvegarde & restauration Postgres (`pg_dump`)
 
-Sous un backend Postgres actif, `forge-console backup` (CLI / `POST /api/backup` / scheduler) sauvegarde
+Sous un backend Postgres actif, `forge backup` (CLI / `POST /api/backup` / scheduler) sauvegarde
 **Postgres** — plus le fichier SQLite (qui serait **vide**). L'artefact `db` de l'archive chiffrée est un
 dump **`pg_dump -Fc`** (format custom, compressé, **restaurable via `pg_restore`**), sous l'entrée
 `db.pgdump` (le manifeste porte `db_format: "pgdump"`). `pg_dump` est invoqué en **argv fixe (no-shell)**
@@ -435,14 +435,14 @@ est-ouest**. C'est le pendant k8s du harnais `docker-compose.ha.yml` + `Caddyfil
 #    SQLite par défaut FAIL-CLOSE sous FORGE_HA=1.
 docker build -f Dockerfile \
   --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
-  -t <registry>/forge-console:0.0.1 ..        # contexte = parent GUATX/ (inclut core/ + forge/)
-docker push <registry>/forge-console:0.0.1
+  -t <registry>/forge:0.0.1 ..        # contexte = parent GUATX/ (inclut core/ + forge/)
+docker push <registry>/forge:0.0.1
 
 # 2) Régler l'image dans k8s/40-console.yaml (et le host réel dans k8s/50-ingress.yaml +
 #    FORGE_CONSOLE_HOST dans k8s/11-config.yaml).
 
 # 3) PROD : NE PAS appliquer k8s/10-secrets.example.yaml (placeholders d'ÉVAL). Provisionner les 3
-#    Secrets (forge-db, forge-console-auth, forge-objectstore) hors-bande (SealedSecrets/ExternalSecrets/
+#    Secrets (forge-db, forge-auth, forge-objectstore) hors-bande (SealedSecrets/ExternalSecrets/
 #    SOPS), retirer la ligne du kustomization.yaml, puis :
 kubectl apply -k k8s/                          # namespace + config + PG + MinIO + console + ingress + netpol
 # (lab : appliquer tel quel — les Secrets d'éval bootent le cluster de test.)
@@ -461,7 +461,7 @@ overrides compose :
 | `FORGE_INSTANCE_ID` | **`fieldRef: metadata.name`** | identité d'instance = **nom du pod** (unique par réplica → clé du bail leader). Une valeur statique collisionnerait — d'où le `fieldRef`, équivalent k8s du fallback HOSTNAME de compose |
 | `FORGE_CONSOLE_ADDR=0.0.0.0:7100` | ConfigMap | bind interne au pod (jamais public — Service + Ingress + NetworkPolicy devant) |
 | `FORGE_CONSOLE_HOST` | ConfigMap | allowlist Host anti-DNS-rebinding — DOIT inclure le host public de l'Ingress + les noms de Service |
-| `FORGE_CONSOLE_TOKEN` / `_PASS_HASH` / `_OPERATOR_HASH` | **Secret** `forge-console-auth` | bearer d'ingestion + hashes argon2id (stables entre réplicas) |
+| `FORGE_CONSOLE_TOKEN` / `_PASS_HASH` / `_OPERATOR_HASH` | **Secret** `forge-auth` | bearer d'ingestion + hashes argon2id (stables entre réplicas) |
 | `FORGE_BLOB_S3_*` | ConfigMap (endpoint/bucket) + **Secret** `forge-objectstore` (clés) | object-store artefacts, actif seulement si l'image est buildée `--features object-store` |
 | `FORGE_CONSOLE_DB` | ConfigMap → `emptyDir` | fallback SQLite **local au pod** (inutilisé sous PG) — jamais sur le volume partagé |
 
@@ -539,9 +539,9 @@ least-privilege, additifs :
 
 | Flux autorisé | Egress (source) | Ingress (destination) |
 |---|---|---|
-| Ingress-controller → **console:7100** | — (hors namespace) | policy `forge-console` (from ns `ingress-nginx`) |
-| **console → Postgres:5432** | policy `forge-console` | policy `forge-postgres` (from pods console) |
-| **console → MinIO:9000** | policy `forge-console` | policy `forge-minio` (from pods console) |
+| Ingress-controller → **console:7100** | — (hors namespace) | policy `forge` (from ns `ingress-nginx`) |
+| **console → Postgres:5432** | policy `forge` | policy `forge-postgres` (from pods console) |
+| **console → MinIO:9000** | policy `forge` | policy `forge-minio` (from pods console) |
 | **\<tous pods\> → kube-dns:53** (UDP+TCP) | policy `allow-dns-egress` | (kube-system) |
 
 **Tout le reste est refusé** : pas d'egress internet, pas de mouvement latéral, **pas de trafic
@@ -727,7 +727,7 @@ simple TCP port-open (qui passerait même si le routeur HTTP est mort).
   pour alerter/évincer une instance dont la DB est down.
 
 ```sh
-docker inspect --format '{{.State.Health.Status}}' forge-console      # -> healthy
+docker inspect --format '{{.State.Health.Status}}' forge      # -> healthy
 curl -s http://127.0.0.1:7100/health   # -> {"db":"ok","status":"ok","version":"0.0.1"}
 ```
 
@@ -803,7 +803,7 @@ build**. Bump de version = rafraîchir version **et** digest.
 #### Host natif ✅
 
 - `pip install -e .` + `cargo build --release` + outils sur PATH.
-- Unité systemd durcie fournie (`deploy/forge-console.service`) — cf. [§1.4](#14-natif--systemd-sans-docker).
+- Unité systemd durcie fournie (`deploy/forge.service`) — cf. [§1.4](#14-natif--systemd-sans-docker).
 
 #### venv ✅
 

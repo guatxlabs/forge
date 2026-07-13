@@ -48,10 +48,10 @@ docker compose -f forge/docker-compose.yml up -d --build
 - **Le plus simple** : ouvre http://127.0.0.1:7100 → le **wizard de 1er déploiement** crée l'admin, choisit la crypto (argon2id, SQLCipher optionnel) et la source de détection. Il s'auto-désactive une fois provisionné (409).
 - **Ou en CLI** :
 ```bash
-docker compose -f forge/docker-compose.yml exec forge-console forge-console useradd <toi> admin
+docker compose -f forge/docker-compose.yml exec forge forge useradd <toi> admin
 # (mot de passe demandé)
 ```
-Vérifier l'état : `docker compose -f forge/docker-compose.yml exec forge-console forge-console status`
+Vérifier l'état : `docker compose -f forge/docker-compose.yml exec forge forge status`
 
 ## 4. Ton programme = l'Engagement #1
 Au 1er boot, le scope monté devient **l'Engagement #1** (migration zéro-perte). Tout ce que tu testes
@@ -79,17 +79,17 @@ un module `@register` / un `FORGE_PLUGINS` (drop-in, gouverné). cf. `contrib/`.
 ## 7. Cycle de vie (sûr, une commande)
 ```bash
 # état
-docker compose -f forge/docker-compose.yml exec forge-console forge-console status
+docker compose -f forge/docker-compose.yml exec forge forge status
 # upgrade sûr : snapshot chiffré pré-upgrade -> migrate -> verify -> rollback auto si échec (no-op = 0 écriture)
-docker compose -f forge/docker-compose.yml exec forge-console forge-console upgrade --passphrase-env FORGE_BACKUP_PASSPHRASE
+docker compose -f forge/docker-compose.yml exec forge forge upgrade --passphrase-env FORGE_BACKUP_PASSPHRASE
 # backup / restore chiffrés
-docker compose -f forge/docker-compose.yml exec forge-console forge-console backup   --passphrase-env FORGE_BACKUP_PASSPHRASE --out /data/db/backup.forge
-docker compose -f forge/docker-compose.yml exec forge-console forge-console restore  <archive> --passphrase-env FORGE_BACKUP_PASSPHRASE
+docker compose -f forge/docker-compose.yml exec forge forge backup   --passphrase-env FORGE_BACKUP_PASSPHRASE --out /data/db/backup.forge
+docker compose -f forge/docker-compose.yml exec forge forge restore  <archive> --passphrase-env FORGE_BACKUP_PASSPHRASE
 ```
 Arrêt / purge : `docker compose -f forge/docker-compose.yml down` (les volumes persistent ; `down -v` pour tout effacer).
 
 ## Alternatives (mêmes concepts, autres cibles)
-- **Host natif** : `cd console && cargo build --release && FORGE_CONSOLE_SCOPE=../scope.json ./target/release/forge-console` (puis `useradd`). Le scope/engagement/campagne sont identiques.
+- **Host natif** : `cd console && cargo build --release && FORGE_CONSOLE_SCOPE=../scope.json ./target/release/forge` (puis `useradd`). Le scope/engagement/campagne sont identiques.
 - **Postgres (équipe)** : `--profile postgres` + `FORGE_ENTERPRISE_STORE=postgres` (voir `docs/DEPLOYMENT.md §3bis`).
 - **HA / k3s** : `kubectl apply -k k8s/` (voir `docs/DEPLOYMENT.md §3bis.6` + `docs/UPGRADE.md` pour le rolling-upgrade drain-leader ; `docs/KEY_CUSTODY.md` pour la clé de signature hors volume partagé).
 

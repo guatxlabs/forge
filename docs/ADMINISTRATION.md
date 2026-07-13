@@ -31,7 +31,7 @@ Trois rôles (contrainte applicative ; la table `users` stocke un TEXT) :
 - **UI** : *Administration → Comptes* — créer, changer le rôle/mot de passe, désactiver.
 - **API** (admin) : `GET /api/users` (jamais `pass_hash`), `POST /api/users` (`{login, role,
   password}`), `POST /api/users/:login` (update), `DELETE /api/users/:login`.
-- **CLI** : `forge-console useradd <login> <role>` (mot de passe sur STDIN). Idempotent par login.
+- **CLI** : `forge useradd <login> <role>` (mot de passe sur STDIN). Idempotent par login.
 
 Garde-fous :
 - Le **dernier admin activé** est protégé (impossible de se verrouiller dehors).
@@ -131,8 +131,8 @@ En bref (*Administration → Sauvegarde*, admin, ledgerisé) :
 
 | Action | Route / CLI |
 |---|---|
-| Créer une sauvegarde (téléchargement) | `POST /api/backup {passphrase}` · ou `forge-console backup --out … --passphrase-env …` |
-| Restaurer (valide par défaut ; swap = `apply:true`+`confirm:true`, **redémarrage requis**) | `POST /api/restore {archive_b64, passphrase, apply?, confirm?}` · ou `forge-console restore --in … --force` |
+| Créer une sauvegarde (téléchargement) | `POST /api/backup {passphrase}` · ou `forge backup --out … --passphrase-env …` |
+| Restaurer (valide par défaut ; swap = `apply:true`+`confirm:true`, **redémarrage requis**) | `POST /api/restore {archive_b64, passphrase, apply?, confirm?}` · ou `forge restore --in … --force` |
 | Politique programmée/offsite (rédigée au GET) | `GET`/`POST /api/backup/policy` |
 
 Scheduler en-console **fail-open** (un échec est loggé + ledgerisé, ne crashe jamais). Deux knobs
@@ -153,8 +153,8 @@ garde-fous + option chiffrement au repos : **[`MIGRATION.md`](MIGRATION.md)**.
 # UX primaire : conteneur one-shot (source ouverte READ-ONLY, jamais mutée)
 docker run --rm \
   -v /ancien/forge:/import:ro -v forge-db:/data/db -v forge-ledger:/data/ledger \
-  forge-console:0.0.1 \
-  forge-console migrate --from /import --to /data/db/forge-console.db \
+  forge:0.0.1 \
+  forge migrate --from /import --to /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --verify
 ```
 

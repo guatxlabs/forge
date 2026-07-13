@@ -25,7 +25,7 @@ Forge se configure à **deux niveaux complémentaires** :
 | Variable | Sens | Défaut | Exemple |
 |---|---|---|---|
 | `FORGE_CONSOLE_ADDR` | Adresse de bind API/UI. **Jamais** `0.0.0.0` sans reverse-proxy + auth + host-allowlist. | `127.0.0.1:7100` (binaire) · `0.0.0.0:7100` (image, réseau isolé) | `127.0.0.1:7100` |
-| `FORGE_CONSOLE_DB` | Chemin du store SQLite. | `forge-console.db` | `/data/db/forge-console.db` |
+| `FORGE_CONSOLE_DB` | Chemin du store SQLite. | `forge.db` | `/data/db/forge.db` |
 | `FORGE_CONSOLE_LEDGER` | Chemin du ledger d'engagement (JSONL). | `engagement.jsonl` | `/data/ledger/engagement.jsonl` |
 | `FORGE_CONSOLE_SCOPE` | Chemin du scope/ROE **actif** (in_scope vide = INERTE). Pré-filtre fail-closed des cibles lançables depuis le web. | `<pkg_dir>/scope.json` | `/data/scope/scope.json` |
 | `FORGE_CONSOLE_WEB` | Racine des assets UI servis en fallback. | résolu auto (`console/web`) | `/opt/forge/console/web` |
@@ -43,11 +43,11 @@ via le [wizard](FIRST_DEPLOYMENT.md)).
 | Variable | Sens | Défaut | Comment l'obtenir |
 |---|---|---|---|
 | `FORGE_CONSOLE_TOKEN` | **[SECRET]** Bearer d'**ingestion** (canal moteur→console). Sinon généré au boot (éphémère). | *(auto)* | `openssl rand -hex 16` |
-| `FORGE_CONSOLE_PASS_HASH` | **[SECRET]** Hash argon2id du rôle **viewer** (Basic). Sa présence engage la gate d'auth. | *(vide)* | `forge-console hashpw '<pw>'` |
-| `FORGE_CONSOLE_OPERATOR_HASH` | **[SECRET]** Hash argon2id du rôle **opérateur** C2 (en-tête `X-Forge-Operator`). Vide = **C2 fermé** (fail-closed). | *(vide)* | `forge-console hashpw-operator '<pw>'` |
+| `FORGE_CONSOLE_PASS_HASH` | **[SECRET]** Hash argon2id du rôle **viewer** (Basic). Sa présence engage la gate d'auth. | *(vide)* | `forge hashpw '<pw>'` |
+| `FORGE_CONSOLE_OPERATOR_HASH` | **[SECRET]** Hash argon2id du rôle **opérateur** C2 (en-tête `X-Forge-Operator`). Vide = **C2 fermé** (fail-closed). | *(vide)* | `forge hashpw-operator '<pw>'` |
 
 > **Attribution individuelle** : l'administration (`check_admin`) **n'accepte PAS** de repli
-> env-hash — elle exige une **session admin** nommée (créée via le wizard ou `forge-console useradd
+> env-hash — elle exige une **session admin** nommée (créée via le wizard ou `forge useradd
 > <login> admin`). Les hashes env sont un mécanisme d'**amorçage headless** (viewer/opérateur).
 
 ### 1.3 Moteur Python — spawn & timeouts
@@ -73,7 +73,7 @@ Voir [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION
 
 | Variable | Sens | Défaut | Exemple |
 |---|---|---|---|
-| `FORGE_ALLOW_API_MIGRATE` | Ouvre `POST /api/setup/migrate` (sinon **403** — la CLL `forge-console migrate` reste l'UX primaire). | *(off)* | `1` |
+| `FORGE_ALLOW_API_MIGRATE` | Ouvre `POST /api/setup/migrate` (sinon **403** — la CLL `forge migrate` reste l'UX primaire). | *(off)* | `1` |
 | `FORGE_CONSOLE_IMPORT_DIR` | Racine allowlistée des chemins d'import de la migration API (anti path-traversal). | *(racine de données)* | `/import` |
 
 ### 1.6 Sauvegardes programmées

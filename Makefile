@@ -15,7 +15,7 @@ PG_URL        ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)
 
 # --- Démo hors-ligne (engagement de référence synthétique — TLD .example, aucune cible réelle) ---
 DEMO_DIR   ?= examples/reference-engagement
-DEMO_DB    ?= forge-console-demo.db
+DEMO_DB    ?= forge-demo.db
 PLUME_PORT ?= 8899
 
 help:  ## Affiche cette aide
@@ -56,20 +56,20 @@ install:  ## Installe forge en editable (met `forge` sur le PATH)
 	pip install -e .
 
 console:  ## Build release de la console puis la lance (127.0.0.1:7100)
-	cd console && cargo build --release && ./target/release/forge-console
+	cd console && cargo build --release && ./target/release/forge
 
 doctor:  ## Diagnostic des modules + outils/services attendus
 	python3 -m forge.cli doctor
 
 demo-seed:  ## Amorce la base démo avec l'engagement de référence (idempotent, offline)
 	cd console && cargo build --release
-	FORGE_CONSOLE_DB=$(DEMO_DB) console/target/release/forge-console seed-demo --dir $(DEMO_DIR)
+	FORGE_CONSOLE_DB=$(DEMO_DB) console/target/release/forge seed-demo --dir $(DEMO_DIR)
 
 demo: demo-seed  ## Console peuplée en 1 commande (Findings/Coverage/Runs) — http://127.0.0.1:7100
 	@echo "[demo] console -> http://127.0.0.1:7100  (Findings/Coverage/Runs peuplés). Ctrl-C pour arrêter."
 	@echo "[demo] pour l'onglet Purple (détecté/raté/MTTD) : make demo-purple"
 	FORGE_CONSOLE_DB=$(DEMO_DB) FORGE_CONSOLE_SCOPE=$(DEMO_DIR)/scope.json FORGE_PKG_DIR=. \
-		console/target/release/forge-console
+		console/target/release/forge
 
 demo-purple: demo-seed  ## Démo Purple : stub mock-Plume (DEMO, PAS un vrai SOC) + console -> matrice détecté/raté/MTTD
 	@echo "[demo-purple] démarre le stub mock-Plume (DEMO FIXTURE — PAS un vrai SOC) sur 127.0.0.1:$(PLUME_PORT) puis la console."
@@ -78,7 +78,7 @@ demo-purple: demo-seed  ## Démo Purple : stub mock-Plume (DEMO, PAS un vrai SOC
 	  PLUME_PID=$$!; trap 'kill $$PLUME_PID 2>/dev/null' EXIT INT TERM; \
 	  sleep 1; \
 	  FORGE_CONSOLE_DB=$(DEMO_DB) FORGE_CONSOLE_SCOPE=$(DEMO_DIR)/scope.json FORGE_PKG_DIR=. \
-	    PLUME_URL=http://127.0.0.1:$(PLUME_PORT) console/target/release/forge-console
+	    PLUME_URL=http://127.0.0.1:$(PLUME_PORT) console/target/release/forge
 
 clean:  ## Supprime les artefacts de build + la base démo (préserve scope/ledger gitignorés)
 	rm -rf build dist *.egg-info .pytest_cache

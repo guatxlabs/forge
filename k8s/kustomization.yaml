@@ -3,7 +3,7 @@
 # ⚠️ SECRETS ARE NOT IN THE DEFAULT APPLY PATH (LOW-2). 10-secrets.example.yaml is DELIBERATELY
 # absent from `resources` below so `kubectl apply -k k8s/` never ships placeholder credentials
 # (forge/forge, forgeadmin/forgeadminsecret). Before applying, the operator MUST create the three
-# Secrets `forge-db`, `forge-console-auth`, `forge-objectstore` in the `forge` namespace out-of-band
+# Secrets `forge-db`, `forge-auth`, `forge-objectstore` in the `forge` namespace out-of-band
 # (SealedSecrets / ExternalSecrets / SOPS / `kubectl create secret`). The workloads reference those
 # Secret names, so without them the console/postgres/minio pods stay Pending on the missing Secret —
 # which is the intended fail-safe (no silent default creds). See docs/DEPLOYMENT.md §k8s.

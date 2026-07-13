@@ -166,7 +166,7 @@ pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, a
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     let mut req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-console-detection\r\nAccept: application/json\r\nConnection: close\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-detection\r\nAccept: application/json\r\nConnection: close\r\n"
     );
     // En-tête d'auth selon le schéma. Un secret/valeur vide => aucun en-tête (cas anonyme, ex.
     // SOC_PUBLIC_DEMO). Anti-injection d'en-tête : on refuse toute valeur portant CR/LF.

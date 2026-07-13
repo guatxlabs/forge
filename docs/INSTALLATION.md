@@ -46,16 +46,16 @@ Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dé
 ```sh
 cd GUATX
 # full (défaut)
-docker build -f forge/Dockerfile -t forge-console:0.0.1 .
+docker build -f forge/Dockerfile -t forge:0.0.1 .
 # mini
-docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge-console:0.0.1-mini .
+docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge:0.0.1-mini .
 
-docker run -d --name forge-console \
+docker run -d --name forge \
   -p 127.0.0.1:7100:7100 \
   -v forge-db:/data/db -v forge-ledger:/data/ledger \
   -v "$PWD/forge/scope.json:/data/scope/scope.json:ro" \
   --env-file forge/.env \
-  forge-console:0.0.1
+  forge:0.0.1
 ```
 
 Bind **loopback uniquement**. N'exposer publiquement qu'à travers un reverse-proxy + auth +
@@ -92,19 +92,19 @@ compose documentent le câblage BYO (bring-your-own).
 
 ## 4. Natif / systemd (sans Docker)
 
-Unité durcie fournie : [`../deploy/forge-console.service`](../deploy/forge-console.service)
+Unité durcie fournie : [`../deploy/forge.service`](../deploy/forge.service)
 (`NoNewPrivileges`, `ProtectSystem=strict`, `CapabilityBoundingSet=`, seccomp `@system-service`…). Le
 durcissement systemd **n'affaiblit aucun garde-fou applicatif**.
 
 ```sh
 cd GUATX/forge/console && cargo build --release            # binaire offline depuis le cache cargo
-sudo install -m0755 target/release/forge-console /usr/local/bin/
+sudo install -m0755 target/release/forge /usr/local/bin/
 sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
 sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
 sudo mkdir -p /var/lib/forge/{db,ledger,scope}                      # remplir scope/scope.json AVEC AUTORISATION
-sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge-console.env   # hashes argon2id ici
-sudo cp deploy/forge-console.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now forge-console
+sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge.env   # hashes argon2id ici
+sudo cp deploy/forge.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now forge
 ```
 
 Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans aucune dépendance pip**.
@@ -124,7 +124,7 @@ make test
 ```
 
 `pip install -e .` termine sans erreur, `forge --version` répond, `cargo build --release` produit
-`console/target/release/forge-console`, et `make test` finit sur **`OK`**. Le package Python n'a
+`console/target/release/forge`, et `make test` finit sur **`OK`**. Le package Python n'a
 **aucune dépendance pip** — il tient en venv nu. Parcours opérateur 100 % hors-ligne (seed +
 mock-Plume) : [`GETTING_STARTED.md`](GETTING_STARTED.md).
 
@@ -138,13 +138,13 @@ chiffrement au repos, compiler avec la feature `encryption` puis fournir la clé
 ```sh
 # 1) image/binaire chiffré (feature Cargo -> backend SQLCipher)
 cd GUATX/forge/console && cargo build --release --features encryption
-#    (Docker : construire une image taguée forge-console:0.0.1-encryption avec cette feature)
+#    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
 
 # 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)
 #    docker-compose.override.yml :
 #      services:
-#        forge-console:
-#          image: forge-console:0.0.1-encryption
+#        forge:
+#          image: forge:0.0.1-encryption
 #          environment:
 #            FORGE_DB_KEY: ${FORGE_DB_KEY}     # [SECRET] depuis .env/docker secret, JAMAIS commité
 ```
@@ -164,7 +164,7 @@ existant en clair → chiffré = **Runbook B** de [`MIGRATION.md`](MIGRATION.md)
 ```sh
 # liveness
 curl -s http://127.0.0.1:7100/health          # -> {"status":"ok","version":"0.0.1"}
-docker inspect --format '{{.State.Health.Status}}' forge-console   # -> healthy
+docker inspect --format '{{.State.Health.Status}}' forge   # -> healthy
 
 # diagnostic des modules (quels outils sont présents)
 python3 -m forge.cli doctor                    # ou: forge doctor

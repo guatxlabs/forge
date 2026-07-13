@@ -24,7 +24,7 @@ docker compose -f forge/docker-compose.yml down
 docker compose -f forge/docker-compose.yml down -v
 
 # Supprimer l'image
-docker image rm forge-console:0.0.1 forge-console:0.0.1-mini 2>/dev/null
+docker image rm forge:0.0.1 forge:0.0.1-mini 2>/dev/null
 
 # Les volumes nommés restants (si -v non passé)
 docker volume rm forge_forge-db forge_forge-ledger 2>/dev/null   # préfixe = nom du projet compose ("forge")
@@ -39,9 +39,9 @@ Le **scope actif** est bind-monté depuis l'hôte (`forge/scope.json`) — il re
 ## 2. Docker (conteneur seul)
 
 ```sh
-docker rm -f forge-console                    # arrête + supprime le conteneur
+docker rm -f forge                    # arrête + supprime le conteneur
 docker volume rm forge-db forge-ledger        # DESTRUCTIF (si créés en volumes nommés)
-docker image rm forge-console:0.0.1
+docker image rm forge:0.0.1
 ```
 
 Si vous aviez bind-monté un dossier de données (`-v /chemin/db:/data/db`), purgez-le à la main (§4).
@@ -52,16 +52,16 @@ Si vous aviez bind-monté un dossier de données (`-v /chemin/db:/data/db`), pur
 
 ```sh
 # Arrêter + désactiver le service
-sudo systemctl disable --now forge-console
-sudo rm -f /etc/systemd/system/forge-console.service
+sudo systemctl disable --now forge
+sudo rm -f /etc/systemd/system/forge.service
 sudo systemctl daemon-reload
 
 # Binaire + application + assets
-sudo rm -f /usr/local/bin/forge-console
+sudo rm -f /usr/local/bin/forge
 sudo rm -rf /opt/forge
 
 # EnvironmentFile (contient les hashes argon2id / secrets)
-sudo rm -f /etc/forge/forge-console.env
+sudo rm -f /etc/forge/forge.env
 
 # Données (DESTRUCTIF) — DB, ledger, clé de signature, scope
 sudo rm -rf /var/lib/forge
@@ -81,7 +81,7 @@ Selon `FORGE_CONSOLE_DB` / `FORGE_CONSOLE_LEDGER` / `FORGE_CONSOLE_SCOPE` (cf.
 
 ```sh
 # Base SQLite (+ WAL/SHM)
-rm -f forge-console.db forge-console.db-wal forge-console.db-shm
+rm -f forge.db forge.db-wal forge.db-shm
 
 # Ledger d'engagement + sa clé de signature (0600) — DESTRUCTIF pour l'auditabilité
 rm -f engagement.jsonl engagement.jsonl.ed25519

@@ -17,14 +17,14 @@ chiffré vérifié**, et **tout échec revient à l'état EXACT d'avant**.
 
 ```sh
 # À quelle version de schéma est cette base ? (lecture seule, ne démarre pas le serveur)
-forge-console status
+forge status
 
 # Aperçu SANS rien muter (montre le snapshot + la migration prévue)
-forge-console upgrade --dry-run
+forge upgrade --dry-run
 
 # Upgrade réel : snapshot chiffré -> migrate additif -> vérif -> rollback si échec
 FORGE_UPGRADE_PASS='…' \
-forge-console upgrade --passphrase-env FORGE_UPGRADE_PASS
+forge upgrade --passphrase-env FORGE_UPGRADE_PASS
 ```
 
 Idempotent : re-lancer alors que la base est déjà à jour = **no-op succès** (vérifié, aucun changement).
@@ -33,7 +33,7 @@ Idempotent : re-lancer alors que la base est déjà à jour = **no-op succès** 
 
 ## 1. `status` — « à quelle version est cette base »
 
-`forge-console status [--db <path>] [--ledger <path>] [--json]` imprime un instantané **lecture seule**
+`forge status [--db <path>] [--ledger <path>] [--json]` imprime un instantané **lecture seule**
 (aucune mutation, ne démarre **pas** le serveur, exit rapide) :
 
 | Champ | Sens |
@@ -56,7 +56,7 @@ La même version est **surfacée sur `/health`** (champ `schema_version`, additi
 ## 2. `upgrade` — flux sûr en une commande
 
 ```
-forge-console upgrade --passphrase-env <ENVVAR>
+forge upgrade --passphrase-env <ENVVAR>
     [--db <path>] [--ledger <path>] [--backup-dir <dir>]
     [--to <postgres-url>] [--force] [--dry-run]
 ```
@@ -99,15 +99,15 @@ et **ne mute RIEN** (aucun snapshot, aucun `migrate`).
 
 ```sh
 # 1) constater l'état
-forge-console status --db /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl
+forge status --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl
 
 # 2) aperçu
-forge-console upgrade --db /data/db/forge-console.db \
+forge upgrade --db /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --backup-dir /data/backups --dry-run
 
 # 3) upgrade réel
-FORGE_UPGRADE_PASS='…' forge-console upgrade \
-    --db /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl \
+FORGE_UPGRADE_PASS='…' forge upgrade \
+    --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
     --backup-dir /data/backups --passphrase-env FORGE_UPGRADE_PASS
 ```
 
@@ -115,15 +115,15 @@ En Docker : arrêter le conteneur console, lancer `upgrade` en **one-shot** sur 
 redémarrer sur la nouvelle image.
 
 ```sh
-docker stop forge-console
+docker stop forge
 docker run --rm \
   -v forge-db:/data/db -v forge-ledger:/data/ledger -v forge-backups:/data/backups \
   -e FORGE_UPGRADE_PASS \
-  forge-console:<nouvelle-version> \
-  forge-console upgrade --db /data/db/forge-console.db \
+  forge:<nouvelle-version> \
+  forge upgrade --db /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --backup-dir /data/backups \
     --passphrase-env FORGE_UPGRADE_PASS
-docker start forge-console   # boot sur la nouvelle image (migrate() re-tamponne, idempotent)
+docker start forge   # boot sur la nouvelle image (migrate() re-tamponne, idempotent)
 ```
 
 ### 3.2 Postgres (backend enterprise)
@@ -133,8 +133,8 @@ l'image `store-postgres` et **tamponné** (`schema_version`) sous le verrou DDL 
 
 - **Migrer les DONNÉES SQLite → Postgres** (bascule de backend) : image `store-postgres`, puis
   ```sh
-  FORGE_UPGRADE_PASS='…' forge-console upgrade \
-      --db /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl \
+  FORGE_UPGRADE_PASS='…' forge upgrade \
+      --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
       --backup-dir /data/backups --passphrase-env FORGE_UPGRADE_PASS \
       --to 'postgres://…@pg:5432/forge?sslmode=require'   # [--force] pour écraser une cible non vide
   ```
@@ -175,7 +175,7 @@ Si le rollback automatique **échoue lui-même** (I/O, permissions), le message 
 snapshot chiffré et la commande manuelle exacte :
 
 ```sh
-forge-console restore --in <pre-upgrade-…​.forge> --passphrase-env <ENV> \
+forge restore --in <pre-upgrade-…​.forge> --passphrase-env <ENV> \
     --to <db> --ledger <ledger> --force
 ```
 
@@ -187,13 +187,13 @@ forge-console restore --in <pre-upgrade-…​.forge> --passphrase-env <ENV> \
 
 ```sh
 # Sauvegarde CHIFFRÉE (db + ledger + clé .ed25519 + manifest) — passphrase via ENV, jamais argv
-FORGE_BACKUP_PASS='…' forge-console backup --out /data/backups/manual.forge \
-    --db /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl \
+FORGE_BACKUP_PASS='…' forge backup --out /data/backups/manual.forge \
+    --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
     --passphrase-env FORGE_BACKUP_PASS
 
 # Restauration (déchiffre, vérifie sha256 + hash-chain, refuse d'écraser un install non vide sans --force)
-FORGE_BACKUP_PASS='…' forge-console restore --in /data/backups/manual.forge \
-    --to /data/db/forge-console.db --ledger /data/ledger/engagement.jsonl \
+FORGE_BACKUP_PASS='…' forge restore --in /data/backups/manual.forge \
+    --to /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
     --passphrase-env FORGE_BACKUP_PASS   # [--force] pour un swap en place
 ```
 
@@ -207,11 +207,11 @@ stockée/loggée/ledgerisée). Programmation + rétention + offsite S3/MinIO : [
 
 ```sh
 # 1) récupérer une archive offsite (S3/MinIO ou copie local_dir), la valider SANS écrire :
-FORGE_BACKUP_PASS='…' forge-console restore --in /tmp/offsite-copy.forge \
+FORGE_BACKUP_PASS='…' forge restore --in /tmp/offsite-copy.forge \
     --to /tmp/restore-drill.db --ledger /tmp/restore-drill.jsonl --passphrase-env FORGE_BACKUP_PASS
 # 2) vérifier la base + la chaîne restaurées :
-forge-console status --db /tmp/restore-drill.db --ledger /tmp/restore-drill.jsonl
-forge-console ledger verify --ledger /tmp/restore-drill.jsonl
+forge status --db /tmp/restore-drill.db --ledger /tmp/restore-drill.jsonl
+forge ledger verify --ledger /tmp/restore-drill.jsonl
 # 3) nettoyer : rm /tmp/restore-drill.*
 ```
 

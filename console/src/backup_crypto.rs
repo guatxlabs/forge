@@ -12,7 +12,7 @@ pub(crate) use argon2::Params;
 use sha2::{Digest, Sha256};
 
 // ===========================================================================================
-// SAUVEGARDE / RESTAURATION CHIFFRÉE — `forge-console backup` / `forge-console restore`.
+// SAUVEGARDE / RESTAURATION CHIFFRÉE — `forge backup` / `forge restore`.
 //
 // Une archive de sauvegarde regroupe TROIS actifs sensibles couplés (mêmes trois que la migration) :
 //   1) un snapshot COHÉRENT de la base SQLite (VACUUM INTO — copie défragmentée d'une source READ-ONLY) ;

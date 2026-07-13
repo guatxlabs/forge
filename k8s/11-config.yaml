@@ -7,7 +7,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: forge-console-config
+  name: forge-config
   namespace: forge
   labels: { app.kubernetes.io/part-of: forge }
 data:
@@ -24,7 +24,7 @@ data:
   FORGE_HA: "1"
   # SQLite fallback path — LOCAL to each pod (emptyDir), UNUSED while Postgres is the active store.
   # Kept off the shared ledger volume so N replicas never contend on one SQLite file at boot.
-  FORGE_CONSOLE_DB: "/data/db/forge-console.db"
+  FORGE_CONSOLE_DB: "/data/db/forge.db"
   # Tamper-evident engagement ledger — on the shared RWX PVC (see console Deployment + DEPLOYMENT.md
   # §k8s for the RWX-vs-object-store / per-instance-ledger tradeoff).
   FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
@@ -32,7 +32,7 @@ data:
   # Host allowlist (anti-DNS-rebinding). Must include EVERY Host clients present through the Ingress,
   # plus the in-cluster Service names. localhost/127.0.0.1/::1 are already allowed by default (the
   # readiness/liveness probes send Host: localhost). REPLACE forge.example.test with your real host.
-  FORGE_CONSOLE_HOST: "forge.example.test,forge-console,forge-console.forge.svc.cluster.local,localhost,127.0.0.1"
+  FORGE_CONSOLE_HOST: "forge.example.test,forge,forge.forge.svc.cluster.local,localhost,127.0.0.1"
   FORGE_PKG_DIR: "/opt/forge"
   FORGE_PYTHON: "python3"
   FORGE_RUN_TIMEOUT: "900"

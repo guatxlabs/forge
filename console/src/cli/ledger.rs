@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console ledger verify` — vérif hash-chaining lecture-seule (PURE MOVE depuis cli.rs).
+//! `forge ledger verify` — vérif hash-chaining lecture-seule (PURE MOVE depuis cli.rs).
 use crate::*;
 
-/// Sous-commande LECTURE SEULE, NON INTERACTIVE et RAPIDE : `forge-console ledger verify [--ledger <path>]
+/// Sous-commande LECTURE SEULE, NON INTERACTIVE et RAPIDE : `forge ledger verify [--ledger <path>]
 /// [--json]`. Recompute la chaîne SHA-256 (prev|seq|ts|kind|canon(detail)) du ledger JSONL et VÉRIFIE
 /// chaque hash + le chaînage `prev` — MÊME algorithme que GET /api/ledger/verify et `migrate --verify`
 /// (verify_ledger_chain, source de vérité unique). Ne démarre AUCUN serveur, n'ouvre AUCUNE base SQLite,
@@ -18,7 +18,7 @@ pub(crate) fn run_ledger_cli(args: &[String]) -> i32 {
     match sub {
         Some("verify") => {}
         _ => {
-            eprintln!("usage: forge-console ledger verify [--ledger <path>] [--json]");
+            eprintln!("usage: forge ledger verify [--ledger <path>] [--json]");
             eprintln!("  Vérifie le hash-chaining SHA-256 du ledger JSONL (lecture seule, non interactive,");
             eprintln!("  ne démarre pas le serveur). La vérif de signature (Ed25519/HMAC) reste côté");
             eprintln!("  `forge ledger verify --pubkey`. Codes : 0=intègre, 1=rompu/absent, 2=usage.");

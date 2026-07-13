@@ -17,7 +17,7 @@ Aujourd'hui les outils de sécurité externes (httpx, nuclei, subfinder ; nmap e
    - Pour une version arbitraire/plus récente absente du manifeste : exiger que l'opérateur fournisse le SHA256 attendu (ou récupérer+afficher le checksum publié par ProjectDiscovery pour confirmation admin explicite). JAMAIS de confiance implicite.
 4. **Surface console** :
    - API : étendre la surface admin/module (hook naturel : `POST /api/modules/:kind` `module_governance`, déjà `check_admin` à `main.rs:1675`) ou un nouveau `POST /api/tools/:name/{install|update|remove}`. Admin-only, audité via `append_console_ledger` (motif à `main.rs:1614`).
-   - CLI : sous-commande `forge-console tools {list|install|update|remove}` (dispatch à `main.rs:9835`).
+   - CLI : sous-commande `forge tools {list|install|update|remove}` (dispatch à `main.rs:9835`).
    - UI : panneau outils affichant version installée vs version cible, boutons install/update/remove, indicateur baseline mini/full.
 5. **Visibilité des versions** : aujourd'hui la disponibilité est un booléen sondé (`shutil.which`, `runner.available`), sans version. Ajouter une sonde de version (`httpx -version`, etc.) pour que l'UI montre installé vs cible et propose l'update quand ils diffèrent.
 

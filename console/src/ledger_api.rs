@@ -299,13 +299,13 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
                     head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
                     // F5 OBSERVABILITY : l'écriture/fsync disque a échoué -> l'entrée est PERDUE. On la rend
                     // visible (kind + raison) au lieu de la laisser tomber silencieusement.
-                    eprintln!("[forge-console] LEDGER DROP — append écrit/fsync échoué pour '{path}' \
+                    eprintln!("[forge] LEDGER DROP — append écrit/fsync échoué pour '{path}' \
                                (kind={kind}) : entrée d'audit PERDUE (écriture disque partielle/échouée)");
                 }
             }
             Err(e) => {
                 head.loaded = false;
-                eprintln!("[forge-console] LEDGER DROP — ouverture '{path}' impossible (kind={kind}) : \
+                eprintln!("[forge] LEDGER DROP — ouverture '{path}' impossible (kind={kind}) : \
                            {e} — entrée d'audit PERDUE");
             }
         }
@@ -313,7 +313,7 @@ pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
         // FAIL-CLOSED outage (PG advisory lock unreachable across the retry budget). `with_ledger_lock`
         // already logged the outage; here we ADD the `kind` of the specific dropped entry so the lost
         // attestation is traceable, not just "an append failed somewhere".
-        eprintln!("[forge-console] LEDGER DROP — entrée d'audit REFUSÉE (kind={kind}) : {e}");
+        eprintln!("[forge] LEDGER DROP — entrée d'audit REFUSÉE (kind={kind}) : {e}");
     }
 }
 

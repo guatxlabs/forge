@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console seed-demo` — amorçage de l'engagement de référence (PURE MOVE depuis cli.rs).
+//! `forge seed-demo` — amorçage de l'engagement de référence (PURE MOVE depuis cli.rs).
 // ===========================================================================================
-// `forge-console seed-demo` — amorce la base SQLite avec l'ENGAGEMENT DE RÉFÉRENCE fourni
+// `forge seed-demo` — amorce la base SQLite avec l'ENGAGEMENT DE RÉFÉRENCE fourni
 // (examples/reference-engagement/), pour qu'une console fraîche affiche IMMÉDIATEMENT des
 // Findings / Coverage / Purple / Runs peuplés, HORS-LIGNE et sans réseau. Voie d'ingestion
 // LOCALE (écrit directement dans SQLite, PAS via /api/ingest) — réutilise la MÊME dérivation
@@ -62,7 +62,7 @@ pub(crate) fn resolve_seed_dir(explicit: Option<&str>) -> std::path::PathBuf {
     candidates.push(std::path::Path::new("..").join(&rel));
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // target/release/forge-console -> release -> target -> console -> racine du repo
+            // target/release/forge -> release -> target -> console -> racine du repo
             candidates.push(dir.join("..").join("..").join("..").join(&rel));
         }
     }
@@ -75,22 +75,22 @@ pub(crate) fn resolve_seed_dir(explicit: Option<&str>) -> std::path::PathBuf {
     candidates.into_iter().next().unwrap_or(rel)
 }
 
-/// `forge-console seed-demo [--dir <path>] [--campaign <name>]` — amorce la base avec l'engagement
+/// `forge seed-demo [--dir <path>] [--campaign <name>]` — amorce la base avec l'engagement
 /// de référence fourni. Codes : 0 OK, 2 erreur (dossier/JSON/IO). Écrit directement dans SQLite.
 pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
     let campaign = cli_opt(args, "campaign").unwrap_or_else(|| SEED_DEMO_CAMPAIGN.to_string());
     let dir = resolve_seed_dir(cli_opt(args, "dir").as_deref());
     let findings = match read_jsonl(&dir.join("findings.jsonl"), true) {
         Ok(v) => v,
-        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+        Err(e) => { eprintln!("[forge] seed-demo: {e}"); return 2; }
     };
     let runrecords = match read_jsonl(&dir.join("runrecords.jsonl"), true) {
         Ok(v) => v,
-        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+        Err(e) => { eprintln!("[forge] seed-demo: {e}"); return 2; }
     };
     let roe = match read_jsonl(&dir.join("roe_decisions.jsonl"), false) {
         Ok(v) => v,
-        Err(e) => { eprintln!("[forge-console] seed-demo: {e}"); return 2; }
+        Err(e) => { eprintln!("[forge] seed-demo: {e}"); return 2; }
     };
 
     // POSTGRES (feature `store-postgres`) : sème le backend PG à travers le seam. Les lectures JSONL
@@ -104,12 +104,12 @@ pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
     let db_path = cli_db_path();
     let conn = match Connection::open(&db_path) {
         Ok(c) => c,
-        Err(e) => { eprintln!("[forge-console] seed-demo: ouverture de '{db_path}' impossible: {e}"); return 2; }
+        Err(e) => { eprintln!("[forge] seed-demo: ouverture de '{db_path}' impossible: {e}"); return 2; }
     };
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     if conn.execute_batch(SCHEMA).is_err() {
-        eprintln!("[forge-console] seed-demo: initialisation du schéma impossible");
+        eprintln!("[forge] seed-demo: initialisation du schéma impossible");
         return 2;
     }
     migrate(&conn); // colonnes additives (run_id, cwe/cvss, run_job C2) — requises par les INSERT ci-dessous
@@ -192,10 +192,10 @@ pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
             skipped_budget, coverage_gaps, targets_json, modules_json],
     );
 
-    println!("[forge-console] seed-demo : engagement de référence chargé depuis {}", dir.display());
-    println!("[forge-console] base={db_path}  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
-    println!("[forge-console] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
-    println!("[forge-console] Findings / Coverage / Runs peuplés. Pour l'onglet Purple : lance tools/mock_plume.py + PLUME_URL (voir `make demo-purple`).");
+    println!("[forge] seed-demo : engagement de référence chargé depuis {}", dir.display());
+    println!("[forge] base={db_path}  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
+    println!("[forge] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
+    println!("[forge] Findings / Coverage / Runs peuplés. Pour l'onglet Purple : lance tools/mock_plume.py + PLUME_URL (voir `make demo-purple`).");
     0
 }
 
@@ -300,13 +300,13 @@ fn run_seed_demo_pg(
 
     match outcome {
         Ok(Ok((nf, nr, fired_cnt, nd, vetoed_cnt, dry_run_cnt))) => {
-            println!("[forge-console] seed-demo (Postgres) : engagement de référence chargé depuis {}", dir.display());
-            println!("[forge-console] backend=postgres  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
-            println!("[forge-console] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
+            println!("[forge] seed-demo (Postgres) : engagement de référence chargé depuis {}", dir.display());
+            println!("[forge] backend=postgres  campagne='{campaign}'  run_id={SEED_DEMO_RUN_ID}");
+            println!("[forge] findings={nf}  run-records={nr} (fired={fired_cnt})  roe={nd} (veto={vetoed_cnt}, dry_run={dry_run_cnt})");
             0
         }
         Ok(Err(e)) | Err(e) => {
-            eprintln!("[forge-console] seed-demo: {e}");
+            eprintln!("[forge] seed-demo: {e}");
             2
         }
     }

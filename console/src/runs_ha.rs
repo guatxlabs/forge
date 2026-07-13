@@ -102,7 +102,7 @@ pub(crate) fn reconcile_runs(store: &crate::store::Store, scope: ReconcileScope)
     };
     if n > 0 {
         println!(
-            "[forge-console] reconcile: {n} run(s) orphelin(s) 'running' -> 'failed' ({} groupe(s) local/(aux) signalé(s))",
+            "[forge] reconcile: {n} run(s) orphelin(s) 'running' -> 'failed' ({} groupe(s) local/(aux) signalé(s))",
             orphan_pgids.len()
         );
     }
@@ -451,7 +451,7 @@ pub(crate) async fn leader_tick_loop(app: App) {
             let n = reap_dead_leader_runs(&store, &me);
             drop(store);
             if n > 0 {
-                println!("[forge-console] leader-tick: {n} run(s) orphelin(s) d'un leader mort -> 'failed' (failover, sans killpg cross-host)");
+                println!("[forge] leader-tick: {n} run(s) orphelin(s) d'un leader mort -> 'failed' (failover, sans killpg cross-host)");
             }
         }
         // 2) CANCEL-WATCH — coupe MES runs vivants dont l'intention DB est 'cancelled'.

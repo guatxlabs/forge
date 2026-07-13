@@ -13,7 +13,7 @@
 # ⚠️ CONTEXTE DE BUILD = le dossier PARENT `GUATX/` (pas `forge/`), car le crate
 #    `console/` dépend du crate sibling `../../core` (guatx-core). Construire ainsi :
 #
-#        docker build -f forge/Dockerfile -t forge-console:0.0.1 .      # depuis GUATX/
+#        docker build -f forge/Dockerfile -t forge:0.0.1 .      # depuis GUATX/
 #    ou  (via docker-compose qui fixe déjà le bon context, voir forge/docker-compose.yml)
 #
 #    Construire depuis `forge/` directement ÉCHOUERA (core/ hors contexte) — c'est voulu.
@@ -85,7 +85,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/forge/console/target \
     cargo build --release --locked ${FORGE_CARGO_FEATURES:+--features "$FORGE_CARGO_FEATURES"} \
     && mkdir -p /out \
-    && cp target/release/forge-console /out/forge-console
+    && cp target/release/forge /out/forge
 
 # -----------------------------------------------------------------------------
 # Stage 2 — runtime
@@ -114,7 +114,7 @@ ARG NUCLEI_SHA256_arm64=a07744736613c73fa2c3aef63e176941e3de95fa76feb4870551a1c4
 ARG SUBFINDER_SHA256_amd64=d988a481d3037c55e685afee023eb104a81a77dd2691fb902b59019a365f6103
 ARG SUBFINDER_SHA256_arm64=07b7fa2c2cfe6770df9cdfc0ab761a33bbaaf7146add51ea44e806953edc2d88
 
-LABEL org.opencontainers.image.title="forge-console" \
+LABEL org.opencontainers.image.title="forge" \
       org.opencontainers.image.description="Forge red-team console (ROE fail-closed + ledger tamper-evident) — usage autorisé uniquement." \
       org.opencontainers.image.vendor="GuatX" \
       org.opencontainers.image.source="https://guatx.com"
@@ -227,7 +227,7 @@ RUN set -eux; \
 WORKDIR /opt/forge
 
 # Binaire console depuis le builder.
-COPY --from=builder /out/forge-console /usr/local/bin/forge-console
+COPY --from=builder /out/forge /usr/local/bin/forge
 
 # Package python `forge` + assets web de la console + modèle de scope.
 # (On ne copie PAS les .db/.jsonl/secrets : ils vivent dans des volumes, cf. ENV ci-dessous.)
@@ -248,7 +248,7 @@ USER forge
 # --- Configuration (ENV documentées) ------------------------------------------
 # Console (Rust) :
 ENV FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
-    FORGE_CONSOLE_DB=/data/db/forge-console.db \
+    FORGE_CONSOLE_DB=/data/db/forge.db \
     FORGE_CONSOLE_LEDGER=/data/ledger/engagement.jsonl \
     FORGE_CONSOLE_SCOPE=/data/scope/scope.json \
     FORGE_CONSOLE_WEB=/opt/forge/console/web \
@@ -259,8 +259,8 @@ ENV FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
     PYTHONUNBUFFERED=1
 # Secrets — NE PAS cuire dans l'image ; injecter au run (env_file / --env / secret) :
 #   FORGE_CONSOLE_TOKEN           bearer d'ingestion (CSPRNG, sinon généré au boot)
-#   FORGE_CONSOLE_PASS_HASH       hash argon2id du rôle viewer    (`forge-console hashpw <pw>`)
-#   FORGE_CONSOLE_OPERATOR_HASH   hash argon2id du rôle opérateur (`forge-console hashpw-operator <pw>`)
+#   FORGE_CONSOLE_PASS_HASH       hash argon2id du rôle viewer    (`forge hashpw <pw>`)
+#   FORGE_CONSOLE_OPERATOR_HASH   hash argon2id du rôle opérateur (`forge hashpw-operator <pw>`)
 #   FORGE_CONSOLE_HOST            allowlist Host anti-DNS-rebinding (CSV) si reverse-proxy
 # Services externes pilotés (laisser vide = connecteur inerte/indisponible à fire-time) :
 #   FORGE_BROWSER_URL=http://browser-automation:8080
@@ -289,4 +289,4 @@ VOLUME ["/data/db", "/data/ledger", "/data/scope"]
 
 # tini = PID 1 (reaping propre des enfants `python3 -m forge.cli` spawnés par la console).
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["forge-console"]
+CMD ["forge"]

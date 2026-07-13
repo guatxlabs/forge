@@ -249,17 +249,17 @@ pub(crate) async fn backup_scheduler_loop(app: App) {
         }
         match res {
             Ok(Ok(v)) => {
-                println!("[forge-console] backup programmé OK — {} octets (offsite: {})",
+                println!("[forge] backup programmé OK — {} octets (offsite: {})",
                     v.get("archive_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
                     v.get("offsite").and_then(|o| o.get("kind")).and_then(|x| x.as_str())
                         .or_else(|| v.get("offsite").and_then(|o| o.get("shipped")).map(|_| "done")).unwrap_or("none"));
             }
             Ok(Err(e)) => {
-                eprintln!("[forge-console] backup programmé ÉCHEC (fail-open, console intacte): {e}");
+                eprintln!("[forge] backup programmé ÉCHEC (fail-open, console intacte): {e}");
                 append_console_ledger(&app, "console.backup.error", json!({"actor": "scheduler", "why": e}));
             }
             Err(join_err) => {
-                eprintln!("[forge-console] backup programmé : tâche interrompue (fail-open): {join_err}");
+                eprintln!("[forge] backup programmé : tâche interrompue (fail-open): {join_err}");
                 append_console_ledger(&app, "console.backup.error", json!({"actor": "scheduler", "why": "tâche de backup interrompue"}));
             }
         }

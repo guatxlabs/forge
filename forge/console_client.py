@@ -1,6 +1,6 @@
 """Client de la console Forge — POST des findings + run-records vers le store Rust.
 
-Ferme la boucle : moteur Python (engine) -> console (`forge-console`, port 7100) -> store +
+Ferme la boucle : moteur Python (engine) -> console (`forge`, port 7100) -> store +
 boucle purple (run-records ATT&CK ingérés, prêts pour la corrélation Plume). URL via
 FORGE_CONSOLE_URL (défaut http://127.0.0.1:7100), token via FORGE_CONSOLE_TOKEN. Zéro dépendance.
 """

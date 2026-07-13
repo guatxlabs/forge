@@ -528,8 +528,8 @@ fn build_router(app: App, web_dir: &str) -> Router {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     // sous-commandes de provisioning de hash argon2id :
-    //   forge-console hashpw <password>           -> hash du viewer (FORGE_CONSOLE_PASS_HASH)
-    //   forge-console hashpw-operator <password>  -> hash du rôle OPÉRATEUR C2 (FORGE_CONSOLE_OPERATOR_HASH)
+    //   forge hashpw <password>           -> hash du viewer (FORGE_CONSOLE_PASS_HASH)
+    //   forge hashpw-operator <password>  -> hash du rôle OPÉRATEUR C2 (FORGE_CONSOLE_OPERATOR_HASH)
     let args: Vec<String> = std::env::args().collect();
     // Dispatch CLI extrait dans `dispatch_cli` (PURE EXTRACTION, parité stricte) : `Some(code)` => une
     // sous-commande a tourné, on sort avec ce code ; `None` => aucune sous-commande, on enchaîne sur le
@@ -548,7 +548,7 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
     match args.get(1).map(String::as_str) {
         // --version / -V : imprime la version unique (fichier VERSION, include_str! à la compile).
         Some("--version") | Some("-V") => {
-            println!("forge-console {}", forge_version());
+            println!("forge {}", forge_version());
             Some(0)
         }
         Some("hashpw") | Some("hashpw-operator") => {
@@ -558,7 +558,7 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
                     Some(0)
                 }
                 _ => {
-                    eprintln!("usage: forge-console {} <password>", args[1]);
+                    eprintln!("usage: forge {} <password>", args[1]);
                     Some(2)
                 }
             }
@@ -568,28 +568,28 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
         Some(cmd @ ("findings" | "roe" | "coverage" | "query")) => {
             Some(run_read_cli(cmd, &args[2..]))
         }
-        // Provisioning d'un COMPTE INDIVIDUEL : forge-console useradd <login> <role> [--pass <pw>]
+        // Provisioning d'un COMPTE INDIVIDUEL : forge useradd <login> <role> [--pass <pw>]
         //   role ∈ {viewer|operator|admin}. Le mot de passe est lu sur STDIN par défaut (jamais en
         //   argv -> pas de fuite via ps/cmdline) ; `--pass <pw>` est toléré pour le scripting. Le hash
         //   argon2id est calculé ici et stocké dans `users` (idempotent par login : upsert + réactive).
         Some("useradd") => {
             Some(run_useradd_cli(&args[2..]))
         }
-        // AMORÇAGE DÉMO : forge-console seed-demo [--dir <path>] [--campaign <name>]
+        // AMORÇAGE DÉMO : forge seed-demo [--dir <path>] [--campaign <name>]
         //   Charge l'engagement de référence synthétique (examples/reference-engagement/) DIRECTEMENT
         //   dans la base SQLite (hors-ligne, sans réseau, sans /api/ingest) pour qu'une console fraîche
         //   affiche immédiatement Findings/Coverage/Purple/Runs. Idempotent (purge la campagne démo).
         Some("seed-demo") => {
             Some(run_seed_demo_cli(&args[2..]))
         }
-        // MIGRATION DE DONNÉES : forge-console migrate --from <dir|db> --to <db> [--ledger <path>]
+        // MIGRATION DE DONNÉES : forge migrate --from <dir|db> --to <db> [--ledger <path>]
         //   [--verify] [--encrypt --key-env <ENVVAR>]. Importe un install Forge existant (non-Docker)
         //   vers une base cible (Docker/autre) : copie DB (VACUUM INTO / SQLCipher), ledger + clé
         //   .ed25519 (0600), puis SCHEMA + migrate() sur la cible. UX primaire = conteneur one-shot.
         Some("migrate") => {
             Some(run_migrate_cli(&args[2..]))
         }
-        // MIGRATION DE STORE (feature `store-postgres`) : forge-console migrate-store --to <postgres-url>
+        // MIGRATION DE STORE (feature `store-postgres`) : forge migrate-store --to <postgres-url>
         //   [--from <sqlite-path>] [--dry-run] [--force] [--ledger <path>]. Copie gouvernée SQLite ->
         //   Postgres à travers le seam (ids + typage préservés, ordre FK, recalage IDENTITY, vérif des
         //   comptes, checkpoint ledger signé). Arm ENTIÈREMENT gardé par la feature -> le build community
@@ -598,21 +598,21 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
         Some("migrate-store") => {
             Some(crate::cli::run_migrate_store_cli(&args[2..]))
         }
-        // SAUVEGARDE CHIFFRÉE : forge-console backup --out <archive> --passphrase-env <ENVVAR>
+        // SAUVEGARDE CHIFFRÉE : forge backup --out <archive> --passphrase-env <ENVVAR>
         //   [--db <path>] [--ledger <path>]. Archive TOUJOURS chiffrée (argon2id + XChaCha20-Poly1305)
         //   regroupant snapshot DB (VACUUM INTO) + ledger + clé .ed25519 + manifest.json. Passphrase
         //   lue UNIQUEMENT depuis l'ENV (jamais argv). Chaîne ledger vérifiée avant, backup tracé.
         Some("backup") => {
             Some(run_backup_cli(&args[2..]))
         }
-        // RESTAURATION CHIFFRÉE : forge-console restore --in <archive> --passphrase-env <ENVVAR>
+        // RESTAURATION CHIFFRÉE : forge restore --in <archive> --passphrase-env <ENVVAR>
         //   [--to <db>] [--ledger <path>] [--force]. Déchiffre (mauvaise passphrase/altération => rien
         //   écrit), vérifie les sha256 du manifest + la chaîne ledger, refuse d'écraser un install non
         //   vide sans --force, place db/ledger/clé (.ed25519 = 0600). Restore tracé au ledger.
         Some("restore") => {
             Some(run_restore_cli(&args[2..]))
         }
-        // ROUND-TRIP BLOBSTORE (feature `object-store`) : forge-console blob-selftest [--key <key>]
+        // ROUND-TRIP BLOBSTORE (feature `object-store`) : forge blob-selftest [--key <key>]
         //   [--no-delete]. PUT -> GET -> compare octets -> EXISTS -> (DELETE) sur le store ACTIF (S3/MinIO
         //   si FORGE_BLOB_S3_* configuré, sinon local FORGE_BLOB_DIR). Preuve d'aller-retour sans serveur.
         //   Arm ENTIÈREMENT gardé par la feature -> le build community (défaut) ne le connaît pas.
@@ -620,20 +620,20 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
         Some("blob-selftest") => {
             Some(crate::blob::run_blob_selftest_cli(&args[2..]))
         }
-        // VÉRIF LEDGER (lecture seule, NON INTERACTIVE, RAPIDE) : forge-console ledger verify
+        // VÉRIF LEDGER (lecture seule, NON INTERACTIVE, RAPIDE) : forge ledger verify
         //   [--ledger <path>] [--json]. Recompute la chaîne SHA-256 du ledger JSONL et exit immédiat
         //   (0 intègre / 1 rompu-absent / 2 usage). NE démarre PAS le serveur, n'ouvre PAS la base,
         //   ne lit PAS STDIN. La vérif de signature reste côté `forge ledger verify --pubkey` (Python).
         Some("ledger") => {
             Some(run_ledger_cli(&args[2..]))
         }
-        // ÉTAT (lecture seule, NON INTERACTIF, RAPIDE) : forge-console status [--db <path>]
+        // ÉTAT (lecture seule, NON INTERACTIF, RAPIDE) : forge status [--db <path>]
         //   [--ledger <path>] [--json]. Imprime version, VERSION DE SCHÉMA persistée, backend actif,
         //   base RÉDIGÉE, tête de ledger vérifiée — SANS démarrer le serveur. Base d'un upgrade sûr.
         Some("status") => {
             Some(run_status_cli(&args[2..]))
         }
-        // UPGRADE SÛR EN UNE COMMANDE (fail-closed avec rollback) : forge-console upgrade
+        // UPGRADE SÛR EN UNE COMMANDE (fail-closed avec rollback) : forge upgrade
         //   --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]
         //   [--to <postgres-url>] [--force] [--dry-run]. Snapshot pré-upgrade CHIFFRÉ (moteur backup
         //   audité) -> migrate additif (+ migration de store si --to) -> vérif schéma/ledger/santé ->
@@ -651,7 +651,7 @@ fn dispatch_cli(args: &[String]) -> Option<i32> {
 /// (heartbeat/leader-tick/cache-poll/présence puis backup-scheduler) puis bind + serve. L'ordre des étapes,
 /// l'ordre des spawns et le gating HA sont STRICTEMENT inchangés par rapport à l'ancien main() monolithique.
 async fn serve() {
-    let db_path = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge-console.db".to_string());
+    let db_path = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge.db".to_string());
     let conn = Connection::open(&db_path).expect("open db");
     // CHIFFREMENT AU REPOS (opt-in, feature `encryption`) : si FORGE_DB_KEY est posé, `PRAGMA key`
     // DOIT précéder TOUTE autre requête (sinon SQLCipher lit une base illisible). Dans le build par
@@ -685,7 +685,7 @@ async fn serve() {
     let store_selection = match enterprise_store_gate(requested_store.as_deref(), db_url_env.as_deref()) {
         Ok(sel) => sel,
         Err(msg) => {
-            eprintln!("[forge-console] FATAL {msg}");
+            eprintln!("[forge] FATAL {msg}");
             std::process::exit(2);
         }
     };
@@ -718,10 +718,10 @@ async fn serve() {
             .join()
             .expect("postgres connect thread panicked")
             .unwrap_or_else(|e| {
-                eprintln!("[forge-console] FATAL {e}");
+                eprintln!("[forge] FATAL {e}");
                 std::process::exit(2);
             });
-            println!("[forge-console] store: Postgres (FORGE_DB_URL) — pool de {pool_size} clients connecté (écritures concurrentes, reconnect+retry HA armé)");
+            println!("[forge] store: Postgres (FORGE_DB_URL) — pool de {pool_size} clients connecté (écritures concurrentes, reconnect+retry HA armé)");
             // Stage 4 HA : le DSN voyage AVEC le pool pour re-établir un client cassé dans son slot après
             // une coupure (restart/failover) — cf. `Store::postgres_reconnectable`.
             Some(Arc::new(crate::store::PgPool::new(url, clients)))
@@ -741,7 +741,7 @@ async fn serve() {
     let (ha, instance_id) = {
         let want_ha = flags::env_truthy("FORGE_HA");
         if want_ha && pg.is_none() {
-            eprintln!("[forge-console] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite");
+            eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite");
             std::process::exit(2);
         }
         let iid = std::env::var("FORGE_INSTANCE_ID")
@@ -755,7 +755,7 @@ async fn serve() {
     // it, FAIL CLOSED with the same guidance rather than silently running a single unsynchronised instance.
     #[cfg(not(feature = "store-postgres"))]
     if flags::env_truthy("FORGE_HA") {
-        eprintln!("[forge-console] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite (this binary has no Postgres backend; rebuild with --features store-postgres)");
+        eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite (this binary has no Postgres backend; rebuild with --features store-postgres)");
         std::process::exit(2);
     }
 
@@ -791,7 +791,7 @@ async fn serve() {
     // `app.store()` APRÈS la construction de l'App (cf. bloc « AMORÇAGE BOOT »), plus ici sur `conn` brut.
     // racine des assets web statiques (style.css/app.js/fonts/…) servis en fallback.
     let web_dir = resolve_web_dir();
-    println!("[forge-console] web assets: {web_dir}");
+    println!("[forge] web assets: {web_dir}");
 
     // NE PAS journaliser le token en clair (fuite via logs/journald/historique terminal). On affiche
     // une empreinte courte (8 hex de sha256) — suffisante pour corréler/diagnostiquer sans exposer le
@@ -799,33 +799,33 @@ async fn serve() {
     let token_was_provided = std::env::var("FORGE_CONSOLE_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
     let token_fp = &sha_hex(&token)[..8];
     if token_was_provided {
-        println!("[forge-console] ingest token: (fourni via env) fp=sha8:{token_fp}");
+        println!("[forge] ingest token: (fourni via env) fp=sha8:{token_fp}");
     } else {
         // token auto-généré, ÉPHÉMÈRE : on n'imprime QUE l'empreinte (comme la branche env), JAMAIS le
         // secret en clair (fuite via logs/journald/historique terminal). Le moteur spawné le reçoit en
         // mémoire (App.token_raw) — la boucle purple / l'ingest interne fonctionnent sans l'afficher. Pour
         // un `/api/ingest` MANUEL reproductible, l'opérateur POSE `FORGE_CONSOLE_TOKEN=<valeur connue>`
         // (qu'il choisit) et redémarre : la branche « fourni via env » ci-dessus s'appliquera alors.
-        println!("[forge-console] ingest token (auto-généré, éphémère) fp=sha8:{token_fp} — pose FORGE_CONSOLE_TOKEN=<valeur connue> pour le fixer et t'en servir en /api/ingest manuel");
+        println!("[forge] ingest token (auto-généré, éphémère) fp=sha8:{token_fp} — pose FORGE_CONSOLE_TOKEN=<valeur connue> pour le fixer et t'en servir en /api/ingest manuel");
     }
-    println!("[forge-console] db: {db_path}");
-    println!("[forge-console] ledger: {ledger_path}");
+    println!("[forge] db: {db_path}");
+    println!("[forge] ledger: {ledger_path}");
     // ÉTAT DB de la gate d'auth : un compte activé en base engage la gate MÊME sans hash env (ferme le
     // trou dev-open historique). On le calcule ici sur `conn` (avant son déplacement dans App) pour un
     // log fidèle ; App.recompute_auth_required() recalcule ensuite le cache faisant autorité.
     let has_enabled_user: bool =
         conn.query_row("SELECT 1 FROM users WHERE disabled=0 LIMIT 1", [], |_| Ok(())).is_ok();
     if pass_hash.is_empty() && !has_enabled_user {
-        println!("[forge-console] AUTH OFF (dev localhost) — ni FORGE_CONSOLE_PASS_HASH ni compte activé en base. `forge-console useradd <login> admin` (ou pose le hash env) pour engager la gate.");
+        println!("[forge] AUTH OFF (dev localhost) — ni FORGE_CONSOLE_PASS_HASH ni compte activé en base. `forge useradd <login> admin` (ou pose le hash env) pour engager la gate.");
     } else if pass_hash.is_empty() {
-        println!("[forge-console] auth ON (état DB) — gate engagée par au moins un compte activé (table users) ; connexion via POST /api/login (session individuelle) ; hash env absent");
+        println!("[forge] auth ON (état DB) — gate engagée par au moins un compte activé (table users) ; connexion via POST /api/login (session individuelle) ; hash env absent");
     } else {
-        println!("[forge-console] auth ON — user={user}, lectures protégées (Basic), écritures par token (comptes individuels via POST /api/login également acceptés)");
+        println!("[forge] auth ON — user={user}, lectures protégées (Basic), écritures par token (comptes individuels via POST /api/login également acceptés)");
     }
     if operator_hash.is_empty() {
-        println!("[forge-console] C2 FAIL-CLOSED — rôle opérateur NON provisionné (FORGE_CONSOLE_OPERATOR_HASH absent) : /api/run* renverra 403. `forge-console hashpw-operator '...'` pour l'activer.");
+        println!("[forge] C2 FAIL-CLOSED — rôle opérateur NON provisionné (FORGE_CONSOLE_OPERATOR_HASH absent) : /api/run* renverra 403. `forge hashpw-operator '...'` pour l'activer.");
     } else {
-        println!("[forge-console] C2 armé — rôle opérateur via en-tête X-Forge-Operator ; cibles ⊆ scope serveur ({} entrée(s)) ; exploit/destructif possibles UNIQUEMENT via opt-in haut-impact gouverné (allow_high_impact + arm + reason, journalisé au ledger) ; scope-guard moteur inchangé (hors-scope = VETO) ; watchdog={run_timeout_secs}s", scope_in.len());
+        println!("[forge] C2 armé — rôle opérateur via en-tête X-Forge-Operator ; cibles ⊆ scope serveur ({} entrée(s)) ; exploit/destructif possibles UNIQUEMENT via opt-in haut-impact gouverné (allow_high_impact + arm + reason, journalisé au ledger) ; scope-guard moteur inchangé (hors-scope = VETO) ; watchdog={run_timeout_secs}s", scope_in.len());
     }
 
     // (log DÉTECTION déplacé après la construction de l'App + reload_detection_source — la source
@@ -837,10 +837,10 @@ async fn serve() {
     // fail-closed sur le pair TCP). On alerte l'opérateur pour qu'il reconfigure explicitement.
     match settings_get(&conn, "trusted_proxy") {
         Some(raw) if !raw.trim().is_empty() && parse_trusted_proxy_cidrs(&raw).is_empty() => {
-            eprintln!("[forge-console] WARN trusted_proxy={raw:?} n'est PAS un CIDR valide — X-Forwarded-For sera IGNORÉ (repli fail-closed sur le pair TCP). Reconfigure `trusted_proxy` sur le(s) CIDR(s) du proxy amont réel (ex. le CIDR Traefik/cluster ou l'egress Cloudflare), sinon la politique opérateur source-CIDR verra l'IP du proxy et jamais celle du client.");
+            eprintln!("[forge] WARN trusted_proxy={raw:?} n'est PAS un CIDR valide — X-Forwarded-For sera IGNORÉ (repli fail-closed sur le pair TCP). Reconfigure `trusted_proxy` sur le(s) CIDR(s) du proxy amont réel (ex. le CIDR Traefik/cluster ou l'egress Cloudflare), sinon la politique opérateur source-CIDR verra l'IP du proxy et jamais celle du client.");
         }
         Some(raw) if !raw.trim().is_empty() => {
-            println!("[forge-console] trusted_proxy: X-Forwarded-For honoré UNIQUEMENT si le pair TCP appartient à {:?}", parse_trusted_proxy_cidrs(&raw));
+            println!("[forge] trusted_proxy: X-Forwarded-For honoré UNIQUEMENT si le pair TCP appartient à {:?}", parse_trusted_proxy_cidrs(&raw));
         }
         _ => {}
     }
@@ -974,10 +974,10 @@ async fn serve() {
         let endpoint = ds_endpoint(&cfg);
         let http_kind = kind == "plume" || kind == "generic_http";
         if kind == "none" || kind.is_empty() || (http_kind && endpoint.is_empty()) {
-            println!("[forge-console] DÉTECTION OFF — aucune source configurée : /api/detection/coverage (alias /api/purple/coverage) répondra en fail-open lisible (source_reachable:false). Configure `settings.detection_source` (wizard) ou pose PLUME_URL/PLUME_TOKEN (rétro-compat kind=plume).");
+            println!("[forge] DÉTECTION OFF — aucune source configurée : /api/detection/coverage (alias /api/purple/coverage) répondra en fail-open lisible (source_reachable:false). Configure `settings.detection_source` (wizard) ou pose PLUME_URL/PLUME_TOKEN (rétro-compat kind=plume).");
         } else {
             // JAMAIS le secret dans le log — kind + endpoint + type d'auth seuls.
-            println!("[forge-console] DÉTECTION armée — kind={kind} endpoint={endpoint} auth={} ; LECTURE seule, joint runrecord[fired] (red) vs détections de la source (blue).",
+            println!("[forge] DÉTECTION armée — kind={kind} endpoint={endpoint} auth={} ; LECTURE seule, joint runrecord[fired] (red) vs détections de la source (blue).",
                 ds_auth_type(&cfg));
         }
     }
@@ -990,7 +990,7 @@ async fn serve() {
     #[cfg(feature = "store-postgres")]
     if app.ha {
         println!(
-            "[forge-console] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader-tick toutes les {}s (claim pending + reap failover + cancel-watch, leader-only) ; leader/instance_id publiés sur /health.",
+            "[forge] HA ARMÉ — instance_id={} ; bail scope='run-worker' TTL={}s ; heartbeat toutes les {}s ; leader-tick toutes les {}s (claim pending + reap failover + cancel-watch, leader-only) ; leader/instance_id publiés sur /health.",
             app.instance_id, crate::ha::LEASE_TTL_SECS, crate::ha::HEARTBEAT_TICK_SECS, crate::runs_ha::LEADER_TICK_SECS
         );
         tokio::spawn(crate::ha::heartbeat_loop(app.clone()));
@@ -1024,7 +1024,7 @@ async fn serve() {
 
     let addr = std::env::var("FORGE_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:7100".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    println!("[forge-console] http://{addr}");
+    println!("[forge] http://{addr}");
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .expect("serve");
@@ -1787,7 +1787,7 @@ mod tests {
 
         // source sur disque : base ANCIENNE + ledger intact.
         let src_dir = tmp_dir("forge-mig-http-src");
-        let src_db = format!("{src_dir}/forge-console.db");
+        let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);
         let src_ledger = format!("{src_dir}/engagement.jsonl");
         ledger_append_standalone(&src_ledger, "engagement.start", &json!({"a": 1})).unwrap();
@@ -1835,7 +1835,7 @@ mod tests {
         std::env::remove_var("FORGE_ALLOW_API_MIGRATE");
 
         let src_dir = tmp_dir("forge-mig-flagoff-src");
-        seed_old_source_db(&format!("{src_dir}/forge-console.db"));
+        seed_old_source_db(&format!("{src_dir}/forge.db"));
         let led = tmp_path("forge-mig-flagoff-led");
         let app = test_app(&led); // non provisionnée -> la fenêtre de setup est ouverte.
         assert!(!app.provisioned(), "console non provisionnée (fenêtre setup ouverte)");
@@ -5010,7 +5010,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
 
     // =============================================================================================
     // LEDGER VERIFY CLI — lecture seule, NON INTERACTIVE, RAPIDE (ne démarre PAS le serveur).
-    // Régression : `forge-console ledger verify` retombait sur le boot serveur et PENDAIT.
+    // Régression : `forge ledger verify` retombait sur le boot serveur et PENDAIT.
     // =============================================================================================
 
 }

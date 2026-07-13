@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `forge-console status` — instantané LECTURE SEULE de l'état d'une installation console.
+//! `forge status` — instantané LECTURE SEULE de l'état d'une installation console.
 // ===========================================================================================
-// `forge-console status [--db <path>] [--ledger <path>] [--json]` imprime un instantané SANS
+// `forge status [--db <path>] [--ledger <path>] [--json]` imprime un instantané SANS
 // démarrer le serveur ni ouvrir de socket : version produit, VERSION DE SCHÉMA persistée
 // (settings.schema_version, tamponnée par migrate()/le boot PG), backend actif (sqlite | postgres),
 // chemin/URL de la base RÉDIGÉ (jamais de credentials), et la TÊTE du ledger (hash-chain vérifiée).
@@ -29,7 +29,7 @@ fn resolve_backend_and_version(db_path: &str) -> Result<(String, String, Option<
     Ok(("sqlite".to_string(), db_path.to_string(), sv))
 }
 
-/// `forge-console status [--db <path>] [--ledger <path>] [--json]`. Codes : 0 = OK, 2 = base illisible.
+/// `forge status [--db <path>] [--ledger <path>] [--json]`. Codes : 0 = OK, 2 = base illisible.
 pub(crate) fn run_status_cli(args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
     let db_path = cli_opt(args, "db").filter(|s| !s.is_empty()).unwrap_or_else(cli_db_path);
@@ -41,7 +41,7 @@ pub(crate) fn run_status_cli(args: &[String]) -> i32 {
     let (backend, db_redacted, schema_version) = match resolve_backend_and_version(&db_path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[forge-console] status: {e}");
+            eprintln!("[forge] status: {e}");
             return 2;
         }
     };
@@ -74,7 +74,7 @@ pub(crate) fn run_status_cli(args: &[String]) -> i32 {
     } else {
         let sv = schema_version.map(|v| v.to_string()).unwrap_or_else(|| "(non tamponnée — base antérieure)".to_string());
         let head = lv.head.clone().unwrap_or_else(|| if lv.empty { "(ledger vide/absent)".to_string() } else { "(chaîne rompue)".to_string() });
-        println!("forge-console status");
+        println!("forge status");
         println!("  version           : {}", forge_version());
         println!("  schema_version    : {sv}  (attendu par ce binaire : {})", crate::schema::SCHEMA_VERSION);
         println!("  backend           : {backend}");

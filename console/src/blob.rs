@@ -305,7 +305,7 @@ pub(crate) fn ship_offsite_s3(offsite: &Value, archive_path: &str) -> Result<Val
     }))
 }
 
-/// `forge-console blob-selftest [--key <key>] [--no-delete]` — ROUND-TRIP du BlobStore ACTIF (S3 si
+/// `forge blob-selftest [--key <key>] [--no-delete]` — ROUND-TRIP du BlobStore ACTIF (S3 si
 /// configuré+feature, sinon local) : PUT d'un petit payload -> GET -> compare octets -> EXISTS ->
 /// (DELETE sauf `--no-delete`) -> EXISTS. Imprime un rapport JSON. Code 0 si put+get(octets identiques)
 /// +exists OK, 1 sinon. Sert de PREUVE de l'aller-retour (MinIO/local) sans démarrer le serveur.
@@ -321,7 +321,7 @@ pub(crate) fn run_blob_selftest_cli(args: &[String]) -> i32 {
         let report = match ship_offsite_s3(&offsite, &file) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[forge-console] blob-selftest --file: ship_offsite_s3 échoué: {e}");
+                eprintln!("[forge] blob-selftest --file: ship_offsite_s3 échoué: {e}");
                 return 1;
             }
         };
@@ -330,21 +330,21 @@ pub(crate) fn run_blob_selftest_cli(args: &[String]) -> i32 {
         let store = match select_blob_store() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[forge-console] blob-selftest --file: init store échouée: {e}");
+                eprintln!("[forge] blob-selftest --file: init store échouée: {e}");
                 return 1;
             }
         };
         let orig = match std::fs::read(&file) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[forge-console] blob-selftest --file: lecture '{file}' échouée: {e}");
+                eprintln!("[forge] blob-selftest --file: lecture '{file}' échouée: {e}");
                 return 1;
             }
         };
         let got = match store.get(&key) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[forge-console] blob-selftest --file: GET '{key}' échoué: {e}");
+                eprintln!("[forge] blob-selftest --file: GET '{key}' échoué: {e}");
                 return 1;
             }
         };
@@ -367,7 +367,7 @@ pub(crate) fn run_blob_selftest_cli(args: &[String]) -> i32 {
     let store = match select_blob_store() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[forge-console] blob-selftest: init du store échouée: {e}");
+            eprintln!("[forge] blob-selftest: init du store échouée: {e}");
             return 1;
         }
     };
@@ -377,14 +377,14 @@ pub(crate) fn run_blob_selftest_cli(args: &[String]) -> i32 {
     let url = match store.put(&key, &payload, "application/octet-stream") {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("[forge-console] blob-selftest: PUT échoué: {e}");
+            eprintln!("[forge] blob-selftest: PUT échoué: {e}");
             return 1;
         }
     };
     let got = match store.get(&key) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("[forge-console] blob-selftest: GET échoué: {e}");
+            eprintln!("[forge] blob-selftest: GET échoué: {e}");
             return 1;
         }
     };

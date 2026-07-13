@@ -39,7 +39,7 @@ services:
   # ---------------------------------------------------------------------------
   # Console red-team : binaire Rust + python `forge` spawné, UI web + API sur :7100.
   # ---------------------------------------------------------------------------
-  forge-console:
+  forge:
     build:
       # Contexte = parent de forge/ (= GUATX/), pour inclure forge/ ET core/.
       context: ..
@@ -53,10 +53,10 @@ services:
         HTTPX_VERSION: "1.6.9"
         NUCLEI_VERSION: "3.3.7"
         SUBFINDER_VERSION: "2.6.7"
-    image: forge-console:0.0.1
-    container_name: forge-console
+    image: forge:0.0.1
+    container_name: forge
     restart: unless-stopped
-    # ENTRYPOINT/CMD hérités de l'image (Dockerfile) : tini en PID1 (reaping) + `forge-console`. AUCUN
+    # ENTRYPOINT/CMD hérités de l'image (Dockerfile) : tini en PID1 (reaping) + `forge`. AUCUN
     # override ici : le scope serveur est OPTIONNEL. S'il est absent (aucun bind scope.json), la console
     # démarre proprement en fail-closed (load_server_scope -> in_scope vide, rien lançable) et l'assistant
     # web définit le périmètre de l'engagement #1. Pas de pré-étape, pas de fichier hôte requis.
@@ -72,7 +72,7 @@ services:
       # Bind interne au conteneur (réseau Docker isolé). NE PAS exposer publiquement
       # sans reverse-proxy + auth + Host-allowlist (FORGE_CONSOLE_HOST).
       FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
-      FORGE_CONSOLE_DB: "/data/db/forge-console.db"
+      FORGE_CONSOLE_DB: "/data/db/forge.db"
       FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
       FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
       FORGE_PKG_DIR: "/opt/forge"
@@ -112,7 +112,7 @@ services:
       #   PLUME_TOKEN: "<base64 user:pass>"           # [SECRET] → forge/.env (Basic auth vers Plume)
 
       # --- Chiffrement AU REPOS (image opt-in `--features encryption`) ---------------------
-      # UNIQUEMENT si tu construis l'image chiffrée (forge-console:0.0.1-encryption, cf.
+      # UNIQUEMENT si tu construis l'image chiffrée (forge:0.0.1-encryption, cf.
       # docs/MIGRATION.md Runbook B). La console lit FORGE_DB_KEY au boot et émet `PRAGMA key`
       # AVANT toute requête (contrat SQLCipher). Sans clé correcte → base illisible (fail-closed).
       # Dans le build PAR DÉFAUT ce hook N'EXISTE PAS (base en clair) → la variable est ignorée.
@@ -194,7 +194,7 @@ services:
   #   command: ["msfrpcd","-a","0.0.0.0","-p","55553","-U","msf","-P","${MSF_RPC_PASS}","-S"]
   #   expose: ["55553"]
   #   networks: [forge-net]
-  #   # puis dans forge-console.environment : MSF_RPC_HOST=msfrpcd (+ MSF_RPC_PASS via forge/.env)
+  #   # puis dans forge.environment : MSF_RPC_HOST=msfrpcd (+ MSF_RPC_PASS via forge/.env)
 
   # ---------------------------------------------------------------------------
   # burp — connecteur burp.scan (OPTIONNEL, profil "burp", BRING-YOUR-OWN).
@@ -209,7 +209,7 @@ services:
   #   restart: unless-stopped
   #   expose: ["1337"]
   #   networks: [forge-net]
-  #   # puis dans forge-console.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via forge/.env)
+  #   # puis dans forge.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via forge/.env)
 
   # ---------------------------------------------------------------------------
   # postgres — backend ENTERPRISE (OPTIONNEL, profil "postgres", Stage 4 HA/multi-instance).

@@ -27,8 +27,8 @@ engagements/
 *.db
 *.db-wal
 *.db-shm
-forge-console.db
-forge-console-*.db
+forge.db
+forge-*.db
 
 # --- Snapshots/backups chiffrés (backup, restore, snapshot pré-upgrade) -------
 # Les archives .forge contiennent la base + le ledger CHIFFRÉS d'un engagement réel

@@ -94,7 +94,7 @@ make demo          # amorce la base démo + lance la console peuplée  -> http:/
 make demo-purple   # idem + stub mock-Plume (DEMO FIXTURE) -> matrice détecté/raté/MTTD (7 tirés, 4 détectés, 3 ratés)
 ```
 
-`make demo` lance `forge-console seed-demo --dir examples/reference-engagement`, qui **ingère les
+`make demo` lance `forge seed-demo --dir examples/reference-engagement`, qui **ingère les
 fixtures directement dans SQLite** (idempotent, sans réseau, ne touche que la campagne démo
 `acme-lab`). Le write-up commercial correspondant :
 [`examples/reference-engagement/REFERENCE_ENGAGEMENT.md`](examples/reference-engagement/REFERENCE_ENGAGEMENT.md).
@@ -108,10 +108,10 @@ findings + run-records ATT&CK du moteur Python ; Plume corrèle ensuite par cham
 ```sh
 cd console && cargo build --release            # compile offline depuis le cache cargo
 # (optionnel) activer l'auth opérateur : hash argon2id du mot de passe, jamais en clair
-HASH=$(./target/release/forge-console hashpw 'mon-mot-de-passe')
+HASH=$(./target/release/forge hashpw 'mon-mot-de-passe')
 FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) \
 FORGE_CONSOLE_USER=forge FORGE_CONSOLE_PASS_HASH="$HASH" \
-    ./target/release/forge-console            # http://127.0.0.1:7100  (sans PASS_HASH = dev localhost ouvert)
+    ./target/release/forge            # http://127.0.0.1:7100  (sans PASS_HASH = dev localhost ouvert)
 # côté moteur : expédier une campagne vers la console
 python3 -m forge.cli campaign --scope scope.json --targets t.json --campaign op1 \
     --console http://127.0.0.1:7100 --console-token "$FORGE_CONSOLE_TOKEN"
@@ -121,7 +121,7 @@ python3 -m forge.cli campaign --scope scope.json --targets t.json --campaign op1
 routes derrière (a) **host-guard** anti-DNS-rebinding (`Host` en allowlist → sinon `421`) et (b)
 **auth-guard** si `FORGE_CONSOLE_PASS_HASH` est défini — **Basic** (opérateur=viewer, lecture) ou
 **Bearer token** (agent/admin=écriture). Sans hash → mode dev localhost ouvert (les écritures
-restent gatées par le token). Mot de passe **argon2id** via `forge-console hashpw '...'`.
+restent gatées par le token). Mot de passe **argon2id** via `forge hashpw '...'`.
 Endpoints : `GET /health` · `POST /api/ingest` (token) · `GET /api/findings` · `GET /api/runrecords` ·
 `GET /api/coverage` (rollup ATT&CK) · **`GET /api/query?q=...`** (soql) · **`/api/panels`** (GET liste ·
 POST créer [token] · DELETE [token] · `GET /api/panels/:id/data`) · `GET /` (console opérateur dark,
@@ -146,7 +146,7 @@ Un champ hors allowlist → `400` (anti-injection). Le SQL compilé est renvoyé
 cd console && cargo build --release && cd ..
 
 # 2) lancer la console (dev : localhost ouvert, écritures gatées par token)
-FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) ./console/target/release/forge-console &
+FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) ./console/target/release/forge &
 #    -> http://127.0.0.1:7100   (UI opérateur dark + API)
 
 # 3) peupler le catalogue de modules côté UI
@@ -226,7 +226,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Wizard 1er déploiement** (self-deploy : provisionne admin/crypto/source de détection/politique opérateur **depuis le navigateur**, auto-désactivant, zéro défaut codé en dur) | ✅ — `GET /api/setup/state` · `POST /api/setup` |
 | **RBAC admin & gouvernance des connecteurs** (comptes `/api/users`, viewer/opérateur/admin ; msf/burp sondés à fire-time, `exploit` fail-safe, jamais de sur-classement) | ✅ — testé en live |
 | **Source de détection infra-agnostique** (plugin configurable dans l'UI : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec, secret write-only) | ✅ — cf. `docs/DETECTION.md` |
-| **Sauvegarde/restore chiffrées + migration** (archive **toujours chiffrée** argon2id+XChaCha20, scheduler + offsite, `migrate` DB+ledger+clé `.ed25519`) | ✅ — `/api/backup(/policy)` · `/api/restore` · `forge-console migrate` |
+| **Sauvegarde/restore chiffrées + migration** (archive **toujours chiffrée** argon2id+XChaCha20, scheduler + offsite, `migrate` DB+ledger+clé `.ed25519`) | ✅ — `/api/backup(/policy)` · `/api/restore` · `forge migrate` |
 | **Chiffrement AU REPOS SQLCipher** (image opt-in `--features encryption`, `PRAGMA key` au boot) | ✅ opt-in — `capabilities.sqlcipher` exposé au wizard |
 | Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
 
