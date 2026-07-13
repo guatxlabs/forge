@@ -34,6 +34,7 @@ import socket
 from .registry import register, Module
 from .. import runner
 from ..roe import Scope
+from .toolspec import check_extra_args, safe_value
 
 # sous-ensemble des plages Cloudflare (dérive dans le temps — rafraîchir périodiquement)
 CF_RANGES = [
@@ -73,14 +74,43 @@ class OriginFind(Module):
     exploit = False
     mitre = "T1590.005"
     description = ("Trouve l'IP d'origine derrière un CDN/WAF (subfinder + préfixes passifs → DNS → "
-                  "drop-CF → vérif Host-header) — bypass WAF si l'origine est joignable.")
+                  "drop-CF → vérif Host-header) — bypass WAF si l'origine est joignable. Params UI : "
+                  "sources (-sources), timeout (-timeout), rate (-rl), extra_args (allowlist) — tunent subfinder.")
     SUB, SUB_IMG = "subfinder", "projectdiscovery/subfinder"
     HX, HX_IMG = "httpx", "projectdiscovery/httpx"
+
+    # SCHÉMA servi à l'UI — tune l'énumération subfinder de l'étape 1. Rendu par modules-form.js.
+    PARAMS_SCHEMA = [
+        {"name": "sources", "type": "text", "label": "sources subfinder (-sources)", "flag": "-sources"},
+        {"name": "timeout", "type": "number", "label": "timeout par source (-timeout s)", "flag": "-timeout"},
+        {"name": "rate", "type": "number", "label": "rate-limit subfinder (-rl req/s)", "flag": "-rl"},
+        {"name": "extra_args", "type": "list", "label": "extra args subfinder (allowlist)", "flag": ""},
+    ]
+    # ALLOWLIST des drapeaux subfinder acceptés en argument libre — tout flag hors liste est REFUSÉ.
+    # EXCLUS : -o/-oJ/-oD (écriture fichier), -config/-pc (lecture fichier de config/provider arbitraire).
+    FLAG_ALLOWLIST = ("-all", "-recursive", "-nW", "-sources", "-rl", "-timeout", "-max-time", "-silent")
 
     @property
     def available(self):
         return (runner.available(self.SUB, self.SUB_IMG, prefer_docker=True)
                 and runner.available(self.HX, self.HX_IMG, prefer_docker=True))
+
+    def _subfinder_args(self, domain, params):
+        """Argv subfinder de l'étape 1 : défaut `-d <domain> -silent` (BYTE-IDENTIQUE sans params) +
+        knobs optionnels (sources/timeout/rate) + extra_args VALIDÉS (le gate fire() refuse en amont)."""
+        p = params or {}
+        argv = ["-d", domain, "-silent"]
+        sources = p.get("sources")
+        if sources is not None and safe_value(str(sources)):
+            argv += ["-sources", str(sources)]
+        timeout = p.get("timeout")
+        if timeout not in (None, "") and safe_value(str(timeout)):
+            argv += ["-timeout", str(timeout)]
+        rate = p.get("rate")
+        if rate not in (None, "") and safe_value(str(rate)):
+            argv += ["-rl", str(rate)]
+        _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
+        return argv + extra
 
     def dry(self, action):
         return (f"subfinder -d {action.target} -silent + préfixes passifs (origin./direct./cpanel.…) "
@@ -96,6 +126,11 @@ class OriginFind(Module):
 
     def fire(self, action):
         domain = action.target
+        # EXTRA_ARGS gouvernés : un drapeau subfinder libre hors allowlist (ou non-liste) -> refus fail-closed.
+        bad_extra, _ = check_extra_args(action.params.get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return [self._skipped(action, f"origin.find non exécuté — argument libre refusé ({bad_extra})",
+                                  "Aucun processus lancé (fail-closed).")]
         # Scope reconstruit depuis les params injectés par l'engine (miroir IDOR engine.py:130-134).
         # Quand le scope EST fourni (chemin de production : l'engine injecte TOUJOURS in_scope/out_scope),
         # on applique un filtre FAIL-CLOSED sur chaque IP résolue : in_scope vide => is_in_scope()==False
@@ -104,7 +139,8 @@ class OriginFind(Module):
         enforce = "in_scope" in action.params or "out_scope" in action.params
         guard = Scope({"in_scope": action.params.get("in_scope", []),
                        "out_scope": action.params.get("out_scope", [])})
-        rc, out, err = runner.tool(self.SUB, self.SUB_IMG, ["-d", domain, "-silent"], timeout=120, prefer_docker=True)
+        rc, out, err = runner.tool(self.SUB, self.SUB_IMG, self._subfinder_args(domain, action.params),
+                                   timeout=120, prefer_docker=True)
         # DÉGRADATION : subfinder indisponible/en échec -> skipped. On NE bascule PAS en résolution DNS
         # passive « à sa place » : cela frapperait le réseau réel hors du seam d'énumération (et
         # masquerait la panne). Le module se neutralise proprement (offline-safe).

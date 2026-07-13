@@ -41,6 +41,7 @@ import urllib.parse
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .access_control import _body_hash, _normalize_body
+from .toolspec import check_extra_args, safe_value
 from .. import runner
 from .. import techniques
 
@@ -261,8 +262,30 @@ class SqliProbe(InjectionOracle):
            "privilège sur le compte de base de données (CWE-89).")
     description = ("Oracle SQLi à PREUVE : différentiel BOOLÉEN fiable et/ou version SGBD error-based "
                    "UNIQUEMENT (jamais de dump de données). sqlmap optionnel via runner (absent -> "
-                   "skipped) ; détection primaire native. Sinon tested. CWE-89.")
+                   "skipped) ; détection primaire native. Sinon tested. CWE-89. Params UI sqlmap : "
+                   "level/risk/technique/dbms/delay + extra_args (allowlist).")
     SQLMAP_BIN = "sqlmap"
+    # SCHÉMA servi à l'UI — la sonde native lit param/value/method ; les knobs sqlmap tunent la
+    # corroboration OPT-IN (params.sqlmap). Rendu par modules-form.js via `forge modules --json`.
+    PARAMS_SCHEMA = [
+        {"name": "param", "type": "text", "label": "paramètre injectable (requis)", "flag": ""},
+        {"name": "value", "type": "text", "label": "valeur de base (défaut 1)", "flag": ""},
+        {"name": "method", "type": "select", "label": "méthode HTTP", "flag": "", "allowed": ["GET", "POST"]},
+        {"name": "level", "type": "select", "label": "sqlmap --level", "flag": "--level",
+         "allowed": ["1", "2", "3", "4", "5"]},
+        {"name": "risk", "type": "select", "label": "sqlmap --risk", "flag": "--risk",
+         "allowed": ["1", "2", "3"]},
+        {"name": "technique", "type": "text", "label": "sqlmap --technique (défaut BE)", "flag": "--technique"},
+        {"name": "dbms", "type": "text", "label": "sqlmap --dbms (ex MySQL)", "flag": "--dbms"},
+        {"name": "extra_args", "type": "list", "label": "extra args sqlmap (allowlist)", "flag": ""},
+    ]
+    # ALLOWLIST CONSERVATRICE des drapeaux sqlmap acceptés en argument libre — tout flag hors liste est
+    # REFUSÉ. EXCLUS explicitement : --dump/--dump-all/--os-shell/--os-cmd/--sql-shell/--file-read/
+    # --file-write/--eval/-r/--tamper/--proxy/--output-dir/--config (exfil, RCE, I/O fichier, exfil réseau
+    # — au-delà de l'usage gouverné « SQLi = détection + version SGBD seule »).
+    FLAG_ALLOWLIST = ("--level", "--risk", "--technique", "--dbms", "--delay", "--timeout", "--threads",
+                      "--batch", "--random-agent", "-p", "--banner", "--time-sec", "--retries",
+                      "--string", "--not-string", "--code")
 
     # --- seams sqlmap (patchables ; corroboration OPTIONNELLE opt-in, jamais la détection primaire) ---
     @staticmethod
@@ -271,12 +294,25 @@ class SqliProbe(InjectionOracle):
         return runner.available(SqliProbe.SQLMAP_BIN, None)
 
     @staticmethod
-    def _run_sqlmap(url, param, method, timeout):
+    def _run_sqlmap(url, param, method, timeout, opts=None):
         """Seam sous-processus SANS shell (via runner.tool) : lance sqlmap en mode NON destructif
-        (batch, --technique BE, sans dump). Renvoie (rc, stdout, stderr). Patchable par les tests."""
-        args = ["-u", url, "-p", param, "--batch", "--level", "1", "--risk", "1",
-                "--technique", "BE", "--flush-session", "--answers", "quit=N",
+        (batch, sans dump). Renvoie (rc, stdout, stderr). Patchable par les tests. `opts` (dict optionnel)
+        pilote level/risk/technique/dbms/delay + extra_args VALIDÉS -> argv BYTE-IDENTIQUE au défaut
+        (level 1, risk 1, technique BE) quand `opts` est absent/vide."""
+        o = opts or {}
+        level = o.get("level") if safe_value(str(o.get("level", ""))) else "1"
+        risk = o.get("risk") if safe_value(str(o.get("risk", ""))) else "1"
+        tech = o.get("technique") if safe_value(str(o.get("technique", ""))) else "BE"
+        args = ["-u", url, "-p", param, "--batch", "--level", str(level), "--risk", str(risk),
+                "--technique", str(tech), "--flush-session", "--answers", "quit=N",
                 "--timeout", "10", "--retries", "1", "--disable-coloring"]
+        dbms = o.get("dbms")
+        if dbms and safe_value(str(dbms)):
+            args += ["--dbms", str(dbms)]
+        delay = o.get("delay")
+        if delay and safe_value(str(delay)):
+            args += ["--delay", str(delay)]
+        args += list(o.get("extra") or ())
         if method and method.upper() != "GET":
             args += ["--method", method.upper()]
         return runner.tool(SqliProbe.SQLMAP_BIN, None, args, timeout=timeout)
@@ -363,11 +399,21 @@ class SqliProbe(InjectionOracle):
                 evidence=("Le binaire sqlmap est absent : corroboration sautée (dégradation gracieuse). "
                           "La détection native reste la source de vérité. Installer sqlmap pour activer."),
                 poc=self.dry(action))
+        # EXTRA_ARGS gouvernés : un drapeau sqlmap libre hors allowlist (ou non-liste) -> refus fail-closed.
+        bad_extra, extra = check_extra_args(action.params.get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return self.degraded(
+                target=url, title="sqli.probe — corroboration sqlmap refusée (argument libre hors allowlist)",
+                evidence=f"extra_args refusé : {bad_extra}. Aucun processus lancé (fail-closed).",
+                poc=self.dry(action))
         try:
             timeout = max(30, min(int(action.params.get("timeout") or 120), 600))
         except (TypeError, ValueError):
             timeout = 120
-        rc, out, err = self._run_sqlmap(url, param, method, timeout)
+        opts = {"level": action.params.get("level"), "risk": action.params.get("risk"),
+                "technique": action.params.get("technique"), "dbms": action.params.get("dbms"),
+                "delay": action.params.get("rate_delay_s"), "extra": extra}
+        rc, out, err = self._run_sqlmap(url, param, method, timeout, opts)
         if rc in (124, 127) or (rc != 0 and not out):
             return self.degraded(
                 target=url, title="sqli.probe — corroboration sqlmap non concluante (échec/indisponible)",
