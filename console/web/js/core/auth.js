@@ -140,7 +140,7 @@ if ($('#logout')) $('#logout').addEventListener('click', async () => {
 //  seuls identifiant + mot de passe sont requis ; détection/politique opérateur sont optionnels.
 // =====================================================================================
 export let SETUP_STEP = 1;
-export const SETUP_MAX = 4;
+export const SETUP_MAX = 5;
 export let SETUP_DET_FORM = null; // composant source de détection partagé (étape 3 du wizard)
 export function showSetup(state) {
   document.body.classList.add('gated');
@@ -208,6 +208,17 @@ export function setupBuildPayload() {
   const cidrs = (($('#su-op-cidrs') && $('#su-op-cidrs').value) || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   if (cidrs.length) op.source_cidrs = cidrs;
   payload.operator_policy = op;
+  // périmètre / ROE (étape 5) : MÊMES champs que l'éditeur d'engagement (mode + in/out scope, une entrée
+  // par ligne). Envoyé UNIQUEMENT si l'opérateur a renseigné un in/out-scope OU choisi un mode non-défaut
+  // (grey) — sinon rien (engagement #1 reste en scope VIDE, fail-closed, réglable plus tard). Le serveur
+  // reste l'autorité (validate_engagement_scope : invalide -> 400, aucun provisioning).
+  const scopeLines = s => String(s || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const scMode = ($('#su-scope-mode') && $('#su-scope-mode').value) || 'grey';
+  const scIn = scopeLines($('#su-scope-in') && $('#su-scope-in').value);
+  const scOut = scopeLines($('#su-scope-out') && $('#su-scope-out').value);
+  if (scIn.length || scOut.length || scMode !== 'grey') {
+    payload.scope_json = { mode: scMode, in_scope: scIn, out_scope: scOut };
+  }
   return payload;
 }
 export async function setupSubmit() {
@@ -234,8 +245,10 @@ export async function setupSubmit() {
       return;
     }
     if (!r.ok) {
-      let why = 'HTTP ' + r.status;
-      try { const j = await r.json(); if (j && typeof j.why === 'string') why = j.why; else if (j && typeof j.error === 'string') why = j.error; } catch (e) {}
+      let why = 'HTTP ' + r.status, code = '';
+      try { const j = await r.json(); if (j && typeof j.error === 'string') code = j.error; if (j && typeof j.why === 'string') why = j.why; else if (code) why = code; } catch (e) {}
+      // un ROE invalide (validate_engagement_scope côté serveur) -> ramener à l'étape Périmètre.
+      if (code === 'bad_scope') { setupGoto(5); }
       setupErr('Échec du provisioning : ' + why);
       return;
     }

@@ -1919,6 +1919,79 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// [WIZARD ROE] setup_provision accepte un `scope_json` OPTIONNEL et l'écrit dans l'engagement #1 via le
+    /// MÊME chemin de mise à jour validé que l'éditeur d'engagement. Trois cas : (a) scope valide -> 200,
+    /// l'engagement #1 porte le scope (un run l'appliquerait — host_in_scope_list le confirme) ; (b) scope
+    /// invalide -> 400 et RIEN n'est provisionné (fail-closed) ; (c) aucun scope -> 200, engagement #1 en
+    /// scope VIDE (fail-closed) et la route s'auto-désactive (2e appel -> 409).
+    #[tokio::test]
+    async fn setup_provision_wizard_scope_optional_validated_and_self_disabling() {
+        // (b) ROE invalide -> 400, aucun provisioning (validé AVANT toute écriture).
+        {
+            let path = tmp_path("forge-test-setup-scope-bad");
+            let app = test_app(&path);
+            insert_test_engagement(&app, 1, &[], "grey", &path);
+            let bad = json!({"admin_login": "root", "admin_password": "pw",
+                "scope_json": {"mode": "grey", "in_scope": ["bad host with spaces"]}});
+            let r = setup_provision(State(app.clone()), Json(bad)).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "ROE invalide -> 400");
+            assert!(!app.any_enabled_admin(), "un 400 ROE ne provisionne AUCUN admin (fail-closed)");
+            let eng = load_engagement(&app.store(), 1).expect("engagement #1");
+            assert!(eng.scope_in.is_empty(), "engagement #1 inchangé (scope resté vide)");
+            let _ = std::fs::remove_file(&path);
+        }
+        // (a) ROE valide -> 200, engagement #1 porte le scope (enforcement prouvé via host_in_scope_list).
+        {
+            let path = tmp_path("forge-test-setup-scope-ok");
+            let app = test_app(&path);
+            insert_test_engagement(&app, 1, &[], "grey", &path);
+            let ok = json!({"admin_login": "root", "admin_password": "pw",
+                "scope_json": {"mode": "white", "in_scope": ["app.example.com", "*.lab.test"], "out_scope": ["admin.example.com"]}});
+            let r = setup_provision(State(app.clone()), Json(ok)).await;
+            assert_eq!(r.status(), StatusCode::OK, "ROE valide -> 200");
+            assert!(app.provisioned(), "admin provisionné");
+            let eng = load_engagement(&app.store(), 1).expect("engagement #1");
+            assert_eq!(eng.mode, "white", "mode de l'engagement #1 = mode du ROE du wizard");
+            assert_eq!(eng.scope_in, vec!["app.example.com".to_string(), "*.lab.test".to_string()],
+                "in-scope de l'engagement #1 = ROE du wizard");
+            assert_eq!(eng.scope_out, vec!["admin.example.com".to_string()], "out-scope écrit");
+            // un run appliquerait CE scope : une cible in-scope passe, une hors-scope est refusée.
+            assert!(host_in_scope_list(&eng.scope_in, "app.example.com"), "cible in-scope acceptée");
+            assert!(host_in_scope_list(&eng.scope_in, "x.lab.test"), "wildcard in-scope accepté");
+            assert!(!host_in_scope_list(&eng.scope_in, "evil.example.org"), "cible hors-scope refusée");
+            let _ = std::fs::remove_file(&path);
+        }
+        // (c) aucun ROE -> 200, engagement #1 en scope VIDE (fail-closed), route auto-désactivée (2e -> 409).
+        {
+            let path = tmp_path("forge-test-setup-scope-none");
+            let app = test_app(&path);
+            insert_test_engagement(&app, 1, &[], "grey", &path);
+            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "root", "admin_password": "pw"}))).await;
+            assert_eq!(r.status(), StatusCode::OK, "sans ROE -> 200 (provisioning ok)");
+            let eng = load_engagement(&app.store(), 1).expect("engagement #1");
+            assert!(eng.scope_in.is_empty(), "sans ROE -> engagement #1 en scope VIDE (fail-closed)");
+            let r2 = setup_provision(State(app.clone()), Json(json!({"admin_login": "root2", "admin_password": "pw2"}))).await;
+            assert_eq!(r2.status(), StatusCode::CONFLICT, "route auto-désactivée après provisioning (409)");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// [ENGAGEMENT #1] `ensure_default_engagement` avec un scope serveur VIDE/absent (aucun scope.json monté,
+    /// cas ZÉRO-PRÉ-ÉTAPE du `docker compose up`) amorce PROPREMENT l'engagement #1 en scope VIDE
+    /// (fail-closed) — pas de panique, rien lançable tant que l'opérateur ne renseigne pas le périmètre.
+    #[test]
+    fn ensure_default_engagement_empty_server_scope_boots_clean() {
+        let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
+        let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
+        conn().execute_batch(SCHEMA).expect("schema");
+        // scope serveur ABSENT -> load_server_scope renvoie (vec![], "grey"). Amorçage avec ces valeurs.
+        ensure_default_engagement(&crate::store::Store::sqlite(conn()), &[], "grey", "/tmp/eng1-empty.jsonl");
+        let eng = load_engagement(&crate::store::Store::sqlite(conn()), 1).expect("engagement #1 amorcé");
+        assert_eq!(eng.mode, "grey");
+        assert!(eng.scope_in.is_empty(), "scope VIDE -> fail-closed (rien lançable)");
+        assert!(!host_in_scope_list(&eng.scope_in, "anything.example.com"), "scope vide -> tout refusé");
+    }
+
     /// [OPÉRATEUR source-CIDR] ip_in_cidr : appartenance v4/v6, IP exacte, /0, familles hétérogènes,
     /// et rejet fail-closed des entrées malformées (préfixe non numérique / hors borne, réseau invalide).
     #[test]
