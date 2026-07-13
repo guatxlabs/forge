@@ -31,7 +31,7 @@ pub(crate) fn modules_catalog(store: &crate::store::Store) -> Vec<Value> {
     // LENIENT read (`query_lax`) reproduces the pre-seam `query_map(..).filter_map(|r| r.ok())`
     // byte-for-byte: a malformed row is skipped, a prepare error yields an empty catalogue.
     store.query_lax(
-        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override,params_schema \
+        "SELECT kind,exploit,destructive,available,mitre,descr,web_allowed,enabled,available_override,params_schema,user_added \
          FROM module ORDER BY kind",
         &[],
         |r| {
@@ -53,6 +53,9 @@ pub(crate) fn modules_catalog(store: &crate::store::Store) -> Vec<Value> {
                 "available_override": match override_bool { Some(b) => Value::Bool(b), None => Value::Null },
                 "effective_available": module_effectively_available(enabled, override_bool, probed),
                 "params_schema": params_schema,      // schéma servi à l'UI (formulaire dynamique)
+                // user_added : 1 = outil ajouté par l'UI (ToolSpec déclaratif) — sert au badge UI + GET/DELETE
+                // /api/tools (seul un user_added=1 est supprimable). Colonne additive (base ancienne => 0).
+                "user_added": r.get_opt_i64(10)?.unwrap_or(0) != 0,
             }))
         },
     )

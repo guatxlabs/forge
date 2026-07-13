@@ -30,6 +30,11 @@ engagements/
 forge.db
 forge-*.db
 
+# --- Outils ajoutés par l'UI (ToolSpecs server-managed, POST /api/tools) ------
+# Dossier RUNTIME (sibling de la base) où la console persiste les ToolSpecs déclaratifs
+# ajoutés depuis l'UI. Artefact d'exploitation, jamais suivi (comme la base et le ledger).
+toolspecs/
+
 # --- Snapshots/backups chiffrés (backup, restore, snapshot pré-upgrade) -------
 # Les archives .forge contiennent la base + le ledger CHIFFRÉS d'un engagement réel
 # (dont les snapshots `pre-upgrade-<ver>-<epoch>.forge` écrits par `upgrade`). Le

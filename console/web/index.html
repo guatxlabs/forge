@@ -723,6 +723,22 @@
     <div id="admin-connectors-body"><div class="muted">chargement…</div></div>
   </section>
 
+  <!-- ADMINISTRATION — AJOUTER UN OUTIL (« add a tool from the web UI »). POST/GET /api/tools, DELETE
+       /api/tools/:kind (check_admin, 403 sinon), ledgerisé. Déclare un ToolSpec GOUVERNÉ (binaire + argv
+       no-shell tokenisé + params_schema + flag_allowlist) — SANS édition de fichier ni recompilation.
+       L'outil apparaît aussitôt dans « Capacités » et « Lancement » (params_schema rendu dynamiquement).
+       Aucun code arbitraire : uniquement de la donnée déclarative, gouvernée par le moteur. -->
+  <section id="admin-addtool" class="card span2" aria-labelledby="adm-tool-h">
+    <div class="panelhead">
+      <h2 id="adm-tool-h">Administration — ajouter un outil</h2>
+      <span class="qbar">
+        <button id="admin-addtool-reload" class="k-theme" type="button" title="Réinitialiser le formulaire et rafraîchir la liste">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Déclarez votre propre outil CLI (<b>ToolSpec déclaratif</b> : binaire + <code>argv_template</code> tokenisé no-shell + <code>params_schema</code> typé + <code>flag_allowlist</code>) — <b>sans</b> éditer de fichier ni recompiler. À l'ajout, l'outil est <b>persisté</b> (dossier server-managed) puis le catalogue est <b>rechargé à chaud</b> : il apparaît dans <b>Capacités</b> et dans <b>Lancement</b> (son formulaire de params est rendu depuis le schéma). Gouvernance identique à un module natif : <b>scope-guard</b> fail-closed, <b>argv fixe no-shell</b>, <b>allowlist</b> de drapeaux, statut <b>jamais</b> « vulnerable », plancher <b>exploit</b> (arm + raison). <b>Admin-only</b>, chaque ajout/suppression est <b>attribué</b> et <b>ledgerisé</b>. Un binaire absent du runtime -> outil « indispo » (skippé au run).</p>
+    <div id="admin-addtool-body"><div class="muted">chargement…</div></div>
+  </section>
+
   <!-- ADMINISTRATION — source de détection (boucle purple, réservé role=admin). GET/POST /api/detection/source
        (check_admin, 403 sinon), ledgerisé ; le SECRET est WRITE-ONLY (affiché ••• une fois posé, jamais
        renvoyé par GET). Test de joignabilité via POST /api/detection/test. Même composant que le wizard (étape 3). -->

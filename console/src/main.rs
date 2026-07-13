@@ -262,6 +262,12 @@ pub(crate) use crate::net::*;
 // module_governance) résolvent ces handlers/helpers INCHANGÉS.
 mod users;
 pub(crate) use crate::users::*;
+// OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI ») — routes admin `tools_add`/`tools_list`/
+// `tools_delete` (POST/GET /api/tools, DELETE /api/tools/:kind) qui déclarent un ToolSpec GOUVERNÉ
+// (binaire + argv no-shell + allowlist), le persistent dans le dir server-managed (`FORGE_TOOLSPECS`) et
+// HOT-RELOADENT le catalogue via `populate_modules`. Re-exporté `pub(crate)` pour build_router + tests.
+mod tools;
+pub(crate) use crate::tools::{tools_add, tools_delete, tools_list};
 // ÉTAT PARTAGÉ (`App`) + substrat couplé (structs App/RunState/RunHandle/RunEvent/LedgerHead/Engagement,
 // SCHEMA+migrate()+ensure_default_*/populate_modules, resolve_web_dir/load_server_scope, settings_get/set,
 // now_epoch, sous-système DÉTECTION/purple + run_report) extrait de main.rs (PURE MOVE, stage `state`). Les
@@ -399,6 +405,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
         // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
         .route("/api/modules/:kind", post(module_governance))
+        // OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI ») — ADMIN-ONLY (check_admin, 403 sinon),
+        // ledgerisé, validé fail-closed. POST déclare un ToolSpec gouverné (binaire + argv no-shell +
+        // allowlist), le persiste dans le dir server-managed + HOT-RELOAD le catalogue ; GET liste les
+        // outils UI ; DELETE :kind en retire un (jamais un built-in). Ne collisionne pas avec /api/modules.
+        .route("/api/tools", get(tools_list).post(tools_add))
+        .route("/api/tools/:kind", axum::routing::delete(tools_delete))
         .route("/api/campaigns", get(campaigns))
         // ENGAGEMENT (objet de 1re classe) : liste + compteurs (viewer) ; create = OPÉRATEUR ; edit/
         // archive/delete via POST :id (edit=OPÉRATEUR, archive/delete=ADMIN, cf. handler). Chaque mutation
@@ -954,6 +966,10 @@ async fn serve() {
     // PARTAGÉE, jamais leader-sensible ; hors du verrou DDL car il spawn un process python). En HA les 2
     // réplicas peuplent (upsert ON CONFLICT row-safe). En mono-instance : identique à avant.
     populate_modules(&app.store());
+    // OUTILS AJOUTÉS PAR L'UI : re-marque `module.user_added=1` pour les ToolSpecs présents dans le dir
+    // server-managed (le re-probe upsert le module mais `user_added` défaute à 0). Idempotent, no-op si
+    // aucun outil UI. Garantit que GET/DELETE /api/tools reconnaissent les outils utilisateur après reboot.
+    crate::tools::sync_user_added_flags(&app.store());
     // BOOT-RECONCILE (run_job 'running' orphelins d'un crash -> 'failed', killpg des pgid locaux) :
     //   - mono-instance (!ha) : ICI, scope=All (byte-identique au comportement historique) ;
     //   - HA : DIFFÉRÉ au leader-tick (is_leader est FAUX au boot ; cf. runs::leader_tick_loop) — boot-
@@ -4546,6 +4562,162 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
             .route("/api/modules/refresh", post(modules_refresh))
             .route("/api/modules/:kind", post(module_governance));
     }
+
+    // =============================================================================================
+    // OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI ») — validation fail-closed + endpoints.
+    // =============================================================================================
+
+    fn simple_toolspec() -> Value {
+        json!({
+            "kind": "custom.echotool", "vuln_class": "Recon", "binary": "echo",
+            "argv_template": ["{target}"], "parser": "lines", "hit_status": "tested",
+            "severity": "INFO", "description": "echo wrapper (test)"
+        })
+    }
+
+    /// [tools validation] validate_toolspec REJETTE fail-closed : argv non-liste (chaîne shell), token
+    /// `{evil}`, binaire interpréteur, drapeau d'exfil, `{args}` sans allowlist, kind hors `custom.*`
+    /// (collision natif), et traversée de kind. Un spec propre PASSE et se canonicalise.
+    #[test]
+    fn validate_toolspec_fail_closed() {
+        // spec propre -> OK, kind normalisé.
+        let (k, canon) = crate::tools::validate_toolspec(&simple_toolspec()).expect("spec propre accepté");
+        assert_eq!(k, "custom.echotool");
+        assert_eq!(canon["binary"], "echo");
+        // argv = chaîne shell (pas une liste) -> 400 (jamais de shell).
+        let mut s = simple_toolspec(); s["argv_template"] = json!("echo {target}; rm -rf /");
+        assert_eq!(crate::tools::validate_toolspec(&s).unwrap_err().0, StatusCode::BAD_REQUEST, "argv chaîne refusée");
+        // token placeholder inconnu {evil} -> 400.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["-u", "{evil}"]);
+        assert_eq!(crate::tools::validate_toolspec(&s).unwrap_err().0, StatusCode::BAD_REQUEST, "{{evil}} refusé");
+        // métacaractère shell dans un token littéral -> 400.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "; id"]);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "métacaractère shell refusé");
+        // binaire interpréteur (bash) -> 400 (réintroduirait le shell).
+        let mut s = simple_toolspec(); s["binary"] = json!("bash"); s["argv_template"] = json!(["-c", "id"]);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "bash refusé");
+        // drapeau d'exfil dans argv (-o output) -> 400.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["-o", "out.txt", "{target}"]);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "-o (output-file) refusé");
+        // {args} sans flag_allowlist -> 400.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "{{args}} sans allowlist refusé");
+        // {args} AVEC allowlist non dangereuse -> OK.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
+        s["flag_allowlist"] = json!(["-t", "--rate"]);
+        assert!(crate::tools::validate_toolspec(&s).is_ok(), "{{args}} + allowlist accepté");
+        // allowlist avec drapeau d'exfil -> 400.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
+        s["flag_allowlist"] = json!(["--proxy"]);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "allowlist --proxy refusée");
+        // kind hors namespace custom.* (surcharge natif) -> 400.
+        let mut s = simple_toolspec(); s["kind"] = json!("recon.httpx");
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "kind non-custom refusé");
+        // kind avec traversée -> validate_kind refuse.
+        assert!(crate::tools::validate_kind("custom../etc/passwd").is_err(), "traversée de kind refusée");
+        assert!(crate::tools::validate_kind("custom.").is_err(), "kind sans nom refusé");
+        assert!(crate::tools::validate_kind("x").is_err(), "kind trop court refusé");
+        assert!(crate::tools::validate_kind("recon.httpx").is_err(), "kind natif (hors custom.) refusé");
+        // hit_status='vulnerable' interdit (proof-oriented).
+        let mut s = simple_toolspec(); s["hit_status"] = json!("vulnerable");
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "hit_status vulnerable refusé");
+        // champ inconnu -> 400 (aucune capacité surprise, ex bug_bounty_eligible).
+        let mut s = simple_toolspec(); s["bug_bounty_eligible"] = json!(true);
+        assert!(crate::tools::validate_toolspec(&s).is_err(), "champ inconnu refusé");
+    }
+
+    /// [tools path] spec_file_path reste SOUS le dir managé et refuse toute traversée dérivée du kind.
+    #[test]
+    fn tool_spec_path_is_traversal_safe() {
+        let _g = env_lock();
+        let dir = tmp_dir("forge-test-tsdir");
+        std::env::set_var("FORGE_TOOLSPECS_DIR", &dir);
+        let p = crate::tools::spec_file_path("custom.echotool").unwrap();
+        assert!(p.starts_with(&dir), "le fichier de spec reste sous le dir managé");
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "custom.echotool.json");
+        assert!(crate::tools::spec_file_path("custom./../evil").is_err(), "traversée refusée");
+        std::env::remove_var("FORGE_TOOLSPECS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [tools endpoint] POST /api/tools admin -> persiste 0600 + HOT-RELOAD (apparaît dans /api/modules) +
+    /// ledger `console.tool.add` ; GET /api/tools le liste ; non-admin -> 403 ; DELETE admin le retire mais
+    /// REFUSE un built-in (recon.httpx). Spawn le vrai probe python (registre in-tree, dir managé injecté).
+    #[tokio::test]
+    async fn tools_add_list_delete_admin_gated_and_hot_reload() {
+        let _g = env_lock();
+        let dir = tmp_dir("forge-test-tools-managed");
+        std::env::set_var("FORGE_TOOLSPECS_DIR", &dir);
+        std::env::remove_var("FORGE_TOOLSPECS");
+        let path = tmp_path("forge-test-tools-ledger");
+        let app = test_app(&path);
+        seed_modules(&app); // recon.httpx (built-in, user_added=0)
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "aa", "admin", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (atok, _) = create_session(&app, uid_of(&app, "aa"));
+
+        // non-admin -> 403, ET rien de persisté.
+        let r = tools_add(State(app.clone()), bearer_headers(&vtok), Json(simple_toolspec())).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "non-admin refusé (fail-closed)");
+        assert!(!dir_has_spec(&dir, "custom.echotool"), "aucun fichier écrit sur refus 403");
+
+        // admin -> 200. (le probe python peut être indisponible dans certains environnements : on tolère,
+        // mais le fichier DOIT être écrit 0600 et le ledger DOIT porter l'entrée d'ajout.)
+        let r = tools_add(State(app.clone()), bearer_headers(&atok), Json(simple_toolspec())).await;
+        assert_eq!(r.status(), StatusCode::OK, "admin autorisé");
+        assert!(dir_has_spec(&dir, "custom.echotool"), "spec persisté");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(dir_spec(&dir, "custom.echotool")).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "spec écrit 0600");
+        }
+        let entries = read_ledger_lines(&path);
+        let add = entries.iter().rev().find(|e| e["kind"] == "console.tool.add").expect("ledger add");
+        assert_eq!(add["detail"]["actor"], "aa", "ajout attribué à l'admin");
+        assert_eq!(add["detail"]["kind"], "custom.echotool");
+
+        // le module doit apparaître dans le catalogue (hot-reload via re-probe) + marqué user_added.
+        let present = { let s = app.store(); modules_catalog(&s).into_iter()
+            .any(|m| m.get("kind").and_then(|v| v.as_str()) == Some("custom.echotool")) };
+        assert!(present, "l'outil ajouté apparaît dans /api/modules (hot-reload)");
+        let ua: i64 = { let db = app.db(); db.query_row("SELECT user_added FROM module WHERE kind='custom.echotool'", [], |r| r.get(0)).unwrap() };
+        assert_eq!(ua, 1, "outil marqué user_added");
+
+        // GET /api/tools (admin) le liste ; viewer -> 403.
+        let r = tools_list(State(app.clone()), bearer_headers(&atok)).await;
+        assert_eq!(r.status(), StatusCode::OK, "GET /api/tools admin");
+        let body = resp_json(r).await;
+        assert!(body["tools"].as_array().map(|a| a.iter().any(|t| t["kind"] == "custom.echotool")).unwrap_or(false),
+            "l'outil UI est listé");
+        assert_eq!(tools_list(State(app.clone()), bearer_headers(&vtok)).await.status(), StatusCode::FORBIDDEN);
+
+        // DELETE d'un BUILT-IN -> 403 (jamais supprimable).
+        let r = tools_delete(State(app.clone()), bearer_headers(&atok), Path("recon.httpx".into())).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "un built-in n'est pas supprimable");
+        // DELETE non-admin -> 403.
+        assert_eq!(tools_delete(State(app.clone()), bearer_headers(&vtok), Path("custom.echotool".into())).await.status(),
+            StatusCode::FORBIDDEN, "delete non-admin refusé");
+        // DELETE admin de l'outil UI -> 200 + fichier + ligne retirés + ledger remove.
+        let r = tools_delete(State(app.clone()), bearer_headers(&atok), Path("custom.echotool".into())).await;
+        assert_eq!(r.status(), StatusCode::OK, "suppression admin de l'outil UI");
+        assert!(!dir_has_spec(&dir, "custom.echotool"), "fichier de spec supprimé");
+        let gone = { let db = app.db(); db.query_row("SELECT COUNT(*) FROM module WHERE kind='custom.echotool'", [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(gone, 0, "ligne module retirée");
+        let entries = read_ledger_lines(&path);
+        assert!(entries.iter().any(|e| e["kind"] == "console.tool.remove"), "suppression ledgerisée");
+
+        std::env::remove_var("FORGE_TOOLSPECS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn dir_spec(dir: &str, kind: &str) -> std::path::PathBuf { std::path::Path::new(dir).join(format!("{kind}.json")) }
+    fn dir_has_spec(dir: &str, kind: &str) -> bool { dir_spec(dir, kind).is_file() }
 
     // =============================================================================================
     // SÉLECTION DE TECHNIQUES PAR-SCOPE (profil + toggles catégorie/technique) — validation, persistance,
