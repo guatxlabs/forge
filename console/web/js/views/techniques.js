@@ -1,6 +1,6 @@
 import { api, write } from '../core/api.js';
 import { $, esc } from '../core/dom.js';
-import { confirmModal, guardList, modal, toast } from '../core/ui.js';
+import { guardList, modalConfirm, modalPrompt, toast } from '../core/ui.js';
 
 // TQ.profile porte la valeur du sélecteur : un profil de BASE ('bug_bounty'|'pentest'|'custom') OU un
 // profil NOMMÉ ('named:<nom>'). TQ.named = bibliothèque de profils nommés {nom: {profile,categories,
@@ -168,22 +168,26 @@ async function saveSelection(extra) {
 // (création ou mise à jour) EN PLUS de l'appliquer comme sélection active de l'engagement.
 if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
   const suggested = isNamed(TQ.profile) ? namedName(TQ.profile) : '';
-  const r = await modal({
+  const name = await modalPrompt({
     title: 'Enregistrer comme profil',
     message: 'Enregistre la sélection COURANTE (toggles) sous un nom RÉUTILISABLE (ex : bug_bounty_web, pentest_interne). Un nom existant est mis à jour. Operator/admin — action ledgerisée.',
-    okText: 'Enregistrer',
-    fields: [{ name: 'name', label: 'Nom du profil', value: suggested, required: true, placeholder: 'bug_bounty_web', hint: '[A-Za-z0-9._-], 1 à 64 — hors bug_bounty/pentest/custom (réservés).' }],
-    validate: v => { const s = String(v.name || '').trim(); return validProfileName(s) ? null : 'Nom invalide ou réservé.'; },
+    label: 'Nom du profil',
+    value: suggested,
+    placeholder: 'bug_bounty_web',
+    confirmText: 'Enregistrer',
+    hint: '[A-Za-z0-9._-], 1 à 64 — hors bug_bounty/pentest/custom (réservés).',
+    required: true,
+    validate: v => { const s = String(v || '').trim(); return validProfileName(s) ? null : 'Nom invalide ou réservé.'; },
   });
-  if (!r) return;
-  await saveSelection({ save_as: String(r.name).trim() });
+  if (name === null) return;
+  await saveSelection({ save_as: String(name).trim() });
 });
 
 // « Supprimer le profil » : retire le profil NOMMÉ sélectionné (global). N'affecte PAS la sélection active.
 if ($('#tq-delete')) $('#tq-delete').addEventListener('click', async () => {
   if (!isNamed(TQ.profile)) { toast('Sélectionne un profil enregistré à supprimer.', 'bad'); return; }
   const name = namedName(TQ.profile);
-  if (!(await confirmModal('Supprimer le profil « ' + name + ' » ? La sélection active de l\'engagement n\'est pas modifiée.', { okText: 'Supprimer', danger: true }))) return;
+  if (!(await modalConfirm({ title: 'Supprimer le profil', message: 'Supprimer le profil « ' + name + ' » ? La sélection active de l\'engagement n\'est pas modifiée.', confirmText: 'Supprimer', danger: true }))) return;
   try {
     const r = await write('/api/techniques/selection', { body: { delete_profile: name }, auth: 'operator' });
     if (r.status === 403) { toast('Réservé à un compte operator/admin', 'bad'); return; }

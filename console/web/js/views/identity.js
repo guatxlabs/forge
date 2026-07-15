@@ -1,7 +1,7 @@
 import { adminApi } from '../core/api.js';
 import { ENTERPRISE, identityAdmin, identityOn } from '../core/auth.js';
 import { $, esc } from '../core/dom.js';
-import { guardList, toast } from '../core/ui.js';
+import { guardList, modalConfirm, toast } from '../core/ui.js';
 
 // =====================================================================================
 //  IDENTITY / SSO (ENTERPRISE, flag-gated) — vue #identity : (1) provider OIDC, (2) token SCIM,
@@ -81,7 +81,7 @@ if ($('#id-scim-rotate')) $('#id-scim-rotate').addEventListener('click', async (
   } catch (e) { toast('Génération refusée : ' + e.message, 'bad'); }
 });
 if ($('#id-scim-revoke')) $('#id-scim-revoke').addEventListener('click', async () => {
-  if (!confirm('Révoquer le token SCIM ? L\'IdP ne pourra plus provisionner.')) return;
+  if (!(await modalConfirm({ title: 'Révoquer le token SCIM', message: 'Révoquer le token SCIM ? L\'IdP ne pourra plus provisionner.', confirmText: 'Révoquer', danger: true }))) return;
   try {
     await adminApi('/scim/config', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ revoke: true }) });
     const once = $('#id-scim-token-once'); if (once) once.hidden = true;
@@ -115,7 +115,7 @@ export async function loadIdentityMap() {
   host.innerHTML = html;
   host.querySelectorAll('.id-map-del').forEach(b => b.addEventListener('click', async () => {
     const g = b.getAttribute('data-group') || '';
-    if (!confirm('Retirer le mapping du groupe « ' + g + ' » ?')) return;
+    if (!(await modalConfirm({ title: 'Retirer le mapping', message: 'Retirer le mapping du groupe « ' + g + ' » ?', confirmText: 'Retirer', danger: true }))) return;
     try { await adminApi('/rbac/group-map/' + encodeURIComponent(g), { method: 'DELETE', headers: { Accept: 'application/json' } }); toast('Mapping retiré', 'good'); await loadIdentityMap(); }
     catch (e) { toast('Retrait refusé : ' + e.message, 'bad'); }
   }));

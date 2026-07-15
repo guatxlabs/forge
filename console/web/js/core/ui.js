@@ -70,6 +70,25 @@ export async function confirmModal(message, opts = {}) {
   const r = await modal({ title: opts.title || 'Confirmer', message, okText: opts.okText || 'Confirmer', cancelText: opts.cancelText, danger: opts.danger !== false });
   return r !== null;
 }
+// modalConfirm : confirmation stylée in-page (remplace window.confirm). Résout true (Confirmer) /
+// false (Annuler). danger=true => bouton de confirmation rouge (action destructive). Réutilise modal()
+// via confirmModal : focus-trap, aria-modal, Esc=annuler, Enter=confirmer, texte échappé par modal().
+export async function modalConfirm({ title, message, confirmText, danger } = {}) {
+  return confirmModal(message, { title, okText: confirmText || 'Confirmer', danger: !!danger });
+}
+// modalPrompt : saisie texte stylée in-page (remplace window.prompt). Résout la chaîne saisie, ou null
+// si annulé. Enter valide, Esc annule, focus auto sur le champ (assurés par modal()). Tout texte
+// interpolé (title/label/value/placeholder) est échappé par modal() -> aucune injection possible via value.
+export async function modalPrompt({ title, label, value, placeholder, confirmText, hint, message, required, validate } = {}) {
+  const r = await modal({
+    title,
+    message,
+    okText: confirmText || 'Confirmer',
+    fields: [{ name: 'value', label: label || '', value, placeholder, hint, required: !!required }],
+    validate: validate ? (v => validate(v.value)) : undefined,
+  });
+  return r === null ? null : String(r.value == null ? '' : r.value);
+}
 // modale d'info read-only (détail finding / entrée ledger) : DOM sûr (textContent).
 export function infoModal(title, buildBody) {
   const prevFocus = document.activeElement;   // a11y : restaurer le focus déclencheur à la fermeture
