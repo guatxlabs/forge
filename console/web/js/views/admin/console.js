@@ -76,6 +76,72 @@ function el(tag, cls, attrs) {
   return e;
 }
 
+// --- Carte « Token d'ingest » (B3) : révèle la VALEUR du token pour un /api/ingest MANUEL (panels/
+//     dashboards). Réservé admin (le serveur re-vérifie check_admin -> 403). Masqué par défaut ; boutons
+//     Révéler / Copier. Le token du moteur spawné est auto-câblé côté serveur — ceci sert l'écriture manuelle.
+function renderIngestTokenCard() {
+  const card = el('div', 'console-cmd');
+  const head = el('div', 'console-cmd-head');
+  head.appendChild(el('code', 'console-cmd-name', { text: 'token d’ingest' }));
+  card.appendChild(head);
+  card.appendChild(el('p', 'muted console-cmd-desc', {
+    text: 'Bearer requis pour POST /api/ingest MANUEL (panels/dashboards importés à la main). Le moteur '
+        + 'lancé depuis la console le reçoit automatiquement — ceci ne sert qu’aux écritures manuelles.',
+  }));
+
+  const field = el('input', null, { type: 'text', readonly: 'readonly', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Token d’ingest' });
+  field.value = '••••••••••••••••';
+  field.style.fontFamily = 'monospace';
+  field.style.width = '100%';
+  const meta = el('p', 'muted', { text: '' });
+
+  let revealed = false;
+  let value = '';
+  const revealBtn = el('button', 'k-theme', { type: 'button' });
+  revealBtn.textContent = 'Révéler';
+  const copyBtn = el('button', 'k-theme', { type: 'button' });
+  copyBtn.textContent = 'Copier';
+
+  const fetchToken = async () => {
+    const r = await fetch('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
+    if (!r.ok) {
+      let why = 'HTTP ' + r.status;
+      try { const j = await r.json(); why = (j && (j.why || j.error)) || why; } catch (e) {}
+      toast('Token indisponible : ' + why, 'bad');
+      return null;
+    }
+    return r.json();
+  };
+
+  revealBtn.addEventListener('click', async () => {
+    if (revealed) { revealed = false; field.value = '••••••••••••••••'; revealBtn.textContent = 'Révéler'; return; }
+    const j = await fetchToken();
+    if (!j) return;
+    value = j.token || '';
+    field.value = value;
+    revealed = true;
+    revealBtn.textContent = 'Masquer';
+    meta.textContent = j.provided
+      ? 'Source : FORGE_CONSOLE_TOKEN (fixe — survit à un redémarrage).'
+      : 'Source : auto-généré (éphémère — rotera au redémarrage ; pose FORGE_CONSOLE_TOKEN pour le fixer).';
+  });
+  copyBtn.addEventListener('click', async () => {
+    const j = value ? { token: value } : await fetchToken();
+    if (!j) return;
+    const tok = j.token != null ? j.token : value;
+    try { await navigator.clipboard.writeText(tok); toast('Token copié.', 'ok'); }
+    catch (e) { field.value = tok; field.select(); toast('Copie auto impossible — sélectionné, Ctrl+C.', 'bad'); }
+  });
+
+  card.appendChild(field);
+  const btns = el('div', 'console-preview-wrap');
+  btns.appendChild(revealBtn);
+  btns.appendChild(copyBtn);
+  card.appendChild(btns);
+  card.appendChild(meta);
+  return card;
+}
+
 // --- Point d'entrée du panneau : rend une carte par commande allowlistée + un volet de sortie partagé.
 export function loadConsolePanel() {
   const host = $('#admin-console-body'); if (!host) return;
@@ -87,6 +153,7 @@ export function loadConsolePanel() {
   out.textContent = 'La sortie des commandes s’affichera ici.';
 
   const grid = el('div', 'console-cmd-grid');
+  grid.appendChild(renderIngestTokenCard());
   for (const cmd of COMMANDS) grid.appendChild(renderCommandCard(cmd, out));
 
   host.appendChild(grid);

@@ -25,7 +25,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Json, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use serde_json::{json, Value};
@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{admin_denied, append_console_ledger, attribution_login, check_admin, App};
+use crate::{admin_denied, append_console_ledger, attribution_login, check_admin, secret_from_env, App};
 
 /// Hard allowlist of console-exposed subcommands (stable IDs used by the UI + the fail-closed error).
 /// EXCLUDED on purpose (see module + docs): `restore` (destructive overwrite of db+ledger+key),
@@ -474,9 +474,38 @@ pub(crate) async fn console_exec(
         .into_response()
 }
 
+/// GET /api/console/ingest-token — ADMIN-ONLY (check_admin, fail-closed 403). Révèle la VALEUR du token
+/// d'ingest (`FORGE_CONSOLE_TOKEN`, sinon le token auto-généré au boot conservé en mémoire dans
+/// `App.token_raw`). B3 — sans ça, un token auto-généré n'était visible NULLE PART (seule son empreinte
+/// sha8 était loguée) : impossible pour l'opérateur de faire un `/api/ingest` MANUEL (panels/dashboards).
+/// La révélation est réservée à une SESSION ADMIN (qui détient déjà tous les pouvoirs) ; `provided`
+/// indique s'il vient de l'env (fixe, survivra à un restart) ou est auto-généré (éphémère — rotera au
+/// prochain restart tant que `FORGE_CONSOLE_TOKEN` n'est pas posé). Le moteur spawné reçoit ce MÊME token
+/// via env automatiquement (auto-wire) : ce endpoint sert les écritures MANUELLES.
+pub(crate) async fn ingest_token_reveal(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let token = app.token_raw.as_str().to_string();
+    // `provided` : le token vient-il de l'env (fixe) ou est-il auto-généré (éphémère) ? Recalculé à la
+    // volée (secret_from_env) — pas d'état supplémentaire, cohérent avec la résolution du boot.
+    let provided = secret_from_env("FORGE_CONSOLE_TOKEN").is_some();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "token": token,
+            "provided": provided,
+            "env": "FORGE_CONSOLE_TOKEN",
+        })),
+    )
+        .into_response()
+}
+
 /// Route table — merged into `build_router`'s protected router (inherits auth_guard/host_guard).
 pub(crate) fn routes() -> Router<App> {
-    Router::new().route("/api/console/exec", post(console_exec))
+    Router::new()
+        .route("/api/console/exec", post(console_exec))
+        .route("/api/console/ingest-token", get(ingest_token_reveal))
 }
 
 #[cfg(test)]

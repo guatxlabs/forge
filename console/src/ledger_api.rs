@@ -230,83 +230,157 @@ pub(crate) fn engagement_ledger_path(app: &App, eid: i64) -> String {
         .unwrap_or_else(|| app.ledger_path.as_str().to_string())
 }
 
+/// (prev_hash, seq) de la DERNIÈRE entrée valide du ledger JSONL sur disque, ou (GENESIS, 0) si
+/// vide/absent. Miroir strict de `forge/ledger.py::_disk_tail` : une dernière ligne corrompue/tronquée
+/// (crash en plein write) est ignorée — on chaîne sur la dernière entrée valide. DOIT être appelé SOUS
+/// le verrou fichier (l'append re-lit la queue ici pour chaîner sur une écriture concurrente d'un AUTRE
+/// processus — la console ET le moteur Python écrivent le MÊME fichier).
+fn read_disk_tail(path: &str) -> (String, i64) {
+    let mut prev = "0".repeat(64);
+    let mut seq = 0i64;
+    if let Ok(s) = std::fs::read_to_string(path) {
+        for line in s.lines().filter(|l| !l.trim().is_empty()) {
+            if let Ok(rec) = serde_json::from_str::<Value>(line) {
+                if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { prev = h.to_string(); }
+                if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { seq = q; }
+            }
+        }
+    }
+    (prev, seq)
+}
+
+/// Verrou consultatif EXCLUSIF cross-processus sur le fichier ledger, via `fcntl.flock(LOCK_EX)` — LA
+/// MÊME sémantique POSIX que `forge/ledger.py::append`. C'est LE chaînon manquant de B1 : la console
+/// Rust et le moteur Python écrivent le MÊME `engagement.jsonl` ; sans un verrou PARTAGÉ ENTRE
+/// PROCESSUS, un append moteur interleavé et un append console lisaient tous deux la même queue en
+/// cache et écrivaient deux entrées de même (prev,seq) -> fourche de la chaîne SHA-256. flock() étant
+/// pris sur LE MÊME fichier par les deux, l'un bloque l'autre : lecture-queue -> calcul -> write ->
+/// fsync forment UNE section critique cross-processus. Relâché au Drop (LOCK_UN puis close du fd).
+#[cfg(unix)]
+struct FlockExclusive {
+    fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+impl FlockExclusive {
+    /// Prend LOCK_EX (bloquant) sur le fd du fichier ouvert. Le fd reste valide tant que le `File`
+    /// emprunté vit ; on garde le guard MOINS longtemps que le `File` (déclaré après lui -> droppé
+    /// avant), donc aucun usage après close.
+    fn acquire(f: &std::fs::File) -> Result<Self, String> {
+        use std::os::unix::io::AsRawFd;
+        let fd = f.as_raw_fd();
+        // SAFETY : fd valide (emprunté au File vivant) ; LOCK_EX bloque jusqu'à obtention du verrou.
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(format!("flock LOCK_EX échoué: {}", std::io::Error::last_os_error()));
+        }
+        Ok(Self { fd })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FlockExclusive {
+    fn drop(&mut self) {
+        // Relâche explicite (la fermeture du fd relâcherait aussi le verrou, mais on le fait avant le
+        // fsync/close pour une section critique nette). Best-effort : un échec de LOCK_UN est ignoré.
+        unsafe { libc::flock(self.fd, libc::LOCK_UN); }
+    }
+}
+
+#[cfg(not(unix))]
+struct FlockExclusive;
+
+#[cfg(not(unix))]
+impl FlockExclusive {
+    // Non-POSIX (Windows) : pas de flock -> repli sans verrou (sûr en écrivain unique uniquement,
+    // parité avec le repli `fcntl is None` de forge/ledger.py). La cible de déploiement est Linux.
+    fn acquire(_f: &std::fs::File) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Append UNE entrée `sha256-console` (chaîne SHA-256 NON signée, sig "") à `path`, SÉRIALISÉ
+/// CROSS-PROCESSUS par un `fcntl.flock(LOCK_EX)` tenu de la relecture de la queue jusqu'au fsync. Le
+/// même verrou est pris par le moteur Python (`forge/ledger.py`) sur le même fichier -> les deux
+/// processus ne partagent JAMAIS un (prev,seq) : le prev/seq est TOUJOURS dérivé de la queue RELUE
+/// SUR DISQUE sous le verrou (jamais d'un compteur en mémoire qui devient périmé quand l'autre
+/// processus a appendé). Renvoie (prev, seq, hash) de l'entrée écrite, ou Err lisible sur échec I/O.
+/// C'est la SOURCE UNIQUE d'append console : `append_console_ledger` (ledger de la console) ET
+/// `ledger_append_standalone` (ledger dédié d'un engagement) passent tous deux par ici.
+pub(crate) fn append_sha256_console_locked(
+    path: &str, kind: &str, detail: &Value,
+) -> Result<(String, i64, String), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    use std::io::Write;
+    // read(true) requis pour pouvoir relire l'octet de fin sous le verrou (garde ligne tronquée).
+    let mut f = std::fs::OpenOptions::new()
+        .create(true).read(true).append(true).open(path)
+        .map_err(|e| format!("ouverture ledger '{path}' impossible: {e}"))?;
+    // Verrou consultatif cross-processus (bloquant) : sérialise vs le moteur Python sur le même fichier.
+    let _flock = FlockExclusive::acquire(&f)?;
+    // Queue AUTORITATIVE relue sur disque SOUS le verrou : un append moteur interleavé est CHAÎNÉ
+    // dessus (jamais écrasé). C'est ce qui rend impossible la collision de seq observée en B1.
+    let (prev, tail_seq) = read_disk_tail(path);
+    let seq = tail_seq + 1;
+    let ts = format!("@{}", chrono_now_compact());
+    let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(detail));
+    let hash = sha_hex(&preimage);
+    let rec = json!({
+        "seq": seq, "ts": ts, "kind": kind, "detail": detail,
+        "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
+    });
+    // Si le dernier octet disque n'est pas '\n' (un writer a crashé en plein write), repartir sur une
+    // ligne fraîche pour ne pas coller sur un enregistrement tronqué (parité forge/ledger.py).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        if let Ok(meta) = f.metadata() {
+            let end = meta.len();
+            if end > 0 {
+                let mut last = [0u8; 1];
+                if f.read_exact_at(&mut last, end - 1).is_ok() && last[0] != b'\n' {
+                    let _ = f.write_all(b"\n");
+                }
+            }
+        }
+    }
+    writeln!(f, "{}", canon_json(&rec)).map_err(|e| format!("écriture ledger '{path}' échouée: {e}"))?;
+    // SYS-2 : fsync AVANT de relâcher le verrou -> l'entrée tamper-evident est DURABLE.
+    f.sync_all().map_err(|e| format!("sync ledger '{path}' échoué: {e}"))?;
+    Ok((prev, seq, hash))
+    // _flock droppé ici (LOCK_UN), puis f droppé (close).
+}
+
 /// Ajoute une entrée au ledger JSONL côté console (chaîne SHA-256, alg "sha256-console", sig "").
 /// Compatible avec /api/ledger/verify (qui ne vérifie pas la signature, seulement le hash-chaining).
 pub(crate) fn append_console_ledger(app: &App, kind: &str, detail: Value) {
     let path = app.ledger_path.as_str();
-    // VERROU ledger : couvre lecture-head -> calcul hash -> écriture en UNE section critique. Sans lui,
-    // deux appends concurrents lisaient le MÊME prev/seq puis écrivaient deux entrées de même seq/prev
-    // -> chaîne SHA-256 cassée (la vérif /api/ledger/verify échouerait). Empoisonnement récupéré
-    // (into_inner) : un panic passé ne doit pas geler l'audit.
+    // VERROU ledger in-proc : sérialise les appends console DU MÊME processus + protège le cache de head.
+    // Empoisonnement récupéré (into_inner) : un panic passé ne doit pas geler l'audit. B1 — le prev/seq
+    // AUTORITATIF ne vient PLUS du cache en mémoire (qui devenait périmé quand le moteur Python appendait
+    // entre deux appends console -> fourche) mais TOUJOURS de la queue relue sur disque SOUS le
+    // `fcntl.flock` cross-processus de `append_sha256_console_locked` (même verrou que forge/ledger.py).
     let mut head = app.ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
-    // B5 — LEDGER MULTI-INSTANCE : sous HA le fichier ledger est PARTAGÉ entre réplicas ; un pair a pu
-    // appender depuis notre dernier head EN CACHE. On sérialise la section critique read-tail->compute->
-    // append CROSS-INSTANCE via un verrou consultatif PG (`ha::with_ledger_lock`, keyed sur le path) et, à
-    // l'intérieur du verrou, on INVALIDE le cache pour RELIRE la tête du fichier partagé -> aucune fourche
-    // de la chaîne SHA-256 (verify inchangé). Single-instance (!ha) : `with_ledger_lock` est un pass-through
-    // et le verrou in-proc + le cache O(1) restent autoritatifs, byte-identique à avant.
-    // Fire-and-forget console-ledger helper (63 governed call sites). Under a FAIL-CLOSED outage the append
-    // is REFUSED (PG advisory lock unreachable). F5 OBSERVABILITY: a DROPPED audit entry must never be
-    // SILENT — we log the `kind` + reason at error level here so a lost governed-action attestation is
-    // visible in the console logs (call-site ergonomics unchanged: this fn still returns `()`).
-    // Single-instance: `with_ledger_lock` is a pass-through -> always `Ok`.
+    // B5 — LEDGER MULTI-INSTANCE : sous HA le fichier est aussi PARTAGÉ entre réplicas ; on garde le
+    // verrou consultatif PG cross-INSTANCE (`ha::with_ledger_lock`) EN PLUS du flock cross-PROCESSUS.
+    // Les deux sont complémentaires et IMBRIQUÉS (PG dehors, flock dedans) — pas deux mécanismes
+    // disjoints/alternatifs : le flock sérialise les processus d'un même host (console + moteur), le
+    // verrou PG sérialise les réplicas d'un cluster. Single-instance (!ha) : PG = pass-through, seul le
+    // flock (+ mutex in-proc) gouverne. Fire-and-forget (63 sites) : sous une panne FAIL-CLOSED HA
+    // l'append est REFUSÉ ; F5 OBSERVABILITY : on log le `kind` + la raison (entrée d'audit perdue visible).
     if let Err(e) = crate::ha::with_ledger_lock(app, path, || {
-        if crate::ha::ha_enabled(app) {
-            // Un pair a pu écrire dans le fichier partagé -> notre (prev,seq) en cache est périmé. On force
-            // une relecture de la tête depuis le disque SOUS le verrou consultatif (single writer garanti).
-            head.loaded = false;
-        }
-        // initialisation paresseuse du head depuis le disque (une seule relecture intégrale, au 1er append) ;
-        // ensuite on garde (prev,seq) en cache -> O(1) amorti au lieu de relire tout le fichier (O(n²)).
-        if !head.loaded {
-            head.prev = "0".repeat(64);
-            head.seq = 0;
-            if let Ok(s) = std::fs::read_to_string(path) {
-                for line in s.lines().filter(|l| !l.trim().is_empty()) {
-                    if let Ok(rec) = serde_json::from_str::<Value>(line) {
-                        if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { head.prev = h.to_string(); }
-                        if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { head.seq = q; }
-                    }
-                }
+        match append_sha256_console_locked(path, kind, &detail) {
+            Ok((_prev, seq, hash)) => {
+                // le cache est mis à jour mais N'EST PLUS la source du prochain seq (toujours relu du disque).
+                head.prev = hash;
+                head.seq = seq;
+                head.loaded = true;
             }
-            head.loaded = true;
-        }
-        let prev = head.prev.clone();
-        let seq = head.seq + 1;
-        let ts = {
-            // ISO-ish UTC sans dépendance : on réutilise le compact + 'Z' épochal. verify ne parse pas ts.
-            format!("@{}", chrono_now_compact())
-        };
-        let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(&detail));
-        let hash = sha_hex(&preimage);
-        let rec = json!({
-            "seq": seq, "ts": ts, "kind": kind, "detail": detail,
-            "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
-        });
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        use std::io::Write;
-        // n'avance le head EN CACHE que si l'écriture disque réussit (sinon on relira au prochain append).
-        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            Ok(mut f) => {
-                // SYS-2 : fsync APRÈS un writeln! réussi -> le journal tamper-evident est DURABLE (survit à
-                // un crash/coupure post-écriture). N'avance le head en cache qu'après un flush disque confirmé.
-                if writeln!(f, "{}", canon_json(&rec)).is_ok() && f.sync_all().is_ok() {
-                    head.prev = hash;
-                    head.seq = seq;
-                } else {
-                    head.loaded = false; // écriture partielle/échouée -> forcer une relecture au prochain append
-                    // F5 OBSERVABILITY : l'écriture/fsync disque a échoué -> l'entrée est PERDUE. On la rend
-                    // visible (kind + raison) au lieu de la laisser tomber silencieusement.
-                    eprintln!("[forge] LEDGER DROP — append écrit/fsync échoué pour '{path}' \
-                               (kind={kind}) : entrée d'audit PERDUE (écriture disque partielle/échouée)");
-                }
-            }
-            Err(e) => {
+            Err(err) => {
                 head.loaded = false;
-                eprintln!("[forge] LEDGER DROP — ouverture '{path}' impossible (kind={kind}) : \
-                           {e} — entrée d'audit PERDUE");
+                eprintln!("[forge] LEDGER DROP — {err} (kind={kind}) : entrée d'audit PERDUE");
             }
         }
     }) {

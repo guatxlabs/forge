@@ -1220,6 +1220,77 @@ mod tests {
         a
     }
 
+    /// B1 (CRITIQUE — anti-fourche) — MODÈLE DE LA COURSE DE PROD : la console (append_console_ledger) et
+    /// le moteur Python écrivent le MÊME ledger. On simule un append MOTEUR (ligne écrite DIRECTEMENT sur
+    /// disque, chaînée sur la queue) INTERCALÉ entre deux appends console. AVANT le fix, la console
+    /// réutilisait son head EN CACHE (prev/seq périmés) -> deux entrées de même seq/prev -> fourche
+    /// (« chaînage rompu (prev) », exactement le symptôme observé seq=8 après 23 entrées valides). APRÈS le
+    /// fix, chaque append console RELIT la queue disque sous le flock -> l'entrée console chaîne SUR la
+    /// queue du moteur (prev = hash moteur, seq = seq_moteur+1) et verify reste OK.
+    #[test]
+    fn console_engine_ledger_interleave_no_fork() {
+        let path = tmp_path("forge-test-ledger-interleave");
+        let app = test_app(&path);
+
+        // (1) append CONSOLE #1 (seq 1).
+        append_console_ledger(&app, "console.run.start", json!({"run": "r1"}));
+
+        // (2) append MOTEUR interlacé : écrit une ligne DIRECTEMENT (comme forge/ledger.py le ferait sous
+        //     SON flock), chaînée sur la queue actuelle. Alg hmac-sha256 (moteur), sig non vérifiée par
+        //     verify_ledger_chain (hash-chain uniquement). C'est CE writer concurrent qui périmait le cache.
+        let (tail_prev, tail_seq) = {
+            let lines = read_ledger_lines(&path);
+            let last = lines.last().cloned().unwrap();
+            (last["hash"].as_str().unwrap().to_string(), last["seq"].as_i64().unwrap())
+        };
+        let eng_seq = tail_seq + 1;
+        let eng_ts = "2026-07-15T15:20:30+00:00";
+        let eng_kind = "roe.decision";
+        let eng_detail = json!({"verdict": "DRY_RUN", "target": "example.com"});
+        let eng_preimage = format!("{tail_prev}|{eng_seq}|{eng_ts}|{eng_kind}|{}", canon_json(&eng_detail));
+        let eng_hash = sha_hex(&eng_preimage);
+        let eng_rec = json!({
+            "seq": eng_seq, "ts": eng_ts, "kind": eng_kind, "detail": eng_detail,
+            "prev": tail_prev, "hash": eng_hash, "alg": "hmac-sha256", "sig": "deadbeef"
+        });
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f, "{}", canon_json(&eng_rec)).unwrap();
+        }
+
+        // (3) append CONSOLE #2 : DOIT chaîner sur la queue du MOTEUR (pas sur le cache périmé).
+        append_console_ledger(&app, "console.run.end", json!({"run": "r1", "status": "done"}));
+
+        // La chaîne complète (console#1 -> moteur -> console#2) doit être INTÈGRE : aucune fourche.
+        let v = verify_ledger_chain(&path);
+        assert!(v.ok, "chaîne intègre attendue (pas de fourche) ; broken={:?} why={:?}", v.broken, v.why);
+        assert_eq!(v.entries, 3, "3 entrées chaînées (console, moteur, console)");
+
+        // L'entrée console #2 chaîne bien SUR le hash du moteur, seq = seq_moteur+1 (pas une réutilisation).
+        let lines = read_ledger_lines(&path);
+        let last = lines.last().unwrap();
+        assert_eq!(last["prev"].as_str().unwrap(), eng_hash, "console#2.prev == hash moteur");
+        assert_eq!(last["seq"].as_i64().unwrap(), eng_seq + 1, "console#2.seq == seq_moteur+1");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.hwm"));
+    }
+
+    /// B2 — l'URL d'ingest du moteur spawné est TOUJOURS un loopback (Host accepté par host_guard),
+    /// jamais l'host de bind wildcard (`0.0.0.0`) qui provoquait le 421 Misdirected Request.
+    #[test]
+    fn engine_console_url_is_loopback_host_accepted() {
+        // bind wildcard Docker -> loopback (le bug B2).
+        assert_eq!(engine_console_url("0.0.0.0:7100"), "http://127.0.0.1:7100");
+        assert_eq!(engine_console_url("[::]:7100"), "http://127.0.0.1:7100");
+        assert_eq!(engine_console_url("127.0.0.1:9000"), "http://127.0.0.1:9000");
+        assert_eq!(engine_console_url("garbage"), "http://127.0.0.1:7100"); // pas de port -> défaut
+        // le Host résultant (127.0.0.1) est dans l'allowlist par défaut -> host_guard PASSE (pas de 421).
+        let allowed = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+        assert!(host_allowed("127.0.0.1:7100", &allowed), "loopback accepté");
+        assert!(!host_allowed("0.0.0.0:7100", &allowed), "wildcard bind refusé (aurait donné 421)");
+    }
+
     /// [2b] try_create_session PROPAGE l'échec d'écriture au lieu de l'avaler : si la table `session` est
     /// absente, l'INSERT échoue -> `Err` (aucun token non persisté rendu). Le handler /api/login le remonte
     /// en 500 (plus de faux-200 avec un token mort qui serait rejeté au 1er usage).
