@@ -487,6 +487,17 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 /* selects au meme chrome que les boutons (coherence) */
 #case-filter,#range,#viz{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:6px 11px;cursor:pointer;font-size:13px}
 #case-filter:hover,#range:hover,#viz:hover{border-color:var(--acc)}
+/* contrôles de barre d'outils SANS classe (fall-through navigateur -> chrome par défaut clair) + selects
+   des drilldowns (détail finding) : même chrome que les boutons/.k-theme (fond carte, bordure, rayon,
+   focus accent) pour rester cohérent avec le thème Aurora. Cible des IDs/scopes précis -> ne touche PAS
+   les selects déjà stylés (.k-theme #f-views/#f-bulk-*, .ruleform select, .viewbar select…). */
+#f-sev,#f-status,#f-assignee,#f-triage,#roe-verdict,#lc-runstatus,.findctl-row select{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:6px 11px;cursor:pointer;font-size:13px;font-family:inherit}
+#f-sev:hover,#f-status:hover,#f-assignee:hover,#f-triage:hover,#roe-verdict:hover,#lc-runstatus:hover,.findctl-row select:hover{border-color:var(--acc)}
+#f-sev:focus,#f-status:focus,#f-assignee:focus,#f-triage:focus,#roe-verdict:focus,#lc-runstatus:focus,.findctl-row select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+/* champs de recherche de barre d'outils sans classe (cible/filtre campagne) : même chrome, non-cliquable */
+#cm-filter,#f-target{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:6px 11px;font-size:13px;font-family:inherit}
+#cm-filter::placeholder,#f-target::placeholder{color:var(--mut)}
+#cm-filter:focus,#f-target:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
 .dashtile-head .dashmeta{font-size:11px;color:var(--mut);margin-right:auto;white-space:nowrap}
 .dashtile-head .grip{display:inline-flex;color:var(--mut);cursor:grab}
 .dashtile-head .grip .ic{width:15px;height:15px}
