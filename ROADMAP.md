@@ -43,6 +43,10 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 - **C7 — Rapport** : un seul sélecteur de format + drilldown stylé. **✅ CORRIGÉ `a93b6a3`**
 - **C8 — Bouton GLOBAL tout sélectionner/désélectionner** (techniques). **✅ CORRIGÉ `48a4c51`**
 
+## 🐞 Round 3 — 3e test live (2026-07-13)
+- **C10 — Doublon « actif : … »** : l'indicateur `#eng-active` répète le sélecteur (qui affiche déjà « Engagement par défaut · white »). **Supprimer** l'indicateur redondant (le sélecteur = l'actif). En cours.
+- **C11 — Label « C2 » trompeur** : « Lancement C2 » / « opérateur C2 » / « C2-light gouverné » → C2 = Command&Control **post-exploitation** (implants), or Forge lance des campagnes recon/scan/oracle **pré-exploitation** orientées-preuve. **Renommer** l'UI en « Lancement / Campagne / Opérateur » (garder le rôle *opérateur*, retirer « C2 »). En cours.
+
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
 
