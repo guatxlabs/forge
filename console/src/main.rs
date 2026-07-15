@@ -302,6 +302,12 @@ mod store;
 // sa dép `rust-s3` vivent DERRIÈRE la feature OPT-IN `object-store` (openssl-free : sync-rustls-tls ->
 // attohttpc + rustls/ring). Référencé fully-qualified (`crate::blob::…`) — pas de glob re-export.
 mod blob;
+// CONSOLE FORGE IN-UI (roadmap P5) — POST /api/console/exec : runner GOUVERNÉ, admin-only, ledgerisé,
+// STREAMÉ (SSE) d'un ALLOWLIST STRICT de sous-commandes `forge` (status/ledger verify/read-*/backup/
+// upgrade), chacune avec un SCHÉMA D'ARGUMENTS typé. PAS un shell : argv FIXE construit depuis
+// l'allowlist (jamais `sh -c`, jamais de texte utilisateur promu en flag). Retire le besoin de
+// `docker compose exec forge forge …` pour les ops courantes. Re-exporté pour build_router.
+mod exec;
 
 
 
@@ -494,6 +500,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // Merged AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route 404
         // (not_found) tant que le flag n'est pas engagé => community byte-identique (aucune surface compliance).
         .merge(compliance::routes())
+        // CONSOLE FORGE IN-UI (P5) — POST /api/console/exec : runner gouverné, ADMIN-ONLY (check_admin
+        // interne, 403 sinon), ledgerisé `console.exec`, STREAMÉ (SSE). Allowlist stricte de sous-commandes
+        // `forge` + schéma d'arguments typé par commande ; argv FIXE, sans shell ; `upgrade` (effet d'état)
+        // exige confirm:true. Fusionné AVANT le fallback + route_layer => hérite de l'auth_guard/host_guard.
+        .merge(exec::routes())
         .fallback_service(ServeDir::new(web_dir))
         .route_layer(middleware::from_fn_with_state(app.clone(), auth_guard));
     Router::new()

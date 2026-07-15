@@ -28,7 +28,7 @@ export const VIEWS = {
   import: 'import',
   modules: 'modules', techniques: 'techniques', workflows: 'workflows', findings: 'findings', 'findings-library': 'findings-library', reports: 'reports', explore: 'explore',
   coverage: 'coverage', 'attack-matrix': 'attack-matrix', 'purple-coverage': 'purple-coverage', campaigns: 'campaigns', roe: 'roe', ledger: 'ledger', dashboards: 'dashboards',
-  admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin',
+  admin: 'admin', 'admin-connectors': 'admin', 'admin-detection': 'admin', 'admin-console': 'admin',
   tenants: 'tenants',
   identity: 'identity',
   compliance: 'compliance',

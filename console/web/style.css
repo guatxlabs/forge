@@ -1094,3 +1094,32 @@ textarea.at-inp{resize:vertical;min-height:38px}
 .at-existing{margin-top:14px;border-top:1px solid var(--bd);padding-top:12px}
 .at-h3{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 8px;font-weight:600}
 @media(max-width:720px){.at-prow{grid-template-columns:1fr 1fr auto}}
+
+/* ===== CONSOLE FORGE IN-UI (roadmap P5) — panneau admin #admin-console ===== */
+.console-cmd-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.console-cmd{background:var(--card2);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.console-cmd.danger{border-color:color-mix(in srgb,var(--bad) 32%,var(--bd))}
+.console-cmd-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.console-cmd-name{font-family:var(--font-mono);font-size:13px;color:var(--acc);font-weight:600}
+.console-cmd-desc{font-size:12px;margin:0;line-height:1.45}
+.console-cmd-fields{display:flex;flex-direction:column;gap:8px}
+.console-f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mut)}
+.console-f span{font-weight:600}
+.console-f input{background:var(--card);border:1px solid var(--bd);border-radius:8px;color:var(--fg);padding:8px 10px;font-size:13px;font-family:var(--font-mono)}
+.console-f input:focus{outline:none;border-color:var(--acc)}
+.console-f-inline{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--fg);cursor:pointer}
+.console-confirm{padding:6px 8px;border:1px dashed color-mix(in srgb,var(--bad) 40%,var(--bd));border-radius:8px}
+.console-preview-wrap{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;border-top:1px solid var(--bd);padding-top:8px}
+.console-preview-lbl{font-size:11px}
+.console-preview{font-family:var(--font-mono);font-size:12px;color:var(--fg);word-break:break-all}
+.console-run{align-self:flex-start;padding:7px 16px;font-size:13px}
+.console-out-wrap{margin-top:14px}
+.console-out-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.console-out-head span{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600}
+.console-out{background:#0b0806;border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin:0;max-height:360px;overflow:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.5;color:var(--fg);white-space:pre-wrap;word-break:break-word}
+:root[data-theme=light] .console-out{background:#1a1310;color:#e8ddd3}
+.console-out span{display:block}
+.console-line-cmd{color:var(--acc);font-weight:600}
+.console-line-ok{color:var(--ok);font-weight:600}
+.console-line-err{color:var(--bad)}
+.console-line-sys{color:var(--warn)}
