@@ -28,9 +28,10 @@ Un test réel de la webUI (wizard → engagement → run C2 → rapport → cons
 - **B12 — Lancement C2 : filtre « Tous statut » non stylisé.**
 - **B13 — Favicon** : pas centré ; enlever le carré noir (fond transparent), **juste la plume**.
 
-## 🐞 Round 2 — 2e test live (2026-07-13) : régressions + fixes incomplets
+## 🐞 Round 2 — 2e test live (2026-07-13) : ✅ TOUS CORRIGÉS
 
-⚠️ Le round 1 marqué « TOUS CORRIGÉS » était **prématuré** : validé via curl/markup, PAS le vrai navigateur (le conteneur browser n'atteint pas le loopback hôte) → bugs *niveau navigateur* ratés (cookie Secure, popups natives). Leçon : valider les bugs UX en pilotant un vrai navigateur.
+Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C3/C4/C7** `a93b6a3`.
+⚠️ Le round 1 « TOUS CORRIGÉS » était **prématuré** (validé curl/markup, pas le vrai navigateur → cookie Secure & popups natives ratés). **Leçon appliquée au round 2 : validé en pilotant un vrai navigateur (harness Camoufox MCP).** Plusieurs « bugs » (C3 indicateur, C7 format-double) étaient déjà réglés au HEAD — l'user testait un **build antérieur** ; d'où le rebuild systématique du conteneur après chaque vague.
 
 - **C1 — 🔴 LOGIN CASSÉ sur http (cookie `Secure`).** Bons cred → session non stockée (navigateur jette le cookie Secure sur http). **✅ CORRIGÉ `cd4739c`** : `Secure` uniquement si https (`X-Forwarded-Proto: https` / `FORGE_FORCE_SECURE_COOKIE`), sinon http local marche ; HttpOnly+SameSite gardés. Prouvé curl (http=no-Secure+session OK, xfp-https=Secure).
 - **C6 — 🔴 Token exigé pour écrire (panneaux/dashboards).** Un admin loggé devait coller un token machine qu'il n'a pas (→ mettait le mdp admin). **✅ CORRIGÉ `cd4739c`** : écritures UI via **session admin/operator** (`check_writer`) ; token ingest = machine only ; token **surfacé au wizard** + carte admin.
