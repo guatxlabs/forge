@@ -426,6 +426,69 @@ CATALOG_SPECS = [
                     "AUCUNE attaque active) — alertes RAPPORTÉES sur la cible. Image docker "
                     "zaproxy/zap-stable ; prefer_docker (entrypoint image != script -> zap-baseline.py "
                     "en 1er token d'argv)."),
+
+    # --- SONDES RÉSEAU GOUVERNÉES (HTTP/DNS) — non-exploit, non-destructif, scope-guardées ---
+    # recon.curl : SONDE HTTP bénigne. Forge pilote curl pour SONDER une cible in-scope (statut/headers/
+    #   corps) — JAMAIS pour exfiltrer : la réponse va sur STDOUT (aucun `-o`), et l'allowlist n'a AUCUN
+    #   drapeau de sortie-fichier (-o/-O/--output), d'upload (-T/-F/--upload-file), de proxy (-x/--proxy),
+    #   de config lue (-K/--config), de données POST (-d/--data*) ni de creds (-u). Le loader `dangerous_flag`
+    #   refuse aussi ces drapeaux côté voie fichier (défense en profondeur). insecure (-k) / suivi de
+    #   redirection (-L) / --connect-timeout : options SÛRES, dispo via extra_args allowlistés.
+    ToolSpec(
+        kind="recon.curl", vuln_class="HTTPProbe", binary="curl",
+        argv_template=("-s", "-i", "-A", "forge", "--max-time", "{param:timeout:15}",
+                       "-X", "{param:method:GET}", ("-H", "{param:header}"), "{args}", "{target_url}"),
+        mitre="T1595", phase="recon", capability="active", attck_tactic="Reconnaissance",
+        depends_on=("recon.httpx",), parser="lines",
+        hit_status="tested", severity="INFO", hit_is_asset=False,
+        params_schema=(
+            {"name": "method", "type": "select", "label": "méthode HTTP (-X)", "flag": "-X",
+             "allowed": ["GET", "HEAD", "POST", "PUT", "OPTIONS"], "default": "GET"},
+            {"name": "timeout", "type": "number", "label": "timeout total (--max-time s, défaut 15)",
+             "flag": "--max-time", "default": 15},
+            {"name": "header", "type": "text", "label": "en-tête de requête (-H, ex 'X-Foo: bar')", "flag": "-H"},
+            _EXTRA),
+        # ALLOWLIST CONSERVATRICE — SONDE gouvernée uniquement : méthode/en-tête/UA/affichage-headers/
+        # timeouts/redirection/insecure. EXCLUS (jamais dans l'allowlist) : -o/-O/--output (écriture
+        # fichier), -T/-F/--upload-file (upload/exfil), -K/--config (config lue), -x/--proxy (exfil
+        # réseau), -d/--data* (corps POST arbitraire), -u (creds). insecure -k = TLS non vérifié (optionnel).
+        flag_allowlist=("-X", "-H", "-A", "-i", "-s", "--max-time", "--connect-timeout", "-L", "-k"),
+        description="Sonde HTTP gouvernée (curl -s -i -A forge) — requête bénigne dont la réponse va sur "
+                    "STDOUT (headers+corps), JAMAIS d'exfil/écriture-fichier/upload/proxy/POST-data. Méthode "
+                    "(GET/HEAD/POST/PUT/OPTIONS), en-tête (-H) et timeout (--max-time) via params ; insecure "
+                    "(-k), suivi de redirection (-L) et --connect-timeout via extra_args allowlistés. "
+                    "Scope-guardée (cible in-scope), non-exploit / non-destructif."),
+
+    # recon.dig : LOOKUP DNS (dig +short). PASSIF (une requête de résolution), non-exploit, non-destructif.
+    #   Le NOM interrogé ({target_host}) est SCOPE-GUARDÉ (cible in-scope, fail-closed). Le RÉSOLVEUR
+    #   (@resolver, optionnel) est une infra CHOISIE par l'opérateur (ex 8.8.8.8) : une requête DNS (port 53)
+    #   vers un résolveur choisi n'est PAS un fetch/SSRF (aucune URL arbitraire récupérée) — la discipline de
+    #   périmètre porte sur le NOM interrogé, pas sur le résolveur. dig utilise des options `+opt` (pas `-opt`) :
+    #   elles passent comme tokens NON-drapeaux via {args} (check_extra_args ne les prend pas pour des
+    #   drapeaux) ; les drapeaux fichiers `-f` (batch file) et `-k` (clé TSIG) sont ABSENTS de l'allowlist
+    #   -> un `-f`/`-k` en extra_args RESSEMBLE à un drapeau, hors allowlist => REFUSÉ fail-closed.
+    ToolSpec(
+        kind="recon.dig", vuln_class="DNSLookup", binary="dig",
+        argv_template=("{param:record_type:A}", "{target_host}", "+short",
+                       ("@{param:resolver}",), "{args}"),
+        mitre="T1590.002", phase="recon", capability="passive", attck_tactic="Reconnaissance",
+        depends_on=(), parser="lines", hit_status="tested", severity="INFO", hit_is_asset=False,
+        params_schema=(
+            {"name": "record_type", "type": "select", "label": "type d'enregistrement (positionnel)",
+             "flag": "", "allowed": ["A", "AAAA", "MX", "TXT", "NS", "CNAME", "SOA", "CAA", "SRV", "PTR"],
+             "default": "A"},
+            {"name": "resolver", "type": "text", "label": "résolveur DNS (@resolver, optionnel, ex 8.8.8.8)",
+             "flag": "@"},
+            _EXTRA),
+        # ALLOWLIST = uniquement des options dig `+opt` (options de requête SÛRES). dig ne prend PAS de
+        # `-opt` de sortie-fichier ; EXCLUS explicitement : -f (batch file, lecture fichier) et -k (clé
+        # TSIG, lecture fichier). Un `-f`/`-k` en extra_args ressemble à un drapeau -> hors allowlist -> REFUSÉ.
+        flag_allowlist=("+short", "+noall", "+answer", "+trace", "+nssearch", "+tcp", "+time", "+tries"),
+        description="Lookup DNS gouverné (dig +short) — enregistrements du NOM interrogé (scope-guardé). "
+                    "Type d'enregistrement via params.record_type (select A/AAAA/MX/TXT/…), résolveur "
+                    "optionnel via params.resolver (@srv, infra opérateur, pas un vecteur SSRF). PASSIF, "
+                    "non-exploit / non-destructif ; options +opt via extra_args allowlistés (les -f/-k "
+                    "fichiers sont refusés fail-closed)."),
 ]
 
 # Self-registering : FOLD chaque spec dans techniques.py + @register (idempotent au ré-import).

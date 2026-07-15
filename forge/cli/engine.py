@@ -19,6 +19,29 @@ from .. import console_client
 from .. import workflows
 
 
+def _parse_cli_params(param_args):
+    """Parse `--param KIND.KEY=VALUE` (répétable) en dict imbriqué {kind: {key: value}}. FAIL-CLOSED :
+    un `--param` malformé (sans '=' séparant la valeur, ou sans '.' séparant kind.key) -> SystemExit
+    avec un message clair (jamais un drop silencieux). Les valeurs restent des CHAÎNES (le tool/schéma
+    coerce les types comme aujourd'hui). N'INJECTE QUE de la donnée dans module_params : l'allowlist de
+    drapeaux, le no-shell et le scope-guard restent appliqués en aval (même chemin que les params UI)."""
+    out = {}
+    for raw in (param_args or []):
+        if "=" not in raw:
+            raise SystemExit(f"forge campaign : --param invalide '{raw}' — format attendu KIND.KEY=VALUE "
+                             f"(ex : recon.nmap.ports=1-65535)")
+        left, value = raw.split("=", 1)
+        if "." not in left:
+            raise SystemExit(f"forge campaign : --param invalide '{raw}' — 'KIND.KEY' doit contenir un '.' "
+                             f"séparant le kind du paramètre (ex : recon.nmap.ports=1-65535)")
+        kind, key = left.rsplit(".", 1)
+        if not kind or not key:
+            raise SystemExit(f"forge campaign : --param invalide '{raw}' — kind et clé requis "
+                             f"(ex : recon.nmap.ports=1-65535)")
+        out.setdefault(kind, {})[key] = value
+    return out
+
+
 def _load_actions(path):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out = []
@@ -157,6 +180,13 @@ def cmd_campaign(args):
             print("  Activées : " + ", ".join(s["kind"] for s in kept))
         if dropped:
             print("  Larguées : " + ", ".join(s["kind"] for s in dropped))
+    # --param KIND.KEY=VALUE (répétable) : params par-module ergonomiques pour CE run, SANS éditer
+    # scope.json. Intention EXPLICITE de l'opérateur -> PRIORITAIRE : fusionnés PAR-DESSUS scope.module_params
+    # ET les params de workflow (le --param gagne). N'injecte QUE de la donnée dans module_params : le
+    # scope-guard + l'allowlist de drapeaux + le no-shell restent seuls juges au tir (un extra_arg hors
+    # allowlist passé via --param est refusé en aval, exactement comme un param posé via l'UI).
+    for kind, p in _parse_cli_params(getattr(args, "param", None)).items():
+        merged = dict(module_params.get(kind, {})); merged.update(p or {}); module_params[kind] = merged
     # --auto-pentest : MODE PENTEST AUTOMATISÉ — balaie TOUTES les techniques ACTIVÉES du scope à
     # travers la surface découverte (recon -> chaînage -> oracles), gouverné à l'identique (scope-guard,
     # plancher exploit, ledger). Sinon cerveau heuristique standard. L'ensemble balayé = l'effective set
