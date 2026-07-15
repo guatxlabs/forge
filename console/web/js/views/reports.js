@@ -36,14 +36,32 @@ export async function loadReports() {
   await previewReport();
 }
 
-// Aperçu HTML du rapport de l'engagement ACTIF dans un iframe SANDBOX same-origin. Le HTML provient de
-// notre endpoint authentifié (cookie same-origin) ; tout dynamique est échappé côté serveur. On injecte
-// une <base href> (URL canonique du rapport) pour résoudre /quetzal.svg. Sandbox SANS allow-scripts :
-// les éventuels handlers inline du document sont neutralisés (l'UI fournit ses propres contrôles).
+// Format actuellement sélectionné dans le SÉLECTEUR UNIQUE du panneau (`#rep-format`). Ce même choix
+// pilote À LA FOIS l'aperçu et le téléchargement — il n'existe qu'UN contrôle de format (le document
+// rendu n'embarque plus ses propres liens ?format=, cf. render_html(preview=true) côté serveur).
+function repFormat() {
+  const sel = $('#rep-format');
+  const f = sel && sel.value;
+  return REP_FMT[f] ? f : 'html';
+}
+
+// Aperçu du rapport de l'engagement ACTIF. Seul le HTML se prévisualise dans un iframe SANDBOX
+// same-origin (`&preview=1` -> document SANS barre d'actions : le sélecteur de format unique reste
+// celui du panneau). Le HTML provient de notre endpoint authentifié (cookie same-origin) ; tout
+// dynamique est échappé côté serveur. On injecte une <base href> (URL canonique) pour résoudre un logo
+// relatif. Sandbox SANS allow-scripts. Pour les formats binaires/non-HTML (pdf/docx/csv/json) l'aperçu
+// n'a pas de sens : on affiche une note invitant à « Générer / Télécharger » (même sélecteur, export
+// cohérent). Appelée aussi au changement de `#rep-format` -> l'aperçu suit le format choisi.
 export async function previewReport() {
   const host = $('#rep-preview'); if (!host) return;
   const { id } = repActive(); if (id == null) return;
-  const url = '/api/engagements/' + id + '/report?format=html';
+  const fmt = repFormat();
+  if (fmt !== 'html') {
+    host.innerHTML = '<div class="muted">Aperçu disponible en <b>HTML</b> uniquement. Le format <b>' +
+      esc(REP_FMT[fmt]) + '</b> sera produit via « Générer / Télécharger ».</div>';
+    return;
+  }
+  const url = '/api/engagements/' + id + '/report?format=html&preview=1';
   host.innerHTML = '<div class="muted">chargement de l\'aperçu…</div>';
   let r, html;
   try { r = await fetch(url, { headers: { Accept: 'text/html' } }); html = await r.text().catch(() => ''); }
@@ -113,7 +131,7 @@ export async function brandingModal() {
     message: 'Marque le livrable au commanditaire (aucun secret). Portée GLOBALE (tous les engagements) ou OVERRIDE de l\'engagement actif' + (e ? ' « ' + e.name + ' »' : '') + '. Réservé admin, journalisé au ledger.',
     fields: [
       { name: 'customer_name', label: 'Nom du commanditaire', type: 'text', value: eff.customer_name || '', placeholder: 'ACME Corp' },
-      { name: 'logo', label: 'Logo (URL ou data-URI, optionnel)', type: 'textarea', value: eff.logo || '', placeholder: 'data:image/png;base64,… ou /assets/logo.png', hint: 'Intégré tel quel dans la page de garde (document autonome). Vide = logo Forge par défaut.' },
+      { name: 'logo', label: 'Logo client (optionnel)', type: 'textarea', value: eff.logo || '', placeholder: 'data:image/png;base64,… ou /assets/logo.png', hint: 'Logo du commanditaire (URL ou data-URI) intégré tel quel sur la page de garde. Vide = aucun logo (la case reste masquée, pas de carré vide).' },
       { name: 'vendor', label: 'Prestataire (vendor)', type: 'text', value: eff.vendor || '', placeholder: 'GuatX Forge' },
       { name: 'confidentiality', label: 'Mention de confidentialité', type: 'text', value: eff.confidentiality || '' },
       { name: 'per_engagement', label: 'Appliquer à l\'engagement actif uniquement (override)' + (e ? ' — ' + e.name : ''), type: 'checkbox', value: false },
@@ -130,7 +148,10 @@ export async function brandingModal() {
   } catch (err) { toast(err.status === 403 ? 'Réservé aux administrateurs.' : ('Échec : ' + err.message), 'bad'); }
 }
 
-if ($('#rep-generate')) $('#rep-generate').addEventListener('click', () => downloadReport(($('#rep-format') && $('#rep-format').value) || 'html'));
+// SÉLECTEUR DE FORMAT UNIQUE (`#rep-format`) : pilote l'export (Générer) ET l'aperçu (au changement,
+// l'aperçu suit le format — HTML rendu, autres formats -> note « Générer pour produire »).
+if ($('#rep-generate')) $('#rep-generate').addEventListener('click', () => downloadReport(repFormat()));
+if ($('#rep-format')) $('#rep-format').addEventListener('change', previewReport);
 if ($('#rep-refresh')) $('#rep-refresh').addEventListener('click', previewReport);
 if ($('#rep-brand')) $('#rep-brand').addEventListener('click', brandingModal);
 

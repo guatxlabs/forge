@@ -544,7 +544,15 @@ fn dash(s: &str) -> &str {
 
 /// Rapport d'engagement HTML BRANDÉ (thème Aurora réutilisé de main.rs, `REPORT_CSS`). Document
 /// autonome (CSS inliné, imprimable). Tout texte dynamique échappé HTML ; secrets déjà rédigés.
-fn render_html(data: &Value) -> String {
+///
+/// `preview` : rendu destiné à l'APERÇU intégré (iframe de la vue #reports). Dans ce mode la barre
+/// d'actions du document est OMISE — le SÉLECTEUR DE FORMAT unique vit dans le panneau de la console
+/// (`#rep-format` + « Générer »). Sans ce garde, le document embarquait ses PROPRES liens ?format=…
+/// dupliquant le sélecteur du panneau (choix affichés deux fois) et, cliqués dans l'iframe sandboxée
+/// (attachment -> download, sans allow-scripts pour `window.print`), aboutissant à un panneau BLANC.
+/// En mode NON-preview (téléchargement HTML autonome) on ne conserve que le bouton « Imprimer »
+/// (aucun lien ?format= : ils seraient inertes hors serveur et redupliqueraient le contrôle unique).
+fn render_html(data: &Value, preview: bool) -> String {
     let e = html_escape;
     let getstr = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let branding = data.get("branding").cloned().unwrap_or(json!({}));
@@ -577,20 +585,23 @@ fn render_html(data: &Value) -> String {
     h.push_str("</head><body>");
 
     // ----- barre d'actions (écran seulement) -----
-    h.push_str("<div class=\"toolbar noprint\">");
-    h.push_str("<button type=\"button\" onclick=\"window.print()\">Imprimer / Enregistrer en PDF</button>");
-    h.push_str("<a class=\"btn\" href=\"?format=pdf\">PDF</a>");
-    h.push_str("<a class=\"btn\" href=\"?format=docx\">DOCX</a>");
-    h.push_str("<a class=\"btn\" href=\"?format=csv\">CSV</a>");
-    h.push_str("<a class=\"btn\" href=\"?format=json\">JSON</a>");
-    h.push_str("</div>");
+    // SÉLECTEUR DE FORMAT UNIQUE : il vit dans le panneau de la console (`#rep-format`), PAS dans le
+    // document. En APERÇU (preview) : aucune barre (sinon les choix de format apparaîtraient deux fois
+    // et, cliqués dans l'iframe sandboxée, blanchiraient le panneau). En téléchargement HTML autonome :
+    // uniquement « Imprimer » (les liens ?format= seraient inertes hors serveur — on ne les remet pas).
+    if !preview {
+        h.push_str("<div class=\"toolbar noprint\">");
+        h.push_str("<button type=\"button\" onclick=\"window.print()\">Imprimer / Enregistrer en PDF</button>");
+        h.push_str("</div>");
+    }
 
-    // ----- PAGE DE GARDE brandée (logo client + nom) -----
+    // ----- PAGE DE GARDE brandée (logo client OPTIONNEL + nom) -----
+    // Le logo de la page de garde est le logo DU COMMANDITAIRE (livrable brandé) : configurable par
+    // l'admin (branding.logo, URL ou data-URI). ABSENT -> on N'AFFICHE RIEN (pas de carré vide ni de
+    // mark Forge détournée en « logo client »). src échappé HTML (html_escape neutralise les quotes).
     h.push_str("<section class=\"cover\">");
     if !logo.is_empty() {
-        h.push_str(&format!("<img class=\"qz\" src=\"{}\" alt=\"logo\">", e(&logo)));
-    } else {
-        h.push_str("<img class=\"qz\" src=\"/quetzal.svg\" alt=\"\">");
+        h.push_str(&format!("<img class=\"qz\" src=\"{}\" alt=\"logo du commanditaire\">", e(&logo)));
     }
     h.push_str(&format!("<div class=\"brand\">{}</div>", e(&customer)));
     h.push_str(&format!("<div class=\"cover-camp\">Évaluation de sécurité — {}</div>", e(&vendor)));
@@ -868,9 +879,14 @@ async fn engagement_report(
             render_csv(&data),
         )
             .into_response(),
-        "html" => ([("content-type", "text/html; charset=utf-8")], Html(render_html(&data))).into_response(),
+        "html" => {
+            // `?preview=1` (aperçu intégré) : document SANS barre d'actions (le sélecteur de format
+            // unique vit dans le panneau de la console). Sinon : HTML autonome (bouton Imprimer).
+            let preview = q.get("preview").map(|v| v == "1" || v == "true").unwrap_or(false);
+            ([("content-type", "text/html; charset=utf-8")], Html(render_html(&data, preview))).into_response()
+        }
         "pdf" => {
-            let html = render_html(&data);
+            let html = render_html(&data, false);
             match render_pdf_from_html(&html).await {
                 Some(bytes) => (
                     StatusCode::OK,
@@ -1299,6 +1315,120 @@ mod tests {
         let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
         let html = to_text(r).await;
         assert!(html.contains("ACME Corp"), "branding rendu dans le rapport");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// Extrait (status, headers, octets) d'une réponse — pour les formats binaires (docx) où l'on
+    /// vérifie EN-TÊTES + magic bytes sans supposer de l'UTF-8.
+    async fn to_parts(resp: Response) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let (parts, body) = resp.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap().to_vec();
+        (parts.status, parts.headers, bytes)
+    }
+
+    /// EXPORT NON-BLANC sur engagement VIDE (0 finding) — régression B7 (« export blanc »).
+    /// JSON : 200 + corps JSON valide NON vide (summary.total=0, findings []). DOCX : 200 + .docx
+    /// valide (magic ZIP `PK\x03\x04`, non vide, content-type/disposition corrects) quand python est
+    /// présent ; 501 documenté (docx_unavailable) s'il est absent — JAMAIS un 200 blanc.
+    #[tokio::test]
+    async fn empty_engagement_json_docx_nonblank() {
+        let led = tmp_ledger("empty");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-vide"); // AUCUN finding
+        let (vtok, _o, _a) = seed_roles(&app);
+
+        // JSON : toujours 200, corps NON vide et parsable, comptes à zéro.
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "json".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let (st, hdrs, bytes) = to_parts(r).await;
+        assert_eq!(st, StatusCode::OK, "JSON engagement vide -> 200");
+        assert!(bytes.len() > 50, "JSON NON blanc (len={})", bytes.len());
+        assert_eq!(hdrs.get("content-type").unwrap(), "application/json; charset=utf-8");
+        let v: Value = serde_json::from_slice(&bytes).expect("JSON valide");
+        assert_eq!(v["summary"]["total"], 0, "0 finding");
+        assert_eq!(v["findings"].as_array().unwrap().len(), 0);
+        assert!(v.get("engagement").is_some() && v.get("custody").is_some(), "structure complète");
+
+        // DOCX : 200 + .docx valide quand python présent ; sinon 501 documenté (jamais 200 blanc).
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "docx".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let (st, hdrs, bytes) = to_parts(r).await;
+        assert!(st == StatusCode::OK || st == StatusCode::NOT_IMPLEMENTED, "DOCX: 200 ou 501, jamais autre (got {st})");
+        if st == StatusCode::OK {
+            assert!(!bytes.is_empty() && bytes.starts_with(b"PK\x03\x04"), "DOCX = ZIP OOXML valide non vide");
+            assert_eq!(
+                hdrs.get("content-type").unwrap(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            );
+            let cd = hdrs.get("content-disposition").unwrap().to_str().unwrap();
+            assert!(cd.contains("attachment") && cd.contains("forge-engagement-1.docx"), "disposition: {cd}");
+        } else {
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["error"], "docx_unavailable");
+        }
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// SÉLECTEUR DE FORMAT UNIQUE (régression B8) : le document d'APERÇU (`?preview=1`) N'EMBARQUE
+    /// AUCUN lien `?format=` ni barre d'actions — le seul contrôle de format est celui du panneau.
+    /// Le HTML autonome (sans preview) conserve UNIQUEMENT le bouton « Imprimer » (toujours zéro lien
+    /// ?format= : ils dupliqueraient le contrôle et seraient inertes hors serveur).
+    #[tokio::test]
+    async fn preview_has_single_format_control() {
+        let led = tmp_ledger("preview");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        seed_finding(&app, 1, "f1", "a.example.com", "HIGH", "x");
+        let (vtok, _o, _a) = seed_roles(&app);
+
+        // preview=1 : aucune barre d'actions, aucun lien ?format=.
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "html".to_string());
+        q.insert("preview".to_string(), "1".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let html = to_text(r).await;
+        assert!(!html.contains("?format="), "aperçu : AUCUN lien ?format= (sélecteur unique = panneau)");
+        assert!(!html.contains("class=\"toolbar"), "aperçu : aucune barre d'actions embarquée");
+
+        // sans preview : HTML autonome — bouton Imprimer présent, MAIS toujours zéro lien ?format=.
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "html".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let html = to_text(r).await;
+        assert!(!html.contains("?format="), "HTML autonome : plus de liens ?format= dupliqués");
+        assert!(html.contains("window.print()"), "HTML autonome : bouton Imprimer conservé");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// LOGO CLIENT OPTIONNEL (régression B9) : sans logo configuré -> AUCUN `<img class="qz">` ni
+    /// fallback `/quetzal.svg` (pas de carré vide). Avec un logo -> il est rendu, src ÉCHAPPÉ (anti-XSS).
+    #[tokio::test]
+    async fn client_logo_hidden_when_unset() {
+        let led = tmp_ledger("logo");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        let (vtok, _o, _a) = seed_roles(&app);
+
+        // sans logo : ni img qz ni quetzal fallback.
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "html".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q.clone())).await;
+        let html = to_text(r).await;
+        assert!(!html.contains("class=\"qz\""), "logo non configuré -> pas d'<img class=qz> (pas de carré vide)");
+        assert!(!html.contains("/quetzal.svg"), "logo non configuré -> pas de fallback quetzal");
+
+        // avec un logo hostile : rendu + src échappé (pas d'injection d'attribut/handler).
+        let store = app.store();
+        crate::settings_set_store(&store, "branding",
+            &json!({"logo": "https://cdn.example.com/l.png\" onerror=\"alert(1)"}).to_string()).unwrap();
+        drop(store);
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let html = to_text(r).await;
+        assert!(html.contains("<img class=\"qz\""), "logo configuré -> img rendu");
+        assert!(!html.contains("onerror=\"alert(1)\""), "src échappé (pas d'attribut injecté)");
+        assert!(html.contains("&quot;"), "guillemets échappés dans le src");
         let _ = std::fs::remove_file(&led);
     }
 
