@@ -29,9 +29,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-/// Vrai si l'hôte appartient au scope serveur (in_scope). Match littéral exact ou suffixe de domaine
-/// (sous-domaine d'une entrée listée). Conservateur : pas de glob côté console — le moteur Python
-/// applique le vrai matching ROE, ceci n'est qu'un pré-filtre fail-closed pour ne pas spawner hors scope.
+/// Vrai si l'hôte appartient au scope serveur GLOBAL (App.scope_in, figé au boot). Match littéral exact
+/// ou suffixe de domaine (sous-domaine d'une entrée listée). Conservé pour la rétro-compat lecture des
+/// App globals (et sa couverture de test dédiée) : le scope-check / dry-plan / run flow utilisent
+/// désormais TOUS le scope de l'ENGAGEMENT résolu (host_in_scope_list), jamais ces globals figés.
+#[allow(dead_code)] // n'est plus consommé par un handler (scope désormais par-engagement) — gardé pour la parité de test.
 pub(crate) fn host_in_server_scope(app: &App, host: &str) -> bool {
     host_in_scope_list(&app.scope_in, host)
 }
@@ -238,19 +240,30 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
         "SELECT e.id, e.name, e.status, e.mode, e.created,
                 (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
                 (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
-                e.tenant_id, e.classification
+                e.tenant_id, e.classification, e.scope_json
          FROM engagement e{where_clause} ORDER BY e.id",
     ), &tparams, |r| {
         let tenant_id = r.get_i64(7)?;
+        // SCOPE (B4) : le scope réel de l'engagement, DÉCODÉ depuis scope_json, est exposé pour que
+        // l'éditeur AFFICHE le scope courant (in/out) au lieu d'un simple placeholder — sans quoi
+        // l'opérateur ne peut pas confirmer ce qui est persisté (« l'édition n'a rien enregistré »).
+        // Le `mode` renvoyé est le mode EFFECTIF (scope_json.mode prime sur la colonne mode, cohérent
+        // avec load_engagement / le run flow) : l'éditeur et le rapport reflètent le MÊME mode.
+        let scope_v: Value = serde_json::from_str(&r.get_opt_str(9)?.unwrap_or_default()).unwrap_or_else(|_| json!({}));
+        let col_mode = r.get_opt_str(3)?.unwrap_or_else(|| "grey".into());
+        let eff_mode = scope_v.get("mode").and_then(|m| m.as_str()).map(String::from).unwrap_or(col_mode);
         let mut o = json!({
             "id": r.get_i64(0)?,
             "name": r.get_opt_str(1)?.unwrap_or_default(),
             "status": r.get_opt_str(2)?.unwrap_or_else(|| "active".into()),
-            "mode": r.get_opt_str(3)?.unwrap_or_else(|| "grey".into()),
+            "mode": eff_mode,
             "created": r.get_opt_str(4)?.unwrap_or_default(),
             "counts": {"findings": r.get_i64(5)?, "runs": r.get_i64(6)?},
             // CLASSIFICATION TLP 2.0 (#15) : label de diffusion de l'engagement (vide = non classifié).
             "classification": r.get_opt_str(8)?.unwrap_or_default(),
+            // SCOPE réel (in/out) — une entrée par host, servi tel quel à l'éditeur (B4 : « show the real scope »).
+            "in_scope": scope_json_list(&scope_v, "in_scope"),
+            "out_scope": scope_json_list(&scope_v, "out_scope"),
         });
         if expose_tenant {
             o["tenant_id"] = json!(tenant_id);

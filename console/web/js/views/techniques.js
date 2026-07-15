@@ -1,8 +1,16 @@
-import { api, token, write } from '../core/api.js';
+import { api, write } from '../core/api.js';
 import { $, esc } from '../core/dom.js';
-import { guardList, toast } from '../core/ui.js';
+import { confirmModal, guardList, modal, toast } from '../core/ui.js';
 
-export let TQ = { profile: 'bug_bounty', rowByKind: {}, groups: {}, desired: {} };
+// TQ.profile porte la valeur du sélecteur : un profil de BASE ('bug_bounty'|'pentest'|'custom') OU un
+// profil NOMMÉ ('named:<nom>'). TQ.named = bibliothèque de profils nommés {nom: {profile,categories,
+// techniques}} servie par /api/techniques. TQ.desired = LA sélection live (toggles) — source de vérité.
+export let TQ = { profile: 'bug_bounty', rowByKind: {}, groups: {}, desired: {}, named: {} };
+
+const BASE_PROFILES = ['bug_bounty', 'pentest', 'custom'];
+const isNamed = p => String(p || '').startsWith('named:');
+const namedName = p => String(p || '').slice(6);
+const validProfileName = s => /^[A-Za-z0-9._-]{1,64}$/.test(s) && !s.startsWith('-') && !BASE_PROFILES.includes(s);
 
 // Base d'un profil côté client — miroir COSMÉTIQUE de forge.techniques (prefill des cases au changement
 // de profil). Le MOTEUR reste autoritatif : le prefill se recorrige au rechargement après enregistrement.
@@ -13,24 +21,74 @@ export function tqBase(row, profile) {
   return !!row.bug_bounty_eligible || row.phase === 'recon';
 }
 
+// Applique un profil NOMMÉ (snapshot complet) aux toggles courants : un kind présent dans le snapshot
+// prend sa valeur, un kind absent (profil plus ancien qu'un module récent) = OFF (fail-closed).
+function applyNamedSelection(sel) {
+  const t = (sel && sel.techniques) || {};
+  Object.keys(TQ.rowByKind).forEach(k => { TQ.desired[k] = !!t[k]; });
+}
+
+// Détecte le profil ACTIF à l'entrée : si les toggles chargés (sélection persistée) correspondent
+// EXACTEMENT à un profil nommé, on le re-sélectionne (l'opérateur RETROUVE son profil, pas « custom ») ;
+// sinon on garde le profil de base persisté par le moteur (cat.profile).
+function detectActiveProfile(base) {
+  const kinds = Object.keys(TQ.rowByKind);
+  if (kinds.length) {
+    for (const n of Object.keys(TQ.named).sort()) {
+      const t = (TQ.named[n] && TQ.named[n].techniques) || {};
+      if (kinds.every(k => (!!TQ.desired[k]) === (!!t[k]))) return 'named:' + n;
+    }
+  }
+  return BASE_PROFILES.includes(base) ? base : 'custom';
+}
+
+// (Re)peuple le sélecteur : profils de base + optgroup des profils nommés. Sélectionne TQ.profile.
+function renderProfileSelect() {
+  const sel = $('#tq-profile'); if (!sel) return;
+  sel.replaceChildren();
+  BASE_PROFILES.forEach(p => { const o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
+  const names = Object.keys(TQ.named).sort();
+  if (names.length) {
+    const og = document.createElement('optgroup'); og.label = 'Profils enregistrés';
+    names.forEach(n => { const o = document.createElement('option'); o.value = 'named:' + n; o.textContent = n; og.appendChild(o); });
+    sel.appendChild(og);
+  }
+  sel.value = TQ.profile;
+  syncDeleteBtn();
+}
+
+// Le bouton « Supprimer le profil » n'est actif que si un profil NOMMÉ est sélectionné (fail-closed UI).
+function syncDeleteBtn() {
+  const btn = $('#tq-delete'); if (!btn) return;
+  btn.disabled = !isNamed(TQ.profile);
+  btn.title = isNamed(TQ.profile) ? 'Supprimer le profil enregistré sélectionné (operator/admin, ledgerisé)'
+    : 'Sélectionne un profil enregistré pour pouvoir le supprimer';
+}
+
 export async function loadTechniques() {
   const host = $('#tq-groups'); if (!host) return;
   let cat;
   try { cat = await api('/techniques'); }
   catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
-  if (cat && cat.error) {
+  // Profils nommés servis même quand le moteur (groupes) est indisponible.
+  TQ.named = (cat && cat.named_profiles && typeof cat.named_profiles === 'object') ? cat.named_profiles : {};
+  if (cat && cat.error && !cat.groups) {
+    TQ.groups = {}; TQ.rowByKind = {}; TQ.desired = {};
     host.innerHTML = '<div class="bad">catalogue indisponible : ' + esc(String(cat.why || cat.error)) + '</div>';
     if ($('#tq-count')) $('#tq-count').textContent = '';
+    TQ.profile = BASE_PROFILES.includes(cat.profile) ? cat.profile : 'bug_bounty';
+    renderProfileSelect();
     return;
   }
   TQ.groups = cat.groups || {};
-  TQ.profile = cat.profile || 'bug_bounty';
   TQ.rowByKind = {}; TQ.desired = {};
   let total = 0;
   Object.values(TQ.groups).forEach(rows => (rows || []).forEach(r => {
     TQ.rowByKind[r.kind] = r; TQ.desired[r.kind] = !!r.enabled_for_current_scope; total++;
   }));
-  if ($('#tq-profile')) $('#tq-profile').value = TQ.profile;
+  // Charge la sélection SAUVÉE à l'entrée (persistance across nav) et re-sélectionne le profil actif.
+  TQ.profile = detectActiveProfile(cat.profile || 'bug_bounty');
+  renderProfileSelect();
   if ($('#tq-count')) $('#tq-count').textContent = total + ' techniques';
   renderTechniques();
 }
@@ -76,26 +134,62 @@ export function renderTechniques() {
   }));
 }
 
-// changement de profil : re-prefill COSMÉTIQUE des cases à la base du profil (moteur autoritatif au save).
+// changement de profil : APPLIQUE le profil aux toggles (base = prefill cosmétique ; nommé = snapshot).
+// Rien n'est persisté ici — « appliquer » est purement client ; c'est « Enregistrer comme profil… » qui
+// persiste. La sélection résultante (TQ.desired) reste la source de vérité pour l'enregistrement.
 if ($('#tq-profile')) $('#tq-profile').addEventListener('change', () => {
   TQ.profile = $('#tq-profile').value;
-  Object.values(TQ.rowByKind).forEach(r => { TQ.desired[r.kind] = tqBase(r, TQ.profile); });
+  if (isNamed(TQ.profile)) applyNamedSelection(TQ.named[namedName(TQ.profile)] || {});
+  else Object.values(TQ.rowByKind).forEach(r => { TQ.desired[r.kind] = tqBase(r, TQ.profile); });
+  syncDeleteBtn();
   renderTechniques();
 });
 if ($('#tq-reload')) $('#tq-reload').addEventListener('click', loadTechniques);
-if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
-  // On envoie un profil + une map TECHNIQUE COMPLÈTE (kind -> désiré) : elle définit sans ambiguïté
-  // l'ensemble activé pour les kinds courants, tout en laissant un futur module hériter de la base du
-  // profil (kind absent de la map -> résolu par le profil). Le moteur ENFORCE ; ici on persiste l'intention.
+
+// Construit + POST la sélection courante (map TECHNIQUE COMPLÈTE kind->désiré : sans ambiguïté). `extra`
+// porte `save_as` (enregistrer sous un nom réutilisable). auth:'operator' -> l'en-tête X-Forge-Operator +
+// le COOKIE de session admin/operator autorisent (aucun token séparé à coller) ; mutation ledgerisée serveur.
+async function saveSelection(extra) {
   const techniques = {}; Object.keys(TQ.desired).forEach(k => { techniques[k] = !!TQ.desired[k]; });
-  const body = { profile: TQ.profile, categories: {}, techniques };
+  const base = isNamed(TQ.profile) ? 'custom' : TQ.profile;
+  const body = Object.assign({ profile: base, categories: {}, techniques }, extra || {});
   const st = $('#tq-status');
   try {
-    const r = await write('/api/techniques/selection', { body, auth: 'token', engagement: true });
+    const r = await write('/api/techniques/selection', { body, auth: 'operator', engagement: true });
     if (r.status === 403) { toast('Sélection réservée à un compte operator/admin', 'bad'); return; }
-    if (!r.ok) { toast('Échec : ' + String(r.json.why || r.json.error || r.status), 'bad'); return; }
-    toast('Sélection enregistrée (ledgerisée)', 'ok');
+    if (!r.ok) { toast('Échec : ' + String((r.json && (r.json.why || r.json.error)) || r.status), 'bad'); return; }
+    toast(extra && extra.save_as ? ('Profil « ' + extra.save_as + ' » enregistré (ledgerisé)') : 'Sélection enregistrée (ledgerisée)', 'ok');
     if (st) { st.hidden = false; st.textContent = 'Sélection persistée — appliquée aux prochains runs (' + tqEnabledCount() + ' techniques activées).'; }
+    loadTechniques();
+  } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
+}
+
+// « Enregistrer comme profil… » : DEMANDE un nom, puis enregistre la sélection courante SOUS ce nom
+// (création ou mise à jour) EN PLUS de l'appliquer comme sélection active de l'engagement.
+if ($('#tq-save')) $('#tq-save').addEventListener('click', async () => {
+  const suggested = isNamed(TQ.profile) ? namedName(TQ.profile) : '';
+  const r = await modal({
+    title: 'Enregistrer comme profil',
+    message: 'Enregistre la sélection COURANTE (toggles) sous un nom RÉUTILISABLE (ex : bug_bounty_web, pentest_interne). Un nom existant est mis à jour. Operator/admin — action ledgerisée.',
+    okText: 'Enregistrer',
+    fields: [{ name: 'name', label: 'Nom du profil', value: suggested, required: true, placeholder: 'bug_bounty_web', hint: '[A-Za-z0-9._-], 1 à 64 — hors bug_bounty/pentest/custom (réservés).' }],
+    validate: v => { const s = String(v.name || '').trim(); return validProfileName(s) ? null : 'Nom invalide ou réservé.'; },
+  });
+  if (!r) return;
+  await saveSelection({ save_as: String(r.name).trim() });
+});
+
+// « Supprimer le profil » : retire le profil NOMMÉ sélectionné (global). N'affecte PAS la sélection active.
+if ($('#tq-delete')) $('#tq-delete').addEventListener('click', async () => {
+  if (!isNamed(TQ.profile)) { toast('Sélectionne un profil enregistré à supprimer.', 'bad'); return; }
+  const name = namedName(TQ.profile);
+  if (!(await confirmModal('Supprimer le profil « ' + name + ' » ? La sélection active de l\'engagement n\'est pas modifiée.', { okText: 'Supprimer', danger: true }))) return;
+  try {
+    const r = await write('/api/techniques/selection', { body: { delete_profile: name }, auth: 'operator' });
+    if (r.status === 403) { toast('Réservé à un compte operator/admin', 'bad'); return; }
+    if (!r.ok) { toast('Échec : ' + String((r.json && (r.json.why || r.json.error)) || r.status), 'bad'); return; }
+    toast('Profil « ' + name + ' » supprimé.', 'ok');
+    TQ.profile = 'custom';
     loadTechniques();
   } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
 });

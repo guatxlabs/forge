@@ -4946,6 +4946,139 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = std::fs::remove_file(&path);
     }
 
+    /// [B4 — édition du scope d'engagement PERSISTE + AFFICHÉE + scope-check ENGAGEMENT-AWARE] Un in-scope
+    /// NON VIDE posé via engagement_do_update écrit scope_json.in_scope ; la liste le RE-EXPOSE (l'éditeur
+    /// « reload shows it ») ; le scope-check résout la cible IN scope contre l'ENGAGEMENT (jamais les App
+    /// globals figés). Une zone scope VIDE laisse le scope INCHANGÉ (sémantique documentée conservée).
+    #[tokio::test]
+    async fn engagement_scope_edit_persists_and_scope_check_is_engagement_aware() {
+        let ledger = tmp_path("forge-test-b4-scope");
+        // App globals VIDES : prouve que le scope-check lit l'ENGAGEMENT, pas les globals disque figés.
+        let app = test_app(&ledger);
+        { let db = app.db(); migrate(&db); }
+        insert_test_engagement(&app, 1, &[], "grey", &ledger);
+
+        // AVANT : scope vide -> HORS scope (fail-closed).
+        let before = resp_json(scope_check(State(app.clone()), HeaderMap::new(), eng_query(1),
+            Json(json!({"target": "example.com"}))).await.into_response()).await;
+        assert_eq!(before["in_scope"], json!(false), "scope vide -> HORS scope");
+
+        // ÉDITE : in-scope NON VIDE (example.com) + mode black.
+        let v = engagement_do_update(&app, 1, "opr", &json!({
+            "scope_json": {"mode": "black", "in_scope": ["example.com"], "out_scope": []}
+        })).expect("edit ok");
+        assert_eq!(v["action"], "edit");
+
+        // PERSISTÉ : load_engagement + la liste RE-EXPOSENT le scope (« reload shows it ») + mode effectif.
+        let eng = load_engagement(&app.store(), 1).unwrap();
+        assert_eq!(eng.scope_in, vec!["example.com".to_string()], "in_scope persisté");
+        assert_eq!(eng.mode, "black", "mode effectif persisté");
+        let engs = engagement_list_json(&app, &HeaderMap::new());
+        let e1 = engs.iter().find(|e| e["id"] == json!(1)).unwrap();
+        assert_eq!(e1["in_scope"], json!(["example.com"]), "liste ré-expose le scope (éditeur l'affiche)");
+        assert_eq!(e1["mode"], json!("black"), "liste expose le mode EFFECTIF (scope_json.mode)");
+
+        // scope-check ENGAGEMENT-AWARE : la cible est désormais IN scope + le mode reflète l'engagement.
+        let after = resp_json(scope_check(State(app.clone()), HeaderMap::new(), eng_query(1),
+            Json(json!({"target": "example.com"}))).await.into_response()).await;
+        assert_eq!(after["in_scope"], json!(true), "après édition -> IN scope (engagement-aware)");
+        assert_eq!(after["mode"], json!("black"), "scope-check reflète le mode de l'engagement");
+        assert_eq!(after["engagement_id"], json!(1));
+
+        // ZONE VIDE = INCHANGÉ : un update sans scope_json (rename seul) ne touche pas le scope.
+        engagement_do_update(&app, 1, "opr", &json!({"name": "renamed"})).expect("rename ok");
+        let eng2 = load_engagement(&app.store(), 1).unwrap();
+        assert_eq!(eng2.scope_in, vec!["example.com".to_string()], "scope inchangé quand scope_json absent");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [B5 — bascule d'engagement = re-ciblage effectif] Le scope-check (comme le run flow) résout contre
+    /// l'engagement DEMANDÉ (`?engagement=`) : basculer l'actif de A vers B change la cible évaluée. Prouve
+    /// que « rendre B actif » (côté client : ajoute ?engagement=B) fait bien opérer sur le scope de B.
+    #[tokio::test]
+    async fn scope_check_targets_the_selected_engagement() {
+        let ledger = tmp_path("forge-test-b5-switch");
+        let ledger2 = tmp_path("forge-test-b5-switch2");
+        let app = test_app(&ledger);
+        { let db = app.db(); migrate(&db); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        insert_test_engagement(&app, 2, &["b.example.com"], "black", &ledger2);
+
+        // Actif = #1 : b.example.com HORS scope, a.example.com IN.
+        let r1 = resp_json(scope_check(State(app.clone()), HeaderMap::new(), eng_query(1),
+            Json(json!({"target": "b.example.com"}))).await.into_response()).await;
+        assert_eq!(r1["in_scope"], json!(false), "#1 : b.example.com hors scope");
+        // Bascule sur #2 : b.example.com IN scope, mode = celui de #2.
+        let r2 = resp_json(scope_check(State(app.clone()), HeaderMap::new(), eng_query(2),
+            Json(json!({"target": "b.example.com"}))).await.into_response()).await;
+        assert_eq!(r2["in_scope"], json!(true), "#2 : b.example.com in scope (re-ciblage)");
+        assert_eq!(r2["mode"], json!("black"), "#2 : mode de l'engagement basculé");
+        assert_eq!(r2["engagement_id"], json!(2));
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
+    /// [B6 — profils de techniques NOMMÉS] « Enregistrer comme profil » (save_as) persiste la sélection
+    /// courante sous un nom RÉUTILISABLE (map globale) EN PLUS de la poser comme sélection active ; la
+    /// sélection est rechargeable à l'entrée (PAS reset « custom ») ; delete_profile la retire ; une
+    /// technique DÉSACTIVÉE reste exclue (fail-closed intact) ; la mutation reste operator-gated (403 viewer).
+    #[tokio::test]
+    async fn technique_named_profiles_save_reload_delete_and_fail_closed() {
+        let path = tmp_path("forge-test-b6-profiles");
+        let app = test_app(&path);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+
+        // SAVE-AS : sélection (rce.probe ON, sqli.err OFF) enregistrée sous « bug_bounty_web ».
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
+            Json(json!({"profile": "custom", "save_as": "bug_bounty_web",
+                        "techniques": {"rce.probe": true, "sqli.err": false}}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "save_as -> 200");
+
+        // PERSISTÉ (map globale) + fail-closed (OFF reste OFF).
+        let profiles = technique_profiles_map(&app);
+        assert!(profiles.contains_key("bug_bounty_web"), "profil nommé persisté");
+        assert_eq!(profiles["bug_bounty_web"]["techniques"]["rce.probe"], json!(true));
+        assert_eq!(profiles["bug_bounty_web"]["techniques"]["sqli.err"], json!(false), "technique désactivée reste exclue (fail-closed)");
+        // sélection ACTIVE de l'engagement #1 = la même (rechargée à l'entrée, PAS reset custom).
+        let active = technique_selection_value_for(&app, 1);
+        assert_eq!(active["techniques"]["rce.probe"], json!(true), "sélection active persistée (reload la retrouve)");
+        assert_eq!(active["techniques"]["sqli.err"], json!(false), "OFF reste OFF au reload (fail-closed)");
+        // ledger : la sauvegarde de profil est journalisée (governance ledgerisée).
+        let entries = read_ledger_lines(&path);
+        assert!(entries.iter().any(|e| e["kind"] == "console.techniques.profile.save"), "save profil ledgerisé");
+
+        // nom RÉSERVÉ (base) refusé (400) — pas de masquage base vs nommé.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
+            Json(json!({"profile": "custom", "save_as": "bug_bounty", "techniques": {}}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "nom de base réservé refusé");
+
+        // DELETE : retire le profil nommé.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
+            Json(json!({"delete_profile": "bug_bounty_web"}))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "delete -> 200");
+        assert!(!technique_profiles_map(&app).contains_key("bug_bounty_web"), "profil supprimé");
+        // delete inconnu -> 404 ; delete d'un nom de base -> 400.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
+            Json(json!({"delete_profile": "ghost"}))).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "profil inconnu -> 404");
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&otok),
+            Json(json!({"delete_profile": "pentest"}))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "delete d'un nom de base -> 400");
+
+        // GOVERNANCE : un viewer NE PEUT PAS créer de profil (fail-closed, aucun profil écrit).
+        { let db = app.db(); upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap(); }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let resp = technique_selection_set(State(app.clone()), conn_info(), Query(HashMap::new()), bearer_headers(&vtok),
+            Json(json!({"profile": "custom", "save_as": "sneaky", "techniques": {}}))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer -> 403 (governance operator/admin)");
+        assert!(!technique_profiles_map(&app).contains_key("sneaky"), "aucun profil créé par un refus");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     // =============================================================================================
     // WORKFLOWS ÉDITABLES & SAUVEGARDÉS — validation pure, routes non-conflictuelles, CRUD gouverné
     // (opérateur/admin) + ledgerisé + persisté, builtins protégés (fail-closed).

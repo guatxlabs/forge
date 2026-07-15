@@ -66,10 +66,18 @@ export function renderEngagementSelector() {
     }
   }
   const bar = $('#eng-bar');
+  const e = ENGAGEMENTS.find(x => x.id === active);
   if (bar) {
-    const e = ENGAGEMENTS.find(x => x.id === active);
     bar.classList.toggle('archived', !!(e && e.status === 'archived'));
     bar.title = e ? ('Engagement actif : ' + e.name + ' (' + e.mode + ', ' + e.status + ')') : 'Aucun engagement';
+  }
+  // Indicateur PROÉMINENT de l'engagement actif (B5) : un libellé visible « actif : NOM · mode » lève
+  // toute ambiguïté sur l'espace de travail que ciblent Lancement/Findings/Runs après un « Basculer ».
+  const lbl = $('#eng-active');
+  if (lbl) {
+    lbl.textContent = e ? (e.name + ' · ' + e.mode) : '(aucun)';
+    lbl.title = e ? ('Engagement ACTIF : ' + e.name + ' — les runs/findings ciblent cet espace') : 'Aucun engagement actif';
+    lbl.classList.toggle('archived', !!(e && e.status === 'archived'));
   }
 }
 
@@ -133,17 +141,25 @@ export async function engagementCreateModal() {
   } catch (e) { toast('Erreur réseau : ' + String(e.message || e), 'bad'); }
 }
 
-// modale d'édition (operator) : rename + mode + (optionnel) redéfinir le scope.
+// modale d'édition (operator) : rename + mode + (optionnel) redéfinir le scope. AFFICHE le scope RÉEL
+// courant (in/out + mode effectif servis par /api/engagements) pour que l'opérateur voie/confirme ce qui
+// est persisté. Sémantique conservée : une zone scope VIDE = INCHANGÉE ; y saisir des hôtes REMPLACE la
+// liste (un hôte par ligne). Le placeholder « fantôme » = le scope actuel (repère visuel, non soumis).
 export async function engagementEditModal(e) {
+  const curIn = Array.isArray(e.in_scope) ? e.in_scope : [];
+  const curOut = Array.isArray(e.out_scope) ? e.out_scope : [];
+  const curInTxt = curIn.length ? curIn.join(', ') : '(vide)';
+  const curOutTxt = curOut.length ? curOut.join(', ') : '(vide)';
   const vals = await modal({
     title: 'Éditer « ' + e.name + ' »', okText: 'Enregistrer', wide: true,
-    message: 'Renommer / changer le mode / redéfinir le scope. Laisser les zones scope VIDES ne les modifie pas.',
+    message: 'Scope actuel — mode ' + (e.mode || 'grey') + ' · in-scope: ' + curInTxt + ' · out-of-scope: ' + curOutTxt
+      + '. Renommer / changer le mode / redéfinir le scope : laisser une zone scope VIDE la laisse INCHANGÉE ; y saisir des hôtes REMPLACE la liste (un hôte par ligne).',
     fields: [
       { name: 'name', label: 'Nom', type: 'text', value: e.name, required: true },
       { name: 'mode', label: 'Mode', type: 'select', value: e.mode, options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
       { name: 'classification', label: 'Classification (TLP 2.0)', type: 'select', value: e.classification || '', options: TLP_OPTS },
-      { name: 'in_scope', label: 'Redéfinir in-scope (vide = inchangé — une entrée par ligne)', type: 'textarea', placeholder: 'app.example.com' },
-      { name: 'out_scope', label: 'Redéfinir out-of-scope (vide = inchangé)', type: 'textarea' },
+      { name: 'in_scope', label: 'Redéfinir in-scope (vide = inchangé — un hôte par ligne)', type: 'textarea', placeholder: curIn.length ? curIn.join('\n') : 'app.example.com', hint: 'Actuel : ' + curInTxt },
+      { name: 'out_scope', label: 'Redéfinir out-of-scope (vide = inchangé)', type: 'textarea', placeholder: curOut.length ? curOut.join('\n') : 'admin.example.com', hint: 'Actuel : ' + curOutTxt },
     ],
   });
   if (!vals) return;

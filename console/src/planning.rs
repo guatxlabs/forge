@@ -96,11 +96,15 @@ pub(crate) async fn modules(State(app): State<App>) -> impl IntoResponse {
     Json(Value::Array(modules_catalog(&store)))
 }
 
-/// POST /api/scope-check {target} -> {target, in_scope, mode, allow_exploit, allow_destructive}.
-/// LECTURE pure : réutilise host_in_server_scope (même règle que le pré-filtre de /api/run). Les
-/// capacités exposées sont CELLES IMPOSÉES par la console au lancement web (exploit/destructif
+/// POST /api/scope-check {target} -> {target, in_scope, mode, engagement_id, allow_exploit, allow_destructive}.
+/// LECTURE pure ENGAGEMENT-AWARE : résout l'engagement ACTIF (`?engagement=` sinon le plus récent) et
+/// vérifie la cible contre SON scope (`scope_in`) + son `mode` — EXACTEMENT la règle qu'appliquera
+/// /api/run (host_in_scope_list sur le scope de l'engagement résolu), jamais les App globals figés au
+/// boot. Sans cela, éditer le scope d'un engagement laissait le scope-check répondre « HORS SCOPE »
+/// (il lisait le scope disque global) : l'opérateur croyait à tort que l'édition n'avait rien enregistré.
+/// Les capacités exposées sont CELLES IMPOSÉES par la console au lancement web (exploit/destructif
 /// toujours false depuis le web) — pas une bascule, juste de la transparence.
-pub(crate) async fn scope_check(State(app): State<App>, Json(body): Json<Value>) -> impl IntoResponse {
+pub(crate) async fn scope_check(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
     let target = body.get("target").and_then(|v| v.as_str()).unwrap_or("");
     let validated = match validate_host(target) {
         Ok(h) => h,
@@ -108,11 +112,18 @@ pub(crate) async fn scope_check(State(app): State<App>, Json(body): Json<Value>)
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_target", "why": e})));
         }
     };
-    let in_scope = host_in_server_scope(&app, &validated);
+    // ENGAGEMENT résolu (par-engagement) : son scope/mode gouvernent, comme le run flow. Fail-closed :
+    // un engagement introuvable / NO_ENGAGEMENT (enterprise sans grant) => scope VIDE (rien in-scope).
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    let (in_scope, mode) = match load_engagement(&app.store(), eid) {
+        Some(eng) => (host_in_scope_list(&eng.scope_in, &validated), eng.mode),
+        None => (false, app.scope_mode.as_str().to_string()),
+    };
     (StatusCode::OK, Json(json!({
         "target": validated,
         "in_scope": in_scope,
-        "mode": app.scope_mode.as_str(),
+        "mode": mode,
+        "engagement_id": eid,
         // ce que la console autorise depuis le web pour cette cible — INVARIANT (plancher exploit).
         "allow_exploit": false,
         "allow_destructive": false,
@@ -124,8 +135,15 @@ pub(crate) async fn scope_check(State(app): State<App>, Json(body): Json<Value>)
 /// web_allowed non-exploit), CAPTURE sa sortie et renvoie la liste action->verdict (VETO/DRY_RUN).
 /// Aucune action ne tire — c'est un aperçu de gouvernance. Réutilise toutes les validations de
 /// /api/run (campaign/host/modules/plancher exploit) SANS persister de run_job ni ouvrir le slot FIFO.
-pub(crate) async fn plan(State(app): State<App>, Json(body): Json<Value>) -> impl IntoResponse {
-    // (1) validation des cibles : host bien formé ET ⊆ scope serveur (fail-closed, comme /api/run).
+pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
+    // ENGAGEMENT résolu (par-engagement) : le pré-filtre de scope + le mode du dry-plan viennent de
+    // l'engagement ACTIF (son scope_in / son mode), EXACTEMENT comme /api/run — jamais les App globals.
+    // Fail-closed : engagement introuvable / NO_ENGAGEMENT => scope VIDE (rien ne passe le pré-filtre).
+    let eid = resolve_view_engagement_id(&app, &headers, &q);
+    let eng = load_engagement(&app.store(), eid);
+    let scope_in: Vec<String> = eng.as_ref().map(|e| e.scope_in.clone()).unwrap_or_default();
+    let scope_mode: String = eng.as_ref().map(|e| e.mode.clone()).unwrap_or_else(|| app.scope_mode.as_str().to_string());
+    // (1) validation des cibles : host bien formé ET ⊆ scope de l'engagement (fail-closed, comme /api/run).
     let targets_in = match body.get("targets").and_then(|v| v.as_array()) {
         Some(a) if !a.is_empty() => a.clone(),
         _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_targets", "why": "targets[] requis (non vide)"}))),
@@ -135,8 +153,8 @@ pub(crate) async fn plan(State(app): State<App>, Json(body): Json<Value>) -> imp
         let host = t.as_str().unwrap_or("");
         match validate_host(host) {
             Ok(h) => {
-                if !host_in_server_scope(&app, &h) {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "out_of_scope", "why": format!("'{h}' hors du scope serveur autorisé")})));
+                if !host_in_scope_list(&scope_in, &h) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "out_of_scope", "why": format!("'{h}' hors du scope de l'engagement autorisé")})));
                 }
                 targets.push(h);
             }
@@ -163,7 +181,7 @@ pub(crate) async fn plan(State(app): State<App>, Json(body): Json<Value>) -> imp
     }
     let scope_doc = json!({
         "_comment": format!("dry-plan {stamp} — INERTE (exploit/destructif forcés false, mode propose)"),
-        "mode": app.scope_mode.as_str(),
+        "mode": scope_mode,
         "in_scope": targets,
         "out_scope": [],
         "rate": 5,
@@ -272,6 +290,38 @@ pub(crate) fn technique_selection_value(app: &App) -> Value {
     technique_selection_value_for(app, 1)
 }
 
+// =====================================================================================
+// PROFILS DE TECHNIQUES NOMMÉS — snapshots RÉUTILISABLES d'une sélection (« bug_bounty », « pentest »,
+// noms libres de l'opérateur). La sélection ACTIVE d'un engagement reste la source de vérité pour
+// l'enforcement (technique_selection_key) ; un profil nommé est juste un modèle qu'on APPLIQUE (côté
+// client) puis qu'on peut ENREGISTRER comme sélection active. Persistés GLOBALEMENT (settings
+// `technique_profiles` = {name: {profile, categories, techniques}}) — un même profil sert plusieurs
+// engagements. Mutation gouvernée (operator/admin) + ledgerisée, comme la sélection.
+// =====================================================================================
+
+/// Clé `settings` (globale) de la bibliothèque de profils nommés.
+pub(crate) fn technique_profiles_key() -> &'static str { "technique_profiles" }
+
+/// Noms de profils de BASE (compris par le moteur) — RÉSERVÉS : on ne peut pas créer un profil nommé
+/// qui les masque (évite l'ambiguïté base vs nommé dans le sélecteur).
+pub(crate) const BASE_PROFILE_NAMES: &[&str] = &["bug_bounty", "pentest", "custom"];
+
+/// Grammaire d'un nom de profil nommé : [A-Za-z0-9._-], 1..64, pas de '-' en tête, ET pas un nom de
+/// base réservé. PURE. Réutilise valid_workflow_token (même grammaire de token gouverné).
+pub(crate) fn valid_technique_profile_name(name: &str) -> bool {
+    valid_workflow_token(name) && !BASE_PROFILE_NAMES.contains(&name)
+}
+
+/// Lit la map globale des profils nommés (`settings[technique_profiles]`). Fail-soft : absente/illisible/
+/// non-objet -> map vide (jamais de valeur inventée). Verrouille le mutex DB.
+pub(crate) fn technique_profiles_map(app: &App) -> serde_json::Map<String, Value> {
+    let raw = { let store = app.store(); crate::settings_get_store(&store, technique_profiles_key()) };
+    match raw.as_deref().map(serde_json::from_str::<Value>) {
+        Some(Ok(Value::Object(m))) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
 /// Valide/normalise une sélection POSTée : {profile?, categories?:{str:bool}, techniques?:{str:bool}}.
 /// `profile` ∈ {bug_bounty,pentest,custom} (défaut bug_bounty). Les clés de toggle sont des noms bien
 /// formés (grammaire [A-Za-z0-9._-], 1..64), les valeurs des booléens, la map bornée (≤256). Les clés
@@ -353,9 +403,16 @@ pub(crate) async fn techniques_catalog(State(app): State<App>, headers: HeaderMa
     // ENGAGEMENT : catalogue résolu contre la sélection/profil de l'engagement actif (par-engagement).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     let sel = technique_selection_value_for(&app, eid);
+    // PROFILS NOMMÉS (réutilisables) — servis avec le catalogue pour peupler le sélecteur du SPA et
+    // permettre d'APPLIQUER un profil (prefill des toggles côté client) sans aller-retour serveur.
+    let named_profiles = Value::Object(technique_profiles_map(&app));
     match spawn_techniques_catalog(&app, &sel) {
         Ok(mut v) => {
-            if let Some(o) = v.as_object_mut() { o.insert("engagement_id".into(), json!(eid)); }
+            if let Some(o) = v.as_object_mut() {
+                o.insert("engagement_id".into(), json!(eid));
+                o.insert("named_profiles".into(), named_profiles);
+                o.insert("selection".into(), sel);
+            }
             (StatusCode::OK, Json(v)).into_response()
         }
         // fail-soft LISIBLE : le SPA affiche encore le sélecteur de profil même si le moteur est absent.
@@ -364,6 +421,7 @@ pub(crate) async fn techniques_catalog(State(app): State<App>, headers: HeaderMa
             "engagement_id": eid,
             "profile": sel.get("profile").cloned().unwrap_or(json!("bug_bounty")),
             "profiles": ["bug_bounty", "pentest", "custom"],
+            "named_profiles": named_profiles,
             "selection": sel, "enabled": [], "groups": {},
         }))).into_response(),
     }
@@ -386,6 +444,29 @@ pub(crate) async fn technique_selection_set(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
+    let actor = attribution_login(&app, &headers);
+    // (A) SUPPRESSION d'un profil nommé (`{"delete_profile": "<nom>"}`) — global, ne touche AUCUNE
+    // sélection active. Refuse un nom de base réservé (via valid_technique_profile_name) et un profil
+    // inconnu (404). Ledgerisé. Traité AVANT la résolution d'engagement (un profil n'est pas par-engagement).
+    if let Some(pname) = body.get("delete_profile").and_then(|v| v.as_str()) {
+        if !valid_technique_profile_name(pname) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_profile_name", "why": "nom de profil invalide ([A-Za-z0-9._-], 1..64, hors bug_bounty|pentest|custom)"}))).into_response();
+        }
+        let mut map = technique_profiles_map(&app);
+        if map.remove(pname).is_none() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": format!("profil inconnu : {pname}")}))).into_response();
+        }
+        {
+            let store = app.store();
+            if let Err(e) = crate::settings_set_store(&store, technique_profiles_key(), &Value::Object(map.clone()).to_string()) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
+            }
+        }
+        append_console_ledger(&app, "console.techniques.profile.delete", json!({
+            "actor": actor, "by": "operator", "profile": pname,
+        }));
+        return (StatusCode::OK, Json(json!({"ok": true, "deleted_profile": pname, "named_profiles": Value::Object(map)}))).into_response();
+    }
     // ENGAGEMENT : la sélection est PAR-ENGAGEMENT (chaque engagement a SON profil/toggles). L'engagement
     // cible vient de `?engagement=` (ou body.engagement_id), défaut = engagement actif. Un id EXPLICITE
     // doit exister (fail-closed : on n'écrit jamais une sélection pour un engagement fantôme).
@@ -397,17 +478,46 @@ pub(crate) async fn technique_selection_set(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_selection", "why": e}))).into_response(),
     };
+    // (B) « Enregistrer comme profil… » (`{"save_as": "<nom>"}`) — persiste la sélection courante SOUS
+    // un nom RÉUTILISABLE (en plus de l'appliquer comme sélection active). Nom validé (grammaire + hors
+    // base réservée). Un save-as sur un nom existant l'ÉCRASE (update). Ledgerisé séparément.
+    let save_as: Option<String> = match body.get("save_as") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(Value::String(s)) => {
+            let s = s.trim().to_string();
+            if !valid_technique_profile_name(&s) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_profile_name", "why": "nom de profil invalide ([A-Za-z0-9._-], 1..64, hors bug_bounty|pentest|custom)"}))).into_response();
+            }
+            Some(s)
+        }
+        Some(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_profile_name", "why": "save_as doit être une chaîne"}))).into_response(),
+    };
     {
         let store = app.store();
         if let Err(e) = crate::settings_set_store(&store, &technique_selection_key(eid), &sel.to_string()) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
         }
     }
-    let actor = attribution_login(&app, &headers);
     append_console_ledger(&app, "console.techniques.selection.set", json!({
         "actor": actor, "by": "operator", "engagement_id": eid, "selection": sel,
     }));
-    (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "selection": sel}))).into_response()
+    // Persiste le profil nommé APRÈS la sélection active (les deux réussissent ou la sélection reste posée).
+    let mut named_out = technique_profiles_map(&app);
+    if let Some(ref pname) = save_as {
+        named_out.insert(pname.clone(), sel.clone());
+        {
+            let store = app.store();
+            if let Err(e) = crate::settings_set_store(&store, technique_profiles_key(), &Value::Object(named_out.clone()).to_string()) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "persist_failed", "why": e}))).into_response();
+            }
+        }
+        append_console_ledger(&app, "console.techniques.profile.save", json!({
+            "actor": actor, "by": "operator", "profile": pname, "selection": sel,
+        }));
+    }
+    (StatusCode::OK, Json(json!({"ok": true, "engagement_id": eid, "selection": sel,
+        "saved_profile": save_as, "named_profiles": Value::Object(named_out)}))).into_response()
 }
 
 // =====================================================================================
