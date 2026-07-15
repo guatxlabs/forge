@@ -750,6 +750,25 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .presence-avatars .pav.more{background:var(--card2);color:var(--mut);box-shadow:0 0 0 1px var(--bd)}
 .presence-count{font-size:11px}
 .presence-count .ic{width:12px;height:12px;vertical-align:-2px;margin-right:3px}
+/* NOTIFICATIONS (triage enrichi) : cloche + badge non-lu + panneau déroulant. Personnel, discret. */
+.notif{position:relative;display:flex;align-items:center}
+.notif-bell{position:relative;padding:6px 8px}
+.notif-bell .ic{width:17px;height:17px}
+.notif-badge{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;font-size:10px;line-height:16px;font-weight:700;font-family:var(--font-mono);text-align:center;color:var(--acc-ink);background:var(--acc);border-radius:999px;border:2px solid var(--bg);box-sizing:content-box}
+.notif-panel{position:absolute;top:calc(100% + 8px);right:0;z-index:60;width:340px;max-width:82vw;background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);box-shadow:0 12px 34px rgba(0,0,0,.35);overflow:hidden}
+.notif-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--bd)}
+.notif-head .notif-title{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);font-weight:600}
+.notif-head button{font-size:11px;padding:4px 9px}
+.notif-list{max-height:min(60vh,420px);overflow:auto;padding:6px}
+.notif-item{display:flex;align-items:flex-start;gap:9px;width:100%;text-align:left;background:transparent;border:0;border-radius:9px;padding:9px 10px;cursor:pointer;color:var(--fg);font-size:13px;font-family:inherit}
+.notif-item:hover{background:var(--acc-bg)}
+.notif-item.unread{background:color-mix(in srgb,var(--acc) 7%,transparent)}
+.notif-item.unread:hover{background:var(--acc-bg)}
+.notif-dot{flex:0 0 auto;width:8px;height:8px;margin-top:6px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 1px color-mix(in srgb,var(--acc) 35%,transparent)}
+.notif-dot.read{background:transparent;box-shadow:0 0 0 1px var(--bd)}
+.notif-main{display:flex;flex-direction:column;gap:2px;min-width:0}
+.notif-text{color:var(--fg);word-break:break-word;line-height:1.4}
+.notif-meta{font-size:11px}
 /* vue de login : plein écran, fond aurora (hérité de body::before), carte centrée */
 /* z-index 150 : au-dessus de l'en-tête (20) et des modales app (100), mais SOUS les toasts (200)
    pour que les notifications (ex. « Déconnecté ») restent lisibles par-dessus le portail. */

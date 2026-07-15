@@ -602,6 +602,13 @@ pub(crate) async fn finding_assign(
     append_console_ledger(&app, "console.finding.assign", json!({
         "by": actor, "engagement_id": eid, "finding_id": id, "assignee": assignee,
     }));
+    // NOTIFICATION (triage enrichi) — best-effort, APRÈS un succès durable + ledger (guard `store` libéré ;
+    // aucun verrou tenu à travers l'émission/SSE). UNIQUEMENT sur une ASSIGNATION (Some) — jamais sur une
+    // désassignation. `notify_assigned` saute l'auto-assignation + applique le grant-scope. Un échec d'insert
+    // de notif NE casse NI ne fausse cette assignation (déjà réussie/ledgerisée) et NE double PAS le ledger.
+    if let Some(uid) = assignee {
+        notifications::notify_assigned(&app, &headers, eid, id, uid);
+    }
     (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "assignee": assignee}))).into_response()
 }
 
@@ -711,6 +718,9 @@ pub(crate) async fn finding_triage(
         kind: "finding.triage".to_string(),
         payload: json!({"finding_id": id, "from": current, "to": to, "engagement": eid, "by": actor}),
     });
+    // NOTIFICATION (triage enrichi) — best-effort : notifie l'ASSIGNÉ du finding (s'il existe et != acteur)
+    // de la transition. Grant-scopée + no-self dans `notify_triage`. N'affecte pas la mutation (déjà réussie).
+    notifications::notify_triage(&app, &headers, eid, id, &current, &to);
     (StatusCode::OK, Json(json!({"ok": true, "finding_id": id, "from": current, "to": to}))).into_response()
 }
 
@@ -948,6 +958,15 @@ pub(crate) async fn findings_bulk_assign(
         detail.as_object_mut().unwrap().insert("errored".into(), json!(errored));
     }
     append_console_ledger(&app, "console.finding.bulk_assign", detail);
+    // NOTIFICATION (triage enrichi) — best-effort, UNIQUEMENT sur une ASSIGNATION (Some) et pour les findings
+    // RÉELLEMENT mutés (`applied`). Acteur (user_id + login) résolu UNE fois hors de la boucle (évite N
+    // résolutions de session). `notify_assigned_by` saute l'auto-assignation + applique le grant-scope.
+    if let Some(uid) = assignee {
+        let actor_uid = tenancy::caller_user_id(&app, &headers);
+        for id in &applied {
+            notifications::notify_assigned_by(&app, actor_uid, &actor, eid, *id, uid);
+        }
+    }
     if !errored.is_empty() {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
             "ok": false, "error": "db_write_failed", "assignee": assignee, "engagement_id": eid,
@@ -1009,6 +1028,9 @@ pub(crate) async fn findings_bulk_triage(
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }
     let (mut applied, mut skipped, mut errored): (Vec<i64>, Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new(), Vec::new());
+    // (id, from) des transitions RÉELLEMENT durables — sert à composer les notifications per-finding (chaque
+    // finding transitionne DEPUIS SON état courant, donc le `from` diffère). Parallèle à `applied`.
+    let mut applied_from: Vec<(i64, String)> = Vec::new();
     for id in &ids {
         // État courant PER-FINDING (confiné à l'engagement) : introuvable ou transition illégale -> SKIP.
         let current = match current_triage(&app, *id, eid) {
@@ -1024,7 +1046,7 @@ pub(crate) async fn findings_bulk_triage(
             "UPDATE finding SET triage=? WHERE id=? AND engagement_id=?",
             &crate::sql_params![to.clone(), *id, eid],
         ) {
-            Ok(n) if n > 0 => applied.push(*id),
+            Ok(n) if n > 0 => { applied.push(*id); applied_from.push((*id, current.clone())); }
             Ok(_) => skipped.push(*id),
             Err(_) => errored.push(*id),
         }
@@ -1045,6 +1067,15 @@ pub(crate) async fn findings_bulk_triage(
             kind: "finding.triage".to_string(),
             payload: json!({"finding_ids": applied, "to": to, "engagement": eid, "by": actor}),
         });
+    }
+    // NOTIFICATION (triage enrichi) — best-effort : notifie l'ASSIGNÉ de CHAQUE finding réellement transitionné
+    // (depuis SON `from`). Acteur (user_id) résolu UNE fois hors de la boucle. Grant-scopé + no-self dans
+    // `notify_triage_by`. N'affecte pas les mutations (déjà réussies/ledgerisées).
+    if !applied_from.is_empty() {
+        let actor_uid = tenancy::caller_user_id(&app, &headers);
+        for (id, from) in &applied_from {
+            notifications::notify_triage_by(&app, actor_uid, &actor, eid, *id, from, &to);
+        }
     }
     if !errored.is_empty() {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({

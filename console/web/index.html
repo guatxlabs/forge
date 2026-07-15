@@ -33,6 +33,22 @@
   <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
   <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
   <div class="hdr-tools">
+    <!-- NOTIFICATIONS (triage enrichi) : cloche + badge non-lu, mis à jour en direct via SSE
+         (/api/notifications/events). Ouvre un panneau listant les notifs récentes (chacune lie son
+         finding). Masqué tant qu'aucune notif. Personnel (fail-closed au user_id). Voir notifications.rs. -->
+    <div id="notif" class="notif" hidden>
+      <button id="notif-bell" class="k-theme notif-bell" type="button" aria-label="Notifications" aria-haspopup="true" aria-expanded="false" title="Notifications">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 7H3s3 0 3-7"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+        <span id="notif-badge" class="notif-badge badge" title="Notifications non lues" hidden>0</span>
+      </button>
+      <div id="notif-panel" class="notif-panel" role="menu" aria-label="Notifications récentes" hidden>
+        <div class="notif-head">
+          <span class="notif-title">Notifications</span>
+          <button id="notif-readall" class="k-theme" type="button" title="Tout marquer comme lu">Tout marquer lu</button>
+        </div>
+        <div id="notif-list" class="notif-list"><div class="muted">chargement…</div></div>
+      </div>
+    </div>
     <!-- PRÉSENCE (#9) : indicateur multi-opérateur LIVE — qui est connecté sur l'engagement actif.
          Initiales/avatars + compteur, mis à jour en direct via SSE (/api/presence/events). Discret,
          masqué tant qu'il n'y a personne (ou un seul soi-même). Per-instance (voir presence.rs). -->

@@ -81,6 +81,11 @@ mod saved_views;
 // ET le câblage d'UN `Extension<PresenceRegistry>` (état EN MÉMOIRE, per-instance) dans build_router — donc
 // AUCUN champ ajouté à App (zéro site de construction touché). Réutilise App + le bus App.events + auth/tenancy.
 mod presence;
+// NOTIFICATIONS (triage enrichi) — couche LÉGÈRE de collaboration in-app posée sur l'ownership (assignee)
+// + le cycle de triage. Même discipline que presence/saved_views : handlers/logique dans son PROPRE module ;
+// main.rs n'y contribue que la ligne `mod` + le `merge` des routes. Émet sur les hooks assign/triage de
+// findings.rs (best-effort, grant-scopé), réutilise App + le bus App.events (topic dédié) — zéro champ App.
+mod notifications;
 // HA (#10 Wave A/B) — leader lease + heartbeat + run-leader (enqueue/claim/spawn), PG-only + opt-in
 // FORGE_HA. The MODULE is now compiled UNCONDITIONALLY because Wave B routes the SHARED run-flow through
 // its PORTABLE predicates (`ha_enabled`/`is_leader`/`my_instance_id`) — in the community build those
@@ -483,6 +488,13 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // flux SSE (join au connect, leave au drop, heartbeat interne) ; POST /api/presence/heartbeat.
         // FAIL-CLOSED auth + tenant-scopé. L'état vit dans l'Extension câblée sur le routeur externe.
         .merge(presence::routes())
+        // NOTIFICATIONS (triage enrichi) : boîte de réception in-app PERSONNELLE. Routes DANS
+        // console/src/notifications.rs, fusionnées AVANT le fallback + le route_layer => héritent de
+        // l'auth_guard/host_guard. GET /api/notifications = mes notifs (non-lues d'abord + compteur non-lu) ;
+        // POST /api/notifications/read = marquer lues (les MIENNES) ; GET /api/notifications/events = flux SSE
+        // filtré sur mon user_id. Fail-closed au user_id de l'appelant (jamais celles d'un autre). Émission
+        // sur les hooks assign/triage de findings.rs (best-effort, grant-scopée).
+        .merge(notifications::routes())
         // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
         // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
