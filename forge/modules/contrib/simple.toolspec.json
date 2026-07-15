@@ -1,0 +1,15 @@
+{
+  "kind": "custom.whatweb",
+  "vuln_class": "Recon",
+  "binary": "whatweb",
+  "argv_template": ["{target_url}"],
+  "parser": "lines",
+  "phase": "recon",
+  "capability": "active",
+  "attck_tactic": "Reconnaissance",
+  "mitre": "T1595",
+  "hit_status": "tested",
+  "severity": "INFO",
+  "timeout": 120,
+  "description": "SIMPLE — le strict minimum : binaire + cible, aucun paramètre. Enrobe `whatweb` pour fingerprinter une URL (juste la cible → run). Aucun params_schema, aucune flag_allowlist, pas de {args}. Gouverné comme un module natif : argv fixe no-shell, scope-guard fail-closed, proof-oriented (hit=tested, jamais vulnerable). Charge via FORGE_TOOLSPECS / `--toolspec` / le formulaire UI (coller ce JSON). Namespace `custom.*` obligatoire."
+}

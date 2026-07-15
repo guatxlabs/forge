@@ -1,0 +1,38 @@
+{
+  "kind": "custom.nuclei_scan",
+  "vuln_class": "WebScan",
+  "binary": "nuclei",
+  "docker_image": "projectdiscovery/nuclei",
+  "prefer_docker": false,
+  "argv_template": [
+    "-u", "{target_url}",
+    "-severity", "{param:severity:low,medium,high,critical}",
+    "-tags", "{param:tags}",
+    "-t", "{param:templates}",
+    "-rl", "{param:rate:0}",
+    "-jsonl", "-silent",
+    "{args}"
+  ],
+  "params_schema": [
+    { "name": "severity",  "type": "select", "label": "sévérité",
+      "allowed": ["info", "low", "medium", "high", "critical", "low,medium,high,critical"],
+      "default": "low,medium,high,critical" },
+    { "name": "tags",      "type": "text",   "label": "tags (ex cve,rce)" },
+    { "name": "templates", "type": "text",   "label": "templates (chemin/id)" },
+    { "name": "rate",      "type": "number", "label": "rate-limit (req/s, 0 = défaut)", "default": 0 }
+  ],
+  "flag_allowlist": ["-u", "-severity", "-tags", "-t", "-rl", "-jsonl", "-silent", "-etags", "-itags", "-timeout"],
+  "parser": "jsonl",
+  "parser_json_path": ["info.name", "info.severity", "matched-at"],
+  "phase": "access",
+  "capability": "active",
+  "attck_tactic": "Reconnaissance",
+  "mitre": "T1595.002",
+  "cwe": "CWE-937",
+  "exploit": true,
+  "destructive": false,
+  "hit_status": "reported_by_tool",
+  "severity": "MEDIUM",
+  "timeout": 1200,
+  "description": "DIFFICILE — exploit-class (operator+arm requis pour tirer), fallback docker, parser JSONL + json_path (extraction de champs), params riches (severity/tags/templates/rate) + extra_args allowlistés. `exploit=true` => plancher exploit : un scope gouverné lié SANS opt-in armé (allow_exploit/allow_high_impact) => skipped, zéro I/O — il n'est PAS lançable sans la gate d'armement. Repli docker (projectdiscovery/nuclei) si le binaire local manque. Parser jsonl : chaque ligne JSON est extraite via parser_json_path. Statut CLAMPÉ à reported_by_tool (jamais vulnerable : un scanner rapporte, il ne prouve pas). Charge via FORGE_TOOLSPECS / `--toolspec` / le formulaire UI (coller ce JSON). Namespace `custom.*` obligatoire."
+}
