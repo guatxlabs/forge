@@ -165,20 +165,30 @@ const SHELL_METACHARS: &[char] = &[';', '|', '&', '$', '`', '<', '>', '\n', '\r'
 /// `Some(raison)` si dangereux. Appliqué au binaire, aux tokens-drapeaux, à la `flag_allowlist` et aux
 /// `flag` des descripteurs — JAMAIS aux textes libres (description/label).
 fn dangerous_flag(tok: &str) -> Option<String> {
-    let t = tok.trim().to_ascii_lowercase();
-    // drapeaux EXACTS d'écriture-fichier (famille -o de nmap/httpx/…) et de proxy.
+    let raw = tok.trim();
+    // Drapeaux COURTS curl d'exfil, CASE-SENSITIVE : `-T`/`--upload-file` (fichier→URL), `-K` (lecture
+    // d'un fichier de config, forme courte de `--config`), `-F` (upload de fichier de formulaire
+    // `-F name=@file`). On DOIT les distinguer de leurs homologues MINUSCULES très courants et légitimes
+    // (`-t` threads/templates, `-k` insecure-TLS, `-f` fail) — d'où la comparaison AVANT le lowercase.
+    const EXACT_CS: &[&str] = &["-T", "-K", "-F"];
+    if EXACT_CS.contains(&raw) {
+        return Some(format!("drapeau '{tok}' exfiltre (upload-file/config-read/form-file curl) — refusé"));
+    }
+    let t = raw.to_ascii_lowercase();
+    // drapeaux EXACTS d'écriture-fichier (famille -o de nmap/httpx/…), de proxy et d'upload (--upload-file).
     const EXACT: &[&str] = &[
         "-o", "-oa", "-on", "-ox", "-og", "-oj", "-os", "-of", "-x", "-r", "--output", "--proxy",
         "--config", "--file-read", "--file-write", "--os-shell", "--os-cmd", "--sql-shell", "--eval",
-        "--tamper", "--dump", "--dump-all",
+        "--tamper", "--dump", "--dump-all", "--upload-file",
     ];
     if EXACT.contains(&t.as_str()) {
-        return Some(format!("drapeau '{tok}' exfiltre (output-file/config-read/proxy/shell) — refusé"));
+        return Some(format!("drapeau '{tok}' exfiltre (output-file/config-read/proxy/upload/shell) — refusé"));
     }
-    // sous-chaînes signant la même intention (couvre --output-dir, -replay-proxy, --config-file, …).
+    // sous-chaînes signant la même intention (couvre --output-dir, -replay-proxy, --config-file,
+    // --upload-file=…, …).
     const SUBSTR: &[&str] = &[
-        "output", "proxy", "config", "file-write", "file-read", "os-shell", "os-cmd", "os-pwn",
-        "sql-shell", "tamper", "debug-log", "--dump",
+        "output", "proxy", "config", "file-write", "file-read", "upload-file", "os-shell", "os-cmd",
+        "os-pwn", "sql-shell", "tamper", "debug-log", "--dump",
     ];
     for s in SUBSTR {
         if t.contains(s) {

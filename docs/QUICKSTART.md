@@ -27,6 +27,8 @@ Ouvre **http://127.0.0.1:7100**. Au 1er lancement, l'**assistant de déploiement
 
 L'assistant s'auto-désactive une fois provisionné. Tu es connecté, prêt à tester. **Zéro fichier, zéro commande.**
 
+> ⚠️ **Provisionne AVANT d'exposer le port.** Le wizard est public jusqu'à ce que l'admin existe — quiconque atteint l'hôte en premier peut le réclamer. Garde le bind sur **loopback `127.0.0.1`** (le défaut) et **ne passe PAS à `0.0.0.0`** tant que tu n'as pas claim l'admin (cf. `docs/DEPLOYMENT.md §2`).
+
 > Le périmètre saisi devient l'**Engagement #1**. `allow_exploit`/`allow_destructive` restent `false` en bug bounty (techniques destructrices/DoS/brute-force bannies et refusées par le scope-guard de toute façon). Le test authentifié (IDOR/ATO : creds/session/idor_targets) se règle dans l'éditeur d'engagement (secret, jamais journalisé).
 
 ## 3. Un 2e programme = un nouvel Engagement (dans l'UI)

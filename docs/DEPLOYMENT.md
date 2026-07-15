@@ -171,6 +171,16 @@ détection** : tout se provisionne **depuis le navigateur** au premier accès.
 3. La gate d'auth **s'engage** dès qu'un admin activé existe (l'état DB fait autorité). `/api/setup`
    se ferme définitivement.
 
+> ⚠️ **Sécurité — NE PAS exposer le port AVANT le premier provisioning.** Le wizard zéro-config est
+> **public par conception** jusqu'à ce qu'un admin existe (`POST /api/setup` s'auto-désactive en `409`
+> seulement une fois l'admin créé). Tant que l'install est vierge, **quiconque atteint l'hôte avant vous
+> peut réclamer l'admin** — exposition standard des wizards self-hosted. Le code gère la course
+> (création d'admin atomique, `/api/setup` fail-closed dès le premier admin), **mais le port doit rester
+> sur loopback / derrière une auth tant que l'install n'est pas provisionnée.** Le bind par défaut est
+> déjà **`127.0.0.1:7100`** (loopback) — **ne PAS passer à `0.0.0.0` avant d'avoir claim l'admin.**
+> Provisionner d'abord (localement ou via un tunnel/reverse-proxy authentifié), publier ensuite. En
+> headless, provisionner par variables d'env (ci-dessous) **avant** le premier démarrage exposé.
+
 **Provisioning headless** (sans navigateur) : poser `FORGE_CONSOLE_PASS_HASH` /
 `FORGE_CONSOLE_OPERATOR_HASH` (hashes argon2id via `forge hashpw` / `hashpw-operator`) et
 `FORGE_CONSOLE_TOKEN` dans `.env`/l'EnvironmentFile — l'`state` bascule alors `provisioned:true` sans wizard.

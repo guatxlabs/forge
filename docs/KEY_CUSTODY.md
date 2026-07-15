@@ -124,23 +124,68 @@ Store the PIN via your secret manager and inject it as `FORGE_LEDGER_PKCS11_PIN`
 argv). Rotate the ledger key by generating a new token key and re-anchoring; the public key changes, so
 publish the new public key to your auditors/witness.
 
-### Escape hatch — GCP-KMS-Ed25519 / custom signers (exec signer)
+### Escape hatch — GCP-KMS-Ed25519 via the generic exec signer (recommended cloud-KMS path)
 
-If your backend signs Ed25519 but has **no PKCS#11 provider** (e.g. GCP KMS via the CLI), use the generic
-**no-shell exec signer** already in `forge/signing.py` — a fixed, admin-configured argv that receives the
-bytes on stdin and writes the hex Ed25519 signature to stdout:
+If your backend signs Ed25519 but has **no PKCS#11 provider** — the canonical case is **GCP KMS driven by
+the `gcloud` CLI** — use the generic **no-shell exec signer** already in `forge/signing.py`. It runs a
+**fixed, admin-configured argv** (a JSON array — never a shell string, so no metacharacter is ever
+interpreted), pipes the bytes-to-sign on **stdin**, and reads the **hex Ed25519 signature (128 hex chars)**
+back from **stdout**. Same fail-closed guarantee as every enterprise signer: `RemoteSigner.sign`
+**re-verifies** the returned signature against `FORGE_LEDGER_SIGNER_PUBKEY` before the entry is written — a
+malformed or non-verifying response is **rejected** and the append aborts (never an unsigned entry).
+
+> **No bespoke GCP driver — by design.** Forge ships **no** GCP-KMS-specific code: the generic exec signer
+> already covers GCP-KMS end-to-end (below). **AWS-KMS remains unsupported for this ledger** — it offers no
+> Ed25519 key type (RSA/ECDSA only; see the table above). For AWS, front the ledger with a **PKCS#11**
+> HSM/CloudHSM instead, or use GCP KMS.
+
+**1 — create an Ed25519 signing key in GCP KMS** (algorithm `EC_SIGN_ED25519`):
+
+```bash
+gcloud kms keyrings create forge --location=global
+gcloud kms keys create ledger \
+  --location=global --keyring=forge \
+  --purpose=asymmetric-signing \
+  --default-algorithm=ec-sign-ed25519      # EC_SIGN_ED25519 — Ed25519, matches the ledger algorithm
+```
+
+**2 — export the PUBLIC key as 64-hex** (exactly what `verify_external` / `ledger verify --pubkey` expects):
+
+```bash
+gcloud kms keys versions get-public-key 1 \
+  --location=global --keyring=forge --key=ledger --output-file=ledger.pub.pem
+# PEM (SubjectPublicKeyInfo) → raw 32-byte Ed25519 pubkey → hex:
+python3 -c 'from cryptography.hazmat.primitives.serialization import load_pem_public_key; \
+  print(load_pem_public_key(open("ledger.pub.pem","rb").read()).public_bytes_raw().hex())'
+# → 64 hex chars. This is FORGE_LEDGER_SIGNER_PUBKEY — publish it to your auditors/witness.
+```
+
+**3 — the sign helper** `/opt/forge/gcp-kms-ed25519-sign.sh` — reads the bytes on stdin, calls
+`gcloud kms asymmetric-sign` (which for Ed25519 signs the **raw input**, no pre-digest), and hex-encodes the
+**raw 64-byte** signature GCP returns onto stdout:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+loc="$1"; kr="$2"; key="$3"; ver="$4"                    # passed as fixed argv elements (no shell parsing)
+gcloud kms asymmetric-sign \
+  --location="$loc" --keyring="$kr" --key="$key" --version="$ver" \
+  --input-file=- --signature-file=- \
+  | python3 -c 'import sys; sys.stdout.write(sys.stdin.buffer.read().hex())'
+```
+
+**4 — wire the exec signer** (the argv is a JSON array — the helper path plus its fixed arguments):
 
 ```bash
 export FORGE_ENTERPRISE_COMPLIANCE=1
 export FORGE_LEDGER_SIGNER=exec
-export FORGE_LEDGER_SIGNER_PUBKEY=<64-hex Ed25519 public key>
-# argv is a JSON array (no shell); the helper must emit the hex signature of stdin:
-export FORGE_LEDGER_SIGNER_ARGV='["/opt/forge/gcp-kms-ed25519-sign.sh","projects/…/cryptoKeyVersions/1"]'
+export FORGE_LEDGER_SIGNER_PUBKEY=<64-hex from step 2>
+export FORGE_LEDGER_SIGNER_ARGV='["/opt/forge/gcp-kms-ed25519-sign.sh","global","forge","ledger","1"]'
 ```
 
-The helper wraps e.g. `gcloud kms asymmetric-sign --key … --signature-file - --input-file -` (returning
-the raw signature as hex). Same fail-closed re-verify applies: a signature that does not verify against
-`FORGE_LEDGER_SIGNER_PUBKEY` is rejected.
+The private key **never leaves GCP KMS** (only `gcloud … asymmetric-sign` is invoked; no key material on
+any pod volume). Rotate by creating a new key version and re-exporting the public key (step 2) — then
+publish the new public key to your auditors/witness.
 
 ---
 

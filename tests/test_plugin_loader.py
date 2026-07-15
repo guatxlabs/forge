@@ -253,6 +253,56 @@ class TestToolspecLoader(unittest.TestCase):
                 loader.load_toolspec_file(f.name)
             os.unlink(f.name)
 
+    def test_dangerous_spec_fail_closed_parity_with_api(self):
+        # PARITÉ avec l'endpoint Rust /api/tools : un spec déclaratif porteur d'un binaire interpréteur,
+        # d'un drapeau d'exfil (argv OU flag_allowlist), d'un `{args}` sans allowlist, ou d'un placeholder
+        # inconnu est REJETÉ fail-closed (SpecError nommant le fichier) — aucun enregistrement.
+        cases = {
+            "binaire interpréteur (sh)":   dict(self.GOOD, kind="recon.d1", binary="sh"),
+            "binaire interpréteur (/usr/bin/python3)": dict(self.GOOD, kind="recon.d2", binary="/usr/bin/python3"),
+            "exfil argv (-o)":             dict(self.GOOD, kind="recon.d3", argv_template=["-o", "out.txt", "{target_url}"]),
+            "exfil argv curl (-T)":        dict(self.GOOD, kind="recon.d4", argv_template=["-T", "{target_url}"]),
+            "exfil argv (--upload-file)":  dict(self.GOOD, kind="recon.d5", argv_template=["--upload-file", "{target_url}"]),
+            "exfil allowlist (--proxy)":   dict(self.GOOD, kind="recon.d6", argv_template=["{target_url}", "{args}"], flag_allowlist=["--proxy"]),
+            "{args} sans allowlist":       dict(self.GOOD, kind="recon.d7", argv_template=["{target_url}", "{args}"]),
+            "placeholder inconnu {evil}":  dict(self.GOOD, kind="recon.d8", argv_template=["-u", "{evil}"]),
+        }
+        for label, spec in cases.items():
+            with self.subTest(label):
+                with _Registry():
+                    path = self._write(spec)
+                    with self.assertRaises(loader.SpecError, msg=f"{label} aurait dû être refusé"):
+                        loader.load_toolspec_file(path)
+                    os.unlink(path)
+                    self.assertNotIn(spec["kind"], mods.kinds(), f"{label} ne doit PAS s'enregistrer")
+
+    def test_lowercase_short_flags_still_allowed(self):
+        # anti-sur-blocage : -t/-k/-f minuscules (threads/insecure/fail) restent LÉGITIMES via {args}.
+        spec = dict(self.GOOD, kind="recon.okflags", argv_template=["-u", "{target_url}", "{args}"],
+                    flag_allowlist=["-t", "-k", "-f"])
+        with _Registry():
+            path = self._write(spec)
+            kind = loader.load_toolspec_file(path)
+            os.unlink(path)
+            self.assertEqual(kind, "recon.okflags")
+
+    def test_env_toolspecs_dir_skips_dangerous_soft(self):
+        # FAIL-SOFT : un spec dangereux déposé dans FORGE_TOOLSPECS est IGNORÉ (warning journalisé), le
+        # spec propre voisin se charge quand même — le loader ne CRASHE jamais au boot.
+        with _Registry():
+            with tempfile.TemporaryDirectory() as d:
+                (Path(d) / "a_bad.json").write_text(
+                    json.dumps(dict(self.GOOD, kind="recon.bad", binary="bash")), encoding="utf-8")
+                (Path(d) / "b_good.json").write_text(
+                    json.dumps(self.GOOD), encoding="utf-8")
+                os.environ["FORGE_TOOLSPECS"] = d
+                with self.assertLogs("forge.modules.loader", level="WARNING") as cm:
+                    kinds = loader.load_env_toolspecs()
+                del os.environ["FORGE_TOOLSPECS"]
+                self.assertEqual(kinds, ["recon.plugintool"], "seul le spec propre est chargé")
+                self.assertNotIn("recon.bad", mods.kinds(), "spec dangereux non enregistré")
+                self.assertTrue(any("interpréteur" in m for m in cm.output), "cause journalisée")
+
     def test_yaml_optional_no_hard_dep(self):
         # YAML n'est chargé QUE si pyyaml présent ; sinon SpecError clair (jamais un ImportError dur).
         with _Registry():
