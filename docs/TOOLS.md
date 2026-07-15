@@ -105,21 +105,78 @@ tests) — **rien** n'est affaibli par cet endpoint, qui ne fait que **déclarer
 ## 5. Rendre le binaire disponible
 
 Un outil dont le `binary`/`docker_image` **n'est pas présent** dans le runtime dégrade proprement en
-`available:false` et est **skippé** au run (il ne *prétend* jamais tourner). Trois façons de le rendre exécutable :
+`available:false` et est **skippé** au run — **jamais** un faux résultat, jamais un `vulnerable` inventé.
+**Trois façons** de rendre un outil disponible :
 
-1. **Baker le binaire dans une image custom** (recommandé en conteneur/k3s) — dérivez l'image Forge et
-   `COPY`/installez votre binaire dans le `PATH` :
-   ```dockerfile
-   FROM forge:latest
-   RUN apk add --no-cache your-tool     # ou COPY ./bin/your-tool /usr/local/bin/
-   ```
-2. **Script auto-contenu** que l'`argv` invoque (déposé dans le `PATH` de l'image, exécutable).
-3. **`docker_image`** : **nécessite le socket docker** monté dans le conteneur Forge. En conteneur **sans**
-   socket docker (le défaut durci), un outil `docker_image` **ne peut pas** tourner → privilégiez un **binaire
-   présent dans l'image** (chemin primaire) ou un script auto-contenu.
+### (a) Il est déjà dans l'image `full`
 
-Sinon (binaire absent) : l'outil reste visible dans le catalogue mais **`indispo`** — il est simplement **skippé**
-(offline-safe), jamais un faux résultat.
+Le profil `full` (défaut) embarque **`nmap`**, **`curl`**, **`dig`** (dnsutils), **`httpx`**, **`nuclei`**,
+**`subfinder`**. Ces `binary:` sont résolus d'office — rien à faire. *(En profil `mini`, seuls nmap/curl/dig
+sont présents ; httpx/nuclei/subfinder dégradent en `available:false`.)*
+
+### (b) Image custom mince (`FROM forge:0.0.1`) — jeu d'outils figé, production
+
+Recommandé quand le jeu d'outils est **arrêté** (déploiement reproductible, conteneur/k3s durci sans montage).
+Dérivez l'image et installez/copiez vos binaires dans le `PATH` :
+
+```dockerfile
+FROM forge:0.0.1
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends sqlmap ffuf \
+    && rm -rf /var/lib/apt/lists/*
+COPY ./bin/myfuzzer /usr/local/bin/myfuzzer        # binaire ou script auto-contenu (chmod +x)
+USER forge
+```
+
+### (c) Monter SANS rebuild — `./tools`, `./plugins`, `./toolspecs`
+
+Un red-teamer **itère** sur beaucoup d'outils : inutile de reconstruire l'image à chaque ajout. L'image expose
+**trois dossiers de montage OPT-IN** (binds `:ro` **commentés** dans `docker-compose.yml` — décommenter + créer
+le dossier hôte ; cf. la section « OUTILLAGE OPÉRATEUR SANS REBUILD » du compose) :
+
+| Dossier hôte | → conteneur | Contenu | Câblage | Prise en compte |
+|--------------|-------------|---------|---------|-----------------|
+| `./tools` | `/opt/tools` | binaires **ou scripts auto-contenus exécutables** (shebang + `chmod +x`) | **déjà sur le `PATH`** (aucune env) | résolu sur PATH par `shutil.which` — **sans redémarrage** |
+| `./plugins` | `/opt/forge/plugins` | modules **Python `@register`** (code) | env `FORGE_PLUGINS=/opt/forge/plugins` | chargé au **boot / re-sonde** du catalogue |
+| `./toolspecs` | `/opt/toolspecs` | **ToolSpecs déclaratifs** JSON/YAML (zéro code) | env `FORGE_TOOLSPECS=/opt/toolspecs` | chargé au **boot / re-sonde** du catalogue |
+
+**Exemple — ajouter `myfuzzer` sans rebuild :**
+
+```bash
+# 1) déposer le binaire/script exécutable côté hôte
+mkdir -p forge/tools && cp ~/bin/myfuzzer forge/tools/ && chmod +x forge/tools/myfuzzer
+# 2) décommenter le bind dans forge/docker-compose.yml (bloc volumes du service `forge`) :
+#      - ./tools:/opt/tools:ro
+# 3) (re)démarrer — aucune reconstruction d'image
+docker compose -f forge/docker-compose.yml up -d
+```
+
+Puis déclarez un ToolSpec pointant `"binary": "myfuzzer"` (via **Administration → Ajouter un outil**, §2, ou un
+fichier JSON déposé dans `./toolspecs`). `/opt/tools` étant sur le `PATH`, `runner.tool` le résout au run.
+
+> **Posture de sécurité — à assumer.** `./tools` et `./plugins` sont **OPÉRATEUR-DE-CONFIANCE** : vous
+> exécutez des **binaires / du code Python arbitraires que VOUS choisissez de monter** (un plugin `.py` tourne
+> dans le process moteur). La **gouvernance ToolSpec** (scope-guard fail-closed, argv **no-shell**, **allowlist**
+> de drapeaux, statut jamais promu `vulnerable`, plancher exploit) borne **COMMENT** un outil est invoqué — elle
+> ne sandboxe pas ce qu'un binaire/plugin fait en interne. `./toolspecs` est la voie **gouvernée sans code**
+> (déclaratif uniquement). Tous les montages sont **`:ro`** et **opt-in** (rien de monté par défaut).
+
+### `docker_image` (repli conteneurisé) — nécessite le socket docker
+
+Un ToolSpec peut fixer un `docker_image` de repli. Il **nécessite le socket docker** monté dans le conteneur
+Forge ; **sans** socket (le défaut durci), un outil `docker_image` **ne peut pas** tourner → privilégiez un
+**binaire présent** (image `full`, image custom, ou `./tools`) ou un script auto-contenu.
+
+### Scripts Python personnalisés — deux voies légitimes
+
+Un ToolSpec **ne peut PAS** invoquer un interpréteur (`python3 script.py`, `sh`, `bash`… sont **refusés
+fail-closed** — sinon `bash -c` ré-introduirait le shell). Pour un outil écrit en Python :
+
+- **soit** un **plugin** `@register` déposé dans `./plugins` (`FORGE_PLUGINS`) — la voie code ;
+- **soit** un **exécutable auto-contenu** (shebang `#!/usr/bin/env python3` + `chmod +x`) déposé dans `./tools`,
+  invoqué par son **nom** (`"binary": "monoutil"`), pas via un interpréteur.
+
+Dans tous les cas : **binaire absent au runtime → `skipped`** (offline-safe), jamais un faux résultat.
 
 ## 6. API
 

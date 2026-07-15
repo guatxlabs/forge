@@ -123,6 +123,10 @@ LABEL org.opencontainers.image.title="forge" \
 #   - python3            : la console spawn `python3 -m forge.cli` (cœur pur-stdlib, zéro pip) ;
 #   - ca-certificates    : TLS sortant (httpx/nuclei/connecteurs REST) ;
 #   - nmap               : module recon.nmap_scan ;
+#   - dnsutils           : fournit `dig` — ToolSpec `recon.dig` (lookup DNS gouverné) + repli natif de
+#                          recon.dns / subdomain.takeover. Ajout MINIMAL (dig seul) ; le reste du catalogue
+#                          d'outils se monte sans rebuild via /opt/tools (cf. docker-compose.yml), on n'embarque
+#                          donc PAS toute la boîte à outils dans l'image.
 #   - curl, unzip        : récupération des binaires PD ci-dessous ;
 #   - tini               : init PID 1 (reaping des process enfants spawnés par la console).
 RUN apt-get update \
@@ -130,6 +134,7 @@ RUN apt-get update \
         python3 \
         ca-certificates \
         nmap \
+        dnsutils \
         curl \
         unzip \
         tini \
@@ -238,16 +243,34 @@ COPY forge/scope.example.json /opt/forge/scope.example.json
 
 # Répertoires de données persistés (déclarés en volumes) : DB console, ledger d'engagement,
 # scope/ROE actif. Vides dans l'image — remplis par bind/named volumes au run.
-RUN mkdir -p /data/db /data/ledger /data/scope
+#
+# Points de montage OPT-IN pour l'outillage opérateur SANS rebuild (cf. docker-compose.yml, tous commentés
+# par défaut) — créés VIDES ici pour que les binds `:ro` aient une cible existante ET lisible par le user
+# non-root, et pour que /opt/tools existe sur le PATH même sans montage :
+#   /opt/tools         → binaires & scripts AUTO-CONTENUS exécutables déposés par l'opérateur ; AJOUTÉ AU
+#                        PATH (ENV ci-dessous) → résolus par `runner.tool`/`shutil.which` au run (un ToolSpec
+#                        `binary: X` devient exécutable dès que /opt/tools/X existe). Ramassé sans redémarrage.
+#   /opt/forge/plugins → modules Python `@register` utilisateur (via FORGE_PLUGINS) — CODE ARBITRAIRE, haute
+#                        confiance opérateur ; chargés au boot / à la re-sonde du catalogue.
+#   /opt/toolspecs     → ToolSpecs déclaratifs JSON/YAML (via FORGE_TOOLSPECS) — gouvernés, ZÉRO code ;
+#                        fusionnés avec le dossier server-managed (les specs opérateur restent chargés).
+RUN mkdir -p /data/db /data/ledger /data/scope /opt/tools /opt/forge/plugins /opt/toolspecs
 
 # Utilisateur non-root (least privilege) — la console bind un port haut (>1024), pas besoin de root.
+# Les dossiers de montage opt-in sont chownés au user pour rester LISIBLES même sous un bind `:ro`
+# (le contenu monté est en lecture seule ; le user a seulement besoin de le LIRE/EXÉCUTER).
 RUN useradd --system --create-home --uid 10001 forge \
-    && chown -R forge:forge /opt/forge /data
+    && chown -R forge:forge /opt/forge /data /opt/tools /opt/toolspecs
 USER forge
 
 # --- Configuration (ENV documentées) ------------------------------------------
 # Console (Rust) :
-ENV FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
+# PATH : /opt/tools EN TÊTE → un binaire/script exécutable monté par l'opérateur (docker-compose.yml,
+# bind `./tools:/opt/tools:ro`) est résolu par `runner.tool` (shutil.which) SANS rebuild. Dossier
+# opérateur-contrôlé (vide dans l'image par défaut) : le préfixer est sûr et voulu (il n'ombre rien tant
+# que l'opérateur n'y dépose pas délibérément un binaire homonyme). Le reste du PATH système est préservé.
+ENV PATH="/opt/tools:${PATH}" \
+    FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
     FORGE_CONSOLE_DB=/data/db/forge.db \
     FORGE_CONSOLE_LEDGER=/data/ledger/engagement.jsonl \
     FORGE_CONSOLE_SCOPE=/data/scope/scope.json \

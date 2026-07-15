@@ -78,6 +78,14 @@ services:
       FORGE_PKG_DIR: "/opt/forge"
       FORGE_PYTHON: "python3"
       FORGE_RUN_TIMEOUT: "900"
+
+      # --- Outillage opérateur SANS rebuild (OPT-IN) : env À DÉCOMMENTER AVEC le bind :ro correspondant ---
+      # (voir le bloc `volumes:` plus bas). Ces env n'activent QUE les dossiers Python/spec ; les binaires
+      # de `./tools` sont, eux, déjà sur le PATH de l'image (aucune env requise). DÉFAUT (commenté) = aucun
+      # dossier hôte requis, catalogue inchangé. Décommenter charge le dossier au boot / à la re-sonde.
+      #   FORGE_PLUGINS: "/opt/forge/plugins"    # modules Python @register (CODE ARBITRAIRE — haute confiance opérateur)
+      #   FORGE_TOOLSPECS: "/opt/toolspecs"      # ToolSpecs déclaratifs JSON/YAML (gouvernés, zéro code ; fusionnés au dir server-managed)
+
       # --- Couche accès/évasion (browser-automation) ---------------------------------------
       # Service OPTIONNEL derrière `profiles: ["browser"]` (défini plus bas). Ce nom d'hôte ne
       # résout QUE sous `docker compose --profile browser up`. Sinon le connecteur évasion sonde à
@@ -156,6 +164,30 @@ services:
       # OPTIONNEL : pour amorcer #1 depuis un fichier hôte AVEC AUTORISATION, décommenter la ligne suivante
       # et créer forge/scope.json (`cp scope.example.json scope.json`, puis éditer). Absent = fail-closed.
       # - ./scope.json:/data/scope/scope.json:ro
+      #
+      # --- OUTILLAGE OPÉRATEUR SANS REBUILD (OPT-IN, même logique que le bind scope.json ci-dessus) --------
+      # Un red-teamer itère sur beaucoup d'outils : déposez-les dans des dossiers HÔTE montés EN LECTURE
+      # SEULE (`:ro`), plutôt que de reconstruire l'image. DÉFAUT = tout commenté → aucun dossier hôte
+      # requis, `docker compose up` inchangé. Pour activer une voie : créer le dossier hôte (ex.
+      # `mkdir -p forge/tools`) PUIS décommenter SA ligne (+ pour (b)/(c), l'env FORGE_* associée plus haut).
+      #
+      #  (a) ./tools → /opt/tools : binaires OU scripts auto-contenus exécutables (shebang + `chmod +x`).
+      #      /opt/tools est DÉJÀ sur le PATH de l'image → `runner.tool` les résout via `shutil.which` au run
+      #      (un ToolSpec `binary: myfuzzer` s'exécute dès que `forge/tools/myfuzzer` existe). Ramassé sur
+      #      PATH SANS redémarrage. ⚠️ OPÉRATEUR-DE-CONFIANCE : vous exécutez ce que vous montez (binaires/
+      #      scripts arbitraires que VOUS choisissez). La gouvernance ToolSpec (scope-guard fail-closed, argv
+      #      no-shell, allowlist de drapeaux) borne COMMENT l'outil est invoqué — pas ce que le binaire fait.
+      # - ./tools:/opt/tools:ro
+      #
+      #  (b) ./plugins → /opt/forge/plugins (REQUIERT FORGE_PLUGINS décommentée plus haut) : modules Python
+      #      `@register`. ⚠️ HAUTE CONFIANCE — CODE PYTHON ARBITRAIRE exécuté dans le process moteur ; à
+      #      réserver à des plugins dont vous maîtrisez la source. Chargés au boot / à la re-sonde du catalogue.
+      # - ./plugins:/opt/forge/plugins:ro
+      #
+      #  (c) ./toolspecs → /opt/toolspecs (REQUIERT FORGE_TOOLSPECS décommentée plus haut) : ToolSpecs
+      #      déclaratifs JSON/YAML — ZÉRO code, gouvernés EXACTEMENT comme un module natif. Fusionnés avec le
+      #      dossier server-managed (vos specs restent chargés). Chargés au boot / à la re-sonde du catalogue.
+      # - ./toolspecs:/opt/toolspecs:ro
     networks:
       - forge-net
     # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et
