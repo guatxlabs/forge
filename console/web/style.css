@@ -1159,3 +1159,36 @@ textarea.at-inp{resize:vertical;min-height:38px}
 .lc-modopt .lc-modargs{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--acc);white-space:nowrap;opacity:.85}
 .lc-modopt.params-open .lc-modargs{opacity:1}
 .lc-modparams-head{font-size:11px;font-weight:600;color:var(--fg);letter-spacing:.02em}
+
+/* =====================================================================================
+   C3 + C4 + C7 (2e test live) — contrôles/indicateurs restés en chrome NATIF (fall-through navigateur)
+   ou non contraints, remis au thème Aurora (sombre ET clair, via les tokens partagés). Bloc DISTINCT
+   appendé (anti-clobber : un agent parallèle édite aussi ce fichier).
+   ===================================================================================== */
+
+/* C3 — indicateur « actif : NOM · mode » : sans contrainte, le libellé enveloppait sur plusieurs lignes
+   et faisait gonfler la barre d'engagement (rendu « cassé »). On garde tout sur UNE ligne : la barre ne
+   retourne pas à la ligne, le select et le libellé ellipsent proprement (le nom·mode reste lisible, jamais
+   tronqué en un simple « - »). Le libellé est peuplé par renderEngagementSelector (textContent, anti-XSS). */
+.eng-bar{flex-wrap:nowrap;max-width:min(48vw,560px)}
+.eng-select{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.eng-active-wrap{display:inline-flex;align-items:center;gap:4px;min-width:0;font-size:12px;color:var(--mut);white-space:nowrap}
+.eng-active{font-weight:650;color:var(--fg);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eng-active.archived{color:var(--sev3)}
+
+/* C4 — bouton « Vérifier » du scope-check : tombait sur le bouton natif (clair) au milieu du thème sombre.
+   Même chrome que les boutons secondaires de l'app (fond carte, bordure, survol/focus accent). Le champ
+   cible reçoit un focus-ring cohérent. */
+.lc-scope-btn{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600;transition:border-color .15s,color .15s,background .15s}
+.lc-scope-btn:hover{border-color:var(--acc);color:var(--acc)}
+.lc-scope-btn:focus-visible{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.lc-scope-row input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+
+/* C7 — sélecteur de format UNIQUE du rapport (#rep-format) : rendu natif (clair) → chrome de l'app (comme
+   #viz / #f-sev). C'est le SEUL contrôle de format (le document rendu n'embarque aucun lien ?format=). Les
+   notes non-HTML de l'aperçu (formats binaires / erreurs) sont espacées pour ne pas coller au bord de la
+   carte d'aperçu. */
+.rep-fmt select#rep-format{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:9px;padding:0 10px;cursor:pointer;font-size:13px;font-family:inherit}
+.rep-fmt select#rep-format:hover{border-color:var(--acc)}
+.rep-fmt select#rep-format:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.rep-preview>.muted,.rep-preview>.bad{padding:16px}
