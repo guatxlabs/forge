@@ -33,12 +33,26 @@ export function schemaFields(schema) {
   });
 }
 
+// Champ générique d'ARGUMENTS LIBRES (extra_args) — proposé pour TOUT outil à schéma (et pour un outil
+// SANS schéma), afin que l'opérateur puisse TOUJOURS passer des arguments. La saisie est une LISTE de
+// tokens (séparés par virgule) ; le serveur les VALIDE contre l'allowlist de drapeaux du module
+// (fail-closed : un drapeau hors allowlist est refusé au lancement). C9 : rendre la personnalisation
+// d'outil systématiquement DÉCOUVRABLE, quel que soit l'outil/script.
+const EXTRA_ARGS_FIELD = { name: 'extra_args', type: 'list', label: 'extra_args — arguments libres (tokens séparés par virgule, allowlist serveur)', placeholder: '--script, default, --min-rate, 500' };
+
 // Champs de params EFFECTIFS d'un module : le `params_schema` servi par le moteur PRIME (source unique) ;
-// à défaut (aucun schéma servi), on retombe sur le map statique MODULE_PARAMS (modules d'évasion).
+// à défaut, on retombe sur le map statique MODULE_PARAMS (modules d'évasion browser, PAS de CLI -> pas
+// d'extra_args). Tout outil À SCHÉMA reçoit en plus un champ `extra_args` (s'il n'en déclare pas déjà un).
+// Un outil SANS schéma NI MODULE_PARAMS (mais lançable) reçoit AU MINIMUM le champ `extra_args` générique.
 export function fieldsFor(m) {
   const served = schemaFields(m && m.params_schema);
-  if (served.length) return served;
-  return MODULE_PARAMS[m && m.kind] || null;
+  if (served.length) {
+    return served.some(f => f.name === 'extra_args') ? served : served.concat([EXTRA_ARGS_FIELD]);
+  }
+  const evasion = MODULE_PARAMS[m && m.kind];
+  if (evasion) return evasion;                 // pseudo-module browser (pas d'outil CLI) : pas d'extra_args
+  // Outil lançable sans schéma déclaré -> au moins les arguments libres allowlistés (jamais « rien »).
+  return [EXTRA_ARGS_FIELD];
 }
 
 // rendu de la liste de modules dans le formulaire : web_allowed=1 -> case cochable ;
@@ -114,10 +128,23 @@ export function renderLaunchModules() {
     } else if (m.mitre) {
       lab.title = m.mitre + (m.descr ? ' — ' + m.descr : '');
     }
+    // AFFORDANCE DÉCOUVRABLE (C9) : un outil personnalisable annonce ses arguments AVANT la case cochée,
+    // pour que l'opérateur SACHE qu'il peut le régler. Le clic sur la case révèle le panneau (params-open).
+    if (specs && !disabledByAdmin && !disabledByAbsent) {
+      const gear = document.createElement('span'); gear.className = 'lc-modargs';
+      gear.textContent = '⚙ personnaliser';
+      gear.title = 'Cocher cet outil révèle son panneau « Personnaliser » — ports/wordlist/threads/… + arguments libres (extra_args allowlistés).';
+      top.appendChild(gear);
+    }
     lab.appendChild(top);
     // bloc de params spécifiques : visible seulement quand la case est cochée (params-open).
     if (specs) {
       const pbox = document.createElement('div'); pbox.className = 'lc-modparams'; pbox.dataset.lcparamsFor = m.kind;
+      // en-tête CLAIR du panneau : « Personnaliser <outil> — arguments » (lève l'ambiguïté : c'est ICI
+      // qu'on règle les arguments de l'outil).
+      const phead = document.createElement('div'); phead.className = 'lc-modparams-head';
+      phead.textContent = 'Personnaliser ' + m.kind + ' — arguments';
+      pbox.appendChild(phead);
       specs.forEach(f => {
         const pf = document.createElement('div'); pf.className = 'lc-pf';
         const cap = document.createElement('span'); cap.textContent = f.label || f.name; pf.appendChild(cap);

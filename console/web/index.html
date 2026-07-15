@@ -154,7 +154,7 @@
       <span class="lc-lbl" style="margin:0">Vérifier le scope d'une cible <span class="muted">— lecture pure, ne lance rien</span></span>
       <div class="lc-scope-row">
         <input id="lc-scopetarget" placeholder="ex: api.example.com ou 10.0.0.0/8" spellcheck="false" autocomplete="off">
-        <button id="lc-scopecheck" type="button">Vérifier</button>
+        <button id="lc-scopecheck" class="lc-scope-btn" type="button">Vérifier</button>
         <button id="lc-scopeadd" type="button" class="k-theme" title="Ajouter cette cible aux cibles du lancement" hidden>+ Cibles</button>
       </div>
       <div id="lc-scoperes" class="lc-scope-out" hidden></div>
@@ -343,6 +343,8 @@
             <option value="custom">custom</option>
           </select>
         </label>
+        <button id="tq-all" class="k-theme" type="button" title="Tout sélectionner (toutes catégories) — coche chaque technique du catalogue. Le moteur enforce toujours le scope (fail-closed).">Tout sélectionner</button>
+        <button id="tq-none" class="k-theme" type="button" title="Tout désélectionner (toutes catégories) — décoche chaque technique.">Tout désélectionner</button>
         <button id="tq-save" class="k-theme" type="button" title="Enregistre la sélection courante (toggles) sous un NOM réutilisable. Autorisé par votre session operator/admin (aucun token à coller), action ledgerisée.">Enregistrer comme profil…</button>
         <button id="tq-delete" class="k-theme" type="button" disabled title="Sélectionne un profil enregistré pour pouvoir le supprimer">Supprimer le profil</button>
         <button id="tq-reload" class="k-theme" type="button" title="Recharger le catalogue + la sélection enregistrée depuis le moteur">Recharger</button>

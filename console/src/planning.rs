@@ -172,6 +172,18 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
     if let Err(e) = validate_modules(&app, &requested_modules, false) {
         return e.into_parts();
     }
+    // (2b) params PAR-MODULE (C9) : mêmes validations que /api/run (kind bien formé, ⊆ modules[] si
+    // fourni, forme/taille/NUL, extra_args ∈ allowlist du module — fail-closed). Threadés dans le
+    // targets.json du dry-plan (attrs.module_params) EXACTEMENT comme au run : le moteur en propose
+    // tient compte, l'aperçu reflète donc les arguments de l'opérateur (parité run/plan). INERTE.
+    let module_params = match validate_module_params(&body, &requested_modules) {
+        Ok(m) => m,
+        Err(e) => return e.into_parts(),
+    };
+    if let Err(e) = validate_extra_args(&app, &module_params) {
+        return e.into_parts();
+    }
+    let module_params = Value::Object(module_params);
 
     // (3) dir temp éphémère : scope.json (allow_* FORCÉS false) + targets.json. Nettoyé en fin.
     let stamp = format!("plan-{}-{}", chrono_now_compact(), gen_token().chars().take(8).collect::<String>());
@@ -191,7 +203,12 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
         "idor_targets": [],
         "notes": "dry-plan via console (gouverné) — rien ne tire"
     });
-    let targets_doc: Vec<Value> = targets.iter().map(|h| json!({"host": h, "kind": "host"})).collect();
+    // Chaque cible porte les params par-module (attrs.module_params) — MÊME passthrough qu'au run
+    // (runs_proc), pour que le proposer applique les arguments de l'opérateur dans l'aperçu.
+    let targets_doc: Vec<Value> = targets
+        .iter()
+        .map(|h| json!({"host": h, "kind": "host", "attrs": {"module_params": module_params.clone()}}))
+        .collect();
     let scope_path = plan_dir.join("scope.json");
     let targets_path = plan_dir.join("targets.json");
     if std::fs::write(&scope_path, serde_json::to_vec(&scope_doc).unwrap()).is_err()
@@ -237,6 +254,7 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
                 "mode": "propose",
                 "targets": targets,
                 "modules": requested_modules,
+                "module_params": module_params,
                 "actions": actions,
                 "exit_ok": o.status.success(),
                 "stdout": stdout,

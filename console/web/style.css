@@ -1153,3 +1153,9 @@ textarea.at-inp{resize:vertical;min-height:38px}
 .console-line-ok{color:var(--ok);font-weight:600}
 .console-line-err{color:var(--bad)}
 .console-line-sys{color:var(--warn)}
+
+/* === C9 — découvrabilité de la personnalisation d'outil (Launch) : affordance « ⚙ personnaliser »
+   dans la ligne du module + en-tête clair du panneau d'arguments. Bloc distinct (anti-clobber). === */
+.lc-modopt .lc-modargs{margin-left:auto;font-size:10px;font-family:var(--font-mono);color:var(--acc);white-space:nowrap;opacity:.85}
+.lc-modopt.params-open .lc-modargs{opacity:1}
+.lc-modparams-head{font-size:11px;font-weight:600;color:var(--fg);letter-spacing:.02em}
