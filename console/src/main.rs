@@ -4640,6 +4640,21 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
         s["flag_allowlist"] = json!(["--proxy"]);
         assert!(crate::tools::validate_toolspec(&s).is_err(), "allowlist --proxy refusée");
+        // drapeaux courts curl d'exfil/upload/config -T/-K/-F et --upload-file -> 400 (soit en argv, soit
+        // en flag_allowlist). CASE-SENSITIVE : les minuscules -t/-k/-f (threads/insecure/fail) restent OK.
+        for bad_flag in ["-T", "-K", "-F", "--upload-file"] {
+            let mut s = simple_toolspec(); s["argv_template"] = json!([bad_flag, "{target}"]);
+            assert!(crate::tools::validate_toolspec(&s).is_err(), "argv '{bad_flag}' (exfil curl) refusé");
+            let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
+            s["flag_allowlist"] = json!([bad_flag]);
+            assert!(crate::tools::validate_toolspec(&s).is_err(), "flag_allowlist '{bad_flag}' refusée");
+        }
+        // garde anti-sur-blocage : les drapeaux MINUSCULES homologues restent autorisés (threads/insecure/fail).
+        for ok_flag in ["-t", "-k", "-f"] {
+            let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{args}"]);
+            s["flag_allowlist"] = json!([ok_flag]);
+            assert!(crate::tools::validate_toolspec(&s).is_ok(), "flag_allowlist '{ok_flag}' (légitime) acceptée");
+        }
         // kind hors namespace custom.* (surcharge natif) -> 400.
         let mut s = simple_toolspec(); s["kind"] = json!("recon.httpx");
         assert!(crate::tools::validate_toolspec(&s).is_err(), "kind non-custom refusé");

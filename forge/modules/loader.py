@@ -177,9 +177,149 @@ def _read_spec_data(filepath):
     return data
 
 
+# =================================================================================================
+#  PARITÉ SÉCURITÉ avec l'endpoint Rust /api/tools (console/src/tools.rs::validate_toolspec)
+# -------------------------------------------------------------------------------------------------
+#  Un ToolSpec déposé dans un dossier `FORGE_TOOLSPECS` (ou via `--toolspec`) DOIT subir EXACTEMENT les
+#  mêmes garde-fous fail-closed que celui soumis via l'API console : (1) binaire NON-interpréteur/shell,
+#  (2) AUCUN drapeau d'exfil/écriture-fichier/lecture-config dans `argv_template`/`flag_allowlist`,
+#  (3) `{args}` EXIGE une `flag_allowlist` non vide, (4) placeholders bornés au jeu connu. Défense en
+#  profondeur : la voie fichier obtient la même sûreté que la voie API. MIROIR VOLONTAIRE de tools.rs —
+#  garder les listes synchronisées avec `INTERPRETER_BINARIES` / `dangerous_flag` côté Rust.
+_INTERPRETER_BINARIES = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "busybox", "env", "python",
+    "python2", "python3", "perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "awk", "gawk",
+    "mawk", "expect", "tclsh", "wish", "powershell", "pwsh", "cmd", "xargs", "find", "eval", "exec",
+    "source", "sudo", "doas", "ssh", "scp", "sftp", "socat", "nc", "ncat", "netcat", "telnet", "rsync",
+})
+# Drapeaux COURTS curl d'exfil, CASE-SENSITIVE (≠ minuscules -t/-k/-f threads/insecure/fail légitimes).
+_DANGEROUS_FLAG_CS = ("-T", "-K", "-F")
+_DANGEROUS_FLAG_EXACT = frozenset({
+    "-o", "-oa", "-on", "-ox", "-og", "-oj", "-os", "-of", "-x", "-r", "--output", "--proxy",
+    "--config", "--file-read", "--file-write", "--os-shell", "--os-cmd", "--sql-shell", "--eval",
+    "--tamper", "--dump", "--dump-all", "--upload-file",
+})
+_DANGEROUS_FLAG_SUBSTR = (
+    "output", "proxy", "config", "file-write", "file-read", "upload-file", "os-shell", "os-cmd",
+    "os-pwn", "sql-shell", "tamper", "debug-log", "--dump",
+)
+_KNOWN_PLACEHOLDERS = ("target", "target_host", "target_url")
+
+
+def _dangerous_flag(tok):
+    """Miroir de `dangerous_flag` (Rust). Renvoie une RAISON si `tok` smuggle une exfil / écriture-fichier
+    / lecture-config / proxy, sinon None. CASE-SENSITIVE sur -T/-K/-F (upload-file/config-read/form-file
+    curl) pour ne PAS attraper les -t/-k/-f minuscules très courants et légitimes."""
+    raw = str(tok).strip()
+    if raw in _DANGEROUS_FLAG_CS:
+        return f"drapeau '{tok}' exfiltre (upload-file/config-read/form-file curl) — refusé"
+    t = raw.lower()
+    if t in _DANGEROUS_FLAG_EXACT:
+        return f"drapeau '{tok}' exfiltre (output-file/config-read/proxy/upload/shell) — refusé"
+    for s in _DANGEROUS_FLAG_SUBSTR:
+        if s in t:
+            return f"drapeau '{tok}' contient '{s}' (exfil output/config/proxy) — refusé"
+    return None
+
+
+def _validate_placeholder_body(body, tok):
+    """Corps d'un `{...}` autorisé : target|target_host|target_url|param:NAME[:DEF]. `args` doit être
+    STANDALONE (traité à part), tout autre est REFUSÉ. Renvoie une raison si invalide, sinon None."""
+    if body in _KNOWN_PLACEHOLDERS:
+        return None
+    if body.startswith("param:"):
+        rest = body[len("param:"):]
+        name = rest.split(":", 1)[0]
+        if not name or not all(c.isalnum() or c == "_" for c in name):
+            return f"token '{tok}' : nom de param invalide dans {{param:{rest}}} (attendu [A-Za-z0-9_]+)"
+        return None
+    return (f"token '{tok}' : placeholder {{{body}}} inconnu — seuls "
+            f"{{target}}/{{target_host}}/{{target_url}}/{{param:NAME}}/{{args}} sont permis")
+
+
+def _scan_argv_token(tok, in_group):
+    """Valide UN token argv (string). Renvoie (reason_or_None, args_used_bool). `{args}` n'est autorisé
+    que STANDALONE au top-level ; un token-drapeau (`-x`) passe la curation d'exfil sur sa tête."""
+    if not isinstance(tok, str):
+        return (f"token argv_template non-string refusé: {tok!r}", False)
+    if "\x00" in tok:
+        return ("token argv_template contient un octet NUL — refusé", False)
+    if tok.strip() == "{args}":
+        if in_group:
+            return ("'{args}' n'est autorisé qu'au niveau supérieur (pas dans un groupe)", False)
+        return (None, True)
+    i, n, literal = 0, len(tok), []
+    while i < n:
+        if tok[i] == "{":
+            close = tok.find("}", i)
+            if close == -1:
+                return (f"token '{tok}' : accolade '{{' non fermée", False)
+            reason = _validate_placeholder_body(tok[i + 1:close], tok)
+            if reason is not None:
+                return (reason, False)
+            i = close + 1
+        else:
+            if tok[i] == "}":
+                return (f"token '{tok}' : '}}' sans '{{' correspondant", False)
+            literal.append(tok[i])
+            i += 1
+    lit = "".join(literal)
+    if lit.startswith("-"):
+        reason = _dangerous_flag(lit)
+        if reason is not None:
+            return (reason, False)
+    return (None, False)
+
+
+def _reject_dangerous(data):
+    """Applique les garde-fous fail-closed de l'endpoint Rust /api/tools à un ToolSpec DÉCLARATIF (parité
+    défense-en-profondeur). Renvoie une RAISON de refus (str) si le spec est dangereux, sinon None. Pur,
+    ne lève jamais (le caller `_validate_spec_fields` transforme en SpecError nommant le fichier)."""
+    # (1) binaire : jamais un interpréteur/shell, jamais un drapeau d'exfil.
+    binary = data.get("binary", "")
+    if isinstance(binary, str) and binary:
+        base = re.split(r"[\\/]", binary)[-1].lower().split(".")[0]
+        if base in _INTERPRETER_BINARIES:
+            return (f"binaire '{binary}' est un interpréteur/shell ('{base}') — refusé "
+                    f"(réintroduirait le shell)")
+        reason = _dangerous_flag(binary)
+        if reason is not None:
+            return reason
+    # (2)+(4) argv_template : placeholders bornés + aucun drapeau d'exfil ; suit l'usage de `{args}`.
+    args_used = False
+    stack = [(data.get("argv_template", ()) or (), False)]
+    if not isinstance(stack[0][0], (list, tuple)):
+        return "argv_template doit être une LISTE de tokens (jamais une chaîne shell)"
+    while stack:
+        tokens, in_group = stack.pop()
+        for t in tokens:
+            if isinstance(t, (list, tuple)):
+                stack.append((t, True))
+                continue
+            reason, used = _scan_argv_token(t, in_group)
+            if reason is not None:
+                return reason
+            if used:
+                args_used = True
+    # (3) flag_allowlist : aucun drapeau d'exfil ; requise et NON VIDE si `{args}` est employé.
+    allowlist = data.get("flag_allowlist", ()) or ()
+    if isinstance(allowlist, (list, tuple)):
+        for f in allowlist:
+            if isinstance(f, str):
+                reason = _dangerous_flag(f)
+                if reason is not None:
+                    return reason
+    if args_used and not (isinstance(allowlist, (list, tuple)) and len(allowlist) > 0):
+        return ("'{args}' utilisé mais flag_allowlist absente/vide — refusé "
+                "(extra-args non gouvernés)")
+    return None
+
+
 def _validate_spec_fields(ToolSpec, data, filepath):
     """Valide `data` contre la signature du constructeur `ToolSpec` (fail-closed). Rejette tout champ
-    INCONNU et signale tout champ REQUIS manquant, avec un message NOMMANT le fichier. Retourne data."""
+    INCONNU, signale tout champ REQUIS manquant, ET applique les garde-fous sûreté (parité API : binaire
+    non-interpréteur, drapeaux d'exfil, `{args}`⇒allowlist, placeholders bornés) — avec un message NOMMANT
+    le fichier. Retourne data."""
     params = [p for p in inspect.signature(ToolSpec.__init__).parameters.values() if p.name != "self"]
     allowed = {p.name for p in params}
     required = {p.name for p in params if p.default is inspect.Parameter.empty
@@ -191,6 +331,9 @@ def _validate_spec_fields(ToolSpec, data, filepath):
     missing = required - set(data)
     if missing:
         raise SpecError(f"{filepath}: champ(s) requis manquant(s) {sorted(missing)}")
+    danger = _reject_dangerous(data)
+    if danger:
+        raise SpecError(f"{filepath}: {danger}")
     return data
 
 
