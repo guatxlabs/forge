@@ -159,7 +159,9 @@ fn resolve_detection_source_from(setting: Option<String>) -> Value {
     }
     // repli env legacy : uniquement si settings n'a PAS de detection_source lisible.
     let url = std::env::var("PLUME_URL").unwrap_or_default().trim_end_matches('/').to_string();
-    let token = std::env::var("PLUME_TOKEN").unwrap_or_default();
+    // PLUME_TOKEN with a `*_FILE` fallback (Docker/k8s secret) — the detection creds can live in a
+    // mounted file. Only consulted for the LEGACY env path (settings.detection_source wins above).
+    let token = crate::secret_from_env("PLUME_TOKEN").unwrap_or_default();
     if !url.is_empty() {
         return json!({"kind": "plume", "endpoint": url, "auth": {"type": "basic", "secret": token}});
     }

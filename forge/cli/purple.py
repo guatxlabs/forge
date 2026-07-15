@@ -11,6 +11,7 @@ import urllib.request
 
 from .. import console_client
 from .. import collectors
+from ..portability import env_secret
 
 
 # Une « technique » ATT&CK : Txxxx éventuellement suivie d'un sous-technique .yyy (ex T1190, T1059.001).
@@ -73,7 +74,9 @@ def _configured_source():
     """Résout la source de détection VISIBLE par la CLI (diagnostic) : env `FORGE_DETECTION_SOURCE`
     (JSON posé par la console), sinon repli rétro-compat `PLUME_URL`/`PLUME_TOKEN` -> preset `plume`,
     sinon None (non configurée -> boucle purple INERTE). Ne lève jamais."""
-    raw = os.environ.get("FORGE_DETECTION_SOURCE", "").strip()
+    # FORGE_DETECTION_SOURCE (JSON porteur de secret) + PLUME_TOKEN : repli `*_FILE` (secret Docker/k8s)
+    # — l'env porte un chemin, le secret vit dans un fichier monté. `load_source` résout aussi `*_FILE`.
+    raw = (env_secret("FORGE_DETECTION_SOURCE") or "").strip()
     if raw:
         try:
             return collectors.load_source("env:FORGE_DETECTION_SOURCE")
@@ -82,7 +85,7 @@ def _configured_source():
     url = os.environ.get("PLUME_URL", "").strip()
     if url:
         return {"kind": "plume", "endpoint": url.rstrip("/"),
-                "auth": {"type": "basic", "secret": os.environ.get("PLUME_TOKEN", "")}}
+                "auth": {"type": "basic", "secret": env_secret("PLUME_TOKEN") or ""}}
     return None
 
 
@@ -160,7 +163,7 @@ def cmd_doctor_purple(args):
 
     console_url = console_client.base_url()            # respecte FORGE_CONSOLE_URL (défaut 127.0.0.1:7100)
     plume_url = os.environ.get("PLUME_URL", "").rstrip("/")
-    plume_token = os.environ.get("PLUME_TOKEN", "")    # base64 de user:pass -> Authorization: Basic
+    plume_token = env_secret("PLUME_TOKEN") or ""      # base64 de user:pass -> Authorization: Basic (repli `*_FILE`)
     timeout = getattr(args, "timeout", None) or 8.0
 
     lines = []                                         # (state, label, detail)

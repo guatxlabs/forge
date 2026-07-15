@@ -94,6 +94,9 @@ mod ha;
 // (appels cross-module) et `super::<helper>` (bloc de tests inline) résolvent à l'identique.
 mod common;
 pub(crate) use crate::common::*;
+// `*_FILE` secret indirection (Docker/k8s secrets) — env holds a PATH, secret lives in a mounted file.
+mod secret_env;
+pub(crate) use crate::secret_env::*;
 // Shared internal substrate for the flag-gated enterprise modules (dedup, behaviour-neutral):
 //   error  — compact typed ApiError + IntoResponse (byte-identical `{"error","why"}` envelope).
 //   flags  — the single copy of `env_truthy` + `enterprise_enabled` (env|per-DB config gate).
@@ -771,7 +774,11 @@ async fn serve() {
         std::process::exit(2);
     }
 
-    let token = std::env::var("FORGE_CONSOLE_TOKEN").unwrap_or_else(|_| gen_token());
+    // Ingest/console bearer: resolve FORGE_CONSOLE_TOKEN with a `*_FILE` fallback (Docker/k8s secret),
+    // then auto-generate an ephemeral token when NEITHER is supplied. An empty/unreadable source is
+    // treated as "not provided" (never a silent empty bearer that would leave /api/ingest open).
+    let provided_token = secret_from_env("FORGE_CONSOLE_TOKEN");
+    let token = provided_token.clone().unwrap_or_else(gen_token);
     let user = std::env::var("FORGE_CONSOLE_USER").unwrap_or_else(|_| "forge".to_string());
     let pass_hash = std::env::var("FORGE_CONSOLE_PASS_HASH").unwrap_or_default();
     // rôle OPÉRATEUR (C2) — FAIL-CLOSED : vide => tout endpoint C2 renvoie 403.
@@ -808,7 +815,7 @@ async fn serve() {
     // NE PAS journaliser le token en clair (fuite via logs/journald/historique terminal). On affiche
     // une empreinte courte (8 hex de sha256) — suffisante pour corréler/diagnostiquer sans exposer le
     // secret. Le token en clair reste disponible à l'opérateur via FORGE_CONSOLE_TOKEN (qu'il a posé).
-    let token_was_provided = std::env::var("FORGE_CONSOLE_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+    let token_was_provided = provided_token.is_some();
     let token_fp = &sha_hex(&token)[..8];
     if token_was_provided {
         println!("[forge] ingest token: (fourni via env) fp=sha8:{token_fp}");

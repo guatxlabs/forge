@@ -399,7 +399,10 @@ pub(crate) fn run_migration(opts: &MigrateOpts) -> Result<Value, String> {
 /// dans le build par défaut, ce hook n'existe pas et la base reste en clair (inchangé).
 #[cfg(feature = "encryption")]
 pub(crate) fn apply_db_key_on_boot(conn: &Connection) {
-    if let Ok(key) = std::env::var("FORGE_DB_KEY") {
+    // FORGE_DB_KEY with a `*_FILE` fallback (Docker/k8s secret): the key can live in a mounted,
+    // root-owned file instead of a plaintext env beside the app. Absent/empty => base stays clear
+    // (unchanged). `secret_from_env` never returns an empty string, but keep the guard for clarity.
+    if let Some(key) = crate::secret_from_env("FORGE_DB_KEY") {
         if !key.is_empty() {
             // la clé est passée telle quelle -> SQLCipher en dérive la clé de chiffrement (KDF).
             let _ = conn.pragma_update(None, "key", &key);

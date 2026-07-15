@@ -66,6 +66,7 @@ from ._msgpack import mp_pack, mp_unpack
 from .registry import register, Module
 from .. import session as _session
 from .. import techniques
+from ..portability import env_secret
 from ..schema import extract_cwe
 
 
@@ -91,9 +92,10 @@ def _cfg(action):
         "host": p.get("host") or os.environ.get("MSF_RPC_HOST", "127.0.0.1"),
         "port": int(p.get("port") or os.environ.get("MSF_RPC_PORT", "55553")),
         "user": p.get("user") or os.environ.get("MSF_RPC_USER", "msf"),
-        "pass": p.get("pass") or os.environ.get("MSF_RPC_PASS", ""),
+        # secrets (pass/token) : repli `*_FILE` (secret Docker/k8s) — l'env porte un chemin, pas le secret.
+        "pass": p.get("pass") or env_secret("MSF_RPC_PASS") or "",
         "ssl": _as_bool(p.get("ssl"), os.environ.get("MSF_RPC_SSL", "true")),
-        "token": p.get("token") or os.environ.get("MSF_RPC_TOKEN") or None,
+        "token": p.get("token") or env_secret("MSF_RPC_TOKEN") or None,
     }
 
 

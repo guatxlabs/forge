@@ -555,15 +555,18 @@ def _resolve_signer_config(config, env):
             cfg["timeout"] = float(to)
         except ValueError:
             pass
+    # Secrets (argv de l'exec-signer / credential du signeur distant) : repli `*_FILE` (secret
+    # Docker/k8s) — l'env porte un chemin, le secret vit dans un fichier monté. `env` peut être un
+    # mapping de test, donc on le passe explicitement à `env_secret`.
     if mode in ("exec", "command"):
-        cfg["argv"] = env.get(_SIGNER_ARGV_ENV)
+        cfg["argv"] = portability.env_secret(_SIGNER_ARGV_ENV, env)
     elif mode == "pkcs11":
         pass  # PKCS#11 params live in dedicated FORGE_LEDGER_PKCS11_* env, read by signing_pkcs11 (lazy)
     else:
         ep = env.get(_SIGNER_ENDPOINT_ENV)
         if ep:
             cfg["endpoint"] = ep.strip()
-        cred = env.get(_SIGNER_CREDENTIAL_ENV)
+        cred = portability.env_secret(_SIGNER_CREDENTIAL_ENV, env)
         if cred:
             cfg["credential"] = cred
     return cfg

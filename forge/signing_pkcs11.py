@@ -30,6 +30,7 @@ CONFIG via ENV (never argv — matches the secret-hygiene rule; PIN is a secret)
 import os
 
 from . import signing
+from .portability import env_secret
 
 RemoteSignerError = signing.RemoteSignerError
 
@@ -76,10 +77,13 @@ def resolve_pkcs11_config(config=None, env=None):
     env = os.environ if env is None else env
     config = config or {}
 
-    def pick(key, envk):
+    def pick(key, envk, secret=False):
         v = config.get(key)
         if v is None or v == "":
-            v = env.get(envk)
+            # Le PIN (secret) honore le repli `*_FILE` (secret Docker/k8s) — l'env porte un chemin,
+            # le PIN vit dans un fichier monté ; jamais en argv/logs. Les autres champs (module/slot/
+            # labels — non secrets) restent une lecture d'env directe.
+            v = env_secret(envk, env) if secret else env.get(envk)
         return v
 
     return {
@@ -88,7 +92,7 @@ def resolve_pkcs11_config(config=None, env=None):
         "slot": pick("slot", PKCS11_SLOT_ENV),
         "key_label": pick("key_label", PKCS11_KEY_LABEL_ENV),
         "key_id": pick("key_id", PKCS11_KEY_ID_ENV),
-        "pin": pick("pin", PKCS11_PIN_ENV),
+        "pin": pick("pin", PKCS11_PIN_ENV, secret=True),
     }
 
 

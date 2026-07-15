@@ -124,7 +124,12 @@ fn redacted_ledger_signer() -> Value {
         if m.is_empty() { "local".to_string() } else { m }
     };
     let off_host = !matches!(mode.as_str(), "local" | "file" | "localfile");
-    let set = |k: &str| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false);
+    // `*_set` booleans stay HONEST when the operator supplies the value via a `*_FILE` Docker/k8s
+    // secret instead of an inline env (the Python signer resolves the credential the same way).
+    let set = |k: &str| {
+        std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false)
+            || std::env::var(format!("{k}_FILE")).map(|v| !v.trim().is_empty()).unwrap_or(false)
+    };
     // The PUBLIC key is safe to show (it is the verification material). Prefer the signer pubkey, then the
     // console ledger pubkey — never a private key (there is no env that holds one).
     let pubkey = std::env::var("FORGE_LEDGER_SIGNER_PUBKEY")
@@ -298,10 +303,11 @@ fn seq_to_str(v: &Value) -> String {
 /// convenience). Empty => None => the purge is REFUSED (never a silent, unrecoverable delete). The
 /// passphrase is NEVER returned/logged/ledgered.
 fn archive_passphrase(app: &App) -> Option<String> {
-    if let Ok(v) = std::env::var("FORGE_COMPLIANCE_ARCHIVE_KEY") {
-        if !v.is_empty() {
-            return Some(v);
-        }
+    // FORGE_COMPLIANCE_ARCHIVE_KEY with a `*_FILE` fallback (Docker/k8s secret) — the passphrase can
+    // live in a mounted file instead of a plaintext env beside the app. Empty/unreadable => fall to
+    // the per-DB setting (and ultimately None => purge refused; never a silent unrecoverable delete).
+    if let Some(v) = crate::secret_from_env("FORGE_COMPLIANCE_ARCHIVE_KEY") {
+        return Some(v);
     }
     let store = app.store();
     crate::settings_get_store(&store, "compliance.archive_key").filter(|s| !s.is_empty())

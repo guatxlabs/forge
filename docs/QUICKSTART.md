@@ -67,4 +67,4 @@ Arrêt : `docker compose -f forge/docker-compose.yml down` (volumes persistent ;
 Le **scope est l'autorisation**. N'y mets que ce que le programme t'autorise ; `allow_exploit`/`allow_destructive`
 restent `false` sauf ROE écrit. Les secrets ne traînent pas en clair : détection/SSO se règlent write-only dans
 l'UI ; les secrets d'env (token, passphrase, creds connecteurs) passent par Docker/k8s secrets (`*_FILE`), pas un
-`.env` en clair à côté de l'app (durcissement en cours — cf. `ROADMAP.md`). Forge refuse tout hors-scope, c'est sa raison d'être.
+`.env` en clair à côté de l'app (cf. [`docs/SECRETS.md`](SECRETS.md)). Forge refuse tout hors-scope, c'est sa raison d'être.
