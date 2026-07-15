@@ -64,7 +64,9 @@ pub fn enabled(app: &App) -> bool {
 /// user_id of the caller's INDIVIDUAL session (non-expired, enabled account) — or None.
 /// FAIL-CLOSED: the env-hash bootstrap identity and anonymous dev-open have NO tenant grants (enterprise
 /// requires a provisioned individual account). Mirrors resolve_session_identity's account re-check.
-fn caller_user_id(app: &App, headers: &HeaderMap) -> Option<i64> {
+/// pub(crate) so the notifications layer can resolve the ACTOR's user_id (skip self-notify) and the
+/// RECIPIENT scoping of `GET/POST /api/notifications` reuse the SAME session→user_id resolution.
+pub(crate) fn caller_user_id(app: &App, headers: &HeaderMap) -> Option<i64> {
     let tok = crate::session_token_from_headers(headers);
     if tok.is_empty() {
         return None;

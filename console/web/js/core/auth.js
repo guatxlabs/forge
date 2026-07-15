@@ -8,6 +8,7 @@ import { loadStatuses } from '../views/overview.js';
 import { route } from './router.js';
 import { loadTenancyContext } from '../views/tenancy.js';
 import { initPresence } from './presence.js';
+import { initNotifications } from './notifications.js';
 import { confirmModal, toast } from './ui.js';
 
 export function complianceOn() { return !!(ENTERPRISE && ENTERPRISE.compliance); }
@@ -317,5 +318,7 @@ export async function bootApp() {
   loadStatuses();
   // PRÉSENCE (#9) : ouvrir le flux LIVE après le sélecteur d'engagement (pour scoper sur l'engagement actif).
   try { initPresence(); } catch (e) { /* fail-soft : l'indicateur reste masqué */ }
+  // NOTIFICATIONS (triage enrichi) : ouvrir le flux LIVE + charger la boîte (fail-soft : cloche masquée).
+  try { initNotifications(); } catch (e) { /* fail-soft : la cloche reste masquée */ }
   route();
 }
