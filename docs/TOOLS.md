@@ -218,6 +218,51 @@ fail-closed** — sinon `bash -c` ré-introduirait le shell). Pour un outil écr
 
 Dans tous les cas : **binaire absent au runtime → `skipped`** (offline-safe), jamais un faux résultat.
 
+### Langages supportés
+
+Un outil peut être écrit dans **n'importe quel langage** — ce qui compte, c'est que le runtime sache le
+lancer par son **nom** (pas via un interpréteur, cf. l'argv no-shell §4). Le tableau ci-dessous résume
+**comment fournir** l'outil selon son langage, et si un **redémarrage** est nécessaire.
+
+| Langage de l'outil | Comment le fournir | Redémarrage ? |
+|--------------------|--------------------|---------------|
+| **Binaire compilé** (C/C++/Rust/Go) | Déposez le binaire dans **`forge/tools/`** (`chmod +x`). **Statique de préférence** : un binaire **dynamiquement lié** exige que ses `.so` soient présents dans l'image (sinon `skipped` au run). | **Non** — résolu sur le `PATH` à **fire-time**, sans restart. |
+| **Script Python** | `python3` est présent (c'est le moteur). **Deux voies** : (1) shebang `#!/usr/bin/env python3` + `chmod +x` dans **`forge/tools/`**, invoqué par son **nom** ; (2) module **`@register`** dans **`forge/plugins/`** (montage **opt-in**, code arbitraire). ⚠️ Rappel : un ToolSpec `"binary": "python3", "argv_template": ["script.py"]` est **REJETÉ** (python = interpréteur banni, anti-shell §4) — d'où le **shebang-exécutable** ou le **plugin**. | **Non** (`tools/`) — dispo au prochain run. Le plugin `./plugins` exige d'activer le montage opt-in (recréation one-shot). |
+| **Node/JS, PHP, Ruby, etc.** | L'interpréteur **n'est PAS** dans l'image `full` → **fournissez-le** : soit un **binaire statique** (`node`/`php`) déposé dans **`forge/tools/`**, soit une **image custom** (`FROM forge:0.0.1` + `apt install nodejs php-cli`, cf. §5(b)). | **Non** si binaire statique dans `tools/` ; **oui** (rebuild) pour l'image custom. |
+
+> **Ce qui est réellement dans l'image `full`** (vérifié dans le `Dockerfile`) : le **seul interpréteur**
+> présent est **`python3`** (le cœur du moteur ; le profil `full` ajoute aussi `python3-pip`/`python3-venv`
+> pour le moteur PDF weasyprint, toujours du Python). Les **binaires** livrés sont `nmap`, `curl`, `dig`
+> (dnsutils), `httpx`, `nuclei`, `subfinder`. **Ni `node`, ni `php`, ni `ruby`, ni `perl`** — pour ces
+> langages, il faut donc fournir l'interpréteur vous-même (colonne ci-dessus).
+
+### Ajouter un outil PACKAGÉ (ex. `hydra`, un paquet apt) en live
+
+Certains outils ne sont pas un simple binaire auto-contenu mais un **paquet** (dépendances système). Options,
+**du plus rapide au plus reproductible** :
+
+1. **`docker compose exec -u root forge apt-get update && apt-get install -y <paquet>`** — installe le paquet
+   dans le **conteneur EN COURS**, **sans `build` / `down` / `up`**. À savoir : c'est **éphémère** (reperdu dès
+   que le conteneur est recréé), **non-reproductible**, et ça **nécessite l'accès réseau** (OK en Docker local ;
+   **bloqué en k8s** si une `NetworkPolicy` `egress-deny` est en place). Déclarez ensuite son **ToolSpec**
+   (formulaire **Administration → Ajouter un outil**, §2) puis **« Rafraîchir modules »**.
+2. **Binaire statique / portable dans `forge/tools/`** — pas de souci de dépendances, **persistant** tant que le
+   dossier est monté, **sans redémarrage** (cf. §5(c)).
+3. **Image custom `FROM forge:0.0.1` + `apt install <paquet>`** (§5(b)) — la voie **reproductible / permanente**.
+   Elle implique un **rebuild**, donc **PAS pendant un run** — à **préparer avant** l'engagement.
+
+**Gouvernance — vrai pour tout outil packagé ajouté :**
+
+- Il reste **scope-gardé** : le scope-guard ROE fail-closed s'applique (cible hors périmètre → `skipped`, **zéro
+  I/O**) — **jamais** une action hors-scope, quel que soit l'outil.
+- Un outil d'**exploit / brute-force** doit être **déclaré `exploit=true`** dans son ToolSpec → il n'est
+  **lançable** qu'avec **operator + arm + reason** (le gate C2 existant, cf. §4).
+- ⚠️ Les outils de **brute-force / cred-cracking** (`hydra`, `hashcat`, `john`) sont **hors du catalogue par
+  défaut** : Forge est **proof-oriented** (et le brute-force est **banni** côté bug-bounty). **MAIS** l'opérateur
+  **peut** les ajouter pour un **pentest autorisé** — le mécanisme **ne l'interdit pas** : ils restent
+  **admin-gated**, **scope-gardés** et **armés** (classe exploit). C'est un **choix de politique**, **pas un
+  blocage technique**.
+
 ## 6. API
 
 Toutes admin-only (session admin ; fail-closed 401/403 sinon), ledgerisées.
