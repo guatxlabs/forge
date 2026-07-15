@@ -1,6 +1,6 @@
 import { OPERATOR_SECRET, write } from '../../core/api.js';
 import { $, esc, ic } from '../../core/dom.js';
-import { activeEngagement } from '../../core/state.js';
+import { activeEngagement, withEngagement } from '../../core/state.js';
 import { confirmModal, toast } from '../../core/ui.js';
 import { MODULES } from '../modules.js';
 import { LC_ERRMAP, lcClearErr, lcShowErr } from './submit.js';
@@ -29,7 +29,8 @@ export async function lcScopeCheck() {
   out.innerHTML = '<span class="muted">vérification…</span>';
   let r, j;
   try {
-    r = await fetch('/api/scope-check', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ target }) });
+    // ENGAGEMENT-AWARE : scope-check résout contre le scope de l'engagement ACTIF (même règle que /api/run).
+    r = await fetch(withEngagement('/api/scope-check'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ target }) });
     j = await r.json().catch(() => ({}));
   } catch (e) { out.innerHTML = `<span class="badge destr">erreur réseau</span> <span class="muted">${esc(String(e.message || e))}</span>`; return; }
   if (r.status === 400 || (j && j.error)) {
@@ -79,7 +80,7 @@ export async function lcDryPlan() {
   if (modules.length) body.modules = modules;
   let r, j;
   try {
-    r = await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+    r = await fetch(withEngagement('/api/plan'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
     j = await r.json().catch(() => ({}));
   } catch (e) {
     if (btn) btn.disabled = false;
