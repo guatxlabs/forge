@@ -108,6 +108,9 @@ EXPECTED_KINDS = {
     "recon.theharvester",                                        # OSINT PASSIF emails/sous-domaines
     "fuzz.wfuzz",                                                # fuzzing de contenu/paramètres web
     "web.zap_baseline",                                          # scan web BASELINE PASSIF OWASP ZAP (aucune attaque active)
+    # SONDES RÉSEAU GOUVERNÉES (HTTP/DNS) — non-exploit/non-destructif, UI-configurables (params_schema)
+    "recon.curl",                                                # sonde HTTP bénigne (réponse -> STDOUT, aucun exfil/upload/proxy)
+    "recon.dig",                                                 # lookup DNS PASSIF (+short ; -f/-k fichiers refusés)
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {

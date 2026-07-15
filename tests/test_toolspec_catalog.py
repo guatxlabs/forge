@@ -36,6 +36,8 @@ from forge.modules.toolspec import (ToolSpec, build_argv, parse_output, make_mod
 NEW_KINDS = {
     "recon.masscan", "recon.gobuster_dns", "recon.theharvester",
     "fuzz.wfuzz", "web.zap_baseline",
+    # SONDES RÉSEAU GOUVERNÉES (HTTP/DNS) — non-exploit/non-destructif, scope-guardées, UI-configurables.
+    "recon.curl", "recon.dig",
 }
 
 # Les kinds livrés par le catalogue (toolcatalog.py) — pinnés pour prouver l'auto-intégration.

@@ -283,6 +283,12 @@ def build_parser():
     cp.add_argument("--auto-pentest", dest="auto_pentest", action="store_true",
                     help="mode pentest automatisé : balaie TOUTES les techniques ACTIVÉES du scope (profil+toggles) sur la surface découverte, gouverné à l'identique")
     cp.add_argument("--modules", help="liste de kinds (séparés par des virgules) restreignant le plan ; vide = plan complet du cerveau")
+    cp.add_argument("--param", action="append", metavar="KIND.KEY=VALUE",
+                    help="paramètre par-module pour CE run (répétable), format KIND.KEY=VALUE — ex : "
+                         "--param recon.nmap.ports=1-65535 --param recon.nmap.timing=2 "
+                         "--param recon.content.threads=40. PRIORITAIRE sur scope.json et le workflow. "
+                         "La valeur reste une DONNÉE de module_params (allowlist de drapeaux / no-shell / "
+                         "scope-guard inchangés) ; un --param malformé (sans '.' ou sans '=') échoue fail-closed.")
     cp.add_argument("--workflow", help="nom d'un workflow SAUVEGARDÉ : lance EXACTEMENT ses étapes (techniques+params), filtrées par l'ensemble activé du scope + ROE (fail-closed)")
     cp.add_argument("--workflows", help="fichier JSON de workflows utilisateur (sinon env FORGE_WORKFLOWS_FILE ; les workflows intégrés sont toujours disponibles)")
     cp.add_argument("--purple")
