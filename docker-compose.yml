@@ -79,12 +79,15 @@ services:
       FORGE_PYTHON: "python3"
       FORGE_RUN_TIMEOUT: "900"
 
-      # --- Outillage opérateur SANS rebuild (OPT-IN) : env À DÉCOMMENTER AVEC le bind :ro correspondant ---
+      # --- Outillage opérateur SANS rebuild : ajouter des outils PENDANT un pentest, sans redémarrage -----
       # (voir le bloc `volumes:` plus bas). Ces env n'activent QUE les dossiers Python/spec ; les binaires
-      # de `./tools` sont, eux, déjà sur le PATH de l'image (aucune env requise). DÉFAUT (commenté) = aucun
-      # dossier hôte requis, catalogue inchangé. Décommenter charge le dossier au boot / à la re-sonde.
-      #   FORGE_PLUGINS: "/opt/forge/plugins"    # modules Python @register (CODE ARBITRAIRE — haute confiance opérateur)
-      #   FORGE_TOOLSPECS: "/opt/toolspecs"      # ToolSpecs déclaratifs JSON/YAML (gouvernés, zéro code ; fusionnés au dir server-managed)
+      # de `./tools` sont, eux, déjà sur le PATH de l'image (aucune env requise). FORGE_TOOLSPECS est ON PAR
+      # DÉFAUT (voie GOUVERNÉE sans code) : un ToolSpec déposé dans ./toolspecs est chargé à la re-sonde
+      # (« Rafraîchir modules » / POST /api/modules/refresh). Sa valeur est FUSIONNÉE par la console avec le
+      # dir server-managed des outils ajoutés par l'UI (probe_toolspecs_env, cf. console/src/tools.rs) → les
+      # deux coexistent. FORGE_PLUGINS reste OPT-IN (code Python arbitraire — décommenter avec son bind).
+      FORGE_TOOLSPECS: "/opt/toolspecs"        # ToolSpecs déclaratifs JSON/YAML (gouvernés, zéro code ; fusionnés au dir server-managed) — ON par défaut
+      #   FORGE_PLUGINS: "/opt/forge/plugins"    # modules Python @register (CODE ARBITRAIRE — haute confiance opérateur) — OPT-IN
 
       # --- Couche accès/évasion (browser-automation) ---------------------------------------
       # Service OPTIONNEL derrière `profiles: ["browser"]` (défini plus bas). Ce nom d'hôte ne
@@ -165,29 +168,37 @@ services:
       # et créer forge/scope.json (`cp scope.example.json scope.json`, puis éditer). Absent = fail-closed.
       # - ./scope.json:/data/scope/scope.json:ro
       #
-      # --- OUTILLAGE OPÉRATEUR SANS REBUILD (OPT-IN, même logique que le bind scope.json ci-dessus) --------
-      # Un red-teamer itère sur beaucoup d'outils : déposez-les dans des dossiers HÔTE montés EN LECTURE
-      # SEULE (`:ro`), plutôt que de reconstruire l'image. DÉFAUT = tout commenté → aucun dossier hôte
-      # requis, `docker compose up` inchangé. Pour activer une voie : créer le dossier hôte (ex.
-      # `mkdir -p forge/tools`) PUIS décommenter SA ligne (+ pour (b)/(c), l'env FORGE_* associée plus haut).
+      # --- OUTILLAGE OPÉRATEUR SANS REBUILD — AJOUTER DES OUTILS PENDANT UN PENTEST, SANS REDÉMARRAGE -------
+      # Un red-teamer itère sur beaucoup d'outils. Les deux voies SÛRES (a)+(c) sont MONTÉES PAR DÉFAUT (`:ro`)
+      # pour qu'on puisse toujours DÉPOSER un outil à chaud : la disponibilité est vérifiée à fire-time
+      # (`runner.available`→`shutil.which`), donc un binaire déposé dans `./tools` est utilisable au PROCHAIN
+      # run SANS rien redémarrer, et un ToolSpec déposé dans `./toolspecs` apparaît après « Rafraîchir modules »
+      # (POST /api/modules/refresh). Les dossiers hôte existent (tracked via .gitkeep) → le bind par défaut ne
+      # crée PAS de dossier root-owned, et un dossier VIDE monté est inoffensif (aucun outil chargé tant que
+      # rien n'est déposé). Le conteneur tourne en user non-root `forge` (uid 10001) : un dossier hôte 0755
+      # (défaut) est lisible en `:ro`. On NE fait JAMAIS `docker build`/`down`/`up` pour ajouter un outil.
       #
-      #  (a) ./tools → /opt/tools : binaires OU scripts auto-contenus exécutables (shebang + `chmod +x`).
-      #      /opt/tools est DÉJÀ sur le PATH de l'image → `runner.tool` les résout via `shutil.which` au run
-      #      (un ToolSpec `binary: myfuzzer` s'exécute dès que `forge/tools/myfuzzer` existe). Ramassé sur
+      #  (a) ./tools → /opt/tools [DÉFAUT ON] : binaires OU scripts auto-contenus exécutables (shebang + `chmod
+      #      +x`). /opt/tools est DÉJÀ sur le PATH de l'image → `runner.tool` les résout via `shutil.which` au
+      #      run (un ToolSpec `binary: myfuzzer` s'exécute dès que `forge/tools/myfuzzer` existe). Ramassé sur
       #      PATH SANS redémarrage. ⚠️ OPÉRATEUR-DE-CONFIANCE : vous exécutez ce que vous montez (binaires/
       #      scripts arbitraires que VOUS choisissez). La gouvernance ToolSpec (scope-guard fail-closed, argv
       #      no-shell, allowlist de drapeaux) borne COMMENT l'outil est invoqué — pas ce que le binaire fait.
-      # - ./tools:/opt/tools:ro
+      - ./tools:/opt/tools:ro
       #
-      #  (b) ./plugins → /opt/forge/plugins (REQUIERT FORGE_PLUGINS décommentée plus haut) : modules Python
-      #      `@register`. ⚠️ HAUTE CONFIANCE — CODE PYTHON ARBITRAIRE exécuté dans le process moteur ; à
-      #      réserver à des plugins dont vous maîtrisez la source. Chargés au boot / à la re-sonde du catalogue.
-      # - ./plugins:/opt/forge/plugins:ro
-      #
-      #  (c) ./toolspecs → /opt/toolspecs (REQUIERT FORGE_TOOLSPECS décommentée plus haut) : ToolSpecs
+      #  (c) ./toolspecs → /opt/toolspecs [DÉFAUT ON] (env FORGE_TOOLSPECS ON par défaut plus haut) : ToolSpecs
       #      déclaratifs JSON/YAML — ZÉRO code, gouvernés EXACTEMENT comme un module natif. Fusionnés avec le
-      #      dossier server-managed (vos specs restent chargés). Chargés au boot / à la re-sonde du catalogue.
-      # - ./toolspecs:/opt/toolspecs:ro
+      #      dossier server-managed (vos specs UI restent chargés). Chargés à la re-sonde du catalogue.
+      - ./toolspecs:/opt/toolspecs:ro
+      #
+      #  (b) ./plugins → /opt/forge/plugins [OPT-IN — décommenter ce bind ET FORGE_PLUGINS plus haut] : modules
+      #      Python `@register`. ⚠️ HAUTE CONFIANCE — CODE PYTHON ARBITRAIRE exécuté dans le process moteur ; à
+      #      réserver à des plugins dont vous maîtrisez la source. Reste OPT-IN (contrairement à (a)/(c) qui sont
+      #      de la donnée déclarative/exécutable choisie) : l'opérateur l'active EXPLICITEMENT. L'activer est la
+      #      SEULE exception qui exige un `docker compose up` de recréation one-shot (on ne peut pas ajouter un
+      #      montage à un conteneur déjà lancé) — d'où le choix de garder (a)/(c) ON pour ne jamais bloquer en
+      #      plein pentest. Chargés au boot / à la re-sonde du catalogue.
+      # - ./plugins:/opt/forge/plugins:ro
     networks:
       - forge-net
     # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et

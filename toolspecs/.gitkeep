@@ -1,0 +1,1 @@
+# Déposez ici des ToolSpecs déclaratifs JSON/YAML (gouvernés, zéro code) — montés :ro sur /opt/toolspecs (FORGE_TOOLSPECS). Après dépôt, cliquez « Rafraîchir modules » dans l'UI (ou POST /api/modules/refresh) → l'outil apparaît en direct. Monté par défaut. Le contenu est gitignore (sauf ce .gitkeep).
