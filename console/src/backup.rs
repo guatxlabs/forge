@@ -376,10 +376,14 @@ pub(crate) fn run_restore(opts: &RestoreOpts) -> Result<Value, String> {
     }))
 }
 
-/// Lit une passphrase depuis la variable d'ENV nommée (JAMAIS depuis argv/STDIN echo). Vide/absente =>
-/// None (l'appelant échoue fail-closed). La valeur n'est jamais imprimée/loggée.
+/// Lit une passphrase depuis la variable d'ENV nommée (JAMAIS depuis argv/STDIN echo), avec repli
+/// `*_FILE` (secret Docker/k8s) : si `<VAR>` est vide/absente mais `<VAR>_FILE` pointe un fichier
+/// lisible, la passphrase est LUE depuis ce fichier (newline de fin retiré). Vide/absente/illisible
+/// => None (l'appelant échoue fail-closed). La valeur n'est jamais imprimée/loggée. Ce SEUL point de
+/// résolution est partagé par le backup/restore CLI, le scheduler (`policy.passphrase_env`) et
+/// `upgrade` (`--passphrase-env`) — tous héritent donc du repli `*_FILE`.
 pub(crate) fn read_passphrase_env(var: &str) -> Option<String> {
-    std::env::var(var).ok().filter(|v| !v.is_empty())
+    crate::secret_from_env(var)
 }
 
 /// `forge backup --out <archive> --passphrase-env <ENVVAR> [--db <path>] [--ledger <path>]`

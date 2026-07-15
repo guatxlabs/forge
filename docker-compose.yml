@@ -93,9 +93,11 @@ services:
       #   MSF_RPC_PORT: "55553"
       #   MSF_RPC_USER: "msf"
       #   MSF_RPC_SSL:  "true"
-      #   MSF_RPC_PASS: ""                 # [SECRET] → forge/.env
+      #   MSF_RPC_PASS: ""                 # [SECRET] inline → forge/.env  (PRÉFÉRÉ : MSF_RPC_PASS_FILE, cf. bloc `secrets:` en bas)
+      #   MSF_RPC_PASS_FILE: "/run/secrets/msf_rpc_pass"   # Docker secret : l'env porte un CHEMIN, le secret vit dans un fichier root-owned monté
       #   BURP_API_URL: "http://burp:1337"
-      #   BURP_API_KEY: ""                 # [SECRET] → forge/.env
+      #   BURP_API_KEY: ""                 # [SECRET] inline → forge/.env  (PRÉFÉRÉ : BURP_API_KEY_FILE)
+      #   BURP_API_KEY_FILE: "/run/secrets/burp_api_key"   # Docker secret (idem)
 
       # --- Source de détection (boucle purple) : SETTINGS-DRIVEN d'abord -------------------
       # La source BLUE (SIEM/IDS/pare-feu) se configure de préférence dans l'UI (wizard 1er boot
@@ -109,14 +111,17 @@ services:
       # est absent). Vide = boucle purple OFF/fail-open lisible (source_reachable:false, aucune
       # métrique inventée). cf. docs/PURPLE_PREREQS.md :
       #   PLUME_URL:   "http://plume-internal:PORT"   # http:// interne uniquement (pas de TLS côté console)
-      #   PLUME_TOKEN: "<base64 user:pass>"           # [SECRET] → forge/.env (Basic auth vers Plume)
+      #   PLUME_TOKEN: "<base64 user:pass>"           # [SECRET] inline → forge/.env (Basic auth vers Plume)
+      #   PLUME_TOKEN_FILE: "/run/secrets/plume_token"  # PRÉFÉRÉ : Docker secret (l'env porte un CHEMIN, pas le token)
+      #   FORGE_DETECTION_SOURCE_FILE: "/run/secrets/detection_source"  # le JSON porteur du secret peut aussi vivre dans un fichier monté
 
       # --- Chiffrement AU REPOS (image opt-in `--features encryption`) ---------------------
       # UNIQUEMENT si tu construis l'image chiffrée (forge:0.0.1-encryption, cf.
       # docs/MIGRATION.md Runbook B). La console lit FORGE_DB_KEY au boot et émet `PRAGMA key`
       # AVANT toute requête (contrat SQLCipher). Sans clé correcte → base illisible (fail-closed).
       # Dans le build PAR DÉFAUT ce hook N'EXISTE PAS (base en clair) → la variable est ignorée.
-      #   FORGE_DB_KEY: "${FORGE_DB_KEY:-}"           # [SECRET] → forge/.env / docker secret ; JAMAIS commité
+      #   FORGE_DB_KEY: "${FORGE_DB_KEY:-}"           # [SECRET] inline → forge/.env ; JAMAIS commité
+      #   FORGE_DB_KEY_FILE: "/run/secrets/db_key"    # PRÉFÉRÉ : Docker secret — la clé SQLCipher vit dans un fichier root-owned, pas « à côté de la porte »
 
       # --- Sauvegardes chiffrées programmées (offsite) -------------------------------------
       # La POLITIQUE (activation/intervalle/rétention/offsite rclone|exec) se règle dans l'UI
@@ -124,7 +129,21 @@ services:
       # scheduler en-console lit ces 2 knobs d'environnement ; l'archive est TOUJOURS chiffrée
       # (argon2id + XChaCha20-Poly1305). Détails/restore/offsite : docs/BACKUP.md.
       #   FORGE_BACKUP_TICK_SECS:  "60"               # période de réveil du scheduler (défaut 60s)
-      #   FORGE_BACKUP_PASSPHRASE: ""                 # [SECRET] → forge/.env ; nom d'ENV référencé par policy.passphrase_env
+      #   FORGE_BACKUP_PASSPHRASE: ""                 # [SECRET] inline → forge/.env ; nom d'ENV référencé par policy.passphrase_env
+      #   FORGE_BACKUP_PASSPHRASE_FILE: "/run/secrets/backup_passphrase"  # PRÉFÉRÉ : Docker secret — pointe policy.passphrase_env sur FORGE_BACKUP_PASSPHRASE et fournis le fichier
+      #
+      # --- Indirection `*_FILE` (secrets Docker/k8s) — « la clé pas à côté de la porte » --------
+      # TOUT secret ci-dessus (FORGE_CONSOLE_TOKEN, FORGE_DB_KEY, FORGE_BACKUP_PASSPHRASE, PLUME_TOKEN,
+      # MSF_RPC_PASS, BURP_API_KEY, FORGE_DETECTION_SOURCE, FORGE_LEDGER_SIGNER_CREDENTIAL,
+      # FORGE_LEDGER_PKCS11_PIN, FORGE_COMPLIANCE_ARCHIVE_KEY) accepte un JUMEAU `<VAR>_FILE` : si `<VAR>`
+      # est absente/vide et `<VAR>_FILE` pointe un fichier LISIBLE, la valeur est lue depuis ce fichier
+      # (newline de fin retiré). L'env ne porte alors qu'un CHEMIN, le secret vit dans un fichier monté
+      # root-owned — jamais en clair dans un `.env` posé à côté de l'app. Voir le bloc `secrets:` en bas
+      # + docs/SECRETS.md. Rétro-compat : renseigner `<VAR>` en direct reste supporté (l'inline gagne).
+      #   FORGE_CONSOLE_TOKEN_FILE: "/run/secrets/console_token"
+      #   FORGE_LEDGER_SIGNER_CREDENTIAL_FILE: "/run/secrets/signer_credential"
+      #   FORGE_LEDGER_PKCS11_PIN_FILE: "/run/secrets/pkcs11_pin"
+      #   FORGE_COMPLIANCE_ARCHIVE_KEY_FILE: "/run/secrets/archive_key"
     ports:
       # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
       - "127.0.0.1:7100:7100"
@@ -254,3 +273,32 @@ volumes:
   forge-ledger:
   # Données Postgres (utilisé UNIQUEMENT sous le profil "postgres" + l'override — cf. docs/DEPLOYMENT.md).
   forge-pg:
+
+# ---------------------------------------------------------------------------
+# secrets — INDIRECTION `*_FILE` (Docker secrets). OPTIONNEL, tout commenté.
+# ---------------------------------------------------------------------------
+# Standard 12-factor : « la clé ne doit pas être posée à côté de la porte ». Au lieu d'un secret en
+# clair dans forge/.env, on monte chaque secret comme FICHIER root-owned sous /run/secrets/<nom> et
+# on pointe la variable `<VAR>_FILE` dessus (cf. bloc `environment:` de la console). La console (Rust)
+# et le moteur (Python) résolvent alors `<VAR>` puis, à défaut, `<VAR>_FILE` (fichier lu, newline de
+# fin retiré). Pour ACTIVER : décommenter le bloc `secrets:` ci-dessous, la clause `secrets:` du
+# service `forge`, et les lignes `*_FILE` correspondantes. `file:` référence un fichier hôte HORS-repo
+# (gitignored), OU utiliser `external: true` + `docker secret create` en mode Swarm. Voir docs/SECRETS.md.
+#
+# secrets:
+#   console_token:      { file: ./secrets/console_token }      # FORGE_CONSOLE_TOKEN_FILE
+#   db_key:             { file: ./secrets/db_key }             # FORGE_DB_KEY_FILE (image --features encryption)
+#   backup_passphrase:  { file: ./secrets/backup_passphrase }  # FORGE_BACKUP_PASSPHRASE_FILE
+#   plume_token:        { file: ./secrets/plume_token }        # PLUME_TOKEN_FILE
+#   msf_rpc_pass:       { file: ./secrets/msf_rpc_pass }       # MSF_RPC_PASS_FILE
+#   burp_api_key:       { file: ./secrets/burp_api_key }       # BURP_API_KEY_FILE
+#   signer_credential:  { file: ./secrets/signer_credential }  # FORGE_LEDGER_SIGNER_CREDENTIAL_FILE
+#   pkcs11_pin:         { file: ./secrets/pkcs11_pin }         # FORGE_LEDGER_PKCS11_PIN_FILE
+#   archive_key:        { file: ./secrets/archive_key }        # FORGE_COMPLIANCE_ARCHIVE_KEY_FILE
+#
+# Puis DANS le service `forge` (à côté de `env_file:` / `environment:`), déclarer quels secrets sont
+# montés (Docker les expose sous /run/secrets/<nom>, mode 0400 root) :
+#   secrets:
+#     - console_token
+#     - backup_passphrase
+#     - plume_token

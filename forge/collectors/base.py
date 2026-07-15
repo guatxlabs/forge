@@ -72,7 +72,10 @@ def load_source(spec):
     s = spec.strip()
     if s.startswith("env:"):
         name = s[4:]
-        raw = os.environ.get(name, "")
+        # Repli `*_FILE` (secret Docker/k8s) : `env:NAME` lit `NAME`, sinon le fichier `NAME_FILE` —
+        # la config source (JSON porteur du secret d'auth) peut vivre dans un fichier monté.
+        from ..portability import env_secret
+        raw = env_secret(name) or ""
         if not raw:
             raise ValueError(f"variable d'environnement {name} vide ou absente")
     elif s.startswith("@"):

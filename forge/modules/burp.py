@@ -50,6 +50,7 @@ import urllib.request
 from .registry import register, Module
 from .. import session as _session
 from .. import techniques
+from ..portability import env_secret
 from ..schema import extract_cwe
 
 # mapping sévérité Burp -> sévérité Forge (Burp: high/medium/low/info[rmation])
@@ -95,7 +96,8 @@ def _cfg(action=None):
     p = (action.params if action is not None else None) or {}
     return {
         "url": (p.get("burp_api_url") or os.environ.get("BURP_API_URL", "http://127.0.0.1:1337")).rstrip("/"),
-        "key": p.get("burp_api_key") or os.environ.get("BURP_API_KEY", "") or None,
+        # BURP_API_KEY : repli `*_FILE` (secret Docker/k8s) — l'env porte un chemin, pas la clé.
+        "key": p.get("burp_api_key") or env_secret("BURP_API_KEY") or None,
     }
 
 

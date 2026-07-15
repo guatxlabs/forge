@@ -94,6 +94,11 @@ Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés)
 (gitignoré, `required:false`). Gabarit commenté : [`.env.example`](../.env.example). Les connecteurs
 `browser`/`msf`/`burp` restent **inertes** tant que leur service n'est pas joignable (sonde à fire-time).
 
+> **Secrets sans `.env` en clair.** Chaque secret d'env accepte un jumeau `<VAR>_FILE` : l'env porte un
+> **chemin**, le secret vit dans un **fichier monté root-owned** (Docker secret / Secret k8s), pas dans
+> un `.env` posé à côté de l'app. Détails, tableau des secrets couverts, et ce qui est déjà write-only
+> via l'UI (détection, SSO `client_secret`) : [`docs/SECRETS.md`](SECRETS.md).
+
 ### 1.4 Natif / systemd (sans Docker)
 
 Unité durcie fournie : [`deploy/forge.service`](../deploy/forge.service)

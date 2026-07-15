@@ -172,5 +172,50 @@ class TestSigningNonPosixDoesNotCrash(unittest.TestCase):
             self.assertTrue(os.path.exists(base + ".ed25519"))
 
 
+class TestEnvSecret(unittest.TestCase):
+    """`env_secret` — indirection `*_FILE` (secrets Docker/k8s). Précédence env direct > fichier,
+    trim du newline de fin, fail-soft sur fichier illisible, None si aucun des deux."""
+
+    def test_direct_var_returns_value(self):
+        env = {"FOO_SECRET": "direct-value"}
+        self.assertEqual(portability.env_secret("FOO_SECRET", env), "direct-value")
+
+    def test_file_returns_trimmed_contents_when_only_file_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "secret")
+            # newline + espaces de fin DOIVENT être retirés (convention fichier-secret Docker).
+            Path(fp).write_text("s3cr3t-from-file  \n\n", encoding="utf-8")
+            env = {"FOO_SECRET_FILE": fp}
+            self.assertEqual(portability.env_secret("FOO_SECRET", env), "s3cr3t-from-file")
+
+    def test_direct_var_takes_precedence_over_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "secret")
+            Path(fp).write_text("from-file", encoding="utf-8")
+            env = {"FOO_SECRET": "from-env", "FOO_SECRET_FILE": fp}
+            # L'env direct gagne — le `*_FILE` n'est qu'un REPLI (défaut communautaire inchangé).
+            self.assertEqual(portability.env_secret("FOO_SECRET", env), "from-env")
+
+    def test_empty_direct_var_falls_through_to_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "secret")
+            Path(fp).write_text("file-wins-over-empty-env", encoding="utf-8")
+            # Env direct VIDE traité comme absent (jamais un secret vide silencieux) -> on lit le fichier.
+            env = {"FOO_SECRET": "", "FOO_SECRET_FILE": fp}
+            self.assertEqual(portability.env_secret("FOO_SECRET", env), "file-wins-over-empty-env")
+
+    def test_missing_both_is_none(self):
+        self.assertIsNone(portability.env_secret("FOO_SECRET", {}))
+
+    def test_unreadable_file_is_fail_soft_none_not_raise(self):
+        env = {"FOO_SECRET_FILE": "/nonexistent/forge/secret/does-not-exist"}
+        # FAIL-SOFT : fichier illisible -> None (jamais d'exception, jamais un secret vide).
+        self.assertIsNone(portability.env_secret("FOO_SECRET", env))
+
+    def test_defaults_to_os_environ(self):
+        with mock.patch.dict(os.environ, {"FOO_SECRET_OSENV": "via-os-environ"}, clear=False):
+            self.assertEqual(portability.env_secret("FOO_SECRET_OSENV"), "via-os-environ")
+
+
 if __name__ == "__main__":
     unittest.main()

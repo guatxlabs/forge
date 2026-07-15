@@ -181,6 +181,27 @@ spec:
             # below); the pre-generated key is READ (not rewritten) so it never lands on /data/ledger.
             # - name: FORGE_LEDGER_KEY
             #   value: /etc/forge/ledger-key/forge.ed25519
+            #
+            # --- `*_FILE` SECRET-AS-FILE indirection (P6) — OPT-IN -------------------------------
+            # Prefer mounting secrets as FILES over injecting their VALUE via secretKeyRef: a
+            # `<VAR>_FILE` env holds a PATH, and the plaintext lives ONLY in a read-only tmpfs Secret
+            # mount (never in the pod's env, `kubectl describe` env dump, or child-process environ).
+            # The console (`secret_from_env`) + engine (`env_secret`) resolve `<VAR>` then `<VAR>_FILE`.
+            # Uncomment together with the `secret-files` volume + volumeMount below AND provision Secret
+            # `forge-secret-files` out-of-band (or apply 10-secrets.example.yaml for lab). To use these
+            # INSTEAD of the secretKeyRef bearer above, drop the FORGE_CONSOLE_TOKEN secretKeyRef entry.
+            # - name: FORGE_CONSOLE_TOKEN_FILE
+            #   value: /etc/forge/secrets/console_token
+            # - name: FORGE_BACKUP_PASSPHRASE_FILE
+            #   value: /etc/forge/secrets/backup_passphrase
+            # - name: PLUME_TOKEN_FILE
+            #   value: /etc/forge/secrets/plume_token
+            # - name: FORGE_LEDGER_SIGNER_CREDENTIAL_FILE
+            #   value: /etc/forge/secrets/signer_credential
+            # - name: FORGE_COMPLIANCE_ARCHIVE_KEY_FILE
+            #   value: /etc/forge/secrets/archive_key
+            # - name: FORGE_DB_KEY_FILE                      # image built --features encryption only
+            #   value: /etc/forge/secrets/db_key
           envFrom:
             - configMapRef:
                 name: forge-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
@@ -201,6 +222,11 @@ spec:
             # readOnly:true keeps the key immutable to the pod (the local signer READS it, never rewrites).
             # - name: ledger-key
             #   mountPath: /etc/forge/ledger-key
+            #   readOnly: true
+            # OPT-IN (`*_FILE` secret indirection): secrets mounted as read-only FILES; each `<VAR>_FILE`
+            # env above points at /etc/forge/secrets/<name>. Uncomment with the `secret-files` volume below.
+            # - name: secret-files
+            #   mountPath: /etc/forge/secrets
             #   readOnly: true
           # /health is PUBLIC (outside auth_guard) and ALWAYS 200 when the HTTP router is live (it
           # returns db:"degraded" without failing on a transient DB blip). Host: localhost is in the
@@ -252,6 +278,21 @@ spec:
         #     items:
         #       - key: forge.ed25519
         #         path: forge.ed25519
+        # OPT-IN (`*_FILE` secret indirection, P6): the `forge-secret-files` Secret projected as FILES,
+        # one file per key under /etc/forge/secrets. defaultMode 0400 = owner-read-only (uid 1000 via
+        # fsGroup). Uncomment with the volumeMount + FORGE_*_FILE env above; provision the Secret
+        # out-of-band (or apply 10-secrets.example.yaml for lab). Add only the keys you actually use.
+        # - name: secret-files
+        #   secret:
+        #     secretName: forge-secret-files
+        #     defaultMode: 0400
+        #     items:
+        #       - { key: console_token,      path: console_token }
+        #       - { key: backup_passphrase,  path: backup_passphrase }
+        #       - { key: plume_token,        path: plume_token }
+        #       - { key: signer_credential,  path: signer_credential }
+        #       - { key: archive_key,        path: archive_key }
+        #       - { key: db_key,             path: db_key }
         - name: scope
           configMap:
             name: forge-scope

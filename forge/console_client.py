@@ -8,6 +8,8 @@ import json
 import os
 import urllib.request
 
+from .portability import env_secret
+
 DEFAULT_URL = "http://127.0.0.1:7100"
 
 
@@ -59,7 +61,8 @@ def ingest(campaign, findings, run_records, url=None, token=None, timeout=30,
            skipped_budget=None):
     """POST /api/ingest. Retourne (status, json) ; lève sur erreur réseau/HTTP."""
     endpoint = (url or base_url()).rstrip("/") + "/api/ingest"
-    token = token if token is not None else os.environ.get("FORGE_CONSOLE_TOKEN", "")
+    # FORGE_CONSOLE_TOKEN with a `*_FILE` fallback (Docker/k8s secret) — env holds a path, not the token.
+    token = token if token is not None else (env_secret("FORGE_CONSOLE_TOKEN") or "")
     if not token:                                  # token vide -> requête probablement rejetée (401) côté console
         import sys
         print("[forge] avertissement : token console vide (FORGE_CONSOLE_TOKEN non défini) "

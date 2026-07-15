@@ -99,3 +99,40 @@ def restrict_file_permissions(path, mode=0o600) -> bool:
         return True
     except OSError:
         return False
+
+
+def env_secret(name, env=None):
+    """Résout un SECRET depuis l'environnement avec indirection `*_FILE` (pattern 12-factor / secrets
+    Docker & k8s — « la clé ne doit pas être posée à côté de la porte »). La valeur en clair peut ainsi
+    vivre dans un FICHIER monté (root-owned) plutôt que dans un `.env` à côté de l'app ; l'env ne porte
+    alors qu'un CHEMIN, pas le secret.
+
+    Priorité :
+      1. `<name>` posé ET non vide      -> sa valeur (voie directe ; DÉFAUT COMMUNAUTAIRE — byte-identique).
+      2. sinon `<name>_FILE` posé        -> LIT le fichier, retire le newline/espace de FIN (un `\\n`
+                                            final dans un fichier de secret Docker ne doit pas corrompre
+                                            le token/passphrase), et retourne le contenu.
+         fichier illisible/absent         -> None + avertissement (nomme la VARIABLE, JAMAIS la valeur).
+      3. sinon                           -> None.
+
+    FAIL-SOFT : un `<name>_FILE` illisible ne lève jamais et ne renvoie jamais un secret vide silencieux
+    (qui affaiblirait l'auth) — il renvoie None pour que le repli de l'appelant (génération/refus
+    fail-closed) s'applique. La valeur du secret n'est JAMAIS journalisée. `env` (défaut os.environ)
+    permet aux tests d'injecter un mapping.
+    """
+    e = os.environ if env is None else env
+    v = e.get(name)
+    if v is not None and v != "":
+        return v                                    # voie directe — communauté inchangée
+    file_path = e.get(name + "_FILE")
+    if not file_path:
+        return None
+    try:
+        data = Path(file_path).read_text(encoding="utf-8")
+    except OSError as ex:                            # FAIL-SOFT : jamais de crash, jamais la valeur
+        import sys
+        print(f"[forge] avertissement : {name}_FILE illisible ({type(ex).__name__}) — "
+              f"secret non résolu (fail-soft, aucune valeur exposée)", file=sys.stderr)
+        return None
+    # Retire whitespace/newline de FIN (convention fichier-secret Docker/k8s : `\n` terminal).
+    return data.rstrip()
