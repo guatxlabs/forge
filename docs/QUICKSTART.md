@@ -42,15 +42,17 @@ Administration → **Engagements** → créer un engagement avec son propre scop
 Techniques natives : IDOR, SSRF, XSS, SQLi, JWT/auth, CORS, XXE, race, CSRF, open-redirect, SSTI, cmdi,
 proto-pollution, GraphQL, NoSQL, cache-poison, smuggling, takeover, secrets… (cf. `docs/TECHNIQUE_COVERAGE.md`).
 
-## 5. Outils (piloter nmap/nuclei/httpx/sqlmap/ffuf…)
+## 5. Outils (piloter nmap/nuclei/httpx/sqlmap/ffuf…) — TOUT depuis l'UI
 Forge **pilote** des outils, il n'embarque pas d'arsenal offensif. Les scanners standards sont dans l'image `full`.
 Pour Metasploit/Burp : pointe les env `MSF_RPC_*` / `BURP_API_*` vers tes services (profils `--profile msf|burp`).
-Ajouter/paramétrer un outil se fait de plus en plus **depuis l'UI** (roadmap : formulaire ToolSpec, arguments
-custom par-run, contrôle du rate-limit — cf. `ROADMAP.md`). Aujourd'hui, un outil CLI supplémentaire = une entrée
-ToolSpec (`toolcatalog.py`) ou un fichier JSON (`FORGE_TOOLSPECS`), ou un drop-in `FORGE_PLUGINS`.
+- **Paramétrer un outil** : chaque outil (26 kinds — nmap, nuclei, ffuf, sqlmap, subfinder, naabu, feroxbuster, dalfox…) expose ses **arguments dans l'UI** (ports/scripts/timing/wordlist/threads/rate…), plus un champ `extra_args` allowlisté. Ex. nmap entièrement custom `-sV -p- --script http-* -T2`.
+- **Rate-limit** : règle le débit (req/s) dans la vue Launch → propagé à chaque outil (`--max-rate`/`-rl`/`--rate`/`--delay`) + throttle moteur + back-off automatique sur 429/WAF.
+- **Ajouter TON outil** : Administration → **Ajouter un outil** → déclare un ToolSpec gouverné (binaire/docker, argv, params, allowlist) → il apparaît dans Launch, configurable, scope-guardé. Aucun fichier, aucun rebuild (cf. `docs/TOOLS.md`). *(Le binaire doit être présent dans l'image ou fourni par un script — sinon l'outil est `skipped`.)*
 
-## 6. Cycle de vie (sûr)
-Le plus simple reste l'UI (Administration). En CLI (optionnel, pour les habitués) :
+## 6. Cycle de vie (sûr) — depuis l'UI
+Administration → **Console Forge** : un panneau qui lance les commandes gouvernées (`status`, `ledger verify`,
+`backup`, `upgrade`…) **sans quitter le navigateur** (allowlist, pas de shell, `upgrade` demande confirmation,
+sortie streamée). En CLI (optionnel, pour les habitués) :
 ```bash
 docker compose -f forge/docker-compose.yml exec forge forge status
 # upgrade sûr : snapshot chiffré -> migrate -> verify -> rollback auto si échec (no-op = 0 écriture)

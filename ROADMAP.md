@@ -43,6 +43,8 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 - **Args custom par-outil dans l'UI** `0d19512 5c15dfd` — **26 kinds** avec `params_schema` typé + `flag_allowlist` conservatrice (nmap custom + nuclei + 20 ToolSpec + ffuf/sqlmap/httpx/subfinder), rendu dynamique, `extra_args` allowlisté no-shell.
 - **Rate-limit** `3034616` — throttle moteur (token-bucket `Oracle._http`) + flags rate par outil + back-off 429/`Retry-After`/WAF + signal « throttled ». Défaut byte-identical.
 - **Ajout d'outils par l'UI** `b6b8ee8` — `POST /api/tools` admin+ledgered, **ToolSpec gouverné** `custom.*` (no-shell, allowlist, traversal-safe, jamais built-in/`vulnerable`), hot-reload, form `admin/addtool.js`, `docs/TOOLS.md`.
+- **Secrets sans `.env` en clair** `83d47cc` — indirection **`*_FILE`** (Docker/k8s secrets) sur TOUS les secrets (token, passphrase backup, `FORGE_DB_KEY`, creds connecteurs MSF/Burp/Plume, PIN PKCS#11) : l'env porte un **chemin**, le secret vit dans un fichier monté root-owned. Détection & SSO déjà write-only UI. `docs/SECRETS.md`. Défaut byte-identical.
+- **Console `forge` gouvernée DANS l'UI** `b4096bd` — panneau admin « Console Forge » : runner à **allowlist** (`status`/`ledger verify`/`read`/`backup`/`upgrade`), **argv fixe, jamais de shell**, args schéma-validés, `upgrade` exige `confirm`, destructifs (`restore`/`migrate-store`) exclus, secrets jamais échoués, ledgerisé, sortie **streamée SSE**. Supprime `docker compose exec` pour les ops courantes. `docs/CONSOLE.md`.
 
 ## E. Déploiement & cycle de vie
 - **Upgrade sûr une-commande** `131ee7d` — snapshot chiffré pré-upgrade → migrate → verify → **rollback auto** si échec ; `schema_version` + `forge status` ; `docs/UPGRADE.md`.
@@ -57,9 +59,8 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 
 # 🔜 RESTE À FAIRE
 
-## Planifié — expérience opérateur (ordre de build)
-- **P5 — console `forge` gouvernée DANS l'UI** — runner de commandes admin-only à **allowlist** (`status`/`upgrade`/`ledger verify`/…, **pas de shell libre**), sortie streamée comme un run → supprime `docker compose exec` pour les ops courantes.
-- **P6 — secrets sans `.env` en clair** — indirection `*_FILE` (Docker/k8s secrets) + settings write-only UI pour token / passphrase backup / creds connecteurs (détection & SSO déjà write-only). « La clé pas à côté de la porte. »
+## Planifié — expérience opérateur
+- **Rien de planifié — les items UX sont livrés** (onboarding zéro-étape, rename `forge`, args custom tous outils, rate-limit, ajout d'outils UI, secrets `*_FILE`, console `forge` dans l'UI). Voir §D.
 
 ## Possible next (décision produit, non planifié)
 - **Triage findings enrichi** — notifications / SLA / routage automatique au-delà du cycle de vie + ownership déjà livrés.
