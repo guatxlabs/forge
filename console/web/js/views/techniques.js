@@ -28,18 +28,48 @@ function applyNamedSelection(sel) {
   Object.keys(TQ.rowByKind).forEach(k => { TQ.desired[k] = !!t[k]; });
 }
 
-// Détecte le profil ACTIF à l'entrée : si les toggles chargés (sélection persistée) correspondent
-// EXACTEMENT à un profil nommé, on le re-sélectionne (l'opérateur RETROUVE son profil, pas « custom ») ;
-// sinon on garde le profil de base persisté par le moteur (cat.profile).
-function detectActiveProfile(base) {
+// Détecte le profil ACTIF à l'entrée : réconcilie la sélection ACTIVE PERSISTÉE (`cat.selection`, la
+// map BRUTE des toggles POSTés — PAS l'état résolu-par-scope `enabled_for_current_scope`) contre chaque
+// profil nommé. Comparer le BRUT vs le BRUT est robuste : juste après un « Enregistrer comme profil… »
+// la sélection active et le profil nommé sont IDENTIQUES, donc l'opérateur RETROUVE son profil (et pas
+// « custom »). Bug corrigé (C5) : l'ancienne version comparait `TQ.desired` (résolu par le moteur, ∩
+// scope) au profil brut — un décalage de scope faisait retomber le sélecteur sur « custom » après save.
+// Repli sur `TQ.desired` pour un kind absent de la sélection persistée (toggle jamais explicité).
+function detectActiveProfile(cat) {
+  const selT = (cat && cat.selection && cat.selection.techniques) || {};
+  const activeVal = k => (Object.prototype.hasOwnProperty.call(selT, k)) ? !!selT[k] : !!TQ.desired[k];
   const kinds = Object.keys(TQ.rowByKind);
   if (kinds.length) {
     for (const n of Object.keys(TQ.named).sort()) {
       const t = (TQ.named[n] && TQ.named[n].techniques) || {};
-      if (kinds.every(k => (!!TQ.desired[k]) === (!!t[k]))) return 'named:' + n;
+      if (kinds.every(k => activeVal(k) === (!!t[k]))) return 'named:' + n;
     }
   }
+  const base = (cat && cat.profile) || 'bug_bounty';
   return BASE_PROFILES.includes(base) ? base : 'custom';
+}
+
+// Réconcilie le SÉLECTEUR depuis les toggles LIVE (TQ.desired) — appelé après CHAQUE édition (case,
+// catégorie, global). Rend l'état actif SANS AMBIGUÏTÉ (C5) : la sélection courante correspond-elle
+// encore à un profil nommé / de base, ou est-ce une édition transitoire non enregistrée (« custom ») ?
+// Purement client (aucun aller-retour). N'écrit rien : « custom » = sélection éditée pas encore sauvée.
+function syncActiveFromDesired() {
+  const kinds = Object.keys(TQ.rowByKind);
+  let match = 'custom';
+  if (kinds.length) {
+    for (const n of Object.keys(TQ.named).sort()) {
+      const t = (TQ.named[n] && TQ.named[n].techniques) || {};
+      if (kinds.every(k => (!!TQ.desired[k]) === (!!t[k]))) { match = 'named:' + n; break; }
+    }
+    if (match === 'custom') {
+      for (const p of ['bug_bounty', 'pentest']) {
+        if (kinds.every(k => (!!TQ.desired[k]) === tqBase(TQ.rowByKind[k], p))) { match = p; break; }
+      }
+    }
+  }
+  TQ.profile = match;
+  const sel = $('#tq-profile'); if (sel) sel.value = match;
+  syncDeleteBtn();
 }
 
 // (Re)peuple le sélecteur : profils de base + optgroup des profils nommés. Sélectionne TQ.profile.
@@ -87,7 +117,7 @@ export async function loadTechniques() {
     TQ.rowByKind[r.kind] = r; TQ.desired[r.kind] = !!r.enabled_for_current_scope; total++;
   }));
   // Charge la sélection SAUVÉE à l'entrée (persistance across nav) et re-sélectionne le profil actif.
-  TQ.profile = detectActiveProfile(cat.profile || 'bug_bounty');
+  TQ.profile = detectActiveProfile(cat);
   renderProfileSelect();
   if ($('#tq-count')) $('#tq-count').textContent = total + ' techniques';
   renderTechniques();
@@ -108,8 +138,8 @@ export function renderTechniques() {
     const acts = document.createElement('span'); acts.className = 'tq-catacts';
     const bAll = document.createElement('button'); bAll.type = 'button'; bAll.className = 'k-theme'; bAll.textContent = 'Tout activer';
     const bNone = document.createElement('button'); bNone.type = 'button'; bNone.className = 'k-theme'; bNone.textContent = 'Tout désactiver';
-    bAll.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = true; }); renderTechniques(); };
-    bNone.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = false; }); renderTechniques(); };
+    bAll.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = true; }); syncActiveFromDesired(); renderTechniques(); };
+    bNone.onclick = () => { rows.forEach(r => { TQ.desired[r.kind] = false; }); syncActiveFromDesired(); renderTechniques(); };
     acts.append(bAll, bNone); head.appendChild(acts); card.appendChild(head);
     const list = document.createElement('div'); list.className = 'tq-list';
     rows.forEach(r => {
@@ -118,6 +148,7 @@ export function renderTechniques() {
       cb.onchange = () => {
         TQ.desired[r.kind] = cb.checked; lab.classList.toggle('off', !cb.checked);
         const b = head.querySelector('.tq-catcount'); if (b) b.textContent = rows.filter(x => TQ.desired[x.kind]).length + '/' + rows.length;
+        syncActiveFromDesired();   // C5 : édition transitoire -> le sélecteur reflète custom / profil correspondant
       };
       const meta = document.createElement('span'); meta.className = 'tq-meta';
       const badges = [];
@@ -145,6 +176,17 @@ if ($('#tq-profile')) $('#tq-profile').addEventListener('change', () => {
   renderTechniques();
 });
 if ($('#tq-reload')) $('#tq-reload').addEventListener('click', loadTechniques);
+
+// C8 — SÉLECTION GLOBALE (toutes catégories d'un coup). Coche/décoche TOUTE technique du catalogue.
+// La sélection reste une INTENTION : le moteur ENFORCE toujours l'ensemble effectif (∩ scope ∩
+// technique_kinds) au tir — une technique hors-scope reste EXCLUE (fail-closed), même « tout activée ».
+function tqSetAll(on) {
+  Object.keys(TQ.rowByKind).forEach(k => { TQ.desired[k] = on; });
+  syncActiveFromDesired();
+  renderTechniques();
+}
+if ($('#tq-all')) $('#tq-all').addEventListener('click', () => tqSetAll(true));
+if ($('#tq-none')) $('#tq-none').addEventListener('click', () => tqSetAll(false));
 
 // Construit + POST la sélection courante (map TECHNIQUE COMPLÈTE kind->désiré : sans ambiguïté). `extra`
 // porte `save_as` (enregistrer sous un nom réutilisable). auth:'operator' -> l'en-tête X-Forge-Operator +

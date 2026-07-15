@@ -4,6 +4,7 @@ import { activeEngagement, withEngagement } from '../../core/state.js';
 import { confirmModal, toast } from '../../core/ui.js';
 import { MODULES } from '../modules.js';
 import { LC_ERRMAP, lcClearErr, lcShowErr } from './submit.js';
+import { collectModuleParams } from './modules-form.js';
 import { followRun } from './live.js';
 import { loadRuns } from './runs-list.js';
 
@@ -78,6 +79,10 @@ export async function lcDryPlan() {
   const btn = $('#lc-dryplan'); if (btn) btn.disabled = true;
   const body = { targets };
   if (modules.length) body.modules = modules;
+  // C9 : les params PAR-MODULE personnalisés (ports/wordlist/threads/extra_args…) sont threadés dans le
+  // dry-plan EXACTEMENT comme au run, pour que l'aperçu reflète les arguments de l'opérateur (parité).
+  const moduleParams = collectModuleParams();
+  if (Object.keys(moduleParams).length) body.module_params = moduleParams;
   let r, j;
   try {
     r = await fetch(withEngagement('/api/plan'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });

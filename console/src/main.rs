@@ -3656,6 +3656,97 @@ mod tests {
         let _ = std::fs::remove_file(&ledger2);
     }
 
+    /// [C5 — profils nommés] « Enregistrer comme profil… » crée un profil NOMMÉ (pas « custom ») dont les
+    /// techniques ÉGALENT la sélection active persistée — c'est l'invariant sur lequel s'appuie le
+    /// reconcile client (detectActiveProfile) pour re-sélectionner le profil au reload (et NON « custom »).
+    /// Un nom de base réservé (bug_bounty/pentest/custom) est refusé.
+    #[tokio::test]
+    async fn save_as_creates_named_profile_matching_active_selection() {
+        let ledger = tmp_path("forge-test-saveas");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // save_as "web_bb" avec une sélection custom + toggles explicites.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+            Json(json!({"profile": "custom", "techniques": {"sqli.error": true, "xss.reflected": false}, "save_as": "web_bb"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "save_as accepté");
+
+        // le profil NOMMÉ existe (pas « custom ») ET ÉGALE la sélection active persistée (reconcile => actif au reload).
+        let map = technique_profiles_map(&app);
+        assert!(map.contains_key("web_bb"), "profil nommé 'web_bb' créé (pas 'custom')");
+        let active = technique_selection_value_for(&app, 1);
+        assert_eq!(map["web_bb"]["techniques"], active["techniques"], "profil nommé == sélection active persistée");
+        assert_eq!(map["web_bb"]["techniques"]["sqli.error"], json!(true), "toggle capturé dans le profil");
+
+        // un nom de base réservé ne peut pas masquer un profil de base.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+            Json(json!({"profile": "custom", "save_as": "custom"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "nom de base réservé refusé");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [C5 — profils nommés] Renommer = « Enregistrer comme profil… » sous un NOUVEAU nom (les deux
+    /// coexistent, l'ancien peut ensuite être supprimé). Supprimer retire le profil NOMMÉ (global) sans
+    /// toucher la sélection active ; supprimer un profil inconnu -> 404.
+    #[tokio::test]
+    async fn technique_profile_rename_then_delete() {
+        let ledger = tmp_path("forge-test-profren");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // crée "old", puis "renomme" en enregistrant SOUS "new" (la sélection active demeure).
+        for name in ["old", "new"] {
+            let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+                Json(json!({"profile": "custom", "techniques": {"idor.horizontal": true}, "save_as": name}))).await.into_response();
+            assert_eq!(resp.status(), StatusCode::OK, "save_as '{name}' accepté");
+        }
+        let map = technique_profiles_map(&app);
+        assert!(map.contains_key("old") && map.contains_key("new"), "les deux profils coexistent");
+
+        // supprime "old" -> 200, "new" conservé, sélection active intacte.
+        let active_before = technique_selection_value_for(&app, 1);
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+            Json(json!({"delete_profile": "old"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "suppression 'old' acceptée");
+        let map = technique_profiles_map(&app);
+        assert!(!map.contains_key("old") && map.contains_key("new"), "'old' supprimé, 'new' conservé");
+        assert_eq!(technique_selection_value_for(&app, 1)["techniques"], active_before["techniques"], "sélection active non touchée par la suppression");
+
+        // supprimer un profil inconnu -> 404.
+        let resp = technique_selection_set(State(app.clone()), conn_info(), eng_query(1), bearer_headers(&otok),
+            Json(json!({"delete_profile": "ghost"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "profil inconnu -> 404");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [C9 — params par-module dans le dry-plan] /api/plan THREADE désormais `module_params` : un
+    /// `extra_args` avec un drapeau HORS allowlist est refusé FAIL-CLOSED (400) AVANT tout spawn moteur —
+    /// preuve que les arguments de l'opérateur sont bien traités (parité run/plan), pas ignorés.
+    #[tokio::test]
+    async fn plan_threads_and_validates_module_params_extra_args() {
+        let ledger = tmp_path("forge-test-planparams");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+
+        // extra_args non-allowlisté (module sans allowlist -> ensemble vide -> tout drapeau refusé).
+        let resp = plan(State(app.clone()), HeaderMap::new(), eng_query(1),
+            Json(json!({"targets": ["a.example.com"], "module_params": {"recon.http": {"extra_args": ["--evil-flag"]}}}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "extra_args hors allowlist refusé par /api/plan (fail-closed)");
+
+        // params par-module MAL FORMÉS (pas un objet) -> 400 avant spawn (traités par /api/plan).
+        let resp = plan(State(app.clone()), HeaderMap::new(), eng_query(1),
+            Json(json!({"targets": ["a.example.com"], "module_params": "pas-un-objet"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "module_params non-objet refusé par /api/plan");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// [parité lecture] parse_plan_verdicts : extrait verdict + kind→target des lignes du moteur
     /// (mode propose), ignore les lignes sans verdict, tolère `->` et `→`. Couvre le format inline
     /// (CLI `forge plan` : `[VERDICT] kind → target`).
