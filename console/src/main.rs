@@ -1305,7 +1305,7 @@ mod tests {
         { let db = app.db(); db.execute_batch("DROP TABLE session").unwrap(); }
         assert!(try_create_session(&app, uid).is_err(), "INSERT échoué -> Err (pas de faux-succès)");
         // bout-en-bout : login avec de BONS identifiants mais persistance impossible -> 500, pas 200.
-        let r = login(State(app.clone()), Json(json!({"login": "sessu", "password": "pw"}))).await;
+        let r = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": "sessu", "password": "pw"}))).await;
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "login -> 500 sur échec de persistance de session");
         let b = resp_json(r).await;
         assert_eq!(b["error"], "session_persist_failed");
@@ -1319,7 +1319,7 @@ mod tests {
     #[tokio::test]
     async fn login_lockout_triggers_without_user_enumeration() {
         async fn attempt(app: &App, login_name: &str, pw: &str) -> (StatusCode, Value) {
-            let r = login(State(app.clone()), Json(json!({"login": login_name, "password": pw}))).await;
+            let r = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": login_name, "password": pw}))).await;
             let st = r.status();
             (st, resp_json(r).await)
         }
@@ -1576,6 +1576,88 @@ mod tests {
         assert!(check_admin(&app, &bearer_headers(&atok)), "admin autorisé");
         assert!(!check_admin(&app, &operator_headers("s3cr3t")), "hash env opérateur NE confère PAS l'admin (pas de repli)");
         assert!(!check_admin(&app, &HeaderMap::new()), "aucune preuve -> refus (fail-closed)");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [C1] session_cookie : drapeau `Secure` SCHEME-AWARE (posé UNIQUEMENT en HTTPS), jamais par défaut.
+    /// `HttpOnly` + `SameSite=Strict` + `Path=/` TOUJOURS. En http clair (is_https=false) -> pas de Secure
+    /// (sinon le navigateur DROPPE un cookie Secure servi en http -> session jamais persistée = LE bug
+    /// corrigé). En https (is_https=true) -> Secure posé. HttpOnly/SameSite jamais affaiblis.
+    #[test]
+    fn session_cookie_secure_is_scheme_aware() {
+        let c_http = session_cookie("tok", 3600, false);
+        assert!(c_http.contains("HttpOnly") && c_http.contains("SameSite=Strict") && c_http.contains("Path=/"),
+            "attributs durcis toujours posés: {c_http}");
+        assert!(!c_http.contains("Secure"), "http clair -> pas de Secure (sinon cookie droppé): {c_http}");
+        let c_https = session_cookie("tok", 3600, true);
+        assert!(c_https.contains("; Secure"), "https -> Secure posé: {c_https}");
+        assert!(c_https.contains("HttpOnly") && c_https.contains("SameSite=Strict"),
+            "https garde HttpOnly+SameSite: {c_https}");
+    }
+
+    /// [C1] request_is_https : true SEULEMENT si `X-Forwarded-Proto: https` (1er hop du proxy TLS) OU
+    /// l'override `FORGE_FORCE_SECURE_COOKIE`. Sans en-tête (http direct loopback) OU XFP=http -> false.
+    /// XFP n'est utilisé QUE pour le flag Secure, jamais pour l'auth (cf. doc). (L'override env n'est pas
+    /// testé ici pour éviter la mutation d'env process-globale sous exécution parallèle.)
+    #[test]
+    fn request_is_https_detects_forwarded_proto() {
+        assert!(!request_is_https(&HeaderMap::new()), "pas d'en-tête -> http direct -> false");
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(request_is_https(&h), "XFP=https -> true (reverse-proxy TLS)");
+        let mut hc = HeaderMap::new();
+        hc.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        assert!(request_is_https(&hc), "XFP chaîné 'https, http' -> 1er hop https -> true");
+        let mut hh = HeaderMap::new();
+        hh.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!request_is_https(&hh), "XFP=http -> false");
+    }
+
+    /// [C6] Écriture UI (panneaux/dashboards) autorisée par la SESSION (admin|operator), PAS par le token
+    /// d'ingest machine. Un admin CONNECTÉ crée un panneau SANS coller aucun token ; un viewer connecté est
+    /// refusé (403 writer_required) ; le token d'ingest ("t") ne satisfait PLUS l'écriture UI (check_writer)
+    /// mais reste la porte de l'ingest MACHINE (check_token) — les deux gates restent bien distinctes.
+    #[tokio::test]
+    async fn panel_write_authorized_by_session_not_ingest_token() {
+        let path = tmp_path("forge-test-panel-session");
+        let app = test_app(&path);
+        { let db = app.db(); migrate(&db); } // colonnes additives panel (descr/col_span/updated/dashboard_id)
+        ensure_default_dashboard(&app.store()); // dashboard #1 (panel_create refuse un dashboard inexistant)
+        {
+            let db = app.db();
+            upsert_user(&db, "adm", "admin", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "viw", "viewer", &hash_pw("pw")).unwrap();
+        }
+        let (atok, _) = create_session(&app, uid_of(&app, "adm"));
+        let (vtok, _) = create_session(&app, uid_of(&app, "viw"));
+
+        // check_writer : session admin OK, viewer NON, anonyme NON.
+        assert!(check_writer(&app, &bearer_headers(&atok)), "session admin autorise l'écriture UI");
+        assert!(!check_writer(&app, &bearer_headers(&vtok)), "session viewer refusée (fail-closed)");
+        assert!(!check_writer(&app, &HeaderMap::new()), "anonyme refusé (fail-closed)");
+
+        // Séparation des gates : le token d'ingest machine ("t") NE vaut PAS une session (écriture UI),
+        // et une session admin N'EST PAS le token d'ingest. check_token reste la porte de l'ingest machine.
+        assert!(!check_writer(&app, &bearer_headers("t")), "token d'ingest ≠ session (pas d'écriture UI)");
+        assert!(check_token(&app, &bearer_headers("t")), "token d'ingest reste valide pour l'ingest machine");
+        assert!(!check_token(&app, &bearer_headers(&atok)), "session admin n'est pas le token d'ingest");
+
+        // BOUT-EN-BOUT : admin connecté -> crée un panneau SANS token d'ingest -> 200.
+        let ok = panel_create(
+            State(app.clone()),
+            bearer_headers(&atok),
+            Json(json!({"name": "P1", "query": "search severity=HIGH | stats count by mitre"})),
+        ).await.into_response();
+        assert_eq!(ok.status(), StatusCode::OK, "admin connecté crée un panneau sans token d'ingest");
+
+        // Viewer connecté -> refusé (403), aucun token à coller.
+        let denied = panel_create(
+            State(app.clone()),
+            bearer_headers(&vtok),
+            Json(json!({"name": "P2", "query": "search severity=LOW | stats count by mitre"})),
+        ).await.into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN, "viewer refusé (403 writer_required)");
+
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2017,10 +2099,10 @@ mod tests {
         // login invalide -> 400
         {
             let app = test_app(&path);
-            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "-bad", "admin_password": "x"}))).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(json!({"admin_login": "-bad", "admin_password": "x"}))).await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "login invalide -> 400");
             // mot de passe vide -> 400
-            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "ok", "admin_password": ""}))).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(json!({"admin_login": "ok", "admin_password": ""}))).await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "mot de passe vide -> 400");
             assert!(!app.any_enabled_admin(), "aucun refus 400 ne provisionne quoi que ce soit");
         }
@@ -2030,7 +2112,7 @@ mod tests {
             app.pass_hash = Arc::new(hash_pw("bootstrap"));
             app.recompute_auth_required();
             assert!(app.provisioned(), "hash env -> déjà provisionné");
-            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "root", "admin_password": "x"}))).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(json!({"admin_login": "root", "admin_password": "x"}))).await;
             assert_eq!(r.status(), StatusCode::CONFLICT, "hash env d'amorçage -> /api/setup fermée (409)");
         }
         let _ = std::fs::remove_file(&path);
@@ -2050,7 +2132,7 @@ mod tests {
             insert_test_engagement(&app, 1, &[], "grey", &path);
             let bad = json!({"admin_login": "root", "admin_password": "pw",
                 "scope_json": {"mode": "grey", "in_scope": ["bad host with spaces"]}});
-            let r = setup_provision(State(app.clone()), Json(bad)).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(bad)).await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "ROE invalide -> 400");
             assert!(!app.any_enabled_admin(), "un 400 ROE ne provisionne AUCUN admin (fail-closed)");
             let eng = load_engagement(&app.store(), 1).expect("engagement #1");
@@ -2064,7 +2146,7 @@ mod tests {
             insert_test_engagement(&app, 1, &[], "grey", &path);
             let ok = json!({"admin_login": "root", "admin_password": "pw",
                 "scope_json": {"mode": "white", "in_scope": ["app.example.com", "*.lab.test"], "out_scope": ["admin.example.com"]}});
-            let r = setup_provision(State(app.clone()), Json(ok)).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(ok)).await;
             assert_eq!(r.status(), StatusCode::OK, "ROE valide -> 200");
             assert!(app.provisioned(), "admin provisionné");
             let eng = load_engagement(&app.store(), 1).expect("engagement #1");
@@ -2083,11 +2165,11 @@ mod tests {
             let path = tmp_path("forge-test-setup-scope-none");
             let app = test_app(&path);
             insert_test_engagement(&app, 1, &[], "grey", &path);
-            let r = setup_provision(State(app.clone()), Json(json!({"admin_login": "root", "admin_password": "pw"}))).await;
+            let r = setup_provision(State(app.clone()), HeaderMap::new(), Json(json!({"admin_login": "root", "admin_password": "pw"}))).await;
             assert_eq!(r.status(), StatusCode::OK, "sans ROE -> 200 (provisioning ok)");
             let eng = load_engagement(&app.store(), 1).expect("engagement #1");
             assert!(eng.scope_in.is_empty(), "sans ROE -> engagement #1 en scope VIDE (fail-closed)");
-            let r2 = setup_provision(State(app.clone()), Json(json!({"admin_login": "root2", "admin_password": "pw2"}))).await;
+            let r2 = setup_provision(State(app.clone()), HeaderMap::new(), Json(json!({"admin_login": "root2", "admin_password": "pw2"}))).await;
             assert_eq!(r2.status(), StatusCode::CONFLICT, "route auto-désactivée après provisioning (409)");
             let _ = std::fs::remove_file(&path);
         }

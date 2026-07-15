@@ -264,6 +264,30 @@ pub(crate) fn check_admin(app: &App, headers: &HeaderMap) -> bool {
     }
 }
 
+/// Authz ÉCRITURE UI (panneaux/dashboards/config d'affichage) — FAIL-CLOSED. Vrai si une SESSION
+/// valide (cookie `forge_session`) porte le rôle `admin` OU `operator`. Contrairement à `check_token`
+/// (secret machine PARTAGÉ = token d'ingest), ceci autorise l'utilisateur CONNECTÉ à créer/éditer ses
+/// panneaux et dashboards SANS coller de token : c'est SA session qui l'autorise (attribution
+/// individuelle). Un viewer/anonyme ne passe pas. Le token d'ingest reste réservé à l'ingest MACHINE
+/// (`POST /api/ingest` depuis le moteur/outils externes). Pas de repli env-hash (session obligatoire).
+pub(crate) fn check_writer(app: &App, headers: &HeaderMap) -> bool {
+    match resolve_session_identity(app, headers) {
+        Some(id) => id.role == "admin" || id.role == "operator",
+        None => false,
+    }
+}
+
+/// Réponse standard d'un refus d'écriture UI (403). Message stable et non-fuiteur (fail-closed).
+pub(crate) fn writer_denied() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "writer_required",
+            "why": "écriture réservée à une session au rôle admin ou operator (POST /api/login) — aucun token d'ingest à coller"
+        })),
+    )
+}
+
 /// Réponse standard d'un refus admin (403). Message stable et non-fuiteur (fail-closed).
 pub(crate) fn admin_denied() -> (StatusCode, Json<Value>) {
     (
@@ -442,15 +466,39 @@ pub(crate) fn create_session(app: &App, user_id: i64) -> (String, i64) {
     try_create_session(app, user_id).expect("create_session: INSERT session échoué (in-memory ne devrait jamais échouer)")
 }
 
-/// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis (`HttpOnly`,
-/// `SameSite=Strict`, `Path=/`, `Max-Age=<ttl>`) ET `Secure` PAR DÉFAUT — le déploiement documenté
-/// (DEPLOYMENT.md) termine la TLS en amont (reverse-proxy), donc le cookie de session ne doit jamais
-/// transiter en clair. FAIL-CLOSED : `Secure` est posé sauf si l'affordance de dev HTTP local est
-/// explicitement engagée via `FORGE_COOKIE_INSECURE` (accès direct http://127.0.0.1:7100 du 1er
-/// déploiement — les navigateurs modernes traitent localhost comme contexte sûr, mais l'opt-out reste
-/// disponible pour un proxy non-TLS). Un flag mal orthographié => Secure conservé (jamais un fail-open).
-pub(crate) fn session_cookie(token: &str, ttl: i64) -> String {
-    let secure = if crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "" } else { "; Secure" };
+/// Détermine si la requête effective transite en HTTPS, à partir des en-têtes. Sources de confiance :
+/// (1) l'en-tête `X-Forwarded-Proto: https` — le signal STANDARD d'un reverse-proxy qui TERMINE la TLS
+/// en amont (le déploiement documenté) ; (2) l'override explicite `FORGE_FORCE_SECURE_COOKIE=1`. Sinon
+/// (http direct en clair, ex: docker loopback `http://127.0.0.1:7100`) => `false`.
+///
+/// SÉCURITÉ : XFP n'est utilisé QUE pour décider du drapeau `Secure` d'un cookie — JAMAIS pour une
+/// décision d'authentification/autorisation. Au pire, un attaquant qui forcerait `X-Forwarded-Proto:
+/// https` ferait poser `Secure` sur un cookie servi en http -> le navigateur le DROPPE (auto-DoS de la
+/// victime), ce qui n'est pas une fuite. C'est donc fail-safe côté confidentialité.
+pub(crate) fn request_is_https(headers: &HeaderMap) -> bool {
+    if crate::env_flag_enabled("FORGE_FORCE_SECURE_COOKIE") {
+        return true;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        // Un proxy peut chaîner plusieurs protos ("https, http") — le PREMIER hop (client->proxy) fait foi.
+        .map(|proto| proto.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+/// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis TOUJOURS
+/// posés : `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=<ttl>`. Le drapeau `Secure` est
+/// SCHEME-AWARE (et non plus par défaut) : il n'est posé QUE si la requête effective est en HTTPS
+/// (`is_https`, dérivé de `request_is_https` : `X-Forwarded-Proto: https` d'un reverse-proxy TLS, ou
+/// l'override `FORGE_FORCE_SECURE_COOKIE=1`). En http direct (docker loopback `http://127.0.0.1:7100`,
+/// l'accès local documenté du 1er déploiement), `Secure` est OMIS pour que le navigateur STOCKE
+/// réellement le cookie — sinon la session n'est jamais persistée et un login pourtant VALIDE « ne
+/// marche pas » (le bug corrigé). `FORGE_COOKIE_INSECURE=1` reste un override explicite « jamais Secure ».
+/// Le drapeau `Secure` ne change RIEN à l'authz (cf. request_is_https : au pire un Secure forcé = cookie
+/// droppé = auto-DoS, pas une fuite). `HttpOnly`/`SameSite` ne sont JAMAIS affaiblis.
+pub(crate) fn session_cookie(token: &str, ttl: i64, is_https: bool) -> String {
+    let secure = if is_https && !crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "; Secure" } else { "" };
     format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}{secure}")
 }
 

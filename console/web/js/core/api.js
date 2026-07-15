@@ -1,34 +1,14 @@
 import { $ } from './dom.js';
 import { withEngagement } from './state.js';
-import { modal, toast } from './ui.js';
-
 
 // =====================================================================================
-//  TOKEN (écritures panels : Bearer = l'« ingest token » affiché au démarrage du daemon)
+//  AUTH DES ÉCRITURES — modèle
 // =====================================================================================
-// Le token est lu de façon SYNCHRONE (authHeaders() est appelé dans des handlers non-async).
-// S'il manque, on ne bloque pas avec un prompt() natif : on ouvre une modale in-app (asynchrone,
-// dé-bouncée pour n'apparaître qu'une fois) qui mémorise le token puis invite à relancer l'action.
-export let _tokenAsking = false;
-export function promptToken() {
-  if (_tokenAsking) return;
-  _tokenAsking = true;
-  modal({
-    title: 'Token console',
-    message: 'Colle l’« ingest token » affiché au démarrage du daemon (requis pour les écritures : panneaux, dashboards).',
-    fields: [{ name: 'token', label: 'Token', type: 'password', required: true, placeholder: 'Bearer token' }],
-    okText: 'Enregistrer',
-  }).then(r => {
-    _tokenAsking = false;
-    if (r && r.token) { localStorage.setItem('forge_token', String(r.token).trim()); toast('Token enregistré — relance l’action.', 'ok'); }
-  });
-}
-export function token() {
-  const t = localStorage.getItem('forge_token');
-  if (!t) promptToken();
-  return t || '';
-}
-export function authHeaders(extra = {}) { return { Authorization: 'Bearer ' + token(), ...extra }; }
+// Les écritures UI (panneaux, dashboards, config d'affichage) sont autorisées par la SESSION de
+// l'utilisateur connecté (cookie HttpOnly `forge_session`, envoyé automatiquement en same-origin) :
+// AUCUN token à coller. Côté serveur, `check_writer` exige un rôle admin|operator. Le token d'ingest
+// (`FORGE_CONSOLE_TOKEN`) est réservé à l'ingest MACHINE (POST /api/ingest depuis le moteur/outils) et
+// n'est plus jamais demandé dans l'UI — il est seulement RÉVÉLÉ (admin) dans le wizard et l'admin.
 
 // =====================================================================================
 //  API helpers
@@ -58,16 +38,16 @@ export const withCampaign = qs => { const c = $('#campaign') && $('#campaign').v
 // via les flags), et la MÊME extraction anti-XSS que api() : on ne renvoie JAMAIS le corps brut du
 // serveur (un proxy/gateway peut renvoyer du HTML non-fiable), seulement le JSON structuré parsé (dont
 // les champs contrôlés .why/.error) + le code HTTP. Retour : { ok, status, json } (json = {} si vide/
-// non-JSON, exactement comme `await r.json().catch(() => ({}))`). Appeler authHeaders()/operatorHeaders()
-// préserve leurs effets de bord (prompt de token viewer, injection du secret opérateur).
+// non-JSON, exactement comme `await r.json().catch(() => ({}))`). operatorHeaders() préserve son effet
+// de bord (injection du secret opérateur). `auth: 'admin'` s'appuie sur le cookie de session (aucun
+// en-tête d'auth ajouté — le serveur applique check_admin/check_writer sur la session).
 export async function write(path, { method = 'POST', body, auth = 'operator', engagement = false, campaign = false } = {}) {
   let url = path;
   if (engagement) url = withEngagement(url);
   if (campaign) url = withCampaign(url);
   const hasBody = body !== undefined;
   const extra = hasBody ? { 'Content-Type': 'application/json' } : {};
-  const headers = auth === 'token' ? authHeaders(extra)
-    : auth === 'admin' ? { ...extra, Accept: 'application/json' }
+  const headers = auth === 'admin' ? { ...extra, Accept: 'application/json' }
     : operatorHeaders(extra);
   const opts = { method, headers };
   if (hasBody) opts.body = JSON.stringify(body);

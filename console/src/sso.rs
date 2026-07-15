@@ -418,7 +418,10 @@ async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<Ha
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "session_persist_failed", format!("could not persist session: {e}")),
     };
     let ttl = crate::session_ttl_secs();
-    let cookie = crate::session_cookie(&token, ttl);
+    // Scheme-aware `Secure` : posé si la requête effective est en HTTPS (X-Forwarded-Proto: https d'un
+    // reverse-proxy TLS, ou FORGE_FORCE_SECURE_COOKIE). Le callback OIDC arrive via une navigation
+    // top-level du navigateur ; `headers` porte le XFP du proxy amont le cas échéant.
+    let cookie = crate::session_cookie(&token, ttl, crate::request_is_https(&headers));
     // Clear the one-time state-binding cookie now that the flow completed (hygiene).
     let clear_state = format!("{STATE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/api/sso; Max-Age=0");
 
@@ -1442,7 +1445,11 @@ byHb5g3JqJSE6WJSuyEQrUob
         assert_eq!(header_val(&r, "location").as_deref(), Some("http://localhost/app"), "redirect to allowlisted target");
         let tok = cookie_token(&r).expect("forge_session cookie issued");
         let sc = header_val(&r, "set-cookie").unwrap();
-        assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict") && sc.contains("Secure"), "hardened cookie: {sc}");
+        // Cookie durci : HttpOnly + SameSite=Strict TOUJOURS. `Secure` est SCHEME-AWARE : ce test tape en
+        // http clair (pas de X-Forwarded-Proto: https) -> le flag Secure est OMIS pour que le navigateur
+        // STOCKE réellement le cookie (sinon session jamais persistée sur http local). Cf. request_is_https.
+        assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict"), "hardened cookie: {sc}");
+        assert!(!sc.contains("Secure"), "plain http -> pas de Secure (sinon cookie droppé): {sc}");
 
         // The session identifies the mapped user (email 'Alice@Corp.com' -> login 'alice.corp.com', operator).
         let w = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={tok}\r\n"))).await;

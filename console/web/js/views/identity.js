@@ -1,4 +1,4 @@
-import { adminApi, token } from '../core/api.js';
+import { adminApi } from '../core/api.js';
 import { ENTERPRISE, identityAdmin, identityOn } from '../core/auth.js';
 import { $, esc } from '../core/dom.js';
 import { guardList, toast } from '../core/ui.js';
