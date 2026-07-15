@@ -9,6 +9,38 @@ comme un module natif** : scope-guard fail-closed, argv **fixe no-shell**, **all
 **jamais** promu `vulnerable`, plancher **exploit** (arm + raison). C'est de la **donnée déclarative** (un
 `ToolSpec`), **jamais du code arbitraire**.
 
+---
+
+## ⚡ Ajouter un outil PENDANT un pentest (sans redémarrage)
+
+**Les deux voies sûres sont montées PAR DÉFAUT** (`docker-compose.yml`, binds `:ro` `./tools` + `./toolspecs`) —
+rien à activer, rien à reconstruire. **Une analyse en cours n'est JAMAIS interrompue ; le conteneur continue de
+tourner ; vous ne faites JAMAIS `docker build` / `down` / `up` pour ajouter un outil.**
+
+- **(a) Un binaire / script exécutable** → déposez-le dans **`forge/tools/`** (`chmod +x`). `/opt/tools` est
+  sur le `PATH` et la disponibilité est vérifiée **à fire-time** (`runner.available`→`shutil.which`) → l'outil
+  est **utilisable au PROCHAIN run**, **rien à cliquer**.
+
+  ```bash
+  cp ~/bin/myfuzzer forge/tools/ && chmod +x forge/tools/myfuzzer   # c'est tout
+  ```
+
+- **(b) Un ToolSpec gouverné** (JSON/YAML, zéro code) → déposez-le dans **`forge/toolspecs/`** *(ou ajoutez-le
+  via **Administration → Ajouter un outil**)** → cliquez **« Rafraîchir modules »** (bouton `#mod-refresh`,
+  opérateur ; ou `POST /api/modules/refresh`) → il **apparaît en direct**. Le dir `./toolspecs` est **fusionné**
+  avec le dir server-managed des outils ajoutés par l'UI (`probe_toolspecs_env`) → les deux **coexistent**.
+
+- **(c) Un module Python custom** (`@register`) → **activez d'abord** le montage `./plugins` (**OPT-IN** — code
+  arbitraire) : décommentez le bind `./plugins` + l'env `FORGE_PLUGINS` dans `docker-compose.yml`, déposez le
+  module, puis **« Rafraîchir modules »**.
+
+> **La SEULE exception au « jamais de recréation »** : activer le montage opt-in `./plugins` (ou si vous aviez
+> retiré les montages par défaut) exige **un** `docker compose up` de recréation (on ne peut pas ajouter un
+> bind-mount à un conteneur déjà lancé). C'est précisément pourquoi `./tools` + `./toolspecs` restent **ON par
+> défaut** : vous n'y êtes **jamais** confronté en plein pentest. Détail complet : [§5](#5-rendre-le-binaire-disponible).
+
+---
+
 - [1. En bref](#1-en-bref)
 - [2. Le formulaire (Administration → Ajouter un outil)](#2-le-formulaire)
 - [3. Anatomie d'un ToolSpec](#3-anatomie-dun-toolspec)
@@ -128,38 +160,46 @@ COPY ./bin/myfuzzer /usr/local/bin/myfuzzer        # binaire ou script auto-cont
 USER forge
 ```
 
-### (c) Monter SANS rebuild — `./tools`, `./plugins`, `./toolspecs`
+### (c) Monter SANS rebuild — `./tools`, `./toolspecs` (défaut), `./plugins` (opt-in)
 
 Un red-teamer **itère** sur beaucoup d'outils : inutile de reconstruire l'image à chaque ajout. L'image expose
-**trois dossiers de montage OPT-IN** (binds `:ro` **commentés** dans `docker-compose.yml` — décommenter + créer
-le dossier hôte ; cf. la section « OUTILLAGE OPÉRATEUR SANS REBUILD » du compose) :
+**trois dossiers de montage** `:ro` (binds dans `docker-compose.yml`, section « OUTILLAGE OPÉRATEUR SANS
+REBUILD ») — **deux ON par défaut, un opt-in** :
 
-| Dossier hôte | → conteneur | Contenu | Câblage | Prise en compte |
-|--------------|-------------|---------|---------|-----------------|
-| `./tools` | `/opt/tools` | binaires **ou scripts auto-contenus exécutables** (shebang + `chmod +x`) | **déjà sur le `PATH`** (aucune env) | résolu sur PATH par `shutil.which` — **sans redémarrage** |
-| `./plugins` | `/opt/forge/plugins` | modules **Python `@register`** (code) | env `FORGE_PLUGINS=/opt/forge/plugins` | chargé au **boot / re-sonde** du catalogue |
-| `./toolspecs` | `/opt/toolspecs` | **ToolSpecs déclaratifs** JSON/YAML (zéro code) | env `FORGE_TOOLSPECS=/opt/toolspecs` | chargé au **boot / re-sonde** du catalogue |
+| Dossier hôte | → conteneur | Contenu | Câblage | Défaut | Prise en compte |
+|--------------|-------------|---------|---------|--------|-----------------|
+| `./tools` | `/opt/tools` | binaires **ou scripts auto-contenus exécutables** (shebang + `chmod +x`) | **déjà sur le `PATH`** (aucune env) | **✅ ON** | résolu sur PATH par `shutil.which` à **fire-time** — **sans redémarrage, rien à cliquer** |
+| `./toolspecs` | `/opt/toolspecs` | **ToolSpecs déclaratifs** JSON/YAML (zéro code) | env `FORGE_TOOLSPECS=/opt/toolspecs` (**ON**) | **✅ ON** | chargé à la **re-sonde** (« Rafraîchir modules » / `POST /api/modules/refresh`) ; **fusionné** avec le dir server-managed |
+| `./plugins` | `/opt/forge/plugins` | modules **Python `@register`** (code) | env `FORGE_PLUGINS=/opt/forge/plugins` | **⚠️ OPT-IN** | chargé au **boot / re-sonde** — décommenter le bind **et** l'env |
 
-**Exemple — ajouter `myfuzzer` sans rebuild :**
+**Pourquoi `./tools` + `./toolspecs` sont ON par défaut, `./plugins` non.** Un bind-mount ne peut **pas** être
+ajouté à un conteneur **déjà lancé** — il doit exister dès le premier `up`. Pour ne **jamais** vous bloquer en
+plein pentest, les deux voies **sûres** (un binaire/script que vous choisissez ; un ToolSpec **déclaratif
+gouverné, zéro code**) sont donc montées d'emblée. `./plugins` = **code Python arbitraire** dans le process
+moteur → l'opérateur l'active **explicitement**. Les dossiers hôte existent déjà (tracked via `.gitkeep`), donc
+le bind par défaut **ne crée pas** de dossier root-owned, et un dossier **vide** monté est inoffensif (aucun
+outil chargé tant que rien n'est déposé — cf. §4/§5(a) : binaire absent → `skipped`).
+
+**Exemple — ajouter `myfuzzer` sans redémarrage (montage déjà actif) :**
 
 ```bash
-# 1) déposer le binaire/script exécutable côté hôte
-mkdir -p forge/tools && cp ~/bin/myfuzzer forge/tools/ && chmod +x forge/tools/myfuzzer
-# 2) décommenter le bind dans forge/docker-compose.yml (bloc volumes du service `forge`) :
-#      - ./tools:/opt/tools:ro
-# 3) (re)démarrer — aucune reconstruction d'image
-docker compose -f forge/docker-compose.yml up -d
+# déposer le binaire/script exécutable côté hôte — c'est tout : utilisable au PROCHAIN run
+cp ~/bin/myfuzzer forge/tools/ && chmod +x forge/tools/myfuzzer
 ```
 
 Puis déclarez un ToolSpec pointant `"binary": "myfuzzer"` (via **Administration → Ajouter un outil**, §2, ou un
-fichier JSON déposé dans `./toolspecs`). `/opt/tools` étant sur le `PATH`, `runner.tool` le résout au run.
+fichier JSON déposé dans `./toolspecs` + **« Rafraîchir modules »**). `/opt/tools` étant sur le `PATH`,
+`runner.tool` le résout au run. **Aucun `docker build` / `down` / `up`.** *(La seule exception : activer le
+montage opt-in `./plugins` exige un `docker compose up` de recréation one-shot — voir le tableau ci-dessus.)*
 
 > **Posture de sécurité — à assumer.** `./tools` et `./plugins` sont **OPÉRATEUR-DE-CONFIANCE** : vous
 > exécutez des **binaires / du code Python arbitraires que VOUS choisissez de monter** (un plugin `.py` tourne
 > dans le process moteur). La **gouvernance ToolSpec** (scope-guard fail-closed, argv **no-shell**, **allowlist**
 > de drapeaux, statut jamais promu `vulnerable`, plancher exploit) borne **COMMENT** un outil est invoqué — elle
 > ne sandboxe pas ce qu'un binaire/plugin fait en interne. `./toolspecs` est la voie **gouvernée sans code**
-> (déclaratif uniquement). Tous les montages sont **`:ro`** et **opt-in** (rien de monté par défaut).
+> (déclaratif uniquement) — c'est pourquoi elle, comme `./tools`, est **ON par défaut** tandis que `./plugins`
+> (code) reste **opt-in**. Tous les montages sont **`:ro`** ; le conteneur tourne en user **non-root** `forge`
+> (uid 10001) et lit un dossier hôte `0755` sans souci. Rien n'est chargé tant que vous ne déposez rien.
 
 ### `docker_image` (repli conteneurisé) — nécessite le socket docker
 

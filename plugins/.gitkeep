@@ -1,0 +1,1 @@
+# Modules Python @register (CODE ARBITRAIRE — haute confiance opérateur). Montage OPT-IN : décommentez le bind ./plugins + l'env FORGE_PLUGINS dans docker-compose.yml (un `up` de recréation one-shot), puis déposez ici et « Rafraîchir modules ». Contrairement à tools/ et toolspecs/, ce montage n'est PAS activé par défaut. Le contenu est gitignore (sauf ce .gitkeep).

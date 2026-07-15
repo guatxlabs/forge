@@ -30,10 +30,23 @@ engagements/
 forge.db
 forge-*.db
 
-# --- Outils ajoutés par l'UI (ToolSpecs server-managed, POST /api/tools) ------
-# Dossier RUNTIME (sibling de la base) où la console persiste les ToolSpecs déclaratifs
-# ajoutés depuis l'UI. Artefact d'exploitation, jamais suivi (comme la base et le ledger).
-toolspecs/
+# --- Dossiers de montage opérateur (outillage live SANS rebuild) --------------
+# tools/ toolspecs/ plugins/ sont des CIBLES DE BIND MONTÉES :ro dans le conteneur
+# (docker-compose.yml). tools/ + toolspecs/ sont montés PAR DÉFAUT → l'opérateur y
+# dépose binaires/ToolSpecs PENDANT un pentest (utilisables au run suivant, sans
+# redémarrage) ; plugins/ reste opt-in. On IGNORE le CONTENU déposé (jamais commité
+# par accident : outils réels, specs d'engagement) mais on GARDE le dossier vide via
+# son .gitkeep, pour que le bind par défaut fonctionne sans que Docker crée un dossier
+# root-owned. NB : toolspecs/ est aussi le dir RUNTIME (sibling de la base) où la
+# console persiste les ToolSpecs ajoutés depuis l'UI (POST /api/tools) — ceux-là
+# restent donc ignorés eux aussi.
+tools/*
+!tools/.gitkeep
+!tools/mock_plume.py
+toolspecs/*
+!toolspecs/.gitkeep
+plugins/*
+!plugins/.gitkeep
 
 # --- Snapshots/backups chiffrés (backup, restore, snapshot pré-upgrade) -------
 # Les archives .forge contiennent la base + le ledger CHIFFRÉS d'un engagement réel
