@@ -45,6 +45,8 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 - **Ajout d'outils par l'UI** `b6b8ee8` — `POST /api/tools` admin+ledgered, **ToolSpec gouverné** `custom.*` (no-shell, allowlist, traversal-safe, jamais built-in/`vulnerable`), hot-reload, form `admin/addtool.js`, `docs/TOOLS.md`.
 - **Secrets sans `.env` en clair** `83d47cc` — indirection **`*_FILE`** (Docker/k8s secrets) sur TOUS les secrets (token, passphrase backup, `FORGE_DB_KEY`, creds connecteurs MSF/Burp/Plume, PIN PKCS#11) : l'env porte un **chemin**, le secret vit dans un fichier monté root-owned. Détection & SSO déjà write-only UI. `docs/SECRETS.md`. Défaut byte-identical.
 - **Console `forge` gouvernée DANS l'UI** `b4096bd` — panneau admin « Console Forge » : runner à **allowlist** (`status`/`ledger verify`/`read`/`backup`/`upgrade`), **argv fixe, jamais de shell**, args schéma-validés, `upgrade` exige `confirm`, destructifs (`restore`/`migrate-store`) exclus, secrets jamais échoués, ledgerisé, sortie **streamée SSE**. Supprime `docker compose exec` pour les ops courantes. `docs/CONSOLE.md`.
+- **Notifications in-app** `6b6d518` — l'assigné est notifié sur assign/triage (cloche+badge+panneau, **grant-scopé**, own-only, live SSE). Complète ownership+triage.
+- **Revue sécu de la nouvelle surface** `50c458a` — audit adverse post-features (console-exec/add-tools/args-custom/rate/secrets/wizard) : **0 Critical/High**, contrôles tiennent ; 3 notes Info (frontière admin) fermées : `dangerous_flag` élargi (exfil `-T`/`-K`/`-F`/`--upload-file`), **parité de validation** du loader Python (spec `FORGE_TOOLSPECS` = mêmes checks que l'API), note port-avant-provision.
 
 ## E. Déploiement & cycle de vie
 - **Upgrade sûr une-commande** `131ee7d` — snapshot chiffré pré-upgrade → migrate → verify → **rollback auto** si échec ; `schema_version` + `forge status` ; `docs/UPGRADE.md`.
@@ -62,10 +64,10 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 ## Planifié — expérience opérateur
 - **Rien de planifié — les items UX sont livrés** (onboarding zéro-étape, rename `forge`, args custom tous outils, rate-limit, ajout d'outils UI, secrets `*_FILE`, console `forge` dans l'UI). Voir §D.
 
-## Possible next (décision produit, non planifié)
-- **Triage findings enrichi** — notifications / SLA / routage automatique au-delà du cycle de vie + ownership déjà livrés.
-- **Native in-process SAML** — derrière une feature `saml` optionnelle (samael + openssl+libxmlsec1) ; défaut reste OIDC-bridge, openssl-free. Sur demande contractuelle uniquement.
-- **Driver KMS cloud additionnel** (GCP-KMS Ed25519 via exec-signer, déjà documenté ; AWS-KMS impossible en Ed25519).
+## Décisions produit (actées)
+- **Triage enrichi** → **notifications in-app LIVRÉES** (`6b6d518`). SLA / email / webhook **différés** : nécessitent une config de canaux (SMTP/webhook) — à construire sur demande, pas une dette.
+- **Native in-process SAML** → **DÉCISION : ne pas construire.** Garder le **bridge OIDC** (Dex/Keycloak/oauth2-proxy) — SAML natif tirerait openssl+libxmlsec1 (casse openssl-free) et XML-DSig maison = foot-gun XSW. Feature `saml` optionnelle reste différée, uniquement si un contrat l'exige. (`docs/DEPLOYMENT.md §3ter`.)
+- **KMS cloud** → **DÉCISION : pas de driver bespoke.** L'**exec-signer générique couvre déjà GCP-KMS Ed25519** — recette concrète dans `docs/KEY_CUSTODY.md` (`50c458a`). PKCS#11 couvre HSM/CloudHSM. AWS-KMS **impossible** (pas d'Ed25519).
 
 ## Résiduels sécurité — ASSUMÉS et documentés (cf. `docs/SECURITY_AUDIT.md §4`)
 - **F4** — intégrité d'audit vs compromission **host-root** : **fermable en opt-in** (signeur off-host PKCS#11 + `WitnessAnchor`). Par défaut local + `NullAnchor` (byte-identique).
