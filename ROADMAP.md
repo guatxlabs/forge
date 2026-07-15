@@ -4,9 +4,10 @@
 > Validation à jour : `cargo test` défaut + `--features store-postgres` verts, `pytest` vert, `kubeconform` OK.
 > Docs détail : [`docs/AUDIT.md`](docs/AUDIT.md) · [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) · [`docs/READINESS_MATRIX.md`](docs/READINESS_MATRIX.md) · [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) · [`docs/QUICKSTART.md`](docs/QUICKSTART.md) · [`docs/UPGRADE.md`](docs/UPGRADE.md) · [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md) · [`docs/TECHNIQUE_COVERAGE.md`](docs/TECHNIQUE_COVERAGE.md) · [`docs/TOOLS.md`](docs/TOOLS.md)
 
-## En cours — 🐞 Bugs & UX remontés par un test live (2026-07-13)
+## 🐞 Bugs & UX d'un test live (2026-07-13) — ✅ TOUS CORRIGÉS
 
-Un test réel de la webUI (wizard → engagement → run C2 → rapport → console) a remonté ces défauts. **En cours de correction.**
+Un test réel de la webUI (wizard → engagement → run C2 → rapport → console) a remonté 13 défauts. **Tous corrigés + validés** :
+`adc7b29` (B1 ledger fork + B2 ingest 421 + B3 token) · `d3b2595` (B4 scope persist + B5 switch + B6 profils techniques) · `ecd74d0` (B7 export + B8 format ×2 + B9 logo) · `11f7ba1` (B10 drilldowns + B11 boutons import + B12 filtre statut C2) · `532ec76` (B13 favicon transparent/centré). Causes détaillées ci-dessous.
 
 ### 🔴 CRITIQUE — intégrité / correctness
 - **B1 — Ledger CASSÉ (fork de chaîne).** `forge ledger verify` → INVALIDE « chaînage rompu (prev), entrée seq=8 après 23 valides » ; `forge status` → `ledger ok=false`. Cause probable : la **console Rust** ET le **moteur Python** appendent au MÊME `engagement.jsonl` sans **verrou advisory partagé** (le flock Python ne couvre pas l'append Rust) → collision de seq. Fix : partager le flock cross-process (Rust `with_ledger_lock` doit prendre le même `fcntl.flock` que `forge/ledger.py`), ou sérialiser les deux écrivains.
