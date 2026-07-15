@@ -115,6 +115,24 @@ Exemple minimal (enrobe `httpx` pour récupérer le `<title>`) :
 - `{args}` s'étend en les **extra-args** validés contre la `flag_allowlist` (chaque drapeau **hors liste** est
   refusé fail-closed — aucun processus lancé).
 
+**Exemples gradués** (copier-coller-fonctionnels — ils chargent, s'enregistrent et passent la sûreté ;
+prouvés par `tests/test_contrib_graded_toolspecs.py`). Namespace **`custom.*` obligatoire**. Se chargent via
+`FORGE_TOOLSPECS=forge/modules/contrib`, `--toolspec <fichier>`, ou le formulaire UI (coller le JSON) :
+
+- [`forge/modules/contrib/simple.toolspec.json`](../forge/modules/contrib/simple.toolspec.json) — **SIMPLE**
+  (`custom.whatweb`) : le strict minimum — binaire + cible, **aucun** param, **aucune** `flag_allowlist`,
+  pas de `{args}`. Juste la cible → run.
+- [`forge/modules/contrib/medium.toolspec.json`](../forge/modules/contrib/medium.toolspec.json) — **MOYEN**
+  (`custom.dirfuzz`, ffuf) : `params_schema` typés (wordlist/threads/rate/codes) rendus en formulaire,
+  `flag_allowlist` gouvernant `{args}`, et le mot-clé positionnel `FUZZ` injecté dans l'URL.
+- [`forge/modules/contrib/hard.toolspec.json`](../forge/modules/contrib/hard.toolspec.json) — **DIFFICILE**
+  (`custom.nuclei_scan`) : **exploit-class** (`exploit:true` → gaté par le plancher operator+arm), repli
+  **docker** (`projectdiscovery/nuclei`), parser **JSONL** + `parser_json_path` (extraction de champs), et
+  `params_schema` riche (select `severity` + tags/templates/rate).
+
+(L'exemple historique [`forge/modules/contrib/example.toolspec.json`](../forge/modules/contrib/example.toolspec.json)
+reste disponible — enrobe `httpx` pour le `<title>`.)
+
 ## 4. Gouvernance
 
 Un outil ajouté par l'UI **hérite** de toutes les garanties du wrapper d'outils externes (prouvées par les
