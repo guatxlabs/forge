@@ -14,7 +14,7 @@
 use crate::*;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ fn login_clear(key: &str) {
 ///   le cookie (UI), soit par `Authorization: Bearer <token>` (CLI/API). 401 sur identifiants invalides.
 /// NB : route NON gardée par auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
 /// elle est sous host_guard comme tout le reste. Échec d'identifiant -> message générique (anti-énum).
-pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let login_in = body.get("login").and_then(|v| v.as_str()).unwrap_or("");
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if login_in.is_empty() || password.is_empty() {
@@ -143,7 +143,7 @@ pub(crate) async fn login(State(app): State<App>, Json(body): Json<Value>) -> Re
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
     };
     let ttl = session_ttl_secs();
-    let cookie = session_cookie(&token, ttl);
+    let cookie = session_cookie(&token, ttl, request_is_https(&headers));
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -196,7 +196,7 @@ pub(crate) async fn setup_state(State(app): State<App>) -> impl IntoResponse {
 /// dans l'UI). Recalcule la gate d'auth (un admin activé existe désormais), ouvre une session (cookie
 /// forge_session) pour que le navigateur atterrisse connecté, et ledgerise `console.setup.provision`
 /// (attribution = le login admin ; JAMAIS le mot de passe ni le hash).
-pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn setup_provision(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     // AUTO-DÉSACTIVANTE : une console déjà provisionnée ne peut plus être (re)provisionnée anonymement.
     if app.provisioned() {
         return (
@@ -285,7 +285,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, Json(body): Json<Val
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
     };
     let ttl = session_ttl_secs();
-    let cookie = session_cookie(&token, ttl);
+    let cookie = session_cookie(&token, ttl, request_is_https(&headers));
     // ledger : provision attribuée au nouvel admin. JAMAIS le mot de passe/hash (login + booléens seuls).
     append_console_ledger(&app, "console.setup.provision", json!({
         "actor": login,

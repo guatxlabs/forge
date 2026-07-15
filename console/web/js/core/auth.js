@@ -9,7 +9,7 @@ import { route } from './router.js';
 import { loadTenancyContext } from '../views/tenancy.js';
 import { initPresence } from './presence.js';
 import { initNotifications } from './notifications.js';
-import { confirmModal, toast } from './ui.js';
+import { confirmModal, infoModal, toast } from './ui.js';
 
 export function complianceOn() { return !!(ENTERPRISE && ENTERPRISE.compliance); }
 export function complianceAdmin() { return !!(complianceOn() && isAdmin()); }
@@ -260,11 +260,52 @@ export async function setupSubmit() {
     showApp();
     toast('Console provisionnée — bienvenue.', 'ok');
     await bootApp();
+    // Dernière étape du wizard : RÉVÈLE le token d'ingest MACHINE (copiable) pour l'usage moteur/externe.
+    // Fail-soft (ne bloque pas le boot) : la session admin fraîche l'autorise ; sinon la carte Administration l'expose aussi.
+    revealSetupIngestToken();
   } catch (err) {
     setupErr('Erreur réseau : ' + String((err && err.message) || err));
   } finally {
     if (fin) fin.disabled = false;
   }
+}
+// Révèle le token d'ingest MACHINE après provisioning (usage moteur/externe : POST /api/ingest). La
+// session admin fraîche autorise la révélation (le serveur re-vérifie check_admin). Ce token n'est PAS
+// requis pour les écritures UI (panneaux/dashboards) — celles-ci passent par la session admin/operator.
+// Fail-soft : sur échec, on n'affiche rien (la carte Administration → Console l'expose aussi à tout moment).
+export async function revealSetupIngestToken() {
+  let data;
+  try {
+    const r = await fetch('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch (e) { return; }
+  if (!data || !data.token) return;
+  infoModal('Token d’ingest machine', body => {
+    const p = document.createElement('p'); p.className = 'muted';
+    p.textContent = 'Réservé à l’ingest MACHINE (POST /api/ingest depuis le moteur ou un outil externe). '
+      + 'Le moteur lancé depuis la console le reçoit automatiquement — copiez-le seulement pour un usage externe. '
+      + 'Les écritures UI (panneaux, dashboards) n’en ont PAS besoin : votre session admin les autorise. '
+      + 'Retrouvable à tout moment dans Administration → Console.';
+    body.appendChild(p);
+    const field = document.createElement('input');
+    field.type = 'text'; field.readOnly = true; field.value = data.token;
+    field.style.width = '100%'; field.style.fontFamily = 'monospace';
+    field.setAttribute('aria-label', 'Token d’ingest machine'); field.setAttribute('spellcheck', 'false');
+    body.appendChild(field);
+    const meta = document.createElement('p'); meta.className = 'muted';
+    meta.textContent = data.provided
+      ? 'Source : FORGE_CONSOLE_TOKEN (fixe — survit à un redémarrage).'
+      : 'Source : auto-généré (éphémère — rotera au redémarrage ; posez FORGE_CONSOLE_TOKEN pour le fixer).';
+    body.appendChild(meta);
+    const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'k-theme';
+    copy.textContent = 'Copier';
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(data.token); toast('Token copié.', 'ok'); }
+      catch (e) { field.select(); toast('Copie auto impossible — sélectionné, Ctrl+C.', 'bad'); }
+    });
+    body.appendChild(copy);
+  });
 }
 if ($('#su-next')) $('#su-next').addEventListener('click', () => {
   if (SETUP_STEP === 1) { const e = setupValidateStep1(); if (e) { setupErr(e); return; } }

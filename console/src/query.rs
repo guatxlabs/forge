@@ -3,8 +3,9 @@
 //! soql read-only (`exec_soql`/`exec_soql_time` + helpers `cell`/`soql_stats`), les endpoints
 //! `/api/query` (GET+POST), et le CRUD des dashboards (vues) + panels soql sauvegardés (modèle
 //! query-driven de Plume). Le moteur ouvre une connexion `SQLITE_OPEN_READ_ONLY` (défense en
-//! profondeur). Les écritures (dashboards/panels) sont gatées par `check_token` (racine de crate).
-//! Réutilise App + `check_token`/`gs`/`soql` via `use crate::*`, et est re-exporté à la racine par
+//! profondeur). Les écritures (dashboards/panels) sont gatées par `check_writer` (session admin|operator,
+//! racine de crate) — l'utilisateur CONNECTÉ édite ses panneaux sans coller de token d'ingest.
+//! Réutilise App + `check_writer`/`gs`/`soql` via `use crate::*`, et est re-exporté à la racine par
 //! `pub(crate) use crate::query::*` — les routes de build_router (`get(query).post(query_post)`,
 //! `get(dashboards_list)`, `get(panels_list)`, …) ET les tests inline de main.rs (`super::*`)
 //! résolvent donc ces handlers INCHANGÉS. `exec_soql_time` est aussi consommé par `coverage`
@@ -184,8 +185,8 @@ pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) 
 // --- dashboards / vues : regroupement de panels (CRUD) ---
 //
 // Un « dashboard » (alias « vue ») est un conteneur nommé de panels. Le panel porte `dashboard_id`
-// (défaut 1 = dashboard par défaut, garanti au boot). CRUD gaté par le même token que les panels
-// (check_token) ; les lectures sont sous auth_guard comme le reste de l'API.
+// (défaut 1 = dashboard par défaut, garanti au boot). CRUD gaté par la SESSION de l'utilisateur
+// (check_writer : admin|operator), comme les panels ; les lectures sont sous auth_guard comme le reste.
 
 /// GET /api/dashboards — liste les dashboards (ordre `position`, id). Lecture (viewer).
 pub(crate) async fn dashboards_list(State(app): State<App>) -> impl IntoResponse {
@@ -212,10 +213,10 @@ pub(crate) async fn dashboards_list(State(app): State<App>) -> impl IntoResponse
     Json(Value::Array(out))
 }
 
-/// POST /api/dashboards {name, descr?, position?} -> {id}. Écriture (token).
+/// POST /api/dashboards {name, descr?, position?} -> {id}. Écriture (session admin|operator).
 pub(crate) async fn dashboard_create(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     let name = gs(&body, "name");
     if name.is_empty() || name.len() > 128 {
@@ -235,10 +236,10 @@ pub(crate) async fn dashboard_create(State(app): State<App>, headers: HeaderMap,
     }
 }
 
-/// POST /api/dashboards/:id {name?, descr?, position?} — met à jour (champs présents). Écriture (token).
+/// POST /api/dashboards/:id {name?, descr?, position?} — met à jour (champs présents). Écriture (session admin|operator).
 pub(crate) async fn dashboard_update(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>, Json(body): Json<Value>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     let store = app.store();
     let mut sets: Vec<String> = Vec::new();
@@ -265,10 +266,10 @@ pub(crate) async fn dashboard_update(State(app): State<App>, headers: HeaderMap,
 }
 
 /// DELETE /api/dashboards/:id — supprime un dashboard et réassigne ses panels au dashboard #1.
-/// Le dashboard #1 (défaut) est PROTÉGÉ (409) — il garantit la rétro-compat. Écriture (token).
+/// Le dashboard #1 (défaut) est PROTÉGÉ (409) — il garantit la rétro-compat. Écriture (session admin|operator).
 pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     if id == 1 {
         return (StatusCode::CONFLICT, Json(json!({"error": "default_protected", "why": "le dashboard par défaut (#1) ne peut pas être supprimé"})));
@@ -317,8 +318,8 @@ pub(crate) async fn panels_list(State(app): State<App>, Query(q): Query<HashMap<
 }
 
 pub(crate) async fn panel_create(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     let name = gs(&body, "name");
     let qy = gs(&body, "query");
@@ -354,8 +355,8 @@ pub(crate) async fn panel_create(State(app): State<App>, headers: HeaderMap, Jso
 /// POST /api/panels/:id — met à jour un panel existant (champs présents seulement).
 /// Corps : {name?, query?, viz?, descr?, col_span?, position?}. La query, si fournie, est validée.
 pub(crate) async fn panel_update(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>, Json(body): Json<Value>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     if let Some(qy) = body.get("query").and_then(|v| v.as_str()) {
         if let Err(e) = soql::compile(qy, &soql::Schema::forge()) {
@@ -393,8 +394,8 @@ pub(crate) async fn panel_update(State(app): State<App>, headers: HeaderMap, Pat
 }
 
 pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    if !check_token(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+    if !check_writer(&app, &headers) {
+        return writer_denied();
     }
     
     let _ = app.store().execute("DELETE FROM panel WHERE id=?", &crate::sql_params![id]);

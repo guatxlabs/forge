@@ -1,4 +1,4 @@
-import { api, token, write } from '../core/api.js';
+import { api, write } from '../core/api.js';
 import { $, esc, ic, raw } from '../core/dom.js';
 import { currentFrom, currentTo, runQuery, vizElement } from './explore.js';
 import { confirmModal, modal, toast } from '../core/ui.js';
@@ -17,16 +17,18 @@ export function setDashPref(id, upd) { const all = dashPrefs(); all[id] = { ...(
 export function viewStore() { try { return JSON.parse(localStorage.getItem('forge_dash_views') || '{}') || {}; } catch (e) { return {}; } }
 export function saveViewStore(v) { try { localStorage.setItem('forge_dash_views', JSON.stringify(v)); } catch (e) {} }
 
-// PATCH d'un panneau (POST /api/panels/:id, Bearer). Le backend connaît name/query/viz/descr/col_span/position/dashboard_id.
+// PATCH d'un panneau (POST /api/panels/:id). Autorisé par la SESSION (admin|operator) — aucun token à
+// coller. Le backend connaît name/query/viz/descr/col_span/position/dashboard_id.
 export async function patchPanel(id, upd) {
-  const r = await write('/api/panels/' + id, { body: upd, auth: 'token' });
-  if (r.status === 401) { localStorage.removeItem('forge_token'); toast('Token invalide ou requis pour éditer un panneau.', 'bad'); }
+  const r = await write('/api/panels/' + id, { body: upd, auth: 'admin' });
+  if (r.status === 401 || r.status === 403) toast('Édition réservée à une session admin/operator — connectez-vous.', 'bad');
   return r;
 }
-// PATCH d'un dashboard (POST /api/dashboards/:id, Bearer). Champs backend : name/descr/position.
+// PATCH d'un dashboard (POST /api/dashboards/:id). Autorisé par la SESSION (admin|operator). Champs
+// backend : name/descr/position.
 export async function patchDash(id, upd) {
-  const r = await write('/api/dashboards/' + id, { body: upd, auth: 'token' });
-  if (r.status === 401) { localStorage.removeItem('forge_token'); toast('Token invalide ou requis pour éditer un dashboard.', 'bad'); }
+  const r = await write('/api/dashboards/' + id, { body: upd, auth: 'admin' });
+  if (r.status === 401 || r.status === 403) toast('Édition réservée à une session admin/operator — connectez-vous.', 'bad');
   return r;
 }
 // crée un panneau dans le dashboard `did` (défaut 1). dashboard_id doit exister (sinon 400 unknown_dashboard).
@@ -42,9 +44,9 @@ export async function createPanelModal(did = 1, query = '') {
   if (!r) return;
   const body = { name: r.name.trim(), query: r.query.trim(), viz: r.viz, descr: r.descr, col_span: 1, position: 999 };
   if (did && Number(did) !== 1) body.dashboard_id = Number(did);   // 1 = défaut (omis pour rétro-compat)
-  const resp = await write('/api/panels', { body, auth: 'token' });
+  const resp = await write('/api/panels', { body, auth: 'admin' });
   const j = resp.json;
-  if (!resp.ok) { if (resp.status === 401) localStorage.removeItem('forge_token'); toast('Erreur : ' + (j.error || resp.status), 'bad'); return; }
+  if (!resp.ok) { toast(resp.status === 401 || resp.status === 403 ? 'Création réservée à une session admin/operator — connectez-vous.' : ('Erreur : ' + (j.error || resp.status)), 'bad'); return; }
   toast('Panneau créé', 'ok');
   loadDashboards();
 }
@@ -77,7 +79,7 @@ export function renderPanel(p) {
   open.onclick = () => { $('#sql').value = p.query; location.hash = 'explore'; runQuery(); };
   const edit = document.createElement('button'); edit.className = 'picon editonly'; edit.innerHTML = ic('pencil'); edit.title = 'Éditer le panneau';
   const del = document.createElement('button'); del.className = 'picon editonly'; del.innerHTML = ic('x'); del.title = 'Supprimer le panneau';
-  del.onclick = async () => { if (await confirmModal('Supprimer ce panneau ?', { danger: true })) { await write('/api/panels/' + p.id, { method: 'DELETE', auth: 'token' }); loadDashboards(); } };
+  del.onclick = async () => { if (await confirmModal('Supprimer ce panneau ?', { danger: true })) { await write('/api/panels/' + p.id, { method: 'DELETE', auth: 'admin' }); loadDashboards(); } };
   const wsel = document.createElement('select'); wsel.className = 'picon editonly'; wsel.title = 'Largeur (colonnes)';
   [1, 2, 3, 4].forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n + ' col'; wsel.appendChild(o); });
   wsel.value = String(p.col_span || 1);
@@ -240,11 +242,13 @@ export function renderDashboard(d) {
   del.onclick = async () => {
     if (d.id === 1) return;   // garde-fou : dashboard par défaut protégé (409 côté serveur de toute façon)
     if (!await confirmModal('Supprimer ce dashboard ? Ses panneaux seront réassignés au dashboard par défaut.', { danger: true })) return;
-    const resp = await write('/api/dashboards/' + d.id, { method: 'DELETE', auth: 'token' });
+    const resp = await write('/api/dashboards/' + d.id, { method: 'DELETE', auth: 'admin' });
     const j = resp.json;
     if (!resp.ok) {
-      if (resp.status === 401) localStorage.removeItem('forge_token');
-      toast(j.error === 'default_protected' ? 'Le dashboard par défaut ne peut pas être supprimé.' : ('Erreur : ' + (j.error || resp.status)), 'bad');
+      const authErr = resp.status === 401 || resp.status === 403;
+      toast(j.error === 'default_protected' ? 'Le dashboard par défaut ne peut pas être supprimé.'
+        : authErr ? 'Suppression réservée à une session admin/operator — connectez-vous.'
+        : ('Erreur : ' + (j.error || resp.status)), 'bad');
       return;
     }
     // retirer ce dashboard des collections de vues locales
@@ -397,9 +401,9 @@ if ($('#dash-new')) $('#dash-new').addEventListener('click', async () => {
     ], validate: v => dashList.some(d => d.name === v.name.trim()) ? 'Un dashboard porte déjà ce nom.' : null,
   });
   if (!r) return;
-  const resp = await write('/api/dashboards', { body: { name: r.name.trim(), descr: r.descr.trim(), position: dashList.length }, auth: 'token' });
+  const resp = await write('/api/dashboards', { body: { name: r.name.trim(), descr: r.descr.trim(), position: dashList.length }, auth: 'admin' });
   const j = resp.json;
-  if (!resp.ok) { if (resp.status === 401) localStorage.removeItem('forge_token'); toast('Erreur : ' + (j.error || resp.status), 'bad'); return; }
+  if (!resp.ok) { toast(resp.status === 401 || resp.status === 403 ? 'Création réservée à une session admin/operator — connectez-vous.' : ('Erreur : ' + (j.error || resp.status)), 'bad'); return; }
   toast('Dashboard créé', 'ok');
   loadDashboards();
 });
