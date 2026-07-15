@@ -35,7 +35,7 @@ export function renderWhoami(w) {
     roleEl.textContent = role;
     roleEl.classList.remove(...ROLE_CLASSES);
     if (ROLE_CLASSES.includes('role-' + role)) roleEl.classList.add('role-' + role);
-    roleEl.title = (w.is_operator ? 'Opérateur C2' : 'Lecture') + ' — rôle « ' + role + ' »' + (w.via_session ? '' : ' (repli bootstrap)');
+    roleEl.title = (w.is_operator ? 'Opérateur' : 'Lecture') + ' — rôle « ' + role + ' »' + (w.via_session ? '' : ' (repli bootstrap)');
   }
   const userEl = $('#whoami-user');
   if (userEl) userEl.textContent = w.login || '';

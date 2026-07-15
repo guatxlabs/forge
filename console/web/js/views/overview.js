@@ -52,7 +52,7 @@ export async function loadStatuses() {
 }
 
 // =====================================================================================
-//  LANCEMENT C2 (capacité PRIVILÉGIÉE, gouvernée + auditée) — endpoints consommés :
+//  LANCEMENT (capacité PRIVILÉGIÉE, gouvernée + auditée) — endpoints consommés :
 //    POST /api/run                  (écriture ; en-tête X-Forge-Operator requis)
 //    GET  /api/runs?status=         (liste, viewer)        GET /api/runs/:id (détail, viewer)
 //    POST /api/runs/:id/cancel      (écriture ; X-Forge-Operator)

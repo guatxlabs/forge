@@ -58,12 +58,12 @@ export async function write(path, { method = 'POST', body, auth = 'operator', en
   return { ok: r.ok, status: r.status, json };
 }
 export let OPERATOR_SECRET = '';            // mémoire de session : jamais persisté (ni localStorage ni cookie)
-// en-têtes pour une écriture C2 : opérateur (toujours) + viewer (Bearer) si l'auth viewer est ON.
+// en-têtes pour une écriture opérateur : opérateur (toujours) + viewer (Bearer) si l'auth viewer est ON.
 // En dev-open (pas de pass_hash), seul X-Forge-Operator est requis ; le Bearer est inerte mais inoffensif.
 // INVARIANT (anti-régression) : le secret opérateur ne transite QUE via l'en-tête X-Forge-Operator
 // d'une requête POST (jamais en query-string ni dans un corps GET). Il NE DOIT JAMAIS être mis sur
 // une URL EventSource/SSE (cf. startSse : EventSource ne peut pas porter d'en-tête -> on bascule en
-// polling, on n'expose PAS le secret) ni loggé/persisté. Toute écriture C2 passe par operatorHeaders().
+// polling, on n'expose PAS le secret) ni loggé/persisté. Toute écriture opérateur passe par operatorHeaders().
 export function operatorHeaders(extra = {}) {
   const h = { 'X-Forge-Operator': OPERATOR_SECRET, ...extra };
   const t = localStorage.getItem('forge_token');     // ne PROMPT pas : le token viewer est optionnel ici

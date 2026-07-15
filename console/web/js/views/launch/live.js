@@ -10,7 +10,7 @@ export const TERMINAL_RUN = new Set(['done', 'failed', 'timeout', 'cancelled']);
 export const RUNSTAT_BADGE = { running: 'webyes', done: 'ok', failed: 'destr', timeout: 'expl', cancelled: 'mut' };
 export let LC_LIVE = null;                  // { runId, es, poll, lastId, terminal } — flux du run suivi
 
-// montre l'état du rôle opérateur C2 (FAIL-CLOSED) en sondant /api/run sans secret.
+// montre l'état du rôle opérateur (FAIL-CLOSED) en sondant /api/run sans secret.
 //  403 operator_required  -> rôle armé côté serveur (le secret est requis pour lancer).
 //  202/400/409            -> dev-open : un secret vide est accepté (on l'indique).
 export async function probeC2State() {
@@ -19,13 +19,13 @@ export async function probeC2State() {
   // sonde non-destructive : campagne valide mais sans secret. Le serveur valide l'opérateur EN PREMIER.
   // (aucun run n'est créé : soit 403 operator_required, soit une 400 de validation plus loin.)
   // dev-open ET armé renvoient TOUS DEUX 403 operator_required (fail-closed) ; on les distingue par
-  // le `why` : « non provisionné » (C2 fermé) vs « invalide ou absente » (rôle armé, secret exigé).
+  // le `why` : « non provisionné » (rôle non armé) vs « invalide ou absente » (rôle armé, secret exigé).
   try {
     const r = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forge-Operator': '' }, body: JSON.stringify({ campaign: '__c2probe__', targets: [] }) });
     const j = await r.json().catch(() => ({}));
     if (r.status === 401) { el.className = 'badge expl'; el.textContent = 'auth viewer requise'; el.title = 'L\'auth viewer (Basic/Bearer) est exigée avant le rôle opérateur.'; }
-    else if (r.status === 403 && /non provisionn|C2 ferm/i.test(String(j.why || ''))) { el.className = 'badge destr'; el.innerHTML = `${ic('ban')} C2 fermé`; el.title = 'FAIL-CLOSED : rôle opérateur non provisionné (FORGE_CONSOLE_OPERATOR_HASH absent). Tout lancement renverra 403.'; }
-    else if (r.status === 403) { el.className = 'badge ok'; el.innerHTML = `${ic('lock')} opérateur armé`; el.title = 'Rôle opérateur C2 armé : le secret X-Forge-Operator est exigé pour lancer.'; }
+    else if (r.status === 403 && /non provisionn/i.test(String(j.why || ''))) { el.className = 'badge destr'; el.innerHTML = `${ic('ban')} opérateur fermé`; el.title = 'FAIL-CLOSED : rôle opérateur non provisionné (FORGE_CONSOLE_OPERATOR_HASH absent). Tout lancement renverra 403.'; }
+    else if (r.status === 403) { el.className = 'badge ok'; el.innerHTML = `${ic('lock')} opérateur armé`; el.title = 'Rôle opérateur armé : le secret X-Forge-Operator est exigé pour lancer.'; }
     else { el.className = 'badge mut'; el.textContent = 'état inattendu (' + r.status + ')'; el.title = String(j.why || j.error || ''); }
   } catch (e) { el.className = 'badge mut'; el.textContent = 'indisponible'; el.title = String(e.message || e); }
 }
