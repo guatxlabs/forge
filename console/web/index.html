@@ -773,6 +773,20 @@
     <h3 style="margin:14px 0 6px;font-size:.95rem">Sauvegarde programmée &amp; offsite</h3>
     <div id="admin-bk-policy"><div class="muted">chargement…</div></div>
   </section>
+
+  <!-- CONSOLE FORGE IN-UI (roadmap P5) — panneau ADMIN : lance des sous-commandes `forge` GOUVERNÉES
+       depuis l'UI web (plus besoin de `docker compose exec forge forge …`). Ce n'est PAS un terminal :
+       chaque commande est une entrée d'une ALLOWLIST STRICTE, avec uniquement ses options TYPÉES
+       (boutons/cases). Le serveur reconstruit un argv FIXE (sans shell), ledgerise `console.exec` et
+       STREAME la sortie (SSE) dans le volet en lecture seule. Réservé admin (le serveur reste l'autorité :
+       check_admin -> 403 ; toute commande/flag hors allowlist -> 400 fail-closed). -->
+  <section id="admin-console" class="card span2" aria-labelledby="adm-cons-h">
+    <div class="panelhead">
+      <h2 id="adm-cons-h">Console Forge <span class="badge mut" title="Runner gouverné — allowlist stricte, sans shell">gouverné</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Lance des sous-commandes <code>forge</code> <b>gouvernées</b> depuis l'UI — plus besoin de <code>docker&nbsp;compose&nbsp;exec&nbsp;forge&nbsp;forge&nbsp;…</code>. <b>Ce n'est pas un shell</b> : chaque bouton correspond à une commande d'une <b>allowlist stricte</b>, avec seulement ses <b>options typées</b> ; le serveur reconstruit un <b>argv fixe</b> (sans shell), <b>ledgerise</b> chaque exécution (<code>console.exec</code>) et <b>streame</b> la sortie ci-dessous. Les commandes à <b>effet d'état</b> (<code>upgrade</code>) exigent une <b>confirmation explicite</b>. Les secrets (<code>--passphrase-env</code>) sont résolus <b>côté serveur</b> — vous ne fournissez qu'un <b>nom de variable</b>, jamais la valeur.</p>
+    <div id="admin-console-body"><div class="muted">chargement…</div></div>
+  </section>
 </main>
 </div>
 <!-- PORTAIL DE CONNEXION — gate du shell : affiché quand /api/whoami répond 401 (session requise et

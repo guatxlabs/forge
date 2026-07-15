@@ -71,6 +71,9 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
   `.ed25519`), option chiffrement au repos SQLCipher.
 - **[Sauvegarde & restauration](BACKUP.md)** — archives **toujours chiffrées** (argon2id +
   XChaCha20-Poly1305), programmation + offsite.
+- **[Console in-UI](CONSOLE.md)** — runner **gouverné** de sous-commandes `forge` depuis l'UI (allowlist
+  stricte, **sans shell**, admin-only, ledgerisé, streamé) : supprime le `docker compose exec forge forge …`
+  pour les ops courantes (`status`, `ledger verify`, `read`, `backup`, `upgrade`).
 
 ### 4. Références
 
