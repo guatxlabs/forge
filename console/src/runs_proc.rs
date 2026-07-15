@@ -14,6 +14,21 @@ use axum::response::Json;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+/// URL que le MOTEUR spawné utilise pour POST /api/ingest. `FORGE_CONSOLE_ADDR` est l'adresse de BIND
+/// de la console (ex. `0.0.0.0:7100` en Docker) ; un host de bind wildcard/unspecified (`0.0.0.0`, `::`)
+/// N'EST PAS un Host valide pour le garde anti-rebinding `host_guard` (allowlist =
+/// localhost/127.0.0.1/::1) -> le moteur recevait `421 Misdirected Request` (B2). Le moteur tournant sur
+/// le MÊME host que la console, on POST TOUJOURS en loopback `127.0.0.1:<port>` : ce Host est toujours
+/// dans l'allowlist. On ne conserve du bind que le PORT (dernier segment `:`), défaut 7100.
+pub(crate) fn engine_console_url(bind_addr: &str) -> String {
+    let port = bind_addr
+        .rsplit(':')
+        .next()
+        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or("7100");
+    format!("http://127.0.0.1:{port}")
+}
+
 /// pré-exec hook posix : place l'enfant dans un nouveau groupe de session (setsid) pour que
 /// cancel/watchdog puissent tuer TOUT le sous-arbre via killpg, et pour qu'un Ctrl-C console
 /// ne propage pas au moteur (et inversement). Sans shell — argv fixe.
@@ -195,7 +210,12 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
 
     // (4) argv FIXE — aucun shell. Le token console (en clair) transite UNIQUEMENT par l'environnement.
     let token: Option<String> = if app.token_raw.is_empty() { None } else { Some(app.token_raw.as_str().to_string()) };
-    let console_url = format!("http://{}", std::env::var("FORGE_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:7100".to_string()));
+    // B2 — le moteur POST /api/ingest en LOOPBACK (127.0.0.1:<port du bind>), JAMAIS sur l'host de bind
+    // (0.0.0.0 en Docker) qui déclenchait un 421 host_guard. Même host que la console -> loopback toujours
+    // joignable et son Host toujours dans l'allowlist. Cf. `engine_console_url`.
+    let console_url = engine_console_url(
+        &std::env::var("FORGE_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:7100".to_string()),
+    );
     let mut argv: Vec<String> = vec![
         "-m".into(), "forge.cli".into(), "campaign".into(),
         "--scope".into(), scope_path.to_string_lossy().into_owned(),

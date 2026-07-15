@@ -173,37 +173,15 @@ pub(crate) fn validate_api_migrate_paths(from: &str, to: &str, ledger: Option<&s
 }
 
 /// Append UNE entrée au ledger JSONL à `path`, en (re)lisant le head depuis le disque (chaîne
-/// SHA-256, alg "sha256-console", sig ""). AUTONOME (pas d'App/cache) — pour la migration one-shot :
-/// une seule entrée, pas de contention. Miroir strict de append_console_ledger côté pré-image, donc
-/// /api/ledger/verify recompute la chaîne SANS rupture. Renvoie le hash de la nouvelle entrée.
+/// SHA-256, alg "sha256-console", sig ""). AUTONOME (pas d'App/cache). Miroir strict de
+/// append_console_ledger côté pré-image, donc /api/ledger/verify recompute la chaîne SANS rupture.
+/// Renvoie le hash de la nouvelle entrée. B1 — DÉLÈGUE à `append_sha256_console_locked` : la relecture
+/// de la queue ET l'écriture se font SOUS un `fcntl.flock` cross-processus (le MÊME verrou que
+/// forge/ledger.py), si bien qu'un ledger dédié écrit CONCURREMMENT par le moteur Python (spawné avec
+/// `--ledger <ce fichier>`) ne peut plus forker la chaîne (la queue est relue sous le verrou, pas via
+/// un état pré-verrou -> plus de TOCTOU lecture-queue/écriture).
 pub(crate) fn ledger_append_standalone(path: &str, kind: &str, detail: &Value) -> Result<String, String> {
-    let mut prev = "0".repeat(64);
-    let mut seq = 0i64;
-    if let Ok(s) = std::fs::read_to_string(path) {
-        for line in s.lines().filter(|l| !l.trim().is_empty()) {
-            if let Ok(rec) = serde_json::from_str::<Value>(line) {
-                if let Some(h) = rec.get("hash").and_then(|v| v.as_str()) { prev = h.to_string(); }
-                if let Some(q) = rec.get("seq").and_then(|v| v.as_i64()) { seq = q; }
-            }
-        }
-    }
-    let seq = seq + 1;
-    let ts = format!("@{}", chrono_now_compact());
-    let preimage = format!("{prev}|{seq}|{ts}|{kind}|{}", canon_json(detail));
-    let hash = sha_hex(&preimage);
-    let rec = json!({
-        "seq": seq, "ts": ts, "kind": kind, "detail": detail,
-        "prev": prev, "hash": hash, "alg": "sha256-console", "sig": ""
-    });
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() { let _ = std::fs::create_dir_all(parent); }
-    }
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)
-        .map_err(|e| format!("ouverture ledger cible '{path}' impossible: {e}"))?;
-    writeln!(f, "{}", canon_json(&rec)).map_err(|e| format!("écriture ledger cible échouée: {e}"))?;
-    // SYS-2 : fsync -> l'entrée du ledger dédié est DURABLE avant de retourner (comme append_console_ledger).
-    f.sync_all().map_err(|e| format!("sync ledger cible échoué: {e}"))?;
+    let (_prev, _seq, hash) = crate::append_sha256_console_locked(path, kind, detail)?;
     Ok(hash)
 }
 
