@@ -28,6 +28,20 @@ Un test réel de la webUI (wizard → engagement → run C2 → rapport → cons
 - **B12 — Lancement C2 : filtre « Tous statut » non stylisé.**
 - **B13 — Favicon** : pas centré ; enlever le carré noir (fond transparent), **juste la plume**.
 
+## 🐞 Round 2 — 2e test live (2026-07-13) : régressions + fixes incomplets
+
+⚠️ Le round 1 marqué « TOUS CORRIGÉS » était **prématuré** : validé via curl/markup, PAS le vrai navigateur (le conteneur browser n'atteint pas le loopback hôte) → bugs *niveau navigateur* ratés (cookie Secure, popups natives). Leçon : valider les bugs UX en pilotant un vrai navigateur.
+
+- **C1 — 🔴 LOGIN CASSÉ sur http (cookie `Secure`).** Bons cred → session non stockée (navigateur jette le cookie Secure sur http). **✅ CORRIGÉ `cd4739c`** : `Secure` uniquement si https (`X-Forwarded-Proto: https` / `FORGE_FORCE_SECURE_COOKIE`), sinon http local marche ; HttpOnly+SameSite gardés. Prouvé curl (http=no-Secure+session OK, xfp-https=Secure).
+- **C6 — 🔴 Token exigé pour écrire (panneaux/dashboards).** Un admin loggé devait coller un token machine qu'il n'a pas (→ mettait le mdp admin). **✅ CORRIGÉ `cd4739c`** : écritures UI via **session admin/operator** (`check_writer`) ; token ingest = machine only ; token **surfacé au wizard** + carte admin.
+- **C2 — 🟠 Popups Chrome natives** (`prompt/alert/confirm`) → **modals stylisés page** partout (Firefox/Safari/Camoufox). À FAIRE.
+- **C5 — 🟠 Renommer/enregistrer un profil ne marche pas** (sauve « custom » et l'écrase ; pas de vrai save-as nommé). À FAIRE.
+- **C9 — 🟠 Sélectionner un outil + le personnaliser (args) pas clair/possible** — le cœur de la valeur ; rendre découvrable dans Launch (form params + extra_args) quel que soit l'outil/script. À FAIRE.
+- **C3 — 🟡 « actif : - »** n'affiche pas le nom de l'engagement actif. À FAIRE.
+- **C4 — 🟡 Bouton « Vérifier »** (scope-check) non stylisé. À FAIRE.
+- **C7 — 🟡 Rapport** : encore drilldown non stylisé + doublon format (drilldown pdf/json/csv vs « enregistrer »). À FAIRE.
+- **C8 — 🟡 Bouton GLOBAL tout sélectionner / tout désactiver** (techniques). À FAIRE.
+
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
 
