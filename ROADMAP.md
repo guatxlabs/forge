@@ -4,8 +4,31 @@
 > Validation à jour : `cargo test` défaut + `--features store-postgres` verts, `pytest` vert, `kubeconform` OK.
 > Docs détail : [`docs/AUDIT.md`](docs/AUDIT.md) · [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) · [`docs/READINESS_MATRIX.md`](docs/READINESS_MATRIX.md) · [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) · [`docs/QUICKSTART.md`](docs/QUICKSTART.md) · [`docs/UPGRADE.md`](docs/UPGRADE.md) · [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md) · [`docs/TECHNIQUE_COVERAGE.md`](docs/TECHNIQUE_COVERAGE.md) · [`docs/TOOLS.md`](docs/TOOLS.md)
 
-## En cours
-- Rien mid-flight. Working tree propre. Reste **2 items planifiés** (expérience opérateur P5/P6, voir §D) + des choix **accepted-as-is** — aucun item readiness / audit / sécurité non résolu.
+## En cours — 🐞 Bugs & UX remontés par un test live (2026-07-13)
+
+Un test réel de la webUI (wizard → engagement → run C2 → rapport → console) a remonté ces défauts. **En cours de correction.**
+
+### 🔴 CRITIQUE — intégrité / correctness
+- **B1 — Ledger CASSÉ (fork de chaîne).** `forge ledger verify` → INVALIDE « chaînage rompu (prev), entrée seq=8 après 23 valides » ; `forge status` → `ledger ok=false`. Cause probable : la **console Rust** ET le **moteur Python** appendent au MÊME `engagement.jsonl` sans **verrou advisory partagé** (le flock Python ne couvre pas l'append Rust) → collision de seq. Fix : partager le flock cross-process (Rust `with_ledger_lock` doit prendre le même `fcntl.flock` que `forge/ledger.py`), ou sérialiser les deux écrivains.
+- **B2 — Ingest 421 Misdirected Request.** Le moteur n'arrive pas à réinjecter les findings dans la console (`HTTPError 421`) → host_guard rejette le `Host`. Findings/panneaux non persistés.
+- **B3 — Ingest token non affiché.** « Colle l'ingest token affiché au démarrage » mais il n'apparaît **ni au wizard ni dans l'UI** → impossible d'écrire panneaux/dashboards. Le surfacer (UI, write-only) ou l'auto-gérer.
+
+### 🟠 FONCTIONNEL
+- **B4 — Scope non enregistré.** Éditeur d'engagement : saisir `example.com` en in-scope **ne persiste pas** ; incohérence mode/scope (report=black/example.com vs éditeur=black/app.example.com) ; du coup C2 → « HORS SCOPE ».
+- **B5 — « Basculer » d'engagement ne fait rien / pas clair.**
+- **B6 — Sélection de techniques (profils) confuse.** Choisir un profil (bug bounty) puis changer d'onglet/​recharger → revient à **custom** ; « Enregistrer » ne demande **pas de nom** de profil (bug_bounty/pentest) ; pas de suppression de profil ; « Enregistrer » **ne demande pas le token** mais ledgerise quand même. Clarifier : sélection = drilldown auto ; Enregistrer = créer/nommer un profil (+ token si gouverné).
+- **B7 — Export rapport blanc.** DOCX/PDF/JSON → page blanche (PDF attendu en `mini` sans weasyprint, mais **DOCX/JSON doivent marcher** même sans finding).
+- **B8 — Format en double.** Le sélecteur de format apparaît **2 fois** (drilldown + prévisualisation) → incohérent.
+- **B9 — Placeholder logo client** dans le rapport d'engagement (carré vide) : le rendre optionnel/clair (branding client BB).
+
+### 🟡 STYLE / COHÉRENCE UI
+- **B10 — Drilldowns non stylisés** (pas le design de la page) : Findings, Importer un scan, Campagnes, ROE/Garde-fou.
+- **B11 — Boutons « Importer un scan » pas tous stylisés.**
+- **B12 — Lancement C2 : filtre « Tous statut » non stylisé.**
+- **B13 — Favicon** : pas centré ; enlever le carré noir (fond transparent), **juste la plume**.
+
+## Reste (hors bugs live)
+- **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
 
 ---
 
