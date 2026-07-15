@@ -28,7 +28,6 @@
   <div id="eng-bar" class="eng-bar" role="group" aria-label="Engagement actif">
     <span class="eng-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg></span>
     <select id="engagement" class="eng-select" aria-label="Engagement actif" title="Engagement actif (espace de travail isolé)"></select>
-    <span class="eng-active-wrap" aria-hidden="true">actif :&nbsp;<b id="eng-active" class="eng-active">-</b></span>
     <button id="eng-new" class="k-theme eng-new" type="button" aria-label="Nouvel engagement" title="Nouvel engagement (operator)"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
@@ -80,7 +79,7 @@
   <nav class="sidebar" id="nav" aria-label="Navigation">
     <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
     <a href="#engagements"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg> <span>Engagements</span></a>
-    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement C2</span></a>
+    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement</span></a>
     <a href="#import"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> <span>Importer un scan</span></a>
     <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
     <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
@@ -142,11 +141,11 @@
     <div id="eg-result"><div class="muted">chargement…</div></div>
   </section>
 
-  <!-- LANCEMENT C2 -->
+  <!-- LANCEMENT DE CAMPAGNE -->
   <section id="lc-form" class="card span2" aria-labelledby="lch">
     <div class="panelhead">
-      <h2 id="lch">Lancement de campagne <span class="muted">— C2-light gouverné &amp; audité</span></h2>
-      <span class="qbar"><span id="lc-c2state" class="badge mut" title="État du rôle opérateur C2 côté serveur">—</span></span>
+      <h2 id="lch">Lancement de campagne <span class="muted">— gouverné &amp; audité</span></h2>
+      <span class="qbar"><span id="lc-c2state" class="badge mut" title="État du rôle opérateur côté serveur">—</span></span>
     </div>
     <p class="muted" style="margin:0 0 10px">Lancement <b>non-exploit / non-destructif</b> par défaut : les modules <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> restent <b>grisés</b> tant que l'opt-in gouverné « fort impact » (zone danger ci-dessous) n'est pas activé — il exige <b>armer + raison + secret opérateur</b> et une <b>double-confirmation</b>. Les cibles doivent appartenir au scope serveur : <b>hors-scope = VETO dur</b>, jamais élargi via le web. Chaque lancement est journalisé au ledger (<code>console.run.start</code>).</p>
     <!-- SCOPE-CHECK : décision de scope LECTURE pure (POST /api/scope-check) — aucune action, juste de la transparence -->
@@ -201,7 +200,7 @@
         <input id="lc-reason" maxlength="200" placeholder="justification de l'engagement (audit)">
       </label>
       <label><span class="lc-lbl">Secret opérateur <span class="muted">(en-tête X-Forge-Operator — mémoire de session uniquement, jamais persisté)</span></span>
-        <input id="lc-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur C2 (requis pour lancer)">
+        <input id="lc-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur (requis pour lancer)">
       </label>
       <!-- ZONE DANGER : opt-in gouverné des modules à fort impact (exploit/destructif). DEFAUT OFF. -->
       <div id="lc-danger" class="lc-danger">
@@ -225,7 +224,7 @@
     </form>
   </section>
 
-  <!-- LANCEMENT C2 : dry-plan (aperçu de gouvernance INERTE) + approbation granulaire RECON -->
+  <!-- LANCEMENT : dry-plan (aperçu de gouvernance INERTE) + approbation granulaire RECON -->
   <section id="lc-plan" class="card span2" aria-labelledby="lcph" hidden>
     <div class="panelhead">
       <h2 id="lcph">Dry-plan <span id="lc-plancount" class="badge mut">—</span></h2>
@@ -240,7 +239,7 @@
     </div>
   </section>
 
-  <!-- LANCEMENT C2 : log live + détail du run courant -->
+  <!-- LANCEMENT : log live + détail du run courant -->
   <section id="lc-live" class="card span2" aria-labelledby="lclh">
     <div class="panelhead">
       <h2 id="lclh">Run en cours <span id="lc-livebadge" class="badge mut">aucun</span></h2>
@@ -256,7 +255,7 @@
     <div id="lc-result" class="lc-result" hidden></div>
   </section>
 
-  <!-- LANCEMENT C2 : liste des runs -->
+  <!-- LANCEMENT : liste des runs -->
   <section id="lc-runs" class="card span2" aria-labelledby="lcrh">
     <div class="panelhead">
       <h2 id="lcrh">Runs <span id="lc-runcount" class="badge"></span></h2>
@@ -279,7 +278,7 @@
   <section id="import" class="card span2" aria-labelledby="imph">
     <div class="panelhead">
       <h2 id="imph">Importer un scan <span class="muted">— migration Faraday/Trickest/reNgine/Osmedeus</span></h2>
-      <span class="qbar"><span id="im-c2state" class="badge mut" title="État du rôle opérateur C2 côté serveur">—</span></span>
+      <span class="qbar"><span id="im-c2state" class="badge mut" title="État du rôle opérateur côté serveur">—</span></span>
     </div>
     <p class="lc-planhint">Ingère une <b>sortie d'outil déjà produite</b> (nmap XML, nuclei JSON/JSONL, export Burp XML, httpx/ffuf JSON, listes subfinder/amass, ou JSON/CSV générique) en findings Forge <b>orientés preuve</b> : un scanner qui s'auto-déclare (nuclei/burp) devient <code>reported_by_tool</code>, la recon/découverte (nmap/httpx/ffuf/subfinder) devient <code>tested</code> — <b>jamais</b> <code>vulnerable</code>. <b>Pur data, aucune exécution.</b> Les assets <b>hors périmètre</b> sont écartés (scope-guard) et les <b>secrets</b> du fichier sont rédigés. L'import est <b>gouverné (opérateur)</b> et <b>journalisé au ledger</b>.</p>
     <form id="im-form" class="ruleform" autocomplete="off">
@@ -305,8 +304,8 @@
         <input id="im-file" type="file" accept=".xml,.json,.jsonl,.csv,.txt,application/json,text/xml,text/plain,text/csv">
       </label>
       <label style="flex:0 0 auto"><input id="im-flag" type="checkbox"> <b>Marquer</b> (au lieu de <b>jeter</b>) les findings hors-scope (conservés en <code>status=skipped</code>)</label>
-      <label><span class="lc-lbl">Secret opérateur C2 (requis pour importer)</span>
-        <input id="im-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur C2">
+      <label><span class="lc-lbl">Secret opérateur (requis pour importer)</span>
+        <input id="im-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur">
       </label>
       <div id="im-err" class="lc-warn bad" hidden></div>
       <div class="rf-actions">
@@ -585,7 +584,7 @@
         <button id="admin-new" class="k-theme" type="button" title="Créer un compte individuel (login, rôle, mot de passe)">+ Compte</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Comptes individuels (<code>viewer</code> lecture · <code>operator</code> arme le C2 · <code>admin</code> administre). Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>. La désactivation, la rétrogradation et la réinitialisation de mot de passe <b>révoquent immédiatement</b> les sessions du compte. Le <b>dernier admin activé</b> ne peut être ni désactivé, ni rétrogradé, ni supprimé (garde-fou anti-verrouillage).</p>
+    <p class="muted" style="margin:0 0 10px">Comptes individuels (<code>viewer</code> lecture · <code>operator</code> arme les campagnes · <code>admin</code> administre). Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>. La désactivation, la rétrogradation et la réinitialisation de mot de passe <b>révoquent immédiatement</b> les sessions du compte. Le <b>dernier admin activé</b> ne peut être ni désactivé, ni rétrogradé, ni supprimé (garde-fou anti-verrouillage).</p>
     <div id="admin-users"><div class="muted">chargement…</div></div>
   </section>
 
@@ -815,7 +814,7 @@
 <div id="login-view" class="login-view" hidden>
   <form id="login-form" class="login-card" autocomplete="on" aria-labelledby="login-title">
     <div class="login-brand"><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span class="login-wordmark">Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></div>
-    <h2 id="login-title">Console C2 — connexion</h2>
+    <h2 id="login-title">Console — connexion</h2>
     <p class="login-lead">Authentifiez-vous pour accéder à la console d'engagement gouvernée.</p>
     <label class="login-f"><span>Identifiant</span><input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required placeholder="ex: operator"></label>
     <label class="login-f"><span>Mot de passe</span><input id="login-pass" name="password" type="password" autocomplete="current-password" required placeholder="mot de passe du compte"></label>
@@ -870,9 +869,9 @@
       <div id="su-det-form"></div>
     </div>
 
-    <!-- STEP 4 — politique opérateur (C2). require_reason par défaut ON (parité comportement actuel) -->
+    <!-- STEP 4 — politique opérateur. require_reason par défaut ON (parité comportement actuel) -->
     <div class="setup-panel" data-panel="4">
-      <div class="setup-note muted">Règles qui encadrent l'armement du C2 par un <code>operator</code>. Tout est modifiable plus tard ; ces valeurs sont des garde-fous, pas des blocages définitifs.</div>
+      <div class="setup-note muted">Règles qui encadrent l'armement des lancements par un <code>operator</code>. Tout est modifiable plus tard ; ces valeurs sont des garde-fous, pas des blocages définitifs.</div>
       <label class="login-f setup-toggle"><span>Exiger une raison à l'armement</span><input id="su-op-reason" type="checkbox" checked></label>
       <small class="fhint">Recommandé (ON) : chaque armement doit porter une justification, tracée au ledger pour l'audit.</small>
       <label class="login-f"><span>Allowlist CIDR source opérateur (une par ligne, optionnel)</span><textarea id="su-op-cidrs" rows="2" spellcheck="false" placeholder="ex:&#10;10.0.0.0/24&#10;192.168.1.5"></textarea></label>

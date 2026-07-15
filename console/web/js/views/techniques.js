@@ -245,6 +245,6 @@ if ($('#tq-delete')) $('#tq-delete').addEventListener('click', async () => {
 //  PROPOSITION gouvernée : GET /api/workflows (utilisateur + intégrés dérivés du registre) + le
 //  catalogue /api/techniques (groupé par catégorie + état ACTIVÉ par le scope) alimentent le builder ;
 //  la MUTATION (POST /api/workflows[/:name]) est operator/admin + ledgerisée. « Lancer ce workflow »
-//  passe par le C2 GOUVERNÉ (POST /api/run modules=étapes, auto_pentest) — le scope-guard ROE, la
+//  passe par le lancement GOUVERNÉ (POST /api/run modules=étapes, auto_pentest) — le scope-guard ROE, la
 //  sélection par-scope et l'opt-in fort-impact restent seuls JUGES (étape hors-scope/désactivée larguée).
 // =====================================================================================

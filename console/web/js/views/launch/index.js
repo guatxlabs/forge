@@ -1,5 +1,5 @@
 // =====================================================================================
-//  LANCEMENT C2 — composition root de la vue #launch.
+//  LANCEMENT — composition root de la vue #launch.
 //  launch.js a été éclaté en package js/views/launch/ (11 responsabilités -> modules dédiés) :
 //    modules-form.js  — formulaire de modules + opt-in fort impact (MODULE_PARAMS, renderLaunchModules…)
 //    run-result.js    — rendu pur du panneau résultat (tuiles, tables issue/findings)
@@ -28,7 +28,7 @@ import { lcApproveAndRun, lcDryPlan, lcScopeAddTarget, lcScopeCheck, lcSyncAppro
 //   - renderLaunchModules: reports.js re-rend la liste de modules quand la vue #launch est active.
 export { lcStopLive, followRun, loadRuns, renderLaunchModules };
 
-let lcC2Probed = false;              // sonde l'état C2 une seule fois (la sonde POSTe /api/run)
+let lcC2Probed = false;              // sonde l'état opérateur une seule fois (la sonde POSTe /api/run)
 let lcModulesLoaded = false;
 
 export async function loadLaunch() {
@@ -38,7 +38,7 @@ export async function loadLaunch() {
     lcModulesLoaded = true;
   }
   renderLaunchModules();
-  if (!lcC2Probed) { lcC2Probed = true; probeC2State(); }   // sonde C2 une fois (évite de marteler /api/run)
+  if (!lcC2Probed) { lcC2Probed = true; probeC2State(); }   // sonde l'état opérateur une fois (évite de marteler /api/run)
   loadRuns();
   // si un run est déjà suivi, on garde le flux ; sinon on tente de raccrocher le run courant.
   if (!LC_LIVE) reattachRunningRun();

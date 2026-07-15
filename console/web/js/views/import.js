@@ -6,12 +6,12 @@ import { toast } from '../core/ui.js';
 //  IMPORT — migration : ingérer une SORTIE DE SCANNER EXISTANTE en findings orientés preuve.
 //  POST /api/import (opérateur, ledgerisé, scope-guardé). PUR DATA : le fichier est parsé côté
 //  serveur (moteur Python, SOURCE UNIQUE des parseurs), scope-filtré, secrets rédigés. Le secret
-//  opérateur est partagé avec le lancement C2 (OPERATOR_SECRET, jamais persisté).
+//  opérateur est partagé avec le lancement (OPERATOR_SECRET, jamais persisté).
 // =====================================================================================
 export function imShowErr(msg) { const e = $('#im-err'); if (e) { e.textContent = msg; e.hidden = !msg; } }
 
 export function loadImport() {
-  // reflète l'état du secret opérateur en session (partagé avec la vue Lancement C2).
+  // reflète l'état du secret opérateur en session (partagé avec la vue Lancement).
   const b = $('#im-c2state');
   if (b) {
     const ok = !!OPERATOR_SECRET;
@@ -58,7 +58,7 @@ export async function submitImport(ev) {
   const fileEl = $('#im-file');
   const file = fileEl && fileEl.files && fileEl.files[0];
   const flag = !!($('#im-flag') && $('#im-flag').checked);
-  if (!OPERATOR_SECRET) { imShowErr('Secret opérateur C2 requis pour importer.'); if ($('#im-operator')) $('#im-operator').focus(); return; }
+  if (!OPERATOR_SECRET) { imShowErr('Secret opérateur requis pour importer.'); if ($('#im-operator')) $('#im-operator').focus(); return; }
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(campaign) || campaign.startsWith('-')) { imShowErr('Campagne invalide (^[A-Za-z0-9._-]{1,64}$, pas de « - » en tête).'); return; }
   if (!file) { imShowErr('Sélectionne un fichier de scan à importer.'); return; }
   const btn = $('#im-submit'); const stat = $('#im-stat');
@@ -76,7 +76,7 @@ export async function submitImport(ev) {
   }
   if (btn) btn.disabled = false; if (stat) stat.textContent = '';
   const j = r.json;
-  if (r.status === 403) { imShowErr('Refusé : rôle opérateur requis (vérifie le secret opérateur C2).'); return; }
+  if (r.status === 403) { imShowErr('Refusé : rôle opérateur requis (vérifie le secret opérateur).'); return; }
   if (!r.ok) { imShowErr('Import refusé : ' + esc(String((j && (j.why || j.error)) || ('HTTP ' + r.status)))); return; }
   renderImportResult(j);
   toast(`Import OK — ${j.ingested ?? 0} finding(s) ingéré(s) (format ${j.format || '?'}).`, 'ok');

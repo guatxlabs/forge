@@ -159,7 +159,7 @@ if ($('#rep-brand')) $('#rep-brand').addEventListener('click', brandingModal);
 export async function refreshModules() {
   const btn = $('#mod-refresh');
   if (!OPERATOR_SECRET) {
-    toast('Secret opérateur requis : renseigne-le dans « Lancement C2 » (en-tête X-Forge-Operator).', 'bad');
+    toast('Secret opérateur requis : renseigne-le dans « Lancement » (en-tête X-Forge-Operator).', 'bad');
     location.hash = 'launch'; if ($('#lc-operator')) $('#lc-operator').focus();
     return;
   }

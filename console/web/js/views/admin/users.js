@@ -5,7 +5,7 @@ import { confirmModal, guardList, modal, toast } from '../../core/ui.js';
 
 export const ADMIN_ROLES = [
   { value: 'viewer', label: 'viewer — lecture seule' },
-  { value: 'operator', label: 'operator — arme le C2' },
+  { value: 'operator', label: 'operator — arme les campagnes' },
   { value: 'admin', label: 'admin — administration' },
 ];
 export const LOGIN_RE = /^[A-Za-z0-9._-]{1,64}$/;
@@ -58,7 +58,7 @@ export async function adminCreateUser() {
     okText: 'Creer',
     fields: [
       { name: 'login', label: 'Login', required: true, placeholder: '[A-Za-z0-9._-]', hint: 'Identifiant de connexion : lettres, chiffres, . _ - (1 à 64 car., sans tiret initial).' },
-      { name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: 'viewer', hint: 'viewer = lecture seule (aucun tir) · operator = arme et lance le C2 (opt-in fort impact possible) · admin = administre comptes, connecteurs, source de détection et sauvegardes. Attribuez le minimum requis.' },
+      { name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: 'viewer', hint: 'viewer = lecture seule (aucun tir) · operator = arme et lance les campagnes (opt-in fort impact possible) · admin = administre comptes, connecteurs, source de détection et sauvegardes. Attribuez le minimum requis.' },
       { name: 'password', label: 'Mot de passe', type: 'password', required: true, placeholder: 'mot de passe du compte', hint: 'Haché en argon2id côté serveur (jamais stocké en clair). Choisissez une phrase de passe forte ; le compte pourra la changer.' },
     ],
     validate: v => loginError(v.login) || (!String(v.password || '') ? 'Mot de passe requis.' : null),
@@ -74,7 +74,7 @@ export async function adminEditRole(u) {
   const r = await modal({
     title: 'Changer le role — ' + u.login,
     okText: 'Appliquer',
-    fields: [{ name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: u.role, hint: 'viewer = lecture seule · operator = arme/lance le C2 · admin = administration complète. Rétrograder révoque immédiatement les sessions du compte.' }],
+    fields: [{ name: 'role', label: 'Role', type: 'select', options: ADMIN_ROLES, value: u.role, hint: 'viewer = lecture seule · operator = arme/lance les campagnes · admin = administration complète. Rétrograder révoque immédiatement les sessions du compte.' }],
   });
   if (!r || r.role === u.role) return;
   try {

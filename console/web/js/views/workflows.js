@@ -194,7 +194,7 @@ export async function runWorkflow(wf) {
   const defCamp = ($('#campaign') && $('#campaign').value) || 'default';
   const vals = await modal({
     title: 'Lancer le workflow « ' + wf.name + ' »', wide: true, okText: 'Lancer',
-    message: 'Lancement C2 gouverné : les étapes hors-scope / désactivées pour le scope sont LARGUÉES (fail-closed) ; les étapes exploit exigent l\'opt-in fort-impact (armer + raison). Le scope-guard reste seul juge du périmètre.',
+    message: 'Lancement gouverné : les étapes hors-scope / désactivées pour le scope sont LARGUÉES (fail-closed) ; les étapes exploit exigent l\'opt-in fort-impact (armer + raison). Le scope-guard reste seul juge du périmètre.',
     fields: [
       { name: 'campaign', label: 'Campagne', type: 'text', value: defCamp, required: true },
       { name: 'targets', label: 'Cibles (une par ligne, ⊆ scope serveur)', type: 'textarea', required: true, placeholder: 'app.example.com' },

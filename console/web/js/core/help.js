@@ -29,8 +29,8 @@ export const HELP_TOPICS = [
     ['p', "Tableau de bord d'entrée : l'état de la boucle purple, la répartition des findings par sévérité et les capacités disponibles. C'est le point de départ pour situer l'engagement en cours."],
     ['p', "Le sélecteur de campagne (en-tête) filtre toutes les vues sur une campagne précise. Le badge « posture » résume l'état de la boucle."],
   ] },
-  { key: 'launch', title: 'Lancement C2 (campagne)', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
-    ['p', "Compose et lance une campagne C2-light gouvernée. Non-exploit / non-destructif par défaut ; tout est borné au scope serveur et journalisé au ledger (console.run.start)."],
+  { key: 'launch', title: 'Lancement (campagne)', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
+    ['p', "Compose et lance une campagne gouvernée. Non-exploit / non-destructif par défaut ; tout est borné au scope serveur et journalisé au ledger (console.run.start)."],
     ['steps', [
       "Vérifiez une cible (lecture pure) : la décision in-scope / hors-scope s'affiche sans rien lancer.",
       "Renseignez la campagne, le mode (propose = simulation ; auto = exécute les actions FIRE) et les cibles (⊆ scope serveur, une par ligne).",
@@ -52,7 +52,7 @@ export const HELP_TOPICS = [
   { key: 'workflows', title: 'Workflows', icon: 'layout', doc: 'docs/MODULES.md', view: 'workflows', blocks: [
     ['p', "Pipelines COMPOSÉS sans code : une sélection ORDONNÉE de techniques/outils (+ params par étape), sauvegardée et éditable. Absorbe les scan-engines de reNgine, les workflows d'Osmedeus et les pipelines visuels de Trickest — le builder réutilise le catalogue par catégorie et l'état activé par le scope."],
     ['p', "GOUVERNANCE fail-closed : un workflow est une PROPOSITION. Le scope-guard ROE et la sélection par-scope restent seuls juges — une étape hors-scope / désactivée pour le scope est LARGUÉE au tir. Les étapes exploit restent derrière l'opt-in fort-impact. Les workflows intégrés (dérivés du registre) ne sont pas supprimables."],
-    ['p', "Création/édition/suppression réservées operator/admin et journalisées au ledger (POST /api/workflows[/:name]). « Lancer ce workflow » passe par le C2 gouverné (POST /api/run modules=étapes, auto_pentest) : mêmes garde-fous que le lancement C2 standard."],
+    ['p', "Création/édition/suppression réservées operator/admin et journalisées au ledger (POST /api/workflows[/:name]). « Lancer ce workflow » passe par le lancement gouverné (POST /api/run modules=étapes, auto_pentest) : mêmes garde-fous que le lancement standard."],
   ] },
   { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
@@ -98,7 +98,7 @@ export const HELP_TOPICS = [
   { key: 'admin', title: 'Administration', icon: 'user', doc: 'docs/ADMINISTRATION.md', view: 'admin', blocks: [
     ['p', "Réservé au rôle admin. Toutes les mutations sont attribuées à votre compte et ledgerisées."],
     ['h', 'Comptes'],
-    ['p', "viewer (lecture seule) · operator (arme le C2) · admin (administre). Désactivation, rétrogradation et réinitialisation de mot de passe révoquent immédiatement les sessions du compte. Le dernier admin activé est protégé (anti-verrouillage)."],
+    ['p', "viewer (lecture seule) · operator (arme les campagnes) · admin (administre). Désactivation, rétrogradation et réinitialisation de mot de passe révoquent immédiatement les sessions du compte. Le dernier admin activé est protégé (anti-verrouillage)."],
     ['h', 'Connecteurs'],
     ['p', "Interrupteur opérateur par module. Désactiver — ou forcer « indisponible » — un connecteur le rend SKIP au tir, y compris pour les modules choisis par le planner. Disponibilité effective = activé ET (override ?? sonde host)."],
     ['h', 'Source de détection'],

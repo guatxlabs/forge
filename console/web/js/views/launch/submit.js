@@ -8,7 +8,7 @@ import { loadRuns } from './runs-list.js';
 
 // affiche un message d'erreur clair sous le formulaire (mappe les codes du contrat run_create).
 export const LC_ERRMAP = {
-  operator_required: 'Secret opérateur requis ou invalide (en-tête X-Forge-Operator). Renseigne le mot de passe opérateur C2.',
+  operator_required: 'Secret opérateur requis ou invalide (en-tête X-Forge-Operator). Renseigne le mot de passe opérateur.',
   bad_campaign: 'Nom de campagne invalide : ^[A-Za-z0-9._-]{1,64}$ et pas de « - » en tête.',
   no_targets: 'Au moins une cible est requise (une par ligne).',
   bad_target: 'Cible invalide : hostname ou IP/CIDR, sans espace ni métacaractère.',

@@ -65,25 +65,14 @@ export function renderEngagementSelector() {
       if (active != null) sel.value = String(active);
     }
   }
+  // L'engagement actif est montré UNE seule fois — par le sélecteur lui-même (l'option sélectionnée = l'actif,
+  // « NOM · mode »). La barre porte le détail complet (nom, mode, statut) en tooltip (survol) ; on ne duplique
+  // plus l'info dans un libellé séparé (C10 : « NOM · mode » n'apparaissait sinon deux fois).
   const bar = $('#eng-bar');
   const e = ENGAGEMENTS.find(x => x.id === active);
   if (bar) {
     bar.classList.toggle('archived', !!(e && e.status === 'archived'));
     bar.title = e ? ('Engagement actif : ' + e.name + ' (' + e.mode + ', ' + e.status + ')') : 'Aucun engagement';
-  }
-  // Indicateur PROÉMINENT de l'engagement actif (B5) : un libellé visible « actif : NOM · mode » lève
-  // toute ambiguïté sur l'espace de travail que ciblent Lancement/Findings/Runs après un « Basculer ».
-  // Résolution ROBUSTE (C3) : on affiche TOUJOURS le nom·mode d'un engagement réel dès qu'il en existe un
-  // VISIBLE (jamais le « - » d'amorçage ni « (aucun) » à tort). `e` (résolu par id via pickActiveEngagement)
-  // est la source normale ; si l'id ne résout pas (course de chargement, liste momentanément désynchronisée),
-  // on retombe sur le 1er actif VISIBLE (sinon le 1er visible) — tenant-safe (pool = visibleEngagements()).
-  // textContent (jamais innerHTML) => le nom d'engagement, potentiellement hostile, ne peut pas injecter de HTML.
-  const lbl = $('#eng-active');
-  if (lbl) {
-    const le = e || pool.find(x => x.status === 'active') || pool[0] || null;
-    lbl.textContent = le ? (le.name + ' · ' + le.mode) : '(aucun)';
-    lbl.title = le ? ('Engagement ACTIF : ' + le.name + ' — les runs/findings ciblent cet espace') : 'Aucun engagement actif';
-    lbl.classList.toggle('archived', !!(le && le.status === 'archived'));
   }
 }
 
