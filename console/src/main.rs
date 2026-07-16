@@ -365,6 +365,26 @@ fn health_db_ping(app: &App) -> bool {
         .unwrap_or(false)
 }
 
+/// FILET ANTI-PANIC (safety net) — responder de `tower_http::catch_panic::CatchPanicLayer`. Câblé comme
+/// couche la PLUS EXTERNE du routeur (cf. `build_router`), il transforme TOUTE panique d'un handler (ou
+/// des middlewares auth_guard/host_guard) en une réponse `500` PROPRE au lieu d'une connexion resetée
+/// (RST -> le navigateur voyait « Failed to fetch », process survivant). Corps STABLE et GÉNÉRIQUE :
+/// ne fuit JAMAIS le message de panique ni la backtrace (aucun `downcast` de l'erreur) — juste
+/// `{"error":"internal", ...}` + `content-type: application/json`, lisible par le client. C'est un
+/// dernier rempart : les chemins gouvernés (run_create/claim_and_spawn …) renvoient déjà des erreurs
+/// JSON typées ; cette couche garantit qu'une panique IMPRÉVUE reste une réponse HTTP, jamais un drop.
+fn catch_panic_response(_err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    // Corps figé : aucun détail de `_err` (message/backtrace) n'est exposé. Response::builder() sur des
+    // valeurs statiques valides -> jamais d'erreur (l'`unwrap` ne peut pas paniquer ici).
+    axum::response::Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            r#"{"error":"internal","why":"une erreur interne est survenue"}"#,
+        ))
+        .expect("static 500 panic response is always valid")
+}
+
 fn build_router(app: App, web_dir: &str) -> Router {
     // routes protégées par auth_guard ; ServeDir sert les assets statiques (style.css/app.js/quetzal.svg/
     // favicon.svg/fonts/…) en fallback pour toute route non-API non matchée — l'index `/` reste rendu
@@ -565,6 +585,14 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // récupèrent via `Extension<PresenceRegistry>` ; les autres routes l'ignorent (inoffensif).
         .layer(axum::Extension(presence::PresenceRegistry::for_app(&app)))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+        // FILET ANTI-PANIC — couche la PLUS EXTERNE (appliquée en DERNIER => elle enveloppe TOUT, y
+        // compris host_guard/auth_guard/Extension et tous les handlers). Une panique de n'importe quel
+        // task de handler devient un `500 {"error":"internal", …}` JSON lisible, JAMAIS une connexion
+        // resetée (« Failed to fetch » côté navigateur). Le process n'est pas affecté (catch_unwind local
+        // au task). Cf. `catch_panic_response` pour le corps stable non-fuyant.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            catch_panic_response,
+        ))
         .with_state(app)
 }
 
@@ -1132,6 +1160,67 @@ pub(crate) mod testutil;
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    /// FILET ANTI-PANIC (C15) — le responder `catch_panic_response` renvoie un 500 STABLE et
+    /// NON-FUYANT : status 500, `content-type: application/json`, corps générique figé, et AUCUNE
+    /// fuite du message de panique (le `Box<dyn Any>` passé n'apparaît jamais dans le corps).
+    #[tokio::test]
+    async fn catch_panic_response_is_stable_and_non_leaking() {
+        // On passe une charge de panique DISTINCTIVE : elle ne DOIT jamais transparaître dans le corps.
+        let resp = catch_panic_response(Box::new("SECRET_PANIC_PAYLOAD_xyz".to_string()));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "500");
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).map(|v| v.to_str().unwrap()),
+            Some("application/json"),
+            "content-type application/json"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let txt = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(txt, r#"{"error":"internal","why":"une erreur interne est survenue"}"#, "corps stable");
+        assert!(!txt.contains("SECRET_PANIC_PAYLOAD_xyz"), "le message de panique ne fuit JAMAIS");
+    }
+
+    /// FILET ANTI-PANIC (C15) — END-TO-END : une route qui PANIQUE, enveloppée par LE MÊME
+    /// `CatchPanicLayer::custom(catch_panic_response)` que `build_router`, renvoie une réponse HTTP
+    /// `500` JSON PROPRE au client — PAS une connexion resetée (« Failed to fetch »). On sert la couche
+    /// sur un port éphémère et on frappe avec un client TCP brut (std, zéro nouvelle dépendance) : la
+    /// preuve est que le client REÇOIT une réponse complète (jamais un RST/EOF prématuré).
+    #[tokio::test]
+    async fn catch_panic_layer_converts_handler_panic_into_clean_500() {
+        use std::io::{Read, Write};
+        // Return type explicite (`Response`) : évite le never-type fallback du `panic!` divergent.
+        async fn boom() -> Response {
+            panic!("boom-should-be-caught-not-leaked")
+        }
+        let router = Router::new()
+            .route("/boom", get(boom))
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(catch_panic_response));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service()).await;
+        });
+        let raw = tokio::task::spawn_blocking(move || {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            s.write_all(b"GET /boom HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).unwrap(); // Connection: close -> lit jusqu'à EOF (réponse complète)
+            buf
+        })
+        .await
+        .unwrap();
+        server.abort();
+        assert!(raw.starts_with("HTTP/1.1 500"), "panique -> 500 propre (jamais un drop), got: {raw}");
+        assert!(
+            raw.to_ascii_lowercase().contains("content-type: application/json"),
+            "corps JSON, got: {raw}"
+        );
+        assert!(
+            raw.contains(r#"{"error":"internal","why":"une erreur interne est survenue"}"#),
+            "corps stable, got: {raw}"
+        );
+        assert!(!raw.contains("boom-should-be-caught-not-leaked"), "message de panique jamais exposé, got: {raw}");
+    }
 
     /// GATE CONTRACT (Stage 2b batch 5) : la sélection du backend enterprise est FAIL-CLOSED.
     ///   - Toute valeur non-postgres (`None`/`"sqlite"`/`""`) -> `Sqlite`, dans LES DEUX builds.

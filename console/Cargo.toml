@@ -57,7 +57,7 @@ significant_drop_tightening = "warn"
 [dependencies]
 guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe
 axum = "0.7"
-tower-http = { version = "0.5", features = ["fs"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA
+tower-http = { version = "0.5", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
 libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign
 futures-util = { version = "0.3", default-features = false }   # stream::unfold -> SSE sans tokio-stream
