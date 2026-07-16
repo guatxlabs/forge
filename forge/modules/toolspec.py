@@ -290,6 +290,60 @@ def _safe_extra_tokens(allowlist, params):
     return tokens
 
 
+# =================================================================================================
+#  FlagAllowlistMixin — plomberie extra_args DÉDUPLIQUÉE pour les modules-wrappers ÉCRITS À LA MAIN
+# =================================================================================================
+class FlagAllowlistMixin:
+    """Mixin léger factorisant la plomberie `extra_args` DUPLIQUÉE dans les modules-wrappers ÉCRITS À
+    LA MAIN (ceux qui ne descendent PAS de `ExternalToolModule`, lequel centralise déjà ce contrat dans
+    son `fire()`). Source unique de trois éléments jusque-là recopiés d'un module à l'autre :
+
+      - `extra_args_param(label=…)`  : le descripteur de params `{"name":"extra_args",…}` répété à
+                                       l'identique dans chaque PARAMS_SCHEMA (label paramétrable car il
+                                       varie par outil : « extra args ffuf/subfinder/sqlmap … ») ;
+      - `_refuse(action, reason)`    : le finding de REFUS fail-closed (`status='skipped'`, aucun
+                                       processus lancé), dont category/mitre/tool sont pris SUR la classe
+                                       concrète (`_refuse_*`) pour rester BYTE-IDENTIQUE à l'ex-`_refuse`
+                                       local du module (nuclei/httpx/nmap) ;
+      - `gate_extra_args(action)`    : la porte fail-closed — `None` si OK, sinon le finding de refus
+                                       déjà construit (à retourner tel quel depuis `fire()`).
+
+    Aucune capacité élargie : `FLAG_ALLOWLIST` reste déclarée PAR CHAQUE module (intrinsèque à l'outil
+    enveloppé — jamais centralisée). Le mixin ne fait que dédupliquer la plomberie, à comportement
+    strictement préservé (même allowlist, même refus, même argv). Un module dont le refus a un libellé
+    propre (ex origin/recon.content via `_skipped`, sqli.probe via `degraded`) réutilise
+    `extra_args_param()` mais garde son émetteur de refus spécifique."""
+
+    FLAG_ALLOWLIST = ()                  # déclarée (surchargée) par chaque module concret
+    # Provenance du finding de REFUS — posée par chaque module pour rester byte-identique à son ex-`_refuse`.
+    _refuse_category = "recon"
+    _refuse_mitre = ""
+    _refuse_tool = ""
+
+    @classmethod
+    def extra_args_param(cls, label="extra args (allowlist de drapeaux)"):
+        """Descripteur de params UI pour `extra_args` (source unique de l'entrée répétée)."""
+        return {"name": "extra_args", "type": "list", "label": label, "flag": ""}
+
+    def _refuse(self, action, reason):
+        """Finding de REFUS fail-closed (aucun processus lancé) — remplace les `_refuse` copiés verbatim
+        dans nuclei/httpx/nmap. category/mitre/tool lus sur la classe (`_refuse_*`) : sortie
+        BYTE-IDENTIQUE à l'ancien `_refuse` local de chaque module."""
+        return [self.finding(
+            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
+            category=self._refuse_category, mitre=self._refuse_mitre, status="skipped",
+            tool=self._refuse_tool,
+            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
+
+    def gate_extra_args(self, action):
+        """Porte `extra_args` fail-closed : `None` si les arguments libres sont valides/allowlistés, sinon
+        le finding de refus (`_refuse`) prêt à retourner. Adosse `check_extra_args` à `self.FLAG_ALLOWLIST`."""
+        bad_extra, _ = check_extra_args((action.params or {}).get("extra_args"), self.FLAG_ALLOWLIST)
+        if bad_extra is not None:
+            return self._refuse(action, f"argument libre refusé ({bad_extra})")
+        return None
+
+
 def build_argv(spec, target, params=None):
     """Construit l'argv FIXE (list[str]) à partir du gabarit du spec — SANS SHELL. Chaque placeholder
     devient un/des élément(s) d'argv distinct(s) ; une cible avec métacaractères shell reste UN élément.
