@@ -10,13 +10,15 @@ import json
 from .registry import register, Module
 from .. import runner
 from .. import techniques
-from .toolspec import check_extra_args, safe_value
+from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 
 
 @register("web.nuclei")
-class NucleiScan(Module):
+class NucleiScan(FlagAllowlistMixin, Module):
     kind = "web.nuclei"
     exploit = False
+    _refuse_category = "nuclei"                   # provenance du finding de refus (mixin) — inchangée
+    _refuse_tool = "nuclei"
     mitre = techniques.mitre_for("web.nuclei")   # source de vérité : forge/techniques.py
     description = ("Scan de vulnérabilités par templates nuclei (medium/high/critical par défaut). "
                    "Params UI : severity (allow-listée), templates (-t), tags (-tags), extra_args (allowlist).")
@@ -31,7 +33,7 @@ class NucleiScan(Module):
          "allowed": ["info", "low", "medium", "high", "critical"]},
         {"name": "templates", "type": "text", "label": "templates (-t, ex cves/ ou http/…)", "flag": "-t"},
         {"name": "tags", "type": "text", "label": "tags (-tags, ex cve,rce)", "flag": "-tags"},
-        {"name": "extra_args", "type": "list", "label": "extra args (allowlist de drapeaux)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(),
     ]
     # ALLOWLIST des drapeaux acceptés en argument libre (extra_args) — tout flag hors liste est REFUSÉ.
     FLAG_ALLOWLIST = ("-severity", "-t", "-tags", "-etags", "-itags", "-rl", "-c", "-timeout",
@@ -74,19 +76,12 @@ class NucleiScan(Module):
     def dry(self, action):
         return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
-    def _refuse(self, action, reason):
-        return [self.finding(
-            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
-            category="nuclei", status="skipped", tool="nuclei",
-            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
-
     def fire(self, action):
         p = action.params or {}
         if str(action.target).startswith("-"):
             return self._refuse(action, "cible positionnelle ambiguë (commence par '-')")
-        bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
-        if bad_extra is not None:
-            return self._refuse(action, f"argument libre refusé ({bad_extra})")
+        if (refused := self.gate_extra_args(action)):     # extra_args gouvernés (mixin, fail-closed)
+            return refused
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action),
                                    timeout=600, prefer_docker=True)
         # Parser stdout d'ABORD : nuclei peut sortir rc!=0 sur condition bénigne tout en ayant
