@@ -91,7 +91,10 @@ Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents 
 - **T10** anti-rebinding — 2 chemins restants fermés : redirects cross-host (pinné sous règles ROE, ou 3xx non suivi si refusé) + `recon_surface._http_get` pinné, via helper partagé `pin.build_pinned_opener` (TLS/SNI préservés). `327bff4`. Résiduel LOW documenté : redirect cross-host d'une cible recon déjà pinnée re-résout (GET passif).
 - **T11** archi étapes 2 & 4 — `tests.rs` → **11 fichiers `tests_*.rs`** (+ helpers → `testutil.rs`), `boot.rs` extrait. **`main.rs` 981 → 450 lignes**, 361 tests inchangés (default + postgres). `6859511`, `1c3a1a2` (contenu split dans `d59eeef` suite à une course worktree — code correct, commit mal étiqueté, pas de force-push).
 - **T12** factorisation Python `FlagAllowlistMixin` — 5 modules migrés (web/recon/origin/recon_active/injection), byte-identical vérifié champ-par-champ, suite 1245 constante. `d69e487`→`05ad800`. SqliProbe garde son refus sqlmap bespoke.
-- **Toujours ouvert (non engagé)** : nuance entreprise M4 (gate `sso_managed` — élargir si SCIM+SSO combinés) ; résiduel LOW T10.
+- **M4 élargi (`ef80249`)** : login SSO accepte désormais les comptes **SCIM-managed** (déploiement SCIM+SSO combiné) ; comptes locaux non-marqués **toujours refusés** (propriété de sécurité M4 intacte), rôle SCIM préservé. 362 tests verts.
+- **Résiduel LOW T10 — ACCEPTÉ** : redirect cross-host d'une cible recon déjà pinnée re-résout le nouvel hôte (GET passif, l'attaquant doit contrôler un hôte in-scope). Faible risque, non-secret/verdict ; ne justifie pas de complexifier la sémantique de redirect du recon passif. Documenté, accepté en l'état.
+
+### ✅ Session de remédiation TERMINÉE — audit holistique (31 findings) intégralement traité (T1→T12 + M4), aucun item de remédiation ouvert. Résiduels : 1 LOW accepté (T10) + cosmétique git (`d59eeef` mal étiqueté, code correct).
 
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
