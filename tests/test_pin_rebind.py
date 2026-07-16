@@ -471,5 +471,114 @@ class TestReconSurfacePin(unittest.TestCase):
         self.assertIsNone(st, "court-circuit après capture -> transport échoue proprement (offline-safe)")
 
 
+# =================================================================================================
+#  9. recon_surface._http_get (T13) — REDIRECTION CROSS-HOST du GET passif : la cible est connectée sur
+#     SON IP ÉPINGLÉE (résolue sous les MÊMES règles fail-closed), ou le suivi est REFUSÉ (privé/out_scope),
+#     MÊME HÔTE reste épinglé, et pin-absent => suivi urllib NORMAL byte-identique. Prouvé AU SOCKET.
+#     (Miroir d'`Oracle._http` §7, mais recon SUIT via un `_PinnedFollowRedirect` gaté au lieu de no-follow.)
+# =================================================================================================
+class TestReconSurfaceCrossHostRedirectPin(unittest.TestCase):
+    def setUp(self):
+        _RedirHandler.seen = []
+        _RedirHandler.redirect_host = "target.invalid"
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), _RedirHandler)
+        self.port = self.httpd.server_address[1]
+        _RedirHandler.port = self.port
+        self.th = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.th.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.th.join(5)
+
+    @staticmethod
+    def _roe_resolves(mapping):
+        """Faux `getaddrinfo` : `mapping` {hostname: ip} résout vers cette IP (le ROE « voit » ces noms) ;
+        tout le reste DÉLÈGUE au vrai resolver (les IP littérales — dont l'IP épinglée loopback que
+        `create_connection` re-résout en interne — restent normales). La couche CONNEXION ne connaît PAS
+        `target.invalid`/`internal.invalid` : seul le pin dérivé les rend atteignables (preuve socket)."""
+        real = socket.getaddrinfo                                 # capturé AVANT le patch (encore réel)
+
+        def _fake(host, *a, **k):
+            ip = mapping.get(str(host))
+            if ip is not None:
+                return [(2, 1, 6, "", (ip, 0))]
+            return real(host, *a, **k)
+        return _fake
+
+    def test_cross_host_redirect_connected_on_pinned_ip(self):
+        # (a) target.invalid résout (ROE) vers loopback ; allow_private autorise l'IP loopback épinglée.
+        #     Non résolvable au niveau CONNEXION -> n'atteint /final QUE si le pin dérivé a court-circuité le DNS.
+        sc = Scope({"mode": "grey", "in_scope": ["origin.invalid", "target.invalid"], "allow_private": True})
+        store = SessionStore(sc)
+        origin = f"http://origin.invalid:{self.port}/"
+        roemod = sys.modules["forge.roe"]
+        with mock.patch.object(roemod.socket, "getaddrinfo",
+                               self._roe_resolves({"target.invalid": "127.0.0.1"})):
+            with _session_mod.using(store), pin.using(origin, ["127.0.0.1"]):
+                st, body, _h = PassiveSurface._http_get(origin, timeout=5)
+        self.assertEqual(st, 200, "la redirection cross-host a été suivie via l'IP ÉPINGLÉE (loopback)")
+        self.assertEqual(body, "ok")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertIn("/final", paths,
+                      "le 2e saut cross-host a atteint le serveur -> connecté PAR-IP épinglée (hostname mort sinon)")
+        hosts = [hh for (hh, _p) in _RedirHandler.seen]
+        self.assertIn(f"target.invalid:{self.port}", hosts,
+                      "Host header du 2e saut = hôte d'ORIGINE cross-host (jamais l'IP) -> TLS/identité préservée")
+
+    def test_cross_host_redirect_refused_when_target_resolves_private(self):
+        # (b) internal.invalid résout (ROE) vers une IP PRIVÉE ; allow_private=False -> safe_pinned_ip None
+        #     -> le suivi cross-host est REFUSÉ fail-closed (la 3xx remonte, aucun 2e connect nulle part).
+        _RedirHandler.redirect_host = "internal.invalid"
+        sc = Scope({"mode": "grey", "in_scope": ["origin.invalid", "internal.invalid"], "allow_private": False})
+        store = SessionStore(sc)
+        origin = f"http://origin.invalid:{self.port}/"
+        roemod = sys.modules["forge.roe"]
+        connects = []
+        real_cc = pin.socket.create_connection
+
+        def _spy_cc(addr, *a, **k):
+            connects.append(addr)
+            return real_cc(addr, *a, **k)
+
+        with mock.patch.object(roemod.socket, "getaddrinfo",
+                               self._roe_resolves({"internal.invalid": "10.0.0.5"})), \
+                mock.patch.object(pin.socket, "create_connection", _spy_cc):
+            with _session_mod.using(store), pin.using(origin, ["127.0.0.1"]):
+                st, _body, _h = PassiveSurface._http_get(origin, timeout=5)
+        self.assertEqual(st, 302, "cross-host vers un hôte résolvant en PRIVÉ -> NON suivi (3xx telle quelle)")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertNotIn("/final", paths, "le 2e saut n'a JAMAIS atteint le serveur (fail-closed)")
+        self.assertTrue(all(a[0] == "127.0.0.1" for a in connects),
+                        f"aucun connect hors de l'IP épinglée d'origine (connects={connects})")
+
+    def test_same_host_redirect_stays_pinned(self):
+        # (c) redirection vers le MÊME hôte (origin.invalid, non résolvable) : reste épinglée -> atteint /final.
+        _RedirHandler.redirect_host = "origin.invalid"
+        origin = f"http://origin.invalid:{self.port}/"
+        with pin.using(origin, ["127.0.0.1"]):                    # aucun scope requis : same-host ne touche pas safe_pinned_ip
+            st, body, _h = PassiveSurface._http_get(origin, timeout=5)
+        self.assertEqual(st, 200, "redirection MÊME hôte suivie via l'IP épinglée d'origine")
+        self.assertEqual(body, "ok")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertIn("/final", paths, "le saut same-host reste épinglé (hostname non résolvable sinon)")
+        hosts = [hh for (hh, _p) in _RedirHandler.seen]
+        self.assertTrue(all(hh == f"origin.invalid:{self.port}" for hh in hosts),
+                        f"Host header reste l'hôte d'origine sur les 2 sauts (hosts={hosts})")
+
+    def test_pin_absent_normal_follow_byte_identical(self):
+        # (d) SANS pin : opener None -> `urllib.request.urlopen` NORMAL, le handler gaté n'est PAS câblé.
+        #     Hôte 127.0.0.1 (résolvable) -> redirection same-host suivie normalement (byte-identique).
+        _RedirHandler.redirect_host = "127.0.0.1"
+        origin = f"http://127.0.0.1:{self.port}/"
+        self.assertIsNone(pin.current(), "aucun contexte de pin lié")
+        st, body, _h = PassiveSurface._http_get(origin, timeout=5)
+        self.assertEqual(st, 200, "sans pin : suivi urllib NORMAL (byte-identique), handler gaté non câblé")
+        self.assertEqual(body, "ok")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertIn("/final", paths, "redirection suivie normalement hors contexte gouverné")
+
+
 if __name__ == "__main__":
     unittest.main()
