@@ -141,7 +141,7 @@ export async function loadAddTool() {
   // params_schema (champs typés servis au formulaire de Lancement)
   const paramBox = el('div', 'at-list'); paramBox.id = 'at-params';
   const paramHead = el('div', 'at-listhead');
-  paramHead.appendChild(el('span', 'at-lab', { text: 'params_schema — champs de configuration (rendus dans « Lancement »)' }));
+  paramHead.appendChild(el('span', 'at-lab', { text: 'params_schema — champs de configuration (rendus dans « Campagne »)' }));
   const paramAdd = el('button', 'k-theme at-add', { type: 'button', text: '+ champ' });
   paramAdd.onclick = () => paramRow(paramBox);
   paramHead.appendChild(paramAdd);

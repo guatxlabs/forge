@@ -29,7 +29,7 @@ export const HELP_TOPICS = [
     ['p', "Tableau de bord d'entrée : l'état de la boucle purple, la répartition des findings par sévérité et les capacités disponibles. C'est le point de départ pour situer l'engagement en cours."],
     ['p', "Le sélecteur de campagne (en-tête) filtre toutes les vues sur une campagne précise. Le badge « posture » résume l'état de la boucle."],
   ] },
-  { key: 'launch', title: 'Lancement (campagne)', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
+  { key: 'launch', title: 'Campagne', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
     ['p', "Compose et lance une campagne gouvernée. Non-exploit / non-destructif par défaut ; tout est borné au scope serveur et journalisé au ledger (console.run.start)."],
     ['steps', [
       "Vérifiez une cible (lecture pure) : la décision in-scope / hors-scope s'affiche sans rien lancer.",

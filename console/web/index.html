@@ -79,7 +79,7 @@
   <nav class="sidebar" id="nav" aria-label="Navigation">
     <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
     <a href="#engagements"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg> <span>Engagements</span></a>
-    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Lancement</span></a>
+    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Campagne</span></a>
     <a href="#import"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> <span>Importer un scan</span></a>
     <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
     <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
@@ -745,7 +745,7 @@
   <!-- ADMINISTRATION — AJOUTER UN OUTIL (« add a tool from the web UI »). POST/GET /api/tools, DELETE
        /api/tools/:kind (check_admin, 403 sinon), ledgerisé. Déclare un ToolSpec GOUVERNÉ (binaire + argv
        no-shell tokenisé + params_schema + flag_allowlist) — SANS édition de fichier ni recompilation.
-       L'outil apparaît aussitôt dans « Capacités » et « Lancement » (params_schema rendu dynamiquement).
+       L'outil apparaît aussitôt dans « Capacités » et « Campagne » (params_schema rendu dynamiquement).
        Aucun code arbitraire : uniquement de la donnée déclarative, gouvernée par le moteur. -->
   <section id="admin-addtool" class="card span2" aria-labelledby="adm-tool-h">
     <div class="panelhead">
@@ -754,7 +754,7 @@
         <button id="admin-addtool-reload" class="k-theme" type="button" title="Réinitialiser le formulaire et rafraîchir la liste">Rafraîchir</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Déclarez votre propre outil CLI (<b>ToolSpec déclaratif</b> : binaire + <code>argv_template</code> tokenisé no-shell + <code>params_schema</code> typé + <code>flag_allowlist</code>) — <b>sans</b> éditer de fichier ni recompiler. À l'ajout, l'outil est <b>persisté</b> (dossier server-managed) puis le catalogue est <b>rechargé à chaud</b> : il apparaît dans <b>Capacités</b> et dans <b>Lancement</b> (son formulaire de params est rendu depuis le schéma). Gouvernance identique à un module natif : <b>scope-guard</b> fail-closed, <b>argv fixe no-shell</b>, <b>allowlist</b> de drapeaux, statut <b>jamais</b> « vulnerable », plancher <b>exploit</b> (arm + raison). <b>Admin-only</b>, chaque ajout/suppression est <b>attribué</b> et <b>ledgerisé</b>. Un binaire absent du runtime -> outil « indispo » (skippé au run).</p>
+    <p class="muted" style="margin:0 0 10px">Déclarez votre propre outil CLI (<b>ToolSpec déclaratif</b> : binaire + <code>argv_template</code> tokenisé no-shell + <code>params_schema</code> typé + <code>flag_allowlist</code>) — <b>sans</b> éditer de fichier ni recompiler. À l'ajout, l'outil est <b>persisté</b> (dossier server-managed) puis le catalogue est <b>rechargé à chaud</b> : il apparaît dans <b>Capacités</b> et dans <b>Campagne</b> (son formulaire de params est rendu depuis le schéma). Gouvernance identique à un module natif : <b>scope-guard</b> fail-closed, <b>argv fixe no-shell</b>, <b>allowlist</b> de drapeaux, statut <b>jamais</b> « vulnerable », plancher <b>exploit</b> (arm + raison). <b>Admin-only</b>, chaque ajout/suppression est <b>attribué</b> et <b>ledgerisé</b>. Un binaire absent du runtime -> outil « indispo » (skippé au run).</p>
     <div id="admin-addtool-body"><div class="muted">chargement…</div></div>
   </section>
 
