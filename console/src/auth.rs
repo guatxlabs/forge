@@ -559,6 +559,13 @@ pub(crate) async fn security_headers(req: Request, next: Next) -> Response {
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP_POLICY));
+    // Permissions-Policy (F1 follow-up) : verrouille les fonctionnalités puissantes du navigateur — la
+    // console n'en utilise AUCUNE. Sans en-tête, `web.security_headers` (le module oracle) le flaggait à
+    // juste titre sur la console elle-même. `header` (http) n'a pas de constante pour ce nom -> HeaderName statique.
+    h.insert(
+        axum::http::HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("geolocation=(), camera=(), microphone=(), payment=(), usb=()"),
+    );
     if is_https {
         h.insert(
             header::STRICT_TRANSPORT_SECURITY,
