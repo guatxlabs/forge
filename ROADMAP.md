@@ -87,6 +87,12 @@ Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents 
 - **T6 — Front quick-wins** : `L17` toasts good/warn · `L18` double-esc title · `I2` dead import · `I3` doc `write()`.
 - **T7 — Architecture (plan incrémental)** : découpe `main.rs` (5911 l) + factorisation modules Python — opportuniste, JAMAIS big-bang.
 
+## ✅ Résiduels traités (continuation)
+- **T10** anti-rebinding — 2 chemins restants fermés : redirects cross-host (pinné sous règles ROE, ou 3xx non suivi si refusé) + `recon_surface._http_get` pinné, via helper partagé `pin.build_pinned_opener` (TLS/SNI préservés). `327bff4`. Résiduel LOW documenté : redirect cross-host d'une cible recon déjà pinnée re-résout (GET passif).
+- **T11** archi étapes 2 & 4 — `tests.rs` → **11 fichiers `tests_*.rs`** (+ helpers → `testutil.rs`), `boot.rs` extrait. **`main.rs` 981 → 450 lignes**, 361 tests inchangés (default + postgres). `6859511`, `1c3a1a2` (contenu split dans `d59eeef` suite à une course worktree — code correct, commit mal étiqueté, pas de force-push).
+- **T12** factorisation Python `FlagAllowlistMixin` — 5 modules migrés (web/recon/origin/recon_active/injection), byte-identical vérifié champ-par-champ, suite 1245 constante. `d69e487`→`05ad800`. SqliProbe garde son refus sqlmap bespoke.
+- **Toujours ouvert (non engagé)** : nuance entreprise M4 (gate `sso_managed` — élargir si SCIM+SSO combinés) ; résiduel LOW T10.
+
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
 
