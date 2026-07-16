@@ -233,14 +233,17 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
         argv.push(requested_modules.join(","));
     }
 
-    let output = std::process::Command::new(app.python.as_str())
+    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : le dry-plan ne stalle plus un worker
+    // Tokio le temps que le moteur planifie. Comportement identique à std::process::Command::output().
+    let output = tokio::process::Command::new(app.python.as_str())
         .args(&argv)
         .current_dir(app.pkg_dir.as_str())
         // parité avec run_create : stdout Python non bufferisé (le dry-plan est collecté d'un bloc via
         // .output(), donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
         .env("PYTHONUNBUFFERED", "1")
         .stdin(std::process::Stdio::null())
-        .output();
+        .output()
+        .await;
     let _ = std::fs::remove_dir_all(&plan_dir); // nettoyage best-effort quel que soit le résultat
 
     match output {
@@ -394,13 +397,15 @@ pub(crate) fn validate_technique_selection(body: &Value) -> Result<Value, String
 /// en argv — cohérent avec le passthrough sûr du reste). DÉRIVÉ du registre côté moteur (SOURCE UNIQUE :
 /// groupement par catégorie + `enabled_for_current_scope` via resolve_enabled_kinds). Renvoie le
 /// catalogue JSON parsé, ou une erreur lisible (moteur indisponible / JSON illisible).
-pub(crate) fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, String> {
-    let out = std::process::Command::new(app.python.as_str())
+pub(crate) async fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, String> {
+    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : ne stalle plus un worker Tokio.
+    let out = tokio::process::Command::new(app.python.as_str())
         .args(["-m", "forge.cli", "techniques", "--json"])
         .current_dir(app.pkg_dir.as_str())
         .env("FORGE_TECHNIQUE_SELECTION", selection.to_string())
         .stdin(std::process::Stdio::null())
         .output()
+        .await
         .map_err(|e| format!("spawn échoué: {e}"))?;
     if !out.status.success() {
         return Err(format!(
@@ -424,7 +429,7 @@ pub(crate) async fn techniques_catalog(State(app): State<App>, headers: HeaderMa
     // PROFILS NOMMÉS (réutilisables) — servis avec le catalogue pour peupler le sélecteur du SPA et
     // permettre d'APPLIQUER un profil (prefill des toggles côté client) sans aller-retour serveur.
     let named_profiles = Value::Object(technique_profiles_map(&app));
-    match spawn_techniques_catalog(&app, &sel) {
+    match spawn_techniques_catalog(&app, &sel).await {
         Ok(mut v) => {
             if let Some(o) = v.as_object_mut() {
                 o.insert("engagement_id".into(), json!(eid));
@@ -630,12 +635,14 @@ pub(crate) fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
 /// Spawne `forge workflows --json` -> workflows INTÉGRÉS (DÉRIVÉS du registre côté moteur : SOURCE
 /// UNIQUE, toujours à jour). Renvoie le tableau `builtins` parsé, ou une erreur lisible (moteur absent /
 /// JSON illisible). Env passthrough sûr ; aucun argv sensible.
-pub(crate) fn spawn_workflows_builtins(app: &App) -> Result<Vec<Value>, String> {
-    let out = std::process::Command::new(app.python.as_str())
+pub(crate) async fn spawn_workflows_builtins(app: &App) -> Result<Vec<Value>, String> {
+    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : ne stalle plus un worker Tokio.
+    let out = tokio::process::Command::new(app.python.as_str())
         .args(["-m", "forge.cli", "workflows", "--json"])
         .current_dir(app.pkg_dir.as_str())
         .stdin(std::process::Stdio::null())
         .output()
+        .await
         .map_err(|e| format!("spawn échoué: {e}"))?;
     if !out.status.success() {
         return Err(format!(
@@ -689,7 +696,7 @@ pub(crate) async fn workflows_list(State(app): State<App>, headers: HeaderMap, Q
             user.push(workflow_view(wf));
         }
     }
-    match spawn_workflows_builtins(&app) {
+    match spawn_workflows_builtins(&app).await {
         Ok(builtins) => {
             let bl: Vec<Value> = builtins.iter().map(workflow_view).collect();
             (StatusCode::OK, Json(json!({"engagement_id": eid, "workflows": user, "builtins": bl}))).into_response()

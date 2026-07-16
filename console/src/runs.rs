@@ -381,6 +381,26 @@ pub(crate) async fn import_scan(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
+    // (1b) L9 FIX — ENGAGEMENT CIBLE (parité EXACTE avec run_create). Une ingestion MUTE un engagement :
+    // elle DOIT viser un engagement résolu (tenant-aware, fail-closed) et non atterrir aveuglément sur #1.
+    // `engagement_id` (corps) sélectionne l'engagement ; absent => l'engagement actif le plus ancien accessible.
+    // Cross-tenant (tenant non accordé) => resolve refuse ici (400 bad_engagement) — jamais divulgué.
+    let engagement_id = body.get("engagement_id").and_then(|v| v.as_i64());
+    let eng = match resolve_engagement(&app, &headers, engagement_id) {
+        Ok(e) => e,
+        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
+    };
+    // (1c) L9 FIX — ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14, parité run_create) : le rôle EFFECTIF du
+    // caller sur CET engagement doit permettre OPERATE (tenant_admin|tenant_operator), most-specific-wins,
+    // FAIL-CLOSED. Un tenant_viewer (ou override viewer sur cet engagement) est REFUSÉ ici même s'il voit le
+    // tenant et a passé le gate operator console-global. Community (flag OFF) => NO-OP (byte-identique).
+    if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eng.id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "engagement_operator_required",
+                        "why": format!("rôle operator requis sur l'engagement #{} (grant per-engagement/tenant insuffisant — fail-closed)", eng.id)})),
+        ).into_response();
+    }
     // (2) validation stricte de l'entrée
     let campaign = match validate_campaign(body.get("campaign").and_then(|v| v.as_str()).unwrap_or("default")) {
         Ok(c) => c,
@@ -410,11 +430,14 @@ pub(crate) async fn import_scan(
     }
     let file_path = import_dir.join("scan.input");
     let scope_path = import_dir.join("scope.json");
+    // L9 FIX — scope AUTORITATIF de L'ENGAGEMENT CIBLE (mode/in_scope/out_scope), plus les App globals (qui
+    // ne sont que les défauts de l'engagement #1). Le moteur filtre les findings importés contre le périmètre
+    // de CET engagement — comme run_create écrit le scope depuis l'engagement (cf. build_run_scope_doc).
     let scope_doc = json!({
         "_comment": "scope serveur autoritatif — filtre les findings importés hors périmètre (scope-guard fail-closed)",
-        "mode": app.scope_mode.as_str(),
-        "in_scope": app.scope_in.as_ref().clone(),
-        "out_scope": [],
+        "mode": eng.mode,
+        "in_scope": eng.scope_in,
+        "out_scope": eng.scope_out,
     });
     if std::fs::write(&file_path, content.as_bytes()).is_err()
         || std::fs::write(&scope_path, serde_json::to_vec(&scope_doc).unwrap()).is_err()
@@ -432,11 +455,15 @@ pub(crate) async fn import_scan(
         "--json".into(),
     ];
     if flag_oos { argv.push("--flag-out-of-scope".into()); }
-    let spawn = std::process::Command::new(app.python.as_str())
+    // L10 FIX — spawn NON bloquant : `tokio::process::Command(...).output().await` (parité runs_proc/exec) ne
+    // stalle plus un worker Tokio pendant que le moteur parse (le parse d'un gros fichier pouvait bloquer le
+    // runtime). Comportement identique : `.output()` collecte stdout/stderr/status à l'identique de std.
+    let spawn = tokio::process::Command::new(app.python.as_str())
         .args(&argv)
         .current_dir(app.pkg_dir.as_str())
         .stdin(std::process::Stdio::null())
-        .output();
+        .output()
+        .await;
     // nettoyage IMMÉDIAT — le contenu (secrets potentiels) ne persiste jamais sur disque au-delà du parse.
     let _ = std::fs::remove_dir_all(&import_dir);
     let out = match spawn {
@@ -469,11 +496,13 @@ pub(crate) async fn import_scan(
                 cvss_score = s;
             }
             if let Ok(n) = store.execute(
-                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                // L9 FIX — engagement_id EXPLICITE = l'engagement CIBLE résolu (plus de DEFAULT 1 : les findings
+                // importés appartiennent à l'engagement visé, pas systématiquement à #1).
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
                 &crate::sql_params![gs(f,"ts"), &campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
-                    gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score],
+                    gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score, eng.id],
             ) {
                 ingested += n as i64;
             }
@@ -931,6 +960,72 @@ mod idor_tenancy_tests {
         let r = run_cancel(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Path("run-B".into())).await;
         let resp = r.into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT, "community: cancel -> 409 not_running (jamais 403)");
+    }
+
+    /// L9 — ENTERPRISE ON : un import CIBLANT l'engagement d'un AUTRE tenant est REFUSÉ (résolution tenant-
+    /// aware fail-closed, comme run_create) AVANT tout spawn/insertion. Aucun finding n'atterrit dans
+    /// l'engagement de B (le défaut historique faisait tomber les findings importés sur l'engagement #1).
+    #[tokio::test]
+    async fn cross_tenant_import_is_refused() {
+        let app = test_app();
+        seed_engagement(&app, 1, 1); // engagement A -> tenant 1
+        seed_engagement(&app, 2, 2); // engagement B -> tenant 2
+        enable_tenancy(&app);
+        // alice : operator console + tenant_operator sur le tenant 1 UNIQUEMENT (rien sur le tenant 2).
+        let atok = user_with_tenant_grant(&app, "alice", "operator", 1, "tenant_operator");
+        let h = bearer_headers(&atok);
+
+        let body = json!({"engagement_id": 2, "campaign": "camp", "format": "auto", "content": "1.2.3.4"});
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let r = import_scan(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Json(body)).await;
+        let resp = r.into_response();
+        // REFUS : la résolution tenant-aware rejette l'engagement cross-tenant AVANT le spawn (400 bad_engagement).
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "import cross-tenant -> refusé (jamais 200)");
+        let jb = resp_json(resp).await;
+        assert_eq!(jb["error"], "bad_engagement", "refus au stade résolution d'engagement (fail-closed)");
+
+        // AUCUN finding n'a été inséré dans l'engagement de B (ni ailleurs) — l'import n'a rien muté.
+        let n_b: i64 = { let s = app.store(); s.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=2", &[], |r| r.get_i64(0)).unwrap_or(-1) };
+        assert_eq!(n_b, 0, "aucun finding importé dans l'engagement de B");
+    }
+
+    /// L8 — DELETE-THEN-ATTEST : si la cascade de suppression ÉCHOUE (rollback), AUCUNE attestation n'est
+    /// écrite dans le ledger DÉDIÉ (le défaut précédent appendait `console.engagement.delete` AVANT la
+    /// transaction, attestant un delete qui n'a jamais eu lieu). On force l'échec en supprimant `run_job`
+    /// (une des cibles du DELETE) : la tx part en erreur -> 500 -> le ledger reste vierge et la ligne survit.
+    #[tokio::test]
+    async fn delete_rollback_writes_no_attestation() {
+        let app = test_app();
+        // Ledger DÉDIÉ sur disque (fichier temp), pré-ensemencé d'une ligne quelconque (il EXISTE déjà).
+        let led = std::env::temp_dir().join(format!("forge-l8-ledger-{}.jsonl", std::process::id()));
+        let led_s = led.to_string_lossy().to_string();
+        std::fs::write(&led, b"{\"kind\":\"engagement.start\"}\n").unwrap();
+        // Engagement #2 ARCHIVÉ (esquive la garde « dernier actif ») avec SON ledger dédié.
+        {
+            let db = app.db();
+            db.execute(
+                "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+                 VALUES(2,'eng-2','archived','grey','{\"in_scope\":[\"a.example.com\"]}',?,datetime('now'),datetime('now'))",
+                rusqlite::params![led_s],
+            ).unwrap();
+            // Supprime la table `run_job` : la cascade `DELETE FROM run_job` échouera -> with_tx ROLLBACK.
+            db.execute("DROP TABLE run_job", []).unwrap();
+        }
+
+        let res = engagement_do_delete(&app, 2, "tester");
+        // La suppression a ÉCHOUÉ (rollback) -> 500.
+        assert!(res.is_err(), "la cascade doit échouer (run_job absente)");
+        assert_eq!(res.err().unwrap().0, StatusCode::INTERNAL_SERVER_ERROR, "-> 500 sur échec cascade");
+
+        // Le ledger dédié NE contient PAS d'attestation de delete (delete-then-attest : jamais atteint).
+        let content = std::fs::read_to_string(&led).unwrap();
+        assert!(!content.contains("console.engagement.delete"),
+            "aucune attestation de delete ne doit être écrite quand la cascade rollback");
+
+        // La ligne engagement #2 a SURVÉCU (rollback) — l'état est cohérent.
+        let still: i64 = { let s = app.store(); s.query_row("SELECT COUNT(*) FROM engagement WHERE id=2", &[], |r| r.get_i64(0)).unwrap_or(-1) };
+        assert_eq!(still, 1, "l'engagement doit survivre au rollback");
+        let _ = std::fs::remove_file(&led);
     }
 }
 
