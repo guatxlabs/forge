@@ -64,6 +64,18 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 ## 🛡️ Round 3 — feature sécurité réseau (F4)
 - **C20 / F4 — Politique réseau deux-portes (scan réseau client sans devenir une faille)** : pour qu'un pentester puisse scanner du privé/LAN/loopback sans que Forge soit une surface d'attaque sur le réseau client. **Modèle 3 portes cumulatives** : (1) interrupteur **global** `network.allow_private` (OFF par défaut, admin, ledgerisé — kill-switch instantané sans down/up) ; (2) opt-in **par-engagement** (isolation) ; (3) scope fail-closed. `effective = global && engagement`, écrit dans `scope.json`. **Enforcement 2 couches** : Rust `run_create` (IP littérale → `400 private_target_blocked`) + moteur `roe.py` (résout hostnames via getaddrinfo → VETO ceux pointant vers du privé = anti-rebinding/SSRF). **Compose durci** : `network_mode: host` + `FORGE_CONSOLE_ADDR=127.0.0.1:7100` (loopback strict, jamais 0.0.0.0 — prouvé : console inaccessible depuis l'IP LAN 192.168.1.38:7100 → 000). **F1 complété** : `Permissions-Policy` ajouté. UI : toggle global danger-styled + case par-engagement. E2E prouvé bloqué(400)→débloqué(202), fail-closed prouvé, 349 tests Rust + 1208 Python. **✅ `38aa635`**
 
+## 🔍 Audit holistique multi-agents (2026-07) → remédiation
+Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents (find → vérif adverse → synthèse), **31 findings confirmés** (42 bruts) : **0 critique · 1 HIGH · 7 MEDIUM · 20 LOW · 3 INFO**. Posture globalement saine (garde-fous cœur cohérents) ; défauts = écarts d'uniformité concentrés sur 3 thèmes.
+
+**Plan de remédiation (tranches — tâches suivies) :**
+- **T1 — Intégrité ledger (WORM)** : `H1` purge hors verrou cross-process (`compliance.rs:377`) → perte d'écriture silencieuse + **test de course** · `M1` parité `canon_json` Rust/Python (`\b`/`\f`, `ledger_api.rs:78`) · `M2` `verify()` tolère ligne torn + flock (`ledger.py:292`).
+- **T2 — Auth / tenancy** : `M3` Bearer périmé masque le cookie dans `tenancy.rs:70` (**même classe que C14, non propagée**) · `M4` SSO auto-lie un compte local par collision (`sso.rs:371`) · `L6` borne role SSO · `L7` SCIM membership transactionnel.
+- **T3 — ROE / anti-rebinding SSRF** : `L1-L4` épinglage d'IP (résout au FIRE, connexion par-IP) `roe.py` · `L5` `_log` fail-safe · `L16` clamp `severity`.
+- **T4 — Moteur / modules** : `M5` `finding_events` scopé · `M6` wrapper `ExecResult(ERROR)` FIRE · `M7` corrélation contenu origin · `L11/L12` caps parsing `net.rs` · `L14` race.py.
+- **T5 — Data / runs** : `L8` delete-then-attest · `L9` `import_scan` RBAC/scope · `L10` 4 handlers async blocants.
+- **T6 — Front quick-wins** : `L17` toasts good/warn · `L18` double-esc title · `I2` dead import · `I3` doc `write()`.
+- **T7 — Architecture (plan incrémental)** : découpe `main.rs` (5911 l) + factorisation modules Python — opportuniste, JAMAIS big-bang.
+
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.
 
