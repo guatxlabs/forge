@@ -68,10 +68,23 @@ services:
     env_file:
       - path: .env
         required: false
+    # RÉSEAU HÔTE (make-or-break) : le service partage la PILE RÉSEAU DE L'HÔTE. C'est VOULU — un scanner
+    # red-team déployé sur le réseau d'un client a besoin d'une PORTÉE SORTANTE large (joindre le LAN client
+    # pour le scan AUTORISÉ, sans NAT/bridge Docker qui masquerait/altérerait les paquets). CONTREPARTIE
+    # CRITIQUE : sous `network_mode: host`, le mappage `ports:` est IGNORÉ — l'adresse de BIND de la console
+    # (FORGE_CONSOLE_ADDR ci-dessous) devient la SEULE barrière d'exposition entrante. On la met donc en
+    # LOOPBACK STRICT (127.0.0.1) : la console (UI+API) n'est joignable QUE depuis la machine hôte, JAMAIS
+    # depuis le LAN client. Bilan : SORTANT large (scan) ⊕ ENTRANT loopback-only (surface d'attaque nulle sur
+    # le LAN). Le scan de cibles PRIVÉES/LAN/loopback reste par ailleurs verrouillé par la politique réseau à
+    # DEUX portes (master global + opt-in par engagement, fail-closed) — cf. console (settings.network.allow_private).
+    network_mode: host
     environment:
-      # Bind interne au conteneur (réseau Docker isolé). NE PAS exposer publiquement
-      # sans reverse-proxy + auth + Host-allowlist (FORGE_CONSOLE_HOST).
-      FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
+      # BIND LOOPBACK STRICT (127.0.0.1, PAS 0.0.0.0) — obligatoire sous `network_mode: host` : la console
+      # n'écoute QUE sur l'interface loopback de l'hôte, donc JAMAIS exposée sur une interface du LAN client.
+      # Mettre 0.0.0.0 ici l'exposerait sur TOUTES les interfaces hôte (= joignable depuis le LAN client), la
+      # vulnérabilité EXACTE que ce durcissement empêche. Accès distant légitime => reverse-proxy TLS + auth
+      # sur l'hôte, jamais un bind 0.0.0.0 nu.
+      FORGE_CONSOLE_ADDR: "127.0.0.1:7100"
       FORGE_CONSOLE_DB: "/data/db/forge.db"
       FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
       FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
@@ -155,9 +168,13 @@ services:
       #   FORGE_LEDGER_SIGNER_CREDENTIAL_FILE: "/run/secrets/signer_credential"
       #   FORGE_LEDGER_PKCS11_PIN_FILE: "/run/secrets/pkcs11_pin"
       #   FORGE_COMPLIANCE_ARCHIVE_KEY_FILE: "/run/secrets/archive_key"
-    ports:
-      # Exposé sur loopback hôte uniquement (127.0.0.1) — jamais 0.0.0.0 par défaut.
-      - "127.0.0.1:7100:7100"
+    # ports: — VOLONTAIREMENT RETIRÉ. Sous `network_mode: host` le mappage de ports est IGNORÉ par Docker
+    # (le conteneur partage déjà la pile réseau hôte : le port 7100 « existe » directement sur l'hôte). Le
+    # laisser donnerait une fausse impression de confinement (« mappé sur 127.0.0.1 ») alors que SEULE
+    # l'adresse de bind (FORGE_CONSOLE_ADDR=127.0.0.1:7100) gouverne réellement l'exposition entrante. Le
+    # loopback-only est donc garanti par le BIND, pas par ce mappage.
+    # ports:
+    #   - "127.0.0.1:7100:7100"   # IGNORÉ sous host-net — cf. FORGE_CONSOLE_ADDR (bind loopback strict)
     volumes:
       # Persistance hors cycle de vie du conteneur (dont le scope/ROE de l'engagement #1, stocké en DB).
       - forge-db:/data/db
@@ -199,8 +216,13 @@ services:
       #      montage à un conteneur déjà lancé) — d'où le choix de garder (a)/(c) ON pour ne jamais bloquer en
       #      plein pentest. Chargés au boot / à la re-sonde du catalogue.
       # - ./plugins:/opt/forge/plugins:ro
-    networks:
-      - forge-net
+    # networks: — RETIRÉ pour le service forge : `network_mode: host` est INCOMPATIBLE avec un réseau Docker
+    # nommé (Compose refuserait « conflicting options »). La console utilise directement la pile hôte. Le
+    # réseau `forge-net` reste défini plus bas pour les services OPTIONNELS (browser-automation/postgres).
+    # ⚠️ Corollaire host-net : la résolution par NOM DE SERVICE (`browser-automation`, `postgres`) ne
+    # fonctionne PLUS pour la console — pointer les connecteurs optionnels vers `127.0.0.1:<port>` (le service
+    # devant alors publier son port sur l'hôte) si on les active. Named volumes (forge-db/forge-ledger) :
+    # INCHANGÉS, ils fonctionnent normalement sous host-net (le montage n'a rien à voir avec le réseau).
     # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et
     # ne sont PAS requis au boot. `docker compose up` démarre la console SEULE ; chaque connecteur
     # sonde son service à fire-time et s'auto-neutralise si injoignable (inertie par défaut). Ne PAS
