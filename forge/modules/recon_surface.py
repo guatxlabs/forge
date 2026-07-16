@@ -66,6 +66,40 @@ def _under(host, root):
     return bool(root) and (host == root or host.endswith("." + root))
 
 
+class _PinnedFollowRedirect(urllib.request.HTTPRedirectHandler):
+    """Handler de suivi de redirection GATÉ anti-rebinding pour le GET passif de recon. Câblé DANS
+    l'opener `pin.build_pinned_opener` UNIQUEMENT quand un pin gouverné s'applique à l'hôte de départ
+    (cf. `_http_get`). Contrairement à `oracle._NoRedirect` (qui ne suit JAMAIS), recon SUIT les
+    redirections (cartographie de surface) — mais un saut CROSS-HOST est gaté fail-closed, MIROIR de la
+    boucle de redirection d'`Oracle._http` :
+
+      - saut MÊME hôte : reste ÉPINGLÉ (la connexion par-IP de l'opener dial l'IP du pin de cet hôte
+        via `pin.ip_for`) -> suivi urllib NORMAL.
+      - saut CROSS-HOST sous contexte de pin gouverné : le nouvel hôte N'EST PAS épinglé par le ROE
+        (qui n'a épinglé QUE l'hôte de départ) -> la couche connexion urllib RE-RÉSOUDRAIT le DNS
+        (fenêtre de DNS-rebinding). On résout le nouvel hôte sous les MÊMES règles fail-closed que le
+        ROE (`Scope.safe_pinned_ip` : privé/out_scope/timeout/inconnu => None) et on l'ÉPINGLE
+        (`pin.bind`) -> le follow se connecte PAR-IP. `None` (ou aucun scope gouverné lié) => on NE
+        SUIT PAS (retour None -> la 3xx remonte telle quelle, aucun 2e connect). AUCUN secret n'est
+        re-posté par recon (le GET passif n'émet pas de matériel de session cross-host).
+      - hors contexte de pin gouverné (défensif — l'opener n'est câblé QUE sous pin) : suivi urllib
+        NORMAL, byte-identique.
+
+    Ne duplique AUCUNE logique de résolution : réutilise `Scope.safe_pinned_ip` + `pin.bind`/`ip_for`
+    (source unique, comme l'oracle). Ne lève jamais dans son propre code (fail-safe)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        if _pin.current() is not None and Scope._host(newurl) != Scope._host(req.full_url):
+            if _pin.ip_for(newurl) is None:                  # hôte dérivé pas encore épinglé
+                store = _session.current()
+                scope = getattr(store, "scope", None) if store is not None else None
+                safe_ip = scope.safe_pinned_ip(newurl) if scope is not None else None
+                if safe_ip is None:
+                    return None                              # fail-closed : ne pas suivre (la 3xx remonte)
+                _pin.bind(newurl, safe_ip)                   # épingle -> le follow connecte PAR-IP
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class PassiveSurface(ScopeGuardMixin, Module):
     """Base des modules passifs de surface : plomberie Finding + HTTP + périmètre partagée.
 
@@ -130,8 +164,11 @@ class PassiveSurface(ScopeGuardMixin, Module):
         req = urllib.request.Request(url, headers=req_headers)
         # ANTI-REBINDING : hôte épinglé par le ROE -> opener partagé (connexion PAR-IP) ; sinon urlopen normal
         # (byte-identique). L'override reste None : le dial consulte le pin thread-local PAR hôte, donc un
-        # saut de redirection vers un hôte non épinglé se résout normalement (pas de dial vers la mauvaise IP).
-        opener = _pin.build_pinned_opener() if _pin.ip_for(url) else None
+        # saut de redirection vers le MÊME hôte reste épinglé. Un saut CROSS-HOST est gaté fail-closed par
+        # `_PinnedFollowRedirect` (câblé dans l'opener) : résolu via `Scope.safe_pinned_ip` + épinglé, ou NON
+        # suivi — fermant le résidu de re-résolution du suivi auto d'urllib (miroir d'Oracle._http).
+        opener = (_pin.build_pinned_opener(extra_handlers=(_PinnedFollowRedirect,))
+                  if _pin.ip_for(url) else None)
         try:
             with (opener.open(req, timeout=timeout) if opener is not None
                   else urllib.request.urlopen(req, timeout=timeout)) as r:
