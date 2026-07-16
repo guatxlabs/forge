@@ -125,5 +125,86 @@ class TestCidrScopeBypass(unittest.TestCase):
         self.assertFalse(s.is_in_scope("https://10.0.0.1/x"))
 
 
+class TestNetworkPolicyPrivate(unittest.TestCase):
+    """POLITIQUE RÉSEAU (privé/LAN/loopback) — enforcement AUTORITATIF fail-closed du moteur.
+    Contrat : scope.json porte `allow_private` (bool). OFF (défaut) => toute cible qui EST une IP
+    privée OU qui RÉSOUT vers une IP privée est VÉTOÉE, MÊME in-scope. ON => elle tire (soumise au reste)."""
+    import forge.roe as _roe
+
+    def _armed_auto(self, in_scope, allow_private):
+        s = Scope({"mode": "grey", "in_scope": list(in_scope), "allow_private": allow_private})
+        roe = Roe(s, mode="auto"); roe.arm()
+        return roe
+
+    def test_default_is_fail_closed_absent_field(self):
+        # champ absent du scope => allow_private False (fail-closed) : IP privée in-scope => VETO.
+        s = Scope({"mode": "grey", "in_scope": ["127.0.0.1"]})
+        self.assertFalse(s.allow_private)
+        roe = Roe(s, mode="auto"); roe.arm()
+        self.assertEqual(roe.decide(Action("demo.fingerprint", "127.0.0.1")).verdict, VETO)
+
+    def test_literal_private_ips_vetoed_when_off(self):
+        for ip in ("127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.9",
+                   "169.254.1.1", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fc00::1"):
+            roe = self._armed_auto([ip], allow_private=False)
+            d = roe.decide(Action("demo.fingerprint", ip))
+            self.assertEqual(d.verdict, VETO, f"{ip} devait être VÉTOÉ (politique OFF)")
+            self.assertTrue(any("politique réseau" in r for r in d.reasons), ip)
+
+    def test_ipv4_mapped_v6_private_vetoed(self):
+        # ::ffff:127.0.0.1 : le verdict se décide sur l'IPv4 embarquée -> privé.
+        roe = self._armed_auto(["::ffff:127.0.0.1"], allow_private=False)
+        self.assertEqual(roe.decide(Action("x", "::ffff:127.0.0.1")).verdict, VETO)
+
+    def test_hostname_resolving_to_private_is_vetoed_antirebinding(self):
+        # hostname d'apparence publique qui RÉSOUT vers 127.0.0.1 -> VETO (anti-rebinding/SSRF).
+        import unittest.mock as mock
+        fake = [(2, 1, 6, "", ("127.0.0.1", 0))]
+        roe = self._armed_auto(["rebind.example"], allow_private=False)
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake) as gai:
+            d = roe.decide(Action("demo.fingerprint", "rebind.example"))
+            self.assertTrue(gai.called, "getaddrinfo doit être consulté pour un hostname")
+        self.assertEqual(d.verdict, VETO)
+        self.assertTrue(any("politique réseau" in r for r in d.reasons))
+
+    def test_hostname_resolving_to_private_among_many_addrs_vetoed(self):
+        # une SEULE adresse privée parmi plusieurs résolues suffit à véto (on vérifie TOUT).
+        import unittest.mock as mock
+        fake = [(2, 1, 6, "", ("93.184.216.34", 0)), (2, 1, 6, "", ("10.1.2.3", 0))]
+        roe = self._armed_auto(["mixed.example"], allow_private=False)
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake):
+            self.assertEqual(roe.decide(Action("x", "mixed.example")).verdict, VETO)
+
+    def test_private_fires_when_policy_on(self):
+        # allow_private True => l'IP privée in-scope tire (soumise au reste du ROE).
+        roe = self._armed_auto(["127.0.0.1"], allow_private=True)
+        self.assertEqual(roe.decide(Action("demo.fingerprint", "127.0.0.1")).verdict, FIRE)
+
+    def test_hostname_resolving_private_fires_when_policy_on(self):
+        import unittest.mock as mock
+        fake = [(2, 1, 6, "", ("127.0.0.1", 0))]
+        roe = self._armed_auto(["rebind.example"], allow_private=True)
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake):
+            self.assertEqual(roe.decide(Action("x", "rebind.example")).verdict, FIRE)
+
+    def test_public_target_unaffected_when_off(self):
+        # une cible PUBLIQUE (IP + hostname résolvant public) n'est JAMAIS bloquée par cette politique.
+        import unittest.mock as mock
+        roe = self._armed_auto(["93.184.216.34", "public.example"], allow_private=False)
+        self.assertEqual(roe.decide(Action("x", "93.184.216.34")).verdict, FIRE)
+        fake = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake):
+            self.assertEqual(roe.decide(Action("x", "public.example")).verdict, FIRE)
+
+    def test_unresolvable_hostname_not_flagged_private(self):
+        # résolution qui échoue => non-privé (aucune connexion possible) ; le scope-guard reste juge.
+        import unittest.mock as mock
+        import socket as _socket
+        roe = self._armed_auto(["nxdomain.example"], allow_private=False)
+        with mock.patch.object(self._roe.socket, "getaddrinfo", side_effect=_socket.gaierror):
+            # in-scope + non-privé (non résolu) => tire (le tir échouera au niveau réseau, pas au ROE).
+            self.assertEqual(roe.decide(Action("x", "nxdomain.example")).verdict, FIRE)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

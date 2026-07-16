@@ -586,6 +586,22 @@
     </div>
     <p class="muted" style="margin:0 0 10px">Comptes individuels (<code>viewer</code> lecture · <code>operator</code> arme les campagnes · <code>admin</code> administre). Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>. La désactivation, la rétrogradation et la réinitialisation de mot de passe <b>révoquent immédiatement</b> les sessions du compte. Le <b>dernier admin activé</b> ne peut être ni désactivé, ni rétrogradé, ni supprimé (garde-fou anti-verrouillage).</p>
     <div id="admin-users"><div class="muted">chargement…</div></div>
+
+    <!-- POLITIQUE RÉSEAU — MASTER SWITCH GLOBAL (admin, ledgerisé). Le « gros bouton rouge » instance-wide :
+         OFF (défaut sûr) = AUCUN engagement ne peut scanner de cible privée/LAN/loopback. L'effectif exige
+         AUSSI l'opt-in par engagement ET le scope (trois portes indépendantes, fail-closed). -->
+    <div id="admin-network" class="lc-danger" style="margin-top:18px">
+      <div class="lc-danger-head">
+        <span class="lc-dot" aria-hidden="true"></span>
+        <span>Politique réseau — scan des cibles <b>privées / LAN / loopback</b> (master global)</span>
+        <span id="admin-net-state" class="badge mut" title="État courant du master global">—</span>
+        <span class="lc-dtag">zone danger</span>
+      </div>
+      <div class="lc-danger-body">
+        <div class="lc-warn bad" style="margin:0">Interrupteur <b>instance-wide</b>. <b>OFF est le défaut sûr</b> : tant qu'il est OFF, <b>aucun</b> engagement ne peut scanner une cible privée/LAN/loopback, quelle que soit sa configuration. Le passer sur ON n'ouvre <b>rien à lui seul</b> : chaque engagement doit AUSSI cocher son propre opt-in <i>et</i> la cible doit être dans son scope (trois portes indépendantes). Réservé <b>admin</b> ; chaque bascule est <b>ledgerisée</b> (<code>console.settings.network_policy</code>).</div>
+        <div id="admin-net-body" class="lc-danger-reqs" aria-live="polite"><div class="muted">chargement…</div></div>
+      </div>
+    </div>
   </section>
 
   <!-- TENANTS (ENTERPRISE — multi-tenancy, flag-gated). Vue rendue UNIQUEMENT quand la multi-tenancy est

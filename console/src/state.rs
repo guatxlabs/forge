@@ -58,6 +58,10 @@ pub(crate) struct Engagement {
     pub(crate) scope_in: Vec<String>,
     pub(crate) scope_out: Vec<String>,
     pub(crate) ledger_path: String,
+    /// POLITIQUE RÉSEAU (privé/LAN/loopback) — opt-in PAR ENGAGEMENT (colonne `engagement.allow_private`).
+    /// Défaut FALSE (fail-closed). Une des DEUX portes cumulatives : effectif = master global AND ceci
+    /// (calculé dans run_create). Isolation : activer sur l'engagement A n'affecte JAMAIS un autre engagement.
+    pub(crate) allow_private: bool,
 }
 
 /// Extrait la liste de chaînes d'un champ tableau d'un scope_json (in_scope/out_scope). Absent/mal
@@ -73,11 +77,12 @@ pub(crate) fn scope_json_list(v: &Value, key: &str) -> Vec<String> {
 /// scope_json prime sur la colonne `mode` s'il est présent — le scope reste la source autoritaire du
 /// périmètre). None si l'id n'existe pas. Pure lecture (aucune écriture).
 pub(crate) fn load_engagement(store: &crate::store::Store, id: i64) -> Option<Engagement> {
-    let (mode_col, scope_json, ledger_path): (String, String, String) = store
+    // allow_private : colonne INTEGER (0/1) ; défaut 0 fail-closed si NULL/illisible (rétro-compat).
+    let (mode_col, scope_json, ledger_path, allow_private): (String, String, String, i64) = store
         .query_row(
-            "SELECT mode, scope_json, ledger_path FROM engagement WHERE id=?",
+            "SELECT mode, scope_json, ledger_path, allow_private FROM engagement WHERE id=?",
             &crate::sql_params![id],
-            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?)),
+            |r| Ok((r.get_str(0)?, r.get_str(1)?, r.get_str(2)?, r.get_opt_i64(3)?.unwrap_or(0))),
         )
         .ok()?;
     let v: Value = serde_json::from_str(&scope_json).unwrap_or_else(|_| json!({}));
@@ -92,7 +97,20 @@ pub(crate) fn load_engagement(store: &crate::store::Store, id: i64) -> Option<En
         scope_in: scope_json_list(&v, "in_scope"),
         scope_out: scope_json_list(&v, "out_scope"),
         ledger_path,
+        allow_private: allow_private != 0,
     })
+}
+
+/// MASTER SWITCH GLOBAL de la politique réseau (`settings.network.allow_private`). Défaut FALSE
+/// (FAIL-CLOSED) : sur une instance fraîche, AUCUN engagement ne peut scanner de cible privée/LAN/loopback.
+/// Lu à CHAQUE run (aucun cache) => une bascule admin prend effet IMMÉDIATEMENT, sans redémarrage. C'est
+/// le « gros bouton rouge » instance-wide : OFF ⇒ le scan privé est impossible partout, indépendamment de
+/// l'opt-in per-engagement. Absent/illisible => False. Truthy = on|1|true|yes (miroir des flags entreprise).
+pub(crate) fn network_allow_private(store: &crate::store::Store) -> bool {
+    matches!(
+        settings_get_store(store, "network.allow_private").as_deref(),
+        Some("on") | Some("1") | Some("true") | Some("yes")
+    )
 }
 
 

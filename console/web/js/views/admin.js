@@ -13,10 +13,12 @@ import { loadAddTool } from './admin/addtool.js';
 import { loadAdminDetection } from './admin/detection.js';
 import { backupCreate, backupRestore, loadAdminBackup } from './admin/backup.js';
 import { loadConsolePanel } from './admin/console.js';
+import { loadAdminNetwork } from './admin/network.js';
 
-// Vue #admin : charge comptes, connecteurs, AJOUT D'OUTIL, source de détection, sauvegarde ET la
-// Console Forge in-UI (runner gouverné P5) — tous réservés au role admin (le serveur reste l'autorité).
-export function loadAdmin() { loadAdminUsers(); loadAdminConnectors(); loadAddTool(); loadAdminDetection(); loadAdminBackup(); loadConsolePanel(); }
+// Vue #admin : charge comptes, POLITIQUE RÉSEAU (master global), connecteurs, AJOUT D'OUTIL, source de
+// détection, sauvegarde ET la Console Forge in-UI (runner gouverné P5) — tous réservés au role admin (le
+// serveur reste l'autorité).
+export function loadAdmin() { loadAdminUsers(); loadAdminNetwork(); loadAdminConnectors(); loadAddTool(); loadAdminDetection(); loadAdminBackup(); loadConsolePanel(); }
 
 // --- Câblage des actions de la vue #admin (les handlers vivent dans les modules de domaine) ---
 if ($('#admin-new')) $('#admin-new').addEventListener('click', adminCreateUser);

@@ -136,6 +136,54 @@ pub(crate) fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
 // ALLOW significant_drop_tightening: the promotion critical section below holds run_state + run_reservations
 // together across insert-then-remove (atomic hand-off from reservation to live run). Tightening either guard
 // reopens a window where an observer sees NEITHER — a real race, so the hold is load-bearing.
+/// Construit le `scope.json` du run (fonction PURE, testable). CONTRAT avec le moteur Python (roe.Scope) :
+///   - `mode`/`in_scope`/`out_scope` = périmètre de L'ENGAGEMENT (le scope-guard reste seul juge) ;
+///   - `allow_exploit`/`allow_destructive` = opt-in haut-impact GOUVERNÉ (false par défaut) ;
+///   - `allow_private` = EFFECTIF (master global AND opt-in engagement, calculé server-side dans run_create) ;
+///     le moteur le lit (défaut False si absent) et VÉTO toute cible privée/loopback OU qui RÉSOUT en privé.
+/// INVARIANT : on ne touche JAMAIS in_scope/out_scope ici — uniquement les bascules de capacité/politique.
+pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec) -> Value {
+    let scope_comment = if spec.high_impact {
+        format!("scope généré par la console pour {run_id} — HAUT-IMPACT GOUVERNÉ (allow_exploit/destructive=true, autorisé par operator armé)")
+    } else {
+        format!("scope généré par la console pour {run_id} — exploit/destructif IMPOSSIBLES (forcés false)")
+    };
+    let scope_notes = if spec.high_impact {
+        "lancé via console C2-light (gouverné/audité) — opt-in HAUT-IMPACT honoré (operator+arm+reason) ; scope-guard moteur inchangé (hors-scope = VETO)"
+    } else {
+        "lancé via console C2-light (gouverné/audité) — non-exploit, non-destructif forcés"
+    };
+    let sel_profile = spec.selection.get("profile").cloned().unwrap_or(json!("bug_bounty"));
+    let sel_categories = spec.selection.get("categories").cloned().unwrap_or(json!({}));
+    let sel_techniques = spec.selection.get("techniques").cloned().unwrap_or(json!({}));
+    json!({
+        "_comment": scope_comment,
+        // mode + out_scope viennent de L'ENGAGEMENT (figés dans le spec) : le scope-guard du moteur applique
+        // le périmètre de CET engagement. in_scope = cibles validées ⊆ scope de l'engagement.
+        "mode": spec.eng_mode,
+        "in_scope": spec.targets,
+        "out_scope": spec.eng_scope_out,
+        // DÉBIT : override per-run si fourni (throttle oracle + drapeaux de débit outils), sinon défaut 5.
+        // `rate_explicit` gate l'ajout des drapeaux CLI aux sous-process (byte-identique sans override).
+        "rate": spec.rate.unwrap_or(5),
+        "rate_explicit": spec.rate.is_some(),
+        "allow_exploit": spec.high_impact,
+        "allow_destructive": spec.high_impact,
+        // POLITIQUE RÉSEAU (privé/LAN/loopback) — CONTRAT avec le moteur (roe.Scope lit `allow_private`,
+        // défaut False si absent). EFFECTIF = master global AND opt-in engagement (calculé dans run_create).
+        // False => le moteur VÉTO toute cible privée OU qui RÉSOUT en privé (anti-rebinding, seul juge autoritatif).
+        "allow_private": spec.allow_private,
+        "known_creds": [],
+        "idor_targets": [],
+        "module_params": spec.module_params.clone(),
+        "disabled_modules": spec.disabled_modules.clone(),
+        "profile": sel_profile,
+        "categories_enabled": sel_categories,
+        "techniques_enabled": sel_techniques,
+        "notes": scope_notes
+    })
+}
+
 #[allow(clippy::significant_drop_tightening)]
 pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservation: RunReservation<'_>) -> (StatusCode, Json<Value>) {
     let run_id = spec.run_id.as_str();
@@ -159,41 +207,8 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     // scope du run : RESTREINT aux cibles validées. allow_exploit/destructive = opt-in haut-impact GOUVERNÉ
     // (false par défaut). INVARIANT : on ne touche QUE allow_exploit/destructive — in_scope/out_scope (le
     // périmètre) restent dictés par le scope de l'engagement, le scope-guard du moteur reste seul juge.
-    let scope_comment = if spec.high_impact {
-        format!("scope généré par la console pour {run_id} — HAUT-IMPACT GOUVERNÉ (allow_exploit/destructive=true, autorisé par operator armé)")
-    } else {
-        format!("scope généré par la console pour {run_id} — exploit/destructif IMPOSSIBLES (forcés false)")
-    };
-    let scope_notes = if spec.high_impact {
-        "lancé via console C2-light (gouverné/audité) — opt-in HAUT-IMPACT honoré (operator+arm+reason) ; scope-guard moteur inchangé (hors-scope = VETO)"
-    } else {
-        "lancé via console C2-light (gouverné/audité) — non-exploit, non-destructif forcés"
-    };
-    let sel_profile = spec.selection.get("profile").cloned().unwrap_or(json!("bug_bounty"));
-    let sel_categories = spec.selection.get("categories").cloned().unwrap_or(json!({}));
-    let sel_techniques = spec.selection.get("techniques").cloned().unwrap_or(json!({}));
-    let scope_doc = json!({
-        "_comment": scope_comment,
-        // mode + out_scope viennent de L'ENGAGEMENT (figés dans le spec) : le scope-guard du moteur applique
-        // le périmètre de CET engagement. in_scope = cibles validées ⊆ scope de l'engagement.
-        "mode": spec.eng_mode,
-        "in_scope": spec.targets,
-        "out_scope": spec.eng_scope_out,
-        // DÉBIT : override per-run si fourni (throttle oracle + drapeaux de débit outils), sinon défaut 5.
-        // `rate_explicit` gate l'ajout des drapeaux CLI aux sous-process (byte-identique sans override).
-        "rate": spec.rate.unwrap_or(5),
-        "rate_explicit": spec.rate.is_some(),
-        "allow_exploit": spec.high_impact,
-        "allow_destructive": spec.high_impact,
-        "known_creds": [],
-        "idor_targets": [],
-        "module_params": spec.module_params.clone(),
-        "disabled_modules": spec.disabled_modules.clone(),
-        "profile": sel_profile,
-        "categories_enabled": sel_categories,
-        "techniques_enabled": sel_techniques,
-        "notes": scope_notes
-    });
+    // Construction EXTRAITE (fonction PURE, testable) : le CONTRAT scope.json est ainsi vérifiable en test.
+    let scope_doc = build_run_scope_doc(run_id, spec);
     // Chaque cible porte les params par-module dans `attrs.module_params` (passthrough sûr, doublon volontaire).
     let targets_doc: Vec<Value> = spec.targets.iter()
         .map(|h| json!({"host": h, "kind": "host", "attrs": {"module_params": spec.module_params.clone()}}))
@@ -433,6 +448,43 @@ pub(crate) fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_i
         // nettoyage du dir temp (scope/targets) — best-effort.
         let _ = std::fs::remove_dir_all(&run_dir);
     });
+}
+
+#[cfg(test)]
+mod scope_doc_contract_tests {
+    use super::*;
+
+    /// Spec minimal paramétré uniquement par high_impact + allow_private (le reste inerte).
+    fn spec(high_impact: bool, allow_private: bool) -> RunSpawnSpec {
+        RunSpawnSpec {
+            run_id: "run-x".into(), eng_id: 1, eng_mode: "white".into(),
+            eng_scope_out: vec!["out.example".into()], eng_ledger_path: String::new(),
+            campaign: "c".into(), targets: vec!["10.0.0.5".into()], requested_modules: vec![],
+            module_params: json!({}), mode: "auto".into(), budget: None, exhaustive: false,
+            auto_pentest: false, reason: String::new(), arm: false, high_impact,
+            started_by: "op".into(), actor: "op".into(), selection: json!({}),
+            disabled_modules: vec![], body_targets: json!(["10.0.0.5"]), rate: None,
+            allow_private,
+        }
+    }
+
+    /// CONTRAT scope.json (linchpin) : le writer Rust émet `allow_private` = valeur EFFECTIVE du spec, et
+    /// n'y touche JAMAIS in_scope/out_scope (le périmètre reste dicté par l'engagement). Le reader Python
+    /// (roe.Scope) lit exactement cette clé (défaut False si absente).
+    #[test]
+    fn scope_doc_carries_effective_allow_private_and_preserves_scope() {
+        let on = build_run_scope_doc("run-x", &spec(false, true));
+        assert_eq!(on["allow_private"], json!(true), "allow_private effectif=true écrit tel quel");
+        let off = build_run_scope_doc("run-x", &spec(false, false));
+        assert_eq!(off["allow_private"], json!(false), "allow_private effectif=false écrit tel quel (fail-closed)");
+        // in_scope/out_scope INTOUCHÉS par la politique réseau (seul allow_private varie).
+        assert_eq!(off["in_scope"], json!(["10.0.0.5"]));
+        assert_eq!(off["out_scope"], json!(["out.example"]));
+        // orthogonal au haut-impact : allow_private ne dépend pas de allow_exploit/destructive.
+        let hi = build_run_scope_doc("run-x", &spec(true, false));
+        assert_eq!(hi["allow_exploit"], json!(true));
+        assert_eq!(hi["allow_private"], json!(false), "politique réseau indépendante du haut-impact");
+    }
 }
 
 #[cfg(all(test, unix))]

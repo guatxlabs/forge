@@ -25,6 +25,7 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import json
+import socket
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,6 +38,42 @@ if TYPE_CHECKING:                                         # imports paresseux (t
 VETO = "VETO"
 DRY_RUN = "DRY_RUN"
 FIRE = "FIRE"
+
+# --- POLITIQUE RÉSEAU (privé/LAN/loopback) — enforcement AUTORITATIF fail-closed --------------------
+# Ensemble EXPLICITE des plages à bloquer quand la politique est OFF. On liste les CIDR au lieu de
+# s'appuyer sur les drapeaux stdlib `is_private`/`is_reserved` car CEUX-CI DÉRIVENT d'une version de
+# Python à l'autre (p.ex. 3.14 marque les plages de DOCUMENTATION RFC5737 203.0.113/24 comme is_private)
+# et DIVERGERAIENT alors du writer Rust `runs.rs` (Rust std `Ipv4Addr::is_private` = STRICTEMENT RFC1918).
+# Cette liste = MIROIR EXACT de l'énumération Rust -> verdict STABLE et IDENTIQUE des deux côtés (contrat).
+_PRIVATE_V4 = (
+    ipaddress.ip_network("127.0.0.0/8"),     # loopback
+    ipaddress.ip_network("10.0.0.0/8"),      # RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),   # RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC1918
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local
+    ipaddress.ip_network("0.0.0.0/8"),       # unspecified / « this network »
+    ipaddress.ip_network("100.64.0.0/10"),   # CGNAT (RFC6598)
+)
+_ULA_V6 = ipaddress.ip_network("fc00::/7")            # ULA
+_LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")    # link-local
+
+
+def _ip_is_private(ip_str: str) -> bool:
+    """True si `ip_str` est une IP LITTÉRALE privée/LAN/loopback. Couvre IPv4 (loopback 127/8, RFC1918,
+    link-local 169.254/16, unspecified 0/8, CGNAT 100.64/10) et IPv6 (::1, ::, ULA fc00::/7, link-local
+    fe80::/10, et IPv4-mapped ::ffff:a.b.c.d via l'IPv4 embarquée). Énumération EXACTE (miroir Rust) —
+    PAS les drapeaux stdlib (version-dépendants). Une valeur non-IP => False (le chemin résolution gère)."""
+    try:
+        ip = ipaddress.ip_address(str(ip_str).strip())
+    except ValueError:
+        return False
+    # IPv4-mapped IPv6 (::ffff:a.b.c.d) : le verdict se décide sur l'IPv4 EMBARQUÉE (autoritatif).
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 4:
+        return any(ip in net for net in _PRIVATE_V4)
+    return ip.is_loopback or ip.is_unspecified or ip in _ULA_V6 or ip in _LINK_LOCAL_V6
 
 
 class ScopeError(Exception):
@@ -113,6 +150,12 @@ class Scope:
         self.rate_explicit = bool(data.get("rate_explicit", False))
         self.allow_exploit = bool(data.get("allow_exploit", False))
         self.allow_destructive = bool(data.get("allow_destructive", False))
+        # POLITIQUE RÉSEAU (privé/LAN/loopback) — CONTRAT avec la console Rust (`runs.rs::run_create`
+        # écrit `allow_private` = global master AND opt-in engagement). ABSENT => False (FAIL-CLOSED :
+        # une base de scope legacy ou un scope.json crafté sans le champ ne peut PAS scanner de cible
+        # privée). Quand False, `Roe.decide` VÉTO toute cible qui EST une IP privée OU qui RÉSOUT vers
+        # une IP privée (anti-rebinding/SSRF) — couche INDÉPENDANTE et additive au scope-guard.
+        self.allow_private = bool(data.get("allow_private", False))
         self.known_creds = data.get("known_creds", [])
         self.idor_targets = data.get("idor_targets", [])
         # params par-module GLOBAUX (clé additive : ignorée par le ROE/Scope, consommée par l'engine).
@@ -196,6 +239,30 @@ class Scope:
             return False
         return self._match(target, self.in_scope)
 
+    # --- POLITIQUE RÉSEAU (privé/LAN/loopback) : détection AUTORITATIVE (littéral + résolution) ---
+    def is_private_target(self, target: str) -> bool:
+        """True si la cible EST une IP privée/LAN/loopback OU RÉSOUT (getaddrinfo) vers une telle IP.
+        C'est le point ANTI-REBINDING/SSRF : un hostname d'apparence publique dont A/AAAA pointe vers
+        127.0.0.1 / 10.x / 192.168.x / etc. est détecté ICI (le check littéral Rust ne le voit pas).
+        On teste TOUTES les adresses résolues — une seule adresse privée suffit à classer la cible
+        privée. Une résolution qui échoue (hôte inconnu) => False : aucune connexion n'aura lieu, donc
+        aucune atteinte réseau privée possible (le scope-guard reste par ailleurs seul juge du périmètre).
+        Fail-closed du gate global : `decide()` enveloppe l'appel dans son try/except -> VETO sur erreur."""
+        host = self._host(target)
+        if not host:
+            return False
+        if _ip_is_private(host):                              # cible = IP LITTÉRALE privée
+            return True
+        try:                                                  # sinon hostname -> résout et vérifie TOUT
+            infos = socket.getaddrinfo(host, None)
+        except Exception:                                     # hôte inconnu / DNS indisponible
+            return False
+        for info in infos:
+            sockaddr = info[4] if len(info) > 4 else None
+            if sockaddr and _ip_is_private(sockaddr[0]):
+                return True
+        return False
+
     # --- SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed, en plus du scope-guard) ---
     def technique_selection_configured(self) -> bool:
         """True si ce scope porte une SÉLECTION de techniques (profil et/ou toggles). Sinon (scope
@@ -249,6 +316,14 @@ class Roe:
             # Couche 2 — appartenance (fail-closed)
             if not self.scope.is_in_scope(action.target):
                 reasons.append(f"hors scope: {action.target}")
+                return self._finish(VETO, action, reasons)
+
+            # Couche 2bis — POLITIQUE RÉSEAU (privé/LAN/loopback), fail-closed et ADDITIVE au scope.
+            # Quand la politique est OFF (allow_private=False, le défaut), une cible qui EST une IP privée
+            # OU qui RÉSOUT vers une IP privée est VÉTOÉE — même si elle est in-scope. C'est l'enforcement
+            # AUTORITATIF (le check littéral Rust ne voit pas un hostname qui résout en privé : anti-rebinding).
+            if not self.scope.allow_private and self.scope.is_private_target(action.target):
+                reasons.append("hors politique réseau (privé/LAN/loopback non autorisé)")
                 return self._finish(VETO, action, reasons)
 
             # Couche 3 — capacité

@@ -451,6 +451,10 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // sur l'engagement actif (`?engagement=`). Le segment `:id` (i64) ne collisionne pas avec la liste.
         .route("/api/engagements", get(engagements_list).post(engagements_create))
         .route("/api/engagements/:id", post(engagements_update))
+        // POLITIQUE RÉSEAU (privé/LAN/loopback) — MASTER SWITCH GLOBAL (admin, ledgerisé). GET lit l'état,
+        // POST le bascule. C'est le « gros bouton rouge » instance-wide : OFF (défaut) = aucun scan privé
+        // possible depuis AUCUN engagement (l'effectif exige aussi l'opt-in per-engagement + le scope).
+        .route("/api/network-policy", get(network_policy_get).post(network_policy_set))
         .route("/api/roe", get(roe))
         // --- ADMINISTRATION comptes (#4) : réservé admin (check_admin, fail-closed 403 sinon). Chaque
         //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
@@ -1331,6 +1335,10 @@ mod tests {
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(SCHEMA).expect("schema");
+        // Le boot serveur enchaîne TOUJOURS SCHEMA puis migrate() (colonnes additives : engagement.tenant_id,
+        // engagement.allow_private, run_job.*, …). On applique donc migrate ici aussi pour que l'App de test
+        // reflète le schéma de PRODUCTION (idempotent/additif : n'altère aucune colonne existante).
+        migrate(&conn);
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -2388,6 +2396,7 @@ mod tests {
         let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
         let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
         conn().execute_batch(SCHEMA).expect("schema");
+        migrate(&conn()); // production enchaîne SCHEMA puis migrate (ajoute engagement.allow_private, etc.)
         // scope serveur ABSENT -> load_server_scope renvoie (vec![], "grey"). Amorçage avec ces valeurs.
         ensure_default_engagement(&crate::store::Store::sqlite(conn()), &[], "grey", "/tmp/eng1-empty.jsonl");
         let eng = load_engagement(&crate::store::Store::sqlite(conn()), 1).expect("engagement #1 amorcé");
@@ -2850,6 +2859,14 @@ mod tests {
         }
         // engagement #1 en mode white, 127.0.0.1 in-scope (réplique la config live de l'utilisateur).
         insert_test_engagement(&app, 1, &["127.0.0.1"], "white", &ledger);
+        // POLITIQUE RÉSEAU : 127.0.0.1 est loopback -> les DEUX portes (master global + opt-in engagement)
+        // doivent être ouvertes pour le scanner (sinon private_target_blocked). On les ouvre ici pour
+        // exercer le chemin fort-impact — l'intention de CE test (le gate réseau a ses propres tests dédiés).
+        {
+            let db = app.db();
+            crate::settings_set(&db, "network.allow_private", "on").unwrap();
+            db.execute("UPDATE engagement SET allow_private=1 WHERE id=1", []).unwrap();
+        }
         let (otok, _) = create_session(&app, uid_of(&app, "opr"));
 
         // corps EXACT honoré : auto + arm + allow_high_impact + reason + modules vides + engagement #1.
@@ -2870,6 +2887,143 @@ mod tests {
         let entries = read_ledger_lines(&ledger);
         assert!(entries.iter().any(|e| e["kind"] == "console.run.high_impact_authorized"),
             "l'autorisation fort-impact est journalisée (ledger intact)");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [POLITIQUE RÉSEAU — FAIL-CLOSED PAR DÉFAUT] Instance fraîche (master global OFF + opt-in engagement
+    /// OFF) : un run visant un LITTÉRAL privé/LAN/loopback est REFUSÉ (private_target_blocked) AVANT tout
+    /// spawn, pour CHAQUE famille d'IP privée. Une cible PUBLIQUE n'est JAMAIS bloquée par cette politique.
+    #[tokio::test]
+    async fn private_target_blocked_when_policy_off_by_default() {
+        let ledger = tmp_path("forge-test-netpol-off");
+        let mut app = test_app_scoped(&ledger, vec!["127.0.0.1".into()]);
+        app.python = Arc::new("true".into()); // spawn no-op (la publique atteint 202 sans moteur réel)
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["127.0.0.1", "10.0.0.5", "192.168.1.1", "93.184.216.34"], "white", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        for ip in ["127.0.0.1", "10.0.0.5", "192.168.1.1"] {
+            let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+                Json(run_body("c", Some(1), &[ip]))).await.into_response();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{ip} doit être bloqué (politique OFF)");
+            assert_eq!(resp_json(resp).await["error"], "private_target_blocked", "{ip}");
+        }
+        // cible PUBLIQUE : jamais bloquée par la politique réseau (202).
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("c", Some(1), &["93.184.216.34"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "cible publique non bloquée par la politique réseau");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [POLITIQUE RÉSEAU — DEUX PORTES CUMULATIVES] Master global ON mais opt-in engagement OFF => TOUJOURS
+    /// bloqué (il faut les DEUX). Prouve que le master seul n'ouvre rien (isolation par engagement).
+    #[tokio::test]
+    async fn private_blocked_when_global_on_but_engagement_off() {
+        let ledger = tmp_path("forge-test-netpol-global-only");
+        let mut app = test_app_scoped(&ledger, vec!["10.0.0.5".into()]);
+        app.python = Arc::new("true".into());
+        { let db = app.db();
+          upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+          crate::settings_set(&db, "network.allow_private", "on").unwrap(); } // master ON
+        insert_test_engagement(&app, 1, &["10.0.0.5"], "white", &ledger);       // opt-in OFF (défaut 0)
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("c", Some(1), &["10.0.0.5"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "global ON + engagement OFF -> bloqué (2 portes)");
+        assert_eq!(resp_json(resp).await["error"], "private_target_blocked");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [POLITIQUE RÉSEAU — DÉVERROUILLAGE] Les DEUX portes ouvertes (master global ON + opt-in engagement
+    /// ON) => la cible privée in-scope passe le gate pré-spawn (202 ACCEPTED). C'est l'unlock end-to-end.
+    #[tokio::test]
+    async fn private_allowed_when_both_gates_on() {
+        let ledger = tmp_path("forge-test-netpol-both-on");
+        let mut app = test_app_scoped(&ledger, vec!["10.0.0.5".into()]);
+        app.python = Arc::new("true".into()); // spawn no-op : prouve qu'on PASSE le gate sans moteur réel
+        { let db = app.db();
+          upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+          crate::settings_set(&db, "network.allow_private", "on").unwrap(); }   // porte 1
+        insert_test_engagement(&app, 1, &["10.0.0.5"], "white", &ledger);
+        { let db = app.db(); db.execute("UPDATE engagement SET allow_private=1 WHERE id=1", []).unwrap(); } // porte 2
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Json(run_body("c", Some(1), &["10.0.0.5"]))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "les DEUX portes ouvertes -> scan privé autorisé");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [POLITIQUE RÉSEAU — API MASTER GLOBAL] GET/POST /api/network-policy : ADMIN uniquement (operator ->
+    /// 403), défaut fail-closed (false), persistance + ledger `console.settings.network_policy` (old->new).
+    #[tokio::test]
+    async fn network_policy_api_admin_gated_persists_and_ledgers() {
+        let ledger = tmp_path("forge-test-netpol-api");
+        let app = test_app_scoped(&ledger, vec!["x.example".into()]);
+        { let db = app.db();
+          upsert_user(&db, "adm", "admin", &hash_pw("pw")).unwrap();
+          upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        let (atok, _) = create_session(&app, uid_of(&app, "adm"));
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // défaut : GET (admin) -> allow_private false (fail-closed).
+        let r = network_policy_get(State(app.clone()), bearer_headers(&atok)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(resp_json(r).await["allow_private"], false, "défaut master = OFF (fail-closed)");
+
+        // operator (non-admin) -> 403 sur GET et POST.
+        let r = network_policy_get(State(app.clone()), bearer_headers(&otok)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "GET réservé admin");
+        let r = network_policy_set(State(app.clone()), bearer_headers(&otok), Json(json!({"allow_private": true}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "POST réservé admin");
+        assert!(!crate::network_allow_private(&app.store()), "le POST refusé n'a rien persisté");
+
+        // admin POST true -> persiste + ledger console.settings.network_policy (old=false, new=true).
+        let r = network_policy_set(State(app.clone()), bearer_headers(&atok), Json(json!({"allow_private": true}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(crate::network_allow_private(&app.store()), "master persistant ON");
+        let r = network_policy_get(State(app.clone()), bearer_headers(&atok)).await;
+        assert_eq!(resp_json(r).await["allow_private"], true, "relecture ON");
+        let entries = read_ledger_lines(&ledger);
+        assert!(entries.iter().any(|e| e["kind"] == "console.settings.network_policy"
+            && e["detail"]["old"] == false && e["detail"]["new"] == true),
+            "bascule ledgerisée avec old->new");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [POLITIQUE RÉSEAU — OPT-IN ENGAGEMENT] Le champ `allow_private` d'un engagement fait l'aller-retour
+    /// via l'API : create (true) -> GET /api/engagements l'expose -> update (false) -> relecture (false).
+    #[tokio::test]
+    async fn engagement_allow_private_round_trips_through_api() {
+        let ledger = tmp_path("forge-test-eng-allowpriv");
+        let app = test_app_scoped(&ledger, vec!["x.example".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["x.example"], "grey", &ledger); // ancre #1 (jamais le dernier actif)
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // create avec allow_private=true.
+        let body = json!({"name": "neteng", "scope_json": {"mode": "grey", "in_scope": ["y.example"]}, "allow_private": true});
+        let r = engagements_create(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let created = resp_json(r).await;
+        assert_eq!(created["engagement"]["allow_private"], true, "create renvoie allow_private");
+        let new_id = created["engagement"]["id"].as_i64().unwrap();
+
+        // GET liste -> l'entrée porte allow_private=true.
+        let r = engagements_list(State(app.clone()), bearer_headers(&otok)).await.into_response();
+        let list = resp_json(r).await;
+        let found = list["engagements"].as_array().unwrap().iter()
+            .find(|e| e["id"].as_i64() == Some(new_id)).cloned().expect("engagement listé");
+        assert_eq!(found["allow_private"], true, "la liste expose allow_private");
+
+        // update -> allow_private=false.
+        let r = engagements_update(State(app.clone()), conn_info(), bearer_headers(&otok),
+            Path(new_id), Json(json!({"allow_private": false}))).await;
+        assert_eq!(r.status(), StatusCode::OK, "update accepté");
+        let r = engagements_list(State(app.clone()), bearer_headers(&otok)).await.into_response();
+        let list = resp_json(r).await;
+        let found = list["engagements"].as_array().unwrap().iter()
+            .find(|e| e["id"].as_i64() == Some(new_id)).cloned().unwrap();
+        assert_eq!(found["allow_private"], false, "update a basculé allow_private à false");
         let _ = std::fs::remove_file(&ledger);
     }
 

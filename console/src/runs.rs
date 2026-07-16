@@ -30,9 +30,102 @@ use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+// ===========================================================================================
+// POLITIQUE RÉSEAU (privé/LAN/loopback) — helpers de classification IP (std uniquement, ZÉRO crate).
+//
+// Ces helpers décident si une CIBLE LITTÉRALE (IP ou CIDR) est privée/LAN/loopback. C'est la 1re
+// des deux couches d'enforcement (pré-spawn, Rust) ; la couche AUTORITATIVE (moteur Python roe.py)
+// attrape en plus les HOSTNAMES qui RÉSOLVENT en privé (anti-rebinding). L'énumération ci-dessous est
+// le MIROIR EXACT de `forge/roe.py::_ip_is_private` : mêmes plages -> verdict IDENTIQUE des deux côtés.
+// ===========================================================================================
+
+/// True si l'IPv4 est privée/LAN/loopback/unspecified/CGNAT. `is_private`/`is_loopback`/`is_link_local`/
+/// `is_unspecified` sont stables (std) ; CGNAT 100.64/10 et 0.0.0.0/8 sont vérifiés à la main (pas de crate).
+pub(crate) fn v4_is_private(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    v4.is_loopback()            // 127.0.0.0/8
+        || v4.is_private()      // 10/8, 172.16/12, 192.168/16 (RFC1918, strict)
+        || v4.is_link_local()   // 169.254.0.0/16
+        || v4.is_unspecified()  // 0.0.0.0 (l'adresse exacte)
+        || o[0] == 0            // 0.0.0.0/8 (« this network », au-delà de l'unspecified exact)
+        || (o[0] == 100 && (o[1] & 0xC0) == 64) // CGNAT 100.64.0.0/10 (RFC6598)
+}
+
+/// True si l'IPv6 est privée/LAN/loopback : ::1, ::, ULA fc00::/7, link-local fe80::/10, et IPv4-mapped
+/// ::ffff:a.b.c.d (le verdict se décide alors sur l'IPv4 EMBARQUÉE — autoritatif, mappe vers v4_is_private).
+pub(crate) fn v6_is_private(v6: Ipv6Addr) -> bool {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return v4_is_private(v4);
+    }
+    let seg = v6.segments();
+    v6.is_loopback()                       // ::1
+        || v6.is_unspecified()             // ::
+        || (seg[0] & 0xfe00) == 0xfc00     // ULA fc00::/7
+        || (seg[0] & 0xffc0) == 0xfe80     // link-local fe80::/10
+}
+
+/// True si `ip` (déjà parsée) est privée/LAN/loopback.
+pub(crate) fn ip_is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4_is_private(v4),
+        IpAddr::V6(v6) => v6_is_private(v6),
+    }
+}
+
+/// True si la CIBLE VALIDÉE est un LITTÉRAL privé : soit une IP nue privée, soit un CIDR dont la BASE est
+/// privée (ex: `10.0.0.0/24`). Un HOSTNAME => False (non tranchable ici sans résoudre ; le moteur Python
+/// est le juge autoritatif pour les hostnames qui résolvent en privé — anti-rebinding).
+pub(crate) fn target_is_private_literal(host: &str) -> bool {
+    let h = host.trim();
+    if let Ok(ip) = h.parse::<IpAddr>() {          // IP nue
+        return ip_is_private(ip);
+    }
+    if let Some((base, _mask)) = h.split_once('/') {  // CIDR a.b.c.d/n ou v6/n -> base
+        if let Ok(ip) = base.trim().parse::<IpAddr>() {
+            return ip_is_private(ip);
+        }
+    }
+    false
+}
+
+/// GET /api/network-policy — lit le MASTER SWITCH GLOBAL de la politique réseau. ADMIN (check_admin,
+/// fail-closed 403). Renvoie `{allow_private: bool}`. C'est le « gros bouton rouge » instance-wide :
+/// OFF (défaut) => AUCUN engagement ne peut scanner de cible privée/LAN/loopback (les deux portes doivent
+/// être ouvertes ET la cible in-scope). L'UI admin l'affiche + avertit que OFF est le défaut sûr.
+pub(crate) async fn network_policy_get(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    (StatusCode::OK, Json(json!({"allow_private": crate::network_allow_private(&app.store())}))).into_response()
+}
+
+/// POST /api/network-policy `{allow_private: bool}` — bascule le MASTER SWITCH GLOBAL. ADMIN (check_admin,
+/// fail-closed 403). Persiste `settings.network.allow_private` (on/off) et LEDGERISE
+/// `console.settings.network_policy` (actor + old->new). Prend effet IMMÉDIATEMENT (lu à CHAQUE run, sans
+/// redémarrage). N'ouvre RIEN à lui seul : un run privé exige AUSSI l'opt-in per-engagement ET le scope.
+pub(crate) async fn network_policy_set(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !check_admin(&app, &headers) {
+        return admin_denied().into_response();
+    }
+    let new_val = match body.get("allow_private").and_then(|v| v.as_bool()) {
+        Some(b) => b,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "corps attendu : {allow_private: bool}"}))).into_response(),
+    };
+    let old_val = crate::network_allow_private(&app.store());
+    if let Err(e) = crate::settings_set_store(&app.store(), "network.allow_private", if new_val { "on" } else { "off" }) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "settings_write_failed", "why": e}))).into_response();
+    }
+    let actor = attribution_login(&app, &headers);
+    append_console_ledger(&app, "console.settings.network_policy", json!({
+        "actor": actor, "setting": "network.allow_private", "old": old_val, "new": new_val,
+        "note": "master switch global — OFF (défaut) = aucun scan de cible privée/LAN/loopback possible (fail-closed)"
+    }));
+    (StatusCode::OK, Json(json!({"allow_private": new_val, "old": old_val}))).into_response()
+}
 
 // ===========================================================================================
 // C2-light — lancement GOUVERNÉ + AUDITÉ de campagnes Forge depuis l'UI web.
@@ -101,6 +194,13 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         Some(a) if !a.is_empty() => a.clone(),
         _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_targets", "why": "targets[] requis (non vide)"}))),
     };
+    // POLITIQUE RÉSEAU (privé/LAN/loopback) — DEUX PORTES CUMULATIVES calculées SERVER-SIDE :
+    //   effectif = master GLOBAL (settings.network.allow_private, défaut FALSE) AND opt-in ENGAGEMENT
+    //   (engagement.allow_private, défaut FALSE). Fail-closed : si l'une des deux est OFF => pas de scan privé.
+    //   Lu à CHAQUE run (aucun cache) -> une bascule admin/opérateur prend effet SANS redémarrage.
+    let global_master = crate::network_allow_private(&app.store());
+    let allow_private_effective = global_master && eng.allow_private;
+
     let mut targets: Vec<String> = Vec::new();
     for t in &targets_in {
         let host = t.as_str().unwrap_or("");
@@ -113,6 +213,16 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
                 // scope de A UNIQUEMENT — jamais les App globals ni le scope d'un autre engagement.
                 if !host_in_scope_list(&eng.scope_in, &h) {
                     return (StatusCode::BAD_REQUEST, Json(json!({"error": "out_of_scope", "why": format!("'{h}' hors du scope de l'engagement #{}", eng.id)})));
+                }
+                // POLITIQUE RÉSEAU (fail-closed, pré-spawn) : une cible LITTÉRALE privée/LAN/loopback (IP nue
+                // ou CIDR de base privée) est REFUSÉE tant que les DEUX portes ne sont pas ouvertes. On ne
+                // dépense aucun process pour ça. Les hostnames qui RÉSOLVENT en privé sont attrapés
+                // AUTORITATIVEMENT par le moteur (roe.py, anti-rebinding) — ici on ne tranche que le littéral.
+                if !allow_private_effective && target_is_private_literal(&h) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({
+                        "error": "private_target_blocked",
+                        "why": "cible privée/LAN/loopback refusée — active la politique réseau (global + engagement) pour l'autoriser"
+                    })));
                 }
                 targets.push(h);
             }
@@ -224,6 +334,7 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         disabled_modules,
         body_targets: body.get("targets").cloned().unwrap_or(json!([])),
         rate,
+        allow_private: allow_private_effective,
     };
 
     // ─── BRANCHEMENT RUN-LEADER (HA #10 Wave B) ──────────────────────────────────────────────────────
@@ -820,5 +931,70 @@ mod idor_tenancy_tests {
         let r = run_cancel(State(app.clone()), axum::extract::ConnectInfo(peer), h.clone(), Path("run-B".into())).await;
         let resp = r.into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT, "community: cancel -> 409 not_running (jamais 403)");
+    }
+}
+
+// =====================================================================================
+// TESTS — POLITIQUE RÉSEAU (privé/LAN/loopback) : classification IP LITTÉRALE (fonctions PURES).
+// Prouve que `target_is_private_literal` bloque exactement l'énumération exigée (miroir de roe.py) et
+// laisse passer le PUBLIC — c'est la 1re couche (pré-spawn Rust ; le moteur Python attrape la résolution).
+// =====================================================================================
+#[cfg(test)]
+mod network_policy_ip_tests {
+    use super::{ip_is_private, target_is_private_literal};
+    use std::net::IpAddr;
+
+    fn priv_ip(s: &str) -> bool {
+        ip_is_private(s.parse::<IpAddr>().expect("ip"))
+    }
+
+    #[test]
+    fn private_v4_literals_are_flagged() {
+        for ip in ["127.0.0.1", "127.5.5.5", "10.0.0.5", "10.255.255.255",
+                   "172.16.0.9", "172.31.255.1", "192.168.1.1", "169.254.1.1",
+                   "0.0.0.0", "0.1.2.3", "100.64.0.1", "100.127.255.255"] {
+            assert!(priv_ip(ip), "{ip} devait être classé privé");
+        }
+    }
+
+    #[test]
+    fn public_v4_literals_are_not_flagged() {
+        // dont les plages DOCUMENTATION RFC5737 (utilisées comme « faux public » dans les tests) : NON bloquées.
+        for ip in ["93.184.216.34", "8.8.8.8", "1.1.1.1", "203.0.113.10",
+                   "198.51.100.5", "192.0.2.5", "172.15.0.1", "172.32.0.1", "100.63.255.255", "100.128.0.0"] {
+            assert!(!priv_ip(ip), "{ip} devait être classé public");
+        }
+    }
+
+    #[test]
+    fn private_v6_literals_are_flagged() {
+        for ip in ["::1", "::", "fc00::1", "fd12:3456::1", "fe80::1",
+                   "::ffff:127.0.0.1", "::ffff:10.0.0.5", "::ffff:192.168.1.1"] {
+            assert!(priv_ip(ip), "{ip} devait être classé privé");
+        }
+    }
+
+    #[test]
+    fn public_v6_literals_are_not_flagged() {
+        for ip in ["2001:4860:4860::8888", "::ffff:93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(!priv_ip(ip), "{ip} devait être classé public");
+        }
+    }
+
+    #[test]
+    fn cidr_base_decides_literal_verdict() {
+        assert!(target_is_private_literal("10.0.0.0/24"), "CIDR de base privée -> bloqué");
+        assert!(target_is_private_literal("192.168.0.0/16"), "CIDR RFC1918 -> bloqué");
+        assert!(target_is_private_literal("fc00::/7"), "CIDR ULA -> bloqué");
+        assert!(!target_is_private_literal("93.184.216.0/24"), "CIDR public -> non bloqué");
+    }
+
+    #[test]
+    fn hostnames_are_not_literal_private() {
+        // un hostname (même s'il résout en privé) n'est PAS tranché ici : c'est le moteur Python (roe.py)
+        // qui l'attrape autoritativement via getaddrinfo. La couche Rust ne juge QUE le littéral.
+        for h in ["example.com", "localhost", "internal.corp", "rebind.attacker.test"] {
+            assert!(!target_is_private_literal(h), "{h} n'est pas un littéral -> non bloqué côté Rust");
+        }
     }
 }

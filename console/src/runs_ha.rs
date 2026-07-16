@@ -226,6 +226,7 @@ pub(crate) struct RunSpawnSpec {
     pub(crate) disabled_modules: Vec<String>,
     pub(crate) body_targets: Value,           // body["targets"] d'origine (colonne run_job.targets + ledger)
     pub(crate) rate: Option<i64>,             // débit req/s OPT-IN (override per-run) : None => défaut 5, byte-identique
+    pub(crate) allow_private: bool,           // EFFECTIF (master global AND opt-in engagement) écrit dans scope.json
 }
 
 impl RunSpawnSpec {
@@ -239,7 +240,7 @@ impl RunSpawnSpec {
             "exhaustive": self.exhaustive, "auto_pentest": self.auto_pentest, "reason": self.reason,
             "arm": self.arm, "high_impact": self.high_impact, "started_by": self.started_by,
             "actor": self.actor, "selection": self.selection, "disabled_modules": self.disabled_modules,
-            "body_targets": self.body_targets, "rate": self.rate,
+            "body_targets": self.body_targets, "rate": self.rate, "allow_private": self.allow_private,
         })
     }
 
@@ -271,6 +272,8 @@ impl RunSpawnSpec {
             disabled_modules: scope_json_list(v, "disabled_modules"),
             body_targets: v.get("body_targets").cloned().unwrap_or_else(|| json!([])),
             rate: v.get("rate").and_then(|x| x.as_i64()),
+            // FAIL-CLOSED : blob sans le champ (spec legacy) => false (jamais de scan privé « par défaut »).
+            allow_private: v.get("allow_private").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
 }
@@ -597,6 +600,7 @@ mod wave_b_tests {
             auto_pentest: false, reason: String::new(), arm: false, high_impact: false,
             started_by: "op".into(), actor: "op".into(), selection: serde_json::json!({}),
             disabled_modules: vec![], body_targets: serde_json::json!([]), rate: None,
+            allow_private: false,
         }
     }
 
@@ -628,6 +632,7 @@ mod wave_b_tests {
             disabled_modules: vec!["sqlmap".into()],
             body_targets: serde_json::json!(["a.example.com", "b.example.com"]),
             rate: Some(25),
+            allow_private: true,
         };
         let round = RunSpawnSpec::from_value(&spec.to_value()).expect("reconstruct");
         assert_eq!(round.run_id, spec.run_id);
@@ -652,6 +657,7 @@ mod wave_b_tests {
         assert_eq!(round.disabled_modules, spec.disabled_modules);
         assert_eq!(round.body_targets, spec.body_targets);
         assert_eq!(round.rate, spec.rate);
+        assert_eq!(round.allow_private, spec.allow_private);
         // blob corrompu -> None (le leader marque failed et passe au suivant).
         assert!(RunSpawnSpec::from_value(&serde_json::json!({"garbage": 1})).is_none(), "spec sans run_id/eng_id => None");
     }
