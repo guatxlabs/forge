@@ -107,6 +107,29 @@ signée* — ce qu'aucune ligne de cette table n'a en colonne unique.
 
 ---
 
+## 3bis. Face à l'OSS / AGPL (honnête)
+
+La vérité qui désarme l'objection « c'est juste reNgine avec une autre UI » : comme **orchestrateur
+d'outils piloté depuis une interface**, Forge n'est **PAS unique** — l'OSS mature couvre déjà bien cet
+axe. Le différenciateur de Forge n'est pas l'orchestration : c'est la couche
+**gouvernance + preuve + non-répudiation** qu'aucun projet OSS n'industrialise.
+
+| Outil | Licence | Ce qu'il fait aussi bien (ou mieux) | Ce qui manque vs Forge |
+|---|---|---|---|
+| **reNgine** | GPL-3.0 | Orchestration recon/scan via UI web, scan-engines paramétrables, findings. Le plus proche sur « piloter des outils depuis une UI ». | Pas de scope-guard fail-closed, pas de ledger, pas de discipline de preuve, pas de purple. Orienté recon web. |
+| **Faraday** (Community) | GPL-3.0 | Plateforme collaborative multi-pentest : workspaces (≈ engagements), 80+ outils intégrés, findings, reporting, RBAC. | Il agrège, il ne tire pas sous contrainte ; pas de ledger signé, pas de planner coverage-safe, pas de purple. |
+| **Osmedeus** | MIT | Framework d'automatisation recon/scan par workflows, rapide, CLI-first. | CLI, pas de gouvernance UI, pas de preuve/ledger/purple. |
+| **DefectDojo** (OWASP) | BSD-2 | Vuln management / ASPM : import de scans, dédup, triage, métriques, rapport. | DevSecOps, pas d'orchestration active, pas de scope-guard offensif, pas de ledger d'autorisation. |
+| **Nuclei / ProjectDiscovery** | MIT | Le moteur de scan que Forge pilote. | Une brique, pas un orchestrateur gouverné. |
+| **Metasploit / Sliver / Havoc / Mythic** | BSD/Apache/GPL | Vrais frameworks d'exploitation & C2 (post-ex). | Niche opposée : ils exploitent ; Forge exclut l'exploit et se veut prouvable/auditable — il les pilote. |
+
+**Lecture** : comme orchestrateur-UI, Forge n'est **pas unique** (reNgine / Faraday sont matures). Le
+trou que personne ne remplit = **prouver l'autorisation** (scope-guard fail-closed), **prouver
+l'impact** (oracle → preuve), et le rendre **non-répudiable** (ledger Ed25519 chaîné) + la **boucle
+purple**. C'est là, pas sur « une UI par-dessus des outils », que se joue le moat.
+
+---
+
 ## 4. Ce que Forge N'EST PAS (anti-confusion)
 
 - **PAS un beacon / un C2** : aucun implant, aucun callback persistant, aucune post-exploitation.
