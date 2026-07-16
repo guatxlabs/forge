@@ -1492,6 +1492,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// [C14 — 401 création engagement] resolve_session_identity essaie Bearer PUIS cookie : un cookie
+    /// de session VALIDE authentifie MÊME quand un Bearer PÉRIMÉ/ÉTRANGER (résidu d'un ancien build)
+    /// l'accompagne — c'est la régression exacte du « Échec : 401 » sur POST /api/engagements. Prouve
+    /// aussi : (a) cookie seul OK, (c) Bearer valide seul OK, (d) Bearer bidon SANS cookie -> None
+    /// (fail-closed, aucune élévation). Assert check_operator=true sur le cas régressif (b).
+    #[test]
+    fn valid_cookie_authenticates_despite_stale_bearer() {
+        // Construit un HeaderMap avec un cookie forge_session=<tok> (+ éventuellement un Bearer).
+        fn cookie_headers(tok: &str) -> HeaderMap {
+            let mut h = HeaderMap::new();
+            h.insert("cookie", format!("forge_session={tok}").parse().unwrap());
+            h
+        }
+        fn cookie_and_bearer(cookie_tok: &str, bearer_tok: &str) -> HeaderMap {
+            let mut h = HeaderMap::new();
+            h.insert("cookie", format!("forge_session={cookie_tok}").parse().unwrap());
+            h.insert("authorization", format!("Bearer {bearer_tok}").parse().unwrap());
+            h
+        }
+
+        let path = tmp_path("forge-test-cookie-vs-bearer");
+        let app = test_app(&path);
+        { let db = app.db(); upsert_user(&db, "adm", "admin", &hash_pw("pw")).unwrap(); }
+        let uid: i64 = { let db = app.db(); db.query_row("SELECT id FROM users WHERE login='adm'", [], |r| r.get(0)).unwrap() };
+        let (atok, _) = create_session(&app, uid);
+        let bogus = "stale-bogus-token-from-old-build";
+
+        // (a) cookie SEUL -> identité admin résolue, opérateur autorisé.
+        let id = resolve_session_identity(&app, &cookie_headers(&atok)).expect("cookie seul -> session résolue");
+        assert_eq!(id.login, "adm");
+        assert_eq!(id.role, "admin");
+        assert!(check_operator(&app, &cookie_headers(&atok), None), "cookie admin seul -> C2 autorisé");
+
+        // (b) RÉGRESSION : cookie VALIDE + Bearer PÉRIMÉ -> le Bearer ne masque plus le cookie.
+        let hdrs = cookie_and_bearer(&atok, bogus);
+        let id_b = resolve_session_identity(&app, &hdrs).expect("cookie valide doit gagner malgré Bearer périmé");
+        assert_eq!(id_b.login, "adm", "authentifie comme le user DU COOKIE (pas d'élévation)");
+        assert_eq!(id_b.role, "admin");
+        assert!(check_operator(&app, &hdrs, None), "[C14] cookie admin + Bearer périmé -> C2 autorisé (était 401)");
+
+        // (c) Bearer VALIDE seul -> résolu (priorité Bearer, chemin inchangé).
+        let id_c = resolve_session_identity(&app, &bearer_headers(&atok)).expect("Bearer valide seul -> résolu");
+        assert_eq!(id_c.login, "adm");
+
+        // (d) Bearer BIDON seul (aucun cookie) -> None (fail-closed, aucune élévation).
+        assert!(resolve_session_identity(&app, &bearer_headers(bogus)).is_none(), "Bearer bidon sans cookie -> None");
+        assert!(!check_operator(&app, &bearer_headers(bogus), None), "Bearer bidon seul -> C2 refusé");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// [#6 RÉTRO-COMPAT] attribution_login : sans aucune identité (dev-open, ni session ni hash env),
     /// retombe sur le littéral historique 'operator' (comportement existant préservé).
     #[test]

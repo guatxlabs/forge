@@ -310,9 +310,9 @@ pub(crate) struct Identity {
     pub(crate) via_session: bool,
 }
 
-/// Extrait le token de session du porteur : en-tête `Authorization: Bearer <t>` (priorité) OU cookie
-/// `forge_session=<t>`. Renvoie le token EN CLAIR (à hasher avant lookup), vide si absent.
-pub(crate) fn session_token_from_headers(headers: &HeaderMap) -> String {
+/// Token de session porté par l'en-tête `Authorization: Bearer <t>` (en clair, à hasher avant lookup).
+/// Vide si l'en-tête est absent, non-Bearer, ou de valeur vide.
+pub(crate) fn bearer_session_token(headers: &HeaderMap) -> String {
     if let Some(authz) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(tok) = authz.strip_prefix("Bearer ") {
             let t = tok.trim();
@@ -321,7 +321,12 @@ pub(crate) fn session_token_from_headers(headers: &HeaderMap) -> String {
             }
         }
     }
-    // cookie forge_session=...
+    String::new()
+}
+
+/// Token de session porté par le cookie `forge_session=<t>` (en clair, à hasher avant lookup).
+/// Vide si le cookie est absent ou de valeur vide.
+pub(crate) fn cookie_session_token(headers: &HeaderMap) -> String {
     if let Some(cookie) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
         for part in cookie.split(';') {
             let p = part.trim();
@@ -335,16 +340,28 @@ pub(crate) fn session_token_from_headers(headers: &HeaderMap) -> String {
     String::new()
 }
 
-/// Résout l'identité depuis une session VALIDE (non expirée, compte non désactivé). None si pas de
-/// session présentée, session inconnue/expirée, ou compte désactivé (fail-closed). Purge en passant
-/// la session expirée (best-effort). Lecture du compte au moment du lookup => un rôle changé/désactivé
-/// prend effet immédiatement même sur une session déjà émise.
-pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
-    let tok = session_token_from_headers(headers);
-    if tok.is_empty() {
+/// Extrait le token de session du porteur : en-tête `Authorization: Bearer <t>` (priorité) OU cookie
+/// `forge_session=<t>`. Renvoie le token EN CLAIR (à hasher avant lookup), vide si absent. Conservé
+/// INCHANGÉ (Bearer-prioritaire) pour les appelants qui veulent UN seul token candidat (ex. tenancy::
+/// caller_user_id). `resolve_session_identity`, lui, essaie les DEUX candidats (cf. sa doc).
+pub(crate) fn session_token_from_headers(headers: &HeaderMap) -> String {
+    let bearer = bearer_session_token(headers);
+    if !bearer.is_empty() {
+        return bearer;
+    }
+    cookie_session_token(headers)
+}
+
+/// Résout l'identité d'UN token de session candidat (en clair) contre la table `session`. None si le
+/// token est vide, inconnu, expiré, ou attaché à un compte désactivé (fail-closed). Purge en passant
+/// la session expirée (best-effort, EXACTEMENT comme avant). Lecture du compte au moment du lookup =>
+/// un rôle changé/désactivé prend effet immédiatement même sur une session déjà émise. Chaque candidat
+/// est validé INDÉPENDAMMENT (join sur un vrai user) — aucune élévation de privilège possible.
+fn lookup_session_token(app: &App, token: &str) -> Option<Identity> {
+    if token.is_empty() {
         return None;
     }
-    let token_sha = sha_hex(&tok);
+    let token_sha = sha_hex(token);
     let store = app.store();
     let row = store.query_row(
         "SELECT s.expires, u.login, u.role, u.disabled
@@ -374,6 +391,27 @@ pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option
         }
         Err(_) => None,
     }
+}
+
+/// Résout l'identité depuis une session VALIDE (non expirée, compte non désactivé). Essaie les DEUX
+/// tokens candidats dans l'ordre de priorité : `Authorization: Bearer <t>` PUIS cookie `forge_session`,
+/// et renvoie l'identité du PREMIER qui résout vers une session valide. None si aucun des deux ne
+/// résout (fail-closed). Ce fallback corrige le cas où un Bearer PÉRIMÉ/ÉTRANGER (résidu d'un ancien
+/// build côté front) masquait un cookie de session pourtant VALIDE -> 401 sur les écritures opérateur.
+/// AUCUNE élévation : chaque candidat est validé indépendamment contre la table `session` (cf.
+/// lookup_session_token) ; un Bearer bidon + cookie valide authentifie comme le user DU COOKIE ; un
+/// Bearer bidon sans cookie valide -> None. Si Bearer == cookie, le 2e essai est un no-op inoffensif.
+pub(crate) fn resolve_session_identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
+    let bearer = bearer_session_token(headers);
+    let cookie = cookie_session_token(headers);
+    for tok in [bearer.as_str(), cookie.as_str()] {
+        if !tok.is_empty() {
+            if let Some(id) = lookup_session_token(app, tok) {
+                return Some(id);
+            }
+        }
+    }
+    None
 }
 
 /// Identité effective d'un appelant pour l'ATTRIBUTION et l'AUTHZ C2 :
