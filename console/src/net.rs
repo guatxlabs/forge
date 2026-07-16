@@ -17,6 +17,13 @@ use std::time::Duration;
 /// (SIEM/IdP on-prem légitime sur un réseau privé). Absent/faux => la deny-list SSRF ci-dessous s'applique.
 pub(crate) const ALLOW_INTERNAL_INTEGRATIONS_ENV: &str = "FORGE_ALLOW_INTERNAL_INTEGRATIONS";
 
+/// L11/L12 — BORNE DURE de mémoire pour le fetcher d'intégration : plafond du corps de réponse bufferisé
+/// (`read_to_end`) ET plafond de taille de chunk `chunked`. Une source configurée par un admin reste dans la
+/// trust boundary, mais un endpoint compromis/hostile (ou un MITM) ne doit pas pouvoir épuiser la RAM de la
+/// console via une réponse illimitée ou une taille de chunk aberrante. 8 MiB couvre largement tout payload
+/// JSON de détection/OIDC légitime.
+pub(crate) const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Deny-list SSRF (defense-in-depth) pour les fetches SERVEUR PROPRES À LA CONSOLE — c.-à-d. les URLs
 /// CONFIGURÉES PAR UN ADMIN que la console va chercher elle-même : sources de détection (detection.rs
 /// `rust_http_collect`/`http_get_blocking`) et endpoints OIDC discovery / JWKS / token (sso.rs).
@@ -184,7 +191,12 @@ pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, a
     }
     stream.write_all(req.as_bytes()).map_err(|e| format!("écriture requête échouée: {e}"))?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| format!("lecture réponse échouée: {e}"))?;
+    // L11 — BUFFERING BORNÉ : `take(MAX_RESPONSE_BYTES)` cape la lecture (anti-OOM sur une réponse illimitée).
+    // Le read-timeout par-read (set_read_timeout ci-dessus) borne déjà la LATENCE ; ce cap borne la MÉMOIRE.
+    (&mut stream)
+        .take(MAX_RESPONSE_BYTES)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("lecture réponse échouée: {e}"))?;
     let text = String::from_utf8_lossy(&raw);
     // sépare l'en-tête du corps (CRLFCRLF). Vérifie un statut 200.
     let split = text.find("\r\n\r\n").ok_or_else(|| "réponse HTTP malformée (pas d'en-tête/corps)".to_string())?;
@@ -228,8 +240,18 @@ pub(crate) fn dechunk(body: &[u8]) -> String {
         if size == 0 {
             break;
         }
+        // L12 — taille de chunk aberrante (au-delà du cap de réponse) => stop best-effort (anti-OOM),
+        // cohérent avec `MAX_RESPONSE_BYTES` de L11. Empêche aussi un `out` non borné multi-chunks.
+        if size > MAX_RESPONSE_BYTES as usize || out.len().saturating_add(size) > MAX_RESPONSE_BYTES as usize {
+            break;
+        }
         let start = nl + 2;
-        let end = start + size;
+        // L12 — `checked_add` : une taille de chunk malicieuse ne peut plus faire déborder `start + size`
+        // (panique/wrap d'index). Overflow => stop best-effort.
+        let end = match start.checked_add(size) {
+            Some(e) => e,
+            None => break,
+        };
         if end > rest.len() {
             out.extend_from_slice(&rest[start..]);
             break;
@@ -239,6 +261,43 @@ pub(crate) fn dechunk(body: &[u8]) -> String {
         rest = if end + 2 <= rest.len() { &rest[end + 2..] } else { &[] };
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod dechunk_tests {
+    use super::{dechunk, MAX_RESPONSE_BYTES};
+
+    /// Décodage nominal : deux chunks ASCII valides -> concaténation, terminé par le chunk 0.
+    #[test]
+    fn dechunk_valid_ascii() {
+        let body = b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        assert_eq!(dechunk(body), "Wikipedia");
+    }
+
+    /// L12 — taille de chunk NON hex (malformée) => stop best-effort, aucune panique.
+    #[test]
+    fn dechunk_malformed_size_no_panic() {
+        let body = b"zz\r\ngarbage\r\n0\r\n\r\n";
+        assert_eq!(dechunk(body), "", "taille invalide -> break sans crash");
+    }
+
+    /// L12 — `checked_add` : une taille de chunk énorme (proche de usize::MAX, > buffer réel) ne provoque NI
+    /// overflow d'index NI panique de tranche. On tronque best-effort à ce qui reste.
+    #[test]
+    fn dechunk_overflow_size_no_panic() {
+        // ffffffffffffffff = usize::MAX en hex sur 64 bits : `start + size` déborderait sans checked_add.
+        let body = b"ffffffffffffffff\r\nABC";
+        // > MAX_RESPONSE_BYTES -> break AVANT toute arithmétique dangereuse ; sortie vide, aucune panique.
+        assert_eq!(dechunk(body), "");
+    }
+
+    /// L12 — une taille de chunk supérieure au cap de réponse est refusée (anti-OOM), sortie bornée.
+    #[test]
+    fn dechunk_oversized_chunk_capped() {
+        // taille annoncée = MAX_RESPONSE_BYTES + 1 (hex) -> break immédiat, rien n'est bufferisé.
+        let big = format!("{:x}\r\nXY", MAX_RESPONSE_BYTES as usize + 1);
+        assert_eq!(dechunk(big.as_bytes()), "", "chunk au-delà du cap -> refusé");
+    }
 }
 
 #[cfg(test)]

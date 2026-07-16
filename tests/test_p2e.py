@@ -159,14 +159,16 @@ class TestOriginHostHeader(unittest.TestCase):
             self.addCleanup(lambda: setattr(originmod.socket, "gethostbyname", orig_g))
 
     def test_verified_origin_flags_high(self):
-        # subfinder renvoie un sous-domaine ; il résout sur une IP hors-CF ; httpx confirme via Host header
+        # M7 — HIGH SEULEMENT si statut joignable (200/301/302) ET contenu corrélé : le title servi PAR L'IP
+        # (Host header) est IDENTIQUE au title de la baseline CDN (fetch contre le domaine).
         def tool_fn(binary, docker_image=None, args=None, **k):
             if binary == "subfinder":
                 return (0, "app.exemple.test\n", "")
             if binary == "httpx":
-                # vérifie que l'en-tête Host est bien passé à httpx
-                assert "Host: exemple.test" in args, f"host header manquant: {args}"
-                return (0, "http://9.9.9.9 [200]", "")
+                if "http://9.9.9.9" in args:                  # vérif par-IP : Host header requis
+                    assert "Host: exemple.test" in args, f"host header manquant: {args}"
+                    return (0, "http://9.9.9.9 [200] [Mon Vrai Site]", "")
+                return (0, "http://exemple.test [200] [Mon Vrai Site]", "")  # baseline CDN (title corrélé)
             return (127, "", "?")
         self._patch(tool_fn, gethostbyname=lambda s: "9.9.9.9")  # hors plage Cloudflare
         findings = OriginFind().fire(Action("origin.find", "exemple.test"))
@@ -175,6 +177,39 @@ class TestOriginHostHeader(unittest.TestCase):
         self.assertEqual(hi[0].target, "9.9.9.9")
         self.assertEqual(hi[0].status, "vulnerable")
         self.assertIn("VÉRIFIÉE", hi[0].title)
+
+    def test_status_match_without_content_correlation_not_high(self):
+        # M7 (régression) — un match de STATUT seul (200) SANS corrélation de contenu (title de l'IP != baseline)
+        # ne doit PLUS fabriquer un faux HIGH : vhost par défaut / shared-hosting renvoient 200 à tout Host.
+        def tool_fn(binary, docker_image=None, args=None, **k):
+            if binary == "subfinder":
+                return (0, "app.exemple.test\n", "")
+            if binary == "httpx":
+                if "http://9.9.9.9" in args:
+                    return (0, "http://9.9.9.9 [200] [Default vhost]", "")   # title != baseline
+                return (0, "http://exemple.test [200] [Mon Vrai Site]", "")  # baseline
+            return (127, "", "?")
+        self._patch(tool_fn, gethostbyname=lambda s: "9.9.9.9")
+        findings = OriginFind().fire(Action("origin.find", "exemple.test"))
+        self.assertTrue(all(f.severity != "HIGH" for f in findings), "aucun faux HIGH sans corrélation de contenu")
+        self.assertTrue(all(f.status != "vulnerable" for f in findings))
+        self.assertTrue(any("NON corrélé" in f.title for f in findings))
+
+    def test_403_alone_is_not_verified(self):
+        # M7 (régression) — 403 est RETIRÉ du set « joignable » : un WAF deny-by-default renvoie 403 à tout
+        # Host. Même si le title « matche », un 403 ne prouve rien -> jamais HIGH/vulnerable.
+        def tool_fn(binary, docker_image=None, args=None, **k):
+            if binary == "subfinder":
+                return (0, "app.exemple.test\n", "")
+            if binary == "httpx":
+                if "http://9.9.9.9" in args:
+                    return (0, "http://9.9.9.9 [403] [Blocked]", "")
+                return (0, "http://exemple.test [403] [Blocked]", "")
+            return (127, "", "?")
+        self._patch(tool_fn, gethostbyname=lambda s: "9.9.9.9")
+        findings = OriginFind().fire(Action("origin.find", "exemple.test"))
+        self.assertTrue(all(f.severity != "HIGH" for f in findings), "403 seul ne prouve pas l'origine")
+        self.assertTrue(all(f.status != "vulnerable" for f in findings))
 
     def test_unverified_origin_stays_info(self):
         # httpx ne confirme pas (pas de code 2xx/3xx/403) -> pas de flag HIGH

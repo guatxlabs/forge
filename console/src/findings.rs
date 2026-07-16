@@ -729,30 +729,49 @@ pub(crate) async fn finding_triage(
 /// `presence_events`, sans registre ni guard (aucune présence à suivre). Chaque event = signal « une
 /// transition a eu lieu -> re-fetch la liste ». Un `sync` initial amorce le client ; un débordement de buffer
 /// (Lagged) demande une resync ; la fermeture du bus termine le flux.
-pub(crate) async fn finding_events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+/// M5 — décision de FORWARD d'un event `FINDINGS_TOPIC` vers un abonné SSE : `true` SEULEMENT si l'`engagement`
+/// porté par le payload est VISIBLE au caller (`tenancy::engagement_visible`). Payload sans champ `engagement`
+/// entier (ne devrait jamais arriver sur ce topic) => `false` (fail-closed). Community (tenancy off) =>
+/// `engagement_visible` renvoie toujours `true` (no-op, comportement byte-identique au single-tenant).
+fn finding_event_visible_for(app: &App, headers: &HeaderMap, payload: &Value) -> bool {
+    payload
+        .get("engagement")
+        .and_then(|v| v.as_i64())
+        .map(|eid| tenancy::engagement_visible(app, headers, eid))
+        .unwrap_or(false)
+}
+
+pub(crate) async fn finding_events(State(app): State<App>, headers: HeaderMap) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = app.events.subscribe();
     let mut ticker = tokio::time::interval(Duration::from_secs(FINDINGS_SSE_TICK_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // M5 — SCOPING PER-TENANT : `app` + `headers` sont FILÉS dans l'état de l'unfold (comme le `guard` de
+    // `presence_events`) pour que chaque event bus soit re-vérifié contre la visibilité d'engagement du caller.
+    // Community (tenancy off) => `engagement_visible` renvoie true (no-op, comportement byte-identique).
     let stream = futures_util::stream::unfold(
-        (rx, ticker, false),
-        move |(mut rx, mut ticker, mut synced)| async move {
+        (rx, ticker, false, app, headers),
+        move |(mut rx, mut ticker, mut synced, app, headers)| async move {
             if !synced {
                 synced = true;
                 let ev = Event::default()
                     .event("finding")
                     .json_data(json!({"event": "sync"}))
                     .unwrap_or_else(|_| Event::default().comment("sync"));
-                return Some((Ok(ev), (rx, ticker, synced)));
+                return Some((Ok(ev), (rx, ticker, synced, app, headers)));
             }
             loop {
                 tokio::select! {
                     r = rx.recv() => match r {
                         Ok(ev) if ev.run_id == FINDINGS_TOPIC => {
+                            // FAIL-CLOSED : on ne forwarde l'event QUE si son `engagement` est visible au caller.
+                            if !finding_event_visible_for(&app, &headers, &ev.payload) {
+                                continue; // event d'un tenant/engagement non visible — jamais divulgué
+                            }
                             let ev2 = Event::default()
                                 .event("finding")
                                 .json_data(&ev.payload)
                                 .unwrap_or_else(|_| Event::default().comment("finding"));
-                            return Some((Ok(ev2), (rx, ticker, synced)));
+                            return Some((Ok(ev2), (rx, ticker, synced, app, headers)));
                         }
                         Ok(_) => continue, // event d'un run / de présence — pas du triage
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -760,12 +779,12 @@ pub(crate) async fn finding_events(State(app): State<App>) -> Sse<impl Stream<It
                                 .event("finding")
                                 .json_data(json!({"event": "resync"}))
                                 .unwrap_or_else(|_| Event::default().comment("resync"));
-                            return Some((Ok(ev), (rx, ticker, synced)));
+                            return Some((Ok(ev), (rx, ticker, synced, app, headers)));
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
                     _ = ticker.tick() => {
-                        return Some((Ok(Event::default().comment("hb")), (rx, ticker, synced)));
+                        return Some((Ok(Event::default().comment("hb")), (rx, ticker, synced, app, headers)));
                     }
                 }
             }
@@ -2349,6 +2368,52 @@ mod tests {
             r.status()
         );
         assert_eq!(assignee_of(&app, f1), None, "aucune mutation");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// M5 — SSE `finding_events` SCOPÉ PAR TENANT (fuite de métadonnées cross-tenant fermée). Le filtre
+    /// `finding_event_visible_for` ne forwarde un event de triage que si son `engagement` est visible au
+    /// caller. Community (tenancy off) => tout passe (no-op). Enterprise => un caller granté SEULEMENT sur le
+    /// tenant A NE reçoit PAS les events du tenant B (from/to/by/finding_id d'un autre tenant jamais divulgués).
+    #[tokio::test]
+    async fn finding_events_scoped_per_tenant() {
+        let led = tmp_ledger("sse-scope");
+        let app = test_app(&led);
+        // engagement 1 => tenant 1 (défaut) ; engagement 2 => tenant 2 (explicite).
+        seed_engagement(&app, 1, "A");
+        seed_engagement(&app, 2, "B");
+        {
+            let db = app.db();
+            db.execute("UPDATE engagement SET tenant_id=2 WHERE id=2", []).unwrap();
+        }
+        let (vtok, otok) = seed_roles(&app);
+        let ho = bearer(&otok);
+        // operator granté UNIQUEMENT sur le tenant 1.
+        seed_tenant_grant(&app, uid_of(&app, "oo"), 1, "tenant_operator");
+
+        let ev_a = json!({"finding_id": 10, "from": "new", "to": "triaging", "engagement": 1, "by": "oo"});
+        let ev_b = json!({"finding_id": 20, "from": "new", "to": "confirmed", "engagement": 2, "by": "mallory"});
+
+        // COMMUNITY (tenancy off) : les deux events passent (no-op, byte-identique single-tenant).
+        assert!(finding_event_visible_for(&app, &ho, &ev_a), "community forwarde tenant 1");
+        assert!(finding_event_visible_for(&app, &ho, &ev_b), "community forwarde tenant 2 (no-op)");
+
+        // ENTERPRISE (tenancy on) : seul le tenant 1 (visible) passe ; le tenant 2 est DROPPÉ.
+        {
+            let db = app.db();
+            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        }
+        assert!(finding_event_visible_for(&app, &ho, &ev_a), "tenant granté (A) reçoit ses propres events");
+        assert!(!finding_event_visible_for(&app, &ho, &ev_b), "tenant NON granté (B) ne fuit PAS cross-tenant");
+
+        // Payload sans `engagement` => fail-closed (droppé).
+        assert!(!finding_event_visible_for(&app, &ho, &json!({"finding_id": 30, "to": "triaging"})),
+            "payload sans engagement -> droppé (fail-closed)");
+
+        // Un caller SANS aucun grant (viewer vv) ne voit RIEN (deny-by-default).
+        let hv = bearer(&vtok);
+        assert!(!finding_event_visible_for(&app, &hv, &ev_a), "sans grant -> aucun event visible");
+        assert!(!finding_event_visible_for(&app, &hv, &ev_b), "sans grant -> aucun event visible");
         let _ = std::fs::remove_file(&led);
     }
 

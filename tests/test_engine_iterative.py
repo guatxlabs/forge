@@ -262,5 +262,33 @@ class TestIterativeCampaign(unittest.TestCase):
         self.assertNotIn("access_control.idor", deferred_kinds)
 
 
+class TestFireExceptionRobustness(unittest.TestCase):
+    """M6 — une exception LEVÉE par module.fire() devient un ExecResult(ERROR) TRAÇABLE ; la campagne
+    (boucle run/execute) CONTINUE au lieu d'avorter (contrat « zéro lacune silencieuse »)."""
+
+    def test_module_exception_becomes_error_record_and_run_continues(self):
+        def boom(action):
+            raise RuntimeError("module boom xyz")
+        good = [Finding(target="app.test", title="hit", severity="LOW", mitre="T1")]
+        # 1er kind explose au tir, 2e kind est sain -> on prouve que le 2e tire QUAND MÊME.
+        with _swap_registry({"access_control.idor": boom, "web.nuclei": good}):
+            eng = _armed_auto(scope())
+            bad = Action(kind="access_control.idor", target="app.test")
+            ok = Action(kind="web.nuclei", target="app.test")
+            # run() enchaîne les deux : le 1er lève côté module, le 2e est sain. AUCUNE exception ne remonte.
+            results = eng.run([bad, ok])
+            self.assertEqual(len(results), 2, "run() n'a PAS avorté à l'exception du module")
+            # (1) l'action qui explose -> ExecResult(ERROR) traçable, repr de l'exception dans les raisons.
+            self.assertEqual(results[0]["verdict"], "ERROR")
+            self.assertTrue(any("boom xyz" in r for r in results[0]["reasons"]),
+                            "la raison porte le repr de l'exception levée")
+            self.assertIsNone(results[0]["output"])
+            # (2) l'action SUIVANTE (module sain) a bien tiré -> la campagne survit et produit son finding.
+            self.assertEqual(results[1]["verdict"], FIRE)
+            self.assertTrue(results[1]["output"], "le module sain produit un output APRÈS l'ERROR")
+            # (3) l'ERROR est bucketé dans results (rapport anti-masquage), jamais perdu silencieusement.
+            self.assertTrue(any(r["verdict"] == "ERROR" for r in eng.results))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

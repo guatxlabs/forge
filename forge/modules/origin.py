@@ -29,6 +29,7 @@ scope est injecté dans action.params par l'engine, miroir de l'injection IDOR e
 Une IP hors-scope -> finding INFO, AUCUNE connexion. Pas de scope dans les params -> fail-closed
 (rien n'est en scope), on ne connecte pas : on n'élargit jamais le périmètre par omission.
 """
+import re
 import socket
 
 from .registry import register, Module
@@ -66,6 +67,39 @@ def _passive_candidates(domain):
     """Hôtes candidats PASSIFS (génération de chaînes, ZÉRO réseau) : domaine nu + préfixes
     couramment révélateurs d'origine. Résolus ensuite via le même seam DNS (socket.gethostbyname)."""
     return [domain] + [f"{p}.{domain}" for p in ORIGIN_PREFIXES]
+
+
+# M7 — corrélation de CONTENU. Un code de statut seul (surtout 403) ne prouve PAS qu'une IP sert le site :
+# vhost par défaut, shared-hosting, WAF deny-by-default renvoient couramment 200/403 à un Host arbitraire.
+# On EXIGE une corrélation de contenu positive (title normalisé identique à la baseline CDN) avant de
+# promouvoir un finding en HIGH/vulnerable. Ces helpers parsent la sortie httpx (`-status-code -title`).
+_HTTPX_BRACKET = re.compile(r"\[([^\]]*)\]")
+_STATUS_RE = re.compile(r"\d{3}(?:,\d{3})*")
+
+
+def _httpx_fields(text):
+    """Extrait (status, title) de la 1re ligne httpx `-status-code -title -silent -no-color`
+    (ex. `http://1.2.3.4 [200] [Example Domain]`). Le premier groupe `[...]` purement numérique est
+    le statut (1er code si chaîne de redirections `[301,200]`) ; le premier groupe non numérique est le
+    title. Champs absents -> chaînes vides. PURE, sans réseau."""
+    raw = (text or "").strip()
+    line = raw.splitlines()[0] if raw else ""
+    status, title = "", ""
+    for g in _HTTPX_BRACKET.findall(line):
+        gg = g.strip()
+        if not gg:
+            continue
+        if _STATUS_RE.fullmatch(gg):
+            if not status:
+                status = gg.split(",")[0]
+        elif not title:
+            title = gg
+    return status, title
+
+
+def _norm_title(t):
+    """Normalise un title pour comparaison : espaces compactés + casefold. Vide -> ''."""
+    return " ".join((t or "").split()).casefold()
 
 
 @register("origin.find")
@@ -172,6 +206,23 @@ class OriginFind(Module):
             seen_ip.add(ip)
             candidates.append((s, ip))
 
+        # M7 — BASELINE CDN de corrélation de contenu : title du site tel que SERVI PAR LE CDN. Une IP
+        # candidate n'est promue HIGH que si SON contenu (title) MATCHE cette baseline. Résolue PARESSEUSE-
+        # MENT (None -> fetch au 1er candidat IN-SCOPE réellement vérifié) pour ne JAMAIS émettre de requête
+        # si aucun candidat ne passe le scope-guard. Baseline vide/indisponible => aucune corrélation
+        # possible => AUCUN HIGH (fail-closed : on préfère un faux négatif à un faux HIGH).
+        base_title = None                                     # None = pas encore résolue (lazy)
+
+        def _baseline_title():
+            nonlocal base_title
+            if base_title is None:
+                rcb, bo, _be = runner.tool(self.HX, self.HX_IMG,
+                                           ["-u", f"http://{domain}", "-title", "-status-code",
+                                            "-silent", "-no-color"], timeout=30, prefer_docker=True)
+                _bt = _httpx_fields(bo or "")[1] if rcb == 0 else ""
+                base_title = _norm_title(_bt)
+            return base_title
+
         findings = []
         for s, ip in candidates:
             converge = len(ip_sources.get(ip, [s]))           # nb d'hôtes convergeant vers cet IP (confiance)
@@ -188,32 +239,56 @@ class OriginFind(Module):
                               f"aucune requête httpx émise (infra tierce/mutualisée possible)."),
                     poc=f"# {ip} hors-scope : ne pas connecter ; ajouter au scope si autorisé"))
                 continue
-            # VÉRIFICATION avant flag : l'IP sert-elle le site avec l'en-tête Host ?
+            # VÉRIFICATION avant flag : l'IP sert-elle le site avec l'en-tête Host ? On demande AUSSI le
+            # title (`-title`) pour la corrélation de contenu M7.
             rc2, vo, ve = runner.tool(self.HX, self.HX_IMG,
                                       ["-u", f"http://{ip}", "-H", f"Host: {domain}",
-                                       "-status-code", "-silent", "-no-color"], timeout=30, prefer_docker=True)
-            verified = any(code in (vo or "") for code in ("[200]", "[301]", "[302]", "[403]"))
+                                       "-status-code", "-title", "-silent", "-no-color"], timeout=30, prefer_docker=True)
+            ip_status, ip_title = _httpx_fields(vo or "")
+            # M7 — 403 RETIRÉ du set « joignable » (un WAF deny-by-default le renvoie à tout Host : jamais
+            # une preuve). Seuls 200/301/302 comptent comme joignables.
+            reachable = ip_status in ("200", "301", "302")
+            # M7 — CORRÉLATION DE CONTENU : promotion HIGH SEULEMENT si le title de l'IP MATCHE la baseline
+            # CDN (non vide des deux côtés). Un match de statut seul ne suffit plus.
+            base = _baseline_title()
+            content_ok = bool(base) and _norm_title(ip_title) == base
+            verified = reachable and content_ok
+            reachable_only = reachable and not content_ok      # joignable mais contenu NON corrélé
             # Distinguer l'échec d'outil (httpx indisponible/timeout) d'un vrai négatif : un rc2!=0
-            # sans hit n'est PAS la preuve que l'origine ne sert pas le site — on ne flague pas HIGH.
+            # sans statut joignable n'est PAS la preuve que l'origine ne sert pas le site — pas de HIGH.
             # DÉGRADATION : verif non concluante par outil indisponible -> `status='skipped'`.
-            tool_ko = (rc2 != 0 and not verified)
+            tool_ko = (rc2 != 0 and not reachable)
+            if verified:
+                sev, st = "HIGH", "vulnerable"
+                title = "Origine exposée derrière CDN (VÉRIFIÉE, contenu corrélé) — bypass WAF"
+            elif reachable_only:
+                # joignable mais aucune corrélation de contenu -> NE PAS promouvoir en HIGH (M7). MEDIUM :
+                # piste à confirmer manuellement (vhost par défaut / shared-hosting / WAF non exclus).
+                sev, st = "MEDIUM", "tested"
+                title = "IP hors-CDN joignable — contenu NON corrélé à la baseline (origine NON confirmée)"
+            elif tool_ko:
+                sev, st = "INFO", "skipped"
+                title = "IP hors-CDN — verif non concluante: httpx indisponible/timeout"
+            else:
+                sev, st = "INFO", "tested"
+                title = "IP hors-CDN (origine non confirmée)"
             findings.append(self.finding(
-                _proven=bool(verified),                  # PREUVE concrète (host-header check confirmé)
+                _proven=bool(verified),                  # PREUVE concrète (statut joignable + contenu corrélé)
                 target=ip,
-                title=("Origine exposée derrière CDN (VÉRIFIÉE) — bypass WAF" if verified
-                       else "IP hors-CDN — verif non concluante: httpx indisponible/timeout" if tool_ko
-                       else "IP hors-CDN (origine non confirmée)"),
-                severity=("HIGH" if verified else "INFO"),
+                title=title,
+                severity=sev,
                 category="origin-exposure", mitre="T1590.005",
                 fix=("Restreindre l'accès à l'IP d'origine au seul CDN/WAF : allowlist des plages IP du "
                      "fournisseur (ex: Cloudflare) au niveau pare-feu/groupe de sécurité et refuser tout "
                      "trafic direct, afin de rendre l'origine non joignable hors du CDN (et de fermer le "
                      "contournement de WAF)."),
-                status=("vulnerable" if verified else "skipped" if tool_ko else "tested"),
+                status=st,
                 tool="subfinder+httpx",
-                evidence=(f"{s} -> {ip} (convergence: {converge} hôte(s)) ; host-header check={verified} ; "
-                          + (f"verif non concluante (rc={rc2}): {((ve or vo) or '').strip()[:200]}"
-                             if tool_ko else (vo or "").strip()[:200])),
+                evidence=(f"{s} -> {ip} (convergence: {converge} hôte(s)) ; statut={ip_status or 'n/a'} "
+                          f"joignable={reachable} ; title-match baseline={content_ok} "
+                          f"(ip_title={ip_title!r}) ; "
+                          + (f"verif non concluante (rc={rc2}): {((ve or vo) or '').strip()[:160]}"
+                             if tool_ko else (vo or "").strip()[:160])),
                 poc=f"curl -sI -H 'Host: {domain}' http://{ip}"))
         if not findings:
             findings.append(self.finding(
