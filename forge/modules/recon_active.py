@@ -43,7 +43,7 @@ import tempfile
 
 from .registry import register
 from .recon_surface import PassiveSurface, _host_only
-from .toolspec import check_extra_args, safe_value
+from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 from .recon import _path_argval
 from .. import runner
 from .. import techniques
@@ -67,7 +67,7 @@ DEFAULT_PATHS = [
 
 
 @register("recon.content")
-class ContentDiscovery(PassiveSurface):
+class ContentDiscovery(FlagAllowlistMixin, PassiveSurface):
     kind = "recon.content"
     mitre = techniques.mitre_for("recon.content")            # T1595.003 (source de vérité : techniques.py)
     tool = "forge/modules/recon_active.py:recon.content"
@@ -88,7 +88,7 @@ class ContentDiscovery(PassiveSurface):
         {"name": "extensions", "type": "text", "label": "extensions (-e, ex .php,.bak)", "flag": "-e"},
         {"name": "match_codes", "type": "text", "label": "codes acceptés (-mc, ex 200,301,403)", "flag": "-mc"},
         {"name": "timeout", "type": "number", "label": "timeout global sous-processus (s)", "flag": ""},
-        {"name": "extra_args", "type": "list", "label": "extra args ffuf (allowlist de drapeaux)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(label="extra args ffuf (allowlist de drapeaux)"),
     ]
     # ALLOWLIST des drapeaux ffuf acceptés en argument libre — tout flag hors liste est REFUSÉ.
     # EXCLUS : -o/-of/-debug-log (écriture fichier), -x/-replay-proxy (proxy exfil), -config (lecture
@@ -174,6 +174,12 @@ class ContentDiscovery(PassiveSurface):
                 f"-mc {self.MATCH_CODES} -rate {rate} -t {self._threads(action)} -json -s "
                 f"# rate-limité, lecture seule, in-scope")
 
+    def _refuse(self, action, reason):
+        """Refus fail-closed du mixin, routé vers l'émetteur propre à ce module (`_skipped` :
+        category=recon, tool/mitre du module, poc) — sortie BYTE-IDENTIQUE à l'ancien refus inline."""
+        return [self._skipped(action.target, f"{self.kind} non exécuté — {reason}",
+                              "Aucun processus lancé (fail-closed).", self.dry(action))]
+
     def fire(self, action):
         target = action.target
         if not self._target_allowed(action):
@@ -185,10 +191,10 @@ class ContentDiscovery(PassiveSurface):
                                   "Le binaire ffuf est absent ; aucune découverte de contenu possible. "
                                   "Installer ffuf (binaire local) pour activer ce module.", self.dry(action))]
         # EXTRA_ARGS gouvernés : un drapeau ffuf libre hors allowlist (ou non-liste) -> refus fail-closed.
+        # Appel unique (on garde `extra` = tokens VALIDÉS pour l'argv ffuf) ; le refus passe par le mixin.
         bad_extra, extra = check_extra_args(action.params.get("extra_args"), self.FLAG_ALLOWLIST)
         if bad_extra is not None:
-            return [self._skipped(target, f"recon.content non exécuté — argument libre refusé ({bad_extra})",
-                                  "Aucun processus lancé (fail-closed).", self.dry(action))]
+            return self._refuse(action, f"argument libre refusé ({bad_extra})")
         wl, n_paths, is_tmp = self._wordlist(action)
         try:
             rc, out, err = self._run_ffuf(self._url(target), wl, self._rate(action),
