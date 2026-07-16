@@ -132,6 +132,12 @@ def build_report(engine, title="Forge — rapport d'engagement"):
     out.append(f"- **Refusées (VETO — hors scope / capacité non autorisée)** : {len(cov['vetoed'])}")
     out.append(f"- **Erreurs / skips** : {len(cov['errors'])}")
     out.append(f"- **Findings dédupliqués (déjà en mémoire)** : {getattr(engine, 'dups', 0)}")
+    not_planned = getattr(engine, "not_planned", None) or {}
+    if not_planned:
+        # bucket anti-lacune : modules sélectionnés/disponibles que le planner n'a JAMAIS ordonnancés
+        # (ni tirés, ni simulés, ni vétoés, ni skippés). Compté ici pour que l'accounting FERME au niveau
+        # module : disponibles-non-planifiés + planifiés == sélectionnés (aucune omission silencieuse).
+        out.append(f"- **Disponibles non planifiés (jamais ordonnancés)** : {len(not_planned)}")
     out.append("")
     for label, key in [("Simulées (non armé/approuvé)", "dry_run"),
                        ("Refusées (VETO)", "vetoed"),
@@ -157,6 +163,17 @@ def build_report(engine, title="Forge — rapport d'engagement"):
         out.append("**Classes jamais tentées**")
         for tgt, miss in gaps.items():
             out.append(f"- `{tgt}` : {', '.join(miss)}")
+        out.append("")
+
+    # --- modules disponibles mais jamais planifiés (bucket anti-lacune, par MODULE) ---
+    # Chaque module sélectionné qui n'a pas été planifié (donc jamais tiré/simulé/vétoé/skippé) est listé
+    # ICI avec sa raison — dérivée du run (mode/capacités/surface). C'est le trou que le rapport masquait :
+    # 35 modules « outil présent mais jamais ordonnancé » n'apparaissaient nulle part. Zéro lacune silencieuse.
+    if not_planned:
+        out.append(f"**Modules disponibles non planifiés** ({len(not_planned)} — outil présent, "
+                   "jamais ordonnancé par le plan)")
+        for kind, reason in not_planned.items():
+            out.append(f"- `{kind}` : {reason}")
         out.append("")
 
     # --- techniques ATT&CK exercées (parité console : ce qui a été tiré, par MITRE) ---

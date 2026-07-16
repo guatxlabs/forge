@@ -249,6 +249,65 @@ class TestReport(unittest.TestCase):
         self.assertIn("/api/runs/<run-id>/report", md)       # pointeur générique quand run_id absent
 
 
+class TestCoverageAccounting(unittest.TestCase):
+    """Anti-lacune silencieuse — chaque module SÉLECTIONNÉ est comptabilisé : soit planifié
+    (fired/dry/vetoed/errors, entré dans results), soit listé dans `not_planned` avec une raison.
+    `not_planned ∪ planifiés == selected` : aucun module disponible ne disparaît du rapport (le trou
+    des 35 « outil présent mais jamais ordonnancé »)."""
+
+    def _run(self, exploit=False):
+        # scope legacy (aucune sélection technique) -> univers « select-all » = TOUS les modules
+        # enregistrés ; le HeuristicBrain n'en planifie qu'une poignée -> le reste = disponibles non
+        # planifiés (reproduit fidèlement le bucket manquant sur des données réelles).
+        eng = Engine(scope(exploit=exploit))
+        eng.campaign([Target("app.test", "url")], HeuristicBrain(), Planner())
+        return eng
+
+    def test_accounting_closes_selected_equals_planned_plus_not_planned(self):
+        eng = self._run()
+        planned = {r["kind"] for r in eng.results}
+        not_planned = set(eng.not_planned)
+        # (1) partition : disponibles-non-planifiés et planifiés sont DISJOINTS…
+        self.assertTrue(not_planned.isdisjoint(planned), "un module ne peut être à la fois planifié et non-planifié")
+        # (2) …et leur union RECOUVRE EXACTEMENT l'univers sélectionné -> zéro omission silencieuse.
+        self.assertEqual(not_planned | planned, eng.selected_modules)
+        # (3) le run reproduit bien le trou : des modules disponibles n'ont PAS été planifiés.
+        self.assertTrue(not_planned, "des modules disponibles auraient dû rester non planifiés")
+
+    def test_not_planned_reasons_are_truthful(self):
+        # un module non-exploit disponible mais non planifié porte la raison « hors périmètre du plan » ;
+        # un module exploit sous un scope lecture-seule porte la raison capacité-exploit (dérivée, non fabriquée).
+        eng = self._run(exploit=False)
+        # business_logic.scan : disponible, non-exploit, jamais proposé par le brain heuristique ->
+        # raison « hors périmètre du plan » (dérivée : surface non concordante / capacités engagement).
+        self.assertIn("business_logic.scan", eng.not_planned)
+        self.assertIn("non planifié", eng.not_planned["business_logic.scan"])
+        # rce.probe : module exploit -> sous allow_exploit=false, raison = capacité exploit non autorisée.
+        self.assertIn("rce.probe", eng.not_planned)
+        self.assertIn("exploit", eng.not_planned["rce.probe"])
+
+    def test_report_lists_not_planned_modules_with_reasons(self):
+        eng = self._run()
+        md = report.build_report(eng)
+        self.assertIn("Modules disponibles non planifiés", md)
+        self.assertIn("Disponibles non planifiés", md)         # compteur dans la synthèse transparence
+        # un module concret disponible-non-planifié figure NOMMÉMENT avec sa raison.
+        self.assertIn("web.nikto", md)
+
+    def test_ingest_payload_carries_not_planned(self):
+        from forge import console_client
+        eng = self._run()
+        payload = console_client.build_payload(
+            "camp", eng.findings, eng.run_records, not_planned=eng.not_planned)
+        self.assertIn("not_planned", payload)                  # additif : nouveau champ JSON
+        self.assertEqual(payload["not_planned"], {k: str(v) for k, v in eng.not_planned.items()})
+
+    def test_no_not_planned_section_when_all_selected_planned(self):
+        # rétro-compat : engine vierge (aucune campagne) -> not_planned vide -> section absente, pas de crash.
+        md = report.build_report(Engine(scope()))
+        self.assertNotIn("Modules disponibles non planifiés", md)
+
+
 class TestPurple(unittest.TestCase):
     def test_runrecord_emitted_on_fire(self):
         # module demo (no-op) armé+approuvé -> un FIRE -> un run-record

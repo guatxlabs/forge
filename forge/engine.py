@@ -159,6 +159,14 @@ class Engine:
         self.run_records: list[dict[str, Any]] = []      # boucle purple : un record ATT&CK par action tirée
         self.skipped_budget: list[Action] = []           # actions déférées par le planner (defer != delete)
         self.coverage_gaps: dict[str, list[str]] = {}    # classes jamais tentées, par cible
+        # ANTI-LACUNE SILENCIEUSE (bucket manquant) : modules SÉLECTIONNÉS/DISPONIBLES que le planner
+        # n'a JAMAIS ordonnancés (jamais entrés dans results) -> {kind: raison}. Un module dont l'outil
+        # était présent mais que le plan n'a pas planifié (mode lecture seule, capacités de l'engagement,
+        # surface non concordante) ne tombait dans AUCUN bucket (ni fired/dry/vetoed/errors ni skipped_budget
+        # ni coverage_gaps) : il DISPARAISSAIT du rapport. Rempli par campaign() ; la raison est DÉRIVÉE des
+        # métadonnées du module + des capacités du scope (jamais fabriquée).
+        self.selected_modules: set[str] = set()          # univers des modules demandés pour ce run
+        self.not_planned: dict[str, str] = {}            # {kind: raison} — disponibles mais jamais planifiés
         self.dups = 0              # findings ignorés car déjà en mémoire
         self.waves = 0             # nb de vagues plan->observe->replan exécutées (campagne itérative)
 
@@ -450,8 +458,58 @@ class Engine:
         # une classe n'est une lacune QUE si elle n'a JAMAIS été tentée sur AUCUNE vague :
         # recalcul final à partir de tous les kinds réellement exécutés (results), par host.
         self.coverage_gaps = self._final_gaps(planner, hosts)
+        # ANTI-LACUNE : accounting AU NIVEAU MODULE. L'univers DEMANDÉ pour ce run moins les modules
+        # réellement planifiés (entrés dans results) = les modules disponibles JAMAIS ordonnancés. Chaque
+        # module sélectionné est désormais soit planifié (fired/dry/vetoed/errors) soit listé ici avec sa
+        # raison -> `not_planned ∪ planifiés == selected_modules` (aucune omission silencieuse).
+        self.selected_modules = self._selected_universe(modules)
+        self.not_planned = self.unplanned_modules(self.selected_modules)
         self.waves = waves
         return self.coverage()
+
+    def _selected_universe(self, modules: "Iterable[str] | None") -> set[str]:
+        """Univers des modules DEMANDÉS pour ce run (base de l'accounting anti-lacune). Priorité,
+        purement dérivée du run (aucune fabrication) :
+          1. sélection `--modules` explicite (console/UI) -> ces kinds ;
+          2. sinon sélection technique PAR-SCOPE (`enabled_kinds`) quand configurée ;
+          3. sinon TOUS les modules enregistrés (run « select-all » : aucun filtre)."""
+        wanted = {m for m in (modules or []) if m}
+        if wanted:
+            return wanted
+        if self.enabled_kinds is not None:
+            return set(self.enabled_kinds)
+        return set(mods.kinds())
+
+    def unplanned_modules(self, selected: "Iterable[str]") -> dict[str, str]:
+        """Modules SÉLECTIONNÉS/DISPONIBLES mais JAMAIS planifiés par le planner (jamais entrés dans
+        `results`) -> {kind: raison}. Comble le bucket manquant : un module dont l'outil était présent
+        mais que le plan n'a pas ordonnancé (mode lecture seule, capacités de l'engagement, surface non
+        concordante) n'apparaissait dans AUCUN autre bucket. `selected − planifiés` : par construction
+        disjoint des kinds planifiés, donc `not_planned ∪ planifiés == selected` (accounting fermé)."""
+        planned = {r["kind"] for r in self.results}
+        return {kind: self._unplanned_reason(kind)
+                for kind in sorted(selected) if kind not in planned}
+
+    def _unplanned_reason(self, kind: str) -> str:
+        """Raison — DÉRIVÉE des métadonnées du module + des capacités du scope, jamais fabriquée — pour
+        laquelle un module sélectionné/disponible n'a pas été planifié. De la plus spécifique à la plus
+        générale (miroir des SKIP au tir), pour que la lacune porte l'explication la plus précise."""
+        module = mods.get(kind)
+        if module is None:
+            return "module non enregistré (kind demandé sans implémentation)"
+        if getattr(module, "available", True) is False:
+            return "outil sous-jacent absent (module indisponible, jamais planifié)"
+        disabled = getattr(self.scope, "disabled_modules", None) or set()
+        if kind in disabled:
+            return "module désactivé par la console (gouvernance connecteur), jamais planifié"
+        if self.enabled_kinds is not None and kind not in self.enabled_kinds:
+            return "technique désactivée pour ce scope (sélection profil/catégorie/technique)"
+        if getattr(module, "exploit", False) and not self.scope.allow_exploit:
+            return "capacité exploit non autorisée par l'engagement (lecture seule) — non planifié"
+        if getattr(module, "destructive", False) and not self.scope.allow_destructive:
+            return "capacité destructif non autorisée par l'engagement — non planifié"
+        return ("outil disponible, non planifié (hors périmètre du plan / surface non concordante / "
+                "capacités de l'engagement)")
 
     def _final_gaps(self, planner: Planner, hosts: list[str]) -> dict[str, list[str]]:
         """Lacunes APRÈS toutes les vagues : classe de la checklist jamais tentée sur le host.
