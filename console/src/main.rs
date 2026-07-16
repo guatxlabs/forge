@@ -952,5 +952,30 @@ fn enterprise_store_gate(requested: Option<&str>, db_url: Option<&str>) -> Resul
 #[cfg(test)]
 pub(crate) mod testutil;
 
+// TESTS D'INTÉGRATION — `tests.rs` (le `mod tests` inline historique, ~4600 l) a été SCINDÉ en
+// modules cohésifs miroir des sous-systèmes source (STEP 2 du refactor archi,
+// docs/ARCHITECTURE_REFACTOR_PLAN.md §1.2). Chaque fichier est un module ENFANT de la racine de
+// crate (donc `super::*` y résout la racine à l'identique de l'ancien inline) et importe les
+// fixtures partagées via `use crate::testutil::*`. PURE MOVE : aucun corps de test modifié.
 #[cfg(test)]
-mod tests;
+mod tests_http_boot;
+#[cfg(test)]
+mod tests_auth_session;
+#[cfg(test)]
+mod tests_users_admin;
+#[cfg(test)]
+mod tests_setup;
+#[cfg(test)]
+mod tests_net_policy;
+#[cfg(test)]
+mod tests_ledger;
+#[cfg(test)]
+mod tests_runs_engagement;
+#[cfg(test)]
+mod tests_tenancy_rbac;
+#[cfg(test)]
+mod tests_planning_techniques;
+#[cfg(test)]
+mod tests_reports_purple;
+#[cfg(test)]
+mod tests_modules_tools;
