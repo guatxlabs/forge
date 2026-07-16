@@ -5,6 +5,8 @@ import { $, esc } from './dom.js';
 //  modales + toasts in-page (remplacent alert/confirm/prompt)
 // =====================================================================================
 export function toast(msg, kind = 'info', ms = 3200) {
+  // kinds stylés en CSS : ok / bad / info. Tout kind inconnu retombe sur 'info' (styling neutre garanti).
+  if (kind !== 'ok' && kind !== 'bad' && kind !== 'info') kind = 'info';
   let host = $('#toasts');
   if (!host) { host = document.createElement('div'); host.id = 'toasts'; host.setAttribute('aria-live', 'polite'); host.setAttribute('aria-atomic', 'false'); document.body.appendChild(host); }
   const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = msg;

@@ -194,7 +194,7 @@ async function submitTool(form, btn) {
   try {
     const r = await adminApi('/tools', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
     const reg = r && r.registered;
-    toast('Outil « ' + body.kind + ' » ajouté' + (reg ? '' : ' (persisté ; registre indisponible — pris au prochain boot)') + '.', reg ? 'ok' : 'warn');
+    toast('Outil « ' + body.kind + ' » ajouté' + (reg ? '' : ' (persisté ; registre indisponible — pris au prochain boot)') + '.', reg ? 'ok' : 'info');
     loadAddTool();                                  // reset + rafraîchit la liste
     if (typeof loadModules === 'function') loadModules();          // refléter dans « Capacités » + « Lancement »
     if (typeof loadAdminConnectors === 'function') loadAdminConnectors();
