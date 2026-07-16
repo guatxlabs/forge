@@ -213,6 +213,11 @@ TECHNIQUES = {t.key: t for t in [
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
     _k("burp.scan",           "Scanner", False, depends_on=("recon.httpx",), mitre="T1595.002",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
+    # AUDIT de durcissement HTTP (en-têtes de sécurité + cookies) — natif Forge, urllib stdlib, non
+    # exploit/non destructif. Observation de CONFIG (INFO/LOW, status=tested, jamais vulnerable) : ce
+    # que nuclei ne signale pas même toutes sévérités. vuln_class="Hardening", pentest_only.
+    _k("web.security_headers", "Hardening", False, depends_on=("recon.httpx",), mitre="T1595.002",
+       attck_tactic="Reconnaissance", phase="recon", capability="active"),
     _k("origin.find",         "Recon", False, depends_on=("recon.httpx",), mitre="T1590.005",
        attck_tactic="Reconnaissance", phase="recon", capability="active", proof_required=True),
     _k("recon.httpx",         "Recon", False, depends_on=("recon.subdomains",), mitre="T1595",
