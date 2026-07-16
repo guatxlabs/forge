@@ -41,7 +41,7 @@ import urllib.parse
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .access_control import _body_hash, _normalize_body
-from .toolspec import check_extra_args, safe_value
+from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 from .. import runner
 from .. import techniques
 
@@ -252,7 +252,12 @@ _BOOL_PAIRS = [
 
 
 @register("sqli.probe")
-class SqliProbe(InjectionOracle):
+class SqliProbe(FlagAllowlistMixin, InjectionOracle):
+    # MRO : FlagAllowlistMixin (extra_args_param + FLAG_ALLOWLIST) EN TÊTE, InjectionOracle ->
+    # ScopeGuardedOracle -> ScopeGuardMixin -> Oracle -> Module. Le mixin ne masque AUCUN membre de la
+    # chaîne Oracle (finding/_in_scope/skip/degraded/proof/_scope_refused) : il n'apporte que la plomberie
+    # extra_args. Le refus sqlmap garde son émetteur propre (`degraded`, libellé spécifique) -> non routé
+    # par le mixin, seul `extra_args_param()` est partagé.
     kind = "sqli.probe"
     mitre = techniques.mitre_for("sqli.probe")           # source de vérité : forge/techniques.py (T1190)
     cwe = "CWE-89"                                        # category + cwe des findings
@@ -277,7 +282,7 @@ class SqliProbe(InjectionOracle):
          "allowed": ["1", "2", "3"]},
         {"name": "technique", "type": "text", "label": "sqlmap --technique (défaut BE)", "flag": "--technique"},
         {"name": "dbms", "type": "text", "label": "sqlmap --dbms (ex MySQL)", "flag": "--dbms"},
-        {"name": "extra_args", "type": "list", "label": "extra args sqlmap (allowlist)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(label="extra args sqlmap (allowlist)"),
     ]
     # ALLOWLIST CONSERVATRICE des drapeaux sqlmap acceptés en argument libre — tout flag hors liste est
     # REFUSÉ. EXCLUS explicitement : --dump/--dump-all/--os-shell/--os-cmd/--sql-shell/--file-read/
