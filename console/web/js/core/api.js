@@ -33,7 +33,7 @@ export const campaignParam = () => { const c = $('#campaign') && $('#campaign').
 export const withCampaign = qs => { const c = $('#campaign') && $('#campaign').value; if (!c) return qs; return qs + (qs.includes('?') ? '&' : '?') + 'campaign=' + encodeURIComponent(c); };
 
 // Ecriture centralisée (POST/DELETE). Réunit ce que ~20 sites open-codaient : choix d'en-têtes selon
-// `auth` (operator = X-Forge-Operator[+Bearer] ; token = Bearer viewer ; admin = cookie de session),
+// `auth` (operator = X-Forge-Operator[+Bearer] ; admin = cookie de session),
 // sérialisation JSON du corps, scoping engagement/campagne (UNIQUEMENT quand le site le faisait déjà,
 // via les flags), et la MÊME extraction anti-XSS que api() : on ne renvoie JAMAIS le corps brut du
 // serveur (un proxy/gateway peut renvoyer du HTML non-fiable), seulement le JSON structuré parsé (dont

@@ -57,7 +57,7 @@ if ($('#id-oidc-form')) $('#id-oidc-form').addEventListener('submit', async e =>
   if (secret) body.client_secret = secret; // write-only : envoyé seulement si (re)saisi
   try {
     await adminApi('/sso/config', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
-    toast('Provider OIDC enregistré', 'good'); await loadIdentityOidc();
+    toast('Provider OIDC enregistré', 'ok'); await loadIdentityOidc();
   } catch (e) { idErr('#id-oidc-err', 'Enregistrement refusé : ' + e.message); }
 });
 
@@ -77,7 +77,7 @@ if ($('#id-scim-rotate')) $('#id-scim-rotate').addEventListener('click', async (
       const box = $('#id-scim-token-once'), val = $('#id-scim-token-val');
       if (val) val.textContent = r.token; if (box) box.hidden = false; // affiché UNE fois
     }
-    toast('Token SCIM généré (copiez-le maintenant)', 'good'); await loadIdentityScim();
+    toast('Token SCIM généré (copiez-le maintenant)', 'ok'); await loadIdentityScim();
   } catch (e) { toast('Génération refusée : ' + e.message, 'bad'); }
 });
 if ($('#id-scim-revoke')) $('#id-scim-revoke').addEventListener('click', async () => {
@@ -85,18 +85,18 @@ if ($('#id-scim-revoke')) $('#id-scim-revoke').addEventListener('click', async (
   try {
     await adminApi('/scim/config', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ revoke: true }) });
     const once = $('#id-scim-token-once'); if (once) once.hidden = true;
-    toast('Token SCIM révoqué', 'good'); await loadIdentityScim();
+    toast('Token SCIM révoqué', 'ok'); await loadIdentityScim();
   } catch (e) { toast('Révocation refusée : ' + e.message, 'bad'); }
 });
 if ($('#id-scim-save-role')) $('#id-scim-save-role').addEventListener('click', async () => {
   const role = ($('#id-scim-role') && $('#id-scim-role').value) || 'viewer';
   try {
     await adminApi('/scim/config', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ default_role: role }) });
-    toast('Rôle SCIM par défaut enregistré', 'good');
+    toast('Rôle SCIM par défaut enregistré', 'ok');
   } catch (e) { toast('Enregistrement refusé : ' + e.message, 'bad'); }
 });
 if ($('#id-scim-token-copy')) $('#id-scim-token-copy').addEventListener('click', () => {
-  const val = $('#id-scim-token-val'); if (val && navigator.clipboard) navigator.clipboard.writeText(val.textContent || '').then(() => toast('Token copié', 'good'), () => {});
+  const val = $('#id-scim-token-val'); if (val && navigator.clipboard) navigator.clipboard.writeText(val.textContent || '').then(() => toast('Token copié', 'ok'), () => {});
 });
 
 // (3) Mapping groupe -> rôle/grant (RBAC avancé) — GET/POST/DELETE /api/rbac/group-map (admin).
@@ -116,7 +116,7 @@ export async function loadIdentityMap() {
   host.querySelectorAll('.id-map-del').forEach(b => b.addEventListener('click', async () => {
     const g = b.getAttribute('data-group') || '';
     if (!(await modalConfirm({ title: 'Retirer le mapping', message: 'Retirer le mapping du groupe « ' + g + ' » ?', confirmText: 'Retirer', danger: true }))) return;
-    try { await adminApi('/rbac/group-map/' + encodeURIComponent(g), { method: 'DELETE', headers: { Accept: 'application/json' } }); toast('Mapping retiré', 'good'); await loadIdentityMap(); }
+    try { await adminApi('/rbac/group-map/' + encodeURIComponent(g), { method: 'DELETE', headers: { Accept: 'application/json' } }); toast('Mapping retiré', 'ok'); await loadIdentityMap(); }
     catch (e) { toast('Retrait refusé : ' + e.message, 'bad'); }
   }));
 }
@@ -132,7 +132,7 @@ if ($('#id-map-form')) $('#id-map-form').addEventListener('submit', async e => {
   if (trole) body.tenant_role = trole;
   try {
     await adminApi('/rbac/group-map', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
-    toast('Mapping enregistré', 'good');
+    toast('Mapping enregistré', 'ok');
     if ($('#id-map-group')) $('#id-map-group').value = '';
     await loadIdentityMap();
   } catch (e) { idErr('#id-map-err', 'Enregistrement refusé : ' + e.message); }

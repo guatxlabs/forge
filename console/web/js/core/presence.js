@@ -8,7 +8,7 @@
 //
 // Discret : masqué tant qu'il n'y a personne d'autre que soi. Aucune dépendance externe, ES-module pur.
 
-import { $, esc, ic } from './dom.js';
+import { $, ic } from './dom.js';
 import { activeEngagement } from './state.js';
 
 let ES = null;                 // EventSource courant (null si fermé)
@@ -55,7 +55,7 @@ function renderPresence(data) {
     const el = document.createElement('span');
     el.className = 'pav' + (o.self ? ' self' : '');
     el.textContent = initials(o.login);
-    el.title = esc(o.login) + (o.role ? ' (' + esc(o.role) + ')' : '') + (o.self ? ' — vous' : '');
+    el.title = o.login + (o.role ? ' (' + o.role + ')' : '') + (o.self ? ' — vous' : '');
     frag.appendChild(el);
   });
   avatars.replaceChildren(frag);
