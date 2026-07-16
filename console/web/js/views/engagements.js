@@ -113,6 +113,7 @@ export async function engagementCreateModal() {
       { name: 'classification', label: 'Classification (TLP 2.0)', type: 'select', value: '', options: TLP_OPTS },
       { name: 'in_scope', label: 'In-scope (une entrée par ligne — host / *.wildcard / CIDR)', type: 'textarea', placeholder: 'app.example.com\n*.example.com\n10.0.0.0/8' },
       { name: 'out_scope', label: 'Out-of-scope (optionnel)', type: 'textarea', placeholder: 'admin.example.com' },
+      { name: 'allow_private', label: 'Autoriser le réseau privé pour cet engagement (nécessite AUSSI la politique globale + le scope)', type: 'checkbox', value: false },
     ],
   });
   if (!vals) return;
@@ -120,6 +121,9 @@ export async function engagementCreateModal() {
     name: String(vals.name || '').trim(),
     mode: vals.mode || 'grey',
     classification: vals.classification || '',
+    // POLITIQUE RÉSEAU (opt-in par engagement) : n'ouvre RIEN seul — l'effectif = ceci ET le master global
+    // ET le scope. Défaut décoché (fail-closed).
+    allow_private: !!vals.allow_private,
     scope_json: { mode: vals.mode || 'grey', in_scope: _scopeLines(vals.in_scope), out_scope: _scopeLines(vals.out_scope) },
   };
   try {
@@ -155,10 +159,13 @@ export async function engagementEditModal(e) {
       { name: 'classification', label: 'Classification (TLP 2.0)', type: 'select', value: e.classification || '', options: TLP_OPTS },
       { name: 'in_scope', label: 'Redéfinir in-scope (vide = inchangé — un hôte par ligne)', type: 'textarea', placeholder: curIn.length ? curIn.join('\n') : 'app.example.com', hint: 'Actuel : ' + curInTxt },
       { name: 'out_scope', label: 'Redéfinir out-of-scope (vide = inchangé)', type: 'textarea', placeholder: curOut.length ? curOut.join('\n') : 'admin.example.com', hint: 'Actuel : ' + curOutTxt },
+      { name: 'allow_private', label: 'Autoriser le réseau privé pour cet engagement (nécessite AUSSI la politique globale + le scope)', type: 'checkbox', value: !!e.allow_private },
     ],
   });
   if (!vals) return;
   const body = { name: String(vals.name || '').trim(), mode: vals.mode || e.mode, classification: vals.classification || '' };
+  // POLITIQUE RÉSEAU : bascule l'opt-in par engagement (booléen strict ; n'ouvre rien sans le master global + scope).
+  body.allow_private = !!vals.allow_private;
   const inl = _scopeLines(vals.in_scope), outl = _scopeLines(vals.out_scope);
   if (inl.length || outl.length) body.scope_json = { mode: vals.mode || e.mode, in_scope: inl, out_scope: outl };
   await engagementMutate(e.id, body, 'Engagement mis à jour.');

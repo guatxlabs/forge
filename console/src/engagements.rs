@@ -240,7 +240,7 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
         "SELECT e.id, e.name, e.status, e.mode, e.created,
                 (SELECT COUNT(*) FROM finding f WHERE f.engagement_id=e.id),
                 (SELECT COUNT(*) FROM run_job j WHERE j.engagement_id=e.id),
-                e.tenant_id, e.classification, e.scope_json
+                e.tenant_id, e.classification, e.scope_json, e.allow_private
          FROM engagement e{where_clause} ORDER BY e.id",
     ), &tparams, |r| {
         let tenant_id = r.get_i64(7)?;
@@ -264,6 +264,9 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
             // SCOPE réel (in/out) — une entrée par host, servi tel quel à l'éditeur (B4 : « show the real scope »).
             "in_scope": scope_json_list(&scope_v, "in_scope"),
             "out_scope": scope_json_list(&scope_v, "out_scope"),
+            // POLITIQUE RÉSEAU (privé/LAN/loopback) : opt-in PAR ENGAGEMENT (colonne allow_private). L'éditeur
+            // affiche/édite la case. Effectif = ceci AND le master global (indiqué séparément côté UI).
+            "allow_private": r.get_opt_i64(10)?.unwrap_or(0) != 0,
         });
         if expose_tenant {
             o["tenant_id"] = json!(tenant_id);
@@ -317,6 +320,10 @@ pub(crate) async fn engagements_create(
             None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_classification", "why": format!("classification '{s}' invalide (TLP: {})", TLP_CLASSES.join("|"))}))).into_response(),
         },
     };
+    // POLITIQUE RÉSEAU (privé/LAN/loopback) : opt-in PAR ENGAGEMENT, DÉFAUT FALSE (fail-closed). Booléen
+    // strict (bool JSON) ; toute autre valeur/absence => false. N'ouvre RIEN à lui seul : l'effectif exige
+    // AUSSI le master global (calculé dans run_create). Ledgerisé plus bas avec le reste de la création.
+    let allow_private: i64 = if body.get("allow_private").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
     let actor = attribution_login(&app, &headers);
     // ENTERPRISE (flag-gated) : un engagement naît DANS un tenant accordé au créateur (fail-closed — on
     // ne crée jamais un espace dans un tenant qu'on ne possède pas). Community => None (tenant #1 par
@@ -338,9 +345,9 @@ pub(crate) async fn engagements_create(
         // execute_returning_id : id du nouvel engagement lu du MÊME INSERT (RETURNING id sur PG), sans
         // lastval() — session-indépendant, sûr sur backend poolé. L'UPDATE tenant/ledger vient APRÈS.
         let id = match store.execute_returning_id(
-            "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,classification,created,updated)
-             VALUES(?,?,?,?,'',?,datetime('now'),datetime('now'))",
-            &crate::sql_params![&name, "active", &mode, scope_json, &classification],
+            "INSERT INTO engagement(name,status,mode,scope_json,ledger_path,classification,allow_private,created,updated)
+             VALUES(?,?,?,?,'',?,?,datetime('now'),datetime('now'))",
+            &crate::sql_params![&name, "active", &mode, scope_json, &classification, allow_private],
         ) {
             Ok(id) => id,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response(),
@@ -369,14 +376,14 @@ pub(crate) async fn engagements_create(
     }
     // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
     append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
-        "actor": actor, "engagement_id": id, "name": name, "mode": mode,
+        "actor": actor, "engagement_id": id, "name": name, "mode": mode, "allow_private": allow_private != 0,
     }));
     if ledger_path != app.ledger_path.as_str() {
         append_console_ledger(&app, "console.engagement.create", json!({
-            "actor": actor, "engagement_id": id, "name": name, "mode": mode,
+            "actor": actor, "engagement_id": id, "name": name, "mode": mode, "allow_private": allow_private != 0,
         }));
     }
-    (StatusCode::OK, Json(json!({"ok": true, "engagement": {"id": id, "name": name, "status": "active", "mode": mode}}))).into_response()
+    (StatusCode::OK, Json(json!({"ok": true, "engagement": {"id": id, "name": name, "status": "active", "mode": mode, "allow_private": allow_private != 0}}))).into_response()
 }
 
 /// ÉDITE un engagement (name/mode/scope/status). GARDE-FOU fail-closed : on ne peut pas ARCHIVER le
@@ -427,8 +434,18 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
             }
         }
     };
-    if new_name.is_none() && new_scope.is_none() && new_mode.is_none() && new_status.is_none() && new_class.is_none() {
-        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (name|mode|scope_json|status|classification)".into()));
+    // POLITIQUE RÉSEAU (privé/LAN/loopback) : opt-in PAR ENGAGEMENT éditable. Booléen strict (bool JSON) ;
+    // absent => pas de changement ; toute autre valeur => 400. N'ouvre RIEN seul (effectif = ceci AND master global).
+    let new_allow_private: Option<i64> = match body.get("allow_private") {
+        None => None,
+        Some(v) => match v.as_bool() {
+            Some(b) => Some(if b { 1 } else { 0 }),
+            None => return Err((StatusCode::BAD_REQUEST, "allow_private doit être un booléen (true|false)".into())),
+        },
+    };
+    if new_name.is_none() && new_scope.is_none() && new_mode.is_none() && new_status.is_none()
+        && new_class.is_none() && new_allow_private.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "aucun changement fourni (name|mode|scope_json|status|classification|allow_private)".into()));
     }
     let archiving = new_status.as_deref() == Some("archived") && cur_status == "active";
     {
@@ -451,8 +468,12 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
         if let Some(m) = &new_mode { sets.push("mode=?"); vals.push(m.clone()); }
         if let Some(s) = &new_status { sets.push("status=?"); vals.push(s.clone()); }
         if let Some(c) = &new_class { sets.push("classification=?"); vals.push(c.clone()); }
+        // allow_private est un ENTIER (0/1), pas du texte : on l'ajoute EN DERNIER dans la liste des SET,
+        // et son Param::Int est poussé après les params texte (ordre des placeholders préservé), avant `id`.
+        if new_allow_private.is_some() { sets.push("allow_private=?"); }
         let sql = format!("UPDATE engagement SET {}, updated=datetime('now') WHERE id=?", sets.join(", "));
         let mut params: Vec<crate::store::Param> = vals.iter().map(|s| crate::store::Param::Text(s.clone())).collect();
+        if let Some(ap) = new_allow_private { params.push(crate::store::Param::Int(ap)); }
         params.push(crate::store::Param::Int(id));
         if let Err(e) = store.execute(&sql, &params) {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("écriture de l'engagement échouée: {e}")));
@@ -465,6 +486,7 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
         "actor": actor, "engagement_id": id,
         "name": new_name, "mode": new_mode, "status": new_status, "scope_changed": new_scope.is_some(),
         "classification": new_class,
+        "allow_private": new_allow_private.map(|v| v != 0),
     }));
     Ok(json!({"ok": true, "engagement_id": id, "action": action}))
 }
