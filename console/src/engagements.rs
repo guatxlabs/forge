@@ -516,23 +516,12 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
             return Err((StatusCode::CONFLICT, "impossible : dernier engagement actif (suppression refusée, fail-closed)".into()));
         }
     }
-    // entrée FINALE dans le ledger DÉDIÉ (avant retrait de la ligne) — l'audit du fichier survit. B5 (HA) :
-    // sous le verrou consultatif cross-instance keyed sur ce ledger (pas de fourche si un pair appende encore).
-    if !ledger.is_empty() && ledger != app.ledger_path.as_str() {
-        // GOVERNED ACTION: the FINAL dedicated-ledger entry must land BEFORE we delete the rows. Under HA the
-        // advisory lock is the SOLE serialiser; if it is unreachable (FAIL-CLOSED), the append is REFUSED —
-        // so we must NOT proceed with the delete (a governed act must not run unaudited). Surface 503; the
-        // client retries once PG recovers. Single-instance (!ha): always `Ok`, this branch never trips.
-        crate::ha::with_ledger_lock(app, &ledger, || {
-            let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
-                &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
-        })
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
-    }
-    // FAIL-CLOSED + ATOMIQUE (with_tx) : la cascade de suppression est tout-ou-rien. Un échec en cours ->
-    // ROLLBACK + 500 AVANT le ledger console `console.engagement.delete` (sinon il attesterait une suppression
-    // partielle/inexistante — findings supprimés mais ligne engagement restante, ou l'inverse). L'entrée FINALE
-    // du ledger DÉDIÉ écrite plus haut (audit du fichier) est préservée intentionnellement.
+    // L8 FIX — DELETE-THEN-ATTEST (parité avec tous les handlers voisins : compliance purge, run cancel…).
+    // FAIL-CLOSED + ATOMIQUE (with_tx) : la cascade de suppression est tout-ou-rien et s'exécute EN PREMIER.
+    // Un échec en cours -> ROLLBACK + 500 et on N'ÉCRIT AUCUNE attestation (ni ledger dédié, ni ledger
+    // console) : le code ci-dessous n'est jamais atteint. On ne peut donc PLUS attester une suppression qui
+    // n'a pas eu lieu (le défaut précédent : l'entrée `console.engagement.delete` était appendée AVANT la
+    // transaction, donc un rollback laissait le ledger attestant un delete inexistant).
     {
         let store = app.store();
         if let Err(e) = store.with_tx(|tx| {
@@ -547,6 +536,18 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
         }) {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("suppression de l'engagement échouée: {e}")));
         }
+    }
+    // entrée FINALE dans le ledger DÉDIÉ — appendée SEULEMENT après le COMMIT de la cascade (delete-then-
+    // attest). B5 (HA) : sous le verrou consultatif cross-instance keyed sur ce ledger (pas de fourche si un
+    // pair appende encore). Si le lock est injoignable (FAIL-CLOSED), on surface 503 — les lignes sont déjà
+    // supprimées (le ledger console ci-dessous enregistre malgré tout le delete ; un retry client verra 404).
+    // Single-instance (!ha): always `Ok`, cette branche ne trébuche jamais.
+    if !ledger.is_empty() && ledger != app.ledger_path.as_str() {
+        crate::ha::with_ledger_lock(app, &ledger, || {
+            let _ = ledger_append_standalone(&ledger, "console.engagement.delete",
+                &json!({"actor": actor, "engagement_id": id, "findings": findings, "runs": runs}));
+        })
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
     }
     append_console_ledger(app, "console.engagement.delete", json!({
         "actor": actor, "engagement_id": id, "findings": findings, "runs": runs,

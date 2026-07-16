@@ -5841,6 +5841,10 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     async fn import_endpoint_operator_gated_ledgered_and_scope_guarded() {
         let path = tmp_path("forge-test-import-ep");
         let app = test_app_scoped(&path, vec!["example.com".into(), "*.example.com".into()]);
+        // Le boot serveur seede TOUJOURS l'engagement #1 depuis le scope serveur (ensure_default_engagement).
+        // import_scan résout désormais l'engagement cible (L9) : on reflète donc le boot de PROD. Le scope
+        // ainsi dérivé (mode/in_scope/out_scope=[]) est IDENTIQUE aux globals utilisés auparavant.
+        ensure_default_engagement(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
         {
             let db = app.db();
             upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
