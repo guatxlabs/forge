@@ -593,6 +593,11 @@ fn build_router(app: App, web_dir: &str) -> Router {
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             catch_panic_response,
         ))
+        // EN-TÊTES DE SÉCURITÉ — couche la PLUS EXTERNE (ajoutée en DERNIER => appliquée en PREMIER à
+        // l'entrée, en DERNIER à la sortie) : elle tamponne DONC toutes les réponses, y compris le 421
+        // anti-rebinding du host_guard et le 500 du filet anti-panic ci-dessus. X-Frame-Options/nosniff/
+        // Referrer-Policy/CSP sur tout ; HSTS SCHEME-AWARE (seulement derrière TLS, cf. security_headers).
+        .layer(middleware::from_fn(security_headers))
         .with_state(app)
 }
 
@@ -1220,6 +1225,62 @@ mod tests {
             "corps stable, got: {raw}"
         );
         assert!(!raw.contains("boom-should-be-caught-not-leaked"), "message de panique jamais exposé, got: {raw}");
+    }
+
+    /// EN-TÊTES DE SÉCURITÉ (F1) — END-TO-END sur le VRAI `build_router` : on sert le routeur complet sur
+    /// un port éphémère et on frappe avec un client TCP brut (std, zéro nouvelle dépendance). On vérifie
+    /// que TOUTES les réponses (shell `/` public + une route `/api/*`) portent X-Frame-Options/nosniff/
+    /// Referrer-Policy/CSP, et que HSTS est ABSENT en http clair mais PRÉSENT quand
+    /// `X-Forwarded-Proto: https` est présenté (scheme-aware, même gate que le drapeau Secure du cookie).
+    #[tokio::test]
+    async fn security_headers_present_on_all_responses_and_hsts_is_scheme_aware() {
+        use std::io::{Read, Write};
+        // Un install non provisionné (auth_required=false via test_app) : `/` et `/api/whoami` répondent
+        // sans credentials — ce qui nous suffit pour observer les EN-TÊTES (posés AVANT tout gating).
+        let path = tmp_path("sechdr-ledger");
+        let app = test_app(&path);
+        let router = build_router(app, "web");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service()).await;
+        });
+        // Helper : envoie une requête brute, lit la réponse complète (Connection: close -> EOF).
+        fn hit(addr: std::net::SocketAddr, req: &str) -> String {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).unwrap();
+            buf
+        }
+        let req_root = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string();
+        let req_api = "GET /api/whoami HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string();
+        let req_https = "GET / HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n".to_string();
+        let (root, api, https) = tokio::task::spawn_blocking(move || {
+            (hit(addr, &req_root), hit(addr, &req_api), hit(addr, &req_https))
+        })
+        .await
+        .unwrap();
+        server.abort();
+
+        // Les 4 en-têtes non-HSTS présents sur le shell ET sur l'API (comparaison insensible à la casse).
+        for (label, raw) in [("/", &root), ("/api/whoami", &api)] {
+            let lc = raw.to_ascii_lowercase();
+            assert!(lc.contains("x-frame-options: deny"), "{label}: X-Frame-Options manquant\n{raw}");
+            assert!(lc.contains("x-content-type-options: nosniff"), "{label}: nosniff manquant\n{raw}");
+            assert!(lc.contains("referrer-policy: no-referrer"), "{label}: Referrer-Policy manquant\n{raw}");
+            assert!(lc.contains("content-security-policy:"), "{label}: CSP manquante\n{raw}");
+            assert!(lc.contains("frame-ancestors 'none'"), "{label}: frame-ancestors 'none' manquant\n{raw}");
+        }
+        // HSTS scheme-aware : ABSENT en http clair, PRÉSENT derrière X-Forwarded-Proto: https.
+        assert!(
+            !root.to_ascii_lowercase().contains("strict-transport-security"),
+            "HSTS ne doit PAS être posé en http loopback clair\n{root}"
+        );
+        assert!(
+            https.to_ascii_lowercase().contains("strict-transport-security: max-age=63072000; includesubdomains"),
+            "HSTS DOIT être posé quand X-Forwarded-Proto: https\n{https}"
+        );
     }
 
     /// GATE CONTRACT (Stage 2b batch 5) : la sélection du backend enterprise est FAIL-CLOSED.
