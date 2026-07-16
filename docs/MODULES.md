@@ -20,7 +20,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 - **dépendance** — outil/service attendu (`stdlib` = toujours disponible, pur Python ; sinon
   auto-neutralisé si absent).
 
-## Les 31 modules
+## Les 34 modules
 
 | kind | exploit | destructif | ATT&CK | dépendance | description |
 |---|:---:|:---:|---|---|---|
@@ -54,6 +54,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 | `ssrf.callback` | oui | — | T1190 | stdlib + collecteur callback | Oracle SSRF à PREUVE : injecte une URL de callback unique et confirme la réception côté collecteur. Pas de callback → tested (jamais vuln aveugle). CWE-918. |
 | `ssti.eval` | — | — | T1190 | stdlib | Oracle SSTI à PREUVE BÉNIGNE : injecte un produit arithmétique unique ; PREUVE = le produit ÉVALUÉ est réfléchi. Aucune exécution de code. Sinon tested. CWE-1336. |
 | `web.nuclei` | — | — | T1595.002 | nuclei (bin/docker) | Scan de vulnérabilités par templates nuclei (medium/high/critical). |
+| `web.security_headers` | — | — | T1595.002 | stdlib | Audit des en-têtes HTTP de sécurité (CSP/X-Frame-Options/nosniff/Referrer-Policy/HSTS sur https/Permissions-Policy) + cookies non sécurisés (Secure/HttpOnly/SameSite). Un finding INFO/LOW par écart, status=tested (jamais vulnerable). CWE-693. |
 | `xss.reflected` | — | — | T1059 | stdlib | Oracle Reflected XSS à PREUVE BÉNIGNE : marqueur unique réfléchi NON échappé en contexte JS-exécutable. L'exécution réelle + la chaînabilité exigent le module navigateur/évasion. Sinon tested. CWE-79. |
 
 ## Gouvernance des connecteurs

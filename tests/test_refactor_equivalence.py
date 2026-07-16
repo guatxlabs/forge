@@ -111,6 +111,8 @@ EXPECTED_KINDS = {
     # SONDES RÉSEAU GOUVERNÉES (HTTP/DNS) — non-exploit/non-destructif, UI-configurables (params_schema)
     "recon.curl",                                                # sonde HTTP bénigne (réponse -> STDOUT, aucun exfil/upload/proxy)
     "recon.dig",                                                 # lookup DNS PASSIF (+short ; -f/-k fichiers refusés)
+    # AUDIT DE DURCISSEMENT — en-têtes HTTP de sécurité + cookies (security_headers.py), INFO/LOW tested
+    "web.security_headers",                                      # CSP/X-Frame-Options/nosniff/Referrer/HSTS/Permissions-Policy/cookies
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
 EXPECTED_QUALIFYING = {
