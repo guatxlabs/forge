@@ -67,7 +67,17 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 ## 🔍 Audit holistique multi-agents (2026-07) → remédiation
 Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents (find → vérif adverse → synthèse), **31 findings confirmés** (42 bruts) : **0 critique · 1 HIGH · 7 MEDIUM · 20 LOW · 3 INFO**. Posture globalement saine (garde-fous cœur cohérents) ; défauts = écarts d'uniformité concentrés sur 3 thèmes.
 
-**Plan de remédiation (tranches — tâches suivies) :**
+**Remédiation — ✅ LIVRÉE & DÉPLOYÉE (rebuild host-net, ledger verify OK, console loopback-strict prouvée) :**
+- ✅ **T1** ledger WORM (H1 purge sous verrou cross-process + test de course zéro-perte, M1 canon parité, M2 verify tolérant) — `563611a`
+- ✅ **T2** auth/tenancy (M3 dual-candidate propagé, M4 SSO no-auto-adopt, L6 role borné, L7 SCIM tx) — `7fe3b70`
+- ✅ **T3** ROE/anti-rebinding (L1-L4 TOCTOU de décision fermé + IP épinglée, L5, L16 ; connexion-pin bout-en-bout → suivi T8) — `53407a6`
+- ✅ **T4** moteur/modules (M5 SSE scopé, M6 FIRE→ERROR, M7 origin corrélé, L11/L12 caps net.rs, L14) — `b4014d5`
+- ✅ **T5** data/runs (L8 delete-then-attest, L9 import gaté tenancy/scope, L10 async) — `da658db`
+- ✅ **T6** front quick-wins (L17/L18/I2/I3) — `77155b9`
+- ✅ **T7** plan archi (`docs/ARCHITECTURE_REFACTOR_PLAN.md` — main.rs = ~80% tests ; découpe incrémentale) — `64f48dc`
+- ⏳ **T8** (suivi) pin de connexion bout-en-bout des modules (Oracle._http + httpflow re-résolvent encore).
+
+**Plan initial (tranches — historique) :**
 - **T1 — Intégrité ledger (WORM)** : `H1` purge hors verrou cross-process (`compliance.rs:377`) → perte d'écriture silencieuse + **test de course** · `M1` parité `canon_json` Rust/Python (`\b`/`\f`, `ledger_api.rs:78`) · `M2` `verify()` tolère ligne torn + flock (`ledger.py:292`).
 - **T2 — Auth / tenancy** : `M3` Bearer périmé masque le cookie dans `tenancy.rs:70` (**même classe que C14, non propagée**) · `M4` SSO auto-lie un compte local par collision (`sso.rs:371`) · `L6` borne role SSO · `L7` SCIM membership transactionnel.
 - **T3 — ROE / anti-rebinding SSRF** : `L1-L4` épinglage d'IP (résout au FIRE, connexion par-IP) `roe.py` · `L5` `_log` fail-safe · `L16` clamp `severity`.
