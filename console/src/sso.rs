@@ -704,17 +704,22 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, email_verified: 
         let store = app.store();
         if let Ok(id) = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
             // M4 — NO AUTO-ADOPT of an UNMARKED LOCAL account (fail-closed). Only an account that already
-            // carries an explicit SSO binding marker (`sso_managed` — set when SSO auto-provisions it, or by
-            // a future admin link) may be authenticated-as by an SSO identity. A pre-existing LOCAL account
-            // (created via /api/setup or admin CRUD, never via SSO) is NEVER adopted by a colliding IdP
-            // claim: otherwise an attacker whose sanitised `sub`/`email` collides with a privileged local
-            // login could authenticate AS it — and the caller's `apply_to_user` would then re-role it from
-            // the IdP `groups`. Refusing here also PREVENTS that re-role (the caller returns 403 before it).
-            if is_sso_managed(&store, id) {
+            // carries an explicit IdP-provisioning marker may be authenticated-as by an SSO identity:
+            //   - `sso_managed` — set when SSO auto-provisions it, or by a future admin link; OR
+            //   - `scim_user`   — a SCIM-provisioned account (combined SCIM+SSO: an IdP provisions users via
+            //     SCIM, those users then interactively sign in via SSO — a legitimate enterprise pattern).
+            // A pre-existing UNMARKED LOCAL account (created via /api/setup or admin CRUD, never via SSO or
+            // SCIM) is NEVER adopted by a colliding IdP claim: otherwise an attacker whose sanitised
+            // `sub`/`email` collides with a privileged local login could authenticate AS it — and the
+            // caller's `apply_to_user` would then re-role it from the IdP `groups`. Refusing here also
+            // PREVENTS that re-role (the caller returns 403 before it). The security property is unchanged:
+            // an IdP claim can never hijack a plain local account; only an account the IdP already OWNS
+            // (via SSO or SCIM provisioning) can be signed into via SSO.
+            if is_sso_managed(&store, id) || is_scim_managed(&store, id) {
                 return Ok((id, login, false));
             }
             return Err(format!(
-                "account '{login}' already exists and is not SSO-managed — refusing to auto-adopt a local account (fail-closed; an admin must explicitly link it to SSO before an SSO identity can sign in as it)"
+                "account '{login}' already exists and is neither SSO- nor SCIM-managed — refusing to auto-adopt a local account (fail-closed; an admin must explicitly link it to SSO, or it must be SCIM-provisioned, before an SSO identity can sign in as it)"
             ));
         }
     }
@@ -861,6 +866,16 @@ fn mark_sso_managed(store: &crate::store::Store, user_id: i64) {
 fn is_sso_managed(store: &crate::store::Store, user_id: i64) -> bool {
     store
         .query_row("SELECT 1 FROM sso_managed WHERE user_id=?", &crate::sql_params![user_id], |_| Ok(()))
+        .is_ok()
+}
+
+/// Is `user_id` a SCIM-provisioned account (has a `scim_user` mapping row — the same predicate SCIM uses
+/// everywhere to decide an account it OWNS)? Used to allow combined SCIM+SSO: a SCIM-provisioned account
+/// may interactively sign in via SSO. In a SCIM-less deployment the `scim_user` table does not exist, the
+/// query errs, and this returns `false` (fail-closed — no bearing on the M4 unmarked-local-account gate).
+fn is_scim_managed(store: &crate::store::Store, user_id: i64) -> bool {
+    store
+        .query_row("SELECT 1 FROM scim_user WHERE user_id=?", &crate::sql_params![user_id], |_| Ok(()))
         .is_ok()
 }
 
@@ -1908,6 +1923,95 @@ byHb5g3JqJSE6WJSuyEQrUob
         let r2 = http_raw(addr, &callback_req(&s2, "c")).await;
         assert_eq!(parse_status(&r2), 302, "[M4] fresh SSO account still provisions: {r2}");
         assert!(cookie_token(&r2).is_some(), "[M4] fresh SSO login issues a session");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 13b') COMBINED SCIM+SSO — the M4 adopt-gate is broadened to accept a SCIM-PROVISIONED account
+    //       (has a `scim_user` row) at SSO login, WITHOUT weakening the M4 property: an UNMARKED LOCAL
+    //       account (neither SSO- nor SCIM-managed) is STILL refused fail-closed. Covers:
+    //         (a) SCIM-managed pre-existing account -> SSO login ADOPTS it (session issued);
+    //         (b) UNMARKED LOCAL account            -> STILL refused (no session, role unchanged);
+    //         (c) SSO-managed account               -> still works (fresh provision + re-adoption).
+    //       Role handling on adoption (SAFE, least-surprising): map_user only decides ADOPTION, never
+    //       role. When the IdP asserts NO mapping group, `apply_to_user` leaves the role untouched and
+    //       the F6 downgrade cannot fire (the SCIM-only account is not `sso_managed`), so SCIM's role
+    //       authority is preserved — no surprise escalation of a SCIM account via SSO groups.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn sso_adopts_scim_managed_account_but_still_refuses_unmarked_local() {
+        let ledger = tmp_path("sso-scimsso-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        // auto-provision, sub-keyed, default viewer.
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "sub");
+
+        let hash = crate::hash_pw("localpw");
+        {
+            let db = app.db();
+            // (a) SCIM-PROVISIONED account: a local `users` row PLUS a `scim_user` mapping — the exact
+            //     predicate SCIM uses everywhere to mark an account it OWNS. Role operator (SCIM authority).
+            crate::upsert_user(&db, "scim-alice", "operator", &hash).unwrap();
+            let scim_id: i64 =
+                db.query_row("SELECT id FROM users WHERE login='scim-alice'", [], |r| r.get(0)).unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS scim_user(
+                   user_id INTEGER PRIMARY KEY, external_id TEXT NOT NULL DEFAULT '',
+                   email TEXT NOT NULL DEFAULT '', given_name TEXT NOT NULL DEFAULT '',
+                   family_name TEXT NOT NULL DEFAULT '', display_name TEXT NOT NULL DEFAULT '',
+                   created INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0);",
+            )
+            .unwrap();
+            db.execute("INSERT INTO scim_user(user_id,created,updated) VALUES(?,0,0)", [scim_id]).unwrap();
+            // (b) plain LOCAL account — NO markers (never SSO, never SCIM). Must stay refused.
+            crate::upsert_user(&db, "local-bob", "viewer", &hash).unwrap();
+            drop(db);
+        }
+        let addr = serve(app.clone()).await;
+
+        // (a) SCIM-managed account -> SSO login ADOPTS it (session issued). No mapping group asserted, so
+        //     SCIM's role authority is preserved (operator unchanged).
+        let (s, n, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "scim-alice", "", false, &n, 3600);
+        let r = http_raw(addr, &callback_req(&s, "c")).await;
+        assert_eq!(parse_status(&r), 302, "[SCIM+SSO] SCIM-managed account ADOPTS at SSO login: {r}");
+        assert!(cookie_token(&r).is_some(), "[SCIM+SSO] session issued for the SCIM-managed account");
+        let role_a: String = {
+            let db = app.db();
+            db.query_row("SELECT role FROM users WHERE login='scim-alice'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(role_a, "operator", "[SCIM+SSO] no mapping group -> SCIM's role preserved (no surprise re-role)");
+
+        // (b) UNMARKED LOCAL account -> STILL refused (M4 property preserved). No session, role unchanged.
+        let (s2, n2, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "local-bob", "", false, &n2, 3600);
+        let r2 = http_raw(addr, &callback_req(&s2, "c")).await;
+        assert_eq!(parse_status(&r2), 403, "[M4] unmarked local account STILL refused: {r2}");
+        assert!(body_of(&r2).contains("user_mapping_failed"), "[M4] reason: {}", body_of(&r2));
+        assert!(cookie_token(&r2).is_none(), "[M4] no session for the unmarked local account");
+        let role_b: String = {
+            let db = app.db();
+            db.query_row("SELECT role FROM users WHERE login='local-bob'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(role_b, "viewer", "[M4] unmarked local account NOT re-roled by the IdP claim");
+
+        // (c) SSO-managed account -> still works. A fresh `sub` auto-provisions AND marks it `sso_managed`;
+        //     a SECOND login with the same `sub` re-adopts it via the `is_sso_managed` path.
+        let (s3, n3, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sso-carol", "", false, &n3, 3600);
+        let r3 = http_raw(addr, &callback_req(&s3, "c")).await;
+        assert_eq!(parse_status(&r3), 302, "[SSO] fresh SSO account provisions + logs in: {r3}");
+        assert!(cookie_token(&r3).is_some(), "[SSO] session issued (fresh sso_managed account)");
+        let (s4, n4, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "sso-carol", "", false, &n4, 3600);
+        let r4 = http_raw(addr, &callback_req(&s4, "c")).await;
+        assert_eq!(parse_status(&r4), 302, "[SSO] SSO-managed account RE-ADOPTS on second login: {r4}");
+        assert!(cookie_token(&r4).is_some(), "[SSO] session re-issued for the SSO-managed account");
         let _ = std::fs::remove_file(&ledger);
     }
 
