@@ -370,7 +370,6 @@ fn build_router(app: App, web_dir: &str) -> Router {
     // favicon.svg/fonts/…) en fallback pour toute route non-API non matchée — l'index `/` reste rendu
     // par include_str!.
     let protected = Router::new()
-        .route("/", get(index))
         .route("/api/whoami", get(whoami))
         .route("/api/ingest", post(ingest))
         .route("/api/findings", get(findings))
@@ -524,6 +523,12 @@ fn build_router(app: App, web_dir: &str) -> Router {
         // fichier VERSION (source unique) ; `db` (ADDITIF Stage 4) PING le store ACTIF. `forge doctor
         // --purple` et le healthcheck compose ne testent que le code HTTP 200 (forme préservée).
         .route("/health", get(health))
+        // / : SHELL SPA STATIQUE (hors auth_guard). `index()` retourne include_str!("../web/index.html") —
+        // un document statique SANS secret, contenu IDENTIQUE à `/index.html` déjà public via ServeDir. Il
+        // DOIT être atteignable par navigation top-level pour que le SPA se rende et affiche le portail de
+        // login / wizard stylé ; un 401+WWW-Authenticate sur `/` déclencherait le popup Basic natif du
+        // navigateur au lieu du SPA. Toutes les DONNÉES restent derrière `/api/*` sous auth_guard.
+        .route("/", get(index))
         // /api/login HORS auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
         // reste sous host_guard (anti-rebinding). Pose une session individuelle (cookie + bearer).
         .route("/api/login", post(login))

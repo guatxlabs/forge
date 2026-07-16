@@ -46,6 +46,7 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 ## 🐞 Round 3 — 3e test live (2026-07-13)
 - **C10 — Doublon « actif : … »** : l'indicateur `#eng-active` répète le sélecteur (qui affiche déjà « Engagement par défaut · white »). **Supprimé** l'indicateur redondant (`9583467`) — actif affiché une seule fois (le sélecteur).
 - **C11 — Label « C2 » trompeur** : « Lancement C2 » / « opérateur C2 » / « C2-light gouverné » → C2 = Command&Control **post-exploitation** (implants), or Forge lance des campagnes recon/scan/oracle **pré-exploitation** orientées-preuve. **Renommé** l'UI en « Lancement / Campagne / Opérateur » (`9583467`) — 43 occurrences « C2 » user-facing → 0 (IDs internes intacts).
+- **C12 — Popup Chrome native au chargement** (au lieu du wizard/login stylé) : root cause `GET /` gated → `401` + `WWW-Authenticate: Basic realm="forge"` → le navigateur ouvre son **dialog Basic natif** sur la navigation top-level, le SPA ne se rend jamais. **Corrigé** : `/` servi **public** (shell SPA statique, sans secret, identique à `/index.html`) hors auth_guard ; en-tête `WWW-Authenticate` **retiré** du 401 du guard (le guard reste **fail-closed** + accepte toujours `Authorization: Basic` proactif — rétro-compat Plume/curl). Plus aucun popup natif ; le SPA gère l'auth via le portail de login stylé sur 401. **✅ corrigé — `03b3444`**
 
 ## Reste (hors bugs live)
 - **2 items planifiés** (P5/P6 — LIVRÉS, voir §D) + choix **accepted-as-is**. Aucun item readiness / audit / sécurité non résolu.

@@ -558,14 +558,15 @@ pub(crate) fn auth_guard_allows(app: &App, headers: &HeaderMap) -> bool {
 /// RBAC (middleware) : la gate s'engage dès qu'un hash env est posé OU qu'un compte activé existe en
 /// base (auth_required). Engagée + sans preuve valide -> 401 (le SPA affiche alors le portail de
 /// login). Désengagée (dev-open) -> passe. Toute la décision vit dans auth_guard_allows (testable).
+///
+/// La gate reste FAIL-CLOSED (401 dès qu'il n'y a pas de session valide) et accepte TOUJOURS
+/// proactivement `Authorization: Basic` via auth_guard_allows/check_basic (rétro-compat Plume/curl
+/// inchangée). On n'émet DÉLIBÉRÉMENT PAS l'en-tête `WWW-Authenticate: Basic` sur le 401 : sinon le
+/// navigateur ouvre son popup Basic natif sur toute navigation top-level au lieu de laisser le SPA
+/// rendre son portail de login stylé. Le SPA gère l'auth lui-même sur 401 via le portail stylé.
 pub(crate) async fn auth_guard(State(app): State<App>, req: Request, next: Next) -> Response {
     if auth_guard_allows(&app, req.headers()) {
         return next.run(req).await;
     }
-    (
-        StatusCode::UNAUTHORIZED,
-        [("WWW-Authenticate", "Basic realm=\"forge\"")],
-        "auth requise",
-    )
-        .into_response()
+    (StatusCode::UNAUTHORIZED, "auth requise").into_response()
 }
