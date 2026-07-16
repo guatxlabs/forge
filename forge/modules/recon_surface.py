@@ -41,6 +41,7 @@ import urllib.request
 
 from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
+from .. import pin as _pin
 from .. import runner
 from .. import session as _session
 from .. import techniques
@@ -114,15 +115,26 @@ class PassiveSurface(ScopeGuardMixin, Module):
         SESSION GOUVERNÉE : si un `SessionStore` est lié (moteur, autour de fire()), le matériel d'auth
         SECRET applicable à `url` — et UNIQUEMENT si `url` est IN-SCOPE (scope-guard du store) — est
         fusionné SOUS les en-têtes de l'appelant. Jamais renvoyé, jamais exposé dans un finding (les
-        findings recon dérivent de la RÉPONSE). Sans store lié -> aucune modification (byte-à-byte)."""
+        findings recon dérivent de la RÉPONSE). Sans store lié -> aucune modification (byte-à-byte).
+
+        ANTI-REBINDING : si le ROE a épinglé l'IP de l'hôte de `url` au fire-time (`pin.ip_for`), on ouvre
+        via l'opener PARTAGÉ `pin.build_pinned_opener` (source UNIQUE avec Oracle._pinned_open) qui SE
+        CONNECTE à l'IP épinglée AU LIEU de re-résoudre le DNS — Host/SNI/cert restent l'hôte d'origine
+        (TLS non affaibli). Pin ABSENT (hôte non épinglé, ex crt.sh/Wayback, ou aucun contexte lié) ->
+        `urllib.request.urlopen` NORMAL, BYTE-IDENTIQUE à l'historique."""
         req_headers = dict(headers or {"User-Agent": "forge-surface"})
         store = _session.current()
         if store is not None:                            # scope-guard PAR-URL : {} si url hors-scope
             for k, v in store.headers_for(url).items():
                 req_headers.setdefault(k, v)             # les en-têtes explicites de l'appelant priment
         req = urllib.request.Request(url, headers=req_headers)
+        # ANTI-REBINDING : hôte épinglé par le ROE -> opener partagé (connexion PAR-IP) ; sinon urlopen normal
+        # (byte-identique). L'override reste None : le dial consulte le pin thread-local PAR hôte, donc un
+        # saut de redirection vers un hôte non épinglé se résout normalement (pas de dial vers la mauvaise IP).
+        opener = _pin.build_pinned_opener() if _pin.ip_for(url) else None
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with (opener.open(req, timeout=timeout) if opener is not None
+                  else urllib.request.urlopen(req, timeout=timeout)) as r:
                 body = r.read(maxlen).decode("utf-8", "replace")
                 return r.status, body, {k: v for k, v in r.headers.items()}
         except urllib.error.HTTPError as e:

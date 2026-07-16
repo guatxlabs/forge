@@ -31,8 +31,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import pin                                            # noqa: E402
+from forge import session as _session_mod                        # noqa: E402
+from forge.session import SessionStore                            # noqa: E402
 from forge.roe import Action, Scope, FIRE                        # noqa: E402
 from forge.modules.oracle import Oracle                          # noqa: E402
+from forge.modules.recon_surface import PassiveSurface           # noqa: E402
 from forge.modules.httpflow import RequestSmugglingProbe        # noqa: E402
 from forge.engine import Engine                                  # noqa: E402
 
@@ -185,7 +188,8 @@ class TestOracleHttpPinSocketLayer(unittest.TestCase):
     """Preuve SOCKET fine sur `_pinned_open` : `create_connection` reçoit l'IP épinglée."""
 
     def test_pinned_open_dials_pinned_ip(self):
-        oraclemod = sys.modules["forge.modules.oracle"]
+        # la logique de connexion PAR-IP vit désormais en source UNIQUE dans forge.pin
+        # (build_pinned_opener) ; on patche donc le seam socket de CE module.
         captured = {}
 
         def _fake_cc(addr, timeout=None, source_address=None):
@@ -194,7 +198,7 @@ class TestOracleHttpPinSocketLayer(unittest.TestCase):
 
         import urllib.request
         req = urllib.request.Request("http://evil.example:8080/")
-        with mock.patch.object(oraclemod.socket, "create_connection", _fake_cc):
+        with mock.patch.object(pin.socket, "create_connection", _fake_cc):
             with self.assertRaises(Exception):                    # URLError enveloppe l'OSError
                 Oracle._pinned_open(req, "127.0.0.1", timeout=5)
         self.assertEqual(captured.get("addr"), ("127.0.0.1", 8080))
@@ -205,7 +209,6 @@ class TestOracleHttpPinSocketLayer(unittest.TestCase):
 # =================================================================================================
 class TestHttpsSniPreserved(unittest.TestCase):
     def test_sni_is_original_host_when_pinned(self):
-        oraclemod = sys.modules["forge.modules.oracle"]
         captured = {}
 
         class _FakeSock:
@@ -222,7 +225,7 @@ class TestHttpsSniPreserved(unittest.TestCase):
 
         import urllib.request
         req = urllib.request.Request("https://secure.invalid/api")
-        with mock.patch.object(oraclemod.socket, "create_connection", _fake_cc), \
+        with mock.patch.object(pin.socket, "create_connection", _fake_cc), \
                 mock.patch.object(ssl.SSLContext, "wrap_socket", _fake_wrap):
             with self.assertRaises(Exception):
                 Oracle._pinned_open(req, "127.0.0.1", timeout=5)
@@ -306,6 +309,166 @@ class TestEngineBindsPin(unittest.TestCase):
         self.assertEqual(seen.get("params"), ["93.184.216.34"], "l'IP résolue est exposée via action.params")
         self.assertEqual(seen.get("ctx_ip"), "93.184.216.34",
                          "Engine.execute a lié pin.using -> le module voit l'IP épinglée par le contexte")
+
+
+# =================================================================================================
+#  7. Oracle._http — REDIRECTION CROSS-HOST (T10) : la cible est connectée sur SON IP ÉPINGLÉE (résolue
+#     sous les MÊMES règles fail-closed), ou le suivi est REFUSÉ (privé/out_scope) — prouvé au socket.
+# =================================================================================================
+class _RedirHandler(http.server.BaseHTTPRequestHandler):
+    """Serveur loopback : `/` -> 302 vers `redirect_host:port/final` (cross-host) ; `/final` -> 200."""
+    port = None
+    redirect_host = "target.invalid"
+    seen = []                                                     # [(Host header, path)] reçus
+
+    def do_GET(self):                                             # noqa: N802
+        _RedirHandler.seen.append((self.headers.get("Host", ""), self.path))
+        if self.path == "/final":
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(302)
+            self.send_header("Location", f"http://{_RedirHandler.redirect_host}:{_RedirHandler.port}/final")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def log_message(self, *a):                                    # silencieux
+        pass
+
+
+class TestOracleCrossHostRedirectPin(unittest.TestCase):
+    def setUp(self):
+        _RedirHandler.seen = []
+        _RedirHandler.redirect_host = "target.invalid"
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), _RedirHandler)
+        self.port = self.httpd.server_address[1]
+        _RedirHandler.port = self.port
+        self.th = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.th.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.th.join(5)
+
+    @staticmethod
+    def _roe_resolves(mapping):
+        """Faux `getaddrinfo` : `mapping` {hostname: ip} résout vers cette IP (le ROE « voit » ces noms),
+        tout le reste DÉLÈGUE au vrai resolver (les IP littérales — dont l'IP épinglée loopback que
+        `create_connection` re-résout en interne — restent normales). La couche CONNEXION ne connaît PAS
+        `target.invalid`/`internal.invalid` : seule la résolution+pin du ROE les rend atteignables."""
+        real = socket.getaddrinfo                                 # capturé AVANT le patch (encore réel)
+
+        def _fake(host, *a, **k):
+            ip = mapping.get(str(host))
+            if ip is not None:
+                return [(2, 1, 6, "", (ip, 0))]
+            return real(host, *a, **k)
+        return _fake
+
+    def test_cross_host_redirect_connected_on_pinned_ip(self):
+        # target.invalid résout (ROE) vers loopback ; allow_private autorise l'IP loopback épinglée.
+        sc = Scope({"mode": "grey", "in_scope": ["origin.invalid", "target.invalid"], "allow_private": True})
+        store = SessionStore(sc)
+        origin = f"http://origin.invalid:{self.port}/"
+        roemod = sys.modules["forge.roe"]
+        with mock.patch.object(roemod.socket, "getaddrinfo",
+                               self._roe_resolves({"target.invalid": "127.0.0.1"})):
+            with _session_mod.using(store), pin.using(origin, ["127.0.0.1"]):
+                st, body, _h = Oracle._http(origin, follow_redirects=True)
+        self.assertEqual(st, 200, "la redirection cross-host a été suivie via l'IP ÉPINGLÉE (loopback)")
+        self.assertEqual(body, "ok")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertIn("/final", paths,
+                      "le 2e saut cross-host a atteint le serveur -> connecté PAR-IP épinglée (hostname mort sinon)")
+        hosts = [hh for (hh, _p) in _RedirHandler.seen]
+        self.assertIn(f"target.invalid:{self.port}", hosts,
+                      "Host header du 2e saut = hôte d'ORIGINE cross-host (jamais l'IP) -> TLS/identité préservée")
+
+    def test_cross_host_redirect_refused_when_target_resolves_private(self):
+        # internal.invalid résout (ROE) vers une IP PRIVÉE ; allow_private=False -> safe_pinned_ip None
+        # -> le suivi cross-host est REFUSÉ fail-closed (la 3xx remonte telle quelle, aucun 2e connect).
+        _RedirHandler.redirect_host = "internal.invalid"
+        sc = Scope({"mode": "grey", "in_scope": ["origin.invalid", "internal.invalid"], "allow_private": False})
+        store = SessionStore(sc)
+        origin = f"http://origin.invalid:{self.port}/"
+        roemod = sys.modules["forge.roe"]
+        connects = []
+        real_cc = pin.socket.create_connection
+
+        def _spy_cc(addr, *a, **k):
+            connects.append(addr)
+            return real_cc(addr, *a, **k)
+
+        with mock.patch.object(roemod.socket, "getaddrinfo",
+                               self._roe_resolves({"internal.invalid": "10.0.0.5"})), \
+                mock.patch.object(pin.socket, "create_connection", _spy_cc):
+            with _session_mod.using(store), pin.using(origin, ["127.0.0.1"]):
+                st, body, _h = Oracle._http(origin, follow_redirects=True)
+        self.assertEqual(st, 302, "cross-host vers un hôte résolvant en PRIVÉ -> NON suivi (3xx telle quelle)")
+        paths = [p for (_hh, p) in _RedirHandler.seen]
+        self.assertNotIn("/final", paths, "le 2e saut n'a JAMAIS atteint le serveur (fail-closed)")
+        # aucune connexion vers l'IP privée : les seuls connects sont vers l'IP épinglée de l'origine (loopback)
+        self.assertTrue(all(a[0] == "127.0.0.1" for a in connects),
+                        f"aucun connect hors de l'IP épinglée d'origine (connects={connects})")
+
+
+# =================================================================================================
+#  8. recon_surface._http_get (T10) — honore le pin ROE : connexion PAR-IP épinglée (preuve socket)
+# =================================================================================================
+class TestReconSurfacePin(unittest.TestCase):
+    def test_pinned_http_get_reaches_loopback_host_preserved(self):
+        # `pinned.invalid` ne résout PAS ; le pin court-circuite le DNS -> atteint le serveur loopback réel.
+        received = {}
+        srv = socket.create_server(("127.0.0.1", 0))
+        srv.settimeout(5)
+        port = srv.getsockname()[1]
+
+        def _serve():
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    conn.settimeout(5)
+                    received["raw"] = conn.recv(4096)
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            except Exception:                                     # noqa: BLE001
+                pass
+
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+        try:
+            url = f"http://pinned.invalid:{port}/"
+            with pin.using(url, ["127.0.0.1"]):
+                st, body, _h = PassiveSurface._http_get(url, timeout=5)
+        finally:
+            th.join(6)
+            srv.close()
+        self.assertEqual(st, 200, "recon _http_get a atteint le loopback via l'IP ÉPINGLÉE (hostname non résolvable)")
+        self.assertEqual(body, "ok")
+        self.assertIn(b"Host: pinned.invalid", received.get("raw", b""),
+                      "Host header = hôte d'ORIGINE (pas l'IP) -> identité préservée")
+
+    def test_without_pin_unresolvable_host_returns_none(self):
+        # CONTRASTE : sans pin, `pinned.invalid` n'est pas résolvable -> transport échoue (None), byte-identique.
+        st, _body, _h = PassiveSurface._http_get("http://pinned.invalid:1/", timeout=3)
+        self.assertIsNone(st, "sans pin : aucune connexion (hostname non résolvable) — comportement historique")
+
+    def test_pinned_http_get_dials_pinned_ip_socket_layer(self):
+        captured = {}
+
+        def _fake_cc(addr, timeout=None, source_address=None):
+            captured["addr"] = addr
+            raise OSError("court-circuit après capture (aucune connexion réelle)")
+
+        url = "http://pinned.invalid:8080/"
+        with pin.using(url, ["127.0.0.1"]):
+            with mock.patch.object(pin.socket, "create_connection", _fake_cc):
+                st, _b, _h = PassiveSurface._http_get(url, timeout=3)
+        self.assertEqual(captured.get("addr"), ("127.0.0.1", 8080),
+                         "recon _http_get doit dialer l'IP ÉPINGLÉE, jamais re-résoudre le hostname")
+        self.assertIsNone(st, "court-circuit après capture -> transport échoue proprement (offline-safe)")
 
 
 if __name__ == "__main__":

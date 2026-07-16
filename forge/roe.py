@@ -356,6 +356,31 @@ class Scope:
                 return True
         return False
 
+    def safe_pinned_ip(self, target: str) -> str | None:
+        """UNE IP SÛRE à ÉPINGLER pour une CONNEXION dérivée à runtime (ex : cible d'une REDIRECTION
+        CROSS-HOST que le ROE n'a PAS déjà épinglée au fire-time), en appliquant les MÊMES règles
+        fail-closed que `Roe.decide` au point de tir. Rend None (=> l'appelant REFUSE de suivre /
+        connecter) si :
+          - la résolution EXPIRE (`_ResolveTimeout`) ;
+          - l'hôte est INCONNU / ne résout vers aucune IP ([]) ;
+          - une IP résolue est PRIVÉE/LAN/loopback et `allow_private` est False (anti-rebinding) ;
+          - une IP résolue tombe dans un CIDR/IP `out_scope`.
+        Sinon la 1re IP résolue (déterministe — même choix que `pin.pick`). NE remplace PAS le
+        scope-guard hostname (`is_in_scope`, que l'appelant a déjà vérifié) : c'est la COUCHE réseau
+        anti-rebinding pour un hôte non déjà gouverné par une Decision. Utilise la résolution bornée +
+        mémoïsée par-run. Ne lève jamais."""
+        try:
+            ips = self.resolve_target_ips(target)
+        except _ResolveTimeout:
+            return None
+        if not ips:
+            return None
+        if not self.allow_private and self.resolved_ips_private(ips):
+            return None
+        if self.out_scope_matches_ips(ips):
+            return None
+        return ips[0]
+
     def is_private_target(self, target: str) -> bool:
         """True si la cible EST une IP privée/LAN/loopback OU RÉSOUT vers une telle IP (rétro-compat :
         API publique conservée). S'appuie sur `resolve_target_ips` (résolution bornée + cache). Un timeout
