@@ -783,7 +783,15 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 /* vue de login : plein écran, fond aurora (hérité de body::before), carte centrée */
 /* z-index 150 : au-dessus de l'en-tête (20) et des modales app (100), mais SOUS les toasts (200)
    pour que les notifications (ex. « Déconnecté ») restent lisibles par-dessus le portail. */
-.login-view{position:fixed;inset:0;z-index:150;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto}
+/* fond OPAQUE plein écran : le portail occulte totalement l'ossature app dans TOUT état transitoire
+   (défense en profondeur — ne dépend plus du seul body.gated). L'aurora est répliquée en ::before
+   (le fond opaque masquerait body::before) pour conserver l'ambiance « éclairée » sur login/wizard. */
+.login-view{position:fixed;inset:0;z-index:150;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto;background:var(--bg)}
+.login-view::before{content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;opacity:var(--aurora);filter:blur(48px);
+  background:
+    radial-gradient(42vw 42vw at 6% -8%, var(--b1), transparent 62%),
+    radial-gradient(38vw 38vw at 102% 10%, var(--b2), transparent 62%),
+    radial-gradient(36vw 36vw at 44% 116%, var(--b3), transparent 62%);}
 .login-card{width:min(400px,100%);background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);box-shadow:0 24px 70px #000a;padding:26px 26px 20px;display:flex;flex-direction:column;gap:13px;animation:movf .2s ease}
 .login-brand{display:flex;align-items:center;gap:8px;margin-bottom:2px}
 .login-brand .qz-brand{height:1.8em;width:auto;flex:none}
