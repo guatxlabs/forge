@@ -5,7 +5,7 @@ Auto-neutralisation (`available`) si ni binaire ni docker présents : discipline
 """
 from .registry import register, Module
 from .. import runner
-from .toolspec import check_extra_args, safe_value
+from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 
 
 def _path_argval(val):
@@ -29,10 +29,12 @@ def _rate_flag(params):
 
 
 @register("recon.httpx")
-class HttpxFingerprint(Module):
+class HttpxFingerprint(FlagAllowlistMixin, Module):
     kind = "recon.httpx"
     exploit = False
     mitre = "T1595"
+    _refuse_mitre = "T1595"                       # provenance du finding de refus (mixin) — inchangée
+    _refuse_tool = "httpx"
     description = ("Fingerprint HTTP (httpx) : status, titre, techno détectées. Params UI : threads "
                    "(-threads), rate (-rl), status-codes (-mc), paths (-path), extra_args (allowlist). "
                    "Défaut inchangé quand rien n'est fourni.")
@@ -45,7 +47,7 @@ class HttpxFingerprint(Module):
         {"name": "rate", "type": "number", "label": "rate-limit (-rl req/s)", "flag": "-rl"},
         {"name": "status_codes", "type": "text", "label": "codes filtrés (-mc, ex 200,301)", "flag": "-mc"},
         {"name": "paths", "type": "text", "label": "chemins probés (-path, ex /,/admin)", "flag": "-path"},
-        {"name": "extra_args", "type": "list", "label": "extra args (allowlist de drapeaux)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(),
     ]
     # ALLOWLIST des drapeaux acceptés en argument libre (extra_args) — tout flag hors liste est REFUSÉ.
     # EXCLUS : -o/-output (écriture fichier), -sr/-srd (store-response dans un dossier), -proxy/-http-proxy
@@ -78,18 +80,10 @@ class HttpxFingerprint(Module):
     def dry(self, action):
         return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
-    def _refuse(self, action, reason):
-        return [self.finding(
-            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
-            category="recon", mitre="T1595", status="skipped", tool="httpx",
-            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
-
     def fire(self, action):
-        p = action.params or {}
         # EXTRA_ARGS gouvernés : un drapeau libre hors allowlist (ou non-liste) -> refus fail-closed.
-        bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
-        if bad_extra is not None:
-            return self._refuse(action, f"argument libre refusé ({bad_extra})")
+        if (refused := self.gate_extra_args(action)):
+            return refused
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action), timeout=60, prefer_docker=True)
         failed = self.tool_failed(action, rc, out, err, "httpx")
         if failed:
@@ -101,10 +95,12 @@ class HttpxFingerprint(Module):
 
 
 @register("recon.nmap")
-class NmapServices(Module):
+class NmapServices(FlagAllowlistMixin, Module):
     kind = "recon.nmap"
     exploit = False
     mitre = "T1046"
+    _refuse_mitre = "T1046"                       # provenance du finding de refus (mixin) — inchangée
+    _refuse_tool = "nmap"
     description = ("Découverte des services exposés (nmap -sV). Params UI : ports (-p), top_ports "
                    "(--top-ports), scripts NSE (--script), timing (-T0..5), extra_args (allowlist). "
                    "Défaut : -sV -Pn --top-ports 1000 quand rien n'est fourni.")
@@ -119,7 +115,7 @@ class NmapServices(Module):
         {"name": "scripts", "type": "text", "label": "scripts NSE (--script, ex http-* ou default)", "flag": "--script"},
         {"name": "timing", "type": "select", "label": "timing (-T0..5)", "flag": "-T",
          "allowed": ["0", "1", "2", "3", "4", "5"]},
-        {"name": "extra_args", "type": "list", "label": "extra args (allowlist de drapeaux)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(),
     ]
     # ALLOWLIST des drapeaux acceptés en argument libre (extra_args) — tout flag hors liste est REFUSÉ.
     FLAG_ALLOWLIST = ("-sV", "-sC", "-sT", "-sS", "-p", "-p-", "--top-ports", "--script",
@@ -167,21 +163,13 @@ class NmapServices(Module):
     def dry(self, action):
         return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
-    def _refuse(self, action, reason):
-        return [self.finding(
-            target=action.target, title=f"{self.kind} non exécuté — {reason}", severity="INFO",
-            category="recon", mitre="T1046", status="skipped", tool="nmap",
-            evidence=f"{reason}. Aucun processus lancé (fail-closed).")]
-
     def fire(self, action):
-        p = action.params or {}
         # GARDE-FOU anti-injection d'argument : cible positionnelle commençant par '-' -> refus fail-closed.
         if str(action.target).startswith("-"):
             return self._refuse(action, "cible positionnelle ambiguë (commence par '-')")
         # EXTRA_ARGS gouvernés : un drapeau libre hors allowlist (ou non-liste) -> refus fail-closed.
-        bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
-        if bad_extra is not None:
-            return self._refuse(action, f"argument libre refusé ({bad_extra})")
+        if (refused := self.gate_extra_args(action)):
+            return refused
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action), timeout=300, prefer_docker=True)
         failed = self.tool_failed(action, rc, out, err, "nmap")
         if failed:
