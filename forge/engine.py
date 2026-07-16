@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
 from . import modules as mods
+from . import pin
 from . import purple
 from . import session
 from . import throttle
@@ -252,14 +253,17 @@ class Engine:
                 # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
                 # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
                 # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
-                # ANTI-REBINDING : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre laquelle le
-                # verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) pour qu'il PUISSE
-                # se connecter PAR-IP (Host header conservé). NB : aucun module ne consomme encore ce pin (la
-                # couche connexion urllib/httpflow re-résout) -> pont pour le futur épinglage END-TO-END ;
-                # additif et inoffensif s'il est ignoré. Ce qui est fermé aujourd'hui = la TOCTOU du VERDICT.
+                # ANTI-REBINDING END-TO-END : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre
+                # laquelle le verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) ET on
+                # LIE le contexte de pin (pin.using) : les chokepoints de connexion (Oracle._http, httpflow.
+                # _timed) SE CONNECTENT à CETTE IP au lieu de re-résoudre le hostname (le Host/SNI/cert restent
+                # l'hôte d'origine — TLS jamais affaibli). Ferme la fenêtre de DNS-rebinding sub-ms entre la
+                # résolution du ROE et le connect du module — en plus de la TOCTOU du VERDICT (déjà fermée).
+                # Pin absent (ips vide) => contexte no-op => résolution NORMALE (byte-identique à l'historique).
                 if decision.pinned_ips:
                     action.params["_pinned_ips"] = list(decision.pinned_ips)
-                with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions):
+                with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions), \
+                        pin.using(action.target, action.params.get("_pinned_ips")):
                     raw = module.fire(action) or []
                 # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur
                 # « rate-limited » (au lieu d'empties silencieux) dans les raisons de la décision (anti-masquage).

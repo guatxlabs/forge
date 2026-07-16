@@ -49,6 +49,7 @@ import urllib.parse
 from .oracle import ScopeGuardedOracle
 from .clientflow import ClientFlowOracle
 from .registry import register
+from .. import pin as _pin
 from .. import techniques
 
 
@@ -104,10 +105,16 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
         port = parsed.port or (443 if tls else 80)
         path = parsed.path or "/"
         raw = RequestSmugglingProbe._craft(variant, host, path)
+        # ANTI-REBINDING : le ROE a résolu+épinglé l'IP de la cible au fire-time (action.params["_pinned_ips"]).
+        # On établit la connexion TCP vers l'IP ÉPINGLÉE au lieu de re-résoudre le hostname ici (fenêtre de
+        # DNS-rebinding). Le `Host:` de la requête crafted reste `host` (voir _craft) et, en TLS, le SNI reste
+        # `host` (server_hostname ci-dessous) : la validation du certificat n'est PAS affaiblie. Pin absent =>
+        # `connect_host = host` (résolution normale, byte-identique à l'historique).
+        connect_host = _pin.pick(action.params.get("_pinned_ips")) or host
         t0 = time.monotonic()
         sock = None
         try:
-            sock = socket.create_connection((host, port), timeout=min(timeout, 10))
+            sock = socket.create_connection((connect_host, port), timeout=min(timeout, 10))
             if tls:
                 sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
             sock.settimeout(timeout)

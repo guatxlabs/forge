@@ -175,9 +175,10 @@ class Decision:
     destructive: bool
     reasons: list[str]
     # IP ÉPINGLÉES au POINT DE TIR (anti-rebinding) : la/les IP contre lesquelles le verdict a été rendu
-    # (résolution UNIQUE au fire-time). Vide sauf sur un FIRE. Le moteur les passe au module (action.params)
-    # pour qu'il puisse se connecter PAR-IP (voir note d'honnêteté dans `Roe.decide` : la couche connexion
-    # ne les honore pas encore end-to-end -> la garantie fermée ici est la TOCTOU sur le VERDICT).
+    # (résolution UNIQUE au fire-time). Vide sauf sur un FIRE. Le moteur les passe au module (action.params
+    # ["_pinned_ips"]) ET lie le contexte `pin.using` : les chokepoints de connexion (Oracle._http, httpflow.
+    # _timed) SE CONNECTENT à cette IP (Host/SNI/cert = hôte d'origine, TLS non affaibli) au lieu de
+    # re-résoudre -> l'épinglage est END-TO-END (verdict ET connexion), fermant la fenêtre de rebinding.
     pinned_ips: list[str] = field(default_factory=list)
     ts: str = field(default_factory=_now)
 
@@ -458,10 +459,12 @@ class Roe:
             # On est sur le point de FIRE. C'EST ICI, et NULLE PART AILLEURS, qu'on résout le hostname
             # (résolution unique, bornée par timeout + mémoïsée par-run). Le verdict privé/out_scope est
             # rendu CONTRE l'IP résolue, qui est ensuite ÉPINGLÉE sur la Decision (le moteur la passe au
-            # module). Ferme la TOCTOU sur le VERDICT : un hostname qui paraît public au plan mais RÉSOUT
-            # en interne au tir est VÉTOÉ ici. NB HONNÊTETÉ : la couche connexion des modules ne se
-            # connecte pas encore PAR-IP (urllib/httpflow re-résolvent) -> l'épinglage END-TO-END de la
-            # CONNEXION est reporté ; ce qui est FERMÉ ici est la TOCTOU sur la DÉCISION, pas le pin réseau.
+            # module ET lie `pin.using`). Ferme la TOCTOU sur le VERDICT : un hostname qui paraît public au
+            # plan mais RÉSOUT en interne au tir est VÉTOÉ ici. L'épinglage est désormais END-TO-END : les
+            # chokepoints de connexion (Oracle._http via `_pinned_open`, httpflow._timed) SE CONNECTENT à
+            # l'IP épinglée (Host/SNI/cert = hôte d'origine) au lieu de re-résoudre -> fenêtre de rebinding
+            # fermée aussi côté CONNEXION. SEULE EXCEPTION documentée : une redirection HTTP vers un AUTRE
+            # hôte re-résout (le pin ne couvre que l'hôte de la cible d'origine ; même hôte reste épinglé).
             try:
                 pinned = self.scope.resolve_target_ips(action.target)
             except _ResolveTimeout:                           # résolution expirée -> fail-closed (VETO)
