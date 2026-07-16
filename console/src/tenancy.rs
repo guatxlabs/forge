@@ -63,24 +63,18 @@ pub fn enabled(app: &App) -> bool {
 
 /// user_id of the caller's INDIVIDUAL session (non-expired, enabled account) — or None.
 /// FAIL-CLOSED: the env-hash bootstrap identity and anonymous dev-open have NO tenant grants (enterprise
-/// requires a provisioned individual account). Mirrors resolve_session_identity's account re-check.
+/// requires a provisioned individual account).
 /// pub(crate) so the notifications layer can resolve the ACTOR's user_id (skip self-notify) and the
 /// RECIPIENT scoping of `GET/POST /api/notifications` reuse the SAME session→user_id resolution.
+///
+/// M3 — resolved via the SAME dual-candidate logic as `auth_guard` (`resolve_session_identity`: Bearer
+/// OR cookie, each validated INDEPENDENTLY against `session` with the disabled/expiry re-check). Reusing
+/// the resolved `user_id` guarantees AUTH and TENANCY can never diverge: a caller admitted by auth (e.g.
+/// a VALID cookie accompanied by a STALE/foreign Bearer — a common residue of an old front build) now
+/// resolves to the SAME individual account for grants, instead of the previous single-candidate
+/// (Bearer-first) lookup that returned None and left them grantless in enterprise mode.
 pub(crate) fn caller_user_id(app: &App, headers: &HeaderMap) -> Option<i64> {
-    let tok = crate::session_token_from_headers(headers);
-    if tok.is_empty() {
-        return None;
-    }
-    let token_sha = crate::sha_hex(&tok);
-    let store = app.store();
-    store
-        .query_row(
-            "SELECT u.id FROM session s JOIN users u ON u.id = s.user_id
-          WHERE s.token_sha = ? AND u.disabled = 0 AND s.expires > ?",
-            &crate::sql_params![token_sha, crate::now_epoch()],
-            |r| r.get_i64(0),
-        )
-        .ok()
+    crate::resolve_session_identity(app, headers).map(|id| id.user_id)
 }
 
 /// The SET of tenant_ids the caller is granted (their access universe). ENTERPRISE-only semantics.

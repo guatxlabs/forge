@@ -251,7 +251,7 @@ pub(crate) use crate::engagements::*;
 // (PURE MOVE). Re-exporté `pub(crate)` à la racine pour que les routes/middlewares de build_router
 // (`get(whoami)`, `host_guard`, `auth_guard`), les appelants inter-modules (`crate::check_admin`,
 // `crate::check_operator`, `crate::attribution_login`, `crate::create_session`,
-// `crate::resolve_session_identity`, `crate::session_token_from_headers`, `crate::operator_denied`,
+// `crate::resolve_session_identity`, `crate::operator_denied`,
 // `crate::admin_denied`, `crate::Identity` …) ET les tests inline (`super::*`) résolvent INCHANGÉS.
 mod auth;
 pub(crate) use crate::auth::*;
@@ -1690,6 +1690,17 @@ mod tests {
         assert_eq!(id_b.role, "admin");
         assert!(check_operator(&app, &hdrs, None), "[C14] cookie admin + Bearer périmé -> C2 autorisé (était 401)");
 
+        // (M3) TENANCY converge avec l'AUTH : `caller_user_id` (chemin tenancy) résout le MÊME user que
+        // l'auth malgré le Bearer périmé — plus de single-candidat Bearer-first qui rendait l'utilisateur
+        // grantless en mode entreprise. Cookie valide + Bearer bidon -> uid du COOKIE (pas None).
+        assert_eq!(
+            tenancy::caller_user_id(&app, &hdrs),
+            Some(uid),
+            "[M3] tenancy résout l'user DU COOKIE malgré le Bearer périmé (auth/tenancy ne divergent plus)"
+        );
+        assert_eq!(tenancy::caller_user_id(&app, &cookie_headers(&atok)), Some(uid), "[M3] cookie seul -> uid résolu");
+        assert_eq!(id_b.user_id, uid, "[M3] resolve_session_identity expose le user_id réel de la session");
+
         // (c) Bearer VALIDE seul -> résolu (priorité Bearer, chemin inchangé).
         let id_c = resolve_session_identity(&app, &bearer_headers(&atok)).expect("Bearer valide seul -> résolu");
         assert_eq!(id_c.login, "adm");
@@ -1697,6 +1708,7 @@ mod tests {
         // (d) Bearer BIDON seul (aucun cookie) -> None (fail-closed, aucune élévation).
         assert!(resolve_session_identity(&app, &bearer_headers(bogus)).is_none(), "Bearer bidon sans cookie -> None");
         assert!(!check_operator(&app, &bearer_headers(bogus), None), "Bearer bidon seul -> C2 refusé");
+        assert_eq!(tenancy::caller_user_id(&app, &bearer_headers(bogus)), None, "[M3] Bearer bidon seul -> aucun user (fail-closed)");
         let _ = std::fs::remove_file(&path);
     }
 

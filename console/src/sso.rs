@@ -112,6 +112,17 @@ struct SsoConfig {
     require_email_verified: bool,
 }
 
+/// L6 — clamp the SSO auto-provisioning DEFAULT role to at most `operator` (SSO never auto-confers admin).
+/// Parity with `rbac::scim_role_for_group`'s `clamp_role(_, true)`. `admin` -> `operator`; a valid
+/// `operator`/`viewer` is kept; anything unknown -> `viewer` (fail-closed).
+fn clamp_sso_default_role(role: &str) -> String {
+    match role {
+        "operator" | "admin" => "operator",
+        _ => "viewer",
+    }
+    .to_string()
+}
+
 /// Load + validate the stored config. Returns `None` (UNCONFIGURED) if issuer/client_id/client_secret/
 /// redirect_uri is missing — the flow is disabled until an admin sets them.
 fn load_config(app: &App) -> Option<SsoConfig> {
@@ -133,7 +144,13 @@ fn load_config(app: &App) -> Option<SsoConfig> {
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
     let provisioning = v.get("provisioning").and_then(|x| x.as_str()).unwrap_or("match").to_string();
-    let default_role = v.get("default_role").and_then(|x| x.as_str()).unwrap_or("viewer").to_string();
+    // L6 — the SSO auto-provisioning DEFAULT role is BOUNDED to viewer|operator: SSO must NEVER auto-confer
+    // admin (parity with SCIM's `scim_role_for_group` clamp). This bounds ONLY the default fallback used when
+    // no IdP group maps; an EXPLICIT group→admin mapping is still honoured for an interactive SSO login (that
+    // path flows through `rbac::resolve`/`apply_to_user`, not this field). Clamp at LOAD so every consumer
+    // (map_user provisioning, the F6 downgrade target) sees the bounded value, even for a stored config that
+    // predates the clamp. admin -> operator; unknown -> viewer (fail-closed).
+    let default_role = clamp_sso_default_role(v.get("default_role").and_then(|x| x.as_str()).unwrap_or("viewer"));
     let user_claim = v.get("user_claim").and_then(|x| x.as_str()).unwrap_or("email").to_string();
     // Default TRUE (fail-closed): absent/malformed => require email_verified. Only an explicit `false`
     // (bool) opts out.
@@ -686,7 +703,19 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, email_verified: 
     {
         let store = app.store();
         if let Ok(id) = store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![&login], |r| r.get_i64(0)) {
-            return Ok((id, login, false));
+            // M4 — NO AUTO-ADOPT of an UNMARKED LOCAL account (fail-closed). Only an account that already
+            // carries an explicit SSO binding marker (`sso_managed` — set when SSO auto-provisions it, or by
+            // a future admin link) may be authenticated-as by an SSO identity. A pre-existing LOCAL account
+            // (created via /api/setup or admin CRUD, never via SSO) is NEVER adopted by a colliding IdP
+            // claim: otherwise an attacker whose sanitised `sub`/`email` collides with a privileged local
+            // login could authenticate AS it — and the caller's `apply_to_user` would then re-role it from
+            // the IdP `groups`. Refusing here also PREVENTS that re-role (the caller returns 403 before it).
+            if is_sso_managed(&store, id) {
+                return Ok((id, login, false));
+            }
+            return Err(format!(
+                "account '{login}' already exists and is not SSO-managed — refusing to auto-adopt a local account (fail-closed; an admin must explicitly link it to SSO before an SSO identity can sign in as it)"
+            ));
         }
     }
     if cfg.provisioning != "auto" {
@@ -1825,6 +1854,81 @@ byHb5g3JqJSE6WJSuyEQrUob
             db.query_row("SELECT role FROM users WHERE login='root'", [], |r| r.get(0)).unwrap()
         };
         assert_eq!(root_role, "admin", "local (non-SSO) admin must NOT be downgraded");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 13b) M4 — an OIDC claim colliding with an existing UNMARKED LOCAL login does NOT authenticate as,
+    //      nor re-role, that account. Only an explicit SSO binding marker (sso_managed) permits adoption.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn sso_never_adopts_or_reroles_unmarked_local_account() {
+        let ledger = tmp_path("sso-m4-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        let (issuer, slot) = spawn_mock_idp().await;
+        // auto-provision, sub-keyed (no email_verified concern), default viewer.
+        set_config(&app, &issuer, vec!["http://localhost/app"], "auto", "viewer", "sub");
+        // Map forge-admins -> admin so the IdP `groups` claim WOULD re-role the colliding login if adopted.
+        let _ = crate::rbac::resolve(&app, &["seed".to_string()]);
+        let hash = crate::hash_pw("localpw");
+        {
+            let db = app.db();
+            db.execute(
+                "INSERT INTO rbac_group_map(idp_group,role,tenant_id,tenant_role,created) VALUES('forge-admins','admin',NULL,NULL,0)",
+                [],
+            )
+            .unwrap();
+            // A pre-existing LOCAL account (role viewer), created via admin CRUD — NEVER via SSO/SCIM.
+            crate::upsert_user(&db, "victim", "viewer", &hash).unwrap();
+            drop(db);
+        }
+        let addr = serve(app.clone()).await;
+
+        // SSO login whose `sub` sanitises to the existing local login "victim", carrying an admin-conferring group.
+        let (s, n, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token_groups(GOOD_PEM, KID, &issuer, "forge-client", "victim", "", false, &n, 3600, &["forge-admins"]);
+        let r = http_raw(addr, &callback_req(&s, "c")).await;
+        assert_eq!(parse_status(&r), 403, "[M4] colliding claim on unmarked local account -> 403: {r}");
+        assert!(body_of(&r).contains("user_mapping_failed"), "[M4] reason: {}", body_of(&r));
+        assert!(cookie_token(&r).is_none(), "[M4] no session issued for the local account");
+
+        // The local account is NEITHER authenticated-as NOR re-roled (still viewer, never admin).
+        let role: String = {
+            let db = app.db();
+            db.query_row("SELECT role FROM users WHERE login='victim'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(role, "viewer", "[M4] unmarked local account must NOT be re-roled by the IdP groups claim");
+
+        // Regression: a FRESH `sub` (no collision) still auto-provisions and logs in normally.
+        let (s2, n2, _) = start_login(addr, "http://localhost/app").await;
+        *slot.lock().unwrap() =
+            make_id_token(GOOD_PEM, KID, &issuer, "forge-client", "brand-new-sub", "", false, &n2, 3600);
+        let r2 = http_raw(addr, &callback_req(&s2, "c")).await;
+        assert_eq!(parse_status(&r2), 302, "[M4] fresh SSO account still provisions: {r2}");
+        assert!(cookie_token(&r2).is_some(), "[M4] fresh SSO login issues a session");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 13c) L6 — SSO default_role is bounded to viewer|operator (never admin). Parity with SCIM's clamp.
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn sso_default_role_bounded_below_admin() {
+        // Pure clamp: admin -> operator; viewer/operator pass through; unknown -> viewer (fail-closed).
+        assert_eq!(clamp_sso_default_role("admin"), "operator", "[L6] admin default clamps down (never auto-confers admin)");
+        assert_eq!(clamp_sso_default_role("operator"), "operator");
+        assert_eq!(clamp_sso_default_role("viewer"), "viewer");
+        assert_eq!(clamp_sso_default_role("root"), "viewer", "[L6] unknown -> viewer (fail-closed)");
+
+        // End-to-end via load_config: a stored config with default_role="admin" loads as "operator".
+        let ledger = tmp_path("sso-l6-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        set_config(&app, "http://idp", vec!["http://localhost/app"], "auto", "admin", "sub");
+        let cfg = load_config(&app).expect("config loads");
+        assert_eq!(cfg.default_role, "operator", "[L6] SSO default_role=admin bounded to operator at load");
         let _ = std::fs::remove_file(&ledger);
     }
 
