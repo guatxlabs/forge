@@ -162,58 +162,6 @@
     }
 
 
-    /// App minimale pour tester append_console_ledger (ledger sur disque, reste inerte).
-    fn test_app(ledger_path: &str) -> App {
-        let conn = Connection::open_in_memory().expect("mem db");
-        conn.execute_batch(SCHEMA).expect("schema");
-        // Le boot serveur enchaîne TOUJOURS SCHEMA puis migrate() (colonnes additives : engagement.tenant_id,
-        // engagement.allow_private, run_job.*, …). On applique donc migrate ici aussi pour que l'App de test
-        // reflète le schéma de PRODUCTION (idempotent/additif : n'altère aucune colonne existante).
-        migrate(&conn);
-        let (events, _) = broadcast::channel::<RunEvent>(64);
-        App {
-            db: Arc::new(Mutex::new(conn)),
-            db_path: Arc::new(":memory:".into()),
-            #[cfg(feature = "store-postgres")]
-            pg: None,
-            #[cfg(feature = "store-postgres")]
-            ha: false,
-            #[cfg(feature = "store-postgres")]
-            instance_id: Arc::new("test-instance".into()),
-            #[cfg(feature = "store-postgres")]
-            is_leader: Arc::new(AtomicBool::new(true)),
-            token_sha: Arc::new(sha_hex("t")),
-            token_raw: Arc::new("t".into()),
-            user: Arc::new("forge".into()),
-            pass_hash: Arc::new(String::new()),
-            auth_required: Arc::new(AtomicBool::new(false)),
-            operator_hash: Arc::new(String::new()),
-            allowed_hosts: Arc::new(vec!["localhost".into()]),
-            ledger_path: Arc::new(ledger_path.to_string()),
-            pkg_dir: Arc::new("..".into()),
-            python: Arc::new("python3".into()),
-            scope_in: Arc::new(vec![]),
-            scope_mode: Arc::new("grey".into()),
-            detection_source: Arc::new(std::sync::RwLock::new(Arc::new(json!({"kind": "none"})))),
-            run_timeout_secs: 1800,
-            run_state: Arc::new(AsyncMutex::new(RunState { current: HashMap::new() })),
-            run_reservations: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            events,
-            ledger_lock: Arc::new(Mutex::new(LedgerHead::default())),
-        }
-    }
-
-
-    /// App de test avec un SCOPE SERVEUR non vide (pour les endpoints scope-guardés comme /api/import).
-    /// Applique aussi `migrate()` (colonnes additives run_id/cwe/cvss du finding) comme en production —
-    /// le boot serveur enchaîne toujours SCHEMA puis migrate ; les INSERT findings en dépendent.
-    fn test_app_scoped(ledger_path: &str, scope_in: Vec<String>) -> App {
-        let mut a = test_app(ledger_path);
-        a.scope_in = Arc::new(scope_in);
-        { let db = a.db(); migrate(&db); }
-        a
-    }
-
     /// B1 (CRITIQUE — anti-fourche) — MODÈLE DE LA COURSE DE PROD : la console (append_console_ledger) et
     /// le moteur Python écrivent le MÊME ledger. On simule un append MOTEUR (ligne écrite DIRECTEMENT sur
     /// disque, chaînée sur la queue) INTERCALÉ entre deux appends console. AVANT le fix, la console
@@ -369,13 +317,6 @@
         assert!(!verify_pw("wrong", &h1), "mauvais mdp doit échouer");
     }
 
-
-    /// Construit un HeaderMap avec un X-Forge-Operator (repli bootstrap env-hash).
-    fn operator_headers(pw: &str) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        h.insert("x-forge-operator", pw.parse().unwrap());
-        h
-    }
 
     /// [#6 comptes] validate_login / validate_role : grammaire stricte, rôles fermés (fail-closed).
     #[test]
@@ -717,12 +658,6 @@
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Compte les sessions d'un user_id (helper de test).
-    fn session_count(app: &App, uid: i64) -> i64 {
-        let db = app.db();
-        db.query_row("SELECT COUNT(*) FROM session WHERE user_id=?", [uid], |r| r.get(0)).unwrap()
-    }
-
     /// [ADMIN #4] admin_create_user + admin_list_users : création, vue publique SANS pass_hash, ledger
     /// de création SANS mot de passe/hash, attribution à l'acteur, doublon de login -> 409.
     #[test]
@@ -908,43 +843,6 @@
     // ---------------------------------------------------------------------------------------------
     // WIZARD 1er DÉPLOIEMENT + politique opérateur source-CIDR
     // ---------------------------------------------------------------------------------------------
-
-    /// Client HTTP brut minimal (aucune dép externe) : envoie `req` et lit toute la réponse jusqu'à EOF
-    /// (le serveur ferme la connexion sur `Connection: close`). Suffisant pour tester le câblage réel.
-    async fn http_raw(addr: SocketAddr, req: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        s.write_all(req.as_bytes()).await.expect("write");
-        let mut buf = Vec::new();
-        s.read_to_end(&mut buf).await.expect("read");
-        String::from_utf8_lossy(&buf).into_owned()
-    }
-    fn get_req(path: &str, extra: &str) -> String {
-        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\r\n")
-    }
-    fn post_req(path: &str, body: &str, extra: &str) -> String {
-        format!(
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
-            body.len()
-        )
-    }
-    fn parse_status(resp: &str) -> u16 {
-        resp.lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0)
-    }
-    fn body_of(resp: &str) -> &str {
-        resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
-    }
-    fn cookie_token(resp: &str) -> Option<String> {
-        let head = resp.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(resp);
-        let idx = head.find("forge_session=")?;
-        let rest = &head[idx + "forge_session=".len()..];
-        let end = rest.find(';').unwrap_or(rest.len());
-        Some(rest[..end].to_string())
-    }
 
     /// [SETUP wizard] Flux END-TO-END sur le VRAI routeur (build_router) : fresh -> needs_setup ;
     /// POST /api/setup crée l'admin, pose le cookie, bascule provisioned ; 2e POST -> 409 ;
@@ -1560,27 +1458,6 @@
     // ENGAGEMENT (objet de 1re classe) — migration zéro-perte + isolation du run flow.
     // =============================================================================================
 
-    /// Insère un engagement de test (scope_json dérivé de scope_in/mode, out_scope vide).
-    fn insert_test_engagement(app: &App, id: i64, scope_in: &[&str], mode: &str, ledger: &str) {
-        
-        let scope_json = json!({"mode": mode, "in_scope": scope_in, "out_scope": []}).to_string();
-        app.db().execute(
-            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
-             VALUES(?,?,'active',?,?,?,datetime('now'),datetime('now'))",
-            rusqlite::params![id, format!("eng{id}"), mode, scope_json, ledger],
-        )
-        .unwrap();
-    }
-
-    /// Corps /api/run minimal (campaign + targets + engagement_id optionnel).
-    fn run_body(campaign: &str, engagement_id: Option<i64>, targets: &[&str]) -> Value {
-        let mut b = json!({"campaign": campaign, "targets": targets, "mode": "propose"});
-        if let Some(e) = engagement_id {
-            b["engagement_id"] = json!(e);
-        }
-        b
-    }
-
     /// [ENGAGEMENT #1 — migration ZÉRO-PERTE] `migrate()` ajoute engagement_id NOT NULL DEFAULT 1 :
     /// une ligne finding PRÉ-EXISTANTE (schéma ancien, sans la colonne) est rétro-rattachée à
     /// l'engagement #1. `ensure_default_engagement` crée l'engagement #1 depuis le scope serveur COURANT
@@ -2045,11 +1922,6 @@
         let _ = std::fs::remove_file(&ledger_b);
     }
 
-    /// Query<HashMap> pratique pour cibler un engagement en lecture dans les tests (`?engagement=<id>`).
-    fn eng_query(id: i64) -> Query<HashMap<String, String>> {
-        Query(HashMap::from([("engagement".to_string(), id.to_string())]))
-    }
-
     /// [ENGAGEMENT — vues filtrées] Les endpoints de LISTE ne renvoient QUE les données de l'engagement
     /// ciblé par `?engagement=<id>` : les findings/runrecords/roe/runs/campagnes/couverture de A ne sont
     /// JAMAIS visibles sous B, et réciproquement (isolation stricte des vues, fail-closed).
@@ -2119,74 +1991,6 @@
     // community no-op (byte-identical). Ces tests sont MUTATION-PROVABLES : affaiblir le filtre central
     // (tenancy::engagement_visible / engagement_in / granted_tenants) fait passer un test AU ROUGE.
     // =====================================================================================
-
-    /// Engage le flag enterprise via la config par-DB `enterprise.tenancy=on` (isolé par test, pas d'ENV
-    /// global). Le comportement community reste le défaut (flag absent).
-    fn enable_enterprise_tenancy(app: &App) {
-        let db = app.db();
-        settings_set(&db, "enterprise.tenancy", "on").unwrap();
-    }
-
-    /// Rattache l'engagement `eid` au tenant `tid` (crée la ligne tenant si besoin).
-    fn set_engagement_tenant(app: &App, eid: i64, tid: i64) {
-        let db = app.db();
-        db.execute(
-            "INSERT OR IGNORE INTO tenant(id,name,status,created,updated) VALUES(?,?,'active',datetime('now'),datetime('now'))",
-            rusqlite::params![tid, format!("tenant{tid}")],
-        ).unwrap();
-        db.execute("UPDATE engagement SET tenant_id=? WHERE id=?", rusqlite::params![tid, eid]).unwrap();
-    }
-
-    /// Accorde à `user_id` l'accès au tenant `tid` (rôle tenant_*).
-    fn grant_tenant(app: &App, user_id: i64, tid: i64, role: &str) {
-        let db = app.db();
-        db.execute(
-            "INSERT OR IGNORE INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,?,?,datetime('now'))",
-            rusqlite::params![user_id, tid, role],
-        ).unwrap();
-    }
-
-    /// PER-ENGAGEMENT RBAC (readiness #14) : pose un grant engagement-spécifique (override tenant).
-    fn grant_engagement(app: &App, user_id: i64, eid: i64, role: &str) {
-        let db = app.db();
-        db.execute(
-            "INSERT OR REPLACE INTO engagement_grant(user_id,engagement_id,role,created) VALUES(?,?,?,datetime('now'))",
-            rusqlite::params![user_id, eid, role],
-        ).unwrap();
-    }
-
-    /// Sème deux tenants (1,2), deux engagements (#1->tenant1, #2->tenant2), chacun avec un finding/
-    /// runrecord/roe/run_job, et deux users (alice->tenant1, bob->tenant2). Retourne (app, alice_headers,
-    /// bob_headers, fid_a, fid_b). L'app est en mode ENTERPRISE.
-    fn seed_two_tenants(ledger: &str, ledger2: &str) -> (App, HeaderMap, HeaderMap, i64, i64) {
-        let app = test_app_scoped(ledger, vec!["a.example.com".into(), "b.example.com".into()]);
-        insert_test_engagement(&app, 1, &["a.example.com"], "grey", ledger);  // A
-        insert_test_engagement(&app, 2, &["b.example.com"], "grey", ledger2); // B
-        set_engagement_tenant(&app, 1, 1);
-        set_engagement_tenant(&app, 2, 2);
-        {
-            let db = app.db();
-            upsert_user(&db, "alice", "operator", &hash_pw("pw")).unwrap();
-            upsert_user(&db, "bob", "operator", &hash_pw("pw")).unwrap();
-            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fa','a.example.com','cA','HIGH',1)", []).unwrap();
-            db.execute("INSERT INTO finding(title,target,campaign,severity,engagement_id) VALUES('fb','b.example.com','cB','LOW',2)", []).unwrap();
-            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cA','a.example.com','recon.http','T1190',1,1)", []).unwrap();
-            db.execute("INSERT INTO runrecord(campaign,target,kind,mitre,fired,engagement_id) VALUES('cB','b.example.com','recon.http','T1046',1,2)", []).unwrap();
-            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cA','r1','a1','a.example.com','recon.http','FIRE',1)", []).unwrap();
-            db.execute("INSERT INTO roe_decision(campaign,run_id,action_id,target,kind,verdict,engagement_id) VALUES('cB','r2','a2','b.example.com','recon.http','VETO',2)", []).unwrap();
-            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r1','cA','done','propose',1)", []).unwrap();
-            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('r2','cB','done','propose',2)", []).unwrap();
-        }
-        let (uid_a, uid_b) = (uid_of(&app, "alice"), uid_of(&app, "bob"));
-        grant_tenant(&app, uid_a, 1, "tenant_operator");
-        grant_tenant(&app, uid_b, 2, "tenant_operator");
-        let (atok, _) = create_session(&app, uid_a);
-        let (btok, _) = create_session(&app, uid_b);
-        let fid_a: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fa'", [], |r| r.get(0)).unwrap() };
-        let fid_b: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fb'", [], |r| r.get(0)).unwrap() };
-        enable_enterprise_tenancy(&app);
-        (app, bearer_headers(&atok), bearer_headers(&btok), fid_a, fid_b)
-    }
 
     /// [TENANCY — community no-op] Flag OFF (défaut) : le filtre tenant est INERTE. Un user SANS aucun
     /// grant voit TOUS les engagements et TOUTES leurs données (comportement mono-tenant historique,
@@ -2449,20 +2253,6 @@
     // separable. Non-disablable super-admin (mirror Plume), audited cross-tenant READ, platform-admin
     // gated tenant CRUD, last-tenant/last-admin guards, tenant-scoped ledger paths.
     // =====================================================================================
-
-    /// Provisionne un compte `admin` + une session, renvoie ses headers bearer.
-    fn admin_session(app: &App, login: &str) -> HeaderMap {
-        { let db = app.db(); upsert_user(&db, login, "admin", &hash_pw("pw")).unwrap(); }
-        let (tok, _) = create_session(app, uid_of(app, login));
-        bearer_headers(&tok)
-    }
-
-    /// Désigne le(s) super-admin(s) via la clé de PROVISIONING par-DB `enterprise.superadmin` (isolée par
-    /// test, pas d'ENV global). N'est PAS une route UI normale (aucune API n'écrit une clé settings arbitraire).
-    fn designate_superadmin(app: &App, csv: &str) {
-        let db = app.db();
-        settings_set(&db, "enterprise.superadmin", csv).unwrap();
-    }
 
     /// [SUPER-ADMIN — désignation fail-closed, provisioning-only] Sans désignation, PERSONNE n'est
     /// super-admin (même une session admin valide). La désignation (clé de provisioning) fait d'un admin
@@ -3330,33 +3120,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     // SOURCE DE DÉTECTION CONFIGURABLE (plugin) — refactor infra-agnostique de la boucle purple.
     // =============================================================================================
 
-    /// Écrit la config de source de détection dans le cache de l'App (utilitaire de test).
-    fn set_detection_source(app: &App, cfg: Value) {
-        *app.detection_source.write().unwrap() = Arc::new(cfg);
-    }
-
-    /// Serveur HTTP mock (UNE connexion) : renvoie `body` en 200 et retourne la requête reçue (ligne +
-    /// en-têtes) pour inspection (ex. vérifier l'en-tête d'auth). Bind éphémère 127.0.0.1:0.
-    async fn mock_http_once(body: String) -> (SocketAddr, tokio::task::JoinHandle<String>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let (mut sock, _) = listener.accept().await.expect("accept mock");
-            let mut buf = vec![0u8; 8192];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.flush().await;
-            req // le drop de `sock` en fin de tâche ferme la connexion (EOF côté client)
-        });
-        (addr, handle)
-    }
-
     /// [détection RÉTRO-COMPAT] resolve_detection_source : sans settings, l'env legacy PLUME_URL/
     /// PLUME_TOKEN produit `{kind:plume, endpoint, auth:{type:basic,secret}}` ; une config `settings`
     /// PRIME sur l'env (la clé settings verbatim gagne). Ces deux branches figent le repli rétro-compat.
@@ -3769,22 +3532,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Seed la table `module` d'une App de test avec un module recon (web_allowed) et un module
-    /// exploit (haut-impact). Réutilisé par les tests du gate haut-impact.
-    fn seed_modules(app: &App) {
-        let db = app.db();
-        // recon.httpx : ni exploit ni destructif -> web_allowed=1 (lançable web par défaut).
-        db.execute(
-            "INSERT OR REPLACE INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed)
-             VALUES('recon.httpx',0,0,1,'','recon',1)", [],
-        ).unwrap();
-        // exploit.rce : exploit=1 -> web_allowed=0 (sous plancher exploit).
-        db.execute(
-            "INSERT OR REPLACE INTO module(kind,exploit,destructive,available,mitre,descr,web_allowed)
-             VALUES('exploit.rce',1,0,1,'T1190','rce',0)", [],
-        ).unwrap();
-    }
-
     /// [HIGH gouvernance] high_impact_gate (fonction pure) : honore l'opt-in UNIQUEMENT avec
     /// operator + arm + reason non vide ; défaut (opt-in absent) => Ok(false) inchangé ; toute
     /// condition manquante => Err 'high_impact_requires_arm_and_reason'.
@@ -4085,14 +3832,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     // OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI ») — validation fail-closed + endpoints.
     // =============================================================================================
 
-    fn simple_toolspec() -> Value {
-        json!({
-            "kind": "custom.echotool", "vuln_class": "Recon", "binary": "echo",
-            "argv_template": ["{target}"], "parser": "lines", "hit_status": "tested",
-            "severity": "INFO", "description": "echo wrapper (test)"
-        })
-    }
-
     /// [tools validation] validate_toolspec REJETTE fail-closed : argv non-liste (chaîne shell), token
     /// `{evil}`, binaire interpréteur, drapeau d'exfil, `{args}` sans allowlist, kind hors `custom.*`
     /// (collision natif), et traversée de kind. Un spec propre PASSE et se canonicalise.
@@ -4247,36 +3986,6 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         std::env::remove_var("FORGE_TOOLSPECS_DIR");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(&path);
-    }
-
-    fn dir_spec(dir: &str, kind: &str) -> std::path::PathBuf { std::path::Path::new(dir).join(format!("{kind}.json")) }
-    fn dir_has_spec(dir: &str, kind: &str) -> bool { dir_spec(dir, kind).is_file() }
-
-    // =============================================================================================
-    // SÉLECTION DE TECHNIQUES PAR-SCOPE (profil + toggles catégorie/technique) — validation, persistance,
-    // catalogue groupé par catégorie (spawn moteur), endpoint gouverné (opérateur/admin) + ledgerisé.
-    // =============================================================================================
-
-    fn conn_info() -> ConnectInfo<SocketAddr> {
-        ConnectInfo("127.0.0.1:5555".parse().unwrap())
-    }
-
-    /// Aplati {groups:{cat:[{kind,enabled_for_current_scope}]}} en une map kind -> activé.
-    fn flatten_enabled(body: &Value) -> std::collections::HashMap<String, bool> {
-        let mut m = std::collections::HashMap::new();
-        if let Some(groups) = body.get("groups").and_then(|g| g.as_object()) {
-            for rows in groups.values() {
-                for r in rows.as_array().into_iter().flatten() {
-                    if let (Some(k), Some(e)) = (
-                        r.get("kind").and_then(|v| v.as_str()),
-                        r.get("enabled_for_current_scope").and_then(|v| v.as_bool()),
-                    ) {
-                        m.insert(k.to_string(), e);
-                    }
-                }
-            }
-        }
-        m
     }
 
     /// [sélection pure] validate_technique_selection : profils fermés, toggles typés bool + clés bien
