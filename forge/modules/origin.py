@@ -35,7 +35,7 @@ import socket
 from .registry import register, Module
 from .. import runner
 from ..roe import Scope
-from .toolspec import check_extra_args, safe_value
+from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 
 # sous-ensemble des plages Cloudflare (dérive dans le temps — rafraîchir périodiquement)
 CF_RANGES = [
@@ -103,7 +103,7 @@ def _norm_title(t):
 
 
 @register("origin.find")
-class OriginFind(Module):
+class OriginFind(FlagAllowlistMixin, Module):
     kind = "origin.find"
     exploit = False
     mitre = "T1590.005"
@@ -118,7 +118,7 @@ class OriginFind(Module):
         {"name": "sources", "type": "text", "label": "sources subfinder (-sources)", "flag": "-sources"},
         {"name": "timeout", "type": "number", "label": "timeout par source (-timeout s)", "flag": "-timeout"},
         {"name": "rate", "type": "number", "label": "rate-limit subfinder (-rl req/s)", "flag": "-rl"},
-        {"name": "extra_args", "type": "list", "label": "extra args subfinder (allowlist)", "flag": ""},
+        FlagAllowlistMixin.extra_args_param(label="extra args subfinder (allowlist)"),
     ]
     # ALLOWLIST des drapeaux subfinder acceptés en argument libre — tout flag hors liste est REFUSÉ.
     # EXCLUS : -o/-oJ/-oD (écriture fichier), -config/-pc (lecture fichier de config/provider arbitraire).
@@ -158,13 +158,17 @@ class OriginFind(Module):
             mitre="T1590.005", status="skipped", tool="subfinder+httpx",
             evidence=(evidence or "")[:500], poc=self.dry(action))
 
+    def _refuse(self, action, reason):
+        """Refus fail-closed du mixin, routé vers l'émetteur propre à origin (`_skipped` :
+        category=origin-exposure, tool=subfinder+httpx, poc) — sortie BYTE-IDENTIQUE à l'ancien refus."""
+        return [self._skipped(action, f"{self.kind} non exécuté — {reason}",
+                              "Aucun processus lancé (fail-closed).")]
+
     def fire(self, action):
         domain = action.target
         # EXTRA_ARGS gouvernés : un drapeau subfinder libre hors allowlist (ou non-liste) -> refus fail-closed.
-        bad_extra, _ = check_extra_args(action.params.get("extra_args"), self.FLAG_ALLOWLIST)
-        if bad_extra is not None:
-            return [self._skipped(action, f"origin.find non exécuté — argument libre refusé ({bad_extra})",
-                                  "Aucun processus lancé (fail-closed).")]
+        if (refused := self.gate_extra_args(action)):
+            return refused
         # Scope reconstruit depuis les params injectés par l'engine (miroir IDOR engine.py:130-134).
         # Quand le scope EST fourni (chemin de production : l'engine injecte TOUJOURS in_scope/out_scope),
         # on applique un filtre FAIL-CLOSED sur chaque IP résolue : in_scope vide => is_in_scope()==False
