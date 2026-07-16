@@ -2770,6 +2770,48 @@ mod tests {
         let _ = std::fs::remove_file(&eng2_ledger);
     }
 
+    /// [RUN FLOW — CHEMIN FORT-IMPACT HONORÉ + auto + arm] RÉGRESSION C16 (« Failed to fetch » au
+    /// lancement). Le corps EXACT que l'UI live envoie quand l'opt-in fort-impact est PLEINEMENT honoré —
+    /// `mode:"auto"`, `arm:true`, `allow_high_impact:true`, `reason` non vide, `modules:[]` (le planner
+    /// choisit) — DOIT renvoyer une réponse GOUVERNÉE PROPRE (202 ACCEPTED, `high_impact:true`), JAMAIS un
+    /// 500/panic ni une connexion coupée. Ce chemin exerce toutes les branches spécifiques au fort-impact
+    /// (scope écrit allow_exploit/destructive=true, ledger `console.run.high_impact_authorized`,
+    /// `high_impact_modules`) que les tests de run antérieurs (mode `propose`, non armés) n'atteignaient
+    /// pas. `python="true"` : spawn no-op — on prouve la réponse HTTP propre sans lancer le moteur réel.
+    #[tokio::test]
+    async fn honored_high_impact_auto_arm_run_is_clean_202_not_panic() {
+        let ledger = tmp_path("forge-test-c16-hi-ledger");
+        let mut app = test_app_scoped(&ledger, vec!["127.0.0.1".into()]);
+        app.python = Arc::new("true".into()); // spawn no-op : réponse HTTP propre sans moteur réel
+        {
+            let db = app.db();
+            upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap();
+        }
+        // engagement #1 en mode white, 127.0.0.1 in-scope (réplique la config live de l'utilisateur).
+        insert_test_engagement(&app, 1, &["127.0.0.1"], "white", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // corps EXACT honoré : auto + arm + allow_high_impact + reason + modules vides + engagement #1.
+        let body = json!({
+            "campaign": "testLoc", "targets": ["127.0.0.1"], "mode": "auto",
+            "arm": true, "allow_high_impact": true, "reason": "test", "modules": [],
+            "engagement_id": 1
+        });
+        let resp = run_create(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body)).await.into_response();
+        // GOUVERNÉ PROPRE : 202 ACCEPTED (jamais 500/panic — le filet CatchPanic n'a rien à rattraper ici).
+        assert_eq!(resp.status(), StatusCode::ACCEPTED,
+            "le chemin fort-impact honoré + auto/arm renvoie 202 (réponse gouvernée propre, pas un panic)");
+        let j = resp_json(resp).await;
+        assert_eq!(j["status"], "running");
+        assert_eq!(j["high_impact"], true, "opt-in fort-impact effectivement honoré");
+        assert_eq!(j["mode"], "auto");
+        // le ledger de l'engagement reçoit l'acte d'autorisation fort-impact (audit non régressé).
+        let entries = read_ledger_lines(&ledger);
+        assert!(entries.iter().any(|e| e["kind"] == "console.run.high_impact_authorized"),
+            "l'autorisation fort-impact est journalisée (ledger intact)");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// [ISOLATION] Deux engagements aux scopes DISJOINTS restent isolés : un run pour A valide contre le
     /// scope de A UNIQUEMENT (la cible de B est refusée), et réciproquement. Un run pour B accepte sa
     /// propre cible et journalise dans SON ledger — jamais celui de A.
