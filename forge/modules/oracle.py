@@ -17,12 +17,15 @@ Ce que la base fournit (chaque oracle concret se réduit à : métadonnées + lo
 Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed restent déclarés par
 chaque module concret et restent gardés par le ROE.
 """
+import http.client
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from ._scopeguard import ScopeGuardMixin
 from .registry import Module
+from .. import pin as _pin
 from .. import session as _session
 from .. import throttle as _throttle
 
@@ -140,6 +143,45 @@ class Oracle(Module):
         l'aveugle (qui re-poste les en-têtes — dont le matériel de session — vers l'hôte cible)."""
         return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
 
+    @staticmethod
+    def _pinned_open(req, pin_ip, timeout=15):
+        """ANTI-REBINDING END-TO-END : comme `_raw_open` (opener no-follow, une 3xx remonte en HTTPError)
+        MAIS la connexion TCP est établie vers `pin_ip` (l'IP ÉPINGLÉE par le ROE au fire-time) AU LIEU de
+        re-résoudre le hostname de `req` — la couche connexion urllib re-résolvait sinon, rouvrant la
+        fenêtre de DNS-rebinding entre la résolution du ROE et le connect.
+
+        CE QUI NE CHANGE PAS (aucune vérification TLS affaiblie) : `self.host` reste l'HÔTE D'ORIGINE ->
+        le `Host:` header est calculé depuis lui (identité HTTP correcte) ET, en HTTPS, `server_hostname`
+        (SNI + validation du certificat) reste l'HÔTE D'ORIGINE via le `_context` VÉRIFIÉ du handler
+        standard — le certificat n'est JAMAIS validé contre l'IP. On ne change QUE la CIBLE du connect."""
+        class _PinHTTPConnection(http.client.HTTPConnection):
+            def connect(self):                                # dial l'IP épinglée, garde self.host (Host header)
+                self.sock = socket.create_connection((pin_ip, self.port), self.timeout, self.source_address)
+                if self._tunnel_host:
+                    self._tunnel()
+
+        class _PinHTTPSConnection(http.client.HTTPSConnection):
+            def connect(self):                                # dial l'IP épinglée ; SNI/cert = hôte d'origine
+                sock = socket.create_connection((pin_ip, self.port), self.timeout, self.source_address)
+                if self._tunnel_host:
+                    self.sock = sock
+                    self._tunnel()
+                    server_hostname = self._tunnel_host
+                else:
+                    server_hostname = self.host               # HÔTE D'ORIGINE -> SNI + validation certificat
+                self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+
+        class _PinHTTPHandler(urllib.request.HTTPHandler):
+            def http_open(self, r):
+                return self.do_open(_PinHTTPConnection, r)
+
+        class _PinHTTPSHandler(urllib.request.HTTPSHandler):  # hérite le _context VÉRIFIÉ (check_hostname on)
+            def https_open(self, r):
+                return self.do_open(_PinHTTPSConnection, r)
+
+        opener = urllib.request.build_opener(_NoRedirect, _PinHTTPHandler, _PinHTTPSHandler)
+        return opener.open(req, timeout=timeout)
+
     # --- câblage HTTP partagé (les `_fetch` concrets adaptent la forme du tuple retourné) ---
     @staticmethod
     def _http(url, *, headers=None, timeout=15, method="GET", data=None, maxlen=200000,
@@ -183,8 +225,15 @@ class Oracle(Module):
                 if bucket is not None:
                     bucket.wait()                    # respect du débit (rate) avant chaque requête sortante
                 req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
+                # ANTI-REBINDING : le ROE a épinglé l'IP de CET hôte au fire-time (moteur -> pin.using).
+                # Si un pin s'applique à `cur_url`, on se connecte PAR-IP (Host/SNI/cert = hôte d'origine) ;
+                # sinon (pas de pin lié, ou hôte non épinglé -> ex redirect cross-origin) résolution NORMALE
+                # (byte-identique à l'historique, et c'est `_raw_open` que les tests monkeypatchent).
+                pin_ip = _pin.ip_for(cur_url)
                 try:
-                    with Oracle._raw_open(req, timeout=timeout) as r:
+                    resp = (Oracle._pinned_open(req, pin_ip, timeout=timeout) if pin_ip
+                            else Oracle._raw_open(req, timeout=timeout))
+                    with resp as r:
                         return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
                 except urllib.error.HTTPError as he:
                     e = he
