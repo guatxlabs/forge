@@ -21,7 +21,7 @@ use crate::*;
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
@@ -523,6 +523,49 @@ pub(crate) fn request_is_https(headers: &HeaderMap) -> bool {
         // Un proxy peut chaîner plusieurs protos ("https, http") — le PREMIER hop (client->proxy) fait foi.
         .map(|proto| proto.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
         .unwrap_or(false)
+}
+
+/// Politique CSP du SHELL SPA. C'est la RÉPLIQUE EXACTE de la meta CSP déjà embarquée dans
+/// `web/index.html` (donc DÉJÀ éprouvée en prod : le SPA vanilla-JS se rend, l'iframe d'aperçu de
+/// rapport charge son document `blob:`, les images `data:` s'affichent, styles inline autorisés,
+/// fetch + SSE `EventSource` vers `/api/*` via `connect-src 'self'`) — servie AUSSI en en-tête HTTP
+/// pour qu'elle couvre TOUTES les réponses (pas seulement le document `/`), avec en PLUS
+/// `frame-ancestors 'none'` (directive IGNORÉE en `<meta>` mais HONORÉE en en-tête HTTP → anti-
+/// clickjacking effectif, complète `X-Frame-Options: DENY`). Servir une politique IDENTIQUE à la
+/// meta garantit l'ABSENCE de régression : l'intersection meta ∩ en-tête est la meta elle-même.
+pub(crate) const CSP_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// Middleware EN-TÊTES DE SÉCURITÉ — posé comme couche la PLUS EXTERNE du routeur (cf. `build_router`)
+/// pour tamponner TOUTES les réponses : shell SPA statique, JSON d'API, rapports, 421 anti-rebinding
+/// du `host_guard`, et même le 500 du filet anti-panic. Ces en-têtes sont INOFFENSIFS sur n'importe
+/// quelle réponse (JSON/HTML/binaire) — ils ne restreignent QUE le rendu d'un document top-level, ce
+/// que seul le shell `/` est. On utilise `insert` (et non `append`) → jamais de doublon, on écrase une
+/// éventuelle valeur préexistante.
+///
+/// - `X-Frame-Options: DENY` + `frame-ancestors 'none'` (dans la CSP) : anti-clickjacking.
+/// - `X-Content-Type-Options: nosniff` : pas de MIME-sniffing.
+/// - `Referrer-Policy: no-referrer` : aucune fuite d'URL interne dans le Referer.
+/// - `Content-Security-Policy` : cf. `CSP_POLICY` (réplique de la meta prod, non-cassante).
+/// - `Strict-Transport-Security` : SCHEME-AWARE — posé UNIQUEMENT si la requête est effectivement en
+///   HTTPS (`request_is_https` : `X-Forwarded-Proto: https` d'un reverse-proxy TLS, ou l'override
+///   `FORGE_FORCE_SECURE_COOKIE`), JAMAIS en http loopback direct (sinon un HSTS posé en clair
+///   « épinglerait » le navigateur sur https pour un hôte servi en http → auto-DoS du déploiement
+///   loopback documenté). Même gate que le drapeau `Secure` du cookie de session (parité).
+pub(crate) async fn security_headers(req: Request, next: Next) -> Response {
+    let is_https = request_is_https(req.headers());
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP_POLICY));
+    if is_https {
+        h.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+        );
+    }
+    resp
 }
 
 /// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis TOUJOURS
