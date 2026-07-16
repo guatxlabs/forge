@@ -86,11 +86,35 @@ class RaceCondition(ScopeGuardedOracle):
         except (TypeError, ValueError):
             return 1
 
+    @staticmethod
+    def _ok_codes(action):
+        """L14 — ensemble des codes de statut comptés comme SUCCÈS. `success_codes` (param OPÉRATEUR, donc
+        potentiellement malformé) est parsé DÉFENSIVEMENT : chaque entrée non convertible en `int` est
+        IGNORÉE au lieu de crasher le module. Accepte une liste, un int seul, ou une chaîne « 200,201 ».
+        Absent / vide / entièrement invalide -> repli sur `_SUCCESS_CODES`. Contrat : ne lève JAMAIS."""
+        codes = action.params.get("success_codes")
+        if not codes or isinstance(codes, bool):
+            return _SUCCESS_CODES                       # None/''/[]/bool -> défauts
+        if isinstance(codes, int):
+            codes = [codes]
+        elif isinstance(codes, str):
+            codes = codes.replace(",", " ").split()
+        try:
+            items = list(codes)
+        except TypeError:
+            return _SUCCESS_CODES                       # valeur non itérable -> défauts (jamais de crash)
+        parsed = set()
+        for c in items:
+            try:
+                parsed.add(int(c))
+            except (TypeError, ValueError):
+                continue                                # entrée invalide -> ignorée (skip)
+        return frozenset(parsed) if parsed else _SUCCESS_CODES
+
     def _is_success(self, st, body, action):
         """True si une réponse compte comme un SUCCÈS de l'action à usage limité. Précision > rappel :
         code 2xx d'écriture ET (marqueur de succès présent si fourni) ET (pas de marqueur d'échec)."""
-        codes = action.params.get("success_codes")
-        ok_codes = frozenset(int(c) for c in codes) if codes else _SUCCESS_CODES
+        ok_codes = self._ok_codes(action)
         if st not in ok_codes:
             return False
         fail = action.params.get("failure_marker")

@@ -94,12 +94,13 @@ class Verdict(enum.Enum):
 class Phase(enum.Enum):
     """Étage de la boucle `execute()` qui a PRODUIT un résultat — enum INTERNE (jamais sérialisé :
     absent de `to_dict()`, donc aucun changement de forme de sortie). Sert à nommer sans ambiguïté
-    les cinq points de construction d'un `ExecResult` (traçabilité de la gouvernance/gate)."""
+    les six points de construction d'un `ExecResult` (traçabilité de la gouvernance/gate)."""
     NO_MODULE = "no_module"                    # aucun module enregistré pour le kind
     GOVERNANCE_DISABLED = "governance_disabled"  # connecteur désactivé (console)
     TECHNIQUE_DESELECTED = "technique_deselected"  # technique hors sélection par-scope
     UNAVAILABLE = "unavailable"                # outil/service sous-jacent absent
     DECIDED = "decided"                        # verdict rendu par la gate ROE (VETO/DRY_RUN/FIRE)
+    FIRE_ERROR = "fire_error"                  # M6 — exception LEVÉE pendant le tir (module.fire/post-traitement)
 
 
 @dataclass
@@ -237,60 +238,76 @@ class Engine:
         elif decision.verdict == DRY_RUN:
             output = module.dry(action)              # AUCUN effet de bord
         else:                                        # FIRE
-            # SESSION GOUVERNÉE : lie le store (scope-guardé) le temps du fire — les modules recon/oracle
-            # attachent le matériel d'auth SECRET aux requêtes IN-SCOPE via les chokepoints HTTP partagés.
-            # Rien de secret ne transite par les findings ni le ledger (le matériel n'est que dans la
-            # requête sortante). Le contexte est restauré en sortie même en cas d'exception.
-            # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
-            # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
-            # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
-            # ANTI-REBINDING : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre laquelle le
-            # verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) pour qu'il PUISSE
-            # se connecter PAR-IP (Host header conservé). NB : aucun module ne consomme encore ce pin (la
-            # couche connexion urllib/httpflow re-résout) -> pont pour le futur épinglage END-TO-END ;
-            # additif et inoffensif s'il est ignoré. Ce qui est fermé aujourd'hui = la TOCTOU du VERDICT.
-            if decision.pinned_ips:
-                action.params["_pinned_ips"] = list(decision.pinned_ips)
-            with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions):
-                raw = module.fire(action) or []
-            # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur
-            # « rate-limited » (au lieu d'empties silencieux) dans les raisons de la décision (anti-masquage).
-            if _bucket is not None and getattr(_bucket, "blocked", 0):
-                decision.reasons = list(decision.reasons) + [
-                    f"rate-limited: {_bucket.blocked} réponse(s) 429/WAF après back-off (débit {_bucket.rate:g}/s)"]
-            new = []
-            for f in raw:
-                if self.memory is not None and not self.memory.store(f):
-                    self.dups += 1                   # déjà vu -> dedup
-                    continue
-                new.append(f)
-                self.findings.append(f)
-                self.graph.add_finding(f)            # enrichit le world-model
-                # SESSION À TRAVERS LA CHAÎNE : un module de découverte a dérivé un NOUVEL hôte/endpoint
-                # in-scope (origine IP, sous-domaine, endpoint) depuis action.target. On fait HÉRITER à
-                # cette cible dérivée la session gouvernée de la source (SCOPE-GUARDÉE : no-op si la
-                # dérivée est hors-scope) pour que les oracles chaînés soient authentifiés. Le matériel
-                # reste SECRET : `inherit` ne journalise/retourne rien et n'entre ni dans le finding, ni
-                # dans le ledger, ni dans action.params, ni dans le graphe.
-                dst = getattr(f, "target", None)
-                if dst and dst != action.target:
-                    self.sessions.inherit(action.target, dst)
+            # M6 — ROBUSTESSE DU TIR : le corps FIRE (module.fire + post-traitement) est enveloppé dans un
+            # try/except. Une exception d'un module (params opérateur non gardés, bug, I/O) ne doit PAS
+            # avorter toute la campagne (vagues/cibles restantes jamais tentées, coverage/report/checkpoint
+            # jamais produits) : elle devient un ExecResult(ERROR) TRAÇABLE (results + ledger), et la vague
+            # suivante continue — ALIGNÉ sur les 4 autres chemins d'execute(). Contrat « zéro lacune
+            # silencieuse ». Les `with` (throttle/session) restaurent leur contexte même en cas d'exception.
+            try:
+                # SESSION GOUVERNÉE : lie le store (scope-guardé) le temps du fire — les modules recon/oracle
+                # attachent le matériel d'auth SECRET aux requêtes IN-SCOPE via les chokepoints HTTP partagés.
+                # Rien de secret ne transite par les findings ni le ledger (le matériel n'est que dans la
+                # requête sortante). Le contexte est restauré en sortie même en cas d'exception.
+                # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
+                # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
+                # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
+                # ANTI-REBINDING : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre laquelle le
+                # verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) pour qu'il PUISSE
+                # se connecter PAR-IP (Host header conservé). NB : aucun module ne consomme encore ce pin (la
+                # couche connexion urllib/httpflow re-résout) -> pont pour le futur épinglage END-TO-END ;
+                # additif et inoffensif s'il est ignoré. Ce qui est fermé aujourd'hui = la TOCTOU du VERDICT.
+                if decision.pinned_ips:
+                    action.params["_pinned_ips"] = list(decision.pinned_ips)
+                with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions):
+                    raw = module.fire(action) or []
+                # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur
+                # « rate-limited » (au lieu d'empties silencieux) dans les raisons de la décision (anti-masquage).
+                if _bucket is not None and getattr(_bucket, "blocked", 0):
+                    decision.reasons = list(decision.reasons) + [
+                        f"rate-limited: {_bucket.blocked} réponse(s) 429/WAF après back-off (débit {_bucket.rate:g}/s)"]
+                new = []
+                for f in raw:
+                    if self.memory is not None and not self.memory.store(f):
+                        self.dups += 1                   # déjà vu -> dedup
+                        continue
+                    new.append(f)
+                    self.findings.append(f)
+                    self.graph.add_finding(f)            # enrichit le world-model
+                    # SESSION À TRAVERS LA CHAÎNE : un module de découverte a dérivé un NOUVEL hôte/endpoint
+                    # in-scope (origine IP, sous-domaine, endpoint) depuis action.target. On fait HÉRITER à
+                    # cette cible dérivée la session gouvernée de la source (SCOPE-GUARDÉE : no-op si la
+                    # dérivée est hors-scope) pour que les oracles chaînés soient authentifiés. Le matériel
+                    # reste SECRET : `inherit` ne journalise/retourne rien et n'entre ni dans le finding, ni
+                    # dans le ledger, ni dans action.params, ni dans le graphe.
+                    dst = getattr(f, "target", None)
+                    if dst and dst != action.target:
+                        self.sessions.inherit(action.target, dst)
+                    if self.ledger:
+                        self.ledger.append("finding", f.to_dict())
+                # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
+                #   1. params.mitre (posé par le scope/console)   2. mitre du 1er finding émis
+                #   3. mitre déclaré par le module                4. fallback par-kind (DEFAULT_MITRE_BY_KIND)
+                # Le repli par-kind garantit un record NON VIDE même pour un tir SANS finding sur un module
+                # à mitre='' (sinon trou de couverture purple sur les tirs « rien trouvé »).
+                mitre = (action.params.get("mitre") or (new[0].mitre if new else "")
+                         or getattr(module, "mitre", "") or purple.mitre_for_kind(action.kind) or "")
+                rr = purple.run_record(action.target, action.kind, mitre, fired=True,
+                                       detail=f"{len(new)} finding(s)",
+                                       run_id=self.run_id, campaign=self.campaign_id)
+                self.run_records.append(rr)
                 if self.ledger:
-                    self.ledger.append("finding", f.to_dict())
-            # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
-            #   1. params.mitre (posé par le scope/console)   2. mitre du 1er finding émis
-            #   3. mitre déclaré par le module                4. fallback par-kind (DEFAULT_MITRE_BY_KIND)
-            # Le repli par-kind garantit un record NON VIDE même pour un tir SANS finding sur un module
-            # à mitre='' (sinon trou de couverture purple sur les tirs « rien trouvé »).
-            mitre = (action.params.get("mitre") or (new[0].mitre if new else "")
-                     or getattr(module, "mitre", "") or purple.mitre_for_kind(action.kind) or "")
-            rr = purple.run_record(action.target, action.kind, mitre, fired=True,
-                                   detail=f"{len(new)} finding(s)",
-                                   run_id=self.run_id, campaign=self.campaign_id)
-            self.run_records.append(rr)
-            if self.ledger:
-                self.ledger.append("purple.runrecord", rr)
-            output = [f.to_dict() for f in new]
+                    self.ledger.append("purple.runrecord", rr)
+                output = [f.to_dict() for f in new]
+            except Exception as e:  # noqa: BLE001 — un crash de module ne doit jamais avorter la campagne
+                res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                                 verdict=Verdict.ERROR,
+                                 reasons=[f"exception au tir (module '{action.kind}'.fire): {e!r}"],
+                                 output=None, phase=Phase.FIRE_ERROR).to_dict()
+                self.results.append(res)
+                if self.ledger:
+                    self.ledger.append("engine.error", res)
+                return res
 
         res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                          verdict=decision.verdict, reasons=decision.reasons, output=output,

@@ -194,6 +194,32 @@ class TestRaceConditionOracle(unittest.TestCase):
         self.assertEqual(f[0].status, "vulnerable")
         self.assertIn("succès comptés=4", f[0].evidence)
 
+    def test_ok_codes_defensive_parsing_never_raises(self):
+        # L14 — `success_codes` malformé (param opérateur) ne doit JAMAIS crasher : entrées invalides
+        # ignorées, repli sur les défauts si tout est invalide.
+        mk = lambda v: Action("race.condition", self.TGT, params={"success_codes": v})
+        r = RaceCondition()
+        self.assertEqual(r._ok_codes(mk(["abc", None, "201", 200])), frozenset({201, 200}))  # invalides skip
+        self.assertEqual(r._ok_codes(mk("200,201")), frozenset({200, 201}))                  # chaîne tokenisée
+        self.assertEqual(r._ok_codes(mk(200)), frozenset({200}))                             # int seul
+        self.assertEqual(r._ok_codes(mk(["zzz"])), racemod._SUCCESS_CODES)                   # tout invalide -> défauts
+        self.assertEqual(r._ok_codes(mk(None)), racemod._SUCCESS_CODES)                      # absent -> défauts
+        self.assertEqual(r._ok_codes(mk({"weird": 1})), racemod._SUCCESS_CODES)              # dict -> défauts
+
+    def test_malformed_success_codes_fire_no_crash(self):
+        # L14 — un fire() COMPLET avec success_codes malformé ne lève pas (contrat « ne lève jamais »).
+        def fake(url, headers=None, timeout=15, method="POST", data=None):
+            return (200, "ok")
+        restore = _patch(RaceCondition, fake)
+        try:
+            f = RaceCondition().fire(Action("race.condition", self.TGT,
+                                            params={"success_codes": ["abc", None], "in_scope": ["app.test"],
+                                                    "burst": 3}))
+        finally:
+            restore()
+        # ["abc", None] : aucun code valide -> repli _SUCCESS_CODES (200 inclus) -> 3 succès > quota 1.
+        self.assertEqual(f[0].status, "vulnerable")
+
     # --- rafale BORNÉE (jamais un DoS) ---
     def test_burst_is_bounded(self):
         calls = []
