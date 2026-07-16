@@ -75,7 +75,8 @@ Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents 
 - ✅ **T5** data/runs (L8 delete-then-attest, L9 import gaté tenancy/scope, L10 async) — `da658db`
 - ✅ **T6** front quick-wins (L17/L18/I2/I3) — `77155b9`
 - ✅ **T7** plan archi (`docs/ARCHITECTURE_REFACTOR_PLAN.md` — main.rs = ~80% tests ; découpe incrémentale) — `64f48dc`
-- ⏳ **T8** (suivi) pin de connexion bout-en-bout des modules (Oracle._http + httpflow re-résolvent encore).
+- ✅ **T8** anti-rebinding bout-en-bout : modules connectent sur l'IP épinglée (urllib `Oracle._http` + socket `httpflow`), SNI/cert préservés (aucun bypass), 14 tests socket-level — `a8ebd87`. Résiduel documenté : redirects cross-host + `recon_surface._http_get` re-résolvent (hors des 2 chokepoints).
+- ✅ **T9** refactor archi exécuté : `main.rs` **6069 → 956 lignes** (tests → `tests.rs` `c683d18`, `build_router` → `router.rs` `d9af574`), 361 tests inchangés. Fix guard portabilité (exclut les modules de test extraits) — `d3b7362`.
 
 **Plan initial (tranches — historique) :**
 - **T1 — Intégrité ledger (WORM)** : `H1` purge hors verrou cross-process (`compliance.rs:377`) → perte d'écriture silencieuse + **test de course** · `M1` parité `canon_json` Rust/Python (`\b`/`\f`, `ledger_api.rs:78`) · `M2` `verify()` tolère ligne torn + flock (`ledger.py:292`).
