@@ -26,6 +26,7 @@ import fnmatch
 import ipaddress
 import json
 import socket
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,6 +39,59 @@ if TYPE_CHECKING:                                         # imports paresseux (t
 VETO = "VETO"
 DRY_RUN = "DRY_RUN"
 FIRE = "FIRE"
+
+# --- RÉSOLUTION DNS BORNÉE (anti-rebinding / L1-L3) ------------------------------------------------
+# Délai MAX d'une résolution `getaddrinfo` au POINT DE TIR. `getaddrinfo` n'honore PAS le timeout socket
+# sur la plupart des plateformes -> on l'exécute dans un thread joint avec deadline (borne DURE de
+# liveness : une résolution qui stalle ne bloque JAMAIS le moteur). Dépassement => `_ResolveTimeout` =>
+# le ROE VÉTO (fail-closed : on ne peut pas PROUVER que la cible est publique). Une résolution qui échoue
+# proprement (NXDOMAIN/gaierror) est distincte d'un timeout : elle rend `[]` (hôte inconnu, aucune
+# connexion possible) et NE véto PAS par elle-même (le scope-guard reste juge du périmètre).
+_RESOLVE_TIMEOUT = 5.0
+
+
+class _ResolveTimeout(Exception):
+    """La résolution DNS a dépassé `_RESOLVE_TIMEOUT` -> traitée fail-closed (VETO) par le ROE."""
+
+
+_TIMEOUT = object()   # sentinelle de cache DNS : « résolution expirée » (VETO fail-closed persistant/run)
+
+
+def _resolve_ips(host: str, timeout: float | None = None) -> list[str]:
+    """Résout `host` en une liste d'IP (str), avec une DEADLINE dure via thread joint (getaddrinfo peut
+    staller indéfiniment sans respecter le timeout socket). Sémantique :
+      - succès            -> liste des IP littérales résolues (dé-doublonnée, ordre stable) ;
+      - NXDOMAIN/gaierror -> [] (hôte inconnu : aucune connexion, donc aucune atteinte réseau) ;
+      - DÉPASSEMENT       -> lève `_ResolveTimeout` (fail-closed en amont : VETO).
+    Un `host` déjà littéral IP est renvoyé tel quel SANS I/O réseau (court-circuit sûr en plan/dry)."""
+    if timeout is None:                                   # lu au call-time -> patchable en test/config
+        timeout = _RESOLVE_TIMEOUT
+    try:                                                  # court-circuit : host = IP littérale -> pas d'I/O
+        ipaddress.ip_address(str(host).strip())
+        return [str(host).strip()]
+    except ValueError:
+        pass
+    box: dict[str, Any] = {}
+
+    def _work() -> None:
+        try:
+            box["infos"] = socket.getaddrinfo(host, None)
+        except Exception as e:                            # noqa: BLE001 (gaierror/réseau : hôte inconnu)
+            box["err"] = e
+
+    t = threading.Thread(target=_work, daemon=True)       # daemon : n'empêche jamais la sortie du process
+    t.start()
+    t.join(timeout)
+    if t.is_alive():                                      # deadline dépassée : résolution encore en cours
+        raise _ResolveTimeout(host)
+    if "infos" not in box:                                # échec propre (gaierror) : hôte inconnu -> []
+        return []
+    out: list[str] = []
+    for info in box["infos"]:
+        sockaddr = info[4] if len(info) > 4 else None
+        if sockaddr and sockaddr[0] and sockaddr[0] not in out:
+            out.append(sockaddr[0])
+    return out
 
 # --- POLITIQUE RÉSEAU (privé/LAN/loopback) — enforcement AUTORITATIF fail-closed --------------------
 # Ensemble EXPLICITE des plages à bloquer quand la politique est OFF. On liste les CIDR au lieu de
@@ -120,6 +174,11 @@ class Decision:
     exploit: bool
     destructive: bool
     reasons: list[str]
+    # IP ÉPINGLÉES au POINT DE TIR (anti-rebinding) : la/les IP contre lesquelles le verdict a été rendu
+    # (résolution UNIQUE au fire-time). Vide sauf sur un FIRE. Le moteur les passe au module (action.params)
+    # pour qu'il puisse se connecter PAR-IP (voir note d'honnêteté dans `Roe.decide` : la couche connexion
+    # ne les honore pas encore end-to-end -> la garantie fermée ici est la TOCTOU sur le VERDICT).
+    pinned_ips: list[str] = field(default_factory=list)
     ts: str = field(default_factory=_now)
 
     @property
@@ -130,7 +189,7 @@ class Decision:
         return {
             "verdict": self.verdict, "action_id": self.action_id, "target": self.target,
             "kind": self.kind, "exploit": self.exploit, "destructive": self.destructive,
-            "reasons": self.reasons, "ts": self.ts,
+            "reasons": self.reasons, "pinned_ips": self.pinned_ips, "ts": self.ts,
         }
 
 
@@ -188,6 +247,11 @@ class Scope:
         self.techniques_enabled = data.get("techniques_enabled")
         self.categories_enabled = data.get("categories_enabled")
         self.notes = data.get("notes", "")
+        # CACHE DNS PAR-RUN (anti-rebinding L2) : hôte canonique -> résultat de résolution. Évite de
+        # re-résoudre (et re-staller) le même hôte à chaque décision d'un run, et STABILISE le verdict
+        # (une seule vérité de résolution par run). Valeurs : list[str] (IP résolues, [] si NXDOMAIN) ou
+        # la sentinelle `_TIMEOUT` (résolution expirée -> VETO fail-closed persistant pour le run).
+        self._dns_cache: dict[str, Any] = {}
 
     @classmethod
     def load(cls, path: str | Path) -> "Scope":
@@ -240,28 +304,72 @@ class Scope:
         return self._match(target, self.in_scope)
 
     # --- POLITIQUE RÉSEAU (privé/LAN/loopback) : détection AUTORITATIVE (littéral + résolution) ---
+    def resolve_target_ips(self, target: str) -> list[str]:
+        """Résout la cible en IP ÉPINGLABLES (anti-rebinding). C'est LE point de résolution unique du ROE :
+        appelé UNIQUEMENT au fire-time (pas en plan/dry -> pas de fuite d'intention opsec, L3), le résultat
+        est mémoïsé par-run (L2) pour STABILISER le verdict et éviter de re-staller. Une IP littérale est
+        renvoyée sans I/O. Un hôte inconnu (gaierror) rend []. Un DÉPASSEMENT de résolution lève
+        `_ResolveTimeout` (le ROE le convertit en VETO fail-closed). Le décideur épingle CETTE liste et
+        rend le verdict (privé / out_scope-par-IP) CONTRE ELLE."""
+        host = self._host(target)
+        if not host:
+            return []
+        cached = self._dns_cache.get(host)
+        if cached is _TIMEOUT:                                # timeout déjà observé ce run -> re-fail-closed
+            raise _ResolveTimeout(host)
+        if cached is not None:                                # liste résolue mémoïsée (y compris [])
+            return list(cached)
+        try:
+            ips = _resolve_ips(host)
+        except _ResolveTimeout:
+            self._dns_cache[host] = _TIMEOUT                  # mémoïse le timeout (verdict stable sur le run)
+            raise
+        self._dns_cache[host] = list(ips)
+        return list(ips)
+
+    def resolved_ips_private(self, ips: Iterable[str]) -> bool:
+        """True si AU MOINS une IP (déjà résolue/épinglée) est privée/LAN/loopback. Une seule suffit."""
+        return any(_ip_is_private(ip) for ip in ips)
+
+    def out_scope_matches_ips(self, ips: Iterable[str]) -> bool:
+        """True si une IP RÉSOLUE tombe dans un pattern CIDR/IP d'`out_scope` (L4 : symétrie avec le veto
+        privé). Ferme l'asymétrie où un hostname RÉSOLVANT dans une plage out_scope contournait le matching
+        littéral. Patterns non-CIDR (globs hostname) ignorés ici : ils sont déjà couverts par `is_in_scope`
+        sur l'hôte. Patterns non-string ignorés (fail-closed lisible)."""
+        ip_objs = []
+        for ip in ips:
+            try:
+                ip_objs.append(ipaddress.ip_address(str(ip).strip()))
+            except ValueError:
+                continue
+        if not ip_objs:
+            return False
+        for p in self.out_scope:
+            if not isinstance(p, str):
+                continue
+            try:
+                net = ipaddress.ip_network(p, strict=False)
+            except ValueError:
+                continue                                      # pattern hostname : hors de ce chemin IP
+            if any(ip in net for ip in ip_objs):
+                return True
+        return False
+
     def is_private_target(self, target: str) -> bool:
-        """True si la cible EST une IP privée/LAN/loopback OU RÉSOUT (getaddrinfo) vers une telle IP.
-        C'est le point ANTI-REBINDING/SSRF : un hostname d'apparence publique dont A/AAAA pointe vers
-        127.0.0.1 / 10.x / 192.168.x / etc. est détecté ICI (le check littéral Rust ne le voit pas).
-        On teste TOUTES les adresses résolues — une seule adresse privée suffit à classer la cible
-        privée. Une résolution qui échoue (hôte inconnu) => False : aucune connexion n'aura lieu, donc
-        aucune atteinte réseau privée possible (le scope-guard reste par ailleurs seul juge du périmètre).
-        Fail-closed du gate global : `decide()` enveloppe l'appel dans son try/except -> VETO sur erreur."""
+        """True si la cible EST une IP privée/LAN/loopback OU RÉSOUT vers une telle IP (rétro-compat :
+        API publique conservée). S'appuie sur `resolve_target_ips` (résolution bornée + cache). Un timeout
+        de résolution est traité ici comme « non prouvé public » -> False pour préserver le contrat legacy
+        (hôte inconnu => False) ; le CHEMIN DE DÉCISION (`Roe.decide`), lui, VÉTO sur timeout (fail-closed).
+        Le check littéral reste sans I/O réseau (sûr en plan/dry)."""
         host = self._host(target)
         if not host:
             return False
-        if _ip_is_private(host):                              # cible = IP LITTÉRALE privée
+        if _ip_is_private(host):                              # cible = IP LITTÉRALE privée (aucune I/O)
             return True
-        try:                                                  # sinon hostname -> résout et vérifie TOUT
-            infos = socket.getaddrinfo(host, None)
-        except Exception:                                     # hôte inconnu / DNS indisponible
+        try:
+            return self.resolved_ips_private(self.resolve_target_ips(target))
+        except _ResolveTimeout:
             return False
-        for info in infos:
-            sockaddr = info[4] if len(info) > 4 else None
-            if sockaddr and _ip_is_private(sockaddr[0]):
-                return True
-        return False
 
     # --- SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed, en plus du scope-guard) ---
     def technique_selection_configured(self) -> bool:
@@ -318,11 +426,11 @@ class Roe:
                 reasons.append(f"hors scope: {action.target}")
                 return self._finish(VETO, action, reasons)
 
-            # Couche 2bis — POLITIQUE RÉSEAU (privé/LAN/loopback), fail-closed et ADDITIVE au scope.
-            # Quand la politique est OFF (allow_private=False, le défaut), une cible qui EST une IP privée
-            # OU qui RÉSOUT vers une IP privée est VÉTOÉE — même si elle est in-scope. C'est l'enforcement
-            # AUTORITATIF (le check littéral Rust ne voit pas un hostname qui résout en privé : anti-rebinding).
-            if not self.scope.allow_private and self.scope.is_private_target(action.target):
+            # Couche 2bis-LITTÉRAL — POLITIQUE RÉSEAU (IP LITTÉRALE privée) : check SANS I/O réseau, sûr
+            # en plan/dry. Une cible qui EST déjà une IP privée est VÉTOÉE tout de suite (même non armée) —
+            # aucune résolution requise. Le volet ANTI-REBINDING (hostname qui RÉSOUT en privé) est reporté
+            # au POINT DE TIR ci-dessous : on ne résout PAS en simulation (L3, opsec) et on épingle l'IP (L1).
+            if not self.scope.allow_private and _ip_is_private(self.scope._host(action.target)):
                 reasons.append("hors politique réseau (privé/LAN/loopback non autorisé)")
                 return self._finish(VETO, action, reasons)
 
@@ -336,7 +444,7 @@ class Roe:
 
             # in-scope + capacité OK -> au pire DRY_RUN, jamais VETO au-delà
 
-            # Couche 1 — engagement armé ?
+            # Couche 1 — engagement armé ?  (AUCUNE résolution DNS avant ce point : chemin inerte pur, L3)
             if not self.armed:
                 reasons.append("engagement non armé (dry-run)")
                 return self._finish(DRY_RUN, action, reasons)
@@ -346,8 +454,32 @@ class Roe:
                 reasons.append("action non approuvée (mode propose, dry-run)")
                 return self._finish(DRY_RUN, action, reasons)
 
+            # === POINT DE TIR — ANTI-REBINDING (L1/L2/L3/L4) ==========================================
+            # On est sur le point de FIRE. C'EST ICI, et NULLE PART AILLEURS, qu'on résout le hostname
+            # (résolution unique, bornée par timeout + mémoïsée par-run). Le verdict privé/out_scope est
+            # rendu CONTRE l'IP résolue, qui est ensuite ÉPINGLÉE sur la Decision (le moteur la passe au
+            # module). Ferme la TOCTOU sur le VERDICT : un hostname qui paraît public au plan mais RÉSOUT
+            # en interne au tir est VÉTOÉ ici. NB HONNÊTETÉ : la couche connexion des modules ne se
+            # connecte pas encore PAR-IP (urllib/httpflow re-résolvent) -> l'épinglage END-TO-END de la
+            # CONNEXION est reporté ; ce qui est FERMÉ ici est la TOCTOU sur la DÉCISION, pas le pin réseau.
+            try:
+                pinned = self.scope.resolve_target_ips(action.target)
+            except _ResolveTimeout:                           # résolution expirée -> fail-closed (VETO)
+                reasons.append("résolution DNS expirée au tir -> fail-closed (VETO)")
+                return self._finish(VETO, action, reasons)
+
+            # L1/anti-rebinding — l'IP effectivement résolue est-elle privée ? (le hostname pointe interne)
+            if not self.scope.allow_private and self.scope.resolved_ips_private(pinned):
+                reasons.append("hors politique réseau (privé/LAN/loopback non autorisé)")
+                return self._finish(VETO, action, reasons)
+
+            # L4 — l'IP résolue tombe-t-elle dans un CIDR/IP out_scope ? (symétrie avec le veto privé)
+            if self.scope.out_scope_matches_ips(pinned):
+                reasons.append(f"IP résolue dans une plage out_scope -> hors scope: {action.target}")
+                return self._finish(VETO, action, reasons)
+
             reasons.append("armé + in-scope + autorisé + approuvé")
-            return self._finish(FIRE, action, reasons)
+            return self._finish(FIRE, action, reasons, pinned_ips=pinned)
         except Exception as e:                                # fail-closed : toute erreur => VETO
             reasons.append(f"erreur d'évaluation -> fail-closed: {e!r}")
             return self._finish(VETO, action, reasons)
@@ -359,12 +491,23 @@ class Roe:
             raise ScopeError(f"{d.verdict}: {action.target} — " + " ; ".join(d.reasons))
         return d
 
-    def _finish(self, verdict: str, action: Action, reasons: list[str]) -> Decision:
+    def _finish(self, verdict: str, action: Action, reasons: list[str],
+                pinned_ips: list[str] | None = None) -> Decision:
         d = Decision(verdict, action.id, action.target, action.kind,
-                     action.exploit, action.destructive, reasons)
+                     action.exploit, action.destructive, reasons,
+                     pinned_ips=list(pinned_ips or []))
         self._log("roe.decision", d.to_dict())
         return d
 
     def _log(self, kind: str, detail: dict[str, Any]) -> None:
-        if self.ledger is not None:
+        # FAIL-SAFE (L5) : un échec d'écriture du ledger (disque plein, permission, WORM verrouillé, etc.)
+        # ne doit JAMAIS altérer ni annuler un verdict fail-closed. On journalise en BEST-EFFORT : la
+        # Decision est déjà construite et RETOURNÉE par `_finish` quoi qu'il arrive. Sinon une exception
+        # d'`append` remonterait dans `decide()` -> convertie en VETO d'un côté, mais surtout casserait le
+        # log d'un FIRE légitime : on préfère un verdict CORRECT non journalisé à un verdict corrompu.
+        if self.ledger is None:
+            return
+        try:
             self.ledger.append(kind, detail)
+        except Exception:                                     # noqa: BLE001 (le log ne décide jamais)
+            pass

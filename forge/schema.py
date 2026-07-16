@@ -134,6 +134,13 @@ class Finding:
         #    que via le chemin de preuve sanctionné, cf. `Oracle.proof(proven=True)` / marqueur `_proven`).
         if self.status not in STATUSES:
             self.status = "tested"
+        # 0bis) SÉVÉRITÉ — validation SCHEMA-ENFORCED fail-closed (miroir du clamp `status`, L16). Une
+        #    sévérité hors de `SEVERITIES` (typo, plugin hostile, valeur forgée) fausserait la synthèse
+        #    (`sev_rank` -> 0, absente du tri/CVSS) : on la NORMALISE (strip + upper) puis on la RABAT sur
+        #    'INFO' si elle reste inconnue. Jamais de crash, jamais de valeur arbitraire propagée dans le
+        #    ledger signé ni le rapport. Fait AVANT la dérivation CVSS (§3) qui consomme `self.severity`.
+        _sev = str(self.severity or "").strip().upper()
+        self.severity = _sev if _sev in SEVERITIES else "INFO"
         # 1) CWE dédié : si non fourni, le dériver de `category` (rétro-compat avec les modules qui
         #    n'utilisaient que `category="CWE-639"`). `category` n'est jamais modifié.
         if not self.cwe:

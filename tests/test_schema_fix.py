@@ -88,6 +88,21 @@ class TestFindingPostInit(unittest.TestCase):
         f = Finding(target="t", title="x", severity="INFO")
         self.assertEqual((f.cvss_vector, f.cvss_score), ("", 0.0))
 
+    def test_out_of_range_severity_clamps_to_info(self):
+        # L16 : une sévérité hors SEVERITIES (typo/plugin hostile/valeur forgée) est RABATTUE sur INFO
+        # (fail-closed, miroir du clamp `status`). Ne crashe pas, ne propage pas la valeur arbitraire.
+        for bad in ("SUPER-CRITICAL", "urgent", "", "9", "None", "  "):
+            f = Finding(target="t", title="x", severity=bad)
+            self.assertEqual(f.severity, "INFO", f"{bad!r} devait être rabattu sur INFO")
+            self.assertEqual(f.sev_rank(), 0)
+            self.assertEqual((f.cvss_vector, f.cvss_score), ("", 0.0))   # CVSS dérivé APRÈS le clamp
+
+    def test_lowercase_severity_normalized_not_clamped(self):
+        # une sévérité VALIDE mais en minuscules est NORMALISÉE (upper), pas rabattue sur INFO.
+        f = Finding(target="t", title="x", severity="high")
+        self.assertEqual(f.severity, "HIGH")
+        self.assertTrue(f.cvss_vector.startswith("CVSS:3.1/"))
+
     def test_retrocompat_to_dict_carries_new_fields_and_keeps_old(self):
         f = Finding(target="t", title="x", category="CWE-639", severity="HIGH", mitre="T1190")
         d = f.to_dict()
