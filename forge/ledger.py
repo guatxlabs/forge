@@ -204,6 +204,29 @@ class Ledger:
             return "ledger tronqué (hash high-water-mark absent de la chaîne)"
         return None
 
+    def _read_locked(self) -> str:
+        """Lit tout le fichier ledger SOUS UN VERROU PARTAGÉ (`fcntl.flock LOCK_SH`, M2). Un append
+        concurrent prend `LOCK_EX` : le verrou partagé l'exclut LE TEMPS DE LA LECTURE, si bien que
+        `verify()`/`verify_external()` ne lisent JAMAIS une queue à moitié écrite (faux positif transitoire
+        « entrée altérée » sur un ledger honnête écrit par un AUTRE processus — le cas multi-process visé
+        par le module). Plusieurs lecteurs partagent le LOCK_SH (pas de sérialisation entre vérifs). Repli
+        sans verrou sur non-POSIX (`fcntl` absent), parité avec `append`. Appelé APRÈS le check d'existence."""
+        with self.path.open("r", encoding="utf-8") as f:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                return f.read()
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _nonempty_lines(text: str) -> "list[str]":
+        """Lignes non vides (strippées) du JSONL. Sert à identifier la DERNIÈRE ligne : une dernière ligne
+        non parsable = crash en plein append (tolérée, cf. `_disk_tail`) ; une ligne INTÉRIEURE non
+        parsable = falsification (rejetée). C'est la distinction au cœur du fix M2."""
+        return [s for s in (ln.strip() for ln in text.splitlines()) if s]
+
     # --- append (le seul moyen d'écrire) — flock+fsync-sérialisé ENTRE PROCESSUS ---
     # Le MÊME ledger est écrit par la console Rust (kinds `console.*`) ET le moteur Python. Un append
     # est donc rendu ATOMIQUE vis-à-vis des autres processus par un verrou consultatif EXCLUSIF
@@ -280,16 +303,21 @@ class Ledger:
         n = 0
         tail_seq = 0
         seen: set[str] = set()
-        for raw in self.path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            n += 1
+        # M2 : lecture SOUS LOCK_SH (pas de queue à moitié écrite lue) + tolérance de la DERNIÈRE ligne
+        # tronquée (crash mid-append), alignée sur `append`/`_disk_tail`. Une ligne non parsable n'est une
+        # falsification (tamper) que si elle est INTÉRIEURE ; la dernière est ignorée (chaîne sur la dernière
+        # entrée valide, exactement comme `_disk_tail`). Le HWM couvre la vraie troncature (drop de queue).
+        lines = self._nonempty_lines(self._read_locked())
+        last_idx = len(lines) - 1
+        for i, raw in enumerate(lines):
             try:
                 rec = json.loads(raw)
                 seq, ts, kind, detail = rec["seq"], rec["ts"], rec["kind"], rec["detail"]
             except (ValueError, KeyError, TypeError) as e:
-                return {"ok": False, "entries": n, "broken": None, "why": f"entrée malformée: {e}", "alg": self.alg}
+                if i == last_idx:
+                    break  # dernière ligne tronquée : tolérée (crash en plein write), pas une falsification
+                return {"ok": False, "entries": n + 1, "broken": None, "why": f"entrée malformée (intérieure): {e}", "alg": self.alg}
+            n += 1
             if rec.get("prev") != prev:
                 return {"ok": False, "entries": n, "broken": seq, "why": "chaînage rompu (prev)", "alg": self.alg}
             h = _entry_hash(prev, seq, ts, kind, detail)
@@ -334,16 +362,20 @@ class Ledger:
         n = 0
         tail_seq = 0
         seen: set[str] = set()
-        for raw in self.path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            n += 1
+        # M2 (parité avec verify()) : LOCK_SH + tolérance de la dernière ligne tronquée ; une ligne non
+        # parsable INTÉRIEURE reste une falsification. Un tiers (`forge ledger verify --pubkey`) ne doit pas
+        # non plus voir un ledger honnête à dernière ligne tronquée comme « CASSÉ ».
+        lines = self._nonempty_lines(self._read_locked())
+        last_idx = len(lines) - 1
+        for i, raw in enumerate(lines):
             try:
                 rec = json.loads(raw)
                 seq, ts, kind, detail = rec["seq"], rec["ts"], rec["kind"], rec["detail"]
             except (ValueError, KeyError, TypeError) as e:
-                return {"ok": False, "entries": n, "broken": None, "why": f"entrée malformée: {e}"}
+                if i == last_idx:
+                    break  # dernière ligne tronquée : tolérée (crash en plein write)
+                return {"ok": False, "entries": n + 1, "broken": None, "why": f"entrée malformée (intérieure): {e}"}
+            n += 1
             entry_alg = rec.get("alg")
             # multi-algos : ed25519 -> vérif par la clé publique (non-répudiation) ;
             # sha256-console -> chaîne non signée écrite par la console, intégrité = chaîne de hachage
