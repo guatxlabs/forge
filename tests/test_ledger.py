@@ -81,6 +81,65 @@ class TestLedger(unittest.TestCase):
         v = Ledger(self.path, key=b"k" * 32).verify()
         self.assertFalse(v["ok"])
 
+    # ---- M2 : tolérance de la DERNIÈRE ligne tronquée (crash mid-append) vs tamper INTÉRIEUR ----
+
+    def test_torn_last_line_verifies_ok(self):
+        # Un crash en plein append laisse une DERNIÈRE ligne tronquée (JSON partiel, pas de '\n'). verify()
+        # DOIT rester OK (aligné sur append/_disk_tail qui chaînent sur la dernière entrée VALIDE), sinon un
+        # ledger HONNÊTE serait lu « CASSÉ ❌ » de façon permanente (contradiction relevée en M2).
+        self._seed()                                            # 3 entrées valides (HWM => seq 3)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write('{"seq": 4, "ts": "@x", "kin')              # append tronqué (crash simulé), pas de newline
+        try:
+            v = Ledger(self.path, key=b"k" * 32).verify()
+        except Exception as e:                                  # noqa: BLE001
+            self.fail(f"verify() a levé sur une dernière ligne tronquée: {e!r}")
+        self.assertTrue(v["ok"], v)                             # dernière ligne tronquée => tolérée
+        self.assertEqual(v["entries"], 3, "la ligne tronquée n'est pas comptée comme entrée valide")
+
+    def test_interior_malformed_line_is_tamper(self):
+        # À l'inverse : une ligne non parsable AU MILIEU (pas la dernière) ne peut pas venir d'un crash
+        # d'append (qui n'affecte que la queue) -> c'est une FALSIFICATION -> verify() DOIT échouer.
+        self._seed()                                            # 3 entrées ; index 1 = intérieure
+        lines = self.path.read_text().splitlines()
+        lines[1] = "{ corruption au milieu"
+        self.path.write_text("\n".join(lines) + "\n")
+        v = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertFalse(v["ok"], "une ligne intérieure malformée = falsification")
+        self.assertIn("malformée", v["why"])
+        self.assertIn("intérieure", v["why"])
+
+    def test_verify_takes_shared_lock_and_reads_under_concurrent_appends(self):
+        # M2 (LOCK_SH) : verify() lit sous un verrou PARTAGÉ — un append concurrent (LOCK_EX) ne peut pas
+        # lui faire lire une queue à moitié écrite. On martèle des appends depuis un thread pendant que le
+        # thread principal vérifie en boucle : AUCUNE vérif ne doit lever ni rapporter un faux « altérée »
+        # (chaque lecture voit une frontière d'entrée propre grâce au flock partagé/exclusif).
+        import threading
+        self._seed()
+        stop = threading.Event()
+        errors: list = []
+
+        def appender():
+            led = Ledger(self.path, key=b"k" * 32)
+            i = 0
+            while not stop.is_set() and i < 60:
+                led.append("roe.decision", {"i": i}); i += 1
+
+        t = threading.Thread(target=appender); t.start()
+        try:
+            for _ in range(40):
+                v = Ledger(self.path, key=b"k" * 32).verify()
+                # ok True en régime normal ; le SEUL faux positif interdit ici est « altérée »/« malformée »
+                # dû à une lecture partielle. Une vraie troncature ne peut pas survenir (on n'ampute rien).
+                if not v["ok"] and ("altér" in v["why"] or "malformée" in v["why"]):
+                    errors.append(v)
+        finally:
+            stop.set(); t.join()
+        self.assertEqual(errors, [], f"lecture non verrouillée -> faux positif d'intégrité: {errors}")
+        # état final cohérent
+        vf = Ledger(self.path, key=b"k" * 32).verify()
+        self.assertTrue(vf["ok"], vf)
+
 
 @unittest.skipUnless(signing._HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestEd25519(unittest.TestCase):
@@ -112,12 +171,14 @@ class TestEd25519(unittest.TestCase):
         self.assertFalse(led.verify_external(pub)["ok"])                  # altération détectée par la clé publique
 
     def test_external_verify_malformed_line_returns_not_ok_without_raising(self):
-        # comme verify(), verify_external() ne doit PAS lever sur une ligne JSONL non parsable
+        # comme verify(), verify_external() ne doit PAS lever sur une ligne JSONL non parsable INTÉRIEURE
+        # (M2 : une ligne INTÉRIEURE malformée = falsification ; la DERNIÈRE tronquée est tolérée -> testée
+        # séparément). 3 entrées, on corrompt une ligne du MILIEU pour rester sur le cas « tamper ».
         led = Ledger(self.path)
-        led.append("finding", {"t": "y"}); led.append("finding", {"t": "z"})
+        led.append("finding", {"t": "y"}); led.append("finding", {"t": "z"}); led.append("finding", {"t": "w"})
         pub = led.public_id().split(":", 1)[1]
         lines = self.path.read_text().splitlines()
-        lines[1] = "{ ceci n'est pas du JSON valide"            # corruption brute
+        lines[1] = "{ ceci n'est pas du JSON valide"            # corruption brute d'une ligne INTÉRIEURE
         self.path.write_text("\n".join(lines) + "\n")
         try:
             v = led.verify_external(pub)

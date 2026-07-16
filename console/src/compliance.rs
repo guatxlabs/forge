@@ -367,17 +367,138 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
     let actor = crate::attribution_login(&app, &headers);
     let now = crate::now_epoch();
 
-    // CRITICAL SECTION (FIX 3): read → archive → re-anchor → write must be ATOMIC vs a concurrent
-    // append_console_ledger on the SHARED ledger. Both take THE SAME `ledger_lock`, so an interleaved append
-    // can neither be lost (over-written by our rewrite) nor corrupt the SHA-256 chain. We hold the guard
-    // across the whole rewrite and invalidate the head IN PLACE (head.loaded=false) — we must NOT call
-    // app.invalidate_ledger_head() while holding it (it re-locks the SAME non-reentrant mutex => deadlock).
-    // No `.await` runs while the guard is held. (For a dedicated ledger this lock is a harmless extra
-    // serialization; the shared-ledger case is the one that needs it.)
-    let mut head = app.ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
+    // Expired findings/runrecords are gathered from the DB BEFORE the cross-process ledger lock, so the
+    // flock critical section (below) touches ONLY the ledger FILE — no nested `store()` access while HA's
+    // `with_ledger_lock` holds a Postgres transaction. Their DELETE still happens AFTER the re-anchor
+    // attests the counts (step 10). Unparseable ts => kept (fail-closed).
+    let (arch_findings, del_finding_ids) = collect_expired_rows(&app, eid, retention, now, "finding");
+    let (arch_runs, del_run_ids) = collect_expired_rows(&app, eid, retention, now, "runrecord");
 
-    // 4) compute the expired LEADING prefix of the ledger (append-only => expired entries are oldest-first).
-    let entries = read_ledger_pairs(&ledger_path);
+    // CRITICAL SECTION (FIX H1): snapshot -> archive -> re-anchor -> REWRITE must be atomic vs a concurrent
+    // append from ANY writer — the same-process console (`append_console_ledger`), the Python ENGINE
+    // process (`forge/ledger.py`, `fcntl.flock`), and an HA PEER replica. The previous version held ONLY the
+    // in-proc `ledger_lock`, so an engine/peer append that flock the shared file could interleave and be
+    // silently lost when the rename swapped the inode. We now take the SAME three-tier lock as appends, in
+    // the SAME order to preclude deadlock:  in-proc `ledger_lock` -> `ha::with_ledger_lock` (PG advisory
+    // xact lock, cross-instance) -> `FlockExclusive` (fcntl.flock, cross-process). And we REWRITE IN PLACE
+    // (no rename) so a blocked appender that flock the SAME path keeps contending on the SAME inode — a
+    // rename would swap the inode out from under it and drop its entry (the H1 write-loss). We hold the
+    // in-proc guard across the whole thing and invalidate the head cache IN PLACE (head.loaded=false):
+    // calling app.invalidate_ledger_head() while holding it would re-lock the same non-reentrant mutex.
+    let mut head = app.ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut section: Option<Result<Option<PurgeOk>, Response>> = None;
+    let ha = crate::ha::with_ledger_lock(&app, &ledger_path, || {
+        section = Some(purge_locked_section(
+            &ledger_path, is_global, eid, tid, retention, now, &actor, &passphrase,
+            arch_findings, arch_runs, del_finding_ids.len(), del_run_ids.len(),
+        ));
+    });
+    // Head cache invalidated in place (we hold the in-proc lock) whether or not the rewrite ran; the next
+    // append rebuilds head from disk regardless. Release the in-proc lock: the DB deletes + verify below do
+    // NOT touch the ledger chain.
+    head.loaded = false;
+    drop(head);
+
+    if let Err(e) = ha {
+        // FAIL-CLOSED HA outage: the PG advisory lock stayed unreachable across the retry budget, so the
+        // section NEVER ran and the ledger is UNTOUCHED. Refuse the purge (integrity > availability) — do
+        // not report success as though records were archived/purged.
+        return err(StatusCode::SERVICE_UNAVAILABLE, "ledger_unavailable", e.to_string());
+    }
+    let ok = match section {
+        Some(Ok(Some(o))) => o, // ledger re-anchored in place -> proceed to DB deletes + verify.
+        Some(Ok(None)) => {
+            // nothing expired => no-op (ledger untouched, byte-identical). Not an error.
+            return (StatusCode::OK, Json(json!({ "ok": true, "purged_ledger_entries": 0, "note": "nothing expired past retention" }))).into_response();
+        }
+        Some(Err(resp)) => return resp, // fail-closed abort (signed survivor / archive / write / changed).
+        None => return err(StatusCode::INTERNAL_SERVER_ERROR, "ledger_lock_failed", "purge critical section did not run".to_string()),
+    };
+
+    // 10) delete the archived (expired) findings/runrecords rows. FAIL-CLOSED : the ledger was ALREADY
+    // re-anchored above attesting `purged_findings`/`purged_runrecords` — a silent delete failure would
+    // diverge ledger↔DB. On Err, surface 500 (the encrypted archive is safe on disk; a retry re-runs the
+    // idempotent DELETE-by-id). No new ledger entry is written on this error path.
+    if let Err(e) = delete_rows(&app, "finding", &del_finding_ids)
+        .and_then(|_| delete_rows(&app, "runrecord", &del_run_ids))
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "purge_delete_failed", format!("{e} (archive preserved at {})", ok.archive_path));
+    }
+
+    // 11) verify the re-anchored ledger under the EXISTING verifier (must stay OK).
+    let v = crate::verify_ledger_chain(&ledger_path);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "engagement_id": eid,
+            "purged_ledger_entries": ok.cut,
+            "purged_findings": del_finding_ids.len(),
+            "purged_runrecords": del_run_ids.len(),
+            "survivors": ok.survivors_len,
+            "archive_path": ok.archive_path,
+            "archive_sha256": ok.archive_sha256,
+            "segment_sha256": ok.segment_sha256,
+            "purged_head": ok.purged_head,
+            "new_head": ok.new_head,
+            "ledger_verified": v.ok,
+            "checkpoint_kind": PURGE_KIND,
+        })),
+    )
+        .into_response()
+}
+
+/// Outputs of the LOCKED ledger section that the caller needs AFTER releasing the cross-process lock
+/// (build the success JSON + do the DB deletes). All ledger-file mutation is already durable when this is
+/// returned.
+struct PurgeOk {
+    cut: usize,
+    survivors_len: usize,
+    archive_path: String,
+    archive_sha256: String,
+    segment_sha256: String,
+    purged_head: String,
+    new_head: String,
+}
+
+/// The governed purge's LEDGER-FILE critical section (H1). Runs while the caller holds the FULL append
+/// lock stack (in-proc `ledger_lock` + `ha::with_ledger_lock` + — acquired HERE — `FlockExclusive`), so a
+/// concurrent append from any writer (console / Python engine / HA peer) can be neither lost nor fork the
+/// chain. Snapshots the ledger UNDER the flock, archives the expired prefix (encrypted, separate file),
+/// builds the re-anchored chain, RE-READS the ledger under the lock and ABORTS if it changed since the
+/// snapshot (belt-and-suspenders: cannot happen while the flock is held), then rewrites IN PLACE (no rename
+/// — inode-stable so a blocked appender keeps contending on the same lock). Returns:
+///   Ok(Some(PurgeOk)) — re-anchored; caller proceeds to DB deletes + verify.
+///   Ok(None)          — nothing expired (no-op); ledger byte-identical.
+///   Err(Response)     — fail-closed abort (signed survivor / archive failure / write failure / changed).
+#[allow(clippy::too_many_arguments)]
+fn purge_locked_section(
+    ledger_path: &str,
+    is_global: bool,
+    eid: i64,
+    tid: Option<i64>,
+    retention: i64,
+    now: i64,
+    actor: &str,
+    passphrase: &str,
+    arch_findings: Vec<Value>,
+    arch_runs: Vec<Value>,
+    del_findings_n: usize,
+    del_runs_n: usize,
+) -> Result<Option<PurgeOk>, Response> {
+    // Open + flock the ledger for an IN-PLACE rewrite (same fcntl.flock the engine/console appenders take).
+    let file = crate::open_ledger_rw(ledger_path)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "ledger_open_failed", e))?;
+    let _flock = crate::FlockExclusive::acquire(&file)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "ledger_lock_failed", e))?;
+
+    // SNAPSHOT under the flock — the AUTHORITATIVE current content. `snapshot` (raw bytes) drives the
+    // change-detection compare (8b); `entries` is the parsed view via the SHARED `read_ledger_pairs`
+    // helper. Both reads happen UNDER the flock, so they see the same inode content.
+    let snapshot = std::fs::read_to_string(ledger_path).unwrap_or_default();
+    let entries = read_ledger_pairs(ledger_path);
+
+    // 4) compute the expired LEADING prefix (append-only => expired entries are oldest-first).
     let mut cut = 0usize;
     for (_, rec) in entries.iter() {
         let ts = rec.get("ts").and_then(|v| v.as_str()).unwrap_or("");
@@ -392,23 +513,18 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
         }
     }
     if cut == 0 {
-        // nothing expired => no-op (ledger untouched, byte-identical). Not an error.
-        return (StatusCode::OK, Json(json!({ "ok": true, "purged_ledger_entries": 0, "note": "nothing expired past retention" }))).into_response();
+        return Ok(None); // nothing expired => no-op (ledger untouched, byte-identical).
     }
     let survivors = &entries[cut..];
     // 5) FAIL-CLOSED: a SURVIVING signed entry cannot be re-anchored (re-hashing breaks its Ed25519 sig).
     if let Some((_, bad)) = survivors.iter().find(|(_, r)| r.get("alg").and_then(|v| v.as_str()) != Some(CONSOLE_ALG)) {
         let alg = bad.get("alg").and_then(|v| v.as_str()).unwrap_or("?");
-        return err(
+        return Err(err(
             StatusCode::CONFLICT,
             "signed_survivor",
             format!("a surviving entry is signed (alg '{alg}') — re-anchoring would invalidate its signature; purge refused (fail-closed)"),
-        );
+        ));
     }
-
-    // 6) gather expired findings/runrecords (archived + deleted). Unparseable ts => kept (fail-closed).
-    let (arch_findings, del_finding_ids) = collect_expired_rows(&app, eid, retention, now, "finding");
-    let (arch_runs, del_run_ids) = collect_expired_rows(&app, eid, retention, now, "runrecord");
 
     // 7) ARCHIVE FIRST (encrypted, reuse of the backup discipline). Nothing is mutated until this succeeds.
     let purged_lines: Vec<&str> = entries[..cut].iter().map(|(l, _)| l.as_str()).collect();
@@ -427,17 +543,17 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
     });
     let plaintext = match serde_json::to_vec(&archive_doc) {
         Ok(b) => b,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "archive_build_failed", e.to_string()),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "archive_build_failed", e.to_string())),
     };
     let segment_sha256 = crate::sha256_hex_bytes(&plaintext);
-    let encrypted = match crate::backup_encrypt(&plaintext, &passphrase) {
+    let encrypted = match crate::backup_encrypt(&plaintext, passphrase) {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "archive_encrypt_failed", e),
+        Err(e) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "archive_encrypt_failed", e)),
     };
     let archive_sha256 = crate::sha256_hex_bytes(&encrypted);
     let archive_path = format!("{ledger_path}.purged-{now}.enc");
     if let Err(e) = crate::backup_write_atomic(&archive_path, &encrypted, 0o600) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "archive_write_failed", e);
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "archive_write_failed", e));
     }
 
     // 8) build the re-anchored ledger: [checkpoint R @ genesis] + [survivors re-linked (content preserved)].
@@ -459,8 +575,8 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
         "segment_sha256": segment_sha256,
         "archive_path": archive_path,
         "archive_sha256": archive_sha256,
-        "purged_findings": del_finding_ids.len(),
-        "purged_runrecords": del_run_ids.len(),
+        "purged_findings": del_findings_n,
+        "purged_runrecords": del_runs_n,
         "reanchor": true,
     });
     let r_seq: i64 = 0; // re-genesis marker
@@ -490,47 +606,34 @@ async fn purge(State(app): State<App>, headers: HeaderMap, Json(body): Json<Valu
         out.push('\n');
         prev = hash;
     }
-    // 9) atomically replace the ledger with the re-anchored chain (archive already safe on disk).
-    if let Err(e) = crate::backup_write_atomic(&ledger_path, out.as_bytes(), 0o600) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "ledger_write_failed", format!("{e} (archive preserved at {archive_path})"));
-    }
-    // Invalidate the head cache IN PLACE (we HOLD the lock — calling app.invalidate_ledger_head() would
-    // re-lock the same non-reentrant mutex => deadlock). The next append rebuilds head from the re-anchored
-    // file. Then RELEASE the lock: the DB deletes + verify below don't touch the ledger chain.
-    head.loaded = false;
-    drop(head);
 
-    // 10) delete the archived (expired) findings/runrecords rows. FAIL-CLOSED : the ledger was ALREADY
-    // re-anchored above attesting `purged_findings`/`purged_runrecords` — a silent delete failure would
-    // diverge ledger↔DB. On Err, surface 500 (the encrypted archive is safe on disk; a retry re-runs the
-    // idempotent DELETE-by-id). No new ledger entry is written on this error path.
-    if let Err(e) = delete_rows(&app, "finding", &del_finding_ids)
-        .and_then(|_| delete_rows(&app, "runrecord", &del_run_ids))
-    {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "purge_delete_failed", format!("{e} (archive preserved at {archive_path})"));
+    // 8b) RE-READ under the flock just before writing; ABORT if the file changed since the snapshot. While
+    // the flock is held this can't happen, but it makes the "no lost append" invariant explicit and guards
+    // any future refactor that would release the lock between snapshot and write.
+    let current = std::fs::read_to_string(ledger_path).unwrap_or_default();
+    if current != snapshot {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "ledger_changed",
+            "the ledger changed under the purge lock — aborting to avoid clobbering a concurrent append (retry); archive preserved".to_string(),
+        ));
     }
 
-    // 11) verify the re-anchored ledger under the EXISTING verifier (must stay OK).
-    let v = crate::verify_ledger_chain(&ledger_path);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "engagement_id": eid,
-            "purged_ledger_entries": cut,
-            "purged_findings": del_finding_ids.len(),
-            "purged_runrecords": del_run_ids.len(),
-            "survivors": survivors.len(),
-            "archive_path": archive_path,
-            "archive_sha256": archive_sha256,
-            "segment_sha256": segment_sha256,
-            "purged_head": purged_head,
-            "new_head": prev,
-            "ledger_verified": v.ok,
-            "checkpoint_kind": PURGE_KIND,
-        })),
-    )
-        .into_response()
+    // 9) REWRITE IN PLACE on the flocked fd (NO rename — inode preserved). The archive is already durable.
+    crate::rewrite_ledger_in_place(&file, out.as_bytes()).map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, "ledger_write_failed", format!("{e} (archive preserved at {archive_path})"))
+    })?;
+
+    Ok(Some(PurgeOk {
+        cut,
+        survivors_len: survivors.len(),
+        archive_path,
+        archive_sha256,
+        segment_sha256,
+        purged_head,
+        new_head: prev,
+    }))
+    // _flock dropped here (LOCK_UN), then `file` dropped (close).
 }
 
 // ============================================================================================
@@ -1158,6 +1261,56 @@ mod tests {
         let pairs = read_ledger_pairs(&path);
         let appended = pairs.iter().filter(|(_, r)| r["kind"] == "console.race.append").count();
         assert_eq!(appended, 5, "no concurrent append may be lost under the shared ledger_lock");
+    }
+
+    // ---- H1: a CROSS-PROCESS (flock-only) engine/peer append during a purge is not lost (WORM) ----
+    //
+    // The PRE-FIX purge held ONLY the in-proc `ledger_lock` and rewrote via rename (inode swap). A Python
+    // ENGINE append (`forge/ledger.py`) or an HA PEER uses `fcntl.flock` on the file — NOT the Rust in-proc
+    // mutex — so it could interleave in the snapshot->rename window and be SILENTLY DROPPED when the rename
+    // unlinked the inode it had written to, while `verify` still said ok. This test mimics that appender with
+    // `append_sha256_console_locked` (the flock-ONLY primitive, NO `ledger_lock`), hammers it concurrently
+    // with a purge, and asserts ZERO signed entries lost + `verify` stays ok. The fix (flock held across the
+    // whole read+rewrite + IN-PLACE rewrite) makes the appender block until the purge finishes and then chain
+    // onto the re-anchored head — never onto an orphaned inode. Fresh ts => these are survivors, never in the
+    // purged prefix, so any loss would be pure data loss.
+    #[tokio::test]
+    async fn cross_process_append_during_purge_not_lost() {
+        let path = tmp_path("comp-race-xproc");
+        let app = test_app(&path);
+        engage(&app);
+        let now = crate::now_epoch();
+        seed_ledger(&path, now, 3, 1_000_000, 1, 5); // 3 expired (purged) + 1 fresh (survivor)
+        {
+            let db = app.db();
+            crate::settings_set(&db, &ret_key_global(), "100").unwrap();
+            // a REAL archive key => backup_encrypt does its (slow) KDF, WIDENING the purge critical section
+            // so the flock-only appender genuinely piles up against the lock (adversarial timing).
+            crate::settings_set(&db, "compliance.archive_key", "correct horse battery").unwrap();
+        }
+        // A flock-ONLY appender (NO app.ledger_lock) — a faithful stand-in for the Python engine / an HA
+        // peer PROCESS. It hammers the SAME file while the purge runs.
+        let p2 = path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut ok = 0usize;
+            for i in 0..40 {
+                if crate::append_sha256_console_locked(&p2, "engine.race.append", &json!({ "i": i })).is_ok() {
+                    ok += 1;
+                }
+            }
+            ok
+        });
+        let tok = admin_session(&app);
+        let resp = purge(State(app.clone()), bearer(&tok), Json(json!({"engagement_id": 1}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let appended_ok = writer.join().unwrap();
+        // (a) the re-anchored chain still verifies (no fork, no torn in-place rewrite).
+        assert!(crate::verify_ledger_chain(&path).ok, "chain must verify after cross-process append + purge");
+        // (b) EVERY successfully-appended engine entry is PRESENT — none dropped by the purge rewrite.
+        let pairs = read_ledger_pairs(&path);
+        let present = pairs.iter().filter(|(_, r)| r["kind"] == "engine.race.append").count();
+        assert!(appended_ok > 0, "the appender must have written at least one entry (test is non-vacuous)");
+        assert_eq!(present, appended_ok, "no cross-process (flock-only) append may be lost by the purge (H1)");
     }
 
     // ---- FIX A: the RETENTION path over a finding with a multibyte ts does NOT panic and RETAINS it ----

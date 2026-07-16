@@ -66,6 +66,11 @@ fn canon_into(v: &Value, out: &mut String) {
 
 /// Échappement de chaîne JSON minimal compatible json.dumps(ensure_ascii=False) :
 /// échappe \" \\ et les contrôles < 0x20, laisse l'UTF-8 tel quel.
+/// PARITÉ Python (M1) : `json.dumps` émet les SHORT escapes `\b` (0x08) et `\f` (0x0c) — comme
+/// `\n`/`\r`/`\t` — et non ``/``. Ces deux arms DOIVENT précéder l'arm générique `< 0x20`,
+/// sinon une entrée moteur (Python) portant 0x08/0x0c dans un champ `detail` (injectable par ingestion :
+/// titre de finding, kind ROE) produirait un préimage Rust différent -> `verify_ledger_chain` crierait
+/// « entrée altérée » sur une entrée légitime (fausse alarme d'intégrité).
 fn canon_str(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -75,6 +80,8 @@ fn canon_str(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),  // parité json.dumps : 0x08 -> \b (AVANT l'arm < 0x20)
+            '\u{000c}' => out.push_str("\\f"),  // parité json.dumps : 0x0c -> \f (AVANT l'arm < 0x20)
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -257,7 +264,7 @@ fn read_disk_tail(path: &str) -> (String, i64) {
 /// pris sur LE MÊME fichier par les deux, l'un bloque l'autre : lecture-queue -> calcul -> write ->
 /// fsync forment UNE section critique cross-processus. Relâché au Drop (LOCK_UN puis close du fd).
 #[cfg(unix)]
-struct FlockExclusive {
+pub(crate) struct FlockExclusive {
     fd: std::os::unix::io::RawFd,
 }
 
@@ -266,7 +273,7 @@ impl FlockExclusive {
     /// Prend LOCK_EX (bloquant) sur le fd du fichier ouvert. Le fd reste valide tant que le `File`
     /// emprunté vit ; on garde le guard MOINS longtemps que le `File` (déclaré après lui -> droppé
     /// avant), donc aucun usage après close.
-    fn acquire(f: &std::fs::File) -> Result<Self, String> {
+    pub(crate) fn acquire(f: &std::fs::File) -> Result<Self, String> {
         use std::os::unix::io::AsRawFd;
         let fd = f.as_raw_fd();
         // SAFETY : fd valide (emprunté au File vivant) ; LOCK_EX bloque jusqu'à obtention du verrou.
@@ -288,13 +295,44 @@ impl Drop for FlockExclusive {
 }
 
 #[cfg(not(unix))]
-struct FlockExclusive;
+pub(crate) struct FlockExclusive;
 
 #[cfg(not(unix))]
 impl FlockExclusive {
     // Non-POSIX (Windows) : pas de flock -> repli sans verrou (sûr en écrivain unique uniquement,
     // parité avec le repli `fcntl is None` de forge/ledger.py). La cible de déploiement est Linux.
-    fn acquire(_f: &std::fs::File) -> Result<Self, String> { Ok(Self) }
+    pub(crate) fn acquire(_f: &std::fs::File) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Ouvre le fichier ledger pour une RÉÉCRITURE IN-PLACE (read+write, créé si absent) — utilisé par le
+/// purge de conformité gouverné (compliance.rs) pour le `flock` avec le MÊME `FlockExclusive` que les
+/// appends, puis le réécrire SANS rename (inode stable). Un rename échangerait l'inode sous un appender
+/// bloqué sur le flock -> son entrée serait écrite sur l'inode délié = PERDUE (la perte d'écriture H1).
+pub(crate) fn open_ledger_rw(path: &str) -> Result<std::fs::File, String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    std::fs::OpenOptions::new()
+        .create(true).read(true).write(true).open(path)
+        .map_err(|e| format!("ouverture ledger '{path}' pour réécriture impossible: {e}"))
+}
+
+/// Réécrit le ledger IN-PLACE sur un fd DÉJÀ flocké : seek 0, write `data`, tronque à sa longueur, fsync.
+/// AUCUN rename — l'inode est préservé, donc un appender concurrent qui `flock` le MÊME chemin continue de
+/// contendre sur le MÊME verrou (un rename échangerait l'inode et perdrait silencieusement l'entrée d'un
+/// appender bloqué — la perte d'écriture H1). DOIT être appelé en tenant `FlockExclusive` sur `f`.
+pub(crate) fn rewrite_ledger_in_place(f: &std::fs::File, data: &[u8]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut fw: &std::fs::File = f;                 // impl Write/Seek pour &File
+    fw.seek(SeekFrom::Start(0)).map_err(|e| format!("seek ledger échoué: {e}"))?;
+    fw.write_all(data).map_err(|e| format!("réécriture in-place ledger échouée: {e}"))?;
+    fw.flush().map_err(|e| format!("flush ledger échoué: {e}"))?;
+    f.set_len(data.len() as u64).map_err(|e| format!("truncate ledger échoué: {e}"))?;
+    // fsync AVANT de relâcher le flock (fait par le Drop du guard côté appelant) -> réécriture DURABLE.
+    f.sync_all().map_err(|e| format!("sync ledger échoué: {e}"))?;
+    Ok(())
 }
 
 /// Append UNE entrée `sha256-console` (chaîne SHA-256 NON signée, sig "") à `path`, SÉRIALISÉ
@@ -399,4 +437,45 @@ pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/api/ledger", get(ledger))
         .route("/api/ledger/verify", get(ledger_verify))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M1 — PARITÉ canon_str vs Python `json.dumps(obj, ensure_ascii=False)` sur TOUS les octets de
+    /// contrôle 0x00..0x1f. Python émet les SHORT escapes `\b \t \n \f \r` (0x08,0x09,0x0a,0x0c,0x0d) et
+    /// `\u00xx` (hex minuscule) pour le reste ; `"` et `\` s'échappent aussi. Avant le fix, 0x08/0x0c
+    /// sortaient en ``/`` côté Rust -> préimage divergent -> fausse « entrée altérée ».
+    /// Les valeurs attendues ci-dessous sont EXACTEMENT ce que produit `json.dumps` (hardcodées, pas
+    /// dérivées du code testé) — c'est une preuve byte-à-byte de la parité.
+    #[test]
+    fn canon_str_matches_python_json_dumps_control_bytes() {
+        // Le short-escape Python attendu pour chaque octet de contrôle (None => \u00xx générique).
+        let short = |b: u32| -> Option<&'static str> {
+            match b {
+                0x08 => Some("\\b"),
+                0x09 => Some("\\t"),
+                0x0a => Some("\\n"),
+                0x0c => Some("\\f"),
+                0x0d => Some("\\r"),
+                _ => None,
+            }
+        };
+        for b in 0x00u32..=0x1f {
+            let c = char::from_u32(b).unwrap();
+            let s: String = c.to_string();
+            let got = canon_json(&Value::String(s));
+            let expected = match short(b) {
+                Some(esc) => format!("\"{esc}\""),
+                None => format!("\"\\u{b:04x}\""), // json.dumps : \u00xx, hex MINUSCULE
+            };
+            assert_eq!(got, expected, "canon_str diverge de json.dumps pour l'octet 0x{b:02x}");
+        }
+        // Sanity : `"` et `\` restent échappés comme json.dumps (\" et \\).
+        assert_eq!(canon_json(&Value::String("\"".into())), "\"\\\"\"");
+        assert_eq!(canon_json(&Value::String("\\".into())), "\"\\\\\"");
+        // Sanity : l'UTF-8 non-contrôle est laissé tel quel (ensure_ascii=False).
+        assert_eq!(canon_json(&Value::String("é→😀".into())), "\"é→😀\"");
+    }
 }
