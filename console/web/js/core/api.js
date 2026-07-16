@@ -65,10 +65,12 @@ export let OPERATOR_SECRET = '';            // mémoire de session : jamais pers
 // une URL EventSource/SSE (cf. startSse : EventSource ne peut pas porter d'en-tête -> on bascule en
 // polling, on n'expose PAS le secret) ni loggé/persisté. Toute écriture opérateur passe par operatorHeaders().
 export function operatorHeaders(extra = {}) {
-  const h = { 'X-Forge-Operator': OPERATOR_SECRET, ...extra };
-  const t = localStorage.getItem('forge_token');     // ne PROMPT pas : le token viewer est optionnel ici
-  if (t) h.Authorization = 'Bearer ' + t;
-  return h;
+  // Le secret opérateur voyage via X-Forge-Operator ; l'AUTHN viewer/opérateur repose sur le cookie
+  // de session `forge_session` (HttpOnly), envoyé automatiquement par le navigateur. On N'ATTACHE PLUS
+  // de `Authorization: Bearer <forge_token>` : ce token legacy n'est écrit par AUCUN build courant
+  // (résidu localStorage d'un ancien build) et, prioritaire côté serveur, il MASQUAIT le cookie de
+  // session valide -> écritures opérateur/admin en 401 (ex. POST /api/engagements). Cf. C14 / ROADMAP.
+  return { 'X-Forge-Operator': OPERATOR_SECRET, ...extra };
 }
 // Appel API admin : renvoie le JSON parsé, lève une Error (avec .status) sur !ok. On ne remonte que le
 // champ contrôlé `why`/`error` du backend (jamais un corps brut non-fiable -> anti-XSS, cf. api()).
