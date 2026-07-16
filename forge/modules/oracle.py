@@ -17,8 +17,6 @@ Ce que la base fournit (chaque oracle concret se réduit à : métadonnées + lo
 Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed restent déclarés par
 chaque module concret et restent gardés par le ROE.
 """
-import http.client
-import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -150,36 +148,12 @@ class Oracle(Module):
         re-résoudre le hostname de `req` — la couche connexion urllib re-résolvait sinon, rouvrant la
         fenêtre de DNS-rebinding entre la résolution du ROE et le connect.
 
-        CE QUI NE CHANGE PAS (aucune vérification TLS affaiblie) : `self.host` reste l'HÔTE D'ORIGINE ->
-        le `Host:` header est calculé depuis lui (identité HTTP correcte) ET, en HTTPS, `server_hostname`
-        (SNI + validation du certificat) reste l'HÔTE D'ORIGINE via le `_context` VÉRIFIÉ du handler
-        standard — le certificat n'est JAMAIS validé contre l'IP. On ne change QUE la CIBLE du connect."""
-        class _PinHTTPConnection(http.client.HTTPConnection):
-            def connect(self):                                # dial l'IP épinglée, garde self.host (Host header)
-                self.sock = socket.create_connection((pin_ip, self.port), self.timeout, self.source_address)
-                if self._tunnel_host:
-                    self._tunnel()
-
-        class _PinHTTPSConnection(http.client.HTTPSConnection):
-            def connect(self):                                # dial l'IP épinglée ; SNI/cert = hôte d'origine
-                sock = socket.create_connection((pin_ip, self.port), self.timeout, self.source_address)
-                if self._tunnel_host:
-                    self.sock = sock
-                    self._tunnel()
-                    server_hostname = self._tunnel_host
-                else:
-                    server_hostname = self.host               # HÔTE D'ORIGINE -> SNI + validation certificat
-                self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
-
-        class _PinHTTPHandler(urllib.request.HTTPHandler):
-            def http_open(self, r):
-                return self.do_open(_PinHTTPConnection, r)
-
-        class _PinHTTPSHandler(urllib.request.HTTPSHandler):  # hérite le _context VÉRIFIÉ (check_hostname on)
-            def https_open(self, r):
-                return self.do_open(_PinHTTPSConnection, r)
-
-        opener = urllib.request.build_opener(_NoRedirect, _PinHTTPHandler, _PinHTTPSHandler)
+        La logique de connexion PAR-IP (sous-classes HTTPConnection/HTTPSConnection + handlers, SNI/cert
+        préservés) vit en SOURCE UNIQUE dans `pin.build_pinned_opener` (partagée avec recon_surface). On y
+        passe `override_ip=pin_ip` (l'appelant fournit l'IP explicitement) + `_NoRedirect` (aucun suivi
+        auto). TLS NON affaibli : `self.host` reste l'HÔTE D'ORIGINE -> `Host:` header ET, en HTTPS, SNI +
+        validation du certificat restent l'hôte d'origine (jamais l'IP). On ne change QUE la CIBLE du connect."""
+        opener = _pin.build_pinned_opener(override_ip=pin_ip, extra_handlers=(_NoRedirect,))
         return opener.open(req, timeout=timeout)
 
     # --- câblage HTTP partagé (les `_fetch` concrets adaptent la forme du tuple retourné) ---
@@ -254,16 +228,32 @@ class Oracle(Module):
                     loc = None
                 nxt = _redirect_target(cur_url, loc, store)
                 if nxt is not None:
+                    follow = True
                     if _host_of(nxt) != _host_of(cur_url):
                         # saut CROSS-ORIGIN : on NE re-poste JAMAIS le secret de l'appelant vers le
                         # nouvel hôte ; la session gouvernée du nouvel hôte (scope-guardée) sera
                         # re-fusionnée au tour suivant via headers_for(nxt).
                         caller_headers = {k: v for k, v in caller_headers.items()
                                           if k.lower() not in ("cookie", "authorization")}
-                    if e.code not in (307, 308):         # 301/302/303 -> GET sans corps (convention)
-                        cur_method, cur_payload = "GET", None
-                    cur_url = nxt
-                    continue
+                        # ANTI-REBINDING (résidu T8 fermé) : le ROE n'a épinglé QUE l'hôte de la cible
+                        # d'origine. Sous un contexte de pin gouverné, un hôte cross-host N'EST PAS épinglé
+                        # -> la couche connexion RE-RÉSOUDRAIT (fenêtre de rebinding). On RÉSOUT le nouvel
+                        # hôte sous les MÊMES règles fail-closed que le ROE (`Scope.safe_pinned_ip` :
+                        # privé/out_scope/timeout/inconnu => None) et on l'ÉPINGLE ; None => on REFUSE de
+                        # suivre (la 3xx remonte telle quelle). Hors contexte gouverné (dev/test/offline) =>
+                        # aucun pin lié => suivi NORMAL byte-identique (le scope-guard hostname a déjà gaté nxt).
+                        if _pin.current() is not None and _pin.ip_for(nxt) is None:
+                            scope = getattr(store, "scope", None) if store is not None else None
+                            safe_ip = scope.safe_pinned_ip(nxt) if scope is not None else None
+                            if safe_ip is None:
+                                follow = False           # fail-closed : hôte dérivé non épinglable
+                            else:
+                                _pin.bind(nxt, safe_ip)  # épingle l'hôte dérivé -> connexion PAR-IP au tour suivant
+                    if follow:
+                        if e.code not in (307, 308):     # 301/302/303 -> GET sans corps (convention)
+                            cur_method, cur_payload = "GET", None
+                        cur_url = nxt
+                        continue
             # THROTTLING PERSISTANT (429/503 après back-off) : marque le bucket -> l'engine surface un
             # marqueur « rate-limited » au run (au lieu d'empties silencieux). Puis la réponse telle quelle.
             if _is_throttled(e) and bucket is not None:
