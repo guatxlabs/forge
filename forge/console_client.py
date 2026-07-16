@@ -37,13 +37,15 @@ def _skipped_budget(skipped):
 
 def build_payload(campaign, findings, run_records, run_id=None,
                   roe_decisions=None, coverage=None, coverage_gaps=None,
-                  skipped_budget=None):
+                  skipped_budget=None, not_planned=None):
     """Payload d'ingest (pur, testable sans réseau).
 
     Ajoute la transparence anti-masquage à la boucle purple : `run_id` (corrèle un run
     lancé depuis la console), `roe_decisions` (verdict par action), `coverage` (compteurs
     fired/dry_run/vetoed/errors), `coverage_gaps` (classes jamais tentées par cible),
-    `skipped_budget` (actions déférées). Champs additifs — la console ignore les inconnus."""
+    `skipped_budget` (actions déférées), `not_planned` (modules disponibles JAMAIS ordonnancés
+    par le plan, {kind: raison} — le bucket anti-lacune au niveau module). Champs additifs — la
+    console ignore les inconnus."""
     return {
         "campaign": campaign or "default",
         "run_id": run_id,
@@ -53,12 +55,13 @@ def build_payload(campaign, findings, run_records, run_id=None,
         "coverage": _coverage_counts(coverage),
         "coverage_gaps": {k: list(v) for k, v in (coverage_gaps or {}).items()},
         "skipped_budget": _skipped_budget(skipped_budget),
+        "not_planned": {str(k): str(v) for k, v in (not_planned or {}).items()},
     }
 
 
 def ingest(campaign, findings, run_records, url=None, token=None, timeout=30,
            run_id=None, roe_decisions=None, coverage=None, coverage_gaps=None,
-           skipped_budget=None):
+           skipped_budget=None, not_planned=None):
     """POST /api/ingest. Retourne (status, json) ; lève sur erreur réseau/HTTP."""
     endpoint = (url or base_url()).rstrip("/") + "/api/ingest"
     # FORGE_CONSOLE_TOKEN with a `*_FILE` fallback (Docker/k8s secret) — env holds a path, not the token.
@@ -69,7 +72,8 @@ def ingest(campaign, findings, run_records, url=None, token=None, timeout=30,
               "— l'ingest sera probablement refusé (401)", file=sys.stderr)
     payload = build_payload(campaign, findings, run_records, run_id=run_id,
                             roe_decisions=roe_decisions, coverage=coverage,
-                            coverage_gaps=coverage_gaps, skipped_budget=skipped_budget)
+                            coverage_gaps=coverage_gaps, skipped_budget=skipped_budget,
+                            not_planned=not_planned)
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         endpoint, data=data, method="POST",

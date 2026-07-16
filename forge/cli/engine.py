@@ -205,6 +205,11 @@ def cmd_campaign(args):
         print("Lacunes de couverture (classes jamais tentées) :")
         for tgt, miss in engine.coverage_gaps.items():
             print(f"  {tgt}: {', '.join(miss)}")
+    if engine.not_planned:
+        # bucket anti-lacune : modules sélectionnés/disponibles jamais ordonnancés par le plan.
+        print(f"Modules disponibles non planifiés ({len(engine.not_planned)}) :")
+        for kind, reason in engine.not_planned.items():
+            print(f"  {kind}: {reason}")
     if args.purple and engine.run_records:
         n = purple.emit(args.purple, engine.run_records)
         print(f"Run-records ATT&CK -> {args.purple} ({n})")
@@ -215,7 +220,7 @@ def cmd_campaign(args):
                 url=args.console, token=args.console_token,
                 run_id=args.run_id, roe_decisions=engine.roe_decisions(),
                 coverage=cov, coverage_gaps=engine.coverage_gaps,
-                skipped_budget=engine.skipped_budget)
+                skipped_budget=engine.skipped_budget, not_planned=engine.not_planned)
             print(f"Console <- ingest (HTTP {st}): {resp}")
         except Exception as e:  # noqa: BLE001
             print(f"Console: échec ingest ({e!r})")
