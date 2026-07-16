@@ -795,10 +795,18 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
     let mut added = 0usize;
     let mut removed = 0usize;
     if let Some(members) = doc.get("members").and_then(|m| m.as_array()) {
-        // PUT-style full replace of membership.
+        // PUT-style full replace of membership. FAIL-CLOSED + TRANSACTIONAL (L7): the membership wipe runs in
+        // a `with_tx` and its Result is MATCHED — a DB error ROLLS BACK and 500s BEFORE any re-add or the
+        // ledger, so `console.scim.group.update` never attests a replace whose wipe silently failed (was a
+        // swallowed `let _ = …execute()`). Mirrors the group_delete tx pattern.
         {
             let store = app.store();
-            let _ = store.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid]);
+            if let Err(e) = store.with_tx(|tx| {
+                tx.execute("DELETE FROM scim_group_member WHERE group_id=?", &crate::sql_params![gid])?;
+                Ok(())
+            }) {
+                return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("membership replace failed: {e}"), None);
+            }
         }
         for uid in members.iter().filter_map(member_id_of) {
             if let Err(e) = add_member(&app, gid, uid, &role) {
@@ -807,6 +815,9 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
             added += 1;
         }
     }
+    // Collect membership REMOVALS during the ops scan, then apply them ATOMICALLY below (L7). Adds are applied
+    // in-loop (add_member re-locks the store and re-roles the member, so it cannot run inside a held tx guard).
+    let mut remove_uids: Vec<i64> = Vec::new();
     if let Some(ops) = doc.get("Operations").and_then(|o| o.as_array()) {
         for op in ops {
             let action = op.get("op").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
@@ -832,13 +843,26 @@ async fn group_patch(State(app): State<App>, headers: HeaderMap, Path(id): Path<
                 "remove" => {
                     // path like: members[value eq "42"]  → extract the id.
                     if let Some(uid) = extract_member_path_id(path).or_else(|| vals.and_then(member_id_of)) {
-                        
-                        let _ = app.store().execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", &crate::sql_params![gid, uid]);
+                        remove_uids.push(uid);
                         removed += 1;
                     }
                 }
                 _ => {}
             }
+        }
+    }
+    // Apply all membership removals ATOMICALLY (L7): one `with_tx`, each DELETE's Result MATCHED — a partial
+    // failure ROLLS BACK (no inconsistent membership) and 500s BEFORE the ledger (no false `success`
+    // attestation of a removal that never landed). Was a swallowed `let _ = app.store().execute()`.
+    if !remove_uids.is_empty() {
+        let store = app.store();
+        if let Err(e) = store.with_tx(|tx| {
+            for uid in &remove_uids {
+                tx.execute("DELETE FROM scim_group_member WHERE group_id=? AND user_id=?", &crate::sql_params![gid, *uid])?;
+            }
+            Ok(())
+        }) {
+            return scim_err(StatusCode::INTERNAL_SERVER_ERROR, format!("membership remove failed: {e}"), None);
         }
     }
     {
@@ -1853,6 +1877,55 @@ mod tests {
         // No group.create ledger for the aborted op (guard fired before ledgering).
         let lines = crate::read_ledger_lines(&ledger);
         assert_eq!(lines.len(), before, "guarded op does not ledger a mutation");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // 10b) SCIM L7 — group membership PATCH `remove` is applied TRANSACTIONALLY and error-checked: the
+    //      removal lands (200), the retained member stays (consistent membership), and the previously
+    //      SWALLOWED DELETE result is now matched (a real failure would 500 before the ledger).
+    // ------------------------------------------------------------------------------------------------
+    #[tokio::test]
+    async fn group_patch_remove_member_is_transactional() {
+        let ledger = tmp_path("scim-l7-ledger");
+        let app = scim_test_app(&ledger);
+        engage_flag(&app);
+        set_token(&app, "tok-l7");
+        let addr = serve(app.clone()).await;
+        // Two genuine SCIM users (each gets a scim_user row, so both can join a SCIM group).
+        let c1 = http_raw(addr, &body_req("POST", "/scim/v2/Users", &scim_user_body("u1@corp.com", true, "ext-1"), &bearer_hdr("tok-l7"))).await;
+        let c2 = http_raw(addr, &body_req("POST", "/scim/v2/Users", &scim_user_body("u2@corp.com", true, "ext-2"), &bearer_hdr("tok-l7"))).await;
+        let u1 = json_of(&c1)["id"].as_str().unwrap().to_string();
+        let u2 = json_of(&c2)["id"].as_str().unwrap().to_string();
+        // A group carrying both members.
+        let gbody = json!({
+            "schemas": [SCHEMA_GROUP],
+            "displayName": "Forge Readers",
+            "members": [{ "value": u1 }, { "value": u2 }],
+        })
+        .to_string();
+        let gr = http_raw(addr, &body_req("POST", "/scim/v2/Groups", &gbody, &bearer_hdr("tok-l7"))).await;
+        assert_eq!(parse_status(&gr), 201, "group created: {gr}");
+        let gid = json_of(&gr)["id"].as_str().unwrap().to_string();
+        // PATCH remove u2 via the `members[value eq "<id>"]` path form.
+        let patch = json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{ "op": "remove", "path": format!("members[value eq \"{u2}\"]") }],
+        })
+        .to_string();
+        let pr = http_raw(addr, &body_req("PATCH", &format!("/scim/v2/Groups/{gid}"), &patch, &bearer_hdr("tok-l7"))).await;
+        assert_eq!(parse_status(&pr), 200, "[L7] patch remove -> 200: {pr}");
+        // u2 removed, u1 retained — membership is consistent (atomic remove landed, no partial state).
+        {
+            let db = app.db();
+            let gid_i: i64 = gid.parse().unwrap();
+            let u2_i: i64 = u2.parse().unwrap();
+            let u1_i: i64 = u1.parse().unwrap();
+            let has_u2: i64 = db.query_row("SELECT COUNT(*) FROM scim_group_member WHERE group_id=? AND user_id=?", [gid_i, u2_i], |r| r.get(0)).unwrap();
+            let has_u1: i64 = db.query_row("SELECT COUNT(*) FROM scim_group_member WHERE group_id=? AND user_id=?", [gid_i, u1_i], |r| r.get(0)).unwrap();
+            assert_eq!(has_u2, 0, "[L7] removed member is gone");
+            assert_eq!(has_u1, 1, "[L7] other member retained (consistent membership)");
+        }
         let _ = std::fs::remove_file(&ledger);
     }
 

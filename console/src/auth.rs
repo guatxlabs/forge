@@ -4,7 +4,7 @@
 //! rôle opérateur C2 fail-closed (`check_operator`/`check_operator_env`/`operator_denied`) avec sa politique
 //! source-CIDR (`ip_in_cidr`/`effective_client_ip`/`cidr_is_valid`/`parse_trusted_proxy_cidrs`/
 //! `operator_source_allowed`), rôle admin (`check_admin`/`admin_denied`), l'identité résolue (`Identity`,
-//! `session_token_from_headers`/`resolve_session_identity`/`resolve_identity`/`attribution_login`), la
+//! `resolve_session_identity`/`resolve_identity`/`attribution_login`), la
 //! création de session (`create_session`), le handler `GET /api/whoami` (`whoami`) et les middlewares de
 //! garde HTTP (`host_guard`/`host_allowed` anti-rebinding, `auth_guard`/`auth_guard_allows` RBAC).
 //!
@@ -14,7 +14,7 @@
 //! re-exporté à la racine par `pub(crate) use crate::auth::*` — les routes de build_router (`get(whoami)`,
 //! middlewares `host_guard`/`auth_guard`), les appelants inter-modules (`crate::check_admin`,
 //! `crate::check_operator`, `crate::attribution_login`, `crate::create_session`,
-//! `crate::resolve_session_identity`, `crate::session_token_from_headers`, `crate::operator_denied`,
+//! `crate::resolve_session_identity`, `crate::operator_denied`,
 //! `crate::admin_denied` …) ET les tests inline de main.rs (`super::*`) résolvent donc ces fonctions/types
 //! INCHANGÉS.
 use crate::*;
@@ -302,13 +302,25 @@ pub(crate) fn admin_denied() -> (StatusCode, Json<Value>) {
 /// Identité résolue d'un appelant : login affiché en attribution + rôle effectif. `is_operator`
 /// = peut armer le C2 (operator|admin OU bootstrap env-hash). `via_session` distingue un compte
 /// individuel (true) du repli bootstrap par hash env (false).
+///
+/// `user_id` = l'id `users.id` de la SESSION individuelle résolue (via `lookup_session_token`), pour
+/// que la tenancy (`tenancy::caller_user_id`) réutilise EXACTEMENT la même résolution dual-candidat
+/// (Bearer OU cookie) que l'auth — auth et tenancy ne peuvent plus diverger (M3). Sur le repli
+/// bootstrap env-hash (`resolve_identity`, PAS un compte individuel), `user_id` = `NO_USER` (-1, ne
+/// matche AUCUNE ligne) : ce chemin n'a jamais de grant tenant (fail-closed) et `caller_user_id` ne
+/// consulte de toute façon QUE `resolve_session_identity` (qui n'émet jamais l'identité bootstrap).
 #[derive(Clone, Debug)]
 pub(crate) struct Identity {
+    pub(crate) user_id: i64,
     pub(crate) login: String,
     pub(crate) role: String,
     pub(crate) is_operator: bool,
     pub(crate) via_session: bool,
 }
+
+/// Sentinel `users.id` qui ne matche AUCUNE ligne — porté par l'identité de repli bootstrap (env-hash),
+/// laquelle n'est jamais un compte individuel. Mirroir de `tenancy::NO_ENGAGEMENT` pour les grants.
+pub(crate) const NO_USER: i64 = -1;
 
 /// Token de session porté par l'en-tête `Authorization: Bearer <t>` (en clair, à hasher avant lookup).
 /// Vide si l'en-tête est absent, non-Bearer, ou de valeur vide.
@@ -340,18 +352,6 @@ pub(crate) fn cookie_session_token(headers: &HeaderMap) -> String {
     String::new()
 }
 
-/// Extrait le token de session du porteur : en-tête `Authorization: Bearer <t>` (priorité) OU cookie
-/// `forge_session=<t>`. Renvoie le token EN CLAIR (à hasher avant lookup), vide si absent. Conservé
-/// INCHANGÉ (Bearer-prioritaire) pour les appelants qui veulent UN seul token candidat (ex. tenancy::
-/// caller_user_id). `resolve_session_identity`, lui, essaie les DEUX candidats (cf. sa doc).
-pub(crate) fn session_token_from_headers(headers: &HeaderMap) -> String {
-    let bearer = bearer_session_token(headers);
-    if !bearer.is_empty() {
-        return bearer;
-    }
-    cookie_session_token(headers)
-}
-
 /// Résout l'identité d'UN token de session candidat (en clair) contre la table `session`. None si le
 /// token est vide, inconnu, expiré, ou attaché à un compte désactivé (fail-closed). Purge en passant
 /// la session expirée (best-effort, EXACTEMENT comme avant). Lecture du compte au moment du lookup =>
@@ -364,7 +364,7 @@ fn lookup_session_token(app: &App, token: &str) -> Option<Identity> {
     let token_sha = sha_hex(token);
     let store = app.store();
     let row = store.query_row(
-        "SELECT s.expires, u.login, u.role, u.disabled
+        "SELECT s.expires, u.login, u.role, u.disabled, u.id
            FROM session s JOIN users u ON u.id = s.user_id
           WHERE s.token_sha = ?",
         &crate::sql_params![&token_sha],
@@ -373,10 +373,11 @@ fn lookup_session_token(app: &App, token: &str) -> Option<Identity> {
             r.get_str(1)?,
             r.get_str(2)?,
             r.get_i64(3)?,
+            r.get_i64(4)?,
         )),
     );
     match row {
-        Ok((expires, login, role, disabled)) => {
+        Ok((expires, login, role, disabled, user_id)) => {
             if disabled != 0 {
                 return None; // compte désactivé -> fail-closed
             }
@@ -387,7 +388,7 @@ fn lookup_session_token(app: &App, token: &str) -> Option<Identity> {
                 return None;
             }
             let is_operator = role == "operator" || role == "admin";
-            Some(Identity { login, role, is_operator, via_session: true })
+            Some(Identity { user_id, login, role, is_operator, via_session: true })
         }
         Err(_) => None,
     }
@@ -427,6 +428,7 @@ pub(crate) fn resolve_identity(app: &App, headers: &HeaderMap) -> Option<Identit
     // Repli bootstrap (rétro-compat) : l'en-tête opérateur env-hash agit comme un compte admin.
     if !app.operator_hash.is_empty() && check_operator_env(app, headers) {
         return Some(Identity {
+            user_id: NO_USER, // repli bootstrap : pas un compte individuel -> aucun grant tenant (fail-closed)
             login: "bootstrap".into(),
             role: "admin".into(),
             is_operator: true,
