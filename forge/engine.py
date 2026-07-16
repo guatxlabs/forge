@@ -244,6 +244,13 @@ class Engine:
             # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
             # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
             # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
+            # ANTI-REBINDING : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre laquelle le
+            # verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) pour qu'il PUISSE
+            # se connecter PAR-IP (Host header conservé). NB : aucun module ne consomme encore ce pin (la
+            # couche connexion urllib/httpflow re-résout) -> pont pour le futur épinglage END-TO-END ;
+            # additif et inoffensif s'il est ignoré. Ce qui est fermé aujourd'hui = la TOCTOU du VERDICT.
+            if decision.pinned_ips:
+                action.params["_pinned_ips"] = list(decision.pinned_ips)
             with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions):
                 raw = module.fire(action) or []
             # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur

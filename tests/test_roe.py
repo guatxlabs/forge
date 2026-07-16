@@ -206,5 +206,114 @@ class TestNetworkPolicyPrivate(unittest.TestCase):
             self.assertEqual(roe.decide(Action("x", "nxdomain.example")).verdict, FIRE)
 
 
+class TestAntiRebindingFireTime(unittest.TestCase):
+    """ANTI-REBINDING — la TOCTOU sur le VERDICT est fermée : la résolution a lieu AU POINT DE TIR
+    (pas en plan/dry) et le verdict est rendu CONTRE l'IP résolue, ensuite ÉPINGLÉE sur la Decision."""
+    import forge.roe as _roe
+
+    def _armed_auto(self, in_scope, allow_private=False, out_scope=()):
+        s = Scope({"mode": "grey", "in_scope": list(in_scope),
+                   "out_scope": list(out_scope), "allow_private": allow_private})
+        roe = Roe(s, mode="auto"); roe.arm()
+        return roe
+
+    def test_public_then_private_is_vetoed_at_fire(self):
+        # Un résolveur qui change ENTRE le plan et le tir : public d'abord, PRIVÉ ensuite. Le ROE ne
+        # résolvant qu'au tir, c'est l'IP PRIVÉE (127.0.0.1) qui décide -> VETO (rebinding attrapé).
+        import unittest.mock as mock
+        public = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        private = [(2, 1, 6, "", ("127.0.0.1", 0))]
+        roe = self._armed_auto(["rebind.example"], allow_private=False)
+        with mock.patch.object(self._roe.socket, "getaddrinfo",
+                               side_effect=[public, private]) as gai:
+            # Plan (non armé) : AUCUNE résolution (chemin inerte) -> la 1re réponse mockée reste intacte.
+            plan_roe = Roe(Scope({"mode": "grey", "in_scope": ["rebind.example"]}))
+            plan_roe.decide(Action("x", "rebind.example"))
+            self.assertEqual(gai.call_count, 0, "le plan/dry ne doit PAS résoudre (opsec/L3)")
+            # Tir : résout MAINTENANT -> obtient l'IP publique (1re réponse). Rebind : 2e décision (cache
+            # neuf sur un nouveau scope) obtient l'IP privée -> VETO.
+            d1 = roe.decide(Action("x", "rebind.example"))
+            self.assertEqual(d1.verdict, FIRE)
+            self.assertEqual(d1.pinned_ips, ["93.184.216.34"], "l'IP résolue doit être ÉPINGLÉE")
+            roe2 = self._armed_auto(["rebind.example"], allow_private=False)
+            d2 = roe2.decide(Action("x", "rebind.example"))
+            self.assertEqual(d2.verdict, VETO, "rebind vers privé au tir -> VETO")
+            self.assertTrue(any("politique réseau" in r for r in d2.reasons))
+
+    def test_no_dns_resolution_in_plan_or_dry(self):
+        # Un hostname (non armé) ne doit JAMAIS déclencher getaddrinfo : chemin inerte, pas de fuite opsec.
+        import unittest.mock as mock
+        s = Scope({"mode": "grey", "in_scope": ["host.example"]})
+        roe = Roe(s)                                          # NON armé -> DRY_RUN
+        with mock.patch.object(self._roe.socket, "getaddrinfo",
+                               return_value=[(2, 1, 6, "", ("127.0.0.1", 0))]) as gai:
+            d = roe.decide(Action("x", "host.example"))
+            self.assertEqual(d.verdict, DRY_RUN)
+            self.assertEqual(gai.call_count, 0, "aucune résolution DNS hors du point de tir")
+
+    def test_resolution_timeout_is_veto_failclosed(self):
+        # Une résolution qui DÉPASSE la deadline -> VETO fail-closed (on ne peut pas prouver « public »).
+        import unittest.mock as mock
+        import time
+        def _stall(*a, **k):
+            time.sleep(2.0); return [(2, 1, 6, "", ("93.184.216.34", 0))]
+        roe = self._armed_auto(["slow.example"], allow_private=False)
+        with mock.patch.object(self._roe, "_RESOLVE_TIMEOUT", 0.2), \
+             mock.patch.object(self._roe.socket, "getaddrinfo", side_effect=_stall):
+            d = roe.decide(Action("x", "slow.example"))
+        self.assertEqual(d.verdict, VETO)
+        self.assertTrue(any("expirée" in r for r in d.reasons))
+
+    def test_dns_cache_resolves_once_per_run(self):
+        # Le cache DNS par-run : le même hôte n'est résolu QU'UNE fois (stabilité du verdict + anti-stall).
+        import unittest.mock as mock
+        roe = self._armed_auto(["cached.example"], allow_private=False)
+        fake = [(2, 1, 6, "", ("93.184.216.34", 0))]
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake) as gai:
+            roe.decide(Action("a", "cached.example"))
+            roe.decide(Action("b", "cached.example"))
+            self.assertEqual(gai.call_count, 1, "résolution mémoïsée : un seul getaddrinfo pour 2 décisions")
+
+    def test_hostname_resolving_into_out_scope_cidr_vetoed(self):
+        # L4 : un hostname qui RÉSOUT dans une plage out_scope (CIDR) est VÉTOÉ (symétrie avec le veto privé).
+        import unittest.mock as mock
+        fake = [(2, 1, 6, "", ("203.0.113.7", 0))]           # dans 203.0.113.0/24 (out_scope)
+        roe = self._armed_auto(["cdn.example"], allow_private=True, out_scope=["203.0.113.0/24"])
+        with mock.patch.object(self._roe.socket, "getaddrinfo", return_value=fake):
+            d = roe.decide(Action("x", "cdn.example"))
+        self.assertEqual(d.verdict, VETO)
+        self.assertTrue(any("out_scope" in r for r in d.reasons))
+
+    def test_pinned_ips_empty_on_non_fire(self):
+        # Une Decision non-FIRE ne porte JAMAIS d'IP épinglée (pas de résolution -> pas de pin).
+        roe = Roe(Scope({"mode": "grey", "in_scope": ["app.test"]}))   # non armé -> DRY_RUN
+        d = roe.decide(Action("x", "app.test"))
+        self.assertEqual(d.verdict, DRY_RUN)
+        self.assertEqual(d.pinned_ips, [])
+
+
+class TestLogFailSafe(unittest.TestCase):
+    """L5 — un échec d'écriture du ledger dans `_log` ne doit JAMAIS altérer/annuler un verdict."""
+
+    def test_log_raising_does_not_change_verdict(self):
+        class _BoomLedger:
+            def append(self, *a, **k):
+                raise IOError("disque plein / WORM verrouillé")
+        s = Scope({"mode": "grey", "in_scope": ["app.test"]})
+        roe = Roe(s, ledger=_BoomLedger(), mode="auto"); roe.arm()
+        d = roe.decide(Action("demo.fingerprint", "app.test"))
+        # le ledger explose à chaque append, mais le verdict reste CORRECT (FIRE) et non corrompu.
+        self.assertEqual(d.verdict, FIRE)
+
+    def test_log_raising_preserves_veto(self):
+        class _BoomLedger:
+            def append(self, *a, **k):
+                raise RuntimeError("boom")
+        s = Scope({"mode": "grey", "in_scope": ["app.test"]})
+        roe = Roe(s, ledger=_BoomLedger())
+        d = roe.decide(Action("x", "evil.example"))          # hors scope -> VETO malgré le ledger cassé
+        self.assertEqual(d.verdict, VETO)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
