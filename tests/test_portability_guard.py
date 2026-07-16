@@ -147,6 +147,12 @@ def _iter_source_files():
     for p in sorted(PYTHON_ENGINE.rglob("*.py")):
         yield p, "py"
     for p in sorted(RUST_CONSOLE.rglob("*.rs")):
+        # Modules de test EXTRAITS EN FICHIER (convention dépôt : `#[cfg(test)] mod tests;` en
+        # pied de main.rs -> tests.rs / tests_*.rs ; cf. docs/ARCHITECTURE_REFACTOR_PLAN.md).
+        # Leurs `/tmp/...` sont des FIXTURES de test — exclus au même titre qu'un module
+        # `#[cfg(test)]` inline (que `_rust_test_region` saute déjà quand le marqueur est présent).
+        if p.name == "tests.rs" or p.name.startswith("tests_"):
+            continue
         yield p, "rust"
 
 
