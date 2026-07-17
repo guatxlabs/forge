@@ -126,7 +126,7 @@ class HeuristicBrain(Brain):
         endpoint, URL historique). Détecté via le TITRE des findings (constantes techniques.DISCOVERY_*,
         partagées avec les émetteurs recon). Sert au fan-out bound et à ne pas re-semer la découverte."""
         markers = (techniques.DISCOVERY_SUBDOMAIN_MARKER, techniques.DISCOVERY_ENDPOINT_MARKER,
-                   techniques.DISCOVERY_HISTORICAL_URL_MARKER)
+                   techniques.DISCOVERY_HISTORICAL_URL_MARKER, techniques.DISCOVERY_SERVICE_MARKER)
         for f in graph.findings_for(host):
             title = str(f.get("title", ""))
             for m in markers:

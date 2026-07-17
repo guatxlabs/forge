@@ -47,6 +47,7 @@ from .techniques_data import (  # noqa: F401  (ré-export : chemins d'import pub
     DEFAULT_CHECKLIST, PURPLE_FALLBACK_KINDS,
     DISCOVERY_SUBDOMAIN_MARKER, DISCOVERY_ENDPOINT_MARKER,
     DISCOVERY_HISTORICAL_URL_MARKER, DISCOVERY_CHALLENGE_MARKER,
+    DISCOVERY_SERVICE_MARKER,
     PROFILES, _PHASE_RANK, PROFILE_NAMES,
 )
 from .challenge import (  # noqa: F401  (ré-export : `techniques.looks_like_challenge` stable)
