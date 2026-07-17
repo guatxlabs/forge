@@ -10,6 +10,7 @@ coverage-safe + graph (P2). v0 fonctionne sans, en mode liste-d'actions explicit
 from __future__ import annotations
 
 import enum
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +80,46 @@ _RATE_FLAG_KINDS = frozenset({
 })
 
 
+# --- PARALLÉLISME INTRA-VAGUE BORNÉ (G3) ----------------------------------------------------------
+# L'exécution d'une action se scinde en DEUX temps (cf. Engine._decide_blocking / _apply) :
+#   (1) le TIR bloquant (module.fire/dry — sous-process nikto/nuclei/testssl, I/O réseau) qui LIBÈRE le
+#       GIL et se PARALLÉLISE sans risque (aucun effet de bord partagé) ; il tourne dans un pool de
+#       threads BORNÉ ;
+#   (2) les MUTATIONS D'ÉTAT (append ledger, ingest console/checkpoint, decision ROE journalisée,
+#       findings/graph/compteurs, sessions.inherit) qui, elles, restent STRICTEMENT SÉRIELLES et
+#       ORDONNÉES (thread principal, dans l'ordre d'action) — pour que la chaîne append-only du ledger
+#       demeure reproductible et tamper-evident (H1/M1/M2) et que D1/E2/E3/E4 composent inchangés.
+# La parallélisation ne concerne QUE (1). (2) n'est jamais concurrent. FORGE_PARALLELISM=1 (ou pool<=1)
+# => chemin sériel historique, byte-identique. Défaut CONSERVATEUR = 4.
+_DEFAULT_PARALLELISM = 4
+
+
+def _parallelism() -> int:
+    """Cap de l'exécuteur intra-vague, lu depuis `FORGE_PARALLELISM` (défaut 4). <=1 => chemin SÉRIEL
+    historique (byte-identique). Valeur absente/illisible => défaut. Borné à [1, 64] (garde-fou anti-abus)."""
+    raw = os.environ.get("FORGE_PARALLELISM")
+    if not raw:
+        return _DEFAULT_PARALLELISM
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_PARALLELISM
+    if v < 1:
+        return 1
+    return min(v, 64)
+
+
+def _shutdown_executor(ex: Any) -> None:
+    """Ferme l'exécuteur SANS attendre (`wait=False`) et ANNULE les tâches encore en file d'attente
+    (`cancel_futures`) — sur un arrêt gracieux (_Terminate) ou une exception, on ne DÉMARRE plus de
+    nouveau tir ; les tirs DÉJÀ en vol sont coupés séparément par le handler SIGTERM du moteur
+    (`runner.terminate_live_tool_groups`, E4). `cancel_futures` (py>=3.9) — repli défensif sinon."""
+    try:
+        ex.shutdown(wait=False, cancel_futures=True)
+    except TypeError:  # pragma: no cover — cancel_futures indisponible (<3.9)
+        ex.shutdown(wait=False)
+
+
 class Verdict(enum.Enum):
     """Verdict d'exécution d'une action — enum INTERNE au moteur. Les trois verdicts ROE
     (VETO/DRY_RUN/FIRE) reprennent VERBATIM les chaînes de `roe` (source de vérité, comparées par
@@ -123,6 +164,34 @@ class ExecResult:
         verdict = self.verdict.value if isinstance(self.verdict, Verdict) else self.verdict
         return {"action": self.action, "target": self.target, "kind": self.kind,
                 "verdict": verdict, "reasons": self.reasons, "output": self.output}
+
+
+@dataclass
+class _Pending:
+    """Résultat du TIR BLOQUANT d'une action (`Engine._decide_blocking`), calculé DANS un thread worker
+    SANS AUCUN effet de bord sur l'état du moteur/ledger/console. `Engine._apply` le consomme sur le
+    THREAD PRINCIPAL, dans l'ORDRE d'action déterministe, pour appliquer les mutations (append ledger,
+    ingest, decision ROE, findings/graph/compteurs) — le point de sérialisation qui préserve l'ordre
+    append-only du ledger. Deux familles de chemin :
+
+      • CHEMIN SIMPLE (module absent / SKIP gouvernance-connecteur / technique désélectionnée / outil
+        indisponible) : le `res` est déjà construit (aucune décision ROE) — `_apply` l'ajoute juste à
+        `results` (+ `engine.error` au ledger si `simple_ledger_error`).
+      • CHEMIN DÉCISION (VETO/DRY_RUN/FIRE) : porte la `Decision` (dont le log `roe.decision` est DIFFÉRÉ
+        à `_apply`), le module, la sortie `dry()` (DRY_RUN), et — pour FIRE — les findings BRUTS du
+        `fire()` (`raw`) OU l'exception CAPTURÉE du tir (`fire_exc` -> devient un ExecResult FIRE_ERROR à
+        l'application, miroir du try/except M6 sériel), plus les compteurs de throttle relus après le tir."""
+    action: Action
+    simple_res: dict[str, Any] | None = None
+    simple_ledger_error: bool = False            # chemin simple -> engine.error (NO_MODULE)
+    decision: Any = None                         # roe.Decision — log `roe.decision` différé à _apply
+    module: Any = None
+    output: Any = None                           # sortie dry() (DRY_RUN) ; None (VETO)
+    is_fire: bool = False
+    raw: "list[Any] | None" = None               # findings bruts du fire() (FIRE réussi)
+    fire_exc: BaseException | None = None        # exception capturée du fire() (FIRE en erreur)
+    bucket_blocked: int = 0                      # 429/WAF persistants relus sur le throttle après le tir
+    bucket_rate: float = 0.0
 
 
 class Engine:
@@ -180,17 +249,33 @@ class Engine:
         self.roe.approve(action_id, reason)
 
     # --- exécution d'une action via son module ---
+    # SCINDÉE en DEUX (G3, parallélisme intra-vague) : `_decide_blocking` fait le TIR BLOQUANT (fire/dry)
+    # SANS effet de bord (parallélisable dans un pool de threads borné) ; `_apply` fait TOUTES les mutations
+    # d'état (ledger/ingest/decision/findings/graph/compteurs) SÉRIELLEMENT, dans l'ordre d'action. En
+    # SÉRIEL, `execute` compose simplement les deux -> byte-identique à l'ancien monolithe (mêmes opérations,
+    # même ordre, même thread). Seul détail : `roe.decision` est journalisée dans `_apply` (après le tir)
+    # au lieu de pendant `decide()` — mais TOUJOURS avant les findings/run-record de l'action, donc l'ORDRE
+    # append-only du ledger est identique (seul l'horodatage — déjà non reproductible d'un run à l'autre —
+    # se décale). Cette symétrie est le socle de la preuve de déterminisme parallèle==sériel.
     def execute(self, action: Action) -> dict[str, Any]:
+        return self._apply(self._decide_blocking(action))
+
+    def _decide_blocking(self, action: Action) -> _Pending:
+        """PHASE 1 (parallélisable) : résout le module, applique les portes SKIP, rend le verdict ROE
+        (SANS journaliser — log différé), et exécute le TIR BLOQUANT (`module.dry`/`module.fire`, les
+        sous-process/I/O). AUCUN effet de bord sur l'état du moteur/ledger/console : tout est renvoyé dans
+        un `_Pending` que `_apply` consommera sur le thread principal, dans l'ordre. Sûr à appeler depuis
+        plusieurs threads : les contextes throttle/session/pin sont THREAD-LOCAL (liés DANS ce thread), le
+        registre pgid de `runner` est verrouillé, et le cache DNS du scope est verrouillé (résolution
+        déterministe par-hôte). Une exception du `fire()` est CAPTURÉE (pas propagée) pour devenir un
+        FIRE_ERROR à l'application — miroir exact du try/except M6 sériel."""
         module = mods.get(action.kind)
         if module is None:
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                              verdict=Verdict.ERROR,
                              reasons=[f"aucun module enregistré pour '{action.kind}'"],
                              output=None, phase=Phase.NO_MODULE).to_dict()
-            self.results.append(res)
-            if self.ledger:
-                self.ledger.append("engine.error", res)
-            return res
+            return _Pending(action, simple_res=res, simple_ledger_error=True)
 
         # GOUVERNANCE CONNECTEUR (console) : un kind DÉSACTIVÉ par l'opérateur (scope.disabled_modules)
         # est SKIP comme un outil absent — même si son binaire/service EST présent. C'est l'enforcement
@@ -203,8 +288,7 @@ class Engine:
                              verdict=Verdict.SKIP,
                              reasons=["module désactivé par la console (gouvernance connecteur)"],
                              output=None, phase=Phase.GOVERNANCE_DISABLED).to_dict()
-            self.results.append(res)
-            return res
+            return _Pending(action, simple_res=res)
 
         # SÉLECTION DE TECHNIQUES PAR-SCOPE — ENFORCEMENT AU TIR (fail-closed) : une technique HORS de
         # l'ensemble EFFECTIF activé pour ce scope (profil/catégorie/technique désactivée) est SKIP
@@ -217,101 +301,135 @@ class Engine:
                              verdict=Verdict.SKIP,
                              reasons=["technique désactivée pour ce scope (sélection profil/catégorie/technique)"],
                              output=None, phase=Phase.TECHNIQUE_DESELECTED).to_dict()
-            self.results.append(res)
-            return res
+            return _Pending(action, simple_res=res)
 
         if getattr(module, "available", True) is False:
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                              verdict=Verdict.SKIP,
                              reasons=["module indisponible (outil sous-jacent absent)"],
                              output=None, phase=Phase.UNAVAILABLE).to_dict()
-            self.results.append(res)
-            return res
+            return _Pending(action, simple_res=res)
 
         # le module peut imposer exploit/destructif au-delà de ce que l'action déclare
         action.exploit = action.exploit or bool(getattr(module, "exploit", False))
         action.destructive = action.destructive or bool(getattr(module, "destructive", False))
 
-        decision = self.roe.decide(action)
+        # DÉCISION ROE — log DIFFÉRÉ (`log=False`) : le verdict est calculé ici (résolution DNS bornée +
+        # épinglage IP inclus, chemin de tir), mais l'entrée `roe.decision` est journalisée par `_apply`
+        # sur le thread principal, dans l'ordre déterministe -> le ledger reste mono-écrivain et ordonné.
+        decision = self.roe.decide(action, log=False)
 
         if decision.verdict == VETO:
-            output = None
-        elif decision.verdict == DRY_RUN:
-            output = module.dry(action)              # AUCUN effet de bord
-        else:                                        # FIRE
-            # M6 — ROBUSTESSE DU TIR : le corps FIRE (module.fire + post-traitement) est enveloppé dans un
-            # try/except. Une exception d'un module (params opérateur non gardés, bug, I/O) ne doit PAS
-            # avorter toute la campagne (vagues/cibles restantes jamais tentées, coverage/report/checkpoint
-            # jamais produits) : elle devient un ExecResult(ERROR) TRAÇABLE (results + ledger), et la vague
-            # suivante continue — ALIGNÉ sur les 4 autres chemins d'execute(). Contrat « zéro lacune
-            # silencieuse ». Les `with` (throttle/session) restaurent leur contexte même en cas d'exception.
-            try:
-                # SESSION GOUVERNÉE : lie le store (scope-guardé) le temps du fire — les modules recon/oracle
-                # attachent le matériel d'auth SECRET aux requêtes IN-SCOPE via les chokepoints HTTP partagés.
-                # Rien de secret ne transite par les findings ni le ledger (le matériel n'est que dans la
-                # requête sortante). Le contexte est restauré en sortie même en cas d'exception.
-                # THROTTLE : lie un bucket min-interval (rate req/s injecté dans action.params) le temps du
-                # fire — `Oracle._http` le consulte (dort avant chaque requête, back-off sur 429/WAF). rate<=0/
-                # absent => bucket None => AUCUN throttle (byte-identique). Le compteur `blocked` est relu après.
-                # ANTI-REBINDING END-TO-END : le ROE a résolu la cible au fire-time et ÉPINGLÉ l'IP contre
-                # laquelle le verdict a été rendu. On l'expose au module (action.params["_pinned_ips"]) ET on
-                # LIE le contexte de pin (pin.using) : les chokepoints de connexion (Oracle._http, httpflow.
-                # _timed) SE CONNECTENT à CETTE IP au lieu de re-résoudre le hostname (le Host/SNI/cert restent
-                # l'hôte d'origine — TLS jamais affaibli). Ferme la fenêtre de DNS-rebinding sub-ms entre la
-                # résolution du ROE et le connect du module — en plus de la TOCTOU du VERDICT (déjà fermée).
-                # Pin absent (ips vide) => contexte no-op => résolution NORMALE (byte-identique à l'historique).
-                if decision.pinned_ips:
-                    action.params["_pinned_ips"] = list(decision.pinned_ips)
-                with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions), \
-                        pin.using(action.target, action.params.get("_pinned_ips")):
-                    raw = module.fire(action) or []
-                # THROTTLING PERSISTANT : si l'oracle a essuyé des 429/WAF après back-off, surface un marqueur
-                # « rate-limited » (au lieu d'empties silencieux) dans les raisons de la décision (anti-masquage).
-                if _bucket is not None and getattr(_bucket, "blocked", 0):
-                    decision.reasons = list(decision.reasons) + [
-                        f"rate-limited: {_bucket.blocked} réponse(s) 429/WAF après back-off (débit {_bucket.rate:g}/s)"]
-                new = []
-                for f in raw:
-                    if self.memory is not None and not self.memory.store(f):
-                        self.dups += 1                   # déjà vu -> dedup
-                        continue
-                    new.append(f)
-                    self.findings.append(f)
-                    self.graph.add_finding(f)            # enrichit le world-model
-                    # SESSION À TRAVERS LA CHAÎNE : un module de découverte a dérivé un NOUVEL hôte/endpoint
-                    # in-scope (origine IP, sous-domaine, endpoint) depuis action.target. On fait HÉRITER à
-                    # cette cible dérivée la session gouvernée de la source (SCOPE-GUARDÉE : no-op si la
-                    # dérivée est hors-scope) pour que les oracles chaînés soient authentifiés. Le matériel
-                    # reste SECRET : `inherit` ne journalise/retourne rien et n'entre ni dans le finding, ni
-                    # dans le ledger, ni dans action.params, ni dans le graphe.
-                    dst = getattr(f, "target", None)
-                    if dst and dst != action.target:
-                        self.sessions.inherit(action.target, dst)
-                    if self.ledger:
-                        self.ledger.append("finding", f.to_dict())
-                # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
-                #   1. params.mitre (posé par le scope/console)   2. mitre du 1er finding émis
-                #   3. mitre déclaré par le module                4. fallback par-kind (DEFAULT_MITRE_BY_KIND)
-                # Le repli par-kind garantit un record NON VIDE même pour un tir SANS finding sur un module
-                # à mitre='' (sinon trou de couverture purple sur les tirs « rien trouvé »).
-                mitre = (action.params.get("mitre") or (new[0].mitre if new else "")
-                         or getattr(module, "mitre", "") or purple.mitre_for_kind(action.kind) or "")
-                rr = purple.run_record(action.target, action.kind, mitre, fired=True,
-                                       detail=f"{len(new)} finding(s)",
-                                       run_id=self.run_id, campaign=self.campaign_id)
-                self.run_records.append(rr)
+            return _Pending(action, decision=decision, module=module, output=None, is_fire=False)
+        if decision.verdict == DRY_RUN:
+            output = module.dry(action)              # AUCUN effet de bord (contrat module)
+            return _Pending(action, decision=decision, module=module, output=output, is_fire=False)
+
+        # FIRE — le TIR BLOQUANT. On lie les contextes THREAD-LOCAL (throttle/session/pin) le temps du
+        # fire (voir la version historique pour le détail des trois garanties : throttle min-interval,
+        # session gouvernée scope-guardée, pin anti-rebinding end-to-end). Tout se fait DANS ce thread :
+        # les contextes sont donc visibles par `module.fire` (même thread) et isolés des autres workers.
+        pending = _Pending(action, decision=decision, module=module, is_fire=True)
+        if decision.pinned_ips:
+            action.params["_pinned_ips"] = list(decision.pinned_ips)
+        try:
+            with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions), \
+                    pin.using(action.target, action.params.get("_pinned_ips")):
+                pending.raw = module.fire(action) or []
+            # THROTTLING PERSISTANT : compteur 429/WAF relu après le tir (surface un marqueur « rate-limited »
+            # dans les raisons à l'application, au lieu d'empties silencieux). Différé pour ne PAS muter
+            # `decision.reasons` avant que `_apply` n'ait journalisé la `roe.decision` d'origine.
+            if _bucket is not None:
+                pending.bucket_blocked = int(getattr(_bucket, "blocked", 0) or 0)
+                pending.bucket_rate = float(getattr(_bucket, "rate", 0.0) or 0.0)
+        except Exception as e:  # noqa: BLE001 — capturée -> FIRE_ERROR à l'application (miroir M6 sériel)
+            pending.fire_exc = e
+        return pending
+
+    def _apply(self, pending: _Pending) -> dict[str, Any]:
+        """PHASE 2 (SÉRIELLE, thread principal, ordre d'action) : applique les MUTATIONS d'état d'un
+        `_Pending`. C'est le SEUL point où l'on écrit le ledger, journalise la décision ROE, déduplique/
+        stocke les findings, enrichit le graphe, incrémente les compteurs et pose l'héritage de session.
+        Jamais appelé concurremment -> la chaîne append-only du ledger et l'ingest console restent
+        déterministes et reproductibles (identiques au sériel)."""
+        action = pending.action
+
+        # CHEMIN SIMPLE (aucune décision ROE) : le res est déjà construit.
+        if pending.simple_res is not None:
+            self.results.append(pending.simple_res)
+            if pending.simple_ledger_error and self.ledger:
+                self.ledger.append("engine.error", pending.simple_res)
+            return pending.simple_res
+
+        decision = pending.decision
+        module = pending.module
+        # LOG DIFFÉRÉ de la décision ROE — MÊME appel best-effort que `_finish`/`_log` en sériel, mais posé
+        # ICI (thread principal, ordre déterministe) et TOUJOURS AVANT les findings/run-record de l'action :
+        # l'ordre relatif dans le ledger est donc identique au sériel (roe.decision -> finding(s) -> runrecord).
+        self.roe._log("roe.decision", decision.to_dict())
+
+        if not pending.is_fire:                      # VETO (output None) ou DRY_RUN (output = dry())
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=decision.verdict, reasons=decision.reasons, output=pending.output,
+                             phase=Phase.DECIDED).to_dict()
+            self.results.append(res)
+            return res
+
+        # FIRE — M6 : le post-traitement (+ la ré-émission d'une éventuelle exception CAPTURÉE au tir) est
+        # enveloppé dans le MÊME try/except qu'en sériel. Une exception (tir OU append ledger/mémoire)
+        # devient un ExecResult(ERROR) traçable (results + ledger) et la vague suivante continue.
+        try:
+            if pending.fire_exc is not None:
+                raise pending.fire_exc               # exception du fire() -> même handler qu'en sériel
+            raw = pending.raw or []
+            # THROTTLING PERSISTANT : marqueur « rate-limited » (APRÈS le log roe.decision d'origine, comme
+            # en sériel où l'augmentation suit le fire et ne touche pas l'entrée déjà journalisée).
+            if pending.bucket_blocked:
+                decision.reasons = list(decision.reasons) + [
+                    f"rate-limited: {pending.bucket_blocked} réponse(s) 429/WAF après back-off "
+                    f"(débit {pending.bucket_rate:g}/s)"]
+            new = []
+            for f in raw:
+                if self.memory is not None and not self.memory.store(f):
+                    self.dups += 1                   # déjà vu -> dedup (ordre déterministe : phase 2 sérielle)
+                    continue
+                new.append(f)
+                self.findings.append(f)
+                self.graph.add_finding(f)            # enrichit le world-model
+                # SESSION À TRAVERS LA CHAÎNE : un module de découverte a dérivé un NOUVEL hôte/endpoint
+                # in-scope (origine IP, sous-domaine, endpoint) depuis action.target. On fait HÉRITER à
+                # cette cible dérivée la session gouvernée de la source (SCOPE-GUARDÉE : no-op si la
+                # dérivée est hors-scope) pour que les oracles chaînés soient authentifiés. Le matériel
+                # reste SECRET : `inherit` ne journalise/retourne rien et n'entre ni dans le finding, ni
+                # dans le ledger, ni dans action.params, ni dans le graphe.
+                dst = getattr(f, "target", None)
+                if dst and dst != action.target:
+                    self.sessions.inherit(action.target, dst)
                 if self.ledger:
-                    self.ledger.append("purple.runrecord", rr)
-                output = [f.to_dict() for f in new]
-            except Exception as e:  # noqa: BLE001 — un crash de module ne doit jamais avorter la campagne
-                res = ExecResult(action=action.id, target=action.target, kind=action.kind,
-                                 verdict=Verdict.ERROR,
-                                 reasons=[f"exception au tir (module '{action.kind}'.fire): {e!r}"],
-                                 output=None, phase=Phase.FIRE_ERROR).to_dict()
-                self.results.append(res)
-                if self.ledger:
-                    self.ledger.append("engine.error", res)
-                return res
+                    self.ledger.append("finding", f.to_dict())
+            # run-record purple : la technique a été exécutée. Priorité du mitre (le VRAI prime) :
+            #   1. params.mitre (posé par le scope/console)   2. mitre du 1er finding émis
+            #   3. mitre déclaré par le module                4. fallback par-kind (DEFAULT_MITRE_BY_KIND)
+            # Le repli par-kind garantit un record NON VIDE même pour un tir SANS finding sur un module
+            # à mitre='' (sinon trou de couverture purple sur les tirs « rien trouvé »).
+            mitre = (action.params.get("mitre") or (new[0].mitre if new else "")
+                     or getattr(module, "mitre", "") or purple.mitre_for_kind(action.kind) or "")
+            rr = purple.run_record(action.target, action.kind, mitre, fired=True,
+                                   detail=f"{len(new)} finding(s)",
+                                   run_id=self.run_id, campaign=self.campaign_id)
+            self.run_records.append(rr)
+            if self.ledger:
+                self.ledger.append("purple.runrecord", rr)
+            output = [f.to_dict() for f in new]
+        except Exception as e:  # noqa: BLE001 — un crash de module ne doit jamais avorter la campagne
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.ERROR,
+                             reasons=[f"exception au tir (module '{action.kind}'.fire): {e!r}"],
+                             output=None, phase=Phase.FIRE_ERROR).to_dict()
+            self.results.append(res)
+            if self.ledger:
+                self.ledger.append("engine.error", res)
+            return res
 
         res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                          verdict=decision.verdict, reasons=decision.reasons, output=output,
@@ -357,6 +475,21 @@ class Engine:
         # vague. Une vague de 500+ actions n'est plus « tout ou rien » : un run tué en cours de vague
         # conserve ce qui a été fait. No-op si aucun callback ou intervalle <=0 -> byte-identique
         # (CLI directe, tests, propositions ponctuelles).
+        #
+        # PARALLÉLISME INTRA-VAGUE BORNÉ (G3) : `FORGE_PARALLELISM>1` exécute les TIRS bloquants
+        # (module.fire/dry — sous-process/I/O qui libèrent le GIL) dans un pool de threads BORNÉ, puis
+        # APPLIQUE leurs mutations d'état (ledger/ingest/decision/findings/compteurs) STRICTEMENT DANS
+        # L'ORDRE d'action sur le thread principal. Le déterminisme du ledger et l'ingest console sont
+        # préservés (identiques au sériel). `FORGE_PARALLELISM<=1` (ou pool 1) => chemin sériel historique.
+        pool = _parallelism()
+        if pool <= 1:
+            return self._run_serial(actions, checkpoint, checkpoint_every)
+        return self._run_parallel(list(actions), checkpoint, checkpoint_every, pool)
+
+    def _run_serial(self, actions: Iterable[Action],
+                    checkpoint: "Callable[[], None] | None", checkpoint_every: int) -> list[dict[str, Any]]:
+        """Chemin SÉRIEL historique (byte-identique) : une action à la fois, mutations en ligne. Utilisé
+        quand `FORGE_PARALLELISM<=1`. Émission + checkpoint intra-vague inchangés."""
         out = []
         n = 0
         for a in actions:
@@ -367,6 +500,47 @@ class Engine:
             if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
                 self._run_checkpoint(checkpoint)
         return out
+
+    def _run_parallel(self, actions: list[Action],
+                      checkpoint: "Callable[[], None] | None", checkpoint_every: int,
+                      pool: int) -> list[dict[str, Any]]:
+        """Chemin PARALLÈLE borné (G3). Les TIRS bloquants (`_decide_blocking`, sans effet de bord) sont
+        soumis à un `ThreadPoolExecutor(max_workers=pool)`, traités par LOTS de `pool` ; leurs résultats
+        sont APPLIQUÉS (`_apply`) SÉRIELLEMENT, DANS L'ORDRE d'action, sur le thread principal — d'où le
+        déterminisme identique au sériel (ledger/ingest/decision/findings ordonnés). Le lot borne le
+        nombre de tirs EN VOL à `pool` (au plus un lot d'avance) : la borne « travail après cancel »
+        reste analogue au sériel (au plus un lot au-delà du dernier checkpoint), et l'émission + le
+        checkpoint intra-vague conservent EXACTEMENT la même cadence (mêmes frontières `n`).
+
+        COMPOSITION E3/E4 (cancel/timeout) : plusieurs tirs EN VOL enregistrent chacun leur pgid dans le
+        registre verrouillé de `runner` ; un SIGTERM watchdog coupe TOUS les groupes en vol (E4) et
+        `_run_checkpoint` lève `_Terminate` à la frontière d'action -> on ne DÉMARRE plus de lot ; le
+        `finally` ferme l'exécuteur (annule les tirs en file). D1 : `_apply` étant sériel et ordonné, les
+        offsets d'ingest et le compteur `n` sont identiques au sériel (aucun finding perdu ni doublé)."""
+        from concurrent.futures import ThreadPoolExecutor
+        out: list[dict[str, Any]] = []
+        n = 0
+        total = len(actions)
+        ex = ThreadPoolExecutor(max_workers=pool, thread_name_prefix="forge-wave")
+        try:
+            i = 0
+            while i < total:
+                batch = actions[i:i + pool]
+                # PHASE 1 (parallèle) : soumettre les tirs bloquants du lot (bornés à `pool` en vol).
+                futures = [ex.submit(self._decide_blocking, a) for a in batch]
+                # PHASE 2 (sérielle, ordre d'action) : drainer EN ORDRE et appliquer les mutations.
+                for fut in futures:
+                    pending = fut.result()           # propage une exception worker (ex. dry() qui lève) — mirror sériel
+                    res = self._apply(pending)
+                    self._emit_result(res)
+                    out.append(res)
+                    n += 1
+                    if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
+                        self._run_checkpoint(checkpoint)   # peut lever _Terminate (BaseException) -> arrêt gracieux
+                i += pool
+            return out
+        finally:
+            _shutdown_executor(ex)
 
     def _run_checkpoint(self, checkpoint: "Callable[[], None] | None") -> None:
         """Invoque le callback de checkpoint (flush incrémental console) en BEST-EFFORT : une exception

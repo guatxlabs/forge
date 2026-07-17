@@ -253,6 +253,15 @@ class Scope:
         # (une seule vérité de résolution par run). Valeurs : list[str] (IP résolues, [] si NXDOMAIN) ou
         # la sentinelle `_TIMEOUT` (résolution expirée -> VETO fail-closed persistant pour le run).
         self._dns_cache: dict[str, Any] = {}
+        # VERROU DE RÉSOLUTION (déterminisme sous PARALLÉLISME intra-vague) : sous l'exécuteur borné du
+        # moteur (FORGE_PARALLELISM), plusieurs actions peuvent atteindre le point de tir en même temps et
+        # résoudre le MÊME hôte concurremment. Sans garde, deux résolutions simultanées du même hôte
+        # (avant la mise en cache) pourraient épingler des IP dans un ORDRE différent (round-robin DNS) et
+        # rendre le verdict/pin NON reproductible AU SEIN d'un run. Ce verrou sérialise l'accès au cache :
+        # le 1er thread résout, les suivants lisent le cache -> « une seule résolution par hôte et par run »
+        # (le contrat legacy de la mémoïsation) est PRÉSERVÉ à l'identique en parallèle. En mode SÉRIEL
+        # (pool<=1) le verrou n'est JAMAIS contendu -> zéro changement de comportement.
+        self._dns_lock = threading.Lock()
 
     @classmethod
     def load(cls, path: str | Path) -> "Scope":
@@ -315,18 +324,24 @@ class Scope:
         host = self._host(target)
         if not host:
             return []
-        cached = self._dns_cache.get(host)
-        if cached is _TIMEOUT:                                # timeout déjà observé ce run -> re-fail-closed
-            raise _ResolveTimeout(host)
-        if cached is not None:                                # liste résolue mémoïsée (y compris [])
-            return list(cached)
-        try:
-            ips = _resolve_ips(host)
-        except _ResolveTimeout:
-            self._dns_cache[host] = _TIMEOUT                  # mémoïse le timeout (verdict stable sur le run)
-            raise
-        self._dns_cache[host] = list(ips)
-        return list(ips)
+        # SOUS VERROU (cf. self._dns_lock) : check-cache-puis-résous est ATOMIQUE par-hôte -> un seul thread
+        # résout un hôte donné, les autres attendent puis lisent le cache. Garantit « une résolution par
+        # hôte et par run » même sous l'exécuteur parallèle (déterminisme du pin/verdict). Non contendu en
+        # mode sériel. La résolution bornée (`_resolve_ips`, deadline 5s) reste sous le verrou : elle est
+        # DÉJÀ mémoïsée après le 1er hit, la contention réelle est donc négligeable (peu d'hôtes distincts).
+        with self._dns_lock:
+            cached = self._dns_cache.get(host)
+            if cached is _TIMEOUT:                            # timeout déjà observé ce run -> re-fail-closed
+                raise _ResolveTimeout(host)
+            if cached is not None:                            # liste résolue mémoïsée (y compris [])
+                return list(cached)
+            try:
+                ips = _resolve_ips(host)
+            except _ResolveTimeout:
+                self._dns_cache[host] = _TIMEOUT              # mémoïse le timeout (verdict stable sur le run)
+                raise
+            self._dns_cache[host] = list(ips)
+            return list(ips)
 
     def resolved_ips_private(self, ips: Iterable[str]) -> bool:
         """True si AU MOINS une IP (déjà résolue/épinglée) est privée/LAN/loopback. Une seule suffit."""
@@ -444,13 +459,20 @@ class Roe:
         self._log("roe.approve", {"action_id": action_id, "reason": reason})
 
     # --- décision (le coeur) ---
-    def decide(self, action: Action) -> Decision:
+    def decide(self, action: Action, log: bool = True) -> Decision:
+        """Rend le verdict ROE (VETO/DRY_RUN/FIRE) pour `action`. `log=True` (défaut) JOURNALISE la
+        décision dans le ledger AU MOMENT DE LA DÉCISION (comportement historique, tous les appelants
+        directs). `log=False` construit et rend la Decision SANS écrire au ledger : réservé à l'exécuteur
+        PARALLÈLE du moteur (`Engine._decide_blocking`), qui calcule le verdict dans un thread worker SANS
+        effet de bord puis JOURNALISE la `roe.decision` lui-même, sur le thread principal, dans l'ORDRE
+        d'action déterministe (préserve l'ordre append-only du ledger). L'ordre relatif ledger reste
+        identique au sériel : `roe.decision` est toujours écrite AVANT les findings/run-record de l'action."""
         reasons: list[str] = []
         try:
             # Couche 2 — appartenance (fail-closed)
             if not self.scope.is_in_scope(action.target):
                 reasons.append(f"hors scope: {action.target}")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             # Couche 2bis-LITTÉRAL — POLITIQUE RÉSEAU (IP LITTÉRALE privée) : check SANS I/O réseau, sûr
             # en plan/dry. Une cible qui EST déjà une IP privée est VÉTOÉE tout de suite (même non armée) —
@@ -458,27 +480,27 @@ class Roe:
             # au POINT DE TIR ci-dessous : on ne résout PAS en simulation (L3, opsec) et on épingle l'IP (L1).
             if not self.scope.allow_private and _ip_is_private(self.scope._host(action.target)):
                 reasons.append("hors politique réseau (privé/LAN/loopback non autorisé)")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             # Couche 3 — capacité
             if action.exploit and not self.scope.allow_exploit:
                 reasons.append("exploitation non autorisée par le ROE (allow_exploit=false)")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
             if action.destructive and not self.scope.allow_destructive:
                 reasons.append("action destructive interdite (allow_destructive=false)")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             # in-scope + capacité OK -> au pire DRY_RUN, jamais VETO au-delà
 
             # Couche 1 — engagement armé ?  (AUCUNE résolution DNS avant ce point : chemin inerte pur, L3)
             if not self.armed:
                 reasons.append("engagement non armé (dry-run)")
-                return self._finish(DRY_RUN, action, reasons)
+                return self._finish(DRY_RUN, action, reasons, log=log)
 
             # Couche 4 — action approuvée ?
             if self.mode != "auto" and action.id not in self._approved:
                 reasons.append("action non approuvée (mode propose, dry-run)")
-                return self._finish(DRY_RUN, action, reasons)
+                return self._finish(DRY_RUN, action, reasons, log=log)
 
             # === POINT DE TIR — ANTI-REBINDING (L1/L2/L3/L4) ==========================================
             # On est sur le point de FIRE. C'EST ICI, et NULLE PART AILLEURS, qu'on résout le hostname
@@ -494,23 +516,23 @@ class Roe:
                 pinned = self.scope.resolve_target_ips(action.target)
             except _ResolveTimeout:                           # résolution expirée -> fail-closed (VETO)
                 reasons.append("résolution DNS expirée au tir -> fail-closed (VETO)")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             # L1/anti-rebinding — l'IP effectivement résolue est-elle privée ? (le hostname pointe interne)
             if not self.scope.allow_private and self.scope.resolved_ips_private(pinned):
                 reasons.append("hors politique réseau (privé/LAN/loopback non autorisé)")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             # L4 — l'IP résolue tombe-t-elle dans un CIDR/IP out_scope ? (symétrie avec le veto privé)
             if self.scope.out_scope_matches_ips(pinned):
                 reasons.append(f"IP résolue dans une plage out_scope -> hors scope: {action.target}")
-                return self._finish(VETO, action, reasons)
+                return self._finish(VETO, action, reasons, log=log)
 
             reasons.append("armé + in-scope + autorisé + approuvé")
-            return self._finish(FIRE, action, reasons, pinned_ips=pinned)
+            return self._finish(FIRE, action, reasons, pinned_ips=pinned, log=log)
         except Exception as e:                                # fail-closed : toute erreur => VETO
             reasons.append(f"erreur d'évaluation -> fail-closed: {e!r}")
-            return self._finish(VETO, action, reasons)
+            return self._finish(VETO, action, reasons, log=log)
 
     # --- garde stricte (pour les modules : lève si pas FIRE) ---
     def guard(self, action: Action) -> Decision:
@@ -520,11 +542,14 @@ class Roe:
         return d
 
     def _finish(self, verdict: str, action: Action, reasons: list[str],
-                pinned_ips: list[str] | None = None) -> Decision:
+                pinned_ips: list[str] | None = None, log: bool = True) -> Decision:
         d = Decision(verdict, action.id, action.target, action.kind,
                      action.exploit, action.destructive, reasons,
                      pinned_ips=list(pinned_ips or []))
-        self._log("roe.decision", d.to_dict())
+        # `log=False` -> l'appelant (exécuteur parallèle du moteur) journalisera `roe.decision` lui-même,
+        # sur le thread principal, dans l'ordre d'action déterministe. Le ledger reste mono-écrivain.
+        if log:
+            self._log("roe.decision", d.to_dict())
         return d
 
     def _log(self, kind: str, detail: dict[str, Any]) -> None:

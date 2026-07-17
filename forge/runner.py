@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 
 # Délai de grâce SIGTERM->SIGKILL laissé au GROUPE de process pour se fermer proprement après un
 # dépassement de timeout (miroir de `_daemon_reap.reap_marker` : term gracieux d'abord, kill ferme).
@@ -18,22 +19,34 @@ _TERM_GRACE = 5
 # Forge mais PAS ces sessions séparées. Un `nuclei` en cours SURVIVRAIT donc au cancel (orphelin
 # reparenté à init) — c'est le hard-kill manuel qu'il fallait faire à la main (T29). On tient donc un
 # registre des pgid d'outils en vol pour que le handler SIGTERM du moteur (`forge/cli/engine.py`) les
-# coupe EXPLICITEMENT et ne laisse AUCUN survivant. Set nu (pas de lock) : mutations et lecture-reap
-# sont dans le MÊME thread (POSIX : `communicate()` = select, pas de threads) — le handler de signal
-# s'exécute lui aussi dans le thread principal, à une frontière de bytecode ; `set.add/discard` et le
-# snapshot `list(...)` sont atomiques sous GIL. Pas de lock -> aucun risque de deadlock en contexte
-# handler (un Lock non-réentrant pris par le thread principal au moment du signal se bloquerait lui-même).
+# coupe EXPLICITEMENT et ne laisse AUCUN survivant. E4 tenait DÉJÀ un registre MULTI-pgid : c'est
+# exactement ce que produit l'exécuteur PARALLÈLE borné du moteur (FORGE_PARALLELISM) — plusieurs outils
+# en vol simultanément, chacun dans sa propre session. Sous parallélisme, les mutations
+# (register/unregister) arrivent depuis les THREADS WORKERS (le `fire()` d'un module tourne dans le pool),
+# plus seulement depuis le thread principal : l'ancien argument « un seul thread » ne tient plus. On
+# SÉRIALISE donc register/unregister/snapshot par un VERROU. `set.add/discard` restent atomiques sous GIL,
+# mais `list(set)` PEUT lever `RuntimeError: Set changed size during iteration` si un worker mute pendant
+# que le handler prend son snapshot -> le verrou ferme cette fenêtre. SÛRETÉ DU HANDLER : le SIGTERM du
+# moteur est délivré au THREAD PRINCIPAL (les workers ne posent jamais de handler) ; sous parallélisme le
+# thread principal est bloqué à `future.result()` et NE DÉTIENT PAS ce verrou pendant un fire (ce sont les
+# workers qui l'acquièrent, brièvement) -> le handler l'obtient sans auto-blocage. Un handler Python
+# s'exécute comme du bytecode ordinaire à une frontière d'instruction : acquérir un `threading.Lock` y est
+# licite (un worker le relâche en nanosecondes). En mode SÉRIEL (pool<=1) le fire tourne sur le thread
+# principal mais l'exécuteur n'est pas utilisé : aucune contention, comportement inchangé.
 _LIVE_TOOL_PGIDS = set()
+_PGID_LOCK = threading.Lock()
 
 
 def _register_tool_pgid(pgid):
     """Enregistre le groupe d'un outil qui vient d'être lancé (pgid == pid du leader, cf. start_new_session)."""
-    _LIVE_TOOL_PGIDS.add(pgid)
+    with _PGID_LOCK:
+        _LIVE_TOOL_PGIDS.add(pgid)
 
 
 def _unregister_tool_pgid(pgid):
     """Retire le groupe d'un outil terminé/récolté (best-effort : discard ne lève pas si déjà absent)."""
-    _LIVE_TOOL_PGIDS.discard(pgid)
+    with _PGID_LOCK:
+        _LIVE_TOOL_PGIDS.discard(pgid)
 
 
 def terminate_live_tool_groups(force=True):
@@ -41,14 +54,20 @@ def terminate_live_tool_groups(force=True):
     cancel/watchdog whole-run (fix E4). Sans ça, les outils en SESSIONS séparées (start_new_session)
     survivent au SIGTERM du groupe moteur. `force=True` -> SIGKILL immédiat (un cancel doit STOPPER NET ;
     le travail déjà collecté est flushé par D1 au checkpoint, l'outil en vol n'a rien rendu de toute façon).
+    Coupe TOUS les groupes EN VOL simultanément -> compose avec l'exécuteur parallèle (plusieurs outils
+    en vol tués ensemble, pas un seul).
 
-    ASYNC-SIGNAL-SAFE : snapshot `list(...)` sans lock (cf. `_LIVE_TOOL_PGIDS`), `os.killpg` = un seul
-    syscall, ne lève jamais (process/groupe déjà mort -> ProcessLookupError/OSError avalé). PORTABLE : sans
-    `os.killpg`/`SIGKILL` (Windows) -> no-op (pas de groupes POSIX ; documenté)."""
+    Snapshot `list(...)` pris SOUS `_PGID_LOCK` (les workers peuvent muter le set en parallèle -> sans le
+    verrou, `list(set)` lèverait `RuntimeError` sur une mutation concurrente). `os.killpg` (un seul syscall)
+    est appelé HORS du verrou pour ne pas retenir un worker pendant le kill, et ne lève jamais (process/
+    groupe déjà mort -> ProcessLookupError/OSError avalé). PORTABLE : sans `os.killpg`/`SIGKILL` (Windows)
+    -> no-op (pas de groupes POSIX ; documenté)."""
     if not (hasattr(os, "killpg") and hasattr(signal, "SIGKILL")):
         return
     sig = signal.SIGKILL if force else signal.SIGTERM
-    for pgid in list(_LIVE_TOOL_PGIDS):
+    with _PGID_LOCK:
+        snapshot = list(_LIVE_TOOL_PGIDS)
+    for pgid in snapshot:
         try:
             os.killpg(pgid, sig)
         except (ProcessLookupError, OSError):
