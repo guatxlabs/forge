@@ -3,9 +3,98 @@
 Recon = non-exploit, mais touche quand même le réseau -> reste gaté (in-scope + armé requis).
 Auto-neutralisation (`available`) si ni binaire ni docker présents : discipline héritée de Plume.
 """
+import json
+import re
+
 from .registry import register, Module
 from .. import runner
+from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
+
+# Ports web STANDARD : déjà couverts par l'hôte de base (recon/oracles semés dessus) -> on n'émet PAS
+# de cible `host:port` redondante pour eux. Seuls les ports NON standard (ex. console interne :7100)
+# ont besoin d'être surfacés comme NOUVELLE surface chaînable.
+_STANDARD_WEB_PORTS = frozenset({80, 443})
+_MAX_DISCOVERED_SERVICES = 25            # borne le fan-out (un scan -p- ne doit pas exploser le plan)
+_NMAP_OPEN_PORT_RX = re.compile(r"^(\d{1,5})/tcp\s+open\s+(\S+)", re.MULTILINE)
+
+
+def _bare_host(target):
+    """Hôte nu (scheme/userinfo/path/port retirés) d'une cible. Miroir simplifié de `Scope._host` :
+    sert à ANCRER un `host:port` découvert sur l'hôte DÉJÀ gaté par le ROE (jamais un autre hôte).
+    Pur, ne lève jamais."""
+    s = str(target).strip()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    s = s.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in s:
+        s = s.rsplit("@", 1)[1]
+    if s.startswith("["):                            # IPv6 littéral [::1]:port -> garde l'adresse
+        return s.split("]", 1)[0].lstrip("[")
+    if s.count(":") == 1:                            # host:port (pas IPv6 nu)
+        s = s.split(":", 1)[0]
+    return s
+
+
+def _service_discovery_findings(module, action, ports, tool):
+    """Un finding de DÉCOUVERTE par port web NON standard (target = `host:port`, marqueur
+    DISCOVERY_SERVICE_MARKER) -> le port devient un NŒUD du graphe que le cerveau chaîne (actions web
+    de base + modules web explicites via _directive_actions) sur cette nouvelle surface. Ancré sur
+    l'hôte DÉJÀ gaté par le ROE (`_bare_host(action.target)`) : jamais un autre hôte -> la re-gate ROE
+    de la vague suivante le laisse passer s'il est in-scope (host in-scope => host:port in-scope) et le
+    VÉTOe sinon. Ports 80/443 et le port propre de la cible ignorés (déjà couverts). Borné + dédupliqué."""
+    host = _bare_host(action.target)
+    tgt_netloc = str(action.target).split("://")[-1].split("/", 1)[0]
+    out, seen = [], set()
+    for port in ports:
+        try:
+            p = int(port)
+        except (TypeError, ValueError):
+            continue
+        if p in _STANDARD_WEB_PORTS or p in seen or not (0 < p < 65536):
+            continue
+        hp = f"{host}:{p}"
+        if hp == tgt_netloc:                         # déjà la cible courante -> pas de nœud self-référent
+            continue
+        seen.add(p)
+        out.append(module.finding(
+            target=hp, title=f"{techniques.DISCOVERY_SERVICE_MARKER} : {hp}",
+            severity="INFO", category="recon", mitre=getattr(module, "mitre", ""), status="tested",
+            tool=tool,
+            evidence=(f"Service web découvert sur le port non standard {p} ({hp}) via {tool} — "
+                      f"nouvelle surface web chaînable (fingerprint/oracles à la vague suivante)."),
+            poc=f"# {tool} : service web exposé sur {hp}"))
+        if len(out) >= _MAX_DISCOVERED_SERVICES:
+            break
+    return out
+
+
+def _httpx_web_ports(out):
+    """Ports des services web VIVANTS listés par httpx (JSON par-ligne : chaque ligne = un service
+    répondant). Pur, tolérant (lignes non-JSON ignorées). Ne lève jamais."""
+    ports = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        port = j.get("port")
+        if port is not None:
+            ports.append(port)
+    return ports
+
+
+def _nmap_web_ports(out):
+    """Ports TCP OUVERTS dont le service nmap est HTTP (`http`, `http-proxy`, `ssl/http`, `https`…).
+    Pur, dérivé du texte `-sV`. Ne lève jamais."""
+    ports = []
+    for m in _NMAP_OPEN_PORT_RX.finditer(out or ""):
+        if "http" in m.group(2).lower():
+            ports.append(m.group(1))
+    return ports
 
 
 def _path_argval(val):
@@ -97,10 +186,13 @@ class HttpxFingerprint(FlagAllowlistMixin, Module):
         failed = self.tool_failed(action, rc, out, err, "httpx")
         if failed:
             return [failed]
-        return [self.finding(
+        summary = self.finding(
             target=action.target, title="Fingerprint HTTP (httpx)", severity="INFO",
             category="recon", mitre="T1595", status="tested", tool="httpx",
-            evidence=(out or err).strip()[:1500], poc=self.dry(action))]
+            evidence=(out or err).strip()[:1500], poc=self.dry(action))
+        # DÉCOUVERTE de surface : un service web sur un port NON standard (ex. :7100) devient une cible
+        # chaînable (target=host:port) au lieu de rester enfoui dans le texte de sortie.
+        return [summary] + _service_discovery_findings(self, action, _httpx_web_ports(out), "httpx")
 
 
 @register("recon.nmap")
@@ -189,7 +281,10 @@ class NmapServices(FlagAllowlistMixin, Module):
         failed = self.tool_failed(action, rc, out, err, "nmap")
         if failed:
             return [failed]
-        return [self.finding(
+        summary = self.finding(
             target=action.target, title="Services exposés (nmap -sV)", severity="INFO",
             category="recon", mitre="T1046", status="tested", tool="nmap",
-            evidence=(out or err).strip()[:1500], poc=self.dry(action))]
+            evidence=(out or err).strip()[:1500], poc=self.dry(action))
+        # DÉCOUVERTE de surface : chaque service HTTP sur un port NON standard devient une cible
+        # chaînable (target=host:port) -> le cerveau y sème les actions web à la vague suivante.
+        return [summary] + _service_discovery_findings(self, action, _nmap_web_ports(out), "nmap")

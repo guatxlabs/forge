@@ -360,5 +360,108 @@ class TestExplicitSelectionIsDirective(unittest.TestCase):
             self.assertIn(kind, eng.not_planned, f"{kind} doit rester reporté (not_planned) en mode AUTO")
 
 
+class TestRealReconDiscoversServiceChainsWebModule(unittest.TestCase):
+    """C1+C2 END-TO-END (le VRAI recon.nmap + le VRAI web.security_headers, seuls les seams outil/réseau
+    sont mockés) — reproduit l'échec LIVE et prouve qu'il produit désormais un VERDICT.
+
+    Échec live : cible `127.0.0.1` (console web sur :7100, port NON standard). `web.security_headers`
+    plantait (`unknown url type: '127.0.0.1'`) et ne chaînait jamais vers :7100 (le port restait enfoui
+    dans le texte de sortie de recon, jamais une cible). Ici recon.nmap DÉCOUVRE le service :7100 -> il
+    devient une cible chaînable (host:port) -> `web.security_headers` explicite TIRE dessus et renvoie un
+    vrai finding (jamais error, jamais « injoignable »)."""
+
+    _NMAP_OUT = ("Starting Nmap\nNmap scan report for 127.0.0.1\nHost is up.\n"
+                 "PORT     STATE SERVICE VERSION\n"
+                 "7100/tcp open  http    Werkzeug httpd 2.0.3 (Python 3.11)\n")
+
+    class _Hdrs:                                              # HTTPMessage-like minimal (get / get_all)
+        def __init__(self, d):
+            self._d = d
+        def get(self, k, default=None):
+            return self._d.get(k, default)
+        def get_all(self, k):
+            v = self._d.get(k)
+            return [v] if v else []
+
+    def test_discovered_hostport_gets_real_security_headers_verdict(self):
+        import forge.runner as runner_mod
+        from forge.modules import security_headers as SH
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return binary == "nmap"                          # SEUL nmap dispo -> httpx/nuclei = SKIP propre
+
+        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            return (0, self._NMAP_OUT, "") if binary == "nmap" else (127, "", "")
+
+        # le VRAI module security_headers : son seam réseau répond UNIQUEMENT sur http://127.0.0.1:7100
+        # (la console est en HTTP clair sur un port non standard) -> prouve la normalisation http-first.
+        def fake_fetch(url, headers=None, timeout=15):
+            if url == "http://127.0.0.1:7100":
+                return 200, "<html><body>ok</body></html>", TestRealReconDiscoversServiceChainsWebModule._Hdrs(
+                    {"Server": "Werkzeug/2.0.3", "Content-Type": "text/html"})
+            return None, None, None                          # rien sur :80/:443 ni en https
+
+        sv_av, sv_tool, sv_fetch = runner_mod.available, runner_mod.tool, SH.SecurityHeaders._fetch
+        runner_mod.available, runner_mod.tool = fake_available, fake_tool
+        SH.SecurityHeaders._fetch = staticmethod(fake_fetch)
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["recon.nmap", "web.security_headers"], max_waves=4)
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+            SH.SecurityHeaders._fetch = sv_fetch
+
+        # (1) recon.nmap a SURFACÉ le service :7100 comme cible chaînable (finding de découverte).
+        disc = [f for f in eng.findings
+                if f.target == "127.0.0.1:7100" and "Service web in-scope" in f.title]
+        self.assertTrue(disc, "recon.nmap n'a pas surfacé 127.0.0.1:7100 comme cible")
+
+        # (2) le VRAI web.security_headers a TIRÉ sur la surface DÉCOUVERTE 127.0.0.1:7100 (FIRE, pas SKIP).
+        sh = [r for r in eng.results if r["kind"] == "web.security_headers"
+              and r["target"] == "127.0.0.1:7100"]
+        self.assertTrue(sh, "web.security_headers n'a pas atteint la surface découverte 127.0.0.1:7100")
+        self.assertEqual(sh[0]["verdict"], FIRE, "gouvernance : le tir sur host:port in-scope doit être FIRE")
+
+        # (3) VERDICT RÉEL : des findings `tested` sur 127.0.0.1:7100 — PAS une erreur, PAS « injoignable ».
+        sh_f = [f for f in eng.findings
+                if f.target == "127.0.0.1:7100" and f.tool.endswith("web.security_headers")]
+        self.assertTrue(sh_f, "aucun finding web.security_headers sur la cible découverte")
+        self.assertTrue(all(f.status == "tested" for f in sh_f), "verdict non concluant (skipped/degraded)")
+        self.assertFalse(any("non testé" in f.title or "injoignable" in f.title for f in sh_f))
+        # le PoC pointe l'URL RÉELLEMENT sondée (http + port non standard), preuve de la normalisation.
+        self.assertTrue(any("http://127.0.0.1:7100" in (f.poc or "") for f in sh_f))
+        # (4) AUCUNE exception au tir (le crash `unknown url type` d'origine).
+        self.assertFalse(any(r["verdict"] == "ERROR" for r in eng.results
+                             if r["kind"] == "web.security_headers"))
+
+    def test_governance_out_of_scope_discovered_hostport_is_vetoed(self):
+        # DÉFENSE EN PROFONDEUR : même si un port était surfacé sur un hôte HORS-scope, la re-gate ROE de
+        # la vague suivante le VÉTOe (rien ne tire hors périmètre). Ici on injecte un nœud host:port
+        # hors-scope dans le graphe et on vérifie que web.security_headers explicite y est VÉTOé.
+        from forge.modules import security_headers as SH
+        SH_fetch = SH.SecurityHeaders._fetch
+        SH.SecurityHeaders._fetch = staticmethod(lambda u, headers=None, timeout=15: (None, None, None))
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"], "allow_exploit": False,
+                        "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            # graphe amorcé avec un host:port HORS-scope (10.0.0.9:7100) comme s'il avait été « découvert ».
+            eng.graph.add_host("127.0.0.1", kind="host")
+            eng.graph.add_finding(Finding(target="10.0.0.9:7100", title="Service web in-scope : 10.0.0.9:7100",
+                                          status="tested", severity="INFO", category="recon"))
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["web.security_headers"], max_waves=3)
+        finally:
+            SH.SecurityHeaders._fetch = SH_fetch
+        evil = [r for r in eng.results if r["target"] == "10.0.0.9:7100"]
+        self.assertTrue(evil, "l'action chaînée hors-scope aurait dû être évaluée (puis vétoée)")
+        self.assertTrue(all(r["verdict"] == "VETO" for r in evil), "hôte hors-scope non VÉTOé (fail-open!)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

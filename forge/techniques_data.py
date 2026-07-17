@@ -564,6 +564,11 @@ PURPLE_FALLBACK_KINDS = (
 DISCOVERY_SUBDOMAIN_MARKER = "Sous-domaine in-scope"       # recon.subdomains : nouvel hôte in-scope
 DISCOVERY_ENDPOINT_MARKER = "Endpoint in-scope"            # recon.js_endpoints : endpoint référencé JS
 DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL d'archive in-scope
+# recon.httpx / recon.nmap : service web DÉCOUVERT sur un port NON standard (ex. host:7100). Émis en
+# PLUS du finding de synthèse, target = `host:port` -> devient un nœud du graphe que le cerveau chaîne
+# (actions web de base + modules web explicites via _directive_actions) sur cette NOUVELLE surface. Sans
+# lui, un service web sur un port non standard restait enfoui dans le texte de sortie (jamais une cible).
+DISCOVERY_SERVICE_MARKER = "Service web in-scope"
 # Marqueur de titre : la découverte plain-HTTP a été BLOQUÉE par un challenge/WAF managé — signature
 # de challenge/403 observée ET aucun endpoint extrait. Émis par recon.js_endpoints / recon.content
 # (les émetteurs de découverte HTTP) quand la recon curl est challengée (le trou historique :
