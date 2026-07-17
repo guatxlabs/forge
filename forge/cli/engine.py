@@ -18,6 +18,7 @@ from ..memory import Memory
 from .. import purple
 from .. import console_client
 from .. import workflows
+from .. import runner
 
 
 class _Terminate(BaseException):
@@ -236,10 +237,19 @@ def cmd_campaign(args):
             raise _Terminate()
 
     def _on_sigterm(_signum, _frame):
-        # Watchdog console : kill_group envoie SIGTERM PUIS attend le process (pas de SIGKILL immédiat) ->
-        # on a le temps de flusher. On ne meurt PAS ici : on POSE un drapeau ; le prochain checkpoint
-        # flushe le travail en cours et lève `_Terminate` pour une sortie propre + flush final.
+        # Watchdog/cancel console : kill_group envoie SIGTERM PUIS (fix E4) escalade en SIGKILL après une
+        # grâce -> on a le temps de flusher. On ne meurt PAS ici : on POSE un drapeau ; le prochain
+        # checkpoint flushe le travail en cours et lève `_Terminate` pour une sortie propre + flush final.
         term["sig"] = True
+        # Les outils tournent dans des SESSIONS séparées (start_new_session, E3) -> le SIGTERM whole-run
+        # ne les atteint PAS. On coupe EXPLICITEMENT les groupes d'outils en vol : l'outil courant meurt,
+        # `communicate()` rend la main immédiatement, le moteur atteint son prochain checkpoint et sort
+        # (flush D1) — et il ne reste AUCUN outil orphelin (nuclei &c.) après le cancel (bug T29). Sans
+        # ça, un cancel laissait le moteur relancer des outils jusqu'au checkpoint et des nuclei survivre.
+        try:
+            runner.terminate_live_tool_groups(force=True)
+        except Exception:  # noqa: BLE001 — un handler de signal ne doit JAMAIS lever
+            pass
 
     # intervalle de checkpoint intra-vague (actions). Réglable via FORGE_INGEST_EVERY (défaut 25).
     every = 0

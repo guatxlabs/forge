@@ -68,6 +68,60 @@ pub(crate) fn kill_group(pgid: i32) {
     let _ = pgid;
 }
 
+/// Grâce (s) laissée au GROUPE moteur entre le SIGTERM (cancel/watchdog -> D1 flushe le travail en
+/// vol) et le SIGKILL de dernier ressort. Miroir du `_TERM_GRACE=5` de `forge/runner.py` : term
+/// gracieux d'abord (persistance D1), kill ferme si le moteur ne sort pas.
+pub(crate) const CANCEL_GRACE_SECS: u64 = 5;
+
+/// Vrai si le GROUPE de process `pgid` a AU MOINS un membre VIVANT. `kill(-pgid, 0)` : signal 0 =
+/// test d'existence pur (n'envoie rien), pid NÉGATIF = tout le groupe -> 0 si l'appelant peut
+/// signaler ≥1 membre, ESRCH si le groupe est vide. Note : un leader ZOMBIE non encore récolté
+/// répond « vivant » — le superviseur le récolte (`child.wait`) peu après sa mort.
+#[cfg(unix)]
+pub(crate) fn group_alive(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn group_alive(pgid: i32) -> bool {
+    let _ = pgid;
+    false
+}
+
+/// ESCALADE SIGKILL du GROUPE moteur (le SIGTERM a DÉJÀ été envoyé par `kill_group` juste avant).
+/// Sonde le groupe pendant `grace` : s'il disparaît (sortie gracieuse D1) on s'arrête sans SIGKILL ;
+/// sinon (moteur wedgé / handler qui ne sort pas dans les temps) on SIGKILL TOUT le groupe — signal
+/// non-catchable, garantit la mort du moteur (fin du « cancel = no-op » : un moteur bloqué qui
+/// continuait à lancer des outils est désormais coupé). Idempotent + fail-safe : `pgid<=1` ou groupe
+/// déjà mort -> les signaux sont avalés par le noyau (ESRCH). Réutilise le killpg du watchdog.
+#[cfg(unix)]
+pub(crate) async fn escalate_kill_group(pgid: i32, grace: std::time::Duration) {
+    if pgid <= 1 {
+        return;
+    }
+    let step = std::time::Duration::from_millis(100);
+    let mut waited = std::time::Duration::ZERO;
+    while waited < grace {
+        if !group_alive(pgid) {
+            return; // sorti proprement dans la grâce (D1 a flushé) -> pas de SIGKILL.
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+    // Toujours vivant après la grâce -> dernier ressort : SIGKILL de TOUT le groupe.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn escalate_kill_group(pgid: i32, _grace: std::time::Duration) {
+    let _ = pgid;
+}
+
 /// Reaping FAIL-SAFE d'un enfant moteur DÉJÀ spawné dont le bookkeeping post-spawn a ÉCHOUÉ — garantit
 /// AUCUN orphelin ni faux-succès. `kill_on_drop(true)` ne SIGKILL que le PID direct (pas le GROUPE setsid,
 /// donc pas les petits-enfants) et laisse scope.json/targets.json sur disque : on nettoie explicitement.
@@ -489,7 +543,8 @@ mod scope_doc_contract_tests {
 
 #[cfg(all(test, unix))]
 mod reap_tests {
-    use super::{reap_orphaned_spawn, spawn_setsid};
+    use super::{escalate_kill_group, group_alive, kill_group, reap_orphaned_spawn, spawn_setsid};
+    use std::time::Duration;
 
     /// `libc::kill(pid, 0)` == -1 avec ESRCH => le PID n'existe PLUS (ni vivant, ni zombie non récolté).
     fn process_gone(pid: i32) -> bool {
@@ -520,6 +575,80 @@ mod reap_tests {
         // Récolté de façon déterministe (wait().await) : le PID a disparu, pas d'orphelin ni de zombie.
         assert!(process_gone(pid), "l'enfant doit être tué ET récolté (aucun orphelin)");
         assert!(!run_dir.exists(), "le dir temp du run (scope/targets) doit être supprimé");
+    }
+
+    /// E4 — LE CANCEL COUPE VRAIMENT LE MOTEUR. Reproduit le symptôme (T29) : un moteur détaché qui
+    /// IGNORE SIGTERM (wedgé) et un enfant dans son groupe — le cancel « gracieux » (SIGTERM seul) est
+    /// un NO-OP, le moteur survivait et relançait des outils. On prouve la SÉQUENCE EXACTE du handler
+    /// `run_cancel` — `kill_group` (SIGTERM) PUIS `escalate_kill_group` (SIGKILL après grâce) :
+    ///   1. SIGTERM seul laisse le GROUPE VIVANT (le moteur ignore -> preuve que le cancel d'avant était un no-op) ;
+    ///   2. l'escalade SIGKILL tue TOUT le groupe (leader + enfant) — aucun survivant, comme le hard-kill manuel ;
+    ///   3. ré-escalader un groupe déjà mort est un no-op propre (idempotent / fail-safe).
+    #[tokio::test]
+    async fn cancel_escalates_sigterm_to_sigkill_and_leaves_no_survivor() {
+        // Fichier où l'ENFANT (petit-enfant du test) publie son PID -> preuve directe qu'il meurt aussi.
+        let pidfile = std::env::temp_dir().join(format!("forge-e4-child-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        // Moteur bidon : IGNORE SIGTERM (comme un moteur wedgé), fork un enfant qui publie son pid et
+        // ignore aussi SIGTERM, puis les deux dorment. Python3 = dépendance réelle du moteur Forge.
+        // NB : script sur UNE ligne source (les `\n` sont littéraux). Pas de continuation `\`-retour :
+        // en Rust elle SUPPRIME l'indentation de tête -> IndentationError côté Python.
+        let script = "import os,signal,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\npid=os.fork()\nif pid==0:\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n    open(sys.argv[1],'w').write(str(os.getpid()))\n    time.sleep(120)\nelse:\n    time.sleep(120)\n";
+        let mut cmd = tokio::process::Command::new("python3");
+        cmd.arg("-c").arg(script).arg(&pidfile).kill_on_drop(true);
+        spawn_setsid(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("python3 indisponible — test E4 sauté");
+                return;
+            }
+        };
+        let pid = child.id().expect("pid") as i32;
+        let pgid = pid; // setsid => PID == PGID.
+
+        // attend que l'enfant ait publié son pid (le groupe est alors bien établi : leader + enfant).
+        let mut grandchild = -1;
+        for _ in 0..100 {
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(v) = s.trim().parse::<i32>() {
+                    grandchild = v;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(grandchild > 1, "l'enfant du moteur doit avoir publié son PID");
+        assert!(group_alive(pgid), "le groupe moteur doit être vivant avant le cancel");
+        assert!(!process_gone(grandchild), "l'enfant doit être vivant avant le cancel");
+
+        // (1) SIGTERM seul (ancien comportement du cancel) : le moteur l'IGNORE -> groupe TOUJOURS vivant.
+        kill_group(pgid);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(group_alive(pgid), "SIGTERM seul est un NO-OP sur un moteur wedgé (le bug E4)");
+        assert!(!process_gone(grandchild), "l'enfant survit au SIGTERM seul");
+
+        // (2) ESCALADE SIGKILL (grâce courte) : tue TOUT le groupe.
+        escalate_kill_group(pgid, Duration::from_millis(300)).await;
+        let _ = child.wait().await; // récolte le leader (plus de zombie qui masquerait group_alive).
+
+        // le leader ET l'enfant ont disparu — aucun survivant (l'enfant est récolté par init après SIGKILL).
+        let mut child_gone = false;
+        for _ in 0..100 {
+            if process_gone(grandchild) {
+                child_gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(process_gone(pid), "le leader moteur doit être tué par l'escalade SIGKILL");
+        assert!(child_gone, "l'enfant du moteur doit être tué aussi — AUCUN survivant (comme le hard-kill manuel)");
+        assert!(!group_alive(pgid), "le groupe moteur est entièrement éteint");
+
+        // (3) IDEMPOTENT / FAIL-SAFE : ré-escalader un groupe déjà mort ne panique pas et reste un no-op.
+        escalate_kill_group(pgid, Duration::from_millis(100)).await;
+        assert!(!group_alive(pgid), "ré-escalade sur un groupe mort = no-op propre");
+        let _ = std::fs::remove_file(&pidfile);
     }
 }
 
