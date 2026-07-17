@@ -4,6 +4,7 @@ armement, ledger, planner, workflows, ingest console). Extrait de l'ancien `forg
 déplacement, comportement inchangé)."""
 import json
 import os
+import signal
 from pathlib import Path
 
 from ..roe import Scope, Roe, Action
@@ -17,6 +18,12 @@ from ..memory import Memory
 from .. import purple
 from .. import console_client
 from .. import workflows
+
+
+class _Terminate(BaseException):
+    """Arrêt GRACIEUX d'un run sur watchdog SIGTERM (console). Dérive de `BaseException` (PAS de
+    `Exception`) EXPRÈS : le `except Exception` du moteur (M6, robustesse du tir) ne doit PAS l'avaler
+    — il doit dérouler la campagne jusqu'au flush final (finally) pour ne perdre aucun travail."""
 
 
 def _parse_cli_params(param_args):
@@ -193,8 +200,80 @@ def cmd_campaign(args):
     # du scope (profil + toggles) -> respecte la sélection par-scope sans câblage par-technique.
     brain = (AutoPentestBrain(scope.effective_technique_kinds())
              if auto_pentest else HeuristicBrain())
-    engine.campaign(targets, brain, planner,
-                    modules=modules, module_params=module_params)
+    # ── DURABILITÉ INCRÉMENTALE + ARRÊT GRACIEUX AU WATCHDOG ─────────────────────────────────────
+    # Sous pilotage console (--console), on FLUSHE findings/run-records/décisions AU FIL DE L'EAU
+    # (batch intra-vague via checkpoint_every + frontière de vague) au lieu d'un unique POST « tout ou
+    # rien » en fin de run. Un run tué par le watchdog (kill group SIGTERM) ne perd plus le travail des
+    # vagues/actions déjà accomplies. Le sink suit des offsets -> chaque item n'est posté qu'UNE fois.
+    sink = None
+    if args.console:
+        sink = console_client.IncrementalIngest(
+            args.campaign, args.run_id, url=args.console, token=args.console_token)
+    term = {"sig": False}
+
+    def _flush(partial):
+        """Flush best-effort du delta vers la console. Erreurs réseau AVALÉES (le run continue) ; les
+        offsets du sink n'avancent que sur succès (le delta repart au flush suivant sinon)."""
+        if sink is None:
+            return
+        try:
+            r = sink.flush(engine, partial=partial, coverage=engine.coverage(),
+                           coverage_gaps=engine.coverage_gaps,
+                           skipped_budget=engine.skipped_budget, not_planned=engine.not_planned)
+            if r is not None:
+                st, resp = r
+                print(f"Console <- ingest {'partiel' if partial else 'final'} (HTTP {st}): {resp}",
+                      flush=True)
+        except Exception as e:  # noqa: BLE001 — l'ingest ne doit JAMAIS casser le run
+            print(f"Console: échec ingest {'partiel' if partial else 'final'} ({e!r})", flush=True)
+
+    def _checkpoint():
+        """Appelé par le moteur (intra-vague + par vague) : flush PARTIEL, puis — si un SIGTERM de
+        watchdog est arrivé — DÉCLENCHE l'arrêt gracieux via `_Terminate`. Le raise est posé À UNE
+        FRONTIÈRE d'action (jamais pendant un flush ni un fire) -> pas de réentrance ni de double-envoi."""
+        _flush(partial=True)
+        if term["sig"]:
+            raise _Terminate()
+
+    def _on_sigterm(_signum, _frame):
+        # Watchdog console : kill_group envoie SIGTERM PUIS attend le process (pas de SIGKILL immédiat) ->
+        # on a le temps de flusher. On ne meurt PAS ici : on POSE un drapeau ; le prochain checkpoint
+        # flushe le travail en cours et lève `_Terminate` pour une sortie propre + flush final.
+        term["sig"] = True
+
+    # intervalle de checkpoint intra-vague (actions). Réglable via FORGE_INGEST_EVERY (défaut 25).
+    every = 0
+    old_sigterm = None
+    if args.console:
+        try:
+            every = max(0, int(os.environ.get("FORGE_INGEST_EVERY", "25")))
+        except ValueError:
+            every = 25
+        try:                                    # SIGTERM indisponible hors thread principal / plateforme
+            old_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
+        except (ValueError, OSError):
+            old_sigterm = None
+
+    terminated = False
+    try:
+        if args.console:
+            engine.campaign(targets, brain, planner,
+                            modules=modules, module_params=module_params,
+                            checkpoint=_checkpoint, checkpoint_every=every)
+        else:
+            # chemin SANS console : appel HISTORIQUE (aucun kwarg de durabilité) -> byte-identique.
+            engine.campaign(targets, brain, planner,
+                            modules=modules, module_params=module_params)
+    except _Terminate:
+        terminated = True
+        print("watchdog: SIGTERM reçu — arrêt gracieux, flush du travail accompli", flush=True)
+    finally:
+        if old_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, old_sigterm)
+            except (ValueError, OSError):
+                pass
+
     if ledger is not None:                 # scelle la fin de campagne : checkpoint (ancré si anchor configuré)
         ledger.checkpoint(note="forge campaign end")
     cov = engine.coverage()
@@ -213,17 +292,11 @@ def cmd_campaign(args):
     if args.purple and engine.run_records:
         n = purple.emit(args.purple, engine.run_records)
         print(f"Run-records ATT&CK -> {args.purple} ({n})")
-    if args.console:
-        try:
-            st, resp = console_client.ingest(
-                args.campaign, engine.findings, engine.run_records,
-                url=args.console, token=args.console_token,
-                run_id=args.run_id, roe_decisions=engine.roe_decisions(),
-                coverage=cov, coverage_gaps=engine.coverage_gaps,
-                skipped_budget=engine.skipped_budget, not_planned=engine.not_planned)
-            print(f"Console <- ingest (HTTP {st}): {resp}")
-        except Exception as e:  # noqa: BLE001
-            print(f"Console: échec ingest ({e!r})")
+    # FLUSH FINAL : envoie le delta RESTANT (dernière vague partielle) + gaps/skipped/not_planned
+    # complets. `partial=terminated` : sur une fin NORMALE (partial=False) le run_job est marqué 'done' ;
+    # sur un arrêt watchdog (partial=True) le statut reste 'running' pour que le superviseur console le
+    # marque honnêtement 'timeout' (compteurs non nuls déjà persistés par les flushes incrémentaux).
+    _flush(partial=terminated)
     rep = build_report(engine)
     if args.report:
         Path(args.report).write_text(rep, encoding="utf-8")

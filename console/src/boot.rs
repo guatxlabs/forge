@@ -242,7 +242,9 @@ pub(crate) async fn serve() {
     let run_timeout_secs = std::env::var("FORGE_RUN_TIMEOUT").ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(1800); // 30 min
+        .unwrap_or(3600); // 1 h — budget réaliste pour un run large (500+ actions). Le watchdog reste un
+                          // garde-fou de sûreté, désormais NON destructif : un run tué flushe et conserve
+                          // le travail accompli (ingest incrémental) — voir spawn_supervisor + ingest(partial).
     // scope serveur autorisé : pré-filtre fail-closed des cibles lançables depuis le web.
     // Source : FORGE_CONSOLE_SCOPE (chemin d'un scope.json) ; sinon scope.json relatif au pkg_dir.
     let (scope_in, scope_mode) = load_server_scope(&pkg_dir);
