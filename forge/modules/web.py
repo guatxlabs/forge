@@ -8,6 +8,7 @@ la sévérité auto-déclarée par l'outil (`reported_by_tool`), jamais promu `v
 import json
 
 from .registry import register, Module
+from .. import resource_profile
 from .. import runner
 from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
@@ -45,16 +46,24 @@ class NucleiScan(FlagAllowlistMixin, Module):
 
     def _severity(self, action):
         """Niveaux de sévérité (param UI/console `severity`), filtrés contre la liste blanche nuclei.
-        Accepte une chaîne CSV ou une liste. Valeur absente/invalide -> défaut info,low,medium,high,critical
-        (jamais d'élargissement de capacité : c'est un filtre de templates, pas une bascule ROE)."""
+
+        PRÉCÉDENCE : param `severity` explicite (override, str CSV ou liste) > profil de ressources
+        (`FORGE_RESOURCE_PROFILE`, levier `nuclei_severity`) > défaut-code info,low,medium,high,critical.
+        `balanced` == le défaut -> profil non défini byte-identique ; `low` restreint aux templates lourds
+        (medium,high,critical). Un param explicite INVALIDE (aucune sévérité connue) retombe sur le profil.
+        La valeur de profil est RE-FILTRÉE contre l'allow-list nuclei — jamais d'élargissement de capacité :
+        c'est un filtre de templates, pas une bascule ROE."""
         raw = action.params.get("severity")
+        override = None
         if isinstance(raw, str):
             wanted = [s.strip().lower() for s in raw.split(",")]
+            override = ",".join(s for s in wanted if s in self._ALLOWED_SEV) or None
         elif isinstance(raw, (list, tuple)):
             wanted = [str(s).strip().lower() for s in raw]
-        else:
-            return self._DEFAULT_SEV
-        levels = [s for s in wanted if s in self._ALLOWED_SEV]
+            override = ",".join(s for s in wanted if s in self._ALLOWED_SEV) or None
+        resolved = resource_profile.resolve("nuclei_severity", override=override, default=self._DEFAULT_SEV)
+        # filtre défensif : la valeur (profil comprise) reste allow-listée (fail-closed sur garbage).
+        levels = [s.strip().lower() for s in str(resolved).split(",") if s.strip().lower() in self._ALLOWED_SEV]
         return ",".join(levels) if levels else self._DEFAULT_SEV
 
     def _args(self, action):

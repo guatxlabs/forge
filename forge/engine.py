@@ -19,6 +19,7 @@ from .graph import EngagementGraph
 from . import modules as mods
 from . import pin
 from . import purple
+from . import resource_profile
 from . import session
 from . import throttle
 
@@ -95,15 +96,14 @@ _DEFAULT_PARALLELISM = 4
 
 
 def _parallelism() -> int:
-    """Cap de l'exécuteur intra-vague, lu depuis `FORGE_PARALLELISM` (défaut 4). <=1 => chemin SÉRIEL
-    historique (byte-identique). Valeur absente/illisible => défaut. Borné à [1, 64] (garde-fou anti-abus)."""
-    raw = os.environ.get("FORGE_PARALLELISM")
-    if not raw:
-        return _DEFAULT_PARALLELISM
-    try:
-        v = int(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_PARALLELISM
+    """Cap de l'exécuteur intra-vague. PRÉCÉDENCE : `FORGE_PARALLELISM` (override env, PRIME toujours —
+    rétro-compat) > profil de ressources (`FORGE_RESOURCE_PROFILE`) > défaut-code 4. `balanced` (défaut)
+    == 4 => profil non défini byte-identique. `low` => 1 (chemin SÉRIEL historique). Valeur illisible =>
+    fail-through vers le profil. Borné à [1, 64] (garde-fou anti-abus)."""
+    env = os.environ.get("FORGE_PARALLELISM")
+    v = resource_profile.resolve("parallelism", override=env, default=_DEFAULT_PARALLELISM)
+    if not isinstance(v, int):
+        v = _DEFAULT_PARALLELISM
     if v < 1:
         return 1
     return min(v, 64)
@@ -240,6 +240,9 @@ class Engine:
         self.not_planned: dict[str, str] = {}            # {kind: raison} — disponibles mais jamais planifiés
         self.dups = 0              # findings ignorés car déjà en mémoire
         self.waves = 0             # nb de vagues plan->observe->replan exécutées (campagne itérative)
+        # PROFIL DE RESSOURCES ACTIF (audit) — rempli au lancement de campaign() (snapshot profil +
+        # leviers effectifs). None tant qu'aucune campagne n'a démarré (run() direct des tests).
+        self.resource_profile: dict[str, Any] | None = None
 
     # --- armement délégué (gestes journalisés) ---
     def arm(self, reason: str = "armed by operator") -> None:
@@ -689,6 +692,15 @@ class Engine:
         re-proposée à l'identique (id stable kind:target) n'est jamais rejouée -> point fixe garanti.
         skipped_budget et coverage_gaps sont ACCUMULÉS sur l'ensemble des vagues (anti-masquage).
         """
+        # AUDIT DES RESSOURCES : capture le profil ACTIF (`FORGE_RESOURCE_PROFILE`) + les valeurs de
+        # leviers RÉELLEMENT en vigueur (overrides d'env pris en compte) AU LANCEMENT de la campagne.
+        # Émis au ledger (`engine.resource_profile`) quand un ledger est présent, et exposé au rapport
+        # (`engine.resource_profile`) pour tracer quelles ressources ce run a consommées. Additif :
+        # pure observabilité (n'influe NI sur le plan, NI sur le ROE, NI sur les findings).
+        self.resource_profile = resource_profile.active_snapshot()
+        if self.ledger:
+            self.ledger.append("engine.resource_profile", self.resource_profile)
+
         for t in targets:                            # amorce le world-model avec les cibles
             # SESSION par-cible (SECRET) : matériel d'auth déclaré dans targets.json[].attrs.session.
             # RETIRÉ des attrs poussés au graphe (le secret ne doit JAMAIS entrer dans le world-model,

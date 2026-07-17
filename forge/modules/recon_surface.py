@@ -42,6 +42,7 @@ import urllib.request
 from ._scopeguard import ScopeGuardMixin, web_url_candidates
 from .registry import register, Module
 from .. import pin as _pin
+from .. import resource_profile
 from .. import runner
 from .. import session as _session
 from .. import techniques
@@ -224,8 +225,12 @@ class PassiveSurface(ScopeGuardMixin, Module):
         techniques.DISCOVERY_*). Cartographie de surface seule — aucun endpoint n'est appelé ici, et un
         endpoint dont l'hôte sortirait du périmètre est ÉCARTÉ (jamais émis)."""
         out = []
+        # Cap RÉSOLU par profil de ressources (`crawl_max_endpoints`) : override éventuel > profil >
+        # défaut-classe (`self.MAX_ENDPOINTS`, préservant un éventuel override de sous-classe). `balanced`
+        # == 25 == défaut -> byte-identique ; `low` réduit (10), `full` élargit (50).
+        max_endpoints = resource_profile.resolve("crawl_max_endpoints", default=self.MAX_ENDPOINTS)
         for u in list(dict.fromkeys(urls)):                  # dédup en préservant l'ordre
-            if len(out) >= self.MAX_ENDPOINTS:
+            if len(out) >= max_endpoints:
                 break
             if not self._host_in_scope(action, _host_only(u)):   # défense en profondeur (fail-closed)
                 continue
