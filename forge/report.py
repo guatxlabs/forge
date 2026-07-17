@@ -15,6 +15,7 @@ contenu-moat que le rapport console porte. On ajoute donc, sans casser le squele
 """
 from .schema import SEVERITIES
 from . import signing
+from . import triage as _triage
 
 
 def _engagement_header(engine):
@@ -100,10 +101,49 @@ def _console_report_pointer(engine):
     ]
 
 
+def _triage_section(result):
+    """Section TRANSPARENCE du triage (miroir du bucket anti-lacune) : dit que le triage a TOURNÉ, combien
+    de findings sont actionnables vs bruit/dup, et les top clusters + leurs raisons. Purement DÉRIVÉ du
+    `triage_summary` (aucun finding masqué : c'est une VUE). Vide si le triage est désactivé sans bruit."""
+    s = result.summary
+    out = ["## Triage des findings (dédup / cluster-bruit / rang)", ""]
+    if not s.get("enabled"):
+        out += ["_Triage désactivé (`scope.triage.enabled=false`) — findings bruts, aucun classement._", ""]
+        return out
+    out += [
+        f"- **{s['total']} findings** → **{s['actionable']} actionnables**, "
+        f"**{s['noise']} classés bruit**, **{s['duplicates']} dup(s)** "
+        f"(regroupés en **{s.get('num_clusters', 0)} cluster(s)** à haute cardinalité).",
+        f"- **Auto-masquage** : {'ACTIVÉ' if s.get('auto_hide') else 'DÉSACTIVÉ (défaut sûr — rien retiré, tout reste auditable)'}.",
+        "",
+    ]
+    clusters = s.get("clusters") or []
+    if clusters:
+        out += ["**Top clusters-bruit** (gabarit répété → 1 ligne + membres annotés) :", "",
+                "| Cluster | Gabarit | Sévérité | Membres | Exemple |", "|---|---|---|---|---|"]
+        for c in clusters:
+            lbl = str(c.get("label", ""))[:70]
+            ex = str(c.get("example_target", ""))[:60]
+            out.append(f"| c{c['cluster_id']} | {lbl} | {c['severity']} | {c['size']} | `{ex}` |")
+        out.append("")
+    top = s.get("top_findings") or []
+    if top:
+        out += ["**Top findings actionnables (classés)** :", ""]
+        for t in top:
+            out.append(f"- [{t['severity']}] {t['title']} — `{t['target']}` (bruit={t['score']})")
+        out.append("")
+    return out
+
+
 def build_report(engine, title="Forge — rapport d'engagement"):
     out = [f"# {title}", ""]
     out += _engagement_header(engine)                # en-tête d'engagement (parité console)
     cov = engine.coverage()
+
+    # TRIAGE (couche de VUE, post-collecte) : dédup + cluster-bruit + score + rang. N'ANNOTE et ne CLASSE
+    # que le RENDU — les `engine.findings` bruts et le ledger restent INTACTS (aucune mutation). Config
+    # portée par `scope.triage` (défaut sûr : ON, auto_hide OFF). `len(ranked) == len(engine.findings)`.
+    tr = _triage.triage(list(engine.findings), getattr(getattr(engine, "scope", None), "triage", None))
 
     # --- synthèse findings ---
     by_sev = {s: 0 for s in SEVERITIES}
@@ -114,13 +154,21 @@ def build_report(engine, title="Forge — rapport d'engagement"):
         out.append(f"| {s} | {by_sev.get(s, 0)} |")
     out.append("")
 
-    # --- findings détaillés ---
+    # --- triage : synthèse transparente (dit que le triage a tourné + top clusters/actionnables) ---
+    out += _triage_section(tr)
+
+    # --- findings détaillés (RANG actionnable-d'abord : VUE explicite du triage, PAS un tri silencieux —
+    #     chaque finding porte son annotation de triage, et le raw `engine.findings` reste inchangé) ---
     out += ["## Findings", ""]
     if not engine.findings:
         out += ["_Aucun finding._", ""]
-    for f in sorted(engine.findings, key=lambda x: -x.sev_rank()):
+    for f in tr.ranked:
+        a = tr.annotation_for(f)
+        flag = " · **BRUIT probable**" if a.get("likely_noise") else ""
         out += [f"### [{f.severity}] {f.title} — `{f.target}`",
                 f"- **Catégorie** : {f.category or '—'}  ·  **ATT&CK** : {f.mitre or '—'}  ·  **Statut** : {f.status}",
+                f"- **Triage** : bruit={a.get('score', 0.0)}  ·  cluster={('c%d' % a['cluster_id']) if a.get('cluster_id') is not None else '—'}"
+                f"  ·  {a.get('reason', '—') or '—'}{flag}",
                 f"- **Outil** : {f.tool or '—'}",
                 f"- **Preuve** : {f.evidence or '—'}",
                 f"- **PoC** : `{f.poc or '—'}`", ""]

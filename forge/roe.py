@@ -247,6 +247,13 @@ class Scope:
         self.profile = data.get("profile")
         self.techniques_enabled = data.get("techniques_enabled")
         self.categories_enabled = data.get("categories_enabled")
+        # TRIAGE DES FINDINGS (couche de VUE post-collecte : dédup / cluster-bruit / score / rang) —
+        # additif, fail-open, DÉFAUT SÛR (annote + classe, ne masque RIEN). Config OPTIONNELLE lue ici
+        # comme un simple dict passé tel quel à `triage.TriageConfig.from_dict` (miroir de `allow_private`
+        # /`module_params` : le Scope ne fait que le porter, l'interprétation vit dans forge/triage.py).
+        # Absent => None => défauts sûrs (triage ON, auto_hide OFF). Ne change RIEN au ledger ni aux
+        # findings bruts : le triage est appliqué au RENDU du rapport (build_report), pas au moteur.
+        self.triage = data.get("triage")
         self.notes = data.get("notes", "")
         # CACHE DNS PAR-RUN (anti-rebinding L2) : hôte canonique -> résultat de résolution. Évite de
         # re-résoudre (et re-staller) le même hôte à chaque décision d'un run, et STABILISE le verdict
