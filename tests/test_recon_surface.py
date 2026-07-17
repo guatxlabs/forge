@@ -355,6 +355,20 @@ class TestTech(unittest.TestCase):
         self.assertEqual(f[0].status, "skipped")
         self.assertIn("injoignable", f[0].title)
 
+    def test_reaches_http_only_service_on_nonstandard_port(self):
+        # C2 : un service web en HTTP clair sur un port NON standard (host:port découvert) était
+        # « injoignable » en https-only ; le repli http le fingerprinte désormais (tested, pas skipped).
+        http = _http({"http://127.0.0.1:7100": (200, self.BODY, self.HEADERS)}, default=(None, "", {}))
+        r = _patch(TechFingerprint, "_http_get", http)
+        try:
+            f = TechFingerprint().fire(Action("recon.tech", "127.0.0.1:7100",
+                                              params={"in_scope": ["127.0.0.1"], "use_httpx": False}))
+        finally:
+            r()
+        self.assertEqual(f[0].status, "tested")
+        self.assertNotIn("injoignable", f[0].title)
+        self.assertIn("WordPress", f[0].evidence)
+
 
 # --- parsers purs (robustesse, sans réseau) -------------------------------------------------------
 class TestParsersPure(unittest.TestCase):

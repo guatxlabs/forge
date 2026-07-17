@@ -220,5 +220,53 @@ class TestScopeGuard(unittest.TestCase):
         self.assertEqual(f[0].status, "skipped")
 
 
+class TestC1BareTargetNeverCrashes(unittest.TestCase):
+    """C1 — la cible peut être un hôte NU, un `host:port` ou une URL : le module ne lève JAMAIS
+    `unknown url type` (le crash live sur `127.0.0.1`). Une cible sans scheme est NORMALISÉE (http/https)
+    avant urllib ; une cible injoignable -> `skipped` VISIBLE (jamais une exception)."""
+
+    def test_never_passes_bare_host_to_urllib(self):
+        # chaque URL passée au seam réseau porte TOUJOURS un scheme (jamais la cible nue).
+        for target in ("127.0.0.1", "127.0.0.1:7100", "app.test", "https://app.test/"):
+            seen = []
+
+            def spy(url, headers=None, timeout=15):
+                seen.append(url)
+                return 200, "<html></html>", _headers([("Server", "nginx/1.0")])
+            restore = _patch(spy)
+            try:
+                f = SecurityHeaders().fire(Action("web.security_headers", target))
+            finally:
+                restore()
+            self.assertTrue(seen, f"aucun fetch pour {target}")
+            for url in seen:
+                self.assertIn("://", url, f"cible NUE passée à urllib pour {target}: {url!r}")
+            self.assertTrue(all(x.status == "tested" for x in f), f"verdict non concluant pour {target}")
+
+    def test_hostport_tries_http_first(self):
+        # `host:port` (port non standard) -> http essayé AVANT https (console interne en clair).
+        f = _fire("127.0.0.1:7100", headers_pairs=[("Server", "Werkzeug/2.0")])
+        self.assertTrue(f)
+        self.assertTrue(any("http://127.0.0.1:7100" in (x.poc or "") for x in f))
+
+    def test_unreachable_bare_host_degrades_visibly_never_raises(self):
+        # aucun candidat joignable -> UN finding `skipped` visible, pas d'exception, pas « tout manquant ».
+        restore = _patch(lambda url, headers=None, timeout=15: (None, None, None))
+        try:
+            f = SecurityHeaders().fire(Action("web.security_headers", "127.0.0.1"))
+        finally:
+            restore()
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("non testé", f[0].title)
+
+    def test_url_target_poc_is_byte_identical(self):
+        # cible URL déjà formée -> PoC inchangé (aucune régression sur le chemin historique).
+        a = Action("web.security_headers", "https://app.test/")
+        self.assertEqual(SecurityHeaders().dry(a),
+                         "curl -sSI 'https://app.test/'  # lire les en-têtes de sécurité "
+                         "(CSP/X-Frame-Options/nosniff/Referrer-Policy/HSTS/Permissions-Policy) + flags de cookie")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -11,8 +11,41 @@ Le mixin n'ajoute AUCUNE capacité élargie : exploit/destructive restent décla
 concret et gardés par le ROE.
 """
 
+import urllib.parse
+
 from .. import session as _session
 from ..roe import Scope
+
+
+def web_url_candidates(target):
+    """URLs HTTP à essayer, DANS L'ORDRE, pour une cible qui peut être un hôte nu, un `host:port` ou
+    une URL complète. Point de NORMALISATION unique (partagé par security_headers + PassiveSurface) :
+    une cible sans scheme ne doit JAMAIS être passée telle quelle à urllib (`unknown url type`).
+
+    - cible AVEC scheme (`http://`, `https://`, …) -> renvoyée TELLE QUELLE (candidat unique).
+      BYTE-IDENTIQUE pour les cibles URL / endpoint déjà formées (aucune régression).
+    - `host` / `host:port` nu -> préfixé d'un scheme, http+https ordonnés par vraisemblance :
+        * port 80  -> [http]            ; port 443 -> [https] (le bon scheme est certain) ;
+        * autre port EXPLICITE -> [http, https] (un port non standard est le plus souvent http clair,
+          ex. une console interne sur :7100) ;
+        * AUCUN port -> [https, http] (défaut web https, repli http).
+    Pur, ne lève JAMAIS. Ne renvoie jamais [] pour une cible non vide."""
+    s = str(target).strip()
+    if not s:
+        return []
+    if "://" in s:
+        return [s]
+    try:                                          # urlsplit ne peuple .port qu'avec un netloc (préfixe //)
+        port = urllib.parse.urlsplit("//" + s).port
+    except (ValueError, TypeError):               # netloc/port malformé -> traiter comme sans port
+        port = None
+    if port == 80:
+        return ["http://" + s]
+    if port == 443:
+        return ["https://" + s]
+    if port is not None:
+        return ["http://" + s, "https://" + s]
+    return ["https://" + s, "http://" + s]
 
 
 class ScopeGuardMixin:
