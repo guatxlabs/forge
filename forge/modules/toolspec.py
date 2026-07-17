@@ -32,6 +32,7 @@ Zéro dépendance (stdlib) — cohérent avec le cœur Forge.
 import json
 import re
 
+from . import _daemon_reap
 from . import _discovery
 from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
@@ -80,7 +81,7 @@ class ToolSpec:
         "attck_tactic", "proof_required", "bug_bounty_eligible", "exploit", "destructive", "cls",
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
-        "params_schema", "flag_allowlist", "emit_service_discovery", "skip_bare_ip",
+        "params_schema", "flag_allowlist", "emit_service_discovery", "skip_bare_ip", "reap_daemon",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -89,7 +90,7 @@ class ToolSpec:
                  tools=(), docker_image="", prefer_docker=False, timeout=300, parser="lines",
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
                  hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
-                 emit_service_discovery=False, skip_bare_ip=False):
+                 emit_service_discovery=False, skip_bare_ip=False, reap_daemon=False):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -135,6 +136,13 @@ class ToolSpec:
         # nue (les archives sont indexées par NOM de domaine) -> skip propre, aucun processus lancé (au lieu
         # d'un flot d'URLs d'archive bruitées). Défaut False.
         self.skip_bare_ip = bool(skip_bare_ip)
+        # REAP DAEMON FUITÉ : certains outils (amass v4 `enum`) démarrent un daemon persistant DÉTACHÉ
+        # (`amass engine`, pprof exposé sur :6060) qui SURVIT à la fin de l'enum et ÉCHAPPE au reap par
+        # groupe de processus. reap_daemon=True -> l'outil est lancé avec un HOME privé + un marqueur unique
+        # (cf. `_daemon_reap.reaping_env`) et tout survivant portant ce marqueur est TERMINÉ après l'exécution
+        # (succès/timeout/annulation), de façon CIBLÉE (jamais un amass tiers). Défaut False (aucun reap →
+        # chemin d'exécution BYTE-IDENTIQUE pour tous les autres outils, env hérité comme avant).
+        self.reap_daemon = bool(reap_daemon)
 
     @property
     def asset_hits(self):
@@ -467,6 +475,21 @@ class ExternalToolModule(ScopeGuardMixin, Module):
     def _argv(self, action):
         return build_argv(self.spec, action.target, action.params)
 
+    def _run(self, argv):
+        """Exécute l'outil (argv fixe, no-shell) et retourne (rc, out, err). Pour un outil qui FUIT un
+        daemon persistant (`spec.reap_daemon` — amass v4 `enum` -> `amass engine`), l'exécution se fait
+        sous `_daemon_reap.reaping_env` : HOME privé + marqueur unique dans l'env de l'enfant, et REAP
+        ciblé du survivant portant ce marqueur à la SORTIE (succès, timeout rc=124, OU exception/annulation
+        — le reap est dans le `finally`, donc il compose avec le SIGTERM/timeout de D1). Un outil sans
+        reap_daemon suit le chemin HISTORIQUE (env hérité, aucun reap) → BYTE-IDENTIQUE."""
+        s = self.spec
+        if not s.reap_daemon:
+            return runner.tool(s.binary, s.docker_image or None, argv,
+                               prefer_docker=s.prefer_docker, timeout=s.timeout)
+        with _daemon_reap.reaping_env(prefix="forge-%s-" % s.binary) as env:
+            return runner.tool(s.binary, s.docker_image or None, argv,
+                               prefer_docker=s.prefer_docker, timeout=s.timeout, env=env)
+
     def dry(self, action):
         s = self.spec
         return runner.cmdline(s.binary, s.docker_image or None, self._argv(action),
@@ -541,8 +564,7 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                           f"Installer l'outil pour l'activer."))]
         # (4) EXÉCUTION — argv FIXE, NO-SHELL (via le connecteur subprocess partagé runner.tool).
         argv = self._argv(action)
-        rc, out, err = runner.tool(s.binary, s.docker_image or None, argv,
-                                   prefer_docker=s.prefer_docker, timeout=s.timeout)
+        rc, out, err = self._run(argv)
         # (5) DÉGRADATION — indisponible (127) / timeout (124) -> skipped (offline-safe, jamais un faux hit).
         if rc == 127:
             return [self._mk(
