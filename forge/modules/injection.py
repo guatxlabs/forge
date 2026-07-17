@@ -44,6 +44,7 @@ from .access_control import _body_hash, _normalize_body
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 from .. import runner
 from .. import techniques
+from .. import resource_profile
 
 
 class InjectionOracle(ScopeGuardedOracle):
@@ -178,10 +179,14 @@ class PathTraversal(InjectionOracle):
         if rel:
             return [rel] if isinstance(rel, str) else list(rel)
         name = str(action.params.get("canary_name") or _DEFAULT_CANARY_NAME).lstrip("/")
+        # Profondeur RÉSOLUE par profil : param explicite `max_depth` (override) > profil (crawl_max_depth)
+        # > défaut-classe `self.MAX_DEPTH`. `balanced` == 8 == MAX_DEPTH -> byte-identique ; `low`=2 (moins
+        # de payloads = plus léger), `full`=12. Clampée [1,12] comme avant (borne dure des requêtes).
+        default_depth = resource_profile.resolve("crawl_max_depth", default=self.MAX_DEPTH)
         try:
-            depth = max(1, min(int(action.params.get("max_depth") or self.MAX_DEPTH), 12))
+            depth = max(1, min(int(action.params.get("max_depth") or default_depth), 12))
         except (TypeError, ValueError):
-            depth = self.MAX_DEPTH
+            depth = default_depth
         payloads = []
         for tok in _TRAVERSAL_TOKENS:
             for d in range(1, depth + 1):

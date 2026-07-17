@@ -55,15 +55,28 @@ DEFAULT_PROFILE = "balanced"
 #                       low=10, balanced=25 == défaut, full=50.
 #   crawl_max_params    nb MAX de paramètres sondés par endpoint (brain.MAX_PARAMS_PER_ENDPOINT).
 #                       low=2, balanced=3 == défaut, full=5.
-#   crawl_max_depth     profondeur de crawl/`../` (documenté ; injection.MAX_DEPTH=8 reste le défaut-code,
-#                       non câblé ici — R2). low=1, balanced=2, full=3.
+#   crawl_max_depth     profondeur de traversal `../` (CÂBLÉ R2 : injection.PathTraversal.MAX_DEPTH). low=2,
+#                       balanced=8 == défaut-code injection.MAX_DEPTH, full=12 (== plafond du clamp module).
 #   content_fanout_max  cap du fan-out cibles×scanners chaînés (brain.MAX_CHAIN_TARGETS : services
 #                       découverts × panel de scanners). low=8, balanced=32 == défaut, full=64.
+#   discovery_max_fanout cap du fan-out d'un scan de ports (_discovery : services web découverts &
+#                       ports sondés en HTTP). low=8, balanced=25 == défauts _MAX_DISCOVERED_SERVICES /
+#                       _MAX_PROBED_PORTS, full=50. (Le cap d'ENDPOINTS crawlés passe par crawl_max_endpoints.)
+#   llm_max_tokens      borne de génération LLM (llm.LLMConfig.max_tokens ; défaut de scope.llm quand absent).
+#                       low=256 (plus léger), balanced=512 == défaut-code, full=2048.
+#   llm_num_ctx         fenêtre de contexte LLM (option Ollama, loopback). low=2048 (borne le contexte =>
+#                       moins de RAM), balanced=0 == AUCUNE option envoyée (défaut Ollama/modèle inchangé,
+#                       payload byte-identique), full=8192. 0 = sentinelle « ne pas envoyer » (no-op).
+#   triage_max_items    cap des top-findings SURFACÉS dans la synthèse de triage (triage.summary.top_findings ;
+#                       coverage-safe : res.ranked/annotations gardent TOUT). low=5, balanced=10 == défaut, full=20.
+#   triage_max_clusters cap des clusters-bruit surfacés dans la synthèse (triage.summary.clusters ;
+#                       jamais un finding supprimé). low=10, balanced=20 == défaut, full=40.
 #   rate_per_sec        débit requêtes/s (aligné sur le levier ROE `rate`, défaut 5). low=2 (conservateur),
-#                       balanced=5 == défaut ROE, full=20. Documenté (non câblé : le débit reste porté par
-#                       le scope/ROE — R2 ; le régler ici ne touche PAS la gouvernance).
-#   max_concurrent_procs garde-fou MÉMOIRE (indice) : nb max de sous-process outils simultanés tolérés.
-#                       low=2, balanced=6, full=16. Indice documentaire (non câblé — R2).
+#                       balanced=5 == défaut ROE, full=20. DOCUMENTATION SEULEMENT (non câblé : le débit reste
+#                       porté par le scope/ROE — GOUVERNANCE ; le régler ici ne touche PAS la gouvernance).
+#   max_concurrent_procs garde-fou MÉMOIRE : nb max de sous-process outils simultanés tolérés. low=2,
+#                       balanced=6, full=16. RÉSOLVABLE (helper `max_concurrent_procs()`) — l'ENFORCEMENT
+#                       effectif du plafond arrive en R4 (R2 garantit juste qu'il n'est pas codé en dur).
 # ---------------------------------------------------------------------------------------------------
 PROFILES: dict[str, dict[str, Any]] = {
     "low": {
@@ -74,8 +87,13 @@ PROFILES: dict[str, dict[str, Any]] = {
         "nuclei_severity": "medium,high,critical",
         "crawl_max_endpoints": 10,
         "crawl_max_params": 2,
-        "crawl_max_depth": 1,
+        "crawl_max_depth": 2,
         "content_fanout_max": 8,
+        "discovery_max_fanout": 8,
+        "llm_max_tokens": 256,
+        "llm_num_ctx": 2048,
+        "triage_max_items": 5,
+        "triage_max_clusters": 10,
         "rate_per_sec": 2,
         "max_concurrent_procs": 2,
     },
@@ -87,8 +105,13 @@ PROFILES: dict[str, dict[str, Any]] = {
         "nuclei_severity": "info,low,medium,high,critical",
         "crawl_max_endpoints": 25,
         "crawl_max_params": 3,
-        "crawl_max_depth": 2,
+        "crawl_max_depth": 8,
         "content_fanout_max": 32,
+        "discovery_max_fanout": 25,
+        "llm_max_tokens": 512,
+        "llm_num_ctx": 0,
+        "triage_max_items": 10,
+        "triage_max_clusters": 20,
         "rate_per_sec": 5,
         "max_concurrent_procs": 6,
     },
@@ -100,8 +123,13 @@ PROFILES: dict[str, dict[str, Any]] = {
         "nuclei_severity": "info,low,medium,high,critical",
         "crawl_max_endpoints": 50,
         "crawl_max_params": 5,
-        "crawl_max_depth": 3,
+        "crawl_max_depth": 12,
         "content_fanout_max": 64,
+        "discovery_max_fanout": 50,
+        "llm_max_tokens": 2048,
+        "llm_num_ctx": 8192,
+        "triage_max_items": 20,
+        "triage_max_clusters": 40,
         "rate_per_sec": 20,
         "max_concurrent_procs": 16,
     },
@@ -110,8 +138,9 @@ PROFILES: dict[str, dict[str, Any]] = {
 # Leviers ENTIERS : `resolve()` coerce vers int (les autres restent des chaînes).
 _INT_KNOBS = frozenset({
     "parallelism", "action_timeout_secs", "run_timeout_secs", "crawl_max_endpoints",
-    "crawl_max_params", "crawl_max_depth", "content_fanout_max", "rate_per_sec",
-    "max_concurrent_procs",
+    "crawl_max_params", "crawl_max_depth", "content_fanout_max", "discovery_max_fanout",
+    "llm_max_tokens", "llm_num_ctx", "triage_max_items", "triage_max_clusters",
+    "rate_per_sec", "max_concurrent_procs",
 })
 
 # Variables d'environnement PRÉEXISTANTES qui priment sur le profil (rétro-compat). Pour l'audit
@@ -167,6 +196,19 @@ def resolve(knob: str, *, override: Any = None, profile: Any = None, default: An
         if coerced is not None:
             return coerced
     return None
+
+
+def max_concurrent_procs(*, override: Any = None, profile: Any = None) -> int:
+    """Plafond RÉSOLU de sous-process outils simultanés (garde-fou MÉMOIRE) — override > profil > défaut.
+    R2 EXPOSE ce levier résolvable (helper unique) pour que R4 l'ENFORCE (sémaphore côté runner) sans
+    valeur codée en dur. `override` : futur env/param opérateur ; `default` = valeur `balanced` (6).
+    Ne règle QU'une ressource — ne touche NI scope NI ROE. Retourne toujours un int >= 1."""
+    v = resolve("max_concurrent_procs", override=override, profile=profile,
+                default=PROFILES[DEFAULT_PROFILE]["max_concurrent_procs"])
+    try:
+        return max(1, int(v))
+    except (TypeError, ValueError):
+        return PROFILES[DEFAULT_PROFILE]["max_concurrent_procs"]
 
 
 def active_snapshot() -> dict[str, Any]:
