@@ -12,6 +12,17 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 > régénérer : `python3 -m forge.cli modules --json`. Pour connaître la disponibilité **sur votre
 > machine** (outil présent ou non) : `python3 -m forge.cli doctor`.
 
+> **Outils embarqués dans l'image `full` (défaut).** Depuis l'ajout de la suite de scanners au
+> `Dockerfile`, le profil `full` livre — en plus de `nmap`/`curl`/`dig`/`httpx`/`nuclei`/`subfinder` —
+> les binaires `dnsx`, `naabu`, `katana`, `amass`, `gau`, `gospider`, `feroxbuster`, `ffuf`, `masscan`,
+> `gobuster`, `whatweb`, `wafw00f`, `wfuzz`, `nikto`, `testssl.sh`, `dalfox`, `sqlmap`. Les modules du
+> **catalogue OSS** (`recon.dnsx`, `recon.amass`, `web.nikto`, `web.testssl`, `xss.dalfox`, `sqli.sqlmap`…)
+> ainsi que les modules natifs à **outil optionnel** (`recon.content` → ffuf, `recon.waf` → wafw00f,
+> `sqli.probe` → sqlmap) sont donc `available:true` **d'office** en `full`. En `mini` ils dégradent en
+> `available:false`. Non embarqués (par design) : `wpscan`/`zap-baseline` (repli `docker_image`), **Burp** &
+> **Metasploit** (services externes ENV), `theHarvester` (amont exige Python ≥ 3.12) — cf.
+> [TOOLS.md §4(a)](TOOLS.md#a-il-est-déjà-dans-limage-full).
+
 ## Colonnes
 
 - **exploit** — le module exploite (⇒ exige `allow_exploit` dans le scope, sinon `VETO`).

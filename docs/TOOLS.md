@@ -160,9 +160,27 @@ Un outil dont le `binary`/`docker_image` **n'est pas présent** dans le runtime 
 
 ### (a) Il est déjà dans l'image `full`
 
-Le profil `full` (défaut) embarque **`nmap`**, **`curl`**, **`dig`** (dnsutils), **`httpx`**, **`nuclei`**,
-**`subfinder`**. Ces `binary:` sont résolus d'office — rien à faire. *(En profil `mini`, seuls nmap/curl/dig
-sont présents ; httpx/nuclei/subfinder dégradent en `available:false`.)*
+Le profil `full` (défaut) embarque une **suite de scanners complète** — ces `binary:` sont résolus d'office,
+rien à faire :
+
+- **Cœur / recon de base** : `nmap`, `curl`, `dig` (dnsutils), `httpx`, `nuclei`, `subfinder`.
+- **Suite ProjectDiscovery étendue** : `dnsx` (recon.dnsx), `naabu` (recon.naabu), `katana` (recon.katana).
+- **Recon / énumération** : `amass` (recon.amass), `gau` (recon.gau), `gospider` (recon.gospider),
+  `feroxbuster` (recon.feroxbuster), `ffuf` (recon.content), `masscan` (recon.masscan),
+  `gobuster` (recon.gobuster_dns), `whatweb` (recon.whatweb), `wafw00f` (recon.wafw00f), `wfuzz` (fuzz.wfuzz).
+- **Scan web / TLS / XSS / SQLi** : `nikto` (web.nikto), `testssl.sh` (web.testssl), `dalfox` (xss.dalfox),
+  `sqlmap` (sqli.sqlmap, gaté par le plancher exploit).
+
+*(En profil `mini`, seuls `nmap`/`curl`/`dig` sont présents ; **tous** les outils ci-dessus dégradent en
+`available:false` — l'image `mini` reste minimale et byte-identique.)*
+
+**Non embarqués (par design)** — restent joignables autrement :
+`wpscan` (web.wpscan) et `zap-baseline.py` (web.zap_baseline, `prefer_docker`) via leur `docker_image` de repli ;
+**Burp** (burp.py) et **Metasploit** (msf.py) sont des **services externes** pilotés via ENV/réseau (jamais cuits
+dans l'image) ; `theHarvester` (recon.theharvester) est **omis** (PyPI = placeholder v0.0.1 et l'amont exige
+Python ≥ 3.12 alors que la base bookworm fournit 3.11) → utilisez son `docker_image` `laramies/theharvester`.
+Sur une arche **non-amd64**, les binaires Go/Rust ci-dessus (dnsx…ffuf) sont omis (pins amd64 seulement) — les
+outils apt/git (sqlmap, nikto, testssl.sh, whatweb, masscan, wafw00f, wfuzz, gobuster) restent disponibles.
 
 ### (b) Image custom mince (`FROM forge:0.0.1`) — jeu d'outils figé, production
 
@@ -246,13 +264,16 @@ lancer par son **nom** (pas via un interpréteur, cf. l'argv no-shell §4). Le t
 |--------------------|--------------------|---------------|
 | **Binaire compilé** (C/C++/Rust/Go) | Déposez le binaire dans **`forge/tools/`** (`chmod +x`). **Statique de préférence** : un binaire **dynamiquement lié** exige que ses `.so` soient présents dans l'image (sinon `skipped` au run). | **Non** — résolu sur le `PATH` à **fire-time**, sans restart. |
 | **Script Python** | `python3` est présent (c'est le moteur). **Deux voies** : (1) shebang `#!/usr/bin/env python3` + `chmod +x` dans **`forge/tools/`**, invoqué par son **nom** ; (2) module **`@register`** dans **`forge/plugins/`** (montage **opt-in**, code arbitraire). ⚠️ Rappel : un ToolSpec `"binary": "python3", "argv_template": ["script.py"]` est **REJETÉ** (python = interpréteur banni, anti-shell §4) — d'où le **shebang-exécutable** ou le **plugin**. | **Non** (`tools/`) — dispo au prochain run. Le plugin `./plugins` exige d'activer le montage opt-in (recréation one-shot). |
-| **Node/JS, PHP, Ruby, etc.** | L'interpréteur **n'est PAS** dans l'image `full` → **fournissez-le** : soit un **binaire statique** (`node`/`php`) déposé dans **`forge/tools/`**, soit une **image custom** (`FROM forge:0.0.1` + `apt install nodejs php-cli`, cf. §5(b)). | **Non** si binaire statique dans `tools/` ; **oui** (rebuild) pour l'image custom. |
+| **Node/JS, PHP, etc.** | L'interpréteur **n'est PAS** dans l'image `full` → **fournissez-le** : soit un **binaire statique** (`node`/`php`) déposé dans **`forge/tools/`**, soit une **image custom** (`FROM forge:0.0.1` + `apt install nodejs php-cli`, cf. §5(b)). | **Non** si binaire statique dans `tools/` ; **oui** (rebuild) pour l'image custom. |
 
-> **Ce qui est réellement dans l'image `full`** (vérifié dans le `Dockerfile`) : le **seul interpréteur**
-> présent est **`python3`** (le cœur du moteur ; le profil `full` ajoute aussi `python3-pip`/`python3-venv`
-> pour le moteur PDF weasyprint, toujours du Python). Les **binaires** livrés sont `nmap`, `curl`, `dig`
-> (dnsutils), `httpx`, `nuclei`, `subfinder`. **Ni `node`, ni `php`, ni `ruby`, ni `perl`** — pour ces
-> langages, il faut donc fournir l'interpréteur vous-même (colonne ci-dessus).
+> **Ce qui est réellement dans l'image `full`** (vérifié dans le `Dockerfile`) : l'interpréteur du **moteur**
+> est **`python3`** (le profil `full` ajoute aussi `python3-pip`/`python3-venv` pour le moteur PDF weasyprint,
+> toujours du Python) ; la suite de scanners étendue tire en plus **`ruby`** (dépendance de `whatweb`) et
+> **`perl`** (+ modules, pour `nikto`). Les **binaires/scripts** livrés en `full` : `nmap`, `curl`, `dig`
+> (dnsutils), `httpx`, `nuclei`, `subfinder`, `dnsx`, `naabu`, `katana`, `amass`, `gau`, `gospider`,
+> `feroxbuster`, `ffuf`, `masscan`, `gobuster`, `whatweb`, `wafw00f`, `wfuzz`, `nikto`, `testssl.sh`,
+> `dalfox`, `sqlmap` (liste §4(a)). **Ni `node` ni `php`** — pour ces langages, fournissez l'interpréteur
+> vous-même (colonne ci-dessus).
 
 ### Ajouter un outil PACKAGÉ (ex. `hydra`, un paquet apt) en live
 

@@ -114,6 +114,30 @@ ARG NUCLEI_SHA256_arm64=a07744736613c73fa2c3aef63e176941e3de95fa76feb4870551a1c4
 ARG SUBFINDER_SHA256_amd64=d988a481d3037c55e685afee023eb104a81a77dd2691fb902b59019a365f6103
 ARG SUBFINDER_SHA256_arm64=07b7fa2c2cfe6770df9cdfc0ab761a33bbaaf7146add51ea44e806953edc2d88
 
+# Suite ÉTENDUE de scanners (profil `full` uniquement) — binaires Go/Rust téléchargés + VÉRIFIÉS SHA256.
+# Versions pinnées (bump = re-télécharger l'asset + recalculer sha256sum). Pins amd64 UNIQUEMENT :
+# le bloc d'installation ci-dessous se court-circuite proprement sur les autres arches (les modules
+# correspondants dégradent alors en available:false — déjà géré par l'engine). Chaque digest a été
+# calculé sur l'asset officiel EXACT et le binaire exécuté (--version) avant d'être épinglé ici.
+ARG DNSX_VERSION=1.3.0
+ARG DNSX_SHA256_amd64=1415020474886151a4820c62b9e68a315cc062f7f111a2fd13fda99047a809a6
+ARG NAABU_VERSION=2.6.1
+ARG NAABU_SHA256_amd64=018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90
+ARG KATANA_VERSION=1.6.1
+ARG KATANA_SHA256_amd64=503754f1bd370c3ef287df6998e317baed2dd75bdd13ea64034f09b80ca393f3
+ARG AMASS_VERSION=5.1.1
+ARG AMASS_SHA256_amd64=5e22b5f0239e7eb79439d60d43d3cd20dca2478588bc2242e91ab0c4f8fa40dd
+ARG GAU_VERSION=2.2.4
+ARG GAU_SHA256_amd64=10e2e248c37cafb0be3f6d2931125296b95cd4186066d596d47fa417237529a9
+ARG GOSPIDER_VERSION=1.1.6
+ARG GOSPIDER_SHA256_amd64=41bdd76aff8d063655dc473f035ca7659f8549fbf264be5185f50d288666f93d
+ARG DALFOX_VERSION=3.1.2
+ARG DALFOX_SHA256_amd64=ef48d30c183cead88eb89da10bdc1a7fa58a484d175319096075b470f3652fd4
+ARG FEROXBUSTER_VERSION=2.13.1
+ARG FEROXBUSTER_SHA256_amd64=7985c00e6803b0f25d5e9139f7472279f3f4d891429627a5cedc629e53992d80
+ARG FFUF_VERSION=2.2.1
+ARG FFUF_SHA256_amd64=86307885810d3c36ba4a3e9ba5178c2d9027bba0dd7f4ea39e39e7c972b62396
+
 LABEL org.opencontainers.image.title="forge" \
       org.opencontainers.image.description="Forge red-team console (ROE fail-closed + ledger tamper-evident) — usage autorisé uniquement." \
       org.opencontainers.image.vendor="GuatX" \
@@ -202,6 +226,95 @@ RUN set -eux; \
     fetch httpx "${HTTPX_VERSION}" "${HX_SHA}"; \
     fetch nuclei "${NUCLEI_VERSION}" "${NU_SHA}"; \
     fetch subfinder "${SUBFINDER_VERSION}" "${SF_SHA}"
+
+# =============================================================================
+# Suite ÉTENDUE de scanners (profil `full` uniquement) — pour que les modules du catalogue
+# (forge/modules/toolcatalog.py) qui restaient `available:false` faute de binaire deviennent
+# disponibles et que la couverture Forge ÉGALE celle d'un scan manuel. Chaque outil est
+# installé sous le NOM EXACT que le module sonde via `shutil.which(...)` (runner.available) :
+#   apt        : whatweb, masscan, wafw00f, wfuzz, sqlmap, gobuster
+#   git+wrap   : testssl.sh (drwetter/testssl.sh, sondé "testssl.sh"), nikto (sullo/nikto, "nikto")
+#   release Go : dnsx, naabu, katana (ProjectDiscovery), amass (OWASP), gau, gospider, dalfox,
+#                feroxbuster, ffuf  — binaires statiques, digests SHA256 pinnés (ARG ci-dessus)
+# NON installés (par design) : zap-baseline (web.zap_baseline, prefer_docker → image zaproxy/zap-stable),
+#   Burp (burp.py) et Metasploit (msf.py) restent des SERVICES EXTERNES pilotés via ENV/réseau, jamais
+#   cuits dans l'image ; theHarvester (recon.theharvester) est OMIS ici (son PyPI est un placeholder v0.0.1
+#   et la version amont exige Python>=3.12 alors que la base bookworm fournit 3.11) → reste joignable via
+#   son docker_image `laramies/theharvester` si l'opérateur monte docker.
+# En `mini`, CHAQUE bloc ci-dessous s'auto-court-circuite (exit 0) → les modules dégradent proprement
+# en available:false (déjà géré par l'engine). Le profil `mini` reste donc BYTE-IDENTIQUE à avant.
+# =============================================================================
+
+# (1) Outils packagés apt + dépendances runtime des binaires/scripts installés plus bas :
+#   - libpcap0.8                    : requis par naabu (release Go liée à libpcap) ;
+#   - perl + libnet-ssleay/json/xml : requis par nikto (nikto.pl + modules Perl JSON/XML::Writer/SSL) ;
+#   - procps (ps) + bsdmainutils (hexdump) + openssl : requis par testssl.sh au runtime ;
+#   - git                           : clone de testssl.sh et nikto (bloc 2).
+RUN set -eux; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] mini -> suite scanner étendue (apt) OMISE ; modules recon/web/sqli/xss -> available:false."; \
+        exit 0; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        sqlmap whatweb wafw00f wfuzz masscan gobuster \
+        git bsdmainutils procps openssl libpcap0.8 \
+        perl libnet-ssleay-perl libjson-perl libxml-writer-perl; \
+    rm -rf /var/lib/apt/lists/*
+
+# (2) Outils clonés depuis git + wrapper sur PATH (arch-indépendants). Le NOM sur PATH DOIT matcher
+#   ce que le module sonde : web.testssl -> "testssl.sh" (binary="testssl.sh") ; web.nikto -> "nikto".
+RUN set -eux; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] mini -> testssl.sh / nikto OMIS ; web.testssl & web.nikto -> available:false."; \
+        exit 0; \
+    fi; \
+    git clone --depth 1 https://github.com/drwetter/testssl.sh /opt/testssl.sh; \
+    ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh; \
+    git clone --depth 1 https://github.com/sullo/nikto /opt/nikto; \
+    ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto; \
+    rm -rf /opt/testssl.sh/.git /opt/nikto/.git
+
+# (3) Binaires release (Go/Rust), digests SHA256 pinnés — amd64 uniquement (pins calculés+vérifiés).
+#   Sur une arche non-amd64 le bloc se court-circuite : les modules dégradent en available:false (les
+#   outils apt/git ci-dessus, eux, restent dispo sur toute arche). Toute non-correspondance SHA -> build
+#   ÉCHOUE (sha256sum -c). Noms sur PATH = noms sondés : dnsx/naabu/katana/amass/gau/gospider/dalfox/
+#   feroxbuster (recon.*, xss.dalfox) et ffuf (recon.content, binary="ffuf").
+RUN set -eux; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] mini -> binaires Go étendus OMIS ; modules recon/xss/fuzz -> available:false."; \
+        exit 0; \
+    fi; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "[forge] TARGETARCH=${TARGETARCH}: binaires Go étendus (dnsx/naabu/katana/amass/gau/gospider/dalfox/feroxbuster/ffuf) OMIS (pins amd64 uniquement) -> available:false sur cette arche ; outils apt/git restent dispo."; \
+        exit 0; \
+    fi; \
+    cd /tmp; B=/usr/local/bin; \
+    dl() { \
+        curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors \
+            --connect-timeout 30 --max-time 300 "$1" -o "$3"; \
+        echo "$2  $3" | sha256sum -c -; \
+    }; \
+    dl "https://github.com/projectdiscovery/dnsx/releases/download/v${DNSX_VERSION}/dnsx_${DNSX_VERSION}_linux_amd64.zip" "${DNSX_SHA256_amd64}" dnsx.zip; \
+    unzip -o dnsx.zip dnsx -d "$B/"; \
+    dl "https://github.com/projectdiscovery/naabu/releases/download/v${NAABU_VERSION}/naabu_${NAABU_VERSION}_linux_amd64.zip" "${NAABU_SHA256_amd64}" naabu.zip; \
+    unzip -o naabu.zip naabu -d "$B/"; \
+    dl "https://github.com/projectdiscovery/katana/releases/download/v${KATANA_VERSION}/katana_${KATANA_VERSION}_linux_amd64.zip" "${KATANA_SHA256_amd64}" katana.zip; \
+    unzip -o katana.zip katana -d "$B/"; \
+    dl "https://github.com/owasp-amass/amass/releases/download/v${AMASS_VERSION}/amass_linux_amd64.tar.gz" "${AMASS_SHA256_amd64}" amass.tgz; \
+    tar -xzf amass.tgz --strip-components=1 -C "$B" "amass_linux_amd64/amass"; \
+    dl "https://github.com/lc/gau/releases/download/v${GAU_VERSION}/gau_${GAU_VERSION}_linux_amd64.tar.gz" "${GAU_SHA256_amd64}" gau.tgz; \
+    tar -xzf gau.tgz -C "$B" gau; \
+    dl "https://github.com/jaeles-project/gospider/releases/download/v${GOSPIDER_VERSION}/gospider_v${GOSPIDER_VERSION}_linux_x86_64.zip" "${GOSPIDER_SHA256_amd64}" gospider.zip; \
+    unzip -o -j gospider.zip "*/gospider" -d "$B/"; \
+    dl "https://github.com/hahwul/dalfox/releases/download/v${DALFOX_VERSION}/dalfox-v${DALFOX_VERSION}-linux-x86_64.tar.gz" "${DALFOX_SHA256_amd64}" dalfox.tgz; \
+    tar -xzf dalfox.tgz --strip-components=1 -C "$B" "dalfox-v${DALFOX_VERSION}-linux-x86_64/dalfox"; \
+    dl "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/x86_64-linux-feroxbuster.tar.gz" "${FEROXBUSTER_SHA256_amd64}" ferox.tgz; \
+    tar -xzf ferox.tgz -C "$B" feroxbuster; \
+    dl "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" "${FFUF_SHA256_amd64}" ffuf.tgz; \
+    tar -xzf ffuf.tgz -C "$B" ffuf; \
+    chmod +x "$B/dnsx" "$B/naabu" "$B/katana" "$B/amass" "$B/gau" "$B/gospider" "$B/dalfox" "$B/feroxbuster" "$B/ffuf"; \
+    rm -f /tmp/*.zip /tmp/*.tgz
 
 # Moteur PDF (weasyprint) — profil `full` uniquement, pour que `?format=pdf` marche clé-en-main.
 # ── weasyprint est PUR-PYTHON (pip), il n'ajoute NI Go NI Ruby (la claim de composition tient).
