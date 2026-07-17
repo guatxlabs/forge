@@ -16,6 +16,7 @@ contenu-moat que le rapport console porte. On ajoute donc, sans casser le squele
 from .schema import SEVERITIES
 from . import signing
 from . import triage as _triage
+from . import llm as _llm
 
 
 def _engagement_header(engine):
@@ -135,6 +136,43 @@ def _triage_section(result):
     return out
 
 
+def _assist_section(engine, tr):
+    """IA-2 (OPT-IN) — bloc CONSULTATIF enrichissant la triage IA-1 via un LLM OpenAI-compatible.
+
+    OFF PAR DÉFAUT : `scope.llm.enabled` absent/False => renvoie [] (rapport BYTE-IDENTIQUE, aucun appel
+    réseau). Activé => `llm.enrich_triage` gère l'egress ledgeré + le gate externe + le fail-open borné,
+    et NE TOUCHE NI les findings NI leur ordre NI le ledger des findings. Le bloc rendu est clairement
+    étiqueté « advisory » : la triage native (IA-1) fait toujours foi."""
+    scope = getattr(engine, "scope", None)
+    cfg = _llm.LLMConfig.from_dict(getattr(scope, "llm", None))
+    if not cfg.enabled:
+        return []                                    # OFF => byte-identique, zéro egress
+    block = _llm.enrich_triage(tr, cfg, ledger=getattr(engine, "ledger", None))
+    if not block:
+        return []                                    # défensif (enrich renvoie None seulement si désactivé)
+    host = block.get("endpoint", "?")
+    ext = "endpoint EXTERNE" if block.get("external") else "endpoint loopback (local)"
+    out = [
+        f"## Assist LLM (advisory, endpoint={host} · {ext})",
+        "",
+        "> _Enrichissement **CONSULTATIF** (IA-2) d'un LLM. Il n'altère NI les findings, NI leur ordre, "
+        "NI le ledger : la triage native déterministe (IA-1) fait AUTORITÉ. Le LLM peut se tromper — "
+        "à recouper._",
+        "",
+    ]
+    status = block.get("status")
+    if status == "gated_external":
+        out += [f"- **Egress REFUSÉ** : endpoint externe `{host}` non autorisé "
+                f"(`scope.llm.allow_external=false`). AUCUNE donnée envoyée. Autorisez explicitement "
+                f"l'egress externe (gate opérateur) pour l'activer.", ""]
+    elif status == "unavailable":
+        out += [f"- **Assist indisponible** : endpoint `{host}` injoignable / timeout / erreur — "
+                f"repli sur la triage native (IA-1), intacte. (fail-open)", ""]
+    else:                                            # ok
+        out += [block.get("narrative", "") or "_(réponse vide)_", ""]
+    return out
+
+
 def build_report(engine, title="Forge — rapport d'engagement"):
     out = [f"# {title}", ""]
     out += _engagement_header(engine)                # en-tête d'engagement (parité console)
@@ -156,6 +194,10 @@ def build_report(engine, title="Forge — rapport d'engagement"):
 
     # --- triage : synthèse transparente (dit que le triage a tourné + top clusters/actionnables) ---
     out += _triage_section(tr)
+
+    # --- assist LLM IA-2 (OPT-IN, advisory) : ENRICHIT la synthèse IA-1 sans jamais la réécrire. VIDE
+    #     si OFF (défaut) => rapport BYTE-IDENTIQUE ; egress ledgeré + gate externe gérés dans forge/llm.py.
+    out += _assist_section(engine, tr)
 
     # --- findings détaillés (RANG actionnable-d'abord : VUE explicite du triage, PAS un tri silencieux —
     #     chaque finding porte son annotation de triage, et le raw `engine.findings` reste inchangé) ---
