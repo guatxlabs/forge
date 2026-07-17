@@ -65,25 +65,30 @@ class TestRunnerTool(unittest.TestCase):
 
     def test_prefer_docker_uses_docker_when_both_present(self):
         # Préférence respectée : docker ET binaire local présents + prefer_docker -> docker gagne.
+        # Le runner exécute via subprocess.Popen (pas subprocess.run) pour pouvoir tuer le GROUPE de
+        # process au timeout -> on intercepte Popen pour capturer la commande SÉLECTIONNÉE.
         orig_which = runner.shutil.which
-        orig_run = runner.subprocess.run
+        orig_popen = runner.subprocess.Popen
         runner.shutil.which = lambda name: f"/usr/bin/{name}"  # tout présent
         captured = {}
 
-        class _P:
-            returncode, stdout, stderr = 0, "ok", ""
+        class _FakePopen:
+            returncode = 0
+            pid = 4242
 
-        def fake_run(cmd, **k):
-            captured["cmd"] = cmd
-            return _P()
+            def __init__(self, cmd, **k):
+                captured["cmd"] = cmd
 
-        runner.subprocess.run = fake_run
+            def communicate(self, timeout=None):
+                return ("ok", "")
+
+        runner.subprocess.Popen = _FakePopen
         try:
             runner.tool("nuclei", docker_image="projectdiscovery/nuclei",
                         args=["-u", "x"], prefer_docker=True)
         finally:
             runner.shutil.which = orig_which
-            runner.subprocess.run = orig_run
+            runner.subprocess.Popen = orig_popen
         self.assertEqual(captured["cmd"][0], "docker")        # docker préféré quand dispo
         self.assertIn("projectdiscovery/nuclei", captured["cmd"])
 
@@ -95,6 +100,113 @@ class TestRunnerTool(unittest.TestCase):
             self.assertTrue(runner.available("nuclei", "projectdiscovery/nuclei", prefer_docker=True))
         finally:
             runner.shutil.which = orig_which
+
+
+class TestRunnerPerActionTimeoutKillsGroup(unittest.TestCase):
+    """E3 (b) — BORNE de runtime PAR-ACTION anti-hang : un outil qui hang (et dont un PETIT-ENFANT tient le
+    pipe stdout, comme nikto/`docker run` qui forkent) est TUÉ au timeout par GROUPE de process — le pipeline
+    n'est PAS gelé et l'action suivante tourne. Reproduit le trou T27 (nikto gelait tout 4+ min) et prouve
+    que le kill vise le GROUPE (pas seulement l'enfant direct, qui laisserait le petit-enfant tenir le pipe)."""
+
+    def test_hanging_tool_with_pipe_holding_grandchild_is_group_killed_and_bounded(self):
+        import os
+        import tempfile
+        import time
+        pidfile = tempfile.mktemp(prefix="forge-e3-gc-")
+        # parent python : fork un PETIT-ENFANT `sleep 60` qui HÉRITE du pipe stdout (aucune redirection),
+        # écrit son PID, puis HANG (sleep 60). Sans kill de GROUPE, tuer le seul parent laisse le sleep tenir
+        # le pipe -> communicate() hangerait ~60s malgré timeout=1 (le bug). Avec kill de groupe -> ~1s.
+        code = ("import subprocess, time;"
+                "p = subprocess.Popen(['sleep', '60']);"
+                f"open({pidfile!r}, 'w').write(str(p.pid));"
+                "time.sleep(60)")
+        t0 = time.monotonic()
+        rc, out, err = runner.tool(sys.executable, args=["-c", code], timeout=1)
+        elapsed = time.monotonic() - t0
+        self.assertEqual(rc, 124, "un hang doit rendre 124 (timeout), pas bloquer indéfiniment")
+        self.assertIn("timeout", err)
+        self.assertLess(elapsed, 20,
+                        f"hang NON borné ({elapsed:.1f}s) : le petit-enfant tenait le pipe (kill d'enfant seul)")
+        # le PETIT-ENFANT (sleep 60) doit être MORT -> preuve que le kill vise le GROUPE, pas l'enfant direct.
+        try:
+            gpid = int(open(pidfile).read())
+        finally:
+            try:
+                os.unlink(pidfile)
+            except OSError:
+                pass
+        dead = False
+        for _ in range(250):                                   # poll <= 5s
+            try:
+                os.kill(gpid, 0)
+            except OSError:
+                dead = True
+                break
+            time.sleep(0.02)
+        if not dead:                                           # nettoyage best-effort si le test échoue
+            try:
+                os.kill(gpid, 9)
+            except OSError:
+                pass
+        self.assertTrue(dead, "le petit-enfant a SURVÉCU au timeout -> le kill ne vise PAS le groupe (pipe ouvert)")
+
+    def test_next_action_runs_after_a_hanging_action_pipeline_not_frozen(self):
+        # ENGINE : deux actions en série ; la 1re est un module dont l'outil HANG (kill au timeout -> résultat
+        # `skipped` propre), la 2de est un module trivial. La 2de DOIT tourner (le pipeline ne gèle pas).
+        import time
+        from forge.modules import registry as reg
+        from forge.roe import Scope
+        from forge.engine import Engine
+        from forge.schema import Finding
+
+        class _HangModule(reg.Module):
+            exploit = False
+            available = True
+
+            def dry(self, action):
+                return "hang"
+
+            def fire(self, action):
+                rc, out, err = runner.tool(sys.executable,
+                                           args=["-c", "import time; time.sleep(60)"], timeout=1)
+                # rc 124 -> résultat PROPRE (skipped), jamais un faux hit ; l'engine continue.
+                status = "skipped" if rc == 124 else "tested"
+                return [Finding(target=action.target, title=f"hang rc={rc}", severity="INFO",
+                                category="recon", status=status, tool="test.hang")]
+
+        class _FastModule(reg.Module):
+            exploit = False
+            available = True
+
+            def dry(self, action):
+                return "fast"
+
+            def fire(self, action):
+                return [Finding(target=action.target, title="fast ran", severity="INFO",
+                                category="recon", status="tested", tool="test.fast")]
+
+        saved = {k: reg.REGISTRY.get(k) for k in ("test.hang", "test.fast")}
+        reg.REGISTRY["test.hang"] = _HangModule
+        reg.REGISTRY["test.fast"] = _FastModule
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"], "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            t0 = time.monotonic()
+            eng.run([Action("test.hang", "127.0.0.1"), Action("test.fast", "127.0.0.1")])
+            elapsed = time.monotonic() - t0
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    reg.REGISTRY.pop(k, None)
+                else:
+                    reg.REGISTRY[k] = v
+        self.assertLess(elapsed, 25, "le hang a gelé le pipeline au-delà du timeout par-action")
+        # la 1re action a un verdict (FIRE, résultat skipped) ; la 2de a TOURNÉ après (pipeline non gelé).
+        kinds = [r["kind"] for r in eng.results]
+        self.assertEqual(kinds, ["test.hang", "test.fast"], "l'action suivante n'a pas tourné après le hang")
+        self.assertTrue(any(f.tool == "test.fast" and f.title == "fast ran" for f in eng.findings),
+                        "le module rapide n'a pas produit son finding -> pipeline gelé par le hang")
 
 
 class TestNucleiJsonlParsing(unittest.TestCase):

@@ -125,25 +125,30 @@ class TestRunnerResolvesBinary(unittest.TestCase):
 
     def test_local_argv_uses_shutil_which_resolved_path(self):
         orig_which = runner.shutil.which
-        orig_run = runner.subprocess.run
+        orig_popen = runner.subprocess.Popen            # le runner exécute via Popen (kill de groupe au timeout)
         sentinel = "/opt/forge/bin/mytool"          # chemin résolu simulé (ex. wrapper .bat sous Windows)
         runner.shutil.which = lambda name: sentinel if name == "mytool" else None
         captured = {}
+        test = self
 
-        class _P:
-            returncode, stdout, stderr = 0, "ok", ""
+        class _FakePopen:
+            returncode = 0
+            pid = 4242
 
-        def fake_run(cmd, **k):
-            captured["cmd"] = cmd
-            self.assertFalse(k.get("shell", False))   # NO-SHELL préservé
-            return _P()
+            def __init__(self, cmd, **k):
+                captured["cmd"] = cmd
+                test.assertFalse(k.get("shell", False))   # NO-SHELL préservé
+                test.assertTrue(k.get("start_new_session", False))  # propre groupe -> kill de groupe sûr
 
-        runner.subprocess.run = fake_run
+            def communicate(self, timeout=None):
+                return ("ok", "")
+
+        runner.subprocess.Popen = _FakePopen
         try:
             runner.tool("mytool", docker_image=None, args=["--flag", "x"])
         finally:
             runner.shutil.which = orig_which
-            runner.subprocess.run = orig_run
+            runner.subprocess.Popen = orig_popen
         self.assertEqual(captured["cmd"][0], sentinel)          # argv[0] = binaire résolu, pas "mytool"
         self.assertEqual(captured["cmd"][1:], ["--flag", "x"])
 
