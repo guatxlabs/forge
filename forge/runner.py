@@ -10,6 +10,12 @@ import signal
 import subprocess
 import threading
 
+from . import resource_profile
+
+# Défaut-code de la borne par-action (s). == profil `balanced` -> un `FORGE_RESOURCE_PROFILE` non
+# défini garde EXACTEMENT le comportement historique (byte-identique).
+_DEFAULT_ACTION_TIMEOUT = 120
+
 # Délai de grâce SIGTERM->SIGKILL laissé au GROUPE de process pour se fermer proprement après un
 # dépassement de timeout (miroir de `_daemon_reap.reap_marker` : term gracieux d'abord, kill ferme).
 _TERM_GRACE = 5
@@ -124,8 +130,13 @@ def _terminate_group(proc, *, force=False):
         pass
 
 
-def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120, env=None):
+def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None, env=None):
     """Exécute. Retourne (returncode, stdout, stderr). 127 si indisponible, 124 si timeout.
+
+    `timeout` (borne DURE par-action, s) — PRÉCÉDENCE : valeur explicite de l'appelant (override,
+    ex. web.nuclei=600) > profil de ressources (`FORGE_RESOURCE_PROFILE`, levier `action_timeout_secs`)
+    > défaut-code 120. `timeout=None` (défaut) déclenche la résolution par profil ; `balanced` == 120
+    -> profil non défini byte-identique. `low` raccourcit (60s), `full` allonge (300s).
 
     `prefer_docker` n'est qu'une PRÉFÉRENCE d'ordre : avec prefer_docker -> docker d'abord, REPLI
     sur le binaire local présent si docker est absent ; sans prefer_docker -> binaire local d'abord,
@@ -141,6 +152,8 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120,
     HÉRITE de l'environnement courant (comportement historique, byte-identique). Un appelant qui doit
     marquer/isoler l'enfant (cf. `_daemon_reap.reaping_env` : HOME privé + FORGE_RUN_MARKER pour reaper
     un daemon fuité) passe un dict `os.environ`-dérivé — jamais un env partiel (PATH doit rester)."""
+    if timeout is None:                                # défaut résolu par le profil de ressources
+        timeout = resource_profile.resolve("action_timeout_secs", default=_DEFAULT_ACTION_TIMEOUT)
     args = list(args or [])
     docker_ok = docker_image and shutil.which("docker")
     # Résolution PATH via shutil.which : gère les suffixes .exe/.bat/.cmd (PATHEXT) sous Windows,

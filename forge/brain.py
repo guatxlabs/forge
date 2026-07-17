@@ -17,6 +17,7 @@ sur findings). La priorité réelle est garantie par le planner coverage-safe, p
 """
 from .roe import Action
 from .graph import EngagementGraph
+from . import resource_profile
 from . import techniques
 
 
@@ -139,7 +140,10 @@ class HeuristicBrain(Brain):
         # n'est pas plafonné (peu nombreux, à haute valeur).
         derived = sorted(h for h in hosts if self._discovery_marker(graph, h))
         derived_set = set(derived)
-        kept_derived = set(derived[:self.MAX_CHAIN_TARGETS])
+        # Cap fan-out RÉSOLU par profil (`content_fanout_max`) : override > profil > défaut-classe
+        # (`self.MAX_CHAIN_TARGETS`). `balanced` == 32 == défaut -> byte-identique ; `low`=8, `full`=64.
+        max_chain = resource_profile.resolve("content_fanout_max", default=self.MAX_CHAIN_TARGETS)
+        kept_derived = set(derived[:max_chain])
         process = [h for h in hosts if h not in derived_set or h in kept_derived]
 
         # --- niveau 1 : actions de base par host (recon + oracles + seeds de découverte) ---
@@ -455,11 +459,15 @@ class HeuristicBrain(Brain):
         except Exception:            # noqa: BLE001
             return []
         out, seen = [], set()
+        # Cap params/endpoint RÉSOLU par profil (`crawl_max_params`) : override > profil > défaut-classe.
+        # `balanced` == 3 == défaut -> byte-identique ; `low`=2, `full`=5.
+        max_params = resource_profile.resolve(
+            "crawl_max_params", default=HeuristicBrain.MAX_PARAMS_PER_ENDPOINT)
         for name, value in pairs:
             if name and name not in seen:
                 seen.add(name)
                 out.append((name, value))
-            if len(out) >= HeuristicBrain.MAX_PARAMS_PER_ENDPOINT:
+            if len(out) >= max_params:
                 break
         return out
 

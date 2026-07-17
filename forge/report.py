@@ -42,6 +42,14 @@ def _engagement_header(engine):
     run_id = getattr(engine, "run_id", None)
     if campaign or run_id:
         lines.append(f"- **Campagne** : {campaign or '—'}  ·  **Run** : {run_id or '—'}")
+    # PROFIL DE RESSOURCES (audit) : trace le profil actif + les leviers effectifs du run. Dégrade
+    # proprement (aucune ligne) si la campagne n'a pas rempli le snapshot (run() direct).
+    rp = getattr(engine, "resource_profile", None)
+    if isinstance(rp, dict) and rp.get("profile"):
+        knobs = rp.get("knobs") or {}
+        knob_str = "  ·  ".join(f"{k}={knobs[k]}" for k in sorted(knobs))
+        lines.append(f"- **Profil ressources** : `{rp['profile']}`"
+                     + (f"  ({knob_str})" if knob_str else ""))
     ledger = getattr(engine, "ledger", None)
     if ledger is not None:
         head = getattr(ledger, "head", "") or ""
