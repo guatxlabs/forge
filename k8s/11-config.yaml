@@ -35,7 +35,7 @@ data:
   FORGE_CONSOLE_HOST: "forge.example.test,forge,forge.forge.svc.cluster.local,localhost,127.0.0.1"
   FORGE_PKG_DIR: "/opt/forge"
   FORGE_PYTHON: "python3"
-  FORGE_RUN_TIMEOUT: "900"
+  FORGE_RUN_TIMEOUT: "3600"
   # Object-store (MinIO) endpoint + bucket (non-secret). Access/secret keys come from the
   # forge-objectstore Secret. Only active when the image is built --features object-store.
   FORGE_BLOB_S3_ENDPOINT: "http://forge-minio:9000"

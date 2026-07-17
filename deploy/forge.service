@@ -44,7 +44,7 @@ Environment=FORGE_CONSOLE_SCOPE=/var/lib/forge/scope/scope.json
 Environment=FORGE_CONSOLE_WEB=/opt/forge/console/web
 Environment=FORGE_PKG_DIR=/opt/forge
 Environment=FORGE_PYTHON=/usr/bin/python3
-Environment=FORGE_RUN_TIMEOUT=900
+Environment=FORGE_RUN_TIMEOUT=3600
 Environment=PYTHONPATH=/opt/forge
 Environment=PYTHONUNBUFFERED=1
 # Secrets (hashes argon2id, token, URLs des services pilotés) — fichier 0600 hors VCS.

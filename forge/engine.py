@@ -344,16 +344,42 @@ class Engine:
             line += f" ({reason})"
         self._emit(line)
 
-    def run(self, actions: Iterable[Action]) -> list[dict[str, Any]]:
+    def run(self, actions: Iterable[Action],
+            checkpoint: "Callable[[], None] | None" = None,
+            checkpoint_every: int = 0) -> list[dict[str, Any]]:
         # CHOKE POINT unique de l'émission par-action : chaque action passée à run() (proposition
         # directe ET chaque vague de campaign()) émet sa ligne d'avancement APRÈS décision. Les
         # actions DÉFÉRÉES par le planner (skipped_budget) ne passent pas ici -> pas de bruit.
+        #
+        # DURABILITÉ INCRÉMENTALE (additive) : quand `checkpoint` est branché et `checkpoint_every>0`,
+        # on invoque le callback tous les `checkpoint_every` actions POUR PERSISTER le travail DÉJÀ
+        # accompli (findings/run-records/décisions -> console) AVANT qu'un watchdog/kill n'avorte la
+        # vague. Une vague de 500+ actions n'est plus « tout ou rien » : un run tué en cours de vague
+        # conserve ce qui a été fait. No-op si aucun callback ou intervalle <=0 -> byte-identique
+        # (CLI directe, tests, propositions ponctuelles).
         out = []
+        n = 0
         for a in actions:
             res = self.execute(a)
             self._emit_result(res)
             out.append(res)
+            n += 1
+            if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
+                self._run_checkpoint(checkpoint)
         return out
+
+    def _run_checkpoint(self, checkpoint: "Callable[[], None] | None") -> None:
+        """Invoque le callback de checkpoint (flush incrémental console) en BEST-EFFORT : une exception
+        ORDINAIRE (console injoignable, erreur réseau) n'interrompt JAMAIS le run — miroir de `_emit`.
+        En revanche un signal d'ARRÊT GRACIEUX (watchdog SIGTERM côté console) est propagé VOLONTAIREMENT
+        par le callback via une `BaseException` (hors `Exception`) : elle TRAVERSE ce garde et déroule la
+        campagne jusqu'au flush final (finally, côté CLI) — pour ne perdre AUCUN travail au watchdog."""
+        if checkpoint is None:
+            return
+        try:
+            checkpoint()
+        except Exception:  # noqa: BLE001 — flush best-effort ; l'arrêt gracieux (BaseException) passe volontairement
+            pass
 
     def _prepare(self, actions: list[Action], modules: "Iterable[str] | None",
                  global_params: dict[str, Any], attrs_by_host: dict[str, Any]) -> list[Action]:
@@ -467,7 +493,9 @@ class Engine:
 
     def campaign(self, targets: list[Target], brain: Any, planner: Planner,
                  modules: "Iterable[str] | None" = None,
-                 module_params: dict[str, Any] | None = None, max_waves: int = 4) -> dict[str, Any]:
+                 module_params: dict[str, Any] | None = None, max_waves: int = 4,
+                 checkpoint: "Callable[[], None] | None" = None,
+                 checkpoint_every: int = 0) -> dict[str, Any]:
         """ITÉRATIF : plan -> observe -> replan, jusqu'à un critère d'arrêt.
 
         Boucle (chaque vague) : `brain.propose(self.graph)` lit le world-model -> planner ordonne
@@ -527,8 +555,17 @@ class Engine:
             # le nb d'actions ordonnées + différées. No-op si aucun callback (byte-identique).
             self._emit(f"=== vague {waves + 1} — {len(ordered)} action(s) ordonnée(s)"
                        + (f", {len(skipped)} différée(s)" if skipped else "") + " ===")
-            self.run(ordered)
+            # DURABILITÉ INCRÉMENTALE : le checkpoint est passé À CHAQUE run() (persistance intra-vague
+            # tous les `checkpoint_every` actions) PUIS invoqué une fois de plus à la FRONTIÈRE de vague
+            # (le travail d'une vague complète est flushé avant d'entamer la suivante). Sans callback, on
+            # appelle run() avec sa SIGNATURE HISTORIQUE (aucun kwarg) -> byte-identique (les tests qui
+            # espionnent `run(actions)` restent valides).
+            if checkpoint is None:
+                self.run(ordered)
+            else:
+                self.run(ordered, checkpoint=checkpoint, checkpoint_every=checkpoint_every)
             waves += 1
+            self._run_checkpoint(checkpoint)
 
         self.skipped_budget = list(skipped_by_id.values())
         # une classe n'est une lacune QUE si elle n'a JAMAIS été tentée sur AUCUNE vague :
@@ -623,14 +660,18 @@ class Engine:
         errors = [r for r in self.results if r["verdict"] in ("ERROR", "SKIP")]
         return {"fired": fired, "dry_run": dry, "vetoed": vetoed, "errors": errors}
 
-    def roe_decisions(self) -> list[dict[str, Any]]:
+    def roe_decisions(self, start: int = 0) -> list[dict[str, Any]]:
         """Trace ROE sérialisable : un verdict par action évaluée (anti-masquage).
 
         Dérivé de `self.results` (le journal des décisions) — chaque entrée porte le
         verdict ROE et ses raisons, sans la sortie (output) du module. Consommé par la
-        console pour exposer la couverture par action. Pur, sans réseau."""
+        console pour exposer la couverture par action. Pur, sans réseau.
+
+        `start` (défaut 0) : n'émet QUE les décisions à partir de cet index dans `self.results`
+        — utilisé par le flush incrémental (delta) pour n'envoyer que les NOUVELLES décisions depuis
+        le dernier checkpoint (aucun double-envoi ; `results` est append-only pendant un run)."""
         return [
             {"action_id": r["action"], "target": r["target"], "kind": r["kind"],
              "verdict": r["verdict"], "reasons": list(r.get("reasons") or [])}
-            for r in self.results
+            for r in self.results[start:]
         ]

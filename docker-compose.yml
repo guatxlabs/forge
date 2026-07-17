@@ -90,7 +90,7 @@ services:
       FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
       FORGE_PKG_DIR: "/opt/forge"
       FORGE_PYTHON: "python3"
-      FORGE_RUN_TIMEOUT: "900"
+      FORGE_RUN_TIMEOUT: "3600"
 
       # --- Outillage opérateur SANS rebuild : ajouter des outils PENDANT un pentest, sans redémarrage -----
       # (voir le bloc `volumes:` plus bas). Ces env n'activent QUE les dossiers Python/spec ; les binaires
