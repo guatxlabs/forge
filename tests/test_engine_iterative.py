@@ -569,5 +569,229 @@ class TestReconMislabeledPortConfirmedHttp(unittest.TestCase):
                              if r["kind"] == "web.security_headers"))
 
 
+class TestE1PortDiscoveryReachesContentScanners(unittest.TestCase):
+    """E1 — les ports découverts par un SCANNER DE PORTS (naabu/masscan) atteignent les SCANNERS DE
+    CONTENU HTTP (pas seulement les sondes d'injection). Reproduit le trou T24 : naabu trouvait 18-19
+    ports mais AUCUN service n'était scanné par nikto/tech/waf/content/…/security_headers (ils tapaient
+    le bare :80 fermé). Preuves HERMÉTIQUES (seams outil/réseau mockés, ZÉRO réseau réel)."""
+
+    class _Hdrs:                                              # HTTPMessage-like minimal (get / get_all)
+        def __init__(self, d):
+            self._d = d
+        def get(self, k, default=None):
+            return self._d.get(k, default)
+        def get_all(self, k):
+            v = self._d.get(k)
+            return [v] if v else []
+
+    @staticmethod
+    def _patch_naabu_fetch(fake):
+        """Patch le seam `_fetch` (confirmation HTTP) de la classe naabu GÉNÉRÉE. Restaure exactement."""
+        cls = registry.REGISTRY["recon.naabu"]
+        had = "_fetch" in cls.__dict__
+        prev = cls.__dict__.get("_fetch")
+        cls._fetch = staticmethod(fake)
+        return cls, had, prev
+
+    @staticmethod
+    def _restore_naabu_fetch(cls, had, prev):
+        if had:
+            cls._fetch = prev
+        else:
+            del cls._fetch
+
+    def test_naabu_discovered_nonstandard_port_gets_content_scanner_verdict(self):
+        # END-TO-END : le VRAI recon.naabu (tool/réseau mockés) découvre 127.0.0.1:8000 (port NON-80) qui
+        # parle HTTP -> il devient une cible CHAÎNABLE (marqueur) -> le VRAI web.security_headers TIRE sur
+        # 127.0.0.1:8000 (PAS :80) et renvoie un verdict RÉEL. C'est la barre E1.
+        import forge.runner as runner_mod
+        from forge.modules import security_headers as SH
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return binary == "naabu"                          # SEUL naabu dispo -> autres outils = SKIP propre
+
+        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            # naabu -silent imprime host:port par ligne
+            return (0, "127.0.0.1:8000\n", "") if binary == "naabu" else (127, "", "")
+
+        def fake_probe(url, timeout=5):                       # confirmation HTTP : :8000 parle HTTP
+            return 200 if url == "http://127.0.0.1:8000" else None
+
+        def fake_fetch(url, headers=None, timeout=15):        # seam du VRAI web.security_headers
+            if url == "http://127.0.0.1:8000":
+                return 200, "<html><body>ok</body></html>", TestE1PortDiscoveryReachesContentScanners._Hdrs(
+                    {"Server": "Werkzeug/2.0.3", "Content-Type": "text/html"})
+            return None, None, None                           # rien sur :80/:443 ni en https
+
+        sv_av, sv_tool = runner_mod.available, runner_mod.tool
+        sv_fetch = SH.SecurityHeaders.__dict__["_fetch"]
+        ncls, nhad, nprev = self._patch_naabu_fetch(fake_probe)
+        runner_mod.available, runner_mod.tool = fake_available, fake_tool
+        SH.SecurityHeaders._fetch = staticmethod(fake_fetch)
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["recon.naabu", "web.security_headers"], max_waves=4)
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+            SH.SecurityHeaders._fetch = sv_fetch
+            self._restore_naabu_fetch(ncls, nhad, nprev)
+
+        # (1) naabu a SURFACÉ 127.0.0.1:8000 comme service web chaînable (marqueur DISCOVERY_SERVICE_MARKER).
+        disc = [f for f in eng.findings
+                if f.target == "127.0.0.1:8000" and "Service web in-scope" in f.title]
+        self.assertTrue(disc, "recon.naabu n'a pas surfacé 127.0.0.1:8000 comme cible chaînable")
+        # (1b) naabu émet AUSSI un finding d'INVENTAIRE de la surface ouverte.
+        self.assertTrue(any("Inventaire de ports ouverts" in f.title and f.tool.endswith("naabu")
+                            for f in eng.findings), "pas de finding d'inventaire de ports (naabu)")
+
+        # (2) LE SCANNER DE CONTENU (web.security_headers) a TIRÉ sur le port DÉCOUVERT 127.0.0.1:8000
+        # (pas sur le bare :80). C'est EXACTEMENT le trou E1 refermé.
+        sh = [r for r in eng.results if r["kind"] == "web.security_headers"
+              and r["target"] == "127.0.0.1:8000"]
+        self.assertTrue(sh, "web.security_headers n'a JAMAIS atteint le port découvert 127.0.0.1:8000 (trou E1)")
+        self.assertEqual(sh[0]["verdict"], FIRE, "gouvernance : le tir sur host:port in-scope doit être FIRE")
+
+        # (3) VERDICT RÉEL sur 127.0.0.1:8000 (findings `tested`, PoC sur l'URL sondée) — pas « aucun hit ».
+        sh_f = [f for f in eng.findings
+                if f.target == "127.0.0.1:8000" and f.tool.endswith("web.security_headers")]
+        self.assertTrue(sh_f, "aucun finding web.security_headers sur le port découvert")
+        self.assertTrue(all(f.status == "tested" for f in sh_f))
+        self.assertTrue(any("http://127.0.0.1:8000" in (f.poc or "") for f in sh_f))
+        # (4) AUCUNE exception au tir.
+        self.assertFalse(any(r["verdict"] == "ERROR" for r in eng.results
+                             if r["kind"] == "web.security_headers"))
+
+    def test_auto_discovery_edge_proposes_full_content_scanner_set_on_discovered_service(self):
+        # BRAIN (hermétique) : un service web DÉCOUVERT (host:port + marqueur) -> le cerveau chaîne le SET
+        # COMPLET des scanners de contenu HTTP dessus (pas juste httpx+nuclei du plan de base). C'est ce
+        # qui refait passer nikto/tech/waf/content/…/security_headers sur la surface découverte en AUTO.
+        from forge.schema import Finding as F
+        g = EngagementGraph()
+        g.add_host("127.0.0.1", kind="host")
+        g.add_finding(F(target="127.0.0.1:8000", title="Service web in-scope : 127.0.0.1:8000",
+                        status="tested", severity="INFO", category="recon"))
+        actions = HeuristicBrain().propose(g)
+        on_port = {a.kind for a in actions if a.target == "127.0.0.1:8000"}
+        for kind in HeuristicBrain.HTTP_CONTENT_SCANNERS:
+            self.assertIn(kind, on_port, f"{kind} non chaîné sur le service découvert (trou E1 en AUTO)")
+
+    def test_auto_mode_content_scanners_not_proposed_on_bare_host_without_discovery(self):
+        # NON-RÉGRESSION coverage-safe : SANS découverte de service, le cerveau ne chaîne PAS les scanners
+        # de contenu « lourds » sur un host web nu (ils restent hors du plan AUTO, comme avant E1).
+        g = EngagementGraph()
+        g.add_host("app.test", kind="url")
+        kinds = {a.kind for a in HeuristicBrain().propose(g)}
+        for kind in ("web.nikto", "recon.tech", "recon.waf", "recon.content", "web.testssl",
+                     "web.security_headers"):
+            self.assertNotIn(kind, kinds, f"{kind} ne doit PAS être chaîné sur un host nu sans découverte")
+
+    def test_auto_governance_out_of_scope_discovered_hostport_scanners_vetoed(self):
+        # GOUVERNANCE AUTO : le cerveau chaîne les scanners de contenu sur un service découvert HORS-scope
+        # (10.0.0.9:8000), mais le ROE les VÉTOe TOUS à l'exécution (rien ne tire hors périmètre).
+        from forge.schema import Finding as F
+        sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"], "allow_exploit": False, "allow_private": True})
+        eng = _armed_auto(sc)
+        eng.graph.add_host("127.0.0.1", kind="host")
+        eng.graph.add_finding(F(target="10.0.0.9:8000", title="Service web in-scope : 10.0.0.9:8000",
+                                status="tested", severity="INFO", category="recon"))
+        proposed = HeuristicBrain().propose(eng.graph)
+        evil_scanners = [a for a in proposed if a.target == "10.0.0.9:8000"
+                         and a.kind in HeuristicBrain.HTTP_CONTENT_SCANNERS]
+        self.assertTrue(evil_scanners, "le cerveau aurait dû chaîner des scanners sur le service découvert")
+        # web.security_headers (oracle, TOUJOURS disponible) prouve le VETO ROE hors-scope (un scanner à
+        # outil externe absent renverrait SKIP-indispo AVANT la gate ROE -> preuve moins nette).
+        sh = eng.execute(next(a for a in evil_scanners if a.kind == "web.security_headers"))
+        self.assertEqual(sh["verdict"], "VETO", "service découvert hors-scope non VÉTOé (fail-open!)")
+        # défense en profondeur : AUCUN scanner chaîné hors-scope n'a FIRÉ (VETO ou SKIP-indispo, jamais FIRE).
+        for a in evil_scanners:
+            self.assertNotEqual(eng.execute(a)["verdict"], FIRE, f"{a.kind} hors-scope a FIRÉ (fail-open!)")
+
+    def test_masscan_discovered_port_becomes_chainable(self):
+        # masscan (format de sortie DIFFÉRENT de naabu) émet lui aussi la découverte de service chaînable.
+        import forge.runner as runner_mod
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return binary == "masscan"
+
+        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            return ((0, "Discovered open port 8000/tcp on 127.0.0.1\n", "")
+                    if binary == "masscan" else (127, "", ""))
+
+        def fake_probe(url, timeout=5):
+            return 200 if url == "http://127.0.0.1:8000" else None
+
+        mcls = registry.REGISTRY["recon.masscan"]
+        mhad, mprev = "_fetch" in mcls.__dict__, mcls.__dict__.get("_fetch")
+        sv_av, sv_tool = runner_mod.available, runner_mod.tool
+        runner_mod.available, runner_mod.tool = fake_available, fake_tool
+        mcls._fetch = staticmethod(fake_probe)
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = _armed_auto(sc)
+            eng.run([Action("recon.masscan", "127.0.0.1")])
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+            if mhad:
+                mcls._fetch = mprev
+            else:
+                del mcls._fetch
+        disc = [f for f in eng.findings
+                if f.target == "127.0.0.1:8000" and "Service web in-scope" in f.title]
+        self.assertTrue(disc, "recon.masscan n'a pas surfacé 127.0.0.1:8000 comme cible chaînable")
+
+    def test_gau_skips_bare_ip_target_no_junk(self):
+        # QUICK-WIN : gau (archives web) sur une IP littérale -> SKIP PROPRE, aucun processus lancé, ZÉRO
+        # URL d'archive fantôme (le trou : gau sur 127.0.0.1 remontait ~195 URLs d'archive bruitées).
+        import forge.runner as runner_mod
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return True                                       # gau DISPONIBLE -> prouve le skip AVANT run
+
+        def boom_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            raise AssertionError("gau NE DOIT PAS s'exécuter sur une IP littérale")
+
+        sv_av, sv_tool = runner_mod.available, runner_mod.tool
+        runner_mod.available, runner_mod.tool = fake_available, boom_tool
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = _armed_auto(sc)
+            eng.run([Action("recon.gau", "127.0.0.1")])
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+        skipped = [f for f in eng.findings if f.status == "skipped" and "IP littérale" in f.title]
+        self.assertTrue(skipped, "gau n'a pas émis de skip propre sur une cible IP littérale")
+        # aucune URL d'archive émise (le finding est un SKIP, pas des hits)
+        self.assertFalse([f for f in eng.findings if f.status in ("tested", "reported_by_tool")],
+                         "gau a émis des hits sur une IP (junk) au lieu de skipper")
+
+    def test_gau_still_runs_on_domain_target(self):
+        # le skip IP ne CASSE PAS le cas nominal : sur un DOMAINE, gau s'exécute normalement.
+        import forge.runner as runner_mod
+        ran = {"v": False}
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return True
+
+        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            ran["v"] = True
+            return (0, "", "")
+
+        sv_av, sv_tool = runner_mod.available, runner_mod.tool
+        runner_mod.available, runner_mod.tool = fake_available, fake_tool
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["example.test"], "allow_exploit": False})
+            eng = _armed_auto(sc)
+            eng.run([Action("recon.gau", "example.test")])
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+        self.assertTrue(ran["v"], "gau doit s'exécuter normalement sur un domaine (skip IP trop large)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
