@@ -7,6 +7,7 @@ import json
 import re
 
 from .registry import register, Module
+from .oracle import Oracle
 from .. import runner
 from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
@@ -16,6 +17,7 @@ from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 # ont besoin d'être surfacés comme NOUVELLE surface chaînable.
 _STANDARD_WEB_PORTS = frozenset({80, 443})
 _MAX_DISCOVERED_SERVICES = 25            # borne le fan-out (un scan -p- ne doit pas exploser le plan)
+_MAX_PROBED_PORTS = 25                   # borne les sondes de CONFIRMATION HTTP (un -p- peut ouvrir bcp de ports)
 _NMAP_OPEN_PORT_RX = re.compile(r"^(\d{1,5})/tcp\s+open\s+(\S+)", re.MULTILINE)
 
 
@@ -95,6 +97,47 @@ def _nmap_web_ports(out):
         if "http" in m.group(2).lower():
             ports.append(m.group(1))
     return ports
+
+
+def _nmap_nonhttp_open_ports(out):
+    """Ports TCP OUVERTS que nmap N'A PAS reconnus comme HTTP (ex. `font-service?` : la sonde brute de
+    nmap reçoit le 421 anti-rebinding de la console et MISLABELLISE). Candidats à une CONFIRMATION HTTP
+    active (GET avec Host correct). 80/443 exclus (déjà couverts par l'hôte de base). Pur, ne lève
+    jamais — c'est cette liste que `_http_confirmed_ports` filtre pour ne surfacer QUE le vrai HTTP."""
+    ports = []
+    for m in _NMAP_OPEN_PORT_RX.finditer(out or ""):
+        if "http" in m.group(2).lower():
+            continue
+        p = m.group(1)
+        try:
+            if int(p) in _STANDARD_WEB_PORTS:
+                continue
+        except ValueError:
+            continue
+        ports.append(p)
+    return ports
+
+
+def _http_confirmed_ports(module, host, ports):
+    """Sous-ensemble de `ports` (ouverts mais NON labellisés http par nmap) qui parlent RÉELLEMENT HTTP,
+    prouvé par une sonde GET (Host correct) via le seam `module._fetch` — là où la sonde brute de nmap
+    reçoit un 421 (anti-rebinding) et mislabellise, un vrai GET renvoie un STATUS HTTP (200/401/421…),
+    tandis qu'un service NON-HTTP (VNC 5900…) casse le parse HTTP -> None -> jamais confirmé -> ZÉRO
+    bruit. Sonde BORNÉE (`_MAX_PROBED_PORTS`) : un `-p-` peut ouvrir beaucoup de ports, on n'explose pas.
+    Ancré sur l'hôte DÉJÀ gaté par le ROE (`host` = l'hôte in-scope de la cible nmap) : la sonde ne peut
+    PHYSIQUEMENT pas quitter le périmètre. Pur, ne lève jamais (sonde qui lève => traitée non-HTTP)."""
+    out, n = [], 0
+    for p in ports:
+        if n >= _MAX_PROBED_PORTS:
+            break
+        n += 1
+        try:
+            st = module._fetch(f"http://{host}:{p}")
+        except Exception:            # noqa: BLE001  (réseau/protocole hostile : jamais un crash)
+            st = None
+        if st is not None:           # une RÉPONSE HTTP (quel que soit le code) => le port parle HTTP
+            out.append(p)
+    return out
 
 
 def _path_argval(val):
@@ -267,6 +310,16 @@ class NmapServices(FlagAllowlistMixin, Module):
         argv.append(action.target)                            # cible en POSITIONNEL (dernier)
         return argv
 
+    @staticmethod
+    def _fetch(url, timeout=5):
+        """Sonde de CONFIRMATION HTTP d'un port ouvert -> status (int) ou None. GET avec Host correct
+        via le câblage urllib partagé (`Oracle._http`) : là où la sonde brute de nmap reçoit un 421
+        (anti-rebinding de la console) et MISLABELLISE le service (`font-service?`), un vrai GET obtient
+        un STATUS HTTP -> le port est confirmé web. Un service NON-HTTP (VNC…) casse le parse HTTP ->
+        None -> jamais confirmé. Seam monkeypatché par les tests. Pur, ne lève jamais."""
+        st, _body, _h = Oracle._http(url, timeout=timeout, method="GET", maxlen=2048)
+        return st
+
     def dry(self, action):
         return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
 
@@ -285,6 +338,13 @@ class NmapServices(FlagAllowlistMixin, Module):
             target=action.target, title="Services exposés (nmap -sV)", severity="INFO",
             category="recon", mitre="T1046", status="tested", tool="nmap",
             evidence=(out or err).strip()[:1500], poc=self.dry(action))
-        # DÉCOUVERTE de surface : chaque service HTTP sur un port NON standard devient une cible
-        # chaînable (target=host:port) -> le cerveau y sème les actions web à la vague suivante.
-        return [summary] + _service_discovery_findings(self, action, _nmap_web_ports(out), "nmap")
+        # DÉCOUVERTE de surface : chaque service HTTP sur un port NON standard devient une cible chaînable
+        # (target=host:port) -> le cerveau y sème les actions web à la vague suivante. Deux sources :
+        #  (1) les ports que nmap LABELLISE http (confiance directe) ;
+        #  (2) les ports OUVERTS que nmap NE reconnaît PAS comme HTTP mais CONFIRMÉS par une sonde GET
+        #      (Host correct) — couvre les services que nmap mislabellise (ex. console anti-rebinding
+        #      qui renvoie 421 à la sonde brute -> `font-service?`). Sonde bornée + ancrée sur l'hôte
+        #      in-scope (jamais un autre hôte) ; les vrais non-HTTP (VNC…) ne sont JAMAIS confirmés.
+        host = _bare_host(action.target)
+        ports = _nmap_web_ports(out) + _http_confirmed_ports(self, host, _nmap_nonhttp_open_ports(out))
+        return [summary] + _service_discovery_findings(self, action, ports, "nmap")
