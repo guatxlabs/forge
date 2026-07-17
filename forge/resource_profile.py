@@ -149,6 +149,10 @@ _ENV_OVERRIDES = {
     "parallelism": "FORGE_PARALLELISM",
     "run_timeout_secs": "FORGE_RUN_TIMEOUT",
     "tools_profile": "FORGE_TOOLS_PROFILE",
+    # R4 : plafond de sous-process outils ENFORCÉ par `runner._PROC_GATE`. Exposé ici pour que le
+    # snapshot d'audit reflète le plafond RÉELLEMENT en vigueur quand l'opérateur pose l'override.
+    # Non défini (défaut) -> None -> résout la valeur de profil : snapshot BYTE-IDENTIQUE à avant R4.
+    "max_concurrent_procs": "FORGE_MAX_CONCURRENT_PROCS",
 }
 
 

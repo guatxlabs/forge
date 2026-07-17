@@ -20,6 +20,75 @@ _DEFAULT_ACTION_TIMEOUT = 120
 # dépassement de timeout (miroir de `_daemon_reap.reap_marker` : term gracieux d'abord, kill ferme).
 _TERM_GRACE = 5
 
+# --- GARDE-FOU MÉMOIRE : BORNE LE NB DE SOUS-PROCESS OUTILS SIMULTANÉS (R4) -----------------------
+# L'engine PARALLÉLISE les TIRS bloquants (module.fire -> runner.tool -> Popen) dans un pool de threads
+# borné (FORGE_PARALLELISM). Chaque tir peut lancer un OUTIL LOURD (nuclei/sqlmap/docker run) qui, à N
+# simultanés, peut faire SATURER la RAM d'une machine cliente FAIBLE (OOM). On pose donc un SÉMAPHORE
+# BORNÉ GLOBAL autour du LANCEMENT RÉEL du process externe : au plus `max_concurrent_procs()` process
+# vivants à la fois, TOUS pools/threads confondus. Il est acquis JUSTE AVANT `Popen` et relâché dans un
+# `finally` APRÈS que le groupe de process a été RÉCOLTÉ (crash/timeout/kill compris) -> jamais de fuite.
+#
+# NO-OP PAR DÉFAUT : la table de profils garantit `max_concurrent_procs >= parallelism` pour CHAQUE
+# profil (balanced 6>=4, low 2>=1, full 16>=12) -> sous les défauts le plafond est >= la taille du pool :
+# le sémaphore ne BLOQUE JAMAIS (comportement byte-identique à aujourd'hui). Sa valeur est de laisser un
+# opérateur sur machine contrainte poser `FORGE_MAX_CONCURRENT_PROCS=1` (ou un profil `low`) pour PLAFONNER
+# les outils lourds SOUS la taille du pool et éviter l'OOM — sans toucher au parallélisme intra-vague.
+#
+# SÛRETÉ : le sémaphore borne les PROCESS, pas les WORKERS. Un worker bloqué à l'acquisition attend juste
+# son tour (au plus `pool` workers en contention, plafond >= 1 -> au moins un progresse toujours) => AUCUN
+# deadlock. Il n'enveloppe QUE la phase de tir parallèle (spawn/attente), JAMAIS l'ingest sériel de `_apply`
+# (ledger/findings) ni le checkpoint D1 -> déterminisme et coverage-safety INCHANGÉS.
+_ENV_MAX_CONCURRENT = "FORGE_MAX_CONCURRENT_PROCS"
+
+
+def _max_concurrent_procs():
+    """Plafond RÉSOLU de sous-process outils simultanés — PRÉCÉDENCE : override env
+    `FORGE_MAX_CONCURRENT_PROCS` > profil de ressources (`FORGE_RESOURCE_PROFILE`) > défaut-code
+    (valeur `balanced` = 6). RÉUTILISE le résolveur unique de `resource_profile` (aucune valeur codée en
+    dur). Un override garbage retombe sur le profil (fail-open). Retourne toujours un int >= 1."""
+    env = os.environ.get(_ENV_MAX_CONCURRENT)
+    return resource_profile.max_concurrent_procs(override=env)
+
+
+class _BoundedProcGate:
+    """Sémaphore BORNÉ à plafond DYNAMIQUE — au plus `_resolver()` process externes vivants à la fois.
+
+    Un `threading.BoundedSemaphore` fige sa valeur à la construction ; ici le plafond est RE-RÉSOLU à
+    CHAQUE acquisition (via `_resolver`) pour refléter l'env/profil EN VIGUEUR sans reconstruction — ce
+    qui rend le no-op-par-défaut et le cap-abaissé testables sans état mis en cache entre runs. Compte
+    protégé par une `Condition` : un acquéreur attend tant que `actif >= plafond` puis incrémente ; la
+    libération décrémente et réveille UN attendeur. Réentrant NON (aucun chemin n'imbrique deux tirs dans
+    un même thread). DEADLOCK-FREE : `actif` est borné par le nb de workers en contention (<= pool) et le
+    plafond est >= 1 -> au moins un acquéreur passe toujours ; un worker bloqué attend juste son tour."""
+
+    def __init__(self, resolver):
+        self._resolver = resolver
+        self._cond = threading.Condition()
+        self._active = 0
+
+    def _cap(self):
+        try:
+            return max(1, int(self._resolver()))
+        except (TypeError, ValueError):
+            return 1
+
+    def __enter__(self):
+        with self._cond:
+            self._cond.wait_for(lambda: self._active < self._cap())
+            self._active += 1
+        return self
+
+    def __exit__(self, *exc):
+        with self._cond:
+            if self._active > 0:
+                self._active -= 1
+            self._cond.notify()
+        return False
+
+
+# Instance GLOBALE (un seul plafond partagé par tous les pools/threads du process).
+_PROC_GATE = _BoundedProcGate(_max_concurrent_procs)
+
 # REGISTRE DES GROUPES D'OUTILS VIVANTS (fix E4) — chaque outil tourne dans sa PROPRE session
 # (`start_new_session=True`) : un SIGTERM whole-run (cancel/watchdog de la console) atteint le moteur
 # Forge mais PAS ces sessions séparées. Un `nuclei` en cours SURVIVRAIT donc au cancel (orphelin
@@ -190,33 +259,40 @@ def _spawn_and_wait(cmd, timeout, env):
         déclenche l'arrêt gracieux. Le shutdown est donc DIFFÉRÉ d'au plus un timeout d'action — jamais gelé.
       - E2 (reap daemon, `_daemon_reap`) : mécanisme DISJOINT (kill par MARQUEUR d'env, dans le `finally`
         de `reaping_env` APRÈS ce retour) qui ramasse un daemon double-fork/setsid ayant ÉCHAPPÉ au groupe.
-        Aucun double-kill/deadlock : `os.kill` sur un pid déjà mort est avalé (best-effort des deux côtés)."""
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env, start_new_session=True)
-    except Exception as e:  # noqa: BLE001
-        return (1, "", f"erreur d'exécution: {e!r}")
-    # ENREGISTRE le groupe de l'outil (pgid == pid : leader de sa session) pour qu'un cancel/watchdog
-    # whole-run puisse le couper malgré sa session séparée (fix E4). `finally` -> retiré à coup sûr, que
-    # l'outil sorte normalement, timeoute ou lève (jamais de pgid réutilisé qui traînerait au registre).
-    _register_tool_pgid(proc.pid)
-    try:
+        Aucun double-kill/deadlock : `os.kill` sur un pid déjà mort est avalé (best-effort des deux côtés).
+
+    GARDE-FOU MÉMOIRE (R4) : le LANCEMENT et l'attente sont enveloppés par le sémaphore borné global
+    `_PROC_GATE` (plafond `max_concurrent_procs()`), acquis AVANT `Popen` et relâché dans le `finally`
+    du `with` APRÈS récolte du process (retour normal, timeout OU exception) -> jamais de fuite de slot.
+    Inerte sous les défauts (plafond >= pool). Il borne les PROCESS, pas les workers -> pas de deadlock
+    (cf. `_BoundedProcGate`). N'enveloppe QUE ce tir : l'ingest sériel de l'engine reste hors sémaphore."""
+    with _PROC_GATE:                                            # slot borné (garde-fou mémoire) — relâché en __exit__
         try:
-            out, err = proc.communicate(timeout=timeout)
-            return (proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            _terminate_group(proc)                              # SIGTERM au GROUPE (fermeture propre)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, env=env, start_new_session=True)
+        except Exception as e:  # noqa: BLE001
+            return (1, "", f"erreur d'exécution: {e!r}")
+        # ENREGISTRE le groupe de l'outil (pgid == pid : leader de sa session) pour qu'un cancel/watchdog
+        # whole-run puisse le couper malgré sa session séparée (fix E4). `finally` -> retiré à coup sûr, que
+        # l'outil sorte normalement, timeoute ou lève (jamais de pgid réutilisé qui traînerait au registre).
+        _register_tool_pgid(proc.pid)
+        try:
             try:
-                out, err = proc.communicate(timeout=_TERM_GRACE)
+                out, err = proc.communicate(timeout=timeout)
+                return (proc.returncode, out, err)
             except subprocess.TimeoutExpired:
-                _terminate_group(proc, force=True)              # dernier ressort : SIGKILL du GROUPE
+                _terminate_group(proc)                          # SIGTERM au GROUPE (fermeture propre)
                 try:
                     out, err = proc.communicate(timeout=_TERM_GRACE)
                 except subprocess.TimeoutExpired:
-                    out, err = "", ""                           # drain impossible -> on rend la main quand même
-            return (124, out or "", f"timeout après {timeout}s (groupe de process terminé)")
-        except Exception as e:  # noqa: BLE001
-            _terminate_group(proc, force=True)
-            return (1, "", f"erreur d'exécution: {e!r}")
-    finally:
-        _unregister_tool_pgid(proc.pid)
+                    _terminate_group(proc, force=True)          # dernier ressort : SIGKILL du GROUPE
+                    try:
+                        out, err = proc.communicate(timeout=_TERM_GRACE)
+                    except subprocess.TimeoutExpired:
+                        out, err = "", ""                       # drain impossible -> on rend la main quand même
+                return (124, out or "", f"timeout après {timeout}s (groupe de process terminé)")
+            except Exception as e:  # noqa: BLE001
+                _terminate_group(proc, force=True)
+                return (1, "", f"erreur d'exécution: {e!r}")
+        finally:
+            _unregister_tool_pgid(proc.pid)
