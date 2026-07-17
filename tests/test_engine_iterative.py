@@ -463,5 +463,103 @@ class TestRealReconDiscoversServiceChainsWebModule(unittest.TestCase):
         self.assertTrue(all(r["verdict"] == "VETO" for r in evil), "hôte hors-scope non VÉTOé (fail-open!)")
 
 
+class TestReconMislabeledPortConfirmedHttp(unittest.TestCase):
+    """C3 END-TO-END (le VRAI recon.nmap + le VRAI web.security_headers) — le port n'est PAS labellisé
+    http par nmap mais parle RÉELLEMENT HTTP.
+
+    Reproduit le trou de C2 : la console `127.0.0.1:7100` est OUVERTE mais la sonde brute de nmap reçoit
+    le 421 anti-rebinding de la console et la MISLABELLISE `font-service?`. C2 ne surfaçait que les ports
+    que nmap LABELLISE http -> :7100 était sauté -> aucun verdict web. C3 CONFIRME par une sonde GET (Host
+    correct, seam `NmapServices._fetch`) que :7100 parle HTTP -> il devient une cible chaînable -> le VRAI
+    web.security_headers TIRE dessus et renvoie un verdict. Un port GENUINEMENT non-HTTP (VNC :5900) est
+    sondé, casse le parse HTTP (None) -> JAMAIS surfacé -> zéro bruit."""
+
+    # nmap : :7100 OUVERT mais mislabellisé `font-service?` (pas http) ; :5900 VNC (vrai non-HTTP) ; :22 ssh.
+    _NMAP_OUT = ("Starting Nmap\nNmap scan report for 127.0.0.1\nHost is up.\n"
+                 "PORT     STATE SERVICE      VERSION\n"
+                 "22/tcp   open  ssh          OpenSSH 8.9\n"
+                 "5900/tcp open  vnc          RealVNC 5\n"
+                 "7100/tcp open  font-service?\n")
+
+    class _Hdrs:                                              # HTTPMessage-like minimal (get / get_all)
+        def __init__(self, d):
+            self._d = d
+        def get(self, k, default=None):
+            return self._d.get(k, default)
+        def get_all(self, k):
+            v = self._d.get(k)
+            return [v] if v else []
+
+    def test_mislabeled_open_port_confirmed_http_gets_verdict(self):
+        import forge.runner as runner_mod
+        from forge.modules import recon as RECON
+        from forge.modules import security_headers as SH
+
+        def fake_available(binary, docker_image=None, prefer_docker=False):
+            return binary == "nmap"                          # SEUL nmap dispo -> httpx/nuclei = SKIP propre
+
+        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+            return (0, self._NMAP_OUT, "") if binary == "nmap" else (127, "", "")
+
+        # CONFIRMATION HTTP (seam recon.NmapServices._fetch) : GET avec Host correct -> :7100 répond 200
+        # (la console) ; :5900 (VNC) et :22 (ssh) cassent le parse HTTP -> None -> non confirmés.
+        def fake_probe(url, timeout=5):
+            return 200 if url == "http://127.0.0.1:7100" else None
+
+        # le VRAI web.security_headers : son seam réseau répond UNIQUEMENT sur http://127.0.0.1:7100.
+        def fake_fetch(url, headers=None, timeout=15):
+            if url == "http://127.0.0.1:7100":
+                return 200, "<html><body>ok</body></html>", TestReconMislabeledPortConfirmedHttp._Hdrs(
+                    {"Server": "Werkzeug/2.0.3", "Content-Type": "text/html"})
+            return None, None, None
+
+        sv_av, sv_tool = runner_mod.available, runner_mod.tool
+        sv_probe, sv_fetch = RECON.NmapServices._fetch, SH.SecurityHeaders._fetch
+        runner_mod.available, runner_mod.tool = fake_available, fake_tool
+        RECON.NmapServices._fetch = staticmethod(fake_probe)
+        SH.SecurityHeaders._fetch = staticmethod(fake_fetch)
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["recon.nmap", "web.security_headers"], max_waves=4)
+        finally:
+            runner_mod.available, runner_mod.tool = sv_av, sv_tool
+            RECON.NmapServices._fetch = sv_probe
+            SH.SecurityHeaders._fetch = sv_fetch
+
+        # (1) recon.nmap a SURFACÉ le port mislabellisé :7100 comme cible chaînable (confirmé HTTP).
+        disc = [f for f in eng.findings
+                if f.target == "127.0.0.1:7100" and "Service web in-scope" in f.title]
+        self.assertTrue(disc, "recon.nmap n'a pas surfacé le port mislabellisé mais HTTP 127.0.0.1:7100")
+
+        # (2) AUCUN service GENUINEMENT non-HTTP n'est surfacé (VNC :5900, ssh :22) -> zéro bruit.
+        noise = [f for f in eng.findings if "Service web in-scope" in f.title
+                 and (f.target.endswith(":5900") or f.target.endswith(":22"))]
+        self.assertFalse(noise, f"un port non-HTTP a été faussement surfacé : {[f.target for f in noise]}")
+
+        # (3) le VRAI web.security_headers a TIRÉ sur la surface CONFIRMÉE 127.0.0.1:7100 (FIRE, pas SKIP).
+        sh = [r for r in eng.results if r["kind"] == "web.security_headers"
+              and r["target"] == "127.0.0.1:7100"]
+        self.assertTrue(sh, "web.security_headers n'a pas atteint la surface confirmée 127.0.0.1:7100")
+        self.assertEqual(sh[0]["verdict"], FIRE, "gouvernance : le tir sur host:port in-scope doit être FIRE")
+
+        # (4) VERDICT RÉEL : findings `tested` sur :7100 — pas une erreur, pas « injoignable ».
+        sh_f = [f for f in eng.findings
+                if f.target == "127.0.0.1:7100" and f.tool.endswith("web.security_headers")]
+        self.assertTrue(sh_f, "aucun finding web.security_headers sur la cible confirmée")
+        self.assertTrue(all(f.status == "tested" for f in sh_f), "verdict non concluant (skipped/degraded)")
+        self.assertFalse(any("non testé" in f.title or "injoignable" in f.title for f in sh_f))
+        self.assertTrue(any("http://127.0.0.1:7100" in (f.poc or "") for f in sh_f))
+        # (5) AUCUNE web.security_headers sur un port non-HTTP (jamais surfacé -> jamais tiré).
+        self.assertFalse([r for r in eng.results if r["kind"] == "web.security_headers"
+                          and (r["target"].endswith(":5900") or r["target"].endswith(":22"))])
+        # (6) AUCUNE exception au tir.
+        self.assertFalse(any(r["verdict"] == "ERROR" for r in eng.results
+                             if r["kind"] == "web.security_headers"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
