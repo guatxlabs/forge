@@ -20,6 +20,43 @@ from .graph import EngagementGraph
 from . import techniques
 
 
+# Priorité d'ORDONNANCEMENT des scanners de CONTENU HTTP (EV = value*confidence/cost, cf. planner). Les
+# scanners RAPIDES à FORT SIGNAL (fingerprint HTTP, en-têtes de sécurité, nuclei, techno) doivent passer
+# AVANT les ÉNUMÉRATEURS LENTS (nikto, testssl, feroxbuster/content, katana, gospider) : sinon, à budget de
+# temps borné, `web.nuclei` — le scanner le plus productif vs un scan manuel — restait ordonné DERRIÈRE
+# ~40 oracles par port (EV du sweep ~0.25) et n'était JAMAIS atteint (T27), et un nikto qui hang gelait
+# tout le pipeline avant que le moindre verdict profond ne sorte. C'est un RÉ-ORDONNANCEMENT (pas un
+# changement de capacité) : les lents restent TOUS planifiés, juste APRÈS (defer != delete côté planner ;
+# aucune classe qualifiante affamée — elles restent plancher-protégées). Les (value, confidence, cost) sont
+# choisis pour que l'ORDRE respecte le tiering ET que les 4 rapides passent au-dessus du sweep auto-pentest
+# ET du plancher qualifiant (0.5) — EV DÉCROISSANT :
+_CONTENT_SCANNER_EV = {
+    "recon.httpx":          (0.9, 0.9, 1.0),   # 0.81 — fingerprint HTTP quasi-instantané (1 requête)
+    "web.security_headers": (0.9, 0.85, 1.0),  # 0.765 — audit d'en-têtes (1 GET), fort signal
+    "web.nuclei":           (0.9, 0.8, 1.0),   # 0.72 — le scanner le plus productif (templates medium+)
+    "recon.tech":           (0.8, 0.75, 1.0),  # 0.60 — fingerprint techno
+    "recon.waf":            (0.6, 0.6, 1.0),   # 0.36 — détection WAF/CDN
+    "recon.content":        (0.4, 0.4, 2.0),   # 0.08 — feroxbuster/ffuf (brute de répertoires, LENT)
+    "recon.katana":         (0.4, 0.4, 2.0),   # 0.08 — crawl (LENT)
+    "recon.gospider":       (0.4, 0.4, 2.0),   # 0.08 — crawl (LENT)
+    "web.nikto":            (0.35, 0.4, 2.0),  # 0.07 — scan de vulns web (LENT, sujet aux hangs)
+    "web.testssl":          (0.3, 0.4, 3.0),   # 0.04 — audit TLS (TRÈS LENT)
+}
+# EV par défaut d'un scanner de contenu non listé (chaîné sur service découvert) — préserve l'ancien 0.2.
+_CONTENT_SCANNER_EV_DEFAULT = (0.4, 0.5, 1.0)
+
+
+def _content_scanner_action(kind, target, desc, **kw):
+    """Action d'un scanner de CONTENU HTTP avec l'EV de son TIER (`_CONTENT_SCANNER_EV`) — source unique de
+    la priorité d'ordonnancement (plan de base ET chaînage sur service découvert). Un override explicite de
+    value/confidence/cost via `kw` reste possible (setdefault du tier sinon)."""
+    v, c, cost = _CONTENT_SCANNER_EV.get(kind, _CONTENT_SCANNER_EV_DEFAULT)
+    kw.setdefault("value", v)
+    kw.setdefault("confidence", c)
+    kw.setdefault("cost", cost)
+    return _action(kind, target, desc=desc, **kw)
+
+
 def _action(kind, target, **kw):
     """Action dont `cls` (classe planner) et `exploit` sont DÉRIVÉS de la table unique
     (forge/techniques.py) — plus d'affectation par-kind recopiée dans le cerveau. Un override
@@ -154,8 +191,10 @@ class HeuristicBrain(Brain):
         cands = []
         if is_web:
             cands += [
-                _action("recon.httpx", host, value=0.3, confidence=0.7, cost=1, desc="fingerprint HTTP"),
-                _action("web.nuclei", host, value=0.4, confidence=0.6, cost=2, desc="scan nuclei (medium+)"),
+                # scanners de contenu RAPIDES à FORT SIGNAL -> EV de tier (`_CONTENT_SCANNER_EV`) : ordonnés
+                # tôt (avant le sweep d'oracles / les énumérateurs lents), sinon nuclei n'était jamais atteint.
+                _content_scanner_action("recon.httpx", host, "fingerprint HTTP"),
+                _content_scanner_action("web.nuclei", host, "scan nuclei (medium+)"),
                 # classes qualifiantes : sous-notées mais le planner les plancher-protège
                 _action("access_control.idor", host,
                         value=0.8, confidence=0.3, cost=2, desc="IDOR/BOLA 2-comptes (diff oracle)"),
@@ -280,8 +319,11 @@ class HeuristicBrain(Brain):
         # et l'id d'action stable dédoublonne httpx/nuclei déjà semés. Borné (≤ MAX_CHAIN_TARGETS × le set).
         if self._discovery_marker(graph, host) == techniques.DISCOVERY_SERVICE_MARKER:
             for kind in self.HTTP_CONTENT_SCANNERS:
-                out.append(_action(kind, host, value=0.4, confidence=0.5, cost=1,
-                                   desc=f"scanner de contenu HTTP sur service découvert {host} (chaîné)"))
+                # EV PAR TIER (`_CONTENT_SCANNER_EV`) : les rapides à fort signal (httpx/security_headers/
+                # nuclei/tech) passent AVANT les lents (nikto/testssl/ferox/katana/gospider) — l'ORDRE change,
+                # aucun scanner n'est retiré (tous restent chaînés/planifiés, juste plus tard pour les lents).
+                out.append(_content_scanner_action(
+                    kind, host, f"scanner de contenu HTTP sur service découvert {host} (chaîné)"))
 
         # (c) WAF/CDN identifié (finding recon.waf) -> la cible est PROTÉGÉE : proposer les enablers
         # d'évasion (accès derrière CDN/WAF) sur ce host. Chaîné depuis le fingerprint, planner-selectable.
