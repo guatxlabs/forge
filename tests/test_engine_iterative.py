@@ -569,6 +569,73 @@ class TestReconMislabeledPortConfirmedHttp(unittest.TestCase):
                              if r["kind"] == "web.security_headers"))
 
 
+class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
+    """E3 (a) — ORDONNANCEMENT : sur un service DÉCOUVERT, les scanners de contenu RAPIDES à FORT SIGNAL
+    (httpx/security_headers/nuclei/tech) sont ordonnés AVANT les ÉNUMÉRATEURS LENTS (nikto/testssl/
+    feroxbuster/katana/gospider) — sinon, à budget de temps borné, web.nuclei (le plus productif) restait
+    derrière ~40 oracles par port et n'était JAMAIS atteint (T27). RÉ-ORDONNANCEMENT coverage-safe : les
+    lents restent TOUS planifiés, juste après (defer != delete)."""
+
+    _FAST = ("recon.httpx", "web.security_headers", "web.nuclei", "recon.tech")
+    _SLOW = ("web.nikto", "web.testssl", "recon.content", "recon.katana", "recon.gospider")
+
+    @staticmethod
+    def _discovered_service_graph():
+        g = EngagementGraph()
+        g.add_host("127.0.0.1", kind="host")
+        g.add_finding(Finding(target="127.0.0.1:8000", title="Service web in-scope : 127.0.0.1:8000",
+                              status="tested", severity="INFO", category="recon"))
+        return g
+
+    def test_fast_content_scanners_ordered_before_slow_enumerators(self):
+        actions = HeuristicBrain().propose(self._discovered_service_graph())
+        ordered, _ = Planner().order(actions)                       # budget illimité -> tout ordonné, rien déféré
+        seq = [a.kind for a in ordered if a.target == "127.0.0.1:8000"]
+        for fast in self._FAST:
+            self.assertIn(fast, seq, f"{fast} absent du plan sur le service découvert")
+        for slow in self._SLOW:
+            # COVERAGE-SAFE : le lent n'est PAS retiré du plan — il reste ordonné (juste après).
+            self.assertIn(slow, seq, f"{slow} a été DROPPÉ du plan (régression coverage-safe)")
+        # chaque rapide passe AVANT chaque lent (l'ORDRE est le correctif, pas une capacité en moins).
+        for fast in self._FAST:
+            for slow in self._SLOW:
+                self.assertLess(seq.index(fast), seq.index(slow),
+                                f"{fast} (rapide/fort signal) ordonné APRÈS {slow} (lent) — trou E3")
+
+    def test_nuclei_scheduled_ahead_of_the_oracle_sweep(self):
+        # AUTO-PENTEST : le sweep ajoute ~40+ oracles par port (EV ~0.25) ; web.nuclei (EV de tier ~0.72)
+        # DOIT passer devant eux — c'est exactement ce qui manquait au T27 (nuclei jamais atteint).
+        from forge.brain import AutoPentestBrain
+        actions = AutoPentestBrain().propose(self._discovered_service_graph())
+        ordered, _ = Planner().order(actions)
+        seq = [a.kind for a in ordered if a.target == "127.0.0.1:8000"]
+        sweep = [a for a in actions if a.target == "127.0.0.1:8000"
+                 and (a.desc or "").startswith("auto-pentest")]
+        self.assertGreater(len(sweep), 20, "le sweep auto-pentest devrait proposer de nombreux oracles")
+        # nuclei est dans le peloton de tête, DEVANT le gros du sweep et devant nikto (lent).
+        nuclei_idx = seq.index("web.nuclei")
+        self.assertLess(nuclei_idx, 6, f"web.nuclei ordonné en position {nuclei_idx} (toujours affamé par le sweep)")
+        self.assertLess(nuclei_idx, seq.index("web.nikto"))
+        # preuve directe sur l'EV : nuclei (tier) > un oracle du sweep (défaut 0.25).
+        nuc = next(a for a in actions if a.kind == "web.nuclei" and a.target == "127.0.0.1:8000")
+        self.assertGreater(Planner.ev(nuc), Planner.ev(sweep[0]))
+
+    def test_slow_enumerators_deferred_not_dropped_under_tight_budget(self):
+        # COVERAGE-SAFE sous BUDGET SERRÉ : les lents (non-qualifiants) sont DÉFÉRÉS (skipped_budget, VISIBLE),
+        # jamais supprimés ; les classes QUALIFIANTES (idor/ssrf/auth) restent plancher-protégées dans ordered.
+        actions = HeuristicBrain().propose(self._discovered_service_graph())
+        ordered, skipped = Planner(budget=0.0).order(actions)
+        ordered_kinds = {a.kind for a in ordered}
+        skipped_kinds = {a.kind for a in skipped}
+        self.assertTrue(skipped, "budget=0 aurait dû DÉFÉRER des non-qualifiantes (defer != delete)")
+        # au moins un énumérateur lent est déféré (visible), pas jeté.
+        self.assertTrue(skipped_kinds & set(self._SLOW),
+                        "aucun énumérateur lent déféré — le budget ne mord pas")
+        # les qualifiantes chaînées sur le service restent planifiées malgré budget nul (plancher).
+        self.assertIn("access_control.idor", ordered_kinds)
+        self.assertNotIn("access_control.idor", skipped_kinds)
+
+
 class TestE1PortDiscoveryReachesContentScanners(unittest.TestCase):
     """E1 — les ports découverts par un SCANNER DE PORTS (naabu/masscan) atteignent les SCANNERS DE
     CONTENU HTTP (pas seulement les sondes d'injection). Reproduit le trou T24 : naabu trouvait 18-19
