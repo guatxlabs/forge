@@ -22,6 +22,7 @@ import urllib.parse
 
 from .oracle import Oracle
 from .. import techniques
+from .. import resource_profile
 
 # Ports web STANDARD : déjà couverts par l'hôte de base (recon/oracles semés dessus) -> on n'émet PAS
 # de cible `host:port` redondante pour eux. Seuls les ports NON standard ont besoin d'être surfacés
@@ -84,6 +85,9 @@ def http_confirmed_ports(fetch, host, ports):
     HTTP -> None -> jamais confirmé -> ZÉRO bruit. Sonde BORNÉE (`_MAX_PROBED_PORTS`). Ancrée sur l'hôte
     DÉJÀ gaté par le ROE (`host`) : la sonde ne peut PHYSIQUEMENT pas quitter le périmètre. Pur (hormis
     la sonde), ne lève jamais."""
+    # Cap de sondes RÉSOLU par profil (`discovery_max_fanout`) : `balanced` == 25 == _MAX_PROBED_PORTS
+    # (byte-identique) ; `low`=8 (moins de sondes = plus léger), `full`=50. Défaut-classe préservé.
+    max_probe = resource_profile.resolve("discovery_max_fanout", default=_MAX_PROBED_PORTS)
     out, seen, n = [], set(), 0
     for p in ports:
         try:
@@ -93,7 +97,7 @@ def http_confirmed_ports(fetch, host, ports):
         if pi in seen:
             continue
         seen.add(pi)
-        if n >= _MAX_PROBED_PORTS:
+        if n >= max_probe:
             break
         n += 1
         try:
@@ -115,6 +119,9 @@ def service_discovery_findings(module, action, ports, tool):
     Borné + dédupliqué. Pur, ne lève jamais."""
     host = bare_host(action.target)
     tgt_netloc = str(action.target).split("://")[-1].split("/", 1)[0]
+    # Cap de fan-out RÉSOLU par profil : `balanced` == 25 == _MAX_DISCOVERED_SERVICES (byte-identique) ;
+    # `low`=8, `full`=50. Borne les NŒUDS de service ajoutés au graphe (un -p- ne doit pas l'exploser).
+    max_services = resource_profile.resolve("discovery_max_fanout", default=_MAX_DISCOVERED_SERVICES)
     out, seen = [], set()
     for port in ports:
         try:
@@ -134,7 +141,7 @@ def service_discovery_findings(module, action, ports, tool):
             evidence=(f"Service web découvert sur le port non standard {p} ({hp}) via {tool} — "
                       f"nouvelle surface web chaînable (fingerprint/oracles/scanners à la vague suivante)."),
             poc=f"# {tool} : service web exposé sur {hp}"))
-        if len(out) >= _MAX_DISCOVERED_SERVICES:
+        if len(out) >= max_services:
             break
     return out
 
@@ -179,8 +186,11 @@ def endpoint_discovery_findings(module, action, urls, tool):
         seen.add(s)
         cleaned.append(s)
     cleaned.sort(key=lambda u: 0 if _has_query_param(u) else 1)   # stable : injectables d'abord
+    # Cap d'endpoints crawlés RÉSOLU par le MÊME levier que recon_surface.MAX_ENDPOINTS (`crawl_max_endpoints`) :
+    # `balanced` == 25 == _MAX_DISCOVERED_ENDPOINTS (byte-identique) ; `low`=10, `full`=50.
+    max_endpoints = resource_profile.resolve("crawl_max_endpoints", default=_MAX_DISCOVERED_ENDPOINTS)
     out = []
-    for u in cleaned[:_MAX_DISCOVERED_ENDPOINTS]:
+    for u in cleaned[:max_endpoints]:
         out.append(module.finding(
             target=u, title=f"{techniques.DISCOVERY_ENDPOINT_MARKER} : {u}",
             severity="INFO", category="recon", mitre=getattr(module, "mitre", ""), status="tested",

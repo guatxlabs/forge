@@ -40,6 +40,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .redact import redact_secrets
+from . import resource_profile
 
 # Kind de l'événement d'AUDIT d'egress LLM émis par le MOTEUR (Python). Volontairement PAS `console.*` :
 # le ledger RÉSERVE le préfixe `console.` aux entrées de la console Rust (chaîne SHA-256 non signée) et
@@ -87,7 +88,8 @@ class LLMConfig:
     model: str = "llama3.2:1b"         # petit modèle par défaut (borné)
     api_key: str = ""                  # SECRET WRITE-ONLY — jamais renvoyé/journalisé/ledgeré
     timeout: float = 30.0              # court (fail-open borné)
-    max_tokens: int = 512              # borné
+    max_tokens: int = 512              # borné (défaut-code == profil `balanced`)
+    num_ctx: int = 0                   # fenêtre de contexte (option Ollama, loopback) ; 0 = NE PAS envoyer
     temperature: float = 0.2
     keep_alive: str = "0"              # Ollama : ne PAS épingler le modèle en RAM (extension ignorée par OpenAI)
     allow_external: bool = False       # GATE OPÉRATEUR : autorise l'egress vers un endpoint NON-loopback
@@ -126,7 +128,12 @@ class LLMConfig:
         d.model = _s("model", d.model)
         d.api_key = data.get("api_key") if isinstance(data.get("api_key"), str) else d.api_key
         d.timeout = _f("timeout", d.timeout, 1.0, 120.0)
-        d.max_tokens = _i("max_tokens", d.max_tokens, 16, 8192)
+        # DÉFAUT résolu par profil quand `scope.llm` ne fixe PAS la clé : override explicite (clé présente)
+        # > profil (llm_max_tokens / llm_num_ctx) > défaut-code. `balanced` == 512 / 0 -> byte-identique ;
+        # `low` allège (256 / 2048). num_ctx=0 == sentinelle « ne pas envoyer » (payload inchangé).
+        d.max_tokens = _i("max_tokens", resource_profile.resolve("llm_max_tokens", default=d.max_tokens),
+                          16, 8192)
+        d.num_ctx = _i("num_ctx", resource_profile.resolve("llm_num_ctx", default=d.num_ctx), 0, 131072)
         d.temperature = _f("temperature", d.temperature, 0.0, 2.0)
         d.keep_alive = _s("keep_alive", d.keep_alive)
         d.allow_external = _b("allow_external", d.allow_external)
@@ -138,7 +145,7 @@ class LLMConfig:
         return {
             "enabled": self.enabled, "base_url": self.base_url, "model": self.model,
             "api_key_set": bool(self.api_key), "timeout": self.timeout,
-            "max_tokens": self.max_tokens, "temperature": self.temperature,
+            "max_tokens": self.max_tokens, "num_ctx": self.num_ctx, "temperature": self.temperature,
             "keep_alive": self.keep_alive, "allow_external": self.allow_external,
             "loopback": is_loopback(self.base_url),
         }
@@ -178,6 +185,11 @@ class LLMClient:
         # endpoints loopback (Ollama local) : la compat OpenAI (cloud/externe) reste stricte.
         if cfg.keep_alive and is_loopback(cfg.base_url):
             payload["keep_alive"] = cfg.keep_alive
+        # `num_ctx` est une option OLLAMA (fenêtre de contexte) sans équivalent OpenAI strict : envoyée
+        # UNIQUEMENT si > 0 ET endpoint loopback (comme keep_alive). num_ctx=0 (profil `balanced`) => AUCUNE
+        # option ajoutée => payload BYTE-IDENTIQUE au défaut. Un endpoint OpenAI externe ne la voit jamais.
+        if cfg.num_ctx and cfg.num_ctx > 0 and is_loopback(cfg.base_url):
+            payload.setdefault("options", {})["num_ctx"] = cfg.num_ctx
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if cfg.api_key:                          # Bearer optionnel (OpenAI / endpoints protégés)

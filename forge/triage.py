@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .schema import SEVERITIES
+from . import resource_profile
 
 # --- sévérités ------------------------------------------------------------------------------------
 # Rang de sévérité (INFO=0 .. CRITICAL=4). Un finding >= MEDIUM est « actionnable » par défaut : jamais
@@ -435,6 +436,12 @@ def triage(findings: list[Any], config: Any = None) -> TriageResult:
         for m in cluster_meta.values() if m["is_noise_cluster"]
     ]
     clusters.sort(key=lambda c: (-c["size"], c["cluster_id"]))
+    # CAPS de SYNTHÈSE résolus par profil — bornent la TAILLE du digest (top-findings + clusters), PAS
+    # le classement : `res.ranked` / `res.annotations` gardent TOUS les findings (coverage-safe, never-drop
+    # INCHANGÉ — la synthèse n'est qu'un résumé). `balanced` == 10 / 20 == défauts -> byte-identique ;
+    # `low` allège (5 / 10) le prompt LLM et le rapport. Aucun override existant ici (défaut-code seul).
+    max_items = resource_profile.resolve("triage_max_items", default=10)
+    max_clusters = resource_profile.resolve("triage_max_clusters", default=20)
     # top findings actionnables (pour la synthèse) : les 1ers du rang qui ne sont pas du bruit.
     top = []
     for f in res.ranked:
@@ -444,11 +451,11 @@ def triage(findings: list[Any], config: Any = None) -> TriageResult:
         top.append({"severity": (getattr(f, "severity", "") or "INFO").upper(),
                     "title": getattr(f, "title", ""), "target": getattr(f, "target", ""),
                     "score": a["score"]})
-        if len(top) >= 10:
+        if len(top) >= max_items:
             break
     res.summary = {
         "enabled": True, "total": n, "actionable": actionable, "noise": noise_count,
-        "duplicates": dup_count, "num_clusters": len(clusters), "clusters": clusters[:20],
+        "duplicates": dup_count, "num_clusters": len(clusters), "clusters": clusters[:max_clusters],
         "top_findings": top, "auto_hide": cfg.auto_hide, "config": cfg.to_dict(),
     }
     return res

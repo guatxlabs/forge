@@ -242,5 +242,193 @@ class TestRunRecording(unittest.TestCase):
             self.assertEqual(eng.resource_profile["profile"], "full")
 
 
+# ===================================================================================================
+# R2 — BALAYAGE ANTI-HARD-CODE : leviers de ressources RESTANTS câblés au résolveur.
+#   crawl_max_depth (injection.MAX_DEPTH) · llm_max_tokens/llm_num_ctx (llm.LLMConfig) · triage caps
+#   (triage.summary) · discovery_max_fanout (_discovery) · helper max_concurrent_procs (expose→R4).
+# Pour CHAQUE : (a) précédence override>profil>défaut ; (b) balanced == défaut-code AUJOURD'HUI (no-op) ;
+# (c) low ALLÈGE ; + gardes de câblage (le profil actif change la valeur EFFECTIVE au call-site).
+# ===================================================================================================
+from forge.llm import LLMConfig                                 # noqa: E402
+from forge.llm import LLMClient                                 # noqa: E402
+from forge.modules.injection import PathTraversal, _TRAVERSAL_TOKENS  # noqa: E402
+from forge import triage as T                                   # noqa: E402
+from forge.modules import _discovery                            # noqa: E402
+from forge.schema import Finding                                # noqa: E402
+
+
+class TestR2NewKnobsPrecedenceAndShape(unittest.TestCase):
+    """(a)(b)(c) au niveau TABLE/résolveur pour chaque levier R2 nouvellement câblé."""
+
+    _NEW = ("crawl_max_depth", "discovery_max_fanout", "llm_max_tokens",
+            "llm_num_ctx", "triage_max_items", "triage_max_clusters")
+
+    def test_precedence_override_beats_profile_beats_default(self):
+        with _EnvGuard():
+            for knob in self._NEW:
+                # override GAGNE partout
+                self.assertEqual(rp.resolve(knob, override=7, profile="low", default=999), 7)
+                # sans override : profil GAGNE sur défaut
+                self.assertEqual(rp.resolve(knob, profile="low", default=999),
+                                 rp.PROFILES["low"][knob])
+                # override chaîne d'env coercée en int
+                self.assertEqual(rp.resolve(knob, override="7", profile="low", default=999), 7)
+
+    def test_balanced_equals_todays_literals(self):
+        """(b) balanced == littéraux d'AUJOURD'HUI -> profil non défini = NO-OP byte-identique."""
+        bal = rp.PROFILES["balanced"]
+        self.assertEqual(bal["crawl_max_depth"], PathTraversal.MAX_DEPTH)          # 8
+        self.assertEqual(bal["discovery_max_fanout"], _discovery._MAX_DISCOVERED_SERVICES)   # 25
+        self.assertEqual(bal["discovery_max_fanout"], _discovery._MAX_PROBED_PORTS)          # 25
+        self.assertEqual(bal["llm_max_tokens"], LLMConfig().max_tokens)            # 512
+        self.assertEqual(bal["llm_num_ctx"], LLMConfig().num_ctx)                  # 0 (= non envoyé)
+        self.assertEqual(bal["triage_max_items"], 10)
+        self.assertEqual(bal["triage_max_clusters"], 20)
+
+    def test_low_reduces_each_knob(self):
+        low, bal = rp.PROFILES["low"], rp.PROFILES["balanced"]
+        # numériquement réduits : depth, fan-out, max_tokens, triage caps
+        for knob in ("crawl_max_depth", "discovery_max_fanout", "llm_max_tokens",
+                     "triage_max_items", "triage_max_clusters"):
+            self.assertLess(low[knob], bal[knob], knob)
+        # num_ctx : balanced=0 (aucune borne, défaut modèle) ; low IMPOSE une fenêtre FINIE (=> plus léger).
+        self.assertEqual(bal["llm_num_ctx"], 0)
+        self.assertGreater(low["llm_num_ctx"], 0)
+
+    def test_full_increases_each_knob(self):
+        full, bal = rp.PROFILES["full"], rp.PROFILES["balanced"]
+        for knob in self._NEW:
+            self.assertGreater(full[knob], bal[knob], knob)
+
+
+class TestR2InjectionDepthWiring(unittest.TestCase):
+    """crawl_max_depth CÂBLÉ dans injection.PathTraversal._payloads (call-site guard)."""
+
+    def _depth_of(self, payloads):
+        return len(payloads) // len(_TRAVERSAL_TOKENS)
+
+    def test_balanced_is_todays_depth(self):
+        with _EnvGuard():                                        # aucun profil -> balanced
+            n = self._depth_of(PathTraversal()._payloads(Action("path.traversal", "https://app.test/f")))
+            self.assertEqual(n, PathTraversal.MAX_DEPTH)         # 8 -> byte-identique
+
+    def test_low_reduces_depth(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            n = self._depth_of(PathTraversal()._payloads(Action("path.traversal", "https://app.test/f")))
+            self.assertEqual(n, rp.PROFILES["low"]["crawl_max_depth"])   # 2 < 8
+            self.assertLess(n, PathTraversal.MAX_DEPTH)
+
+    def test_explicit_param_override_wins_over_profile(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"          # profil low
+            a = Action("path.traversal", "https://app.test/f", params={"max_depth": 5})
+            self.assertEqual(self._depth_of(PathTraversal()._payloads(a)), 5)   # param GAGNE
+
+
+class TestR2LLMWiring(unittest.TestCase):
+    """llm_max_tokens / llm_num_ctx CÂBLÉS dans LLMConfig.from_dict + payload (call-site guard)."""
+
+    def _body(self, cfg):
+        req = LLMClient(cfg)._build_request([{"role": "user", "content": "u"}])
+        return json.loads(req.data)
+
+    def test_balanced_is_byte_identical(self):
+        with _EnvGuard():                                        # balanced
+            cfg = LLMConfig.from_dict({"enabled": True})         # ni max_tokens ni num_ctx fournis
+            self.assertEqual(cfg.max_tokens, 512)                # défaut-code
+            self.assertEqual(cfg.num_ctx, 0)
+            body = self._body(cfg)
+            self.assertEqual(body["max_tokens"], 512)
+            self.assertNotIn("options", body)                    # num_ctx NON envoyé -> payload inchangé
+
+    def test_low_lightens_llm(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            cfg = LLMConfig.from_dict({"enabled": True})         # loopback par défaut
+            self.assertEqual(cfg.max_tokens, 256)                # < 512
+            self.assertEqual(cfg.num_ctx, 2048)
+            body = self._body(cfg)
+            self.assertEqual(body["max_tokens"], 256)
+            self.assertEqual(body["options"]["num_ctx"], 2048)   # borne de contexte appliquée (loopback)
+
+    def test_explicit_scope_keys_win_over_profile(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            cfg = LLMConfig.from_dict({"enabled": True, "max_tokens": 999, "num_ctx": 4096})
+            self.assertEqual(cfg.max_tokens, 999)                # override scope GAGNE sur profil
+            self.assertEqual(cfg.num_ctx, 4096)
+
+    def test_num_ctx_not_sent_to_external_endpoint(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            cfg = LLMConfig.from_dict({"enabled": True, "base_url": "https://api.openai.com",
+                                       "allow_external": True})
+            self.assertEqual(cfg.num_ctx, 2048)
+            self.assertNotIn("options", self._body(cfg))         # jamais de param inconnu vers OpenAI strict
+
+
+class TestR2TriageCapsWiring(unittest.TestCase):
+    """triage_max_items / triage_max_clusters CÂBLÉS dans triage.triage() — coverage-safe INCHANGÉ."""
+
+    def _actionables(self, k):
+        return [Finding(target=f"h{i}.example.com/x{i}", title=f"IDOR distinct #{i}", severity="MEDIUM",
+                        category="CWE-639", status="tested", tool="oracle",
+                        evidence=f"preuve unique {i}") for i in range(k)]
+
+    def test_balanced_top_cap_is_ten(self):
+        with _EnvGuard():
+            res = T.triage(self._actionables(15))
+            self.assertEqual(len(res.summary["top_findings"]), 10)   # défaut-code
+            self.assertEqual(len(res.ranked), 15)                    # NEVER-DROP : tout conservé
+
+    def test_low_reduces_top_cap(self):
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            res = T.triage(self._actionables(15))
+            self.assertEqual(len(res.summary["top_findings"]), 5)    # allégé
+            self.assertEqual(len(res.ranked), 15)                    # NEVER-DROP préservé sous low
+
+
+class TestR2DiscoveryFanoutWiring(unittest.TestCase):
+    """discovery_max_fanout / crawl_max_endpoints CÂBLÉS dans _discovery (call-site guard)."""
+
+    def test_probe_cap_reflects_profile(self):
+        ports = list(range(8000, 8060))                          # 60 ports « ouverts »
+        fetch = lambda url: 200                                  # tout parle HTTP
+        with _EnvGuard():                                        # balanced -> 25
+            self.assertEqual(len(_discovery.http_confirmed_ports(fetch, "app.test", ports)),
+                             _discovery._MAX_PROBED_PORTS)
+        with _EnvGuard():
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"         # low -> 8
+            self.assertEqual(len(_discovery.http_confirmed_ports(fetch, "app.test", ports)),
+                             rp.PROFILES["low"]["discovery_max_fanout"])
+
+
+class TestR2MaxConcurrentProcsHelper(unittest.TestCase):
+    """max_concurrent_procs() — levier RÉSOLVABLE exposé pour l'enforcement R4 (pas codé en dur)."""
+
+    def test_resolves_per_profile_and_override(self):
+        with _EnvGuard():
+            self.assertEqual(rp.max_concurrent_procs(), 6)       # balanced (défaut-code)
+            os.environ["FORGE_RESOURCE_PROFILE"] = "low"
+            self.assertEqual(rp.max_concurrent_procs(), 2)       # low allège
+            os.environ["FORGE_RESOURCE_PROFILE"] = "full"
+            self.assertEqual(rp.max_concurrent_procs(), 16)
+            # override GAGNE sur le profil, et plancher >= 1 garanti
+            self.assertEqual(rp.max_concurrent_procs(override=3), 3)
+            self.assertEqual(rp.max_concurrent_procs(override="garbage"), 16)   # fail-through -> profil
+
+
+class TestR2GovernanceUntouched(unittest.TestCase):
+    """GOUVERNANCE : rate_per_sec reste DOCUMENTATION-ONLY (aucun câblage débit via le profil)."""
+
+    def test_rate_per_sec_is_documentation_only(self):
+        # présent dans la table (audit/doc) mais AUCUN module ne lit `rate_per_sec` : le débit reste
+        # porté par le scope/ROE. On garde la table cohérente sans jamais brancher la gouvernance.
+        self.assertIn("rate_per_sec", rp.PROFILES["balanced"])
+        self.assertEqual(rp.PROFILES["balanced"]["rate_per_sec"], 5)   # aligné défaut ROE, non imposé
+
+
 if __name__ == "__main__":
     unittest.main()
