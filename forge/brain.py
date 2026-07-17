@@ -67,6 +67,17 @@ class HeuristicBrain(Brain):
     # chaînées par proposition. La profondeur est bornée séparément par engine.max_waves.
     MAX_CHAIN_TARGETS = 32
 
+    # SET COMPLET des scanners de CONTENU HTTP chaînés sur un SERVICE WEB DÉCOUVERT (host:port). Le plan de
+    # base ne sème que httpx+nuclei sur un host web ; sur un port DÉCOUVERT (nmap/httpx/naabu/masscan), on
+    # chaîne TOUT le panel de contenu — sinon nikto/tech/waf/content/katana/gospider/testssl/security_headers
+    # ne l'atteignaient JAMAIS en AUTO (ils tapaient le bare :80). Chaque scanner est re-gaté par le ROE
+    # (host:port hors-scope -> VETO) et dégrade proprement s'il n'est pas HTTP. httpx/nuclei y figurent aussi
+    # (déjà semés par le plan de base -> dédupliqués par l'id d'action stable). Borné : ≤ MAX_CHAIN_TARGETS
+    # services découverts × ce set.
+    HTTP_CONTENT_SCANNERS = ("recon.httpx", "web.nuclei", "web.nikto", "recon.tech", "recon.waf",
+                             "recon.content", "recon.katana", "recon.gospider", "web.testssl",
+                             "web.security_headers")
+
     def propose(self, graph_state):
         graph = _as_graph(graph_state)
         out, seen = [], set()
@@ -259,6 +270,18 @@ class HeuristicBrain(Brain):
             if "http" in name and port:
                 out.append(_action("recon.httpx", f"{host}:{port}", value=0.4, confidence=0.6, cost=1,
                                     desc=f"fingerprint service {port} (chaîné depuis nmap)"))
+
+        # (g) SERVICE WEB DÉCOUVERT (host:port émis par nmap/httpx/naabu/masscan avec DISCOVERY_SERVICE_MARKER)
+        # -> chaîner le SET COMPLET des scanners de CONTENU HTTP sur ce service, pas juste httpx+nuclei du
+        # plan de base. C'est le correctif du trou E1 : un port découvert n'était scanné (en AUTO) que par
+        # httpx+nuclei ; nikto/tech/waf/content/katana/gospider/testssl/security_headers ne l'atteignaient
+        # jamais et tapaient le bare :80. `host` EST le host:port (nœud dérivé). Chaque scanner est re-gaté
+        # par le ROE à la vague suivante (host:port hors-scope -> VETO), dégrade proprement si non-HTTP (C1),
+        # et l'id d'action stable dédoublonne httpx/nuclei déjà semés. Borné (≤ MAX_CHAIN_TARGETS × le set).
+        if self._discovery_marker(graph, host) == techniques.DISCOVERY_SERVICE_MARKER:
+            for kind in self.HTTP_CONTENT_SCANNERS:
+                out.append(_action(kind, host, value=0.4, confidence=0.5, cost=1,
+                                   desc=f"scanner de contenu HTTP sur service découvert {host} (chaîné)"))
 
         # (c) WAF/CDN identifié (finding recon.waf) -> la cible est PROTÉGÉE : proposer les enablers
         # d'évasion (accès derrière CDN/WAF) sur ce host. Chaîné depuis le fingerprint, planner-selectable.
