@@ -71,6 +71,10 @@ CATALOG_SPECS = [
             {"name": "max_depth", "type": "number", "label": "profondeur max (-max-depth)", "flag": "-max-depth"},
             _EXTRA),
         flag_allowlist=("-passive", "-norecursive", "-timeout", "-max-depth", "-rqps", "-nolocaldb"),
+        # amass v4 `enum` DÉMARRE un daemon `amass engine` DÉTACHÉ (pprof exposé sur :6060) qui SURVIT à la
+        # fin de l'enum et échappe au reap par groupe de processus -> reap_daemon=True : run sous HOME privé
+        # + marqueur unique, le moteur fuité est terminé de façon ciblée après l'exécution (cf. _daemon_reap).
+        reap_daemon=True,
         description="Énumération de sous-domaines (OWASP amass, mode passif) — assets re-validés scope."),
     ToolSpec(
         kind="recon.dnsx", vuln_class="Recon", binary="dnsx",

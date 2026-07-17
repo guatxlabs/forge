@@ -38,13 +38,18 @@ def available(binary, docker_image=None, prefer_docker=False):
     return bool(shutil.which(binary)) or (docker_image is not None and bool(shutil.which("docker")))
 
 
-def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
+def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120, env=None):
     """Exécute. Retourne (returncode, stdout, stderr). 127 si indisponible, 124 si timeout.
 
     `prefer_docker` n'est qu'une PRÉFÉRENCE d'ordre : avec prefer_docker -> docker d'abord, REPLI
     sur le binaire local présent si docker est absent ; sans prefer_docker -> binaire local d'abord,
     sinon docker. 127 (indisponible) UNIQUEMENT si NI docker NI binaire local n'est présent — on ne
-    refuse plus un outil pourtant exécutable localement sous prétexte qu'il est dockerisé."""
+    refuse plus un outil pourtant exécutable localement sous prétexte qu'il est dockerisé.
+
+    `env` (optionnel) : environnement COMPLET du process enfant (dict). None (défaut) -> l'enfant
+    HÉRITE de l'environnement courant (comportement historique, byte-identique). Un appelant qui doit
+    marquer/isoler l'enfant (cf. `_daemon_reap.reaping_env` : HOME privé + FORGE_RUN_MARKER pour reaper
+    un daemon fuité) passe un dict `os.environ`-dérivé — jamais un env partiel (PATH doit rester)."""
     args = list(args or [])
     docker_ok = docker_image and shutil.which("docker")
     # Résolution PATH via shutil.which : gère les suffixes .exe/.bat/.cmd (PATHEXT) sous Windows,
@@ -65,7 +70,7 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120)
     if cmd is None:
         return (127, "", f"indisponible: ni binaire '{binary}' ni docker pour l'image '{docker_image}'")
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return (p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired:
         return (124, "", f"timeout après {timeout}s")
