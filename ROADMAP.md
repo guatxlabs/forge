@@ -64,6 +64,15 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 ## 🛡️ Round 3 — feature sécurité réseau (F4)
 - **C20 / F4 — Politique réseau deux-portes (scan réseau client sans devenir une faille)** : pour qu'un pentester puisse scanner du privé/LAN/loopback sans que Forge soit une surface d'attaque sur le réseau client. **Modèle 3 portes cumulatives** : (1) interrupteur **global** `network.allow_private` (OFF par défaut, admin, ledgerisé — kill-switch instantané sans down/up) ; (2) opt-in **par-engagement** (isolation) ; (3) scope fail-closed. `effective = global && engagement`, écrit dans `scope.json`. **Enforcement 2 couches** : Rust `run_create` (IP littérale → `400 private_target_blocked`) + moteur `roe.py` (résout hostnames via getaddrinfo → VETO ceux pointant vers du privé = anti-rebinding/SSRF). **Compose durci** : `network_mode: host` + `FORGE_CONSOLE_ADDR=127.0.0.1:7100` (loopback strict, jamais 0.0.0.0 — prouvé : console inaccessible depuis l'IP LAN 192.168.1.38:7100 → 000). **F1 complété** : `Permissions-Policy` ajouté. UI : toggle global danger-styled + case par-engagement. E2E prouvé bloqué(400)→débloqué(202), fail-closed prouvé, 349 tests Rust + 1208 Python. **✅ `38aa635`**
 
+## 🎯 Couverture de scan — chaîne A→C3 (issue du tir comparatif Forge vs manuel, validée en live)
+Le tir comparatif T14 (post-remédiation) a montré 2 écarts Forge vs scan manuel → corrigés et **confirmés en live sur la propre console** :
+- **A (`de3571e`)** — `recon.nmap` param `full_ports` → `-p-` (range complet) ; défaut top-1000 inchangé. Live : 11-13 ports = identique au manuel `-p-`.
+- **B (`58e67ea`)** — planner : les modules **explicitement sélectionnés** ne sont plus déférés en silence (root cause : le brain ne les proposait jamais → intersection vide). `_directive_actions` les tire contre la surface. Auto-mode inchangé, gouvernance intacte.
+- **C1 (`4e27d41`)** — `web.security_headers` (+ recon.tech/waf) ne crash plus sur host nu : normalisation URL (`host`→`http://host`, `host:port`, fallback https) via `web_url_candidates`.
+- **C2 (`98a957b`)** — `recon.nmap/httpx` émettent une découverte par service web (`host:port`) → devient nœud du graphe → les modules web explicites chaînent dessus (vague ultérieure). Endpoint hors-scope découvert → VETO.
+- **C3 (`031d0fd`)** — pivot élargi : httpx **confirme HTTP** les ports ouverts que nmap mal-classe (ex: `:7100` fingerprinté `font-service?` à cause du 421 anti-rebinding) → les modules web les couvrent. VNC/non-HTTP filtrés (probe→None). Borné ≤25.
+- **Validation live** : `web.security_headers` FIRE sur `127.0.0.1:7100` découvert → **verdict PROPRE véridique** (curl confirme les en-têtes F1). Forge couvre désormais les services web même quand nmap ne les reconnaît pas.
+
 ## 🔍 Audit holistique multi-agents (2026-07) → remédiation
 Rapport complet : [`docs/HOLISTIC_AUDIT.md`](docs/HOLISTIC_AUDIT.md). 54 agents (find → vérif adverse → synthèse), **31 findings confirmés** (42 bruts) : **0 critique · 1 HIGH · 7 MEDIUM · 20 LOW · 3 INFO**. Posture globalement saine (garde-fous cœur cohérents) ; défauts = écarts d'uniformité concentrés sur 3 thèmes.
 
