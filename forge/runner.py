@@ -13,6 +13,47 @@ import subprocess
 # dépassement de timeout (miroir de `_daemon_reap.reap_marker` : term gracieux d'abord, kill ferme).
 _TERM_GRACE = 5
 
+# REGISTRE DES GROUPES D'OUTILS VIVANTS (fix E4) — chaque outil tourne dans sa PROPRE session
+# (`start_new_session=True`) : un SIGTERM whole-run (cancel/watchdog de la console) atteint le moteur
+# Forge mais PAS ces sessions séparées. Un `nuclei` en cours SURVIVRAIT donc au cancel (orphelin
+# reparenté à init) — c'est le hard-kill manuel qu'il fallait faire à la main (T29). On tient donc un
+# registre des pgid d'outils en vol pour que le handler SIGTERM du moteur (`forge/cli/engine.py`) les
+# coupe EXPLICITEMENT et ne laisse AUCUN survivant. Set nu (pas de lock) : mutations et lecture-reap
+# sont dans le MÊME thread (POSIX : `communicate()` = select, pas de threads) — le handler de signal
+# s'exécute lui aussi dans le thread principal, à une frontière de bytecode ; `set.add/discard` et le
+# snapshot `list(...)` sont atomiques sous GIL. Pas de lock -> aucun risque de deadlock en contexte
+# handler (un Lock non-réentrant pris par le thread principal au moment du signal se bloquerait lui-même).
+_LIVE_TOOL_PGIDS = set()
+
+
+def _register_tool_pgid(pgid):
+    """Enregistre le groupe d'un outil qui vient d'être lancé (pgid == pid du leader, cf. start_new_session)."""
+    _LIVE_TOOL_PGIDS.add(pgid)
+
+
+def _unregister_tool_pgid(pgid):
+    """Retire le groupe d'un outil terminé/récolté (best-effort : discard ne lève pas si déjà absent)."""
+    _LIVE_TOOL_PGIDS.discard(pgid)
+
+
+def terminate_live_tool_groups(force=True):
+    """Coupe TOUS les groupes d'outils encore en vol — appelé par le handler SIGTERM du moteur sur un
+    cancel/watchdog whole-run (fix E4). Sans ça, les outils en SESSIONS séparées (start_new_session)
+    survivent au SIGTERM du groupe moteur. `force=True` -> SIGKILL immédiat (un cancel doit STOPPER NET ;
+    le travail déjà collecté est flushé par D1 au checkpoint, l'outil en vol n'a rien rendu de toute façon).
+
+    ASYNC-SIGNAL-SAFE : snapshot `list(...)` sans lock (cf. `_LIVE_TOOL_PGIDS`), `os.killpg` = un seul
+    syscall, ne lève jamais (process/groupe déjà mort -> ProcessLookupError/OSError avalé). PORTABLE : sans
+    `os.killpg`/`SIGKILL` (Windows) -> no-op (pas de groupes POSIX ; documenté)."""
+    if not (hasattr(os, "killpg") and hasattr(signal, "SIGKILL")):
+        return
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    for pgid in list(_LIVE_TOOL_PGIDS):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, OSError):
+            pass
+
 
 def cmdline(binary, docker_image=None, args=None, prefer_docker=False):
     """Chaîne de commande (pour dry-run / PoC) — ne lance rien.
@@ -123,20 +164,27 @@ def _spawn_and_wait(cmd, timeout, env):
                                 text=True, env=env, start_new_session=True)
     except Exception as e:  # noqa: BLE001
         return (1, "", f"erreur d'exécution: {e!r}")
+    # ENREGISTRE le groupe de l'outil (pgid == pid : leader de sa session) pour qu'un cancel/watchdog
+    # whole-run puisse le couper malgré sa session séparée (fix E4). `finally` -> retiré à coup sûr, que
+    # l'outil sorte normalement, timeoute ou lève (jamais de pgid réutilisé qui traînerait au registre).
+    _register_tool_pgid(proc.pid)
     try:
-        out, err = proc.communicate(timeout=timeout)
-        return (proc.returncode, out, err)
-    except subprocess.TimeoutExpired:
-        _terminate_group(proc)                                  # SIGTERM au GROUPE (fermeture propre)
         try:
-            out, err = proc.communicate(timeout=_TERM_GRACE)
+            out, err = proc.communicate(timeout=timeout)
+            return (proc.returncode, out, err)
         except subprocess.TimeoutExpired:
-            _terminate_group(proc, force=True)                  # dernier ressort : SIGKILL du GROUPE
+            _terminate_group(proc)                              # SIGTERM au GROUPE (fermeture propre)
             try:
                 out, err = proc.communicate(timeout=_TERM_GRACE)
             except subprocess.TimeoutExpired:
-                out, err = "", ""                               # drain impossible -> on rend la main quand même
-        return (124, out or "", f"timeout après {timeout}s (groupe de process terminé)")
-    except Exception as e:  # noqa: BLE001
-        _terminate_group(proc, force=True)
-        return (1, "", f"erreur d'exécution: {e!r}")
+                _terminate_group(proc, force=True)              # dernier ressort : SIGKILL du GROUPE
+                try:
+                    out, err = proc.communicate(timeout=_TERM_GRACE)
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""                           # drain impossible -> on rend la main quand même
+            return (124, out or "", f"timeout après {timeout}s (groupe de process terminé)")
+        except Exception as e:  # noqa: BLE001
+            _terminate_group(proc, force=True)
+            return (1, "", f"erreur d'exécution: {e!r}")
+    finally:
+        _unregister_tool_pgid(proc.pid)

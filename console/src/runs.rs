@@ -590,11 +590,22 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
         let _ = store.execute("UPDATE run_job SET status='cancelled' WHERE run_id=? AND status='running'", &crate::sql_params![&id]);
     }
     let actor = attribution_login(&app, &headers);
-    push_run_log(&app, &id, "system", &format!("cancel demandé par '{actor}' — kill group"));
+    push_run_log(&app, &id, "system", &format!("cancel demandé par '{actor}' — kill group (SIGTERM→SIGKILL)"));
     // ledger de L'ENGAGEMENT propriétaire du run (isolation) — pas systématiquement App.ledger_path.
     let cancel_ledger = engagement_ledger_for_run(&app, &id);
     append_run_ledger_path(&app, &cancel_ledger, "console.run.cancel", json!({"run_id": id, "actor": actor, "by": "operator"}));
+    // ARRÊT RÉEL DU MOTEUR (fix E4) — un cancel ne se contentait que de marquer la base : le moteur
+    // détaché continuait de tourner (il relançait des outils). On coupe VRAIMENT :
+    //   1) SIGTERM IMMÉDIAT au GROUPE (`kill_group`) — le handler D1 du moteur flushe le travail en vol
+    //      (findings/couverture partielle) puis sort proprement ; son handler reape aussi ses outils en
+    //      SESSIONS séparées (start_new_session) qui, sinon, ÉCHAPPENT au SIGTERM whole-run.
+    //   2) ESCALADE SIGKILL après grâce (`escalate_kill_group`, DÉTACHÉE pour ne pas bloquer le handler
+    //      HTTP) : si le moteur est wedgé et ne sort pas dans les temps, le SIGKILL du groupe le tue à
+    //      coup sûr. Le superviseur récolte l'enfant (`child.wait`) et préserve le statut 'cancelled'
+    //      déjà posé. Idempotent/fail-safe : pgid déjà mort -> signaux avalés (ESRCH), aucun panic.
     kill_group(pgid);
+    let grace = std::time::Duration::from_secs(crate::runs_proc::CANCEL_GRACE_SECS);
+    tokio::spawn(async move { crate::runs_proc::escalate_kill_group(pgid, grace).await; });
     (StatusCode::OK, Json(json!({"run_id": id, "status": "cancelling"})))
 }
 
