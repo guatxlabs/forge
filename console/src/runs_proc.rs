@@ -319,6 +319,14 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if let Some(t) = &token { cmd.env("FORGE_CONSOLE_TOKEN", t); }
+    // R3 — RESSOURCES : threade le profil + les overrides par-levier via les env vars que le MOTEUR lit
+    // DÉJÀ (FORGE_RESOURCE_PROFILE / FORGE_PARALLELISM / FORGE_RUN_TIMEOUT / FORGE_TOOLS_PROFILE).
+    // PRÉCÉDENCE préservée : un champ non renseigné => AUCUNE variable posée => défaut du profil (ou
+    // défaut-code). `balanced` sans override => vecteur VIDE => aucune variable => byte-identique.
+    // CHOIX DE RESSOURCE PUR : aucune bascule de scope/ROE/exploit — voir ResourceOptions.
+    for (k, v) in spec.resource.env_pairs() {
+        cmd.env(k, v);
+    }
     #[cfg(unix)]
     spawn_setsid(&mut cmd);
 
@@ -518,7 +526,7 @@ mod scope_doc_contract_tests {
             auto_pentest: false, reason: String::new(), arm: false, high_impact,
             started_by: "op".into(), actor: "op".into(), selection: json!({}),
             disabled_modules: vec![], body_targets: json!(["10.0.0.5"]), rate: None,
-            allow_private,
+            allow_private, resource: Default::default(),
         }
     }
 

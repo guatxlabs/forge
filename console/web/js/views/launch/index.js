@@ -20,6 +20,7 @@ import { LC_LIVE, followRun, lcStopLive, probeC2State, reattachRunningRun } from
 import { loadRuns } from './runs-list.js';
 import { cancelRun, submitRun } from './submit.js';
 import { lcApproveAndRun, lcDryPlan, lcScopeAddTarget, lcScopeCheck, lcSyncApproveBtn } from './scope-plan.js';
+import { renderResourceProfile } from './resource.js';
 
 // Surface publique du package (importée par d'autres vues / core) — index.js est le point d'entrée
 // unique qui remplace l'ancien js/views/launch.js :
@@ -52,6 +53,8 @@ if ($('#lc-runstatus')) $('#lc-runstatus').addEventListener('change', loadRuns);
 if ($('#lc-runreload')) $('#lc-runreload').addEventListener('click', loadRuns);
 // formulaire de lancement + annulation.
 if ($('#lc-runform')) $('#lc-runform').addEventListener('submit', submitRun);
+// RESSOURCES (R3) : rendu initial (description + leviers read-only + placeholders) et resync au change.
+if ($('#lc-resprofile')) { $('#lc-resprofile').addEventListener('change', renderResourceProfile); renderResourceProfile(); }
 if ($('#lc-cancel')) $('#lc-cancel').addEventListener('click', cancelRun);
 // secret opérateur : capté en mémoire de session uniquement (l'input ne reste pas porteur du secret).
 if ($('#lc-operator')) $('#lc-operator').addEventListener('input', e => { setOperatorSecret(e.target.value); lcSyncDanger(); });

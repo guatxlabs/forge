@@ -956,6 +956,15 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 /* Lancement C2 — styles locaux (réutilisent les variables de thème) */
 .lc-lbl{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
 .lc-modblock{display:flex;flex-direction:column;gap:8px}
+/* R3 — profil de ressources + overrides (disclosure). */
+.lc-resadv{border:1px solid var(--bd);border-radius:11px;padding:6px 12px 12px;margin:2px 0}
+.lc-resadv>summary{cursor:pointer;font-size:13px;font-weight:600;padding:6px 0;list-style:revert}
+.lc-resadv[open]>summary{margin-bottom:4px}
+.lc-resknobs{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.lc-respresets{border-collapse:collapse;font-size:12px;max-width:420px}
+.lc-respresets th{text-align:left;font-weight:500;color:var(--mut);padding:3px 14px 3px 0;white-space:nowrap}
+.lc-respresets td{font-family:var(--font-mono);padding:3px 0}
+.lc-respresets tr+tr th,.lc-respresets tr+tr td{border-top:1px solid color-mix(in srgb,var(--bd) 55%,transparent)}
 .lc-modlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
 .lc-modbulk{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
 .lc-modbulk .k-theme{padding:3px 8px;font-size:11px}

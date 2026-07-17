@@ -282,6 +282,12 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
     // normal (scope-guard, plancher exploit, ledger). Ne CHANGE aucun garde-fou : il ne fait qu'élargir
     // le PLAN à l'ensemble effectif du scope (le moteur le re-filtre et le ROE le gate). Défaut : false.
     let auto_pentest = body.get("auto_pentest").and_then(|v| v.as_bool()).unwrap_or(false);
+    // RESSOURCES (R3) — profil `low|balanced|full` + overrides par-levier (parallélisme / run-timeout /
+    // tools-profile), threadés au moteur via les env vars que R1 lit déjà (précédence override>profil>
+    // défaut). CHOIX DE RESSOURCE UNIQUEMENT : ne touche NI le scope, NI le ROE, NI le plancher exploit,
+    // NI l'auth (gate operator déjà passé). Fail-open (champ invalide => None => défaut du profil) ;
+    // `balanced` sans override => tout None => AUCUNE variable posée => comportement byte-identique.
+    let resource = parse_resource_options(&body);
     // `reason`, `arm` et `allow_high_impact`/`high_impact` ont été parsés/évalués plus haut (le gate
     // les exige avant validate_modules). `arm` reste journalisé ; sans opt-in haut-impact honoré il
     // est inerte côté capacité (le scope écrit ci-dessous force allow_*=false dans ce cas).
@@ -335,6 +341,7 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         body_targets: body.get("targets").cloned().unwrap_or(json!([])),
         rate,
         allow_private: allow_private_effective,
+        resource,
     };
 
     // ─── BRANCHEMENT RUN-LEADER (HA #10 Wave B) ──────────────────────────────────────────────────────
