@@ -422,6 +422,49 @@ class Engine:
                 a.params.setdefault("rate_delay_dur", f"{max(1, round(1000.0 / rf))}ms")
         return actions
 
+    def _directive_actions(self, proposed: list[Action], modules: "Iterable[str] | None") -> list[Action]:
+        """DIRECTIVE de sélection EXPLICITE : un module listé dans `--modules` est un ORDRE, pas une
+        suggestion. Le cerveau heuristique ne PROPOSE qu'une poignée de kinds par host (httpx/nuclei/
+        oracles/seeds) ; un kind explicitement demandé qu'il ne propose pas (ex. web.security_headers —
+        jamais proposé — ou recon.tech/recon.waf — proposés SEULEMENT après une découverte de
+        sous-domaine) n'entrait JAMAIS dans le plan et retombait SILENCIEUSEMENT dans `not_planned`
+        (« surface non concordante »), même quand la recon venait de découvrir une surface web.
+
+        Ici, pour CHAQUE kind explicitement demandé mais NON déjà proposé sur une cible, on émet une
+        action sur CHAQUE cible NON-endpoint que le plan touche (hosts initiaux + surface DÉCOUVERTE :
+        IP d'origine, host:port) — EXACTEMENT le périmètre sur lequel `web.nuclei` est proposé (raison
+        pour laquelle nuclei tirait et pas les autres). Le module DÉCIDE ensuite : il tire, ou dégrade
+        en `skipped`/`tested` visible s'il n'a pas de surface — jamais un report silencieux.
+
+        NO-OP en mode AUTO (`modules` vide/None) : le cerveau + le planner coverage-safe restent seuls
+        juges (EV-ordering + plancher qualifiant inchangés). N'ÉLARGIT AUCUN pouvoir : chaque directive
+        repasse par `_prepare` (filtre `enabled_kinds` par-scope), puis `execute` (scope-guard, connecteur
+        désactivé, technique désélectionnée, ROE, plancher exploit) — la gouvernance reste seule à tirer.
+        Idempotent : l'id d'action est stable (kind:target) -> jamais rejoué entre vagues."""
+        wanted = [m for m in (modules or []) if m]
+        if not wanted:
+            return []                                    # mode AUTO : comportement byte-identique
+        from .brain import HeuristicBrain, _action       # import paresseux (évite tout cycle au chargement)
+        have = {a.id for a in proposed}
+        targets: list[str] = []
+        seen_t: set[str] = set()
+        for a in proposed:
+            t = a.target
+            # même surface que web.nuclei : hosts / host:port / IP d'origine — PAS les endpoints à chemin
+            # (ceux-là sont vérifiés par les oracles ciblés du chaînage, edge (e), pas par les modules host).
+            if t in seen_t or HeuristicBrain._is_endpoint(t):
+                continue
+            seen_t.add(t)
+            targets.append(t)
+        extra: list[Action] = []
+        for tgt in targets:
+            for kind in wanted:
+                aid = f"{kind}:{tgt}"
+                if aid not in have:
+                    have.add(aid)
+                    extra.append(_action(kind, tgt, desc=f"sélection explicite (--modules) : {kind}"))
+        return extra
+
     def campaign(self, targets: list[Target], brain: Any, planner: Planner,
                  modules: "Iterable[str] | None" = None,
                  module_params: dict[str, Any] | None = None, max_waves: int = 4) -> dict[str, Any]:
@@ -464,6 +507,11 @@ class Engine:
         while waves < max_waves:
             # le cerveau lit l'ÉTAT (graphe enrichi par la vague précédente), pas juste les cibles.
             proposed = brain.propose(self.graph)
+            # DIRECTIVE de sélection EXPLICITE (--modules) : un kind demandé que le cerveau ne propose
+            # PAS sur la surface qu'il travaille (ex. web.security_headers/recon.tech/recon.waf, jamais
+            # dans le plan heuristique de base) est AJOUTÉ sur cette surface AVANT le filtre de _prepare
+            # — sinon il retombait silencieusement dans `not_planned`. NO-OP en mode AUTO (modules vide).
+            proposed = proposed + self._directive_actions(proposed, modules)
             proposed = self._prepare(proposed, modules, global_params, attrs_by_host)
             # NOUVELLES actions seulement (idempotence : on ne rejoue pas une action déjà planifiée).
             fresh = [a for a in proposed if a.id not in executed_ids]
