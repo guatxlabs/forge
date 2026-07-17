@@ -18,6 +18,7 @@ Zéro dépendance (stdlib) — cohérent avec le cœur Forge. Toutes les fonctio
 """
 import ipaddress
 import re
+import urllib.parse
 
 from .oracle import Oracle
 from .. import techniques
@@ -28,6 +29,7 @@ from .. import techniques
 _STANDARD_WEB_PORTS = frozenset({80, 443})
 _MAX_DISCOVERED_SERVICES = 25            # borne le fan-out (un scan -p- ne doit pas exploser le plan)
 _MAX_PROBED_PORTS = 25                   # borne les sondes de CONFIRMATION HTTP (un -p- peut ouvrir bcp de ports)
+_MAX_DISCOVERED_ENDPOINTS = 25           # borne le fan-out d'un CRAWL (katana/gospider/gau) — style ≤25/≤32
 
 # Extraction de ports depuis la sortie hétérogène des scanners de ports (déjà PARSÉE en « hits ») :
 #  - masscan : « Discovered open port 8000/tcp on 127.0.0.1 » ;
@@ -134,6 +136,56 @@ def service_discovery_findings(module, action, ports, tool):
             poc=f"# {tool} : service web exposé sur {hp}"))
         if len(out) >= _MAX_DISCOVERED_SERVICES:
             break
+    return out
+
+
+def _looks_http_url(u):
+    """True si `u` est une URL http(s) ABSOLUE (candidat d'endpoint chaînable). Pur, ne lève jamais."""
+    return str(u).strip().lower().startswith(("http://", "https://"))
+
+
+def _has_query_param(u):
+    """True si l'URL porte au moins un paramètre de query `?k=v` (donc INJECTABLE via param). Pur."""
+    try:
+        return bool(urllib.parse.parse_qsl(urllib.parse.urlsplit(str(u)).query))
+    except Exception:            # noqa: BLE001
+        return False
+
+
+def endpoint_discovery_findings(module, action, urls, tool):
+    """Convertit les URLs CRAWLÉES (katana/gospider/gau) en findings de DÉCOUVERTE D'ENDPOINT
+    chaînables : chaque URL http(s) IN-SCOPE devient un NŒUD du graphe (target=URL, marqueur
+    DISCOVERY_ENDPOINT_MARKER) que le cerveau CHAÎNE vers les oracles à injection (edge e — il en
+    extrait le paramètre de query et SONDE RÉELLEMENT au lieu d'émettre « config manquante »), AU
+    LIEU d'un simple finding texte par-URL rattaché à l'hôte (jamais vérifié).
+
+    Garde-fous :
+      - RE-VALIDÉ fail-closed contre le périmètre injecté (`module._scope`) : une URL dont l'hôte
+        sort du scope n'est JAMAIS émise (le matériel/réseau ne peut physiquement pas fuir) ;
+      - INJECTABLES D'ABORD : les URLs porteuses d'un paramètre de query (`?k=v`) sont priorisées
+        (tri STABLE) avant celles sans query -> le cap ne sacrifie pas la surface injectable ;
+      - dédupliqué (ordre préservé), borné à `_MAX_DISCOVERED_ENDPOINTS` (un crawl volumineux ne
+        doit pas exploser le plan). Pur, ne lève jamais."""
+    enforce, sc = module._scope(action)
+    seen, cleaned = set(), []
+    for u in urls:
+        s = str(u).strip().rstrip('\\",\')')
+        if not _looks_http_url(s) or s in seen:
+            continue
+        if enforce and not sc.is_in_scope(s):        # fail-closed : jamais un endpoint hors périmètre
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    cleaned.sort(key=lambda u: 0 if _has_query_param(u) else 1)   # stable : injectables d'abord
+    out = []
+    for u in cleaned[:_MAX_DISCOVERED_ENDPOINTS]:
+        out.append(module.finding(
+            target=u, title=f"{techniques.DISCOVERY_ENDPOINT_MARKER} : {u}",
+            severity="INFO", category="recon", mitre=getattr(module, "mitre", ""), status="tested",
+            tool=tool,
+            evidence=(f"Endpoint in-scope découvert par {tool} ({u}) — nouvelle surface chaînable : le "
+                      f"cerveau y branche les oracles à injection (paramètre de query -> sonde réelle)."),
+            poc=f"# {tool} : endpoint in-scope à vérifier -> {u}"))
     return out
 
 

@@ -128,8 +128,12 @@ CATALOG_SPECS = [
             _EXTRA),
         flag_allowlist=("-jc", "-jsl", "-d", "-rl", "-c", "-p", "-ct", "-kf", "-silent",
                         "-xhr-extraction", "-iqp"),
-        description="Crawler d'endpoints (katana) — URLs découvertes, re-validées scope fail-closed. "
-                    "js-crawl (-jc) et known-files (-kf) via extra_args allowlistés."),
+        # DÉCOUVERTE D'ENDPOINT : chaque URL crawlée in-scope devient une cible CHAÎNABLE (URL +
+        # DISCOVERY_ENDPOINT_MARKER) que le cerveau branche aux oracles à injection (paramètre de query ->
+        # sonde RÉELLE au lieu de « config manquante ») — au lieu d'un simple finding texte jamais vérifié.
+        emit_endpoint_discovery=True,
+        description="Crawler d'endpoints (katana) — URLs découvertes, re-validées scope fail-closed, émises "
+                    "comme endpoints CHAÎNABLES (-> oracles à injection). js-crawl (-jc)/known-files (-kf) allowlistés."),
     ToolSpec(
         kind="recon.gau", vuln_class="Recon", binary="gau",
         argv_template=("--subs", ("--threads", "{param:threads}"), ("--providers", "{param:providers}"),
@@ -149,8 +153,11 @@ CATALOG_SPECS = [
         # SKIP CIBLE IP-LITTÉRALE : les archives (Wayback/CommonCrawl) sont indexées par NOM de domaine —
         # une IP nue n'a aucune archive utile (que du bruit) -> skip propre, aucun processus lancé.
         skip_bare_ip=True,
-        description="URLs d'archive (getallurls/gau : Wayback/CommonCrawl) — assets historiques re-validés scope. "
-                    "Skip propre sur une cible IP littérale (archives indexées par domaine)."),
+        # DÉCOUVERTE D'ENDPOINT : les URLs d'archive in-scope deviennent des endpoints CHAÎNABLES (-> oracles
+        # à injection) au lieu de simples findings texte — les URLs d'archive portent souvent `?param=` legacy.
+        emit_endpoint_discovery=True,
+        description="URLs d'archive (getallurls/gau : Wayback/CommonCrawl) — assets historiques re-validés scope, "
+                    "émis comme endpoints CHAÎNABLES (-> oracles à injection). Skip propre sur cible IP littérale."),
     ToolSpec(
         kind="recon.gospider", vuln_class="Recon", binary="gospider",
         argv_template=("-q", "-s", "{target_url}", ("-d", "{param:depth}"), ("-c", "{param:concurrency}"),
@@ -167,7 +174,10 @@ CATALOG_SPECS = [
             _EXTRA),
         flag_allowlist=("-d", "-c", "-t", "-k", "-K", "-m", "-a", "-w", "-r", "--js",
                         "--blacklist", "--whitelist", "-L", "-q", "-s"),
-        description="Crawler web (gospider) — URLs découvertes, re-validées scope fail-closed."),
+        # DÉCOUVERTE D'ENDPOINT : URLs crawlées in-scope -> endpoints CHAÎNABLES (-> oracles à injection).
+        emit_endpoint_discovery=True,
+        description="Crawler web (gospider) — URLs découvertes, re-validées scope fail-closed, émises comme "
+                    "endpoints CHAÎNABLES (-> oracles à injection)."),
     ToolSpec(
         kind="recon.feroxbuster", vuln_class="ContentDiscovery", binary="feroxbuster",
         argv_template=("--silent", "-u", "{target_url}", ("-w", "{param:wordlist}"),
