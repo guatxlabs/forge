@@ -81,7 +81,8 @@ class ToolSpec:
         "attck_tactic", "proof_required", "bug_bounty_eligible", "exploit", "destructive", "cls",
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
-        "params_schema", "flag_allowlist", "emit_service_discovery", "skip_bare_ip", "reap_daemon",
+        "params_schema", "flag_allowlist", "emit_service_discovery", "emit_endpoint_discovery",
+        "skip_bare_ip", "reap_daemon",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -90,7 +91,8 @@ class ToolSpec:
                  tools=(), docker_image="", prefer_docker=False, timeout=300, parser="lines",
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
                  hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
-                 emit_service_discovery=False, skip_bare_ip=False, reap_daemon=False):
+                 emit_service_discovery=False, emit_endpoint_discovery=False, skip_bare_ip=False,
+                 reap_daemon=False):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -132,6 +134,12 @@ class ToolSpec:
         # le `host:port` devient un NŒUD chaînable (le cerveau y sème fingerprint/oracles/scanners de
         # contenu), EXACTEMENT comme recon.nmap/httpx. Défaut False (les autres outils n'en émettent pas).
         self.emit_service_discovery = bool(emit_service_discovery)
+        # DÉCOUVERTE D'ENDPOINT : un CRAWLER (katana/gospider) ou un lister d'URLs (gau) émet, au lieu d'un
+        # simple finding texte par-URL rattaché à l'hôte, un finding de découverte porteur du marqueur
+        # `DISCOVERY_ENDPOINT_MARKER` par URL in-scope -> chaque endpoint devient un NŒUD chaînable que le
+        # cerveau branche aux oracles à injection (le paramètre de query -> sonde RÉELLE au lieu de « config
+        # manquante »). Re-validé fail-closed, injectables priorisés, borné. Défaut False (byte-identique).
+        self.emit_endpoint_discovery = bool(emit_endpoint_discovery)
         # SKIP CIBLE IP-LITTÉRALE : un module d'ARCHIVE WEB (gau/Wayback) ne trouve RIEN d'utile sur une IP
         # nue (les archives sont indexées par NOM de domaine) -> skip propre, aucun processus lancé (au lieu
         # d'un flot d'URLs d'archive bruitées). Défaut False.
@@ -578,7 +586,15 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                 evidence=(err or "timeout")[:500])]
         # (6) PARSING PROOF-ORIENTED — les hits deviennent tested/reported_by_tool, JAMAIS vulnerable.
         hits = parse_output(s, rc, out, err)
-        findings = self._hits_to_findings(action, hits)
+        # (6a) DÉCOUVERTE D'ENDPOINT (crawlers katana/gospider/gau) : chaque URL crawlée in-scope devient un
+        # NŒUD chaînable (marqueur DISCOVERY_ENDPOINT_MARKER, target=URL) que le cerveau branche aux oracles
+        # à injection (le paramètre de query -> sonde RÉELLE au lieu de « config manquante »), AU LIEU d'un
+        # simple finding texte par-URL jamais vérifié. Re-validé fail-closed, injectables priorisés, borné.
+        # Sans le flag -> chemin HISTORIQUE (`_hits_to_findings`) BYTE-IDENTIQUE.
+        if s.emit_endpoint_discovery:
+            findings = self._endpoint_discovery(action, hits)
+        else:
+            findings = self._hits_to_findings(action, hits)
         # (6b) DÉCOUVERTE DE SERVICE (scanners de ports naabu/masscan) : chaque port HTTP-confirmé devient
         # une cible CHAÎNABLE (host:port + marqueur DISCOVERY_SERVICE_MARKER) que le cerveau scanne à la
         # vague suivante (fingerprint/oracles/scanners de contenu) — EXACTEMENT comme recon.nmap/httpx.
@@ -620,6 +636,13 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         confirmed = _discovery.http_confirmed_ports(self._fetch, host, ports)
         out += _discovery.service_discovery_findings(self, action, confirmed, self._toolname)
         return out
+
+    def _endpoint_discovery(self, action, hits):
+        """Convertit les URLs crawlées (hits) en findings de DÉCOUVERTE D'ENDPOINT chaînables (marqueur
+        DISCOVERY_ENDPOINT_MARKER, target=URL) via `_discovery.endpoint_discovery_findings` : re-validé
+        fail-closed contre le périmètre, injectables (avec `?param=`) priorisés, borné. Le cerveau y branche
+        ensuite les oracles à injection (edge e). Pur, ne lève jamais."""
+        return _discovery.endpoint_discovery_findings(self, action, hits, self._toolname)
 
     def _hits_to_findings(self, action, hits):
         """Mappe les hits en Findings PROOF-ORIENTED. Statut CLAMPÉ à {tested, reported_by_tool} (jamais
