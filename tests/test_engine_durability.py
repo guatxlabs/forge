@@ -29,6 +29,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import unittest.mock as _mock                                 # noqa: E402
+import forge.roe as _roe_mod                                  # noqa: E402
 from forge.roe import Scope, Action, FIRE                     # noqa: E402
 from forge.engine import Engine                               # noqa: E402
 from forge.brain import Brain                                 # noqa: E402
@@ -38,6 +40,31 @@ from forge.planner import Planner as _Planner                 # noqa: E402
 from forge import console_client                              # noqa: E402
 from forge.console_client import IncrementalIngest            # noqa: E402
 from forge.cli.engine import _Terminate                       # noqa: E402  (arrêt gracieux réel du CLI)
+
+
+# --- DÉTERMINISME DNS (anti-flake) — voir tests/test_roe.py pour le détail --------------------------
+# Ces preuves de durabilité arment le moteur (mode auto) et tirent des dizaines d'actions sur des hôtes
+# `.test` : CHAQUE tir résout le hostname AU POINT DE TIR de la gate ROE (`socket.getaddrinfo`). Contre le
+# vrai resolver, sous charge, un seul lookup qui stalle > `_RESOLVE_TIMEOUT` (5s) -> VETO fail-closed sur
+# cette action -> les compteurs EXACTS (len(findings)==6, fired==6, ...) dérivent de manière intermittente.
+# On force un NXDOMAIN immédiat (résultat GARANTI d'un `.test` RFC 6761) : les tests deviennent réellement
+# « ZÉRO réseau » comme leur docstring l'affirme, déterministes, sans toucher au comportement de durabilité/
+# checkpoint testé — le verdict FIRE reste identique (hôte inconnu -> non-privé -> tir, pin vide).
+# NB : forcer une IP RÉSOLUE (routable) serait pire — le probe de couverture du moteur tenterait une VRAIE
+# connexion vers cette IP (create_connection) et ré-introduirait une latence/dépendance réseau.
+_gai_patch = None
+
+
+def setUpModule():
+    global _gai_patch
+    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
+                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test)"))
+    _gai_patch.start()
+
+
+def tearDownModule():
+    if _gai_patch is not None:
+        _gai_patch.stop()
 
 
 # --- stubs moteur (repris de test_engine_iterative, zéro réseau) ------------------------------------
