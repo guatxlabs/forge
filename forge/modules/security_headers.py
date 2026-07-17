@@ -22,6 +22,7 @@ Contrôles (un finding par écart) :
   - Set-Cookie sans Secure / HttpOnly / SameSite — par cookie (LOW) ;
   - fuite de version Server / X-Powered-By (INFO).
 """
+from ._scopeguard import web_url_candidates
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .. import techniques
@@ -59,12 +60,23 @@ class SecurityHeaders(ScopeGuardedOracle):
         st, body, h = Oracle._http(url, headers=headers, timeout=timeout, method="GET", maxlen=200000)
         return st, body, h
 
-    def dry(self, action):
+    @staticmethod
+    def _url_for(action):
+        """URL HTTP la plus vraisemblable à sonder pour la cible (hôte nu / host:port / URL déjà formée).
+        Délègue au helper de normalisation partagé (jamais de cible sans scheme passée à urllib). Une URL
+        déjà formée est renvoyée telle quelle (PoC byte-identique)."""
+        cands = web_url_candidates(action.target)
+        return cands[0] if cands else str(action.target)
+
+    def _curl(self, action, url):
         host = (action.params or {}).get("host")
         h = f" -H 'Host: {host}'" if host else ""
-        return (f"curl -sSI{h} '{action.target}'  "
+        return (f"curl -sSI{h} '{url}'  "
                 f"# lire les en-têtes de sécurité (CSP/X-Frame-Options/nosniff/Referrer-Policy/HSTS/"
                 f"Permissions-Policy) + flags de cookie")
+
+    def dry(self, action):
+        return self._curl(action, self._url_for(action))
 
     # --- helpers d'analyse (purs) ---
     @staticmethod
@@ -88,13 +100,15 @@ class SecurityHeaders(ScopeGuardedOracle):
             v = SecurityHeaders._hget(headers, "Set-Cookie")
             return [v] if v else []
 
-    def _gap(self, action, title, severity, evidence, cwe):
+    def _gap(self, action, title, severity, evidence, cwe, poc=None):
         """Finding d'ÉCART de durcissement — status='tested' (fait de config, jamais 'vulnerable').
-        Estampille cwe (par-écart), mitre/tool/fix du module, et le PoC curl rejouable."""
+        Estampille cwe (par-écart), mitre/tool/fix du module, et le PoC curl rejouable. `poc` (l'URL
+        RÉELLEMENT sondée) est fourni par fire() ; à défaut on retombe sur `dry()` (candidat le + probable)."""
         return self.finding(
             target=action.target, title=title, severity=severity,
             category=cwe, cwe=cwe, mitre=self.mitre, status="tested",
-            tool=self.tool, fix=self.fix, evidence=evidence, poc=self.dry(action))
+            tool=self.tool, fix=self.fix, evidence=evidence,
+            poc=poc if poc is not None else self.dry(action))
 
     def fire(self, action):
         # SCOPE-GUARD fail-closed (défense en profondeur ; l'engine gate déjà en amont).
@@ -105,7 +119,20 @@ class SecurityHeaders(ScopeGuardedOracle):
         host = (action.params or {}).get("host")
         if host:
             req_headers.setdefault("Host", host)          # override anti-rebinding (ex Host: localhost)
-        st, body, headers = self._fetch(action.target, headers=req_headers or None)
+
+        # NORMALISATION : une cible hôte nu / host:port n'a PAS de scheme -> la passer telle quelle à
+        # urllib lèverait `unknown url type`. On essaie les candidats (http/https ordonnés par
+        # vraisemblance, cf. web_url_candidates) et on GARDE la 1re réponse. Une URL déjà formée n'a
+        # qu'un candidat (byte-identique). AUCUN candidat joignable -> dégradation `skipped` visible.
+        candidates = web_url_candidates(action.target) or [str(action.target)]
+        url = candidates[0]
+        st = body = headers = None
+        for cand in candidates:
+            st, body, headers = self._fetch(cand, headers=req_headers or None)
+            url = cand
+            if st is not None:
+                break
+        poc = self._curl(action, url)
 
         # ÉCHEC RÉSEAU : status None (transport mort) -> dégradation gracieuse, JAMAIS « tout manquant ».
         if st is None:
@@ -113,9 +140,13 @@ class SecurityHeaders(ScopeGuardedOracle):
                 target=action.target,
                 title=f"{self.kind} non testé — réponse HTTP indisponible",
                 evidence="Aucune réponse HTTP (réseau/transport indisponible) ; audit des en-têtes impossible.",
-                poc=self.dry(action))]
+                poc=poc)]
 
-        is_https = str(action.target).lower().startswith("https://")
+        # `gap` LIE le PoC (l'URL réellement sondée) à chaque finding d'écart émis ci-dessous.
+        def gap(title, severity, evidence, cwe):
+            return self._gap(action, title, severity, evidence, cwe, poc=poc)
+
+        is_https = str(url).lower().startswith("https://")
         body = body or ""
         csp = self._hget(headers, "Content-Security-Policy")
         xfo = self._hget(headers, "X-Frame-Options")
@@ -134,42 +165,42 @@ class SecurityHeaders(ScopeGuardedOracle):
                     and "content-security-policy" in body.lower())
             note = (" (présent uniquement en <meta http-equiv> — plus faible : ignoré pour "
                     "frame-ancestors et par certains agents)") if meta else ""
-            findings.append(self._gap(
-                action, f"Content-Security-Policy absent{' (meta seulement)' if meta else ''}", "INFO",
+            findings.append(gap(
+                f"Content-Security-Policy absent{' (meta seulement)' if meta else ''}", "INFO",
                 f"En-tête HTTP Content-Security-Policy absent{note}. HTTP {st}.", "CWE-693"))
 
         # 2) Clickjacking — X-Frame-Options absent ET CSP sans frame-ancestors -> LOW.
         if not xfo and "frame-ancestors" not in csp_low:
-            findings.append(self._gap(
-                action, "Clickjacking — X-Frame-Options absent (et pas de CSP frame-ancestors)", "LOW",
+            findings.append(gap(
+                "Clickjacking — X-Frame-Options absent (et pas de CSP frame-ancestors)", "LOW",
                 f"X-Frame-Options absent et CSP ne contient pas 'frame-ancestors' (HTTP {st}) : "
                 f"la page peut être enframée (clickjacking).", "CWE-1021"))
 
         # 3) X-Content-Type-Options: nosniff — INFO.
         if xcto.lower() != "nosniff":
-            findings.append(self._gap(
-                action, "X-Content-Type-Options: nosniff absent", "INFO",
+            findings.append(gap(
+                "X-Content-Type-Options: nosniff absent", "INFO",
                 f"X-Content-Type-Options != 'nosniff' (valeur observée: {xcto or 'absent'!r}, HTTP {st}) : "
                 f"MIME sniffing possible.", "CWE-693"))
 
         # 4) Referrer-Policy — INFO.
         if not refpol:
-            findings.append(self._gap(
-                action, "Referrer-Policy absent", "INFO",
+            findings.append(gap(
+                "Referrer-Policy absent", "INFO",
                 f"En-tête Referrer-Policy absent (HTTP {st}) : fuite potentielle du Referer complet.",
                 "CWE-693"))
 
         # 5) Strict-Transport-Security — UNIQUEMENT sur https (N/A en http clair : pas de faux positif).
         if is_https and not hsts:
-            findings.append(self._gap(
-                action, "Strict-Transport-Security absent (HTTPS)", "INFO",
+            findings.append(gap(
+                "Strict-Transport-Security absent (HTTPS)", "INFO",
                 f"Cible HTTPS sans en-tête Strict-Transport-Security (HTTP {st}) : "
                 f"downgrade/MITM SSL-strip non atténué.", "CWE-693"))
 
         # 6) Permissions-Policy — INFO (durcissement optionnel).
         if not permpol:
-            findings.append(self._gap(
-                action, "Permissions-Policy absent", "INFO",
+            findings.append(gap(
+                "Permissions-Policy absent", "INFO",
                 f"En-tête Permissions-Policy absent (HTTP {st}) : APIs navigateur (caméra, micro, "
                 f"géoloc…) non restreintes explicitement.", "CWE-693"))
 
@@ -183,8 +214,8 @@ class SecurityHeaders(ScopeGuardedOracle):
                 ("SameSite", any(a.startswith("samesite") for a in attrs)),
             ) if not present]
             if missing:
-                findings.append(self._gap(
-                    action, f"Cookie non sécurisé — {name} (manque {', '.join(missing)})", "LOW",
+                findings.append(gap(
+                    f"Cookie non sécurisé — {name} (manque {', '.join(missing)})", "LOW",
                     f"Set-Cookie '{name}' sans {', '.join(missing)} (HTTP {st}). "
                     f"Cookie brut: {raw[:200]}", "CWE-614"))
 
@@ -192,8 +223,8 @@ class SecurityHeaders(ScopeGuardedOracle):
         leaks = [f"{k}: {v}" for k, v in (("Server", server), ("X-Powered-By", powered))
                  if v and any(c.isdigit() for c in v)]
         if leaks:
-            findings.append(self._gap(
-                action, "Fuite de version (Server / X-Powered-By)", "INFO",
+            findings.append(gap(
+                "Fuite de version (Server / X-Powered-By)", "INFO",
                 f"En-tête(s) révélant une version logicielle : {'; '.join(leaks)} (HTTP {st}).",
                 "CWE-200"))
 

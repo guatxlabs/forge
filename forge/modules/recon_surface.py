@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ._scopeguard import ScopeGuardMixin
+from ._scopeguard import ScopeGuardMixin, web_url_candidates
 from .registry import register, Module
 from .. import pin as _pin
 from .. import runner
@@ -186,6 +186,22 @@ class PassiveSurface(ScopeGuardMixin, Module):
     def _url(target):
         """Assure un scheme (défaut https) pour une cible nue (`app.test` -> `https://app.test`)."""
         return target if "://" in str(target) else "https://" + str(target)
+
+    def _fetch_web(self, target, timeout=20, headers=None):
+        """GET robuste au SCHEME : essaie les candidats http/https (cf. web_url_candidates, ordonnés par
+        vraisemblance) et GARDE la 1re réponse -> (url_utilisée, status, body, headers_dict). Une cible
+        `host:port` HTTP sur un port non standard (ex. console interne :7100) était injoignable en
+        https-only via `_url` ; on tente désormais http aussi. Une URL déjà formée = un seul candidat
+        (byte-identique). Passe par `self._http_get` (seam monkeypatché par les tests). Aucun candidat
+        joignable -> renvoie (dernier_candidat, None, '', {}) : l'appelant dégrade en `skipped`."""
+        cands = web_url_candidates(target) or [self._url(target)]
+        url, st, body, hdrs = cands[0], None, "", {}
+        for cand in cands:
+            st, body, hdrs = self._http_get(cand, headers=headers, timeout=timeout)
+            url = cand
+            if st is not None:
+                break
+        return url, st, body, hdrs
 
     # --- construction de Finding (informatif de surface / dégradation skipped) ---
     def _finding(self, target, title, evidence, poc, status="tested", severity="INFO"):
@@ -633,7 +649,7 @@ class TechFingerprint(PassiveSurface):
             return [self._skipped(target, "recon.tech non exécuté — cible hors périmètre (fail-closed)",
                                   "Cible hors in-scope ; aucune requête émise.", self.dry(action))]
         techs, evidence_bits = set(), []
-        st, body, headers = self._http_get(self._url(target), timeout=action.params.get("timeout", 20))
+        url, st, body, headers = self._fetch_web(target, timeout=action.params.get("timeout", 20))
         if st is not None:
             low = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
             for hk, label in self._HEADER_SIGS.items():
@@ -653,7 +669,7 @@ class TechFingerprint(PassiveSurface):
         if action.params.get("use_httpx", True) and runner.available(self.HX, self.HX_IMG, prefer_docker=True):
             rc, out, _ = runner.tool(
                 self.HX, self.HX_IMG,
-                ["-u", self._url(target), "-tech-detect", "-silent", "-json", "-no-color"],
+                ["-u", url, "-tech-detect", "-silent", "-json", "-no-color"],
                 timeout=60, prefer_docker=True)
             if rc == 0 and out:
                 evidence_bits.append("httpx: " + out.strip()[:400])

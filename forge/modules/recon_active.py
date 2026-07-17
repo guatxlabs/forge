@@ -609,7 +609,7 @@ class WafIdentify(PassiveSurface):
                                   "La cible n'appartient pas au périmètre in-scope ; aucune requête émise.",
                                   self.dry(action))]
         detected, evidence_bits = set(), []
-        st, body, headers = self._http_get(self._url(target), timeout=action.params.get("timeout", 20))
+        url, st, body, headers = self._fetch_web(target, timeout=action.params.get("timeout", 20))
         if st is not None:
             low = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
             for hk, label in self._HEADER_SIGS.items():
@@ -626,7 +626,7 @@ class WafIdentify(PassiveSurface):
             evidence_bits.append(f"HTTP {st} ; Server={low.get('server', '—')}")
         # enrichissement OPTIONNEL par wafw00f (binaire local) — n'échoue jamais la détection.
         if action.params.get("use_wafw00f", True) and self._wafw00f_available():
-            rc, out, _ = self._run_wafw00f(self._url(target))
+            rc, out, _ = self._run_wafw00f(url)
             if rc == 0 and out:
                 evidence_bits.append("wafw00f: " + out.strip()[:300])
                 for fw in self._parse_wafw00f(out):
