@@ -104,6 +104,14 @@ class HeuristicBrain(Brain):
     # chaînées par proposition. La profondeur est bornée séparément par engine.max_waves.
     MAX_CHAIN_TARGETS = 32
 
+    # Nb MAX de paramètres de query SONDÉS par endpoint découvert. Un endpoint crawlé multi-params
+    # (`?TOPIC=x&QUERY=y`) chaîne chaque oracle à injection UNE FOIS PAR PARAMÈTRE (sinon seul le 1er
+    # était testé et `QUERY` restait « config manquante ») — mais BORNÉ ici pour ne pas exploser le
+    # fan-out (endpoints ≤ MAX_CHAIN_TARGETS × params ≤ MAX_PARAMS_PER_ENDPOINT × |panel|). Le 1er
+    # paramètre garde l'id d'action STABLE (kind:target) — dédup INCHANGÉ vs l'auto-pentest ; les
+    # suivants portent un id suffixé (kind:target#param) pour coexister sans s'auto-écraser.
+    MAX_PARAMS_PER_ENDPOINT = 3
+
     # SET COMPLET des scanners de CONTENU HTTP chaînés sur un SERVICE WEB DÉCOUVERT (host:port). Le plan de
     # base ne sème que httpx+nuclei sur un host web ; sur un port DÉCOUVERT (nmap/httpx/naabu/masscan), on
     # chaîne TOUT le panel de contenu — sinon nikto/tech/waf/content/katana/gospider/testssl/security_headers
@@ -374,7 +382,8 @@ class HeuristicBrain(Brain):
     # kinds exploit (rce.probe) restent exploit=True (dérivé de la table) -> gatés par le ROE (plancher
     # exploit OFF par défaut : DRY_RUN tant que l'opt-in fort-impact n'est pas armé). (value, confidence, cost)
     # modérés — le planner plancher-protège les qualifiants, le cerveau peut sous-noter sans les affamer.
-    # BORNÉ : un SEUL paramètre (le 1er) par endpoint -> fan-out = endpoints(≤MAX_CHAIN_TARGETS) × 1 × |panel|.
+    # BORNÉ : ≤ MAX_PARAMS_PER_ENDPOINT paramètres par endpoint -> fan-out =
+    # endpoints(≤MAX_CHAIN_TARGETS) × params(≤MAX_PARAMS_PER_ENDPOINT) × |panel|.
     _PARAM_INJECTION_ORACLES = (
         ("ssti.eval",                 0.6, 0.3, 2, "SSTI"),
         ("cmdi.probe",                0.7, 0.3, 2, "command-injection"),
@@ -390,43 +399,77 @@ class HeuristicBrain(Brain):
     def _endpoint_oracles(self, endpoint):
         """Oracles de vérification CIBLÉS sur un endpoint in-scope découvert. IDOR + SQLi + XSS reflected
         sont TOUJOURS chaînés (SQLi/XSS dégradent proprement en `tested` sans param — jamais de faux
-        positif). Si l'endpoint porte un PARAMÈTRE de query, il est passé (`param`+`value`) à SQLi/XSS ET à
-        TOUT le panel d'oracles à injection param-drivés (`_PARAM_INJECTION_ORACLES`) : ils prennent alors
-        leur CHEMIN DE TEST RÉEL au lieu d'émettre « config manquante ». IDOR reçoit urls=[endpoint] (comptes/
-        creds injectés par l'engine depuis le scope). access_control.idor & rce.probe restent exploit=True
-        (dérivé de la table) -> gatés par le ROE (le plancher exploit reste OFF par défaut ; DRY_RUN sinon).
-        BORNÉ : ≤ MAX_CHAIN_TARGETS endpoints × (3 + |panel|) oracles ; id d'action stable (kind:target) ->
-        jamais de doublon entre vagues (et la variante param-portée gagne la course d'id sur l'auto-pentest)."""
-        param, value = self._first_query_pair(endpoint)
-        inj = {"param": param} if param else {}
-        if param and value:
-            inj["value"] = value
+        positif). Si l'endpoint porte un ou plusieurs PARAMÈTRES de query (URL-décodés, valeurs VIDES
+        incluses — `?q=` est injectable), chacun (borné à MAX_PARAMS_PER_ENDPOINT, dédupliqué par nom) est
+        passé (`param`+`value`) à SQLi/XSS ET à TOUT le panel d'oracles à injection param-drivés
+        (`_PARAM_INJECTION_ORACLES`) : ils prennent alors leur CHEMIN DE TEST RÉEL au lieu d'émettre
+        « config manquante ». IDOR reçoit urls=[endpoint] (comptes/creds injectés par l'engine depuis le
+        scope). access_control.idor & rce.probe restent exploit=True (dérivé de la table) -> gatés par le
+        ROE (le plancher exploit reste OFF par défaut ; DRY_RUN sinon).
+
+        BORNÉ + DÉDUP INTER-VAGUES : le 1er paramètre garde l'id d'action STABLE (kind:target) -> aucun
+        doublon entre vagues ET la variante param-portée gagne la course d'id sur l'auto-pentest (qui ne
+        sème que l'id bare `kind:target`) ; les paramètres SUIVANTS portent un id suffixé (kind:target#param)
+        pour coexister sans s'auto-écraser. Fan-out ≤ MAX_CHAIN_TARGETS × MAX_PARAMS_PER_ENDPOINT × |panel|."""
+        params = self._query_params(endpoint)
+        # IDOR (param-agnostique) : toujours chaîné, urls=[endpoint] (comptes/creds injectés par l'engine).
         out = [
             _action("access_control.idor", endpoint, value=0.8, confidence=0.3, cost=2,
                     params={"urls": [endpoint]}, desc="IDOR sur endpoint découvert (chaîné)"),
-            _action("sqli.probe", endpoint, value=0.7, confidence=0.3, cost=2,
-                    params=dict(inj), desc="SQLi à preuve sur endpoint découvert (chaîné)"),
-            _action("xss.reflected", endpoint, value=0.6, confidence=0.3, cost=1,
-                    params=dict(inj), desc="XSS reflected à preuve sur endpoint découvert (chaîné)"),
         ]
-        # Le panel élargi n'est chaîné QUE si un paramètre injectable existe : sans param ils dégraderaient
-        # TOUS en « config manquante » (bruit pur). Avec param, chacun reçoit param+value -> sonde réelle.
-        if param:
-            for kind, v, c, cost, label in self._PARAM_INJECTION_ORACLES:
+        if not params:
+            # SANS param : SQLi/XSS restent chaînés (ils dégradent proprement en `tested`, jamais de faux
+            # positif) ; le panel élargi N'est PAS chaîné (il dégraderait TOUT en « config manquante »).
+            out += [
+                _action("sqli.probe", endpoint, value=0.7, confidence=0.3, cost=2,
+                        desc="SQLi à preuve sur endpoint découvert (chaîné)"),
+                _action("xss.reflected", endpoint, value=0.6, confidence=0.3, cost=1,
+                        desc="XSS reflected à preuve sur endpoint découvert (chaîné)"),
+            ]
+            return out
+        # AVEC param(s) : SQLi/XSS + le panel élargi, chacun UNE FOIS PAR PARAMÈTRE (borné), param+value ->
+        # sonde réelle. Le 1er param porte l'id STABLE ; les suivants un id suffixé (#param).
+        panel = (("sqli.probe",   0.7, 0.3, 2, "SQLi"),
+                 ("xss.reflected", 0.6, 0.3, 1, "XSS reflected")) + self._PARAM_INJECTION_ORACLES
+        for i, (param, value) in enumerate(params):
+            inj = {"param": param}
+            if value:
+                inj["value"] = value
+            for kind, v, c, cost, label in panel:
+                aid = f"{kind}:{endpoint}" if i == 0 else f"{kind}:{endpoint}#{param}"
                 out.append(_action(kind, endpoint, value=v, confidence=c, cost=cost, params=dict(inj),
+                                   id=aid,
                                    desc=f"{label} à preuve sur endpoint découvert (param={param}, chaîné)"))
+        return out
+
+    @staticmethod
+    def _query_params(url):
+        """Liste BORNÉE et DÉ-DUPLIQUÉE de (nom, valeur) des paramètres de query d'une URL, URL-DÉCODÉS
+        (`+`/`%xx` via parse_qsl), valeurs VIDES INCLUSES (`keep_blank_values` : `?q=` est injectable —
+        c'était le trou live où `?QUERY=` restait « config manquante »), dédupliqués par NOM (1re
+        occurrence), plafonnés à MAX_PARAMS_PER_ENDPOINT. Points d'injection portés aux oracles à injection
+        chaînés sur un endpoint découvert. Pur, ne lève jamais."""
+        from urllib.parse import urlsplit, parse_qsl
+        try:
+            pairs = parse_qsl(urlsplit(str(url)).query, keep_blank_values=True)
+        except Exception:            # noqa: BLE001
+            return []
+        out, seen = [], set()
+        for name, value in pairs:
+            if name and name not in seen:
+                seen.add(name)
+                out.append((name, value))
+            if len(out) >= HeuristicBrain.MAX_PARAMS_PER_ENDPOINT:
+                break
         return out
 
     @staticmethod
     def _first_query_pair(url):
         """(nom, valeur) du 1er paramètre de query d'une URL — ('', '') si aucun. Point d'injection porté
-        (param+value) aux oracles à injection chaînés sur un endpoint découvert. Pur, ne lève jamais."""
-        from urllib.parse import urlsplit, parse_qsl
-        try:
-            pairs = parse_qsl(urlsplit(str(url)).query)
-            return (pairs[0][0], pairs[0][1]) if pairs else ("", "")
-        except Exception:            # noqa: BLE001
-            return ("", "")
+        (param+value) aux oracles chaînés. Délègue à `_query_params` (URL-décodage, valeurs vides incluses).
+        Pur, ne lève jamais."""
+        ps = HeuristicBrain._query_params(url)
+        return ps[0] if ps else ("", "")
 
 
 class AutoPentestBrain(HeuristicBrain):

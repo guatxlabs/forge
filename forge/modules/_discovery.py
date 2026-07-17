@@ -145,9 +145,11 @@ def _looks_http_url(u):
 
 
 def _has_query_param(u):
-    """True si l'URL porte au moins un paramètre de query `?k=v` (donc INJECTABLE via param). Pur."""
+    """True si l'URL porte au moins un paramètre de query `?k=` (donc INJECTABLE via param) — valeurs
+    VIDES INCLUSES (`keep_blank_values` : `?QUERY=` est injectable, il ne doit pas être dé-priorisé/coupé
+    par le cap comme s'il était sans paramètre). Pur."""
     try:
-        return bool(urllib.parse.parse_qsl(urllib.parse.urlsplit(str(u)).query))
+        return bool(urllib.parse.parse_qsl(urllib.parse.urlsplit(str(u)).query, keep_blank_values=True))
     except Exception:            # noqa: BLE001
         return False
 
