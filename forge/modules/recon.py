@@ -11,64 +11,13 @@ from .oracle import Oracle
 from .. import runner
 from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
+# Découverte de service (host:port chaînable) — SOURCE UNIQUE partagée avec les wrappers spec-driven
+# (naabu/masscan via toolspec.py). recon.nmap/httpx y émettent leurs `host:port` EXACTEMENT comme avant.
+from ._discovery import (
+    bare_host as _bare_host, service_discovery_findings as _service_discovery_findings,
+    http_confirmed_ports, port_inventory_finding, _STANDARD_WEB_PORTS)
 
-# Ports web STANDARD : déjà couverts par l'hôte de base (recon/oracles semés dessus) -> on n'émet PAS
-# de cible `host:port` redondante pour eux. Seuls les ports NON standard (ex. console interne :7100)
-# ont besoin d'être surfacés comme NOUVELLE surface chaînable.
-_STANDARD_WEB_PORTS = frozenset({80, 443})
-_MAX_DISCOVERED_SERVICES = 25            # borne le fan-out (un scan -p- ne doit pas exploser le plan)
-_MAX_PROBED_PORTS = 25                   # borne les sondes de CONFIRMATION HTTP (un -p- peut ouvrir bcp de ports)
 _NMAP_OPEN_PORT_RX = re.compile(r"^(\d{1,5})/tcp\s+open\s+(\S+)", re.MULTILINE)
-
-
-def _bare_host(target):
-    """Hôte nu (scheme/userinfo/path/port retirés) d'une cible. Miroir simplifié de `Scope._host` :
-    sert à ANCRER un `host:port` découvert sur l'hôte DÉJÀ gaté par le ROE (jamais un autre hôte).
-    Pur, ne lève jamais."""
-    s = str(target).strip()
-    if "://" in s:
-        s = s.split("://", 1)[1]
-    s = s.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-    if "@" in s:
-        s = s.rsplit("@", 1)[1]
-    if s.startswith("["):                            # IPv6 littéral [::1]:port -> garde l'adresse
-        return s.split("]", 1)[0].lstrip("[")
-    if s.count(":") == 1:                            # host:port (pas IPv6 nu)
-        s = s.split(":", 1)[0]
-    return s
-
-
-def _service_discovery_findings(module, action, ports, tool):
-    """Un finding de DÉCOUVERTE par port web NON standard (target = `host:port`, marqueur
-    DISCOVERY_SERVICE_MARKER) -> le port devient un NŒUD du graphe que le cerveau chaîne (actions web
-    de base + modules web explicites via _directive_actions) sur cette nouvelle surface. Ancré sur
-    l'hôte DÉJÀ gaté par le ROE (`_bare_host(action.target)`) : jamais un autre hôte -> la re-gate ROE
-    de la vague suivante le laisse passer s'il est in-scope (host in-scope => host:port in-scope) et le
-    VÉTOe sinon. Ports 80/443 et le port propre de la cible ignorés (déjà couverts). Borné + dédupliqué."""
-    host = _bare_host(action.target)
-    tgt_netloc = str(action.target).split("://")[-1].split("/", 1)[0]
-    out, seen = [], set()
-    for port in ports:
-        try:
-            p = int(port)
-        except (TypeError, ValueError):
-            continue
-        if p in _STANDARD_WEB_PORTS or p in seen or not (0 < p < 65536):
-            continue
-        hp = f"{host}:{p}"
-        if hp == tgt_netloc:                         # déjà la cible courante -> pas de nœud self-référent
-            continue
-        seen.add(p)
-        out.append(module.finding(
-            target=hp, title=f"{techniques.DISCOVERY_SERVICE_MARKER} : {hp}",
-            severity="INFO", category="recon", mitre=getattr(module, "mitre", ""), status="tested",
-            tool=tool,
-            evidence=(f"Service web découvert sur le port non standard {p} ({hp}) via {tool} — "
-                      f"nouvelle surface web chaînable (fingerprint/oracles à la vague suivante)."),
-            poc=f"# {tool} : service web exposé sur {hp}"))
-        if len(out) >= _MAX_DISCOVERED_SERVICES:
-            break
-    return out
 
 
 def _httpx_web_ports(out):
@@ -118,26 +67,10 @@ def _nmap_nonhttp_open_ports(out):
     return ports
 
 
-def _http_confirmed_ports(module, host, ports):
-    """Sous-ensemble de `ports` (ouverts mais NON labellisés http par nmap) qui parlent RÉELLEMENT HTTP,
-    prouvé par une sonde GET (Host correct) via le seam `module._fetch` — là où la sonde brute de nmap
-    reçoit un 421 (anti-rebinding) et mislabellise, un vrai GET renvoie un STATUS HTTP (200/401/421…),
-    tandis qu'un service NON-HTTP (VNC 5900…) casse le parse HTTP -> None -> jamais confirmé -> ZÉRO
-    bruit. Sonde BORNÉE (`_MAX_PROBED_PORTS`) : un `-p-` peut ouvrir beaucoup de ports, on n'explose pas.
-    Ancré sur l'hôte DÉJÀ gaté par le ROE (`host` = l'hôte in-scope de la cible nmap) : la sonde ne peut
-    PHYSIQUEMENT pas quitter le périmètre. Pur, ne lève jamais (sonde qui lève => traitée non-HTTP)."""
-    out, n = [], 0
-    for p in ports:
-        if n >= _MAX_PROBED_PORTS:
-            break
-        n += 1
-        try:
-            st = module._fetch(f"http://{host}:{p}")
-        except Exception:            # noqa: BLE001  (réseau/protocole hostile : jamais un crash)
-            st = None
-        if st is not None:           # une RÉPONSE HTTP (quel que soit le code) => le port parle HTTP
-            out.append(p)
-    return out
+def _nmap_all_open_ports(out):
+    """TOUS les ports TCP OUVERTS listés par nmap (HTTP ou non), pour le finding d'INVENTAIRE de surface.
+    Pur, dérivé du texte `-sV`. Ne lève jamais."""
+    return [m.group(1) for m in _NMAP_OPEN_PORT_RX.finditer(out or "")]
 
 
 def _path_argval(val):
@@ -346,5 +279,9 @@ class NmapServices(FlagAllowlistMixin, Module):
         #      qui renvoie 421 à la sonde brute -> `font-service?`). Sonde bornée + ancrée sur l'hôte
         #      in-scope (jamais un autre hôte) ; les vrais non-HTTP (VNC…) ne sont JAMAIS confirmés.
         host = _bare_host(action.target)
-        ports = _nmap_web_ports(out) + _http_confirmed_ports(self, host, _nmap_nonhttp_open_ports(out))
-        return [summary] + _service_discovery_findings(self, action, ports, "nmap")
+        ports = _nmap_web_ports(out) + http_confirmed_ports(self._fetch, host, _nmap_nonhttp_open_ports(out))
+        # INVENTAIRE : la surface ouverte (TOUS les host:port) en UN finding INFO (visible d'un coup,
+        # au lieu d'être noyée dans le texte de sortie). Additif — n'affecte pas la découverte chaînable.
+        inv = port_inventory_finding(self, action, "nmap", _nmap_all_open_ports(out))
+        inventory = [inv] if inv else []
+        return [summary] + inventory + _service_discovery_findings(self, action, ports, "nmap")

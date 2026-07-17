@@ -32,6 +32,7 @@ Zéro dépendance (stdlib) — cohérent avec le cœur Forge.
 import json
 import re
 
+from . import _discovery
 from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
 from .. import runner
@@ -79,7 +80,7 @@ class ToolSpec:
         "attck_tactic", "proof_required", "bug_bounty_eligible", "exploit", "destructive", "cls",
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
-        "params_schema", "flag_allowlist",
+        "params_schema", "flag_allowlist", "emit_service_discovery", "skip_bare_ip",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -87,7 +88,8 @@ class ToolSpec:
                  bug_bounty_eligible=False, exploit=False, destructive=False, cls="", depends_on=(),
                  tools=(), docker_image="", prefer_docker=False, timeout=300, parser="lines",
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
-                 hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=()):
+                 hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
+                 emit_service_discovery=False, skip_bare_ip=False):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -124,6 +126,15 @@ class ToolSpec:
         # ALLOWLIST de drapeaux pour `{args}`/extra_args : ensemble EXACT des flags (`-x`/`--x`) qu'un
         # opérateur peut passer en argument libre. Vide => aucun extra_arg drapeau accepté (fail-closed).
         self.flag_allowlist = tuple(flag_allowlist)
+        # DÉCOUVERTE DE SERVICE : un SCANNER DE PORTS (naabu/masscan) émet, en PLUS de ses hits bruts, un
+        # finding de découverte porteur du marqueur `DISCOVERY_SERVICE_MARKER` par port HTTP-confirmé ->
+        # le `host:port` devient un NŒUD chaînable (le cerveau y sème fingerprint/oracles/scanners de
+        # contenu), EXACTEMENT comme recon.nmap/httpx. Défaut False (les autres outils n'en émettent pas).
+        self.emit_service_discovery = bool(emit_service_discovery)
+        # SKIP CIBLE IP-LITTÉRALE : un module d'ARCHIVE WEB (gau/Wayback) ne trouve RIEN d'utile sur une IP
+        # nue (les archives sont indexées par NOM de domaine) -> skip propre, aucun processus lancé (au lieu
+        # d'un flot d'URLs d'archive bruitées). Défaut False.
+        self.skip_bare_ip = bool(skip_bare_ip)
 
     @property
     def asset_hits(self):
@@ -440,6 +451,9 @@ class ExternalToolModule(ScopeGuardMixin, Module):
 
     spec = None                              # ToolSpec, posé par make_module sur chaque sous-classe
     _toolname = ""                           # label de provenance, posé par make_module
+    # Seam de CONFIRMATION HTTP (sonde GET) pour la découverte de service — monkeypatchable par les tests
+    # (comme `NmapServices._fetch`). Par défaut : la sonde partagée `_discovery.http_probe`.
+    _fetch = staticmethod(_discovery.http_probe)
 
     @property
     def available(self):
@@ -475,6 +489,16 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                 action, status="skipped",
                 title=f"{self.kind} non exécuté — cible hors périmètre (scope-guard fail-closed)",
                 evidence="La cible n'appartient pas au périmètre in-scope ; aucun processus lancé (fail-closed).")]
+        # (1a2) SKIP CIBLE IP-LITTÉRALE (modules d'ARCHIVE WEB : gau/Wayback) — les archives sont indexées
+        # par NOM de domaine ; une IP nue n'a jamais d'archive utile (que du bruit : gau sur 127.0.0.1
+        # remontait ~195 URLs d'archive fantômes). Skip PROPRE (finding visible), aucun processus lancé.
+        if s.skip_bare_ip and _discovery.is_ip_literal(_discovery.bare_host(action.target)):
+            return [self._mk(
+                action, status="skipped",
+                title=f"{self.kind} non exécuté — cible IP littérale (archives web indexées par domaine)",
+                evidence=(f"La cible {action.target!r} est une IP littérale ; les archives web "
+                          f"(Wayback/CommonCrawl) sont indexées par NOM de domaine et n'ont aucune entrée "
+                          f"utile pour une IP -> skip propre (aucun processus lancé, zéro URL fantôme)."))]
         # (1b) ANTI-INJECTION D'ARGUMENT — une cible POSITIONNELLE résolue commençant par `-`/`--`
         # pourrait être interprétée comme une OPTION par l'outil enveloppé. Refus fail-closed (aucun
         # processus lancé) : la tokenisation no-shell empêche l'injection SHELL, ce garde-fou ferme
@@ -531,7 +555,15 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                 title=f"{self.kind} — timeout après {s.timeout}s (résultat partiel ignoré)",
                 evidence=(err or "timeout")[:500])]
         # (6) PARSING PROOF-ORIENTED — les hits deviennent tested/reported_by_tool, JAMAIS vulnerable.
-        findings = self._hits_to_findings(action, parse_output(s, rc, out, err))
+        hits = parse_output(s, rc, out, err)
+        findings = self._hits_to_findings(action, hits)
+        # (6b) DÉCOUVERTE DE SERVICE (scanners de ports naabu/masscan) : chaque port HTTP-confirmé devient
+        # une cible CHAÎNABLE (host:port + marqueur DISCOVERY_SERVICE_MARKER) que le cerveau scanne à la
+        # vague suivante (fingerprint/oracles/scanners de contenu) — EXACTEMENT comme recon.nmap/httpx.
+        # Sans ceci, les ports trouvés par naabu/masscan restaient de simples findings texte, jamais
+        # scannés par les scanners de CONTENU HTTP. Ajoute aussi un finding d'INVENTAIRE (surface ouverte).
+        if s.emit_service_discovery:
+            findings = self._service_discovery(action, hits) + findings
         if findings:
             return findings
         # Aucun hit : outil exécuté sans résultat. rc!=0 sans hit -> finding d'échec traçable (tested INFO).
@@ -547,6 +579,25 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         return [self._mk(
             action, status="tested", title=f"{self.kind} — {s.tool_name}: aucun hit",
             evidence="Outil exécuté (in-scope), aucun résultat.")]
+
+    def _service_discovery(self, action, hits):
+        """Convertit les hits d'un SCANNER DE PORTS (naabu/masscan) en findings de DÉCOUVERTE chaînables :
+        (1) un finding d'INVENTAIRE listant TOUS les host:port ouverts (surface visible d'un coup) ;
+        (2) un finding de découverte (marqueur DISCOVERY_SERVICE_MARKER, target=host:port) par port
+        HTTP-CONFIRMÉ (sonde GET via le seam `_fetch` — un port non-HTTP casse le parse -> jamais surfacé,
+        zéro bruit). Ancré sur l'hôte DÉJÀ gaté par le ROE (`bare_host(action.target)`) ; borné
+        (`_MAX_DISCOVERED_SERVICES`/`_MAX_PROBED_PORTS`). Pur (hormis la sonde), ne lève jamais."""
+        ports = _discovery.ports_from_hits(hits)
+        if not ports:
+            return []
+        host = _discovery.bare_host(action.target)
+        out = []
+        inv = _discovery.port_inventory_finding(self, action, self._toolname, ports)
+        if inv:
+            out.append(inv)
+        confirmed = _discovery.http_confirmed_ports(self._fetch, host, ports)
+        out += _discovery.service_discovery_findings(self, action, confirmed, self._toolname)
+        return out
 
     def _hits_to_findings(self, action, hits):
         """Mappe les hits en Findings PROOF-ORIENTED. Statut CLAMPÉ à {tested, reported_by_tool} (jamais
