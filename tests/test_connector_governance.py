@@ -15,10 +15,34 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import unittest.mock as _mock                                  # noqa: E402
+import forge.roe as _roe_mod                                   # noqa: E402
 from forge.roe import Scope, Action                            # noqa: E402
 from forge.engine import Engine                                # noqa: E402
 from forge.modules import registry                             # noqa: E402
 from forge.schema import Finding                               # noqa: E402
+
+
+# --- DÉTERMINISME DNS (anti-flake) — voir tests/test_roe.py pour le détail --------------------------
+# Le docstring de ce module promet des preuves « HERMÉTIQUES ... ZÉRO réseau », mais la gate ROE résout
+# le hostname de la cible AU POINT DE TIR (`socket.getaddrinfo`). Les hôtes `.test` frappaient donc le
+# vrai resolver ; sous charge un lookup qui stalle > `_RESOLVE_TIMEOUT` (5s) -> VETO fail-closed, cassant
+# les assertions FIRE de façon intermittente. On force un NXDOMAIN immédiat (résultat garanti d'un `.test`),
+# rendant les preuves réellement hermétiques/déterministes sans toucher au comportement testé (désactivation
+# console vs présence host) : le verdict FIRE est identique (hôte inconnu -> non-privé -> tir).
+_gai_patch = None
+
+
+def setUpModule():
+    global _gai_patch
+    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
+                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test)"))
+    _gai_patch.start()
+
+
+def tearDownModule():
+    if _gai_patch is not None:
+        _gai_patch.stop()
 
 
 class _PresentModule(registry.Module):

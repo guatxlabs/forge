@@ -4,7 +4,35 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import unittest.mock as _mock                                 # noqa: E402
+import forge.roe as _roe_mod                                  # noqa: E402
 from forge.roe import Scope, Roe, Action, VETO, DRY_RUN, FIRE  # noqa: E402
+
+
+# --- DÉTERMINISME DNS (anti-flake) — neutralise le SEUL point d'I/O réseau de la gate ROE ------------
+# La résolution AU POINT DE TIR (`roe._resolve_ips` -> socket.getaddrinfo) frappait le VRAI resolver pour
+# les hôtes RFC 6761 `.test`/`.example`. Ces TLD sont RÉSERVÉS et ne résolvent JAMAIS : le chemin nominal
+# est donc NXDOMAIN -> `[]` -> hôte inconnu, non-privé -> FIRE (pin vide). MAIS sous charge, le lookup peut
+# STALLER > `_RESOLVE_TIMEOUT` (5s) -> `_ResolveTimeout` -> VETO fail-closed, faisant FLIPPER de façon non
+# déterministe les tests qui attendent FIRE (flake ~1/5-8 corrélé aux runs lents/chargés). On force ici un
+# NXDOMAIN IMMÉDIAT (gaierror) — exactement le résultat GARANTI d'un `.test`/`.example`, mais instantané :
+# hermétique, déterministe, ZÉRO réseau, ZÉRO stall. Le chemin ROE reste PLEINEMENT exercé (résolution ->
+# branche hôte-inconnu -> verdict). Les tests qui vérifient une résolution SPÉCIFIQUE (privé / IP publique /
+# timeout / out_scope) re-patchent `getaddrinfo` LOCALEMENT : leur `with mock.patch.object` prime puis
+# restaure CE défaut à la sortie (imbrication propre) -> ces preuves-là restent intactes et significatives.
+_gai_patch = None
+
+
+def setUpModule():
+    global _gai_patch
+    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
+                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test/.example)"))
+    _gai_patch.start()
+
+
+def tearDownModule():
+    if _gai_patch is not None:
+        _gai_patch.stop()
 
 
 def mk(in_scope=("app.test",), exploit=False, destructive=False):
