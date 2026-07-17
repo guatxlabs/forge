@@ -254,6 +254,13 @@ class Scope:
         # Absent => None => défauts sûrs (triage ON, auto_hide OFF). Ne change RIEN au ledger ni aux
         # findings bruts : le triage est appliqué au RENDU du rapport (build_report), pas au moteur.
         self.triage = data.get("triage")
+        # ASSIST LLM (IA-2) — couche OPTIONNELLE, OFF PAR DÉFAUT, qui ENRICHIT la triage IA-1 d'un résumé
+        # consultatif produit par un LLM OpenAI-compatible. Gouvernée EXACTEMENT comme `allow_private` :
+        # absente/illisible => None => `llm.LLMConfig.from_dict` retombe sur `enabled=False` (aucun LLM,
+        # rapport BYTE-IDENTIQUE). Le Scope ne fait que PORTER le dict ; l'interprétation, l'egress ledgeré
+        # et le gate externe (`allow_external`) vivent dans forge/llm.py. Advisory-only : ne touche NI les
+        # findings NI le ledger des findings (cf. report.build_report / llm.enrich_triage).
+        self.llm = data.get("llm")
         self.notes = data.get("notes", "")
         # CACHE DNS PAR-RUN (anti-rebinding L2) : hôte canonique -> résultat de résolution. Évite de
         # re-résoudre (et re-staller) le même hôte à chaque décision d'un run, et STABILISE le verdict
