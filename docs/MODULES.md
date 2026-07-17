@@ -43,7 +43,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 | `recon.dns` | — | — | T1590.002 | stdlib socket (dnspython/dig opt.) | Résolution DNS (A/AAAA/CNAME/MX/TXT/NS) des hôtes in-scope. Backend dnspython > dig > socket ; impossible → skipped. |
 | `recon.httpx` | — | — | T1595 | httpx (bin/docker) | Fingerprint HTTP (httpx) : status, titre, techno détectées. |
 | `recon.js_endpoints` | — | — | T1594 | stdlib | Récupère les pages in-scope et extrait routes/URLs d'API référencées dans leur JavaScript. Endpoints jamais appelés. |
-| `recon.nmap` | — | — | T1046 | nmap (bin/docker) | Découverte des services exposés (`nmap -sV`) sur le top 1000 ports. |
+| `recon.nmap` | — | — | T1046 | nmap (bin/docker) | Découverte des services exposés (`nmap -sV`) sur le top 1000 ports par défaut. Param opt-in `full_ports` → `-p-` (scan complet 1-65535, prime sur `ports`/`top_ports`). |
 | `recon.secrets` | — | — | T1552.001 | trufflehog/gitleaks | Détecte les SECRETS EXPOSÉS dans les assets in-scope joignables (bundles JS, config) via trufflehog OU gitleaks. Secret redacté. Absent/KO → skipped. |
 | `recon.subdomains` | — | — | T1590 | stdlib (crt.sh) | Énumération PASSIVE de sous-domaines (crt.sh CT + passive DNS optionnel), verrouillée aux racines in-scope. |
 | `recon.tech` | — | — | T1592.002 | stdlib (httpx opt.) | Fingerprint techno depuis les réponses HTTP (Server/X-Powered-By/cookies/meta) ; enrichi par httpx si dispo. Passif, in-scope. |
