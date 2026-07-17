@@ -177,6 +177,47 @@
           <input id="lc-rate" type="number" min="1" step="1" placeholder="illimité" style="width:110px">
         </label>
       </div>
+      <!-- R3 — PROFIL DE RESSOURCES : un bouton fixe les défauts (parallélisme, timeouts, outils, caps de
+           crawl) selon la machine cliente. CHOIX DE RESSOURCE UNIQUEMENT — n'affecte NI le scope, NI le
+           ROE, NI le plancher d'exploit. `balanced` = défaut (aucune variable forcée, comportement inchangé). -->
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:0 0 auto" title="Profil de ressources : low = machine faible (série, outils légers, timeouts courts) ; balanced = défaut ; full = grosse machine.">
+          <span class="lc-lbl">Profil ressources</span>
+          <select id="lc-resprofile">
+            <option value="balanced" selected>balanced (défaut)</option>
+            <option value="low">low (machine faible)</option>
+            <option value="full">full (grosse machine)</option>
+          </select>
+        </label>
+        <div id="lc-resprofile-desc" class="muted" style="flex:1 1 260px;margin:22px 0 0"></div>
+      </div>
+      <details id="lc-resadv" class="lc-resadv">
+        <summary>Avancé / overrides ressources</summary>
+        <div class="lc-warn" style="margin:8px 0">Laisser vide = défaut du profil sélectionné. Une valeur renseignée <b>prime</b> sur le profil (précédence override &gt; profil &gt; défaut). Ces leviers ne règlent que des <b>ressources</b> — aucun impact sur le scope, le ROE ou le plancher d'exploit.</div>
+        <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+          <label style="flex:0 0 auto" title="Pool d'exécution intra-vague (FORGE_PARALLELISM). Vide = défaut du profil. Borné [1, 64].">
+            <span class="lc-lbl">Parallélisme (pool)</span>
+            <input id="lc-res-parallelism" type="number" min="1" max="64" step="1" placeholder="(profil)" style="width:110px">
+          </label>
+          <label style="flex:0 0 auto" title="Timeout du run / watchdog en secondes (FORGE_RUN_TIMEOUT). Vide = défaut du profil. Le watchdog effectif reste borné par le cap serveur global.">
+            <span class="lc-lbl">Timeout run (s)</span>
+            <input id="lc-res-runtimeout" type="number" min="1" step="1" placeholder="(profil)" style="width:120px">
+          </label>
+          <label style="flex:0 0 auto" title="Image d'outils Docker (FORGE_TOOLS_PROFILE) : mini = paquet léger, full = complet. Vide = défaut du profil.">
+            <span class="lc-lbl">Profil d'outils</span>
+            <select id="lc-res-toolsprofile">
+              <option value="" selected>(profil)</option>
+              <option value="mini">mini (léger)</option>
+              <option value="full">full (complet)</option>
+            </select>
+          </label>
+        </div>
+        <div class="lc-resknobs">
+          <span class="lc-lbl" style="margin:0">Leviers du profil sélectionné</span>
+          <table id="lc-respresets" class="lc-respresets"><tbody></tbody></table>
+          <div class="muted" style="margin:6px 0 0">Timeout par-action, sévérité nuclei et caps de crawl <b>suivent le profil</b> (la sévérité nuclei reste aussi réglable par-module dans les params). Seuls parallélisme, timeout-run et profil d'outils sont surchargeables ici (variables lues par le moteur).</div>
+        </div>
+      </details>
       <label><span class="lc-lbl">Cibles (une par ligne — hostname ou IP/CIDR, ⊆ scope serveur)</span>
         <textarea id="lc-targets" rows="3" spellcheck="false" placeholder="guatx.com&#10;192.0.2.0/24"></textarea>
       </label>

@@ -227,6 +227,7 @@ pub(crate) struct RunSpawnSpec {
     pub(crate) body_targets: Value,           // body["targets"] d'origine (colonne run_job.targets + ledger)
     pub(crate) rate: Option<i64>,             // débit req/s OPT-IN (override per-run) : None => défaut 5, byte-identique
     pub(crate) allow_private: bool,           // EFFECTIF (master global AND opt-in engagement) écrit dans scope.json
+    pub(crate) resource: ResourceOptions,     // R3 — profil de ressources + overrides par-levier -> env du moteur (no-op si vide)
 }
 
 impl RunSpawnSpec {
@@ -241,6 +242,7 @@ impl RunSpawnSpec {
             "arm": self.arm, "high_impact": self.high_impact, "started_by": self.started_by,
             "actor": self.actor, "selection": self.selection, "disabled_modules": self.disabled_modules,
             "body_targets": self.body_targets, "rate": self.rate, "allow_private": self.allow_private,
+            "resource": self.resource.to_value(),
         })
     }
 
@@ -274,6 +276,8 @@ impl RunSpawnSpec {
             rate: v.get("rate").and_then(|x| x.as_i64()),
             // FAIL-CLOSED : blob sans le champ (spec legacy) => false (jamais de scan privé « par défaut »).
             allow_private: v.get("allow_private").and_then(|x| x.as_bool()).unwrap_or(false),
+            // R3 — ressources : blob sans le champ (spec legacy) => `Null` => défauts (aucune variable posée, no-op).
+            resource: ResourceOptions::from_value(v.get("resource").unwrap_or(&Value::Null)),
         })
     }
 }
@@ -600,7 +604,7 @@ mod wave_b_tests {
             auto_pentest: false, reason: String::new(), arm: false, high_impact: false,
             started_by: "op".into(), actor: "op".into(), selection: serde_json::json!({}),
             disabled_modules: vec![], body_targets: serde_json::json!([]), rate: None,
-            allow_private: false,
+            allow_private: false, resource: Default::default(),
         }
     }
 
@@ -633,6 +637,12 @@ mod wave_b_tests {
             body_targets: serde_json::json!(["a.example.com", "b.example.com"]),
             rate: Some(25),
             allow_private: true,
+            resource: crate::ResourceOptions {
+                profile: Some("low".into()),
+                parallelism: Some(8),
+                run_timeout: Some(1800),
+                tools_profile: Some("mini".into()),
+            },
         };
         let round = RunSpawnSpec::from_value(&spec.to_value()).expect("reconstruct");
         assert_eq!(round.run_id, spec.run_id);
@@ -658,6 +668,8 @@ mod wave_b_tests {
         assert_eq!(round.body_targets, spec.body_targets);
         assert_eq!(round.rate, spec.rate);
         assert_eq!(round.allow_private, spec.allow_private);
+        assert_eq!(round.resource, spec.resource, "R3 — profil+overrides ressources survit au round-trip");
+        assert_eq!(round.resource.env_pairs().len(), 4, "les 4 variables d'env sont dérivables après round-trip");
         // blob corrompu -> None (le leader marque failed et passe au suivant).
         assert!(RunSpawnSpec::from_value(&serde_json::json!({"garbage": 1})).is_none(), "spec sans run_id/eng_id => None");
     }

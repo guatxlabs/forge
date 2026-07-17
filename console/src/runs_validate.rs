@@ -206,3 +206,166 @@ pub(crate) fn high_impact_gate(
     Ok(true)
 }
 
+// ===========================================================================================
+//  R3 — PROFIL DE RESSOURCES + OVERRIDES PAR-LEVIER (Launch UI -> env du moteur).
+//
+//  CHOIX DE RESSOURCE UNIQUEMENT : ne touche NI le scope, NI le ROE, NI le plancher d'exploit, NI
+//  aucune bascule de capacité. On ne fait QUE poser les variables d'environnement que le moteur (R1,
+//  `forge/resource_profile.py`) LIT DÉJÀ, en préservant la précédence STRICTE `override > profil >
+//  défaut`. Champ ABSENT/vide/illisible => la variable N'EST PAS posée => le défaut du profil (ou le
+//  défaut-code) s'applique. `balanced` (profil par défaut) SANS override => AUCUNE variable posée =>
+//  comportement byte-identique à aujourd'hui (no-op).
+//
+//  Bornes (garde-fous anti-abus, alignées sur les clamps du moteur) :
+//    parallelism  ∈ [1, 64]   (engine._parallelism clamp) ; run_timeout ∈ [1, 604800] (≤ 7 jours) ;
+//    tools_profile ∈ {mini, full} ; profile ∈ {low, full} honoré (balanced => None, no-op).
+// ===========================================================================================
+
+/// Options de ressources RÉSOLUES depuis le corps /api/run (`body["resource"]`). Chaque champ `None`
+/// signifie « ne pas poser cette variable » (le défaut du profil s'applique). Pur data — aucune décision
+/// de gouvernance ne dépend de ces valeurs.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct ResourceOptions {
+    pub(crate) profile: Option<String>,       // FORGE_RESOURCE_PROFILE — "low"|"full" ; "balanced"/absent => None (no-op)
+    pub(crate) parallelism: Option<i64>,      // FORGE_PARALLELISM      — [1, 64]
+    pub(crate) run_timeout: Option<i64>,      // FORGE_RUN_TIMEOUT      — [1, 604800]
+    pub(crate) tools_profile: Option<String>, // FORGE_TOOLS_PROFILE    — "mini"|"full"
+}
+
+impl ResourceOptions {
+    /// Paires (variable d'env, valeur) à poser sur le process moteur. Un champ `None` => AUCUNE entrée
+    /// (donc la variable n'est pas posée -> défaut du profil). C'est l'UNIQUE dérivation appliquée au
+    /// `Command` du moteur (cf. `claim_and_spawn`). `balanced` sans override => vecteur VIDE (no-op).
+    pub(crate) fn env_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = Vec::new();
+        if let Some(p) = &self.profile {
+            out.push(("FORGE_RESOURCE_PROFILE", p.clone()));
+        }
+        if let Some(n) = self.parallelism {
+            out.push(("FORGE_PARALLELISM", n.to_string()));
+        }
+        if let Some(n) = self.run_timeout {
+            out.push(("FORGE_RUN_TIMEOUT", n.to_string()));
+        }
+        if let Some(t) = &self.tools_profile {
+            out.push(("FORGE_TOOLS_PROFILE", t.clone()));
+        }
+        out
+    }
+
+    /// Sérialise en `Value` (objet plat) pour le blob `run_job.spawn_spec` du chemin HA pending. Les
+    /// champs `None` sont émis en `null` (round-trip fidèle via `from_value`).
+    pub(crate) fn to_value(&self) -> Value {
+        serde_json::json!({
+            "profile": self.profile, "parallelism": self.parallelism,
+            "run_timeout": self.run_timeout, "tools_profile": self.tools_profile,
+        })
+    }
+
+    /// Reconstruit depuis un `Value` (objet plat produit par `to_value`). RE-VALIDE via `parse_resource_options`
+    /// (mêmes bornes/fail-open) — un blob corrompu retombe donc sur les défauts (aucune variable posée).
+    pub(crate) fn from_value(v: &Value) -> Self {
+        parse_resource_options(&serde_json::json!({ "resource": v }))
+    }
+}
+
+/// Parse `body["resource"]` en `ResourceOptions` validées. FAIL-OPEN sur garbage (un champ invalide =>
+/// `None` => défaut du profil), JAMAIS d'erreur : un choix de ressource malformé ne doit pas bloquer un
+/// lancement (le moteur retombe sur le profil/défaut). Absent/non-objet => tout `None` (no-op).
+pub(crate) fn parse_resource_options(body: &Value) -> ResourceOptions {
+    let obj = match body.get("resource") {
+        Some(Value::Object(m)) => m,
+        _ => return ResourceOptions::default(),
+    };
+    // profil : seuls "low"/"full" sont honorés (posent FORGE_RESOURCE_PROFILE). "balanced" (défaut) et
+    // toute autre valeur => None => on ne force PAS la variable (no-op, comportement inchangé).
+    let profile = obj
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s == "low" || s == "full");
+    // parallélisme : entier borné [1, 64] (clamp moteur). Hors bornes/illisible => None.
+    let parallelism = obj
+        .get("parallelism")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n >= 1 && *n <= 64);
+    // watchdog run-timeout (s) : entier borné [1, 604800]. Hors bornes/illisible => None. NB : c'est un
+    // DÉFAUT pour le snapshot moteur — le watchdog Rust reste plafonné par le cap serveur global.
+    let run_timeout = obj
+        .get("run_timeout")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n >= 1 && *n <= 604_800);
+    // profil d'outils Docker : "mini"|"full" uniquement. Autre => None.
+    let tools_profile = obj
+        .get("tools_profile")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s == "mini" || s == "full");
+    ResourceOptions { profile, parallelism, run_timeout, tools_profile }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// (a) NO-OP : balanced sans override (et corps sans `resource`) => AUCUNE variable d'env posée =>
+    /// comportement byte-identique à aujourd'hui. C'est la garantie « balanced = no-op » de R3.
+    #[test]
+    fn balanced_no_overrides_is_noop() {
+        // corps sans clé `resource` du tout
+        let opts = parse_resource_options(&json!({"campaign": "c"}));
+        assert_eq!(opts, ResourceOptions::default());
+        assert!(opts.env_pairs().is_empty(), "aucune variable posée sans resource");
+        // `resource` présent mais profile=balanced, aucun override => toujours no-op
+        let opts = parse_resource_options(&json!({"resource": {"profile": "balanced"}}));
+        assert_eq!(opts.profile, None, "balanced n'est PAS honoré comme override (défaut)");
+        assert!(opts.env_pairs().is_empty(), "balanced + rien => aucune variable => no-op");
+    }
+
+    /// (b) OVERRIDE ATTEINT LE MOTEUR : profile=low pose FORGE_RESOURCE_PROFILE=low ; un pool renseigné
+    /// pose FORGE_PARALLELISM ; run_timeout pose FORGE_RUN_TIMEOUT ; tools_profile pose FORGE_TOOLS_PROFILE.
+    #[test]
+    fn profile_low_and_overrides_reach_env() {
+        let opts = parse_resource_options(&json!({
+            "resource": {"profile": "low", "parallelism": 8, "run_timeout": 3600, "tools_profile": "mini"}
+        }));
+        assert_eq!(opts.profile.as_deref(), Some("low"));
+        assert_eq!(opts.parallelism, Some(8));
+        assert_eq!(opts.run_timeout, Some(3600));
+        assert_eq!(opts.tools_profile.as_deref(), Some("mini"));
+        let env = opts.env_pairs();
+        assert!(env.contains(&("FORGE_RESOURCE_PROFILE", "low".to_string())), "profil low posé");
+        assert!(env.contains(&("FORGE_PARALLELISM", "8".to_string())), "pool override posé");
+        assert!(env.contains(&("FORGE_RUN_TIMEOUT", "3600".to_string())), "run-timeout override posé");
+        assert!(env.contains(&("FORGE_TOOLS_PROFILE", "mini".to_string())), "tools-profile override posé");
+    }
+
+    /// (b-bis) BLANK/ABSENT => variable ABSENTE : profile=full seul ne pose QUE FORGE_RESOURCE_PROFILE
+    /// (les overrides non renseignés restent None -> variables non posées -> défaut du profil).
+    #[test]
+    fn full_profile_alone_sets_only_profile_var() {
+        let opts = parse_resource_options(&json!({"resource": {"profile": "full"}}));
+        let env = opts.env_pairs();
+        assert_eq!(env, vec![("FORGE_RESOURCE_PROFILE", "full".to_string())]);
+        // aucune des variables d'override par-levier n'est présente
+        assert!(!env.iter().any(|(k, _)| *k == "FORGE_PARALLELISM"));
+        assert!(!env.iter().any(|(k, _)| *k == "FORGE_RUN_TIMEOUT"));
+        assert!(!env.iter().any(|(k, _)| *k == "FORGE_TOOLS_PROFILE"));
+    }
+
+    /// GARBAGE / HORS-BORNES => fail-open vers None (défaut profil), JAMAIS de variable posée avec une
+    /// valeur invalide : parallélisme hors [1,64], run_timeout <=0, profils inconnus sont tous ignorés.
+    #[test]
+    fn garbage_and_out_of_bounds_fail_open() {
+        let opts = parse_resource_options(&json!({
+            "resource": {"profile": "turbo", "parallelism": 999, "run_timeout": 0, "tools_profile": "xxl"}
+        }));
+        assert_eq!(opts, ResourceOptions::default(), "tout garbage => défaut => aucune variable");
+        assert!(opts.env_pairs().is_empty());
+        // borne haute parallélisme respectée (64 OK, 65 rejeté)
+        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 64}})).parallelism, Some(64));
+        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 65}})).parallelism, None);
+    }
+}
+

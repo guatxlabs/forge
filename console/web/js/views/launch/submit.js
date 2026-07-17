@@ -3,6 +3,7 @@ import { $, esc } from '../../core/dom.js';
 import { activeEngagement } from '../../core/state.js';
 import { confirmModal, toast } from '../../core/ui.js';
 import { collectModuleParams, highImpactOptIn } from './modules-form.js';
+import { collectResourceBody } from './resource.js';
 import { LC_LIVE, followRun, lcSetLiveBadge } from './live.js';
 import { loadRuns } from './runs-list.js';
 
@@ -72,6 +73,11 @@ export async function submitRun(e) {
   if (rateRaw !== '') { const rn = Number(rateRaw); if (!Number.isNaN(rn) && rn > 0) body.rate = Math.floor(rn); }
   const budgetRaw = ($('#lc-budget') && $('#lc-budget').value || '').trim();
   if (budgetRaw !== '') { const b = Number(budgetRaw); if (!Number.isNaN(b)) body.budget = b; }
+  // RESSOURCES (R3) : profil + overrides par-levier -> body.resource (threadé aux env vars du moteur).
+  // Vide / balanced sans override => objet vide => NON ajouté (no-op, comportement inchangé). CHOIX DE
+  // RESSOURCE PUR — aucune bascule scope/ROE/exploit.
+  const resource = collectResourceBody();
+  if (Object.keys(resource).length) body.resource = resource;
   if (reason) body.reason = reason.slice(0, 200);
   // ENGAGEMENT : le run opère SUR l'engagement actif (son scope + son ledger gouvernent, cf. serveur).
   { const _eng = activeEngagement(); if (_eng != null) body.engagement_id = _eng; }
