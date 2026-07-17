@@ -198,13 +198,17 @@ class Oracle(Module):
             while True:
                 if bucket is not None:
                     bucket.wait()                    # respect du débit (rate) avant chaque requête sortante
-                req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
                 # ANTI-REBINDING : le ROE a épinglé l'IP de CET hôte au fire-time (moteur -> pin.using).
                 # Si un pin s'applique à `cur_url`, on se connecte PAR-IP (Host/SNI/cert = hôte d'origine) ;
                 # sinon (pas de pin lié, ou hôte non épinglé -> ex redirect cross-origin) résolution NORMALE
                 # (byte-identique à l'historique, et c'est `_raw_open` que les tests monkeypatchent).
                 pin_ip = _pin.ip_for(cur_url)
                 try:
+                    # `Request()` est construit DANS le try : une URL sans scheme (`host`/`host:port`,
+                    # normalement normalisée EN AMONT par `web_url_candidates`) ferait lever
+                    # `ValueError: unknown url type` au CONSTRUCTEUR — traitée comme tout échec transport
+                    # -> (None,"",None) offline-safe, JAMAIS de crash. URL valide -> byte-identique.
+                    req = urllib.request.Request(cur_url, headers=req_headers, method=cur_method, data=cur_payload)
                     resp = (Oracle._pinned_open(req, pin_ip, timeout=timeout) if pin_ip
                             else Oracle._raw_open(req, timeout=timeout))
                     with resp as r:

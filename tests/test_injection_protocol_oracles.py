@@ -36,6 +36,10 @@ from forge.modules.injection_probes import (                    # noqa: E402
     NoSqlProbe, LuceneProbe, CmdiProbe, PrototypePollutionProbe, _CMDI_BENIGN_RX)
 from forge.modules.httpflow import (                            # noqa: E402
     RequestSmugglingProbe, CachePoisoningProbe, HeaderInjectionProbe)
+from forge.modules.clientflow import XssReflected, OpenRedirect  # noqa: E402
+from forge.modules.security_headers import SecurityHeaders       # noqa: E402
+from forge.modules.exposure import FrameworkExposure             # noqa: E402
+from forge.modules.cors import CorsCredentials                   # noqa: E402
 
 NEW_KINDS = ("nosql.probe", "prototype_pollution.probe", "request_smuggling.probe",
              "cache_poisoning.probe", "header_injection.probe", "lucene.probe", "cmdi.probe")
@@ -671,6 +675,152 @@ class TestSessionSecrecy(unittest.TestCase):
         for fd in findings:
             blob = f"{fd.title} {fd.evidence} {fd.poc}"
             self.assertNotIn(SECRET, blob, "le secret de session a fuité dans le finding")
+
+
+# =================================================================================================
+#  D2 — cibles SANS scheme (`host` / `host:port`) : plus AUCUN crash `unknown url type`.
+#  cache_poisoning.probe / header_injection.probe construisaient un Request urllib depuis une cible sans
+#  scheme -> `ValueError: unknown url type: '127.0.0.1'` (le constructeur `Request()` lève en Py3.13+).
+#  Correctif : normalisation via `web_url_candidates` AVANT tout Request ; cible injoignable -> `skipped`
+#  visible ; cible host:port joignable -> vrai verdict. + garde de défense en profondeur dans `Oracle._http`.
+# =================================================================================================
+class TestSchemelessTargetNoCrash(unittest.TestCase):
+    # hôte nu, host:port, et URL déjà formée (doit rester byte-identique) — jamais d'exception.
+    BARE = ("127.0.0.1", "app.test", "app.test:7100", "https://app.test/home")
+
+    @staticmethod
+    def _host(t):
+        return Scope._host(t)
+
+    # --- cache_poisoning : VRAI chemin _fetch->_http->Request exercé (seul _raw_open est patché) ---
+    def test_cache_poisoning_normalizes_before_urllib_never_raises(self):
+        for tgt in self.BARE:
+            seen = []
+
+            def raw(req, timeout=15, _seen=seen):
+                _seen.append(req.full_url)                    # atteint SEULEMENT si Request() n'a pas levé
+                raise ConnectionRefusedError("refused (no network in test)")
+            with patch("forge.modules.oracle.Oracle._raw_open", raw):
+                f = CachePoisoningProbe().fire(Action(
+                    "cache_poisoning.probe", tgt, params={"in_scope": [self._host(tgt)]}))
+            self.assertEqual(f[0].status, "skipped", tgt)                # injoignable -> dégradation visible
+            self.assertIn("réseau indisponible", f[0].title, tgt)
+            self.assertTrue(seen, f"aucun Request atteint _raw_open pour {tgt} (normalisation manquante ?)")
+            self.assertTrue(all("://" in u for u in seen), (tgt, seen))  # scheme TOUJOURS présent
+
+    def test_header_injection_normalizes_before_urllib_never_raises(self):
+        for tgt in self.BARE:
+            seen = []
+
+            def raw(req, timeout=15, _seen=seen):
+                _seen.append(req.full_url)
+                raise ConnectionRefusedError("refused (no network in test)")
+            with patch("forge.modules.oracle.Oracle._raw_open", raw):
+                f = HeaderInjectionProbe().fire(Action(
+                    "header_injection.probe", tgt,
+                    params={"param": "next", "in_scope": [self._host(tgt)]}))
+            self.assertEqual(f[0].status, "skipped", tgt)
+            self.assertIn("réseau indisponible", f[0].title, tgt)
+            self.assertTrue(seen, f"aucun Request atteint _raw_open pour {tgt} (normalisation manquante ?)")
+            self.assertTrue(all("://" in u for u in seen), (tgt, seen))
+
+    # --- cible host:port JOIGNABLE (seam _fetch mocké) -> vrai finding, URLs toujours schemées ---
+    def test_cache_poisoning_reachable_host_port_real_finding(self):
+        tgt = "app.test:7100"
+        marker, _b = CachePoisoningProbe._marker(tgt)
+        seen = []
+
+        def fake(url, headers=None, timeout=15, method="GET", data=None, follow_redirects=True):
+            seen.append(url)
+            if (headers or {}).get("X-Forwarded-Host") == marker:
+                return (200, f"<link href=//{marker}/a>", [("Cache-Control", "public, max-age=60")])
+            return (200, "home", [("Cache-Control", "public, max-age=60")])
+        restore = _set(CachePoisoningProbe, "_fetch", fake)
+        try:
+            f = CachePoisoningProbe().fire(Action("cache_poisoning.probe", tgt,
+                                                  params={"in_scope": ["app.test"]}))
+        finally:
+            restore()
+        self.assertEqual(f[0].status, "vulnerable")
+        self.assertIn("Cache-Poisoning CONFIRMÉ", f[0].title)
+        self.assertTrue(seen and all("://" in u for u in seen), seen)
+        self.assertTrue(any(u.startswith("http://app.test:7100") for u in seen), seen)  # http+port explicite
+
+    def test_header_injection_reachable_host_port_real_finding(self):
+        tgt = "app.test:7100"
+        mhost = HeaderInjectionProbe._marker(tgt, "host", "hostinj") + ".forge-hh.test"
+        seen = []
+
+        def fake(url, headers=None, timeout=15, method="GET", data=None, follow_redirects=True):
+            seen.append(url)
+            if (headers or {}).get("X-Forwarded-Host") == mhost:
+                return (302, "redirecting", [("Location", f"https://{mhost}/reset")])
+            return (200, "home", [])
+        restore = _set(HeaderInjectionProbe, "_fetch", fake)
+        try:
+            f = HeaderInjectionProbe().fire(Action("header_injection.probe", tgt,
+                                                   params={"in_scope": ["app.test"]}))
+        finally:
+            restore()
+        self.assertEqual(f[0].status, "vulnerable")
+        self.assertIn("host header poisoning", f[0].title)
+        self.assertTrue(seen and all("://" in u for u in seen), seen)
+
+    # --- request_smuggling : le seam raw-socket `_timed` normalise aussi host:port (sinon hostname=None) ---
+    def test_request_smuggling_timed_normalizes_host_port(self):
+        seen = []
+
+        def fake_conn(addr, timeout=None):
+            seen.append(addr)
+            raise OSError("refused (no socket in test)")
+        with patch("forge.modules.httpflow.socket.create_connection", fake_conn):
+            _el, status = RequestSmugglingProbe._timed(
+                Action("request_smuggling.probe", "app.test:7100"), "baseline", 5)
+        self.assertEqual(status, "error")                        # transport mort, PAS de crash
+        self.assertEqual(seen, [("app.test", 7100)])             # host:port parsé (http -> port explicite)
+
+    # --- défense en profondeur : Oracle._http ne lève JAMAIS `unknown url type` (Request dans le try) ---
+    def test_oracle_http_schemeless_degrades_not_raises(self):
+        for tgt in ("127.0.0.1", "app.test:7100", "not a url", "ftp ://bad"):
+            st, body, h = Oracle._http(tgt)                      # aucune normalisation en amont
+            self.assertIsNone(st, tgt)                           # dégrade proprement, aucune exception
+            self.assertEqual(body, "")
+            self.assertIsNone(h)
+
+
+class TestAuditedWebModulesNoBareHostCrash(unittest.TestCase):
+    """Garde paramétrée : AUCUN module web audité ne lève sur une cible sans scheme (`127.0.0.1`).
+    Transport mocké (`_raw_open` lève) — on prouve l'ABSENCE d'exception (pas de `ValueError` url) et un
+    finding-liste renvoyé. Couvre les modules qui construisent un Request depuis `action.target` : ceux
+    qui auto-normalisent (cache/header/security_headers/exposure via scheme) ET les config-gated qui
+    s'appuient sur la garde `Oracle._http` (xss/redirect/cors)."""
+    HOST = "127.0.0.1"
+
+    @staticmethod
+    def _raw_raise(req, timeout=15):
+        raise ConnectionRefusedError("refused (no network in test)")
+
+    # (classe, kind, params driving a network attempt on the bare host)
+    MODS = (
+        (CachePoisoningProbe, "cache_poisoning.probe", {}),
+        (HeaderInjectionProbe, "header_injection.probe", {"param": "next"}),
+        (XssReflected, "xss.reflected", {"param": "q"}),
+        (OpenRedirect, "redirect.open", {"param": "next"}),
+        (SecurityHeaders, "web.security_headers", {}),
+        (FrameworkExposure, "framework.exposure", {}),
+        (CorsCredentials, "cors.credentials", {"attacker_origin": "https://evil.example"}),
+    )
+
+    def test_no_audited_web_module_raises_on_bare_host(self):
+        for cls, kind, extra in self.MODS:
+            params = dict(extra, in_scope=[self.HOST])
+            with patch("forge.modules.oracle.Oracle._raw_open", self._raw_raise):
+                try:
+                    f = cls().fire(Action(kind, self.HOST, params=params))
+                except Exception as e:                           # noqa: BLE001
+                    self.fail(f"{kind} a levé {type(e).__name__}: {e} sur une cible sans scheme")
+            self.assertIsInstance(f, list, kind)
+            self.assertTrue(f, kind)                             # toujours un finding (jamais un crash muet)
 
 
 if __name__ == "__main__":

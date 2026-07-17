@@ -333,7 +333,11 @@ class TestExplicitSelectionIsDirective(unittest.TestCase):
         # `web.security_headers` explicite mais AUCUNE réponse HTTP (transport mort) -> le module DÉGRADE
         # en finding `skipped` VISIBLE, il n'est pas SILENCIEUSEMENT déféré dans not_planned.
         from forge.modules import security_headers as SH
-        saved = SH.SecurityHeaders._fetch
+        # DESCRIPTEUR BRUT via __dict__ : `SH.SecurityHeaders._fetch` déréférencerait le staticmethod en
+        # fonction NUE -> le reposer casserait le seam (self lié en 1er positionnel -> "multiple values
+        # for argument 'headers'") pour tout test ULTÉRIEUR qui exerce le vrai chemin. On repose le
+        # descripteur staticmethod tel quel (isolation stricte).
+        saved = SH.SecurityHeaders.__dict__["_fetch"]
         SH.SecurityHeaders._fetch = staticmethod(lambda url, headers=None, timeout=15: (None, None, None))
         try:
             sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
@@ -401,7 +405,9 @@ class TestRealReconDiscoversServiceChainsWebModule(unittest.TestCase):
                     {"Server": "Werkzeug/2.0.3", "Content-Type": "text/html"})
             return None, None, None                          # rien sur :80/:443 ni en https
 
-        sv_av, sv_tool, sv_fetch = runner_mod.available, runner_mod.tool, SH.SecurityHeaders._fetch
+        # __dict__ : descripteur staticmethod BRUT (l'accès attribut le déréférencerait en fonction nue,
+        # dont le restore casserait le seam pour tout test ultérieur exerçant le vrai chemin).
+        sv_av, sv_tool, sv_fetch = runner_mod.available, runner_mod.tool, SH.SecurityHeaders.__dict__["_fetch"]
         runner_mod.available, runner_mod.tool = fake_available, fake_tool
         SH.SecurityHeaders._fetch = staticmethod(fake_fetch)
         try:
@@ -443,7 +449,7 @@ class TestRealReconDiscoversServiceChainsWebModule(unittest.TestCase):
         # la vague suivante le VÉTOe (rien ne tire hors périmètre). Ici on injecte un nœud host:port
         # hors-scope dans le graphe et on vérifie que web.security_headers explicite y est VÉTOé.
         from forge.modules import security_headers as SH
-        SH_fetch = SH.SecurityHeaders._fetch
+        SH_fetch = SH.SecurityHeaders.__dict__["_fetch"]                  # descripteur staticmethod brut
         SH.SecurityHeaders._fetch = staticmethod(lambda u, headers=None, timeout=15: (None, None, None))
         try:
             sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"], "allow_exploit": False,
@@ -514,7 +520,9 @@ class TestReconMislabeledPortConfirmedHttp(unittest.TestCase):
             return None, None, None
 
         sv_av, sv_tool = runner_mod.available, runner_mod.tool
-        sv_probe, sv_fetch = RECON.NmapServices._fetch, SH.SecurityHeaders._fetch
+        # __dict__ : descripteurs staticmethod BRUTS (l'accès attribut les déréférencerait en fonctions
+        # nues, dont le restore casserait les seams pour tout test ultérieur au vrai chemin).
+        sv_probe, sv_fetch = RECON.NmapServices.__dict__["_fetch"], SH.SecurityHeaders.__dict__["_fetch"]
         runner_mod.available, runner_mod.tool = fake_available, fake_tool
         RECON.NmapServices._fetch = staticmethod(fake_probe)
         SH.SecurityHeaders._fetch = staticmethod(fake_fetch)
