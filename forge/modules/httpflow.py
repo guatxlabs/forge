@@ -46,6 +46,7 @@ import ssl
 import time
 import urllib.parse
 
+from ._scopeguard import web_url_candidates
 from .oracle import ScopeGuardedOracle
 from .clientflow import ClientFlowOracle
 from .registry import register
@@ -97,7 +98,12 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
         connecté mais aucune réponse (signal de HANG = désync) ; « error » = pas de connexion (offline).
         Connexion isolée puis FERMÉE : aucun empoisonnement de file d'un autre user. Seam monkeypatché
         par les tests (zéro réseau réel)."""
-        parsed = urllib.parse.urlsplit(action.target)
+        # NORMALISATION scheme-less : une cible hôte nu / host:port n'a pas de netloc pour urlsplit
+        # (hostname=None -> "error" et cible non testée). On la préfixe d'un scheme via le helper partagé
+        # (cf. web_url_candidates) AVANT de parser : `host:port` devient testable. URL déjà formée ->
+        # candidat unique = la cible telle quelle (byte-identique à l'historique).
+        cands = web_url_candidates(action.target)
+        parsed = urllib.parse.urlsplit(cands[0] if cands else str(action.target))
         host = parsed.hostname
         if not host:
             return (0.0, "error")
@@ -247,13 +253,22 @@ class CachePoisoningProbe(ClientFlowOracle):
             return True, xc
         return False, cc or "—"
 
-    def _url(self, action, buster):
-        sep = "&" if "?" in action.target else "?"
-        return f"{action.target}{sep}{urllib.parse.urlencode({'forgecb': buster})}"
+    @staticmethod
+    def _base_url(target):
+        """Base URL NORMALISÉE au scheme pour `target` (hôte nu / host:port / URL déjà formée). Délègue au
+        helper partagé (cf. web_url_candidates) : une cible sans scheme n'est JAMAIS passée à urllib. URL
+        déjà formée -> candidat unique = la cible (byte-identique)."""
+        cands = web_url_candidates(target)
+        return cands[0] if cands else str(target)
+
+    def _url(self, base, buster):
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}{urllib.parse.urlencode({'forgecb': buster})}"
 
     def dry(self, action):
         marker, buster = self._marker(action.target)
-        return (f"# envoie {action.target}?forgecb={buster} avec X-Forwarded-Host: {marker} (marqueur "
+        base = self._base_url(action.target)
+        return (f"# envoie {self._url(base, buster)} avec X-Forwarded-Host: {marker} (marqueur "
                 f"BÉNIGN) et compare à un contrôle SANS l'en-tête — PREUVE = {marker} réfléchi dans une "
                 f"réponse CACHEABLE uniquement via l'en-tête non clé ; cache-buster unique (probe-only) ; sinon tested")
 
@@ -265,9 +280,22 @@ class CachePoisoningProbe(ClientFlowOracle):
         user_headers = dict(action.params.get("headers", {}))
         headers = list(action.params.get("unkeyed_headers") or _UNKEYED_HEADERS)
 
+        # NORMALISATION scheme-less : une cible hôte nu / host:port n'a PAS de scheme -> la passer telle
+        # quelle à urllib lèverait `unknown url type`. La requête de CONTRÔLE essaie les candidats
+        # (http/https ordonnés par vraisemblance, cf. web_url_candidates) et FIXE la base sur la 1re
+        # joignable — toutes les sondes suivantes réutilisent cette base. URL déjà formée -> 1 candidat
+        # (byte-identique). AUCUN candidat joignable -> dégradation `skipped` visible (offline-safe).
+        candidates = web_url_candidates(action.target) or [str(action.target)]
+        base = candidates[0]
+
         # contrôle : requête SANS en-tête non clé (buster distinct) -> le marqueur ne doit PAS y apparaître
         # (anti-faux-positif : confirme que tout reflet vient bien de l'en-tête non clé injecté).
-        c_st, c_body, c_pairs = self._fetch(self._url(action, buster + "ctl"), headers=dict(user_headers))
+        c_st, c_body, c_pairs = None, "", []
+        for cand in candidates:
+            c_st, c_body, c_pairs = self._fetch(self._url(cand, buster + "ctl"), headers=dict(user_headers))
+            base = cand
+            if c_st is not None:
+                break
         control_reflects = bool(self._reflected_in(c_pairs, c_body, marker))
         seen_network = c_st is not None
 
@@ -275,7 +303,7 @@ class CachePoisoningProbe(ClientFlowOracle):
         for h in headers:
             probe_headers = dict(user_headers)
             probe_headers[h] = marker
-            st, body, pairs = self._fetch(self._url(action, buster), headers=probe_headers)
+            st, body, pairs = self._fetch(self._url(base, buster), headers=probe_headers)
             if st is not None:
                 seen_network = True
             loc = self._reflected_in(pairs, body, marker)
@@ -305,7 +333,7 @@ class CachePoisoningProbe(ClientFlowOracle):
                       f"réflexion_contrôle(sans en-tête)={control_reflects} (si vrai -> non concluant) ; "
                       f"marqueur BÉNIGN (hostname inerte) + cache-buster unique (aucune persistance nuisible "
                       f"pour de vrais users) ; non destructif ; session gouvernée non journalisée"),
-            poc=(f"# curl -H 'X-Forwarded-Host: {marker}' '{self._url(action, buster)}' vs contrôle sans "
+            poc=(f"# curl -H 'X-Forwarded-Host: {marker}' '{self._url(base, buster)}' vs contrôle sans "
                  f"l'en-tête\n# PREUVE = {marker} réfléchi ({where_reflected or '—'}) dans une réponse "
                  f"CACHEABLE via l'en-tête non clé ; cache-buster unique, probe-only"))]
 
@@ -361,12 +389,23 @@ class HeaderInjectionProbe(ClientFlowOracle):
         user_headers = dict(action.params.get("headers", {}))
         seen_network = False
 
+        # NORMALISATION scheme-less : une cible hôte nu / host:port n'a PAS de scheme -> la passer telle
+        # quelle à urllib lèverait `unknown url type`. La requête de CONTRÔLE essaie les candidats
+        # (http/https ordonnés par vraisemblance, cf. web_url_candidates) et FIXE la base sur la 1re
+        # joignable ; les sondes host + la sonde CRLF (`_send_h(base=...)`) la réutilisent. URL déjà
+        # formée -> 1 candidat (byte-identique). Aucun candidat joignable -> dégradation `skipped`.
+        candidates = web_url_candidates(action.target) or [str(action.target)]
+        base = candidates[0]
+
         # --- (b) HOST HEADER POISONING (CWE-644) — ne requiert AUCUN param ---
         mhost = self._marker(action.target, "host", "hostinj") + ".forge-hh.test"
-        sep = "&" if "?" in action.target else "?"
-        ctl_url = action.target
         # contrôle : requête SANS en-tête d'hôte injecté -> le marqueur d'hôte ne doit PAS y apparaître.
-        c_st, c_body, c_pairs = self._fetch(ctl_url, headers=dict(user_headers))
+        c_st, c_body, c_pairs = None, "", []
+        for cand in candidates:
+            c_st, c_body, c_pairs = self._fetch(cand, headers=dict(user_headers))
+            base = cand
+            if c_st is not None:
+                break
         if c_st is not None:
             seen_network = True
         control_reflects_host = bool(self._reflected_in(c_pairs, c_body, mhost))
@@ -374,7 +413,7 @@ class HeaderInjectionProbe(ClientFlowOracle):
         for hh in _HOST_HEADERS:
             probe_headers = dict(user_headers)
             probe_headers[hh] = mhost
-            st, body, pairs = self._fetch(action.target, headers=probe_headers)
+            st, body, pairs = self._fetch(base, headers=probe_headers)
             if st is not None:
                 seen_network = True
             loc = self._reflected_in(pairs, body, mhost)
@@ -389,7 +428,7 @@ class HeaderInjectionProbe(ClientFlowOracle):
             # valeur BÉNIGNE : un CRLF suivi d'un en-tête témoin inerte ; si l'app l'écrit sans filtrer,
             # l'en-tête `Forge-Split: <token>` se MATÉRIALISE dans la réponse.
             payload = f"forge\r\n{_CRLF_HEADER_NAME}: {crlf_token}\r\n\r\nforge"
-            _, st, _body, pairs = self._send_h(action, param, payload, method)
+            _, st, _body, pairs = self._send_h(action, param, payload, method, base=base)
             if st is not None:
                 seen_network = True
             got = self._get(pairs, _CRLF_HEADER_NAME)
@@ -417,6 +456,6 @@ class HeaderInjectionProbe(ClientFlowOracle):
                       f"réflexion_contrôle={control_reflects_host} (si vrai -> non concluant) ; marqueur BÉNIGN "
                       f"inerte (aucun Set-Cookie/session tamperé) ; non destructif ; session gouvernée non journalisée"),
             poc=(f"# CRLF: {action.params.get('param', '<param>')}=…%0d%0a{_CRLF_HEADER_NAME}:<token> ; "
-                 f"HOST: -H 'X-Forwarded-Host: {mhost}' sur {action.target}\n"
+                 f"HOST: -H 'X-Forwarded-Host: {mhost}' sur {base}\n"
                  f"# PREUVE = en-tête bénin '{_CRLF_HEADER_NAME}' matérialisé OU marqueur d'hôte reflété "
                  f"(diff vs contrôle) ; marqueur inerte"))]

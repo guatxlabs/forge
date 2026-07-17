@@ -92,21 +92,26 @@ class ClientFlowOracle(ScopeGuardedOracle):
         h = hashlib.sha256(f"{target}|{param}|forge-{salt}".encode()).hexdigest()
         return "forge" + h[:12]
 
-    def _send_h(self, action, param, payload, method="GET", follow_redirects=True):
+    def _send_h(self, action, param, payload, method="GET", follow_redirects=True, base=None):
         """Émet l'injection et renvoie (où, status, body, pairs). GET -> payload dans la query ; autre
         méthode -> corps urlencodé. Les en-têtes explicites (action.params.headers) priment ; la session
-        gouvernée (scope-guardée) est fusionnée SOUS eux par `_http`."""
+        gouvernée (scope-guardée) est fusionnée SOUS eux par `_http`.
+
+        `base` (défaut None) — base URL déjà NORMALISÉE au scheme (cf. web_url_candidates) à utiliser à la
+        place de `action.target` : indispensable pour une cible hôte nu / host:port (sans lui, urllib
+        lèverait `unknown url type`). None -> `action.target` (byte-identique pour les cibles URL)."""
         headers = dict(action.params.get("headers", {}))
+        tgt = str(base) if base is not None else action.target
         if method.upper() == "GET":
-            sep = "&" if "?" in action.target else "?"
-            url = f"{action.target}{sep}{urllib.parse.urlencode({param: payload})}"
+            sep = "&" if "?" in tgt else "?"
+            url = f"{tgt}{sep}{urllib.parse.urlencode({param: payload})}"
             st, body, pairs = self._fetch(url, headers=headers, method="GET",
                                           follow_redirects=follow_redirects)
             return url, st, body, pairs
-        st, body, pairs = self._fetch(action.target, headers=headers, method=method.upper(),
+        st, body, pairs = self._fetch(tgt, headers=headers, method=method.upper(),
                                       data=urllib.parse.urlencode({param: payload}),
                                       follow_redirects=follow_redirects)
-        return action.target, st, body, pairs
+        return tgt, st, body, pairs
 
 
 # =================================================================================================
