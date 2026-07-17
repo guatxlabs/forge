@@ -258,6 +258,53 @@ class TestNucleiJsonlParsing(unittest.TestCase):
         self.assertIn("aucun hit", findings[0].title)
 
 
+class TestNucleiDefaultSeverityFloor(unittest.TestCase):
+    """Défaut severity élargi à info,low (faire remonter swagger/openapi, panels LLM, exposed-files)
+    SANS inflation : la sévérité du finding reste = sévérité RÉELLE du template (INFO -> INFO)."""
+
+    def _patch_tool(self, rc, out, err=""):
+        orig = webmod.runner.tool
+        webmod.runner.tool = lambda *a, **k: (rc, out, err)
+        self.addCleanup(lambda: setattr(webmod.runner, "tool", orig))
+
+    def test_default_argv_includes_info_and_low(self):
+        # Sans param severity -> le filtre -severity doit désormais inclure info ET low (+ medium+).
+        argv = NucleiScan()._args(Action("web.nuclei", "https://app.test"))
+        i = argv.index("-severity")
+        sev = argv[i + 1].split(",")
+        self.assertIn("info", sev)
+        self.assertIn("low", sev)
+        for s in ("medium", "high", "critical"):          # medium+ toujours couvert (pas de régression)
+            self.assertIn(s, sev)
+
+    def test_info_template_hit_stays_info_not_inflated(self):
+        # Un template INFO (ex: exposition swagger/openapi) -> finding INFO, jamais promu.
+        jsonl = ('{"template-id":"swagger-api","matched-at":"https://app.test/swagger.json",'
+                 '"info":{"name":"Swagger UI exposed","severity":"info"}}')
+        self._patch_tool(0, jsonl)
+        findings = NucleiScan().fire(Action("web.nuclei", "https://app.test"))
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f.severity, "INFO")               # PAS d'inflation : reste INFO
+        self.assertEqual(f.status, "tested")               # info -> testé, jamais reported_by_tool/vulnerable
+        self.assertNotIn(f.status, ("reported_by_tool",))  # réservé au high/critical
+        self.assertEqual(f.target, "https://app.test/swagger.json")
+
+    def test_low_template_hit_stays_low(self):
+        jsonl = ('{"template-id":"exposed-files","matched-at":"https://app.test/.env",'
+                 '"info":{"name":"Exposed file","severity":"low"}}')
+        self._patch_tool(0, jsonl)
+        findings = NucleiScan().fire(Action("web.nuclei", "https://app.test"))
+        self.assertEqual(findings[0].severity, "LOW")       # LOW template -> LOW finding
+        self.assertEqual(findings[0].status, "tested")
+
+    def test_user_severity_param_still_overrides_default(self):
+        # Le param `severity` fourni par l'utilisateur reste prioritaire sur le défaut élargi.
+        argv = NucleiScan()._args(Action("web.nuclei", "https://app.test", params={"severity": "critical"}))
+        i = argv.index("-severity")
+        self.assertEqual(argv[i + 1], "critical")           # override strict, pas d'ajout d'info/low
+
+
 class TestOriginHostHeader(unittest.TestCase):
     """origin.find : la vérif host-header (httpx -H 'Host: domain') gouverne le flag HIGH."""
 

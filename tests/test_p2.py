@@ -165,11 +165,11 @@ class TestNucleiSeverityParam(unittest.TestCase):
 
     def test_absent_or_invalid_severity_falls_back_to_default(self):
         m = self._module()
-        self.assertEqual(m._severity(Action("web.nuclei", "app.test")), "medium,high,critical")
+        self.assertEqual(m._severity(Action("web.nuclei", "app.test")), "info,low,medium,high,critical")
         # aucun token n'est une sévérité valide ("info; rm -rf" != "info") -> repli défaut,
         # et de toute façon jamais concaténé à un shell (runner exécute argv, pas une string).
         bad = Action("web.nuclei", "app.test", params={"severity": "pwn,info; rm -rf"})
-        self.assertEqual(m._severity(bad), "medium,high,critical")
+        self.assertEqual(m._severity(bad), "info,low,medium,high,critical")
         # une liste contenant un token valide ne garde QUE le valide :
         ok = Action("web.nuclei", "app.test", params={"severity": ["info", "bogus"]})
         self.assertEqual(m._severity(ok), "info")

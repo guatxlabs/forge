@@ -20,13 +20,17 @@ class NucleiScan(FlagAllowlistMixin, Module):
     _refuse_category = "nuclei"                   # provenance du finding de refus (mixin) — inchangée
     _refuse_tool = "nuclei"
     mitre = techniques.mitre_for("web.nuclei")   # source de vérité : forge/techniques.py
-    description = ("Scan de vulnérabilités par templates nuclei (medium/high/critical par défaut). "
+    description = ("Scan de vulnérabilités par templates nuclei (info→critical par défaut, pour faire "
+                   "remonter les expositions info/low : swagger/openapi, panels LLM, exposed-files). "
                    "Params UI : severity (allow-listée), templates (-t), tags (-tags), extra_args (allowlist).")
     BIN, IMG = "nuclei", "projectdiscovery/nuclei"
     available = property(lambda self: runner.available("nuclei", "projectdiscovery/nuclei", prefer_docker=True))
     _SEV = {"info": "INFO", "low": "LOW", "medium": "MEDIUM", "high": "HIGH", "critical": "CRITICAL"}
     _ALLOWED_SEV = ("info", "low", "medium", "high", "critical")
-    _DEFAULT_SEV = "medium,high,critical"
+    # Défaut élargi à info,low pour faire remonter les EXPOSITIONS (swagger/openapi, panels LLM,
+    # exposed-files) qu'un scan manuel voit et que le filtre medium+ masquait. AUCUNE inflation :
+    # la sévérité du finding reste = sévérité RÉELLE du template (INFO template -> finding INFO, cf. _SEV).
+    _DEFAULT_SEV = "info,low,medium,high,critical"
     # SCHÉMA servi à l'UI (source unique) — rendu dynamiquement par modules-form.js via `forge modules --json`.
     PARAMS_SCHEMA = [
         {"name": "severity", "type": "select", "label": "severity (filtre templates)", "flag": "-severity",
@@ -41,7 +45,7 @@ class NucleiScan(FlagAllowlistMixin, Module):
 
     def _severity(self, action):
         """Niveaux de sévérité (param UI/console `severity`), filtrés contre la liste blanche nuclei.
-        Accepte une chaîne CSV ou une liste. Valeur absente/invalide -> défaut medium,high,critical
+        Accepte une chaîne CSV ou une liste. Valeur absente/invalide -> défaut info,low,medium,high,critical
         (jamais d'élargissement de capacité : c'est un filtre de templates, pas une bascule ROE)."""
         raw = action.params.get("severity")
         if isinstance(raw, str):
@@ -112,6 +116,6 @@ class NucleiScan(FlagAllowlistMixin, Module):
             if failed:
                 return [failed]
             findings.append(self.finding(
-                target=action.target, title="nuclei: aucun hit medium+", severity="INFO",
+                target=action.target, title="nuclei: aucun hit", severity="INFO",
                 category="nuclei", status="tested", tool="nuclei", poc=self.dry(action)))
         return findings
