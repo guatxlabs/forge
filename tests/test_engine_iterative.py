@@ -290,5 +290,75 @@ class TestFireExceptionRobustness(unittest.TestCase):
             self.assertTrue(any(r["verdict"] == "ERROR" for r in eng.results))
 
 
+class TestExplicitSelectionIsDirective(unittest.TestCase):
+    """T16 — un module EXPLICITEMENT sélectionné (`--modules`) est un ORDRE, pas une suggestion.
+
+    Régression : le cerveau heuristique ne PROPOSE `web.security_headers` sur AUCUN host (et
+    `recon.tech`/`recon.waf` UNIQUEMENT après une découverte de sous-domaine). Sous `--modules`
+    explicite, ces kinds — jamais proposés — étaient FILTRÉS par `_prepare` et retombaient
+    SILENCIEUSEMENT dans `not_planned` (« surface non concordante »), alors même que la recon venait
+    de découvrir une surface web dans le MÊME run. Le fix les fait tirer sur la surface (host initial
+    + host:port découvert), EXACTEMENT le périmètre où `web.nuclei` était déjà proposé. Le mode AUTO
+    (`modules=None`) reste inchangé : là, la non-proposition/le report coverage-safe demeurent."""
+
+    def test_explicit_web_module_planned_on_base_and_discovered_surface(self):
+        # recon.nmap DÉCOUVRE un service web (host:port) dans la vague 1 ; `web.security_headers` est
+        # EXPLICITEMENT sélectionné. Il DOIT tirer sur le host initial ET sur la surface découverte —
+        # jamais retomber dans not_planned. Tout stubé (zéro réseau).
+        nmap_finds = [Finding(target="127.0.0.1:7100", title="port 7100 http ouvert (nmap)",
+                              status="tested", severity="INFO", category="recon")]
+        stubs = {"recon.nmap": nmap_finds, "web.security_headers": [], "recon.httpx": [],
+                 "web.nuclei": [], "recon.subdomains": [], "recon.js_endpoints": [], "recon.urls": []}
+        sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                    "allow_exploit": False, "allow_private": True})
+        with _swap_registry(stubs):
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["recon.nmap", "web.security_headers"])
+        planned = {r["kind"] for r in eng.results}
+        # (1) le module explicite est PLANIFIÉ (avant : absent -> not_planned).
+        self.assertIn("web.security_headers", planned)
+        # (2) il n'est PLUS reporté silencieusement.
+        self.assertNotIn("web.security_headers", eng.not_planned)
+        # (3) il a tiré sur le host INITIAL et sur la surface DÉCOUVERTE (host:port), gaté FIRE par le ROE.
+        sh = {r["target"]: r["verdict"] for r in eng.results if r["kind"] == "web.security_headers"}
+        self.assertIn("127.0.0.1", sh)
+        self.assertIn("127.0.0.1:7100", sh, "le module explicite n'a pas atteint la surface découverte")
+        self.assertTrue(all(v == FIRE for v in sh.values()), "gouvernance ROE : chaque tir doit être FIRE")
+        # (4) accounting fermé : not_planned ∪ planifiés == sélectionnés (aucune omission).
+        self.assertEqual(set(eng.not_planned) | planned, eng.selected_modules)
+
+    def test_explicit_module_with_no_surface_degrades_visibly_not_silent(self):
+        # `web.security_headers` explicite mais AUCUNE réponse HTTP (transport mort) -> le module DÉGRADE
+        # en finding `skipped` VISIBLE, il n'est pas SILENCIEUSEMENT déféré dans not_planned.
+        from forge.modules import security_headers as SH
+        saved = SH.SecurityHeaders._fetch
+        SH.SecurityHeaders._fetch = staticmethod(lambda url, headers=None, timeout=15: (None, None, None))
+        try:
+            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
+                        "allow_exploit": False, "allow_private": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            eng.campaign([Target("127.0.0.1", "host")], HeuristicBrain(), Planner(),
+                         modules=["web.security_headers"])
+        finally:
+            SH.SecurityHeaders._fetch = saved
+        self.assertIn("web.security_headers", {r["kind"] for r in eng.results})
+        self.assertNotIn("web.security_headers", eng.not_planned)
+        degraded = [f for f in eng.findings if f.status == "skipped" and "non testé" in f.title]
+        self.assertTrue(degraded, "pas de finding `skipped` visible — dégradation silencieuse")
+
+    def test_auto_mode_unchanged_module_still_deferred(self):
+        # MODE AUTO (modules=None) : le cerveau ne propose PAS web.security_headers/recon.tech/recon.waf
+        # sur une cible web nue -> ils RESTENT non planifiés et reportés dans not_planned (inchangé).
+        eng = Engine(Scope({"mode": "grey", "in_scope": ["app.test"], "allow_exploit": False}))
+        eng.campaign([Target("app.test", "url")], HeuristicBrain(), Planner())     # modules=None
+        planned = {r["kind"] for r in eng.results}
+        for kind in ("web.security_headers", "recon.tech", "recon.waf"):
+            self.assertNotIn(kind, planned, f"{kind} ne doit PAS être planifié en mode AUTO")
+            self.assertIn(kind, eng.not_planned, f"{kind} doit rester reporté (not_planned) en mode AUTO")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
