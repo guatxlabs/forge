@@ -16,6 +16,15 @@ def _path_argval(val):
     return bool(s) and not s.startswith("-") and "\x00" not in s and not any(c.isspace() for c in s)
 
 
+def _truthy(v):
+    """True si `v` exprime un OUI booléen : True natif, ou chaîne 'true'/'1'/'yes'/'on' (insensible à la
+    casse/espaces). Tout le reste (None, '', 'false', 'off', 0) -> False. Pur, ne lève jamais. Sert au
+    param opt-in `full_ports` qui vient de l'UI (select) OU du CLI (chaîne)."""
+    if v is True:
+        return True
+    return str(v).strip().lower() in ("1", "true", "yes", "on") if v is not None else False
+
+
 def _rate_flag(params):
     """Débit req/s (entier positif) depuis params['rate'], ou None (aucun drapeau -> byte-identique au
     défaut). Le débit n'est PRÉSENT que si l'opérateur l'a fixé (module_params) — jamais injecté par
@@ -101,15 +110,17 @@ class NmapServices(FlagAllowlistMixin, Module):
     mitre = "T1046"
     _refuse_mitre = "T1046"                       # provenance du finding de refus (mixin) — inchangée
     _refuse_tool = "nmap"
-    description = ("Découverte des services exposés (nmap -sV). Params UI : ports (-p), top_ports "
-                   "(--top-ports), scripts NSE (--script), timing (-T0..5), extra_args (allowlist). "
-                   "Défaut : -sV -Pn --top-ports 1000 quand rien n'est fourni.")
+    description = ("Découverte des services exposés (nmap -sV). Params UI : full_ports (-p-, GAGNE), ports "
+                   "(-p), top_ports (--top-ports), scripts NSE (--script), timing (-T0..5), extra_args "
+                   "(allowlist). Défaut : -sV -Pn --top-ports 1000 quand rien n'est fourni.")
     BIN, IMG = "nmap", "instrumentisto/nmap"
     available = property(lambda self: runner.available("nmap", "instrumentisto/nmap", prefer_docker=True))
 
     # SCHÉMA servi à l'UI (source unique) : chaque descripteur mappe un param à son drapeau CLI. Rendu
     # dynamiquement par le formulaire de lancement (modules-form.js) via `forge modules --json`.
     PARAMS_SCHEMA = [
+        {"name": "full_ports", "type": "select", "label": "full-ports (-p- scan 1-65535, gagne)", "flag": "-p-",
+         "allowed": ["", "true"]},
         {"name": "ports", "type": "text", "label": "ports (-p, ex 1-65535 ou 80,443)", "flag": "-p"},
         {"name": "top_ports", "type": "number", "label": "top-ports (--top-ports N)", "flag": "--top-ports"},
         {"name": "scripts", "type": "text", "label": "scripts NSE (--script, ex http-* ou default)", "flag": "--script"},
@@ -123,8 +134,12 @@ class NmapServices(FlagAllowlistMixin, Module):
                       "--min-rate", "-Pn", "-n")
 
     def _port_spec(self, p):
-        """Fragment de spécification de ports : `-p <ports>` (si valide) sinon `--top-ports <N>` (si valide
-        1..65535) sinon le défaut historique `--top-ports 1000`. Valeur hostile (commençant par '-') ignorée."""
+        """Fragment de spécification de ports. PRIORITÉ : `full_ports` opt-in -> `-p-` (scan 1-65535, GAGNE
+        sur tout) ; sinon `-p <ports>` (si valide) ; sinon `--top-ports <N>` (si valide 1..65535) ; sinon le
+        défaut historique `--top-ports 1000`. Valeur hostile (commençant par '-') ignorée. `full_ports` ABSENT
+        -> byte-identique au comportement historique (aucun `-p-`)."""
+        if _truthy(p.get("full_ports")):                  # opt-in explicite -> plage complète, aucun --top-ports
+            return ["-p-"]
         ports = p.get("ports")
         if ports is not None and safe_value(str(ports)):
             return ["-p", str(ports)]

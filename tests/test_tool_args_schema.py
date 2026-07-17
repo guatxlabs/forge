@@ -85,6 +85,37 @@ class TestNmapCustomArgs(unittest.TestCase):
         self.assertIn("--top-ports", argv)
         self.assertIn("500", argv)
 
+    def test_full_ports_adds_p_dash_and_drops_top_ports(self):
+        # full_ports=True (opt-in) -> `-p-` (plage complète 1-65535) et AUCUN --top-ports.
+        argv = self._argv({"full_ports": True})
+        self.assertIn("-p-", argv)
+        self.assertNotIn("--top-ports", argv)
+        self.assertEqual(argv, ["-sV", "-Pn", "-p-", "scan.test"])
+
+    def test_full_ports_string_true_from_cli(self):
+        # depuis le CLI/UI la valeur arrive en CHAÎNE "true" -> même effet (-p-, pas de --top-ports).
+        argv = self._argv({"full_ports": "true"})
+        self.assertIn("-p-", argv)
+        self.assertNotIn("--top-ports", argv)
+
+    def test_full_ports_wins_over_ports_and_top_ports(self):
+        # full_ports PRIME sur ports et top_ports.
+        argv = self._argv({"full_ports": True, "ports": "80,443", "top_ports": 500})
+        self.assertIn("-p-", argv)
+        self.assertNotIn("-p", [a for a in argv if a == "-p"])  # pas le drapeau -p (seulement -p-)
+        self.assertNotIn("--top-ports", argv)
+
+    def test_full_ports_absent_byte_identical_default(self):
+        # full_ports ABSENT -> argv byte-identique au défaut historique (top-1000, aucun -p-).
+        self.assertEqual(self._argv({}), ["-sV", "-Pn", "--top-ports", "1000", "scan.test"])
+        self.assertNotIn("-p-", self._argv({}))
+
+    def test_full_ports_falsey_stays_default(self):
+        # valeur fausse ('false'/'' /'off') -> pas d'opt-in, défaut top-1000 conservé.
+        for falsey in ("false", "", "off", "0"):
+            argv = self._argv({"full_ports": falsey})
+            self.assertEqual(argv, ["-sV", "-Pn", "--top-ports", "1000", "scan.test"], falsey)
+
     def test_hostile_port_value_ignored(self):
         # une valeur commençant par '-' (option smuggling) est REJETÉE -> repli sur le défaut.
         argv = self._argv({"ports": "-oN"})
@@ -220,7 +251,7 @@ class TestModulesJsonSchema(unittest.TestCase):
         self.assertIn("recon.nmap", rows)
         schema = rows["recon.nmap"]["params_schema"]
         names = {d["name"] for d in schema}
-        self.assertLessEqual({"ports", "top_ports", "scripts", "timing", "extra_args"}, names)
+        self.assertLessEqual({"full_ports", "ports", "top_ports", "scripts", "timing", "extra_args"}, names)
         allow = rows["recon.nmap"]["flag_allowlist"]
         self.assertIn("--max-rate", allow)
         self.assertIn("-p-", allow)
