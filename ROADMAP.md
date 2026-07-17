@@ -64,6 +64,24 @@ Fixes : **C1/C6** `cd4739c` · **C2** `9653ac1` · **C5/C8/C9** `48a4c51` · **C
 ## 🛡️ Round 3 — feature sécurité réseau (F4)
 - **C20 / F4 — Politique réseau deux-portes (scan réseau client sans devenir une faille)** : pour qu'un pentester puisse scanner du privé/LAN/loopback sans que Forge soit une surface d'attaque sur le réseau client. **Modèle 3 portes cumulatives** : (1) interrupteur **global** `network.allow_private` (OFF par défaut, admin, ledgerisé — kill-switch instantané sans down/up) ; (2) opt-in **par-engagement** (isolation) ; (3) scope fail-closed. `effective = global && engagement`, écrit dans `scope.json`. **Enforcement 2 couches** : Rust `run_create` (IP littérale → `400 private_target_blocked`) + moteur `roe.py` (résout hostnames via getaddrinfo → VETO ceux pointant vers du privé = anti-rebinding/SSRF). **Compose durci** : `network_mode: host` + `FORGE_CONSOLE_ADDR=127.0.0.1:7100` (loopback strict, jamais 0.0.0.0 — prouvé : console inaccessible depuis l'IP LAN 192.168.1.38:7100 → 000). **F1 complété** : `Permissions-Policy` ajouté. UI : toggle global danger-styled + case par-engagement. E2E prouvé bloqué(400)→débloqué(202), fail-closed prouvé, 349 tests Rust + 1208 Python. **✅ `38aa635`**
 
+## 📋 Suite / reste ouvert (consigné, non engagé) + principe ressources
+
+### Chantiers restants
+- **Oracles auth-based (idor/ato/takeover)** : encore « config manquante » — ils ont besoin de **comptes/creds**, pas de query params. Feature séparée « **contexte authentifié** » : gérer creds/session/idor_targets par-engagement (déjà un champ éditeur) → seeder les oracles auth pour tester cross-account. C'est le pendant auth du crawl→param déjà fait (G1).
+- **LLM Tier-2 payload hook** : générer des payloads d'injection via le LLM (deephat sans-refus / OpenAI-compat) branché sur la chaîne G1. **Différé** — le cœur déterministe suffit ; IA-2 (`forge/llm.py`) est déjà le seam d'accroche (off par défaut, egress-gaté, advisory, fail-open).
+- **Wall-clock gros run** : parallélisme (G3, pool=4) aide mais 58 modules × N services reste long. Suite = parallélisme plus agressif **+ voir principe ressources ci-dessous**.
+
+### ⚙️ Principe TRANSVERSE — paramétrabilité ressources (machine cliente faible)
+**Exigence** : tout ce qui consomme des ressources DOIT être réglable ; un client sur machine faible doit pouvoir tourner Forge sans le saturer. **Aucune valeur ressource ne doit être codée en dur.**
+
+**Déjà réglable (acquis de la session)** : `FORGE_PARALLELISM` (pool exécution, G3) · `FORGE_RUN_TIMEOUT` (watchdog run, D1) · timeouts par-action/par-outil (E3) · `FORGE_TOOLS_PROFILE=mini|full` (arsenal, D3) · sévérité nuclei (G2) · `module_params` par-module (débit req/s, threads, wordlist, ports…) · caps de fan-out (crawl ≤25, services ≤32, params ≤3) · triage (seuils, on/off, IA-1) · LLM (off/endpoint/model/timeout/max_tokens, IA-2) · politique réseau.
+
+**Gap / à faire** :
+1. **Profil ressources unifié** `FORGE_RESOURCE_PROFILE=low|balanced|full` : pose d'un coup des défauts sains machine-faible (pool bas, timeouts courts, jeu d'outils léger, caps crawl réduits, nuclei templates restreints, LLM off, arsenal mini). `low` = safe par défaut sur petite machine.
+2. **Audit anti-hard-code** : passer en revue moteur+modules pour qu'AUCUNE valeur ressource-impactante (pool, timeout, cap, threads, rate, num_ctx, batch) ne soit figée — toutes overridables (env/settings/param).
+3. **Exposer dans l'UI** : les knobs ressources visibles/éditables au lancement (pas seulement via env).
+4. **Garde-fou mémoire** : borne mémoire/process concurrents optionnelle (un client faible ne doit pas OOM — cf. les OOM de build qu'on a eus).
+
 ## 🤖 IA en 2 tiers (gouvernée, réutilise deephat-search)
 - **IA-1 (`06ca557`) — Triage NATIF** : `forge/triage.py` stdlib-only, **zéro egress** (sûr entreprise). Dédup (Jaccard shingle) + cluster du bruit + noise-score (MEDIUM+ jamais flaggé) + rank actionnable-first. **Coverage-safe** (count in==out prouvé, brut+ledger intacts), **transparent** (section `## Triage` + annotation par finding), **configurable** (défaut sûr : auto-hide OFF). Résultat : 216 findings → 4 actionnables / 212 bruit / 3 clusters. 49ms/2004 findings.
 - **IA-2 (`d4c069a`) — Assist LLM opt-in** : `forge/llm.py` client **OpenAI-compatible** (Ollama/OpenAI/tout compat, repris du `ollama()` de deephat-search). **OFF par défaut**, endpoint externe **gaté** (`allow_external` fail-closed), **egress ledgerisé** (`llm.egress`, jamais le secret), api_key redacted. Advisory-only (enrichit le triage, 1 appel/run, ne touche pas les findings/ledger), fail-open. 16 tests.
