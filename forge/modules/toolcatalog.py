@@ -104,7 +104,11 @@ CATALOG_SPECS = [
             _EXTRA),
         flag_allowlist=("-p", "-top-ports", "-rate", "-c", "-retries", "-timeout", "-warm-up-time",
                         "-silent", "-Pn", "-sn", "-scan-all-ips"),
-        description="Scan de ports rapide (naabu) — host:port ouverts, re-validés scope (jamais hors périmètre)."),
+        # DÉCOUVERTE DE SERVICE : chaque port ouvert HTTP-confirmé devient une cible CHAÎNABLE (host:port
+        # + marqueur) que le cerveau scanne (fingerprint/oracles/scanners de contenu) — comme recon.nmap.
+        emit_service_discovery=True,
+        description="Scan de ports rapide (naabu) — host:port ouverts, re-validés scope (jamais hors périmètre). "
+                    "Les ports HTTP-confirmés deviennent des cibles web chaînables (découverte de service)."),
     ToolSpec(
         kind="recon.katana", vuln_class="Recon", binary="katana",
         argv_template=("-silent", "-u", "{target_url}", ("-d", "{param:depth}"), ("-rl", "{param:rate}"),
@@ -138,7 +142,11 @@ CATALOG_SPECS = [
             _EXTRA),
         flag_allowlist=("--subs", "--threads", "--providers", "--blacklist", "--from", "--to",
                         "--fc", "--mc", "--fp", "--retries", "--timeout"),
-        description="URLs d'archive (getallurls/gau : Wayback/CommonCrawl) — assets historiques re-validés scope."),
+        # SKIP CIBLE IP-LITTÉRALE : les archives (Wayback/CommonCrawl) sont indexées par NOM de domaine —
+        # une IP nue n'a aucune archive utile (que du bruit) -> skip propre, aucun processus lancé.
+        skip_bare_ip=True,
+        description="URLs d'archive (getallurls/gau : Wayback/CommonCrawl) — assets historiques re-validés scope. "
+                    "Skip propre sur une cible IP littérale (archives indexées par domaine)."),
     ToolSpec(
         kind="recon.gospider", vuln_class="Recon", binary="gospider",
         argv_template=("-q", "-s", "{target_url}", ("-d", "{param:depth}"), ("-c", "{param:concurrency}"),
@@ -330,6 +338,9 @@ CATALOG_SPECS = [
             _EXTRA),
         flag_allowlist=("--rate", "--banners", "--ports", "-p", "--retries", "--open-only",
                         "--source-port", "--wait", "--ping"),
+        # DÉCOUVERTE DE SERVICE : chaque port ouvert HTTP-confirmé devient une cible CHAÎNABLE (host:port
+        # + marqueur) que le cerveau scanne — COMPLÈTE naabu sur toute la plage (-p1-65535).
+        emit_service_discovery=True,
         description="Balayage de ports rapide (masscan, -p1-65535 --rate 1000) — ports ouverts RAPPORTÉS "
                     "SUR la cible (non destructif, SYN scan). Complète naabu par un sweep full-range. "
                     "Image docker ilyaglow/masscan (Docker Hub, publiée)."),
