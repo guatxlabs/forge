@@ -30,12 +30,14 @@ INTÉGRATIONS EXTERNES SUPPLÉMENTAIRES (recon/scan/OSINT, NON-destructif, NON-e
     (Cobalt Strike/Sliver/Empire) : ILS COLLISIONNENT avec la philosophie proof-oriented non-brute-force
     de Forge (les premiers) ou exigent un connecteur dédié + décision de politique (les seconds).
 """
-from .toolspec import ToolSpec, register_spec
+from .toolspec import ToolSpec, register_spec, FlagAllowlistMixin
 
 # Champ de schéma PARTAGÉ : les extra_args libres (drapeaux) — bornés par la `flag_allowlist` du spec
 # (tout flag hors liste est REFUSÉ fail-closed). Type `list` -> la console envoie une liste de tokens
 # (jamais une chaîne shell-splittée). Réutilisé par CHAQUE outil pour donner un échappatoire power-user SÛR.
-_EXTRA = {"name": "extra_args", "type": "list", "label": "extra args (drapeaux allowlistés)", "flag": ""}
+# SOURCE UNIQUE : le descripteur est POSSÉDÉ par `FlagAllowlistMixin.extra_args_param()` (toolspec.py) —
+# on route à travers lui au lieu de RE-DÉCLARER le dict ici (dédup ; un seul point à faire évoluer).
+_EXTRA = FlagAllowlistMixin.extra_args_param()
 
 # --- Découverte de surface — chaque hit est un ASSET découvert (attribué + re-validé scope fail-closed) ---
 # NOTE SCHÉMA : un knob n'a d'EFFET que s'il est référencé dans `argv_template` via un GROUPE optionnel

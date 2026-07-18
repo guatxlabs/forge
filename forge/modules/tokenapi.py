@@ -434,6 +434,12 @@ class GraphqlAccess(TokenApiOracle):
         b_in_anon = b_marker in (anon_body or "")
         # PREUVE NETTE : A (authentifié) obtient l'objet de B ET l'anonyme ne l'obtient PAS. Objet public
         # (visible en anonyme) -> tested (pas un BOLA). Comptes A et B DÉTENUS par l'opérateur.
+        # ⚠️ LIMITATION (faux positif) — le différentiel auth-vs-anon ne distingue pas « A n'est PAS
+        # habilité à l'objet de B » de « A EST légitimement habilité à un objet PARTAGÉ entre A et B »
+        # (ressource d'équipe visible des deux comptes mais protégée de l'anonyme) : dans les deux cas
+        # `b_in_auth and not b_in_anon`. Contrat : `b_marker` DOIT désigner un objet PRIVÉ à B auquel A
+        # n'a AUCUN droit d'accès. Le marqueur UNIQUE propre à B (préféré) rend la preuve d'impact nette ;
+        # à défaut, un objet co-détenu (partagé) produirait un BOLA fallacieux — le vérifier hors bande.
         proven = bool(b_in_auth) and not b_in_anon
         findings.append(self.proof(
             target=endpoint, proven=proven,

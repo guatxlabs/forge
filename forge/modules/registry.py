@@ -12,7 +12,7 @@ intercept-modify). Ils restent des OUTILS AUTONOMES — l'engine les orchestre, 
 Discipline (héritée des collecteurs Plume) : un module est OFF par défaut, se neutralise
 proprement si son outil sous-jacent est absent, et n'émet jamais d'effet de bord en dry-run.
 """
-from ..schema import Finding
+from ..schema import Finding, _PROOF_SENTINEL
 
 REGISTRY = {}
 
@@ -61,6 +61,11 @@ class Module:
         légitimes (elles portent toutes `_proven=True`)."""
         if not _proven and kw.get("status") == "vulnerable":
             kw["status"] = "tested"
+        # DÉFENSE EN PROFONDEUR (L1) : le gate de preuve vit AUSSI dans `Finding.__post_init__` (une
+        # construction directe `Finding(status="vulnerable")` y est rabattue à 'tested'). Le chemin de
+        # preuve SANCTIONNÉ transmet la sentinelle opaque pour franchir ce gate — SEUL point qui le fait.
+        if _proven:
+            kw["_proof_token"] = _PROOF_SENTINEL
         return Finding(**kw)
 
     def tool_failed(self, action, rc, out, err, tool, category="recon"):

@@ -115,7 +115,13 @@ class AuthTakeover(ScopeGuardedOracle):
               discriminant concret (même contenu privé que la victime, absent de la vue anonyme).
 
         Anti-faux-positif : un 200 public (que voit aussi l'anonyme) ne tire AUCUN signal ; la ressource
-        que l'attaquant possède légitimement (owner == attaquant) ne tire ni (B) ni (C). Lecture seule
+        que l'attaquant possède légitimement (owner == attaquant) ne tire ni (B) ni (C).
+        ⚠️ LIMITATION résiduelle (partagé-autorisé) : (B)/(C) ne distinguent pas « l'attaquant n'est PAS
+        habilité » de « attaquant et victime sont TOUS DEUX légitimement habilités à une ressource
+        PARTAGÉE » (doc d'équipe protégée de l'anonyme) : le status-delta et le corps identique-victime
+        se produisent aussi. Contrat : les `idor_target` (`url`/`owner`/`marker`) DOIVENT désigner des
+        ressources PRIVÉES à la victime auxquelles l'attaquant n'a AUCUN droit ; le `marker` d'identité
+        victime UNIQUE (voie A, préféré) prouve l'usurpation d'identité et évite ce faux positif. Lecture seule
         (GET). Scope-guard fail-closed PAR-URL (aucune requête — victime, attaquant, anonyme — hors
         périmètre). Le PoC/evidence est RÉDIGÉ à la source (les en-têtes portent le matériel d'auth
         SECRET — masqué AVANT de figer dans le finding, ledger inclus)."""

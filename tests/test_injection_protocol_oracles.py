@@ -477,6 +477,53 @@ class TestRequestSmugglingProbe(unittest.TestCase):
         self.assertEqual(f[0].status, "tested")
         self.assertIn("non confirmé", f[0].title)
 
+    def test_single_transient_stall_does_not_promote(self):
+        # M5 — un HANG mesuré UNE SEULE fois (à-coup réseau transitoire : GC/congestion/perte) NE doit
+        # PAS produire un faux HIGH. La clte pend au 1er échantillon puis répond vite -> quorum non atteint.
+        state = {"clte": 0}
+
+        def timed(action, variant, timeout):
+            if variant == "baseline":
+                return (0.1, "ok")
+            if variant == "clte":
+                state["clte"] += 1
+                return (float(timeout), "timeout") if state["clte"] == 1 else (0.2, "ok")
+            return (0.2, "ok")
+        f = self._fire(timed)
+        self.assertEqual(f[0].status, "tested", "un à-coup isolé ne doit PAS promouvoir en vulnerable")
+        self.assertEqual(f[0].severity, "INFO")
+        self.assertIn("non confirmé", f[0].title)
+
+    def test_consistent_multi_sample_stall_promotes(self):
+        # M5 — un vrai smuggling : le HANG se REPRODUIT sur tous les échantillons -> quorum atteint ->
+        # promotion légitime (pas de faux négatif pour un smuggling réel et stable).
+        def timed(action, variant, timeout):
+            if variant == "baseline":
+                return (0.1, "ok")
+            if variant == "clte":
+                return (float(timeout), "timeout")           # pend à CHAQUE échantillon
+            return (0.2, "ok")
+        f = self._fire(timed)
+        self.assertEqual(f[0].status, "vulnerable")
+        self.assertEqual(f[0].severity, "HIGH")
+        self.assertIn("clte", f[0].evidence)
+        self.assertIn("quorum", f[0].evidence)
+
+    def test_majority_stall_below_quorum_stays_minority(self):
+        # M5 — un unique échantillon lent (1/3) reste sous le quorum (>=2/3) -> pas de promotion, même
+        # si la mesure est un "slower" plutôt qu'un timeout.
+        state = {"tecl": 0}
+
+        def timed(action, variant, timeout):
+            if variant == "baseline":
+                return (0.1, "ok")
+            if variant == "tecl":
+                state["tecl"] += 1
+                return (9.0, "ok") if state["tecl"] == 1 else (0.2, "ok")   # 1 seul slow
+            return (0.2, "ok")
+        f = self._fire(timed)
+        self.assertEqual(f[0].status, "tested")
+
     def test_offline_all_error_degrades_to_skipped(self):
         f = self._fire(lambda a, v, t: (0.0, "error"))
         self.assertEqual(f[0].status, "skipped")

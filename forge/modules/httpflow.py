@@ -43,6 +43,7 @@ import hashlib
 import re
 import socket
 import ssl
+import statistics
 import time
 import urllib.parse
 
@@ -57,6 +58,14 @@ from .. import techniques
 # =================================================================================================
 #  request_smuggling.probe — désync CL.TE/TE.CL par sonde de TIMING différentielle — CWE-444
 # =================================================================================================
+# ANTI-FAUX-POSITIF : un HANG mesuré UNE seule fois peut n'être qu'un à-coup réseau transitoire (GC,
+# congestion, perte de paquet). On EXIGE que le hang se REPRODUISE sur une MAJORITÉ d'échantillons
+# répétés avant toute promotion `vulnerable`. La baseline est elle aussi ré-échantillonnée (médiane)
+# pour une référence stable. `_SMUGGLE_MIN_HANGS`/`_SMUGGLE_SAMPLES` sont le quorum (≥2/3).
+_SMUGGLE_SAMPLES = 3
+_SMUGGLE_MIN_HANGS = 2
+
+
 @register("request_smuggling.probe")
 class RequestSmugglingProbe(ScopeGuardedOracle):
     kind = "request_smuggling.probe"
@@ -156,20 +165,49 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
         except (TypeError, ValueError):
             delay_gap = 5.0
 
-        base_el, base_status = self._timed(action, "baseline", timeout)
-        seen = base_status in ("ok", "timeout")
-        hung, notes = [], [f"baseline:{base_status}({round(base_el, 3)}s)"]
+        # ÉCHANTILLONNAGE RÉPÉTÉ (anti-faux-positif) : chaque mesure est prise `_SMUGGLE_SAMPLES` fois.
+        def _samples(variant):
+            els, sts = [], []
+            for _ in range(_SMUGGLE_SAMPLES):
+                el, st = self._timed(action, variant, timeout)
+                els.append(el)
+                sts.append(st)
+            return els, sts
+
+        seen = False
+        # BASELINE ré-échantillonnée -> référence STABLE : status = "ok" si une MAJORITÉ des échantillons
+        # répond ; élapsed représentatif = médiane des échantillons OK (repli : médiane de tous). Un
+        # à-coup isolé ne fausse plus la référence.
+        base_els, base_sts = _samples("baseline")
+        if any(s in ("ok", "timeout") for s in base_sts):
+            seen = True
+        base_ok = [e for e, s in zip(base_els, base_sts) if s == "ok"]
+        if len(base_ok) >= _SMUGGLE_MIN_HANGS:
+            base_status = "ok"
+        elif any(s == "timeout" for s in base_sts):
+            base_status = "timeout"
+        else:
+            base_status = "error"
+        base_el = statistics.median(base_ok or base_els)
+
+        hung, notes = [], [f"baseline:{base_status}(md {round(base_el, 3)}s /{_SMUGGLE_SAMPLES})"]
         for v in ("clte", "tecl"):
-            el, status = self._timed(action, v, timeout)
-            if status in ("ok", "timeout"):
+            els, sts = _samples(v)
+            if any(s in ("ok", "timeout") for s in sts):
                 seen = True
-            # HANG = connecté mais timeout (le back-end attend) OU réponse bien plus lente que la baseline
-            # RAPIDE. Exige une baseline OK comme référence (sinon aucune conclusion -> tested).
-            timed_out = status == "timeout"
-            slower = status == "ok" and base_status == "ok" and (el - base_el) >= delay_gap
-            if base_status == "ok" and (timed_out or slower):
+            # HANG d'un ÉCHANTILLON = connecté mais timeout (le back-end attend) OU réponse bien plus lente
+            # que la baseline RAPIDE. Exige une baseline OK comme référence (sinon aucune conclusion).
+            hang_count = 0
+            for el, status in zip(els, sts):
+                timed_out = status == "timeout"
+                slower = status == "ok" and base_status == "ok" and (el - base_el) >= delay_gap
+                if base_status == "ok" and (timed_out or slower):
+                    hang_count += 1
+            # PROMOTION seulement si le hang se REPRODUIT (quorum ≥ `_SMUGGLE_MIN_HANGS`) : un unique
+            # à-coup réseau transitoire (1/N) NE promeut PAS -> pas de faux HIGH sur un échantillon isolé.
+            if hang_count >= _SMUGGLE_MIN_HANGS:
                 hung.append(v)
-            notes.append(f"{v}:{status}({round(el, 3)}s)")
+            notes.append(f"{v}:{hang_count}/{_SMUGGLE_SAMPLES}hang(md {round(statistics.median(els), 3)}s)")
 
         # (5) DÉGRADATION GRACIEUSE : aucune connexion établie du tout (tout « error ») -> skipped (offline).
         if not seen:
@@ -185,9 +223,11 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
             title=("Request-Smuggling CONFIRMÉ — désync détectée par différentiel de TIMING (CL.TE/TE.CL)"
                    if proven else "Request-Smuggling non confirmé — aucun hang différentiel (pas de verdict aveugle)"),
             severity=("HIGH" if proven else "INFO"),
-            evidence=(f"variantes en hang={hung or 'aucune'} ; seuil_délai={delay_gap}s ; détail={' '.join(notes)} ; "
-                      f"sonde AUTO-CONTENUE sur notre propre connexion (fermée) — aucun préfixe pendant, aucun "
-                      f"poisoning de file d'un autre user ; non destructif ; session gouvernée non journalisée"),
+            evidence=(f"variantes en hang={hung or 'aucune'} ; seuil_délai={delay_gap}s ; "
+                      f"quorum={_SMUGGLE_MIN_HANGS}/{_SMUGGLE_SAMPLES} échantillons (anti à-coup transitoire) ; "
+                      f"détail={' '.join(notes)} ; sonde AUTO-CONTENUE sur notre propre connexion (fermée) — "
+                      f"aucun préfixe pendant, aucun poisoning de file d'un autre user ; non destructif ; "
+                      f"session gouvernée non journalisée"),
             poc=(f"# baseline (GET) vs CL.TE/TE.CL (Content-Length vs Transfer-Encoding incohérents) sur "
                  f"{action.target} ; PREUVE = HANG d'une variante ambiguë (timeout) vs baseline rapide "
                  f"({hung or '—'}) ; requête auto-contenue, jamais de préfixe smuggé vers un autre user"))]
