@@ -399,6 +399,22 @@ use crate::testutil::*;
         let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{param:port:443}", "{param:mode:fast}"]);
         assert!(crate::tools::validate_toolspec(&s).is_ok(), "défauts de param non-drapeau acceptés");
 
+        // M2 (literal-prefix + concaténation) — le contournement du garde de DEFAULT : `-{param:x:oN}` a une
+        // tête littérale `-` (dangerous_flag("-")=None) et un défaut `oN` BÉNIN isolé, mais se matérialise en
+        // UN SEUL argv `-oN` (drapeau d'écriture-fichier). La forme valeur `-{param:x}` (défaut vide, valeur
+        // caller `oN`) est aussi vulnérable. Les DEUX sont REFUSÉS : un drapeau littéral ne peut pas embarquer
+        // de {param:…}.
+        for evil in ["-{param:x:oN}", "-{param:x}", "-o{param:file:/tmp/x}", "--out={param:f:/tmp/x}"] {
+            let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", evil]);
+            assert!(crate::tools::validate_toolspec(&s).is_err(), "drapeau littéral embarquant {{param}} refusé: {evil}");
+        }
+        // garde anti-sur-blocage : (a) un {param:…} standalone (non préfixé '-') reste accepté même avec
+        // défaut bénin ; (b) un drapeau littéral NON dangereux SANS placeholder (`-sV`) reste accepté.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{param:x:fast}"]);
+        assert!(crate::tools::validate_toolspec(&s).is_ok(), "{{param}} standalone bénin toujours accepté");
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["-sV", "{target}"]);
+        assert!(crate::tools::validate_toolspec(&s).is_ok(), "drapeau littéral non dangereux (-sV) inchangé");
+
         // kind hors namespace custom.* (surcharge natif) -> 400.
         let mut s = simple_toolspec(); s["kind"] = json!("recon.httpx");
         assert!(crate::tools::validate_toolspec(&s).is_err(), "kind non-custom refusé");

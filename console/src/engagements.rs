@@ -689,29 +689,22 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
     if id == 1 {
         return Err((StatusCode::CONFLICT, "engagement par défaut (#1) non supprimable — archivez-le".into()));
     }
-    let (status, ledger, findings, runs, live_runs): (String, String, i64, i64, i64) = {
+    let (status, ledger, findings, runs): (String, String, i64, i64) = {
         let store = app.store();
         let (status, ledger): (String, String) = store
             .query_row("SELECT status, ledger_path FROM engagement WHERE id=?", &crate::sql_params![id], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?;
         let f: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         let r: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
-        // M1 — un run VIVANT (`status='running'`, signal DURABLE cross-instance sous HA) de cet engagement.
-        let lr: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=? AND status='running'", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         drop(store);
-        (status, ledger, f, r, lr)
+        (status, ledger, f, r)
     };
-    // M1 FIX — REFUS 409 si un run est encore VIVANT pour cet engagement. Supprimer ses `run_job` (dont la
-    // ligne 'running') pendant que le moteur détaché tourne encore laisserait ses POSTs `/api/ingest`
-    // tardifs résoudre l'engagement via une ligne run_job DISPARUE -> `unwrap_or(1)` -> findings mal
-    // estampillés à l'engagement #1 (contamination cross-engagement). On refuse plutôt que de tuer
-    // silencieusement le scan d'un opérateur : il doit d'abord l'annuler (`POST /api/runs/:id/cancel`).
-    if live_runs > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("engagement {id} a {live_runs} run(s) en cours — annulez-les avant suppression (POST /api/runs/:id/cancel)"),
-        ));
-    }
+    // M1 FIX (TOCTOU fermé) — le garde « run VIVANT » NE vit plus dans un pré-check sur un handle relâché
+    // (une fenêtre : un run basculant à `running` ENTRE ce read et la tx de suppression était détruit
+    // inconditionnellement -> ses POSTs `/api/ingest` tardifs résolvaient l'engagement via une ligne run_job
+    // DISPARUE -> `unwrap_or(1)` -> findings estampillés à #1, contamination cross-engagement). Il est
+    // désormais RE-VÉRIFIÉ À L'INTÉRIEUR de la tx de cascade, AVANT les DELETE (voir plus bas) : check +
+    // delete sérialisent sous le MÊME verrou d'écriture.
     if status == "active" {
         
         let active_count: i64 = app.store().query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);
@@ -727,7 +720,24 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
     // transaction, donc un rollback laissait le ledger attestant un delete inexistant).
     {
         let store = app.store();
-        if let Err(e) = store.with_tx(|tx| {
+        // `live_in_tx` remonte le COUNT('running') vu SOUS le verrou de la tx : il distingue le refus 409
+        // (run vivant détecté -> ROLLBACK volontaire) d'une vraie erreur DB (500).
+        let mut live_in_tx: i64 = 0;
+        let tx_res = store.with_tx(|tx| {
+            // M1 — RE-CHECK ATOMIQUE : le COUNT des runs `running` est fait ICI, dans la MÊME tx que les
+            // DELETE, AVANT toute suppression. SQLite (mono-connexion, verrou d'écriture) / PG (row-locks)
+            // sérialisent check + delete : plus de fenêtre TOCTOU entre le read initial et la cascade. Un run
+            // vivant vu ici -> on renvoie une erreur SENTINELLE -> ROLLBACK : AUCUNE ligne (ni run_job, ni
+            // finding, ni engagement) n'est supprimée, donc aucune résolution `/api/ingest` vers #1.
+            let lr: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM run_job WHERE engagement_id=? AND status='running'",
+                &crate::sql_params![id],
+                |r| r.get_i64(0),
+            )?;
+            if lr > 0 {
+                live_in_tx = lr;
+                return Err(crate::store::StoreError::Backend("M1: run vivant détecté — ROLLBACK".into()));
+            }
             tx.execute("DELETE FROM finding WHERE engagement_id=?", &crate::sql_params![id])?;
             tx.execute("DELETE FROM runrecord WHERE engagement_id=?", &crate::sql_params![id])?;
             tx.execute("DELETE FROM roe_decision WHERE engagement_id=?", &crate::sql_params![id])?;
@@ -736,7 +746,15 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
             tx.execute("DELETE FROM settings WHERE key=?", &crate::sql_params![workflows_key(id)])?;
             tx.execute("DELETE FROM engagement WHERE id=?", &crate::sql_params![id])?;
             Ok(())
-        }) {
+        });
+        if let Err(e) = tx_res {
+            if live_in_tx > 0 {
+                // Même sémantique 409 que l'ancien pré-check, mais désormais serialisée avec la cascade.
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("engagement {id} a {live_in_tx} run(s) en cours — annulez-les avant suppression (POST /api/runs/:id/cancel)"),
+                ));
+            }
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("suppression de l'engagement échouée: {e}")));
         }
     }
