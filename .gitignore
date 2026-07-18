@@ -102,3 +102,8 @@ forge-demo-*/
 # Runtime *.jsonl / *.db / scope.json / targets.json ELSEWHERE stay ignored.
 !examples/reference-engagement/
 !examples/reference-engagement/**
+
+# Test-coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
