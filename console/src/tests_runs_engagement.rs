@@ -326,6 +326,38 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger);
     }
 
+    /// [M1 — le RE-CHECK EN-TX est autoritaire ET la cascade est ATOMIQUE] Prouve que le garde « run vivant »
+    /// vit désormais À L'INTÉRIEUR de la tx de suppression, avant les DELETE : quand un run `running` existe,
+    /// la closure renvoie une erreur SENTINELLE -> ROLLBACK -> AUCUNE ligne possédée n'est supprimée (ni la
+    /// ligne engagement, NI ses findings, NI son run_job). C'est ce qui ferme le TOCTOU : check + delete
+    /// sérialisent sous le même verrou d'écriture, il n'existe plus de fenêtre où un run bascule à `running`
+    /// entre un pré-check et une tx séparée qui détruirait sa ligne run_job (résolution `/api/ingest` -> #1).
+    #[tokio::test]
+    async fn m1_intx_recheck_rolls_back_whole_cascade() {
+        let ledger = tmp_path("forge-test-m1-atomic");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger); // ancre #1
+        insert_test_engagement(&app, 2, &["a.example.com"], "grey", &ledger); // cible
+        {
+            let db = app.db();
+            // un run VIVANT + une donnée POSSÉDÉE (finding) rattachés à l'engagement #2.
+            db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('rlive2','c','running','propose',2)", []).unwrap();
+            db.execute("INSERT INTO finding(title,target,campaign,engagement_id) VALUES('owned','h.example','c',2)", []).unwrap();
+        }
+        // Refus 409 (run vivant vu SOUS le verrou de la tx) + message explicite.
+        let e = engagement_do_delete(&app, 2, "adm").unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT, "run vivant re-vérifié en-tx -> 409");
+        assert!(e.1.contains("en cours"), "message explicite: {}", e.1);
+        // ROLLBACK TOTAL : engagement, finding ET run_job survivent tous (la cascade n'a rien supprimé).
+        { let n: i64 = app.db().query_row("SELECT COUNT(*) FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
+          assert_eq!(n, 1, "engagement #2 intact (rollback)"); }
+        { let n: i64 = app.db().query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=2", [], |r| r.get(0)).unwrap();
+          assert_eq!(n, 1, "le finding possédé survit -> cascade atomique rollback (pas de suppression partielle)"); }
+        { let s: String = app.db().query_row("SELECT status FROM run_job WHERE run_id='rlive2'", [], |r| r.get(0)).unwrap();
+          assert_eq!(s, "running", "la ligne run_job survit -> aucune résolution /api/ingest vers #1"); }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// [ISOLATION] Deux engagements aux scopes DISJOINTS restent isolés : un run pour A valide contre le
     /// scope de A UNIQUEMENT (la cible de B est refusée), et réciproquement. Un run pour B accepte sa
     /// propre cible et journalise dans SON ledger — jamais celui de A.

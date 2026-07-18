@@ -273,12 +273,19 @@ fn validate_argv_token(tok: &str, depth: usize, args_used: &mut bool) -> Result<
     let bytes = tok.as_bytes();
     let mut i = 0;
     let mut literal = String::new();
+    let mut has_param_placeholder = false;
     while i < bytes.len() {
         if bytes[i] == b'{' {
             let close = tok[i..].find('}').map(|p| i + p);
             let end = close.ok_or_else(|| format!("token '{tok}' : accolade '{{' non fermée"))?;
             let body = &tok[i + 1..end];
             validate_placeholder_body(body, tok)?;
+            // Un `{param:…}` matérialise à l'exécution une valeur CALLER-FOURNIE (ou son DEFAULT) — le seul
+            // segment de placeholder qu'un appelant peut piloter. On le distingue des placeholders
+            // SYSTÈME (`target`/`target_host`/`target_url`, résolus depuis le scope validé).
+            if body.starts_with("param:") {
+                has_param_placeholder = true;
+            }
             i = end + 1;
         } else {
             if bytes[i] == b'}' {
@@ -297,6 +304,21 @@ fn validate_argv_token(tok: &str, depth: usize, args_used: &mut bool) -> Result<
         let head = literal.split('{').next().unwrap_or(&literal);
         if let Some(why) = dangerous_flag(head) {
             return Err(why);
+        }
+        // M2 FIX (defense-in-depth, miroir du garde de DEFAULT dans validate_placeholder_body) — un token
+        // DRAPEAU (`-…`) qui INCORPORE un `{param:…}` fusionne à l'exécution sa tête littérale `-` avec la
+        // valeur/le défaut du param en UN SEUL élément argv : `-{param:x:oN}` -> `-oN`, `-{param:x}` +
+        // valeur `oN` -> `-oN` (drapeau d'écriture-fichier/exfil). La curation `dangerous_flag(head)` ne voit
+        // que la tête `-` (=None) et le garde de DEFAULT ne voit que `oN` (bénin isolé) : la CONCATÉNATION
+        // échappe aux deux `fire()` ne re-scanne jamais les tokens littéraux vettés). Règle plus stricte et
+        // plus simple : un drapeau littéral ne peut PAS embarquer de `{param:…}` — une valeur de drapeau
+        // légitime doit être un argument `{param}` SÉPARÉ, jamais concaténée dans le drapeau. Refus.
+        if has_param_placeholder {
+            return Err(format!(
+                "token '{tok}' : un drapeau ('-…') ne peut pas incorporer un placeholder {{param:…}} \
+                 (option-injection par concaténation, ex `-{{param:x:oN}}` -> `-oN`) — passez la valeur \
+                 via un argument {{param}} SÉPARÉ"
+            ));
         }
     }
     Ok(())

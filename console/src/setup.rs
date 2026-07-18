@@ -86,8 +86,18 @@ fn login_is_locked(store: &Store, key: &str, now: i64) -> bool {
             }
             false
         }
-        Ok(None) => false, // jamais vu -> pas verrouillé
-        Err(_) => false,   // FAIL-OPEN : store indisponible -> ne pas prétendre verrouillé
+        // « 0 ligne » sur un store PRÉSENT (Ok(None)) = ce login n'a pas de série -> pas verrouillé. C'est
+        // le fail-open LÉGITIME (boot / store frais / ligne purgée), silencieux car ce n'est pas une erreur.
+        Ok(None) => false,
+        // FIX3 — une ERREUR de store (≠ « 0 ligne ») ne doit PAS être avalée en silence : un SQLITE_BUSY
+        // transitoire sous contention (ou une panne) désactiverait momentanément le throttle SANS aucune
+        // trace. On conserve le fail-open (un store réellement indisponible ne DOIT pas verrouiller — l'auth
+        // reste gatée en aval par argon2id + le lookup user), mais on le rend OBSERVABLE (log stderr) : la
+        // dégradation devient diagnosticable au lieu d'être un affaiblissement silencieux du throttle.
+        Err(e) => {
+            eprintln!("[forge] WARN login-throttle: lecture du verrou échouée (fail-open — throttle momentanément inactif pour CETTE requête, auth toujours gatée par argon2id): {e}");
+            false
+        }
     }
 }
 
@@ -101,7 +111,7 @@ fn login_note_failure(store: &Store, key: &str, now: i64) {
     let w = fail_window_secs();
     let lock = lockout_secs();
     let max = LOGIN_MAX_FAILS as i64;
-    let _ = store.with_tx(|tx| {
+    let write_res = store.with_tx(|tx| {
         // PURGE opportuniste : lignes dont le verrou est levé (locked_until<=now) ET la fenêtre écoulée
         // (first_ts<=now-w) ne portent plus d'info de throttle -> supprimées (borne mémoire de la table,
         // miroir du sweep in-memory). Ne touche jamais une série vivante ni un verrou actif.
@@ -125,6 +135,13 @@ fn login_note_failure(store: &Store, key: &str, now: i64) {
         )?;
         Ok(())
     });
+    // FIX3 — best-effort (un échec d'écriture ne débloque JAMAIS un compte : au pire cette tentative n'est
+    // pas comptée), mais NE PAS avaler l'erreur en silence : un échec récurrent (store en panne / lock
+    // SQLite) signifie que des échecs d'auth ne sont pas comptabilisés -> throttle affaibli. On le rend
+    // OBSERVABLE (log stderr) au lieu de le jeter avec `let _ =`.
+    if let Err(e) = write_res {
+        eprintln!("[forge] WARN login-throttle: échec d'écriture — cette tentative ratée n'a PAS été comptée (best-effort, compteur brute-force non incrémenté): {e}");
+    }
 }
 
 /// Efface la série d'échecs d'un login après une authentification RÉUSSIE (store partagé). Best-effort.
@@ -556,6 +573,38 @@ mod throttle_tests {
         let later = t0 + fail_window_secs() + lockout_secs() + 10;
         login_note_failure(&Store::sqlite(m.lock().unwrap()), "late", later);
         assert_eq!(row_count(&m), 1, "les 50 lignes périmées purgées -> table bornée (reste la série vivante)");
+    }
+
+    /// [FIX3 — erreur de store OBSERVABLE, throttle jamais désactivé en silence] Une ERREUR de store (≠ « 0
+    /// ligne ») lors de la lecture/écriture du verrou reste FAIL-OPEN (l'auth demeure gatée par argon2id +
+    /// le lookup user en aval) mais emprunte un CHEMIN distinct de `Ok(None)` (journalisé, non avalé). On
+    /// simule une panne en supprimant la table `login_throttle` -> chaque requête renvoie `StoreError`.
+    /// Invariants : (a) un verrou normal verrouille toujours ; (b) le succès efface ; (c) sur store en
+    /// erreur, `login_is_locked` renvoie false SANS paniquer et `login_note_failure` gère l'échec sans panic.
+    #[test]
+    fn fix3_store_error_fail_open_but_not_silently_disabling() {
+        // (a) verrou normal INCHANGÉ (le chemin nominal n'est pas affecté par le fix).
+        let m = mem();
+        let t0: i64 = 9_000_000;
+        for _ in 0..LOGIN_MAX_FAILS {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "v", t0);
+        }
+        assert!(login_is_locked(&Store::sqlite(m.lock().unwrap()), "v", t0), "verrou normal toujours actif");
+        // (b) le succès efface toujours la série.
+        login_clear(&Store::sqlite(m.lock().unwrap()), "v");
+        assert!(!login_is_locked(&Store::sqlite(m.lock().unwrap()), "v", t0), "succès -> déverrouillé");
+
+        // (c) STORE EN ERREUR : table absente -> chaque requête renvoie StoreError (≠ Ok(None), le chemin
+        // « genuinely absent » fail-open). Le lecteur renvoie false (fail-open volontaire, auth gatée en aval)
+        // SANS paniquer, et `login_note_failure` gère l'échec d'écriture proprement (best-effort, pas de panic).
+        let broken = mem();
+        broken.lock().unwrap().execute_batch("DROP TABLE login_throttle").unwrap();
+        assert!(
+            !login_is_locked(&Store::sqlite(broken.lock().unwrap()), "x", t0),
+            "store en erreur -> fail-open (false) SANS panic ; l'auth reste gatée par argon2id en aval"
+        );
+        // Ne panique pas, ne compte rien (rien à asserter côté DB puisque la table est absente).
+        login_note_failure(&Store::sqlite(broken.lock().unwrap()), "x", t0);
     }
 
     /// [e — login sur-long rejeté AVANT tout suivi] Un login > MAX_LOGIN_LEN n'est JAMAIS un compte valide :
