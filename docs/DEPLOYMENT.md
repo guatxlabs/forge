@@ -712,7 +712,7 @@ seul **échouera** (core hors contexte) — c'est **voulu**.
 
 ```toml
 # console/Cargo.toml
-guatx-core = { git = "https://github.com/guatx/core", tag = "vX.Y.Z" }
+guatx-core = { git = "https://github.com/guatxlabs/core", tag = "vX.Y.Z", features = ["forge"] }
 ```
 
 Le contexte pourra alors **redevenir `forge/` seul**, le `COPY core/ ./core/` du builder disparaîtra, et

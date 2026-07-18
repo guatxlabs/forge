@@ -54,5 +54,5 @@ First public cut of Forge — a governed, proof-oriented red-team engine.
 - **AGPL-3.0-only**, open-core. Enterprise features are documented in
   [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md).
 
-[Unreleased]: https://github.com/GUATX/forge/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/GUATX/forge/releases/tag/v0.0.1
+[Unreleased]: https://github.com/guatxlabs/forge/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/guatxlabs/forge/releases/tag/v0.0.1
