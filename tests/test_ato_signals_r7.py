@@ -2,9 +2,11 @@
 faible taux de faux positifs (au-delà du seul marqueur d'identité de R5b), l'evidence NOMMANT lequel
 a tiré :
 
-  (a) STATUS-DELTA : l'attaquant obtient un 2xx là où l'anonyme est refusé (401/403) sur une ressource
-      dont le propriétaire n'est PAS l'attaquant (owner ≠ label attaquant) -> ATO confirmé ; l'evidence
-      contient « status-delta ».
+  (a) STATUS-DELTA SEUL NE PROMEUT PAS (B1) : « attaquant 2xx / anon refusé » prouve seulement que
+      l'endpoint requiert une auth (owner_diff est un compare de LABELS ; aucune requête n'est faite
+      avec la session du propriétaire) — VRAI pour tout endpoint per-user que l'attaquant possède
+      LÉGITIMEMENT -> tested/INFO, JAMAIS CRITICAL ; « status-delta » reste un corroborateur faible
+      nommé dans l'evidence.
   (b) DIFFÉRENTIEL DE CONTENU VICTIME-vs-ATTAQUANT : l'attaquant voit la vue PRIVÉE de la victime
       (même corps normalisé que la victime, ABSENT de la vue anonyme) -> ATO confirmé ; l'evidence
       contient « content-differential ».
@@ -88,25 +90,33 @@ def _is_victim(headers):
 
 
 # =================================================================================================
-#  (a) STATUS-DELTA : attaquant 2xx / anon refusé, owner ≠ attaquant -> ATO confirmé
+#  (a) STATUS-DELTA SEUL NE PROMEUT PAS (B1) : « attaquant 2xx / anon refusé » prouve seulement que
+#      l'endpoint requiert une auth — VRAI pour tout endpoint per-user que l'attaquant possède
+#      LÉGITIMEMENT (owner_diff est un compare de LABELS, aucune requête n'est faite avec la session du
+#      propriétaire). Sans marqueur victime NI différentiel propriétaire -> tested/INFO, jamais CRITICAL.
 # =================================================================================================
-class TestStatusDeltaFires(unittest.TestCase):
-    def test_attacker_2xx_anon_denied_owner_other_is_ato(self):
-        # target SANS marqueur : la seule preuve possible est le status-delta (owner=victim ≠ attacker).
+class TestStatusDeltaAloneDoesNotPromote(unittest.TestCase):
+    def test_attacker_2xx_anon_denied_owner_other_is_not_ato(self):
+        # target SANS marqueur, PAS de compte propriétaire distinct exerçable ici : le seul signal est
+        # le status-delta -> il ne doit PLUS promouvoir (c'était le faux CRITICAL sur accès propre).
         sc = _scope(auth=_auth_block(marker=None))
 
         def fake(url, headers=None, timeout=15, method="GET", data=None):
             if not headers:                     # contrôle anonyme -> refusé (ressource protégée)
                 return 403, "", {}
-            return 200, '{"ok": true, "id": 77}', {}   # attaquant (et victime) autorisés
+            if _is_victim(headers):             # la vue de la victime DIFFÈRE de celle de l'attaquant
+                return 200, '{"ok": true, "id": 99, "who": "victim"}', {}   # -> pas de content-diff
+            return 200, '{"ok": true, "id": 77, "who": "attacker"}', {}     # attaquant : SA propre vue
 
         out = _run(sc, fake)
         f = out[0].to_dict()
-        self.assertEqual(f["status"], "vulnerable")
-        self.assertEqual(f["severity"], "CRITICAL")
-        self.assertIn("CONFIRMÉ", f["title"])
-        self.assertIn("status-delta", f["evidence"])            # l'evidence NOMME le signal
-        self.assertIn("status-delta", f["title"])
+        self.assertEqual(f["status"], "tested")                 # status-delta SEUL ne promeut plus
+        self.assertNotEqual(f["severity"], "CRITICAL")
+        self.assertIn(f["severity"], ("INFO", "LOW"))
+        self.assertNotIn("CONFIRMÉ", f["title"])
+        self.assertIn("NON prouvé", f["title"])                 # message clair « requiert une auth »
+        self.assertIn("status-delta", f["evidence"])            # reste corroborateur faible dans l'evidence
+        self.assertIn("non-promouvant", f["evidence"])
 
     def test_creds_redacted_in_status_delta_evidence(self):
         sc = _scope(auth=_auth_block(marker=None))

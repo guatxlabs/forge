@@ -21,6 +21,7 @@ import hashlib
 import re
 
 from .. import techniques
+from .. import session as _session
 from ..redact import redact_secrets
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -142,14 +143,9 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
 
     @staticmethod
     def _attacker_headers(accounts):
-        """En-têtes du compte ATTAQUANT parmi les comptes LABELLISÉS : le compte 'attacker' si présent,
-        sinon le 1er (convention). None si aucun compte. Chaque compte = {label, headers}."""
-        if not accounts:
-            return None
-        for a in accounts:
-            if str(a.get("label", "")).strip().lower() == "attacker":
-                return a.get("headers", {}) or {}
-        return accounts[0].get("headers", {}) or {}
+        """En-têtes du compte ATTAQUANT (labellisé 'attacker' sinon le 1er). DÉLÈGUE à la SOURCE UNIQUE
+        `session.attacker_headers_from_params` (convention partagée byte-identique avec AuthTakeover)."""
+        return _session.attacker_headers_from_params(accounts)
 
     def _fire_auth_targets(self, action, accounts, targets):
         """R5 — SLICE CROSS-COMPTE via CONTEXTE AUTH PAR-ENGAGEMENT. Pour chaque idor_target
@@ -187,11 +183,32 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             att_ok = r_att[0] in self._OK
             anon_denied = r_anon[0] in self._DENY
             marker_hit = bool(marker) and att_ok and (marker in (r_att[1] or ""))
-            # PREUVE : avec marqueur -> exiger sa présence (signal fort, anti-faux-positif) ; sans
-            # marqueur -> exiger 2xx attaquant ET refus anonyme (jamais « n'importe quel 200 »).
-            proven = marker_hit if marker else (att_ok and anon_denied)
-            how = ("marqueur de la victime présent dans la réponse de l'attaquant" if marker
-                   else "attaquant 2xx là où l'anonyme est refusé (401/403)")
+            # status-delta = corroborateur FAIBLE, JAMAIS promouvant : « attaquant 2xx / anon refusé »
+            # prouve seulement que l'endpoint REQUIERT une auth — c'est VRAI pour tout endpoint
+            # per-user que l'attaquant possède LÉGITIMEMENT (/api/me, /api/settings). Il ne démontre
+            # AUCUN accès cross-compte (aucune requête n'est faite avec la session du PROPRIÉTAIRE,
+            # aucune donnée d'autrui n'est observée). Sans marqueur victime et sans différentiel
+            # propriétaire, ce chemin ne PROMEUT donc PAS (jadis `proven = att_ok and anon_denied` ->
+            # faux HIGH « IDOR CONFIRMÉ » sur un accès à sa propre ressource).
+            status_delta = att_ok and anon_denied
+            # PREUVE SAINE (seule à promouvoir ici) : le marqueur de la victime (donnée d'AUTRUI)
+            # présent dans la réponse de l'attaquant. Le différentiel de contenu à session
+            # propriétaire vit dans _fire_read (2 comptes) ; ce slice cross-compte ne l'exerce pas.
+            proven = marker_hit
+            if proven:
+                title = "IDOR CONFIRMÉ — l'attaquant lit la ressource de la victime (accès cross-compte)"
+                severity = "HIGH"
+                how = "marqueur de la victime présent dans la réponse de l'attaquant"
+            elif status_delta:
+                title = ("IDOR non confirmé — endpoint requiert une auth ; accès cross-compte NON prouvé "
+                         "(ni marqueur victime, ni différentiel propriétaire)")
+                severity = "INFO"
+                how = ("status-delta SEUL (attaquant 2xx / anon 401/403) — prouve seulement que l'endpoint "
+                       "requiert une auth, PAS l'accès cross-compte ; corroborateur faible, non-promouvant")
+            else:
+                title = "IDOR non confirmé (cross-compte auth)"
+                severity = "INFO"
+                how = "aucun signal cross-compte concluant"
             # RÉDACTION à la source : le PoC embarque les en-têtes de l'attaquant (Cookie/Authorization)
             # et l'evidence pourrait refléter du matériel — on masque AVANT de figer dans le finding,
             # pour que même le ledger brut (`finding` append non rédigé) ne porte aucun secret.
@@ -199,13 +216,13 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             evidence = redact_secrets(
                 f"attaquant={r_att[0]}/{r_att[2] or '?'} anon={r_anon[0]} owner={owner!r} "
                 f"marqueur={'présent' if marker_hit else ('absent' if marker else 'n/a')} "
+                f"status-delta={status_delta} (corroborateur faible, non-promouvant) "
                 f"anon_refusé={anon_denied} ; preuve={how} ; compte attaquant DÉTENU par l'opérateur "
                 "(jamais un tiers) ; matériel d'auth rédigé")
             findings.append(self.proof(
                 target=url, proven=proven,
-                title=("IDOR CONFIRMÉ — l'attaquant lit la ressource de la victime (accès cross-compte)"
-                       if proven else "IDOR non confirmé (cross-compte auth)"),
-                severity=("HIGH" if proven else "INFO"),
+                title=title,
+                severity=severity,
                 fix=self._FIX_READ,
                 evidence=evidence, poc=poc))
         return findings
@@ -215,6 +232,7 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         if not self._in_scope(action, action.target):
             return [self._scope_refused(action)]
         accounts = action.params.get("accounts", [])
+        findings = []
         # R5 — CONTEXTE AUTH PAR-ENGAGEMENT : des idor_targets STRUCTURÉS {url, owner, marker} injectés
         # par l'engine depuis `scope.auth` déclenchent le slice cross-compte à MARQUEUR (rejeu avec la
         # session de l'attaquant). Ne consomme QUE le compte attaquant. L'oracle ato/takeover consomme
@@ -222,7 +240,11 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         # historique inchangé (différentiel 2-comptes sur `urls`, ou skip « config manquante »).
         auth_targets = action.params.get("idor_targets")
         if auth_targets:
-            return self._fire_auth_targets(action, accounts, list(auth_targets))
+            findings.extend(self._fire_auth_targets(action, accounts, list(auth_targets)))
+        # FIX B3 — UNION (plus d'early-return) : une action IDOR CHAÎNÉE sur un endpoint découvert porte
+        # `urls=[endpoint]` (edge C) EN PLUS des idor_targets injectés par l'engine. L'ancien early-return
+        # sur `idor_targets` laissait cette surface DÉCOUVERTE sans AUCUN test IDOR. On teste donc AUSSI
+        # `urls` via le différentiel 2-comptes, dédupliqué par URL vs les idor_targets déjà couvertes.
         base_urls = list(action.params.get("urls", []))
         method = str(action.params.get("method", "GET")).upper()
         # Énumération d'IDs : on substitue chaque id dans un template d'URL contenant `{id}`.
@@ -235,8 +257,21 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             for t in tlist:
                 for i in enum_ids:
                     urls.append(str(t).replace("{id}", str(i)))
-        if len(accounts) < 2 or not urls:
-            return [self.skip(
+        # dédupe : préserver l'ordre + retirer les URL déjà testées comme idor_target (pas de double tir).
+        covered = {str((t or {}).get("url")) for t in (auth_targets or []) if isinstance(t, dict)}
+        urls = [u for u in dict.fromkeys(urls) if str(u) not in covered]
+        if not urls:
+            # rien à tester en plus des idor_targets : renvoyer leurs findings, sinon skip « config manquante »
+            # (byte-identique à l'historique quand il n'y a ni urls ni idor_targets).
+            return findings or [self.skip(
+                target=action.target, title="IDOR non testé — config manquante",
+                evidence=("Requiert params.accounts (>=2 : A propriétaire, B attaquant) et "
+                          "params.urls (ou params.url_template avec {id} + params.enum_ids)."),
+                poc=self.dry(action))]
+        if len(accounts) < 2:
+            # des URL restent à tester mais pas 2 comptes pour le différentiel : si des idor_targets ont
+            # déjà été testées, on renvoie leurs findings ; sinon skip « config manquante » (historique).
+            return findings or [self.skip(
                 target=action.target, title="IDOR non testé — config manquante",
                 evidence=("Requiert params.accounts (>=2 : A propriétaire, B attaquant) et "
                           "params.urls (ou params.url_template avec {id} + params.enum_ids)."),
@@ -249,14 +284,17 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             # (allow_destructive => engine pose action.destructive=True). Sinon : finding INFO, AUCUNE
             # requête write émise. Le module ne s'auto-élargit jamais une capacité non gardée.
             if not getattr(action, "destructive", False):
-                return [self.skip(
+                findings.append(self.skip(
                     target=action.target,
                     title=f"IDOR write {method} non tiré — capacité destructive non autorisée",
                     evidence=(f"La méthode {method} mute l'objet (destructif). Requiert allow_destructive "
                               f"dans le ROE + action.destructive=True. Aucune requête write émise (fail-closed)."),
-                    poc=self.dry(action))]
-            return self._fire_write(action, A, B, urls, method)
-        return self._fire_read(action, A, B, urls)
+                    poc=self.dry(action)))
+                return findings
+            findings.extend(self._fire_write(action, A, B, urls, method))
+            return findings
+        findings.extend(self._fire_read(action, A, B, urls))
+        return findings
 
     def _fire_read(self, action, A, B, urls):
         findings = []
