@@ -349,20 +349,17 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&path);
     }
 
-    /// [C1] session_cookie : drapeau `Secure` SCHEME-AWARE (posé UNIQUEMENT en HTTPS), jamais par défaut.
-    /// `HttpOnly` + `SameSite=Strict` + `Path=/` TOUJOURS. En http clair (is_https=false) -> pas de Secure
-    /// (sinon le navigateur DROPPE un cookie Secure servi en http -> session jamais persistée = LE bug
-    /// corrigé). En https (is_https=true) -> Secure posé. HttpOnly/SameSite jamais affaiblis.
+    /// [C1 — durci] session_cookie : drapeau `Secure` posé PAR DÉFAUT (durcissement prod/enterprise),
+    /// PLUS déduit du `X-Forwarded-Proto` spoofable. `HttpOnly` + `SameSite=Strict` + `Path=/` TOUJOURS.
+    /// L'opt-out env `FORGE_COOKIE_INSECURE=1` (dev http-loopback) le retire — non testé ici pour éviter
+    /// une mutation d'env process-globale sous exécution parallèle (cf. request_is_https_detects…).
     #[test]
-    fn session_cookie_secure_is_scheme_aware() {
-        let c_http = session_cookie("tok", 3600, false);
-        assert!(c_http.contains("HttpOnly") && c_http.contains("SameSite=Strict") && c_http.contains("Path=/"),
-            "attributs durcis toujours posés: {c_http}");
-        assert!(!c_http.contains("Secure"), "http clair -> pas de Secure (sinon cookie droppé): {c_http}");
-        let c_https = session_cookie("tok", 3600, true);
-        assert!(c_https.contains("; Secure"), "https -> Secure posé: {c_https}");
-        assert!(c_https.contains("HttpOnly") && c_https.contains("SameSite=Strict"),
-            "https garde HttpOnly+SameSite: {c_https}");
+    fn session_cookie_secure_by_default() {
+        let c = session_cookie("tok", 3600);
+        assert!(c.contains("; Secure"), "Secure posé par défaut (le cookie de session ne transite jamais en clair): {c}");
+        assert!(c.contains("HttpOnly") && c.contains("SameSite=Strict") && c.contains("Path=/"),
+            "attributs durcis toujours posés: {c}");
+        assert!(c.contains("Max-Age=3600"), "ttl posé: {c}");
     }
 
     /// [C1] request_is_https : true SEULEMENT si `X-Forwarded-Proto: https` (1er hop du proxy TLS) OU

@@ -158,7 +158,34 @@ pub(crate) fn soql_stats(columns: &[String], rows: &[Value]) -> Value {
     Value::Object(out)
 }
 
+/// H1 — ENTERPRISE fail-closed gate for the RAW SoQL DATA surface (`/api/query` GET+POST,
+/// `/api/panels/:id/data`). The SoQL engine (`exec_soql_app`) compiles an ARBITRARY caller/stored
+/// query over the WHOLE `finding`/`runrecord` tables with NO engagement/tenant predicate, and its
+/// projection NEVER exposes `engagement_id` (see `Schema::forge` — fcols/rcols carry no engagement id),
+/// so the result rows cannot be reliably tenant-scoped from WITHIN the console crate: a mandatory
+/// `engagement_id IN (<granted>)` restriction would have to be injected in the guatx-core compiler.
+/// Under enterprise tenancy this surface let ANY authenticated session (incl. a tenant_viewer) read
+/// EVERY tenant's findings. We therefore DENY the raw surface when tenancy is engaged — better closed
+/// than leaking. The tenant-scoped views (`/api/findings`, `/api/coverage`, `/api/runs`, …) remain the
+/// supported read path and DO bind `engagement_id` (fail-closed). COMMUNITY (flag OFF) => None:
+/// byte-identical, no gate (engagement is not a security boundary in single-tenant mode).
+fn soql_tenancy_denied(app: &App) -> Option<(StatusCode, Json<Value>)> {
+    if tenancy::enabled(app) {
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "tenant_scoped_surface_required",
+                "why": "la surface SoQL brute (/api/query, /api/panels/:id/data) est désactivée en mode enterprise multi-tenant (fail-closed) — utilisez les vues scopées par engagement (/api/findings, /api/coverage, /api/runs, …)"
+            })),
+        ));
+    }
+    None
+}
+
 pub(crate) async fn query(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    if let Some(denied) = soql_tenancy_denied(&app) {
+        return denied; // H1 : surface SoQL brute non tenant-scopée -> refus fail-closed en enterprise
+    }
     let qs = q.get("q").cloned().unwrap_or_else(|| "search".to_string());
     match exec_soql_app(&app, &qs) {
         Ok(v) => (StatusCode::OK, Json(v)),
@@ -170,6 +197,9 @@ pub(crate) async fn query(State(app): State<App>, Query(q): Query<HashMap<String
 /// Accepte `soql` ou `q` (alias). Même moteur read-only que le GET ; permet des requêtes
 /// longues qui ne tiennent pas en query-string.
 pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) -> impl IntoResponse {
+    if let Some(denied) = soql_tenancy_denied(&app) {
+        return denied; // H1 : surface SoQL brute non tenant-scopée -> refus fail-closed en enterprise
+    }
     let qs = body
         .get("soql")
         .or_else(|| body.get("q"))
@@ -292,8 +322,17 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
 
 /// GET /api/panels?dashboard_id=N — liste les panels, optionnellement filtrés par dashboard.
 /// Sans `dashboard_id` : tous les panels (rétro-compat). `dashboard_id` est lié (param), pas inliné.
-pub(crate) async fn panels_list(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    
+pub(crate) async fn panels_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    // H1 — ENTERPRISE fail-closed : un appelant SANS engagement visible (aucun tenant accordé, ni
+    // super-admin) ne peut pas énumérer les DÉFINITIONS de panels — leurs requêtes SoQL référencent des
+    // campaigns/targets qui peuvent identifier un tenant. Community (flag OFF) => no-op (engagement n'est
+    // pas une frontière de sécurité). Le check granted/superadmin n'audite PAS (simple gate de liste).
+    if tenancy::enabled(&app)
+        && tenancy::granted_tenants(&app, &headers).is_empty()
+        && !tenancy::is_superadmin(&app, &headers)
+    {
+        return Json(Value::Array(vec![]));
+    }
     let (where_, args): (&str, Vec<crate::store::Param>) = match q.get("dashboard_id").and_then(|s| s.parse::<i64>().ok()) {
         Some(d) => (" WHERE dashboard_id=?", vec![crate::store::Param::Int(d)]),
         None => ("", vec![]),
@@ -405,6 +444,9 @@ pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Pat
 /// GET /api/panels/:id/data?from=&to= — exécute la query du panel.
 /// `from`/`to` (epoch seconds) bornent `ts` via compile_with_time (0 = pas de borne).
 pub(crate) async fn panel_data(State(app): State<App>, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    if let Some(denied) = soql_tenancy_denied(&app) {
+        return denied; // H1 : le panel exécute une SoQL brute non tenant-scopée -> refus fail-closed en enterprise
+    }
     let qy: Option<String> = {
         let store = app.store();
         store.query_row("SELECT query FROM panel WHERE id=?", &crate::sql_params![id], |r| r.get_str(0)).ok()

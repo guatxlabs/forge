@@ -39,6 +39,17 @@ pub(crate) fn gen_token() -> String {
     hex(&b)
 }
 
+/// CSPRNG hex de `nbytes` octets (entropie OS). Panique sur échec d'entropie plutôt que d'émettre un
+/// secret FAIBLE (fail-closed sur l'entropie — même discipline que `gen_token`). `what` nomme le secret
+/// dans le message de panique. Consolidé depuis `scim::rand_hex` / `sso::rand_hex` (les deux ne
+/// différaient QUE par cette chaîne) — comportement (sortie hex) BYTE-IDENTIQUE.
+pub(crate) fn rand_hex(nbytes: usize, what: &str) -> String {
+    let mut b = vec![0u8; nbytes];
+    getrandom::getrandom(&mut b)
+        .unwrap_or_else(|_| panic!("CSPRNG (getrandom) unavailable — refusing to emit a weak {what} secret"));
+    hex(&b)
+}
+
 /// Réponse d'erreur typée standard (substrat partagé ; `{"error","why"}` byte-identique). Jamais un secret.
 /// Consolidée depuis compliance/tenancy/sso (corps + signatures IDENTIQUES — dedup Wave, comportement inchangé).
 /// `impl Into<String>` : accepte `&'static str`, `String`, ou `format!(...)` comme les définitions locales d'origine.

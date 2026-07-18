@@ -689,16 +689,29 @@ pub(crate) fn engagement_do_delete(app: &App, id: i64, actor: &str) -> Result<Va
     if id == 1 {
         return Err((StatusCode::CONFLICT, "engagement par défaut (#1) non supprimable — archivez-le".into()));
     }
-    let (status, ledger, findings, runs): (String, String, i64, i64) = {
+    let (status, ledger, findings, runs, live_runs): (String, String, i64, i64, i64) = {
         let store = app.store();
         let (status, ledger): (String, String) = store
             .query_row("SELECT status, ledger_path FROM engagement WHERE id=?", &crate::sql_params![id], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?;
         let f: i64 = store.query_row("SELECT COUNT(*) FROM finding WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         let r: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=?", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
+        // M1 — un run VIVANT (`status='running'`, signal DURABLE cross-instance sous HA) de cet engagement.
+        let lr: i64 = store.query_row("SELECT COUNT(*) FROM run_job WHERE engagement_id=? AND status='running'", &crate::sql_params![id], |r| r.get_i64(0)).unwrap_or(0);
         drop(store);
-        (status, ledger, f, r)
+        (status, ledger, f, r, lr)
     };
+    // M1 FIX — REFUS 409 si un run est encore VIVANT pour cet engagement. Supprimer ses `run_job` (dont la
+    // ligne 'running') pendant que le moteur détaché tourne encore laisserait ses POSTs `/api/ingest`
+    // tardifs résoudre l'engagement via une ligne run_job DISPARUE -> `unwrap_or(1)` -> findings mal
+    // estampillés à l'engagement #1 (contamination cross-engagement). On refuse plutôt que de tuer
+    // silencieusement le scan d'un opérateur : il doit d'abord l'annuler (`POST /api/runs/:id/cancel`).
+    if live_runs > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("engagement {id} a {live_runs} run(s) en cours — annulez-les avant suppression (POST /api/runs/:id/cancel)"),
+        ));
+    }
     if status == "active" {
         
         let active_count: i64 = app.store().query_row("SELECT COUNT(*) FROM engagement WHERE status='active'", &[], |r| r.get_i64(0)).unwrap_or(0);

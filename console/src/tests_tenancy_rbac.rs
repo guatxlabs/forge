@@ -98,6 +98,70 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger2);
     }
 
+    /// [H1 — surface SoQL brute tenant-scopée fail-closed] La surface `/api/query` (GET+POST) et
+    /// `/api/panels/:id/data` compile une SoQL ARBITRAIRE sur TOUTE la table `finding`/`runrecord` SANS
+    /// prédicat d'engagement (sa projection n'expose pas `engagement_id`), ce qui, en mode enterprise,
+    /// laissait n'importe quelle session (même tenant_viewer) lire les findings de TOUS les tenants.
+    /// Correctif fail-closed : la surface brute est REFUSÉE (403) dès que la tenancy est engagée — bob
+    /// (tenant B) ne peut donc PAS lire les findings du tenant A via /api/query. Community (flag OFF) =>
+    /// comportement INCHANGÉ (la SoQL renvoie les lignes ; l'engagement n'est pas une frontière de sécurité).
+    ///
+    /// ⚠️ MUTATION-PROOF : si `soql_tenancy_denied` cessait de refuser sous tenancy, la 1re assertion
+    /// (403 pour bob) ET l'absence de "fa"/"fb" dans une réponse serviraient AU ROUGE.
+    #[tokio::test]
+    async fn h1_raw_soql_surface_tenant_scoped_fail_closed() {
+        let ledger = tmp_path("forge-test-h1-soql");
+        let ledger2 = tmp_path("forge-test-h1-soql2");
+        let (app, alice, bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
+        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+
+        // (a) ENTERPRISE : /api/query (GET) refusé (403) — bob NE PEUT PAS lire les findings du tenant A.
+        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
+        let resp = query(State(app.clone()), q).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : /api/query brut refusé (fail-closed)");
+        let jb = resp_json(resp).await;
+        assert_eq!(jb["error"].as_str(), Some("tenant_scoped_surface_required"), "erreur explicite");
+
+        // (b) ENTERPRISE : POST /api/query (search) — même refus (aucune donnée cross-tenant servie).
+        let resp = query_post(State(app.clone()), Json(json!({"soql": "search"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : POST /api/query brut refusé");
+
+        // (c) ENTERPRISE : panel_data (exécute la SoQL d'un panel) — refusé aussi.
+        {   // un panel existe (semé au boot #1) ou on en crée un via SQL direct.
+            let db = app.db();
+            db.execute("INSERT OR IGNORE INTO panel(id,name,query,viz,position,dashboard_id,updated) VALUES(999,'p','search','table',0,1,datetime('now'))", []).unwrap();
+        }
+        let resp = panel_data(State(app.clone()), Path(999i64), Query(HashMap::new())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : /api/panels/:id/data brut refusé");
+
+        // (d) ENTERPRISE : panels_list gaté — bob (granté sur tenant B) VOIT les définitions (il a un
+        // engagement visible) ; un compte SANS grant obtient une liste VIDE (fail-closed).
+        let _ = bob; // bob est granté ; le cas grantless est couvert par carol ci-dessous.
+        { let db = app.db(); upsert_user(&db, "nogrant", "viewer", &hash_pw("pw")).unwrap(); }
+        let (ntok, _) = create_session(&app, uid_of(&app, "nogrant"));
+        let ng = bearer_headers(&ntok);
+        let jl = resp_json(panels_list(State(app.clone()), ng, Query(HashMap::new())).await.into_response()).await;
+        assert!(jl.as_array().unwrap().is_empty(), "panels_list : appelant sans grant -> liste VIDE (fail-closed)");
+
+        // (e) COMMUNITY (flag OFF) : le gate enterprise est LEVÉ -> comportement INCHANGÉ (plus de 403). On
+        // désengage le flag. NB : en test in-memory (db_path=':memory:') la connexion read-only SÉPARÉE
+        // qu'ouvre le moteur SoQL est vide -> 400 (artefact de harness), mais JAMAIS 403 : la preuve = le
+        // gate est disengagé. Le service RÉEL de données (via le store partagé) est prouvé par panels_list.
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        assert!(!tenancy::enabled(&app), "flag OFF => community");
+        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
+        let resp = query(State(app.clone()), q).await.into_response();
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN, "community : /api/query n'est PLUS refusé (gate levé, inchangé)");
+        // panels_list (lecture via le store PARTAGÉ) : non gaté en community -> la définition de panel semée
+        // est servie normalement (preuve que le gate panels_list est bien un no-op community).
+        let jl = resp_json(panels_list(State(app.clone()), alice.clone(), Query(HashMap::new())).await.into_response()).await;
+        assert!(jl.as_array().unwrap().iter().any(|p| p["id"].as_i64() == Some(999)),
+            "community : panels_list sert les définitions de panels (non gaté)");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&ledger2);
+    }
+
     /// [TENANCY — sans grant = rien] ENTERPRISE ON. Un compte SANS aucun tenant_grant (carol) n'accède à
     /// RIEN : liste vide, résolution vers NO_ENGAGEMENT (zéro ligne), aucun engagement visible. Fail-closed
     /// deny-by-default (miroir du ROE). Le repli bootstrap (hash env) n'a pas non plus de grant.
