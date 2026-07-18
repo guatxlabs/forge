@@ -286,11 +286,16 @@ class TestExternalGated(unittest.TestCase):
         findings = _findings()
         rec = _Recorder()
         orig = _patch_urlopen(rec)
+        # La sous-gate anti-SSRF résout l'hôte externe : on mocke le résolveur (public IP) pour rester
+        # OFFLINE + déterministe (public => non bloqué par la sous-gate privé/link-local).
+        orig_resolve = L._resolve_ips
+        L._resolve_ips = lambda host, timeout=None: ["93.184.216.34"]   # public (documentation IP)
         try:
             rep = build_report(_engine(findings, {"enabled": True, "base_url": "https://api.openai.com",
                                                   "allow_external": True}))
         finally:
             L.urllib.request.urlopen = orig
+            L._resolve_ips = orig_resolve
         # autorisation opérateur explicite => l'appel a lieu, le bloc advisory est rendu.
         self.assertEqual(len(rec.calls), 1)
         self.assertIn("## Assist LLM (advisory", rep)

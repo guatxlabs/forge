@@ -42,6 +42,11 @@ from urllib.parse import urlsplit
 
 from .redact import redact_secrets
 from . import resource_profile
+# Prédicat AUTORITAIRE privé/link-local + résolveur BORNÉ de forge/roe.py (source UNIQUE de la logique
+# CIDR : loopback 127/8, RFC1918, link-local 169.254/16, ULA fc00::/7, link-local fe80::/10). On les
+# RÉUTILISE ici pour la sous-gate d'egress LLM — AUCUNE ré-implémentation de la logique réseau. Import
+# au load sûr : roe ne dépend PAS de llm (pas de cycle) et n'importe que la stdlib à son chargement.
+from .roe import _ip_is_private, _resolve_ips
 
 # Kind de l'événement d'AUDIT d'egress LLM émis par le MOTEUR (Python). Volontairement PAS `console.*` :
 # le ledger RÉSERVE le préfixe `console.` aux entrées de la console Rust (chaîne SHA-256 non signée) et
@@ -81,6 +86,48 @@ def _endpoint_host(base_url: Any) -> str:
         return "?"
 
 
+# --- SOUS-GATE défense-en-profondeur : destination privée/link-local (anti-SSRF) ------------------
+# `allow_external` autorise TOUT hôte non-loopback — y compris RFC1918 (10/8, 172.16/12, 192.168/16),
+# link-local 169.254.169.254 (metadata cloud/IMDS) et ULA/link-local v6. Config OPÉRATEUR (pas
+# attaquant-atteignable), mais sur un réseau d'entreprise un `base_url` mal réglé toucherait un service
+# interne / l'IMDS. On AJOUTE une sous-gate : on RÉSOUT l'hôte de `base_url` et on REFUSE l'egress si
+# l'ADRESSE RÉSOLUE est privée/link-local, SAUF opt-in opérateur explicite `allow_private`. Loopback
+# (Ollama local) reste TOUJOURS exempt. On RÉUTILISE le prédicat AUTORITAIRE de forge/roe.py
+# (`_ip_is_private`, source UNIQUE de la logique CIDR) et son résolveur BORNÉ (`_resolve_ips`, deadline
+# dure via thread joint — 5 s par défaut). On vérifie l'ADRESSE RÉSOLUE, pas seulement le littéral : un
+# hostname peut résoudre vers 169.254.169.254. FAIL-CLOSED : timeout / NXDOMAIN / [] / toute erreur de
+# résolution => traité comme PRIVÉ => egress refusé (l'advisory fail-open est simplement sauté).
+
+
+def _resolved_destination_private(config: "LLMConfig") -> bool:
+    """True si l'hôte de `config.base_url` RÉSOUT vers une adresse privée/link-local OU n'est PAS
+    prouvé public. Réutilise `roe._resolve_ips` (borné) + `roe._ip_is_private` (autoritatif — aucune
+    logique CIDR dupliquée). Vérifie l'ADRESSE RÉSOLUE (pas le seul littéral). FAIL-CLOSED : timeout
+    (`_ResolveTimeout`), NXDOMAIN/hôte inconnu ([]) ou toute erreur => True (bloqué). Ne lève jamais."""
+    host = _endpoint_host(config.base_url)
+    if not host or host == "?":
+        return True                                    # hôte illisible => fail-closed (bloqué)
+    try:
+        ips = _resolve_ips(host)                        # littéral IP -> renvoyé tel quel (aucune I/O)
+    except Exception:                                   # _ResolveTimeout / gaierror / toute erreur
+        return True                                     # non prouvé public => fail-closed (bloqué)
+    if not ips:                                         # NXDOMAIN / hôte inconnu => fail-closed
+        return True
+    return any(_ip_is_private(ip) for ip in ips)        # une seule IP privée suffit (anti-rebinding)
+
+
+def _egress_blocked_private(config: "LLMConfig") -> bool:
+    """Sous-gate anti-SSRF : True si l'egress vers `base_url` doit être REFUSÉ parce que la destination
+    RÉSOUT en privé/link-local SANS override explicite. Loopback => jamais bloqué (cas local par défaut,
+    AUCUNE résolution). `allow_private` => override opérateur (AUCUNE résolution). Sinon résolution
+    bornée + verdict fail-closed via `_resolved_destination_private`."""
+    if is_loopback(config.base_url):
+        return False                                   # loopback (Ollama local) TOUJOURS autorisé
+    if config.allow_private:
+        return False                                   # opt-in opérateur explicite (override)
+    return _resolved_destination_private(config)
+
+
 # --- configuration (miroir de allow_private / TriageConfig : lu depuis scope.json, défaut SÛR) -----
 @dataclass
 class LLMConfig:
@@ -94,6 +141,11 @@ class LLMConfig:
     temperature: float = 0.2
     keep_alive: str = "0"              # Ollama : ne PAS épingler le modèle en RAM (extension ignorée par OpenAI)
     allow_external: bool = False       # GATE OPÉRATEUR : autorise l'egress vers un endpoint NON-loopback
+    allow_private: bool = False        # SOUS-GATE OPÉRATEUR (défense en profondeur, anti-SSRF) : autorise
+                                       # l'egress vers une destination qui RÉSOUT en privé/link-local
+                                       # (RFC1918, 169.254 metadata, ULA/link-local v6). Défaut False =>
+                                       # FAIL-CLOSED : un `base_url` externe résolvant en interne est REFUSÉ
+                                       # même avec `allow_external`. Loopback (Ollama local) reste exempt.
 
     @classmethod
     def from_dict(cls, data: Any) -> "LLMConfig":
@@ -138,6 +190,7 @@ class LLMConfig:
         d.temperature = _f("temperature", d.temperature, 0.0, 2.0)
         d.keep_alive = _s("keep_alive", d.keep_alive)
         d.allow_external = _b("allow_external", d.allow_external)
+        d.allow_private = _b("allow_private", d.allow_private)   # sous-gate privé/link-local (défaut False)
         return d
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +201,7 @@ class LLMConfig:
             "api_key_set": bool(self.api_key), "timeout": self.timeout,
             "max_tokens": self.max_tokens, "num_ctx": self.num_ctx, "temperature": self.temperature,
             "keep_alive": self.keep_alive, "allow_external": self.allow_external,
+            "allow_private": self.allow_private,
             "loopback": is_loopback(self.base_url),
         }
 
@@ -156,10 +210,18 @@ class LLMConfig:
 
     def egress_authorized(self) -> bool:
         """L'egress LLM est-il autorisé à SORTIR ? True seulement si activé ET (loopback OU l'opérateur
-        a explicitement autorisé l'externe). Un endpoint externe sans `allow_external` => FAIL-CLOSED."""
+        a explicitement autorisé l'externe) ET la destination RÉSOLUE n'est PAS privée/link-local (sauf
+        opt-in `allow_private`). Chemins FAIL-CLOSED : endpoint externe sans `allow_external` => refus ;
+        `base_url` externe qui RÉSOUT en RFC1918/169.254-metadata/ULA sans `allow_private` => refus
+        (sous-gate défense-en-profondeur anti-SSRF). Loopback (Ollama local) => TOUJOURS autorisé, sans
+        aucune résolution (chemin par défaut inchangé)."""
         if not self.enabled:
             return False
-        return True if is_loopback(self.base_url) else bool(self.allow_external)
+        if is_loopback(self.base_url):
+            return True                                # loopback : cas local par défaut (aucune I/O)
+        if not self.allow_external:
+            return False                               # gate opérateur externe (existant, fail-closed)
+        return not _egress_blocked_private(self)       # sous-gate privé/link-local (résolution bornée)
 
 
 # --- client OpenAI-compatible (stdlib urllib, fail-open, borné) ------------------------------------
@@ -280,6 +342,9 @@ def enrich_triage(triage_result: Any, config: LLMConfig, ledger: Any = None) -> 
       - LLM OFF (défaut) => renvoie None IMMÉDIATEMENT : AUCUN appel réseau, AUCUN ledger (byte-identique).
       - Endpoint EXTERNE sans `allow_external` => GATÉ : AUCUNE donnée envoyée, AUCUN egress ledgeré ;
         renvoie un bloc `status="gated_external"` (le rapport le signale).
+      - Destination qui RÉSOUT en privé/link-local (RFC1918/169.254-metadata/ULA) sans `allow_private`
+        (sous-gate anti-SSRF, loopback exempt) => GATÉ : AUCUNE donnée envoyée, AUCUN egress ledgeré ;
+        renvoie un bloc `status="gated_private"`. Résolution échouée/expirée => fail-closed (gaté).
       - Autorisé => LEDGER `llm.egress` (endpoint + comptes, PAS de secret) AVANT l'appel
         (la donnée SORT), puis UN appel borné/fail-open. Erreur/timeout => `status="unavailable"`,
         IA-1 intacte. Succès => `status="ok"`, narrative RÉDIGÉE (forge.redact) — advisory only.
@@ -297,6 +362,15 @@ def enrich_triage(triage_result: Any, config: LLMConfig, ledger: Any = None) -> 
     if external and not config.allow_external:
         # GATE : endpoint externe non autorisé par l'opérateur => aucune sortie, aucun egress.
         return {"status": "gated_external", "endpoint": host, "external": True,
+                "model": config.model, "narrative": ""}
+
+    # SOUS-GATE défense-en-profondeur (anti-SSRF) : la destination (RÉSOLUE) est-elle privée/link-local
+    # sans opt-in `allow_private` ? Loopback EXEMPT (aucune résolution). Une destination interne
+    # (RFC1918 / 169.254 metadata / ULA v6), OU un hostname qui RÉSOUT vers une telle adresse, OU une
+    # résolution qui échoue/expire (fail-closed) => REFUSÉE ICI : AUCUNE donnée envoyée, AUCUN egress
+    # ledgeré. L'advisory fail-open continue : IA-1 reste intacte (le rapport signale le gate).
+    if _egress_blocked_private(config):
+        return {"status": "gated_private", "endpoint": host, "external": external,
                 "model": config.model, "narrative": ""}
 
     # EGRESS : on est sur le point d'ENVOYER la synthèse de triage -> journaliser (comptes, pas de secret).
