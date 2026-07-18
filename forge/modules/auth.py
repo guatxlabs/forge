@@ -27,6 +27,7 @@ from .registry import register
 # fonctions pures, module NON modifié (auth.py ne dépend de rien qui réimporte auth -> aucun cycle).
 from .access_control import _normalize_body, _body_hash
 from .. import techniques
+from .. import session as _session
 from ..redact import redact_secrets
 
 
@@ -65,16 +66,10 @@ class AuthTakeover(ScopeGuardedOracle):
 
     @staticmethod
     def _attacker_headers(accounts):
-        """En-têtes du compte ATTAQUANT parmi les comptes LABELLISÉS (R5b) : le compte 'attacker' si
-        présent, sinon le 1er (convention). None si aucun compte. Chaque compte = {label, headers}.
-        Miroir EXACT de `IdorDifferential._attacker_headers` (les deux oracles consomment le même
-        `AuthContext.accounts` — SOURCE unique de la convention de labels)."""
-        if not accounts:
-            return None
-        for a in accounts:
-            if str(a.get("label", "")).strip().lower() == "attacker":
-                return a.get("headers", {}) or {}
-        return accounts[0].get("headers", {}) or {}
+        """En-têtes du compte ATTAQUANT (labellisé 'attacker' sinon le 1er). DÉLÈGUE à la SOURCE UNIQUE
+        `session.attacker_headers_from_params` — même sélection byte-identique que IdorDifferential (les
+        deux oracles consomment le même `AuthContext.accounts` sérialisé)."""
+        return _session.attacker_headers_from_params(accounts)
 
     @staticmethod
     def _attacker_label(accounts):
@@ -161,6 +156,12 @@ class AuthTakeover(ScopeGuardedOracle):
             # (A) marqueur d'identité victime dans la réponse authentifiée de l'attaquant.
             sig_marker = bool(marker) and att_ok and (marker in (wbody or ""))
             # (B) status-delta : attaquant 2xx / anon refusé, sur une ressource d'un AUTRE user.
+            #     CORROBORATEUR FAIBLE, JAMAIS PROMOUVANT : owner_diff est un compare de LABELS
+            #     (owner "victim" ≠ label "attacker") et AUCUNE requête n'est faite avec la session du
+            #     PROPRIÉTAIRE — ce signal se réduit donc à « attaquant 2xx ET anon refusé », VRAI pour
+            #     tout endpoint per-user que l'attaquant possède LÉGITIMEMENT (/api/me, /api/settings).
+            #     Il ne démontre AUCUN accès cross-compte -> il n'entre PAS dans la promotion (jadis il
+            #     suffisait à un faux CRITICAL « ATO CONFIRMÉ » sur un accès à sa propre ressource).
             sig_status = att_ok and anon_denied and owner_diff
             # (C) différentiel de contenu vs la vue authentifiée du PROPRIÉTAIRE (victime).
             sig_content = False
@@ -177,25 +178,37 @@ class AuthTakeover(ScopeGuardedOracle):
                     and _body_hash(wbody) == _body_hash(owner_body)          # attaquant voit la vue victime
                     and _body_hash(wbody) != _body_hash(anon_body))          # ... absente de la vue anonyme
 
-            fired = [name for name, hit in (("marqueur-identité-victime", sig_marker),
-                                            ("status-delta", sig_status),
+            # SEULS les signaux SAINS (impliquant la donnée/session du PROPRIÉTAIRE) PROMEUVENT :
+            # (A) marqueur d'identité victime, (C) différentiel de contenu à session propriétaire. Le
+            # status-delta (B) reste un corroborateur FAIBLE nommé dans l'evidence, jamais promouvant.
+            sound = [name for name, hit in (("marqueur-identité-victime", sig_marker),
                                             ("content-differential", sig_content)) if hit]
-            proven = bool(fired)
-            signals = "+".join(fired) if fired else "aucun"
+            proven = bool(sound)
+            signals = "+".join(sound) if sound else "aucun"
             poc = redact_secrets(self._curl(url, attacker))
             evidence = redact_secrets(
                 f"attaquant={ws} anon={anon_s}"
                 + (f" propriétaire={owner_status}" if owner_status is not None else "")
                 + f" owner={owner!r} owner≠attaquant={owner_diff} ; "
-                f"marqueur={'présent' if sig_marker else 'absent'} status-delta={sig_status} "
-                f"content-differential={sig_content} ; signal(s)={signals} ; preuve=accès/identité "
-                "cross-compte ; comptes (attaquant/victime) DÉTENUS par l'opérateur (jamais un tiers) ; "
+                f"marqueur={'présent' if sig_marker else 'absent'} "
+                f"status-delta={sig_status} (corroborateur faible, non-promouvant) "
+                f"content-differential={sig_content} ; signal(s) promouvant(s)={signals} ; "
+                "comptes (attaquant/victime) DÉTENUS par l'opérateur (jamais un tiers) ; "
                 "matériel d'auth rédigé")
+            if proven:
+                title = f"ATO CONFIRMÉ (cross-compte) — signal(s) : {signals}"
+                severity = "CRITICAL"
+            elif sig_status:
+                title = ("ATO non confirmé — endpoint requiert une auth ; accès cross-compte NON prouvé "
+                         "(ni marqueur victime, ni différentiel propriétaire)")
+                severity = "INFO"
+            else:
+                title = "ATO non confirmé — aucun signal cross-compte concluant"
+                severity = "INFO"
             findings.append(self.proof(
                 target=url, proven=proven,
-                title=(f"ATO CONFIRMÉ (cross-compte) — signal(s) : {signals}" if proven
-                       else "ATO non confirmé — aucun signal cross-compte concluant"),
-                severity=("CRITICAL" if proven else "INFO"),
+                title=title,
+                severity=severity,
                 evidence=evidence, poc=poc))
         return findings
 

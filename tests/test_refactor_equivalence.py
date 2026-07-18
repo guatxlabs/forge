@@ -298,7 +298,14 @@ class TestOracleFindingsMatchSnapshot(unittest.TestCase):
         return cases
 
     def test_every_oracle_finding_matches_snapshot(self):
-        before = _snap("oracle_findings.json")
+        # Le snapshot golden a été CAPTURÉ pré-rédaction-centrale (A1). Depuis, `Finding.to_dict()` passe
+        # TOUT champ texte par la surface unique `redact.redact_secrets` (chokepoint anti-fuite vers le
+        # ledger SIGNÉ). Le seul écart INTENTIONNEL entre le golden et la sortie actuelle est donc
+        # exactement cette rédaction : on compare `after` au golden RÉDIGÉ par la MÊME fonction. Ce test
+        # devient ainsi une PREUVE que la rédaction centrale est le SEUL delta observable (toute autre
+        # dérive — titre/sévérité/cwe/fix… — ferait échouer la comparaison).
+        from forge.report_engagement import redact_finding
+        before = {name: redact_finding(f) for name, f in _snap("oracle_findings.json").items()}
         after = self._cases()
         self.assertEqual(set(after), set(before))
         for name in sorted(before):

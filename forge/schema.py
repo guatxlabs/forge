@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from . import techniques
+from .redact import redact_secrets as _redact_secrets
 
 SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 # machine d'état d'un finding (reprend la logique FAISS du toolkit YWH).
@@ -158,7 +159,17 @@ class Finding:
         return SEVERITIES.index(self.severity) if self.severity in SEVERITIES else 0
 
     def to_dict(self):
-        return asdict(self)
+        # CHOKEPOINT DE RÉDACTION CENTRAL (fail-closed anti-fuite de secret) — TOUT champ texte du
+        # finding passe par la surface UNIQUE `redact.redact_secrets` AVANT de quitter l'objet. C'est
+        # le point de passage OBLIGÉ vers le ledger SIGNÉ (`engine`.append("finding", f.to_dict())),
+        # le graphe en mémoire et l'API `/api/findings/:id` : un secret (Authorization: Bearer …,
+        # Cookie: sid=…) construit dans un `poc`/`evidence` par un chemin sibling/historique
+        # (IDOR read/write, PrivEsc, ATO pré-R5) est neutralisé ICI, une fois, pour toute la surface.
+        # Mirroir EXACT de `report_engagement.redact_finding` (même fonction) -> parité avec le
+        # rendu du rapport. Idempotent : les chemins R5 rédigent déjà à la source (défense en
+        # profondeur) et une double rédaction ne masque jamais moins. Les champs non-texte
+        # (cvss_score, ts) sont conservés tels quels.
+        return {k: (_redact_secrets(v) if isinstance(v, str) else v) for k, v in asdict(self).items()}
 
 
 @dataclass

@@ -122,8 +122,10 @@ class TestIdorFiresCrossAccount(unittest.TestCase):
         # l'attaquant a bien émis avec son bearer ; l'anonyme a été testé comme contrôle
         self.assertTrue(any(h.get("Authorization") == f"Bearer {BEARER}" for _, h in seen))
 
-    def test_status_delta_without_marker_is_idor(self):
-        # target sans marqueur : preuve = 2xx attaquant là où l'anon est refusé (401/403)
+    def test_status_delta_without_marker_does_not_promote(self):
+        # B1 — target sans marqueur : « attaquant 2xx / anon refusé » prouve seulement que l'endpoint
+        # requiert une auth, PAS l'accès cross-compte (aucune donnée d'AUTRUI observée sur ce slice).
+        # -> tested, jamais HIGH (c'était le faux « IDOR CONFIRMÉ » sur accès à sa propre ressource).
         block = _auth_block()
         block["idor_targets"] = [{"url": "https://app.test/api/orders/2", "owner": "victim"}]
         sc = _scope(auth=block)
@@ -138,7 +140,11 @@ class TestIdorFiresCrossAccount(unittest.TestCase):
             out = IdorDifferential().fire(_idor_action(sc))
         finally:
             restore()
-        self.assertEqual(out[0].to_dict()["status"], "vulnerable")
+        f = out[0].to_dict()
+        self.assertEqual(f["status"], "tested")                 # status-delta seul ne promeut plus
+        self.assertNotIn("CONFIRMÉ", f["title"])
+        self.assertIn("NON prouvé", f["title"])
+        self.assertIn("status-delta", f["evidence"])            # reste corroborateur faible dans l'evidence
 
     def test_no_false_positive_on_public_200(self):
         # attaquant 200 MAIS anonyme aussi 200 (ressource publique) -> PAS d'IDOR (tested)

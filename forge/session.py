@@ -313,6 +313,24 @@ class AuthContext:
     __str__ = __repr__
 
 
+def attacker_headers_from_params(accounts):
+    """En-têtes du compte ATTAQUANT parmi les comptes SÉRIALISÉS `{label, headers}` : le compte
+    labellisé 'attacker' si présent, sinon le 1er (convention). None si aucun compte ; `{}` si le
+    compte n'a pas d'en-têtes.
+
+    SOURCE UNIQUE de la sélection « attaquant = labellisé-ou-premier » côté oracles : les deux
+    consommateurs (`IdorDifferential`, `AuthTakeover`) travaillent sur la forme sérialisée produite par
+    `AuthContext.accounts_as_params()` et déléguaient jusqu'ici à deux copies BYTE-IDENTIQUES de cette
+    logique (leur docstring disait « Miroir EXACT »). Single-sourcé ici pour que la sélection de compte
+    — surface sensible à la sécurité — n'existe qu'à UN endroit. Pur, ne lève jamais."""
+    if not accounts:
+        return None
+    for a in accounts:
+        if str(a.get("label", "")).strip().lower() == "attacker":
+            return a.get("headers", {}) or {}
+    return accounts[0].get("headers", {}) or {}
+
+
 # --- liaison ambiante (thread-local) : le moteur LIE le store autour de chaque fire() --------------
 _local = threading.local()
 
