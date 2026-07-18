@@ -173,6 +173,10 @@ def _assist_section(engine, tr):
         out += [f"- **Egress REFUSÉ** : endpoint externe `{host}` non autorisé "
                 f"(`scope.llm.allow_external=false`). AUCUNE donnée envoyée. Autorisez explicitement "
                 f"l'egress externe (gate opérateur) pour l'activer.", ""]
+    elif status == "gated_private":
+        out += [f"- **Egress REFUSÉ** : endpoint `{host}` résout vers une adresse privée/link-local "
+                f"(RFC1918 / métadonnées cloud). AUCUNE donnée envoyée. Défense-en-profondeur SSRF : "
+                f"posez `scope.llm.allow_private=true` explicitement si l'endpoint interne est voulu.", ""]
     elif status == "unavailable":
         out += [f"- **Assist indisponible** : endpoint `{host}` injoignable / timeout / erreur — "
                 f"repli sur la triage native (IA-1), intacte. (fail-open)", ""]
