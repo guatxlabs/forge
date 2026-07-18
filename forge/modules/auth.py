@@ -21,6 +21,11 @@ import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
+# R7 — réutilise la NORMALISATION/HASH de corps de l'oracle IDOR (source unique, cf. reference pattern
+# access_control._fire_auth_targets) pour le signal « différentiel de contenu victime-vs-attaquant » :
+# on compare la STRUCTURE/DONNÉE (CSRF/nonce/horodatages retirés), pas le bruit de session. Import de
+# fonctions pures, module NON modifié (auth.py ne dépend de rien qui réimporte auth -> aucun cycle).
+from .access_control import _normalize_body, _body_hash
 from .. import techniques
 from ..redact import redact_secrets
 
@@ -71,16 +76,56 @@ class AuthTakeover(ScopeGuardedOracle):
                 return a.get("headers", {}) or {}
         return accounts[0].get("headers", {}) or {}
 
+    @staticmethod
+    def _attacker_label(accounts):
+        """Le LABEL du compte attaquant (miroir de `_attacker_headers` : compte 'attacker' si présent,
+        sinon le 1er). Sert au garde anti-faux-positif du signal status-delta : on ne flag JAMAIS
+        l'attaquant lisant SA PROPRE ressource (owner == label attaquant)."""
+        if not accounts:
+            return ""
+        for a in accounts:
+            if str(a.get("label", "")).strip().lower() == "attacker":
+                return str(a.get("label", "")).strip()
+        return str(accounts[0].get("label", "")).strip()
+
+    @staticmethod
+    def _account_headers(accounts, label):
+        """En-têtes du compte LABELLISÉ `label` (insensible à la casse), ou None si absent. Sert à
+        récupérer la vue authentifiée du PROPRIÉTAIRE (victime) pour le différentiel de contenu."""
+        if not accounts or not label:
+            return None
+        lo = str(label).strip().lower()
+        for a in accounts:
+            if str(a.get("label", "")).strip().lower() == lo:
+                return a.get("headers", {}) or {}
+        return None
+
     def _fire_auth_context(self, action, accounts, targets):
-        """R5b — SLICE ATO/TAKEOVER via CONTEXTE AUTH PAR-ENGAGEMENT. La session de l'ATTAQUANT (compte
-        de l'opérateur) rejoue chaque idor_target {url, owner, marker} (endpoint whoami/profil) ; PREUVE
-        NETTE d'un takeover cross-compte = le MARQUEUR D'IDENTITÉ de la victime (`marker`) apparaît dans
-        SA réponse authentifiée (2xx) — l'identité renvoyée est celle d'un AUTRE utilisateur, pas la
-        sienne. Sans marqueur -> pas de signal d'identité, on ne CONFIRME jamais (skip, anti-faux-positif :
-        jamais « n'importe quel 200 »). Lecture seule (GET). Scope-guard fail-closed PAR-URL (aucune
-        requête hors périmètre). Le PoC/evidence est RÉDIGÉ à la source (les en-têtes de l'attaquant
-        portent le matériel d'auth SECRET — masqué AVANT de figer dans le finding, ledger inclus)."""
+        """R5b + R7 — SLICE ATO/TAKEOVER via CONTEXTE AUTH PAR-ENGAGEMENT. La session de l'ATTAQUANT
+        (compte de l'opérateur) rejoue chaque idor_target {url, owner, marker} (endpoint whoami/profil)
+        et l'on CONFIRME un takeover cross-compte sur N'IMPORTE LEQUEL de ces signaux à faible taux de
+        faux positifs, l'evidence NOMMANT lequel a tiré :
+
+          (A) MARQUEUR D'IDENTITÉ VICTIME (R5b, conservé) : le `marker` de la victime apparaît dans la
+              réponse authentifiée (2xx) de l'attaquant — l'identité renvoyée est celle d'AUTRUI.
+          (B) STATUS-DELTA (R7) : l'attaquant obtient un 2xx là où un CONTRÔLE ANONYME est refusé
+              (401/403) sur une ressource dont le PROPRIÉTAIRE n'est PAS l'attaquant (owner ≠ label
+              attaquant) — la ressource est bien contrôlée en accès et un AUTRE utilisateur l'atteint.
+              Le garde owner≠attaquant interdit de flagger l'attaquant lisant SA PROPRE ressource.
+          (C) DIFFÉRENTIEL DE CONTENU VICTIME-vs-ATTAQUANT (R7, le plus fort — exige un compte VICTIME
+              configuré) : on lit la cible AVEC la session VICTIME/PROPRIÉTAIRE ET avec celle de
+              l'attaquant ; si le corps NORMALISÉ non vide de l'attaquant est IDENTIQUE à la vue
+              authentifiée de la victime ET DIFFÈRE de la vue anonyme -> l'attaquant voit la donnée
+              PRIVÉE de la victime (exposition cross-compte). Jamais « les deux en 200 » : il faut un
+              discriminant concret (même contenu privé que la victime, absent de la vue anonyme).
+
+        Anti-faux-positif : un 200 public (que voit aussi l'anonyme) ne tire AUCUN signal ; la ressource
+        que l'attaquant possède légitimement (owner == attaquant) ne tire ni (B) ni (C). Lecture seule
+        (GET). Scope-guard fail-closed PAR-URL (aucune requête — victime, attaquant, anonyme — hors
+        périmètre). Le PoC/evidence est RÉDIGÉ à la source (les en-têtes portent le matériel d'auth
+        SECRET — masqué AVANT de figer dans le finding, ledger inclus)."""
         attacker = self._attacker_headers(accounts)
+        attacker_label = self._attacker_label(accounts)
         findings = []
         for t in targets:
             url = (t or {}).get("url")
@@ -89,7 +134,8 @@ class AuthTakeover(ScopeGuardedOracle):
             marker = str((t or {}).get("marker") or "")
             owner = str((t or {}).get("owner") or "victim")
             # SCOPE-GUARD PAR-URL fail-closed — une cible hors périmètre : AUCUN I/O vers elle (le
-            # matériel d'auth secret ne peut physiquement pas quitter le périmètre déclaré).
+            # matériel d'auth secret ne peut physiquement pas quitter le périmètre déclaré). UNE seule
+            # vérif couvre les trois variantes d'en-têtes (victime/attaquant/anonyme) : même URL.
             if not self._in_scope(action, url):
                 findings.append(self.degraded(
                     target=url,
@@ -104,30 +150,51 @@ class AuthTakeover(ScopeGuardedOracle):
                               "l'attaquant pour rejouer la requête cross-compte."),
                     poc=self.dry(action)))
                 continue
-            if not marker:
-                # sans marqueur d'identité victime, aucune PREUVE de takeover possible (un 2xx seul ne
-                # prouve pas que l'identité renvoyée est celle d'AUTRUI) -> jamais confirmé.
-                findings.append(self.skip(
-                    target=url, title="ATO non testé — marqueur d'identité victime manquant",
-                    evidence=("Requiert un `marker` (identifiant unique de la victime attendu dans la "
-                              "réponse) pour prouver que la session attaquant renvoie l'identité d'AUTRUI."),
-                    poc=self.dry(action)))
-                continue
+            owner_diff = owner.strip().lower() != str(attacker_label).strip().lower()
+
+            # --- SONDES (in-scope) : attaquant + contrôle anonyme (toujours) ; propriétaire (si compte) ---
             ws, wbody, _ = self._fetch(url, headers=attacker)
+            anon_s, anon_body, _ = self._fetch(url, headers={})
             att_ok = ws in (200, 206)
-            marker_hit = att_ok and (marker in (wbody or ""))
-            # PREUVE : session attaquant 2xx ET marqueur d'identité VICTIME présent dans SA réponse
-            # (identity-of-another-user). Jamais « n'importe quel 200 » (marqueur requis ci-dessus).
-            proven = marker_hit
+            anon_denied = anon_s in (401, 403)
+
+            # (A) marqueur d'identité victime dans la réponse authentifiée de l'attaquant.
+            sig_marker = bool(marker) and att_ok and (marker in (wbody or ""))
+            # (B) status-delta : attaquant 2xx / anon refusé, sur une ressource d'un AUTRE user.
+            sig_status = att_ok and anon_denied and owner_diff
+            # (C) différentiel de contenu vs la vue authentifiée du PROPRIÉTAIRE (victime).
+            sig_content = False
+            owner_status = None
+            owner_headers = self._account_headers(accounts, owner)
+            if owner_headers is None:                 # repli : compte 'victim' explicite
+                owner_headers = self._account_headers(accounts, "victim")
+            if owner_diff and owner_headers is not None and owner_headers != attacker:
+                owner_status, owner_body, _ = self._fetch(url, headers=owner_headers)
+                owner_ok = owner_status in (200, 206)
+                att_norm = _normalize_body(wbody)
+                sig_content = bool(
+                    att_ok and owner_ok and att_norm
+                    and _body_hash(wbody) == _body_hash(owner_body)          # attaquant voit la vue victime
+                    and _body_hash(wbody) != _body_hash(anon_body))          # ... absente de la vue anonyme
+
+            fired = [name for name, hit in (("marqueur-identité-victime", sig_marker),
+                                            ("status-delta", sig_status),
+                                            ("content-differential", sig_content)) if hit]
+            proven = bool(fired)
+            signals = "+".join(fired) if fired else "aucun"
             poc = redact_secrets(self._curl(url, attacker))
             evidence = redact_secrets(
-                f"attaquant={ws} marqueur_victime={'présent' if marker_hit else 'absent'} "
-                f"owner={owner!r} ; preuve=identité de la victime renvoyée à la session de l'attaquant ; "
-                "compte attaquant DÉTENU par l'opérateur (jamais un tiers) ; matériel d'auth rédigé")
+                f"attaquant={ws} anon={anon_s}"
+                + (f" propriétaire={owner_status}" if owner_status is not None else "")
+                + f" owner={owner!r} owner≠attaquant={owner_diff} ; "
+                f"marqueur={'présent' if sig_marker else 'absent'} status-delta={sig_status} "
+                f"content-differential={sig_content} ; signal(s)={signals} ; preuve=accès/identité "
+                "cross-compte ; comptes (attaquant/victime) DÉTENUS par l'opérateur (jamais un tiers) ; "
+                "matériel d'auth rédigé")
             findings.append(self.proof(
                 target=url, proven=proven,
-                title=("ATO CONFIRMÉ — la session attaquant renvoie l'identité de la VICTIME (cross-compte)"
-                       if proven else "ATO non confirmé — la réponse ne porte pas l'identité victime"),
+                title=(f"ATO CONFIRMÉ (cross-compte) — signal(s) : {signals}" if proven
+                       else "ATO non confirmé — aucun signal cross-compte concluant"),
                 severity=("CRITICAL" if proven else "INFO"),
                 evidence=evidence, poc=poc))
         return findings

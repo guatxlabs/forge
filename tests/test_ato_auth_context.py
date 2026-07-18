@@ -111,25 +111,25 @@ class TestAtoFiresCrossAccount(unittest.TestCase):
             restore()
         self.assertEqual(out[0].to_dict()["status"], "tested")
 
-    def test_marker_required_no_marker_skips(self):
-        # idor_target SANS marqueur d'identité -> aucune preuve possible -> skip (jamais confirmé).
+    def test_no_marker_public_endpoint_no_false_positive(self):
+        # R7 — sans marqueur, l'oracle n'abandonne PLUS (il évalue status-delta + content-differential),
+        # mais un endpoint PUBLIC (l'anonyme voit le MÊME 200 que l'attaquant et la victime) ne tire
+        # AUCUN signal : ni marqueur, ni status-delta (anon non refusé), ni différentiel (== anon).
         block = _auth_block()
         block["idor_targets"] = [{"url": "https://app.test/api/me", "owner": "victim"}]
         sc = _scope(auth=block)
-        calls = []
 
         def fake(url, headers=None, timeout=15, method="GET", data=None):
-            calls.append(url)
-            return 200, f'{{"user": "{MARKER}"}}', {}
+            return 200, '{"public": true, "banner": "welcome"}', {}   # identique à tout le monde
 
         restore = _patch_fetch(fake)
         try:
             out = AuthTakeover().fire(_ato_action(sc))
         finally:
             restore()
-        self.assertEqual(calls, [])                        # pas de marqueur -> aucune requête émise
-        self.assertEqual(out[0].to_dict()["status"], "tested")   # config manquante (skip) -> tested INFO
-        self.assertIn("marqueur d'identité", out[0].to_dict()["title"])
+        f = out[0].to_dict()
+        self.assertEqual(f["status"], "tested")               # public -> non confirmé (jamais un FP)
+        self.assertIn("non confirmé", f["title"])
 
 
 # =================================================================================================
