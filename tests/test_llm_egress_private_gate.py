@@ -75,18 +75,33 @@ class _Triage:
                                    "top_findings": [{"severity": "MEDIUM", "title": "IDOR", "target": "x"}]}
 
 
-def _patch(urlopen=None, resolve=None):
-    """Patch urlopen et/ou _resolve_ips ; renvoie une fonction de restauration."""
-    o_u, o_r = L.urllib.request.urlopen, L._resolve_ips
+def _patch(urlopen=None, resolve=None, pinned=None):
+    """Patch urlopen, _resolve_ips et/ou _pinned_urlopen (connexion épinglée externe) ; renvoie une
+    fonction de restauration."""
+    o_u, o_r, o_p = L.urllib.request.urlopen, L._resolve_ips, L._pinned_urlopen
     if urlopen is not None:
         L.urllib.request.urlopen = urlopen
     if resolve is not None:
         L._resolve_ips = resolve
+    if pinned is not None:
+        L._pinned_urlopen = pinned
 
     def restore():
         L.urllib.request.urlopen = o_u
         L._resolve_ips = o_r
+        L._pinned_urlopen = o_p
     return restore
+
+
+class _PinnedRecorder:
+    """Espion pour le seam de connexion ÉPINGLÉE : capture l'IP VETTÉE reçue (prouve le pin + l'absence
+    de 2e résolution) et renvoie une réponse OK."""
+    def __init__(self):
+        self.ips = []
+
+    def __call__(self, req, ip, timeout=None):
+        self.ips.append(ip)
+        return _ok_response()
 
 
 def _boom_urlopen(*a, **k):
@@ -233,17 +248,20 @@ class TestEnrichTriageSubGate(unittest.TestCase):
         self.assertIn("llm.egress", led.kinds())
 
     def test_public_host_allowed_calls_and_ledgers(self):
-        # (b) public + allow_external => appel + egress ledgeré (résolveur mocké vers IP publique).
+        # (b) public + allow_external => appel + egress ledgeré (résolveur mocké vers IP publique). La
+        # connexion externe passe par le seam ÉPINGLÉ et reçoit l'IP VETTÉE (anti-rebinding, pas de 2e
+        # résolution) ; l'urlopen NON épinglé lève s'il est touché.
         led = _FakeLedger()
-        rec = _Recorder()
-        restore = _patch(urlopen=rec, resolve=lambda host, timeout=None: ["93.184.216.34"])
+        pinrec = _PinnedRecorder()
+        restore = _patch(urlopen=_boom_urlopen, pinned=pinrec,
+                         resolve=lambda host, timeout=None: ["93.184.216.34"])
         try:
             cfg = _cfg(base_url="https://api.openai.com", allow_external=True)
             block = L.enrich_triage(_Triage(), cfg, ledger=led)
         finally:
             restore()
         self.assertEqual(block["status"], "ok")
-        self.assertEqual(len(rec.calls), 1)
+        self.assertEqual(pinrec.ips, ["93.184.216.34"])       # connecté SUR l'IP vettée (pin, pas re-résolu)
         self.assertIn("llm.egress", led.kinds())
 
     def test_private_with_allow_private_override_calls(self):
@@ -314,6 +332,89 @@ class TestReportFailOpenAdvisoryContinues(unittest.TestCase):
                       for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
                      if path.exists() else [])
             self.assertNotIn("llm.egress", kinds)
+
+
+# ==================================================================================================
+class TestEgressPinnedAntiRebinding(unittest.TestCase):
+    """FIX : la connexion externe DIALE l'IP VETTÉE résolue par le gate (UNE fois) au lieu de re-résoudre
+    — ferme le check-vs-use (DNS-rebinding : public au gate, 169.254.169.254 au connect)."""
+
+    def test_rebinding_domain_pinned_to_first_resolution_no_second_resolve(self):
+        # Résolveur REBINDING : public au 1er appel (gate), privé (metadata) au 2e. Le gate résout UNE
+        # SEULE FOIS et ÉPINGLE l'IP publique ; la connexion DIALE cette IP vettée (aucune 2e résolution)
+        # -> le 169.254.169.254 rebindé n'est JAMAIS atteint.
+        led = _FakeLedger()
+        calls = {"n": 0}
+
+        def _rebind(host, timeout=None):
+            calls["n"] += 1
+            return ["93.184.216.34"] if calls["n"] == 1 else ["169.254.169.254"]
+
+        pinrec = _PinnedRecorder()
+        restore = _patch(urlopen=_boom_urlopen, pinned=pinrec, resolve=_rebind)
+        try:
+            cfg = _cfg(base_url="https://rebind.example", allow_external=True)
+            block = L.enrich_triage(_Triage(), cfg, ledger=led)
+        finally:
+            restore()
+        self.assertEqual(block["status"], "ok")
+        self.assertEqual(calls["n"], 1, "résolu UNE seule fois (verdict+pin), jamais re-résolu au connect")
+        self.assertEqual(pinrec.ips, ["93.184.216.34"], "connecté SUR l'IP vettée, pas le rebind 169.254")
+        self.assertIn("llm.egress", led.kinds())
+
+    def test_metadata_first_resolution_private_blocked_no_connection(self):
+        # si la résolution (unique) rend une IP privée/metadata -> gated_private, AUCUNE connexion
+        # (ni urlopen NON épinglé ni seam épinglé), aucun egress ledgeré.
+        led = _FakeLedger()
+        pinrec = _PinnedRecorder()
+        restore = _patch(urlopen=_boom_urlopen, pinned=pinrec,
+                         resolve=lambda host, timeout=None: ["169.254.169.254"])
+        try:
+            cfg = _cfg(base_url="https://imds.example", allow_external=True)
+            block = L.enrich_triage(_Triage(), cfg, ledger=led)
+        finally:
+            restore()
+        self.assertEqual(block["status"], "gated_private")
+        self.assertEqual(pinrec.ips, [])                      # aucune connexion épinglée
+        self.assertNotIn("llm.egress", led.kinds())
+
+    def test_loopback_never_pinned_uses_urlopen(self):
+        # (a) loopback (Ollama local) : chemin par défaut BYTE-IDENTIQUE — urlopen NORMAL, JAMAIS le seam
+        # épinglé, AUCUNE résolution.
+        led = _FakeLedger()
+        rec = _Recorder()
+
+        def _boom_pinned(*a, **k):
+            raise AssertionError("le seam épinglé ne doit PAS être utilisé pour loopback")
+
+        restore = _patch(urlopen=rec, pinned=_boom_pinned, resolve=_boom_resolve)
+        try:
+            block = L.enrich_triage(_Triage(), _cfg(), ledger=led)
+        finally:
+            restore()
+        self.assertEqual(block["status"], "ok")
+        self.assertEqual(len(rec.calls), 1)                   # urlopen normal (non épinglé)
+
+    def test_payloads_external_public_pinned(self):
+        # enrich_payloads partage le MÊME gate/pin : externe public => connexion épinglée sur l'IP vettée.
+        led = _FakeLedger()
+        captured = {}
+
+        def _pinned(req, ip, timeout=None):
+            captured["ip"] = ip
+            payload = {"choices": [{"message": {"content": "${N*M}"}}]}
+            return _FakeResp(json.dumps(payload).encode("utf-8"))
+
+        restore = _patch(urlopen=_boom_urlopen, pinned=_pinned,
+                         resolve=lambda host, timeout=None: ["93.184.216.34"])
+        try:
+            cfg = _cfg(base_url="https://api.openai.com", allow_external=True)
+            out = L.enrich_payloads("ssti.eval", "https://app.test/x", "q", cfg, ledger=led)
+        finally:
+            restore()
+        self.assertEqual(captured.get("ip"), "93.184.216.34")
+        self.assertTrue(out)                                  # payload suggéré revenu (pin transparent)
+        self.assertIn("llm.egress", led.kinds())
 
 
 if __name__ == "__main__":

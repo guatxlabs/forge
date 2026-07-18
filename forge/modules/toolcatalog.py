@@ -37,7 +37,7 @@ from .toolspec import ToolSpec, register_spec, FlagAllowlistMixin
 # (jamais une chaîne shell-splittée). Réutilisé par CHAQUE outil pour donner un échappatoire power-user SÛR.
 # SOURCE UNIQUE : le descripteur est POSSÉDÉ par `FlagAllowlistMixin.extra_args_param()` (toolspec.py) —
 # on route à travers lui au lieu de RE-DÉCLARER le dict ici (dédup ; un seul point à faire évoluer).
-_EXTRA = FlagAllowlistMixin.extra_args_param()
+_EXTRA = FlagAllowlistMixin.extra_args_param(label="extra args (drapeaux allowlistés)")
 
 # --- Découverte de surface — chaque hit est un ASSET découvert (attribué + re-validé scope fail-closed) ---
 # NOTE SCHÉMA : un knob n'a d'EFFET que s'il est référencé dans `argv_template` via un GROUPE optionnel

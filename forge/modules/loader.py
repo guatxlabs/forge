@@ -222,6 +222,18 @@ def _dangerous_flag(tok):
     return None
 
 
+def _param_default(body):
+    """Le DÉFAUT émis par un `{param:NAME:DEFAULT}` (chaîne ÉMISE TELLE QUELLE et CONCATÉNÉE au littéral
+    qui l'entoure à l'exécution — cf. `toolspec._resolve_token`/`_resolve_placeholder`, `split(':', 2)`),
+    sinon "". `target`/`target_host`/`target_url` = valeur runtime (bornée ailleurs) ; `param` sans défaut
+    = token abandonné si absent -> aucune concaténation. Le DÉFAUT = TOUT après NAME (aligné validateur)."""
+    if body.startswith("param:"):
+        parts = body[len("param:"):].split(":", 1)         # NAME[:DEFAULT] (DEFAULT = tout après NAME)
+        if len(parts) > 1:
+            return parts[1]
+    return ""
+
+
 def _validate_placeholder_body(body, tok):
     """Corps d'un `{...}` autorisé : target|target_host|target_url|param:NAME[:DEF]. `args` doit être
     STANDALONE (traité à part), tout autre est REFUSÉ. Renvoie une raison si invalide, sinon None."""
@@ -261,22 +273,30 @@ def _scan_argv_token(tok, in_group):
         if in_group:
             return ("'{args}' n'est autorisé qu'au niveau supérieur (pas dans un groupe)", False)
         return (None, True)
-    i, n, literal = 0, len(tok), []
+    # On RECONSTRUIT la concaténation PIRE-CAS du token à l'exécution : littéraux + DÉFAUTS des
+    # `{param:NAME:DEFAULT}` foldés INLINE (le défaut est émis tel quel et collé au littéral voisin).
+    # Sans ça, `-{param:x:oN}` passe (tête `-` bénigne + défaut `oN` bénin, tous deux validés) puis
+    # FUSIONNE en `-oN` (drapeau d'écriture-fichier nmap) au runtime -> injection d'option. On re-soumet
+    # la fusion à `_dangerous_flag` ci-dessous. MIROIR du fix Rust (tools.rs). Un `-p{param:ports:1-65535}`
+    # légitime -> `-p1-65535` (non dangereux), inchangé ; un `-sV` littéral -> `-sV`, inchangé.
+    i, n, folded = 0, len(tok), []
     while i < n:
         if tok[i] == "{":
             close = tok.find("}", i)
             if close == -1:
                 return (f"token '{tok}' : accolade '{{' non fermée", False)
-            reason = _validate_placeholder_body(tok[i + 1:close], tok)
+            body = tok[i + 1:close]
+            reason = _validate_placeholder_body(body, tok)
             if reason is not None:
                 return (reason, False)
+            folded.append(_param_default(body))          # fold le DÉFAUT dans la reconstruction runtime
             i = close + 1
         else:
             if tok[i] == "}":
                 return (f"token '{tok}' : '}}' sans '{{' correspondant", False)
-            literal.append(tok[i])
+            folded.append(tok[i])
             i += 1
-    lit = "".join(literal)
+    lit = "".join(folded)
     if lit.startswith("-"):
         reason = _dangerous_flag(lit)
         if reason is not None:

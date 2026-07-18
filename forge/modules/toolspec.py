@@ -182,7 +182,11 @@ def _url(target):
 def _resolve_placeholder(body, ctx):
     """Résout le CORPS d'un placeholder `{...}`. Renvoie une str, ou `_MISSING` (placeholder requis
     manquant / inconnu -> le token sera abandonné). Pur, ne lève jamais."""
-    parts = body.split(":")
+    # split(":", 2) — le DÉFAUT = TOUT ce qui suit NAME (peut contenir des ':' : `{param:u:http://x/a}`).
+    # ALIGNÉ sur le VALIDATEUR (loader `_validate_placeholder_body` : `rest.split(":", 1)`). Un
+    # `body.split(":")[2]` NAÏF tronquait `http://x/a` à `http` (défaut mutilé à l'émission) : le
+    # validateur voyait `http://x/a`, le résolveur émettait `http` — désaccord validateur/résolveur.
+    parts = body.split(":", 2)
     key = parts[0]
     if key == "target":
         return str(ctx["target"])
@@ -192,7 +196,7 @@ def _resolve_placeholder(body, ctx):
         return _url(ctx["target"])
     if key == "param":
         name = parts[1] if len(parts) > 1 else ""
-        default = parts[2] if len(parts) > 2 else _MISSING     # {param:NAME:DEFAULT}
+        default = parts[2] if len(parts) > 2 else _MISSING     # {param:NAME:DEFAULT} (tout après NAME)
         val = (ctx["params"] or {}).get(name, _MISSING)
         if val is _MISSING or val is None or val == "":
             return default

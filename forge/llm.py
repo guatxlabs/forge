@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import pin
 from .redact import redact_secrets
 from . import resource_profile
 # Prédicat AUTORITAIRE privé/link-local + résolveur BORNÉ de forge/roe.py (source UNIQUE de la logique
@@ -99,21 +100,60 @@ def _endpoint_host(base_url: Any) -> str:
 # résolution => traité comme PRIVÉ => egress refusé (l'advisory fail-open est simplement sauté).
 
 
-def _resolved_destination_private(config: "LLMConfig") -> bool:
-    """True si l'hôte de `config.base_url` RÉSOUT vers une adresse privée/link-local OU n'est PAS
-    prouvé public. Réutilise `roe._resolve_ips` (borné) + `roe._ip_is_private` (autoritatif — aucune
-    logique CIDR dupliquée). Vérifie l'ADRESSE RÉSOLUE (pas le seul littéral). FAIL-CLOSED : timeout
-    (`_ResolveTimeout`), NXDOMAIN/hôte inconnu ([]) ou toute erreur => True (bloqué). Ne lève jamais."""
+def _resolve_destination(config: "LLMConfig") -> "tuple[list[str], bool]":
+    """RÉSOUT l'hôte de `config.base_url` UNE SEULE FOIS -> `(ips, blocked)`. `blocked=True` si l'adresse
+    RÉSOLUE est privée/link-local OU non prouvée publique (fail-closed). SOURCE UNIQUE de la résolution :
+    le VERDICT privé ET l'IP à ÉPINGLER pour la connexion dérivent du MÊME appel `_resolve_ips` — ce qui
+    FERME le check-vs-use (DNS-rebinding) : sans ça, le gate résout, puis `urlopen` re-résout au connect
+    (une IP publique au gate, `169.254.169.254` au connect). Réutilise `roe._resolve_ips` (borné) +
+    `roe._ip_is_private` (autoritatif — aucune logique CIDR dupliquée). FAIL-CLOSED : timeout
+    (`_ResolveTimeout`), NXDOMAIN/hôte inconnu ([]) ou toute erreur => `([], True)`. Ne lève jamais."""
     host = _endpoint_host(config.base_url)
     if not host or host == "?":
-        return True                                    # hôte illisible => fail-closed (bloqué)
+        return [], True                                # hôte illisible => fail-closed (bloqué)
     try:
         ips = _resolve_ips(host)                        # littéral IP -> renvoyé tel quel (aucune I/O)
     except Exception:                                   # _ResolveTimeout / gaierror / toute erreur
-        return True                                     # non prouvé public => fail-closed (bloqué)
+        return [], True                                 # non prouvé public => fail-closed (bloqué)
     if not ips:                                         # NXDOMAIN / hôte inconnu => fail-closed
-        return True
-    return any(_ip_is_private(ip) for ip in ips)        # une seule IP privée suffit (anti-rebinding)
+        return [], True
+    return ips, any(_ip_is_private(ip) for ip in ips)   # une seule IP privée suffit (anti-rebinding)
+
+
+def _resolved_destination_private(config: "LLMConfig") -> bool:
+    """True si l'hôte de `config.base_url` RÉSOUT vers une adresse privée/link-local OU n'est PAS
+    prouvé public. Délègue à `_resolve_destination` (source UNIQUE de la résolution). FAIL-CLOSED :
+    timeout / NXDOMAIN / erreur => True (bloqué). Ne lève jamais."""
+    return _resolve_destination(config)[1]
+
+
+# --- CLASSIFICATEUR d'egress UNIFIÉ (source UNIQUE pour enrich_triage / enrich_payloads / egress_authorized)
+# STRINGS d'état ÉMISES TELLES QUELLES dans le rapport (`report.py` branche dessus) — NE PAS renommer.
+EGRESS_OK = "ok"
+EGRESS_GATED_EXTERNAL = "gated_external"
+EGRESS_GATED_PRIVATE = "gated_private"
+
+
+def _classify_egress(config: "LLMConfig") -> "tuple[str, str | None]":
+    """Classe l'egress LLM en `(status, vetted_ip)`, `status ∈ {ok, gated_external, gated_private}`.
+    UN SEUL classificateur consommé par `enrich_triage`, `enrich_payloads` ET `egress_authorized` :
+    ils ne peuvent plus DÉRIVER (auparavant enrich_triage ré-implémentait le gate inline tandis que
+    enrich_payloads passait par `egress_authorized`). Le caller a déjà vérifié `config.enabled`.
+
+    `vetted_ip` = l'IP RÉSOLUE (UNE fois, via `_resolve_destination`) à ÉPINGLER pour la connexion réelle
+    (anti-rebinding : la MÊME résolution sert au verdict ET au connect) quand la destination externe est
+    prouvée publique ; `None` pour loopback (aucune résolution) et pour l'override `allow_private`
+    (résolution normale acceptée par l'opérateur). Ne lève jamais."""
+    if is_loopback(config.base_url):
+        return EGRESS_OK, None                         # loopback (Ollama local) : aucune résolution, no-op
+    if not config.allow_external:
+        return EGRESS_GATED_EXTERNAL, None             # gate opérateur externe (fail-closed)
+    if config.allow_private:
+        return EGRESS_OK, None                         # override opérateur explicite : connexion normale
+    ips, blocked = _resolve_destination(config)         # RÉSOUT UNE FOIS : verdict + IP épinglée
+    if blocked:
+        return EGRESS_GATED_PRIVATE, None              # privé/link-local OU non prouvé public (fail-closed)
+    return EGRESS_OK, pin.pick(ips)                     # IP VETTÉE à épingler (pas de 2e résolution au connect)
 
 
 def _egress_blocked_private(config: "LLMConfig") -> bool:
@@ -214,14 +254,23 @@ class LLMConfig:
         opt-in `allow_private`). Chemins FAIL-CLOSED : endpoint externe sans `allow_external` => refus ;
         `base_url` externe qui RÉSOUT en RFC1918/169.254-metadata/ULA sans `allow_private` => refus
         (sous-gate défense-en-profondeur anti-SSRF). Loopback (Ollama local) => TOUJOURS autorisé, sans
-        aucune résolution (chemin par défaut inchangé)."""
+        aucune résolution (chemin par défaut inchangé). DÉLÈGUE au classificateur UNIFIÉ `_classify_egress`
+        (source unique : même verdict que enrich_triage/enrich_payloads, aucune dérive)."""
         if not self.enabled:
             return False
-        if is_loopback(self.base_url):
-            return True                                # loopback : cas local par défaut (aucune I/O)
-        if not self.allow_external:
-            return False                               # gate opérateur externe (existant, fail-closed)
-        return not _egress_blocked_private(self)       # sous-gate privé/link-local (résolution bornée)
+        status, _ = _classify_egress(self)
+        return status == EGRESS_OK
+
+
+# --- connexion ÉPINGLÉE (anti-rebinding) : dial l'IP VETTÉE au lieu de re-résoudre --------------------
+def _pinned_urlopen(req: "urllib.request.Request", ip: str, timeout: float) -> Any:
+    """Ouvre `req` en DIALANT l'IP VETTÉE `ip` (résolue UNE fois par le gate) au lieu de re-résoudre le
+    DNS au connect — RÉUTILISE `pin.build_pinned_opener` (l'infra d'épinglage END-TO-END déjà employée
+    par les oracles/httpflow/recon) : le `Host:` header + le SNI + la validation du certificat restent
+    l'HÔTE D'ORIGINE, seule la CIBLE du connect TCP devient l'IP vettée. Ferme la fenêtre de
+    DNS-rebinding sub-ms entre le gate et le connect. Seam module-level (monkeypatchable en test comme
+    `urllib.request.urlopen`)."""
+    return pin.build_pinned_opener(override_ip=ip).open(req, timeout=timeout)
 
 
 # --- client OpenAI-compatible (stdlib urllib, fail-open, borné) ------------------------------------
@@ -259,13 +308,23 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {cfg.api_key}"
         return urllib.request.Request(url, data=body, headers=headers, method="POST")
 
-    def chat(self, messages: list[dict[str, str]]) -> str | None:
+    def chat(self, messages: list[dict[str, str]], pinned_ip: str | None = None) -> str | None:
         """UN appel chat borné. Renvoie le contenu (str) ou None sur TOUTE erreur (réseau, timeout,
-        HTTP, JSON, forme inattendue). Ne lève JAMAIS (fail-open : la triage IA-1 reste intacte)."""
+        HTTP, JSON, forme inattendue). Ne lève JAMAIS (fail-open : la triage IA-1 reste intacte).
+
+        `pinned_ip` (fourni par le gate `_classify_egress` pour une destination externe publique) => la
+        connexion DIALE cette IP VETTÉE au lieu de re-résoudre (anti-rebinding, cf. `_pinned_urlopen`).
+        `None` (loopback Ollama / override allow_private) => `urllib.request.urlopen` NORMAL, BYTE-IDENTIQUE
+        au chemin historique (le loopback reste un no-op : aucune résolution, aucun épinglage)."""
         try:
             req = self._build_request(messages)
-            with urllib.request.urlopen(req, timeout=self.config.timeout) as r:
-                data = json.load(r)
+            timeout = self.config.timeout
+            if pinned_ip:
+                with _pinned_urlopen(req, pinned_ip, timeout) as r:
+                    data = json.load(r)
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = json.load(r)
             content = data["choices"][0]["message"]["content"]
             return content.strip() if isinstance(content, str) and content.strip() else None
         except Exception:
@@ -359,17 +418,18 @@ def enrich_triage(triage_result: Any, config: LLMConfig, ledger: Any = None) -> 
     external = config.is_external()
     summary = getattr(triage_result, "summary", None) or {}
 
-    if external and not config.allow_external:
-        # GATE : endpoint externe non autorisé par l'opérateur => aucune sortie, aucun egress.
+    # GATE UNIFIÉ (`_classify_egress`, source unique partagée avec enrich_payloads/egress_authorized) :
+    #  - `gated_external` : endpoint externe non autorisé par l'opérateur => aucune sortie, aucun egress.
+    #  - `gated_private`  : sous-gate anti-SSRF — la destination RÉSOUT en privé/link-local (RFC1918 /
+    #    169.254 metadata / ULA v6) sans opt-in `allow_private`, OU la résolution échoue/expire
+    #    (fail-closed) — loopback EXEMPT => aucune donnée envoyée, aucun egress ledgeré.
+    #  - `ok` : `vetted_ip` = l'IP RÉSOLUE UNE FOIS à ÉPINGLER au connect (anti-rebinding) ; None pour
+    #    loopback / override allow_private (connexion normale). L'advisory fail-open continue : IA-1 intacte.
+    status_gate, vetted_ip = _classify_egress(config)
+    if status_gate == EGRESS_GATED_EXTERNAL:
         return {"status": "gated_external", "endpoint": host, "external": True,
                 "model": config.model, "narrative": ""}
-
-    # SOUS-GATE défense-en-profondeur (anti-SSRF) : la destination (RÉSOLUE) est-elle privée/link-local
-    # sans opt-in `allow_private` ? Loopback EXEMPT (aucune résolution). Une destination interne
-    # (RFC1918 / 169.254 metadata / ULA v6), OU un hostname qui RÉSOUT vers une telle adresse, OU une
-    # résolution qui échoue/expire (fail-closed) => REFUSÉE ICI : AUCUNE donnée envoyée, AUCUN egress
-    # ledgeré. L'advisory fail-open continue : IA-1 reste intacte (le rapport signale le gate).
-    if _egress_blocked_private(config):
+    if status_gate == EGRESS_GATED_PRIVATE:
         return {"status": "gated_private", "endpoint": host, "external": external,
                 "model": config.model, "narrative": ""}
 
@@ -380,7 +440,8 @@ def enrich_triage(triage_result: Any, config: LLMConfig, ledger: Any = None) -> 
         except Exception:
             pass                                       # un échec ledger ne casse jamais le run (fail-open)
 
-    narrative = LLMClient(config).chat(_assist_messages(summary))   # None sur toute erreur (borné)
+    # Connexion épinglée sur l'IP VETTÉE (destination externe publique) — pas de 2e résolution au connect.
+    narrative = LLMClient(config).chat(_assist_messages(summary), pinned_ip=vetted_ip)   # None si erreur
     if not narrative:
         return {"status": "unavailable", "endpoint": host, "external": external,
                 "model": config.model, "narrative": ""}
@@ -502,8 +563,12 @@ def enrich_payloads(kind: Any, target: Any, param: Any, config: Any,
             return []                                # technique non câblée pour l'enrichissement
         if not param or not isinstance(param, str):
             return []                                # pas de point d'injection => rien à enrichir
-        if not config.egress_authorized():
-            return []                                # externe non autorisé (ou désactivé) => gate tient
+        # GATE UNIFIÉ (`_classify_egress`, source unique partagée avec enrich_triage/egress_authorized) :
+        # tout état != `ok` (gated_external / gated_private / résolution fail-closed) => [] (le gate tient,
+        # aucune sortie). `vetted_ip` = l'IP RÉSOLUE UNE FOIS à ÉPINGLER au connect (anti-rebinding).
+        status_gate, vetted_ip = _classify_egress(config)
+        if status_gate != EGRESS_OK:
+            return []                                # externe non autorisé / privé / fail-closed => gate tient
 
         # EGRESS : on est sur le point d'ENVOYER le contexte d'injection -> journaliser (pas de secret).
         if ledger is not None:
@@ -512,7 +577,7 @@ def enrich_payloads(kind: Any, target: Any, param: Any, config: Any,
             except Exception:                        # noqa: BLE001 — un échec ledger ne casse jamais le run
                 pass
 
-        raw = LLMClient(config).chat(_payload_messages(kind, target, param))   # None sur toute erreur
+        raw = LLMClient(config).chat(_payload_messages(kind, target, param), pinned_ip=vetted_ip)  # None si erreur
         if not raw:
             return []                                # indisponible/vide => fail-open (déterministe intact)
 
