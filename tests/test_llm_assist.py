@@ -284,20 +284,26 @@ class TestExternalGated(unittest.TestCase):
 
     def test_external_endpoint_allowed_with_operator_gate(self):
         findings = _findings()
-        rec = _Recorder()
+        rec = _Recorder()                                              # urlopen NON épinglé : ne doit pas être touché
         orig = _patch_urlopen(rec)
         # La sous-gate anti-SSRF résout l'hôte externe : on mocke le résolveur (public IP) pour rester
-        # OFFLINE + déterministe (public => non bloqué par la sous-gate privé/link-local).
+        # OFFLINE + déterministe (public => non bloqué par la sous-gate privé/link-local). La connexion
+        # externe passe par le seam ÉPINGLÉ et reçoit l'IP VETTÉE (anti-rebinding, pas de 2e résolution).
         orig_resolve = L._resolve_ips
+        orig_pinned = L._pinned_urlopen
+        pinned_ips = []
         L._resolve_ips = lambda host, timeout=None: ["93.184.216.34"]   # public (documentation IP)
+        L._pinned_urlopen = lambda req, ip, timeout=None: (pinned_ips.append(ip) or _ok_response())
         try:
             rep = build_report(_engine(findings, {"enabled": True, "base_url": "https://api.openai.com",
                                                   "allow_external": True}))
         finally:
             L.urllib.request.urlopen = orig
             L._resolve_ips = orig_resolve
-        # autorisation opérateur explicite => l'appel a lieu, le bloc advisory est rendu.
-        self.assertEqual(len(rec.calls), 1)
+            L._pinned_urlopen = orig_pinned
+        # autorisation opérateur explicite => l'appel a lieu SUR l'IP vettée (pin), le bloc advisory rendu.
+        self.assertEqual(len(rec.calls), 0)                            # jamais l'urlopen non épinglé
+        self.assertEqual(pinned_ips, ["93.184.216.34"])               # connecté sur l'IP vettée (pas re-résolu)
         self.assertIn("## Assist LLM (advisory", rep)
         self.assertIn("endpoint EXTERNE", rep)
 

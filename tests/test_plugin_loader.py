@@ -281,6 +281,39 @@ class TestToolspecLoader(unittest.TestCase):
                     os.unlink(path)
                     self.assertNotIn(spec["kind"], mods.kinds(), f"{label} ne doit PAS s'enregistrer")
 
+    def test_literal_prefix_default_concatenation_rejected(self):
+        # M2 (miroir du gap Rust tools.rs) — un token à TÊTE littérale `-` QUI EMBARQUE un
+        # `{param:NAME:DEFAULT}` : la tête `-` est bénigne STANDALONE et le défaut `oN` est bénin
+        # STANDALONE (tous deux passent la validation par-segment) MAIS ils CONCATÈNENT en `-oN`
+        # (drapeau d'écriture-fichier nmap) au runtime -> injection d'option. DOIT être refusé.
+        cases = {
+            "tête '-' + défaut oN => -oN":          ["{target_url}", "-{param:x:oN}"],
+            "tête '-o' + défaut ut => -out??":      ["{target_url}", "-o{param:x:utput}"],   # -output (substr)
+            "tête '--pro' + défaut xy => --proxy":  ["{target_url}", "--pro{param:x:xy}"],    # --proxy (substr)
+        }
+        for label, argv in cases.items():
+            with self.subTest(label):
+                spec = dict(self.GOOD, kind="recon.cat1", argv_template=argv)
+                with _Registry():
+                    path = self._write(spec)
+                    with self.assertRaises(loader.SpecError, msg=f"{label} aurait dû être refusé"):
+                        loader.load_toolspec_file(path)
+                    os.unlink(path)
+                    self.assertNotIn("recon.cat1", mods.kinds(), f"{label} ne doit PAS s'enregistrer")
+
+    def test_benign_standalone_default_and_prefixed_flag_still_accepted(self):
+        # non-régression FIX M2 : (1) un défaut BÉNIGN STANDALONE `{param:x:fast}` (pas de tête `-`) reste
+        # accepté ; (2) un flag littéral collé à un défaut BÉNIGN `-p{param:ports:1-65535}` (-> `-p1-65535`,
+        # non dangereux) reste accepté ; (3) `-sV` littéral inchangé.
+        spec = dict(self.GOOD, kind="recon.catok",
+                    argv_template=["-sV", "{param:x:fast}", "-p{param:ports:1-65535}", "{target_url}"])
+        with _Registry():
+            path = self._write(spec)
+            kind = loader.load_toolspec_file(path)
+            os.unlink(path)
+            self.assertEqual(kind, "recon.catok")
+            self.assertIn("recon.catok", mods.kinds())
+
     def test_param_default_benign_still_registers(self):
         # M2 — non-régression : un défaut BÉNIGN de {param:NAME:DEFAULT} (ne commence pas par '-',
         # aucun drapeau d'exfil) reste ACCEPTÉ et l'outil s'enregistre normalement.

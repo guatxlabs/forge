@@ -72,6 +72,32 @@ class TestPayableFloor(unittest.TestCase):
         self.assertEqual(sorted(id(a) for a in ordered + skipped),
                          sorted(id(a) for a in [scan_hi, graphql, xss, extra_scan]))
 
+    def test_rce_probe_floored_despite_not_bug_bounty_eligible(self):
+        # (M4 gap) rce.probe : vuln_class='RCE', phase='exploit', cls DÉCLARÉ "rce" (∈ QUALIFYING) MAIS
+        # bug_bounty_eligible=False (exploit pentest-only). Le cls de l'Action DÉRIVE par défaut du suffixe
+        # du kind ("probe" ∉ QUALIFYING) quand le cerveau ne pose pas l'override -> voies 1 & 2 le
+        # manquaient et la classe la PLUS forte (RCE) était affamable (EV ~0.003 vs plancher 0.5).
+        rce = self._low("rce.probe")
+        self.assertEqual(rce.cls, "probe")                      # cls DÉRIVÉ du suffixe (pas l'override brain)
+        self.assertNotIn("probe", QUALIFYING)
+        self.assertFalse(techniques.CATALOG["rce.probe"].bug_bounty_eligible)  # PAS BB-eligible (inchangé)
+        self.assertEqual(techniques.CATALOG["rce.probe"].cls, "rce")           # cls DÉCLARÉ qualifiant
+        self.assertTrue(_floored(rce), "rce.probe (RCE) doit être planché comme classe qualifiante")
+        # planché EXACTEMENT comme sqli.probe / l'IDOR REST (kept, jamais skippé sous budget).
+        self.assertEqual(Planner.ev(rce), FLOOR)
+        self.assertEqual(Planner.ev(rce), Planner.ev(self._low("sqli.probe")))
+        # sous budget serré : rce.probe sous-noté RESTE dans `ordered`, jamais affamé.
+        scan_hi = Action("web.nuclei", "app.test", value=0.9, confidence=0.9, cost=1)
+        ordered, skipped = Planner(budget=1.0).order([scan_hi, rce])
+        self.assertIn(rce, ordered, "rce.probe affamé par le budget !")
+        self.assertNotIn(rce, skipped)
+
+    def test_rce_probe_not_moved_into_bug_bounty_profile(self):
+        # le fix planche par la classe planner déclarée — il ne TOUCHE PAS bug_bounty_eligible (qui
+        # rangerait cet exploit dans le profil bug_bounty et casserait pentest_only). Garde-fou de non-régression.
+        self.assertNotIn("rce.probe", techniques.profile_set("bug_bounty"))
+        self.assertTrue(techniques.CATALOG["rce.probe"].pentest_only)
+
     def test_qualifying_constant_unchanged(self):
         # (d) — la constante QUALIFYING n'a PAS bougé (le fix agit dans ev/order, pas sur la table).
         self.assertEqual(set(QUALIFYING), techniques.qualifying_classes())

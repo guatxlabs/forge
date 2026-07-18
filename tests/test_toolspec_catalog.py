@@ -179,6 +179,19 @@ class TestArgvNoShell(unittest.TestCase):
         self.assertEqual(build_argv(spec, "good.test", {}), ["http://good.test"])
         self.assertEqual(build_argv(spec, "https://good.test", {}), ["https://good.test"])
 
+    def test_colon_bearing_default_resolves_whole_not_truncated(self):
+        # FIX M2 (désaccord validateur/résolveur) : le DÉFAUT d'un {param:NAME:DEFAULT} = TOUT ce qui
+        # suit NAME (peut contenir des ':'). Un `body.split(":")[2]` NAÏF tronquait `http://ex.com/a`
+        # à `http` ; le résolveur DOIT désormais émettre la valeur ENTIÈRE (aligné sur le validateur).
+        spec = ToolSpec(kind="t.colon", vuln_class="Recon", binary="t",
+                        argv_template=("-u", "{param:u:http://ex.com/a}"))
+        self.assertEqual(build_argv(spec, "x", {}), ["-u", "http://ex.com/a"])   # entier, PAS "http"
+        # un param FOURNI écrase le défaut (inchangé) ; défaut avec plusieurs ':' préservé aussi.
+        self.assertEqual(build_argv(spec, "x", {"u": "https://y.z/p"}), ["-u", "https://y.z/p"])
+        spec2 = ToolSpec(kind="t.colon2", vuln_class="Recon", binary="t",
+                         argv_template=("{param:v:a:b:c}",))
+        self.assertEqual(build_argv(spec2, "x", {}), ["a:b:c"])                  # tout après NAME conservé
+
 
 # =================================================================================================
 class TestScopeGuardZeroIO(unittest.TestCase):

@@ -38,7 +38,7 @@ DEFAULT_CHECKLIST = list(techniques.DEFAULT_CHECKLIST)
 
 
 def _floored(action: Action) -> bool:
-    """True si l'action doit recevoir le PLANCHER anti-starvation. Deux voies COMPLÉMENTAIRES :
+    """True si l'action doit recevoir le PLANCHER anti-starvation. Trois voies COMPLÉMENTAIRES :
 
       1. `action.cls ∈ QUALIFYING` : les 12 jetons de classe historiques (idor/access_control/auth/
          ato/rce/sqli/ssrf/biz/privesc…) — inchangé.
@@ -47,13 +47,24 @@ def _floored(action: Action) -> bool:
          "access", `xss.stored` -> "stored", `ssti.eval` -> "eval", `xxe.probe`, `cmdi.probe`,
          `oauth.flow`, `race.condition`, `csrf.state_change`…). Sans cette voie, ces voies payables
          gardaient une EV ~0.003 vs le plancher 0.5 et étaient affamées par un budget fini / un SIGTERM.
+      3. le `cls` DÉCLARÉ du KIND dans le catalogue est qualifiant (`CATALOG[kind].cls ∈ QUALIFYING`).
+         Ferme le trou de `rce.probe` (`vuln_class='RCE'`, `phase='exploit'`, cls déclaré "rce" MAIS
+         `bug_bounty_eligible=False` — c'est un EXPLOIT pentest-only, PAS une classe BB payable). Le
+         `cls` de l'Action DÉRIVE par défaut du suffixe du kind ("probe") quand le cerveau ne pose pas
+         l'override -> voies 1 & 2 le manquaient et la classe la PLUS forte (RCE) tombait entièrement
+         (EV ~0.003 vs plancher 0.5, affamable). On ne TOUCHE PAS `bug_bounty_eligible` (qui rangerait
+         cet exploit dans le profil bug_bounty et casserait `pentest_only`) : on planche par la classe
+         planner déclarée, qui EST qualifiante par construction (`_t("rce", qualifying=True)`).
 
-    Ainsi TOUTE classe payable (bug_bounty_eligible) reçoit le MÊME plancher que l'IDOR REST — et une
-    action de scan non-qualifiante (`web.nuclei`, recon…) n'est JAMAIS planchée. Pur, ne lève jamais."""
+    Ainsi TOUTE classe payable/qualifiante reçoit le MÊME plancher que l'IDOR REST — et une action de
+    scan non-qualifiante (`web.nuclei`, `recon.subfinder`, cls déclaré "" ) n'est JAMAIS planchée
+    (`"" ∉ QUALIFYING`, pas over-flooring). Pur, ne lève jamais."""
     if action.cls in QUALIFYING:
         return True
     t = techniques.CATALOG.get(action.kind)
-    return bool(t and t.bug_bounty_eligible)
+    if t is None:
+        return False
+    return bool(t.bug_bounty_eligible) or t.cls in QUALIFYING
 
 
 class Planner:
