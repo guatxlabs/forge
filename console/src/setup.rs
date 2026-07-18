@@ -12,17 +12,16 @@
 //! `use crate::*`, et est re-exporté à la racine par `pub(crate) use crate::setup::*` — les routes de
 //! build_router ET les tests inline de main.rs (`super::*`) résolvent donc ces handlers INCHANGÉS.
 use crate::*;
+use crate::store::Store;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // =====================================================================================
-// ANTI-BRUTE-FORCE du login local (LOW / defense-in-depth) — verrou par compte à seuil.
+// ANTI-BRUTE-FORCE du login local (LOW / defense-in-depth) — verrou par compte à seuil, CLUSTER-WIDE.
 //
 // ANTI-ÉNUMÉRATION : la clé de throttle est LE LOGIN SOUMIS, indépendamment de l'existence du compte.
 // Un login inconnu et un login existant-mais-verrouillé sont throttlés par le MÊME mécanisme et renvoient
@@ -30,97 +29,107 @@ use std::time::{Duration, Instant};
 // (l'attaquant contrôle lui-même l'état de verrou en martelant n'importe quelle chaîne). La vérification
 // argon2 reste à timing uniforme (hash réel/factice) sur le chemin NON verrouillé ; sur le chemin
 // verrouillé on rejette après un délai FIXE (uniforme), sans court-circuit révélateur de l'existence.
-// État EN MÉMOIRE (propriété du déploiement, pas d'une requête) ; fail-closed (verrou empoisonné => on
-// throttle quand même). Reset sur login réussi ; le verrou expire (pas de lock-out permanent des légitimes).
+// Reset sur login réussi ; le verrou expire (pas de lock-out permanent des légitimes).
 //
-// HA / MULTI-INSTANCE : ce compteur est PAR PROCESSUS (map en mémoire, non répliquée). Sous HA le seuil
-// effectif est donc N×LOGIN_MAX_FAILS avec N réplicas derrière le load-balancer. C'est ACCEPTÉ (defense-in-
-// depth, pas un contrôle d'auth dur) : un DB-backing du verrou ajouterait une écriture par tentative
-// (amplification DoS) sans supprimer la fenêtre de course cross-instance. Le durcissement d'auth réel reste
-// argon2id + la borne mémoire de la map (MAX_TRACKED_LOGINS) ; on ne sur-conçoit pas ce throttle.
+// HA / MULTI-INSTANCE (le durcissement de cette tranche) : l'état est ADOSSÉ AU STORE PARTAGÉ (table
+// `login_throttle`, seam SQLite/Postgres) — plus une map par-processus. AVANT, N réplicas derrière un load-
+// balancer donnaient à un attaquant ~N×LOGIN_MAX_FAILS tentatives par fenêtre (chaque process comptait seul) ;
+// désormais le compteur + la fenêtre de verrou sont AUTORITAIRES cross-réplica (toute instance lit/écrit la
+// MÊME ligne). MONO-INSTANCE : comportement IDENTIQUE à l'ancien compteur mémoire (mêmes seuil/fenêtre) — le
+// store est simplement l'unique lecteur/écrivain. ATOMICITÉ : l'incrément passe par un INSERT … ON CONFLICT
+// DO UPDATE (une instruction -> pas de lost-update sous échecs concurrents ; row-lock côté PG). FAIL-SAFE :
+// la lecture de verrou FAIL-OPEN (store indisponible / boot très précoce -> on ne PRÉTEND pas verrouillé :
+// ne pas exclure un légitime sur un hoquet infra ; l'auth reste gatée par argon2id + le lookup user, qui
+// échouerait lui aussi si le store était mort). L'écriture d'échec est best-effort (un échec de write ne
+// débloque jamais un compte : au pire on ne compte pas cette tentative-là). La table est BORNÉE par une purge
+// opportuniste des lignes périmées à chaque échec (miroir du sweep in-memory remplacé).
 // =====================================================================================
 
 pub(crate) const LOGIN_MAX_FAILS: u32 = 5; // échecs consécutifs dans la fenêtre avant verrou (pub(crate) : lu par les tests)
 const LOGIN_FAIL_WINDOW: Duration = Duration::from_secs(300); // la série d'échecs se périme après 5 min sans échec
 const LOGIN_LOCKOUT: Duration = Duration::from_secs(300); // durée du verrou une fois déclenché
 const LOGIN_LOCK_DELAY: Duration = Duration::from_millis(700); // délai UNIFORME appliqué à un rejet verrouillé
-/// Borne DURE du nombre de logins suivis SIMULTANÉMENT (anti-épuisement mémoire NON authentifié : la clé
-/// de throttle est le login SOUMIS, donc sans plafond un attaquant insérerait une entrée par chaîne
-/// distincte). Au plafond on balaie d'abord les séries mortes ; si c'est encore plein, on n'insère PAS de
-/// NOUVELLE clé (les entrées existantes — donc les verrous en cours — restent honorées). Par-processus.
-const MAX_TRACKED_LOGINS: usize = 4096;
 /// Longueur max d'un login accepté par `/api/login` (parité `validate_login`). Au-delà = jamais un compte
-/// valide -> rejeté AVANT tout suivi de throttle (n'empoisonne pas la map, ne borne pas la longueur de clé).
+/// valide -> rejeté AVANT tout suivi de throttle (n'écrit pas de ligne, ne stocke pas une clé sur-longue).
 const MAX_LOGIN_LEN: usize = 64;
 
-struct LoginAttempt {
-    fails: u32,
-    first_fail: Instant,      // ancre de fenêtre : 1er échec de la série courante
-    locked_until: Option<Instant>, // posé au franchissement du seuil : rejet jusqu'à cet instant
+/// Fenêtre de série / durée de verrou en epoch-secondes (le store persiste des epochs BIGINT, pas des
+/// `Instant` monotones par-processus). Dérivées des constantes `Duration` ci-dessus -> seuil/fenêtre INCHANGÉS.
+fn fail_window_secs() -> i64 {
+    LOGIN_FAIL_WINDOW.as_secs() as i64
+}
+fn lockout_secs() -> i64 {
+    LOGIN_LOCKOUT.as_secs() as i64
 }
 
-fn login_attempts() -> &'static Mutex<HashMap<String, LoginAttempt>> {
-    static M: OnceLock<Mutex<HashMap<String, LoginAttempt>>> = OnceLock::new();
-    M.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// `true` si `key` (login soumis) est ACTUELLEMENT verrouillé -> la requête doit être rejetée uniformément
-/// SANS même tenter argon2. Expire au passage un verrou/fenêtre périmé (ne pas verrouiller les légitimes
-/// pour toujours). Travail indépendant de l'existence du compte (clé = login soumis).
-fn login_is_locked(key: &str, now: Instant) -> bool {
-    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(a) = map.get_mut(key) {
-        if let Some(until) = a.locked_until {
-            if now < until {
-                return true;
+/// `true` si `key` (login soumis) est ACTUELLEMENT verrouillé selon le STORE PARTAGÉ (autorité cluster-wide)
+/// -> la requête doit être rejetée uniformément SANS même tenter argon2. Purge OPPORTUNISTE la ligne si le
+/// verrou/fenêtre a expiré (miroir du `map.remove` in-memory : ne pas verrouiller les légitimes pour toujours).
+/// Existence-agnostique (clé = login soumis). FAIL-OPEN sur erreur de store (voir l'en-tête du module) :
+/// un store indisponible ne DOIT PAS verrouiller — l'auth reste gatée en aval par argon2id + le lookup user.
+fn login_is_locked(store: &Store, key: &str, now: i64) -> bool {
+    let row = store.query_opt(
+        "SELECT first_ts, locked_until FROM login_throttle WHERE login=?",
+        &crate::sql_params![key],
+        |r| Ok((r.get_i64(0)?, r.get_i64(1)?)),
+    );
+    match row {
+        Ok(Some((first_ts, locked_until))) => {
+            if locked_until > 0 && now < locked_until {
+                return true; // verrou encore actif -> rejet uniforme
             }
-            map.remove(key); // verrou expiré -> on oublie la série (reset)
-        } else if now.duration_since(a.first_fail) > LOGIN_FAIL_WINDOW {
-            map.remove(key); // fenêtre écoulée sans verrou -> on oublie
+            // On n'atteint ce point que si le verrou est nul OU expiré. Ligne périmée (verrou expiré, ou
+            // fenêtre écoulée sans verrou) -> purge opportuniste ; une série PRE-verrou encore vivante est
+            // conservée (l'attaquant approche du seuil). Best-effort (un échec de DELETE ne change rien).
+            if locked_until > 0 || now - first_ts > fail_window_secs() {
+                let _ = store.execute("DELETE FROM login_throttle WHERE login=?", &crate::sql_params![key]);
+            }
+            false
         }
+        Ok(None) => false, // jamais vu -> pas verrouillé
+        Err(_) => false,   // FAIL-OPEN : store indisponible -> ne pas prétendre verrouillé
     }
-    false
 }
 
-/// Retire les entrées dont la série est périmée ET (le cas échéant) le verrou expiré — elles ne portent
-/// plus aucune info de throttle. Balayage périodique bornant la croissance mémoire de la map.
-fn sweep_expired(map: &mut HashMap<String, LoginAttempt>, now: Instant) {
-    map.retain(|_, a| match a.locked_until {
-        Some(until) => now < until,                                    // verrou encore actif -> garder
-        None => now.duration_since(a.first_fail) <= LOGIN_FAIL_WINDOW,  // fenêtre encore vivante -> garder
+/// Enregistre un échec pour `key` dans le STORE PARTAGÉ et arme le verrou au franchissement du seuil dans la
+/// fenêtre — ATOMIQUEMENT via un INSERT … ON CONFLICT DO UPDATE (incrément + reset de fenêtre inline en CASE ;
+/// une seule instruction -> AUCUN lost-update sous échecs concurrents, row-lock côté PG). Purge d'abord les
+/// lignes périmées (borne la table). Appelé UNIQUEMENT sur un vrai échec d'identifiants (compte existant OU
+/// non — même espace de clés). Best-effort : un échec d'écriture ne débloque jamais un compte (au pire cette
+/// tentative n'est pas comptée) — jamais un affaiblissement d'auth.
+fn login_note_failure(store: &Store, key: &str, now: i64) {
+    let w = fail_window_secs();
+    let lock = lockout_secs();
+    let max = LOGIN_MAX_FAILS as i64;
+    let _ = store.with_tx(|tx| {
+        // PURGE opportuniste : lignes dont le verrou est levé (locked_until<=now) ET la fenêtre écoulée
+        // (first_ts<=now-w) ne portent plus d'info de throttle -> supprimées (borne mémoire de la table,
+        // miroir du sweep in-memory). Ne touche jamais une série vivante ni un verrou actif.
+        tx.execute(
+            "DELETE FROM login_throttle WHERE locked_until <= ? AND first_ts <= ?",
+            &crate::sql_params![now, now - w],
+        )?;
+        // INCRÉMENT ATOMIQUE. Ligne absente -> nouvelle série (fails=1, ancre=now, pas de verrou). Ligne
+        // présente : si la fenêtre est écoulée (now-first_ts>w) on RESET (fails=1, ré-ancre now), sinon +1 ;
+        // le verrou est armé (locked_until=now+lock) dès que le NOUVEAU compteur atteint le seuil, sinon 0.
+        // Le même CASE de reset est réévalué dans chaque colonne -> cohérence (une seule ligne réécrite).
+        tx.execute(
+            "INSERT INTO login_throttle(login, fails, first_ts, locked_until) VALUES(?, 1, ?, 0) \
+             ON CONFLICT(login) DO UPDATE SET \
+               fails = CASE WHEN ? - login_throttle.first_ts > ? THEN 1 ELSE login_throttle.fails + 1 END, \
+               first_ts = CASE WHEN ? - login_throttle.first_ts > ? THEN ? ELSE login_throttle.first_ts END, \
+               locked_until = CASE \
+                 WHEN (CASE WHEN ? - login_throttle.first_ts > ? THEN 1 ELSE login_throttle.fails + 1 END) >= ? \
+                 THEN ? + ? ELSE 0 END",
+            &crate::sql_params![key, now, now, w, now, w, now, now, w, max, now, lock],
+        )?;
+        Ok(())
     });
 }
 
-/// Enregistre un échec pour `key` ; déclenche le verrou au franchissement du seuil dans la fenêtre. Appelé
-/// UNIQUEMENT sur un vrai échec d'identifiants (compte existant OU non — même espace de clés).
-fn login_note_failure(key: &str, now: Instant) {
-    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
-    // ANTI-ÉPUISEMENT MÉMOIRE : une clé NOUVELLE au plafond -> balaie les séries mortes ; toujours plein ->
-    // on N'INSÈRE PAS cette nouvelle clé (fail-safe : les verrous existants restent honorés). Une clé DÉJÀ
-    // suivie est toujours mise à jour (on ne perd jamais un verrou en cours).
-    if !map.contains_key(key) && map.len() >= MAX_TRACKED_LOGINS {
-        sweep_expired(&mut map, now);
-        if map.len() >= MAX_TRACKED_LOGINS {
-            return; // plafond atteint après balayage -> ne pas suivre cette nouvelle clé
-        }
-    }
-    let a = map.entry(key.to_string()).or_insert(LoginAttempt { fails: 0, first_fail: now, locked_until: None });
-    if now.duration_since(a.first_fail) > LOGIN_FAIL_WINDOW {
-        a.fails = 0; // série périmée -> nouvelle fenêtre
-        a.first_fail = now;
-        a.locked_until = None;
-    }
-    a.fails += 1;
-    if a.fails >= LOGIN_MAX_FAILS {
-        a.locked_until = Some(now + LOGIN_LOCKOUT);
-    }
-    drop(map); // relâche le verrou explicitement (tightening : la section critique s'arrête ici)
-}
-
-/// Efface la série d'échecs d'un login après une authentification RÉUSSIE.
-fn login_clear(key: &str) {
-    let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
-    map.remove(key);
+/// Efface la série d'échecs d'un login après une authentification RÉUSSIE (store partagé). Best-effort.
+fn login_clear(store: &Store, key: &str) {
+    let _ = store.execute("DELETE FROM login_throttle WHERE login=?", &crate::sql_params![key]);
 }
 
 /// POST /api/login {login,password} -> pose une session COURTE (cookie + bearer renvoyés).
@@ -142,11 +151,14 @@ pub(crate) async fn login(State(app): State<App>, _headers: HeaderMap, Json(body
     if login_in.len() > MAX_LOGIN_LEN {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
-    let now = Instant::now();
-    // THROTTLE anti-brute-force — clé = login SOUMIS (existence-agnostique). Si verrouillé : rejet avec un
-    // délai UNIFORME et la MÊME réponse 401 générique que tout autre échec (aucun signal « verrouillé »
-    // distinct, aucun oracle d'existence — le verrou s'applique aussi aux logins inconnus). Fail-closed.
-    if login_is_locked(login_in, now) {
+    let now = crate::now_epoch();
+    // THROTTLE anti-brute-force CLUSTER-WIDE — clé = login SOUMIS (existence-agnostique). L'état vit dans le
+    // STORE PARTAGÉ (autorité cross-réplica). Si verrouillé : rejet avec un délai UNIFORME et la MÊME réponse
+    // 401 générique que tout autre échec (aucun signal « verrouillé » distinct, aucun oracle d'existence — le
+    // verrou s'applique aussi aux logins inconnus). Le `Store` (guard !Send) est acquis puis RELÂCHÉ dans ce
+    // bloc AVANT le `.await` du sleep. Fail-open sur store indisponible (cf. login_is_locked / en-tête module).
+    let locked = { let store = app.store(); login_is_locked(&store, login_in, now) };
+    if locked {
         tokio::time::sleep(LOGIN_LOCK_DELAY).await;
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
@@ -170,11 +182,12 @@ pub(crate) async fn login(State(app): State<App>, _headers: HeaderMap, Json(body
     };
     let ok = verify_pw(password, &reference) && user_id >= 0 && disabled == 0;
     if !ok {
-        // Échec réel -> compte la tentative (existant OU non : même clé) ; peut déclencher le verrou.
-        login_note_failure(login_in, now);
+        // Échec réel -> compte la tentative (existant OU non : même clé) dans le store partagé ; peut armer
+        // le verrou cluster-wide. Store acquis/relâché dans le bloc (pas d'await ensuite avant le return).
+        { let store = app.store(); login_note_failure(&store, login_in, now); }
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
-    login_clear(login_in); // succès -> reset la série d'échecs de ce login
+    { let store = app.store(); login_clear(&store, login_in); } // succès -> reset la série d'échecs (store partagé)
     // Session persistée AVANT de renvoyer un succès : un échec d'écriture -> 500 (pas de token non persisté).
     let (token, expires) = match try_create_session(&app, user_id) {
         Ok(t) => t,
@@ -416,35 +429,138 @@ pub(crate) async fn setup_migrate(State(app): State<App>, Json(body): Json<Value
 }
 
 // =====================================================================================
-// TESTS — anti-DoS du throttle login (borne mémoire de la map + rejet des logins sur-longs). INLINE car
-// ces helpers sont PRIVÉS au module setup (une sonde depuis un module de test frère n'y accéderait pas).
+// TESTS — throttle login CLUSTER-WIDE adossé au store partagé. INLINE car les helpers de throttle sont
+// PRIVÉS au module setup (une sonde depuis un module de test frère n'y accéderait pas). Les tests directs
+// des helpers utilisent un `Mutex<Connection>` SQLite mémoire partagé : chaque acquisition d'un `Store`
+// frais = un « réplica » différent lisant le MÊME store -> c'est ce qui PROUVE l'autorité cross-instance
+// (aucun état par-processus ne subsiste). Mirroir du patron des tests de `ha.rs`.
 // =====================================================================================
 #[cfg(test)]
-mod dos_tests {
+mod throttle_tests {
     use super::*;
     use crate::testutil::*;
+    use crate::store::Store;
 
-    /// [LOW — sweep borne la map de throttle] `sweep_expired` retire les séries PÉRIMÉES (fenêtre écoulée,
-    /// aucun verrou) mais CONSERVE les séries vivantes et les verrous encore actifs — c'est ce qui empêche
-    /// la map de croître sans borne sous un flot d'échecs de logins distincts.
-    #[test]
-    fn sweep_expired_prunes_dead_entries_only() {
-        let now = Instant::now();
-        let mut map: HashMap<String, LoginAttempt> = HashMap::new();
-        // (a) série périmée : 1er échec au-delà de la fenêtre, aucun verrou -> À RETIRER.
-        map.insert("dead".into(), LoginAttempt { fails: 1, first_fail: now - LOGIN_FAIL_WINDOW - Duration::from_secs(1), locked_until: None });
-        // (b) série vivante : 1er échec récent -> À GARDER.
-        map.insert("live".into(), LoginAttempt { fails: 1, first_fail: now, locked_until: None });
-        // (c) verrou encore actif -> À GARDER.
-        map.insert("locked".into(), LoginAttempt { fails: 5, first_fail: now, locked_until: Some(now + Duration::from_secs(60)) });
-        sweep_expired(&mut map, now);
-        assert!(!map.contains_key("dead"), "série périmée retirée (borne mémoire)");
-        assert!(map.contains_key("live") && map.contains_key("locked"), "séries vivantes / verrous actifs conservés");
+    /// SQLite mémoire portant le SCHEMA de base (dont `login_throttle`), en `Mutex` -> on peut remettre à
+    /// `Store::sqlite` un guard frais PAR APPEL (modèle held-guard de `App::store()` / des tests `ha.rs`).
+    fn mem() -> std::sync::Mutex<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open_in_memory().expect("mem db");
+        conn.execute_batch(crate::SCHEMA).expect("schema");
+        std::sync::Mutex::new(conn)
     }
 
-    /// [LOW — login sur-long rejeté AVANT tout suivi] Un login > MAX_LOGIN_LEN n'est JAMAIS un compte valide :
-    /// `/api/login` le rejette 401 générique SANS l'insérer dans la map de throttle (anti-épuisement mémoire
-    /// non authentifié — sinon un attaquant peuplerait la map d'une entrée par chaîne longue distincte).
+    /// Nombre de lignes dans `login_throttle` (sonde de la borne de table), via un `Store` frais.
+    fn row_count(m: &std::sync::Mutex<rusqlite::Connection>) -> i64 {
+        Store::sqlite(m.lock().unwrap())
+            .query_row("SELECT COUNT(*) FROM login_throttle", &crate::sql_params![], |r| r.get_i64(0))
+            .unwrap()
+    }
+
+    /// [HA — LOCKOUT CROSS-RÉPLICA, LE CŒUR DE LA TRANCHE] LOGIN_MAX_FAILS échecs enregistrés par une
+    /// « instance A » (une acquisition de Store) VERROUILLENT le login lu par une « instance B » (un Store
+    /// FRAÎCHEMENT acquis, sans aucun état partagé en mémoire). Prouve que le verrou est AUTORITAIRE dans le
+    /// store partagé, pas par-processus. Sous le seuil, B ne voit PAS encore de verrou (parité de seuil).
+    #[test]
+    fn lockout_is_cross_replica_db_authoritative() {
+        let m = mem();
+        let t0: i64 = 1_000_000;
+        // « Instance A » : LOGIN_MAX_FAILS-1 échecs -> PAS encore verrouillé côté « instance B ».
+        for _ in 0..(LOGIN_MAX_FAILS - 1) {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "victim", t0);
+        }
+        assert!(
+            !login_is_locked(&Store::sqlite(m.lock().unwrap()), "victim", t0),
+            "sous le seuil : une instance FRAÎCHE ne voit pas de verrou (même seuil qu'avant)"
+        );
+        // Le franchissement du seuil sur « A » -> « B » (Store frais) voit le verrou : cross-réplica.
+        login_note_failure(&Store::sqlite(m.lock().unwrap()), "victim", t0);
+        assert!(
+            login_is_locked(&Store::sqlite(m.lock().unwrap()), "victim", t0),
+            "au seuil : le verrou est LU par une instance distincte via le store partagé (autorité DB)"
+        );
+    }
+
+    /// [c — le succès efface] Après une série d'échecs (verrouillé), `login_clear` retire la ligne -> une
+    /// instance fraîche ne voit plus de verrou et la table est vide (pas de fuite d'état).
+    #[test]
+    fn successful_login_clears_lockout() {
+        let m = mem();
+        let t0: i64 = 2_000_000;
+        for _ in 0..LOGIN_MAX_FAILS {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "u", t0);
+        }
+        assert!(login_is_locked(&Store::sqlite(m.lock().unwrap()), "u", t0), "verrouillé après N échecs");
+        login_clear(&Store::sqlite(m.lock().unwrap()), "u");
+        assert!(!login_is_locked(&Store::sqlite(m.lock().unwrap()), "u", t0), "clear -> plus de verrou");
+        assert_eq!(row_count(&m), 0, "clear supprime la ligne (aucun résidu)");
+    }
+
+    /// [d — expiration de fenêtre] Un login verrouillé à `t0` n'est PLUS verrouillé une fois `LOGIN_LOCKOUT`
+    /// écoulé (lecture à `t0 + lockout + 1`), et la ligne périmée est purgée opportunément à la lecture.
+    #[test]
+    fn window_expiry_unlocks() {
+        let m = mem();
+        let t0: i64 = 3_000_000;
+        for _ in 0..LOGIN_MAX_FAILS {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "z", t0);
+        }
+        assert!(login_is_locked(&Store::sqlite(m.lock().unwrap()), "z", t0), "verrouillé à t0");
+        let later = t0 + lockout_secs() + 1;
+        assert!(!login_is_locked(&Store::sqlite(m.lock().unwrap()), "z", later), "verrou expiré -> déverrouillé");
+        assert_eq!(row_count(&m), 0, "la lecture post-expiration purge la ligne périmée (borne de table)");
+    }
+
+    /// [f — mono-instance : seuils INCHANGÉS] EXACTEMENT LOGIN_MAX_FAILS échecs déclenchent le verrou (ni un
+    /// de moins, ni un de plus) sur un unique store — parité avec l'ancien compteur mémoire. Un échec HORS
+    /// fenêtre (série périmée) RESET le compteur au lieu de s'accumuler (nouvelle fenêtre = 1 échec).
+    #[test]
+    fn single_instance_threshold_and_window_reset_unchanged() {
+        let m = mem();
+        let t0: i64 = 4_000_000;
+        // LOGIN_MAX_FAILS-1 échecs -> pas de verrou ; le N-ième -> verrou (seuil exact).
+        for _ in 0..(LOGIN_MAX_FAILS - 1) {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "acct", t0);
+        }
+        assert!(!login_is_locked(&Store::sqlite(m.lock().unwrap()), "acct", t0), "N-1 échecs -> pas de verrou");
+        login_note_failure(&Store::sqlite(m.lock().unwrap()), "acct", t0);
+        assert!(login_is_locked(&Store::sqlite(m.lock().unwrap()), "acct", t0), "N échecs -> verrou (seuil inchangé)");
+
+        // RESET de fenêtre : un login neuf, un seul échec très espacé du précédent -> jamais verrouillé
+        // (le compteur repart à 1 par fenêtre, il ne s'accumule pas sur des échecs hors fenêtre).
+        let far = t0;
+        for k in 0..(LOGIN_MAX_FAILS + 3) {
+            // chaque échec est décalé de plus d'une fenêtre du précédent -> reset systématique à 1.
+            let ts = far + (k as i64) * (fail_window_secs() + 5);
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), "spaced", ts);
+            let now = far + (k as i64) * (fail_window_secs() + 5);
+            assert!(
+                !login_is_locked(&Store::sqlite(m.lock().unwrap()), "spaced", now),
+                "échecs espacés > fenêtre -> reset à 1, jamais de verrou"
+            );
+        }
+    }
+
+    /// [bound — table purgée] Une rafale d'échecs sur des logins DISTINCTS puis un échec après expiration de
+    /// la fenêtre purge les lignes périmées (la purge opportuniste de `login_note_failure` borne la table —
+    /// miroir du sweep in-memory remplacé). Après la purge, seules subsistent les lignes encore vivantes.
+    #[test]
+    fn stale_rows_pruned_bounds_table() {
+        let m = mem();
+        let t0: i64 = 5_000_000;
+        for i in 0..50 {
+            login_note_failure(&Store::sqlite(m.lock().unwrap()), &format!("attacker-{i}"), t0);
+        }
+        assert_eq!(row_count(&m), 50, "50 logins distincts -> 50 lignes (série vivante)");
+        // Un nouvel échec BIEN après la fenêtre : la purge retire les 50 lignes périmées, il n'en reste
+        // qu'UNE (la nouvelle série de `late`).
+        let later = t0 + fail_window_secs() + lockout_secs() + 10;
+        login_note_failure(&Store::sqlite(m.lock().unwrap()), "late", later);
+        assert_eq!(row_count(&m), 1, "les 50 lignes périmées purgées -> table bornée (reste la série vivante)");
+    }
+
+    /// [e — login sur-long rejeté AVANT tout suivi] Un login > MAX_LOGIN_LEN n'est JAMAIS un compte valide :
+    /// `/api/login` le rejette 401 générique SANS écrire de ligne dans `login_throttle` (rejet avant tout
+    /// suivi de throttle -> ne peuple pas la table, ne stocke pas une clé sur-longue). Bout-en-bout via `login()`.
     #[tokio::test]
     async fn overlong_login_rejected_without_tracking() {
         let app = test_app(&tmp_path("login-overlong"));
@@ -452,9 +568,29 @@ mod dos_tests {
         let longkey = "a".repeat(MAX_LOGIN_LEN + 1);
         let resp = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": longkey, "password": "x"}))).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "login sur-long -> 401 générique (anti-énumération)");
-        assert!(
-            !login_attempts().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&longkey),
-            "la clé sur-longue n'est JAMAIS suivie (rejet avant login_note_failure -> borne mémoire)"
-        );
+        let tracked: i64 = {
+            let store = app.store();
+            store.query_row(
+                "SELECT COUNT(*) FROM login_throttle WHERE login=?",
+                &crate::sql_params![longkey],
+                |r| r.get_i64(0),
+            ).unwrap()
+        };
+        assert_eq!(tracked, 0, "la clé sur-longue n'est JAMAIS suivie (rejet avant login_note_failure)");
+    }
+
+    /// [a — lockout end-to-end via `login()`] Sur un `App` mono-instance, LOGIN_MAX_FAILS mauvais mots de
+    /// passe verrouillent le compte : le BON mot de passe est ensuite refusé (le verrou DB mord dans le
+    /// handler). Complète l'intégration `login_lockout_triggers_without_user_enumeration` de tests_auth_session.
+    #[tokio::test]
+    async fn handler_locks_after_threshold_failures() {
+        let app = test_app(&tmp_path("login-lock-e2e"));
+        { let db = app.db(); upsert_user(&db, "e2euser", "operator", &hash_pw("goodpw")).unwrap(); }
+        for _ in 0..LOGIN_MAX_FAILS {
+            let r = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": "e2euser", "password": "bad"}))).await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        let r = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": "e2euser", "password": "goodpw"}))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "compte verrouillé : bon mdp refusé (verrou DB dans le handler)");
     }
 }
