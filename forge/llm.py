@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -311,3 +312,150 @@ def enrich_triage(triage_result: Any, config: LLMConfig, ledger: Any = None) -> 
                 "model": config.model, "narrative": ""}
     return {"status": "ok", "endpoint": host, "external": external, "model": config.model,
             "narrative": redact_secrets(narrative)}    # sortie LLM RÉDIGÉE avant rendu (anti-fuite)
+
+
+# =================================================================================================
+#  IA-2 (R6) — enrichissement OPTIONNEL de PAYLOADS d'injection (advisory-only, gouverné à l'identique)
+# =================================================================================================
+# Deuxième point de câblage LLM (miroir EXACT d'enrich_triage : OFF par défaut, egress ledgeré, gate
+# externe, fail-open borné, sortie RÉDIGÉE). Ici le LLM ne fait que PROPOSER des CHAÎNES de payload
+# SUPPLÉMENTAIRES pour un endpoint/param crawlé ; l'ORACLE DÉTERMINISTE existant (forge/modules/
+# injection.py) les TESTE et les CONFIRME avec sa PREUVE minimale/bénigne inchangée. Le LLM n'élargit
+# JAMAIS la capacité de l'oracle (ni son espace d'action, ni son scope-guard, ni le ROE) : il ne fournit
+# que des candidats de plus, testés au MÊME titre que les payloads codés en dur. AUCUN finding LLM-only :
+# un finding exige TOUJOURS la confirmation déterministe de l'oracle (preuve concrète échoée).
+#
+# Techniques ENRICHISSABLES : uniquement les oracles à boucle de payload UNIQUE + preuve UNIVERSELLE
+# (le produit arithmétique de SSTI est vérifiable quel que soit le wrapper). ssti.eval qualifie : un
+# wrapper de template SUGGÉRÉ (contenant les opérandes littéraux N et M) est substitué puis prouvé par
+# le MÊME test « le produit évalué apparaît dans la réponse ». Un wrapper qui n'évalue rien -> tested
+# (jamais de faux positif). Étendre cet ensemble = câbler la consommation `_llm_extra_payloads` dans
+# l'oracle correspondant AVANT d'y ajouter le kind.
+ENRICHABLE_KINDS = frozenset({"ssti.eval"})
+
+MAX_ENRICH_PAYLOADS = 8          # cap DUR du nb de payloads suggérés RETENUS par appel (anti-explosion)
+_MAX_PAYLOAD_LEN = 256           # un payload suggéré au-delà => rejeté (malformé / bruit)
+
+# Garde-fou anti-hallucination (miroir d'ASSIST_SYSTEM) : le modèle NE propose QUE des chaînes de
+# payload, jamais un verdict/endpoint/CVE. La preuve reste 100 % déterministe côté oracle.
+_PAYLOAD_SYSTEM = (
+    "Tu es un assistant CONSULTATIF de test d'injection SSTI, dans un cadre pentest/red-team AUTORISÉ. "
+    "Un oracle DÉTERMINISTE injectera CHAQUE chaîne que tu proposes et vérifiera lui-même la preuve "
+    "(le PRODUIT arithmétique évalué apparaît dans la réponse) — tu ne juges RIEN.\n"
+    "- Propose UNIQUEMENT des WRAPPERS de template supplémentaires (syntaxes SSTI variées), UN PAR LIGNE.\n"
+    "- Utilise les DEUX jetons littéraux majuscules N et M comme opérandes de la multiplication (ex: "
+    "`{{N*M}}`, `${N*M}`) : l'oracle les remplacera par ses propres facteurs. CHAQUE ligne DOIT contenir "
+    "`N*M`.\n"
+    "- AUCUNE prose, AUCUN commentaire, AUCUN bloc de code, AUCUNE numérotation : que des payloads bruts.\n"
+    "- N'invente NI endpoint NI finding : tu ne fais que suggérer des chaînes."
+)
+
+
+def _payload_messages(kind: str, target: Any, param: Any) -> list[dict[str, str]]:
+    """Prompt COMPACT et BORNÉ pour la suggestion de payloads (un seul appel par endpoint/param)."""
+    user = (
+        f"Technique: {kind}. Endpoint: {target}. Paramètre injectable: {param}.\n"
+        f"Propose jusqu'à {MAX_ENRICH_PAYLOADS} wrappers de template SSTI supplémentaires, un par ligne, "
+        f"chacun contenant N*M. Rien d'autre."
+    )
+    return [{"role": "system", "content": _PAYLOAD_SYSTEM}, {"role": "user", "content": user}]
+
+
+def _parse_payloads(text: Any) -> list[str]:
+    """Parse TOLÉRANT de la sortie LLM en liste de chaînes candidates. Accepte un tableau JSON de
+    chaînes, un objet `{"payloads": [...]}`, ou (repli) une chaîne LIGNE-PAR-LIGNE dont on retire les
+    puces/numérotations et les clôtures de code. Ne lève JAMAIS (fail-open : garbage -> []). La
+    VALIDATION/dédup/borne finale est faite par l'appelant (`enrich_payloads`)."""
+    t = (str(text) if text is not None else "").strip()
+    if not t:
+        return []
+    try:                                             # forme JSON stricte (tableau ou objet payloads)
+        obj = json.loads(t)
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, str)]
+        if isinstance(obj, dict) and isinstance(obj.get("payloads"), list):
+            return [x for x in obj["payloads"] if isinstance(x, str)]
+    except Exception:                                # noqa: BLE001 — pas du JSON -> repli ligne-par-ligne
+        pass
+    out = []
+    for line in t.splitlines():
+        s = line.strip().strip("`").strip()
+        s = re.sub(r"^\s*[-*•]\s*", "", s)      # puce en tête
+        s = re.sub(r"^\s*\d+[.)]\s*", "", s)          # numérotation en tête
+        if s:
+            out.append(s)
+    return out
+
+
+def _payload_egress_detail(config: LLMConfig, kind: str, target: Any, param: Any) -> dict[str, Any]:
+    """Détail de l'événement ledger `llm.egress` pour l'enrichissement de payloads : endpoint LLM +
+    CLASSE de données + technique + nom de paramètre (jamais de secret, jamais de payload envoyé/reçu,
+    jamais l'URL complète — seulement l'hôte de l'endpoint sondé)."""
+    return {
+        "endpoint": _endpoint_host(config.base_url),
+        "external": config.is_external(),
+        "loopback": is_loopback(config.base_url),
+        "model": config.model,
+        "data_class": "injection_context",
+        "kind": str(kind),
+        "target_host": _endpoint_host(target),
+        "param": str(param),
+    }
+
+
+def enrich_payloads(kind: Any, target: Any, param: Any, config: Any,
+                    ledger: Any = None) -> list[str]:
+    """IA-2 (R6) : renvoie des CHAÎNES de payload SUPPLÉMENTAIRES proposées par le LLM pour un
+    endpoint/param d'injection — ADVISORY ONLY. L'oracle déterministe les teste et les confirme.
+
+    Contrat gouverné (miroir d'enrich_triage) :
+      - LLM OFF (défaut) OU kind non enrichissable OU param manquant => `[]` IMMÉDIATEMENT : AUCUN appel
+        réseau, AUCUN ledger (byte-identique au comportement sans-LLM).
+      - Endpoint EXTERNE sans `allow_external` (egress non autorisé) => `[]` : AUCUNE donnée envoyée,
+        AUCUN egress ledgeré (le gate tient).
+      - Autorisé => LEDGER `llm.egress` (endpoint + technique + param, PAS de secret, PAS de payload)
+        AVANT l'appel (la donnée SORT), puis UN appel borné/fail-open. Erreur/timeout/garbage => `[]`
+        (fail-open : le run continue avec les payloads déterministes inchangés).
+      - Sortie VALIDÉE : chaînes non vides uniquement, longueur bornée (`_MAX_PAYLOAD_LEN`), dédupliquées,
+        plafonnées à `MAX_ENRICH_PAYLOADS`, chacune RÉDIGÉE (`forge.redact`) avant retour (anti-fuite).
+
+    Ne mute RIEN (ni findings, ni ordre, ni capacité de l'oracle) : ajoute seulement, si egress autorisé,
+    l'événement d'AUDIT `llm.egress`. Ne lève JAMAIS (fail-open total)."""
+    try:
+        if not isinstance(config, LLMConfig) or not config.enabled:
+            return []                                # OFF => rien (byte-identique, zéro réseau)
+        if kind not in ENRICHABLE_KINDS:
+            return []                                # technique non câblée pour l'enrichissement
+        if not param or not isinstance(param, str):
+            return []                                # pas de point d'injection => rien à enrichir
+        if not config.egress_authorized():
+            return []                                # externe non autorisé (ou désactivé) => gate tient
+
+        # EGRESS : on est sur le point d'ENVOYER le contexte d'injection -> journaliser (pas de secret).
+        if ledger is not None:
+            try:
+                ledger.append(EGRESS_KIND, _payload_egress_detail(config, kind, target, param))
+            except Exception:                        # noqa: BLE001 — un échec ledger ne casse jamais le run
+                pass
+
+        raw = LLMClient(config).chat(_payload_messages(kind, target, param))   # None sur toute erreur
+        if not raw:
+            return []                                # indisponible/vide => fail-open (déterministe intact)
+
+        out, seen = [], set()
+        for cand in _parse_payloads(raw):
+            if not isinstance(cand, str):
+                continue
+            s = cand.strip()
+            if not s or len(s) > _MAX_PAYLOAD_LEN:
+                continue                             # vide / trop long => rejeté (malformé)
+            s = redact_secrets(s)                    # sortie LLM RÉDIGÉE avant usage (anti-fuite)
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+            if len(out) >= MAX_ENRICH_PAYLOADS:      # borne DURE (anti-explosion d'actions)
+                break
+        return out
+    except Exception:                                # noqa: BLE001 — fail-open TOTAL : jamais de crash
+        return []

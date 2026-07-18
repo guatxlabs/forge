@@ -67,6 +67,12 @@ DEFAULT_PROFILE = "balanced"
 #   llm_num_ctx         fenêtre de contexte LLM (option Ollama, loopback). low=2048 (borne le contexte =>
 #                       moins de RAM), balanced=0 == AUCUNE option envoyée (défaut Ollama/modèle inchangé,
 #                       payload byte-identique), full=8192. 0 = sentinelle « ne pas envoyer » (no-op).
+#   llm_enrich_max_endpoints  nb MAX d'endpoints/params d'injection ENRICHIS par le LLM par vague (R6 :
+#                       suggestions de payloads SUPPLÉMENTAIRES, testés/confirmés par l'oracle DÉTERMINISTE).
+#                       Borne le nb d'appels LLM (donc l'egress) par vague. low=0 == OFF (aucun appel, aucun
+#                       egress) ; balanced=3 (petit) ; full=10. NB : l'enrichissement est de toute façon INERTE
+#                       tant que `scope.llm.enabled` est faux (défaut) — ce levier ne fait que le BORNER une
+#                       fois le LLM activé (aucun impact quand le LLM est OFF).
 #   triage_max_items    cap des top-findings SURFACÉS dans la synthèse de triage (triage.summary.top_findings ;
 #                       coverage-safe : res.ranked/annotations gardent TOUT). low=5, balanced=10 == défaut, full=20.
 #   triage_max_clusters cap des clusters-bruit surfacés dans la synthèse (triage.summary.clusters ;
@@ -92,6 +98,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "discovery_max_fanout": 8,
         "llm_max_tokens": 256,
         "llm_num_ctx": 2048,
+        "llm_enrich_max_endpoints": 0,
         "triage_max_items": 5,
         "triage_max_clusters": 10,
         "rate_per_sec": 2,
@@ -110,6 +117,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "discovery_max_fanout": 25,
         "llm_max_tokens": 512,
         "llm_num_ctx": 0,
+        "llm_enrich_max_endpoints": 3,
         "triage_max_items": 10,
         "triage_max_clusters": 20,
         "rate_per_sec": 5,
@@ -128,6 +136,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "discovery_max_fanout": 50,
         "llm_max_tokens": 2048,
         "llm_num_ctx": 8192,
+        "llm_enrich_max_endpoints": 10,
         "triage_max_items": 20,
         "triage_max_clusters": 40,
         "rate_per_sec": 20,
@@ -139,8 +148,8 @@ PROFILES: dict[str, dict[str, Any]] = {
 _INT_KNOBS = frozenset({
     "parallelism", "action_timeout_secs", "run_timeout_secs", "crawl_max_endpoints",
     "crawl_max_params", "crawl_max_depth", "content_fanout_max", "discovery_max_fanout",
-    "llm_max_tokens", "llm_num_ctx", "triage_max_items", "triage_max_clusters",
-    "rate_per_sec", "max_concurrent_procs",
+    "llm_max_tokens", "llm_num_ctx", "llm_enrich_max_endpoints", "triage_max_items",
+    "triage_max_clusters", "rate_per_sec", "max_concurrent_procs",
 })
 
 # Variables d'environnement PRÉEXISTANTES qui priment sur le profil (rétro-compat). Pour l'audit

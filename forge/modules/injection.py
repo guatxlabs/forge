@@ -58,6 +58,36 @@ class InjectionOracle(ScopeGuardedOracle):
     web_allowed = True           # interaction web (réseau) -> gardée par le ROE
     available = True             # urllib stdlib -> toujours disponible ; dégrade à runtime si besoin
 
+    # Bornes DE DÉFENSE EN PROFONDEUR des payloads suggérés par le LLM (R6). L'appelant (forge/llm.py)
+    # valide/dédup/borne DÉJÀ ; on re-borne ICI (l'oracle ne fait JAMAIS confiance aveuglément à un
+    # champ params). Ces payloads sont des CANDIDATS ADVISORY : ils passent le MÊME test/preuve
+    # déterministe que les payloads codés en dur — le LLM n'élargit PAS l'espace d'action de l'oracle.
+    _LLM_MAX_PAYLOAD_LEN = 256
+    _LLM_MAX_PAYLOADS = 8
+
+    def _llm_extra_payloads(self, action):
+        """Payloads SUPPLÉMENTAIRES suggérés par le LLM gouverné (R6, ADVISORY ONLY), attachés EN AMONT
+        à `action.params['llm_payloads']` par l'étape d'enrichissement egress-gatée et LEDGERÉE du moteur
+        (thread principal). Re-VALIDÉS/dédupliqués/bornés ICI (défense en profondeur) : uniquement des
+        chaînes non vides, longueur bornée, dédupliquées, plafonnées. Absent/OFF (défaut) -> `[]` (no-op
+        BYTE-IDENTIQUE). L'oracle DÉTERMINISTE teste et CONFIRME chacun avec sa preuve inchangée : un
+        payload suggéré non confirmé -> `tested` (JAMAIS de finding LLM-only)."""
+        raw = action.params.get("llm_payloads")
+        if not isinstance(raw, (list, tuple)):
+            return []
+        out, seen = [], set()
+        for p in raw:
+            if not isinstance(p, str):
+                continue
+            s = p.strip()
+            if not s or len(s) > self._LLM_MAX_PAYLOAD_LEN or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+            if len(out) >= self._LLM_MAX_PAYLOADS:
+                break
+        return out
+
     # --- injection d'un payload dans un paramètre : query si GET, corps urlencodé sinon ---
     def _send(self, action, param, payload, method="GET"):
         """Émet la requête d'injection et renvoie (où, status, body). GET -> payload dans la query ;
@@ -127,8 +157,15 @@ class SstiEval(InjectionOracle):
         method = str(action.params.get("method", "GET")).upper()
         n, m, product = self._marker(action.target, param)
         prod_s = str(product)
+        # PAYLOADS DÉTERMINISTES d'abord (source de vérité), PUIS les candidats ADVISORY du LLM (R6),
+        # appendés au MÊME jeu et éprouvés par le MÊME test « le produit évalué apparaît » : un wrapper
+        # suggéré est substitué (N/M -> facteurs) puis prouvé exactement comme un wrapper codé en dur ;
+        # s'il n'évalue rien -> tested (aucun faux positif, aucun finding LLM-only). OFF/absent -> jeu
+        # BYTE-IDENTIQUE. `break` au 1er hit -> les candidats LLM ne sont éprouvés que si le déterministe
+        # n'a rien prouvé (le déterministe reste PRIMAIRE).
+        templates = list(_SSTI_TEMPLATES) + self._llm_extra_payloads(action)
         evaluated, matched_syntax, where = False, "", action.target
-        for tmpl in _SSTI_TEMPLATES:
+        for tmpl in templates:
             payload = tmpl.replace("N", str(n)).replace("M", str(m))
             where, st, body = self._send(action, param, payload, method)
             # PREUVE : le PRODUIT apparaît dans la réponse -> l'expression a été ÉVALUÉE côté serveur.
