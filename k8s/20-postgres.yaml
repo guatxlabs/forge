@@ -60,10 +60,9 @@ spec:
         fsGroup: 999   # postgres group in the official image — lets it own the PVC data dir.
       containers:
         - name: postgres
-          # LOW-10 TODO: pin by immutable digest for prod reproducibility/tamper-proofing —
-          #   image: postgres:16@sha256:<digest>   (resolve via `docker buildx imagetools inspect
-          #   postgres:16` or the registry API at pin time; left as tag-only, digest not resolvable here).
-          image: postgres:16
+          # LOW-10: pinned to immutable digest for reproducibility/tamper-proofing (resolved via
+          #   `docker buildx imagetools inspect postgres:16`, 2026-07-18). Tag kept for readability.
+          image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
           # --- Container hardening (MEDIUM-1) ---------------------------------------------------
           securityContext:
             allowPrivilegeEscalation: false

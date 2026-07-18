@@ -57,10 +57,9 @@ services:
   # flux SSE restent sur un backend. Health-checks actifs GET /health -> failover visible.
   lb:
     profiles: ["ha"]
-    # LOW-10 TODO: pin by immutable digest for prod (caddy:2-alpine@sha256:<digest>) — resolve via
-    # `docker buildx imagetools inspect caddy:2-alpine` or the registry API at pin time (digest not
-    # resolvable offline here; tag kept).
-    image: caddy:2-alpine
+    # LOW-10: pinned to immutable digest (resolved via `docker buildx imagetools inspect caddy:2-alpine`,
+    # 2026-07-18). Tag kept alongside for readability; the digest is authoritative/tamper-proof.
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     container_name: forge-lb
     restart: unless-stopped
     depends_on:
