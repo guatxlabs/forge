@@ -776,6 +776,13 @@ class Engine:
             for a in fresh:
                 executed_ids.add(a.id)
 
+            # ENRICHISSEMENT LLM des payloads d'injection (R6) — OPTIONNEL, OFF par défaut, egress-gaté,
+            # borné, fail-open, ADVISORY ONLY. Sur le THREAD PRINCIPAL (le seul écrivain du ledger) : le
+            # LLM propose des payloads SUPPLÉMENTAIRES pour les endpoints/params d'injection, attachés à
+            # `action.params['llm_payloads']`. L'oracle DÉTERMINISTE les teste/confirme au fire-time (edge
+            # G1). Aucune donnée ne sort sans egress autorisé + ledgeré ; no-op quand le LLM est OFF.
+            self._llm_enrich_injections(fresh)
+
             ordered, skipped = planner.order(fresh)
             for a in skipped:                        # defer != delete : accumulé, jamais jeté
                 skipped_by_id[a.id] = a
@@ -807,6 +814,46 @@ class Engine:
         self.not_planned = self.unplanned_modules(self.selected_modules)
         self.waves = waves
         return self.coverage()
+
+    def _llm_enrich_injections(self, actions: list[Action]) -> None:
+        """R6 — enrichit les actions d'INJECTION de la vague avec des payloads SUPPLÉMENTAIRES suggérés
+        par le LLM gouverné (ADVISORY ONLY). Appelé sur le THREAD PRINCIPAL (mono-écrivain du ledger)
+        AVANT le tir, si bien que l'appel LLM + l'egress `llm.egress` sont ordonnés/déterministes comme
+        toute autre mutation d'état (jamais depuis un worker de tir).
+
+        GOUVERNANCE (miroir d'enrich_triage — mêmes gardes) :
+          - LLM OFF (défaut) => NO-OP total (aucun appel, aucun egress, actions BYTE-IDENTIQUES) ;
+          - egress non autorisé (endpoint externe sans `allow_external`) => NO-OP (le gate tient) ;
+          - levier `llm_enrich_max_endpoints` (resource_profile) <= 0 (défaut `low`) => NO-OP ;
+          - sinon : BORNÉ aux TOP-N actions d'injection enrichissables (tri déterministe par id), chacune
+            IN-SCOPE, param présent ; chaque appel est fail-open (échec => payloads déterministes intacts).
+        L'oracle DÉTERMINISTE reste PRIMAIRE : il teste/confirme chaque payload suggéré avec sa preuve
+        inchangée (scope-guardée, ROE-gatée). Ne lève JAMAIS (pure décoration best-effort)."""
+        try:
+            from . import llm as _llm                 # import paresseux (évite tout cycle au chargement)
+            cfg = _llm.LLMConfig.from_dict(getattr(self.scope, "llm", None))
+            if not cfg.enabled or not cfg.egress_authorized():
+                return                                # OFF ou egress non autorisé => NO-OP (gate tient)
+            max_n = resource_profile.resolve("llm_enrich_max_endpoints", default=0)
+            try:
+                max_n = int(max_n)
+            except (TypeError, ValueError):
+                max_n = 0
+            if max_n <= 0:
+                return                                # levier à 0 (profil low) => enrichissement désactivé
+            # TOP-N déterministe : actions d'injection enrichissables, param présent, cible IN-SCOPE.
+            cands = [a for a in actions
+                     if a.kind in _llm.ENRICHABLE_KINDS
+                     and isinstance(a.params.get("param"), str) and a.params.get("param")
+                     and self.scope.is_in_scope(a.target)]
+            cands.sort(key=lambda a: a.id)            # ordre STABLE (borne l'egress de façon reproductible)
+            for a in cands[:max_n]:
+                extra = _llm.enrich_payloads(a.kind, a.target, a.params.get("param"), cfg,
+                                             ledger=self.ledger)
+                if extra:
+                    a.params["llm_payloads"] = list(extra)
+        except Exception:  # noqa: BLE001 — advisory/best-effort : un échec n'avorte jamais la campagne
+            pass
 
     def _selected_universe(self, modules: "Iterable[str] | None") -> set[str]:
         """Univers des modules DEMANDÉS pour ce run (base de l'accounting anti-lacune). Priorité,
