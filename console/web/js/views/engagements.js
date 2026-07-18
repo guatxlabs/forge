@@ -171,6 +171,163 @@ export async function engagementEditModal(e) {
   await engagementMutate(e.id, body, 'Engagement mis à jour.');
 }
 
+// =====================================================================================
+//  CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5b) — éditeur structuré du bloc `scope_json.auth`.
+//  Deux sections à LIGNES RÉPÉTABLES : comptes de test LABELLISÉS (attacker/victim — matériel bearer/
+//  cookies/headers) + cibles idor (url + owner + marker). Écrit le bloc DANS scope_json SANS écraser les
+//  autres clés (mode/in_scope/out_scope repris de l'engagement). Aucun compte ni cible => bloc OMIS (le
+//  serveur le supprime => engagement byte-identique, no-op). SECRETS : champs password (jamais réaffichés
+//  ni journalisés) ; le résumé RÉDIGÉ (e.auth) sert seulement à ré-afficher labels/noms d'en-têtes/cibles.
+//  Le serveur reste l'autorité (gate operator + validate_auth_block + rédaction des secrets côté moteur).
+// =====================================================================================
+
+// parse une zone "Nom: valeur" (une par ligne) -> objet {Nom: valeur}. Sûr (aucune éval, split simple).
+function _parseHeaderLines(txt) {
+  const out = {};
+  String(txt || '').split('\n').forEach(line => {
+    const s = line.trim();
+    if (!s) return;
+    const i = s.indexOf(':');
+    if (i <= 0) return;
+    const k = s.slice(0, i).trim();
+    const v = s.slice(i + 1).trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+// construit une ligne "compte" (DOM sûr : createElement + value, jamais innerHTML avec de la donnée).
+function _acctRow(container, seed) {
+  const s = seed || {};
+  const row = document.createElement('div'); row.className = 'auth-row';
+  const mk = (labelTxt, el, hintTxt) => {
+    const wrap = document.createElement('label'); wrap.className = 'modal-f';
+    const sp = document.createElement('span'); sp.textContent = labelTxt; wrap.appendChild(sp);
+    wrap.appendChild(el);
+    if (hintTxt) { const h = document.createElement('small'); h.className = 'modal-fhint'; h.textContent = hintTxt; wrap.appendChild(h); }
+    return wrap;
+  };
+  const label = document.createElement('input'); label.type = 'text'; label.dataset.k = 'label';
+  label.placeholder = 'attacker / victim'; label.value = s.label || '';
+  const bearer = document.createElement('input'); bearer.type = 'password'; bearer.dataset.k = 'bearer';
+  bearer.autocomplete = 'new-password'; bearer.placeholder = s.has_bearer ? '•••• défini — ressaisir pour conserver' : 'jeton (optionnel)';
+  const cookies = document.createElement('input'); cookies.type = 'password'; cookies.dataset.k = 'cookies';
+  cookies.autocomplete = 'new-password'; cookies.placeholder = s.has_cookies ? '•••• défini — ressaisir pour conserver' : 'sid=abc; autre=xyz';
+  const headers = document.createElement('textarea'); headers.dataset.k = 'headers'; headers.rows = 2; headers.spellcheck = false;
+  headers.placeholder = 'X-CSRF: valeur\nAuthorization: Bearer …';
+  if (Array.isArray(s.header_keys) && s.header_keys.length) headers.placeholder = s.header_keys.map(k => k + ': (ressaisir la valeur)').join('\n');
+  row.appendChild(mk('Label', label, 'attacker = celui dont on rejoue la session ; victim = propriétaire des ressources.'));
+  row.appendChild(mk('Bearer', bearer));
+  row.appendChild(mk('Cookies', cookies, 'forme « nom=valeur; nom2=valeur2 ».'));
+  row.appendChild(mk('En-têtes', headers, 'un « Nom: valeur » par ligne.'));
+  const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'k-theme danger'; rm.textContent = 'Retirer';
+  rm.onclick = () => row.remove(); row.appendChild(rm);
+  container.appendChild(row);
+}
+
+// construit une ligne "cible idor" (url + owner + marker). Aucun secret ici (config non secrète).
+function _tgtRow(container, seed) {
+  const s = seed || {};
+  const row = document.createElement('div'); row.className = 'auth-row';
+  const mk = (labelTxt, el, ph, hintTxt) => {
+    const wrap = document.createElement('label'); wrap.className = 'modal-f';
+    const sp = document.createElement('span'); sp.textContent = labelTxt; wrap.appendChild(sp);
+    el.type = 'text'; el.placeholder = ph; wrap.appendChild(el);
+    if (hintTxt) { const h = document.createElement('small'); h.className = 'modal-fhint'; h.textContent = hintTxt; wrap.appendChild(h); }
+    return wrap;
+  };
+  const url = document.createElement('input'); url.dataset.k = 'url'; url.value = s.url || '';
+  const owner = document.createElement('input'); owner.dataset.k = 'owner'; owner.value = s.owner || '';
+  const marker = document.createElement('input'); marker.dataset.k = 'marker'; marker.value = s.marker || '';
+  row.appendChild(mk('URL (in-scope)', url, 'https://app/api/orders/1', 'ressource possédée par la victime (whoami/objet).'));
+  row.appendChild(mk('Owner', owner, 'victim'));
+  row.appendChild(mk('Marqueur', marker, 'donnée privée de la victime', 'preuve : présence dans la réponse de l\'attaquant.'));
+  const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'k-theme danger'; rm.textContent = 'Retirer';
+  rm.onclick = () => row.remove(); row.appendChild(rm);
+  container.appendChild(row);
+}
+
+// éditeur structuré du contexte auth (operator). Overlay custom (lignes répétables) — DOM 100% sûr.
+export async function engagementAuthModal(e) {
+  const cur = (e && e.auth) || {};
+  const seedAccounts = Array.isArray(cur.accounts) ? cur.accounts : [];
+  const seedTargets = Array.isArray(cur.idor_targets) ? cur.idor_targets : [];
+  const prevFocus = document.activeElement;
+  const ov = document.createElement('div'); ov.className = 'modal-ov';
+  const box = document.createElement('div'); box.className = 'modal wide';
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true');
+  const form = document.createElement('form');
+
+  const h = document.createElement('h3'); h.textContent = 'Contexte d\'authentification — ' + (e.name || ('#' + e.id)); form.appendChild(h);
+  const msg = document.createElement('p'); msg.className = 'modal-msg';
+  msg.textContent = 'Comptes de test de L\'OPÉRATEUR (attacker/victim) + cibles idor. La session de l\'attaquant est rejouée '
+    + 'contre chaque cible ; un marqueur de la victime dans sa réponse prouve un accès/takeover cross-compte (oracles IDOR & ATO). '
+    + 'Secrets jamais réaffichés : ressaisir un champ pour le conserver, le laisser vide efface ce matériel. Le périmètre (in/out) est inchangé.';
+  form.appendChild(msg);
+
+  const accHead = document.createElement('div'); accHead.className = 'auth-sec-head';
+  const accTitle = document.createElement('b'); accTitle.textContent = 'Comptes'; accHead.appendChild(accTitle);
+  const accAdd = document.createElement('button'); accAdd.type = 'button'; accAdd.className = 'k-theme'; accAdd.textContent = '+ Compte';
+  const accBox = document.createElement('div'); accBox.className = 'auth-rows';
+  accAdd.onclick = () => _acctRow(accBox, null); accHead.appendChild(accAdd); form.appendChild(accHead); form.appendChild(accBox);
+
+  const tgtHead = document.createElement('div'); tgtHead.className = 'auth-sec-head';
+  const tgtTitle = document.createElement('b'); tgtTitle.textContent = 'Cibles idor'; tgtHead.appendChild(tgtTitle);
+  const tgtAdd = document.createElement('button'); tgtAdd.type = 'button'; tgtAdd.className = 'k-theme'; tgtAdd.textContent = '+ Cible';
+  const tgtBox = document.createElement('div'); tgtBox.className = 'auth-rows';
+  tgtAdd.onclick = () => _tgtRow(tgtBox, null); tgtHead.appendChild(tgtAdd); form.appendChild(tgtHead); form.appendChild(tgtBox);
+
+  seedAccounts.forEach(a => _acctRow(accBox, a));
+  seedTargets.forEach(t => _tgtRow(tgtBox, t));
+  if (!seedAccounts.length) { _acctRow(accBox, null); _acctRow(accBox, null); }
+  if (!seedTargets.length) _tgtRow(tgtBox, null);
+
+  const err = document.createElement('div'); err.className = 'modal-err'; err.hidden = true; form.appendChild(err);
+  const act = document.createElement('div'); act.className = 'modal-act';
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'm-cancel'; cancel.textContent = 'Annuler';
+  const ok = document.createElement('button'); ok.type = 'submit'; ok.className = 'm-ok'; ok.textContent = 'Enregistrer';
+  act.appendChild(cancel); act.appendChild(ok); form.appendChild(act);
+  box.appendChild(form); ov.appendChild(box); document.body.appendChild(ov);
+
+  const onKey = ev => { if (ev.key === 'Escape') close(); };
+  const close = () => { ov.classList.add('out'); document.removeEventListener('keydown', onKey); setTimeout(() => ov.remove(), 160); if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (x) {} } };
+  document.addEventListener('keydown', onKey);
+  cancel.onclick = close;
+  ov.onclick = ev => { if (ev.target === ov) close(); };
+
+  form.onsubmit = ev => {
+    ev.preventDefault();
+    // COLLECTE (aucun secret dans un log/URL : tout reste en corps POST, champs password).
+    const accounts = [];
+    accBox.querySelectorAll('.auth-row').forEach(r => {
+      const g = k => (r.querySelector('[data-k="' + k + '"]') || {}).value || '';
+      const label = String(g('label')).trim();
+      const bearer = String(g('bearer'));
+      const cookies = String(g('cookies')).trim();
+      const headers = _parseHeaderLines(g('headers'));
+      const acc = { label };
+      let has = false;
+      if (bearer.trim()) { acc.bearer = bearer; has = true; }
+      if (cookies) { acc.cookies = cookies; has = true; }
+      if (Object.keys(headers).length) { acc.headers = headers; has = true; }
+      if (label && has) accounts.push(acc);          // un compte sans matériel est ignoré (le serveur le drop aussi)
+    });
+    const idor_targets = [];
+    tgtBox.querySelectorAll('.auth-row').forEach(r => {
+      const g = k => (r.querySelector('[data-k="' + k + '"]') || {}).value || '';
+      const url = String(g('url')).trim();
+      if (!url) return;
+      idor_targets.push({ url, owner: String(g('owner')).trim(), marker: String(g('marker')).trim() });
+    });
+    // scope_json COMPLET (préserve mode/in/out de l'engagement) + auth OMIS si vide (=> no-op serveur).
+    const scope_json = { mode: e.mode || 'grey', in_scope: Array.isArray(e.in_scope) ? e.in_scope : [], out_scope: Array.isArray(e.out_scope) ? e.out_scope : [] };
+    if (accounts.length || idor_targets.length) scope_json.auth = { accounts, idor_targets };
+    close();
+    engagementMutate(e.id, { scope_json }, (accounts.length || idor_targets.length) ? 'Contexte auth enregistré (secrets rédigés côté moteur).' : 'Contexte auth vidé.');
+  };
+  setTimeout(() => { const f = form.querySelector('input,textarea'); if (f) f.focus(); }, 30);
+}
+
 // mutation POST /api/engagements/:id (edit/archive/activate/delete). operatorHeaders porte X-Forge-Operator
 // ET le bearer de session (admin) : le serveur gate selon l'opération (fail-closed).
 export async function engagementMutate(id, body, okMsg) {
@@ -218,6 +375,7 @@ export async function loadEngagements() {
     };
     mkBtn('Basculer', 'k-theme', 'Rendre cet engagement actif', () => switchEngagement(e.id), e.id === active);
     mkBtn('Éditer', 'k-theme', 'Renommer / mode / scope (operator)', () => engagementEditModal(e));
+    mkBtn('Auth', 'k-theme', 'Contexte d\'authentification (comptes de test + cibles IDOR/ATO) — operator', () => engagementAuthModal(e));
     if (isActive) {
       mkBtn('Archiver', 'k-theme', 'Archiver (admin) — refusé si dernier actif', async () => {
         if (await confirmModal('Archiver « ' + e.name + ' » ?', { okText: 'Archiver' })) engagementMutate(e.id, { status: 'archived' }, 'Engagement archivé.');

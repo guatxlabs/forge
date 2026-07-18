@@ -217,8 +217,8 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         accounts = action.params.get("accounts", [])
         # R5 — CONTEXTE AUTH PAR-ENGAGEMENT : des idor_targets STRUCTURÉS {url, owner, marker} injectés
         # par l'engine depuis `scope.auth` déclenchent le slice cross-compte à MARQUEUR (rejeu avec la
-        # session de l'attaquant). Ne consomme QUE le compte attaquant. Les oracles ato/takeover
-        # consommeront les mêmes `accounts` plus tard (suivi R5b) — non câblés ici. ABSENT => chemin
+        # session de l'attaquant). Ne consomme QUE le compte attaquant. L'oracle ato/takeover consomme
+        # les MÊMES `accounts` (R5b, cf. auth.py::_fire_auth_context). ABSENT => chemin
         # historique inchangé (différentiel 2-comptes sur `urls`, ou skip « config manquante »).
         auth_targets = action.params.get("idor_targets")
         if auth_targets:

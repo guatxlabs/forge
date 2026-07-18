@@ -558,6 +558,13 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .modal-act .m-cancel:hover{border-color:var(--acc);color:var(--acc)}
 .modal-act .m-ok{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
 .modal-act .m-ok.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+/* R5b — éditeur du contexte auth (lignes répétables comptes/cibles) */
+.auth-sec-head{display:flex;align-items:center;justify-content:space-between;margin:12px 0 6px;font-size:13px}
+.auth-rows{display:flex;flex-direction:column;gap:8px}
+.auth-row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;padding:9px;border:1px solid var(--bd);border-radius:9px;background:var(--card2)}
+.auth-row .modal-f{flex:1 1 130px;min-width:120px;margin-bottom:0}
+.auth-row textarea{min-height:38px}
+.auth-row>button{min-height:38px;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600}
 #toasts{position:fixed;right:16px;bottom:16px;z-index:200;display:flex;flex-direction:column;gap:8px;max-width:360px}
 .toast{background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--acc);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--fg);box-shadow:var(--shadow);animation:tin .2s ease}
 .toast.ok{border-left-color:var(--ok)} .toast.bad{border-left-color:var(--bad)} .toast.info{border-left-color:var(--acc)}

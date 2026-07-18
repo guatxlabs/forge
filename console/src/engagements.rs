@@ -216,8 +216,190 @@ pub(crate) fn validate_engagement_scope(v: &Value) -> Result<(String, String), S
     }
     let in_scope = arr(v, "in_scope")?;
     let out_scope = arr(v, "out_scope")?;
-    let canonical = json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope}).to_string();
+    // CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5b) — bloc OPTIONNEL `auth` {accounts, idor_targets}
+    // VALIDÉ + canonicalisé puis PRÉSERVÉ dans le scope_json (sans quoi il serait silencieusement écrasé
+    // par cette canonicalisation, et l'éditeur structuré n'aurait aucun effet). ABSENT/VIDE => `None` =>
+    // on retombe EXACTEMENT sur l'expression historique (BYTE-IDENTIQUE : aucun champ `auth` ajouté),
+    // pour qu'un engagement sans auth reste un no-op strict. `Session.from_scope` côté moteur lit ce bloc.
+    let auth = validate_auth_block(v.get("auth"))?;
+    let canonical = match auth {
+        None => json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope}).to_string(),
+        Some(a) => json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope, "auth": a}).to_string(),
+    };
     Ok((canonical, mode))
+}
+
+/// Valide + canonicalise le bloc OPTIONNEL `auth` d'un scope_json (R5b). Forme acceptée :
+///   auth: { accounts: [ {label, headers?{k:v}, cookies?{k:v}|"a=b; c=d", bearer?} … ],
+///           idor_targets: [ {url, owner?, marker?} … ] }
+/// PUR (aucune I/O). Renvoie :
+///   - `Ok(None)`               : absent/null OU ne porte NI compte exploitable NI cible (=> omis du
+///                                scope_json => no-op byte-identique) ;
+///   - `Ok(Some(canonical))`    : objet `{accounts:[…], idor_targets:[…]}` canonique, les VALEURS
+///                                (label/headers/cookies/bearer/url/owner/marker) préservées VERBATIM
+///                                (round-trip lossless) — bornées mais jamais altérées ;
+///   - `Err(why)`               : forme invalide (400 en amont).
+/// Un compte SANS matériel d'auth (ni headers, ni cookies, ni bearer) est DROPPÉ (miroir de
+/// `AuthAccount.is_empty` côté moteur : il n'aide en rien). Fail-closed : aucune valeur secrète n'est
+/// journalisée ici (fonction pure) ; la rédaction des secrets dans les findings/ledger vit dans le moteur.
+pub(crate) fn validate_auth_block(v: Option<&Value>) -> Result<Option<Value>, String> {
+    let v = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(x) => x,
+    };
+    if !v.is_object() {
+        return Err("auth doit être un objet {accounts?, idor_targets?}".into());
+    }
+    // borne de chaîne partagée : rejette les valeurs déraisonnables (anti-abus), sans altérer le contenu.
+    fn bounded_str(v: &Value, ctx: &str, max: usize) -> Result<String, String> {
+        let s = v.as_str().ok_or_else(|| format!("{ctx} : chaîne attendue"))?;
+        if s.len() > max {
+            return Err(format!("{ctx} : trop long (>{max} octets)"));
+        }
+        Ok(s.to_string())
+    }
+    // dict {clef:chaîne} borné (headers / cookies objet) — préservé verbatim.
+    fn str_map(v: &Value, ctx: &str) -> Result<serde_json::Map<String, Value>, String> {
+        let o = v.as_object().ok_or_else(|| format!("{ctx} : objet {{clef:valeur}} attendu"))?;
+        if o.len() > 64 {
+            return Err(format!("{ctx} : trop d'entrées (>64)"));
+        }
+        let mut out = serde_json::Map::new();
+        for (k, val) in o {
+            if k.is_empty() || k.len() > 256 {
+                return Err(format!("{ctx} : clef invalide (1..256)"));
+            }
+            out.insert(k.clone(), json!(bounded_str(val, &format!("{ctx}[{k}]"), 8192)?));
+        }
+        Ok(out)
+    }
+    // --- accounts ---
+    let mut accounts: Vec<Value> = Vec::new();
+    match v.get("accounts") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) => {
+            if a.len() > 64 {
+                return Err("accounts : trop d'entrées (>64)".into());
+            }
+            for (i, e) in a.iter().enumerate() {
+                let o = e.as_object().ok_or_else(|| format!("accounts[{i}] : objet attendu"))?;
+                let label = match o.get("label") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(x) => bounded_str(x, &format!("accounts[{i}].label"), 256)?,
+                };
+                let mut acc = serde_json::Map::new();
+                acc.insert("label".into(), json!(label));
+                let mut has_material = false;
+                if let Some(h) = o.get("headers").filter(|x| !x.is_null()) {
+                    let m = str_map(h, &format!("accounts[{i}].headers"))?;
+                    if !m.is_empty() { acc.insert("headers".into(), Value::Object(m)); has_material = true; }
+                }
+                if let Some(c) = o.get("cookies").filter(|x| !x.is_null()) {
+                    // cookies : objet {k:v} OU chaîne 'a=b; c=d' (les deux acceptés par le moteur) — préservé tel quel.
+                    let cv = if c.is_string() {
+                        let s = bounded_str(c, &format!("accounts[{i}].cookies"), 8192)?;
+                        if s.trim().is_empty() { None } else { Some(json!(s)) }
+                    } else {
+                        let m = str_map(c, &format!("accounts[{i}].cookies"))?;
+                        if m.is_empty() { None } else { Some(Value::Object(m)) }
+                    };
+                    if let Some(cv) = cv { acc.insert("cookies".into(), cv); has_material = true; }
+                }
+                if let Some(b) = o.get("bearer").filter(|x| !x.is_null()) {
+                    let s = bounded_str(b, &format!("accounts[{i}].bearer"), 8192)?;
+                    if !s.trim().is_empty() { acc.insert("bearer".into(), json!(s)); has_material = true; }
+                }
+                // un compte SANS matériel d'auth est DROPPÉ (il n'aide en rien — miroir moteur).
+                if has_material {
+                    accounts.push(Value::Object(acc));
+                }
+            }
+        }
+        Some(_) => return Err("accounts : tableau attendu".into()),
+    }
+    // --- idor_targets ---
+    let mut targets: Vec<Value> = Vec::new();
+    match v.get("idor_targets") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) => {
+            if a.len() > 256 {
+                return Err("idor_targets : trop d'entrées (>256)".into());
+            }
+            for (i, e) in a.iter().enumerate() {
+                let o = e.as_object().ok_or_else(|| format!("idor_targets[{i}] : objet attendu"))?;
+                let url = match o.get("url") {
+                    Some(x) if !x.is_null() => bounded_str(x, &format!("idor_targets[{i}].url"), 2048)?,
+                    _ => return Err(format!("idor_targets[{i}] : `url` requis")),
+                };
+                if url.trim().is_empty() {
+                    return Err(format!("idor_targets[{i}] : `url` vide"));
+                }
+                let owner = match o.get("owner") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(x) => bounded_str(x, &format!("idor_targets[{i}].owner"), 256)?,
+                };
+                let marker = match o.get("marker") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(x) => bounded_str(x, &format!("idor_targets[{i}].marker"), 1024)?,
+                };
+                targets.push(json!({"url": url, "owner": owner, "marker": marker}));
+            }
+        }
+        Some(_) => return Err("idor_targets : tableau attendu".into()),
+    }
+    // rien d'exploitable (aucun compte, aucune cible) => OMIS => no-op byte-identique (comme le moteur INERTE).
+    if accounts.is_empty() && targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({"accounts": accounts, "idor_targets": targets})))
+}
+
+/// RÉSUMÉ RÉDIGÉ du bloc `auth` d'un scope_json pour l'éditeur (R5b). Renvoie `None` si aucun bloc auth
+/// (=> champ absent du payload, byte-identique à l'historique). Sinon un objet SANS AUCUN secret :
+///   { accounts: [ {label, has_headers, header_keys:[…], has_cookies, has_bearer} ],
+///     idor_targets: [ {url, owner, marker} ] }
+/// Les VALEURS de bearer/cookies/headers ne sont JAMAIS incluses — seuls les NOMS d'en-têtes (non
+/// secrets, utiles pour ré-afficher les lignes) + des booléens de présence. url/owner/marker sont de la
+/// config non secrète (l'opérateur les a fournis), servis tels quels. Fonction PURE (aucune I/O).
+pub(crate) fn auth_summary_json(scope_v: &Value) -> Option<Value> {
+    let auth = scope_v.get("auth")?.as_object()?;
+    let mut accounts: Vec<Value> = Vec::new();
+    if let Some(arr) = auth.get("accounts").and_then(|x| x.as_array()) {
+        for a in arr {
+            let o = match a.as_object() { Some(o) => o, None => continue };
+            let header_keys: Vec<Value> = o.get("headers").and_then(|h| h.as_object())
+                .map(|m| m.keys().map(|k| json!(k)).collect())
+                .unwrap_or_default();
+            let has_cookies = o.get("cookies").map(|c| match c {
+                Value::String(s) => !s.trim().is_empty(),
+                Value::Object(m) => !m.is_empty(),
+                _ => false,
+            }).unwrap_or(false);
+            let has_bearer = o.get("bearer").and_then(|b| b.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
+            accounts.push(json!({
+                "label": o.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                "has_headers": !header_keys.is_empty(),
+                "header_keys": header_keys,
+                "has_cookies": has_cookies,
+                "has_bearer": has_bearer,
+            }));
+        }
+    }
+    let mut targets: Vec<Value> = Vec::new();
+    if let Some(arr) = auth.get("idor_targets").and_then(|x| x.as_array()) {
+        for t in arr {
+            let o = match t.as_object() { Some(o) => o, None => continue };
+            targets.push(json!({
+                "url": o.get("url").and_then(|x| x.as_str()).unwrap_or(""),
+                "owner": o.get("owner").and_then(|x| x.as_str()).unwrap_or(""),
+                "marker": o.get("marker").and_then(|x| x.as_str()).unwrap_or(""),
+            }));
+        }
+    }
+    if accounts.is_empty() && targets.is_empty() {
+        return None;
+    }
+    Some(json!({"accounts": accounts, "idor_targets": targets}))
 }
 
 /// Liste des engagements + compteurs agrégés (findings/runs) — aucune donnée d'un autre engagement n'est
@@ -268,6 +450,14 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
             // affiche/édite la case. Effectif = ceci AND le master global (indiqué séparément côté UI).
             "allow_private": r.get_opt_i64(10)?.unwrap_or(0) != 0,
         });
+        // CONTEXTE AUTH (R5b) — RÉSUMÉ RÉDIGÉ pour que l'éditeur structuré ré-affiche la STRUCTURE
+        // (labels, quel matériel est défini, cibles idor) SANS jamais renvoyer un secret. Les VALEURS
+        // secrètes (bearer/cookies/headers) ne sont JAMAIS exposées ; seuls les NOMS d'en-têtes (non
+        // secrets) + des booléens de présence le sont. url/owner/marker (config non secrète) tels quels.
+        // Champ ABSENT quand l'engagement n'a pas de bloc auth => payload BYTE-IDENTIQUE à l'historique.
+        if let Some(summary) = auth_summary_json(&scope_v) {
+            o["auth"] = summary;
+        }
         if expose_tenant {
             o["tenant_id"] = json!(tenant_id);
         }

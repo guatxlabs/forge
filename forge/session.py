@@ -243,8 +243,9 @@ class AuthContext:
                         donnée de la victime)} ; l'oracle rejoue chaque `url` avec la session de
                         l'ATTAQUANT et flag si le marqueur (ou un 2xx là où l'anon est refusé) revient.
 
-    Extensible : `ato`/`takeover` consommeront les MÊMES `accounts` plus tard (suivi R5b) — seul le
-    slice IDOR est câblé ici. SECRET : `ledger_summary()`/`repr` n'exposent QUE des labels + des
+    Consommé par DEUX oracles de contrôle d'accès qui partagent ces MÊMES `accounts` (R5 : `access_
+    control.idor` ; R5b : `auth.takeover`/ATO) — l'engine injecte comptes + idor_targets dans les deux,
+    aucun chemin parallèle. SECRET : `ledger_summary()`/`repr` n'exposent QUE des labels + des
     compteurs, jamais un secret. INERTE si absent (`from_scope` -> None -> aucun changement)."""
 
     def __init__(self, accounts=None, idor_targets=None):

@@ -62,6 +62,13 @@ pub(crate) struct Engagement {
     /// Défaut FALSE (fail-closed). Une des DEUX portes cumulatives : effectif = master global AND ceci
     /// (calculé dans run_create). Isolation : activer sur l'engagement A n'affecte JAMAIS un autre engagement.
     pub(crate) allow_private: bool,
+    /// CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5b) — bloc OPTIONNEL `auth` {accounts, idor_targets}
+    /// décodé DEPUIS `scope_json` (validé/canonicalisé par `validate_engagement_scope`). `None` si absent
+    /// (=> le run flow N'ÉMET aucun champ `auth` dans le scope.json du moteur => no-op byte-identique). Le
+    /// moteur (`session.AuthContext.from_scope`) le lit pour alimenter les oracles IDOR (R5) et ATO (R5b)
+    /// en cross-compte. SECRET : porte le matériel d'auth de l'opérateur — jamais journalisé (le moteur le
+    /// rédige dans les findings/ledger) ; ne transite que par le scope.json du run (fichier temp local).
+    pub(crate) auth: Option<Value>,
 }
 
 /// Extrait la liste de chaînes d'un champ tableau d'un scope_json (in_scope/out_scope). Absent/mal
@@ -91,6 +98,13 @@ pub(crate) fn load_engagement(store: &crate::store::Store, id: i64) -> Option<En
         .and_then(|m| m.as_str())
         .map(String::from)
         .unwrap_or(mode_col);
+    // CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : le bloc `auth` déjà VALIDÉ/canonicalisé au moment de l'écriture
+    // (validate_engagement_scope) est décodé tel quel. Un objet non-vide => Some ; absent/non-objet => None
+    // (=> le run flow n'émet aucun `auth` => byte-identique). On ne re-valide PAS ici (source déjà de confiance).
+    let auth = match v.get("auth") {
+        Some(a) if a.is_object() => Some(a.clone()),
+        _ => None,
+    };
     Some(Engagement {
         id,
         mode,
@@ -98,6 +112,7 @@ pub(crate) fn load_engagement(store: &crate::store::Store, id: i64) -> Option<En
         scope_out: scope_json_list(&v, "out_scope"),
         ledger_path,
         allow_private: allow_private != 0,
+        auth,
     })
 }
 
