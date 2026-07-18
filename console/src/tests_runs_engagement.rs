@@ -540,3 +540,114 @@ use crate::testutil::*;
     // (tenancy::engagement_visible / engagement_in / granted_tenants) fait passer un test AU ROUGE.
     // =====================================================================================
 
+
+    // =====================================================================================
+    // R5b — CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT : éditeur structuré (validate_engagement_scope
+    // PRÉSERVE le bloc `auth`), round-trip store/load lossless, résumé RÉDIGÉ pour l'UI, et no-op strict
+    // (aucun bloc auth => scope_json byte-identique, aucun champ `auth`). MUTATION-PROVABLE : retirer la
+    // préservation de `auth` dans validate_engagement_scope fait passer ces tests AU ROUGE.
+    // =====================================================================================
+
+    /// validate_engagement_scope PRÉSERVE le bloc `auth` (round-trip lossless des valeurs) ET l'omet
+    /// quand il est vide/absent (byte-identique à l'historique => no-op strict).
+    #[test]
+    fn engagement_scope_preserves_auth_block_or_omits_it() {
+        // (a) NO-OP : sans bloc auth, la sortie est EXACTEMENT la chaîne historique (aucun champ `auth`).
+        let plain = json!({"mode": "grey", "in_scope": ["app.test"], "out_scope": []});
+        let (canon_plain, _m) = validate_engagement_scope(&plain).expect("scope plain valide");
+        let expect_plain = json!({"mode": "grey", "in_scope": ["app.test"], "out_scope": []}).to_string();
+        assert_eq!(canon_plain, expect_plain, "sans auth => scope_json byte-identique (no-op)");
+        assert!(!canon_plain.contains("auth"), "aucun champ auth injecté sur un scope sans auth");
+
+        // (b) avec un bloc auth non trivial => PRÉSERVÉ (labels, matériel, cibles) VERBATIM.
+        let with_auth = json!({
+            "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+            "auth": {
+                "accounts": [
+                    {"label": "attacker", "bearer": "S3CR3T-tok"},
+                    {"label": "victim", "cookies": {"sid": "V1CT1M"}, "headers": {"X-CSRF": "abc"}}
+                ],
+                "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK-9z"}]
+            }
+        });
+        let (canon, _m) = validate_engagement_scope(&with_auth).expect("scope+auth valide");
+        let v: Value = serde_json::from_str(&canon).unwrap();
+        let a = v.get("auth").expect("bloc auth préservé");
+        assert_eq!(a["accounts"][0]["label"], json!("attacker"));
+        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer préservé VERBATIM");
+        assert_eq!(a["accounts"][1]["cookies"]["sid"], json!("V1CT1M"), "cookie préservé VERBATIM");
+        assert_eq!(a["accounts"][1]["headers"]["X-CSRF"], json!("abc"), "header préservé VERBATIM");
+        assert_eq!(a["idor_targets"][0]["url"], json!("https://app.test/api/me"));
+        assert_eq!(a["idor_targets"][0]["marker"], json!("MK-9z"));
+
+        // (c) un compte SANS matériel d'auth est DROPPÉ ; un bloc totalement vide => OMIS (no-op).
+        let empty_material = json!({
+            "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+            "auth": {"accounts": [{"label": "ghost"}], "idor_targets": []}
+        });
+        let (canon_e, _m) = validate_engagement_scope(&empty_material).expect("valide");
+        assert!(!canon_e.contains("auth"), "compte sans matériel + aucune cible => bloc auth OMIS (no-op)");
+
+        // (d) forme invalide => Err (400 en amont).
+        let bad = json!({"mode": "grey", "in_scope": ["app.test"], "auth": {"accounts": "not-an-array"}});
+        assert!(validate_engagement_scope(&bad).is_err(), "accounts non-tableau => refus");
+    }
+
+    /// ROUND-TRIP STORE/LOAD : un engagement dont le scope_json PORTE un bloc auth le rend via
+    /// load_engagement (eng.auth = Some, valeurs intactes) ; un engagement SANS auth => eng.auth = None.
+    #[test]
+    fn engagement_auth_survives_store_and_load() {
+        let app = test_app("");
+        // scope_json canonicalisé PAR le validateur (chemin de production exact) puis stocké.
+        let with_auth = json!({
+            "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+            "auth": {
+                "accounts": [{"label": "attacker", "bearer": "S3CR3T-tok"}],
+                "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
+            }
+        });
+        let (canon, mode) = validate_engagement_scope(&with_auth).expect("valide");
+        app.db().execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(41,'eng-auth','active',?,?, '', datetime('now'),datetime('now'))",
+            rusqlite::params![mode, canon],
+        ).unwrap();
+        let eng = load_engagement(&app.store(), 41).expect("engagement chargé");
+        let a = eng.auth.expect("eng.auth = Some (bloc préservé au chargement)");
+        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer intact après store/load");
+        assert_eq!(a["idor_targets"][0]["marker"], json!("MK"));
+
+        // engagement SANS auth => eng.auth = None (=> le run flow n'émet aucun champ auth => no-op).
+        insert_test_engagement(&app, 42, &["app.test"], "grey", "");
+        let eng2 = load_engagement(&app.store(), 42).expect("engagement 2 chargé");
+        assert!(eng2.auth.is_none(), "aucun bloc auth => eng.auth = None (no-op)");
+    }
+
+    /// auth_summary_json (exposé à l'éditeur) ne renvoie AUCUN secret : les valeurs bearer/cookies/headers
+    /// n'apparaissent jamais ; seuls des booléens de présence + les NOMS d'en-têtes (non secrets) + les
+    /// url/owner/marker (config) sont exposés.
+    #[test]
+    fn auth_summary_is_redacted_for_the_editor() {
+        let scope_v = json!({
+            "mode": "grey", "in_scope": ["app.test"],
+            "auth": {
+                "accounts": [{"label": "attacker", "bearer": "S3CR3T-tok", "headers": {"X-CSRF": "hidden-val"}},
+                             {"label": "victim", "cookies": {"sid": "V1CT1M"}}],
+                "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
+            }
+        });
+        let s = auth_summary_json(&scope_v).expect("résumé présent");
+        let blob = s.to_string();
+        assert!(!blob.contains("S3CR3T-tok"), "bearer JAMAIS exposé");
+        assert!(!blob.contains("hidden-val"), "valeur d'en-tête JAMAIS exposée");
+        assert!(!blob.contains("V1CT1M"), "valeur de cookie JAMAIS exposée");
+        // structure ré-affichable : labels + présence + noms d'en-têtes + cibles (non secrets).
+        assert_eq!(s["accounts"][0]["label"], json!("attacker"));
+        assert_eq!(s["accounts"][0]["has_bearer"], json!(true));
+        assert_eq!(s["accounts"][0]["header_keys"], json!(["X-CSRF"]), "noms d'en-têtes (non secrets) exposés");
+        assert_eq!(s["accounts"][1]["has_cookies"], json!(true));
+        assert_eq!(s["idor_targets"][0]["url"], json!("https://app.test/api/me"));
+        assert_eq!(s["idor_targets"][0]["marker"], json!("MK"));
+        // aucun bloc auth => None (=> champ absent du payload liste => byte-identique).
+        assert!(auth_summary_json(&json!({"mode": "grey", "in_scope": ["app.test"]})).is_none());
+    }

@@ -624,6 +624,18 @@ class Engine:
                     a.params.setdefault("accounts", self.scope.known_creds)
                 a.params.setdefault("urls", self.scope.idor_targets)
                 a.params.setdefault("mitre", "T1190")
+            # CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : l'oracle ATO/takeover consomme les MÊMES comptes
+            # LABELLISÉS que l'IDOR — la session de l'ATTAQUANT est rejouée contre chaque idor_target
+            # (whoami-like) et un takeover est PROUVÉ si le marqueur d'IDENTITÉ de la victime revient
+            # dans SA réponse authentifiée. MÊME injection que l'IDOR (comptes + cibles structurées), pas
+            # de chemin parallèle. ABSENT (aucun bloc auth) => aucune injection => l'oracle retombe sur
+            # son chemin config-driven historique (whoami_url/victim_marker) : INERTE, no-op byte-identique.
+            elif a.kind == "auth.takeover":
+                if self.auth_context is not None and self.auth_context.accounts:
+                    a.params.setdefault("accounts", self.auth_context.accounts_as_params())
+                    if self.auth_context.idor_targets:
+                        a.params.setdefault("idor_targets", list(self.auth_context.idor_targets))
+                    self._ledger_auth_use()               # journalise la MISE EN USAGE (labels, pas de secret)
 
         # injecte le périmètre dans les actions qui DÉCOUVRENT/RÉSOLVENT des hôtes à runtime : la
         # cible (domaine) est gatée par le ROE, mais ces modules produisent de NOUVEAUX hôtes (IP

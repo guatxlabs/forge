@@ -342,6 +342,11 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         rate,
         allow_private: allow_private_effective,
         resource,
+        // CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : le bloc `auth` de CET engagement (validé à l'écriture) est
+        // propagé au scope.json du run pour que le moteur (AuthContext.from_scope) alimente les oracles
+        // IDOR/ATO en cross-compte. None => aucun champ auth émis (byte-identique). Isolation : le scope du
+        // run reste dicté par CET engagement — jamais l'auth d'un autre.
+        eng_auth: eng.auth.clone(),
     };
 
     // ─── BRANCHEMENT RUN-LEADER (HA #10 Wave B) ──────────────────────────────────────────────────────

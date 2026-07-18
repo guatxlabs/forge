@@ -210,7 +210,7 @@ pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec) -> Value {
     let sel_profile = spec.selection.get("profile").cloned().unwrap_or(json!("bug_bounty"));
     let sel_categories = spec.selection.get("categories").cloned().unwrap_or(json!({}));
     let sel_techniques = spec.selection.get("techniques").cloned().unwrap_or(json!({}));
-    json!({
+    let mut doc = json!({
         "_comment": scope_comment,
         // mode + out_scope viennent de L'ENGAGEMENT (figés dans le spec) : le scope-guard du moteur applique
         // le périmètre de CET engagement. in_scope = cibles validées ⊆ scope de l'engagement.
@@ -235,7 +235,16 @@ pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec) -> Value {
         "categories_enabled": sel_categories,
         "techniques_enabled": sel_techniques,
         "notes": scope_notes
-    })
+    });
+    // CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : le bloc `auth` {accounts, idor_targets} de l'engagement est
+    // AJOUTÉ au scope.json UNIQUEMENT s'il existe -> le moteur (AuthContext.from_scope) alimente les
+    // oracles IDOR/ATO en cross-compte. ABSENT (None) => AUCUN champ `auth` ajouté => scope.json
+    // BYTE-IDENTIQUE à l'historique (no-op strict pour les engagements sans auth). SECRET : ce fichier
+    // temp local du run porte le matériel d'auth ; il n'est jamais journalisé (le moteur rédige findings/ledger).
+    if let Some(auth) = &spec.eng_auth {
+        doc["auth"] = auth.clone();
+    }
+    doc
 }
 
 #[allow(clippy::significant_drop_tightening)]
@@ -526,7 +535,7 @@ mod scope_doc_contract_tests {
             auto_pentest: false, reason: String::new(), arm: false, high_impact,
             started_by: "op".into(), actor: "op".into(), selection: json!({}),
             disabled_modules: vec![], body_targets: json!(["10.0.0.5"]), rate: None,
-            allow_private, resource: Default::default(),
+            allow_private, resource: Default::default(), eng_auth: None,
         }
     }
 
@@ -546,6 +555,26 @@ mod scope_doc_contract_tests {
         let hi = build_run_scope_doc("run-x", &spec(true, false));
         assert_eq!(hi["allow_exploit"], json!(true));
         assert_eq!(hi["allow_private"], json!(false), "politique réseau indépendante du haut-impact");
+    }
+
+    /// CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : le scope.json du run PORTE le bloc `auth` de l'engagement
+    /// UNIQUEMENT s'il existe -> le moteur (AuthContext.from_scope) alimente les oracles IDOR/ATO. ABSENT
+    /// (eng_auth=None) => AUCUN champ `auth` => scope.json byte-identique à l'historique (no-op strict).
+    #[test]
+    fn scope_doc_emits_auth_block_only_when_present() {
+        // (1) sans auth (le défaut du helper) => aucun champ `auth` (no-op byte-identique).
+        let none = build_run_scope_doc("run-x", &spec(false, false));
+        assert!(none.get("auth").is_none(), "eng_auth=None => aucun champ auth dans le scope.json");
+
+        // (2) avec auth => bloc {accounts, idor_targets} propagé TEL QUEL au moteur.
+        let mut s = spec(false, false);
+        let auth = json!({
+            "accounts": [{"label": "attacker", "bearer": "TOK"}, {"label": "victim", "cookies": {"sid": "v"}}],
+            "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
+        });
+        s.eng_auth = Some(auth.clone());
+        let with = build_run_scope_doc("run-x", &s);
+        assert_eq!(with["auth"], auth, "le bloc auth de l'engagement est propagé au scope.json du run");
     }
 }
 

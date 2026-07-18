@@ -228,6 +228,7 @@ pub(crate) struct RunSpawnSpec {
     pub(crate) rate: Option<i64>,             // débit req/s OPT-IN (override per-run) : None => défaut 5, byte-identique
     pub(crate) allow_private: bool,           // EFFECTIF (master global AND opt-in engagement) écrit dans scope.json
     pub(crate) resource: ResourceOptions,     // R3 — profil de ressources + overrides par-levier -> env du moteur (no-op si vide)
+    pub(crate) eng_auth: Option<Value>,       // R5b — bloc `auth` {accounts, idor_targets} de l'engagement -> scope.json (None => aucun champ auth, byte-identique)
 }
 
 impl RunSpawnSpec {
@@ -243,6 +244,9 @@ impl RunSpawnSpec {
             "actor": self.actor, "selection": self.selection, "disabled_modules": self.disabled_modules,
             "body_targets": self.body_targets, "rate": self.rate, "allow_private": self.allow_private,
             "resource": self.resource.to_value(),
+            // R5b — bloc auth de l'engagement, sérialisé tel quel (SECRET : ne transite que par run_job.spawn_spec,
+            // interne au serveur ; jamais dans un ledger/finding). `null` si absent => from_value => None => no-op.
+            "eng_auth": self.eng_auth.clone().unwrap_or(Value::Null),
         })
     }
 
@@ -278,6 +282,8 @@ impl RunSpawnSpec {
             allow_private: v.get("allow_private").and_then(|x| x.as_bool()).unwrap_or(false),
             // R3 — ressources : blob sans le champ (spec legacy) => `Null` => défauts (aucune variable posée, no-op).
             resource: ResourceOptions::from_value(v.get("resource").unwrap_or(&Value::Null)),
+            // R5b — bloc auth : objet => Some ; absent/null (spec legacy) => None => aucun champ auth émis (byte-identique).
+            eng_auth: v.get("eng_auth").filter(|a| a.is_object()).cloned(),
         })
     }
 }
@@ -604,7 +610,7 @@ mod wave_b_tests {
             auto_pentest: false, reason: String::new(), arm: false, high_impact: false,
             started_by: "op".into(), actor: "op".into(), selection: serde_json::json!({}),
             disabled_modules: vec![], body_targets: serde_json::json!([]), rate: None,
-            allow_private: false, resource: Default::default(),
+            allow_private: false, resource: Default::default(), eng_auth: None,
         }
     }
 
@@ -643,6 +649,11 @@ mod wave_b_tests {
                 run_timeout: Some(1800),
                 tools_profile: Some("mini".into()),
             },
+            // R5b — bloc auth non trivial : doit survivre au round-trip SANS perte (labels + matériel + cibles).
+            eng_auth: Some(serde_json::json!({
+                "accounts": [{"label": "attacker", "bearer": "TOK"}, {"label": "victim", "cookies": {"sid": "v"}}],
+                "idor_targets": [{"url": "https://a.example.com/api/me", "owner": "victim", "marker": "MK"}]
+            })),
         };
         let round = RunSpawnSpec::from_value(&spec.to_value()).expect("reconstruct");
         assert_eq!(round.run_id, spec.run_id);
@@ -670,6 +681,7 @@ mod wave_b_tests {
         assert_eq!(round.allow_private, spec.allow_private);
         assert_eq!(round.resource, spec.resource, "R3 — profil+overrides ressources survit au round-trip");
         assert_eq!(round.resource.env_pairs().len(), 4, "les 4 variables d'env sont dérivables après round-trip");
+        assert_eq!(round.eng_auth, spec.eng_auth, "R5b — bloc auth {{accounts,idor_targets}} survit au round-trip SANS perte");
         // blob corrompu -> None (le leader marque failed et passe au suivant).
         assert!(RunSpawnSpec::from_value(&serde_json::json!({"garbage": 1})).is_none(), "spec sans run_id/eng_id => None");
     }

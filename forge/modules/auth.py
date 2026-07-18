@@ -22,6 +22,7 @@ import urllib.parse
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from .. import techniques
+from ..redact import redact_secrets
 
 
 @register("auth.takeover")
@@ -57,11 +58,93 @@ class AuthTakeover(ScopeGuardedOracle):
                 f"# PREUVE = whoami contient le marqueur VICTIME ({p.get('victim_marker', '<victime>')}) "
                 f"-> takeover ; sinon tested")
 
+    @staticmethod
+    def _attacker_headers(accounts):
+        """En-têtes du compte ATTAQUANT parmi les comptes LABELLISÉS (R5b) : le compte 'attacker' si
+        présent, sinon le 1er (convention). None si aucun compte. Chaque compte = {label, headers}.
+        Miroir EXACT de `IdorDifferential._attacker_headers` (les deux oracles consomment le même
+        `AuthContext.accounts` — SOURCE unique de la convention de labels)."""
+        if not accounts:
+            return None
+        for a in accounts:
+            if str(a.get("label", "")).strip().lower() == "attacker":
+                return a.get("headers", {}) or {}
+        return accounts[0].get("headers", {}) or {}
+
+    def _fire_auth_context(self, action, accounts, targets):
+        """R5b — SLICE ATO/TAKEOVER via CONTEXTE AUTH PAR-ENGAGEMENT. La session de l'ATTAQUANT (compte
+        de l'opérateur) rejoue chaque idor_target {url, owner, marker} (endpoint whoami/profil) ; PREUVE
+        NETTE d'un takeover cross-compte = le MARQUEUR D'IDENTITÉ de la victime (`marker`) apparaît dans
+        SA réponse authentifiée (2xx) — l'identité renvoyée est celle d'un AUTRE utilisateur, pas la
+        sienne. Sans marqueur -> pas de signal d'identité, on ne CONFIRME jamais (skip, anti-faux-positif :
+        jamais « n'importe quel 200 »). Lecture seule (GET). Scope-guard fail-closed PAR-URL (aucune
+        requête hors périmètre). Le PoC/evidence est RÉDIGÉ à la source (les en-têtes de l'attaquant
+        portent le matériel d'auth SECRET — masqué AVANT de figer dans le finding, ledger inclus)."""
+        attacker = self._attacker_headers(accounts)
+        findings = []
+        for t in targets:
+            url = (t or {}).get("url")
+            if not url:
+                continue
+            marker = str((t or {}).get("marker") or "")
+            owner = str((t or {}).get("owner") or "victim")
+            # SCOPE-GUARD PAR-URL fail-closed — une cible hors périmètre : AUCUN I/O vers elle (le
+            # matériel d'auth secret ne peut physiquement pas quitter le périmètre déclaré).
+            if not self._in_scope(action, url):
+                findings.append(self.degraded(
+                    target=url,
+                    title="ATO non testé — idor_target hors périmètre (scope-guard fail-closed)",
+                    evidence="Cette cible n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            if attacker is None:
+                findings.append(self.skip(
+                    target=url, title="ATO non testé — compte attaquant manquant",
+                    evidence=("Requiert au moins un compte (auth.accounts) fournissant les en-têtes de "
+                              "l'attaquant pour rejouer la requête cross-compte."),
+                    poc=self.dry(action)))
+                continue
+            if not marker:
+                # sans marqueur d'identité victime, aucune PREUVE de takeover possible (un 2xx seul ne
+                # prouve pas que l'identité renvoyée est celle d'AUTRUI) -> jamais confirmé.
+                findings.append(self.skip(
+                    target=url, title="ATO non testé — marqueur d'identité victime manquant",
+                    evidence=("Requiert un `marker` (identifiant unique de la victime attendu dans la "
+                              "réponse) pour prouver que la session attaquant renvoie l'identité d'AUTRUI."),
+                    poc=self.dry(action)))
+                continue
+            ws, wbody, _ = self._fetch(url, headers=attacker)
+            att_ok = ws in (200, 206)
+            marker_hit = att_ok and (marker in (wbody or ""))
+            # PREUVE : session attaquant 2xx ET marqueur d'identité VICTIME présent dans SA réponse
+            # (identity-of-another-user). Jamais « n'importe quel 200 » (marqueur requis ci-dessus).
+            proven = marker_hit
+            poc = redact_secrets(self._curl(url, attacker))
+            evidence = redact_secrets(
+                f"attaquant={ws} marqueur_victime={'présent' if marker_hit else 'absent'} "
+                f"owner={owner!r} ; preuve=identité de la victime renvoyée à la session de l'attaquant ; "
+                "compte attaquant DÉTENU par l'opérateur (jamais un tiers) ; matériel d'auth rédigé")
+            findings.append(self.proof(
+                target=url, proven=proven,
+                title=("ATO CONFIRMÉ — la session attaquant renvoie l'identité de la VICTIME (cross-compte)"
+                       if proven else "ATO non confirmé — la réponse ne porte pas l'identité victime"),
+                severity=("CRITICAL" if proven else "INFO"),
+                evidence=evidence, poc=poc))
+        return findings
+
     def fire(self, action):
         # SCOPE-GUARD fail-closed sur la cible primaire — hors périmètre -> skipped, AUCUN réseau.
         if not self._in_scope(action, action.target):
             return [self._scope_refused(action)]
         p = action.params
+        # CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : comptes LABELLISÉS + idor_targets structurés injectés par
+        # l'engine (mêmes que l'IDOR). La session de l'attaquant rejoue chaque cible ; un takeover est
+        # prouvé si le marqueur d'IDENTITÉ de la victime revient. Ne consomme QUE le compte attaquant.
+        # ABSENT => chemin config-driven historique (whoami_url/victim_marker), byte-identique.
+        auth_accounts = p.get("accounts")
+        auth_targets = p.get("idor_targets")
+        if auth_accounts and auth_targets:
+            return self._fire_auth_context(action, auth_accounts, list(auth_targets))
         whoami = p.get("whoami_url")
         victim = p.get("victim_marker")
         sess = dict(p.get("attacker_session_headers", {}))
