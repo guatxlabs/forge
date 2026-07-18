@@ -1313,12 +1313,10 @@ fn parse_id(id: &str) -> Option<i64> {
     id.trim().parse::<i64>().ok().filter(|&n| n > 0)
 }
 
-/// CSPRNG hex of `nbytes` bytes (OS entropy). Panics on entropy failure rather than emit a weak secret
-/// (fail-closed on entropy — mirrors sso::rand_hex / gen_session_token).
+/// CSPRNG hex of `nbytes` bytes — delegates to the SHARED `common::rand_hex` (dedup Wave; byte-identical).
+/// `what="SCIM"` names the secret in the fail-closed entropy panic message.
 fn rand_hex(nbytes: usize) -> String {
-    let mut b = vec![0u8; nbytes];
-    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) unavailable — refusing to emit a weak SCIM secret");
-    b.iter().map(|x| format!("{:02x}", x)).collect()
+    crate::common::rand_hex(nbytes, "SCIM")
 }
 
 #[cfg(test)]

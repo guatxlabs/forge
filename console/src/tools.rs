@@ -318,6 +318,16 @@ fn validate_placeholder_body(body: &str, tok: &str) -> Result<(), String> {
                 if def.chars().any(|c| c == '\0' || SHELL_METACHARS.contains(&c)) {
                     return Err(format!("token '{tok}' : défaut de {{param:...}} contient un caractère interdit"));
                 }
+                // M2 FIX — le SEGMENT DEFAULT est matérialisé TEL QUEL dans l'argv à l'exécution : il doit
+                // subir la MÊME curation d'option-injection que les tokens littéraux (mirror du garde
+                // literal-token plus haut). Un défaut commençant par '-' (ex `-oN/tmp/pwned`) smugglerait un
+                // drapeau d'écriture-fichier/exfil que le scan des tokens littéraux ne voit pas. Refus.
+                if def.starts_with('-') {
+                    return Err(format!("token '{tok}' : le défaut de {{param:...}} ne peut pas commencer par '-' (option-injection)"));
+                }
+                if let Some(why) = dangerous_flag(def) {
+                    return Err(format!("token '{tok}' : défaut de {{param:...}} : {why}"));
+                }
             }
             Ok(())
         }

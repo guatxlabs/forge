@@ -435,10 +435,10 @@ async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<Ha
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "session_persist_failed", format!("could not persist session: {e}")),
     };
     let ttl = crate::session_ttl_secs();
-    // Scheme-aware `Secure` : posé si la requête effective est en HTTPS (X-Forwarded-Proto: https d'un
-    // reverse-proxy TLS, ou FORGE_FORCE_SECURE_COOKIE). Le callback OIDC arrive via une navigation
-    // top-level du navigateur ; `headers` porte le XFP du proxy amont le cas échéant.
-    let cookie = crate::session_cookie(&token, ttl, crate::request_is_https(&headers));
+    // `Secure` par défaut (durcissement) — le cookie de session ne transite jamais en clair ; l'opt-out
+    // `FORGE_COOKIE_INSECURE=1` (dev http-loopback) est géré DANS session_cookie. Plus de dépendance au
+    // `X-Forwarded-Proto` spoofable pour ce flag. Le callback OIDC arrive via une navigation top-level.
+    let cookie = crate::session_cookie(&token, ttl);
     // Clear the one-time state-binding cookie now that the flow completed (hygiene).
     let clear_state = format!("{STATE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/api/sso; Max-Age=0");
 
@@ -788,9 +788,13 @@ fn redirect_allowed(cfg: &SsoConfig, ret: &str) -> bool {
 }
 
 /// A same-origin relative path that cannot escape the origin: starts with a single `/`, not `//`
-/// (protocol-relative), not `/\` (backslash treated as `/` by some browsers).
+/// (protocol-relative), not `/\` (backslash treated as `/` by some browsers), and contains NO ASCII
+/// control character (CR/LF/TAB/NUL/… — header/redirect smuggling in a `Location:` value).
 fn safe_relative(s: &str) -> bool {
-    s.starts_with('/') && !s.starts_with("//") && !s.starts_with("/\\")
+    s.starts_with('/')
+        && !s.starts_with("//")
+        && !s.starts_with("/\\")
+        && !s.chars().any(|c| c.is_ascii_control())
 }
 
 /// Minimal absolute-http(s)-URL check for config validation (no external URL crate).
@@ -1041,7 +1045,13 @@ fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Dura
     req.push_str(body);
     stream.write_all(req.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| format!("read failed: {e}"))?;
+    // BORNE MÉMOIRE (anti-OOM) : `take(MAX_RESPONSE_BYTES)` cape la lecture d'une réponse token illimitée
+    // d'un IdP hostile/compromis — miroir de net.rs::http_get_blocking (L11). Le read-timeout borne la
+    // latence ; ce cap borne la mémoire.
+    (&mut stream)
+        .take(crate::net::MAX_RESPONSE_BYTES)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("read failed: {e}"))?;
     let text = String::from_utf8_lossy(&raw);
     let split = text.find("\r\n\r\n").ok_or_else(|| "malformed HTTP response".to_string())?;
     let head = &text[..split];
@@ -1062,12 +1072,10 @@ fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Dura
 // SMALL PURE HELPERS
 // ============================================================================================
 
-/// CSPRNG hex of `nbytes` bytes (OS entropy). Panics on entropy failure rather than emit a weak secret
-/// (fail-closed on entropy — mirrors `gen_session_token`).
+/// CSPRNG hex of `nbytes` bytes — delegates to the SHARED `common::rand_hex` (dedup Wave; byte-identical).
+/// `what="SSO"` names the secret in the fail-closed entropy panic message.
 fn rand_hex(nbytes: usize) -> String {
-    let mut b = vec![0u8; nbytes];
-    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) unavailable — refusing to emit a weak SSO secret");
-    b.iter().map(|x| format!("{:02x}", x)).collect()
+    crate::common::rand_hex(nbytes, "SSO")
 }
 
 /// Read a named cookie's value from the request `Cookie` header (first match). `None` if absent/empty.
@@ -1291,6 +1299,30 @@ byHb5g3JqJSE6WJSuyEQrUob
         crate::settings_set(&db, "enterprise.sso", "on").unwrap();
     }
 
+    /// [LOW — cap de lecture du token OIDC] `http_post_form_blocking` BORNE le corps lu à
+    /// `MAX_RESPONSE_BYTES` via `take()` (miroir de `net.rs::http_get_blocking`) : un IdP hostile/compromis
+    /// renvoyant un corps ILLIMITÉ ne peut pas faire exploser la mémoire de la console. On sert un corps
+    /// > cap ; le résultat est TRONQUÉ au cap (jamais lu en entier). L'appel blocant tourne en
+    /// `spawn_blocking` (comme le vrai callback) pour ne pas figer le runtime current-thread du test.
+    #[tokio::test]
+    async fn oidc_token_read_is_capped() {
+        crate::testutil::allow_internal_integrations_once(); // les mocks bindent 127.0.0.1 (escape-hatch SSRF)
+        let oversized_len = crate::net::MAX_RESPONSE_BYTES as usize + 4096;
+        let (addr, _h) = crate::testutil::mock_http_once("A".repeat(oversized_len)).await;
+        let url = format!("http://{addr}/token");
+        let body = tokio::task::spawn_blocking(move || {
+            http_post_form_blocking(&url, "", "grant_type=x", Duration::from_secs(5))
+        })
+        .await
+        .expect("join")
+        .expect("post ok (statut 200 mock)");
+        assert!(
+            (body.len() as u64) <= crate::net::MAX_RESPONSE_BYTES && body.len() < oversized_len,
+            "corps token TRONQUÉ au cap (lu {} <= cap {} < envoyé {})",
+            body.len(), crate::net::MAX_RESPONSE_BYTES, oversized_len
+        );
+    }
+
     /// Write an SSO config directly into settings (bypasses the admin route — for flow tests).
     fn set_config(app: &App, issuer: &str, allowed: Vec<&str>, provisioning: &str, default_role: &str, user_claim: &str) {
         let cfg = json!({
@@ -1489,11 +1521,12 @@ byHb5g3JqJSE6WJSuyEQrUob
         assert_eq!(header_val(&r, "location").as_deref(), Some("http://localhost/app"), "redirect to allowlisted target");
         let tok = cookie_token(&r).expect("forge_session cookie issued");
         let sc = header_val(&r, "set-cookie").unwrap();
-        // Cookie durci : HttpOnly + SameSite=Strict TOUJOURS. `Secure` est SCHEME-AWARE : ce test tape en
-        // http clair (pas de X-Forwarded-Proto: https) -> le flag Secure est OMIS pour que le navigateur
-        // STOCKE réellement le cookie (sinon session jamais persistée sur http local). Cf. request_is_https.
+        // Cookie durci : HttpOnly + SameSite=Strict TOUJOURS. `Secure` est désormais posé PAR DÉFAUT
+        // (durcissement — le cookie de session ne transite jamais en clair), PLUS déduit du
+        // `X-Forwarded-Proto` spoofable. L'opt-out `FORGE_COOKIE_INSECURE=1` (dev http-loopback) le
+        // retirerait (non engagé ici).
         assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict"), "hardened cookie: {sc}");
-        assert!(!sc.contains("Secure"), "plain http -> pas de Secure (sinon cookie droppé): {sc}");
+        assert!(sc.contains("; Secure"), "Secure posé par défaut (cookie de session jamais en clair): {sc}");
 
         // The session identifies the mapped user (email 'Alice@Corp.com' -> login 'alice.corp.com', operator).
         let w = http_raw(addr, &get_req("/api/whoami", &format!("Cookie: forge_session={tok}\r\n"))).await;

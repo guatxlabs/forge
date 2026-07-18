@@ -108,12 +108,17 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
             );
         } else {
             let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // GARDE `WHERE run_job.status='running'` sur le DO UPDATE (miroir du garde de la branche partielle) :
+            // un flush FINAL de complétion NATURELLE arrivant APRÈS un cancel ne doit PAS ré-ouvrir le run en
+            // 'done' — un run 'cancelled' (ou tout statut terminal) reste tel quel (le conflit devient un no-op).
+            // L'INSERT initial (run_id inconnu, ex. CLI hors run flow) est INCHANGÉ (pas de conflit -> ligne 'done').
             let _ = store.execute(
                 "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps)
                  VALUES(?,?,datetime('now'),'done',?,?,?,?,?,?,?)
                  ON CONFLICT(run_id) DO UPDATE SET status='done', mode=excluded.mode, fired=excluded.fired,
                    dry_run=excluded.dry_run, vetoed=excluded.vetoed, errors=excluded.errors,
-                   skipped_budget=excluded.skipped_budget, coverage_gaps=excluded.coverage_gaps",
+                   skipped_budget=excluded.skipped_budget, coverage_gaps=excluded.coverage_gaps
+                 WHERE run_job.status='running'",
                 &crate::sql_params![&run_id, &campaign, mode, geti("fired"), geti("dry_run"),
                     geti("vetoed"), geti("errors"), skipped, gaps],
             );
@@ -188,6 +193,38 @@ mod partial_ingest_tests {
             assert_eq!(nf, 2, "l'ingest final ajoute son delta (b) au finding déjà persisté (a)");
             assert_eq!(status, "done", "l'ingest final marque le run 'done'");
             assert_eq!(fired, 4);
+        }
+    }
+
+    /// [LOW — flush final ne réécrit PAS un run terminal] Un run `cancelled` (annulé) qui reçoit un flush
+    /// FINAL de complétion NATURELLE tardif (partial=false) NE DOIT PAS être ré-ouvert en `done` : le garde
+    /// `WHERE run_job.status='running'` ajouté au `ON CONFLICT DO UPDATE` rend le conflit un NO-OP (miroir du
+    /// garde de la branche partielle). L'INSERT d'un run_id INCONNU (hors run flow, ex. CLI) reste inchangé.
+    #[tokio::test]
+    async fn final_flush_does_not_clobber_cancelled_run() {
+        let app = test_app(&tmp_path("ingest-cancel-guard"));
+        {   // le run est DÉJÀ 'cancelled' (annulé par l'opérateur) au moment du flush final tardif.
+            let store = app.store();
+            store.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode) VALUES(?,?,datetime('now'),'cancelled','auto')",
+                &crate::sql_params!["run-cx", "camp"],
+            ).unwrap();
+        }
+        // flush FINAL tardif (le moteur a fini naturellement APRÈS le cancel) -> ne doit PAS écraser 'cancelled'.
+        let body = json!({"campaign": "camp", "run_id": "run-cx", "partial": false, "coverage": {"fired": 9}});
+        let _ = ingest(State(app.clone()), bearer(), Json(body)).await;
+        {
+            let store = app.store();
+            let status: String = store.query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params!["run-cx"], |r| r.get_str(0)).unwrap();
+            assert_eq!(status, "cancelled", "un flush final NE ré-ouvre PAS un run annulé en 'done'");
+        }
+        // sanity : un run_id INCONNU (hors run flow) crée bien une ligne 'done' (INSERT inchangé).
+        let body2 = json!({"campaign": "camp", "run_id": "run-new", "partial": false, "coverage": {"fired": 1}});
+        let _ = ingest(State(app.clone()), bearer(), Json(body2)).await;
+        {
+            let store = app.store();
+            let status2: String = store.query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params!["run-new"], |r| r.get_str(0)).unwrap();
+            assert_eq!(status2, "done", "un run_id inconnu -> INSERT 'done' (comportement inchangé)");
         }
     }
 }

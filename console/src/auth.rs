@@ -578,17 +578,16 @@ pub(crate) async fn security_headers(req: Request, next: Next) -> Response {
 }
 
 /// Construit la valeur `Set-Cookie` du cookie de session `forge_session`. Attributs durcis TOUJOURS
-/// posés : `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=<ttl>`. Le drapeau `Secure` est
-/// SCHEME-AWARE (et non plus par défaut) : il n'est posé QUE si la requête effective est en HTTPS
-/// (`is_https`, dérivé de `request_is_https` : `X-Forwarded-Proto: https` d'un reverse-proxy TLS, ou
-/// l'override `FORGE_FORCE_SECURE_COOKIE=1`). En http direct (docker loopback `http://127.0.0.1:7100`,
-/// l'accès local documenté du 1er déploiement), `Secure` est OMIS pour que le navigateur STOCKE
-/// réellement le cookie — sinon la session n'est jamais persistée et un login pourtant VALIDE « ne
-/// marche pas » (le bug corrigé). `FORGE_COOKIE_INSECURE=1` reste un override explicite « jamais Secure ».
-/// Le drapeau `Secure` ne change RIEN à l'authz (cf. request_is_https : au pire un Secure forcé = cookie
-/// droppé = auto-DoS, pas une fuite). `HttpOnly`/`SameSite` ne sont JAMAIS affaiblis.
-pub(crate) fn session_cookie(token: &str, ttl: i64, is_https: bool) -> String {
-    let secure = if is_https && !crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "; Secure" } else { "" };
+/// posés : `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=<ttl>`. Le drapeau `Secure` est désormais
+/// posé PAR DÉFAUT (durcissement prod/enterprise) et N'EST PLUS déduit du `X-Forwarded-Proto` (en-tête
+/// SPOOFABLE par le client) : le cookie de session ne doit jamais transiter en clair. Il n'est OMIS
+/// que sur un OPT-OUT ENV explicite `FORGE_COOKIE_INSECURE=1` — réservé au déploiement http-loopback de
+/// dev (`http://127.0.0.1:7100`), où un cookie Secure servi en http serait DROPPÉ par le navigateur
+/// (session jamais persistée). `HttpOnly`/`SameSite=Strict` ne sont JAMAIS affaiblis. Le drapeau `Secure`
+/// ne change RIEN à l'authz (au pire un Secure droppé en http = auto-DoS de la session, pas une fuite).
+pub(crate) fn session_cookie(token: &str, ttl: i64) -> String {
+    // Secure PAR DÉFAUT ; seul l'opt-out env explicite (dev http-loopback) le retire.
+    let secure = if crate::env_flag_enabled("FORGE_COOKIE_INSECURE") { "" } else { "; Secure" };
     format!("forge_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}{secure}")
 }
 

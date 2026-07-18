@@ -32,12 +32,26 @@ use std::time::{Duration, Instant};
 // verrouillé on rejette après un délai FIXE (uniforme), sans court-circuit révélateur de l'existence.
 // État EN MÉMOIRE (propriété du déploiement, pas d'une requête) ; fail-closed (verrou empoisonné => on
 // throttle quand même). Reset sur login réussi ; le verrou expire (pas de lock-out permanent des légitimes).
+//
+// HA / MULTI-INSTANCE : ce compteur est PAR PROCESSUS (map en mémoire, non répliquée). Sous HA le seuil
+// effectif est donc N×LOGIN_MAX_FAILS avec N réplicas derrière le load-balancer. C'est ACCEPTÉ (defense-in-
+// depth, pas un contrôle d'auth dur) : un DB-backing du verrou ajouterait une écriture par tentative
+// (amplification DoS) sans supprimer la fenêtre de course cross-instance. Le durcissement d'auth réel reste
+// argon2id + la borne mémoire de la map (MAX_TRACKED_LOGINS) ; on ne sur-conçoit pas ce throttle.
 // =====================================================================================
 
 pub(crate) const LOGIN_MAX_FAILS: u32 = 5; // échecs consécutifs dans la fenêtre avant verrou (pub(crate) : lu par les tests)
 const LOGIN_FAIL_WINDOW: Duration = Duration::from_secs(300); // la série d'échecs se périme après 5 min sans échec
 const LOGIN_LOCKOUT: Duration = Duration::from_secs(300); // durée du verrou une fois déclenché
 const LOGIN_LOCK_DELAY: Duration = Duration::from_millis(700); // délai UNIFORME appliqué à un rejet verrouillé
+/// Borne DURE du nombre de logins suivis SIMULTANÉMENT (anti-épuisement mémoire NON authentifié : la clé
+/// de throttle est le login SOUMIS, donc sans plafond un attaquant insérerait une entrée par chaîne
+/// distincte). Au plafond on balaie d'abord les séries mortes ; si c'est encore plein, on n'insère PAS de
+/// NOUVELLE clé (les entrées existantes — donc les verrous en cours — restent honorées). Par-processus.
+const MAX_TRACKED_LOGINS: usize = 4096;
+/// Longueur max d'un login accepté par `/api/login` (parité `validate_login`). Au-delà = jamais un compte
+/// valide -> rejeté AVANT tout suivi de throttle (n'empoisonne pas la map, ne borne pas la longueur de clé).
+const MAX_LOGIN_LEN: usize = 64;
 
 struct LoginAttempt {
     fails: u32,
@@ -68,10 +82,28 @@ fn login_is_locked(key: &str, now: Instant) -> bool {
     false
 }
 
+/// Retire les entrées dont la série est périmée ET (le cas échéant) le verrou expiré — elles ne portent
+/// plus aucune info de throttle. Balayage périodique bornant la croissance mémoire de la map.
+fn sweep_expired(map: &mut HashMap<String, LoginAttempt>, now: Instant) {
+    map.retain(|_, a| match a.locked_until {
+        Some(until) => now < until,                                    // verrou encore actif -> garder
+        None => now.duration_since(a.first_fail) <= LOGIN_FAIL_WINDOW,  // fenêtre encore vivante -> garder
+    });
+}
+
 /// Enregistre un échec pour `key` ; déclenche le verrou au franchissement du seuil dans la fenêtre. Appelé
 /// UNIQUEMENT sur un vrai échec d'identifiants (compte existant OU non — même espace de clés).
 fn login_note_failure(key: &str, now: Instant) {
     let mut map = login_attempts().lock().unwrap_or_else(|e| e.into_inner());
+    // ANTI-ÉPUISEMENT MÉMOIRE : une clé NOUVELLE au plafond -> balaie les séries mortes ; toujours plein ->
+    // on N'INSÈRE PAS cette nouvelle clé (fail-safe : les verrous existants restent honorés). Une clé DÉJÀ
+    // suivie est toujours mise à jour (on ne perd jamais un verrou en cours).
+    if !map.contains_key(key) && map.len() >= MAX_TRACKED_LOGINS {
+        sweep_expired(&mut map, now);
+        if map.len() >= MAX_TRACKED_LOGINS {
+            return; // plafond atteint après balayage -> ne pas suivre cette nouvelle clé
+        }
+    }
     let a = map.entry(key.to_string()).or_insert(LoginAttempt { fails: 0, first_fail: now, locked_until: None });
     if now.duration_since(a.first_fail) > LOGIN_FAIL_WINDOW {
         a.fails = 0; // série périmée -> nouvelle fenêtre
@@ -98,11 +130,17 @@ fn login_clear(key: &str) {
 ///   le cookie (UI), soit par `Authorization: Bearer <token>` (CLI/API). 401 sur identifiants invalides.
 /// NB : route NON gardée par auth_guard (sinon impossible de se connecter quand pass_hash est posé) ;
 /// elle est sous host_guard comme tout le reste. Échec d'identifiant -> message générique (anti-énum).
-pub(crate) async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+pub(crate) async fn login(State(app): State<App>, _headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let login_in = body.get("login").and_then(|v| v.as_str()).unwrap_or("");
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if login_in.is_empty() || password.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": "login et password requis"}))).into_response();
+    }
+    // ANTI-DoS : un login déraisonnablement long n'est JAMAIS un compte valide (parité validate_login).
+    // On le rejette AVANT tout suivi de throttle -> il ne peut ni peupler la map ni allonger une clé
+    // (épuisement mémoire non authentifié). Réponse générique identique (anti-énumération).
+    if login_in.len() > MAX_LOGIN_LEN {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid_credentials"}))).into_response();
     }
     let now = Instant::now();
     // THROTTLE anti-brute-force — clé = login SOUMIS (existence-agnostique). Si verrouillé : rejet avec un
@@ -143,7 +181,7 @@ pub(crate) async fn login(State(app): State<App>, headers: HeaderMap, Json(body)
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
     };
     let ttl = session_ttl_secs();
-    let cookie = session_cookie(&token, ttl, request_is_https(&headers));
+    let cookie = session_cookie(&token, ttl);
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -196,7 +234,7 @@ pub(crate) async fn setup_state(State(app): State<App>) -> impl IntoResponse {
 /// dans l'UI). Recalcule la gate d'auth (un admin activé existe désormais), ouvre une session (cookie
 /// forge_session) pour que le navigateur atterrisse connecté, et ledgerise `console.setup.provision`
 /// (attribution = le login admin ; JAMAIS le mot de passe ni le hash).
-pub(crate) async fn setup_provision(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+pub(crate) async fn setup_provision(State(app): State<App>, _headers: HeaderMap, Json(body): Json<Value>) -> Response {
     // AUTO-DÉSACTIVANTE : une console déjà provisionnée ne peut plus être (re)provisionnée anonymement.
     if app.provisioned() {
         return (
@@ -285,7 +323,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, headers: HeaderMap, 
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "session_persist_failed", "why": e.to_string()}))).into_response(),
     };
     let ttl = session_ttl_secs();
-    let cookie = session_cookie(&token, ttl, request_is_https(&headers));
+    let cookie = session_cookie(&token, ttl);
     // ledger : provision attribuée au nouvel admin. JAMAIS le mot de passe/hash (login + booléens seuls).
     append_console_ledger(&app, "console.setup.provision", json!({
         "actor": login,
@@ -374,5 +412,49 @@ pub(crate) async fn setup_migrate(State(app): State<App>, Json(body): Json<Value
         Ok(Ok(report)) => (StatusCode::OK, Json(report)).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": "migrate_failed", "why": e}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "migrate_panicked", "why": e.to_string()}))).into_response(),
+    }
+}
+
+// =====================================================================================
+// TESTS — anti-DoS du throttle login (borne mémoire de la map + rejet des logins sur-longs). INLINE car
+// ces helpers sont PRIVÉS au module setup (une sonde depuis un module de test frère n'y accéderait pas).
+// =====================================================================================
+#[cfg(test)]
+mod dos_tests {
+    use super::*;
+    use crate::testutil::*;
+
+    /// [LOW — sweep borne la map de throttle] `sweep_expired` retire les séries PÉRIMÉES (fenêtre écoulée,
+    /// aucun verrou) mais CONSERVE les séries vivantes et les verrous encore actifs — c'est ce qui empêche
+    /// la map de croître sans borne sous un flot d'échecs de logins distincts.
+    #[test]
+    fn sweep_expired_prunes_dead_entries_only() {
+        let now = Instant::now();
+        let mut map: HashMap<String, LoginAttempt> = HashMap::new();
+        // (a) série périmée : 1er échec au-delà de la fenêtre, aucun verrou -> À RETIRER.
+        map.insert("dead".into(), LoginAttempt { fails: 1, first_fail: now - LOGIN_FAIL_WINDOW - Duration::from_secs(1), locked_until: None });
+        // (b) série vivante : 1er échec récent -> À GARDER.
+        map.insert("live".into(), LoginAttempt { fails: 1, first_fail: now, locked_until: None });
+        // (c) verrou encore actif -> À GARDER.
+        map.insert("locked".into(), LoginAttempt { fails: 5, first_fail: now, locked_until: Some(now + Duration::from_secs(60)) });
+        sweep_expired(&mut map, now);
+        assert!(!map.contains_key("dead"), "série périmée retirée (borne mémoire)");
+        assert!(map.contains_key("live") && map.contains_key("locked"), "séries vivantes / verrous actifs conservés");
+    }
+
+    /// [LOW — login sur-long rejeté AVANT tout suivi] Un login > MAX_LOGIN_LEN n'est JAMAIS un compte valide :
+    /// `/api/login` le rejette 401 générique SANS l'insérer dans la map de throttle (anti-épuisement mémoire
+    /// non authentifié — sinon un attaquant peuplerait la map d'une entrée par chaîne longue distincte).
+    #[tokio::test]
+    async fn overlong_login_rejected_without_tracking() {
+        let app = test_app(&tmp_path("login-overlong"));
+        { let db = app.db(); upsert_user(&db, "real", "viewer", &hash_pw("pw")).unwrap(); }
+        let longkey = "a".repeat(MAX_LOGIN_LEN + 1);
+        let resp = login(State(app.clone()), HeaderMap::new(), Json(json!({"login": longkey, "password": "x"}))).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "login sur-long -> 401 générique (anti-énumération)");
+        assert!(
+            !login_attempts().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&longkey),
+            "la clé sur-longue n'est JAMAIS suivie (rejet avant login_note_failure -> borne mémoire)"
+        );
     }
 }

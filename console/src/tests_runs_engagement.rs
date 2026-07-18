@@ -295,6 +295,37 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger);
     }
 
+    /// [M1 — suppression d'engagement vs run VIVANT] `engagement_do_delete` REFUSE (409) tant qu'un run de
+    /// l'engagement est encore `status='running'` : supprimer sa ligne `run_job` pendant que le moteur
+    /// détaché tourne laisserait ses POSTs `/api/ingest` tardifs résoudre l'engagement via une ligne
+    /// DISPARUE -> `unwrap_or(1)` -> findings estampillés à l'engagement #1 (contamination cross-engagement).
+    /// Une fois le run terminal (`done`/`cancelled`), la suppression passe.
+    #[tokio::test]
+    async fn m1_delete_engagement_refused_while_run_live() {
+        let ledger = tmp_path("forge-test-m1-live");
+        let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger); // ancre #1 (jamais supprimable)
+        insert_test_engagement(&app, 2, &["a.example.com"], "grey", &ledger); // cible
+        { let db = app.db(); db.execute("INSERT INTO run_job(run_id,campaign,status,mode,engagement_id) VALUES('rlive','c','running','propose',2)", []).unwrap(); }
+
+        // (a) REFUS 409 tant que le run est vivant ; l'engagement ET sa ligne run_job survivent (pas de contamination).
+        let e = engagement_do_delete(&app, 2, "adm").unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT, "delete refusé (409) tant qu'un run est vivant");
+        assert!(e.1.contains("en cours"), "message explicite: {}", e.1);
+        { let n: i64 = app.db().query_row("SELECT COUNT(*) FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
+          assert_eq!(n, 1, "l'engagement #2 N'A PAS été supprimé"); }
+        { let s: String = app.db().query_row("SELECT status FROM run_job WHERE run_id='rlive'", [], |r| r.get(0)).unwrap();
+          assert_eq!(s, "running", "la ligne run_job survit (aucune résolution vers #1 possible)"); }
+
+        // (b) run devenu terminal ('cancelled') -> la suppression PASSE.
+        { let db = app.db(); db.execute("UPDATE run_job SET status='cancelled' WHERE run_id='rlive'", []).unwrap(); }
+        let ok = engagement_do_delete(&app, 2, "adm").expect("delete OK une fois le run terminal");
+        assert_eq!(ok["ok"], true, "suppression réussie");
+        { let n: i64 = app.db().query_row("SELECT COUNT(*) FROM engagement WHERE id=2", [], |r| r.get(0)).unwrap();
+          assert_eq!(n, 0, "l'engagement #2 est supprimé une fois le run terminal"); }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// [ISOLATION] Deux engagements aux scopes DISJOINTS restent isolés : un run pour A valide contre le
     /// scope de A UNIQUEMENT (la cible de B est refusée), et réciproquement. Un run pour B accepte sa
     /// propre cible et journalise dans SON ledger — jamais celui de A.

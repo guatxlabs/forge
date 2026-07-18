@@ -388,6 +388,17 @@ use crate::testutil::*;
             s["flag_allowlist"] = json!([ok_flag]);
             assert!(crate::tools::validate_toolspec(&s).is_ok(), "flag_allowlist '{ok_flag}' (légitime) acceptée");
         }
+        // M2 — le SEGMENT DEFAULT d'un placeholder {param:NAME:DEFAULT} subit la MÊME curation
+        // d'option-injection que les tokens littéraux : un défaut '-'-leading est REFUSÉ (il smugglerait un
+        // drapeau d'écriture-fichier/exfil que le scan des seuls tokens littéraux + nom de param ne voit pas).
+        for evil in ["{param:mode:-oN/tmp/pwned}", "{param:out:--output=/tmp/x}", "{param:p:-x}"] {
+            let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", evil]);
+            assert!(crate::tools::validate_toolspec(&s).is_err(), "défaut de param '-'-leading refusé: {evil}");
+        }
+        // garde anti-sur-blocage : un défaut de param NON-drapeau (valeur positionnelle) reste accepté.
+        let mut s = simple_toolspec(); s["argv_template"] = json!(["{target}", "{param:port:443}", "{param:mode:fast}"]);
+        assert!(crate::tools::validate_toolspec(&s).is_ok(), "défauts de param non-drapeau acceptés");
+
         // kind hors namespace custom.* (surcharge natif) -> 400.
         let mut s = simple_toolspec(); s["kind"] = json!("recon.httpx");
         assert!(crate::tools::validate_toolspec(&s).is_err(), "kind non-custom refusé");
