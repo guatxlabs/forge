@@ -196,6 +196,122 @@ class SessionStore:
     __str__ = __repr__
 
 
+# =================================================================================================
+#  CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5) — comptes de test LABELLISÉS de l'opérateur +
+#  idor_targets structurés, qui alimentent les oracles de contrôle d'accès (IDOR d'abord).
+# =================================================================================================
+class AuthAccount:
+    """Un compte de test de l'opérateur, LABELLISÉ (`attacker` / `victim` / …). Enrobe `Session` pour
+    réutiliser exactement le parsing headers/cookies/bearer ET la rédaction (repr/str n'exposent que
+    des compteurs — le matériel secret ne fuit pas dans une représentation lisible).
+
+    Le compte est FOURNI par l'opérateur (ses propres comptes de test sur une cible in-scope) — jamais
+    récolté/volé. Son seul usage : REJOUER une requête authentifiée (headers de session) contre une
+    ressource possédée par un AUTRE compte de l'opérateur pour prouver un accès cross-compte."""
+
+    def __init__(self, data=None, **kw):
+        d = dict(data or {})
+        d.update(kw)
+        self.label = str(d.get("label") or "").strip()
+        self._session = Session(d)                    # réutilise headers/cookies/bearer + rédaction
+
+    def headers(self):
+        """En-têtes de requête à INJECTER (copie fraîche) — bruts + Cookie + Authorization: Bearer."""
+        return self._session.request_headers()
+
+    def is_empty(self):
+        return self._session.is_empty()
+
+    def as_param(self):
+        """Forme consommée par l'oracle IDOR : {label, headers}. SECRET — les headers portent le
+        matériel d'auth (jamais journalisé tel quel ; le PoC/evidence est rédigé à la source)."""
+        return {"label": self.label, "headers": self.headers()}
+
+    # --- rédaction : JAMAIS de valeur secrète dans une représentation lisible/loggable ---
+    def __repr__(self):
+        return f"<forge.AuthAccount label={self.label!r} {self._session!r}>"
+
+    __str__ = __repr__
+
+
+class AuthContext:
+    """Contexte d'authentification PAR-ENGAGEMENT (R5) : comptes de test LABELLISÉS de l'opérateur +
+    `idor_targets` structurés {url, owner, marker}. Alimente les oracles de contrôle d'accès.
+
+    - `accounts`      : liste d'`AuthAccount` non vides (attacker/victim/…) ;
+    - `idor_targets`  : liste de dicts {url (in-scope), owner (ex 'victim'), marker (chaîne prouvant la
+                        donnée de la victime)} ; l'oracle rejoue chaque `url` avec la session de
+                        l'ATTAQUANT et flag si le marqueur (ou un 2xx là où l'anon est refusé) revient.
+
+    Extensible : `ato`/`takeover` consommeront les MÊMES `accounts` plus tard (suivi R5b) — seul le
+    slice IDOR est câblé ici. SECRET : `ledger_summary()`/`repr` n'exposent QUE des labels + des
+    compteurs, jamais un secret. INERTE si absent (`from_scope` -> None -> aucun changement)."""
+
+    def __init__(self, accounts=None, idor_targets=None):
+        self.accounts = [a for a in (accounts or [])
+                         if isinstance(a, AuthAccount) and not a.is_empty()]
+        self.idor_targets = list(idor_targets or [])
+
+    @classmethod
+    def from_scope(cls, scope):
+        """Construit depuis `scope.auth` (bloc optionnel). Rend None (INERTE) si le bloc est absent,
+        illisible, ou ne porte NI compte NI cible exploitable — l'oracle retombe alors sur son chemin
+        historique (« config manquante »), byte-identique. Fail-closed : une entrée non-dict est
+        ignorée (jamais une exception -> jamais un contexte fabriqué)."""
+        raw = getattr(scope, "auth", None)
+        if not isinstance(raw, dict):
+            return None
+        accounts = []
+        for a in (raw.get("accounts") or []):
+            if isinstance(a, dict):
+                acc = AuthAccount(a)
+                if not acc.is_empty():                # un compte sans matériel d'auth n'aide en rien
+                    accounts.append(acc)
+        targets = []
+        for t in (raw.get("idor_targets") or []):
+            if isinstance(t, dict) and t.get("url"):
+                targets.append({
+                    "url": str(t.get("url")),
+                    "owner": str(t.get("owner") or ""),
+                    "marker": "" if t.get("marker") is None else str(t.get("marker")),
+                })
+        if not accounts and not targets:
+            return None                               # rien d'exploitable -> INERTE
+        return cls(accounts=accounts, idor_targets=targets)
+
+    def account(self, label):
+        """Le compte portant `label` (insensible à la casse), ou None."""
+        lo = str(label or "").strip().lower()
+        for a in self.accounts:
+            if a.label.lower() == lo:
+                return a
+        return None
+
+    def attacker(self):
+        """Le compte ATTAQUANT : celui labellisé 'attacker' si présent, sinon le 1er compte (convention)."""
+        return self.account("attacker") or (self.accounts[0] if self.accounts else None)
+
+    def accounts_as_params(self):
+        """Les comptes sous la forme {label, headers} consommée par l'oracle IDOR (SECRET — rédigé à
+        la source lors de la construction du finding)."""
+        return [a.as_param() for a in self.accounts]
+
+    def is_empty(self):
+        return not self.accounts and not self.idor_targets
+
+    def ledger_summary(self):
+        """Vue SÛRE pour le ledger/log d'un run qui a UTILISÉ le contexte : labels des comptes + nombre
+        de cibles idor. AUCUN secret (jamais un header/cookie/bearer/URL complète d'un marqueur)."""
+        return {"accounts": [a.label for a in self.accounts],
+                "idor_targets": len(self.idor_targets)}
+
+    def __repr__(self):
+        return (f"<forge.AuthContext accounts={len(self.accounts)} "
+                f"idor_targets={len(self.idor_targets)}>")
+
+    __str__ = __repr__
+
+
 # --- liaison ambiante (thread-local) : le moteur LIE le store autour de chaque fire() --------------
 _local = threading.local()
 
