@@ -194,6 +194,18 @@ CREATE TABLE IF NOT EXISTS notification(
   engagement_id INTEGER, finding_id INTEGER, text TEXT NOT NULL DEFAULT '',
   read INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_notification_user_read ON notification(user_id, read);
+-- LOGIN THROTTLE (anti-brute-force du login local — CLUSTER-WIDE) : compteur d'échecs + fenêtre de verrou
+-- ADOSSÉS AU STORE PARTAGÉ, donc autoritaires cross-réplica sous HA (remplacent la map PAR-PROCESSUS qui, N
+-- réplicas derrière un LB, laissait ~N×seuil tentatives par fenêtre). Une ligne par LOGIN SOUMIS (clé métier,
+-- EXISTENCE-AGNOSTIQUE : un login inconnu et un compte réel sont throttlés à l'identique -> anti-énumération),
+-- `fails` = échecs consécutifs dans la fenêtre, `first_ts` = epoch s du 1er échec de la série (ancre de
+-- fenêtre), `locked_until` = epoch s jusqu'auquel le login est rejeté (0 = pas de verrou). Écriture ATOMIQUE
+-- (INSERT … ON CONFLICT(login) DO UPDATE : incrément sans lost-update sous échecs concurrents) + purge
+-- opportuniste des lignes périmées à chaque échec (borne la table — miroir du sweep in-memory remplacé).
+-- BIGINT pour les epochs (affinité INTEGER en SQLite -> parité PG_SCHEMA, comme leader_lease/ha_instance).
+CREATE TABLE IF NOT EXISTS login_throttle(
+  login TEXT PRIMARY KEY, fails BIGINT NOT NULL DEFAULT 0,
+  first_ts BIGINT NOT NULL DEFAULT 0, locked_until BIGINT NOT NULL DEFAULT 0);
 ";
 
 // SCHEMA POSTGRES (feature `store-postgres`) — MIROIR du `SCHEMA` SQLite ci-dessus AVEC les colonnes
@@ -340,6 +352,12 @@ CREATE TABLE IF NOT EXISTS notification(
   engagement_id BIGINT, finding_id BIGINT, text TEXT NOT NULL DEFAULT '',
   read BIGINT NOT NULL DEFAULT 0, created TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_notification_user_read ON notification(user_id, read);
+-- LOGIN THROTTLE (anti-brute-force CLUSTER-WIDE) — MIROIR PG de la table SQLite. `login` PK (clé métier,
+-- pas d'IDENTITY), fails/first_ts/locked_until BIGINT (epoch s). Adossé au store partagé -> le verrou tient
+-- ACROSS RÉPLICAS (INSERT … ON CONFLICT(login) DO UPDATE atomique, row-lock PG -> pas de lost-update).
+CREATE TABLE IF NOT EXISTS login_throttle(
+  login TEXT PRIMARY KEY, fails BIGINT NOT NULL DEFAULT 0,
+  first_ts BIGINT NOT NULL DEFAULT 0, locked_until BIGINT NOT NULL DEFAULT 0);
 ";
 
 // SCHEMA VERSION STAMP — version LOGIQUE du schéma DB, persistée dans `settings` (clé
