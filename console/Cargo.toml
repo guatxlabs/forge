@@ -55,7 +55,7 @@ await_holding_lock = "warn"
 significant_drop_tightening = "warn"
 
 [dependencies]
-guatx-core = { path = "../../core" }   # cœur partagé public (GUATX/core) ; passer à une dép git quand le repo public existe
+guatx-core = { path = "../../core", features = ["forge"] }   # cœur partagé ; la feature `forge` (défaut OFF côté core) active Schema::forge/engagement_id — code Forge-spécifique compilé UNIQUEMENT ici, absent du build Plume/OSS. Compilateur SOQL + RowFilter restent génériques (une seule copie, pas de fork). Passer à une dép git/crate publié quand le repo core public existe.
 axum = "0.7"
 tower-http = { version = "0.5", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
