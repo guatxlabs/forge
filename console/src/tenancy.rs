@@ -96,6 +96,43 @@ pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
     set
 }
 
+/// H1 — the SET of engagement ids the caller may READ, materialized for the mandatory raw-SoQL row-filter
+/// (`soql::Schema::with_row_filter("engagement_id", …)`). ENTERPRISE-only (callers gate on `enabled()` and
+/// pass the result straight to the core compiler, which ANDs `engagement_id IN (<these>)` — or `1=0` when
+/// EMPTY — into every compiled base). Semantics mirror `engagement_visible` (an engagement is visible iff
+/// its tenant is in the caller's granted set), just expanded to the full id list:
+///   - SUPER-ADMIN (platform/MSSP) => ALL engagement ids (legitimate cross-tenant read of the raw surface) ;
+///   - otherwise => every engagement id whose `tenant_id` is in the caller's granted tenants ;
+///   - NO grant & not super-admin => EMPTY vec => the core row-filter matches NOTHING (fail-closed: zero
+///     rows, never all). Ids sorted for a deterministic compiled statement.
+pub fn granted_engagement_ids(app: &App, headers: &HeaderMap) -> Vec<i64> {
+    // Super-admin first: acquires+releases its own db handle BEFORE we take a store guard (no re-lock).
+    if is_superadmin(app, headers) {
+        let store = app.store();
+        let mut ids: Vec<i64> = store
+            .query_lax("SELECT id FROM engagement", &[], |r| r.get_i64(0))
+            .unwrap_or_default();
+        ids.sort_unstable();
+        return ids;
+    }
+    // `granted_tenants` takes+releases its OWN store guard -> must run BEFORE we acquire ours (no deadlock).
+    let granted = granted_tenants(app, headers);
+    if granted.is_empty() {
+        return Vec::new(); // fail-closed: no grant => empty scope => row-filter matches nothing
+    }
+    let (ph, params) = tenants_in_bind(&granted);
+    let store = app.store();
+    let mut ids: Vec<i64> = store
+        .query_lax(
+            &format!("SELECT id FROM engagement WHERE tenant_id IN ({ph})"),
+            &params,
+            |r| r.get_i64(0),
+        )
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids
+}
+
 /// tenant_id owning engagement `eid` (data inherits tenant via engagement_id). None if the engagement
 /// does not exist. Pure lookup.
 fn tenant_of_engagement(app: &App, eid: i64) -> Option<i64> {

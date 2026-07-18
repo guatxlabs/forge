@@ -39,12 +39,15 @@ pub(crate) fn cell(row: &rusqlite::Row, i: usize) -> Value {
 ///   - `total` : nb de lignes renvoyées (après LIMIT éventuel du pipeline soql) ;
 ///   - `stats` : agrégats légers par colonne numérique (min/max/sum) — utile aux viz du dashboard.
 pub(crate) fn exec_soql(db_path: &str, q: &str) -> Result<Value, (StatusCode, String)> {
-    exec_soql_time(db_path, q, 0, 0)
+    // CLI local admin (single-tenant) : schéma Forge NON scopé (aucun row-filter) — parité stricte.
+    exec_soql_time(db_path, q, 0, 0, &soql::Schema::forge())
 }
 
 /// Variante avec bornes temporelles (epoch ; 0 = pas de borne) — utilisée par panel_data (from/to).
-pub(crate) fn exec_soql_time(db_path: &str, q: &str, from: i64, to: i64) -> Result<Value, (StatusCode, String)> {
-    let c = soql::compile_with_time(q, from, to, &soql::Schema::forge()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+/// `schema` porte le row-filter tenant OBLIGATOIRE (H1) quand l'appelant est scopé ; `Schema::forge()`
+/// nu en community/CLI (émission byte-identique).
+pub(crate) fn exec_soql_time(db_path: &str, q: &str, from: i64, to: i64, schema: &soql::Schema) -> Result<Value, (StatusCode, String)> {
+    let c = soql::compile_with_time(q, from, to, schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -67,24 +70,47 @@ pub(crate) fn exec_soql_time(db_path: &str, q: &str, from: i64, to: i64) -> Resu
 /// SQLite (aujourd'hui, `App.pg` toujours `None` — gate fail-closed) => le chemin read-only
 /// SQLite EXISTANT (`exec_soql_time`), BYTE-IDENTIQUE. Postgres (feature `store-postgres` + `App.pg`
 /// = Some) => `exec_soql_time_pg` (session PG read-only). Les handlers qui DISPOSENT de l'App
-/// (`query`/`query_post`/`panel_data`) passent par ICI ; la sous-commande CLI `query` (sans App)
-/// garde `exec_soql` (SQLite) ou route elle-même vers PG (cli.rs). L'isolation READ-ONLY est
-/// préservée sur les DEUX backends.
-pub(crate) fn exec_soql_app(app: &App, q: &str) -> Result<Value, (StatusCode, String)> {
-    exec_soql_time_app(app, q, 0, 0)
-}
-
-/// Variante bornée dans le temps de [`exec_soql_app`] (from/to epoch ; 0 = pas de borne).
-pub(crate) fn exec_soql_time_app(app: &App, q: &str, from: i64, to: i64) -> Result<Value, (StatusCode, String)> {
+/// (`query`/`query_post`/`panel_data`) passent par ICI (via `exec_soql_time_scoped`, qui pose le
+/// row-filter tenant) ; la sous-commande CLI `query` (sans App) garde `exec_soql` (SQLite). L'isolation
+/// READ-ONLY est préservée sur les DEUX backends.
+/// `schema` porte le row-filter tenant OBLIGATOIRE (H1) quand l'appelant est scopé (cf. `forge_schema_scoped`).
+pub(crate) fn exec_soql_time_app(app: &App, q: &str, from: i64, to: i64, schema: &soql::Schema) -> Result<Value, (StatusCode, String)> {
     // POSTGRES (feature `store-postgres`) : si l'App tient un client PG session-pinné, on lit dessus
     // (transaction READ ONLY). Sinon — et TOUJOURS dans le build community (bloc non compilé) — on
     // retombe sur le chemin SQLite read-only INCHANGÉ ci-dessous.
     #[cfg(feature = "store-postgres")]
     if app.pg.is_some() {
         let store = app.store();
-        return exec_soql_time_pg_store(&store, q, from, to);
+        return exec_soql_time_pg_store(&store, q, from, to, schema);
     }
-    exec_soql_time(&app.db_path, q, from, to)
+    exec_soql_time(&app.db_path, q, from, to, schema)
+}
+
+/// H1 — construit le schéma Forge SCOPÉ à l'appelant. En mode ENTERPRISE (`tenancy::enabled`), pose le
+/// row-filter OBLIGATOIRE NON CONTOURNABLE `engagement_id IN (<engagements accordés>)` (injecté par le
+/// compilateur cœur dans le WHERE de CHAQUE base finding/runrecord, à toute profondeur). Grant VIDE ->
+/// liste d'ids vide -> le row-filter matche RIEN (fail-closed : zéro ligne, jamais toutes). COMMUNITY
+/// (flag OFF) -> `Schema::forge()` nu (aucun filtre — mono-tenant byte-identique, l'engagement n'est pas
+/// une frontière de sécurité).
+fn forge_schema_scoped(app: &App, headers: &HeaderMap) -> soql::Schema {
+    let s = soql::Schema::forge();
+    if tenancy::enabled(app) {
+        let granted = tenancy::granted_engagement_ids(app, headers);
+        s.with_row_filter("engagement_id", &granted)
+    } else {
+        s
+    }
+}
+
+/// H1 — exécute une SoQL brute SCOPÉE au tenant de l'appelant (row-filter obligatoire en enterprise).
+pub(crate) fn exec_soql_scoped(app: &App, headers: &HeaderMap, q: &str) -> Result<Value, (StatusCode, String)> {
+    exec_soql_time_scoped(app, headers, q, 0, 0)
+}
+
+/// Variante bornée dans le temps de [`exec_soql_scoped`].
+pub(crate) fn exec_soql_time_scoped(app: &App, headers: &HeaderMap, q: &str, from: i64, to: i64) -> Result<Value, (StatusCode, String)> {
+    let schema = forge_schema_scoped(app, headers);
+    exec_soql_time_app(app, q, from, to, &schema)
 }
 
 /// CHEMIN LECTURE POSTGRES du moteur SoQL (feature `store-postgres`). ATTEIGNABLE uniquement quand
@@ -104,8 +130,9 @@ pub(crate) fn exec_soql_time_pg_store(
     q: &str,
     from: i64,
     to: i64,
+    schema: &soql::Schema,
 ) -> Result<Value, (StatusCode, String)> {
-    let c = soql::compile_with_time(q, from, to, &soql::Schema::forge()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let c = soql::compile_with_time(q, from, to, schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let ncol = c.columns.len();
     // Transaction READ ONLY = la MÊME isolation read-only que le SQLITE_OPEN_READ_ONLY du chemin SQLite.
     // Un BEGIN qui échoue est une erreur dure (aucune tx ouverte -> on sort). Le COMMIT best-effort est
@@ -158,36 +185,18 @@ pub(crate) fn soql_stats(columns: &[String], rows: &[Value]) -> Value {
     Value::Object(out)
 }
 
-/// H1 — ENTERPRISE fail-closed gate for the RAW SoQL DATA surface (`/api/query` GET+POST,
-/// `/api/panels/:id/data`). The SoQL engine (`exec_soql_app`) compiles an ARBITRARY caller/stored
-/// query over the WHOLE `finding`/`runrecord` tables with NO engagement/tenant predicate, and its
-/// projection NEVER exposes `engagement_id` (see `Schema::forge` — fcols/rcols carry no engagement id),
-/// so the result rows cannot be reliably tenant-scoped from WITHIN the console crate: a mandatory
-/// `engagement_id IN (<granted>)` restriction would have to be injected in the guatx-core compiler.
-/// Under enterprise tenancy this surface let ANY authenticated session (incl. a tenant_viewer) read
-/// EVERY tenant's findings. We therefore DENY the raw surface when tenancy is engaged — better closed
-/// than leaking. The tenant-scoped views (`/api/findings`, `/api/coverage`, `/api/runs`, …) remain the
-/// supported read path and DO bind `engagement_id` (fail-closed). COMMUNITY (flag OFF) => None:
-/// byte-identical, no gate (engagement is not a security boundary in single-tenant mode).
-fn soql_tenancy_denied(app: &App) -> Option<(StatusCode, Json<Value>)> {
-    if tenancy::enabled(app) {
-        return Some((
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "tenant_scoped_surface_required",
-                "why": "la surface SoQL brute (/api/query, /api/panels/:id/data) est désactivée en mode enterprise multi-tenant (fail-closed) — utilisez les vues scopées par engagement (/api/findings, /api/coverage, /api/runs, …)"
-            })),
-        ));
-    }
-    None
-}
-
-pub(crate) async fn query(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    if let Some(denied) = soql_tenancy_denied(&app) {
-        return denied; // H1 : surface SoQL brute non tenant-scopée -> refus fail-closed en enterprise
-    }
+/// H1 — ENTERPRISE tenant-SCOPED raw SoQL DATA surface (`/api/query` GET+POST, `/api/panels/:id/data`).
+/// The SoQL engine compiles an ARBITRARY caller/stored query over the `finding`/`runrecord` tables. Under
+/// enterprise tenancy every such query is now compiled with the core's MANDATORY, non-bypassable row-filter
+/// `engagement_id IN (<caller's granted engagements>)` (see `forge_schema_scoped` + `soql::with_row_filter`):
+/// the result rows are constrained to the caller's tenant(s) at the AST/base level, so no user SoQL
+/// (WHERE/OR/UNION/subquery/comment) can read another tenant's rows. A grantless caller gets the empty
+/// filter => ZERO rows (fail-closed). This REPLACES the previous fail-closed 403 DENY with a proper
+/// tenant-scoped read. COMMUNITY (flag OFF) => plain `Schema::forge()` (no filter) — byte-identical
+/// single-tenant behaviour (engagement is not a security boundary there).
+pub(crate) async fn query(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let qs = q.get("q").cloned().unwrap_or_else(|| "search".to_string());
-    match exec_soql_app(&app, &qs) {
+    match exec_soql_scoped(&app, &headers, &qs) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((s, e)) => (s, Json(json!({"error": e}))),
     }
@@ -196,17 +205,14 @@ pub(crate) async fn query(State(app): State<App>, Query(q): Query<HashMap<String
 /// POST /api/query {"soql": "...", "q": "..."} -> {columns, rows, total, stats, compiled}.
 /// Accepte `soql` ou `q` (alias). Même moteur read-only que le GET ; permet des requêtes
 /// longues qui ne tiennent pas en query-string.
-pub(crate) async fn query_post(State(app): State<App>, Json(body): Json<Value>) -> impl IntoResponse {
-    if let Some(denied) = soql_tenancy_denied(&app) {
-        return denied; // H1 : surface SoQL brute non tenant-scopée -> refus fail-closed en enterprise
-    }
+pub(crate) async fn query_post(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
     let qs = body
         .get("soql")
         .or_else(|| body.get("q"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "search".to_string());
-    match exec_soql_app(&app, &qs) {
+    match exec_soql_scoped(&app, &headers, &qs) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((s, e)) => (s, Json(json!({"error": e}))),
     }
@@ -443,10 +449,7 @@ pub(crate) async fn panel_delete(State(app): State<App>, headers: HeaderMap, Pat
 
 /// GET /api/panels/:id/data?from=&to= — exécute la query du panel.
 /// `from`/`to` (epoch seconds) bornent `ts` via compile_with_time (0 = pas de borne).
-pub(crate) async fn panel_data(State(app): State<App>, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    if let Some(denied) = soql_tenancy_denied(&app) {
-        return denied; // H1 : le panel exécute une SoQL brute non tenant-scopée -> refus fail-closed en enterprise
-    }
+pub(crate) async fn panel_data(State(app): State<App>, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     let qy: Option<String> = {
         let store = app.store();
         store.query_row("SELECT query FROM panel WHERE id=?", &crate::sql_params![id], |r| r.get_str(0)).ok()
@@ -455,7 +458,8 @@ pub(crate) async fn panel_data(State(app): State<App>, Path(id): Path<i64>, Quer
     let to = q.get("to").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     match qy {
         None => (StatusCode::NOT_FOUND, Json(json!({"error": "panel introuvable"}))),
-        Some(q) => match exec_soql_time_app(&app, &q, from, to) {
+        // H1 : la SoQL du panel est compilée avec le row-filter tenant OBLIGATOIRE (scopée à l'appelant).
+        Some(q) => match exec_soql_time_scoped(&app, &headers, &q, from, to) {
             Ok(v) => (StatusCode::OK, Json(v)),
             Err((s, e)) => (s, Json(json!({"error": e}))),
         },

@@ -98,16 +98,22 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger2);
     }
 
-    /// [H1 — surface SoQL brute tenant-scopée fail-closed] La surface `/api/query` (GET+POST) et
-    /// `/api/panels/:id/data` compile une SoQL ARBITRAIRE sur TOUTE la table `finding`/`runrecord` SANS
-    /// prédicat d'engagement (sa projection n'expose pas `engagement_id`), ce qui, en mode enterprise,
-    /// laissait n'importe quelle session (même tenant_viewer) lire les findings de TOUS les tenants.
-    /// Correctif fail-closed : la surface brute est REFUSÉE (403) dès que la tenancy est engagée — bob
-    /// (tenant B) ne peut donc PAS lire les findings du tenant A via /api/query. Community (flag OFF) =>
-    /// comportement INCHANGÉ (la SoQL renvoie les lignes ; l'engagement n'est pas une frontière de sécurité).
+    /// [H1 — surface SoQL brute tenant-SCOPÉE (correctif propre, remplace le 403 DENY)] La surface
+    /// `/api/query` (GET+POST) et `/api/panels/:id/data` compile une SoQL ARBITRAIRE sur `finding`/
+    /// `runrecord`. En mode enterprise, chaque requête est désormais compilée avec le row-filter
+    /// OBLIGATOIRE NON CONTOURNABLE du cœur (`engagement_id IN (<engagements accordés>)`, injecté à la
+    /// base par `soql::with_row_filter`) : bob (tenant B) obtient UNIQUEMENT SES findings (fb), JAMAIS
+    /// ceux du tenant A (fa) ; réciproquement pour alice ; un appelant SANS grant obtient ZÉRO ligne
+    /// (fail-closed). Community (flag OFF) => AUCUN filtre => les DEUX tenants sont servis (mono-tenant,
+    /// byte-identique — l'engagement n'est pas une frontière de sécurité).
     ///
-    /// ⚠️ MUTATION-PROOF : si `soql_tenancy_denied` cessait de refuser sous tenancy, la 1re assertion
-    /// (403 pour bob) ET l'absence de "fa"/"fb" dans une réponse serviraient AU ROUGE.
+    /// ⚠️ MUTATION-PROOF : si le row-filter cessait d'être posé/injecté, l'assertion « bob ne voit pas fa »
+    /// (et « grantless -> zéro ligne ») passerait AU ROUGE.
+    ///
+    /// Le moteur SoQL ouvre sa PROPRE connexion read-only sur `db_path` ; l'App de test pointe sur
+    /// `:memory:` (une base SÉPARÉE, vide). On SNAPSHOTe donc la base semée (VACUUM INTO) vers un fichier
+    /// réel et on pointe un clone dessus, pour que la surface brute lise les VRAIS findings semés
+    /// (fa=engagement1/tenantA, fb=engagement2/tenantB) et prouve le scoping sur des lignes réelles.
     #[tokio::test]
     async fn h1_raw_soql_surface_tenant_scoped_fail_closed() {
         let ledger = tmp_path("forge-test-h1-soql");
@@ -115,51 +121,82 @@ use crate::testutil::*;
         let (app, alice, bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
         assert!(tenancy::enabled(&app), "flag ON => enterprise");
 
-        // (a) ENTERPRISE : /api/query (GET) refusé (403) — bob NE PEUT PAS lire les findings du tenant A.
-        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
-        let resp = query(State(app.clone()), q).await.into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : /api/query brut refusé (fail-closed)");
-        let jb = resp_json(resp).await;
-        assert_eq!(jb["error"].as_str(), Some("tenant_scoped_surface_required"), "erreur explicite");
+        // Snapshot de la base semée vers un fichier réel -> le moteur SoQL (connexion read-only séparée)
+        // lit les vraies lignes. Les grants/panels restent lus depuis la base in-memory PARTAGÉE (le clone
+        // partage `db`, seul `db_path` diffère).
+        let dbfile = tmp_path("forge-test-h1-soql-db");
+        { let db = app.db(); db.execute("VACUUM INTO ?1", [dbfile.as_str()]).unwrap(); }
+        let mut app_f = app.clone();
+        app_f.db_path = std::sync::Arc::new(dbfile.clone());
 
-        // (b) ENTERPRISE : POST /api/query (search) — même refus (aucune donnée cross-tenant servie).
-        let resp = query_post(State(app.clone()), Json(json!({"soql": "search"}))).await.into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : POST /api/query brut refusé");
-
-        // (c) ENTERPRISE : panel_data (exécute la SoQL d'un panel) — refusé aussi.
-        {   // un panel existe (semé au boot #1) ou on en crée un via SQL direct.
-            let db = app.db();
-            db.execute("INSERT OR IGNORE INTO panel(id,name,query,viz,position,dashboard_id,updated) VALUES(999,'p','search','table',0,1,datetime('now'))", []).unwrap();
+        // Extrait la colonne `title` d'une réponse /api/query {columns, rows, ...}.
+        fn titles(v: &Value) -> Vec<String> {
+            let cols = v["columns"].as_array().expect("columns");
+            let ti = cols.iter().position(|c| c.as_str() == Some("title")).expect("colonne title");
+            v["rows"].as_array().unwrap().iter()
+                .filter_map(|r| r.as_array().and_then(|a| a.get(ti)).and_then(|x| x.as_str()))
+                .map(|s| s.to_string()).collect()
         }
-        let resp = panel_data(State(app.clone()), Path(999i64), Query(HashMap::new())).await.into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "enterprise : /api/panels/:id/data brut refusé");
 
-        // (d) ENTERPRISE : panels_list gaté — bob (granté sur tenant B) VOIT les définitions (il a un
-        // engagement visible) ; un compte SANS grant obtient une liste VIDE (fail-closed).
-        let _ = bob; // bob est granté ; le cas grantless est couvert par carol ci-dessous.
+        // (a) ENTERPRISE — bob (tenant B) : GET /api/query "search" -> SES findings (fb) UNIQUEMENT,
+        // JAMAIS ceux du tenant A (fa). Scopé, plus de 403.
+        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
+        let resp = query(State(app_f.clone()), bob.clone(), q).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "enterprise : /api/query désormais SERVI (scopé, plus de 403)");
+        let jb = resp_json(resp).await;
+        let t = titles(&jb);
+        assert!(t.contains(&"fb".to_string()), "bob voit SON finding (fb) : {t:?}");
+        assert!(!t.contains(&"fa".to_string()), "bob ne voit JAMAIS le finding du tenant A (fa) : {t:?}");
+        // Preuve compilée : le row-filter obligatoire `engagement_id IN (...)` est ANDé (jamais toute la table).
+        assert!(jb["compiled"].as_str().unwrap().contains("\"engagement_id\" IN ("),
+            "row-filter obligatoire dans le SQL compilé : {}", jb["compiled"]);
+
+        // (b) ENTERPRISE — POST /api/query : même scoping (bob -> fb only) ; alice -> fa only (réciproque).
+        let resp = query_post(State(app_f.clone()), bob.clone(), Json(json!({"soql": "search"}))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let t = titles(&resp_json(resp).await);
+        assert!(t.contains(&"fb".to_string()) && !t.contains(&"fa".to_string()), "POST scopé à B : {t:?}");
+        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
+        let ta = titles(&resp_json(query(State(app_f.clone()), alice.clone(), q).await.into_response()).await);
+        assert!(ta.contains(&"fa".to_string()) && !ta.contains(&"fb".to_string()), "alice scopée à A : {ta:?}");
+
+        // (c) ENTERPRISE — panel_data (exécute une SoQL stockée) : scopé de la même façon (bob -> fb only).
+        { let db = app.db();
+          db.execute("INSERT OR IGNORE INTO panel(id,name,query,viz,position,dashboard_id,updated) VALUES(999,'p','search','table',0,1,datetime('now'))", []).unwrap(); }
+        let resp = panel_data(State(app_f.clone()), bob.clone(), Path(999i64), Query(HashMap::new())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "enterprise : /api/panels/:id/data SERVI (scopé)");
+        let t = titles(&resp_json(resp).await);
+        assert!(t.contains(&"fb".to_string()) && !t.contains(&"fa".to_string()), "panel_data scopé à B : {t:?}");
+
+        // (d) ENTERPRISE — appelant SANS grant : scope VIDE -> ZÉRO ligne (fail-closed), jamais toutes.
         { let db = app.db(); upsert_user(&db, "nogrant", "viewer", &hash_pw("pw")).unwrap(); }
         let (ntok, _) = create_session(&app, uid_of(&app, "nogrant"));
         let ng = bearer_headers(&ntok);
+        let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
+        let jn = resp_json(query(State(app_f.clone()), ng.clone(), q).await.into_response()).await;
+        assert!(titles(&jn).is_empty(), "grantless -> zéro ligne (fail-closed) : {:?}", titles(&jn));
+        assert_eq!(jn["total"].as_i64(), Some(0), "grantless -> total 0 (jamais toute la table)");
+        // panels_list (gate HeaderMap conservé de e878e79) : appelant sans grant -> liste VIDE.
         let jl = resp_json(panels_list(State(app.clone()), ng, Query(HashMap::new())).await.into_response()).await;
-        assert!(jl.as_array().unwrap().is_empty(), "panels_list : appelant sans grant -> liste VIDE (fail-closed)");
+        assert!(jl.as_array().unwrap().is_empty(), "panels_list : sans grant -> liste VIDE (fail-closed)");
 
-        // (e) COMMUNITY (flag OFF) : le gate enterprise est LEVÉ -> comportement INCHANGÉ (plus de 403). On
-        // désengage le flag. NB : en test in-memory (db_path=':memory:') la connexion read-only SÉPARÉE
-        // qu'ouvre le moteur SoQL est vide -> 400 (artefact de harness), mais JAMAIS 403 : la preuve = le
-        // gate est disengagé. Le service RÉEL de données (via le store partagé) est prouvé par panels_list.
+        // (e) COMMUNITY (flag OFF) : AUCUN filtre -> les DEUX findings (fa ET fb) servis (mono-tenant, inchangé).
         { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
         assert!(!tenancy::enabled(&app), "flag OFF => community");
         let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
-        let resp = query(State(app.clone()), q).await.into_response();
-        assert_ne!(resp.status(), StatusCode::FORBIDDEN, "community : /api/query n'est PLUS refusé (gate levé, inchangé)");
-        // panels_list (lecture via le store PARTAGÉ) : non gaté en community -> la définition de panel semée
-        // est servie normalement (preuve que le gate panels_list est bien un no-op community).
+        let resp = query(State(app_f.clone()), alice.clone(), q).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "community : /api/query servi (non gaté)");
+        let t = titles(&resp_json(resp).await);
+        assert!(t.contains(&"fa".to_string()) && t.contains(&"fb".to_string()),
+            "community : findings des DEUX tenants servis (mono-tenant, non scopé) : {t:?}");
+        // panels_list non gaté en community.
         let jl = resp_json(panels_list(State(app.clone()), alice.clone(), Query(HashMap::new())).await.into_response()).await;
         assert!(jl.as_array().unwrap().iter().any(|p| p["id"].as_i64() == Some(999)),
             "community : panels_list sert les définitions de panels (non gaté)");
 
         let _ = std::fs::remove_file(&ledger);
         let _ = std::fs::remove_file(&ledger2);
+        let _ = std::fs::remove_file(&dbfile);
     }
 
     /// [TENANCY — sans grant = rien] ENTERPRISE ON. Un compte SANS aucun tenant_grant (carol) n'accède à
