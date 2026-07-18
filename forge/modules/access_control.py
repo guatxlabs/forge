@@ -21,6 +21,7 @@ import hashlib
 import re
 
 from .. import techniques
+from ..redact import redact_secrets
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 
@@ -139,11 +140,89 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             return False
         return _body_hash(ba) == _body_hash(bb)
 
+    @staticmethod
+    def _attacker_headers(accounts):
+        """En-têtes du compte ATTAQUANT parmi les comptes LABELLISÉS : le compte 'attacker' si présent,
+        sinon le 1er (convention). None si aucun compte. Chaque compte = {label, headers}."""
+        if not accounts:
+            return None
+        for a in accounts:
+            if str(a.get("label", "")).strip().lower() == "attacker":
+                return a.get("headers", {}) or {}
+        return accounts[0].get("headers", {}) or {}
+
+    def _fire_auth_targets(self, action, accounts, targets):
+        """R5 — SLICE CROSS-COMPTE via CONTEXTE AUTH PAR-ENGAGEMENT. Pour chaque idor_target
+        {url, owner, marker} : l'ATTAQUANT (session de l'opérateur) récupère la ressource POSSÉDÉE par
+        la victime ; PREUVE NETTE = le marqueur (donnée de la victime) apparaît dans SA réponse (statut
+        2xx), OU — sans marqueur — il obtient un 2xx là où l'anonyme est REFUSÉ (401/403). Lecture
+        seule (GET). Scope-guard fail-closed PAR-URL (aucune requête hors périmètre). Le PoC/evidence
+        est RÉDIGÉ à la source (les en-têtes de l'attaquant y affleureraient sinon)."""
+        attacker = self._attacker_headers(accounts)
+        findings = []
+        for t in targets:
+            url = (t or {}).get("url")
+            if not url:
+                continue
+            marker = str((t or {}).get("marker") or "")
+            owner = str((t or {}).get("owner") or "victim")
+            # SCOPE-GUARD PAR-URL fail-closed — une idor_target hors périmètre : AUCUN I/O vers elle
+            # (le matériel d'auth secret ne peut physiquement pas quitter le périmètre déclaré).
+            if not self._in_scope(action, url):
+                findings.append(self.degraded(
+                    target=url,
+                    title="IDOR non testé — idor_target hors périmètre (scope-guard fail-closed)",
+                    evidence="Cette idor_target n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            if attacker is None:
+                findings.append(self.skip(
+                    target=url, title="IDOR non testé — compte attaquant manquant",
+                    evidence=("Requiert au moins un compte (auth.accounts) fournissant les en-têtes de "
+                              "l'attaquant pour rejouer la requête cross-compte."),
+                    poc=self.dry(action)))
+                continue
+            r_att = self._fetch(url, attacker)               # (status, body, content_type)
+            r_anon = self._fetch(url, {})
+            att_ok = r_att[0] in self._OK
+            anon_denied = r_anon[0] in self._DENY
+            marker_hit = bool(marker) and att_ok and (marker in (r_att[1] or ""))
+            # PREUVE : avec marqueur -> exiger sa présence (signal fort, anti-faux-positif) ; sans
+            # marqueur -> exiger 2xx attaquant ET refus anonyme (jamais « n'importe quel 200 »).
+            proven = marker_hit if marker else (att_ok and anon_denied)
+            how = ("marqueur de la victime présent dans la réponse de l'attaquant" if marker
+                   else "attaquant 2xx là où l'anonyme est refusé (401/403)")
+            # RÉDACTION à la source : le PoC embarque les en-têtes de l'attaquant (Cookie/Authorization)
+            # et l'evidence pourrait refléter du matériel — on masque AVANT de figer dans le finding,
+            # pour que même le ledger brut (`finding` append non rédigé) ne porte aucun secret.
+            poc = redact_secrets(self._curl(url, attacker))
+            evidence = redact_secrets(
+                f"attaquant={r_att[0]}/{r_att[2] or '?'} anon={r_anon[0]} owner={owner!r} "
+                f"marqueur={'présent' if marker_hit else ('absent' if marker else 'n/a')} "
+                f"anon_refusé={anon_denied} ; preuve={how} ; compte attaquant DÉTENU par l'opérateur "
+                "(jamais un tiers) ; matériel d'auth rédigé")
+            findings.append(self.proof(
+                target=url, proven=proven,
+                title=("IDOR CONFIRMÉ — l'attaquant lit la ressource de la victime (accès cross-compte)"
+                       if proven else "IDOR non confirmé (cross-compte auth)"),
+                severity=("HIGH" if proven else "INFO"),
+                fix=self._FIX_READ,
+                evidence=evidence, poc=poc))
+        return findings
+
     def fire(self, action):
         # SCOPE-GUARD fail-closed sur la cible primaire — hors périmètre -> skipped, AUCUN réseau.
         if not self._in_scope(action, action.target):
             return [self._scope_refused(action)]
         accounts = action.params.get("accounts", [])
+        # R5 — CONTEXTE AUTH PAR-ENGAGEMENT : des idor_targets STRUCTURÉS {url, owner, marker} injectés
+        # par l'engine depuis `scope.auth` déclenchent le slice cross-compte à MARQUEUR (rejeu avec la
+        # session de l'attaquant). Ne consomme QUE le compte attaquant. Les oracles ato/takeover
+        # consommeront les mêmes `accounts` plus tard (suivi R5b) — non câblés ici. ABSENT => chemin
+        # historique inchangé (différentiel 2-comptes sur `urls`, ou skip « config manquante »).
+        auth_targets = action.params.get("idor_targets")
+        if auth_targets:
+            return self._fire_auth_targets(action, accounts, list(auth_targets))
         base_urls = list(action.params.get("urls", []))
         method = str(action.params.get("method", "GET")).upper()
         # Énumération d'IDs : on substitue chaque id dans un template d'URL contenant `{id}`.

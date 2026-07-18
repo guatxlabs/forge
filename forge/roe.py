@@ -218,6 +218,19 @@ class Scope:
         self.allow_private = bool(data.get("allow_private", False))
         self.known_creds = data.get("known_creds", [])
         self.idor_targets = data.get("idor_targets", [])
+        # CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5) — bloc OPTIONNEL `auth` porté TEL QUEL
+        # (interprété par `session.AuthContext.from_scope`, miroir de `allow_private`/`module_params` :
+        # le Scope ne fait que TRANSPORTER, la logique vit ailleurs). Forme :
+        #   auth: { accounts: [ {label, headers|cookies|bearer}, … ],
+        #           idor_targets: [ {url: <in-scope>, owner: "victim", marker: "<preuve donnée victime>"} ] }
+        # Les comptes de test sont ceux de L'OPÉRATEUR (attaquant + victime) sur des cibles IN-SCOPE ;
+        # l'oracle IDOR REJOUE une requête vers une ressource possédée par la victime avec la session de
+        # l'ATTAQUANT -> si la donnée victime revient (marqueur / 2xx là où l'anon est refusé) = IDOR
+        # cross-compte. SECRET : les creds/cookies/bearer sont RÉDIGÉS partout où ils pourraient
+        # affleurer (ledger/rapport/log/evidence) et n'entrent JAMAIS dans le ledger tels quels. ABSENT
+        # => `AuthContext.from_scope` rend None => l'oracle se comporte comme aujourd'hui (skip « config
+        # manquante ») : INERTE par défaut, aucun changement de comportement.
+        self.auth = data.get("auth")
         # params par-module GLOBAUX (clé additive : ignorée par le ROE/Scope, consommée par l'engine).
         # Exposée ici pour que la CLI n'ait pas à re-lire/re-parser le scope.json une 2e fois.
         self.module_params = data.get("module_params") or {}

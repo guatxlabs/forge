@@ -208,6 +208,14 @@ class Engine:
         # + `sessions` par-hôte). Lié autour de chaque fire() (execute) ; les modules recon/oracle y
         # puisent le matériel à attacher AUX SEULES requêtes in-scope. Store inerte si rien de configuré.
         self.sessions = session.SessionStore.from_scope(scope)
+        # CONTEXTE D'AUTHENTIFICATION PAR-ENGAGEMENT (R5, SECRET) : comptes de test LABELLISÉS de
+        # l'opérateur (attaquant + victime) + idor_targets structurés, dérivés du bloc `scope.auth`.
+        # None si aucun bloc `auth` (INERTE : l'oracle IDOR retombe sur son chemin historique « config
+        # manquante » — aucun changement de comportement). Injecté dans les actions IDOR par `_prepare`
+        # et sa MISE EN USAGE est journalisée une fois (`engine.auth_context`, labels + compte de
+        # cibles, JAMAIS les secrets) pour qu'un run ayant utilisé des creds soit auditable.
+        self.auth_context = session.AuthContext.from_scope(scope)
+        self._auth_ledgered = False                       # `engine.auth_context` émis au plus une fois
         # SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed) — snapshot de l'ensemble EFFECTIF
         # de kinds ACTIVÉS pour ce scope (profil + toggles catégorie/technique, DÉRIVÉ de la table
         # unique). `enabled_kinds is None` <=> scope LEGACY (aucune sélection) => AUCUN filtrage
@@ -243,6 +251,18 @@ class Engine:
         # PROFIL DE RESSOURCES ACTIF (audit) — rempli au lancement de campaign() (snapshot profil +
         # leviers effectifs). None tant qu'aucune campagne n'a démarré (run() direct des tests).
         self.resource_profile: dict[str, Any] | None = None
+
+    # --- usage du contexte d'authentification (audit) ---
+    def _ledger_auth_use(self) -> None:
+        """Journalise UNE SEULE FOIS qu'un contexte d'auth par-engagement a été MIS EN USAGE (injecté
+        dans une action IDOR). Détail SÛR : labels des comptes + nombre de cibles (via
+        `AuthContext.ledger_summary`) — JAMAIS un secret (header/cookie/bearer). No-op si aucun
+        contexte, si déjà journalisé, ou si aucun ledger n'est branché."""
+        if self._auth_ledgered or self.auth_context is None:
+            return
+        self._auth_ledgered = True
+        if self.ledger is not None:
+            self.ledger.append("engine.auth_context", self.auth_context.ledger_summary())
 
     # --- armement délégué (gestes journalisés) ---
     def arm(self, reason: str = "armed by operator") -> None:
@@ -591,7 +611,17 @@ class Engine:
         # skiperait faute de creds). Une action IDOR de base (sans urls) reçoit urls=idor_targets.
         for a in actions:
             if a.cls in ("access_control", "idor", "bola"):
-                a.params.setdefault("accounts", self.scope.known_creds)
+                # CONTEXTE AUTH PAR-ENGAGEMENT (R5) : si l'opérateur a fourni un bloc `auth`, on injecte
+                # ses comptes LABELLISÉS (attacker/victim) et ses idor_targets STRUCTURÉS {url,owner,
+                # marker} — l'oracle rejoue chaque cible avec la session de l'ATTAQUANT. Sinon (aucun
+                # bloc auth) on retombe EXACTEMENT sur l'historique (known_creds) : INERTE, no-op.
+                if self.auth_context is not None:
+                    a.params.setdefault("accounts", self.auth_context.accounts_as_params())
+                    if self.auth_context.idor_targets:
+                        a.params.setdefault("idor_targets", list(self.auth_context.idor_targets))
+                    self._ledger_auth_use()               # journalise la MISE EN USAGE (labels, pas de secret)
+                else:
+                    a.params.setdefault("accounts", self.scope.known_creds)
                 a.params.setdefault("urls", self.scope.idor_targets)
                 a.params.setdefault("mitre", "T1190")
 
