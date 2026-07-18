@@ -134,7 +134,7 @@ export function renderTechniques() {
     const on = rows.filter(r => TQ.desired[r.kind]).length;
     const card = document.createElement('div'); card.className = 'tq-cat';
     const head = document.createElement('div'); head.className = 'tq-cathead';
-    head.innerHTML = `<span class="tq-catname">${esc(cat)} <span class="badge tq-catcount">${on}/${rows.length}</span></span>`;
+    head.innerHTML = `<span class="tq-catname">${esc(cat)} <span class="badge tq-catcount">${Number(on)}/${Number(rows.length)}</span></span>`;
     const acts = document.createElement('span'); acts.className = 'tq-catacts';
     const bAll = document.createElement('button'); bAll.type = 'button'; bAll.className = 'k-theme'; bAll.textContent = 'Tout activer';
     const bNone = document.createElement('button'); bNone.type = 'button'; bNone.className = 'k-theme'; bNone.textContent = 'Tout désactiver';

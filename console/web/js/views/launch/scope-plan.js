@@ -146,7 +146,7 @@ export function renderPlan(j) {
     });
     table.appendChild(tb);
     const tally_line = document.createElement('div'); tally_line.className = 'lc-planhint'; tally_line.style.marginTop = '8px';
-    tally_line.innerHTML = ['FIRE', 'DRY_RUN', 'VETO', 'SKIP'].map(k => `<span class="badge ${PLAN_VERDICT_BADGE[k]}">${k} ${tally[k]}</span>`).join(' ');
+    tally_line.innerHTML = ['FIRE', 'DRY_RUN', 'VETO', 'SKIP'].map(k => `<span class="badge ${PLAN_VERDICT_BADGE[k]}">${esc(k)} ${Number(tally[k]) || 0}</span>`).join(' ');
     host.append(table, tally_line);
   }
   // note d'inertie + sortie brute (transparence, repliée par défaut via <details>).

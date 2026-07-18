@@ -113,7 +113,7 @@ export async function loadTenants() {
     const tr = document.createElement('tr');
     const state = t.status === 'archived' ? '<span class="badge bad">archivé</span>' : '<span class="badge ok">actif</span>';
     tr.innerHTML =
-      `<td class="mut">${t.id}</td>` +
+      `<td class="mut">${Number(t.id)}</td>` +
       `<td class="mono">${esc(t.name)}</td>` +
       `<td>${state}</td>` +
       `<td class="mut">${(t.counts && t.counts.engagements) || 0}</td>` +

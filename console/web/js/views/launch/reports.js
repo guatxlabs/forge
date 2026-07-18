@@ -29,12 +29,16 @@ export async function openRunReportHtml(runId, print) {
   } catch (e) { toast('Rapport HTML : ' + (e.message || e), 'bad'); return; }
   if (r.status === 404) { toast('Run inconnu (pas de rapport).', 'bad'); return; }
   if (!r.ok) { toast('Rapport HTML indisponible (' + r.status + ').', 'bad'); return; }
-  // injecte une <base href> (URL canonique du rapport) pour que les liens relatifs (?format=pdf/md)
-  // et /quetzal.svg résolvent en same-origin, puis publie le document via un Blob URL (évite
-  // document.write ; le HTML provient de notre endpoint authentifié, tout dynamique étant échappé
-  // côté serveur). Le Blob URL est révoqué après ouverture.
+  // La fenêtre est un document TOP-LEVEL same-origin (pas un iframe sandbox) : on NEUTRALISE donc
+  // tout script embarqué via une CSP `script-src 'none'; object-src 'none'` injectée en TÊTE du <head>
+  // (l'impression/rendu du rapport n'exécute aucun script — le contenu peut porter de la sortie d'outil
+  // influençable par un attaquant, un <script> inline s'exécuterait sinon avec l'origine console).
+  // On injecte AUSSI une <base href> (URL canonique du rapport) pour que les liens relatifs
+  // (?format=pdf/md) et /quetzal.svg résolvent en same-origin, puis on publie le document via un Blob
+  // URL (évite document.write). Le Blob URL est révoqué après ouverture.
   const baseHref = new URL(url, location.href).href;
-  const withBase = html.replace(/<head>/i, '<head><base href="' + baseHref.replace(/"/g, '&quot;') + '">');
+  const csp = '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; object-src \'none\'">';
+  const withBase = html.replace(/<head>/i, '<head>' + csp + '<base href="' + baseHref.replace(/"/g, '&quot;') + '">');
   const blobUrl = URL.createObjectURL(new Blob([withBase], { type: 'text/html;charset=utf-8' }));
   const win = window.open(blobUrl, '_blank');
   if (!win) { URL.revokeObjectURL(blobUrl); toast('Pop-up bloquée : autorise les fenêtres pour ouvrir le rapport.', 'bad'); return; }

@@ -23,7 +23,7 @@ export async function loadRuns() {
     const tr = document.createElement('tr'); tr.style.cursor = 'pointer'; tr.title = 'Cliquer pour le détail du run';
     const cls = RUNSTAT_BADGE[x.status] || 'mut';
     const ntgt = Array.isArray(x.targets) ? x.targets.length : 0;
-    tr.innerHTML = `<td class="numcol">${i + 1}</td><td><span class="badge ${cls}">${esc(x.status)}</span></td><td>${esc(x.campaign)}</td>`
+    tr.innerHTML = `<td class="numcol">${Number(i + 1)}</td><td><span class="badge ${cls}">${esc(x.status)}</span></td><td>${esc(x.campaign)}</td>`
       + `<td class="mut">${esc(x.mode)}</td><td class="mono">${Number(x.fired || 0)}/${Number(x.dry_run || 0)}/${Number(x.vetoed || 0)}</td>`
       + `<td class="mut">${Number(x.errors || 0)}</td><td class="mut">${ntgt}</td><td class="mut">${esc(fmtTs(x.ts))}</td>`;
     tr.onclick = () => openRun(x.run_id);

@@ -47,7 +47,7 @@ export async function loadFindings(offset = 0) {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = F_STATE.selected.has(x.id); cb.setAttribute('aria-label', 'Sélectionner ce finding');
     cb.onclick = e => { e.stopPropagation(); if (cb.checked) F_STATE.selected.add(x.id); else F_STATE.selected.delete(x.id); updateBulkBar(); selAll.checked = rows.every(r => F_STATE.selected.has(r.id)); };
     cbTd.appendChild(cb); tr.appendChild(cbTd);
-    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${offset + i + 1}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TRIAGE_BADGE(x.triage))}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.assignee_login || '—'}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
+    tr.insertAdjacentHTML('beforeend', safeHtml`<td class="numcol">${Number(offset + i + 1)}</td><td>${raw(SEV_BADGE(x.severity))}</td><td>${x.target}</td><td>${x.title}</td><td><code>${x.mitre}</code></td><td>${x.status}</td><td>${raw(TRIAGE_BADGE(x.triage))}</td><td>${raw(TLP_BADGE(x.classification))}</td><td class="mut">${x.assignee_login || '—'}</td><td class="mut">${x.tool}</td><td class="mut">${fmtTs(x.ts)}</td>`);
     tr.onclick = () => openFinding(x.id);
     tb.appendChild(tr);
   });

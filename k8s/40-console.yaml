@@ -113,6 +113,12 @@ spec:
             - name: http
               containerPort: 7100
           env:
+            # Bind 0.0.0.0 INSIDE the pod so the ClusterIP Service can reach the container. The image
+            # default is now loopback-strict (127.0.0.1:7100, safe-by-default for `docker run`); a
+            # Service-fronted pod MUST override it back to all-interfaces. Safe here: exposure is gated
+            # by ClusterIP + the default-deny NetworkPolicy + Pod Security Admission — not the bind addr.
+            - name: FORGE_CONSOLE_ADDR
+              value: 0.0.0.0:7100
             # Redirect all runtime scratch/cache/config to the writable emptyDir seams (required by
             # readOnlyRootFilesystem: true). HOME → /home/forge emptyDir; TMPDIR → /tmp emptyDir.
             - name: HOME

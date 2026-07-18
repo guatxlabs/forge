@@ -262,16 +262,29 @@ RUN set -eux; \
         perl libnet-ssleay-perl libjson-perl libxml-writer-perl; \
     rm -rf /var/lib/apt/lists/*
 
-# (2) Outils clonés depuis git + wrapper sur PATH (arch-indépendants). Le NOM sur PATH DOIT matcher
-#   ce que le module sonde : web.testssl -> "testssl.sh" (binary="testssl.sh") ; web.nikto -> "nikto".
+# (2) Outils clonés depuis git, ÉPINGLÉS à un commit de release PRÉCIS (reproductibilité + cohérence
+#   avec la promesse « tous les outils vérifiés/immuables » : l'ancien `git clone --depth 1` suivait le
+#   HEAD flottant de la branche par défaut → build non reproductible, upstream mutable). Les SHA
+#   ci-dessous ont été relevés via `git ls-remote` au moment du pin et sont les SOMMETS des tags de
+#   release indiqués (immuables). L'idéal serait un checksum de tarball signé ; le pin par SHA de commit
+#   est la garantie git-native la plus forte à ce jour.
+#     testssl.sh -> ae939a9faa19e2e603673eb954ca0b2900b0798a  (tag v3.2.4)
+#     nikto      -> 150cb9ef535eda24964253728374beddeed42607  (tag 2.5.0)
+#   Le NOM sur PATH DOIT matcher ce que le module sonde : web.testssl -> "testssl.sh" (binary="testssl.sh") ;
+#   web.nikto -> "nikto". (Clone complet puis checkout du SHA — un `--depth 1` ne peut pas cibler un SHA
+#   arbitraire ; le .git est supprimé ensuite, pas d'empreinte inutile dans la couche.)
 RUN set -eux; \
+    TESTSSL_SHA=ae939a9faa19e2e603673eb954ca0b2900b0798a; \
+    NIKTO_SHA=150cb9ef535eda24964253728374beddeed42607; \
     if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
         echo "[forge] mini -> testssl.sh / nikto OMIS ; web.testssl & web.nikto -> available:false."; \
         exit 0; \
     fi; \
-    git clone --depth 1 https://github.com/drwetter/testssl.sh /opt/testssl.sh; \
+    git clone https://github.com/drwetter/testssl.sh /opt/testssl.sh; \
+    git -C /opt/testssl.sh checkout -q "${TESTSSL_SHA}"; \
     ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh; \
-    git clone --depth 1 https://github.com/sullo/nikto /opt/nikto; \
+    git clone https://github.com/sullo/nikto /opt/nikto; \
+    git -C /opt/nikto checkout -q "${NIKTO_SHA}"; \
     ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto; \
     rm -rf /opt/testssl.sh/.git /opt/nikto/.git
 
@@ -382,8 +395,13 @@ USER forge
 # bind `./tools:/opt/tools:ro`) est résolu par `runner.tool` (shutil.which) SANS rebuild. Dossier
 # opérateur-contrôlé (vide dans l'image par défaut) : le préfixer est sûr et voulu (il n'ombre rien tant
 # que l'opérateur n'y dépose pas délibérément un binaire homonyme). Le reste du PATH système est préservé.
+# FORGE_CONSOLE_ADDR : bind LOOPBACK-STRICT par défaut (safe-by-default). Auparavant `0.0.0.0:7100` →
+# un `docker run --network=host forge` SANS l'override de compose exposait la console sur tout le LAN.
+# Défaut = 127.0.0.1:7100 ; exposer sur toutes les interfaces est un OPT-IN EXPLICITE (compose fixe déjà
+# 127.0.0.1 explicitement ; k8s remet 0.0.0.0:7100 explicitement dans le Deployment console — sûr derrière
+# ClusterIP + NetworkPolicy default-deny + PSA — pour que le Service atteigne le conteneur dans le pod).
 ENV PATH="/opt/tools:${PATH}" \
-    FORGE_CONSOLE_ADDR=0.0.0.0:7100 \
+    FORGE_CONSOLE_ADDR=127.0.0.1:7100 \
     FORGE_CONSOLE_DB=/data/db/forge.db \
     FORGE_CONSOLE_LEDGER=/data/ledger/engagement.jsonl \
     FORGE_CONSOLE_SCOPE=/data/scope/scope.json \

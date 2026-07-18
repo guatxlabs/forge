@@ -116,7 +116,7 @@ export async function loadPurpleCoverage() {
     const head = document.createElement('div'); head.className = 'pc-so-head';
     head.innerHTML = `${ic('plug')} <span>Aucune source de détection configurée — Forge fonctionne en autonome</span><span class="pc-dtag">standalone</span>`;
     const det = document.createElement('div'); det.className = 'pc-so-detail';
-    det.innerHTML = `Forge ne dépend d'aucune source de détection. Connectez-en une (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier…) dans <a href="#admin-detection">Administration &rarr; Source de détection</a> pour activer la boucle purple (détecté / raté / MTTD). ${fired} technique(s) distincte(s) déjà tirée(s) côté Forge en attendant.`;
+    det.innerHTML = `Forge ne dépend d'aucune source de détection. Connectez-en une (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier…) dans <a href="#admin-detection">Administration &rarr; Source de détection</a> pour activer la boucle purple (détecté / raté / MTTD). ${Number(fired) || 0} technique(s) distincte(s) déjà tirée(s) côté Forge en attendant.`;
     // actions d'aide : ouvrir directement la source de détection + expliquer la boucle purple (aide in-app).
     const acts = document.createElement('div'); acts.className = 'pc-so-acts';
     const goBtn = document.createElement('a'); goBtn.href = '#admin-detection'; goBtn.className = 'k-theme'; goBtn.innerHTML = `${ic('plug')}<span>Connecter une source</span>`;
@@ -163,7 +163,7 @@ export async function loadPurpleCoverage() {
   if (nMiss > 0) {
     const sep2 = document.createElement('span'); sep2.className = 'pc-sep'; band.appendChild(sep2);
     const gapEl = document.createElement('span'); gapEl.className = 'pc-sub';
-    gapEl.innerHTML = `<span class="badge destr">${nMiss} trou(s) de détection</span>`;
+    gapEl.innerHTML = `<span class="badge destr">${Number(nMiss) || 0} trou(s) de détection</span>`;
     band.appendChild(gapEl);
   }
   host.appendChild(band);
