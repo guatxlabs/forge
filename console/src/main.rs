@@ -196,6 +196,16 @@ pub(crate) use crate::ledger_api::*;
 // (`super::*`) résolvent ces handlers INCHANGÉS. Les vues restent isolées par engagement actif.
 mod findings;
 pub(crate) use crate::findings::*;
+// BULK-OPS + VUES DE REPORTING du modèle ROUGE — god-file `findings.rs` scindé en modules cohésifs (PURE
+// MOVE), tous re-exportés `pub(crate)` à la racine (mêmes résolutions `crate::*`/`super::*` INCHANGÉES) :
+// `findings_bulk` (opérations de masse : findings_bulk_status/assign/triage/export + parse_ids/csv_field)
+// et `findings_report` (vues lecture-seule : runrecords/campaigns/roe/coverage/attack_matrix + le catalogue
+// ATT&CK). Les routes de build_router (`post(findings_bulk_status)`, `get(coverage)`, `get(attack_matrix)`,
+// …) ET les tests inline (`super::*`) résolvent ces handlers INCHANGÉS.
+mod findings_bulk;
+pub(crate) use crate::findings_bulk::*;
+mod findings_report;
+pub(crate) use crate::findings_report::*;
 // SOUS-SYSTÈME QUERY / DASHBOARDS (moteur soql read-only exec_soql/exec_soql_time + helpers cell/
 // soql_stats, /api/query GET+POST, CRUD dashboards+panels) extrait de main.rs (PURE MOVE). Re-exporté
 // `pub(crate)` à la racine pour que les routes de build_router (`get(query).post(query_post)`,
