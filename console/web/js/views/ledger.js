@@ -11,7 +11,7 @@ export async function loadLedger() {
     if (badge) {
       const ok = vr.ok;
       badge.className = 'badge ' + (ok ? 'ok' : 'destr');
-      badge.innerHTML = `${ic(ok ? 'check' : 'warn')} ${ok ? 'chaîne intègre' : 'chaîne ROMPUE'} (${vr.entries} entrées) ${ic('lock')} signature non vérifiée`;
+      badge.innerHTML = `${ic(ok ? 'check' : 'warn')} ${ok ? 'chaîne intègre' : 'chaîne ROMPUE'} (${Number(vr.entries) || 0} entrées) ${ic('lock')} signature non vérifiée`;
       badge.title = `alg=${vr.alg || '?'} · sig_checked=false (la console ne détient pas la clé) · ${vr.broken != null ? 'rompu au seq ' + vr.broken + ' : ' + (vr.why || '') : (vr.why || '')}`;
     }
   } catch (e) { if (badge) { badge.className = 'badge destr'; badge.textContent = 'vérif indisponible'; } }

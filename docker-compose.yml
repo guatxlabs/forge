@@ -307,6 +307,9 @@ services:
   # (forge/forge) — à SURCHARGER via forge/.env (FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB) en prod.
   postgres:
     profiles: ["postgres"]
+    # LOW-10 TODO: pin by immutable digest for prod (postgres:16@sha256:<digest>) — resolve via
+    # `docker buildx imagetools inspect postgres:16` or the registry API at pin time (digest not
+    # resolvable offline here; tag kept).
     image: postgres:16
     container_name: forge-postgres
     restart: unless-stopped

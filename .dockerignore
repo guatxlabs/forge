@@ -1,0 +1,75 @@
+# =============================================================================
+# Forge — .dockerignore RACINE (belt-and-suspenders, LOW-12).
+# =============================================================================
+#
+# POURQUOI ce fichier EN PLUS de `forge/Dockerfile.dockerignore` ?
+#   Le build documenté utilise BuildKit avec `-f forge/Dockerfile`, qui honore
+#   l'ignore-file SPÉCIFIQUE `forge/Dockerfile.dockerignore` (préféré à un
+#   `.dockerignore` racine). MAIS un build LEGACY / non-BuildKit ignore ce fichier
+#   par-Dockerfile et ne lit QUE le `.dockerignore` à la racine du contexte → un
+#   `.env` / `*.ed25519` / `*.key` local traînant pourrait alors entrer dans une
+#   couche. Ce miroir garantit l'exclusion des secrets/données quel que soit le
+#   moteur de build (défense en profondeur). Garder les deux SYNCHRONISÉS.
+#
+# NB portée : les motifs `**/…` matchent à n'importe quelle profondeur, donc
+#   fonctionnent que le contexte soit `GUATX/` (build documenté) ou `forge/`
+#   (build lancé depuis ce repo). Les préfixes `forge/…` n'agissent qu'avec le
+#   contexte `GUATX/` ; ils sont inoffensifs sinon.
+# =============================================================================
+
+# --- Repos siblings NON nécessaires au build (le build n'utilise que forge/ + core/) ---
+plume/
+guatx-infra/
+guatx-k3s-manifests/
+_archive/
+
+# --- Cache de build Rust (~1.6 GB) : jamais expédié, reconstruit via cache-mount ---
+forge/console/target/
+forge/**/target/
+console/target/
+**/target/
+
+# --- Bases SQLite + WAL/SHM (données/console) : jamais dans le contexte ---
+forge/**/*.db
+forge/**/*.db-wal
+forge/**/*.db-shm
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# --- Ledger d'engagement & JSONL (actions sur cibles réelles) ---
+forge/**/*.jsonl
+**/*.jsonl
+
+# --- Caches Python ---
+forge/**/__pycache__/
+**/__pycache__/
+**/*.py[cod]
+
+# --- VCS ---
+**/.git
+**/.git/**
+
+# --- État Forge & sauvegardes ---
+*.forge
+forge/**/*.forge
+**/*.forge
+forge/**/backups/
+**/backups/
+
+# --- Secrets / autorisation d'engagement (jamais requis au build ;
+#     seul scope.example.json est COPY'é par le Dockerfile) ---
+**/*.env
+**/.env
+*.env
+.env
+forge/scope.json
+forge/targets.json
+forge/actions.json
+scope.json
+targets.json
+actions.json
+*.key
+*.pem
+*.pub
+*.ed25519

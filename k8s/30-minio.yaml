@@ -63,11 +63,10 @@ spec:
         fsGroup: 1000
       containers:
         - name: minio
-          # MEDIUM-3: pinned to a specific released tag (was the floating `:latest`). Every other
-          # image in the repo is pinned; match that. ⚠️ VERIFY / pin-by-digest for prod:
-          #   minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-          # (digest of RELEASE.2025-09-07T16-13-09Z as published on Docker Hub at pin time).
-          image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+          # MEDIUM-3 / LOW-10: pinned to a specific released tag AND its immutable digest (was the
+          # floating `:latest`, then tag-only). tag+digest = human-readable + tamper-proof. The digest
+          # below is that of RELEASE.2025-09-07T16-13-09Z as published on Docker Hub at pin time.
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
           # --- Container hardening (MEDIUM-1) ---------------------------------------------------
           securityContext:
             allowPrivilegeEscalation: false

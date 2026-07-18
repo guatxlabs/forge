@@ -30,7 +30,7 @@ export function renderCampaigns() {
   const tb = document.createElement('tbody');
   list.forEach(c => {
     const tr = document.createElement('tr'); tr.style.cursor = 'pointer'; tr.title = 'Cliquer pour filtrer sur cette campagne';
-    tr.innerHTML = `<td>${esc(c.campaign)}</td><td>${c.findings}</td><td class="mut">${esc(fmtTs(c.last_ts))}</td>`;
+    tr.innerHTML = `<td>${esc(c.campaign)}</td><td>${Number(c.findings) || 0}</td><td class="mut">${esc(fmtTs(c.last_ts))}</td>`;
     tr.onclick = () => { const sel = $('#campaign'); if (sel) { sel.value = c.campaign; sel.dispatchEvent(new Event('change')); } location.hash = 'findings'; };
     tb.appendChild(tr);
   });
