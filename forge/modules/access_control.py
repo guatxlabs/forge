@@ -297,6 +297,16 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         return findings
 
     def _fire_read(self, action, A, B, urls):
+        """Oracle IDOR par DIFFÉRENTIEL de CONTENU (2 comptes) : B lit le corps normalisé identique à A
+        et l'anon est refusé -> IDOR.
+
+        ⚠️ LIMITATION (faux positif possible) — le différentiel de CONTENU seul ne peut pas distinguer
+        « B accède à la ressource PRIVÉE de A » de « A et B sont TOUS DEUX légitimement autorisés à lire
+        une ressource PARTAGÉE » (doc d'équipe, objet public-authentifié…) : dans les deux cas `same` est
+        vrai et l'anon refusé. Contrat d'usage : les `urls` (et les `idor_targets`) DOIVENT désigner des
+        ressources auxquelles le compte ATTAQUANT (B) n'est PAS habilité (possédées par A seul). Le chemin
+        à MARQUEUR (`_fire` sur `idor_targets={url, owner, marker}`, où B doit voir un marqueur PROPRE à A)
+        est PRÉFÉRÉ : il prouve l'appartenance à A et élimine ce faux positif de ressource partagée."""
         findings = []
         for url in urls:
             # SCOPE-GUARD PAR-URL fail-closed — une URL (souvent une IDOR chaînée/énumérée) hors

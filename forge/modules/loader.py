@@ -229,9 +229,22 @@ def _validate_placeholder_body(body, tok):
         return None
     if body.startswith("param:"):
         rest = body[len("param:"):]
-        name = rest.split(":", 1)[0]
+        parts = rest.split(":", 1)                       # {param:NAME[:DEFAULT]}
+        name = parts[0]
         if not name or not all(c.isalnum() or c == "_" for c in name):
             return f"token '{tok}' : nom de param invalide dans {{param:{rest}}} (attendu [A-Za-z0-9_]+)"
+        # Le DÉFAUT (`{param:NAME:DEFAULT}`) est émis TEL QUEL dans l'argv par build_argv (toolspec.py)
+        # quand le param est absent : il DOIT subir la même curation qu'une valeur d'argv (safe_value /
+        # unsafe_positional_target). Sans ça, `{param:mode:-oN/tmp/pwned}` smugglerait une OPTION d'exfil/
+        # écriture-fichier dans le binaire enveloppé (option-injection). Fail-closed : refus.
+        if len(parts) > 1:
+            default = parts[1]
+            if default.startswith("-"):
+                return (f"token '{tok}' : défaut '{default}' de {{param:{name}:…}} commence par '-' "
+                        f"(injection d'option : le binaire enveloppé le lirait comme un drapeau) — refusé")
+            reason = _dangerous_flag(default)
+            if reason is not None:
+                return f"token '{tok}' : défaut de {{param:{name}:…}} — {reason}"
         return None
     return (f"token '{tok}' : placeholder {{{body}}} inconnu — seuls "
             f"{{target}}/{{target_host}}/{{target_url}}/{{param:NAME}}/{{args}} sont permis")

@@ -113,6 +113,53 @@ class TestFindingPostInit(unittest.TestCase):
         self.assertEqual(d["severity"], "HIGH")
 
 
+class TestL1ProofGateDefenseInDepth(unittest.TestCase):
+    """L1 — le gate de PREUVE vit DANS `Finding.__post_init__` (défense en profondeur), pas seulement
+    dans `Module.finding`. Une construction DIRECTE `Finding(status="vulnerable")` (plugin hostile,
+    chemin sibling, valeur forgée) NE PEUT PAS frapper une attestation « prouvée » : elle est rabattue
+    fail-closed à 'tested'. Seule la sentinelle opaque posée par le chemin sanctionné franchit le gate."""
+
+    def test_direct_construction_vulnerable_clamped_to_tested(self):
+        from forge.schema import Finding as F
+        f = F(target="t", title="forgé", status="vulnerable")
+        self.assertEqual(f.status, "tested", "construction directe ne doit PAS minter 'vulnerable'")
+
+    def test_sentinel_construction_keeps_vulnerable(self):
+        from forge.schema import Finding as F, _PROOF_SENTINEL
+        f = F(target="t", title="prouvé", status="vulnerable", _proof_token=_PROOF_SENTINEL)
+        self.assertEqual(f.status, "vulnerable")
+
+    def test_wrong_sentinel_value_clamped(self):
+        # une valeur devinée/forgée (pas l'objet sentinelle) ne franchit PAS le gate.
+        from forge.schema import Finding as F
+        for bogus in (True, 1, "proof", object()):
+            f = F(target="t", title="x", status="vulnerable", _proof_token=bogus)
+            self.assertEqual(f.status, "tested", f"jeton {bogus!r} ne doit pas franchir le gate")
+
+    def test_proof_token_never_serialized(self):
+        # l'InitVar n'est JAMAIS un champ sérialisé (hors asdict/to_dict, donc hors ledger signé).
+        from forge.schema import Finding as F, _PROOF_SENTINEL
+        f = F(target="t", title="x", status="vulnerable", _proof_token=_PROOF_SENTINEL)
+        self.assertNotIn("_proof_token", f.to_dict())
+
+    def test_module_finding_proven_path_still_vulnerable(self):
+        # le chemin SANCTIONNÉ (`Module.finding(_proven=True)`) mint toujours 'vulnerable'.
+        from forge.modules.registry import Module
+        f = Module.finding(_proven=True, target="t", title="prouvé", status="vulnerable")
+        self.assertEqual(f.status, "vulnerable")
+
+    def test_module_finding_unproven_vulnerable_still_clamped(self):
+        from forge.modules.registry import Module
+        f = Module.finding(_proven=False, target="t", title="non prouvé", status="vulnerable")
+        self.assertEqual(f.status, "tested")
+
+    def test_non_vulnerable_statuses_unaffected(self):
+        # le gate ne touche QUE 'vulnerable' : les autres statuts valides passent inchangés.
+        from forge.schema import Finding as F
+        for st in ("tested", "reported_by_tool", "not_vulnerable", "submitted", "accepted", "skipped"):
+            self.assertEqual(F(target="t", title="x", status=st).status, st)
+
+
 class TestProofModulesCarryFixAndCwe(unittest.TestCase):
     """Sur le chemin de PREUVE, chaque oracle émet un finding fix+cwe non vides."""
 

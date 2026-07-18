@@ -16,11 +16,18 @@ Tous ces enrichissements sont ADDITIFS et FAIL-OPEN : aucun n'écrase une valeur
 et l'absence de mapping laisse simplement le champ vide (zéro régression de comportement).
 """
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, InitVar
 from datetime import datetime, timezone
 
 from . import techniques
 from .redact import redact_secrets as _redact_secrets
+
+# SENTINELLE DE PREUVE (défense en profondeur) — SEUL `Module.finding(_proven=True)` / `Oracle.proof`
+# la posent (via l'InitVar `_proof_token`). Un objet OPAQUE, non devinable/forgeable par valeur : une
+# construction DIRECTE `Finding(status="vulnerable")` (plugin, chemin sibling, valeur forgée) ne la
+# porte PAS -> le statut proof-implying est rabattu fail-closed à 'tested'. Le chemin de preuve
+# sanctionné reste intact (il passe la sentinelle). Voir `Finding.__post_init__` §0ter.
+_PROOF_SENTINEL = object()
 
 SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 # machine d'état d'un finding (reprend la logique FAISS du toolkit YWH).
@@ -126,14 +133,23 @@ class Finding:
     tool: str = ""
     poc: str = ""               # commande/PoC reproductible
     ts: str = field(default_factory=_now)
+    # InitVar (JAMAIS sérialisée : hors asdict/to_dict, hors ledger) — jeton de PREUVE posé UNIQUEMENT
+    # par `Module.finding(_proven=True)` / `Oracle.proof`. Gate défense-en-profondeur, cf. §0ter.
+    _proof_token: InitVar[object] = None
 
-    def __post_init__(self):
+    def __post_init__(self, _proof_token=None):
         # 0) STATUT — validation SCHEMA-ENFORCED (la discipline de preuve n'est plus une simple
         #    convention). Un statut inconnu (typo/plugin hostile/valeur forgée) est ramené fail-closed à
-        #    'tested' : jamais de statut arbitraire dans le ledger SIGNÉ ni le rapport. La promotion vers
-        #    'vulnerable' (proof-implying) reste gardée EN AMONT par `Module.finding` (elle n'est atteignable
-        #    que via le chemin de preuve sanctionné, cf. `Oracle.proof(proven=True)` / marqueur `_proven`).
+        #    'tested' : jamais de statut arbitraire dans le ledger SIGNÉ ni le rapport.
         if self.status not in STATUSES:
+            self.status = "tested"
+        # 0ter) GARDE-FOU DE PREUVE (défense en profondeur, schema-enforced) : le statut proof-implying
+        #    'vulnerable' n'est atteignable QUE via le chemin de preuve SANCTIONNÉ, qui pose l'InitVar
+        #    `_proof_token=_PROOF_SENTINEL` (Module.finding(_proven=True) / Oracle.proof(proven=True)). Une
+        #    construction DIRECTE `Finding(status="vulnerable")` (plugin hostile, chemin sibling, valeur
+        #    forgée) NE porte PAS la sentinelle -> rabattue fail-closed à 'tested'. Impossible de forger une
+        #    attestation « prouvée » dans le ledger SIGNÉ ni le rapport en court-circuitant `Module.finding`.
+        if self.status == "vulnerable" and _proof_token is not _PROOF_SENTINEL:
             self.status = "tested"
         # 0bis) SÉVÉRITÉ — validation SCHEMA-ENFORCED fail-closed (miroir du clamp `status`, L16). Une
         #    sévérité hors de `SEVERITIES` (typo, plugin hostile, valeur forgée) fausserait la synthèse

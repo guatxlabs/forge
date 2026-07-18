@@ -37,6 +37,25 @@ QUALIFYING = techniques.qualifying_classes()
 DEFAULT_CHECKLIST = list(techniques.DEFAULT_CHECKLIST)
 
 
+def _floored(action: Action) -> bool:
+    """True si l'action doit recevoir le PLANCHER anti-starvation. Deux voies COMPLÉMENTAIRES :
+
+      1. `action.cls ∈ QUALIFYING` : les 12 jetons de classe historiques (idor/access_control/auth/
+         ato/rce/sqli/ssrf/biz/privesc…) — inchangé.
+      2. le KIND est `bug_bounty_eligible` dans le catalogue : couvre les 22 classes payables dont le
+         `cls` par défaut (`kind.split('.')[-1]`) n'est PAS un jeton qualifiant (`graphql.access` ->
+         "access", `xss.stored` -> "stored", `ssti.eval` -> "eval", `xxe.probe`, `cmdi.probe`,
+         `oauth.flow`, `race.condition`, `csrf.state_change`…). Sans cette voie, ces voies payables
+         gardaient une EV ~0.003 vs le plancher 0.5 et étaient affamées par un budget fini / un SIGTERM.
+
+    Ainsi TOUTE classe payable (bug_bounty_eligible) reçoit le MÊME plancher que l'IDOR REST — et une
+    action de scan non-qualifiante (`web.nuclei`, recon…) n'est JAMAIS planchée. Pur, ne lève jamais."""
+    if action.cls in QUALIFYING:
+        return True
+    t = techniques.CATALOG.get(action.kind)
+    return bool(t and t.bug_bounty_eligible)
+
+
 class Planner:
     def __init__(self, budget: float | None = None, exhaustive: bool = False,
                  checklist: Iterable[str] | None = None) -> None:
@@ -47,7 +66,7 @@ class Planner:
     @staticmethod
     def ev(action: Action) -> float:
         base = action.value * action.confidence / max(action.cost, 0.01)
-        if action.cls in QUALIFYING:               # plancher : jamais affamer une voie payable
+        if _floored(action):                       # plancher : jamais affamer une voie payable
             return max(base, FLOOR)
         return base
 
@@ -67,7 +86,7 @@ class Planner:
         skipped: list[Action] = []
         spent = 0.0
         for a in ranked:
-            qualifying = a.cls in QUALIFYING
+            qualifying = _floored(a)
             if spent + a.cost <= self.budget or qualifying:  # qualifiant = toujours gardé
                 ordered.append(a)
                 if not qualifying:

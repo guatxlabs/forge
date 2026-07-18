@@ -266,6 +266,11 @@ class TestToolspecLoader(unittest.TestCase):
             "exfil allowlist (--proxy)":   dict(self.GOOD, kind="recon.d6", argv_template=["{target_url}", "{args}"], flag_allowlist=["--proxy"]),
             "{args} sans allowlist":       dict(self.GOOD, kind="recon.d7", argv_template=["{target_url}", "{args}"]),
             "placeholder inconnu {evil}":  dict(self.GOOD, kind="recon.d8", argv_template=["-u", "{evil}"]),
+            # M2 — le DÉFAUT de {param:NAME:DEFAULT} est émis TEL QUEL dans l'argv : un défaut porteur
+            # d'une option d'écriture-fichier/exfil est une injection d'option -> DOIT être refusé.
+            "défaut param option (-oN)":   dict(self.GOOD, kind="recon.d9", argv_template=["-u", "{target_url}", "{param:mode:-oN/tmp/pwned}"]),
+            "défaut param --output":       dict(self.GOOD, kind="recon.d10", argv_template=["-u", "{target_url}", "{param:o:--output=/tmp/x}"]),
+            "défaut param proxy (substr)": dict(self.GOOD, kind="recon.d11", argv_template=["-u", "{target_url}", "{param:p:myproxything}"]),
         }
         for label, spec in cases.items():
             with self.subTest(label):
@@ -275,6 +280,18 @@ class TestToolspecLoader(unittest.TestCase):
                         loader.load_toolspec_file(path)
                     os.unlink(path)
                     self.assertNotIn(spec["kind"], mods.kinds(), f"{label} ne doit PAS s'enregistrer")
+
+    def test_param_default_benign_still_registers(self):
+        # M2 — non-régression : un défaut BÉNIGN de {param:NAME:DEFAULT} (ne commence pas par '-',
+        # aucun drapeau d'exfil) reste ACCEPTÉ et l'outil s'enregistre normalement.
+        spec = dict(self.GOOD, kind="recon.okdefault",
+                    argv_template=["-u", "{target_url}", ("-mode", "{param:mode:fast}"), ("-fmt", "{param:fmt:json}")])
+        with _Registry():
+            path = self._write(spec)
+            kind = loader.load_toolspec_file(path)
+            os.unlink(path)
+            self.assertEqual(kind, "recon.okdefault")
+            self.assertIn("recon.okdefault", mods.kinds())
 
     def test_lowercase_short_flags_still_allowed(self):
         # anti-sur-blocage : -t/-k/-f minuscules (threads/insecure/fail) restent LÉGITIMES via {args}.
