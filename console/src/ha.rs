@@ -566,7 +566,7 @@ mod pg_tests {
         let (tx_held, rx_held) = std::sync::mpsc::channel::<()>();
 
         // Replica A: PERSISTENT pooled connection. Acquire the advisory xact lock, enter crit, append seq=1,
-        // HOLD the lock ~250 ms (so B's acquire has to block on it), leave crit, then COMMIT (releasing lock).
+        // HOLD the lock ~1000 ms (so B's acquire has to block on it), leave crit, then COMMIT (releasing lock).
         let a = {
             let (url, path) = (url.clone(), path.clone());
             let (a_in_crit, tx_held) = (a_in_crit.clone(), tx_held);
@@ -586,8 +586,13 @@ mod pg_tests {
                             "console.race",
                             &serde_json::json!({"replica": "A", "seq_intent": 1}),
                         );
-                        // Hold the advisory lock across B's blocked acquire.
-                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        // Hold the advisory lock across B's blocked acquire. 1000 ms (pas 250) : B doit
+                        // d'abord se CONNECTER (spawn thread + connect_postgres, ~100-300 ms selon la machine/
+                        // le runner) avant d'émettre son acquire, et ce délai grignote la fenêtre de hold. À
+                        // 250 ms la fenêtre restante pouvait tomber sous le seuil de 100 ms (flaky, cf. échec
+                        // "waited 53ms"). 1000 ms laisse une marge >700 ms même sur un connect lent -> le
+                        // `waited >= 100ms` devient déterministe sans dépendre de la latence de connexion de B.
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
                         a_in_crit.store(false, Ordering::SeqCst); // leave crit BEFORE the COMMIT releases the lock.
                         Ok::<(), crate::store::StoreError>(())
                     })
