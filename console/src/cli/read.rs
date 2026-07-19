@@ -203,7 +203,8 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
                     }
                 };
                 // MÊME moteur SoQL read-only que l'API, routé sur PG (transaction READ ONLY sur ce store).
-                match crate::exec_soql_time_pg_store(store, &soql, 0, 0) {
+                // Schéma community nu (`Schema::forge()`) — pas d'App/tenant en CLI, comme le chemin SQLite.
+                match crate::exec_soql_time_pg_store(store, &soql, 0, 0, &guatx_core::soql::Schema::forge()) {
                     Ok(v) => {
                         if as_json {
                             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));

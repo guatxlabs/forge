@@ -47,13 +47,21 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Le CŒUR runtime est stdlib-only, mais la SUITE de tests a besoin de pytest (un test contrib
+      # l'importe) + cryptography (les tests ed25519 du ledger l'exigent, sinon repli HMAC → assertions
+      # ed25519 KO). Extra `test` de pyproject — n'ajoute AUCUNE dép au runtime livré.
+      - name: Install test deps (pytest + cryptography)
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -e ".[test]"
+
       # Garde-fou source-de-vérité-unique : échoue si VERSION, pyproject.toml et Cargo.toml
       # divergent (cf. scripts/check_version.py / `make check-version`). Placé AVANT les tests
       # pour fail-fast sur une dérive de version.
       - name: Version drift check (VERSION == pyproject == Cargo.toml)
         run: make check-version
 
-      - name: Unit tests (stdlib, zéro dépendance)
+      - name: Unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
   # ---------------------------------------------------------------------------
