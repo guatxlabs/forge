@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — IN-APP NOTIFICATIONS (« triage enrichi ») : couche LÉGÈRE de collaboration sur les
 //! findings, posée SUR l'ownership (assignee) + le cycle de triage existants. PAS un moteur SLA/email
 //! (ceux-là exigent une config de canal — hors périmètre).

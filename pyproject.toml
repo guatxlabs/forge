@@ -2,7 +2,7 @@
 name = "forge"
 version = "0.0.1"
 description = "Forge — moteur red-team gated par ROE (sûreté d'abord). Antithèse offensive du SOC blue-team Plume (GuatX)."
-license = "AGPL-3.0-only"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.9"
 dependencies = []   # coeur pur-stdlib (comme secpipe). Les modules réels (P2) ajouteront des deps optionnelles.
 

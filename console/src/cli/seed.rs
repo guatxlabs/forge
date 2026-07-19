@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge seed-demo` — amorçage de l'engagement de référence (PURE MOVE depuis cli.rs).
 // ===========================================================================================
 // `forge seed-demo` — amorce la base SQLite avec l'ENGAGEMENT DE RÉFÉRENCE fourni

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """PKCS#11 (CKM_EDDSA) OFF-HOST ledger signer — driver + wiring tests. `python -m pytest tests/test_pkcs11_signer.py`.
 
 Proves:

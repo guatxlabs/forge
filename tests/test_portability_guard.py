@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Garde de PORTABILITÉ (filet anti-régression, statique) — comportement runtime INCHANGÉ.
 
 Ce test ne modifie RIEN au moteur : il lit l'arbre source et ÉCHOUE si un chemin OS codé en dur

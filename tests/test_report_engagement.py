@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests du générateur de rapport d'engagement agrégé (livrable client, forge/report_engagement.py).
 
 Couvre : ISOLATION (le rapport de l'engagement A ne contient QUE des findings de A) · RÉDACTION des

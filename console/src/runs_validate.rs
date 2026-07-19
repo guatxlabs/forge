@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — VALIDATION / GATING DES PARAMS DE MODULE du run-lifecycle (PURE MOVE extrait de
 //! `runs.rs`). Fonctions PURES, sans état partagé : `validate_module_params` (forme {kind:{params}}),
 //! `validate_modules` (⊆ kinds connus, web_allowed, PLANCHER EXPLOIT + opt-in haut-impact gouverné),

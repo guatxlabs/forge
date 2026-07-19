@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Wrapper GÉNÉRIQUE gouverné d'outils externes — déclarer N'IMPORTE QUEL outil CLI de sécurité comme
 un module Forge À PARTIR D'UN SPEC, SOUS la même gouvernance que les modules natifs.
 

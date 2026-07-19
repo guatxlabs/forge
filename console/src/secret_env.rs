@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `*_FILE` secret indirection (12-factor / Docker & k8s secrets) — "the key shouldn't be next to
 //! the door". Lets a secret's PLAINTEXT live in a mounted, root-owned Secret FILE instead of a
 //! `.env` sitting beside the app; the env then holds a PATH, not the secret.

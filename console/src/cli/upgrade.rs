@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge upgrade` — flux d'UPGRADE SÛR EN UNE COMMANDE, fail-closed avec rollback.
 // ===========================================================================================
 // `forge upgrade --passphrase-env <ENV> [--db <path>] [--ledger <path>] [--backup-dir <dir>]

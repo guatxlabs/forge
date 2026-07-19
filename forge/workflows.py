@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Workflows éditables & sauvegardés — pipelines COMPOSÉS par l'opérateur, SANS code (stdlib only).
 
 Un WORKFLOW est un pipeline NOMMÉ, SAUVEGARDÉ et ÉDITABLE : une SÉLECTION ORDONNÉE de techniques /

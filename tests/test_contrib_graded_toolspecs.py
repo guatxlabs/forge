@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Les 3 exemples gradués de ToolSpec (`forge/modules/contrib/{simple,medium,hard}.toolspec.json`)
 DOIVENT être des exemples COPIER-COLLER-FONCTIONNELS : chacun charge via le loader déclaratif,
 s'ENREGISTRE (le kind apparaît dans `kinds()`), et construit l'argv attendu avec les params par défaut.

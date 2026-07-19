@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Parseurs par format — chacun transforme un fichier de scan en `list[Finding]` orientés preuve.
 
 Contrat commun (voir `_base.make_finding`) : RECON/DÉCOUVERTE -> `status="tested"` ;

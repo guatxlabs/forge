@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — CLIENT HTTP-OUT (fetcher intégré) extrait de main.rs (PURE MOVE). Regroupe le schéma
 //! d'authentification du fetcher (`HttpAuth`), sa construction depuis la config source (`parse_http_auth`),
 //! le GET HTTP/1.1 minimal et BLOQUANT sur socket TCP brut (`http_get_blocking`, aucune dépendance HTTP

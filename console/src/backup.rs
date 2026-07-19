@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SAUVEGARDE / RESTAURATION CHIFFRÉE + politique/scheduler offsite + API backup/restore.
 //! Bloc déplacé depuis main.rs (PURE MOVE, Wave 2). Réutilise App + les helpers d'auth/ledger de la
 //! racine de crate (re-exportés `pub(crate) use crate::backup::*`) et référence `crate::dbmigrate`

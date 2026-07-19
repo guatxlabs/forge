@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Rapport d'ENGAGEMENT agrégé — le LIVRABLE CLIENT (couche à la Ghostwriter).
 
 `report.py` produit le rapport markdown d'UN run (transparence ROE). Ce module produit, lui, le

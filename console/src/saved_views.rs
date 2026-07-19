@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SAVED VIEWS (#8) : jeux de filtres SAUVEGARDÉS de la vue Findings.
 //!
 //! Un `saved_view` capture l'état de filtre de la vue Findings (severity/status/TLP/target/campaign/

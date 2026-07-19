@@ -4,7 +4,7 @@ Thanks for your interest in Forge — the governed red-team engine. Contribution
 under a few rules that exist because Forge is a **safety-critical, authorization-enforcing**
 tool.
 
-By contributing you agree that your contribution is licensed under **AGPL-3.0-only** (the
+By contributing you agree that your contribution is licensed under **AGPL-3.0-or-later** (the
 project license), and you certify the [Developer Certificate of Origin](https://developercertificate.org/)
 by signing off your commits (`git commit -s` → adds `Signed-off-by:`).
 

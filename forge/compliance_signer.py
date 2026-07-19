@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ENTERPRISE (E3 COMPLIANCE) — pluggable checkpoint signer + WORM/retention decision (SEPARABLE, INERT).
 
 Open-core discipline: this is an ENTERPRISE seam. It is INERT unless a compliance flow calls it — merely

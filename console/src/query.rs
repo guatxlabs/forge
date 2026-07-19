@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SOUS-SYSTÈME QUERY / DASHBOARDS extrait de main.rs (PURE MOVE). Contient le moteur
 //! soql read-only (`exec_soql`/`exec_soql_time` + helpers `cell`/`soql_stats`), les endpoints
 //! `/api/query` (GET+POST), et le CRUD des dashboards (vues) + panels soql sauvegardés (modèle

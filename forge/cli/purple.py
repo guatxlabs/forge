@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Préflight de la boucle purple pour la CLI Forge : `doctor --purple` (console /health + source de
 détection / Plume, LECTURE SEULE). Extrait de l'ancien `forge/cli.py` (pur déplacement, comportement
 inchangé). `_configured_source` vit ici (source de détection visible par la CLI) et est réutilisé par

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — VUES DE REPORTING en LECTURE SEULE du modele ROUGE : PURE MOVE extrait de `findings.rs`.
 //! Endpoints d'agregation ISOLES par engagement actif (`resolve_view_engagement_id`, fail-closed) :
 //! `runrecords`, `campaigns`, `roe`, `coverage` (couverture ATT&CK) et `attack_matrix` (grille TACTIQUE x

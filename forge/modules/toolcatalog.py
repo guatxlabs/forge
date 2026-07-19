@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """CATALOGUE d'outils OSS courants PRÉ-WRAPPÉS (specs déclaratifs, self-registering, dégradent si absent).
 
 Chaque entrée est un `ToolSpec` (cf. `toolspec.py`) enregistré via `register_spec` : l'outil apparaît

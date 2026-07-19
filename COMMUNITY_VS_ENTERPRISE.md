@@ -1,7 +1,7 @@
 # Forge — Community vs Enterprise (open-core boundary)
 
 Forge is developed as an **open core**. The full **governance and cryptographic-audit engine** is open
-source under **[AGPL-3.0-only](LICENSE)** and stays that way forever. A separate, future **Enterprise
+source under **[AGPL-3.0-or-later](LICENSE)** and stays that way forever. A separate, future **Enterprise
 edition** (commercial license) adds the **scale / team / compliance** layer on top — never replacing or
 gating the open core.
 

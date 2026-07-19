@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — HANDLER D'INGESTION (le point de jonction de la boucle purple).
 //! Bloc déplacé depuis main.rs (PURE MOVE). `POST /api/ingest` (token bearer) : le moteur Python
 //! POSTe ici ses findings + run-records ATT&CK + décisions ROE + compteurs de couverture, chacun

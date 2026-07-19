@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Commandes moteur de la CLI Forge : `plan`, `run`, `campaign` (chargement d'actions/cibles,
 armement, ledger, planner, workflows, ingest console). Extrait de l'ancien `forge/cli.py` (pur
 déplacement, comportement inchangé)."""

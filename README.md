@@ -7,7 +7,7 @@
 
 **·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
 
-**License: [AGPL-3.0-only](LICENSE) — open core**  ·  Enterprise edition commerciale → [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md)
+**License: [AGPL-3.0-or-later](LICENSE) — open core**  ·  Enterprise edition commerciale → [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md)
 
 </div>
 
@@ -301,7 +301,7 @@ concepts, CLI, API HTTP, sécurité, dépannage). Les pages phares :
 
 Forge suit un modèle **open-core**.
 
-- **Community edition — [AGPL-3.0-only](LICENSE)** : le **cœur complet de gouvernance** est open, gratuit
+- **Community edition — [AGPL-3.0-or-later](LICENSE)** : le **cœur complet de gouvernance** est open, gratuit
   et auto-hébergeable. Scope-guard ROE fail-closed, ledger d'autorisation Ed25519 tamper-evident, oracles
   orientés-preuve, registre extensible de techniques + toutes les classes de techniques, run C2-light
   gouverné, console (UI + wizard + RBAC admin/operator/viewer), connecteurs/orchestration (nuclei/msf/

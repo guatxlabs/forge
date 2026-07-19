@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE (E3 COMPLIANCE) — evidence export + rendering + purge helper reads/deletes.
 //!
 //! Extracted from `compliance.rs` (PURE MOVE — byte-identical bodies, only relocation + visibility +

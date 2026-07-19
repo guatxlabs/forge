@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Commandes ledger de la CLI Forge : `ledger verify|pubkey|keygen`. Extrait de l'ancien
 `forge/cli.py` (pur déplacement, comportement inchangé)."""
 from ..ledger import Ledger

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Câblage du routeur HTTP — PURE MOVE de `build_router` depuis main.rs.
 //!
 //! `build_router` ne fait QUE câbler des handlers déjà définis + re-exportés `pub(crate)` à la

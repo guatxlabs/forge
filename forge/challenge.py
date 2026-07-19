@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Détection de challenge/WAF managé sur une réponse HTTP — heuristiques HTTP pures (stdlib,
 jamais de réseau), SANS rapport avec la taxonomie des techniques. Extrait de `techniques.py`
 (pur déplacement) ; ré-exporté par `techniques.py` pour préserver les chemins d'import publics.

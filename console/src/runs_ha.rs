@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — HA / ORCHESTRATION LEADER du run-lifecycle (PURE MOVE extrait de `runs.rs`). Réconcilie
 //! les runs orphelins (`reconcile_runs`/`ReconcileScope`/`reap_dead_leader_runs`), la réservation FIFO
 //! cancellation-safe (`RunReservation` guard RAII CONC-1 + `reserve_engagement_slot`), le spec résolu

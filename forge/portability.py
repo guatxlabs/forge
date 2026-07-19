@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Cross-platform portability seams for the Forge engine — pur-stdlib, sans effet de bord.
 
 Ce module CENTRALISE les décisions OS-spécifiques pour que le reste du moteur reste OS-agnostique.

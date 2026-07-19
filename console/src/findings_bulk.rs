@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — BULK-OPS (#8) sur le modele ROUGE (finding) : PURE MOVE extrait de `findings.rs`.
 //! Operations de MASSE sur des findings SELECTIONNES (ids) — statut (`findings_bulk_status`), assignation
 //! (`findings_bulk_assign`), triage (`findings_bulk_triage`) et export CSV/JSON (`findings_bulk_export`),

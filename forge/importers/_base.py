@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Socle des importateurs de scans — helpers PURS, sans effet de bord (stdlib only).
 
 Ce module absorbe la propriété « ingest les sorties d'outils existants » de Faraday/Trickest/

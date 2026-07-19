@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — CRUD + TRIAGE/ASSIGN du modele ROUGE (finding). Liste (`findings`, keyset/offset),
 //! detail (`finding_detail`), mutation cycle de vie + classification (`finding_update`), OWNERSHIP
 //! (`findings_assignable`/`resolve_assignee`/`finding_assign`) et WORKFLOW DE TRIAGE (machine a etats

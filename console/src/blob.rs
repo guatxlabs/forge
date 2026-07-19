@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — BLOBSTORE SEAM pour artefacts (archive de backup offsite, exports/évidence).
 //!
 //! SEAM ADDITIF. Le build PAR DÉFAUT (community) ne compile QUE `LocalFsBlobStore` (système de

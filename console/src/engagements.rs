@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SOUS-SYSTÈME ENGAGEMENT (objet de 1re classe) extrait de main.rs (PURE MOVE). Regroupe
 //! le CRUD gouverné + audité des engagements et la RÉSOLUTION de scope/engagement partagée par le run flow
 //! et les vues : le pré-filtre de scope serveur (`host_in_server_scope`/`host_in_scope_list`, fonction PURE

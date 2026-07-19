@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — BOOT SERVEUR + DISPATCH CLI + STORE-GATE (STEP 4 du refactor archi,
 //! docs/ARCHITECTURE_REFACTOR_PLAN.md §1.2). PURE MOVE depuis main.rs : `dispatch_cli`, `serve`
 //! (~390 l, avec ses blocs `cfg(feature="store-postgres"/"encryption")`), `enterprise_store_gate`

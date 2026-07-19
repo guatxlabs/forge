@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SCHÉMA DB + SEEDING, extrait de `state.rs` (PURE MOVE). Regroupe le `SCHEMA` SQLite de
 //! base + son miroir `PG_SCHEMA` (feature `store-postgres`), les migrations additives `migrate()`, les
 //! seeders idempotents rétro-compat (`ensure_default_dashboard`/`ensure_default_engagement`/

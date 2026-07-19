@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE (E3 COMPLIANCE) — PURE POLICY / WORM / legal-hold / retention math + timestamp parsing.
 //!
 //! Extracted from `compliance.rs` (PURE MOVE — byte-identical bodies, only relocation + visibility +

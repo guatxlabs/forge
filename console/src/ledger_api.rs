@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SOUS-SYSTÈME LEDGER (lecture + vérification de la chaîne SHA-256 + écriture).
 //! Bloc déplacé depuis main.rs (PURE MOVE). Regroupe : la canonicalisation JSON (canon_json/…), la
 //! lecture du JSONL (read_ledger_lines), la re-vérification hash-chain (verify_ledger_chain +

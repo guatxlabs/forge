@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Importateurs de scans — ingérer les sorties d'outils EXISTANTS en findings Forge orientés preuve.
 
 Point d'entrée MIGRATION-SUPERSET : un hunter venant de Faraday/Trickest/reNgine/Osmedeus peut verser

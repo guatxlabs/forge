@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge migrate-store` — migrateur gouverné SQLite -> Postgres (PURE MOVE depuis cli.rs).
 // ===========================================================================================
 // `forge migrate-store` (feature `store-postgres`) — MIGRATEUR DE DONNÉES GOUVERNÉ

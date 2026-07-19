@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — ÉTAT PARTAGÉ (`App`) + son substrat d'app couplé. Regroupe la struct d'état `App`
 //! (+ son `impl` : `db()`/`store()`/`recompute_auth_required()`/`reload_detection_source()`/
 //! `detection_config()`/`invalidate_ledger_head()`/`provisioned()` …), les structs de run vivant

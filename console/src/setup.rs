@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — LOGIN + WIZARD DE 1er DÉPLOIEMENT (self-deploy).
 //! Bloc déplacé depuis main.rs (PURE MOVE). Handlers PUBLICS (hors auth_guard, sous host_guard).
 //! `POST /api/login` : vérifie login/mot de passe (argon2id, timing uniforme anti-énum), pose une

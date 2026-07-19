@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Helpers PARTAGÉS de DÉCOUVERTE DE SERVICE (host:port chaînable).
 
 Utilisés par TOUS les modules de recon qui trouvent des PORTS OUVERTS : les modules écrits à la main

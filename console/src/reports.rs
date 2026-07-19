@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — RAPPORT D'ENGAGEMENT AGRÉGÉ (le livrable client, couche à la Ghostwriter).
 //!
 //! `run_report` (main.rs) rend le rapport d'UN run. Ce module rend le rapport AGRÉGÉ d'un ENGAGEMENT

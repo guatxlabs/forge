@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SOUS-SYSTÈME PLANIFICATION / TECHNIQUES / WORKFLOWS / MODULES extrait de main.rs
 //! (PURE MOVE). Regroupe : le catalogue de modules + son refresh gouverné (`modules`/`modules_refresh`,
 //! GET /api/modules, POST /api/modules/refresh) ; le pré-vol de scope (`scope_check`, POST

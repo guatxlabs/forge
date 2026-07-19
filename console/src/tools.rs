@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI »), gouvernés.
 //!
 //! Un opérateur red-team déclare SON PROPRE outil CLI depuis l'UI — SANS éditer de fichier ni recompiler —

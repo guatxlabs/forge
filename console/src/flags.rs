@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Enterprise flag helpers — the ONE copy of the "is this enterprise feature engaged?" logic that
 //! sso / tenancy / compliance / scim each carried verbatim. Behaviour is byte-for-byte the historical
 //! per-module code: env truthy (1|true|on|yes, case-insensitive) OR the per-DB config key in
