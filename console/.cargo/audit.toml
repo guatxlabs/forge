@@ -1,0 +1,21 @@
+# cargo-audit — advisories IGNORÉES, justifiées et datées (pas un blanket-silence).
+# Lu automatiquement par `cargo audit` lancé depuis console/ (.cargo/audit.toml).
+# Règle : un ignore reste EXCEPTIONNEL — advisory RÉELLE mais NON exploitable dans le
+# périmètre livré, sans fix upstream non-cassant disponible. À réviser à chaque bump de dép.
+
+[advisories]
+ignore = [
+    # --- quick-xml 0.32 — DoS parsing XML (RUSTSEC-2026-0194 quadratique sur attrs
+    #     dupliqués ; RUSTSEC-2026-0195 alloc namespaces non bornée). Fix upstream ≥0.41.0.
+    #   SOURCE : rust-s3 0.35.1 → aws-creds → quick-xml (contrainte ^0.32). rust-s3 ≤0.37.2
+    #     (dernier publié au 2026-07-19) épingle TOUJOURS ^0.32 → aucun bump non-cassant.
+    #   PAS DANS LE BINAIRE LIVRÉ : quick-xml n'est tiré QUE par la feature `object-store`
+    #     (BlobStore S3/MinIO), OFF par défaut ; le build community ne le compile pas
+    #     (`cargo tree -i quick-xml` sans --all-features → aucun paquet).
+    #   HORS MODÈLE DE MENACE : le DoS suppose des réponses XML hostiles de l'endpoint
+    #     S3/MinIO — infrastructure de confiance configurée par l'opérateur, pas un input
+    #     contrôlé par un attaquant. Aucune surface réseau non authentifiée.
+    #   → LEVER dès que rust-s3 publie une version dépendant de quick-xml ≥0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
