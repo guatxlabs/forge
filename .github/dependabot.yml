@@ -1,0 +1,25 @@
+# Dependabot — alertes + mises à jour de dépendances (gratuit sur repo public).
+# Épingle les MàJ derrière une PR (jamais un merge auto) → revue humaine, cohérent avec
+# « l'enforcement, pas la confiance ». Couvre : le crate console (cargo) et les GitHub
+# Actions (garde les SHA-pins de ci.yml à jour). Le moteur Python est stdlib-only
+# (pyproject deps=[]) → pas d'écosystème pip à surveiller.
+version: 2
+updates:
+  # Crate Rust de la console (deps de build/runtime).
+  - package-ecosystem: "cargo"
+    directory: "/console"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(cargo)"
+
+  # GitHub Actions — maintient les actions SHA-pinnées de .github/workflows/ à jour
+  # (Dependantbot propose le nouveau SHA + le commentaire de version).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(actions)"
