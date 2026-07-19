@@ -249,3 +249,26 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 
 ## Deferred engineering — RÉSOLU
 - `significant_drop_tightening` clippy **activé** (`3c7a5c4`) · `last_insert_id()` session-scoping **résolu** via `Store::execute_returning_id` (`e188e2b`).
+
+## 🚀 Publication open-source (org `guatxlabs`) — plan & décisions (2026-07-19)
+
+**Org GitHub** : `guatxlabs` (UNE org, repos séparés : `guatxlabs/forge` · `/core` · `/plume` · `/ocular`).
+X : `@guatxlabs` (display « GuatX »). Reddit : poster dans r/netsec/r/redteamsec/r/rust (pas de subreddit dédié au lancement). URLs forge réalignées sur `guatxlabs` (`7525812`).
+
+**Licences — split lib/app :**
+- `core` (guatx-core, la **lib partagée** liée par forge+plume) → **LGPL-3.0**.
+- `forge` / `plume` / `ocular` (**applications**) → **AGPL-3.0** (garde le moat « pas de SaaS-fermé concurrent »). **Forge = AGPL inchangé** (97 headers SPDX intacts, aucune réécriture). Ocular est indépendant (ne lie PAS core). LGPL core + AGPL forge/plume = **compatible** (LGPL liable dans (A)GPL).
+
+**B1 — build standalone (dép core) : git-dep maintenant → crates.io plus tard.**
+- `console/Cargo.toml` **committé** = `guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.1.0", features=["forge"] }`.
+- **Override dev** : `console/.cargo/config.toml` **GITIGNORÉ** = `[patch."…/guatxlabs/core"] guatx-core = { path = "../../core" }` → garde la vitesse du path en monorepo sans dépendre du core publié. **Prouvé** : `cargo metadata --offline` résout vers le path local (git absent non touché) ; `cargo build --release` vert (1m01s) ; **Cargo.lock inchangé**.
+- ⚠️ **Alignement tag** : `v0.1.0` DOIT être identique sur core/forge/plume (sinon un clone public ne résout pas la dép).
+- ⚠️ **Chicken-egg** : publier `guatxlabs/core` + tag `v0.1.0` **EN PREMIER** (forge/plume en dépendent). Rebuild Docker forge **après** core publié (la git-dep résoudra pour de vrai ; d'ici là l'image déployée tourne sur le build path-dep antérieur, intacte).
+
+**Prêt côté forge (public-ready)** : code (3 rounds d'audit + delta-audit, isolation tenant prouvée non-contournable, 0 CRITICAL/HIGH) · tests+couverture (1493 py / 385 rust / 106 core · **88%/84%**) · E2E UI complet (22 vues, 0 erreur JS ; contraintes loopback-strict+anti-rebinding contournées explicitement le temps du test puis restaurées) · fichiers communauté (README/SECURITY/CONTRIBUTING/CODE_OF_CONDUCT/CHANGELOG) · **historique clean** (271 commits, 0 vrai secret — uniquement des fixtures de redaction) · remote `vps` local-only (pas dans un clone public).
+
+**Enforcement (famille GUATX)** : `GUATX/AGENTS.md` (convention partagée : mapping repo↔remote, discipline git, anti-clobber, hand-off cross-repo, actions gatées, §7 pre-receive) **existe déjà**. Hook `pre-receive` écrit+**testé à froid** (secret-scan **fixture-aware** HARD, trailer SOFT, gate tests optionnelle ; 4 cas verts) — **installer APRÈS le publish** (ne pas risquer un faux-positif bloquant la publication cette nuit).
+
+**Stratégie de lancement** : publier le repo forge **bientôt** (soft — feedback/stars, polir les aspérités) ; réserver le **gros splash Reddit/X** pour le moment **purple-team Forge+Plume** ensemble (récit « red+blue open & souverain », plus fort avec les deux).
+
+**Actions forge EN ATTENTE (feu vert humain)** : créer `guatxlabs/forge`+`/core` → `git remote add public …` + `git push public main` (je câble le remote local sur go ; le `push` tu le déclenches). **Périmètre** : core/plume/ocular (relicence, purge historique filter-repo, publication) = domaine user ; **forge = moi** ; coordination des actions par l'user (core d'abord).
