@@ -9,6 +9,12 @@
 
 **License: [AGPL-3.0-or-later](LICENSE) — open core**  ·  Enterprise edition commerciale → [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md)
 
+<br>
+
+<img src="docs/media/console-demo.gif" alt="Console Forge — vue d'ensemble, catalogue de modules, findings mappés ATT&CK, lancement de campagne gouverné" width="860">
+
+<sub>Console Forge — dashboard (**77 modules** natifs) · catalogue (modules **exploit/destructif** gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**).</sub>
+
 </div>
 
 Plume **observe** (la plume qui consigne, bleu). Forge **frappe** — et **trempe** les défenses de
