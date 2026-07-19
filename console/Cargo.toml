@@ -103,7 +103,7 @@ bytes = { version = "1", optional = true }
 # (provider `ring`, racines webpki — AUCUN openssl/native-tls) + `aws-creds/rustls-tls`. Path-style forcé
 # (MinIO). `default-features = false` retire la feature par défaut `use-tokio-native-tls` (async + openssl).
 # N'entre PAS dans le build par défaut (`optional`).
-rust-s3 = { version = "0.35", optional = true, default-features = false, features = ["sync-rustls-tls"] }
+rust-s3 = { version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
 
 [dev-dependencies]
 # Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste
