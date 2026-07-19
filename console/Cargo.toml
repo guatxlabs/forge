@@ -67,7 +67,7 @@ tower-http = { version = "0.7", features = ["fs", "catch-panic"] }   # ServeDir 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
 libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign
 futures-util = { version = "0.3", default-features = false }   # stream::unfold -> SSE sans tokio-stream
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
 sha2 = "0.10"
 argon2 = { version = "0.5", features = ["std"] }
