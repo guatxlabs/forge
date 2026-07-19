@@ -63,7 +63,7 @@ guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.1.0", featur
 #   override la git-dep vers le core local. Vérifié : `cargo metadata --offline` résout vers le path
 #   local sans toucher le git. Un clone PUBLIC (sans ce patch local) résout la vraie git-dep.
 axum = "0.7"
-tower-http = { version = "0.5", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
+tower-http = { version = "0.7", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
 libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign
 futures-util = { version = "0.3", default-features = false }   # stream::unfold -> SSE sans tokio-stream
