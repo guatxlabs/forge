@@ -627,6 +627,7 @@ dependencies = [
 [[package]]
 name = "guatx-core"
 version = "0.0.1"
+source = "git+https://github.com/guatxlabs/core?tag=v0.1.0#0452bb54850c80b7238fcddafaaa2128c810ef96"
 dependencies = [
  "regex",
  "secrecy",
