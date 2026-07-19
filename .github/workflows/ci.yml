@@ -265,3 +265,29 @@ jobs:
           GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks-ci.toml
           # NOTE: gitleaks-action is free for personal accounts; GitHub ORGANIZATIONS must set the
           # GITLEAKS_LICENSE secret. If this repo lives under an org, add that secret here.
+
+  # ---------------------------------------------------------------------------
+  # POINT D'ENTRÉE UNIQUE du ruleset — nom STABLE `CI`. Un ruleset sur `main` doit
+  # exiger CE check, JAMAIS les noms générés `python (unittest)` / `console (...)`
+  # / `security (...)` : le jour où l'un est renommé, réordonné ou ajouté (matrice,
+  # nouveau backend…), un check requis par son nom généré ne remonterait plus et
+  # `main` deviendrait IMPOUSSABLE — y compris pour le commit qui réparerait ça.
+  # Ce job dépend de tous les autres et ne bouge jamais de nom.
+  # ⚠️ Ne poser le required-status-check `CI` dans le ruleset qu'APRÈS un premier
+  #    run réel (un check jamais exécuté est exigé mais jamais satisfait).
+  # ---------------------------------------------------------------------------
+  ci-ok:
+    name: CI
+    if: always()   # sinon un job en échec SAUTE ce job au lieu de le faire échouer
+    needs: [python, console, console-postgres, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Tous les jobs requis doivent avoir RÉUSSI
+        # `skipped` et `cancelled` traités comme des ÉCHECS À DESSEIN : GitHub
+        # considère un check requis mais sauté comme satisfait, ce qui laisserait
+        # passer un job jamais exécuté.
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "::error::un job de CI n'a pas réussi : ${{ join(needs.*.result, ', ') }}"
+          exit 1
