@@ -267,28 +267,48 @@ jobs:
         working-directory: console
         run: cargo audit --deny warnings
 
-      # Ephemeral gitleaks config (runner-only, never committed) — extends defaults + allowlists the
-      # documented eval secrets template so it cannot cause a false positive.
-      - name: Write gitleaks config (allowlist eval template)
+      # Config gitleaks éphémère (runner-only, jamais committée) — extends defaults + allowliste les
+      # fixtures/exemples/faux-positifs NON-secrets d'un outil de sécurité (il porte de faux secrets
+      # par design). Portée de chaque path (JAMAIS de blanket-suppression d'un vrai secret) :
+      #   tests/            → corpus de test rédaction + détection (faux secrets = les fixtures)
+      #   docs/             → exemples de documentation (formats de clés)
+      #   k8s/              → manifestes de déploiement à placeholders (les vrais secrets = sealed-secrets/vault, hors repo)
+      #   console/src/sso.rs      → clés RSA de TEST pour la vérif JWT/OIDC
+      #   console/src/reports.rs  → constante AWS canonique du self-test de rédaction
+      #   forge/signing_pkcs11.py → faux positif : PKCS11_KEY_LABEL_ENV = nom de variable d'env, pas un secret
+      - name: Write gitleaks config (allowlist fixtures/exemples)
         run: |
           cat > "$GITHUB_WORKSPACE/.gitleaks-ci.toml" <<'EOF'
           title = "forge CI gitleaks config"
           [extend]
           useDefault = true
           [allowlist]
-          description = "Documented eval placeholder secrets — non-secret by design (see k8s/10-secrets.example.yaml header)."
+          description = "Fixtures/exemples/faux-positifs non-secrets (corpus test redaction+detection, manifestes/docs a placeholders, constantes d'exemple). JAMAIS de blanket-suppression d'un vrai secret."
           paths = [
-            '''k8s/10-secrets\.example\.yaml''',
+            '''tests/.*''',
+            '''docs/.*''',
+            '''k8s/.*''',
+            '''console/src/sso\.rs''',
+            '''console/src/reports\.rs''',
+            '''forge/signing_pkcs11\.py''',
           ]
           EOF
 
-      - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+      # Secret scan via le BINAIRE gitleaks ÉPINGLÉ (pas la gitleaks-action). L'action exige désormais
+      # GITHUB_TOKEN sur les événements `pull_request` (et une licence pour les orgs) → elle échouerait
+      # sur TOUTE PR, ce qui bloquerait le merge sous un ruleset PR-obligatoire. Le binaire : aucun token,
+      # aucune licence, comportement IDENTIQUE sur push ET PR, version + SHA256 vérifiés (supply-chain).
+      - name: Secret scan (gitleaks — binaire épinglé, checksum-vérifié)
         env:
-          # gitleaks core reads GITLEAKS_CONFIG for the --config path (honored through the action).
-          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks-ci.toml
-          # NOTE: gitleaks-action is free for personal accounts; GitHub ORGANIZATIONS must set the
-          # GITLEAKS_LICENSE secret. If this repo lives under an org, add that secret here.
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 "$url" -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git . --config "$GITHUB_WORKSPACE/.gitleaks-ci.toml" --redact --no-banner --exit-code 1
 
   # ---------------------------------------------------------------------------
   # POINT D'ENTRÉE UNIQUE du ruleset — nom STABLE `CI`. Un ruleset sur `main` doit
