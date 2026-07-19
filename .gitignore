@@ -107,3 +107,7 @@ forge-demo-*/
 .coverage
 .coverage.*
 htmlcov/
+
+# Override dev local (git-dep guatx-core -> path monorepo) — JAMAIS public
+console/.cargo/config.toml
+**/.cargo/config.toml
