@@ -72,7 +72,7 @@ serde_json = "1"
 sha2 = "0.10"
 argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
-getrandom = "0.2"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifié, jamais d'entropie tous-zeros
+getrandom = "0.4"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifié, jamais d'entropie tous-zeros
 subtle = "2"        # comparaison à temps constant du bearer/token (anti timing-oracle)
 chacha20poly1305 = "0.10"   # AEAD PUR RUST (RustCrypto : chacha20 + poly1305, zéro dép C/openssl) — chiffre l'archive backup (XChaCha20-Poly1305, nonce 24o, tag auth). Build par défaut safe.
 tar = "0.4"                 # archive backup au format tar standard (pur Rust) : snapshot DB + ledger JSONL + clé .ed25519 + manifest.json
