@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT MIGRATION — importateurs de scans (`forge/importers/`) : ingérer les sorties d'outils EXISTANTS
 (nmap/nuclei/burp/httpx/ffuf/subfinder-amass/generic-json/generic-csv) en findings Forge SOUS la
 gouvernance.

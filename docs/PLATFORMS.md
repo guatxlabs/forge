@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 # Matrice de support des plateformes
 
 Forge est conçu **OS-agnostique** : aucun chemin absolu ni binaire n'est codé en dur dans le code

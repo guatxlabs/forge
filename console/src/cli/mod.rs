@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SOUS-SYSTÈME CLI (parité LECTURE + provisioning + seed-demo + ledger verify).
 //! Bloc déplacé depuis main.rs (PURE MOVE, Wave 2), puis éclaté en sous-modules cohérents (PURE MOVE :
 //! corps identiques, seule la localisation + la visibilité + les chemins d'import changent). Ces

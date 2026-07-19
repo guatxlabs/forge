@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """R6 — enrichissement OPTIONNEL de PAYLOADS d'injection par le LLM gouverné (advisory-only).
 
 Le LLM (quand activé + egress autorisé) PROPOSE des chaînes de payload SUPPLÉMENTAIRES pour les

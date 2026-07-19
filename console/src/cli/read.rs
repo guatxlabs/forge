@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge findings|roe|coverage|query` — parité LECTURE CLI (PURE MOVE depuis cli.rs).
 use crate::*;
 use rusqlite::Connection;

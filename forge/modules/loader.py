@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Chargeur DROP-IN de modules Forge — remplace la liste d'imports câblée à la main par une découverte
 automatique, SANS affaiblir la gouvernance.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — MIGRATION DE DONNÉES + CHIFFREMENT AU REPOS (import d'un install existant, clé
 //! SQLCipher au boot). Bloc déplacé depuis main.rs (PURE MOVE, Wave 2). `copy_ledger_and_key` route
 //! l'écriture atomique de la clé via `crate::backup::backup_write_atomic` (re-exporté pub(crate)).

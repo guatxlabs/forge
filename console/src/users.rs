@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — ADMINISTRATION WEB DES COMPTES (#4) + GOUVERNANCE DES CONNECTEURS extraites de main.rs
 //! (PURE MOVE). Regroupe le CRUD des comptes réservé `check_admin` (session admin, fail-closed) — chaque
 //! mutation ATTRIBUÉE à l'admin acteur et LEDGERISÉE (`append_console_ledger`), jamais de `pass_hash` ni de

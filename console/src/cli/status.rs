@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge status` — instantané LECTURE SEULE de l'état d'une installation console.
 // ===========================================================================================
 // `forge status [--db <path>] [--ledger <path>] [--json]` imprime un instantané SANS

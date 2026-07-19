@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests du triage NATIF des findings (forge/triage.py) — dédup / cluster-bruit / score / rang.
 
 Garanties prouvées (miroir des principes gouvernés de Forge) :

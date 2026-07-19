@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Épinglage d'IP au fire-time (anti-rebinding END-TO-END) — LIÉ autour d'un `fire()` gouverné par
 l'engine et HONORÉ par les chokepoints de CONNEXION (`Oracle._http`, `httpflow._timed`).
 

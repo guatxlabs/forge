@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE — SCIM 2.0 provisioning (SEPARABLE, FLAG-GATED module).
 //!
 //! Open-core discipline (mirrors `sso.rs` / `tenancy.rs`): this is an ENTERPRISE feature. The COMMUNITY

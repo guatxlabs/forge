@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SCHEDULER de sauvegarde + EXPÉDITION OFFSITE. Extrait de `backup.rs`
 //! (PURE MOVE, behavior-neutral — corps bit-à-bit identiques) : runner périodique fail-open,
 //! exécution d'une sauvegarde programmée, garde « due », expédition offsite (local_dir/exec/s3),

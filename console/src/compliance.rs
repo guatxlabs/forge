@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE (E3 COMPLIANCE) — WORM / retention / legal-hold on the audit ledger + engagement data
 //! (SEPARABLE, FLAG-GATED module).
 //!

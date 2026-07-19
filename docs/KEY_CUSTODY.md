@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 # Key custody — off-host ledger signing (PKCS#11 / KMS / HSM)
 
 Forge's engagement ledger is signed with **Ed25519** (asymmetric → non-repudiation: a third party

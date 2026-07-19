@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — CONSOLE FORGE IN-UI (roadmap P5). A GOUVERNED, ADMIN-ONLY runner of a SMALL, HARD
 //! allowlist of `forge` subcommands, exposed as `POST /api/console/exec` and streamed live to the SPA
 //! over SSE. It removes the need to `docker compose exec forge forge …` for common ops.

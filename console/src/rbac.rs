@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE — Advanced RBAC: IdP-group -> {Forge role, tenant grant} mapping (SEPARABLE, FLAG-GATED).
 //!
 //! Open-core discipline (mirrors `tenancy.rs` / `sso.rs` / `scim.rs`): this is the ENTERPRISE

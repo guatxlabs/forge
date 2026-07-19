@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Sous-gate défense-en-profondeur (anti-SSRF) sur la DESTINATION d'egress LLM (forge/llm.py).
 
 `allow_external` autorisait TOUT hôte non-loopback — y compris RFC1918 (10/8, 172.16/12, 192.168/16),

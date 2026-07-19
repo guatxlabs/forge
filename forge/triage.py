@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Triage NATIF des findings — dédup / cluster-bruit / score-bruit / rang (stdlib pure, zéro-egress).
 
 PROBLÈME (T24/T27) : une campagne émet 441 à 1406 findings DOMINÉS par du bruit à haute cardinalité —

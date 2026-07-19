@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests de la SURFACE UNIQUE de rédaction des secrets (`forge/redact.py`).
 
 Contexte : trois rédacteurs avaient divergé (report_engagement = superset ; importers/_base = tokens

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests IA-2 — assist LLM OPT-IN, compatible OpenAI, gouverné (forge/llm.py + report wiring).
 
 Garanties prouvées (miroir des principes gouvernés de Forge, cf. allow_private / triage IA-1) :

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — FINDINGS LIBRARY (bibliothèque de modèles de findings réutilisables).
 //!
 //! Couche livrable-client (à la Ghostwriter) : l'opérateur capitalise ses findings récurrents en

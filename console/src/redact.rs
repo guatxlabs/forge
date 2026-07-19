@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Secret redaction — the ONE copy of the two redactors previously duplicated in `reports.rs`
 //! (`redact_secrets`, string scan + PEM-block stripping) and `compliance.rs` (`redact_evidence`,
 //! JSON-key redaction). The shared engine is PARAMETERISED by the CALLER's key-set/config: each

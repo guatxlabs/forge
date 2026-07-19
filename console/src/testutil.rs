@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — HELPERS DE TEST PARTAGÉS (hoistés depuis le `mod tests` inline de main.rs :
 //! ils servaient plusieurs sous-systèmes — backup/dbmigrate/cli en plus de main.rs — et sont
 //! désormais mutualisés ici plutôt que dupliqués. `#[cfg(test)]` : aucun code émis hors tests.

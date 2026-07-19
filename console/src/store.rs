@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! PORTABLE DB-ACCESS SEAM (Stage 0) — a thin, backend-agnostic façade over the console's SQLite
 //! connection whose PUBLIC API leaks ZERO rusqlite-specific types. Every call site that migrates onto
 //! `App::store()` becomes portable: a `Backend::Postgres(..)` arm (Stage 2, behind a `postgres` cargo

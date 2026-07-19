@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Commandes catalogue/ingest de la CLI Forge : `techniques`, `workflows`, `detections`, `import`.
 Extrait de l'ancien `forge/cli.py` (pur déplacement, comportement inchangé)."""
 import json

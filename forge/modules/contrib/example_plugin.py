@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """EXEMPLE de plugin `.py` DROP-IN (chargé via FORGE_PLUGINS — jamais auto-découvert : `contrib/` est
 exclu du scan in-tree). Montre la voie Python : déclarer un `ToolSpec` et l'enregistrer via
 `register_spec` — l'outil apparaît alors dans `forge modules --json`, le pipeline, les profils et le

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Compact typed API error shared by the flag-gated enterprise modules (rbac / compliance / sso /
 //! tenancy / scim). Deliberately SMALL by construction (`&'static str` code + `String` why, no boxing)
 //! so `Result<T, ApiError>` never trips `clippy::result_large_err`. `IntoResponse` produces EXACTLY the

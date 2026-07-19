@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — AUTH / SESSIONS / GARDES (extrait de main.rs, PURE MOVE). Regroupe l'auth opérateur
 //! (argon2) + RBAC repris du modèle auth_guard/host_guard de Plume : preuve viewer Basic (`check_basic`),
 //! rôle opérateur C2 fail-closed (`check_operator`/`check_operator_env`/`operator_denied`) avec sa politique

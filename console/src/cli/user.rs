@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `forge useradd` — provisioning d'un compte individuel (PURE MOVE depuis cli.rs).
 use crate::*;
 use rusqlite::Connection;

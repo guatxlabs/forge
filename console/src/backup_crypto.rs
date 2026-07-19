@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — PRIMITIVES CRYPTO/FORMAT de sauvegarde : KDF argon2id, AEAD XChaCha20-Poly1305,
 //! en-tête d'archive auto-descriptif (lié en AAD), tar pur Rust, sha256. Extrait de `backup.rs`
 //! (PURE MOVE, behavior-neutral — corps bit-à-bit identiques). Isole le chemin cryptographique

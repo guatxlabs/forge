@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — tests d'intégration : sessions, login-lockout, tokens, cookie/bearer, attribution, auth-gate, https-detect.
 //! Fichier issu du découpage de `tests.rs` (STEP 2 du refactor archi, docs/ARCHITECTURE_REFACTOR_PLAN.md §1.2).
 //! PURE MOVE : corps des tests byte-identiques ; préambule `use super::*` (racine de crate)

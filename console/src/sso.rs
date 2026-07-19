@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE — OIDC SSO login (SEPARABLE, FLAG-GATED module).
 //!
 //! Open-core discipline (mirrors `tenancy.rs`): this is an ENTERPRISE feature. The COMMUNITY (default)

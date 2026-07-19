@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Throttle partagé (min-interval / token-bucket simple) + compteur de blocages 429/WAF — LIÉ autour
 d'un `fire()` gouverné par l'engine et HONORÉ par `Oracle._http` (le chokepoint HTTP des oracles).
 

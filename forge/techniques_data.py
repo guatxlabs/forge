@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Données FIGÉES du registre de techniques — LA SOURCE DE VÉRITÉ (stdlib only).
 
 Ce module ne porte QUE des DONNÉES : le dataclass `Technique`, ses helpers `_t`/`_k`, les

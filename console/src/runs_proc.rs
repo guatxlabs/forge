@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — SUPERVISION DE PROCESS OS du run-lifecycle (PURE MOVE extrait de `runs.rs`). Frontière
 //! OS quasi sans couplage : helpers de process POSIX (`spawn_setsid`/`kill_group` + repli non-Unix), purge
 //! des dirs temp (`purge_stale_run_dirs`), pousseur de logs run_log+SSE (`push_run_log`), le CŒUR du spawn

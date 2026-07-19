@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """forge.redact — LA SURFACE UNIQUE ET AUDITÉE de rédaction des secrets.
 
 Miroir du principe « une seule surface » du scope-guard (`roe.Scope`) : de même qu'il n'existe

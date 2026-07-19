@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — sous-système DÉTECTION / PURPLE-COVERAGE, extrait de `state.rs` (PURE MOVE). Regroupe
 //! la SOURCE DE DÉTECTION configurable (`resolve_detection_source*`/`ds_*`/`redact_*`/`apply_kept_secret`/
 //! `DETECTION_KINDS`/`is_known_detection_kind`), la COLLECTE (`collect_detections*`/`rust_http_collect`/

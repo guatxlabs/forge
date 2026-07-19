@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Portability seams (cross-platform) — comportement inchangé sous Linux, dégradation gracieuse
 ailleurs. Couvre : config_dir/data_dir résolus PAR plateforme (override FORGE_* prioritaire),
 restrict_file_permissions (0600 POSIX / no-op Windows sans crash), résolution de binaire via

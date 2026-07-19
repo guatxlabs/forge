@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Reaper CIBLÉ de daemons ORPHELINS laissés par un outil externe — stdlib pure, jamais de `pkill`.
 
 Certains outils enveloppés (notamment `amass enum` en v4) DÉMARRENT un daemon persistant en tâche de

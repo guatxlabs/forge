@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — PRESENCE (#9) : roster multi-opérateur LIVE (qui est connecté/en train d'opérer).
 //!
 //! La console a un BUS d'événements SSE (`App.events`, cf. runs.rs) + l'attribution `started_by`. Ce
