@@ -298,17 +298,18 @@ jobs:
       # GITHUB_TOKEN sur les événements `pull_request` (et une licence pour les orgs) → elle échouerait
       # sur TOUTE PR, ce qui bloquerait le merge sous un ruleset PR-obligatoire. Le binaire : aucun token,
       # aucune licence, comportement IDENTIQUE sur push ET PR, version + SHA256 vérifiés (supply-chain).
-      - name: Secret scan (gitleaks — binaire épinglé, checksum-vérifié)
-        env:
-          GITLEAKS_VERSION: "8.30.1"
-          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      # Version 8.24.3 = version épinglée famille (identique core/plume). Le job security fait un
+      # checkout à la RACINE du workspace (pas sous ./forge) → `--source .`. `--config` = là où le
+      # heredoc ci-dessus écrit .gitleaks-ci.toml. Testé localement : detect --source . → 0 finding.
+      - name: Secret scan (gitleaks, pinned binary — no token/license required)
         run: |
           set -euo pipefail
-          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSL --retry 3 "$url" -o gitleaks.tar.gz
-          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
-          ./gitleaks git . --config "$GITHUB_WORKSPACE/.gitleaks-ci.toml" --redact --no-banner --exit-code 1
+          GL_VER=8.24.3
+          GL_SHA=9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+          curl -sSfL -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz"
+          echo "${GL_SHA}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --config "$GITHUB_WORKSPACE/.gitleaks-ci.toml" --no-banner --redact --exit-code 1
 
   # ---------------------------------------------------------------------------
   # POINT D'ENTRÉE UNIQUE du ruleset — nom STABLE `CI`. Un ruleset sur `main` doit
