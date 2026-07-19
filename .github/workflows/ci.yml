@@ -5,11 +5,12 @@
 #   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
 #   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
 #
-# Le crate `console/` dépend du sibling `core/` (guatx-core) via `path = "../../core"`.
-# La CI reproduit l'arborescence relative attendue : on checkout `forge` SOUS un dossier
-# `forge/`, et `core` SOUS un dossier `core/` frère, pour que `../../core` résolve.
-# Adapter `repository:`/`ref:` du checkout `core` quand le repo public existera (cf.
-# console/Cargo.toml : "passer à une dép git quand le repo public existe").
+# Le crate `console/` épingle guatx-core sur la git-dep publique `guatxlabs/core@v0.1.0`
+# (console/Cargo.toml). Pour DÉCOUPLER la CI de la publication de core (build vert même
+# avant que le tag existe), chaque job cargo checkout `forge` sous `forge/` et `core` sous
+# `core/` frère, puis écrit un `[patch]` runner-only (forge/console/.cargo/config.toml) qui
+# override la git-dep vers ce core sibling — exactement comme le [patch] dev local (gitignoré).
+# Résolu en path → cohérent avec Cargo.lock, aucune dépendance réseau au repo core publié.
 #
 # Toutes les versions (actions, toolchain Rust, Python) sont PINNÉES pour la
 # reproductibilité.
@@ -109,6 +110,18 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      - name: Découple core — [patch] git-dep → core sibling checké-out
+        # Le Cargo.toml committé épingle guatx-core sur la git-dep `guatxlabs/core@v0.1.0`.
+        # On l'override vers le core CHECKÉ-OUT en sibling (../../core depuis forge/console/),
+        # comme le [patch] dev local (console/.cargo/config.toml, gitignoré) → build contre CE
+        # core, sans dépendre de core@v0.1.0 publié, cohérent avec Cargo.lock (résolu en path).
+        run: |
+          mkdir -p forge/console/.cargo
+          cat > forge/console/.cargo/config.toml <<'EOF'
+          [patch."https://github.com/guatxlabs/core"]
+          guatx-core = { path = "../../core" }
+          EOF
+
       - name: cargo test (console)
         working-directory: forge/console
         run: cargo test --locked --verbose
@@ -192,6 +205,17 @@ jobs:
             cargo-pg-${{ runner.os }}-
 
       # clippy DOIT rester vert avec la feature (openssl-free, TLS rustls/ring).
+      - name: Découple core — [patch] git-dep → core sibling checké-out
+        # Idem job `console` : override la git-dep guatx-core vers le core sibling checké-out
+        # (../../core depuis forge/console/) via un [patch] runner-only, pour build sans dépendre
+        # de core@v0.1.0 publié et rester cohérent avec Cargo.lock (résolu en path).
+        run: |
+          mkdir -p forge/console/.cargo
+          cat > forge/console/.cargo/config.toml <<'EOF'
+          [patch."https://github.com/guatxlabs/core"]
+          guatx-core = { path = "../../core" }
+          EOF
+
       - name: clippy (feature store-postgres)
         working-directory: forge/console
         run: cargo clippy --all-targets --features store-postgres
