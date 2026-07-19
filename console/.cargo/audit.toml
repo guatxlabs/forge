@@ -5,17 +5,25 @@
 
 [advisories]
 ignore = [
-    # --- quick-xml 0.32 — DoS parsing XML (RUSTSEC-2026-0194 quadratique sur attrs
-    #     dupliqués ; RUSTSEC-2026-0195 alloc namespaces non bornée). Fix upstream ≥0.41.0.
-    #   SOURCE : rust-s3 0.35.1 → aws-creds → quick-xml (contrainte ^0.32). rust-s3 ≤0.37.2
-    #     (dernier publié au 2026-07-19) épingle TOUJOURS ^0.32 → aucun bump non-cassant.
+    # --- quick-xml — DoS parsing XML (RUSTSEC-2026-0194 quadratique sur attrs dupliqués ;
+    #     RUSTSEC-2026-0195 alloc namespaces non bornée). Fix upstream ≥0.41.0. forge tire
+    #     quick-xml 0.38.4 via rust-s3 0.37.2 → aws-creds 0.39 (contrainte ^0.38, toujours < 0.41
+    #     au 2026-07-19 → aucun bump non-cassant).
     #   PAS DANS LE BINAIRE LIVRÉ : quick-xml n'est tiré QUE par la feature `object-store`
-    #     (BlobStore S3/MinIO), OFF par défaut ; le build community ne le compile pas
-    #     (`cargo tree -i quick-xml` sans --all-features → aucun paquet).
-    #   HORS MODÈLE DE MENACE : le DoS suppose des réponses XML hostiles de l'endpoint
-    #     S3/MinIO — infrastructure de confiance configurée par l'opérateur, pas un input
-    #     contrôlé par un attaquant. Aucune surface réseau non authentifiée.
-    #   → LEVER dès que rust-s3 publie une version dépendant de quick-xml ≥0.41.
+    #     (BlobStore S3/MinIO), OFF par défaut ; le build community ne le compile pas.
+    #   HORS MODÈLE DE MENACE : DoS via réponses XML hostiles d'un endpoint S3/MinIO —
+    #     infrastructure de confiance configurée par l'opérateur, pas un input attaquant.
+    #   → LEVER dès que rust-s3 dépend de quick-xml ≥0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # --- rsa (RUSTSEC-2023-0071 — Marvin Attack : récupération de clé par side-channel temporel,
+    #     medium 5.9). AUCUN fix upstream. Tiré par jsonwebtoken 10 (backend `rust_crypto`, pur Rust /
+    #     openssl-free — choisi À DESSEIN vs `aws_lc_rs` qui tire une lib C).
+    #   HORS MODÈLE DE MENACE : le Marvin vise les opérations RSA à CLÉ PRIVÉE (déchiffrement/signature)
+    #     observables par timing. Le runtime forge fait UNIQUEMENT de la VÉRIFICATION RS256 à CLÉ
+    #     PUBLIQUE (SSO OIDC : `from_rsa_components(n,e)` + `decode`) — jamais d'opération à clé privée.
+    #     La signature RSA (`from_rsa_pem`/EncodingKey) n'existe QUE dans le code de TEST (mock IdP),
+    #     absente du binaire livré. Aucun oracle de timing exploitable.
+    #   → LEVER si un fix `rsa` paraît, OU si forge introduit une signature RSA au runtime (revalider).
+    "RUSTSEC-2023-0071",
 ]

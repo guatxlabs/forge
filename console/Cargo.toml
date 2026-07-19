@@ -81,7 +81,7 @@ tar = "0.4"                 # archive backup au format tar standard (pur Rust) :
 # au runtime SSO (on valide via composantes RSA n/e du JWKS, pas via PEM). Le crate reste sur `ring`
 # (crypto RustCrypto/asm — AUCUN openssl) => le build PAR DÉFAUT reste openssl-free. Le module sso est
 # compilé mais INERTE tant que le flag runtime FORGE_ENTERPRISE_SSO / enterprise.sso est OFF (community).
-jsonwebtoken = { version = "9", default-features = false }
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 # ENTERPRISE STORE (Postgres) — OPTIONNELLES, tirées UNIQUEMENT sous la feature `store-postgres`. Le
 # client `postgres` est SYNCHRONE/bloquant (colle au modèle sync/held-guard du seam, comme rusqlite ;
@@ -108,7 +108,7 @@ rust-s3 = { version = "0.37", optional = true, default-features = false, feature
 [dev-dependencies]
 # Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste
 # sur `ring` (pas d'openssl). N'affecte PAS le build/binaire par défaut (dev-dependency).
-jsonwebtoken = { version = "9" }
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 [profile.release]
 opt-level = "z"
