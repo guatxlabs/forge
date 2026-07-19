@@ -569,7 +569,7 @@ pub(crate) fn now_epoch() -> i64 {
 /// (panic) : un échec d'entropie produirait un token PRÉVISIBLE -> usurpation de session.
 pub(crate) fn gen_session_token() -> String {
     let mut b = [0u8; 32];
-    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer une session faible");
+    getrandom::fill(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer une session faible");
     hex(&b)
 }
 

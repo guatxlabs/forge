@@ -35,7 +35,7 @@ pub(crate) fn gen_token() -> String {
     // tous-zeros et produirait un token bearer PRÉVISIBLE (auth /api/ingest contournable). On panique
     // plutôt que de générer un secret faible (fail-closed sur l'entropie).
     let mut b = [0u8; 16];
-    getrandom::getrandom(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer un token faible");
+    getrandom::fill(&mut b).expect("CSPRNG (getrandom) indisponible — refus de générer un token faible");
     hex(&b)
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn gen_token() -> String {
 /// différaient QUE par cette chaîne) — comportement (sortie hex) BYTE-IDENTIQUE.
 pub(crate) fn rand_hex(nbytes: usize, what: &str) -> String {
     let mut b = vec![0u8; nbytes];
-    getrandom::getrandom(&mut b)
+    getrandom::fill(&mut b)
         .unwrap_or_else(|_| panic!("CSPRNG (getrandom) unavailable — refusing to emit a weak {what} secret"));
     hex(&b)
 }
@@ -128,7 +128,7 @@ pub(crate) fn hash_pw(pw: &str) -> String {
     // laisserait un sel tous-zeros (CONSTANT) -> hash identique pour un même mot de passe sur toutes
     // les installs, cassant la résistance aux rainbow tables. On panique plutôt que de saler à zéro.
     let mut s = [0u8; 16];
-    getrandom::getrandom(&mut s).expect("CSPRNG (getrandom) indisponible — refus de générer un sel faible");
+    getrandom::fill(&mut s).expect("CSPRNG (getrandom) indisponible — refus de générer un sel faible");
     let salt = SaltString::encode_b64(&s).expect("salt");
     Argon2::default().hash_password(pw.as_bytes(), &salt).expect("hash").to_string()
 }

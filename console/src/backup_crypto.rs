@@ -166,9 +166,9 @@ pub(crate) fn backup_encrypt(plaintext: &[u8], passphrase: &str) -> Result<Vec<u
     let dp = Params::default();
     let (m_cost, t_cost, p_cost) = (dp.m_cost(), dp.t_cost(), dp.p_cost());
     let mut salt = [0u8; BACKUP_SALT_LEN];
-    getrandom::getrandom(&mut salt).map_err(|e| format!("CSPRNG (sel) indisponible: {e}"))?;
+    getrandom::fill(&mut salt).map_err(|e| format!("CSPRNG (sel) indisponible: {e}"))?;
     let mut nonce = [0u8; BACKUP_NONCE_LEN];
-    getrandom::getrandom(&mut nonce).map_err(|e| format!("CSPRNG (nonce) indisponible: {e}"))?;
+    getrandom::fill(&mut nonce).map_err(|e| format!("CSPRNG (nonce) indisponible: {e}"))?;
     let mut key = backup_derive_key(passphrase, &salt, m_cost, t_cost, p_cost)?;
     let header = backup_build_header(m_cost, t_cost, p_cost, &salt, &nonce);
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|e| format!("clé AEAD invalide: {e}"))?;
