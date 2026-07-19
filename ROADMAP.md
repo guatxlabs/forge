@@ -253,7 +253,7 @@ Tous les findings **HIGH/MEDIUM/LOW exploitables corrigés** :
 ## 🚀 Publication open-source (org `guatxlabs`) — plan & décisions (2026-07-19)
 
 **Org GitHub** : `guatxlabs` (UNE org, repos séparés : `guatxlabs/forge` · `/core` · `/plume` · `/ocular`).
-X : `@guatxlabs` (display « GuatX »). Reddit : poster dans r/netsec/r/redteamsec/r/rust (pas de subreddit dédié au lancement). URLs forge réalignées sur `guatxlabs` (`7525812`).
+X : `@guatxlabs` (display « GuatX »). Reddit : poster dans r/netsec/r/redteamsec/r/rust (pas de subreddit dédié au lancement). URLs forge (README/CHANGELOG/DEPLOYMENT/Cargo.toml) réalignées sur `guatxlabs`.
 
 **Licences — split lib/app :**
 - `core` (guatx-core, la **lib partagée** liée par forge+plume) → **LGPL-3.0**.
