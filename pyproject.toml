@@ -13,6 +13,11 @@ dependencies = []   # coeur pur-stdlib (comme secpipe). Les modules réels (P2) 
 # docs/KEY_CUSTODY.md. (`cryptography` is Forge's existing optional Ed25519 provider, not re-declared here.)
 [project.optional-dependencies]
 pkcs11 = ["python-pkcs11>=0.7"]
+# Deps de TEST uniquement — le cœur runtime reste stdlib-only (le build/install par défaut n'installe
+# RIEN de ceci). pytest : un test contrib l'importe (test_contrib_graded_toolspecs). cryptography :
+# les tests ed25519 (ledger/anchor/compliance) l'EXIGENT — sans elle le signeur retombe sur HMAC-SHA256
+# et les assertions `alg == "ed25519"` échouent. La CI installe `.[test]` avant de lancer la suite.
+test = ["pytest", "cryptography"]
 
 [project.scripts]
 # `pip install -e .` met l'exécutable `forge` sur le PATH -> `forge <commande>`
