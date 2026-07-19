@@ -5,12 +5,12 @@
 #   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
 #   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
 #
-# Le crate `console/` épingle guatx-core sur la git-dep publique `guatxlabs/core@v0.1.0`
-# (console/Cargo.toml). Pour DÉCOUPLER la CI de la publication de core (build vert même
-# avant que le tag existe), chaque job cargo checkout `forge` sous `forge/` et `core` sous
-# `core/` frère, puis écrit un `[patch]` runner-only (forge/console/.cargo/config.toml) qui
-# override la git-dep vers ce core sibling — exactement comme le [patch] dev local (gitignoré).
-# Résolu en path → cohérent avec Cargo.lock, aucune dépendance réseau au repo core publié.
+# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.1.0`
+# (console/Cargo.toml + Cargo.lock épinglé sur le rev du tag). Les jobs cargo la résolvent
+# DIRECTEMENT depuis le repo public — aucun checkout sibling, aucun [patch] : c'est exactement
+# ce qu'un clone standalone fait, donc la CI prouve le build public. (En DEV local uniquement,
+# console/.cargo/config.toml [GITIGNORÉ] override la git-dep vers ../../core pour la vitesse
+# monorepo — build non-locked ; il n'entre jamais en CI ni dans un clone.)
 #
 # Toutes les versions (actions, toolchain Rust, Python) sont PINNÉES pour la
 # reproductibilité.
@@ -63,35 +63,8 @@ jobs:
     name: console (cargo test + build --release)
     runs-on: ubuntu-24.04
     steps:
-      # forge sous ./forge pour reconstituer la disposition relative attendue
-      # par `path = "../../core"` (console/ -> ../../core).
       - name: Checkout forge
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          path: forge
-
-      # Le crate sibling guatx-core. Tant qu'il n'est pas un repo public séparé,
-      # remplacer ce checkout par une copie monorepo (ou un git dep dans Cargo.toml).
-      - name: Checkout core (guatx-core)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          repository: ${{ github.repository_owner }}/core
-          ref: main
-          path: core
-        # N'échoue pas le job si le repo core n'existe pas encore : on tente un repli
-        # monorepo (core déjà présent à côté de forge dans le même checkout).
-        continue-on-error: true
-
-      - name: Repli monorepo — localiser core/ si le checkout dédié a échoué
-        run: |
-          if [ ! -f core/Cargo.toml ]; then
-            if [ -f forge/../core/Cargo.toml ]; then
-              echo "core/ absent en checkout dédié mais présent en monorepo — OK."
-            else
-              echo "::error::crate guatx-core introuvable (core/Cargo.toml) — ajuster le checkout core."
-              exit 1
-            fi
-          fi
 
       - name: Setup Rust toolchain (pinné)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
@@ -105,36 +78,26 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            forge/console/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('forge/console/Cargo.lock') }}
+            console/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('console/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
-      - name: Découple core — [patch] git-dep → core sibling checké-out
-        # Le Cargo.toml committé épingle guatx-core sur la git-dep `guatxlabs/core@v0.1.0`.
-        # On l'override vers le core CHECKÉ-OUT en sibling (../../core depuis forge/console/),
-        # comme le [patch] dev local (console/.cargo/config.toml, gitignoré) → build contre CE
-        # core, sans dépendre de core@v0.1.0 publié, cohérent avec Cargo.lock (résolu en path).
-        run: |
-          mkdir -p forge/console/.cargo
-          cat > forge/console/.cargo/config.toml <<'EOF'
-          [patch."https://github.com/guatxlabs/core"]
-          guatx-core = { path = "../../core" }
-          EOF
-
+      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.1.0 (réseau) —
+      # cohérent avec Cargo.lock (source git+tag), identique à un clone standalone.
       - name: cargo test (console)
-        working-directory: forge/console
+        working-directory: console
         run: cargo test --locked --verbose
 
       - name: cargo build --release (console)
-        working-directory: forge/console
+        working-directory: console
         run: cargo build --release --locked --verbose
 
       - name: Upload artefact (binaire console)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: forge
-          path: forge/console/target/release/forge
+          path: console/target/release/forge
           if-no-files-found: error
           retention-days: 7
 
@@ -165,27 +128,6 @@ jobs:
     steps:
       - name: Checkout forge
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          path: forge
-
-      - name: Checkout core (guatx-core)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          repository: ${{ github.repository_owner }}/core
-          ref: main
-          path: core
-        continue-on-error: true
-
-      - name: Repli monorepo — localiser core/ si le checkout dédié a échoué
-        run: |
-          if [ ! -f core/Cargo.toml ]; then
-            if [ -f forge/../core/Cargo.toml ]; then
-              echo "core/ absent en checkout dédié mais présent en monorepo — OK."
-            else
-              echo "::error::crate guatx-core introuvable (core/Cargo.toml) — ajuster le checkout core."
-              exit 1
-            fi
-          fi
 
       - name: Setup Rust toolchain (pinné)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
@@ -199,36 +141,25 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            forge/console/target
-          key: cargo-pg-${{ runner.os }}-${{ hashFiles('forge/console/Cargo.lock') }}
+            console/target
+          key: cargo-pg-${{ runner.os }}-${{ hashFiles('console/Cargo.lock') }}
           restore-keys: |
             cargo-pg-${{ runner.os }}-
 
       # clippy DOIT rester vert avec la feature (openssl-free, TLS rustls/ring).
-      - name: Découple core — [patch] git-dep → core sibling checké-out
-        # Idem job `console` : override la git-dep guatx-core vers le core sibling checké-out
-        # (../../core depuis forge/console/) via un [patch] runner-only, pour build sans dépendre
-        # de core@v0.1.0 publié et rester cohérent avec Cargo.lock (résolu en path).
-        run: |
-          mkdir -p forge/console/.cargo
-          cat > forge/console/.cargo/config.toml <<'EOF'
-          [patch."https://github.com/guatxlabs/core"]
-          guatx-core = { path = "../../core" }
-          EOF
-
       - name: clippy (feature store-postgres)
-        working-directory: forge/console
+        working-directory: console
         run: cargo clippy --all-targets --features store-postgres
 
       # Le seam PG + les tests d'intégration (dont le reconnect+retry HA) tournent contre le service PG.
       - name: cargo test (feature store-postgres, contre le service Postgres)
-        working-directory: forge/console
+        working-directory: console
         env:
           TEST_PG_URL: postgres://forge:forgepw@localhost:5432/forge
         run: cargo test --locked --features store-postgres --verbose
 
       - name: cargo build --release (feature store-postgres)
-        working-directory: forge/console
+        working-directory: console
         run: cargo build --release --locked --features store-postgres --verbose
 
   # ---------------------------------------------------------------------------
