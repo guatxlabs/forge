@@ -3,42 +3,36 @@
 # =============================================================================
 #
 # POURQUOI ce nom/emplacement ?
-#   Le CONTEXTE de build est le PARENT `GUATX/` (le crate console dépend du sibling
-#   `../../core`). Or seul `forge/` est éditable ici. BuildKit résout, à côté du
-#   Dockerfile désigné par `-f`, un ignore-file nommé `<Dockerfile>.dockerignore` et le
-#   PRÉFÈRE à un `.dockerignore` à la racine du contexte. Comme on build avec
-#   `-f forge/Dockerfile`, ce fichier (`forge/Dockerfile.dockerignore`) EST honoré, tout
-#   en vivant dans `forge/`. (Docker moderne = BuildKit par défaut ; requis de toute
-#   façon par `# syntax=...` + les cache-mounts du Dockerfile.)
+#   Le CONTEXTE de build est la RACINE DE CE DÉPÔT (clone standalone ; le crate console
+#   résout guatx-core via git-dep publique, aucun sibling requis). BuildKit résout, à côté
+#   du Dockerfile désigné par `-f`, un ignore-file nommé `<Dockerfile>.dockerignore` et le
+#   PRÉFÈRE à un `.dockerignore` racine quand il existe. (Docker moderne = BuildKit par
+#   défaut ; requis de toute façon par `# syntax=...` + les cache-mounts du Dockerfile.)
 #
-# PORTÉE DES MOTIFS : relatifs à la RACINE DU CONTEXTE = `GUATX/` (PAS `forge/`).
-#   ➜ on écrit donc `forge/console/target`, `core/…`, etc.
+# PORTÉE DES MOTIFS : relatifs à la RACINE DU CONTEXTE = la racine du dépôt.
 #
 # BUT : ne PAS expédier au daemon les ~1.6 GB de cache Cargo, ni aucune DB / ledger /
-#   secret / donnée d'engagement, ni les repos siblings inutiles au build.
-#   On GARDE `forge/` et `core/` (les deux seuls nécessaires — cf. COPY du Dockerfile).
+#   secret / donnée d'engagement. On GARDE console/, forge/ (package python), VERSION,
+#   pyproject.toml, scope.example.json (cf. COPY du Dockerfile).
 # =============================================================================
 
-# --- Repos siblings NON nécessaires au build (le build n'utilise que forge/ + core/) ---
-plume/
-guatx-infra/
-guatx-k3s-manifests/
-_archive/
-
 # --- Cache de build Rust (~1.6 GB) : jamais expédié, reconstruit via cache-mount ---
-forge/console/target/
-forge/**/target/
+console/target/
+**/target/
+
+# --- Override dev cargo (git-dep guatx-core -> path sibling) : jamais publié ni utile ---
+**/.cargo/config.toml
 
 # --- Bases SQLite + WAL/SHM (données/console) : jamais dans le contexte ---
-forge/**/*.db
-forge/**/*.db-wal
-forge/**/*.db-shm
+**/*.db
+**/*.db-wal
+**/*.db-shm
 
 # --- Ledger d'engagement & JSONL (actions sur cibles réelles) ---
-forge/**/*.jsonl
+**/*.jsonl
 
 # --- Caches Python ---
-forge/**/__pycache__/
+**/__pycache__/
 **/*.py[cod]
 
 # --- VCS ---
@@ -47,21 +41,20 @@ forge/**/__pycache__/
 
 # --- État Forge & sauvegardes ---
 *.forge
-forge/**/*.forge
-forge/**/backups/
+**/*.forge
+**/backups/
 
 # --- Secrets / autorisation d'engagement (jamais requis au build ;
 #     seul scope.example.json est COPY'é par le Dockerfile) ---
 **/*.env
 **/.env
-forge/scope.json
-forge/targets.json
-forge/actions.json
+scope.json
+targets.json
+actions.json
 *.key
 *.pem
 *.pub
 *.ed25519
 
-# Note : on ne liste AUCUN motif excluant `forge/` ou `core/` en bloc ; ils restent
-# donc inclus (moins les sous-chemins ci-dessus). Ne PAS ajouter `forge/scope.example.json`
-# ni `forge/pyproject.toml` ici : ils sont COPY'és par le Dockerfile.
+# Note : NE PAS ajouter `scope.example.json` ni `pyproject.toml` ici : ils sont COPY'és
+# par le Dockerfile.

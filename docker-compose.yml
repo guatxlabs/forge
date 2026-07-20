@@ -1,19 +1,18 @@
 # Forge — orchestration de déploiement (usage AUTORISÉ uniquement).
 # =============================================================================
 #
-# Lancer DEPUIS le dossier parent `GUATX/` pour que le contexte de build inclue le
-# crate sibling `core/` (guatx-core), dont dépend la console :
+# Lancer DEPUIS la racine de ce dépôt. La console résout `guatx-core` via une git-dep
+# publique (tag v0.1.0) — aucun crate sibling requis dans le contexte :
 #
-#     docker compose -f forge/docker-compose.yml up -d --build
+#     docker compose up -d --build
 #
-# Le `context: .` ci-dessous est résolu relativement à CE fichier compose, donc
-# `forge/` ; on remonte d'un cran (`..`) pour englober `core/` ET `forge/`.
+# Le `context: .` ci-dessous est la racine du dépôt (résolu relativement à CE fichier).
 #
 # Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le ledger et la DB
 # sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret n'est en clair ici : les
 # hashes/tokens viennent de `forge/.env` (gitignored).
 #
-# ZÉRO PRÉ-ÉTAPE : `docker compose -f forge/docker-compose.yml up -d --build` fonctionne SANS
+# ZÉRO PRÉ-ÉTAPE : `docker compose -f docker-compose.yml up -d --build` fonctionne SANS
 #   créer le moindre fichier hôte. Aucun scope.json n'est monté par défaut → le scope serveur est
 #   ABSENT au boot → la console démarre proprement (fail-closed : in_scope vide = rien lançable) et
 #   vous atterrissez sur l'ASSISTANT de 1er déploiement dans le navigateur (http://127.0.0.1:7100).
@@ -28,8 +27,8 @@
 #
 # SERVICES OPTIONNELS = derrière des PROFILES → un `docker compose up` NU démarre la CONSOLE SEULE
 # (aucun `depends_on` sur une image que le client n'a pas). Les activer à la demande :
-#     docker compose -f forge/docker-compose.yml --profile browser up -d   # + accès/évasion (Camoufox)
-#     docker compose -f forge/docker-compose.yml --profile msf --profile burp up -d  # + connecteurs (BYO images)
+#     docker compose -f docker-compose.yml --profile browser up -d   # + accès/évasion (Camoufox)
+#     docker compose -f docker-compose.yml --profile msf --profile burp up -d  # + connecteurs (BYO images)
 # Les connecteurs (browser/msf/burp) restent INERTES tant que leur service n'est pas joignable
 # (sonde à fire-time, auto-neutralisation) — cohérent avec l'inertie par défaut de Forge.
 
@@ -41,13 +40,13 @@ services:
   # ---------------------------------------------------------------------------
   forge:
     build:
-      # Contexte = parent de forge/ (= GUATX/), pour inclure forge/ ET core/.
-      context: ..
-      dockerfile: forge/Dockerfile
+      # Contexte = racine du dépôt (clone standalone). guatx-core arrive via git-dep, pas de sibling.
+      context: .
+      dockerfile: Dockerfile
       args:
         # Profil d'image : `full` (défaut, httpx/nuclei/subfinder vérifiés SHA256 + moteur PDF
         # weasyprint) ou `mini` (les omet ; modules -> available:false, ?format=pdf -> pdf_unavailable).
-        # Override : `FORGE_TOOLS_PROFILE=mini docker compose -f forge/docker-compose.yml build`.
+        # Override : `FORGE_TOOLS_PROFILE=mini docker compose -f docker-compose.yml build`.
         FORGE_TOOLS_PROFILE: "${FORGE_TOOLS_PROFILE:-full}"
         # Pins repropagés au Dockerfile (cohérence build reproductible).
         HTTPX_VERSION: "1.6.9"
@@ -247,7 +246,7 @@ services:
   # browser-automation — couche ACCÈS/ÉVASION (Camoufox + Xvfb, port 8080).
   # ---------------------------------------------------------------------------
   # OPTIONNEL — derrière le profil "browser". EXCLU d'un `docker compose up` nu ; démarrer via :
-  #     docker compose -f forge/docker-compose.yml --profile browser up -d
+  #     docker compose -f docker-compose.yml --profile browser up -d
   # L'image vit dans le repo YesWeHack/toolkit/browser-automation (build local
   # `browser-automation-browser`). Adapter `image:` au tag réellement construit, ou remplacer par
   # `build: { context: ../../YesWeHack/toolkit/browser-automation }` si présent.
@@ -301,7 +300,7 @@ services:
   # EXCLU d'un `docker compose up` NU (profil "postgres") => le déploiement PAR DÉFAUT reste SQLite,
   # INCHANGÉ. Pour l'activer, il faut À LA FOIS ce profil ET l'override qui recompile la console avec la
   # feature `store-postgres` et pointe FORGE_DB_URL sur ce service (cf. docs/DEPLOYMENT.md § Postgres) :
-  #     docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+  #     docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
   #                    --profile postgres up -d --build
   # Sans l'override, la console (build SQLite) IGNORE ce Postgres. Credentials : défauts d'ÉVAL
   # (forge/forge) — à SURCHARGER via forge/.env (FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB) en prod.

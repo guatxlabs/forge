@@ -4,9 +4,9 @@
 # reste SQLite (docker-compose.yml seul), byte-identique/inchangé. Avec lui + le profil `postgres`, la
 # console est REBUILDÉE avec la feature `store-postgres` et branchée sur le service `postgres`.
 #
-# Lancer DEPUIS le dossier parent `GUATX/` (contexte de build = .. pour inclure core/ ET forge/) :
+# Lancer DEPUIS la racine du dépôt (guatx-core arrive via git-dep, aucun sibling requis) :
 #
-#   docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
 #                  --profile postgres up -d --build
 #
 # ÉTAPES OBLIGATOIRES (cf. docs/DEPLOYMENT.md § Postgres) :
@@ -17,7 +17,7 @@
 #      SQLite par défaut n'inclut pas le backend PG.
 #   4) MIGRATION des données SQLite existantes (Stage 3) — AVANT le 1er run Postgres, si tu avais déjà des
 #      données SQLite à conserver, lance le migrateur gouverné (one-shot) :
-#        docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+#        docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
 #          --profile postgres run --rm --entrypoint forge forge \
 #          migrate-store --to "postgres://forge:forge@postgres:5432/forge" \
 #          --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl

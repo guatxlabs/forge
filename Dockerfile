@@ -10,39 +10,33 @@
 #                   subfinder) et nmap. La console SPAWN `python3 -m forge.cli` (cf.
 #                   FORGE_PKG_DIR), donc l'image runtime a IMPÉRATIVEMENT besoin des deux.
 #
-# ⚠️ CONTEXTE DE BUILD = le dossier PARENT `GUATX/` (pas `forge/`), car le crate
-#    `console/` dépend du crate sibling `../../core` (guatx-core). Construire ainsi :
+# CONTEXTE DE BUILD = la RACINE DE CE DÉPÔT. Le crate `console/` résout `guatx-core` via une
+#    git-dep publique ÉPINGLÉE (`git = "https://github.com/guatxlabs/core", tag = "v0.1.0"`,
+#    cf. console/Cargo.toml) — core est récupéré depuis GitHub AU BUILD, aucun crate sibling
+#    requis dans le contexte. Un clone STANDALONE de ce dépôt construit directement :
 #
-#        docker build -f forge/Dockerfile -t forge:0.0.1 .      # depuis GUATX/
-#    ou  (via docker-compose qui fixe déjà le bon context, voir forge/docker-compose.yml)
+#        docker build -t forge:0.0.1 .        # depuis la racine du dépôt
+#    ou  docker compose ... up -d --build     # (docker-compose.yml, context: .)
 #
-#    Construire depuis `forge/` directement ÉCHOUERA (core/ hors contexte) — c'est voulu.
-#
-# ── Dépendance sibling `core/` (guatx-core) ──────────────────────────────────
-#    console/Cargo.toml : `guatx-core = { path = "../../core" }`. `core/` est un repo
-#    PARTAGÉ appartenant à l'utilisateur — NON vendoré, NON copié-committé ici : il est
-#    consommé DEPUIS le contexte de build parent (COPY core/ dans le stage builder).
-#    ➜ Migration future prévue quand le repo public existera : remplacer la dép `path`
-#      par une dép git ÉPINGLÉE, ex.
-#          guatx-core = { git = "https://github.com/guatx/core", tag = "vX.Y.Z" }
-#      À ce moment-là le contexte de build pourra redevenir `forge/` seul et le
-#      `COPY core/ ./core/` du builder disparaîtra. Tant que c'est une dép `path`,
-#      le contexte DOIT rester le parent `GUATX/`.
+# ── Dépendance `core/` (guatx-core) : git-dep, plus de sibling ────────────────
+#    console/Cargo.toml : `guatx-core = { git = "…/guatxlabs/core", tag = "v0.1.0" }`.
+#    La migration path→git-dep est FAITE : le builder ne copie plus `core/`, le contexte est
+#    le dépôt lui-même. En DEV monorepo, `console/.cargo/config.toml` (GITIGNORÉ) porte un
+#    `[patch]` qui override la git-dep vers le core local — absent des clones publics.
 #
 # ── Ignore du contexte de build ──────────────────────────────────────────────
-#    Le contexte réel = `GUATX/`, mais l'utilisateur ne modifie que `forge/`. On utilise
-#    donc l'ignore-file SPÉCIFIQUE au Dockerfile (fonction BuildKit) : `forge/Dockerfile.dockerignore`.
+#    Le contexte = la racine du dépôt. On utilise l'ignore-file SPÉCIFIQUE au Dockerfile
+#    (fonction BuildKit) : `Dockerfile.dockerignore`.
 #    BuildKit le préfère à un `.dockerignore` racine quand il existe à côté du Dockerfile
-#    référencé par `-f`. Ses motifs sont relatifs à la RACINE du contexte (`GUATX/`). Il
-#    exclut ~1.6 GB de `forge/console/target/`, les *.db/*.jsonl/ledger/secrets et les repos
-#    siblings inutiles au build (plume/, guatx-infra/, …) — cf. ce fichier.
+#    référencé par `-f`. Ses motifs sont relatifs à la RACINE du contexte (le dépôt). Il
+#    exclut ~1.6 GB de `console/target/`, les *.db/*.jsonl/ledger/secrets — cf. ce fichier.
 #
 # ── Profils d'outils (FORGE_TOOLS_PROFILE=full|mini) ─────────────────────────
 #    `full` (défaut) : embarque httpx/nuclei/subfinder (téléchargés + VÉRIFIÉS SHA256) et
 #      un moteur PDF (weasyprint, pip, pur-Python) → `?format=pdf` clé-en-main.
 #    `mini` : OMET ces outils ; les modules dégradent proprement (available:false, déjà géré)
 #      et `?format=pdf` répond `pdf_unavailable` (l'impression navigateur reste dispo).
-#      Build mini : `docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile .`
+#      Build mini : `docker build --build-arg FORGE_TOOLS_PROFILE=mini .`
 #
 # Services EXTERNES (jamais embarqués ici — montés/réseau, cf. docker-compose.yml & ENV) :
 #   - browser-automation (Camoufox+Xvfb, :8080)  → FORGE_BROWSER_URL
@@ -60,16 +54,14 @@ FROM rust:1.96-bookworm AS builder
 
 WORKDIR /build
 
-# Le crate console dépend du sibling guatx-core via `path = "../../core"`.
-# On reproduit l'arborescence relative attendue : /build/forge/console -> ../../core = /build/core.
-COPY core/ ./core/
-COPY forge/console/ ./forge/console/
-# VERSION vit à la racine du crate (`forge/`) : la console la lit à la COMPILATION via
-# `include_str!(CARGO_MANIFEST_DIR "/../VERSION")` = /build/forge/VERSION. Il faut donc la
-# copier explicitement (elle n'est pas sous forge/console/ que COPY ci-dessus embarque).
-COPY forge/VERSION ./forge/VERSION
+# Le crate console résout guatx-core via git-dep (tag v0.1.0) — aucun sibling à copier.
+COPY console/ ./console/
+# VERSION vit à la racine du dépôt : la console la lit à la COMPILATION via
+# `include_str!(CARGO_MANIFEST_DIR "/../VERSION")` = /build/VERSION. Il faut donc la
+# copier explicitement (elle n'est pas sous console/ que COPY ci-dessus embarque).
+COPY VERSION ./VERSION
 
-WORKDIR /build/forge/console
+WORKDIR /build/console
 
 # Cargo features OPTIONNELLES à activer au build (ADDITIF — VIDE PAR DÉFAUT => build community
 # byte-identique, aucune dépendance supplémentaire). Ex. `store-postgres` (backend Postgres, TLS
@@ -82,7 +74,7 @@ ARG FORGE_CARGO_FEATURES=""
 # Le Cargo.lock du crate est committé → versions de deps verrouillées. `${FORGE_CARGO_FEATURES:+...}` :
 # n'ajoute `--features <…>` QUE si l'ARG est non vide (sinon la ligne est IDENTIQUE au build par défaut).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/forge/console/target \
+    --mount=type=cache,target=/build/console/target \
     cargo build --release --locked ${FORGE_CARGO_FEATURES:+--features "$FORGE_CARGO_FEATURES"} \
     && mkdir -p /out \
     && cp target/release/forge /out/forge
@@ -362,10 +354,10 @@ COPY --from=builder /out/forge /usr/local/bin/forge
 
 # Package python `forge` + assets web de la console + modèle de scope.
 # (On ne copie PAS les .db/.jsonl/secrets : ils vivent dans des volumes, cf. ENV ci-dessous.)
-COPY forge/forge/            /opt/forge/forge/
-COPY forge/console/web/      /opt/forge/console/web/
-COPY forge/pyproject.toml    /opt/forge/pyproject.toml
-COPY forge/scope.example.json /opt/forge/scope.example.json
+COPY forge/            /opt/forge/forge/
+COPY console/web/      /opt/forge/console/web/
+COPY pyproject.toml    /opt/forge/pyproject.toml
+COPY scope.example.json /opt/forge/scope.example.json
 
 # Répertoires de données persistés (déclarés en volumes) : DB console, ledger d'engagement,
 # scope/ROE actif. Vides dans l'image — remplis par bind/named volumes au run.

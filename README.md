@@ -2,7 +2,7 @@
 
 # 🔨 Forge
 
-**The heavyweight red-team engine.** — l'antithèse offensive de [Plume](../plume), le SOC blue-team.
+**The heavyweight red-team engine.** — l'antithèse offensive de [Plume](https://github.com/guatxlabs/plume), le SOC blue-team.
 *Python · stdlib-only core · sûreté d'abord (ROE fail-closed + ledger tamper-evident).*
 
 **·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
@@ -228,7 +228,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Ledger Ed25519** (signature asymétrique à l'append + `verify_external` par clé publique) | ✅ testé |
 | **Ancrage hors-host** (`anchor.py` : interface `Anchor` + témoin co-signataire + `reconcile`) | ✅ testé (détecte une réécriture re-signée localement) |
 | **Mémoire sémantique** (`JaccardMemory` floue stdlib + bridge FAISS embeddings optionnel) | ✅ Jaccard testé, FAISS dégrade proprement |
-| **Cœur partagé `guatx-core`** (crate Rust **public neutre** en `GUATX/core/` ; console en dépend) | ✅ 6 tests Rust, déplacé hors du privé, console rebâtie |
+| **Cœur partagé `guatx-core`** (crate Rust **public neutre**, repo séparé `guatxlabs/core` ; console en dépend via git-dep publique épinglée) | ✅ 6 tests Rust, extrait en repo public, console rebâtie |
 | **Wizard 1er déploiement** (self-deploy : provisionne admin/crypto/source de détection/politique opérateur **depuis le navigateur**, auto-désactivant, zéro défaut codé en dur) | ✅ — `GET /api/setup/state` · `POST /api/setup` |
 | **RBAC admin & gouvernance des connecteurs** (comptes `/api/users`, viewer/opérateur/admin ; msf/burp sondés à fire-time, `exploit` fail-safe, jamais de sur-classement) | ✅ — testé en live |
 | **Source de détection infra-agnostique** (plugin configurable dans l'UI : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec, secret write-only) | ✅ — cf. `docs/DETECTION.md` |
@@ -268,13 +268,13 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 
 ## Déploiement en production (self-deploy)
 
-Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est le
-parent `GUATX/` (la console dépend du sibling `guatx-core` en `path` ; `console/Cargo.lock` est committé
-pour des builds reproductibles) :
+Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est la
+racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.1.0`,
+aucun crate sibling requis ; `console/Cargo.lock` est committé pour des builds reproductibles) :
 
 ```sh
-cd GUATX/forge && cp scope.example.json scope.json     # INERTE tant que in_scope vide ; éditer AVEC AUTORISATION
-cd .. && docker compose -f forge/docker-compose.yml up -d --build   # console SEULE (loopback :7100, healthcheck GET /health)
+cp scope.example.json scope.json          # INERTE tant que in_scope vide ; éditer AVEC AUTORISATION
+docker compose up -d --build              # console SEULE (loopback :7100, healthcheck GET /health)
 ```
 
 Ouvrir `http://127.0.0.1:7100` → le **wizard 1er boot** provisionne l'admin (RBAC argon2id), la crypto,

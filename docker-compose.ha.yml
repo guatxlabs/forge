@@ -5,11 +5,11 @@
 # le déploiement PAR DÉFAUT reste SQLite mono-instance (byte-identique). Le build community (FORGE_HA
 # non posé) est inchangé.
 #
-# Lancer DEPUIS le dossier parent `GUATX/` (contexte de build = .. pour inclure core/ ET forge/) :
+# Lancer DEPUIS la racine du dépôt (guatx-core arrive via git-dep, aucun sibling requis) :
 #
-#   docker compose -f forge/docker-compose.yml \
-#                  -f forge/docker-compose.postgres.yml \
-#                  -f forge/docker-compose.ha.yml \
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.postgres.yml \
+#                  -f docker-compose.ha.yml \
 #                  --profile ha up -d --build --scale forge=2
 #
 # (`--profile ha` démarre le load-balancer `lb` ; `--profile postgres` est impliqué par le service

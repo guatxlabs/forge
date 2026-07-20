@@ -2,7 +2,7 @@
 # =============================================================================================
 # IMAGE: build the console with the Postgres store (and object-store, if used) feature ON:
 #     docker build -f Dockerfile --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
-#         -t <registry>/forge:0.0.1 ..
+#         -t <registry>/forge:0.0.1 .   # build context = repo root (git-dep core, no sibling)
 # The DEFAULT (community) image is SQLite-only and will FAIL-CLOSED under FORGE_HA=1 — you MUST use
 # a store-postgres image here. Push it and set the `image:` below to your registry ref.
 #

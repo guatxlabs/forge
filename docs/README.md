@@ -53,7 +53,8 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
 - **[Démarrage bout-en-bout hors-ligne](GETTING_STARTED.md)** — parcours opérateur 100 % offline
   (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
 - **[Runbook de déploiement self-service](DEPLOYMENT.md)** — le runbook détaillé (empreinte mesurée,
-  matrice Docker/k8s/host/venv, contexte de build `guatx-core`, liveness `/health`, export PDF).
+  matrice Docker/k8s/host/venv, contexte de build = racine du dépôt + git-dep `guatx-core`, liveness
+  `/health`, export PDF).
 - **[Utiliser Forge en standalone (sans Plume)](STANDALONE.md)** — page dédiée : tout fonctionne
   sans SOC.
 

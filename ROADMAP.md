@@ -1,6 +1,6 @@
 # Forge — Roadmap
 
-> État : `vps/main` — build par défaut **communautaire byte-identical + openssl-free** (rustls/ring), `../core`/`../soc` (Plume) jamais touchés.
+> État : **publié open-source** ([github.com/guatxlabs/forge](https://github.com/guatxlabs/forge), AGPL-3.0) — build par défaut **communautaire byte-identical + openssl-free** (rustls/ring). Cœur partagé consommé via la git-dep publique épinglée [`guatxlabs/core`](https://github.com/guatxlabs/core).
 > Validation à jour : `cargo test` défaut + `--features store-postgres` verts, `pytest` vert, `kubeconform` OK.
 > Docs détail : [`docs/AUDIT.md`](docs/AUDIT.md) · [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) · [`docs/READINESS_MATRIX.md`](docs/READINESS_MATRIX.md) · [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) · [`docs/QUICKSTART.md`](docs/QUICKSTART.md) · [`docs/UPGRADE.md`](docs/UPGRADE.md) · [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md) · [`docs/TECHNIQUE_COVERAGE.md`](docs/TECHNIQUE_COVERAGE.md) · [`docs/TOOLS.md`](docs/TOOLS.md)
 
@@ -281,7 +281,7 @@ X : `@guatxlabs` (display « GuatX »). Reddit : poster dans r/netsec/r/redteams
 
 **Actions forge — ✅ FAIT** : `guatxlabs/forge` créé, `remote add public` + `git push public main` + tag `v0.0.1` signé poussés (public = vps synchronisés). **Périmètre** : core/plume/ocular = domaine user (core + ocular **publiés** ; **plume en attente** — scrub identité lourd [nom légal dans 101 commits], signature, réconciliation vps, relicence Apache→AGPL) ; **forge = moi, terminé**.
 
-**Historique forge : scrubé + signé (avant publication).** Identité réécrite → `GuatX <noreply@guatx.com>` (0 gmail perso, 0 xGuatx) ; **271/271 commits signés SSH** (ed25519, « Good signature ») ; config forge locale auto-signe les futurs commits ; 0 merge commit (historique linéaire). Force-pushé sur vps.
+**Historique forge : scrubé + signé (avant publication).** Identité réécrite → `GuatX <noreply@guatx.com>` (0 e-mail personnel, 0 identité github-spécifique) ; **271/271 commits signés SSH** (ed25519, « Good signature ») ; config forge locale auto-signe les futurs commits ; 0 merge commit (historique linéaire). Force-pushé sur vps.
 
 **Durcissement GitHub — ORDRE : pousser d'abord, verrouiller ensuite** (une règle « require PR » rejette le push initial ; « signed »/« linéaire » sont déjà satisfaites côté forge).
 - *Fait côté repo forge (mon domaine)* : CI `permissions: contents: read` + toutes actions **SHA-pinnées** + gitleaks-action ; `.github/dependabot.yml` (cargo+github-actions, PR-only) ; `SECURITY.md` → GitHub advisories ; historique signé/linéaire.

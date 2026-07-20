@@ -17,7 +17,7 @@ def main():
     scope = Scope.load("scope.json")
     engine = Engine(scope, mode="propose")
     engine.arm("demo_ingest: populate console UI (authorized own domain)")
-    actions = [Action(kind="demo.fingerprint", target="guatx.com", desc="demo synthetic fingerprint")]
+    actions = [Action(kind="demo.fingerprint", target="example.com", desc="demo synthetic fingerprint")]
     for a in actions:
         engine.approve(a.id, "demo_ingest approval")
     engine.run(actions)
@@ -29,7 +29,7 @@ def main():
 
     token = os.environ.get("FORGE_CONSOLE_TOKEN", "")
     url = os.environ.get("FORGE_CONSOLE_URL", "http://127.0.0.1:7100")
-    st, resp = console_client.ingest("demo-guatx", engine.findings, engine.run_records,
+    st, resp = console_client.ingest("demo-example", engine.findings, engine.run_records,
                                      url=url, token=token)
     print(f"Console <- ingest (HTTP {st}): {resp}")
     return 0

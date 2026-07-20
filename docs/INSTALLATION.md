@@ -7,10 +7,11 @@ Cette page couvre **toutes les voies d'installation** avec les commandes exactes
 self-deploy détaillé (empreinte mesurée, matrice Docker/k8s/host/venv, export PDF) est dans
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-> ⚠️ **Contexte de build = le dossier PARENT `GUATX/`** (pas `forge/`) : la console dépend du crate
-> sibling `guatx-core` en dép `path`. Toutes les commandes `docker build`/`docker compose`
-> ci-dessous se lancent **depuis `GUATX/`**. Détail + migration future (dép `git`, contexte
-> forge-only) : [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
+> ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.1.0"`, cf.
+> `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
+> les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
+> clone standalone y suffit). Détail : [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
 
 ## Pré-étape OBLIGATOIRE — le fichier scope (fail-loud)
 
@@ -18,7 +19,7 @@ Le scope/ROE actif est **monté en volume**, jamais cuit dans l'image. Créer le
 tout `up` :
 
 ```sh
-cd GUATX/forge
+# depuis la racine du dépôt
 cp scope.example.json scope.json     # in_scope vide = INERTE ; éditer AVEC AUTORISATION écrite
 ```
 
@@ -44,17 +45,17 @@ Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dé
 ## 2. Docker (image seule)
 
 ```sh
-cd GUATX
+# depuis la racine du dépôt
 # full (défaut)
-docker build -f forge/Dockerfile -t forge:0.0.1 .
+docker build -t forge:0.0.1 .
 # mini
-docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge:0.0.1-mini .
+docker build --build-arg FORGE_TOOLS_PROFILE=mini -t forge:0.0.1-mini .
 
 docker run -d --name forge \
   -p 127.0.0.1:7100:7100 \
   -v forge-db:/data/db -v forge-ledger:/data/ledger \
-  -v "$PWD/forge/scope.json:/data/scope/scope.json:ro" \
-  --env-file forge/.env \
+  -v "$PWD/scope.json:/data/scope/scope.json:ro" \
+  --env-file .env \
   forge:0.0.1
 ```
 
@@ -71,18 +72,18 @@ le bind loopback. **Services optionnels derrière des profils** ⇒ un `up` nu d
 (aucun `depends_on` dur).
 
 ```sh
-cd GUATX
-docker compose -f forge/docker-compose.yml up -d --build          # console SEULE (profil full)
-FORGE_TOOLS_PROFILE=mini docker compose -f forge/docker-compose.yml up -d --build   # image mini
+# depuis la racine du dépôt
+docker compose up -d --build          # console SEULE (profil full)
+FORGE_TOOLS_PROFILE=mini docker compose up -d --build   # image mini
 
 # couches optionnelles, à la demande (aucune n'est requise au boot) :
-docker compose -f forge/docker-compose.yml --profile browser up -d        # + accès/évasion (Camoufox :8080)
-docker compose -f forge/docker-compose.yml --profile msf --profile burp up -d   # + connecteurs (BYO images)
+docker compose --profile browser up -d        # + accès/évasion (Camoufox :8080)
+docker compose --profile msf --profile burp up -d   # + connecteurs (BYO images)
 
-docker compose -f forge/docker-compose.yml config      # valider la config résolue
+docker compose config      # valider la config résolue
 ```
 
-Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `forge/.env`
+Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `.env`
 (gitignoré, `required:false`). Gabarit commenté : [`../.env.example`](../.env.example). Les connecteurs
 `browser`/`msf`/`burp` restent **inertes** tant que leur service n'est pas joignable (sonde à
 fire-time). Forge ne fournit **pas** d'image MSF/Burp (licence/outillage opérateur) — les stubs
@@ -97,7 +98,7 @@ Unité durcie fournie : [`../deploy/forge.service`](../deploy/forge.service)
 durcissement systemd **n'affaiblit aucun garde-fou applicatif**.
 
 ```sh
-cd GUATX/forge/console && cargo build --release            # binaire offline depuis le cache cargo
+cd console && cargo build --release            # depuis la racine du dépôt ; binaire offline (cache cargo)
 sudo install -m0755 target/release/forge /usr/local/bin/
 sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
 sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
@@ -114,7 +115,7 @@ Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans
 ## 5. venv / développement
 
 ```sh
-cd GUATX/forge
+# depuis la racine du dépôt
 # 1) moteur Python (met `forge` sur le PATH ; sinon `python3 -m forge.cli`)
 pip install -e .
 # 2) console Rust (compile offline depuis le cache cargo)
@@ -137,7 +138,7 @@ chiffrement au repos, compiler avec la feature `encryption` puis fournir la clé
 
 ```sh
 # 1) image/binaire chiffré (feature Cargo -> backend SQLCipher)
-cd GUATX/forge/console && cargo build --release --features encryption
+cd console && cargo build --release --features encryption   # depuis la racine du dépôt
 #    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
 
 # 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)

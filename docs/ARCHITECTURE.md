@@ -10,20 +10,23 @@
 ## 1. Vue macro — trois processus, un contrat
 
 ```
-GUATX/
-  core/          guatx-core (lib Rust NEUTRE, publique) — le ~70 % commun (moteur soql v0)
-  plume/         Plume (SOC bleu, public) — détection / BAS  [OPTIONNEL pour Forge]
-  forge/         Forge (rouge) :
-    forge/         MOTEUR Python (gate ROE, ledger, modules, oracles, évasion, collecteurs)
-    console/       CONSOLE Rust (axum + rusqlite) — store rouge + API + RBAC + C2-light + dashboards
-    console/web/   SPA vanilla-JS (skin Ember, dark) — findings / coverage / purple / runs / admin
+Ce dépôt — Forge (rouge) :
+  forge/         MOTEUR Python (gate ROE, ledger, modules, oracles, évasion, collecteurs)
+  console/       CONSOLE Rust (axum + rusqlite) — store rouge + API + RBAC + C2-light + dashboards
+  console/web/   SPA vanilla-JS (skin Ember, dark) — findings / coverage / purple / runs / admin
+
+Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
+  guatx-core     lib Rust NEUTRE, publique — le ~70 % commun (moteur soql v0) ; consommée par la console
+                 en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.1.0)
+  plume          Plume (SOC bleu, public) — détection / BAS  [OPTIONNEL pour Forge]
 ```
 
 Il n'y a **pas de process partagé** entre les couches : le moteur Python et la console Rust
 communiquent par un **contrat HTTP/fichier** (`POST /api/ingest`, JSONL de run-records, ledger
 JSONL sur disque). La console **spawne** le moteur (`python3 -m forge.cli campaign …`) pour les runs
-lancés depuis le web (voir §3, C2-light). La console dépend du crate `guatx-core` en dép `path`
-(voir [`DEPLOYMENT.md`](DEPLOYMENT.md) §4 pour la migration future en dép `git`).
+lancés depuis le web (voir §3, C2-light). La console dépend du crate `guatx-core` via une **git-dep
+publique épinglée** (`tag = "v0.1.0"`, récupérée au build ; la migration depuis l'ancienne dép `path`
+sibling est faite — voir [`DEPLOYMENT.md`](DEPLOYMENT.md) §4).
 
 **Empreinte** (mesurée) : moteur Python ~5.3 KLOC (`deps=[]`), console Rust ~4 KLOC, `guatx-core`
 ~1 KLOC, UI ~3.5 KLOC. Livrable cœur ≈ 5 MB ; image Docker 150-250 MB (mini) à 350-500 MB (full).

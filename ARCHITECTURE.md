@@ -8,19 +8,22 @@ pas un all-in-one qui fusionnerait l'arsenal rouge dans le binaire bleu (cela ca
 ## Les trois couches
 
 ```
-GUATX/
-  core/           guatx-core (lib Rust) — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur soql ;
-                  à étendre (auth/host-guard, query-exec). RIEN d'offensif n'y descend.
-  plume/          Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
-  forge/          Forge (rouge, PRIVÉ) : moteur Python (gate ROE, ledger, modules, évasion...) +
-    console/      forge (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
+Ce dépôt — Forge (rouge, PUBLIC) : moteur Python (gate ROE, ledger, modules, évasion...) +
+  console/        forge (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
+
+Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
+  guatx-core      lib Rust — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur soql ; à étendre
+                  (auth/host-guard, query-exec). RIEN d'offensif n'y descend. Consommée par la console
+                  en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.1.0).
+  plume           Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
 ```
-**Frontière public/privé** (décidée) : `core/` **public neutre** + `plume/` **public** (bleu) +
-`forge/` **privé** (rouge). Comme Plume (public) doit pouvoir dépendre de `core`, **`core` DOIT être
+**Frontière des repos** (décidée) : `core` **public neutre** + `plume` **public** (bleu) +
+`forge` **public** (rouge, ce dépôt). Comme Plume doit pouvoir dépendre de `core`, **`core` DOIT être
 public** — c'est ce qui force le découpage. Discipline : aucun élément offensif (module, évasion CF/WAF,
-logique ROE) ne descend dans `core` ; il reste dans le Forge privé, qui dépend du cœur public.
-Aujourd'hui la console pointe `core` en dép `path` (layout sibling) ; quand le repo public existe →
-basculer en **dép `git`** vers l'URL publique. L'extraction est réelle (la console l'utilise), pas un plan.
+logique ROE) ne descend dans `core` ; il reste dans Forge, qui dépend du cœur public.
+La console consomme `core` via une **dép `git` publique épinglée** (`tag = "v0.1.0"`, récupérée au
+build) — la migration depuis l'ancienne dép `path` sibling est **faite**. L'extraction est réelle (la
+console l'utilise), pas un plan.
 
 v0 ne bâtit pas `core/` (extraction prématurée = friction tant que les interfaces bougent). On
 **construit Forge d'abord** (Python, comme secpipe + le toolkit), puis on remontera les ~70 %
