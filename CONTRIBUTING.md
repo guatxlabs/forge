@@ -32,9 +32,11 @@ When in doubt, add a test that proves the invariant still holds.
 
 ## Building & testing
 
-> **Note (open-source build):** the Rust console depends on `guatx-core` via a path dependency
-> (`../../core`). Until that core is published as a crate / public git dependency, a standalone
-> clone of *this* repo alone will not build the console. See `console/Cargo.toml`.
+> **Note (open-source build):** the Rust console depends on `guatx-core` via a **pinned public git
+> dependency** (`git = "https://github.com/guatxlabs/core", tag = "v0.1.0"`; see `console/Cargo.toml`).
+> A standalone clone of *this* repo builds the console directly — the core is fetched from GitHub at
+> build time. For a monorepo dev checkout, `console/.cargo/config.toml` (gitignored) `[patch]`es the
+> git dep to a local `../../core`.
 
 ```sh
 make test           # full suite: Python (unittest/pytest) + Rust (cargo test)

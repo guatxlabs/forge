@@ -10,9 +10,12 @@ All notable changes to Forge are documented here. The format is based on
 ## [Unreleased]
 
 ### Notes for open-source builds
-- The Rust console depends on `guatx-core` via a path dependency (`../../core`). A standalone
-  clone does not yet build the console until that core is published as a crate or a public git
-  dependency. Tracked; see `console/Cargo.toml`.
+- The Rust console depends on `guatx-core` via a **pinned public git dependency**
+  (`git = "https://github.com/guatxlabs/core", tag = "v0.1.0", features = ["forge"]`; see
+  `console/Cargo.toml`). A standalone clone of this repo builds the console directly — the core is
+  fetched from GitHub at build time, no sibling crate required. In a monorepo dev checkout,
+  `console/.cargo/config.toml` (gitignored) carries a `[patch]` that overrides the git dep to a local
+  `../../core` for speed; it is absent from public clones.
 
 ## [0.0.1] — initial release
 

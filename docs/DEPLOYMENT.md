@@ -26,16 +26,18 @@ programmées**. La deuxième moitié conserve l'**empreinte mesurée** et la mat
 
 ## 1. Options de build & run
 
-> ⚠️ **Contexte de build = le dossier PARENT `GUATX/`**, pas `forge/` (la console dépend du crate
-> sibling `guatx-core` en `path`). Toutes les commandes `docker build`/`docker compose` ci-dessous
-> se lancent **depuis `GUATX/`**. Détail + migration future en [§4](#4-contexte-de-build--dépendance-guatx-core).
+> ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.1.0"`, cf.
+> `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
+> les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
+> clone standalone y suffit). Détail en [§4](#4-contexte-de-build--dépendance-guatx-core).
 
 ### 1.0 Pré-étape OBLIGATOIRE — le fichier scope (fail-loud)
 
 Le scope/ROE actif est **monté en volume**, jamais cuit dans l'image. Créer le **fichier** avant tout `up` :
 
 ```sh
-cd GUATX/forge
+# depuis la racine du dépôt
 cp scope.example.json scope.json          # in_scope vide = INERTE ; éditer AVEC AUTORISATION écrite
 ```
 
@@ -56,17 +58,17 @@ Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dé
 ### 1.2 Docker (image seule)
 
 ```sh
-cd GUATX
+# depuis la racine du dépôt
 # full (défaut)
-docker build -f forge/Dockerfile -t forge:0.0.1 .
+docker build -t forge:0.0.1 .
 # mini
-docker build --build-arg FORGE_TOOLS_PROFILE=mini -f forge/Dockerfile -t forge:0.0.1-mini .
+docker build --build-arg FORGE_TOOLS_PROFILE=mini -t forge:0.0.1-mini .
 
 docker run -d --name forge \
   -p 127.0.0.1:7100:7100 \
   -v forge-db:/data/db -v forge-ledger:/data/ledger \
-  -v "$PWD/forge/scope.json:/data/scope/scope.json:ro" \
-  --env-file forge/.env \
+  -v "$PWD/scope.json:/data/scope/scope.json:ro" \
+  --env-file .env \
   forge:0.0.1
 ```
 
@@ -79,18 +81,18 @@ Le compose fixe déjà le bon contexte, le fail-loud du scope, les volumes, le h
 et le bind loopback. **Services optionnels derrière des profils** ⇒ un `up` nu démarre la **console seule**.
 
 ```sh
-cd GUATX
-docker compose -f forge/docker-compose.yml up -d --build          # console SEULE (profil full par défaut)
-FORGE_TOOLS_PROFILE=mini docker compose -f forge/docker-compose.yml up -d --build   # console SEULE, image mini
+# depuis la racine du dépôt
+docker compose up -d --build          # console SEULE (profil full par défaut)
+FORGE_TOOLS_PROFILE=mini docker compose up -d --build   # console SEULE, image mini
 
 # couches optionnelles, à la demande (aucune n'est requise au boot) :
-docker compose -f forge/docker-compose.yml --profile browser up -d        # + accès/évasion (Camoufox :8080)
-docker compose -f forge/docker-compose.yml --profile msf --profile burp up -d   # + connecteurs (BYO images)
+docker compose --profile browser up -d        # + accès/évasion (Camoufox :8080)
+docker compose --profile msf --profile burp up -d   # + connecteurs (BYO images)
 
-docker compose -f forge/docker-compose.yml config      # valider la configuration résolue
+docker compose config      # valider la configuration résolue
 ```
 
-Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `forge/.env`
+Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `.env`
 (gitignoré, `required:false`). Gabarit commenté : [`.env.example`](../.env.example). Les connecteurs
 `browser`/`msf`/`burp` restent **inertes** tant que leur service n'est pas joignable (sonde à fire-time).
 
@@ -106,7 +108,7 @@ Unité durcie fournie : [`deploy/forge.service`](../deploy/forge.service)
 Le durcissement systemd **n'affaiblit aucun garde-fou applicatif**, il renforce l'isolation du process.
 
 ```sh
-cd GUATX/forge/console && cargo build --release            # binaire offline depuis le cache cargo
+cd console && cargo build --release            # depuis la racine du dépôt ; binaire offline (cache cargo)
 sudo install -m0755 target/release/forge /usr/local/bin/
 sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
 sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
@@ -125,7 +127,7 @@ chiffrement au repos, compiler la console avec la feature `encryption` puis four
 
 ```sh
 # 1) image chiffrée (feature Cargo -> backend crypto SQLCipher)
-cd GUATX/forge/console && cargo build --release --features encryption
+cd console && cargo build --release --features encryption   # depuis la racine du dépôt
 #    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
 
 # 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)
@@ -335,12 +337,12 @@ dans l'image) et démarre un service `postgres:16` (profil `postgres`). Le dépl
 (`docker-compose.yml` seul) reste **inchangé** :
 
 ```sh
-# depuis GUATX/ (contexte de build = parent, cf. §4) — profil postgres + override
-docker compose -f forge/docker-compose.yml -f forge/docker-compose.postgres.yml \
+# depuis la racine du dépôt — profil postgres + override
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
                --profile postgres up -d --build
 ```
 
-Credentials par défaut d'ÉVAL (`forge/forge`) — **surcharger** en prod via `forge/.env`
+Credentials par défaut d'ÉVAL (`forge/forge`) — **surcharger** en prod via `.env`
 (`FORGE_PG_USER`/`FORGE_PG_PASSWORD`/`FORGE_PG_DB`, repris à la fois par le service `postgres` et par
 `FORGE_DB_URL`). Ne **jamais** publier le port Postgres publiquement (le service reste `expose:`-only sur
 le réseau compose).
@@ -450,7 +452,7 @@ est-ouest**. C'est le pendant k8s du harnais `docker-compose.ha.yml` + `Caddyfil
 #    SQLite par défaut FAIL-CLOSE sous FORGE_HA=1.
 docker build -f Dockerfile \
   --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
-  -t <registry>/forge:0.0.1 ..        # contexte = parent GUATX/ (inclut core/ + forge/)
+  -t <registry>/forge:0.0.1 .         # contexte = racine du dépôt (git-dep guatx-core, pas de sibling)
 docker push <registry>/forge:0.0.1
 
 # 2) Régler l'image dans k8s/40-console.yaml (et le host réel dans k8s/50-ingress.yaml +
@@ -692,32 +694,28 @@ défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
 
 ## 4. Contexte de build & dépendance `guatx-core`
 
-⚠️ Le contexte de build est le **PARENT `GUATX/`**, pas `forge/` : le crate `console` dépend du sibling
-`guatx-core` via `guatx-core = { path = "../../core" }` (cf. `console/Cargo.toml`). `core/` est un repo
-**partagé** appartenant à l'utilisateur — **non vendoré, non copié-committé** dans `forge/** : le stage
-builder le consomme **depuis le contexte parent** (`COPY core/ ./core/`). Construire depuis `forge/`
-seul **échouera** (core hors contexte) — c'est **voulu**.
+Le contexte de build est la **RACINE de ce dépôt**. Le crate `console` résout `guatx-core` via une
+**git-dep publique ÉPINGLÉE** — `guatx-core = { git = "https://github.com/guatxlabs/core", tag =
+"v0.1.0", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
+build**, aucun crate sibling n'est requis dans le contexte. Un clone **standalone** de ce dépôt construit
+directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe `context: .`).
 
 - **Reproductibilité** : `console/Cargo.lock` est **committé** (retiré de `console/.gitignore`) — un
   binaire/produit verrouille ses deps pour des builds identiques client/CI. Le Dockerfile build
   d'ailleurs `cargo build --release --locked`, qui **exige** un `Cargo.lock` présent et à jour.
-- **Ignore du contexte** : `forge/Dockerfile.dockerignore` (ignore-file **spécifique au Dockerfile** —
+- **Override dev (monorepo)** : `console/.cargo/config.toml` (**GITIGNORÉ**, absent des clones publics)
+  porte un `[patch]` qui redirige la git-dep vers le core local (`path = "../../core"`) — il garde la
+  vitesse du path en développement sans dépendre du core publié. Le build par défaut (sans ce fichier)
+  résout la git-dep épinglée.
+- **Ignore du contexte** : `Dockerfile.dockerignore` (ignore-file **spécifique au Dockerfile** —
   BuildKit le préfère à un `.dockerignore` racine quand il jouxte le Dockerfile désigné par `-f`).
-  Motifs relatifs à `GUATX/`. Exclut le cache Cargo `forge/console/target/` (~1.6 GB), les `*.db`/WAL,
-  le ledger `*.jsonl`, `__pycache__`, `**/.git`, secrets (`*.env`/`*.key`/…) et les repos siblings
-  inutiles (`plume/`, `guatx-infra/`, `guatx-k3s-manifests/`, `_archive/`). `forge/` et `core/` restent inclus.
+  Motifs relatifs à la **racine du dépôt**. Exclut le cache Cargo `console/target/` (~1.6 GB), les
+  `*.db`/WAL, le ledger `*.jsonl`, `__pycache__`, `**/.git` et les secrets (`*.env`/`*.key`/…).
 
-**Migration future (clone forge-only)** : quand le repo public `guatx-core` existera, remplacer la dép
-`path` par une dép **git épinglée** :
-
-```toml
-# console/Cargo.toml
-guatx-core = { git = "https://github.com/guatxlabs/core", tag = "vX.Y.Z", features = ["forge"] }
-```
-
-Le contexte pourra alors **redevenir `forge/` seul**, le `COPY core/ ./core/` du builder disparaîtra, et
-un checkout **forge-only** (sans le sibling `core/`) buildera tel quel. Tant que c'est une dép `path`, le
-contexte **DOIT** rester le parent `GUATX/`.
+**Migration `path` → git-dep : FAITE.** La console consommait autrefois `core` en dép `path` (layout
+sibling monorepo), ce qui imposait un contexte de build parent. Le repo public `guatxlabs/core` (tag
+`v0.1.0`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
+builder qui copiait le sibling `core/` a **disparu**, et un checkout **standalone** (sans sibling) builde tel quel.
 
 ---
 

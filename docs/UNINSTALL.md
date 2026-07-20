@@ -16,12 +16,12 @@ ledger d'engagement, et sa **clé de signature `.ed25519`**.
 ## 1. Docker Compose
 
 ```sh
-cd GUATX
+# depuis la racine du dépôt
 # Arrêter (conserve les volumes/données)
-docker compose -f forge/docker-compose.yml down
+docker compose down
 
 # Arrêter + SUPPRIMER les volumes nommés (DB + ledger) — DESTRUCTIF
-docker compose -f forge/docker-compose.yml down -v
+docker compose down -v
 
 # Supprimer l'image
 docker image rm forge:0.0.1 forge:0.0.1-mini 2>/dev/null
@@ -31,7 +31,7 @@ docker volume rm forge_forge-db forge_forge-ledger 2>/dev/null   # préfixe = no
 docker volume ls | grep forge                                    # vérifier qu'il n'en reste pas
 ```
 
-Le **scope actif** est bind-monté depuis l'hôte (`forge/scope.json`) — il reste sur l'hôte après
+Le **scope actif** est bind-monté depuis l'hôte (`scope.json`) — il reste sur l'hôte après
 `down -v`. Supprimez-le explicitement s'il contient des périmètres sensibles.
 
 ---
@@ -119,7 +119,7 @@ simplement `available:false`.
 ## 6. Nettoyage build/dev
 
 ```sh
-cd GUATX/forge
+# depuis la racine du dépôt
 make clean                     # build/dist/egg-info/.pytest_cache + base démo + __pycache__ + cargo clean
 # ou manuellement :
 cd console && cargo clean      # supprime console/target/ (~1.6 GB de cache)

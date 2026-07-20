@@ -5,17 +5,17 @@
 > Rappel de sûreté : Forge est **fail-closed** — périmètre vide = tout refusé. Le scope EST ton autorisation (ROE).
 
 ## 0. Prérequis
-- Docker + Docker Compose. Le repo `GUATX/` (Forge a besoin du contexte parent pour `core/`).
+- Docker + Docker Compose. Un clone standalone de ce dépôt (la console récupère `guatx-core` via une git-dep publique au build — aucun contexte parent requis).
 - Rien d'autre. Pas de scope.json, pas de compte à pré-créer.
 
 ## 1. Déployer — une seule commande
 ```bash
-# depuis GUATX/
-docker compose -f forge/docker-compose.yml up -d --build
+# depuis la racine du dépôt
+docker compose up -d --build
 ```
 - Service **`forge`** ; console web sur **http://127.0.0.1:7100** (loopback uniquement).
 - Données dans les volumes nommés `forge-db` / `forge-ledger` (re-`up` idempotent, aucune accumulation).
-- Image `full` par défaut (httpx/nuclei/subfinder vérifiés SHA256 + PDF). `mini` : `FORGE_TOOLS_PROFILE=mini docker compose -f forge/docker-compose.yml build`.
+- Image `full` par défaut (httpx/nuclei/subfinder vérifiés SHA256 + PDF). `mini` : `FORGE_TOOLS_PROFILE=mini docker compose build`.
 
 ## 2. Ouvrir l'UI → le wizard fait tout
 Ouvre **http://127.0.0.1:7100**. Au 1er lancement, l'**assistant de déploiement** (5 étapes) crée TOUT, dans le navigateur :
@@ -58,11 +58,11 @@ Administration → **Console Forge** : un panneau qui lance les commandes gouver
 `backup`, `upgrade`…) **sans quitter le navigateur** (allowlist, pas de shell, `upgrade` demande confirmation,
 sortie streamée). En CLI (optionnel, pour les habitués) :
 ```bash
-docker compose -f forge/docker-compose.yml exec forge forge status
+docker compose exec forge forge status
 # upgrade sûr : snapshot chiffré -> migrate -> verify -> rollback auto si échec (no-op = 0 écriture)
-docker compose -f forge/docker-compose.yml exec forge forge upgrade --passphrase-env FORGE_BACKUP_PASSPHRASE
+docker compose exec forge forge upgrade --passphrase-env FORGE_BACKUP_PASSPHRASE
 ```
-Arrêt : `docker compose -f forge/docker-compose.yml down` (volumes persistent ; `down -v` pour tout effacer).
+Arrêt : `docker compose down` (volumes persistent ; `down -v` pour tout effacer).
 
 ## Alternatives
 - **Host natif** : `cd console && cargo build --release && ./target/release/forge` (puis wizard dans le navigateur).

@@ -123,10 +123,13 @@ Supply-chain durcie : les archives ProjectDiscovery sont **épinglées par diges
 non-correspondance fait échouer le build. Lors d'un bump de version, rafraîchir **version ET digest**
 (depuis les `*_checksums.txt` officiels). Alternative : build `mini` puis bind-monter les binaires.
 
-### Le build Docker échoue « core hors contexte »
-Le **contexte de build doit être le parent `GUATX/`** (la console dépend du sibling `guatx-core`).
-Lancer `docker build -f forge/Dockerfile .` **depuis `GUATX/`**, ou utiliser le compose qui fixe déjà
-`context: ..`. Voir [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
+### Le build Docker échoue à récupérer `guatx-core`
+Le **contexte de build est la racine de ce dépôt** ; la console résout `guatx-core` via une git-dep
+publique épinglée (`tag = "v0.1.0"`, cf. `console/Cargo.toml`), **récupérée depuis GitHub au build** —
+le builder a donc besoin d'un **accès réseau à github.com** (ou d'un miroir/cache de registre Cargo). En
+dev monorepo, `console/.cargo/config.toml` (gitignoré) redirige la dép vers le core local. Lancer
+`docker build -t forge:0.0.1 .` **depuis la racine du dépôt**, ou utiliser le compose (`context: .`).
+Voir [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
 
 ### `?format=pdf` renvoie `pdf_unavailable`
 Aucun moteur PDF sur le PATH (image `mini`, ou install sans weasyprint). Utiliser

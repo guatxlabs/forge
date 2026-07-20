@@ -13,7 +13,7 @@
 > Passer un WAF/Cloudflare ≠ une faille : la gate ROE + le scope-guard + le ledger sont là pour
 > **imposer ET prouver** l'autorisation. Voir [`../README.md`](../README.md).
 
-Toutes les commandes se lancent depuis la racine du dépôt (`GUATX/forge/`).
+Toutes les commandes se lancent depuis la racine du dépôt.
 
 ---
 
