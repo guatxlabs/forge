@@ -2,7 +2,7 @@
 
 # 🔨 Forge
 
-**The heavyweight red-team engine.** — l'antithèse offensive de [Plume](../plume), le SOC blue-team.
+**The heavyweight red-team engine.** — l'antithèse offensive de [Plume](https://github.com/guatxlabs/plume), le SOC blue-team.
 *Python · stdlib-only core · sûreté d'abord (ROE fail-closed + ledger tamper-evident).*
 
 **·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
