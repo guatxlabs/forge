@@ -55,7 +55,7 @@ await_holding_lock = "warn"
 significant_drop_tightening = "warn"
 
 [dependencies]
-guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.1.0", features = ["forge"] }
+guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.1.1", features = ["forge"] }
 # ^ Dép GIT épinglée (repo public LGPL `guatxlabs/core`, tag `v0.1.0`) : un clone forge-only
 #   standalone build dès que core@v0.1.0 est publié. Le tag DOIT être identique sur core/forge/plume.
 #   DEV monorepo (vitesse du path sans dépendre du core publié) : `console/.cargo/config.toml`
