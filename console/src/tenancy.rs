@@ -617,14 +617,14 @@ pub(crate) fn routes() -> Router<App> {
         // the tenant UI renders at all + which tenants the caller may switch between. See tenancy_context.
         .route("/api/tenancy", get(tenancy_context))
         .route("/api/tenants", get(tenants_list).post(tenants_create))
-        .route("/api/tenants/:id", post(tenants_update))
-        .route("/api/tenants/:id/grants", get(tenant_grants_list).post(tenant_grant_add))
-        .route("/api/tenants/:id/grants/:login", delete(tenant_grant_remove))
+        .route("/api/tenants/{id}", post(tenants_update))
+        .route("/api/tenants/{id}/grants", get(tenant_grants_list).post(tenant_grant_add))
+        .route("/api/tenants/{id}/grants/{login}", delete(tenant_grant_remove))
         // PER-ENGAGEMENT RBAC (readiness #14) — engagement-specific grant management (platform-admin). The
         // `:id` param name matches the sibling `/api/engagements/:id` (main router) / `/api/engagements/:id/
         // report` (reports router) — matchit requires the SAME param name at that position (it is `:id`).
-        .route("/api/engagements/:id/grants", get(engagement_grants_list).post(engagement_grant_add))
-        .route("/api/engagements/:id/grants/:login", delete(engagement_grant_remove))
+        .route("/api/engagements/{id}/grants", get(engagement_grants_list).post(engagement_grant_add))
+        .route("/api/engagements/{id}/grants/{login}", delete(engagement_grant_remove))
 }
 
 /// GET /api/tenancy — the caller's tenant CONTEXT for the SPA (ANY authenticated caller; not gated to

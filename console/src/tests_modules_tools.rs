@@ -331,7 +331,7 @@ use crate::testutil::*;
         let _r: Router<App> = Router::new()
             .route("/api/modules", get(modules))
             .route("/api/modules/refresh", post(modules_refresh))
-            .route("/api/modules/:kind", post(module_governance));
+            .route("/api/modules/{kind}", post(module_governance));
     }
 
     // =============================================================================================

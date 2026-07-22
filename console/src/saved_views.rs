@@ -46,7 +46,7 @@ const SELECT_COLS: &str = "id,user_id,engagement_id,name,filter_json,created";
 pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/api/saved-views", get(sv_list).post(sv_create))
-        .route("/api/saved-views/:id", delete(sv_delete))
+        .route("/api/saved-views/{id}", delete(sv_delete))
 }
 
 // --- helpers de réponse (JSON stable, non-fuiteur) ---------------------------------------------

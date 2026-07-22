@@ -62,7 +62,7 @@ guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.1.1", featur
 #   (GITIGNORÉ) porte un `[patch."…/guatxlabs/core"] guatx-core = { path = "../../core" }` qui
 #   override la git-dep vers le core local. Vérifié : `cargo metadata --offline` résout vers le path
 #   local sans toucher le git. Un clone PUBLIC (sans ce patch local) résout la vraie git-dep.
-axum = "0.7"
+axum = "0.8"
 tower-http = { version = "0.7", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
 libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign

@@ -115,7 +115,7 @@ pub(crate) fn ensure_pg_schema(store: &crate::store::Store) {
 pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/api/rbac/group-map", get(map_list).post(map_set))
-        .route("/api/rbac/group-map/:group", axum::routing::delete(map_delete))
+        .route("/api/rbac/group-map/{group}", axum::routing::delete(map_delete))
 }
 
 /// GET /api/rbac/group-map — list every group mapping (admin-only). Returns `{enabled, mappings:[…]}`.

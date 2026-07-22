@@ -49,7 +49,7 @@ const MAX_LOGO_LEN: usize = 512 * 1024;
 /// l'auth_guard/host_guard). Segments statiques (`/report`) sous `:id` (i64) : aucun conflit matchit.
 pub(crate) fn routes() -> Router<App> {
     Router::new()
-        .route("/api/engagements/:id/report", get(engagement_report))
+        .route("/api/engagements/{id}/report", get(engagement_report))
         .route("/api/report/branding", get(branding_get).post(branding_set))
 }
 

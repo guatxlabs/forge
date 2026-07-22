@@ -34,9 +34,9 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // (`events`, statique — pas de collision matchit avec `:id`) + single-triage (`:id/triage`).
         .route("/api/findings/bulk/triage", post(findings_bulk_triage))
         .route("/api/findings/events", get(finding_events))
-        .route("/api/findings/:id", get(finding_detail).post(finding_update))
-        .route("/api/findings/:id/assign", post(finding_assign))
-        .route("/api/findings/:id/triage", post(finding_triage))
+        .route("/api/findings/{id}", get(finding_detail).post(finding_update))
+        .route("/api/findings/{id}/assign", post(finding_assign))
+        .route("/api/findings/{id}/triage", post(finding_triage))
         .route("/api/runrecords", get(runrecords))
         .route("/api/coverage", get(coverage))
         // Matrice ATT&CK par engagement : grille tactique × technique (kill-chain), engagement-scopée.
@@ -61,24 +61,24 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // supprimer — mutations OPÉRATEUR/ADMIN gouvernées + ledgerisées, builtins protégés. matchit :
         // le segment statique `selection` (techniques) et `:name` (workflows) ne collisionnent pas.
         .route("/api/workflows", get(workflows_list).post(workflow_create))
-        .route("/api/workflows/:name", post(workflow_edit))
+        .route("/api/workflows/{name}", post(workflow_edit))
         // GOUVERNANCE CONNECTEUR (#4) : écriture réservée admin (check_admin, fail-closed 403), attribuée +
         // ledgerisée. Le segment statique `refresh` prime sur le paramètre `:kind` (matchit). Disabling
         // un connecteur l'empêche RÉELLEMENT de tirer (enforcement au spawn, cf. run_create).
-        .route("/api/modules/:kind", post(module_governance))
+        .route("/api/modules/{kind}", post(module_governance))
         // OUTILS AJOUTÉS PAR L'UI (« add a tool from the web UI ») — ADMIN-ONLY (check_admin, 403 sinon),
         // ledgerisé, validé fail-closed. POST déclare un ToolSpec gouverné (binaire + argv no-shell +
         // allowlist), le persiste dans le dir server-managed + HOT-RELOAD le catalogue ; GET liste les
         // outils UI ; DELETE :kind en retire un (jamais un built-in). Ne collisionne pas avec /api/modules.
         .route("/api/tools", get(tools_list).post(tools_add))
-        .route("/api/tools/:kind", axum::routing::delete(tools_delete))
+        .route("/api/tools/{kind}", axum::routing::delete(tools_delete))
         .route("/api/campaigns", get(campaigns))
         // ENGAGEMENT (objet de 1re classe) : liste + compteurs (viewer) ; create = OPÉRATEUR ; edit/
         // archive/delete via POST :id (edit=OPÉRATEUR, archive/delete=ADMIN, cf. handler). Chaque mutation
         // ledgerisée `console.engagement.*`. Les vues (findings/runrecords/roe/ledger/coverage/runs) filtrent
         // sur l'engagement actif (`?engagement=`). Le segment `:id` (i64) ne collisionne pas avec la liste.
         .route("/api/engagements", get(engagements_list).post(engagements_create))
-        .route("/api/engagements/:id", post(engagements_update))
+        .route("/api/engagements/{id}", post(engagements_update))
         // POLITIQUE RÉSEAU (privé/LAN/loopback) — MASTER SWITCH GLOBAL (admin, ledgerisé). GET lit l'état,
         // POST le bascule. C'est le « gros bouton rouge » instance-wide : OFF (défaut) = aucun scan privé
         // possible depuis AUCUN engagement (l'effectif exige aussi l'opt-in per-engagement + le scope).
@@ -88,7 +88,7 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         //     mutation est attribuée à l'admin acteur + ledgerisée ; GET ne renvoie jamais pass_hash ;
         //     recompute_auth_required après chaque mutation (gate DB-state) ; dernier admin protégé.
         .route("/api/users", get(users_list).post(users_create))
-        .route("/api/users/:login", post(users_update).delete(users_delete))
+        .route("/api/users/{login}", post(users_update).delete(users_delete))
         // --- SAUVEGARDE / RESTAURATION CHIFFRÉES (admin, ledgerisées). L'archive est TOUJOURS chiffrée ;
         //     la passphrase (corps) est transitoire (jamais stockée/loggée/ledgerisée). Le restore VALIDE
         //     par défaut (non destructif) ; un swap en place exige apply=true+confirm=true (redémarrage
@@ -106,10 +106,10 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         .merge(ledger_api::routes())
         .route("/api/query", get(query).post(query_post))
         .route("/api/dashboards", get(dashboards_list).post(dashboard_create))
-        .route("/api/dashboards/:id", post(dashboard_update).delete(dashboard_delete))
+        .route("/api/dashboards/{id}", post(dashboard_update).delete(dashboard_delete))
         .route("/api/panels", get(panels_list).post(panel_create))
-        .route("/api/panels/:id", post(panel_update).delete(panel_delete))
-        .route("/api/panels/:id/data", get(panel_data))
+        .route("/api/panels/{id}", post(panel_update).delete(panel_delete))
+        .route("/api/panels/{id}/data", get(panel_data))
         // --- IMPORT (migration Faraday/Trickest/reNgine/Osmedeus) : ingestion de sorties de scanners
         //     existantes en findings orientés preuve. OPÉRATEUR (fail-closed) + ledgerisé + scope-guardé.
         //     PUR DATA (aucune exécution). DefaultBodyLimit relevé (fichiers de scan volumineux possibles).
@@ -117,11 +117,11 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // --- C2-light : lancement gouverné/audité (opérateur fail-closed sur run/cancel) ---
         .route("/api/run", post(run_create))
         .route("/api/runs", get(runs_list))
-        .route("/api/runs/:id", get(run_detail))
-        .route("/api/runs/:id/report", get(run_report))
-        .route("/api/runs/:id/cancel", post(run_cancel))
-        .route("/api/runs/:id/logs", get(run_logs))
-        .route("/api/runs/:id/events", get(run_sse))
+        .route("/api/runs/{id}", get(run_detail))
+        .route("/api/runs/{id}/report", get(run_report))
+        .route("/api/runs/{id}/cancel", post(run_cancel))
+        .route("/api/runs/{id}/logs", get(run_logs))
+        .route("/api/runs/{id}/events", get(run_sse))
         // FINDINGS LIBRARY (modèles réutilisables) : routes définies DANS le module dédié
         // (finding_templates.rs). Fusionnées AVANT le fallback + le route_layer => elles héritent de
         // l'auth_guard et du host_guard comme toute route protégée. GET=liste (global), POST=create

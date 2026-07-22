@@ -423,7 +423,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     fn workflow_routes_do_not_conflict() {
         let _r: Router<App> = Router::new()
             .route("/api/workflows", get(workflows_list).post(workflow_create))
-            .route("/api/workflows/:name", post(workflow_edit));
+            .route("/api/workflows/{name}", post(workflow_edit));
     }
 
     /// [workflows pur] validate_workflow_body : grammaire nom/kind, steps typées, défauts, name_override,

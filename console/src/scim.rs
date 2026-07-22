@@ -243,12 +243,12 @@ pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/scim/v2/Users", get(users_list).post(users_create))
         .route(
-            "/scim/v2/Users/:id",
+            "/scim/v2/Users/{id}",
             get(user_get).put(user_put).patch(user_patch).delete(user_delete),
         )
         .route("/scim/v2/Groups", get(groups_list).post(groups_create))
         .route(
-            "/scim/v2/Groups/:id",
+            "/scim/v2/Groups/{id}",
             get(group_get).put(group_patch).patch(group_patch).delete(group_delete),
         )
         .route("/scim/v2/ServiceProviderConfig", get(service_provider_config))

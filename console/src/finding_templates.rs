@@ -52,8 +52,8 @@ const SELECT_COLS: &str =
 pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/api/finding-templates", get(ft_list).post(ft_create))
-        .route("/api/finding-templates/:id", post(ft_edit).delete(ft_delete))
-        .route("/api/finding-templates/:id/apply", post(ft_apply))
+        .route("/api/finding-templates/{id}", post(ft_edit).delete(ft_delete))
+        .route("/api/finding-templates/{id}/apply", post(ft_apply))
 }
 
 // --- helpers de réponse (JSON stable, non-fuiteur) ---------------------------------------------
