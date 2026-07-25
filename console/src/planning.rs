@@ -7,6 +7,8 @@
 //! `technique_selection_set` et leurs helpers) ; et le CRUD des workflows (`workflows_list`/
 //! `workflow_create`/`workflow_edit` + validation/persistance). LECTURE/gouvernance : aucune campagne
 //! armée ici — `plan` ne fait qu'un dry-run, `modules_refresh`/mutations sont gatés (opérateur/token).
+//! `plan` l'est AUSSI (S5) : il spawne un process moteur, donc gate OPÉRATEUR + budget de temps
+//! (`FORGE_PLAN_TIMEOUT`) + borne de concurrence (`FORGE_PLAN_MAX_CONCURRENT`) — cf. son doc-comment.
 //! Réutilise App + les helpers de la racine de crate (`check_operator`/`operator_denied`/`check_token`/
 //! `populate_modules`/`validate_host`/`host_in_server_scope`/`resolve_*_engagement_id`/`append_console_ledger`
 //! …) via `use crate::*`, et est re-exporté à la racine par `pub(crate) use crate::planning::*` — les
@@ -130,12 +132,58 @@ pub(crate) async fn scope_check(State(app): State<App>, headers: HeaderMap, Quer
     })))
 }
 
+/// Budget de TEMPS par défaut d'un dry-plan (s) — `FORGE_PLAN_TIMEOUT`. DISTINCT du budget d'un run armé
+/// (`FORGE_RUN_TIMEOUT`, 1 h) : un dry-plan est INERTE (mode propose) et doit rendre la main vite.
+/// Dépassement => le GROUPE moteur est tué et l'appelant reçoit 504 `plan_timeout` (jamais de résultat
+/// partiel rendu comme un plan complet). Valeur d'env invalide ou 0 => ce défaut (jamais « illimité »).
+pub(crate) const PLAN_TIMEOUT_DEFAULT_SECS: u64 = 300;
+/// Nombre par défaut de dry-plans EN VOL simultanés — `FORGE_PLAN_MAX_CONCURRENT`. Chaque dry-plan spawne
+/// un process moteur : la borne protège la MACHINE. Dépassement => 429 `plan_busy` (erreur explicite, pas
+/// de file d'attente muette). Valeur d'env invalide ou 0 => ce défaut.
+pub(crate) const PLAN_MAX_CONCURRENT_DEFAULT: usize = 2;
+
+/// Budget de temps EFFECTIF d'un dry-plan. Lu à l'appel (comme `FORGE_CONSOLE_EXEC_BIN` côté exec) :
+/// l'exploitant peut resserrer la borne sans redémarrer la console.
+fn plan_timeout_secs() -> u64 {
+    std::env::var("FORGE_PLAN_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(PLAN_TIMEOUT_DEFAULT_SECS)
+}
+
+/// SLOTS de dry-plan — sémaphore PROCESS-GLOBAL (un seul compteur pour toute la console : le budget borné
+/// est celui de la machine, pas celui d'une session). Dimensionné au PREMIER dry-plan depuis
+/// `FORGE_PLAN_MAX_CONCURRENT` (le nombre de slots ne change plus ensuite, contrairement au budget de temps).
+fn plan_slots() -> &'static tokio::sync::Semaphore {
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let n = std::env::var("FORGE_PLAN_MAX_CONCURRENT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(PLAN_MAX_CONCURRENT_DEFAULT);
+        tokio::sync::Semaphore::new(n)
+    })
+}
+
 /// POST /api/plan {targets, modules?} -> dry-plan INERTE. Spawne `forge.cli campaign --mode propose`
 /// (jamais armé : scope FORCÉ allow_exploit=false/allow_destructive=false, --modules borné aux kinds
 /// web_allowed non-exploit), CAPTURE sa sortie et renvoie la liste action->verdict (VETO/DRY_RUN).
 /// Aucune action ne tire — c'est un aperçu de gouvernance. Réutilise toutes les validations de
 /// /api/run (campaign/host/modules/plancher exploit) SANS persister de run_job ni ouvrir le slot FIFO.
-pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
+/// GOUVERNANCE (S5) : planifier SPAWNE un process moteur, ce n'est donc PAS une lecture — même gate de
+/// rôle que /api/run (`check_operator`, FAIL-CLOSED : un viewer -> 403), spawn BORNÉ dans le temps
+/// (`FORGE_PLAN_TIMEOUT` -> 504 + groupe tué) et nombre de dry-plans EN VOL borné
+/// (`FORGE_PLAN_MAX_CONCURRENT` -> 429). Aucune borne n'est franchie en silence.
+pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
+    // (0) RÔLE OPÉRATEUR — FAIL-CLOSED, MÊME gate que /api/run (identité en session operator|admin ou
+    // repli hash env, PLUS la politique source-CIDR quand elle est configurée). Refus AVANT toute
+    // validation, tout fichier temp et tout spawn : un viewer authentifié ne consomme aucun process.
+    if !check_operator(&app, &headers, Some(peer.ip())) {
+        let (s, j) = operator_denied(&app);
+        return (s, j);
+    }
     // ENGAGEMENT résolu (par-engagement) : le pré-filtre de scope + le mode du dry-plan viennent de
     // l'engagement ACTIF (son scope_in / son mode), EXACTEMENT comme /api/run — jamais les App globals.
     // Fail-closed : engagement introuvable / NO_ENGAGEMENT => scope VIDE (rien ne passe le pré-filtre).
@@ -185,6 +233,20 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
     }
     let module_params = Value::Object(module_params);
 
+    // (2c) SLOT de dry-plan (borne de CONCURRENCE) — pris APRÈS les validations (une requête invalide ne
+    // consomme aucun slot) et AVANT tout fichier temp / spawn. `try_acquire` : JAMAIS d'attente muette —
+    // plus de slot => 429 explicite, à l'appelant de réessayer. Le permis est relâché par son `Drop` :
+    // retour normal, early-return, panic OU abandon du future (client déconnecté) — cancellation-safe.
+    let _slot = match plan_slots().try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "plan_busy", "why": "trop de planifications à blanc en cours (FORGE_PLAN_MAX_CONCURRENT) — réessayez dans un instant"})),
+            )
+        }
+    };
+
     // (3) dir temp éphémère : scope.json (allow_* FORCÉS false) + targets.json. Nettoyé en fin.
     let stamp = format!("plan-{}-{}", chrono_now_compact(), gen_token().chars().take(8).collect::<String>());
     let plan_dir = std::env::temp_dir().join(format!("forge-run-{stamp}"));
@@ -233,18 +295,48 @@ pub(crate) async fn plan(State(app): State<App>, headers: HeaderMap, Query(q): Q
         argv.push(requested_modules.join(","));
     }
 
-    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : le dry-plan ne stalle plus un worker
+    // L10 FIX — spawn NON bloquant (tokio::process ... .await) : le dry-plan ne stalle plus un worker
     // Tokio le temps que le moteur planifie. Comportement identique à std::process::Command::output().
-    let output = tokio::process::Command::new(app.python.as_str())
-        .args(&argv)
+    // S5 — spawn BORNÉ, MÊME mécanique que le watchdog de /api/run (runs_proc::spawn_supervisor) :
+    // groupe de session dédié (setsid) + `tokio::time::timeout` ; au dépassement on coupe TOUT le groupe
+    // (SIGTERM puis SIGKILL après grâce) et on rend 504 — jamais d'attente illimitée, jamais une sortie
+    // tronquée présentée comme un plan complet.
+    let mut cmd = tokio::process::Command::new(app.python.as_str());
+    cmd.args(&argv)
         .current_dir(app.pkg_dir.as_str())
-        // parité avec run_create : stdout Python non bufferisé (le dry-plan est collecté d'un bloc via
-        // .output(), donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
+        // parité avec run_create : stdout Python non bufferisé (le dry-plan est collecté d'un bloc,
+        // donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
         .env("PYTHONUNBUFFERED", "1")
         .stdin(std::process::Stdio::null())
-        .output()
-        .await;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    spawn_setsid(&mut cmd); // le PID de l'enfant devient son PGID -> kill du GROUPE possible
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&plan_dir);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.to_string()})));
+        }
+    };
+    let pgid = child.id().map_or(0, |p| p as i32);
+    let budget = std::time::Duration::from_secs(plan_timeout_secs());
+    let waited = tokio::time::timeout(budget, child.wait_with_output()).await;
     let _ = std::fs::remove_dir_all(&plan_dir); // nettoyage best-effort quel que soit le résultat
+    let output = match waited {
+        Ok(r) => r,
+        Err(_) => {
+            // BUDGET DÉPASSÉ : `kill_on_drop` a déjà tué le leader ; on coupe le RESTE du groupe (SIGTERM
+            // puis SIGKILL après grâce, comme le watchdog du run) pour ne laisser aucun petit-enfant.
+            kill_group(pgid);
+            escalate_kill_group(pgid, std::time::Duration::from_secs(CANCEL_GRACE_SECS)).await;
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({"error": "plan_timeout", "why": format!("planification à blanc interrompue au-delà de {}s (FORGE_PLAN_TIMEOUT) — moteur arrêté, aucun aperçu partiel rendu", budget.as_secs())})),
+            );
+        }
+    };
 
     match output {
         Ok(o) => {

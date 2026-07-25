@@ -25,6 +25,8 @@ export const LC_ERRMAP = {
   mkdir_failed: 'Erreur serveur : création du répertoire de run impossible.',
   write_failed: 'Erreur serveur : écriture scope/targets impossible.',
   spawn_failed: 'Erreur serveur : démarrage du moteur impossible.',
+  plan_busy: 'Trop de planifications à blanc en cours (borne de concurrence) — réessaie dans un instant.',
+  plan_timeout: 'La planification à blanc a dépassé son budget de temps et a été interrompue — aucun aperçu partiel n\'est rendu.',
 };
 export function lcShowErr(msg) { const e = $('#lc-err'); if (e) { e.innerHTML = msg; e.hidden = false; } }
 export function lcClearErr() { const e = $('#lc-err'); if (e) { e.textContent = ''; e.hidden = true; } }

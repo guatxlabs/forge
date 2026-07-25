@@ -60,7 +60,6 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `GET /api/runs/:id/logs?after=<ID>` | Lignes de log d'un run (fallback polling de SSE). |
 | `GET /api/runs/:id/events` | Flux **SSE** : lignes de log + transitions de statut du run. |
 | `POST /api/scope-check` | Verdict d'appartenance d'une cible au scope serveur (lecture/gouvernance). |
-| `POST /api/plan` | **Dry-plan INERTE** (allow_high_impact=false par construction) : montre les verdicts ROE sans rien tirer. |
 
 ---
 
@@ -80,6 +79,7 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 |---|---|
 | `POST /api/run` | **Lance une campagne gouvernée et auditée** (spawn `python3 -m forge.cli campaign`). Corps `{campaign, targets[], modules?, mode?, budget?, exhaustive?, reason?, arm?, allow_high_impact?, module_params?}`. Fail-closed : cibles ⊆ scope serveur, **plancher exploit** (exploit/destructif refusés sauf opt-in haut-impact = operator + `arm=true` + `reason`), **FIFO par engagement** (un run vivant *par engagement* ; 2e run sur le même engagement → **409** avec `engagement_id` ; autres engagements en parallèle). `engagement_id` optionnel dans le corps (défaut = engagement actif). Voir [Architecture §3.3](ARCHITECTURE.md#33-le-run-flow--c2-light--gouverné). |
 | `POST /api/runs/:id/cancel` | Annule le run courant. |
+| `POST /api/plan` | **Dry-plan INERTE** (allow_high_impact=false par construction) : montre les verdicts ROE sans rien tirer. **Operator** : il spawne quand même un process moteur, donc même gate que `/api/run` (viewer → **403**), budget de temps borné (`FORGE_PLAN_TIMEOUT`, défaut 300 s → **504** `plan_timeout`, groupe moteur tué) et concurrence bornée (`FORGE_PLAN_MAX_CONCURRENT`, défaut 2 → **429** `plan_busy`). |
 | `POST /api/modules/refresh` | Re-peuple le catalogue `module` depuis `forge.cli modules`. |
 
 ---

@@ -122,23 +122,145 @@ use crate::testutil::*;
     /// [C9 — params par-module dans le dry-plan] /api/plan THREADE désormais `module_params` : un
     /// `extra_args` avec un drapeau HORS allowlist est refusé FAIL-CLOSED (400) AVANT tout spawn moteur —
     /// preuve que les arguments de l'opérateur sont bien traités (parité run/plan), pas ignorés.
+    /// (S5 : la route est operator-gated — les appels passent une session OPÉRATEUR pour atteindre la
+    /// validation testée ici ; c'est bien 400 « entrée invalide », pas 403.)
     #[tokio::test]
     async fn plan_threads_and_validates_module_params_extra_args() {
         let ledger = tmp_path("forge-test-planparams");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
         insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
 
         // extra_args non-allowlisté (module sans allowlist -> ensemble vide -> tout drapeau refusé).
-        let resp = plan(State(app.clone()), HeaderMap::new(), eng_query(1),
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
             Json(json!({"targets": ["a.example.com"], "module_params": {"recon.http": {"extra_args": ["--evil-flag"]}}}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "extra_args hors allowlist refusé par /api/plan (fail-closed)");
 
         // params par-module MAL FORMÉS (pas un objet) -> 400 avant spawn (traités par /api/plan).
-        let resp = plan(State(app.clone()), HeaderMap::new(), eng_query(1),
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
             Json(json!({"targets": ["a.example.com"], "module_params": "pas-un-objet"}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "module_params non-objet refusé par /api/plan");
 
         let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// Faux « python » exécutable (script shell) : remplace le moteur dans les tests de GOUVERNANCE du
+    /// dry-plan — aucun engine réel n'est lancé (hermétique, instantané ou volontairement lent).
+    #[cfg(unix)]
+    fn stub_engine(tag: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmp_path(&format!("forge-stub-{tag}.sh"));
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// [S5 — gate de rôle] POST /api/plan SPAWNE un process moteur : c'est un acte OPÉRATEUR, pas une
+    /// lecture. Un VIEWER authentifié doit être refusé (403 fail-closed) AVANT tout spawn ; l'opérateur
+    /// passe sur la MÊME entrée (la gate porte sur le rôle, pas sur la requête).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise les tests qui touchent l'ENV *et* les SLOTS globaux du dry-plan
+    #[tokio::test]
+    async fn plan_route_is_operator_gated() {
+        let _g = env_lock();
+        let ledger = tmp_path("forge-test-plan-gate");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+        }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        app.python = Arc::new(stub_engine("plan-gate", "exit 0")); // moteur bidon : sortie vide, instantané
+        let body = json!({"targets": ["a.example.com"]});
+
+        // viewer -> 403 (fail-closed) : aucun process moteur lancé pour lui.
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&vtok), eng_query(1), Json(body.clone())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer refusé sur /api/plan (le dry-plan spawne un process)");
+
+        // operator -> 200 sur la MÊME entrée.
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1), Json(body)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "operator autorisé");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5 — borne de TEMPS] Le dry-plan est BORNÉ (`FORGE_PLAN_TIMEOUT`, défaut 300 s) : un moteur qui ne
+    /// rend jamais la main est COUPÉ (groupe tué) et l'appelant reçoit une ERREUR EXPLICITE (504) — jamais
+    /// une attente infinie, jamais une sortie partielle présentée comme un plan complet. Sans borne, ce
+    /// handler ne rend AUCUNE réponse (le `expect` ci-dessous est alors l'échec attendu).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global ; tenu à travers l'await volontairement
+    #[tokio::test]
+    async fn plan_spawn_is_time_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_PLAN_TIMEOUT", "1");
+        let ledger = tmp_path("forge-test-plan-timeout");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        app.python = Arc::new(stub_engine("plan-timeout", "sleep 30")); // moteur qui ne rend jamais la main
+
+        let started = std::time::Instant::now();
+        let fut = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
+            Json(json!({"targets": ["a.example.com"]})));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+        std::env::remove_var("FORGE_PLAN_TIMEOUT");
+        let resp = resp
+            .expect("le dry-plan DOIT être borné dans le temps (FORGE_PLAN_TIMEOUT) — aucune réponse rendue")
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT, "dépassement de budget -> 504 explicite");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne, pas à la fin du moteur");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5 — borne de CONCURRENCE] Chaque dry-plan spawne un process moteur : leur nombre EN VOL est borné
+    /// (`FORGE_PLAN_MAX_CONCURRENT`, défaut 2). Au-delà, l'appelant reçoit une ERREUR EXPLICITE (429) —
+    /// jamais une file d'attente muette ni N process illimités.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global + les SLOTS globaux du dry-plan
+    #[tokio::test]
+    async fn plan_concurrency_is_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_PLAN_TIMEOUT", "2");
+        let ledger = tmp_path("forge-test-plan-conc");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        app.python = Arc::new(stub_engine("plan-conc", "sleep 30"));
+        let body = json!({"targets": ["a.example.com"]});
+
+        // 2 dry-plans EN VOL (défaut = 2 slots) : ils occupent toute la borne.
+        let mut inflight = Vec::new();
+        for _ in 0..2 {
+            let (a, h, b) = (app.clone(), bearer_headers(&otok), body.clone());
+            inflight.push(tokio::spawn(async move { plan(State(a), conn_info(), h, eng_query(1), Json(b)).await.into_response().status() }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // laisse les 2 prendre leur slot
+
+        // le 3e est REFUSÉ explicitement (pas de spawn, pas d'attente muette).
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1), Json(body)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "au-delà de la borne -> 429 explicite");
+
+        // les 2 en vol se terminent sur leur propre borne de temps (504) et LIBÈRENT leur slot.
+        for h in inflight {
+            assert_eq!(h.await.unwrap(), StatusCode::GATEWAY_TIMEOUT, "dry-plan en vol coupé à sa borne de temps");
+        }
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
+            Json(json!({"targets": ["a.example.com"]}))).await.into_response();
+        std::env::remove_var("FORGE_PLAN_TIMEOUT");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT, "slot libéré -> un nouveau dry-plan repasse");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(app.python.as_str());
     }
 
     /// [parité lecture] parse_plan_verdicts : extrait verdict + kind→target des lignes du moteur
