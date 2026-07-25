@@ -28,10 +28,10 @@ seul est à annuler, pas à « corriger ensuite ».
 
 1. **Vert avant / vert après.** Avant de committer une étape :
    - Rust : `cargo test -p forge-console` (ou `cargo test` à la racine du workspace console)
-     → **404 tests Rust** (compte MESURÉ : `test result: ok. 404 passed`) doivent rester verts,
+     → **410 tests Rust** (compte MESURÉ : `test result: ok. 410 passed`) doivent rester verts,
      **même nombre, mêmes noms**.
-   - Python : `python3 -m unittest discover -s tests -t .` → **1497 tests Python** (compte MESURÉ :
-     `Ran 1497 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
+   - Python : `python3 -m unittest discover -s tests -t .` → **1504 tests Python** (compte MESURÉ :
+     `Ran 1504 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
    - `cargo build --release` (build communautaire, features par défaut) doit produire un binaire
      **byte-identique** au HEAD précédent : une PURE MOVE ne change ni le code généré ni les
      `include_str!`/assets. (Vérif : `cargo build --release` puis `sha256sum` du binaire
@@ -102,7 +102,7 @@ ne fait que **~1168 lignes**, dont la seule vraie « fonction-dieu » interne es
   absolu inchangé. Aucun `pub` à ajouter, aucun corps de test touché.
 - **Résultat :** `main.rs` passe de 6065 → **~1168 lignes**. Gain de 80 %.
 - **Risque : TRÈS FAIBLE.** Pur déplacement de texte compilé seulement en `cfg(test)`.
-- **Vérif verte :** `cargo test -p forge-console` → **404 tests, mêmes noms** (compte MESURÉ) ; `cargo build
+- **Vérif verte :** `cargo test -p forge-console` → **410 tests, mêmes noms** (compte MESURÉ) ; `cargo build
   --release` byte-identique (le code non-test est inchangé, tests exclus du build release).
 
 #### Étape 2 — Scinder `tests.rs` par sous-système (miroir des modules source)
@@ -259,7 +259,7 @@ class FlagAllowlistMixin:
 
 | # | Module migré | Pourquoi cet ordre | Risque | Vérif verte |
 |---|--------------|--------------------|:------:|-------------|
-| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1497 existants inchangés |
+| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1504 existants inchangés |
 | 1 | **`web.py::NucleiScan`** (1 classe, `_refuse` local le plus simple) | Cas le plus isolé → valide le mixin sur un vrai module | Faible | `pytest -k nuclei` + suite complète ; finding de refus byte-identique |
 | 2 | **`recon.py::HttpxFingerprint` puis `NmapServices`** (2 classes, `_refuse` dupliqué ×2) | Élimine la duplication la plus flagrante ; deux classes ⇒ deux commits | Faible | tests `recon`/`module_routes_do_not_conflict` |
 | 3 | **`origin.py::SubfinderEnum`** (gate en 2 points : preview + fire) | Vérifie que le mixin couvre le double appel `check_extra_args` | Faible | tests `origin`/exposure |
