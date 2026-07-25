@@ -823,6 +823,59 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     // =============================================================================================
 
 
+    /// [S5-C — INVARIANT] `/api/plan` (INERTE) ne doit JAMAIS être PLUS RESTREINT que `/api/run` (ARMÉ) :
+    /// qui peut TIRER doit pouvoir PRÉVISUALISER, sinon on pousse à SAUTER le dry-run. On compare les deux
+    /// handlers sur la MÊME entrée (volontairement invalide : `targets` vide -> aucun spawn, aucun run
+    /// créé — les deux valident le RÔLE avant l'entrée) dans les 4 postures d'authz réelles, dont la
+    /// posture DEV-OPEN par défaut (ni compte, ni hash env) : plan y est fermé EXACTEMENT comme run.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_is_never_more_restricted_than_run() {
+        let _g = env_lock();
+        let ledger = tmp_path("forge-test-planparity");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        {
+            let db = app.db();
+            upsert_user(&db, "vv", "viewer", &hash_pw("pw")).unwrap();
+            upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap();
+        }
+        let (vtok, _) = create_session(&app, uid_of(&app, "vv"));
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        let mut op_hdr = HeaderMap::new();
+        op_hdr.insert("x-forge-operator", "s3cr3t".parse().unwrap());
+        let mut bad_hdr = HeaderMap::new();
+        bad_hdr.insert("x-forge-operator", "mauvais".parse().unwrap());
+
+        // (posture, en-têtes, hash env armé ?, l'appelant PEUT-IL tirer ?)
+        let cases: Vec<(&str, HeaderMap, bool, bool)> = vec![
+            ("dev-open (ni compte ni hash env)", HeaderMap::new(), false, false),
+            ("bootstrap hash-env, bon secret", op_hdr, true, true),
+            ("bootstrap hash-env, mauvais secret", bad_hdr, true, false),
+            ("session viewer", bearer_headers(&vtok), false, false),
+            ("session opérateur", bearer_headers(&otok), false, true),
+        ];
+        for (label, hdr, armed, can_fire) in cases {
+            app.operator_hash = Arc::new(if armed { hash_pw("s3cr3t") } else { String::new() });
+            // MÊME entrée invalide des deux côtés : le rôle est vérifié AVANT elle, donc rien ne spawne.
+            let run = run_create(State(app.clone()), conn_info(), hdr.clone(),
+                Json(json!({"campaign": "parite", "targets": []}))).await.into_response();
+            let plan_r = plan(State(app.clone()), conn_info(), hdr.clone(), eng_query(1),
+                Json(json!({"targets": []}))).await.into_response();
+            let run_denied = run.status() == StatusCode::FORBIDDEN;
+            let plan_denied = plan_r.status() == StatusCode::FORBIDDEN;
+            assert_eq!(run_denied, !can_fire, "[{label}] posture de test mal câblée côté /api/run");
+            assert_eq!(
+                plan_denied, run_denied,
+                "[{label}] /api/plan ({}) et /api/run ({}) divergent : l'aperçu INERTE ne doit jamais être \
+                 plus restreint que le tir ARMÉ",
+                plan_r.status(), run.status()
+            );
+        }
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// [S5-bis — borne de TEMPS sur les AUTRES routes moteur] `GET /api/techniques` spawne un process
     /// moteur par requête, comme le dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) :
     /// un moteur qui ne rend jamais la main est COUPÉ et l'appelant reçoit la réponse fail-soft

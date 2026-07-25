@@ -27,6 +27,7 @@ export const LC_ERRMAP = {
   spawn_failed: 'Erreur serveur : démarrage du moteur impossible.',
   plan_busy: 'Trop de planifications à blanc en cours (borne de concurrence) — réessaie dans un instant.',
   plan_timeout: 'La planification à blanc a dépassé son budget de temps et a été interrompue — aucun aperçu partiel n\'est rendu.',
+  plan_output_too_large: 'Le moteur a produit une sortie au-delà du plafond d\'octets : il a été arrêté — aucun aperçu partiel n\'est rendu.',
 };
 export function lcShowErr(msg) { const e = $('#lc-err'); if (e) { e.innerHTML = msg; e.hidden = false; } }
 export function lcClearErr() { const e = $('#lc-err'); if (e) { e.textContent = ''; e.hidden = true; } }

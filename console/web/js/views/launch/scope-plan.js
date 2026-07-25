@@ -10,13 +10,19 @@ import { loadRuns } from './runs-list.js';
 
 // =====================================================================================
 //  PARITÉ LECTURE/GOUVERNANCE : scope-check, dry-plan + approbation RECON, rapport de run.
-//  Endpoints (tous viewer + host_guard) :
-//    POST /api/scope-check {target}            -> {target, in_scope, mode, allow_exploit, allow_destructive} | 400 bad_target
-//    POST /api/plan {targets, modules?}        -> {dry_run, mode, targets, modules, actions[], exit_ok, stdout, stderr, note} | 400
-//    GET  /api/runs/:id/report                 -> text/markdown | 404 unknown_run
+//  Endpoints (host_guard ; le RÔLE exigé diffère et est indiqué par ligne) :
+//    POST /api/scope-check {target}   viewer   -> {target, in_scope, mode, allow_exploit, allow_destructive} | 400 bad_target
+//    POST /api/plan {targets,modules?} OPERATOR -> {dry_run, mode, targets, modules, actions[], exit_ok, stdout, stderr, note}
+//                                               | 400 | 403 operator_required | 429 plan_busy | 502 plan_output_too_large | 504 plan_timeout
+//    GET  /api/runs/:id/report        viewer   -> text/markdown | 404 unknown_run
 //  INVARIANT (transparence) : allow_exploit/allow_destructive sont TOUJOURS false (plancher exploit
 //  côté web) — affiché comme un fait, jamais comme une bascule. Le dry-plan est INERTE (rien ne tire
 //  ni ne persiste) ; l'approbation granulaire ne relance QUE des actions RECON/non-exploit en auto.
+//  INVARIANT (gouvernance) : le dry-plan INERTE n'est JAMAIS plus restreint que le lancement ARMÉ —
+//  qui peut TIRER doit pouvoir PRÉVISUALISER. Côté serveur, /api/plan applique la gate de /api/run ;
+//  côté client, on poste par LE MÊME helper `write(..., auth:'operator')` (mêmes en-têtes par
+//  construction). Aucune précondition client en plus : c'est le serveur qui tranche, sinon on
+//  rajouterait une restriction que le tir armé n'a pas.
 // =====================================================================================
 
 // --- SCOPE-CHECK : champ cible -> badge IN/OUT scope + mode/flags (lecture pure) ---
@@ -85,8 +91,12 @@ export async function lcDryPlan() {
   if (Object.keys(moduleParams).length) body.module_params = moduleParams;
   let r, j;
   try {
-    r = await fetch(withEngagement('/api/plan'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
-    j = await r.json().catch(() => ({}));
+    // INVARIANT : le dry-plan passe par LE MÊME helper que le lancement armé (`write(..., 'operator')`,
+    // qui injecte X-Forge-Operator via operatorHeaders). Le serveur applique à /api/plan la gate de
+    // /api/run : un `fetch` brut sans preuve opérateur rendait l'aperçu INERTE plus restreint que le tir
+    // ARMÉ — et poussait donc à sauter le dry-run. Identiques PAR CONSTRUCTION, pas par recopie.
+    r = await write('/api/plan', { body, auth: 'operator', engagement: true });
+    j = r.json;
   } catch (e) {
     if (btn) btn.disabled = false;
     if (host) host.innerHTML = `<div class="bad">erreur réseau : ${esc(String(e.message || e))}</div>`;

@@ -170,6 +170,9 @@ static PLAN_GATE: EngineGate = EngineGate::new("FORGE_PLAN_MAX_CONCURRENT", PLAN
 /// (`FORGE_PLAN_MAX_CONCURRENT` -> 429) et sortie moteur PLAFONNÉE en octets (-> 502
 /// `plan_output_too_large` : elle est recopiée dans la réponse JSON, la borne de temps ne protège pas la
 /// RAM). Aucune borne n'est franchie en silence.
+/// INVARIANT (mesuré par `plan_is_never_more_restricted_than_run`, 5 postures dont dev-open) : la gate de
+/// cette route est EXACTEMENT celle de `/api/run` — qui peut TIRER peut toujours PRÉVISUALISER. Toute
+/// restriction ajoutée ici et absente de `/api/run` pousserait à SAUTER le dry-run : c'est l'inverse du but.
 pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
     // (0) RÔLE OPÉRATEUR — FAIL-CLOSED, MÊME gate que /api/run (identité en session operator|admin ou
     // repli hash env, PLUS la politique source-CIDR quand elle est configurée). Refus AVANT toute
