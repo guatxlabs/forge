@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+<title>Forge — console</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#070b13">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="gated">
+<header>
+  <button id="navtoggle" class="navtoggle" type="button" aria-label="Menu"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+  <h1><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span>Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></h1>
+  <!-- TENANT ACTIF (ENTERPRISE — multi-tenancy, flag-gated). Masqué par défaut (community = un seul tenant
+       implicite). Le SPA le dé-masque UNIQUEMENT si GET /api/tenancy renvoie enabled=true, et le peuple des
+       tenants ACCESSIBLES au caller (super-admin => tous). Sélectionner un tenant filtre le sélecteur
+       d'engagement ci-dessous (hiérarchie tenant → engagement). -->
+  <div id="tenant-bar" class="tenant-bar" role="group" aria-label="Tenant actif" hidden>
+    <span class="tenant-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg></span>
+    <select id="tenant" class="tenant-select" aria-label="Tenant actif" title="Tenant actif (espace multi-client — ENTERPRISE)"></select>
+  </div>
+  <!-- ENGAGEMENT ACTIF : sélecteur + indicateur PROÉMINENT. L'opérateur sait toujours dans quel
+       engagement (espace de travail isolé) il travaille. Change l'engagement -> recharge la vue et
+       ajoute ?engagement=<id> à chaque requête. « + » ouvre la création (operator). -->
+  <div id="eng-bar" class="eng-bar" role="group" aria-label="Engagement actif">
+    <span class="eng-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg></span>
+    <select id="engagement" class="eng-select" aria-label="Engagement actif" title="Engagement actif (espace de travail isolé)"></select>
+    <button id="eng-new" class="k-theme eng-new" type="button" aria-label="Nouvel engagement" title="Nouvel engagement (operator)"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  </div>
+  <div id="posture" class="posture" role="status" aria-live="polite" aria-label="État de la boucle purple">-</div>
+  <input id="q" type="search" aria-label="Rechercher dans les findings / events" placeholder="Rechercher...  (ex: severity=HIGH ; T1190)" hidden>
+  <div class="hdr-tools">
+    <!-- NOTIFICATIONS (triage enrichi) : cloche + badge non-lu, mis à jour en direct via SSE
+         (/api/notifications/events). Ouvre un panneau listant les notifs récentes (chacune lie son
+         finding). Masqué tant qu'aucune notif. Personnel (fail-closed au user_id). Voir notifications.rs. -->
+    <div id="notif" class="notif" hidden>
+      <button id="notif-bell" class="k-theme notif-bell" type="button" aria-label="Notifications" aria-haspopup="true" aria-expanded="false" title="Notifications">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 7H3s3 0 3-7"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+        <span id="notif-badge" class="notif-badge badge" title="Notifications non lues" hidden>0</span>
+      </button>
+      <div id="notif-panel" class="notif-panel" role="menu" aria-label="Notifications récentes" hidden>
+        <div class="notif-head">
+          <span class="notif-title">Notifications</span>
+          <button id="notif-readall" class="k-theme" type="button" title="Tout marquer comme lu">Tout marquer lu</button>
+        </div>
+        <div id="notif-list" class="notif-list"><div class="muted">chargement…</div></div>
+      </div>
+    </div>
+    <!-- PRÉSENCE (#9) : indicateur multi-opérateur LIVE — qui est connecté sur l'engagement actif.
+         Initiales/avatars + compteur, mis à jour en direct via SSE (/api/presence/events). Discret,
+         masqué tant qu'il n'y a personne (ou un seul soi-même). Per-instance (voir presence.rs). -->
+    <div id="presence" class="presence" role="status" aria-live="polite" aria-label="Opérateurs connectés" hidden>
+      <span id="presence-avatars" class="presence-avatars" aria-hidden="true"></span>
+      <span id="presence-count" class="presence-count badge" title="Opérateurs connectés sur cet engagement">0</span>
+    </div>
+    <div id="whoami" class="whoami" role="status" aria-live="polite" hidden>
+      <span id="whoami-role" class="badge" title="Rôle effectif de la session">-</span>
+      <span id="whoami-user" class="whoami-user" title="Compte connecté"></span>
+      <button id="logout" class="k-theme" type="button" aria-label="Se déconnecter" title="Se déconnecter"><svg class="ic" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg><span>Déconnexion</span></button>
+    </div>
+    <select id="campaign" class="k-theme" aria-label="Campagne" title="Filtrer par campagne">
+      <option value="">Toutes campagnes</option>
+    </select>
+    <select id="refresh" aria-label="Rafraîchissement auto" title="Rafraîchissement auto">
+      <option value="0" selected> Off</option>
+      <option value="10">10 s</option>
+      <option value="30">30 s</option>
+      <option value="60">60 s</option>
+    </select>
+    <button id="reload" class="k-theme" type="button" aria-label="Rafraîchir" title="Rafraîchir maintenant"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+    <button id="help" class="k-theme" type="button" aria-label="Aide" aria-haspopup="dialog" title="Aide — expliquer la vue courante (raccourci : ?)"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.4 2.4 0 0 1 4.4 1.3c0 1.6-2 1.9-2.4 3.3"/><path d="M12 17.2h.01"/></svg></button>
+    <button id="theme" class="k-theme" type="button" aria-label="Changer de thème" title="Thème clair / sombre"></button>
+  </div>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="nav" aria-label="Navigation">
+    <a href="#overview"><svg class="ic" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg> <span>Vue d'ensemble</span></a>
+    <a href="#engagements"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h10"/><circle cx="19" cy="17" r="2"/></svg> <span>Engagements</span></a>
+    <a href="#launch"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> <span>Campagne</span></a>
+    <a href="#import"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> <span>Importer un scan</span></a>
+    <a href="#modules"><svg class="ic" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 14h10"/></svg> <span>Capacités &amp; Modules</span></a>
+    <a href="#techniques"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg> <span>Techniques &amp; Sélection</span></a>
+    <a href="#workflows"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1"/><rect x="15" y="4" width="6" height="5" rx="1"/><rect x="9" y="15" width="6" height="5" rx="1"/><path d="M6 9v3h12V9M12 12v3"/></svg> <span>Workflows</span></a>
+    <a href="#findings"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Findings</span></a>
+    <a href="#findings-library"><svg class="ic" viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4z"/><path d="M8 7h6M8 11h6"/></svg> <span>Bibliothèque de findings</span></a>
+    <a href="#reports"><svg class="ic" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg> <span>Rapport d'engagement</span></a>
+    <a href="#explore"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> <span>Recherche &amp; Explore</span></a>
+    <a href="#coverage"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg> <span>Couverture ATT&amp;CK</span></a>
+    <a href="#attack-matrix"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg> <span>Matrice ATT&amp;CK</span></a>
+    <a href="#purple-coverage"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> <span>Détection purple</span></a>
+    <a href="#campaigns"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/></svg> <span>Campagnes</span></a>
+    <a href="#roe"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg> <span>ROE / Garde-fou</span></a>
+    <a href="#ledger"><svg class="ic" viewBox="0 0 24 24"><path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1M16 3h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-1"/></svg> <span>Ledger</span></a>
+    <a href="#dashboards"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg> <span>Dashboards</span></a>
+    <!-- ADMINISTRATION : lien affiché UNIQUEMENT quand whoami.role === 'admin' (renderWhoami le dé-masque).
+         Le serveur reste l'autorité (routes gatées check_admin -> 403) ; ce masquage est de la défense en profondeur. -->
+    <a href="#admin" id="nav-admin" hidden><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="M19 8v4M17 10h4"/></svg> <span>Administration</span></a>
+    <!-- TENANTS : lien affiché UNIQUEMENT quand la multi-tenancy ENTERPRISE est active (GET /api/tenancy
+         enabled=true) ET que le caller est platform-admin (applyTenancy le dé-masque). Le serveur reste
+         l'autorité (routes gatées enterprise + platform-admin -> 403) — masquage = défense en profondeur. -->
+    <a href="#tenants" id="nav-tenants" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg> <span>Tenants</span></a>
+    <!-- IDENTITY / SSO : lien affiché UNIQUEMENT quand l'identité ENTERPRISE est active (whoami.enterprise
+         sso|scim=true) ET que le caller est admin (applyIdentityUi le dé-masque). Le serveur reste
+         l'autorité (routes gatées flag + check_admin -> 404/403) — masquage = défense en profondeur. -->
+    <a href="#identity" id="nav-identity" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/><path d="M5 21a7 7 0 0 1 14 0"/></svg> <span>Identité / SSO</span></a>
+    <!-- COMPLIANCE (ENTERPRISE, flag-gated) : lien affiché UNIQUEMENT quand whoami.enterprise.compliance=true
+         ET caller admin (applyComplianceUi le dé-masque). Le serveur reste l'autorité (routes flag + check_admin
+         -> 404/403) — masquage = défense en profondeur. En community (flag OFF) : aucun lien, aucune vue. -->
+    <a href="#compliance" id="nav-compliance" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Compliance</span></a>
+  </nav>
+<main>
+  <!-- VUE D'ENSEMBLE -->
+  <section id="ov-summary" class="card span2" aria-labelledby="ovh">
+    <h2 id="ovh">Boucle purple — état</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+  <section id="ov-sev" class="card" aria-labelledby="ovsh">
+    <h2 id="ovsh">Findings par sévérité</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+  <section id="ov-modules" class="card" aria-labelledby="ovmh">
+    <h2 id="ovmh">Capacités</h2>
+    <div class="body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ENGAGEMENTS : objet de 1re classe (espace de travail isolé). Liste + création + édition/
+       archivage/suppression + bascule d'engagement actif. Chaque engagement porte SON scope, SON
+       ledger, SES techniques/workflows/profil. create/edit = operator ; archive/delete = admin. -->
+  <section id="engagements" class="card span2" aria-labelledby="egh">
+    <div class="panelhead">
+      <h2 id="egh">Engagements <span id="eg-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="eg-new2" type="button">+ Nouvel engagement</button>
+        <button id="eg-reload" class="k-theme" type="button" title="Rafraîchir">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Un <b>engagement</b> est un espace de travail <b>isolé</b> (à la workspace Metasploit) : son propre <b>scope</b> (fail-closed), son propre <b>ledger</b> tamper-evident, ses <b>findings / runs / techniques / workflows</b>. Un engagement ne voit JAMAIS les données d'un autre. On ne peut ni archiver ni supprimer le <b>dernier engagement actif</b>. Création/édition = <b>operator</b> ; archivage/suppression = <b>admin</b>.</p>
+    <div id="eg-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- LANCEMENT DE CAMPAGNE -->
+  <section id="lc-form" class="card span2" aria-labelledby="lch">
+    <div class="panelhead">
+      <h2 id="lch">Lancement de campagne <span class="muted">— gouverné &amp; audité</span></h2>
+      <span class="qbar"><span id="lc-c2state" class="badge mut" title="État du rôle opérateur côté serveur">—</span></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Lancement <b>non-exploit / non-destructif</b> par défaut : les modules <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> restent <b>grisés</b> tant que l'opt-in gouverné « fort impact » (zone danger ci-dessous) n'est pas activé — il exige <b>armer + raison + secret opérateur</b> et une <b>double-confirmation</b>. Les cibles doivent appartenir au scope serveur : <b>hors-scope = VETO dur</b>, jamais élargi via le web. Chaque lancement est journalisé au ledger (<code>console.run.start</code>).</p>
+    <!-- SCOPE-CHECK : décision de scope LECTURE pure (POST /api/scope-check) — aucune action, juste de la transparence -->
+    <div class="lc-scope" aria-label="Vérification de scope">
+      <span class="lc-lbl" style="margin:0">Vérifier le scope d'une cible <span class="muted">— lecture pure, ne lance rien</span></span>
+      <div class="lc-scope-row">
+        <input id="lc-scopetarget" placeholder="ex: api.example.com ou 10.0.0.0/8" spellcheck="false" autocomplete="off">
+        <button id="lc-scopecheck" class="lc-scope-btn" type="button">Vérifier</button>
+        <button id="lc-scopeadd" type="button" class="k-theme" title="Ajouter cette cible aux cibles du lancement" hidden>+ Cibles</button>
+      </div>
+      <div id="lc-scoperes" class="lc-scope-out" hidden></div>
+    </div>
+    <form id="lc-runform" class="ruleform" autocomplete="off">
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:1 1 220px"><span class="lc-lbl">Campagne</span>
+          <input id="lc-campaign" placeholder="ex: purple-2026-06" required pattern="[A-Za-z0-9._][A-Za-z0-9._-]{0,63}" title="^[A-Za-z0-9._-]{1,64}$, pas de '-' en tête">
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Mode</span>
+          <select id="lc-mode" title="propose = simule/propose ; auto = exécute les actions FIRE">
+            <option value="propose" selected>propose (simulation)</option>
+            <option value="auto">auto (exécute les FIRE)</option>
+          </select>
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Budget (optionnel)</span>
+          <input id="lc-budget" type="number" min="0" step="1" placeholder="∞" style="width:110px">
+        </label>
+        <label style="flex:0 0 auto" title="Débit req/s (optionnel) : throttle les oracles HTTP + passe le drapeau de débit aux outils (nmap --max-rate, nuclei -rl, masscan --rate…). Vide = défaut (aucun drapeau de débit ajouté).">
+          <span class="lc-lbl">Débit req/s (optionnel)</span>
+          <input id="lc-rate" type="number" min="1" step="1" placeholder="illimité" style="width:110px">
+        </label>
+      </div>
+      <!-- R3 — PROFIL DE RESSOURCES : un bouton fixe les défauts (parallélisme, timeouts, outils, caps de
+           crawl) selon la machine cliente. CHOIX DE RESSOURCE UNIQUEMENT — n'affecte NI le scope, NI le
+           ROE, NI le plancher d'exploit. `balanced` = défaut (aucune variable forcée, comportement inchangé). -->
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:0 0 auto" title="Profil de ressources : low = machine faible (série, outils légers, timeouts courts) ; balanced = défaut ; full = grosse machine.">
+          <span class="lc-lbl">Profil ressources</span>
+          <select id="lc-resprofile">
+            <option value="balanced" selected>balanced (défaut)</option>
+            <option value="low">low (machine faible)</option>
+            <option value="full">full (grosse machine)</option>
+          </select>
+        </label>
+        <div id="lc-resprofile-desc" class="muted" style="flex:1 1 260px;margin:22px 0 0"></div>
+      </div>
+      <details id="lc-resadv" class="lc-resadv">
+        <summary>Avancé / overrides ressources</summary>
+        <div class="lc-warn" style="margin:8px 0">Laisser vide = défaut du profil sélectionné. Une valeur renseignée <b>prime</b> sur le profil (précédence override &gt; profil &gt; défaut). Ces leviers ne règlent que des <b>ressources</b> — aucun impact sur le scope, le ROE ou le plancher d'exploit.</div>
+        <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+          <label style="flex:0 0 auto" title="Pool d'exécution intra-vague (FORGE_PARALLELISM). Vide = défaut du profil. Borné [1, 64].">
+            <span class="lc-lbl">Parallélisme (pool)</span>
+            <input id="lc-res-parallelism" type="number" min="1" max="64" step="1" placeholder="(profil)" style="width:110px">
+          </label>
+          <label style="flex:0 0 auto" title="Timeout du run / watchdog en secondes (FORGE_RUN_TIMEOUT). Vide = défaut du profil. Le watchdog effectif reste borné par le cap serveur global.">
+            <span class="lc-lbl">Timeout run (s)</span>
+            <input id="lc-res-runtimeout" type="number" min="1" step="1" placeholder="(profil)" style="width:120px">
+          </label>
+          <label style="flex:0 0 auto" title="Image d'outils Docker (FORGE_TOOLS_PROFILE) : mini = paquet léger, full = complet. Vide = défaut du profil.">
+            <span class="lc-lbl">Profil d'outils</span>
+            <select id="lc-res-toolsprofile">
+              <option value="" selected>(profil)</option>
+              <option value="mini">mini (léger)</option>
+              <option value="full">full (complet)</option>
+            </select>
+          </label>
+        </div>
+        <div class="lc-resknobs">
+          <span class="lc-lbl" style="margin:0">Leviers du profil sélectionné</span>
+          <table id="lc-respresets" class="lc-respresets"><tbody></tbody></table>
+          <div class="muted" style="margin:6px 0 0">Timeout par-action, sévérité nuclei et caps de crawl <b>suivent le profil</b> (la sévérité nuclei reste aussi réglable par-module dans les params). Seuls parallélisme, timeout-run et profil d'outils sont surchargeables ici (variables lues par le moteur).</div>
+        </div>
+      </details>
+      <label><span class="lc-lbl">Cibles (une par ligne — hostname ou IP/CIDR, ⊆ scope serveur)</span>
+        <textarea id="lc-targets" rows="3" spellcheck="false" placeholder="guatx.com&#10;192.0.2.0/24"></textarea>
+      </label>
+      <div class="lc-modblock">
+        <div class="rf-row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="lc-lbl" style="margin:0">Modules (optionnel — vide = le planner choisit)</span>
+          <span class="lc-modbulk">
+            <button id="lc-modall" type="button" class="k-theme" title="Cocher tous les modules SÉLECTIONNABLES (les modules désactivés ou dont l'outil est absent restent décochés)">Tout sélectionner</button>
+            <button id="lc-modnone" type="button" class="k-theme" title="Décocher tous les modules">Tout désélectionner</button>
+            <span id="lc-modhint" class="muted" style="margin:0">chargement…</span>
+          </span>
+        </div>
+        <div id="lc-modlist" class="lc-modlist"></div>
+      </div>
+      <div class="rf-row" style="gap:14px;align-items:center">
+        <label style="flex:0 0 auto"><input id="lc-exhaustive" type="checkbox"> exhaustif (ne défère rien)</label>
+        <label style="flex:0 0 auto"><input id="lc-arm" type="checkbox"> armer (<code>--arm</code>)</label>
+      </div>
+      <div id="lc-armwarn" class="lc-warn" hidden>Armer (<code>--arm</code>) journalise l'intention de tirer les actions FIRE. Seul, l'arm <b>n'autorise PAS</b> l'exploit/le destructif : il faut activer l'opt-in <b>« fort impact »</b> de la zone danger ci-dessous (armer + raison + secret opérateur). Le scope serveur reste dur : hors-scope = VETO, quelle que soit l'autorisation.</div>
+      <label><span class="lc-lbl">Raison <span class="muted">(audit — tronquée à 200 car. ; OBLIGATOIRE si opt-in fort impact activé)</span></span>
+        <input id="lc-reason" maxlength="200" placeholder="justification de l'engagement (audit)">
+      </label>
+      <label><span class="lc-lbl">Secret opérateur <span class="muted">(en-tête X-Forge-Operator — mémoire de session uniquement, jamais persisté)</span></span>
+        <input id="lc-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur (requis pour lancer)">
+      </label>
+      <!-- ZONE DANGER : opt-in gouverné des modules à fort impact (exploit/destructif). DEFAUT OFF. -->
+      <div id="lc-danger" class="lc-danger">
+        <div class="lc-danger-head">
+          <span class="lc-dot" aria-hidden="true"></span>
+          <label for="lc-allowhi"><input id="lc-allowhi" type="checkbox"> Autoriser les modules à fort impact (<span class="badge expl">exploit</span> / <span class="badge destr">destructif</span>)</label>
+          <span class="lc-dtag">zone danger</span>
+        </div>
+        <div class="lc-danger-body">
+          <div class="lc-warn bad" style="margin:0">Action à <b>fort impact</b>, <b>scope-bornée</b> et <b>auditée</b>. L'opt-in n'est honoré que si <b>armer</b> est coché, une <b>raison</b> est renseignée et le <b>secret opérateur</b> est fourni. Le garde-fou de périmètre reste dur : toute cible <b>hors-scope est vétoée</b> côté serveur, sans exception. Chaque lancement à fort impact est journalisé au ledger.</div>
+          <div id="lc-hireqs" class="lc-danger-reqs" aria-live="polite"></div>
+        </div>
+      </div>
+      <div id="lc-err" class="lc-warn bad" hidden></div>
+      <div class="rf-actions">
+        <button id="lc-dryplan" type="button" class="k-theme" title="Aperçu de gouvernance INERTE (POST /api/plan) — rien ne tire ni ne persiste">Dry-plan (aperçu)</button>
+        <button id="lc-submit" type="submit">Lancer la campagne</button>
+        <button id="lc-clearop" type="button" title="Oublier le secret opérateur de la session">Oublier le secret</button>
+        <span id="lc-formstat" class="muted" style="margin:0"></span>
+      </div>
+    </form>
+  </section>
+
+  <!-- LANCEMENT : dry-plan (aperçu de gouvernance INERTE) + approbation granulaire RECON -->
+  <section id="lc-plan" class="card span2" aria-labelledby="lcph" hidden>
+    <div class="panelhead">
+      <h2 id="lcph">Dry-plan <span id="lc-plancount" class="badge mut">—</span></h2>
+      <span class="qbar"><span class="muted">aperçu INERTE — <code>mode propose</code>, exploit/destructif forcés false : <b>rien ne tire ni ne persiste</b></span></span>
+    </div>
+    <p class="lc-planhint">Chaque action proposée par le moteur porte son verdict garde-fou : <span class="badge v-FIRE">FIRE</span> / <span class="badge v-DRY_RUN">DRY_RUN</span> / <span class="badge v-VETO">VETO</span> / <span class="badge mut">SKIP</span>. Coche les actions <b>RECON / non-exploit</b> à approuver puis relance en <code>propose&rarr;auto</code> ; l'exploit reste bloqué côté serveur dans cette passe.</p>
+    <div id="lc-planresult"><div class="muted">Lance un dry-plan depuis le formulaire ci-dessus.</div></div>
+    <div class="lc-planactions">
+      <button id="lc-approve" type="button" title="Relancer les actions approuvées en mode auto (RECON/non-exploit uniquement)" disabled>Approuver &amp; lancer (auto)</button>
+      <button id="lc-approve-all" type="button" class="k-theme" title="Cocher toutes les actions approuvables" hidden>Tout cocher</button>
+      <span id="lc-approvestat" class="muted" style="margin:0"></span>
+    </div>
+  </section>
+
+  <!-- LANCEMENT : log live + détail du run courant -->
+  <section id="lc-live" class="card span2" aria-labelledby="lclh">
+    <div class="panelhead">
+      <h2 id="lclh">Run en cours <span id="lc-livebadge" class="badge mut">aucun</span></h2>
+      <span class="qbar">
+        <span id="lc-transport" class="badge mut" title="Transport du flux de logs">—</span>
+        <button id="lc-cancel" class="k-theme" type="button" title="Annuler le run en cours (opérateur)" hidden>Annuler</button>
+      </span>
+    </div>
+    <div id="lc-counts" class="roecounters" hidden></div>
+    <div id="lc-gaps" class="muted" style="margin:0 0 8px" hidden></div>
+    <pre id="lc-log" class="lc-log" aria-live="polite">Aucun run actif. Lance une campagne ci-dessus pour suivre les logs en direct.</pre>
+    <!-- PANNEAU RÉSULTAT (fin de run) : tuiles SKIP/ERREURS séparées + findings (ou état vide) + issue par module -->
+    <div id="lc-result" class="lc-result" hidden></div>
+  </section>
+
+  <!-- LANCEMENT : liste des runs -->
+  <section id="lc-runs" class="card span2" aria-labelledby="lcrh">
+    <div class="panelhead">
+      <h2 id="lcrh">Runs <span id="lc-runcount" class="badge"></span></h2>
+      <span class="qbar">
+        <select id="lc-runstatus" aria-label="Filtre statut run">
+          <option value="">Tous statuts</option>
+          <option value="running">running</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+          <option value="timeout">timeout</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+        <button id="lc-runreload" class="k-theme" type="button" title="Rafraîchir la liste des runs">Rafraîchir</button>
+      </span>
+    </div>
+    <div id="lc-runresult"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- IMPORT : migration — ingérer une sortie de scanner EXISTANTE en findings orientés preuve -->
+  <section id="import" class="card span2" aria-labelledby="imph">
+    <div class="panelhead">
+      <h2 id="imph">Importer un scan <span class="muted">— migration Faraday/Trickest/reNgine/Osmedeus</span></h2>
+      <span class="qbar"><span id="im-c2state" class="badge mut" title="État du rôle opérateur côté serveur">—</span></span>
+    </div>
+    <p class="lc-planhint">Ingère une <b>sortie d'outil déjà produite</b> (nmap XML, nuclei JSON/JSONL, export Burp XML, httpx/ffuf JSON, listes subfinder/amass, ou JSON/CSV générique) en findings Forge <b>orientés preuve</b> : un scanner qui s'auto-déclare (nuclei/burp) devient <code>reported_by_tool</code>, la recon/découverte (nmap/httpx/ffuf/subfinder) devient <code>tested</code> — <b>jamais</b> <code>vulnerable</code>. <b>Pur data, aucune exécution.</b> Les assets <b>hors périmètre</b> sont écartés (scope-guard) et les <b>secrets</b> du fichier sont rédigés. L'import est <b>gouverné (opérateur)</b> et <b>journalisé au ledger</b>.</p>
+    <form id="im-form" class="ruleform" autocomplete="off">
+      <div class="rf-row" style="gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <label style="flex:1 1 220px"><span class="lc-lbl">Campagne</span>
+          <input id="im-campaign" placeholder="ex: migration-2026" required pattern="[A-Za-z0-9._][A-Za-z0-9._-]{0,63}" title="^[A-Za-z0-9._-]{1,64}$, pas de '-' en tête">
+        </label>
+        <label style="flex:0 0 auto"><span class="lc-lbl">Format</span>
+          <select id="im-format" title="auto = auto-détection du format d'après le contenu">
+            <option value="auto" selected>auto-détecter</option>
+            <option value="nmap">nmap (XML)</option>
+            <option value="nuclei">nuclei (JSON/JSONL)</option>
+            <option value="burp">Burp Suite (export XML)</option>
+            <option value="httpx">httpx (JSON)</option>
+            <option value="ffuf">ffuf (JSON)</option>
+            <option value="hosts">subfinder / amass (liste d'hôtes)</option>
+            <option value="generic-json">JSON générique</option>
+            <option value="generic-csv">CSV générique</option>
+          </select>
+        </label>
+      </div>
+      <label><span class="lc-lbl">Fichier de scan (le contenu est parsé côté serveur, secrets rédigés)</span>
+        <input id="im-file" type="file" accept=".xml,.json,.jsonl,.csv,.txt,application/json,text/xml,text/plain,text/csv">
+      </label>
+      <label style="flex:0 0 auto"><input id="im-flag" type="checkbox"> <b>Marquer</b> (au lieu de <b>jeter</b>) les findings hors-scope (conservés en <code>status=skipped</code>)</label>
+      <label><span class="lc-lbl">Secret opérateur (requis pour importer)</span>
+        <input id="im-operator" type="password" autocomplete="new-password" placeholder="mot de passe opérateur">
+      </label>
+      <div id="im-err" class="lc-warn bad" hidden></div>
+      <div class="rf-actions">
+        <button id="im-submit" type="submit">Importer les findings</button>
+        <button id="im-clearop" type="button" title="Oublier le secret opérateur de la session">Oublier le secret</button>
+        <span id="im-stat" class="muted" style="margin:0"></span>
+      </div>
+    </form>
+    <div id="im-result" hidden></div>
+  </section>
+
+  <!-- CAPACITÉS / MODULES -->
+  <section id="modules" class="card span2" aria-labelledby="modh">
+    <div class="panelhead">
+      <h2 id="modh">Capacités &amp; Modules <span id="mod-count" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="modfilt"><input id="mod-avail" type="checkbox"> disponibles seulement</label>
+        <button id="mod-refresh" class="k-theme" type="button" title="Re-spawn forge.cli modules --json et re-seed le registre (gate opérateur : en-tête X-Forge-Operator requis)">Rafraîchir modules</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Catalogue des modules du moteur (lecture <code>/api/modules</code>). Le badge <span class="badge webyes">web</span> indique un module autorisé en cadre web ; <span class="badge expl">exploit</span> / <span class="badge destr">destructif</span> portent un risque accru (gatés par les ROE au lancement).</p>
+    <div id="mod-grid" class="modgrid"></div>
+  </section>
+
+  <!-- TECHNIQUES & SÉLECTION PAR-SCOPE (catalogue groupé par catégorie + profil + toggles) -->
+  <section id="techniques" class="card span2" aria-labelledby="tqh">
+    <div class="panelhead">
+      <h2 id="tqh">Techniques &amp; Sélection <span id="tq-count" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="modfilt" title="Profil = modèle de sélection appliqué aux toggles (base bug_bounty/pentest/custom, ou profil enregistré). Appliquer est purement client ; « Enregistrer comme profil… » persiste.">Profil
+          <select id="tq-profile" class="k-select">
+            <option value="bug_bounty">bug_bounty</option>
+            <option value="pentest">pentest</option>
+            <option value="custom">custom</option>
+          </select>
+        </label>
+        <button id="tq-all" class="k-theme" type="button" title="Tout sélectionner (toutes catégories) — coche chaque technique du catalogue. Le moteur enforce toujours le scope (fail-closed).">Tout sélectionner</button>
+        <button id="tq-none" class="k-theme" type="button" title="Tout désélectionner (toutes catégories) — décoche chaque technique.">Tout désélectionner</button>
+        <button id="tq-save" class="k-theme" type="button" title="Enregistre la sélection courante (toggles) sous un NOM réutilisable. Autorisé par votre session operator/admin (aucun token à coller), action ledgerisée.">Enregistrer comme profil…</button>
+        <button id="tq-delete" class="k-theme" type="button" disabled title="Sélectionne un profil enregistré pour pouvoir le supprimer">Supprimer le profil</button>
+        <button id="tq-reload" class="k-theme" type="button" title="Recharger le catalogue + la sélection enregistrée depuis le moteur">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Catalogue des techniques du moteur, <b>groupé par catégorie</b> (lecture <code>/api/techniques</code>, DÉRIVÉ du registre). « Au scope, retirer des tests automatiques » : le <b>profil</b> donne l'ensemble de base, puis les <b>toggles</b> par catégorie / par technique <b>ajoutent</b> ou <b>retirent</b> (la désactivation prime — fail-closed). Une technique <b>désactivée n'est NI planifiée NI tirée</b> (le moteur l'ENFORCE, en plus du scope-guard). La mutation est réservée operator/admin et journalisée au ledger. Badges : <span class="badge webyes">BB</span> éligible bug bounty · <span class="badge expl">pentest</span> pentest-only.</p>
+    <div id="tq-status" class="muted" style="margin:0 0 10px" hidden></div>
+    <div id="tq-groups" class="tq-groups"></div>
+  </section>
+
+  <!-- WORKFLOWS — pipelines composés (absorbe reNgine/Osmedeus/Trickest), gouvernés fail-closed -->
+  <section id="workflows" class="card span2" aria-labelledby="wfh">
+    <div class="panelhead">
+      <h2 id="wfh">Workflows <span id="wf-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="wf-new" class="k-theme" type="button" title="Composer un nouveau workflow (pipeline de techniques ordonné)">Nouveau workflow</button>
+        <button id="wf-reload" class="k-theme" type="button" title="Recharger les workflows + l'état activé par le scope">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Pipelines <b>composés sans code</b> : une sélection <b>ordonnée</b> de techniques/outils (+ params par étape), sauvegardée et éditable — absorbe les <i>scan-engines</i> de reNgine, les <i>workflows</i> d'Osmedeus et les pipelines de Trickest. Un workflow est une <b>PROPOSITION</b> : le <b>scope-guard ROE</b> et la <b>sélection par-scope</b> restent seuls juges — une étape hors-scope / désactivée est <b>larguée</b> (fail-closed). Les étapes <span class="badge expl">exploit</span> restent derrière l'opt-in fort-impact. Les workflows <span class="badge webyes">intégré</span> (dérivés du registre) sont non supprimables. Création/édition réservées operator/admin et journalisées au ledger.</p>
+    <div id="wf-status" class="muted" style="margin:0 0 10px" hidden></div>
+    <div id="wf-list"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- FINDINGS -->
+  <section id="findings" class="card span2" aria-labelledby="fh">
+    <div class="panelhead">
+      <h2 id="fh">Findings <span id="f-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="f-from-tpl" class="k-theme" type="button" title="Créer un finding dans l'engagement ACTIF à partir d'un modèle de la bibliothèque (placeholders remplis)">Depuis un modèle</button>
+        <button id="f-export-csv" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en CSV (secrets rédigés)">Export CSV</button>
+        <button id="f-export-json" class="k-theme" type="button" title="Exporter les findings de l'engagement actif en JSON (secrets rédigés)">Export JSON</button>
+        <button id="f-report" class="k-theme" type="button" title="Ouvrir le rapport complet brandé de l'engagement actif">Rapport complet</button>
+        <select id="f-views" class="k-theme" aria-label="Vues sauvegardées" title="Appliquer un jeu de filtres sauvegardé">
+          <option value="">Vues sauvegardées…</option>
+        </select>
+        <button id="f-save-view" class="k-theme" type="button" title="Sauvegarder le jeu de filtres courant comme vue réutilisable">Enregistrer la vue</button>
+        <button id="f-del-view" class="k-theme" type="button" title="Supprimer la vue sauvegardée sélectionnée" hidden>Supprimer la vue</button>
+        <select id="f-sev" aria-label="Filtre sévérité">
+          <option value="">Toutes sévérités</option>
+          <option value="CRITICAL">CRITICAL</option>
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+          <option value="INFO">INFO</option>
+        </select>
+        <select id="f-status" aria-label="Filtre statut">
+          <option value="">Tous statuts</option>
+        </select>
+        <select id="f-assignee" aria-label="Filtre propriétaire (assignee)" title="Filtrer par propriétaire">
+          <option value="">Tous propriétaires</option>
+          <option value="unassigned">Non assigné</option>
+        </select>
+        <select id="f-triage" aria-label="Filtre triage" title="Filtrer par état de triage">
+          <option value="">Tous triages</option>
+        </select>
+        <input id="f-target" type="search" aria-label="Filtre cible" placeholder="cible…">
+      </span>
+    </div>
+    <!-- BULK-OPS (#8) : barre d'actions de masse — visible dès qu'au moins un finding est coché. Transition
+         de statut validée + export CSV/JSON de la SÉLECTION (serveur, engagement-scopé fail-closed). -->
+    <div id="f-bulk" class="findbulk" hidden>
+      <span id="f-bulk-count" class="badge">0 sélectionné(s)</span>
+      <select id="f-bulk-status" class="k-theme" aria-label="Statut à appliquer à la sélection">
+        <option value="">Transition de statut…</option>
+      </select>
+      <button id="f-bulk-apply" class="k-theme" type="button" title="Appliquer le statut choisi aux findings sélectionnés (validé par finding)">Appliquer</button>
+      <select id="f-bulk-assignee" class="k-theme" aria-label="Propriétaire à assigner à la sélection" title="Assigner un propriétaire à la sélection (grant-scopé)">
+        <option value="">Assigner à…</option>
+        <option value="__none__">(désassigner)</option>
+      </select>
+      <button id="f-bulk-assign" class="k-theme" type="button" title="Assigner le propriétaire choisi aux findings sélectionnés (grant-scopé, serveur)">Assigner</button>
+      <select id="f-bulk-triage" class="k-theme" aria-label="État de triage à appliquer à la sélection" title="Transitionner la sélection vers cet état de triage (validé par finding côté serveur)">
+        <option value="">Triage vers…</option>
+      </select>
+      <button id="f-bulk-triage-apply" class="k-theme" type="button" title="Transitionner les findings sélectionnés vers l'état de triage choisi (les transitions illégales sont ignorées, serveur)">Triage</button>
+      <button id="f-bulk-csv" class="k-theme" type="button" title="Exporter la sélection en CSV (serveur)">Export CSV</button>
+      <button id="f-bulk-json" class="k-theme" type="button" title="Exporter la sélection en JSON (serveur)">Export JSON</button>
+      <button id="f-bulk-clear" class="k-theme" type="button" title="Vider la sélection">Désélectionner</button>
+    </div>
+    <div id="f-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- FINDINGS LIBRARY (modèles de findings réutilisables — livrable client type Ghostwriter) -->
+  <section id="findings-library" class="card span2" aria-labelledby="ftlh">
+    <div class="panelhead">
+      <h2 id="ftlh">Bibliothèque de findings <span id="ftpl-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="ftpl-new" class="k-theme" type="button" title="Créer un modèle de finding réutilisable (gabarits paramétrés {target}/{param})">Nouveau modèle</button>
+        <button id="ftpl-reload" class="k-theme" type="button" title="Recharger la bibliothèque">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Modèles de findings <b>réutilisables</b> (titre / description / remédiation / CWE / sévérité) à <b>gabarits paramétrés</b> : les placeholders <code>{target}</code>, <code>{param}</code>… sont remplis <b>à l'application</b>. La bibliothèque est <b>GLOBALE</b> — un modèle est réutilisable <i>d'un engagement à l'autre</i>. <b>Appliquer</b> un modèle crée un finding dans l'<b>engagement ACTIF uniquement</b> (isolation : le finding produit appartient à son engagement, jamais à un autre). Création/édition réservées <b>operator</b>, suppression <b>admin</b> ; chaque action est journalisée au ledger.</p>
+    <div id="ftpl-list"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- REPORTS — livrable client : rapport d'engagement AGRÉGÉ + branding (admin) + aperçu HTML.
+       Toujours l'engagement ACTIF (isolation). Génération/branding journalisés au ledger. -->
+  <section id="reports" class="card span2" aria-labelledby="reph">
+    <div class="panelhead">
+      <h2 id="reph">Rapport d'engagement <span id="rep-eng" class="badge"></span></h2>
+      <span class="qbar">
+        <label class="rep-fmt">Format
+          <select id="rep-format" aria-label="Format du rapport">
+            <option value="html">HTML</option>
+            <option value="pdf">PDF</option>
+            <option value="docx">DOCX</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </label>
+        <button id="rep-generate" class="k-theme" type="button" title="Générer et télécharger le rapport de l'engagement actif au format choisi">Générer / Télécharger</button>
+        <button id="rep-refresh" class="k-theme" type="button" title="Rafraîchir l'aperçu HTML">Rafraîchir l'aperçu</button>
+        <button id="rep-brand" class="k-theme" type="button" hidden title="Configurer le branding (nom du commanditaire, logo) — réservé admin">Branding…</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Le <b>livrable client</b> agrégé de l'<b>engagement ACTIF uniquement</b> (<span id="rep-engname" class="mono"></span>) : résumé exécutif, findings détaillés (secrets rédigés), couverture ATT&amp;CK et annexe chaîne-de-custody. <b>Isolation</b> : le rapport ne reflète JAMAIS les données d'un autre engagement. La génération et la configuration du branding sont <b>journalisées au ledger</b>. PDF/DOCX dégradent proprement si le moteur d'impression / python est absent sur l'hôte.</p>
+    <div id="rep-preview" class="rep-preview"><div class="muted">chargement de l'aperçu…</div></div>
+  </section>
+
+  <!-- EXPLORE -->
+  <section id="explore" class="card span2" aria-labelledby="exh">
+    <h2 id="exh">Requête (<code>soql</code>)</h2>
+    <div class="qbar">
+      <textarea id="sql" rows="3" aria-label="Requête soql" spellcheck="false"
+        placeholder="soql:  search severity=HIGH | stats count by mitre | sort -count | head 20"></textarea>
+      <button id="run" type="button">Exécuter</button>
+      <button id="qback" type="button" title="Revenir à la requête précédente (drilldown)" hidden>← Retour</button>
+      <select id="viz" aria-label="Visualisation"><option value="table">Table</option><option value="bar">Barres</option><option value="line">Courbe</option><option value="stat">Stat</option></select>
+      <select id="qsize" aria-label="Lignes par page" title="Lignes par page (pagination)">
+        <option value="50">50/page</option>
+        <option value="100">100/page</option>
+        <option value="200" selected>200/page</option>
+        <option value="500">500/page</option>
+        <option value="1000">1000/page</option>
+      </select>
+      <button id="save-panel" type="button" title="Enregistrer la requête comme panneau">Panneau</button>
+    </div>
+    <div class="srchbody facetbar"><aside id="facets" class="fields" aria-label="Facettes"></aside></div>
+    <div id="qstats" class="muted" role="status" aria-live="polite"></div>
+    <div id="qresult" class="qresult"></div>
+  </section>
+
+  <!-- COUVERTURE ATT&CK -->
+  <section id="coverage" class="card span2" aria-labelledby="covh">
+    <div class="panelhead">
+      <h2 id="covh">Couverture ATT&amp;CK <span class="muted">— run-records (côté offensif)</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Par technique MITRE : nombre de runs tentés et combien ont <b>tiré</b> (déclenché un résultat). Une technique à 0 tiré = couverte mais sans détection côté cible.</p>
+    <div id="cov-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- MATRICE ATT&CK — grille tactique × technique par engagement -->
+  <section id="attack-matrix" class="card span2" aria-labelledby="amh">
+    <div class="panelhead">
+      <h2 id="amh">Matrice ATT&amp;CK <span class="muted">— grille tactique × technique (par engagement)</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Vraie grille ATT&amp;CK : colonnes = <b>tactiques</b> du kill-chain, cellules = <b>techniques</b>. Couleur par état : <span class="badge ok">exercée + détectée</span> (a <b>tiré</b>), <span class="badge destr">exercée non détectée</span> (0 tir), grisée = <b>non exercée</b> (couverture manquante). Le <abbr title="Mean Time To Detect">MTTD</abbr> est surfacé sur les cellules détectées quand une source de détection le mesure. Scopé à l'engagement actif.</p>
+    <div id="am-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- COUVERTURE DE DÉTECTION (PURPLE) — Forge red tirées vs Plume blue détectées -->
+  <section id="purple-coverage" class="card span2" aria-labelledby="pch">
+    <div class="panelhead">
+      <h2 id="pch">Détection purple <span class="muted">— techniques Forge tirées vs détectées par la source de détection (SOC/IDS/pare-feu, optionnelle)</span></h2>
+      <span class="qbar"><span id="pc-plume" class="badge mut" title="Source de détection interrogée pour la corrélation (optionnelle — Forge fonctionne en autonome sans elle)">—</span></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Mesure <b>défensive</b> <b>optionnelle</b> : pour chaque technique ATT&amp;CK <b>tirée</b> en red-team (<code>runrecord</code>), a-t-elle été <b>détectée</b> par la source de détection (SOC/IDS/pare-feu — Plume, CrowdSec, FortiGate, Elastic, fichier…) ? <span class="badge ok">détecté</span> expose la couverture, <span class="badge destr">raté</span> expose un <b>trou de détection</b>. Le <abbr title="Mean Time To Detect">MTTD</abbr> mesure le délai tir&rarr;alerte. Lecture seule — <b>aucune source n'est requise</b> : sans source configurée, Forge tourne en <b>autonome</b> ; si une source est configurée mais injoignable, la mesure est déclarée <b>impossible</b> (aucun « détecté » inventé).</p>
+    <div id="pc-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- CAMPAGNES -->
+  <section id="campaigns" class="card span2" aria-labelledby="cmh">
+    <div class="panelhead">
+      <h2 id="cmh">Campagnes <span id="cm-count" class="badge"></span></h2>
+      <span class="qbar"><input id="cm-filter" type="search" aria-label="Filtre campagne" placeholder="filtrer…"></span>
+    </div>
+    <div id="cm-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ROE / GARDE-FOU -->
+  <section id="roe" class="card span2" aria-labelledby="roeh">
+    <div class="panelhead">
+      <h2 id="roeh">ROE — décisions du garde-fou <span id="roe-count" class="badge"></span></h2>
+      <span class="qbar">
+        <select id="roe-verdict" aria-label="Filtre verdict">
+          <option value="">Tous verdicts</option>
+          <option value="FIRE">FIRE</option>
+          <option value="DRY_RUN">DRY_RUN</option>
+          <option value="VETO">VETO</option>
+        </select>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Chaque action proposée par le moteur passe le garde-fou : <span class="badge v-FIRE">FIRE</span> (exécutée), <span class="badge v-DRY_RUN">DRY_RUN</span> (simulée), <span class="badge v-VETO">VETO</span> (bloquée). La transparence anti-masquage : on voit pourquoi (raisons).</p>
+    <div id="roe-counters" class="roecounters"></div>
+    <div id="roe-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- LEDGER -->
+  <section id="ledger" class="card span2" aria-labelledby="lgh">
+    <div class="panelhead">
+      <h2 id="lgh">Ledger d'engagement <span id="lg-verify" class="badge"></span></h2>
+      <span class="qbar"><span id="lg-path" class="muted"></span></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Journal append-only chaîné par SHA-256. La console <b>recalcule la chaîne</b> de hash (intégrité <b>hash-only</b>) mais ne vérifie <b>pas la signature</b> (<code>sig_checked: false</code> — pas de clé côté console). Pour vérifier la signature cryptographique : lancer <code>forge ledger verify --pubkey &lt;clé&gt;</code> en CLI.</p>
+    <div id="lg-result"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- DASHBOARDS / VUES -->
+  <section id="dashboards" class="span2" aria-labelledby="dash-h">
+    <h2 id="dash-h" class="sronly">Dashboards</h2>
+    <div class="viewbar card">
+      <div class="viewbar-l">
+        <span class="lvl">Vue</span>
+        <select id="view" aria-label="Vue (collection de dashboards)" title="Vue = collection de dashboards (filtre local d'affichage)">
+          <option value="">Tous les dashboards</option>
+        </select>
+        <button id="view-rename" type="button" class="picon" title="Renommer la vue"></button>
+        <button id="view-new" type="button" title="Créer une vue (collection de dashboards)">+ Vue</button>
+        <button id="view-del" type="button" class="picon" title="Supprimer la vue (les dashboards sont conservés)"></button>
+      </div>
+      <div class="viewbar-r">
+        <span class="muted">dashboards de panneaux soql — glisser pour réordonner, coin pour redimensionner</span>
+        <button id="dash-edit" type="button" title="Mode édition : déplacer / redimensionner / assigner les panneaux">Édition</button>
+        <button id="dash-new" type="button" title="Créer un dashboard">+ Dashboard</button>
+      </div>
+    </div>
+    <div id="dashview" class="dashview"></div>
+  </section>
+
+  <!-- ADMINISTRATION — comptes utilisateurs (réservé role=admin). Toutes les mutations passent par des
+       routes gatées check_admin (403 sinon), attribuées à l'admin en session et ledgerisées. -->
+  <section id="admin" class="card span2" aria-labelledby="adm-h">
+    <div class="panelhead">
+      <h2 id="adm-h">Administration — comptes <span id="admin-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="admin-reload" class="k-theme" type="button" title="Rafraîchir la liste des comptes">Rafraîchir</button>
+        <button id="admin-new" class="k-theme" type="button" title="Créer un compte individuel (login, rôle, mot de passe)">+ Compte</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Comptes individuels (<code>viewer</code> lecture · <code>operator</code> arme les campagnes · <code>admin</code> administre). Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>. La désactivation, la rétrogradation et la réinitialisation de mot de passe <b>révoquent immédiatement</b> les sessions du compte. Le <b>dernier admin activé</b> ne peut être ni désactivé, ni rétrogradé, ni supprimé (garde-fou anti-verrouillage).</p>
+    <div id="admin-users"><div class="muted">chargement…</div></div>
+
+    <!-- POLITIQUE RÉSEAU — MASTER SWITCH GLOBAL (admin, ledgerisé). Le « gros bouton rouge » instance-wide :
+         OFF (défaut sûr) = AUCUN engagement ne peut scanner de cible privée/LAN/loopback. L'effectif exige
+         AUSSI l'opt-in par engagement ET le scope (trois portes indépendantes, fail-closed). -->
+    <div id="admin-network" class="lc-danger" style="margin-top:18px">
+      <div class="lc-danger-head">
+        <span class="lc-dot" aria-hidden="true"></span>
+        <span>Politique réseau — scan des cibles <b>privées / LAN / loopback</b> (master global)</span>
+        <span id="admin-net-state" class="badge mut" title="État courant du master global">—</span>
+        <span class="lc-dtag">zone danger</span>
+      </div>
+      <div class="lc-danger-body">
+        <div class="lc-warn bad" style="margin:0">Interrupteur <b>instance-wide</b>. <b>OFF est le défaut sûr</b> : tant qu'il est OFF, <b>aucun</b> engagement ne peut scanner une cible privée/LAN/loopback, quelle que soit sa configuration. Le passer sur ON n'ouvre <b>rien à lui seul</b> : chaque engagement doit AUSSI cocher son propre opt-in <i>et</i> la cible doit être dans son scope (trois portes indépendantes). Réservé <b>admin</b> ; chaque bascule est <b>ledgerisée</b> (<code>console.settings.network_policy</code>).</div>
+        <div id="admin-net-body" class="lc-danger-reqs" aria-live="polite"><div class="muted">chargement…</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TENANTS (ENTERPRISE — multi-tenancy, flag-gated). Vue rendue UNIQUEMENT quand la multi-tenancy est
+       active ET que le caller est platform-admin (loadTenants). Chaque tenant est un espace multi-client
+       ISOLÉ (ses engagements, findings, runs, ledger). CRUD + gestion des grants ; tout est ledgerisé
+       `console.tenant.*`. Garde-fous : dernier tenant actif non archivable, dernier tenant_admin non
+       retirable. Le serveur reste l'autorité (403 enterprise_disabled / platform_admin_required). -->
+  <section id="tenants" class="card span2" aria-labelledby="tn-h">
+    <div class="panelhead">
+      <h2 id="tn-h">Tenants <span class="badge" title="ENTERPRISE — multi-tenancy">enterprise</span> <span id="tenants-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="tenants-reload" class="k-theme" type="button" title="Rafraîchir la liste des tenants">Rafraîchir</button>
+        <button id="tenants-new" class="k-theme" type="button" title="Créer un nouveau tenant (espace multi-client isolé)">+ Tenant</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Un <b>tenant</b> est le sommet de la hiérarchie <b>TENANT → ENGAGEMENT → findings/runs</b> : un espace <b>multi-client isolé</b> (chaque tenant a ses engagements, son ledger tamper-evident, ses données). Un utilisateur d'un tenant ne voit <b>jamais</b> les données d'un autre (filtre fail-closed, deny-by-default). Réservé au <b>platform-admin</b> (admin console ou super-admin) ; chaque action est <b>ledgerisée</b>. Garde-fous : impossible d'archiver le <b>dernier tenant actif</b> ou de retirer le <b>dernier <code>tenant_admin</code></b> d'un tenant.</p>
+    <div id="tenants-list"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- IDENTITY / SSO (ENTERPRISE, flag-gated) — vue affichée UNIQUEMENT quand whoami.enterprise.sso|scim est
+       vrai ET caller admin (applyIdentityUi). Configure : (1) le provider OIDC (issuer/client_id/secret
+       write-only/redirect allowlist), (2) le token SCIM (générer/roter — affiché UNE fois), (3) le mapping
+       groupe IdP -> {rôle, tenant/grant}. Le serveur reste l'autorité (routes flag+admin -> 404/403). En
+       community (flag OFF) : aucun lien, aucune vue, login LOCAL inchangé. -->
+  <section id="identity" class="card span2" aria-labelledby="id-h">
+    <div class="panelhead">
+      <h2 id="id-h">Identité / SSO <span class="badge" title="ENTERPRISE — SSO OIDC + SCIM + RBAC avancé">enterprise</span></h2>
+      <span class="qbar"><button id="identity-reload" class="k-theme" type="button" title="Rafraîchir la configuration identité">Rafraîchir</button></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Fédération d'identité <b>ENTERPRISE</b> : connexion <b>OIDC (SSO)</b>, provisioning <b>SCIM 2.0</b>, et <b>RBAC avancé</b> (mapping groupe IdP → rôle Forge + grant tenant). Une identité SSO/SCIM n'obtient <b>que</b> les droits que son mapping de groupe confère (<b>moindre privilège</b>, fail-closed) — <b>jamais super-admin via SSO</b>. Les secrets (<code>client_secret</code>, token SCIM) sont <b>write-only</b> : jamais réaffichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, comptes <b>locaux</b> inchangés.</p>
+
+    <!-- (1) PROVIDER OIDC -->
+    <div id="id-oidc-wrap" class="id-card" hidden>
+      <h3 class="id-h3">Fournisseur OIDC (SSO) <span id="id-oidc-secret-badge" class="badge"></span></h3>
+      <form id="id-oidc-form" class="id-form" autocomplete="off">
+        <label class="login-f"><span>Issuer (URL du provider)</span><input id="id-oidc-issuer" type="url" placeholder="http://idp.interne/realms/forge" required></label>
+        <label class="login-f"><span>client_id</span><input id="id-oidc-clientid" type="text" placeholder="forge" required></label>
+        <label class="login-f"><span>client_secret <span class="muted">(write-only — laisser vide pour conserver)</span></span><input id="id-oidc-secret" type="password" placeholder="•••••• (inchangé si vide)" autocomplete="new-password"></label>
+        <label class="login-f"><span>redirect_uri (callback console)</span><input id="id-oidc-redirect" type="url" placeholder="http://console.interne/api/sso/callback" required></label>
+        <label class="login-f"><span>Redirections post-login autorisées (allowlist, une par ligne)</span><textarea id="id-oidc-allow" rows="2" placeholder="/&#10;http://console.interne/"></textarea></label>
+        <div class="id-row">
+          <label class="login-f"><span>Provisioning</span><select id="id-oidc-prov"><option value="match">match (compte requis)</option><option value="auto">auto (créer le compte)</option></select></label>
+          <label class="login-f"><span>Claim identité</span><select id="id-oidc-claim"><option value="email">email</option><option value="sub">sub</option></select></label>
+          <label class="login-f"><span>Rôle par défaut (auto-provision)</span><select id="id-oidc-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+        </div>
+        <div id="id-oidc-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Enregistrer le provider OIDC</button>
+      </form>
+    </div>
+
+    <!-- (2) TOKEN SCIM -->
+    <div id="id-scim-wrap" class="id-card" hidden>
+      <h3 class="id-h3">Provisioning SCIM 2.0 <span id="id-scim-token-badge" class="badge"></span></h3>
+      <p class="muted" style="margin:0 0 8px">Endpoint SCIM : <code id="id-scim-endpoint">/scim/v2</code> — authentifié par un <b>bearer token</b> (haché au repos, comparé à temps constant). Le token brut n'est affiché <b>qu'une fois</b> à la génération : copiez-le dans l'IdP immédiatement.</p>
+      <div class="id-row">
+        <label class="login-f"><span>Rôle par défaut des comptes provisionnés</span><select id="id-scim-role"><option value="viewer">viewer</option><option value="operator">operator</option></select></label>
+      </div>
+      <div class="id-row">
+        <button id="id-scim-rotate" class="k-theme" type="button" title="Génère un nouveau token SCIM (affiché une seule fois)">Générer / Roter le token</button>
+        <button id="id-scim-revoke" class="k-theme" type="button" title="Révoque le token SCIM (l'IdP ne pourra plus provisionner)">Révoquer</button>
+        <button id="id-scim-save-role" class="k-theme" type="button" title="Enregistre le rôle par défaut SCIM">Enregistrer le rôle</button>
+      </div>
+      <div id="id-scim-token-once" class="id-token-once" hidden>
+        <span class="muted">Nouveau token (copiez-le maintenant, non réaffichable) :</span>
+        <code id="id-scim-token-val" class="id-token-val"></code>
+        <button id="id-scim-token-copy" class="k-theme" type="button">Copier</button>
+      </div>
+    </div>
+
+    <!-- (3) MAPPING GROUPE -> RÔLE / GRANT (RBAC avancé) -->
+    <div id="id-map-wrap" class="id-card" hidden>
+      <h3 class="id-h3">RBAC avancé — mapping groupe IdP → rôle / grant</h3>
+      <p class="muted" style="margin:0 0 8px">Un groupe IdP (claim <code>groups</code> côté SSO, ou nom de groupe SCIM) est mappé vers un rôle console (<code>viewer|operator|admin</code>) et, optionnellement, un <b>grant tenant</b> (E1). Moindre privilège : un groupe non mappé ne confère <b>rien</b> ; <b>jamais super-admin</b>. Côté SCIM le rôle est plafonné à <code>operator</code>.</p>
+      <div id="id-map-list"><div class="muted">chargement…</div></div>
+      <form id="id-map-form" class="id-form id-map-add" autocomplete="off">
+        <label class="login-f"><span>Groupe IdP</span><input id="id-map-group" type="text" placeholder="Forge-Operators" required></label>
+        <label class="login-f"><span>Rôle</span><select id="id-map-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+        <label class="login-f"><span>tenant_id <span class="muted">(optionnel)</span></span><input id="id-map-tenant" type="number" min="1" placeholder="—"></label>
+        <label class="login-f"><span>Rôle tenant <span class="muted">(optionnel)</span></span><select id="id-map-trole"><option value="">— (dérivé du rôle)</option><option value="tenant_viewer">tenant_viewer</option><option value="tenant_operator">tenant_operator</option><option value="tenant_admin">tenant_admin</option></select></label>
+        <div id="id-map-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Ajouter / Mettre à jour le mapping</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- COMPLIANCE (ENTERPRISE, flag-gated) — vue #compliance : (1) politique de rétention (global/tenant/
+       engagement), (2) legal-hold (toggle, hold gagne toujours), (3) signer du ledger KMS/HSM (rédigé,
+       lecture seule), (4) export de PREUVES SOC 2 / ISO (engagement + fenêtre temporelle + format). Réservé
+       admin + flag engagé (complianceAdmin()). Le serveur reste l'autorité (routes flag+admin -> 404/403).
+       En community (flag OFF) : aucun lien, aucune vue, ledger/données byte-identiques. -->
+  <section id="compliance" class="card span2" aria-labelledby="cmp-h">
+    <div class="panelhead">
+      <h2 id="cmp-h">Compliance <span class="badge" title="ENTERPRISE — WORM / rétention / legal-hold + preuves SOC 2 / ISO">enterprise</span></h2>
+      <span class="qbar"><button id="cmp-reload" class="k-theme" type="button" title="Recharger la politique + le signer (secrets rédigés)">Rafraîchir</button></span>
+    </div>
+    <p class="muted" style="margin:0 0 10px"><b>WORM / rétention / legal-hold</b> sur le ledger tamper-evident + les données d'engagement, et export de <b>preuves d'audit SOC 2 / ISO 27001</b>. La rétention est <b>la plus spécifique</b> (engagement → tenant → global) ; un <b>legal-hold</b> (à n'importe quel niveau) <b>bloque toute purge/suppression</b> — le hold <b>gagne toujours</b> (fail-closed). Chaque mutation est <b>attribuée</b> et <b>ledgerisée</b>. Les secrets (clé d'archive, endpoint/credential du signer) sont <b>rédigés</b> : jamais affichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, ledger/données inchangés.</p>
+
+    <!-- (1) POLITIQUE DE RÉTENTION + (2) LEGAL-HOLD (par scope) -->
+    <div class="id-card">
+      <h3 class="id-h3">Politique de rétention &amp; legal-hold</h3>
+      <form id="cmp-policy-form" class="id-form" autocomplete="off">
+        <div class="id-row">
+          <label class="login-f"><span>Scope</span><select id="cmp-scope"><option value="global">global</option><option value="tenant">tenant</option><option value="engagement" selected>engagement</option></select></label>
+          <label class="login-f"><span>id <span class="muted">(tenant/engagement)</span></span><input id="cmp-scope-id" type="number" min="1" value="1"></label>
+          <label class="login-f"><span>Rétention (secondes, 0/vide = illimité)</span><input id="cmp-retention" type="number" min="0" placeholder="ex. 220752000 (7 ans)"></label>
+        </div>
+        <div id="cmp-policy-err" class="login-err" role="alert" hidden></div>
+        <div class="id-row">
+          <button type="submit" class="login-btn id-btn">Enregistrer la rétention</button>
+          <button id="cmp-hold-on" type="button" class="k-theme" title="Placer un legal-hold sur ce scope (bloque toute purge)">Placer un legal-hold</button>
+          <button id="cmp-hold-off" type="button" class="k-theme" title="Lever le legal-hold sur ce scope">Lever le legal-hold</button>
+        </div>
+      </form>
+      <div id="cmp-policy-state" class="muted" style="margin-top:8px">chargement…</div>
+    </div>
+
+    <!-- (3) SIGNER DU LEDGER (KMS / HSM) — RÉDIGÉ, LECTURE SEULE -->
+    <div class="id-card">
+      <h3 class="id-h3">Signer du ledger d'audit (KMS / HSM) <span id="cmp-signer-badge" class="badge"></span></h3>
+      <p class="muted" style="margin:0 0 8px">La clé privée Ed25519 du ledger peut vivre <b>hors-hôte</b> (KMS/HSM/exec). La <b>vérification</b> n'utilise que la <b>clé publique</b> ; l'endpoint / le credential / l'argv sont <b>secrets</b> — jamais affichés (seul un booléen <code>*_set</code> l'indique). Configuration en lecture seule (via variables d'environnement <code>FORGE_LEDGER_SIGNER*</code>).</p>
+      <div id="cmp-signer" class="muted">—</div>
+    </div>
+
+    <!-- (4) EXPORT DE PREUVES SOC 2 / ISO — engagement + fenêtre + format -->
+    <div class="id-card">
+      <h3 class="id-h3">Export de preuves (SOC 2 / ISO 27001)</h3>
+      <p class="muted" style="margin:0 0 8px">Bundle <b>lecture seule</b> (ne modifie rien) : piste d'audit d'<b>autorisation</b>, état <b>RBAC</b>, journal d'<b>accès/mutation</b>, attestation de <b>sauvegarde</b> (restore-prouvé) et attestation d'<b>intégrité du ledger</b> (head hash + clé publique Ed25519 + résultat de vérification). <b>Isolé</b> par tenant/engagement, <b>secrets rédigés</b>. L'export est lui-même <b>ledgerisé</b>.</p>
+      <form id="cmp-evidence-form" class="id-form" autocomplete="off">
+        <div class="id-row">
+          <label class="login-f"><span>Engagement</span><select id="cmp-ev-engagement"></select></label>
+          <label class="login-f"><span>Format</span><select id="cmp-ev-format"><option value="json">JSON</option><option value="html">HTML</option><option value="pdf">PDF</option></select></label>
+        </div>
+        <div class="id-row">
+          <label class="login-f"><span>De <span class="muted">(optionnel)</span></span><input id="cmp-ev-from" type="datetime-local"></label>
+          <label class="login-f"><span>À <span class="muted">(optionnel)</span></span><input id="cmp-ev-to" type="datetime-local"></label>
+        </div>
+        <div id="cmp-ev-err" class="login-err" role="alert" hidden></div>
+        <button type="submit" class="login-btn id-btn">Exporter les preuves</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ADMINISTRATION — connecteurs (gouvernance, réservé role=admin). Écriture via POST /api/modules/:kind
+       (check_admin, 403 sinon), attribuée + ledgerisée. Désactiver un connecteur l'empêche RÉELLEMENT de
+       tirer (scope.json disabled_modules + filtre --modules), y compris les modules choisis par le planner. -->
+  <section id="admin-connectors" class="card span2" aria-labelledby="adm-conn-h">
+    <div class="panelhead">
+      <h2 id="adm-conn-h">Administration — connecteurs <span id="admin-conn-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="admin-conn-reload" class="k-theme" type="button" title="Rafraîchir le catalogue des connecteurs">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Gouvernance des connecteurs (« installer / désinstaller » opérationnel). <b>État</b> = interrupteur opérateur (<code>enabled</code>) ; <b>override dispo</b> = surcharge de la sonde host (<code>available_override</code> : auto / forcer disponible / forcer indisponible) ; <b>web</b> = lançable depuis le web. Disponibilité <b>effective</b> = <code>enabled ET (override ?? sonde)</code>. Un connecteur <b>désactivé</b> ou <b>forcé indisponible</b> est <b>SKIP au tir</b> même si son binaire est présent — y compris pour les modules choisis par le planner. Chaque mutation est <b>attribuée</b> à votre compte et <b>ledgerisée</b>.</p>
+    <div id="admin-connectors-body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ADMINISTRATION — AJOUTER UN OUTIL (« add a tool from the web UI »). POST/GET /api/tools, DELETE
+       /api/tools/:kind (check_admin, 403 sinon), ledgerisé. Déclare un ToolSpec GOUVERNÉ (binaire + argv
+       no-shell tokenisé + params_schema + flag_allowlist) — SANS édition de fichier ni recompilation.
+       L'outil apparaît aussitôt dans « Capacités » et « Campagne » (params_schema rendu dynamiquement).
+       Aucun code arbitraire : uniquement de la donnée déclarative, gouvernée par le moteur. -->
+  <section id="admin-addtool" class="card span2" aria-labelledby="adm-tool-h">
+    <div class="panelhead">
+      <h2 id="adm-tool-h">Administration — ajouter un outil</h2>
+      <span class="qbar">
+        <button id="admin-addtool-reload" class="k-theme" type="button" title="Réinitialiser le formulaire et rafraîchir la liste">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Déclarez votre propre outil CLI (<b>ToolSpec déclaratif</b> : binaire + <code>argv_template</code> tokenisé no-shell + <code>params_schema</code> typé + <code>flag_allowlist</code>) — <b>sans</b> éditer de fichier ni recompiler. À l'ajout, l'outil est <b>persisté</b> (dossier server-managed) puis le catalogue est <b>rechargé à chaud</b> : il apparaît dans <b>Capacités</b> et dans <b>Campagne</b> (son formulaire de params est rendu depuis le schéma). Gouvernance identique à un module natif : <b>scope-guard</b> fail-closed, <b>argv fixe no-shell</b>, <b>allowlist</b> de drapeaux, statut <b>jamais</b> « vulnerable », plancher <b>exploit</b> (arm + raison). <b>Admin-only</b>, chaque ajout/suppression est <b>attribué</b> et <b>ledgerisé</b>. Un binaire absent du runtime -> outil « indispo » (skippé au run).</p>
+    <div id="admin-addtool-body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ADMINISTRATION — source de détection (boucle purple, réservé role=admin). GET/POST /api/detection/source
+       (check_admin, 403 sinon), ledgerisé ; le SECRET est WRITE-ONLY (affiché ••• une fois posé, jamais
+       renvoyé par GET). Test de joignabilité via POST /api/detection/test. Même composant que le wizard (étape 3). -->
+  <section id="admin-detection" class="card span2" aria-labelledby="adm-det-h">
+    <div class="panelhead">
+      <h2 id="adm-det-h">Administration — source de détection <span id="admin-det-kind" class="badge mut">—</span></h2>
+      <span class="qbar">
+        <button id="admin-det-reload" class="k-theme" type="button" title="Recharger la configuration de la source (secret rédigé)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Source <b>BLUE</b> (SIEM/IDS/pare-feu) corrélée à la boucle purple par identité MITRE. <b>N'importe quelle infra</b> se câble ici sans code (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, commande). Le <b>secret</b> est <b>write-only</b> (affiché <code>•••</code> une fois posé, jamais renvoyé) et manié comme un secret de session. Une source absente/injoignable ⇒ mesure déclarée <b>impossible</b> (<code>source_reachable:false</code>), jamais de détection inventée. Chaque enregistrement est <b>ledgerisé</b>. Détails : <code>docs/DETECTION.md</code>.</p>
+    <div id="admin-det-form"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ADMINISTRATION — sauvegarde & restauration chiffrées (réservé role=admin). POST /api/backup,
+       POST /api/restore, GET/POST /api/backup/policy (check_admin, 403 sinon), ledgerisés. L'archive est
+       TOUJOURS chiffrée (argon2id + XChaCha20-Poly1305) et embarque la clé de signature .ed25519 + la
+       base + le ledger. La passphrase n'est JAMAIS persistée côté client (transmise puis oubliée). La
+       politique GET ne renvoie AUCUN secret (rédigé). Détails : docs/BACKUP.md. -->
+  <section id="admin-backup" class="card span2" aria-labelledby="adm-bk-h">
+    <div class="panelhead">
+      <h2 id="adm-bk-h">Administration — sauvegarde &amp; restauration <span id="admin-bk-badge" class="badge mut">chiffré</span></h2>
+      <span class="qbar">
+        <button id="admin-bk-reload" class="k-theme" type="button" title="Recharger la politique de sauvegarde (secrets rédigés)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Archive <b>toujours chiffrée</b> (argon2id + XChaCha20-Poly1305) : elle embarque la <b>base</b>, le <b>ledger</b> tamper-evident et la <b>clé de signature</b> <code>.ed25519</code> — il n'existe <b>aucun chemin en clair</b>. La <b>passphrase est obligatoire</b> (fail-closed) et n'est <b>jamais</b> stockée/loggée/ledgerisée (elle n'est pas conservée côté navigateur au-delà de la requête). La <b>restauration</b> valide + vérifie par défaut (aucune écriture) ; un <b>swap en place</b> exige une confirmation explicite et un <b>redémarrage</b>. Chaque action est <b>ledgerisée</b> (métadonnées seules). Détails : <code>docs/BACKUP.md</code>.</p>
+    <div class="det-actions" style="margin-bottom:12px">
+      <button id="bk-create" class="login-btn" type="button" title="Créer une sauvegarde chiffrée et la télécharger">Créer une sauvegarde…</button>
+      <button id="bk-restore" class="k-theme" type="button" title="Valider / restaurer une archive chiffrée">Restaurer une archive…</button>
+    </div>
+    <h3 style="margin:14px 0 6px;font-size:.95rem">Sauvegarde programmée &amp; offsite</h3>
+    <div id="admin-bk-policy"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- CONSOLE FORGE IN-UI (roadmap P5) — panneau ADMIN : lance des sous-commandes `forge` GOUVERNÉES
+       depuis l'UI web (plus besoin de `docker compose exec forge forge …`). Ce n'est PAS un terminal :
+       chaque commande est une entrée d'une ALLOWLIST STRICTE, avec uniquement ses options TYPÉES
+       (boutons/cases). Le serveur reconstruit un argv FIXE (sans shell), ledgerise `console.exec` et
+       STREAME la sortie (SSE) dans le volet en lecture seule. Réservé admin (le serveur reste l'autorité :
+       check_admin -> 403 ; toute commande/flag hors allowlist -> 400 fail-closed). -->
+  <section id="admin-console" class="card span2" aria-labelledby="adm-cons-h">
+    <div class="panelhead">
+      <h2 id="adm-cons-h">Console Forge <span class="badge mut" title="Runner gouverné — allowlist stricte, sans shell">gouverné</span></h2>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Lance des sous-commandes <code>forge</code> <b>gouvernées</b> depuis l'UI — plus besoin de <code>docker&nbsp;compose&nbsp;exec&nbsp;forge&nbsp;forge&nbsp;…</code>. <b>Ce n'est pas un shell</b> : chaque bouton correspond à une commande d'une <b>allowlist stricte</b>, avec seulement ses <b>options typées</b> ; le serveur reconstruit un <b>argv fixe</b> (sans shell), <b>ledgerise</b> chaque exécution (<code>console.exec</code>) et <b>streame</b> la sortie ci-dessous. Les commandes à <b>effet d'état</b> (<code>upgrade</code>) exigent une <b>confirmation explicite</b>. Les secrets (<code>--passphrase-env</code>) sont résolus <b>côté serveur</b> — vous ne fournissez qu'un <b>nom de variable</b>, jamais la valeur.</p>
+    <div id="admin-console-body"><div class="muted">chargement…</div></div>
+  </section>
+</main>
+</div>
+<!-- PORTAIL DE CONNEXION — gate du shell : affiché quand /api/whoami répond 401 (session requise et
+     absente). POST /api/login pose le cookie forge_session (HttpOnly, SameSite=Strict) qui authentifie
+     ensuite TOUTES les requêtes (y compris le flux SSE). Masqué en mode dev-open et une fois connecté. -->
+<div id="login-view" class="login-view" hidden>
+  <form id="login-form" class="login-card" autocomplete="on" aria-labelledby="login-title">
+    <div class="login-brand"><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span class="login-wordmark">Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></div>
+    <h2 id="login-title">Console — connexion</h2>
+    <p class="login-lead">Authentifiez-vous pour accéder à la console d'engagement gouvernée.</p>
+    <label class="login-f"><span>Identifiant</span><input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required placeholder="ex: operator"></label>
+    <label class="login-f"><span>Mot de passe</span><input id="login-pass" name="password" type="password" autocomplete="current-password" required placeholder="mot de passe du compte"></label>
+    <div id="login-err" class="login-err" role="alert" hidden></div>
+    <button id="login-submit" type="submit" class="login-btn">Se connecter</button>
+    <!-- SSO (ENTERPRISE) : bouton affiché UNIQUEMENT quand GET /api/setup/state répond sso.enabled=true
+         (flag ON + provider OIDC configuré). Clique -> GET /api/sso/login (Authorization-Code + PKCE). En
+         community (flag OFF / non configuré) : caché => écran de login LOCAL byte-identique. -->
+    <div id="login-sso" hidden>
+      <div class="login-sso-sep"><span>ou</span></div>
+      <button id="login-sso-btn" type="button" class="login-btn login-sso-btn">Se connecter avec le SSO</button>
+    </div>
+    <p class="login-hint muted">Session courte via cookie <code>forge_session</code> (HttpOnly, SameSite=Strict). Au 1er lancement, l'<b>assistant de déploiement</b> crée le compte administrateur (aucune CLI) ; les comptes suivants se créent dans <b>Administration</b>.</p>
+  </form>
+</div>
+<!-- WIZARD 1er DÉPLOIEMENT (self-deploy) — affiché quand GET /api/setup/state répond needs_setup:true
+     (aucun admin activé ni hash d'amorçage). Provisionne le 1er admin + la config initiale DEPUIS le
+     navigateur ; POST /api/setup pose le cookie de session (on atterrit connecté). ZÉRO valeur par
+     défaut : tout hors identifiant/mot de passe est optionnel. La route se ferme d'elle-même (409). -->
+<div id="setup-view" class="login-view setup-view" hidden>
+  <form id="setup-form" class="login-card setup-card" autocomplete="off" aria-labelledby="setup-title">
+    <div class="login-brand"><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span class="login-wordmark">Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></div>
+    <h2 id="setup-title">Premier déploiement — provisioning</h2>
+    <p class="login-lead">Provisionnez le premier administrateur et la configuration initiale de la console.</p>
+    <ol class="setup-steps" aria-hidden="true">
+      <li class="setup-step is-active" data-step="1"><span class="setup-step-n">1</span><span class="setup-step-l">Admin</span></li>
+      <li class="setup-step" data-step="2"><span class="setup-step-n">2</span><span class="setup-step-l">Chiffrement</span></li>
+      <li class="setup-step" data-step="3"><span class="setup-step-n">3</span><span class="setup-step-l">Détection</span></li>
+      <li class="setup-step" data-step="4"><span class="setup-step-n">4</span><span class="setup-step-l">Opérateur</span></li>
+      <li class="setup-step" data-step="5"><span class="setup-step-n">5</span><span class="setup-step-l">Périmètre</span></li>
+    </ol>
+
+    <!-- STEP 1 — compte admin (SEULS champs requis) -->
+    <div class="setup-panel is-active" data-panel="1">
+      <div class="setup-note muted">Ce premier compte a le rôle <b>admin</b> (administration complète). Vous atterrissez connecté après provisioning. Les rôles <code>operator</code> / <code>viewer</code> se créent ensuite dans Administration.</div>
+      <label class="login-f"><span>Identifiant administrateur</span><input id="su-login" name="new-username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" placeholder="ex: root"><small class="fhint">Lettres, chiffres, <code>. _ -</code> — 1 à 64 caractères, sans tiret initial.</small></label>
+      <label class="login-f"><span>Mot de passe</span><input id="su-pass" name="new-password" type="password" autocomplete="new-password" placeholder="mot de passe fort"><small class="fhint">Haché en <code>argon2id</code> côté serveur (jamais stocké en clair). Choisissez une phrase de passe longue.</small></label>
+      <label class="login-f"><span>Confirmer le mot de passe</span><input id="su-pass2" name="confirm-password" type="password" autocomplete="new-password" placeholder="ressaisir le mot de passe"><small class="fhint">Doit correspondre — protège contre une faute de frappe sur un mot de passe masqué.</small></label>
+    </div>
+
+    <!-- STEP 2 — chiffrement : hash de mot de passe fixe (argon2id) + chiffrement au repos si dispo -->
+    <div class="setup-panel" data-panel="2">
+      <div class="setup-note">Hachage des mots de passe : <code>argon2id</code> (fixe, non configurable).</div>
+      <label class="login-f setup-toggle" id="su-enc-wrap" hidden><span>Chiffrer la base au repos (SQLCipher)</span><input id="su-enc" type="checkbox"></label>
+      <div class="setup-note muted" id="su-enc-unavail">Chiffrement de la base au repos indisponible dans ce build — l'implémentation SQLCipher arrive dans une prochaine version.</div>
+    </div>
+
+    <!-- STEP 3 — source de détection (tout optionnel, stocké verbatim pour la boucle purple). MÊME composant
+         que le panneau admin (parité stricte du jeu de champs) : monté dynamiquement dans #su-det-form. -->
+    <div class="setup-panel" data-panel="3">
+      <div class="setup-note muted">Source BLUE (SIEM/IDS/pare-feu) corrélée par identité MITRE. Optionnelle — modifiable plus tard dans Administration. Le secret est write-only. Voir <code>docs/DETECTION.md</code>.</div>
+      <div id="su-det-form"></div>
+    </div>
+
+    <!-- STEP 4 — politique opérateur. require_reason par défaut ON (parité comportement actuel) -->
+    <div class="setup-panel" data-panel="4">
+      <div class="setup-note muted">Règles qui encadrent l'armement des lancements par un <code>operator</code>. Tout est modifiable plus tard ; ces valeurs sont des garde-fous, pas des blocages définitifs.</div>
+      <label class="login-f setup-toggle"><span>Exiger une raison à l'armement</span><input id="su-op-reason" type="checkbox" checked></label>
+      <small class="fhint">Recommandé (ON) : chaque armement doit porter une justification, tracée au ledger pour l'audit.</small>
+      <label class="login-f"><span>Allowlist CIDR source opérateur (une par ligne, optionnel)</span><textarea id="su-op-cidrs" rows="2" spellcheck="false" placeholder="ex:&#10;10.0.0.0/24&#10;192.168.1.5"></textarea></label>
+      <small class="fhint">Restreint l'armement aux IP sources listées (CIDR). Vide = aucune restriction d'origine réseau. N'affecte que l'opérateur, pas la lecture.</small>
+      <label class="login-f setup-toggle"><span>Approbation requise pour le haut-impact</span><input id="su-op-approval" type="checkbox"></label>
+      <small class="fhint">Si activé, un lancement à <b>fort impact</b> (exploit / destructif) exige une étape d'approbation en plus de l'opt-in armer + raison + secret.</small>
+    </div>
+
+    <!-- STEP 5 — périmètre (ROE) de l'engagement #1. OPTIONNEL : mêmes champs que l'éditeur d'engagement
+         (mode + in-scope/out-of-scope, une entrée par ligne). Vide = engagement #1 en scope VIDE (fail-closed :
+         rien n'est lançable tant qu'un in-scope n'est pas défini) ; réglable ensuite dans Engagements. -->
+    <div class="setup-panel" data-panel="5">
+      <div class="setup-note muted">Périmètre autorisé (ROE) de l'engagement #1. <b>Optionnel</b> — laissez vide pour le définir plus tard dans <b>Engagements → éditeur de scope</b>. Un scope vide est <b>fail-closed</b> : aucune cible n'est lançable tant qu'un in-scope n'est pas renseigné. Le serveur valide chaque entrée (host / <code>*.wildcard</code> / CIDR).</div>
+      <label class="login-f"><span>Mode d'engagement</span>
+        <select id="su-scope-mode">
+          <option value="grey" selected>grey</option>
+          <option value="white">white</option>
+          <option value="black">black</option>
+        </select>
+        <small class="fhint">Posture de l'engagement (white = boîte blanche, grey = mixte, black = boîte noire). Modifiable plus tard.</small>
+      </label>
+      <label class="login-f"><span>In-scope (une entrée par ligne — host / <code>*.wildcard</code> / CIDR)</span><textarea id="su-scope-in" rows="3" spellcheck="false" placeholder="app.example.com&#10;*.example.com&#10;10.0.0.0/8"></textarea></label>
+      <small class="fhint">Cibles AUTORISÉES. Chaque run est pré-filtré contre cette liste (scope-guard fail-closed). Vide = rien n'est lançable.</small>
+      <label class="login-f"><span>Out-of-scope (optionnel — une entrée par ligne)</span><textarea id="su-scope-out" rows="2" spellcheck="false" placeholder="admin.example.com"></textarea></label>
+      <small class="fhint">Exclusions explicites : une cible out-of-scope est refusée même si elle matche l'in-scope.</small>
+    </div>
+
+    <div id="setup-err" class="login-err" role="alert" hidden></div>
+    <div class="setup-actions">
+      <button type="button" id="su-back" class="setup-btn-ghost" hidden>Retour</button>
+      <button type="button" id="su-next" class="login-btn setup-btn">Continuer</button>
+      <button type="submit" id="su-finish" class="login-btn setup-btn" hidden>Provisionner</button>
+    </div>
+    <p class="login-hint muted">Seuls l'identifiant et le mot de passe sont requis ; tout le reste est optionnel et modifiable plus tard. Aucune valeur par défaut n'est imposée par le serveur.</p>
+  </form>
+</div>
+<footer><span id="status">connexion…</span> — maj <span id="updated">-</span><span id="version" class="muted" title="version Forge (fichier VERSION, exposé par /health)"></span></footer>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

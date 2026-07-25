@@ -1,0 +1,117 @@
+[package]
+name = "forge"
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Forge console — store findings/run-records + API + le point de jonction de la boucle purple (ingest ATT&CK). Fork de la colonne Plume."
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[features]
+# `encryption` (SQLCipher au repos) — OPT-IN, OFF PAR DÉFAUT. Activée, elle bascule rusqlite sur
+# `bundled-sqlcipher` (amalgame SQLCipher compilé — exige un backend crypto système/openssl à la
+# compilation). Le build PAR DÉFAUT (sans cette feature) ne pull PAS SQLCipher : `cfg!(feature=
+# "encryption")` se lit `false`, tout le code PRAGMA-key/sqlcipher_export est gardé `#[cfg(feature=
+# "encryption")]`, et la suite reste verte sans sqlcipher/openssl. N'activer que pour un déploiement
+# chiffré au repos (`cargo build --features encryption`).
+encryption = ["rusqlite/bundled-sqlcipher"]
+
+# `store-postgres` (Postgres backend for the DB-access seam, store.rs) — OPT-IN, OFF PAR DÉFAUT. Activée,
+# elle compile l'arm `Backend::Postgres` (client `postgres` SYNCHRONE/bloquant, même modèle sync que
+# rusqlite) + le câblage runtime (FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL). Le build PAR DÉFAUT
+# (sans cette feature) ne pull AUCUNE de ces deps (toutes `optional`) et reste BYTE-IDENTICAL + openssl-free.
+# La feature elle-même est AUSSI openssl-free : TLS via rustls (provider `ring`, pas aws-lc/native-tls) +
+# racines webpki-roots. N'activer que pour un déploiement Postgres (`cargo build --features store-postgres`).
+store-postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots", "dep:bytes"]
+
+# `object-store` (BlobStore S3/MinIO pour artefacts — blob.rs) — OPT-IN, OFF PAR DÉFAUT. Activée, elle
+# compile `S3BlobStore` (client `rust-s3` SYNCHRONE — colle au modèle bloquant du moteur backup, appelé
+# via spawn_blocking) + l'arm offsite `s3` + la sous-commande CLI `blob-selftest`. Le build PAR DÉFAUT
+# (sans cette feature) ne pull PAS `rust-s3` (dép `optional`) et reste openssl-free + deps par défaut
+# inchangées ; seul `LocalFsBlobStore` (système de fichiers, aucune dép) est compilé. La feature est
+# AUSSI openssl-free : `rust-s3` en `sync-rustls-tls` -> TLS via attohttpc + rustls (provider `ring`),
+# ZÉRO openssl/native-tls. N'activer que pour un offsite/artefacts S3 (`cargo build --features object-store`).
+object-store = ["dep:rust-s3"]
+
+# Wave-1 lints: only lints that are GREEN under `-D warnings` today are locked in (so CI can enforce
+# them without churn). `await_holding_lock` guards the deferred CONC-1 work (never hold a std Mutex
+# across `.await`). The other candidates were dropped this wave because they flag pre-existing,
+# out-of-scope issues that cannot be fixed without broad/risky churn: `string_slice` (29 hits — string
+# indexing is pervasive), `redundant_clone` (17 hits, nursery lint w/ false positives), and
+# `unreachable_pub` (24 hits — would narrow the enterprise modules' deliberately-`pub` separable API).
+[lints.clippy]
+await_holding_lock = "warn"
+# `significant_drop_tightening` : ACTIVÉ (readiness #6). Le lint flaguait ~93 sites PRÉEXISTANTS (pattern
+# `app.db()`/`app.store()` MutexGuard tenu jusqu'en fin de scope + lectures `RwLock`). RÉSOLU site par site :
+# la grande majorité TIGHTENED (guard relâché juste après son dernier usage — `drop()` explicite ou
+# construction inlinée — le travail restant ne touche plus la DB, donc BEHAVIOR-PRESERVING) ; une poignée de
+# sections ATOMIQUES gardent le verrou par CORRECTION et portent un `#[allow(...)]` fn-level justifié
+# (réservation FIFO run_state/run_reservations dans `reserve_engagement_slot`/`claim_and_spawn`, check-then-
+# act d'`admin_create_user`, apply RBAC multi-écritures d'`apply_to_user`, write-then-readback d'`admin_set_
+# module`, + fixtures de test miroir). Tightening ces sections rouvrirait une fenêtre de course.
+# `await_holding_lock` couvre l'invariant CONC-1 (aucun std Mutex tenu à travers un `.await`).
+significant_drop_tightening = "warn"
+
+[dependencies]
+guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.2.0", features = ["forge"] }
+# ^ Dép GIT épinglée (repo public LGPL `guatxlabs/core`, tag `v0.2.0`) : un clone forge-only
+#   standalone build dès que core@v0.2.0 est publié. Le tag DOIT être identique sur core/forge/plume.
+#   DEV monorepo (vitesse du path sans dépendre du core publié) : `console/.cargo/config.toml`
+#   (GITIGNORÉ) porte un `[patch."…/guatxlabs/core"] guatx-core = { path = "../../core" }` qui
+#   override la git-dep vers le core local. Vérifié : `cargo metadata --offline` résout vers le path
+#   local sans toucher le git. Un clone PUBLIC (sans ce patch local) résout la vraie git-dep.
+axum = "0.8"
+tower-http = { version = "0.7", features = ["fs", "catch-panic"] }   # ServeDir : assets web statiques (style.css/app.js/fonts/…) — fallback du SPA ; catch-panic : filet anti-panic (500 JSON propre au lieu d'une connexion resetée)
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "process", "time", "sync", "io-util"] }
+libc = "0.2"   # setsid (process group) + killpg pour cancel/watchdog du spawn campaign
+futures-util = { version = "0.3", default-features = false }   # stream::unfold -> SSE sans tokio-stream
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.11"
+argon2 = { version = "0.5", features = ["std"] }
+base64 = "0.22"
+getrandom = "0.4"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifié, jamais d'entropie tous-zeros
+subtle = "2"        # comparaison à temps constant du bearer/token (anti timing-oracle)
+chacha20poly1305 = "0.11"   # AEAD PUR RUST (RustCrypto : chacha20 + poly1305, zéro dép C/openssl) — chiffre l'archive backup (XChaCha20-Poly1305, nonce 24o, tag auth). Build par défaut safe.
+tar = "0.4"                 # archive backup au format tar standard (pur Rust) : snapshot DB + ledger JSONL + clé .ed25519 + manifest.json
+# ENTERPRISE SSO (OIDC) — validation cryptographique de l'ID token (signature JWKS RS256, iss/aud/exp).
+# `default-features=false` : on retire la feature `use_pem` (parsing PEM via `pem`+`simple_asn1`) INUTILE
+# au runtime SSO (on valide via composantes RSA n/e du JWKS, pas via PEM). Le crate reste sur `ring`
+# (crypto RustCrypto/asm — AUCUN openssl) => le build PAR DÉFAUT reste openssl-free. Le module sso est
+# compilé mais INERTE tant que le flag runtime FORGE_ENTERPRISE_SSO / enterprise.sso est OFF (community).
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+
+# ENTERPRISE STORE (Postgres) — OPTIONNELLES, tirées UNIQUEMENT sous la feature `store-postgres`. Le
+# client `postgres` est SYNCHRONE/bloquant (colle au modèle sync/held-guard du seam, comme rusqlite ;
+# appelé depuis les handlers async en portée bloquante). TLS openssl-free : `tokio-postgres-rustls` avec
+# le provider crypto `ring` (PAS aws-lc-rs, PAS native-tls/openssl) + racines CA `webpki-roots` (données
+# pures). `rustls` en `default-features=false` + `ring` pour construire le ClientConfig sans provider par
+# défaut aws-lc. Aucune de ces deps n'entre dans le build par défaut (toutes `optional`).
+postgres = { version = "0.19", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = { version = "1", optional = true }
+# `bytes::BytesMut` : type du buffer de sortie de `ToSql::to_sql` — requis pour l'impl du NULL typé-neutre
+# `PgNull` (accepts=true + IsNull::Yes) qui lie un NULL quel que soit le type de colonne inféré par PG.
+bytes = { version = "1", optional = true }
+
+# BLOBSTORE S3/MinIO (feature `object-store`) — OPTIONNELLE, tirée UNIQUEMENT sous la feature. `rust-s3`
+# (lib `s3`) en `sync-rustls-tls` : client SYNCHRONE (attohttpc + maybe-async/is_sync — même modèle
+# sync/bloquant que le moteur backup, invoqué via spawn_blocking) + TLS rustls via `attohttpc/tls-rustls`
+# (provider `ring`, racines webpki — AUCUN openssl/native-tls) + `aws-creds/rustls-tls`. Path-style forcé
+# (MinIO). `default-features = false` retire la feature par défaut `use-tokio-native-tls` (async + openssl).
+# N'entre PAS dans le build par défaut (`optional`).
+rust-s3 = { version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
+
+[dev-dependencies]
+# Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste
+# sur `ring` (pas d'openssl). N'affecte PAS le build/binaire par défaut (dev-dependency).
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

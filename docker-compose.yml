@@ -1,0 +1,379 @@
+# Forge — orchestration de déploiement (usage AUTORISÉ uniquement).
+# =============================================================================
+#
+# Lancer DEPUIS la racine de ce dépôt. La console résout `guatx-core` via une git-dep
+# publique (tag v0.2.0) — aucun crate sibling requis dans le contexte :
+#
+#     docker compose up -d --build
+#
+# Le `context: .` ci-dessous est la racine du dépôt (résolu relativement à CE fichier).
+#
+# Sûreté : Forge reste INERTE par défaut (in_scope vide = tout refusé). Le ledger et la DB
+# sont MONTÉS (volumes), jamais cuits dans l'image. Aucun secret n'est en clair ici : les
+# hashes/tokens viennent de `.env` (gitignored).
+#
+# ZÉRO PRÉ-ÉTAPE : `docker compose -f docker-compose.yml up -d --build` fonctionne SANS
+#   créer le moindre fichier hôte. Aucun scope.json n'est monté par défaut → le scope serveur est
+#   ABSENT au boot → la console démarre proprement (fail-closed : in_scope vide = rien lançable) et
+#   vous atterrissez sur l'ASSISTANT de 1er déploiement dans le navigateur (http://127.0.0.1:7100).
+#   L'assistant crée l'admin PUIS définit le PÉRIMÈTRE (ROE) de l'engagement #1 — aucun JSON, aucune
+#   CLI. Le scope/ROE vit ensuite dans la DB (persistée via le volume forge-db) et s'édite dans l'UI
+#   (Engagements → éditeur de scope). Les runs appliquent le scope de l'ENGAGEMENT, jamais un fichier.
+#
+#   OPTIONNEL — amorcer l'engagement #1 depuis un fichier hôte (au lieu de l'assistant) : décommenter
+#   le bind `./scope.json:/data/scope/scope.json:ro` dans `volumes:` plus bas et créer ce fichier
+#   AVEC AUTORISATION (`cp scope.example.json scope.json`, puis éditer). Absent = l'assistant s'en charge.
+# Env (secrets, connecteurs, boucle purple) : cf. `.env.example` à la racine + Dockerfile.
+#
+# SERVICES OPTIONNELS = derrière des PROFILES → un `docker compose up` NU démarre la CONSOLE SEULE
+# (aucun `depends_on` sur une image que le client n'a pas). Les activer à la demande :
+#     docker compose -f docker-compose.yml --profile msf --profile burp up -d  # + connecteurs (BYO images)
+#     docker compose -f docker-compose.yml --profile browser up -d             # + accès/évasion (BYO image)
+# Les trois services optionnels sont des STUBS COMMENTÉS en bas de fichier : Forge ne fournit aucune
+# de ces images (licences/outillage opérateur). Décommenter le stub et y mettre TON image active le profil.
+# Les connecteurs (browser/msf/burp) restent INERTES tant que leur service n'est pas joignable
+# (sonde à fire-time, auto-neutralisation) — cohérent avec l'inertie par défaut de Forge.
+
+name: forge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Console red-team : binaire Rust + python `forge` spawné, UI web + API sur :7100.
+  # ---------------------------------------------------------------------------
+  forge:
+    build:
+      # Contexte = racine du dépôt (clone standalone). guatx-core arrive via git-dep, pas de sibling.
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Profil d'image : `full` (défaut, httpx/nuclei/subfinder vérifiés SHA256 + moteur PDF
+        # weasyprint) ou `mini` (les omet ; modules -> available:false, ?format=pdf -> pdf_unavailable).
+        # Override : `FORGE_TOOLS_PROFILE=mini docker compose -f docker-compose.yml build`.
+        FORGE_TOOLS_PROFILE: "${FORGE_TOOLS_PROFILE:-full}"
+        # Pins repropagés au Dockerfile (cohérence build reproductible).
+        HTTPX_VERSION: "1.6.9"
+        NUCLEI_VERSION: "3.3.7"
+        SUBFINDER_VERSION: "2.6.7"
+    image: forge:0.0.1
+    container_name: forge
+    restart: unless-stopped
+    # ENTRYPOINT/CMD hérités de l'image (Dockerfile) : tini en PID1 (reaping) + `forge`. AUCUN
+    # override ici : le scope serveur est OPTIONNEL. S'il est absent (aucun bind scope.json), la console
+    # démarre proprement en fail-closed (load_server_scope -> in_scope vide, rien lançable) et l'assistant
+    # web définit le périmètre de l'engagement #1. Pas de pré-étape, pas de fichier hôte requis.
+    # Secrets & overrides d'env : token bearer, hashes argon2id viewer/opérateur,
+    # URLs des services pilotés. Fichier gitignored (cf. .gitignore : *.env).
+    # Créer .env à partir des variables documentées dans le Dockerfile.
+    # `required: false` = absence tolérée (boot sans secrets => token généré au boot,
+    # rôles non provisionnés => C2 fermé ; cohérent avec l'inertie par défaut).
+    env_file:
+      - path: .env
+        required: false
+    # RÉSEAU HÔTE (make-or-break) : le service partage la PILE RÉSEAU DE L'HÔTE. C'est VOULU — un scanner
+    # red-team déployé sur le réseau d'un client a besoin d'une PORTÉE SORTANTE large (joindre le LAN client
+    # pour le scan AUTORISÉ, sans NAT/bridge Docker qui masquerait/altérerait les paquets). CONTREPARTIE
+    # CRITIQUE : sous `network_mode: host`, le mappage `ports:` est IGNORÉ — l'adresse de BIND de la console
+    # (FORGE_CONSOLE_ADDR ci-dessous) devient la SEULE barrière d'exposition entrante. On la met donc en
+    # LOOPBACK STRICT (127.0.0.1) : la console (UI+API) n'est joignable QUE depuis la machine hôte, JAMAIS
+    # depuis le LAN client. Bilan : SORTANT large (scan) ⊕ ENTRANT loopback-only (surface d'attaque nulle sur
+    # le LAN). Le scan de cibles PRIVÉES/LAN/loopback reste par ailleurs verrouillé par la politique réseau à
+    # DEUX portes (master global + opt-in par engagement, fail-closed) — cf. console (settings.network.allow_private).
+    network_mode: host
+    environment:
+      # BIND LOOPBACK STRICT (127.0.0.1, PAS 0.0.0.0) — obligatoire sous `network_mode: host` : la console
+      # n'écoute QUE sur l'interface loopback de l'hôte, donc JAMAIS exposée sur une interface du LAN client.
+      # Mettre 0.0.0.0 ici l'exposerait sur TOUTES les interfaces hôte (= joignable depuis le LAN client), la
+      # vulnérabilité EXACTE que ce durcissement empêche. Accès distant légitime => reverse-proxy TLS + auth
+      # sur l'hôte, jamais un bind 0.0.0.0 nu.
+      FORGE_CONSOLE_ADDR: "127.0.0.1:7100"
+      FORGE_CONSOLE_DB: "/data/db/forge.db"
+      FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
+      FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
+      FORGE_PKG_DIR: "/opt/forge"
+      FORGE_PYTHON: "python3"
+      FORGE_RUN_TIMEOUT: "3600"
+
+      # --- Outillage opérateur SANS rebuild : ajouter des outils PENDANT un pentest, sans redémarrage -----
+      # (voir le bloc `volumes:` plus bas). Ces env n'activent QUE les dossiers Python/spec ; les binaires
+      # de `./tools` sont, eux, déjà sur le PATH de l'image (aucune env requise). FORGE_TOOLSPECS est ON PAR
+      # DÉFAUT (voie GOUVERNÉE sans code) : un ToolSpec déposé dans ./toolspecs est chargé à la re-sonde
+      # (« Rafraîchir modules » / POST /api/modules/refresh). Sa valeur est FUSIONNÉE par la console avec le
+      # dir server-managed des outils ajoutés par l'UI (probe_toolspecs_env, cf. console/src/tools.rs) → les
+      # deux coexistent. FORGE_PLUGINS reste OPT-IN (code Python arbitraire — décommenter avec son bind).
+      FORGE_TOOLSPECS: "/opt/toolspecs"        # ToolSpecs déclaratifs JSON/YAML (gouvernés, zéro code ; fusionnés au dir server-managed) — ON par défaut
+      #   FORGE_PLUGINS: "/opt/forge/plugins"    # modules Python @register (CODE ARBITRAIRE — haute confiance opérateur) — OPT-IN
+
+      # --- Couche accès/évasion (BRING-YOUR-OWN) -------------------------------------------
+      # Contrat : un service HTTP écoutant sur :8080. Forge n'en fournit AUCUNE image — cf. le stub
+      # commenté `browser-automation` en bas de fichier. Ce nom d'hôte ne résout QUE si tu as
+      # décommenté ce stub ET lancé `docker compose --profile browser up`. Sinon le connecteur
+      # évasion sonde à fire-time, ne joint personne, et s'auto-neutralise : les modules `evasion.*`
+      # sont alors INDISPONIBLES par conception. Aucun `depends_on` dur → la console démarre seule.
+      FORGE_BROWSER_URL: "http://browser-automation:8080"
+
+      # --- Connecteurs opérateur (BRING-YOUR-OWN, vide = inerte à fire-time) ----------------
+      # Forge PILOTE des outils standards que l'opérateur exécute déjà ; il n'embarque AUCUNE
+      # capacité offensive. Pointer vers TES services (souvent hors compose). Secrets → `.env`,
+      # jamais ici. Stubs profilés ["msf"]/["burp"] en bas de fichier (BYO images).
+      #   MSF_RPC_HOST: "msfrpcd"          # ou l'hôte réel
+      #   MSF_RPC_PORT: "55553"
+      #   MSF_RPC_USER: "msf"
+      #   MSF_RPC_SSL:  "true"
+      #   MSF_RPC_PASS: ""                 # [SECRET] inline → .env  (PRÉFÉRÉ : MSF_RPC_PASS_FILE, cf. bloc `secrets:` en bas)
+      #   MSF_RPC_PASS_FILE: "/run/secrets/msf_rpc_pass"   # Docker secret : l'env porte un CHEMIN, le secret vit dans un fichier root-owned monté
+      #   BURP_API_URL: "http://burp:1337"
+      #   BURP_API_KEY: ""                 # [SECRET] inline → .env  (PRÉFÉRÉ : BURP_API_KEY_FILE)
+      #   BURP_API_KEY_FILE: "/run/secrets/burp_api_key"   # Docker secret (idem)
+
+      # --- Source de détection (boucle purple) : SETTINGS-DRIVEN d'abord -------------------
+      # La source BLUE (SIEM/IDS/pare-feu) se configure de préférence dans l'UI (wizard 1er boot
+      # ou Administration → Source de détection ; stockée write-only dans settings.detection_source).
+      # AUCUNE infra n'est codée en dur. Modèle + préréglages (CrowdSec/FortiGate/pfSense/OPNsense/
+      # Elastic/OpenSearch/fichier/exec) : docs/DETECTION.md. Repli COLLECTEUR (kinds messy en
+      # https/mTLS/exec) via ENV JSON (jamais en argv) — décommenter seulement si pilotage hors-UI :
+      #   FORGE_DETECTION_SOURCE: '{"kind":"crowdsec","endpoint":"http://crowdsec:8080/v1/alerts","auth":{"type":"bearer","secret":"..."}}'  # [SECRET] → .env
+      #
+      # Préréglage LEGACY kind=plume (rétro-compat ; utilisé SEULEMENT si settings.detection_source
+      # est absent). Vide = boucle purple OFF/fail-open lisible (source_reachable:false, aucune
+      # métrique inventée). cf. docs/PURPLE_PREREQS.md :
+      #   PLUME_URL:   "http://plume-internal:PORT"   # http:// interne uniquement (pas de TLS côté console)
+      #   PLUME_TOKEN: "<base64 user:pass>"           # [SECRET] inline → .env (Basic auth vers Plume)
+      #   PLUME_TOKEN_FILE: "/run/secrets/plume_token"  # PRÉFÉRÉ : Docker secret (l'env porte un CHEMIN, pas le token)
+      #   FORGE_DETECTION_SOURCE_FILE: "/run/secrets/detection_source"  # le JSON porteur du secret peut aussi vivre dans un fichier monté
+
+      # --- Chiffrement AU REPOS (image opt-in `--features encryption`) ---------------------
+      # UNIQUEMENT si tu construis l'image chiffrée (forge:0.0.1-encryption, cf.
+      # docs/MIGRATION.md Runbook B). La console lit FORGE_DB_KEY au boot et émet `PRAGMA key`
+      # AVANT toute requête (contrat SQLCipher). Sans clé correcte → base illisible (fail-closed).
+      # Dans le build PAR DÉFAUT ce hook N'EXISTE PAS (base en clair) → la variable est ignorée.
+      #   FORGE_DB_KEY: "${FORGE_DB_KEY:-}"           # [SECRET] inline → .env ; JAMAIS commité
+      #   FORGE_DB_KEY_FILE: "/run/secrets/db_key"    # PRÉFÉRÉ : Docker secret — la clé SQLCipher vit dans un fichier root-owned, pas « à côté de la porte »
+
+      # --- Sauvegardes chiffrées programmées (offsite) -------------------------------------
+      # La POLITIQUE (activation/intervalle/rétention/offsite rclone|exec) se règle dans l'UI
+      # (Administration → Sauvegarde) ou `POST /api/backup/policy` — rien n'est codé en dur. Le
+      # scheduler en-console lit ces 2 knobs d'environnement ; l'archive est TOUJOURS chiffrée
+      # (argon2id + XChaCha20-Poly1305). Détails/restore/offsite : docs/BACKUP.md.
+      #   FORGE_BACKUP_TICK_SECS:  "60"               # période de réveil du scheduler (défaut 60s)
+      #   FORGE_BACKUP_PASSPHRASE: ""                 # [SECRET] inline → .env ; nom d'ENV référencé par policy.passphrase_env
+      #   FORGE_BACKUP_PASSPHRASE_FILE: "/run/secrets/backup_passphrase"  # PRÉFÉRÉ : Docker secret — pointe policy.passphrase_env sur FORGE_BACKUP_PASSPHRASE et fournis le fichier
+      #
+      # --- Indirection `*_FILE` (secrets Docker/k8s) — « la clé pas à côté de la porte » --------
+      # TOUT secret ci-dessus (FORGE_CONSOLE_TOKEN, FORGE_DB_KEY, FORGE_BACKUP_PASSPHRASE, PLUME_TOKEN,
+      # MSF_RPC_PASS, BURP_API_KEY, FORGE_DETECTION_SOURCE, FORGE_LEDGER_SIGNER_CREDENTIAL,
+      # FORGE_LEDGER_PKCS11_PIN, FORGE_COMPLIANCE_ARCHIVE_KEY) accepte un JUMEAU `<VAR>_FILE` : si `<VAR>`
+      # est absente/vide et `<VAR>_FILE` pointe un fichier LISIBLE, la valeur est lue depuis ce fichier
+      # (newline de fin retiré). L'env ne porte alors qu'un CHEMIN, le secret vit dans un fichier monté
+      # root-owned — jamais en clair dans un `.env` posé à côté de l'app. Voir le bloc `secrets:` en bas
+      # + docs/SECRETS.md. Rétro-compat : renseigner `<VAR>` en direct reste supporté (l'inline gagne).
+      #   FORGE_CONSOLE_TOKEN_FILE: "/run/secrets/console_token"
+      #   FORGE_LEDGER_SIGNER_CREDENTIAL_FILE: "/run/secrets/signer_credential"
+      #   FORGE_LEDGER_PKCS11_PIN_FILE: "/run/secrets/pkcs11_pin"
+      #   FORGE_COMPLIANCE_ARCHIVE_KEY_FILE: "/run/secrets/archive_key"
+    # ports: — VOLONTAIREMENT RETIRÉ. Sous `network_mode: host` le mappage de ports est IGNORÉ par Docker
+    # (le conteneur partage déjà la pile réseau hôte : le port 7100 « existe » directement sur l'hôte). Le
+    # laisser donnerait une fausse impression de confinement (« mappé sur 127.0.0.1 ») alors que SEULE
+    # l'adresse de bind (FORGE_CONSOLE_ADDR=127.0.0.1:7100) gouverne réellement l'exposition entrante. Le
+    # loopback-only est donc garanti par le BIND, pas par ce mappage.
+    # ports:
+    #   - "127.0.0.1:7100:7100"   # IGNORÉ sous host-net — cf. FORGE_CONSOLE_ADDR (bind loopback strict)
+    volumes:
+      # Persistance hors cycle de vie du conteneur (dont le scope/ROE de l'engagement #1, stocké en DB).
+      - forge-db:/data/db
+      - forge-ledger:/data/ledger
+      # PÉRIMÈTRE (ROE) : PAR DÉFAUT non monté → aucun fichier hôte requis. L'engagement #1 démarre avec un
+      # scope VIDE (fail-closed) et l'assistant web (ou l'éditeur d'engagement) le renseigne — persisté en DB.
+      # OPTIONNEL : pour amorcer #1 depuis un fichier hôte AVEC AUTORISATION, décommenter la ligne suivante
+      # et créer scope.json à la racine du dépôt (`cp scope.example.json scope.json`, puis éditer).
+      # Absent = fail-closed.
+      # - ./scope.json:/data/scope/scope.json:ro
+      #
+      # --- OUTILLAGE OPÉRATEUR SANS REBUILD — AJOUTER DES OUTILS PENDANT UN PENTEST, SANS REDÉMARRAGE -------
+      # Un red-teamer itère sur beaucoup d'outils. Les deux voies SÛRES (a)+(c) sont MONTÉES PAR DÉFAUT (`:ro`)
+      # pour qu'on puisse toujours DÉPOSER un outil à chaud : la disponibilité est vérifiée à fire-time
+      # (`runner.available`→`shutil.which`), donc un binaire déposé dans `./tools` est utilisable au PROCHAIN
+      # run SANS rien redémarrer, et un ToolSpec déposé dans `./toolspecs` apparaît après « Rafraîchir modules »
+      # (POST /api/modules/refresh). Les dossiers hôte existent (tracked via .gitkeep) → le bind par défaut ne
+      # crée PAS de dossier root-owned, et un dossier VIDE monté est inoffensif (aucun outil chargé tant que
+      # rien n'est déposé). Le conteneur tourne en user non-root `forge` (uid 10001) : un dossier hôte 0755
+      # (défaut) est lisible en `:ro`. On NE fait JAMAIS `docker build`/`down`/`up` pour ajouter un outil.
+      #
+      #  (a) ./tools → /opt/tools [DÉFAUT ON] : binaires OU scripts auto-contenus exécutables (shebang + `chmod
+      #      +x`). /opt/tools est DÉJÀ sur le PATH de l'image → `runner.tool` les résout via `shutil.which` au
+      #      run (un ToolSpec `binary: myfuzzer` s'exécute dès que `./tools/myfuzzer` existe). Ramassé sur
+      #      PATH SANS redémarrage. ⚠️ OPÉRATEUR-DE-CONFIANCE : vous exécutez ce que vous montez (binaires/
+      #      scripts arbitraires que VOUS choisissez). La gouvernance ToolSpec (scope-guard fail-closed, argv
+      #      no-shell, allowlist de drapeaux) borne COMMENT l'outil est invoqué — pas ce que le binaire fait.
+      - ./tools:/opt/tools:ro
+      #
+      #  (c) ./toolspecs → /opt/toolspecs [DÉFAUT ON] (env FORGE_TOOLSPECS ON par défaut plus haut) : ToolSpecs
+      #      déclaratifs JSON/YAML — ZÉRO code, gouvernés EXACTEMENT comme un module natif. Fusionnés avec le
+      #      dossier server-managed (vos specs UI restent chargés). Chargés à la re-sonde du catalogue.
+      - ./toolspecs:/opt/toolspecs:ro
+      #
+      #  (b) ./plugins → /opt/forge/plugins [OPT-IN — décommenter ce bind ET FORGE_PLUGINS plus haut] : modules
+      #      Python `@register`. ⚠️ HAUTE CONFIANCE — CODE PYTHON ARBITRAIRE exécuté dans le process moteur ; à
+      #      réserver à des plugins dont vous maîtrisez la source. Reste OPT-IN (contrairement à (a)/(c) qui sont
+      #      de la donnée déclarative/exécutable choisie) : l'opérateur l'active EXPLICITEMENT. L'activer est la
+      #      SEULE exception qui exige un `docker compose up` de recréation one-shot (on ne peut pas ajouter un
+      #      montage à un conteneur déjà lancé) — d'où le choix de garder (a)/(c) ON pour ne jamais bloquer en
+      #      plein pentest. Chargés au boot / à la re-sonde du catalogue.
+      # - ./plugins:/opt/forge/plugins:ro
+    # networks: — RETIRÉ pour le service forge : `network_mode: host` est INCOMPATIBLE avec un réseau Docker
+    # nommé (Compose refuserait « conflicting options »). La console utilise directement la pile hôte. Le
+    # réseau `forge-net` reste défini plus bas pour les services OPTIONNELS (browser-automation/postgres).
+    # ⚠️ Corollaire host-net : la résolution par NOM DE SERVICE (`browser-automation`, `postgres`) ne
+    # fonctionne PLUS pour la console — pointer les connecteurs optionnels vers `127.0.0.1:<port>` (le service
+    # devant alors publier son port sur l'hôte) si on les active. Named volumes (forge-db/forge-ledger) :
+    # INCHANGÉS, ils fonctionnent normalement sous host-net (le montage n'a rien à voir avec le réseau).
+    # AUCUN `depends_on` : les services optionnels (browser/msf/burp) sont derrière des PROFILES et
+    # ne sont PAS requis au boot. `docker compose up` démarre la console SEULE ; chaque connecteur
+    # sonde son service à fire-time et s'auto-neutralise si injoignable (inertie par défaut). Ne PAS
+    # remettre un `depends_on` sur une image qu'un client n'aura pas — ça casserait un `up` nu.
+    healthcheck:
+      # Sonde de LIVENESS réelle : GET /health -> attend HTTP 200 (pas un simple TCP port-open,
+      # qui passerait même si le routeur HTTP est mort). /health est PUBLIC mais SOUS host_guard
+      # (anti-DNS-rebinding) : viser 127.0.0.1 pose `Host: 127.0.0.1:7100` -> host_guard retire le
+      # port -> `127.0.0.1`, dans l'allowlist PAR DÉFAUT (localhost/127.0.0.1/::1). Un Host étranger
+      # -> 421 -> unhealthy (vérifié en exécutant le binaire). python3 est présent dans l'image.
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7100/health', timeout=3).getcode()==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # browser-automation — couche ACCÈS/ÉVASION (OPTIONNEL, profil "browser", BRING-YOUR-OWN).
+  # ---------------------------------------------------------------------------
+  # Forge PILOTE un service d'automatisation navigateur, il n'en fournit AUCUNE image. Le CONTRAT
+  # est minimal : un service HTTP qui écoute sur :8080, joignable depuis la console via
+  # FORGE_BROWSER_URL (cf. le bloc `environment:` ci-dessus). Sans ce service, les modules
+  # `evasion.*` restent INDISPONIBLES — PAR CONCEPTION, pas par panne (available:false, dégradation
+  # propre) ; cf. docs/TOOLS.md.
+  # Ce STUB (commenté) documente le câblage si tu veux l'orchestrer ici avec TA propre image :
+  #
+  # browser-automation:
+  #   profiles: ["browser"]
+  #   image: <ton-image-automatisation-navigateur>   # non fourni par Forge
+  #   container_name: forge-browser
+  #   restart: unless-stopped
+  #   # Service interne uniquement : pas de port publié, joignable via le réseau compose
+  #   # à http://browser-automation:8080 (cf. FORGE_BROWSER_URL ci-dessus).
+  #   expose: ["8080"]
+  #   networks: [forge-net]
+
+  # ---------------------------------------------------------------------------
+  # msfrpcd — connecteur msf.module (OPTIONNEL, profil "msf", BRING-YOUR-OWN).
+  # ---------------------------------------------------------------------------
+  # Forge PILOTE msfrpcd, il n'embarque PAS Metasploit (aucune image fournie). La plupart des
+  # opérateurs lancent msfrpcd hors compose (VM/outillage existant) et pointent MSF_RPC_* dessus.
+  # Ce STUB (commenté) documente le câblage si tu veux l'orchestrer ici avec TA propre image :
+  #
+  # msfrpcd:
+  #   profiles: ["msf"]
+  #   image: <ton-image-metasploit>          # non fourni par Forge (licence/outillage opérateur)
+  #   container_name: forge-msfrpcd
+  #   restart: unless-stopped
+  #   command: ["msfrpcd","-a","0.0.0.0","-p","55553","-U","msf","-P","${MSF_RPC_PASS}","-S"]
+  #   expose: ["55553"]
+  #   networks: [forge-net]
+  #   # puis dans forge.environment : MSF_RPC_HOST=msfrpcd (+ MSF_RPC_PASS via .env)
+
+  # ---------------------------------------------------------------------------
+  # burp — connecteur burp.scan (OPTIONNEL, profil "burp", BRING-YOUR-OWN).
+  # ---------------------------------------------------------------------------
+  # REST API Burp Suite Pro/Enterprise (licence requise, non fournie). Souvent hors compose.
+  # Ce STUB (commenté) documente le câblage si tu veux l'orchestrer ici avec TA propre image :
+  #
+  # burp:
+  #   profiles: ["burp"]
+  #   image: <ton-image-burp-rest>           # non fourni par Forge (licence PortSwigger)
+  #   container_name: forge-burp
+  #   restart: unless-stopped
+  #   expose: ["1337"]
+  #   networks: [forge-net]
+  #   # puis dans forge.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via .env)
+
+  # ---------------------------------------------------------------------------
+  # postgres — backend ENTERPRISE (OPTIONNEL, profil "postgres", Stage 4 HA/multi-instance).
+  # ---------------------------------------------------------------------------
+  # EXCLU d'un `docker compose up` NU (profil "postgres") => le déploiement PAR DÉFAUT reste SQLite,
+  # INCHANGÉ. Pour l'activer, il faut À LA FOIS ce profil ET l'override qui recompile la console avec la
+  # feature `store-postgres` et pointe FORGE_DB_URL sur ce service (cf. docs/DEPLOYMENT.md § Postgres) :
+  #     docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+  #                    --profile postgres up -d --build
+  # Sans l'override, la console (build SQLite) IGNORE ce Postgres. Credentials : défauts d'ÉVAL
+  # (forge/forge) — à SURCHARGER via .env (FORGE_PG_USER/FORGE_PG_PASSWORD/FORGE_PG_DB) en prod.
+  postgres:
+    profiles: ["postgres"]
+    # Pinned to an immutable digest (resolved via `docker buildx imagetools inspect postgres:16`,
+    # 2026-07-18). Tag kept alongside for readability; the digest is authoritative/tamper-proof.
+    image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    container_name: forge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${FORGE_PG_USER:-forge}"
+      POSTGRES_PASSWORD: "${FORGE_PG_PASSWORD:-forge}"
+      POSTGRES_DB: "${FORGE_PG_DB:-forge}"
+    volumes:
+      - forge-pg:/var/lib/postgresql/data
+    # Service INTERNE : joignable via le réseau compose à `postgres:5432` (cf. FORGE_DB_URL de l'override).
+    # Pas de port publié par défaut (ne pas exposer Postgres publiquement).
+    expose:
+      - "5432"
+    networks:
+      - forge-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FORGE_PG_USER:-forge} -d ${FORGE_PG_DB:-forge}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  forge-net:
+    driver: bridge
+
+volumes:
+  forge-db:
+  forge-ledger:
+  # Données Postgres (utilisé UNIQUEMENT sous le profil "postgres" + l'override — cf. docs/DEPLOYMENT.md).
+  forge-pg:
+
+# ---------------------------------------------------------------------------
+# secrets — INDIRECTION `*_FILE` (Docker secrets). OPTIONNEL, tout commenté.
+# ---------------------------------------------------------------------------
+# Standard 12-factor : « la clé ne doit pas être posée à côté de la porte ». Au lieu d'un secret en
+# clair dans .env, on monte chaque secret comme FICHIER root-owned sous /run/secrets/<nom> et
+# on pointe la variable `<VAR>_FILE` dessus (cf. bloc `environment:` de la console). La console (Rust)
+# et le moteur (Python) résolvent alors `<VAR>` puis, à défaut, `<VAR>_FILE` (fichier lu, newline de
+# fin retiré). Pour ACTIVER : décommenter le bloc `secrets:` ci-dessous, la clause `secrets:` du
+# service `forge`, et les lignes `*_FILE` correspondantes.
+# OÙ VIVENT CES FICHIERS : `./secrets/<nom>`, un dossier que tu crées toi-même (`mkdir -p secrets`) —
+# il n'est PAS livré. `.gitignore` ignore `secrets/` EN ENTIER, sans exception : rien de ce que tu y
+# déposes ne peut être committé. Vérifier avant tout premier commit :
+#     git check-ignore -v secrets/console_token      # doit répondre
+# Alternatives : un chemin ABSOLU hors du dépôt (`file: /etc/forge/secrets/<nom>`, chmod 0400), ou
+# `external: true` + `docker secret create` en mode Swarm. Voir docs/SECRETS.md.
+#
+# secrets:
+#   console_token:      { file: ./secrets/console_token }      # FORGE_CONSOLE_TOKEN_FILE
+#   db_key:             { file: ./secrets/db_key }             # FORGE_DB_KEY_FILE (image --features encryption)
+#   backup_passphrase:  { file: ./secrets/backup_passphrase }  # FORGE_BACKUP_PASSPHRASE_FILE
+#   plume_token:        { file: ./secrets/plume_token }        # PLUME_TOKEN_FILE
+#   msf_rpc_pass:       { file: ./secrets/msf_rpc_pass }       # MSF_RPC_PASS_FILE
+#   burp_api_key:       { file: ./secrets/burp_api_key }       # BURP_API_KEY_FILE
+#   signer_credential:  { file: ./secrets/signer_credential }  # FORGE_LEDGER_SIGNER_CREDENTIAL_FILE
+#   pkcs11_pin:         { file: ./secrets/pkcs11_pin }         # FORGE_LEDGER_PKCS11_PIN_FILE
+#   archive_key:        { file: ./secrets/archive_key }        # FORGE_COMPLIANCE_ARCHIVE_KEY_FILE
+#
+# Puis DANS le service `forge` (à côté de `env_file:` / `environment:`), déclarer quels secrets sont
+# montés (Docker les expose sous /run/secrets/<nom>, mode 0400 root) :
+#   secrets:
+#     - console_token
+#     - backup_passphrase
+#     - plume_token

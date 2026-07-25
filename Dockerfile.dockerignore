@@ -1,0 +1,109 @@
+# =============================================================================
+# Forge — ignore-file SPÉCIFIQUE au Dockerfile (fonctionnalité BuildKit).
+# =============================================================================
+#
+# POURQUOI ce nom/emplacement ?
+#   Le CONTEXTE de build est la RACINE DE CE DÉPÔT (clone standalone ; le crate console
+#   résout guatx-core via git-dep publique, aucun sibling requis) :
+#
+#       docker build -t forge:0.0.1 .
+#
+#   BuildKit résout, à côté du Dockerfile désigné par `-f`, un ignore-file nommé
+#   `<Dockerfile>.dockerignore` et le PRÉFÈRE à un `.dockerignore` racine quand il
+#   existe. (Docker moderne = BuildKit par défaut ; requis de toute façon par
+#   `# syntax=...` + les cache-mounts du Dockerfile.)
+#
+# PORTÉE DES MOTIFS : relatifs à la RACINE DU CONTEXTE = la racine du dépôt.
+#
+# BUT : ne PAS expédier au daemon les ~1.6 GB de cache Cargo, ni aucune DB / ledger /
+#   secret / donnée d'engagement. On GARDE console/, forge/ (package python), VERSION,
+#   pyproject.toml, scope.example.json (cf. COPY du Dockerfile).
+#
+# Garder SYNCHRONISÉ avec le `.dockerignore` racine (miroir pour les builds legacy).
+# =============================================================================
+
+# --- Cache de build Rust (~1.6 GB) : jamais expédié, reconstruit via cache-mount ---
+console/target/
+**/target/
+
+# --- Override cargo local (redirige la git-dep guatx-core vers une copie locale) ---
+**/.cargo/config.toml
+
+# --- Bases SQLite + WAL/SHM (données/console) : jamais dans le contexte ---
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+
+# --- Ledger d'engagement & JSONL (actions sur cibles réelles) ---
+# Exception : l'engagement de référence SYNTHÉTIQUE (hôtes `.example`, IP RFC 5737,
+# aucune cible ni donnée réelle) est un artefact livré du projet — le ré-inclure,
+# sinon un `COPY examples/` embarquerait un jeu de données silencieusement tronqué.
+**/*.jsonl
+!examples/reference-engagement/
+!examples/reference-engagement/**
+
+# --- Caches Python ---
+**/__pycache__/
+**/*.py[cod]
+
+# --- VCS ---
+**/.git
+**/.git/**
+
+# --- État Forge & sauvegardes ---
+*.forge
+**/*.forge
+**/backups/
+
+# --- Secrets / autorisation d'engagement (jamais requis au build ;
+#     seul scope.example.json est COPY'é par le Dockerfile) ---
+**/*.env
+**/.env
+**/.env.*
+!.env.example
+scope.json
+targets.json
+actions.json
+**/secrets/
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.pub
+**/*.pub
+*.ed25519
+**/*.ed25519
+**/*.crt
+**/*.cer
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.ppk
+**/*.age
+**/*.kdbx
+**/*.token
+**/*_token
+**/kubeconfig
+**/*.kubeconfig
+**/.kube/
+**/id_rsa*
+**/id_ecdsa*
+**/id_ed25519*
+**/credentials
+**/credentials.json
+**/creds.json
+**/client_secret*.json
+**/service-account*.json
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/*.sops.yaml
+**/*.enc.yaml
+**/secrets.y*ml
+**/sealed-secrets.yaml
+
+# Note : NE PAS ajouter `scope.example.json` ni `pyproject.toml` ici : ils sont COPY'és
+# par le Dockerfile.

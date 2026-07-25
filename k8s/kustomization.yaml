@@ -1,0 +1,27 @@
+# Forge — HA topology kustomization. `kubectl apply -k k8s/` applies everything in order.
+# =============================================================================================
+# ⚠️ SECRETS ARE NEVER IN THE APPLY PATH. 10-secrets.example.yaml is DELIBERATELY absent from
+# `resources` below, and it is a SHAPE REFERENCE only — never apply it. Before applying, the
+# operator MUST create the three Secrets `forge-db`, `forge-auth`, `forge-objectstore` in the
+# `forge` namespace out-of-band, with values generated locally:
+#     kubectl -n forge create secret generic forge-auth \
+#         --from-literal=FORGE_CONSOLE_TOKEN="$(openssl rand -hex 16)" \
+#         --from-literal=FORGE_CONSOLE_PASS_HASH="$(forge hashpw <pw>)" \
+#         --from-literal=FORGE_CONSOLE_OPERATOR_HASH=''
+# …or the equivalent via SealedSecrets / ExternalSecrets / SOPS. See 10-secrets.example.yaml for the
+# exact key names each workload expects, and docs/DEPLOYMENT.md §k8s.
+# The workloads reference those Secret names, so without them the console/postgres/minio pods stay
+# Pending on the missing Secret — which is the intended fail-safe (no silent default creds).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forge
+resources:
+  # 10-secrets.example.yaml intentionally OMITTED (shape reference, never applied) — create the real
+  # Secrets out-of-band first (see header).
+  - 00-namespace.yaml
+  - 11-config.yaml
+  - 20-postgres.yaml
+  - 30-minio.yaml
+  - 40-console.yaml
+  - 50-ingress.yaml
+  - 60-networkpolicies.yaml

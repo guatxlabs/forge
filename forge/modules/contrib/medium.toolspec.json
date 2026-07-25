@@ -1,0 +1,30 @@
+{
+  "kind": "custom.dirfuzz",
+  "vuln_class": "ContentDiscovery",
+  "binary": "ffuf",
+  "argv_template": [
+    "-u", "{target_url}/FUZZ",
+    "-w", "{param:wordlist}",
+    "-t", "{param:threads:40}",
+    "-rate", "{param:rate:0}",
+    "-mc", "{param:match_codes:200,204,301,302,401,403}",
+    "{args}"
+  ],
+  "params_schema": [
+    { "name": "wordlist",    "type": "text",   "label": "wordlist (chemin)" },
+    { "name": "threads",     "type": "number", "label": "threads", "default": 40 },
+    { "name": "rate",        "type": "number", "label": "rate (req/s, 0 = illimité)", "default": 0 },
+    { "name": "match_codes", "type": "text",   "label": "codes HTTP à matcher", "default": "200,204,301,302,401,403" }
+  ],
+  "flag_allowlist": ["-u", "-w", "-t", "-rate", "-mc", "-fc", "-fs", "-e", "--timeout"],
+  "parser": "lines",
+  "phase": "access",
+  "capability": "active",
+  "attck_tactic": "Reconnaissance",
+  "mitre": "T1595.003",
+  "cwe": "CWE-22",
+  "hit_status": "tested",
+  "severity": "INFO",
+  "timeout": 600,
+  "description": "MOYEN — params UI typés (wordlist/threads/rate/codes) + extra_args allowlistés + mot-clé positionnel FUZZ. Enrobe `ffuf` : le formulaire de Lancement rend params_schema dynamiquement ; les valeurs deviennent des éléments d'argv (no-shell). `{args}` s'étend en extra-args bornés par flag_allowlist (tout flag hors liste refusé fail-closed). `FUZZ` est le mot-clé positionnel injecté dans l'URL. Charge via FORGE_TOOLSPECS / `--toolspec` / le formulaire UI (coller ce JSON). Namespace `custom.*` obligatoire."
+}

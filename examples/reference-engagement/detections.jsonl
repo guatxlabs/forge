@@ -1,0 +1,4 @@
+{"mitre":"T1595","count":3,"first_ts":1782475440,"rule":"web-scan-burst","source":"plume-lab (DEMO FIXTURE — not a real SOC)"}
+{"mitre":"T1046","count":5,"first_ts":1782475530,"rule":"portscan-horizontal","source":"plume-lab (DEMO FIXTURE — not a real SOC)"}
+{"mitre":"T1190","count":2,"first_ts":1782476280,"rule":"waf-idor-anomaly","source":"plume-lab (DEMO FIXTURE — not a real SOC)"}
+{"mitre":"T1212","count":1,"first_ts":1782476760,"rule":"reset-token-bruteforce","source":"plume-lab (DEMO FIXTURE — not a real SOC)"}

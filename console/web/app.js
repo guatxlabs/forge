@@ -1,0 +1,35 @@
+// Forge — console entry (ES module). Imports core + views for side effects, then boots.
+import './js/core/dom.js';
+import './js/core/api.js';
+import './js/core/state.js';
+import './js/views/explore.js';
+import './js/core/ui.js';
+import './js/core/help.js';
+import './js/views/dashboards.js';
+import './js/views/modules.js';
+import './js/views/techniques.js';
+import './js/views/workflows.js';
+import './js/views/findings.js';
+import './js/views/findings-library.js';
+import './js/views/coverage.js';
+import './js/views/campaigns.js';
+import './js/views/roe.js';
+import './js/views/ledger.js';
+import './js/views/overview.js';
+import './js/views/launch/index.js';
+import './js/views/engagements.js';
+import './js/views/tenancy.js';
+import './js/views/identity.js';
+import './js/views/compliance.js';
+import './js/core/presence.js';
+import './js/core/notifications.js';
+import './js/core/auth.js';
+import './js/views/import.js';
+import './js/views/reports.js';
+import './js/views/admin.js';
+import './js/core/router.js';
+import { loadVersion } from './js/core/router.js';
+import { bootApp } from './js/core/auth.js';
+
+loadVersion();
+bootApp();

@@ -1,0 +1,323 @@
+# Forge — console tier. RWX ledger PVC + Deployment (N replicas) + ClusterIP Service.
+# =============================================================================================
+# IMAGE: build the console with the Postgres store (and object-store, if used) feature ON:
+#     docker build -f Dockerfile --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
+#         -t <registry>/forge:0.0.1 .   # build context = repo root (git-dep core, no sibling)
+# The DEFAULT (community) image is SQLite-only and will FAIL-CLOSED under FORGE_HA=1 — you MUST use
+# a store-postgres image here. Push it and set the `image:` below to your registry ref.
+#
+# LEADER MODEL (Wave A/B/C): every replica is identical. They self-elect ONE run leader via the
+# single-row `leader_lease` (scope='run-worker') in the shared Postgres — the leader executes
+# engagements (one-run-per-engagement, DB-fenced), the others serve UI/API and take over on lease
+# expiry (TTL 45s). There is deliberately NO separate worker Deployment. `leader`/`instance_id` are
+# published on GET /health.
+---
+# Shared, tamper-evident engagement ledger. RWX so every replica mounts the SAME engagement.jsonl.
+# ⚠️ RWX REQUIREMENT: ReadWriteMany needs an RWX-capable StorageClass (NFS / CephFS / EFS /
+# Azure Files / Filestore). Plain block volumes (RWO: EBS, GCE-PD, most CSI defaults) CANNOT satisfy
+# this and the second replica will fail to schedule. See DEPLOYMENT.md §k8s for the RWX-vs-per-
+# instance-ledger-vs-object-store decision — the console serializes its OWN appends per-instance, so
+# a shared file across replicas relies on RWX + accepting the concurrent-append caveat; for a strict
+# multi-writer audit chain prefer a per-instance ledger (StatefulSet + RWO-per-pod) instead.
+# ⚠️ KEY CUSTODY: this shared PVC must carry ONLY the ledger JSONL projection
+# (engagement.jsonl + high-water-mark), NOT the Ed25519 signing key. By default the LOCAL signer writes
+# its private key to `<ledger>.ed25519` next to the ledger — i.e. ONTO this RWX volume, where any pod/
+# sidecar mounting it (or a PVC snapshot) can read the raw signing key. In HA/multi-tenant move the key
+# OFF this volume: (preferred) the off-host PKCS#11 signer, or (fallback) a read-only Secret-mounted key
+# via FORGE_LEDGER_KEY. See the opt-in blocks on the Deployment below + docs/KEY_CUSTODY.md §HA.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forge-ledger
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: <your-rwx-sc>   # REQUIRED: an RWX class (nfs-*, cephfs, efs-sc, azurefile, ...).
+---
+# ClusterIP Service in front of the replicas. sessionAffinity: ClientIP pins a source IP to one
+# replica (belt-and-suspenders for SSE alongside the Ingress cookie affinity in 50-ingress.yaml —
+# per-instance caches + per-instance ledger head make sticky routing the correct posture).
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    app.kubernetes.io/name: console
+  ports:
+    - name: http
+      port: 7100
+      targetPort: 7100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge
+  namespace: forge
+  labels: { app.kubernetes.io/part-of: forge, app.kubernetes.io/name: console }
+spec:
+  replicas: 2   # N replicas — scale freely; the leader lease keeps exactly one run-worker active.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: console
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: forge
+        app.kubernetes.io/name: console
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # MUST match the uid/gid the image actually bakes: the Dockerfile creates `forge` with
+        # `useradd --uid 10001` and chowns /opt/forge /data /opt/tools /opt/toolspecs to it. Running
+        # as any other uid takes EACCES on the RWX ledger mount (engagement.jsonl) and the console
+        # then fails closed. Keep these three in lockstep with the Dockerfile's --uid.
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001      # own the RWX ledger mount + the emptyDir seams.
+      containers:
+        - name: forge
+          # REPLACE with your registry ref of the store-postgres (+object-store) image, DIGEST-PINNED.
+          # ⚠️ FAIL-LOUD PLACEHOLDER — this is NOT a runnable ref. A fresh `kubectl apply` MUST error
+          # (InvalidImageName / ErrImagePull) rather than silently run a stale locally-cached `forge:*`
+          # tag. Build & push the image (see the IMAGE block at the top of this file), then pin it BY
+          # DIGEST (immutable + reproducible), NOT by a mutable :tag:
+          #     image: <registry>/forge@sha256:<64-hex-digest>
+          # Get the digest after push with:  docker inspect --format='{{index .RepoDigests 0}}' <ref>
+          image: REPLACE_ME/forge@sha256:REPLACE_WITH_64_HEX_IMAGE_DIGEST
+          # Always (a digest is immutable, so this only re-verifies; it never runs a stale cache entry).
+          imagePullPolicy: Always
+          # --- Container hardening -------------------------------------------------------------
+          # readOnlyRootFilesystem: true — nothing writes the image rootfs at runtime once the
+          # writable seams below are mounted. The console binary writes ONLY to /data/* (mounted
+          # volumes); the python tool layer (weasyprint PDF rendering, nuclei/httpx/subfinder runs)
+          # writes to $TMPDIR and $HOME — both redirected to emptyDir mounts (/tmp, /home/forge)
+          # with HOME/XDG/TMPDIR env below. The emptyDirs are group-owned via the pod fsGroup:10001,
+          # so uid 10001 can write them regardless of the image's baked-in home ownership.
+          # ⚠️ RESIDUAL VERIFICATION (no cluster available at authoring time): smoke-test
+          #   `?format=pdf` (weasyprint → fontconfig cache under $XDG_CACHE_HOME) and a nuclei run
+          #   (first run syncs templates into $HOME/nuclei-templates). If a tool needs a writable
+          #   path outside /tmp and /home/forge, add an emptyDir for it rather than reverting RO-root.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 7100
+          env:
+            # Bind 0.0.0.0 INSIDE the pod so the ClusterIP Service can reach the container. The image
+            # default is now loopback-strict (127.0.0.1:7100, safe-by-default for `docker run`); a
+            # Service-fronted pod MUST override it back to all-interfaces. Safe here: exposure is gated
+            # by ClusterIP + the default-deny NetworkPolicy + Pod Security Admission — not the bind addr.
+            - name: FORGE_CONSOLE_ADDR
+              value: 0.0.0.0:7100
+            # Redirect all runtime scratch/cache/config to the writable emptyDir seams (required by
+            # readOnlyRootFilesystem: true). HOME → /home/forge emptyDir; TMPDIR → /tmp emptyDir.
+            - name: HOME
+              value: /home/forge
+            - name: TMPDIR
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /home/forge/.cache    # weasyprint/fontconfig font cache lives here.
+            - name: XDG_CONFIG_HOME
+              value: /home/forge/.config    # nuclei/httpx config lives here.
+            # Per-pod identity → lease holder key. fieldRef metadata.name is UNIQUE per replica, so
+            # each replica has a distinct FORGE_INSTANCE_ID (a static value would collide — exactly
+            # the bug to avoid). This is the k8s equivalent of the compose HOSTNAME fallback.
+            - name: FORGE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Postgres DSN (SECRET) — the fail-closed store gate needs it reachable at boot.
+            - name: FORGE_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: forge-db
+                  key: FORGE_DB_URL
+            # Console auth secrets (ingest bearer + argon2id hashes). Stable across replicas.
+            - name: FORGE_CONSOLE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_TOKEN }
+            - name: FORGE_CONSOLE_PASS_HASH
+              valueFrom:
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_PASS_HASH }
+            - name: FORGE_CONSOLE_OPERATOR_HASH
+              valueFrom:
+                secretKeyRef: { name: forge-auth, key: FORGE_CONSOLE_OPERATOR_HASH }
+            # S3/MinIO creds (SECRET) — only consumed when the image is built --features object-store.
+            - name: FORGE_BLOB_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: forge-objectstore, key: FORGE_BLOB_S3_ACCESS_KEY }
+            - name: FORGE_BLOB_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: forge-objectstore, key: FORGE_BLOB_S3_SECRET_KEY }
+            # --- HA LEDGER KEY CUSTODY — pick ONE, both OPT-IN -----------------------------------
+            # By DEFAULT (nothing uncommented) the LOCAL signer writes its Ed25519 key to
+            # `<ledger>.ed25519` on the SHARED forge-ledger RWX PVC (mounted at /data/ledger) — i.e.
+            # the raw signing key sits on a volume every replica/sidecar/snapshot can read. That is
+            # acceptable ONLY for single-tenant lab use. For HA/multi-tenant, uncomment ONE option
+            # AND provision its Secret out-of-band (see 10-secrets.example.yaml for the key names).
+            #
+            # OPTION A (PREFERRED) — OFF-HOST PKCS#11 signer: the private key NEVER touches any pod
+            # volume (lives on an HSM/token). Requires a store-postgres image built with the pkcs11
+            # extra and a PKCS#11 provider `.so` reachable in the container. PIN is env-only (secret).
+            # - name: FORGE_ENTERPRISE_COMPLIANCE
+            #   value: "1"
+            # - name: FORGE_LEDGER_SIGNER
+            #   value: pkcs11
+            # - name: FORGE_LEDGER_PKCS11_MODULE
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_MODULE } }
+            # - name: FORGE_LEDGER_PKCS11_TOKEN_LABEL
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_TOKEN_LABEL } }
+            # - name: FORGE_LEDGER_PKCS11_KEY_LABEL
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_KEY_LABEL } }
+            # - name: FORGE_LEDGER_PKCS11_PIN
+            #   valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_PIN } }
+            #
+            # OPTION B (FALLBACK) — LOCAL signer with the key on a READ-ONLY Secret mount, NOT on the
+            # RWX ledger PVC. FORGE_LEDGER_KEY points at the read-only mount (volume `ledger-key`
+            # below); the pre-generated key is READ (not rewritten) so it never lands on /data/ledger.
+            # - name: FORGE_LEDGER_KEY
+            #   value: /etc/forge/ledger-key/forge.ed25519
+            #
+            # --- `*_FILE` SECRET-AS-FILE indirection — OPT-IN ------------------------------------
+            # Prefer mounting secrets as FILES over injecting their VALUE via secretKeyRef: a
+            # `<VAR>_FILE` env holds a PATH, and the plaintext lives ONLY in a read-only tmpfs Secret
+            # mount (never in the pod's env, `kubectl describe` env dump, or child-process environ).
+            # The console (`secret_from_env`) + engine (`env_secret`) resolve `<VAR>` then `<VAR>_FILE`.
+            # Uncomment together with the `secret-files` volume + volumeMount below AND provision Secret
+            # `forge-secret-files` out-of-band. To use these INSTEAD of the secretKeyRef bearer above,
+            # drop the FORGE_CONSOLE_TOKEN secretKeyRef entry.
+            # - name: FORGE_CONSOLE_TOKEN_FILE
+            #   value: /etc/forge/secrets/console_token
+            # - name: FORGE_BACKUP_PASSPHRASE_FILE
+            #   value: /etc/forge/secrets/backup_passphrase
+            # - name: PLUME_TOKEN_FILE
+            #   value: /etc/forge/secrets/plume_token
+            # - name: FORGE_LEDGER_SIGNER_CREDENTIAL_FILE
+            #   value: /etc/forge/secrets/signer_credential
+            # - name: FORGE_COMPLIANCE_ARCHIVE_KEY_FILE
+            #   value: /etc/forge/secrets/archive_key
+            # - name: FORGE_DB_KEY_FILE                      # image built --features encryption only
+            #   value: /etc/forge/secrets/db_key
+          envFrom:
+            - configMapRef:
+                name: forge-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
+          volumeMounts:
+            - name: db          # local SQLite fallback (unused under Postgres) — per-pod, NOT shared.
+              mountPath: /data/db
+            - name: ledger      # shared RWX audit ledger.
+              mountPath: /data/ledger
+            - name: scope       # inert ROE (read-only).
+              mountPath: /data/scope
+              readOnly: true
+            - name: tmp         # writable scratch (readOnlyRootFilesystem) — tool downloads, temp PDF.
+              mountPath: /tmp
+            - name: home        # writable $HOME — nuclei/httpx config+templates, fontconfig cache.
+              mountPath: /home/forge
+            # OPT-IN (OPTION B): read-only ledger signing key, OFF the shared RWX PVC.
+            # Uncomment together with the FORGE_LEDGER_KEY env above and the `ledger-key` volume below.
+            # readOnly:true keeps the key immutable to the pod (the local signer READS it, never rewrites).
+            # - name: ledger-key
+            #   mountPath: /etc/forge/ledger-key
+            #   readOnly: true
+            # OPT-IN (`*_FILE` secret indirection): secrets mounted as read-only FILES; each `<VAR>_FILE`
+            # env above points at /etc/forge/secrets/<name>. Uncomment with the `secret-files` volume below.
+            # - name: secret-files
+            #   mountPath: /etc/forge/secrets
+            #   readOnly: true
+          # /health is PUBLIC (outside auth_guard) and ALWAYS 200 when the HTTP router is live (it
+          # returns db:"degraded" without failing on a transient DB blip). Host: localhost is in the
+          # default anti-DNS-rebinding allowlist, so the probe is accepted (kubelet would otherwise
+          # send Host: <podIP> → 421 → false unhealthy).
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7100
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7100
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "1000m", memory: "512Mi" }
+      volumes:
+        - name: db
+          emptyDir: {}
+        - name: tmp          # ephemeral scratch for readOnlyRootFilesystem (per-pod).
+          emptyDir: {}
+        - name: home         # ephemeral writable $HOME for readOnlyRootFilesystem (per-pod).
+          emptyDir: {}
+        - name: ledger
+          persistentVolumeClaim:
+            claimName: forge-ledger
+        # OPT-IN (OPTION B): the pre-generated Ed25519 key as a dedicated read-only Secret, so it is
+        # NOT written to / readable from the shared forge-ledger RWX PVC. defaultMode 0440 = read for
+        # OWNER AND GROUP. Group matters: a Secret volume is owned by root and re-grouped to the pod
+        # `fsGroup`, NOT re-owned to `runAsUser` — so 0400 (owner-only) would be UNREADABLE by the
+        # non-root process and the signer would fail. Keep fsGroup == the runAsUser's group (10001).
+        # Uncomment with the volumeMount + env above, and provision Secret `forge-ledger-key`
+        # out-of-band (see 10-secrets.example.yaml for the key name).
+        # - name: ledger-key
+        #   secret:
+        #     secretName: forge-ledger-key
+        #     defaultMode: 0440
+        #     items:
+        #       - key: forge.ed25519
+        #         path: forge.ed25519
+        # OPT-IN (`*_FILE` secret indirection): the `forge-secret-files` Secret projected as FILES, one
+        # file per key under /etc/forge/secrets. defaultMode 0440 = read for OWNER AND GROUP — same
+        # reason as above: the projected files are root-owned and only RE-GROUPED to `fsGroup`, so
+        # 0400 would be unreadable by the non-root process. Uncomment with the volumeMount +
+        # FORGE_*_FILE env above; provision the Secret out-of-band. Add only the keys you actually use.
+        # - name: secret-files
+        #   secret:
+        #     secretName: forge-secret-files
+        #     defaultMode: 0440
+        #     items:
+        #       - { key: console_token,      path: console_token }
+        #       - { key: backup_passphrase,  path: backup_passphrase }
+        #       - { key: plume_token,        path: plume_token }
+        #       - { key: signer_credential,  path: signer_credential }
+        #       - { key: archive_key,        path: archive_key }
+        #       - { key: db_key,             path: db_key }
+        - name: scope
+          configMap:
+            name: forge-scope
+            items:
+              - key: scope.json
+                path: scope.json

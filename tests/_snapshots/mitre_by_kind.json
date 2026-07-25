@@ -1,0 +1,11 @@
+{
+ "access_control.idor": "T1190",
+ "auth.takeover": "T1212",
+ "cors.credentials": "T1539",
+ "demo.fingerprint": "T1595",
+ "origin.find": "T1590.005",
+ "recon.httpx": "T1595",
+ "recon.nmap": "T1046",
+ "ssrf.callback": "T1190",
+ "web.nuclei": "T1595.002"
+}

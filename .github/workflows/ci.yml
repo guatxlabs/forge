@@ -1,0 +1,334 @@
+# Forge — CI (usage AUTORISÉ uniquement, aucun I/O réseau offensif en CI).
+# =============================================================================
+#
+# Jobs :
+#   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
+#   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
+#
+# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.0`
+# (console/Cargo.toml + Cargo.lock épinglé sur le rev du tag). Les jobs cargo la résolvent
+# DIRECTEMENT depuis le repo public — aucun checkout voisin, aucun [patch] : c'est exactement
+# ce qu'un clone standalone fait, donc la CI prouve le build public. (Un `console/.cargo/config.toml`
+# local et gitignoré peut rediriger la git-dep vers une copie locale du crate pour itérer plus vite —
+# build non-locked ; il n'entre jamais en CI ni dans un clone.)
+#
+# Toutes les versions (actions, toolchain Rust, Python) sont PINNÉES pour la
+# reproductibilité.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Annule les runs obsolètes sur une même ref (économie de runners).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python — tests du cœur Forge (stdlib only, aucune dépendance à installer).
+  # ---------------------------------------------------------------------------
+  python:
+    name: python (unittest)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      # Le CŒUR runtime est stdlib-only, mais la SUITE de tests a besoin de pytest (un test contrib
+      # l'importe) + cryptography (les tests ed25519 du ledger l'exigent, sinon repli HMAC → assertions
+      # ed25519 KO). Extra `test` de pyproject — n'ajoute AUCUNE dép au runtime livré.
+      - name: Install test deps (pytest + cryptography)
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      # Garde-fou source-de-vérité-unique : échoue si VERSION, pyproject.toml et Cargo.toml
+      # divergent (cf. scripts/check_version.py / `make check-version`). Placé AVANT les tests
+      # pour fail-fast sur une dérive de version.
+      - name: Version drift check (VERSION == pyproject == Cargo.toml)
+        run: make check-version
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  # ---------------------------------------------------------------------------
+  # Console — tests + build release du crate Rust (core résolu via la git-dep publique).
+  # ---------------------------------------------------------------------------
+  console:
+    name: console (cargo test + build --release)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+
+      - name: Cache cargo (registry + target)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            console/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('console/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.0 (réseau) —
+      # cohérent avec Cargo.lock (source git+tag), identique à un clone standalone.
+      - name: cargo test (console)
+        working-directory: console
+        run: cargo test --locked --verbose
+
+      - name: cargo build --release (console)
+        working-directory: console
+        run: cargo build --release --locked --verbose
+
+      - name: Upload artefact (binaire console)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: forge
+          path: console/target/release/forge
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Console (Postgres) — MATRICE de backend : le job `console` ci-dessus couvre le DÉFAUT SQLite
+  # (feature OFF) ; ce job couvre le backend Postgres OPT-IN (`--features store-postgres`) contre un
+  # vrai Postgres 16 (service container). Prouve le seam PG + le reconnect+retry HA (Stage 4). Le build
+  # community reste byte-identique/openssl-free — c'est le job `console` qui le garde vert.
+  # ---------------------------------------------------------------------------
+  console-postgres:
+    name: console (postgres — cargo test --features store-postgres)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forgepw
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        # Le runner attend que le service soit SAIN avant de lancer les steps.
+        options: >-
+          --health-cmd "pg_isready -U forge"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+
+      - name: Cache cargo (registry + target)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            console/target
+          key: cargo-pg-${{ runner.os }}-${{ hashFiles('console/Cargo.lock') }}
+          restore-keys: |
+            cargo-pg-${{ runner.os }}-
+
+      # clippy DOIT rester vert avec la feature (openssl-free, TLS rustls/ring).
+      - name: clippy (feature store-postgres)
+        working-directory: console
+        run: cargo clippy --all-targets --features store-postgres
+
+      # Le seam PG + les tests d'intégration (dont le reconnect+retry HA) tournent contre le service PG.
+      - name: cargo test (feature store-postgres, contre le service Postgres)
+        working-directory: console
+        env:
+          TEST_PG_URL: postgres://forge:forgepw@localhost:5432/forge
+        run: cargo test --locked --features store-postgres --verbose
+
+      - name: cargo build --release (feature store-postgres)
+        working-directory: console
+        run: cargo build --release --locked --features store-postgres --verbose
+
+  # ---------------------------------------------------------------------------
+  # Security — supply-chain + secret hygiene. Independent gate: runs in parallel with the
+  # build/test jobs and never gates their logic. Two checks:
+  #   1) cargo-audit  — RustSec advisory scan of the console crate's locked dep tree (--deny warnings
+  #      => unmaintained/yanked/vuln advisories FAIL the job). It reads console/Cargo.lock ONLY: no
+  #      build happens and the guatx-core git-dep is never fetched, so core's own tree is NOT audited
+  #      here (core carries its own CI).
+  #   2) gitleaks     — secret scan of the tree + history, with an ephemeral config (written below,
+  #      NOT committed) that extends the default ruleset. Every suppression in it is scoped to ONE
+  #      RULE **and** to the exact fixture file that trips it — see the comment on that step.
+  # (The Python engine is stdlib-only — zero third-party deps — so there is no pip dependency tree to
+  #  audit; the Rust crate is the only supply-chain surface, covered by cargo-audit above.)
+  # ---------------------------------------------------------------------------
+  security:
+    name: security (cargo-audit + gitleaks)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan past commits, not just the tip.
+
+      - name: Setup Rust toolchain (pinné)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # @stable (no semver tags; pinned to stable branch commit)
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit (console crate — deny warnings)
+        working-directory: console
+        run: cargo audit --deny warnings
+
+      # Config gitleaks ÉPHÉMÈRE (runner-only, jamais committée) : `extend.useDefault` + des
+      # allowlists SCOPÉES À LA RÈGLE.
+      #
+      # POURQUOI par règle et non par répertoire. Forge est un outil de sécurité : il embarque de faux
+      # secrets PAR CONCEPTION (corpus de rédaction, paire RSA de test pour la vérif JWT). Mais
+      # allowlister `tests/`, `docs/` ou `k8s/` EN BLOC, pour TOUTES les règles, aveugle le scan sur
+      # trois arborescences VIVANTES : une vraie clé déposée plus tard dans docs/ ou k8s/ passerait
+      # sans un mot. Le mécanisme utilisé ici (`[[rules]]` portant l'`id` d'une règle par défaut + un
+      # `[rules.allowlist]`) NE remplace PAS la règle : sa regex reste active partout ailleurs. Donc
+      # `private-key` reste armé sur tout le dépôt SAUF les deux fichiers de fixture nommés, etc.
+      #
+      # Cette liste est CALIBRÉE sur l'arbre courant (obtenue en partant de zéro allowlist, puis en
+      # n'ajoutant que les faux positifs constatés, un par un). Ajouter une entrée sans avoir vérifié
+      # la valeur, ou en ajouter « au cas où », c'est refaire le trou qu'on vient de fermer.
+      # Après toute modification de l'arbre, revérifier localement :
+      #     gitleaks detect --source . --config .gitleaks-ci.toml --no-banner --redact --exit-code 1
+      - name: Write gitleaks config (allowlists scopées à la règle)
+        run: |
+          cat > "$GITHUB_WORKSPACE/.gitleaks-ci.toml" <<'EOF'
+          title = "forge CI gitleaks config"
+          [extend]
+          useDefault = true
+
+          # Paire RSA de TEST sous `#[cfg(test)]` (vérif de signature JWT/OIDC) + corpus de rédaction.
+          [[rules]]
+          id = "private-key"
+          [rules.allowlist]
+          paths = [
+            '''^console/src/sso\.rs$''',
+            '''^tests/test_redact\.py$''',
+          ]
+
+          # Constante AWS canonique du self-test de rédaction + corpus rédaction/rapport.
+          [[rules]]
+          id = "aws-access-token"
+          [rules.allowlist]
+          paths = [
+            '''^console/src/reports\.rs$''',
+            '''^tests/test_redact\.py$''',
+            '''^tests/test_report_engagement\.py$''',
+          ]
+
+          # `generic-api-key` est la règle la plus bruyante : elle matche des NOMS de variables et les
+          # `SECRET = "..."` de fixture. Portée : le nom d'env PKCS#11, les `secretKeyRef.key` du
+          # Deployment (des noms de clés, pas des valeurs), les exemples de FORMAT de clé de la doc de
+          # custody, et le corpus de tests Python.
+          [[rules]]
+          id = "generic-api-key"
+          [rules.allowlist]
+          paths = [
+            '''^forge/signing_pkcs11\.py$''',
+            '''^k8s/40-console\.yaml$''',
+            '''^docs/KEY_CUSTODY\.md$''',
+            '''^tests/.*\.py$''',
+          ]
+
+          # Jetons / JWT de fixture des oracles de détection.
+          [[rules]]
+          id = "stripe-access-token"
+          [rules.allowlist]
+          paths = ['''^tests/test_recon_active\.py$''']
+
+          [[rules]]
+          id = "jwt"
+          [rules.allowlist]
+          paths = ['''^tests/.*\.py$''']
+
+          # Les faux jetons fournisseur du corpus de rédaction — et de NULLE PART ailleurs.
+          [[rules]]
+          id = "slack-bot-token"
+          [rules.allowlist]
+          paths = ['''^tests/test_redact\.py$''']
+
+          [[rules]]
+          id = "gcp-api-key"
+          [rules.allowlist]
+          paths = ['''^tests/test_redact\.py$''']
+
+          [[rules]]
+          id = "gitlab-pat"
+          [rules.allowlist]
+          paths = ['''^tests/test_redact\.py$''']
+          EOF
+
+      # Secret scan via le BINAIRE gitleaks ÉPINGLÉ (pas la gitleaks-action). L'action exige désormais
+      # GITHUB_TOKEN sur les événements `pull_request` (et une licence pour les orgs) → elle échouerait
+      # sur TOUTE PR, ce qui bloquerait le merge sous un ruleset PR-obligatoire. Le binaire : aucun token,
+      # aucune licence, comportement IDENTIQUE sur push ET PR, version + SHA256 vérifiés (supply-chain).
+      # Version 8.24.3 = version épinglée famille (identique core/plume). Le job security fait un
+      # checkout à la RACINE du workspace (pas sous ./forge) → `--source .`. `--config` = là où le
+      # heredoc ci-dessus écrit .gitleaks-ci.toml.
+      - name: Secret scan (gitleaks, pinned binary — no token/license required)
+        run: |
+          set -euo pipefail
+          GL_VER=8.24.3
+          GL_SHA=9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+          curl -sSfL -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz"
+          echo "${GL_SHA}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --config "$GITHUB_WORKSPACE/.gitleaks-ci.toml" --no-banner --redact --exit-code 1
+
+  # ---------------------------------------------------------------------------
+  # POINT D'ENTRÉE UNIQUE du ruleset — nom STABLE `CI`. Un ruleset sur `main` doit
+  # exiger CE check, JAMAIS les noms générés `python (unittest)` / `console (...)`
+  # / `security (...)` : le jour où l'un est renommé, réordonné ou ajouté (matrice,
+  # nouveau backend…), un check requis par son nom généré ne remonterait plus et
+  # `main` deviendrait IMPOUSSABLE — y compris pour le commit qui réparerait ça.
+  # Ce job dépend de tous les autres et ne bouge jamais de nom.
+  # ⚠️ Ne poser le required-status-check `CI` dans le ruleset qu'APRÈS un premier
+  #    run réel (un check jamais exécuté est exigé mais jamais satisfait).
+  # ---------------------------------------------------------------------------
+  ci-ok:
+    name: CI
+    if: always()   # sinon un job en échec SAUTE ce job au lieu de le faire échouer
+    needs: [python, console, console-postgres, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Tous les jobs requis doivent avoir RÉUSSI
+        # `skipped` et `cancelled` traités comme des ÉCHECS À DESSEIN : GitHub
+        # considère un check requis mais sauté comme satisfait, ce qui laisserait
+        # passer un job jamais exécuté.
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "::error::un job de CI n'a pas réussi : ${{ join(needs.*.result, ', ') }}"
+          exit 1

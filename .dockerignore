@@ -1,0 +1,104 @@
+# =============================================================================
+# Forge — .dockerignore RACINE (belt-and-suspenders).
+# =============================================================================
+#
+# POURQUOI ce fichier EN PLUS de `Dockerfile.dockerignore` ?
+#   Le CONTEXTE de build est la RACINE DE CE DÉPÔT et le Dockerfile est à la racine :
+#
+#       docker build -t forge:0.0.1 .
+#
+#   BuildKit (moteur par défaut, requis de toute façon par `# syntax=…` + les
+#   cache-mounts du Dockerfile) résout, à côté du Dockerfile désigné par `-f`, un
+#   ignore-file nommé `<Dockerfile>.dockerignore` et le PRÉFÈRE à ce `.dockerignore`
+#   racine quand il existe. MAIS un build LEGACY / non-BuildKit ignore le fichier
+#   par-Dockerfile et ne lit QUE ce `.dockerignore` → un `.env` / `*.ed25519` /
+#   `*.key` local traînant pourrait alors entrer dans une couche. Ce miroir garantit
+#   l'exclusion des secrets/données quel que soit le moteur de build (défense en
+#   profondeur). Garder les deux fichiers SYNCHRONISÉS.
+#
+# PORTÉE DES MOTIFS : relatifs à la RACINE DU CONTEXTE = la racine du dépôt. Les
+#   motifs `**/…` matchent à n'importe quelle profondeur.
+# =============================================================================
+
+# --- Cache de build Rust (~1.6 GB) : jamais expédié, reconstruit via cache-mount ---
+console/target/
+**/target/
+
+# --- Override cargo local (redirige la git-dep guatx-core vers une copie locale) ---
+**/.cargo/config.toml
+
+# --- Bases SQLite + WAL/SHM (données/console) : jamais dans le contexte ---
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+
+# --- Ledger d'engagement & JSONL (actions sur cibles réelles) ---
+# Exception : l'engagement de référence SYNTHÉTIQUE (hôtes `.example`, IP RFC 5737,
+# aucune cible ni donnée réelle) est un artefact livré du projet — le ré-inclure,
+# sinon un `COPY examples/` embarquerait un jeu de données silencieusement tronqué.
+**/*.jsonl
+!examples/reference-engagement/
+!examples/reference-engagement/**
+
+# --- Caches Python ---
+**/__pycache__/
+**/*.py[cod]
+
+# --- VCS ---
+**/.git
+**/.git/**
+
+# --- État Forge & sauvegardes ---
+*.forge
+**/*.forge
+**/backups/
+
+# --- Secrets / autorisation d'engagement (jamais requis au build ;
+#     seul scope.example.json est COPY'é par le Dockerfile) ---
+**/*.env
+**/.env
+**/.env.*
+!.env.example
+scope.json
+targets.json
+actions.json
+**/secrets/
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.pub
+**/*.pub
+*.ed25519
+**/*.ed25519
+**/*.crt
+**/*.cer
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.ppk
+**/*.age
+**/*.kdbx
+**/*.token
+**/*_token
+**/kubeconfig
+**/*.kubeconfig
+**/.kube/
+**/id_rsa*
+**/id_ecdsa*
+**/id_ed25519*
+**/credentials
+**/credentials.json
+**/creds.json
+**/client_secret*.json
+**/service-account*.json
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/*.sops.yaml
+**/*.enc.yaml
+**/secrets.y*ml
+**/sealed-secrets.yaml

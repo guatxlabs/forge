@@ -1,0 +1,1 @@
+# Déposez ici des binaires/scripts exécutables (shebang + chmod +x) — montés :ro sur /opt/tools (sur le PATH) → utilisables au PROCHAIN run, sans redémarrage. Monté par défaut (docker-compose.yml). Le contenu est gitignore (sauf ce .gitkeep).

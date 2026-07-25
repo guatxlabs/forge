@@ -1,0 +1,25 @@
+{
+ "QUALIFYING": [
+  "access_control",
+  "ato",
+  "auth",
+  "auth_bypass",
+  "biz",
+  "bola",
+  "business_logic",
+  "idor",
+  "privesc",
+  "rce",
+  "sqli",
+  "ssrf"
+ ],
+ "DEFAULT_CHECKLIST": [
+  "access_control",
+  "auth",
+  "ato",
+  "ssrf",
+  "sqli",
+  "rce",
+  "business_logic"
+ ]
+}

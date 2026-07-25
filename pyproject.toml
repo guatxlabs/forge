@@ -1,0 +1,53 @@
+[project]
+name = "forge"
+version = "0.0.1"
+description = "Forge — moteur red-team gated par ROE (sûreté d'abord). Antithèse offensive du SOC blue-team Plume (GuatX)."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.9"
+dependencies = []   # coeur pur-stdlib. Les modules réels (P2) ajouteront des deps optionnelles.
+
+# --- OPTIONAL extras — NEVER pulled into the zero-runtime-dep default engine ---
+# `pkcs11`: off-host ledger key custody via a PKCS#11 token (Ed25519/CKM_EDDSA) — SoftHSM2 dev/CI, any
+# HSM / AWS CloudHSM / cloud-KMS-via-PKCS#11 prod. Opt-in ONLY: install with `pip install 'forge[pkcs11]'`
+# and select it via `FORGE_LEDGER_SIGNER=pkcs11`. The default engine imports nothing from here. See
+# docs/KEY_CUSTODY.md. (`cryptography` is Forge's existing optional Ed25519 provider, not re-declared here.)
+[project.optional-dependencies]
+pkcs11 = ["python-pkcs11>=0.7"]
+# Deps de TEST uniquement — le cœur runtime reste stdlib-only (le build/install par défaut n'installe
+# RIEN de ceci). pytest : un test contrib l'importe (test_contrib_graded_toolspecs). cryptography :
+# les tests ed25519 (ledger/anchor/compliance) l'EXIGENT — sans elle le signeur retombe sur HMAC-SHA256
+# et les assertions `alg == "ed25519"` échouent. La CI installe `.[test]` avant de lancer la suite.
+test = ["pytest", "cryptography"]
+
+[project.scripts]
+# `pip install -e .` met l'exécutable `forge` sur le PATH -> `forge <commande>`
+# (équivalent à `python3 -m forge.cli <commande>`). Voir README (Install).
+forge = "forge.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["forge", "forge.modules"]
+
+# --- mypy : gate de typage scopé au COEUR de sûreté (ROE / ledger / planner / engine) ---
+# mypy est un outil de DEV uniquement (jamais une dépendance runtime — cf. `dependencies = []`). Installer
+# dans un venv jetable puis lancer le gate :
+#   python -m venv /tmp/mypyenv && /tmp/mypyenv/bin/pip install mypy
+#   /tmp/mypyenv/bin/mypy forge/roe.py forge/ledger.py forge/planner.py forge/engine.py
+# Le gate est délibérément SCOPÉ à ces 4 modules (le fail-closed ROE + la hash-chain du ledger) : ce sont
+# les fichiers annotés. Les autres modules ne sont pas encore typés -> `follow_imports=silent` les suit
+# pour en tirer les types SANS exiger d'annotations, et `ignore_missing_imports` absorbe les deps tierces
+# optionnelles (cryptography, etc.). Étendre la liste `module` ci-dessous au fur et à mesure du typage.
+[tool.mypy]
+# Cible d'analyse mypy (>= 3.10, requis par mypy récent). Le CODE reste compatible 3.9 : toutes les
+# annotations sont différées (`from __future__ import annotations`) donc `X | None` / `list[str]` sont
+# des chaînes non évaluées au runtime — aucune exigence de syntaxe 3.10 à l'exécution.
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["forge.roe", "forge.ledger", "forge.planner", "forge.engine"]
+disallow_untyped_defs = true
