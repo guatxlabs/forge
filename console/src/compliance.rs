@@ -720,6 +720,7 @@ async fn evidence_export(State(app): State<App>, headers: HeaderMap, Query(q): Q
                 Err(crate::PdfErr::Bound(e)) => crate::delegated_render_error(
                     "pdf",
                     "réessayez, ou utilisez ?format=html puis « Imprimer » → « Enregistrer au format PDF », ou ?format=json",
+                    None,
                     &e,
                 ),
                 Err(crate::PdfErr::NoEngine) => (

@@ -915,6 +915,7 @@ async fn engagement_report(
                 Err(crate::PdfErr::Bound(e)) => delegated_render_error(
                     "pdf",
                     "réessayez, ou utilisez ?format=html puis « Imprimer » → « Enregistrer au format PDF »",
+                    None,
                     &e,
                 ),
                 Err(crate::PdfErr::NoEngine) => (
@@ -943,7 +944,10 @@ async fn engagement_report(
             // octets 502 — chacun avec la variable qui le règle.
             Err(e) => delegated_render_error(
                 "docx",
-                "réessayez, ou utilisez ?format=html/pdf/csv/json ; si le générateur manque, installez python3 + le paquet forge",
+                "réessayez, ou utilisez ?format=html/pdf/csv/json",
+                // conseil d'INSTALLATION réservé au 501 « le générateur a réellement manqué » : une
+                // saturation ou un budget dépassé ne doit pas envoyer l'exploitant vérifier son install.
+                Some("si le générateur manque, installez python3 + le paquet forge"),
                 &e,
             ),
         },
@@ -1066,6 +1070,20 @@ mod tests {
     async fn to_text(resp: Response) -> String {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Une BORNE franchie ne doit renvoyer AUCUN conseil d'installation — ni dans `why`, ni dans `hint`,
+    /// ni ailleurs dans le corps. On cherche la RACINE « install » (couvre installez/installer/install)
+    /// et les gestionnaires de paquets courants, sur le corps ENTIER : c'est ce que dit la phrase, donc
+    /// c'est ce qui doit être vérifié (l'assertion précédente ne testait qu'un préfixe de `hint`).
+    fn assert_no_install_advice(body: &Value) {
+        let txt = format!("{body}").to_lowercase();
+        for needle in ["install", "apt-get", "apt ", "pip ", "brew "] {
+            assert!(
+                !txt.contains(needle),
+                "une borne franchie ne doit JAMAIS conseiller une installation (« {needle} ») : {body}"
+            );
+        }
     }
 
     /// La rédaction Rust neutralise les mêmes formes de secrets que le générateur Python.
@@ -1382,8 +1400,11 @@ mod tests {
         assert_eq!(body["error"], "docx_engine_timeout", "la cause RENDUE est la borne franchie");
         let why = body["why"].as_str().unwrap_or("");
         assert!(why.contains("FORGE_ENGINE_TIMEOUT"), "le message NOMME la variable qui règle la borne: {why}");
-        assert!(!why.contains("installez") && !body["hint"].as_str().unwrap_or("").starts_with("installez"),
-            "une borne franchie ne doit JAMAIS être présentée comme une dépendance manquante: {body}");
+        // L'assertion porte sur le CORPS ENTIER (`why` ET `hint`), pas sur un préfixe : la phrase
+        // « surtout pas d'installation » et ce qui est vérifié disent maintenant la même chose.
+        // Mesuré avant correctif : le `hint` d'un 504 contenait « installez python3 + le paquet forge »
+        // — un test de préfixe ne le voyait pas.
+        assert_no_install_advice(&body);
         let _ = std::fs::remove_file(&led);
         let _ = std::fs::remove_file(app.python.as_str());
     }
@@ -1427,6 +1448,9 @@ mod tests {
         let txt = format!("{body}");
         assert!(txt.contains("FORGE_ENGINE_MAX_CONCURRENT"), "le refus NOMME la variable: {txt}");
         assert!(!txt.contains("indisponible sur l'hôte"), "une saturation ne doit pas se dire « indisponible sur l'hôte »: {txt}");
+        // … et ne doit pas non plus CONSEILLER une installation (le doc-comment le dit : c'est
+        // maintenant ce qui est vérifié, sur tout le corps).
+        assert_no_install_advice(&body);
         let _ = inflight.await;
         // les formats PUR-RUST restent servis pendant la saturation (aucune régression de lecture).
         let mut q = HashMap::new();
@@ -1551,6 +1575,13 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED, "python absent -> DOCX dégradé 501");
         let body = to_json(r).await;
         assert_eq!(body["error"], "docx_unavailable");
+        // SYMÉTRIE de l'assertion « une borne ne conseille pas d'installer » : ICI, le générateur manque
+        // POUR DE BON, donc le conseil d'installation DOIT être là. Sans cette assertion, on pourrait
+        // satisfaire l'autre test en supprimant le conseil partout — et perdre l'aide réellement utile.
+        assert!(
+            body["hint"].as_str().unwrap_or("").contains("installez"),
+            "vraie absence du générateur : le conseil d'installation doit être rendu, {body}"
+        );
         let _ = std::fs::remove_file(&led);
     }
 

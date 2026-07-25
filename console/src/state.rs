@@ -733,6 +733,7 @@ pub(crate) async fn run_report(State(app): State<App>, headers: HeaderMap, Path(
                 Err(crate::PdfErr::Bound(e)) => crate::delegated_render_error(
                     "pdf",
                     "réessayez, ou ouvrez ?format=html puis « Imprimer » → « Enregistrer au format PDF »",
+                    None,
                     &e,
                 ),
                 Err(crate::PdfErr::NoEngine) => (

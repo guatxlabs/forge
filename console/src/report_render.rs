@@ -32,7 +32,14 @@ pub(crate) enum PdfErr {
 /// Traduit une borne franchie en réponse HTTP qui NOMME sa cause — un seul endroit pour les deux
 /// livrables délégués (DOCX et PDF), pour qu'aucun des deux ne puisse re-dériver vers une cause inventée.
 /// `kind` = "docx" | "pdf" (préfixe des codes d'erreur historiques), `hint` = la sortie de secours.
-pub(crate) fn delegated_render_error(kind: &str, hint: &str, e: &crate::EngineBoundErr) -> axum::response::Response {
+///
+/// `install_hint` = conseil d'INSTALLATION, ajouté UNIQUEMENT sur la branche « le générateur a
+/// réellement manqué » (`Io` -> 501). Mesuré avant ce correctif : le même `hint` était rendu sur TOUS
+/// les chemins, si bien qu'un `429` de saturation conseillait quand même « installez python3 » — la
+/// cause était juste (le `why` nommait la variable) mais le conseil, lui, envoyait toujours
+/// l'exploitant vérifier son installation. Le test de saturation, qui n'assertait qu'un PRÉFIXE, ne
+/// voyait pas la phrase : les deux ont été alignés.
+pub(crate) fn delegated_render_error(kind: &str, hint: &str, install_hint: Option<&str>, e: &crate::EngineBoundErr) -> axum::response::Response {
     let (status, code) = match e {
         crate::EngineBoundErr::Busy { .. } => (axum::http::StatusCode::TOO_MANY_REQUESTS, "engine_busy"),
         crate::EngineBoundErr::Timeout(_) => (axum::http::StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
@@ -40,6 +47,12 @@ pub(crate) fn delegated_render_error(kind: &str, hint: &str, e: &crate::EngineBo
         crate::EngineBoundErr::Abandoned => (axum::http::StatusCode::GATEWAY_TIMEOUT, "engine_aborted"),
         // seule branche « indisponible » : le spawn ou le générateur lui-même a échoué.
         crate::EngineBoundErr::Io(_) => (axum::http::StatusCode::NOT_IMPLEMENTED, "unavailable"),
+    };
+    // Le conseil d'installation n'accompagne QUE la vraie absence (`Io` -> 501). Une borne franchie
+    // (429/504/502) rend la sortie de secours, et rien qui parle d'installer quoi que ce soit.
+    let hint = match (install_hint, e) {
+        (Some(install), crate::EngineBoundErr::Io(_)) => format!("{hint} ; {install}"),
+        _ => hint.to_string(),
     };
     (
         status,
