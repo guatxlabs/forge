@@ -739,16 +739,25 @@ pub(crate) async fn tools_add(State(app): State<App>, headers: HeaderMap, Json(b
     }
     // HOT-RELOAD : re-probe (FORGE_TOOLSPECS pointe le dir managé) -> le module apparaît dans la table.
     // re-probe BORNÉ (gate opérateur + budget) et non bloquant ; le verrou du store n'est pris qu'APRÈS.
-    populate_modules(&app).await;
-    let view = {
-        let store = app.store();
-        sync_user_added_flags(&store);
-        user_tool_view(&store, &kind)
-    };
+    // La CAUSE d'un re-probe qui n'a pas eu lieu est CONSERVÉE : `registered:false` dit QUE ça n'a pas
+    // marché, pas POURQUOI — et « plafond de spawns atteint » (mesuré : 40 refresh concurrents -> 34
+    // refus) n'a pas le même remède que « registre Python absent ». Même contrat que
+    // `POST /api/modules/refresh`, qui rend déjà `probe_error`.
+    let probe_err = populate_modules(&app).await;
     // si le re-probe n'a pas fait apparaître le module (registre Python indisponible), on ne PRÉTEND pas :
-    // le fichier est écrit (il sera pris au prochain boot) mais on signale l'état dégradé.
-    let present = view.get("module").and_then(|m| m.get("kind")).and_then(|k| k.as_str()) == Some(kind.as_str());
-    let available = view.get("module").and_then(|m| m.get("available")).and_then(|b| b.as_bool()).unwrap_or(false);
+    // le fichier est écrit (il sera pris au prochain boot) mais on signale l'état dégradé. `present` est
+    // lu sur le CATALOGUE, pas sur la vue : `user_tool_view` REMPLIT `{"kind": …}` quand le module est
+    // absent (repli d'affichage), si bien que le tester revenait à se répondre à soi-même — `registered`
+    // valait `true` sur un registre injoignable (mesuré en écrivant le test de cause).
+    let store = app.store();
+    sync_user_added_flags(&store);
+    let row = crate::modules_catalog(&store)
+        .into_iter()
+        .find(|m| m.get("kind").and_then(|v| v.as_str()) == Some(kind.as_str()));
+    let view = user_tool_view(&store, &kind);
+    drop(store); // verrou rendu AVANT le ledger et la réponse (aucun `await` sous le verrou)
+    let present = row.is_some();
+    let available = row.as_ref().and_then(|m| m.get("available")).and_then(|b| b.as_bool()).unwrap_or(false);
     append_console_ledger(&app, "console.tool.add", json!({
         "actor": actor,
         "kind": kind,
@@ -756,8 +765,14 @@ pub(crate) async fn tools_add(State(app): State<App>, headers: HeaderMap, Json(b
         "docker_image": canon.get("docker_image").cloned().unwrap_or(Value::Null),
         "registered": present,
         "available": available,
+        "probe_error": probe_err.clone(),
     }));
-    (StatusCode::OK, Json(json!({"tool": view, "registered": present}))).into_response()
+    let mut out = json!({"tool": view, "registered": present});
+    if let Some(why) = probe_err {
+        out["probe_error"] = json!(why);
+        out["why"] = json!("outil ÉCRIT sur disque, mais la sonde du registre n'a pas abouti : il sera pris au prochain re-probe/boot");
+    }
+    (StatusCode::OK, Json(out)).into_response()
 }
 
 /// DELETE /api/tools/:kind — RETIRE un outil ajouté par l'UI. Admin-only, LEDGERISÉ `console.tool.remove`.
@@ -796,11 +811,16 @@ pub(crate) async fn tools_delete(State(app): State<App>, headers: HeaderMap, Pat
         let store = app.store();
         let _ = store.execute("DELETE FROM module WHERE kind=? AND user_added=1", &crate::sql_params![&kind]);
     }
-    populate_modules(&app).await; // re-probe BORNÉ, hors verrou du store
+    let probe_err = populate_modules(&app).await; // re-probe BORNÉ, hors verrou du store — cause CONSERVÉE
     {
         let store = app.store();
         sync_user_added_flags(&store);
     }
-    append_console_ledger(&app, "console.tool.remove", json!({"actor": actor, "kind": kind}));
-    (StatusCode::OK, Json(json!({"removed": kind}))).into_response()
+    append_console_ledger(&app, "console.tool.remove", json!({"actor": actor, "kind": kind, "probe_error": probe_err.clone()}));
+    let mut out = json!({"removed": kind});
+    if let Some(why) = probe_err {
+        out["probe_error"] = json!(why);
+        out["why"] = json!("outil SUPPRIMÉ (fichier + ligne), mais la sonde du registre n'a pas abouti : la table sera re-sondée au prochain re-probe/boot");
+    }
+    (StatusCode::OK, Json(out)).into_response()
 }

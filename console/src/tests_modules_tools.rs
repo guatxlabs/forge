@@ -522,3 +522,55 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&path);
     }
 
+    /// [CAUSE CONSERVÉE] `POST`/`DELETE /api/tools` re-sondent le registre. Quand cette sonde N'A PAS
+    /// ABOUTI, `registered:false` dit QUE ça a raté, pas POURQUOI — et la cause décide du remède
+    /// (plafond de spawns atteint vs registre absent). C'est le même contrat que
+    /// `POST /api/modules/refresh`, qui rend `probe_error` : les deux autres routes de la même gate le
+    /// rendent maintenant aussi, dans la réponse ET au ledger.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS moteur process-globaux
+    #[tokio::test]
+    async fn tools_routes_report_why_the_registry_probe_failed() {
+        let _g = env_lock();
+        let dir = tmp_dir("forge-test-tools-probefail");
+        std::env::set_var("FORGE_TOOLSPECS_DIR", &dir);
+        std::env::remove_var("FORGE_TOOLSPECS");
+        let path = tmp_path("forge-test-tools-probefail-ledger");
+        let mut app = test_app(&path);
+        // registre INJOIGNABLE de façon déterministe : interpréteur inexistant -> la sonde échoue.
+        app.python = std::sync::Arc::new("forge-no-such-python-xyz".into());
+        seed_modules(&app);
+        {
+            let db = app.db();
+            upsert_user(&db, "aa", "admin", &hash_pw("pw")).unwrap();
+        }
+        let (atok, _) = create_session(&app, uid_of(&app, "aa"));
+
+        let r = tools_add(State(app.clone()), bearer_headers(&atok), Json(simple_toolspec())).await;
+        assert_eq!(r.status(), StatusCode::OK, "l'écriture du spec réussit même sans registre");
+        let body = resp_json(r).await;
+        assert_eq!(body["registered"], serde_json::json!(false), "le module n'a pas pu être enregistré");
+        let why = body["probe_error"].as_str().unwrap_or("");
+        assert!(!why.is_empty(), "la CAUSE de la sonde ratée doit être rendue, pas seulement l'échec : {body}");
+        let entries = read_ledger_lines(&path);
+        let add = entries.iter().rev().find(|e| e["kind"] == "console.tool.add").expect("ledger add");
+        assert!(add["detail"]["probe_error"].is_string(), "la cause est aussi journalisée : {add}");
+
+        // même contrat sur la suppression (la ligne existe : on la crée à la main, le re-probe échouera).
+        {
+            let store = app.store();
+            crate::upsert_probed_module(&store, "custom.echotool", false, false, true, "", "echo", "[]", "[]");
+            let _ = store.execute(
+                "UPDATE module SET user_added=1 WHERE kind=?",
+                &crate::sql_params!["custom.echotool"],
+            );
+        }
+        let r = tools_delete(State(app.clone()), bearer_headers(&atok), Path("custom.echotool".into())).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = resp_json(r).await;
+        assert!(!body["probe_error"].as_str().unwrap_or("").is_empty(), "cause rendue aussi sur DELETE : {body}");
+
+        std::env::remove_var("FORGE_TOOLSPECS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&path);
+    }
+
