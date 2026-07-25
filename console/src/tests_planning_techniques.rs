@@ -230,6 +230,9 @@ use crate::testutil::*;
     async fn plan_concurrency_is_bounded() {
         let _g = env_lock();
         std::env::set_var("FORGE_PLAN_TIMEOUT", "2");
+        // La borne est POSÉE EXPLICITEMENT : ce cas ne dépend plus de « aucun autre test n'a écrit cette
+        // variable » ni de l'ordre d'initialisation d'un compteur global (le plafond est relu à chaque prise).
+        std::env::set_var("FORGE_PLAN_MAX_CONCURRENT", "2");
         let ledger = tmp_path("forge-test-plan-conc");
         let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
         { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
@@ -257,6 +260,7 @@ use crate::testutil::*;
         let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
             Json(json!({"targets": ["a.example.com"]}))).await.into_response();
         std::env::remove_var("FORGE_PLAN_TIMEOUT");
+        std::env::remove_var("FORGE_PLAN_MAX_CONCURRENT");
         assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT, "slot libéré -> un nouveau dry-plan repasse");
 
         let _ = std::fs::remove_file(&ledger);
@@ -822,6 +826,46 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     // Plume (et tout SIEM/IDS) n'est qu'un enrichissement OPTIONNEL de la boucle purple.
     // =============================================================================================
 
+
+    /// [S5-D — la borne n'est pas FIGÉE] `FORGE_PLAN_MAX_CONCURRENT` est relue À CHAQUE prise de slot,
+    /// comme `FORGE_PLAN_TIMEOUT` : c'est ce que la doc d'exploitation promet (« prend effet sans
+    /// redémarrer »). Avec un plafond dimensionné UNE FOIS (OnceLock au premier dry-plan), le 2e appel
+    /// resterait refusé après élargissement — c'est l'échec attendu avant correctif.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_concurrency_bound_is_re_read_not_frozen() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_PLAN_TIMEOUT", "3");
+        std::env::set_var("FORGE_PLAN_MAX_CONCURRENT", "1");
+        let ledger = tmp_path("forge-test-plan-reread");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        app.python = Arc::new(stub_engine("plan-reread", "sleep 30"));
+        let body = json!({"targets": ["a.example.com"]});
+
+        // 1 dry-plan EN VOL occupe l'unique slot.
+        let (a, h, b) = (app.clone(), bearer_headers(&otok), body.clone());
+        let inflight = tokio::spawn(async move { plan(State(a), conn_info(), h, eng_query(1), Json(b)).await.into_response().status() });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1), Json(body.clone())).await.into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "plafond 1 atteint -> 429");
+
+        // ÉLARGISSEMENT à chaud, SANS redémarrage : le suivant doit passer la borne (et atteindre le
+        // moteur, donc finir sur la borne de TEMPS 504 — pas sur 429).
+        std::env::set_var("FORGE_PLAN_MAX_CONCURRENT", "2");
+        let resp = plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1), Json(body)).await.into_response();
+        std::env::remove_var("FORGE_PLAN_MAX_CONCURRENT");
+        std::env::remove_var("FORGE_PLAN_TIMEOUT");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT,
+            "plafond relu à chaud : le slot élargi est accordé (sinon 429 = borne FIGÉE au premier dry-plan)");
+        assert_eq!(inflight.await.unwrap(), StatusCode::GATEWAY_TIMEOUT, "le dry-plan en vol finit sur sa borne de temps");
+
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
 
     /// [S5-C — INVARIANT] `/api/plan` (INERTE) ne doit JAMAIS être PLUS RESTREINT que `/api/run` (ARMÉ) :
     /// qui peut TIRER doit pouvoir PRÉVISUALISER, sinon on pousse à SAUTER le dry-run. On compare les deux

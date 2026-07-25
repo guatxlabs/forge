@@ -28,8 +28,10 @@ seul est à annuler, pas à « corriger ensuite ».
 
 1. **Vert avant / vert après.** Avant de committer une étape :
    - Rust : `cargo test -p forge-console` (ou `cargo test` à la racine du workspace console)
-     → **402 tests Rust** (compte actuel au HEAD) doivent rester verts, **même nombre, mêmes noms**.
-   - Python : `pytest` → **1486 tests Python** doivent rester verts, même nombre.
+     → **401 tests Rust** (compte MESURÉ au HEAD : `test result: ok. 401 passed`) doivent rester verts,
+     **même nombre, mêmes noms**.
+   - Python : `python3 -m unittest discover -s tests -t .` → **1492 tests Python** (compte MESURÉ au
+     HEAD : `Ran 1492 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
    - `cargo build --release` (build communautaire, features par défaut) doit produire un binaire
      **byte-identique** au HEAD précédent : une PURE MOVE ne change ni le code généré ni les
      `include_str!`/assets. (Vérif : `cargo build --release` puis `sha256sum` du binaire
@@ -257,7 +259,7 @@ class FlagAllowlistMixin:
 
 | # | Module migré | Pourquoi cet ordre | Risque | Vérif verte |
 |---|--------------|--------------------|:------:|-------------|
-| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `pytest` : +N tests neufs, 1486 existants inchangés |
+| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1492 existants inchangés |
 | 1 | **`web.py::NucleiScan`** (1 classe, `_refuse` local le plus simple) | Cas le plus isolé → valide le mixin sur un vrai module | Faible | `pytest -k nuclei` + suite complète ; finding de refus byte-identique |
 | 2 | **`recon.py::HttpxFingerprint` puis `NmapServices`** (2 classes, `_refuse` dupliqué ×2) | Élimine la duplication la plus flagrante ; deux classes ⇒ deux commits | Faible | tests `recon`/`module_routes_do_not_conflict` |
 | 3 | **`origin.py::SubfinderEnum`** (gate en 2 points : preview + fire) | Vérifie que le mixin couvre le double appel `check_extra_args` | Faible | tests `origin`/exposure |
