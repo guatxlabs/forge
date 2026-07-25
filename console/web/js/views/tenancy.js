@@ -1,5 +1,5 @@
 import { loginError } from './admin/users.js';
-import { adminApi, api } from '../core/api.js';
+import { adminApi, api, request } from '../core/api.js';
 import { $, esc, fmtTs } from '../core/dom.js';
 import { reloadCurrentView, renderEngagementSelector } from './engagements.js';
 import { loadStatuses } from './overview.js';
@@ -79,7 +79,7 @@ export function switchTenant(id) {
 // tenant porte dès le 1er rendu).
 export async function loadTenancyContext() {
   try {
-    const r = await fetch('/api/tenancy', { headers: { Accept: 'application/json' } });
+    const r = await request('/api/tenancy', { headers: { Accept: 'application/json' } });
     TENANCY = r.ok ? (await r.json().catch(() => ({ enabled: false }))) : { enabled: false };
   } catch (e) { TENANCY = { enabled: false }; }
   if (!TENANCY || typeof TENANCY !== 'object') TENANCY = { enabled: false };

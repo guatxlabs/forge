@@ -1,4 +1,4 @@
-import { OPERATOR_SECRET, adminApi, api, write } from '../core/api.js';
+import { OPERATOR_SECRET, adminApi, api, request, write } from '../core/api.js';
 import { isAdmin } from '../core/auth.js';
 import { $, esc } from '../core/dom.js';
 import { renderLaunchModules } from './launch/index.js';
@@ -64,7 +64,7 @@ export async function previewReport() {
   const url = '/api/engagements/' + id + '/report?format=html&preview=1';
   host.innerHTML = '<div class="muted">chargement de l\'aperçu…</div>';
   let r, html;
-  try { r = await fetch(url, { headers: { Accept: 'text/html' } }); html = await r.text().catch(() => ''); }
+  try { r = await request(url, { headers: { Accept: 'text/html' } }); html = await r.text().catch(() => ''); }
   catch (err) { host.innerHTML = '<div class="bad">aperçu indisponible : ' + esc(err.message || err) + '</div>'; return; }
   if (r.status === 401 || r.status === 403) { host.innerHTML = '<div class="muted">Session requise (viewer+) pour générer un rapport.</div>'; return; }
   if (r.status === 404) { host.innerHTML = '<div class="muted">Engagement introuvable (supprimé ?).</div>'; return; }
@@ -90,7 +90,7 @@ export async function downloadReport(format) {
   const url = '/api/engagements/' + id + '/report?format=' + fmt;
   const btn = $('#rep-generate'); if (btn) btn.disabled = true;
   let r;
-  try { r = await fetch(url, { headers: { Accept: '*/*' } }); }
+  try { r = await request(url, { headers: { Accept: '*/*' } }); }
   catch (e) { if (btn) btn.disabled = false; toast('Erreur réseau : ' + (e.message || e), 'bad'); return; }
   if (btn) btn.disabled = false;
   if (r.status === 401 || r.status === 403) { toast('Session requise (viewer+) pour générer un rapport.', 'bad'); return; }

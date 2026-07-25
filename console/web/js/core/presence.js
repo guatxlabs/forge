@@ -10,6 +10,7 @@
 
 import { $, ic } from './dom.js';
 import { activeEngagement } from './state.js';
+import { request } from './api.js';
 
 let ES = null;                 // EventSource courant (null si fermé)
 let HB = null;                 // timer de heartbeat
@@ -70,7 +71,7 @@ async function refreshRoster() {
   const eng = activeEngagement();
   const url = '/api/presence' + (eng != null ? ('?engagement=' + encodeURIComponent(eng)) : '');
   try {
-    const r = await fetch(url, { headers: { Accept: 'application/json' } });
+    const r = await request(url, { headers: { Accept: 'application/json' } });
     if (!r.ok) return;
     const data = await r.json().catch(() => null);
     if (data) renderPresence(data);
@@ -79,7 +80,7 @@ async function refreshRoster() {
 
 // Heartbeat léger : maintient le TTL côté serveur même si le flux SSE est bufferisé par un proxy.
 async function heartbeat() {
-  try { await fetch('/api/presence/heartbeat', { method: 'POST', headers: { Accept: 'application/json' } }); }
+  try { await request('/api/presence/heartbeat', { method: 'POST', headers: { Accept: 'application/json' } }); }
   catch (e) { /* best-effort */ }
 }
 

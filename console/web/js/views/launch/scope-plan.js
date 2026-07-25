@@ -1,4 +1,4 @@
-import { OPERATOR_SECRET, write } from '../../core/api.js';
+import { OPERATOR_SECRET, request, write } from '../../core/api.js';
 import { $, esc, ic } from '../../core/dom.js';
 import { activeEngagement, withEngagement } from '../../core/state.js';
 import { confirmModal, toast } from '../../core/ui.js';
@@ -37,7 +37,7 @@ export async function lcScopeCheck() {
   let r, j;
   try {
     // ENGAGEMENT-AWARE : scope-check résout contre le scope de l'engagement ACTIF (même règle que /api/run).
-    r = await fetch(withEngagement('/api/scope-check'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ target }) });
+    r = await request(withEngagement('/api/scope-check'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ target }) });
     j = await r.json().catch(() => ({}));
   } catch (e) { out.innerHTML = `<span class="badge destr">erreur réseau</span> <span class="muted">${esc(String(e.message || e))}</span>`; return; }
   if (r.status === 400 || (j && j.error)) {
@@ -93,8 +93,10 @@ export async function lcDryPlan() {
   try {
     // INVARIANT : le dry-plan passe par LE MÊME helper que le lancement armé (`write(..., 'operator')`,
     // qui injecte X-Forge-Operator via operatorHeaders). Le serveur applique à /api/plan la gate de
-    // /api/run : un `fetch` brut sans preuve opérateur rendait l'aperçu INERTE plus restreint que le tir
-    // ARMÉ — et poussait donc à sauter le dry-run. Identiques PAR CONSTRUCTION, pas par recopie.
+    // /api/run : un appel sans preuve opérateur rendait l'aperçu INERTE plus restreint que le tir ARMÉ —
+    // et poussait donc à sauter le dry-run. Identiques PAR CONSTRUCTION, pas par recopie : depuis que le
+    // SPA n'a qu'UNE porte réseau (core/api.js), toute requête mutante emporte la preuve, quel que soit
+    // le site d'appel.
     r = await write('/api/plan', { body, auth: 'operator', engagement: true });
     j = r.json;
   } catch (e) {

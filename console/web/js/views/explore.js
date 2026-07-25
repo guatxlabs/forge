@@ -1,4 +1,4 @@
-import { api } from '../core/api.js';
+import { api, request } from '../core/api.js';
 import { $, CSSV, LOC, fmtTs, ic, raw } from '../core/dom.js';
 
 
@@ -143,7 +143,7 @@ export async function runQ(query, isSoql, fromOverride, limit, offset) {
   if (f) body.from = f;
   if (t) body.to = t;
   if (limit !== undefined && limit !== null) { body.limit = limit; body.offset = offset || 0; }
-  const r = await fetch('/api/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await request('/api/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return r.json();
 }
 export function vizElement(mode, cols, rows, query, drill) {

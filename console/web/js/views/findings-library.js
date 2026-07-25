@@ -1,4 +1,4 @@
-import { api, write } from '../core/api.js';
+import { api, request, write } from '../core/api.js';
 import { editing } from './dashboards.js';
 import { $, SEV_BADGE, esc, raw, safeHtml } from '../core/dom.js';
 import { loadFindings } from './findings.js';
@@ -89,7 +89,7 @@ export async function deleteTemplate(tpl) {
   const ok = await confirmModal('Supprimer le modèle « ' + tpl.name + ' » ? (ledgerisé, réservé admin — les findings déjà créés ne sont pas affectés)', { title: 'Supprimer le modèle', okText: 'Supprimer' });
   if (!ok) return;
   try {
-    const r = await fetch('/api/finding-templates/' + tpl.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json', Accept: 'application/json' } });
+    const r = await request('/api/finding-templates/' + tpl.id, { method: 'DELETE', headers: { 'Content-Type': 'application/json', Accept: 'application/json' } });
     if (r.status === 403) { toast('Suppression réservée à un administrateur', 'bad'); return; }
     if (!r.ok) { const j = await r.json().catch(() => ({})); toast('Échec : ' + String(j.why || j.error || r.status), 'bad'); return; }
     toast('Modèle supprimé (ledgerisé)', 'ok'); loadFindingsLibrary();

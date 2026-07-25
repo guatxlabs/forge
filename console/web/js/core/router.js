@@ -20,6 +20,7 @@ import { loadRoe } from '../views/roe.js';
 import { loadTechniques } from '../views/techniques.js';
 import { loadTenants, tenancyAdmin } from '../views/tenancy.js';
 import { loadWorkflows } from '../views/workflows.js';
+import { request } from './api.js';
 
 export const VIEWS = {
   'ov-summary': 'overview', 'ov-sev': 'overview', 'ov-modules': 'overview',
@@ -99,10 +100,11 @@ if ($('#refresh')) $('#refresh').addEventListener('change', applyAutoRefresh);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 // version produit (source unique : fichier VERSION -> exposé par /health JSON) affichée au pied de page.
-// Best-effort, jamais bloquant : /health est ouvert (hors auth), donc fetch nu sans en-tête.
+// Best-effort, jamais bloquant : /health est ouvert (hors auth), donc aucune preuve à attacher — mais
+// l'appel passe quand même par `request()` : le SPA n'a qu'UNE porte réseau (cf. core/api.js).
 export async function loadVersion() {
   try {
-    const j = await (await fetch('/health', { headers: { accept: 'application/json' } })).json();
+    const j = await (await request('/health', { headers: { accept: 'application/json' } })).json();
     const el = $('#version');
     if (el && j && j.version) el.textContent = ' — forge v' + j.version;
   } catch (e) { /* pied de page informatif : ignorer toute erreur */ }

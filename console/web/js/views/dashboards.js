@@ -1,4 +1,4 @@
-import { api, write } from '../core/api.js';
+import { api, request, write } from '../core/api.js';
 import { $, esc, ic, raw } from '../core/dom.js';
 import { currentFrom, currentTo, runQuery, vizElement } from './explore.js';
 import { confirmModal, modal, toast } from '../core/ui.js';
@@ -180,7 +180,7 @@ export function renderPanel(p) {
   async function load() {
     try {
       const from = currentFrom() || 0, to = currentTo() || 0;
-      const r = await fetch(`/api/panels/${p.id}/data?from=${from}&to=${to}`);
+      const r = await request(`/api/panels/${p.id}/data?from=${from}&to=${to}`);
       const j = await r.json();
       if (!r.ok || j.error) body.replaceChildren(Object.assign(document.createElement('div'), { className: 'bad', textContent: 'Erreur : ' + (j.error || r.status) }));
       else { result = { columns: j.columns, rows: j.rows }; draw(); }
@@ -298,7 +298,7 @@ export function renderDashboard(d) {
 // charge les panneaux d'UN dashboard (GET /api/panels?dashboard_id=N) dans sa grille.
 export async function loadPanelsInto(grid, d) {
   let panels = [];
-  try { panels = await (await fetch('/api/panels?dashboard_id=' + d.id)).json(); }
+  try { panels = await (await request('/api/panels?dashboard_id=' + d.id)).json(); }
   catch (e) { grid.replaceChildren(Object.assign(document.createElement('div'), { className: 'bad', textContent: 'erreur : ' + e.message })); return; }
   if (!Array.isArray(panels)) panels = [];
   if (!panels.length) {
@@ -346,7 +346,7 @@ export function renderDashboards() {
 export async function loadDashboards() {
   const host = $('#dashview'); if (!host) return;
   let list = [];
-  try { list = await (await fetch('/api/dashboards')).json(); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
+  try { list = await (await request('/api/dashboards')).json(); } catch (e) { host.innerHTML = '<div class="bad">erreur : ' + esc(e.message) + '</div>'; return; }
   dashList = Array.isArray(list) ? list : [];
   loadViews();          // (re)peuple le sélecteur de vues (collections locales) — préserve la sélection
   renderDashboards();

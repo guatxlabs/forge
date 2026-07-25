@@ -1,5 +1,5 @@
 import { detectionSourceForm } from '../components/detection-source-form.js';
-import { api, setOperatorSecret } from './api.js';
+import { api, request, setOperatorSecret } from './api.js';
 import { loadCampaigns } from '../views/campaigns.js';
 import { $ } from './dom.js';
 import { loadEngagementSelector } from '../views/engagements.js';
@@ -90,7 +90,7 @@ if ($('#login-form')) $('#login-form').addEventListener('submit', async e => {
   if (!user || !pass) { loginErr('Identifiant et mot de passe requis.'); return; }
   const btn = $('#login-submit'); if (btn) btn.disabled = true;
   try {
-    const r = await fetch('/api/login', {
+    const r = await request('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ login: user, password: pass }),
@@ -120,7 +120,7 @@ if ($('#login-form')) $('#login-form').addEventListener('submit', async e => {
 // client. NB : le cookie forge_session est HttpOnly (sa révocation DURE est côté serveur) ; ici on
 // coupe les flux, on oublie les secrets de session en mémoire et on ramène l'UI au portail.
 export async function doLogout() {
-  try { await fetch('/api/logout', { method: 'POST', headers: { Accept: 'application/json' } }); } catch (e) { /* endpoint absent : sans effet */ }
+  try { await request('/api/logout', { method: 'POST', headers: { Accept: 'application/json' } }); } catch (e) { /* endpoint absent : sans effet */ }
   try { document.cookie = 'forge_session=; Path=/; Max-Age=0; SameSite=Strict'; } catch (e) {}
   setOperatorSecret('');
   const opField = $('#lc-operator'); if (opField) opField.value = '';
@@ -233,7 +233,7 @@ export async function setupSubmit() {
   const fin = $('#su-finish'); if (fin) fin.disabled = true;
   setupErr('');
   try {
-    const r = await fetch('/api/setup', {
+    const r = await request('/api/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(setupBuildPayload()),
@@ -276,7 +276,7 @@ export async function setupSubmit() {
 export async function revealSetupIngestToken() {
   let data;
   try {
-    const r = await fetch('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
+    const r = await request('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
     if (!r.ok) return;
     data = await r.json();
   } catch (e) { return; }
@@ -330,7 +330,7 @@ if ($('#setup-form')) $('#setup-form').addEventListener('submit', e => {
 export async function bootApp() {
   // 1er déploiement : une install fraîche (aucun admin activé ni hash d'amorçage) affiche le wizard.
   try {
-    const sr = await fetch('/api/setup/state', { headers: { Accept: 'application/json' } });
+    const sr = await request('/api/setup/state', { headers: { Accept: 'application/json' } });
     if (sr.ok) {
       const st = await sr.json().catch(() => null);
       // SSO (ENTERPRISE) : capter la disponibilité AVANT toute sortie anticipée (pour l'écran de login).
@@ -340,7 +340,7 @@ export async function bootApp() {
   } catch (e) { /* sonde best-effort : en cas d'échec on poursuit sur le flux whoami habituel */ }
   let w = null;
   try {
-    const r = await fetch('/api/whoami', { headers: { Accept: 'application/json' } });
+    const r = await request('/api/whoami', { headers: { Accept: 'application/json' } });
     if (r.status === 401) { renderWhoami(null); showLogin(); return; }
     if (r.ok) w = await r.json().catch(() => null);
   } catch (e) {

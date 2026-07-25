@@ -1,4 +1,4 @@
-import { adminApi } from '../../core/api.js';
+import { adminApi, request } from '../../core/api.js';
 import { isAdmin } from '../../core/auth.js';
 import { $, esc } from '../../core/dom.js';
 import { emptyState, infoModal, modal, toast } from '../../core/ui.js';
@@ -31,7 +31,7 @@ export async function backupCreate() {
   });
   if (!vals) return;
   try {
-    const r = await fetch('/api/backup', {
+    const r = await request('/api/backup', {
       method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/octet-stream' },
       body: JSON.stringify({ passphrase: vals.passphrase }),
     });

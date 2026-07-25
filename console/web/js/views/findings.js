@@ -1,4 +1,4 @@
-import { api, write } from '../core/api.js';
+import { api, request, write } from '../core/api.js';
 import { withEngagement } from '../core/state.js';
 import { $, FINDING_STATUSES, SEV_BADGE, TLP_BADGE, TLP_CLASSES, TLP_KEY, TRIAGE_BADGE, TRIAGE_NEXT, TRIAGE_STATES, esc, fmtTs, raw, safeHtml } from '../core/dom.js';
 import { downloadReport } from './reports.js';
@@ -322,7 +322,7 @@ async function bulkExport(fmt) {
   if (!ids.length) { toast('Aucun finding sélectionné.', 'info'); return; }
   let r;
   try {
-    r = await fetch(withEngagement('/api/findings/bulk/export'), {
+    r = await request(withEngagement('/api/findings/bulk/export'), {
       method: 'POST', headers: { 'Content-Type': 'application/json', Accept: '*/*' },
       body: JSON.stringify({ ids, format: fmt }),
     });

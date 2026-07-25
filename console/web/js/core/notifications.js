@@ -13,6 +13,7 @@ import { $, fmtTs } from './dom.js';
 import { activeEngagement } from './state.js';
 import { openFinding } from '../views/findings.js';
 import { switchEngagement } from '../views/engagements.js';
+import { request } from './api.js';
 
 let ES = null;             // EventSource courant (null si fermé)
 let PANEL_OPEN = false;    // état du panneau déroulant
@@ -96,7 +97,7 @@ async function onOpen(n) {
 // Re-fetch de la boîte (fail-soft : une erreur laisse l'état courant).
 async function refresh() {
   try {
-    const r = await fetch('/api/notifications', { headers: { Accept: 'application/json' } });
+    const r = await request('/api/notifications', { headers: { Accept: 'application/json' } });
     if (!r.ok) return;
     const data = await r.json().catch(() => null);
     if (!data) return;
@@ -111,7 +112,7 @@ async function refresh() {
 async function markRead(ids) {
   const body = ids && ids.length ? { ids } : {};
   try {
-    await fetch('/api/notifications/read', {
+    await request('/api/notifications/read', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),

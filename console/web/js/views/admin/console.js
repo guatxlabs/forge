@@ -1,13 +1,14 @@
 import { isAdmin } from '../../core/auth.js';
 import { $ } from '../../core/dom.js';
 import { toast } from '../../core/ui.js';
+import { request } from '../../core/api.js';
 
 // =====================================================================================
 //  CONSOLE FORGE IN-UI (roadmap P5) — panneau #admin-console, réservé role=admin.
 //  Ce N'EST PAS un terminal : on affiche une LISTE FIXE des commandes de l'allowlist serveur, chacune
 //  avec seulement ses options TYPÉES (toggles/champs). Un clic « Exécuter » POST /api/console/exec avec
 //  {command, args, confirm} ; le serveur valide (allowlist + schéma d'args), ledgerise `console.exec`,
-//  et STREAME la sortie (SSE : events `log`/`status`). On consomme le flux via fetch() + ReadableStream
+//  et STREAME la sortie (SSE : events `log`/`status`). On consomme le flux via request() + ReadableStream
 //  et on rend chaque ligne ÉCHAPPÉE (esc) dans un volet en lecture seule — jamais d'innerHTML de texte
 //  serveur (anti-XSS). Aucune saisie de commande libre, aucun flag arbitraire : l'UI ne propose que ce
 //  que l'allowlist autorise ; le serveur reste l'autorité (check_admin -> 403 ; hors-allowlist -> 400).
@@ -103,7 +104,7 @@ function renderIngestTokenCard() {
   copyBtn.textContent = 'Copier';
 
   const fetchToken = async () => {
-    const r = await fetch('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
+    const r = await request('/api/console/ingest-token', { headers: { Accept: 'application/json' } });
     if (!r.ok) {
       let why = 'HTTP ' + r.status;
       try { const j = await r.json(); why = (j && (j.why || j.error)) || why; } catch (e) {}
@@ -259,7 +260,7 @@ function renderCommandCard(cmd, out) {
   return card;
 }
 
-// --- Lance l'exec et STREAME la réponse SSE dans le volet de sortie (échappé). fetch() + ReadableStream
+// --- Lance l'exec et STREAME la réponse SSE dans le volet de sortie (échappé). request() + ReadableStream
 //     (POST -> EventSource impossible : GET-only) ; parsing SSE minimal (frames « event:/data: »).
 async function runExec(cmd, body, out, runBtn) {
   runBtn.disabled = true;
@@ -273,7 +274,7 @@ async function runExec(cmd, body, out, runBtn) {
   };
   append('$ forge ' + cmd.label, 'console-line-cmd');
   try {
-    const r = await fetch('/api/console/exec', {
+    const r = await request('/api/console/exec', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
       body: JSON.stringify(body),

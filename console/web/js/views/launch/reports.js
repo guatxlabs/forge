@@ -1,10 +1,11 @@
 import { infoModal, toast } from '../../core/ui.js';
+import { request } from '../../core/api.js';
 
 // --- RAPPORT DE RUN : GET /api/runs/:id/report (text/markdown) -> modale read-only ---
 export async function openRunReport(runId) {
   let r, md;
   try {
-    r = await fetch('/api/runs/' + encodeURIComponent(runId) + '/report', { headers: { Accept: 'text/markdown' } });
+    r = await request('/api/runs/' + encodeURIComponent(runId) + '/report', { headers: { Accept: 'text/markdown' } });
     md = await r.text().catch(() => '');
   } catch (e) { toast('Rapport : ' + (e.message || e), 'bad'); return; }
   if (r.status === 404) { toast('Run inconnu (pas de rapport).', 'bad'); return; }
@@ -24,7 +25,7 @@ export async function openRunReportHtml(runId, print) {
   const url = '/api/runs/' + encodeURIComponent(runId) + '/report?format=html';
   let r, html;
   try {
-    r = await fetch(url, { headers: { Accept: 'text/html' } });
+    r = await request(url, { headers: { Accept: 'text/html' } });
     html = await r.text().catch(() => '');
   } catch (e) { toast('Rapport HTML : ' + (e.message || e), 'bad'); return; }
   if (r.status === 404) { toast('Run inconnu (pas de rapport).', 'bad'); return; }

@@ -1,4 +1,4 @@
-import { api } from '../../core/api.js';
+import { api, request } from '../../core/api.js';
 import { $, esc, ic } from '../../core/dom.js';
 import { loadRuns } from './runs-list.js';
 import { lcRenderLiveResult } from './run-result.js';
@@ -24,7 +24,7 @@ export async function probeC2State() {
   //  - 403 (autre why)          -> rôle armé : le secret X-Forge-Operator est exigé pour lancer ;
   //  - 400 de validation        -> gate OUVERT (on est PASSÉ l'opérateur via la session en cours) : PRÊT.
   try {
-    const r = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forge-Operator': '' }, body: JSON.stringify({ campaign: '__c2probe__', targets: [] }) });
+    const r = await request('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forge-Operator': '' }, body: JSON.stringify({ campaign: '__c2probe__', targets: [] }) });
     const j = await r.json().catch(() => ({}));
     if (r.status === 401) { el.className = 'badge expl'; el.textContent = 'auth viewer requise'; el.title = 'L\'auth viewer (Basic/Bearer) est exigée avant le rôle opérateur.'; }
     else if (r.status === 403 && /non provisionn/i.test(String(j.why || ''))) { el.className = 'badge destr'; el.innerHTML = `${ic('ban')} opérateur fermé`; el.title = 'FAIL-CLOSED : rôle opérateur non provisionné (FORGE_CONSOLE_OPERATOR_HASH absent). Tout lancement renverra 403.'; }
