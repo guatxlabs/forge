@@ -793,6 +793,12 @@ pub(crate) fn module_web_allowed(kind: &str, exploit: bool, destructive: bool) -
 /// à 11,4 s (×53). Désormais : budget `FORGE_ENGINE_TIMEOUT` (le boot repart fail-soft, table inchangée)
 /// et plafond `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` (les refresh au-delà sont refusés, pas mis en file).
 /// Le VERROU du store n'est JAMAIS tenu à travers un `await` : on sonde d'abord, on écrit ensuite.
+/// `#[must_use]` : la CAUSE d'une sonde qui n'a pas abouti ne doit pas pouvoir être jetée par mégarde.
+/// Deux des quatre appelants la jetaient (mesuré : `POST`/`DELETE /api/tools` rendaient `registered:false`
+/// sans dire POURQUOI). Ce n'est plus une discipline d'appelant : le compilateur signale tout site qui
+/// ignore la valeur, y compris un site écrit demain. Un appelant qui veut vraiment l'ignorer doit le DIRE
+/// (`let _ = …`), et ce `let _` est alors visible en revue.
+#[must_use = "la cause d'une sonde de registre interrompue doit être rendue ou explicitement ignorée (let _ = …)"]
 pub(crate) async fn populate_modules(app: &crate::App) -> Option<String> {
     let (mods, why) = probe_modules(app).await;
     apply_probed_modules(&app.store(), mods);
