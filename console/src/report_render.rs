@@ -23,22 +23,25 @@ use crate::{
 /// (wkhtmltopdf ou weasyprint) — AUCUNE dépendance lourde n'est ajoutée au binaire. Retourne None si
 /// aucun moteur n'est installé (l'appelant documente alors l'impression navigateur). Le HTML est passé
 /// par STDIN (wkhtmltopdf `- -`) ou par un fichier temporaire (weasyprint) ; sortie sur stdout/fichier.
+/// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (viewer+) : il est BORNÉ par le helper
+/// partagé (slots en vol `ENGINE_GATE`, budget `FORGE_ENGINE_TIMEOUT` avec kill du groupe, plafond
+/// d'octets sur le PDF collecté, mort de l'enfant si la requête est abandonnée). Toute borne franchie =>
+/// `None` => la dégradation 501 déjà documentée (impression navigateur).
 pub(crate) async fn render_pdf_from_html(html: &str) -> Option<Vec<u8>> {
-    use tokio::io::AsyncWriteExt;
     // 1) wkhtmltopdf : lit le HTML sur stdin (`-`), écrit le PDF sur stdout (`-`). Préféré (rendu CSS).
     if which_in_path("wkhtmltopdf") {
-        let mut child = tokio::process::Command::new("wkhtmltopdf")
-            .args(["--quiet", "--print-media-type", "-", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(html.as_bytes()).await;
-            drop(stdin); // EOF -> wkhtmltopdf termine sa lecture
-        }
-        let out = child.wait_with_output().await.ok()?;
+        let slot = crate::ENGINE_GATE.try_acquire()?;
+        let mut cmd = tokio::process::Command::new("wkhtmltopdf");
+        cmd.args(["--quiet", "--print-media-type", "-", "-"]);
+        let out = crate::bounded_engine_output(
+            &mut cmd,
+            &slot,
+            std::time::Duration::from_secs(crate::engine_timeout_secs()),
+            crate::ENGINE_BINARY_MAX_BYTES,
+            Some(html.as_bytes().to_vec()),
+        )
+        .await
+        .ok()?;
         if out.status.success() && !out.stdout.is_empty() {
             return Some(out.stdout);
         }
@@ -46,6 +49,7 @@ pub(crate) async fn render_pdf_from_html(html: &str) -> Option<Vec<u8>> {
     }
     // 2) weasyprint : HTML d'entrée par fichier temp, PDF en sortie sur stdout (`-`).
     if which_in_path("weasyprint") {
+        let slot = crate::ENGINE_GATE.try_acquire()?;
         let dir = std::env::temp_dir().join(format!("forge-report-{}", gen_token()));
         let _ = std::fs::create_dir_all(&dir);
         let in_path = dir.join("report.html");
@@ -53,14 +57,17 @@ pub(crate) async fn render_pdf_from_html(html: &str) -> Option<Vec<u8>> {
             let _ = std::fs::remove_dir_all(&dir);
             return None;
         }
-        let out = tokio::process::Command::new("weasyprint")
-            .arg(&in_path)
-            .arg("-") // stdout
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .await
-            .ok();
+        let mut cmd = tokio::process::Command::new("weasyprint");
+        cmd.arg(&in_path).arg("-"); // stdout
+        let out = crate::bounded_engine_output(
+            &mut cmd,
+            &slot,
+            std::time::Duration::from_secs(crate::engine_timeout_secs()),
+            crate::ENGINE_BINARY_MAX_BYTES,
+            None,
+        )
+        .await
+        .ok();
         let _ = std::fs::remove_dir_all(&dir);
         let out = out?;
         if out.status.success() && !out.stdout.is_empty() {

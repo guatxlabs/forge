@@ -58,10 +58,18 @@ via le [wizard](FIRST_DEPLOYMENT.md)).
 | `FORGE_PYTHON` | Interpréteur pour `python3 -m forge.cli`. | `python3` | `python3` |
 | `FORGE_RUN_TIMEOUT` | Budget max (s) d'un run C2-light (watchdog). | `1800` (binaire) · `900` (image) | `900` |
 | `FORGE_PLAN_TIMEOUT` | Budget max (s) d'un **dry-plan** (`POST /api/plan`, inerte). Au dépassement : le **groupe** moteur est tué et l'appelant reçoit `504 plan_timeout` (jamais d'aperçu partiel). Valeur invalide ou `0` → défaut. | `300` | `60` |
-| `FORGE_PLAN_MAX_CONCURRENT` | Nombre de **dry-plans en vol** simultanés (chacun spawne un process moteur). Au-delà : `429 plan_busy` — erreur explicite, **pas** de file d'attente muette. Valeur invalide ou `0` → défaut. | `2` | `4` |
+| `FORGE_PLAN_MAX_CONCURRENT` | Nombre de **dry-plans en vol** simultanés (chacun spawne un process moteur). Au-delà : `429 plan_busy` — erreur explicite, **pas** de file d'attente muette. **Relue à chaque dry-plan** (comme `FORGE_PLAN_TIMEOUT`) : une modification prend effet sans redémarrer. Valeur invalide ou `0` → défaut. | `2` | `4` |
+| `FORGE_ENGINE_TIMEOUT` | Budget max (s) des **autres** spawns moteur : catalogue `GET /api/techniques`, `GET /api/workflows`, rendu **DOCX/PDF** du livrable. Au dépassement : le **groupe** est tué et la route rend sa dégradation documentée (fail-soft `techniques_unavailable`/`builtins_unavailable`, `501` pour DOCX/PDF). Relue à chaque appel. Valeur invalide ou `0` → défaut. | `120` | `30` |
+| `FORGE_ENGINE_MAX_CONCURRENT` | Nombre de ces spawns moteur de **lecture** en vol (compteur distinct de celui du dry-plan : une rafale de lectures n'affame pas l'opérateur, et réciproquement). Au-delà : refus **explicite** (le message nomme la variable), **pas** de file d'attente muette. Relue à chaque appel. Valeur invalide ou `0` → défaut. | `4` | `8` |
 | `FORGE_CONSOLE_URL` | Cible d'ingestion `POST /api/ingest` pour le **client Python** (`campaign`, `demo_ingest`, `doctor`). Doit matcher `FORGE_CONSOLE_ADDR`. | `http://127.0.0.1:7100` | `http://127.0.0.1:7100` |
 | `FORGE_LEDGER_KEY` | **[SECRET]** Matériel de clé de signature du ledger côté moteur. Vide = clé locale auto-générée (`<base>.ed25519`, `0600`). | *(vide)* | *(matériel de clé)* |
 | `PYTHONPATH` / `PYTHONUNBUFFERED` | Résolution du package `forge` / logs non bufferisés (fixés par l'image/systemd). | image | `/opt/forge` / `1` |
+
+> **Plafond d'octets (non configurable).** La sortie d'un spawn moteur est collectée en RAM : elle est
+> plafonnée à **8 Mio** (sorties texte : dry-plan, catalogues) et **64 Mio** (sorties binaires : DOCX/PDF).
+> Au-delà, le groupe est tué et l'appelant reçoit une erreur explicite (`502 plan_output_too_large` pour le
+> dry-plan, dégradation `501` pour le livrable) — **aucune sortie partielle n'est rendue comme complète**.
+> Ce n'est pas un réglage d'exploitation mais une digue anti-OOM : ces valeurs sont des constantes du binaire.
 
 ### 1.4 Chiffrement au repos (image `encryption` uniquement)
 

@@ -138,8 +138,10 @@ pub(crate) async fn scope_check(State(app): State<App>, headers: HeaderMap, Quer
 /// partiel rendu comme un plan complet). Valeur d'env invalide ou 0 => ce défaut (jamais « illimité »).
 pub(crate) const PLAN_TIMEOUT_DEFAULT_SECS: u64 = 300;
 /// Nombre par défaut de dry-plans EN VOL simultanés — `FORGE_PLAN_MAX_CONCURRENT`. Chaque dry-plan spawne
-/// un process moteur : la borne protège la MACHINE. Dépassement => 429 `plan_busy` (erreur explicite, pas
-/// de file d'attente muette). Valeur d'env invalide ou 0 => ce défaut.
+/// un process moteur : cette borne plafonne les process issus de CETTE route. Les autres routes qui
+/// spawnent le moteur ont leur propre plafond (`ENGINE_GATE`/`FORGE_ENGINE_MAX_CONCURRENT`) : le total en
+/// vol est donc la SOMME des deux, pas ce seul nombre. Dépassement => 429 `plan_busy` (erreur explicite,
+/// pas de file d'attente muette). Valeur d'env invalide ou 0 => ce défaut.
 pub(crate) const PLAN_MAX_CONCURRENT_DEFAULT: usize = 2;
 
 /// Budget de temps EFFECTIF d'un dry-plan. Lu à l'appel (comme `FORGE_CONSOLE_EXEC_BIN` côté exec) :
@@ -152,20 +154,10 @@ fn plan_timeout_secs() -> u64 {
         .unwrap_or(PLAN_TIMEOUT_DEFAULT_SECS)
 }
 
-/// SLOTS de dry-plan — sémaphore PROCESS-GLOBAL (un seul compteur pour toute la console : le budget borné
-/// est celui de la machine, pas celui d'une session). Dimensionné au PREMIER dry-plan depuis
-/// `FORGE_PLAN_MAX_CONCURRENT` (le nombre de slots ne change plus ensuite, contrairement au budget de temps).
-fn plan_slots() -> &'static tokio::sync::Semaphore {
-    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(|| {
-        let n = std::env::var("FORGE_PLAN_MAX_CONCURRENT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(PLAN_MAX_CONCURRENT_DEFAULT);
-        tokio::sync::Semaphore::new(n)
-    })
-}
+/// SLOTS de dry-plan — compteur PROCESS-GLOBAL (un seul pour toute la console : le budget borné est celui
+/// de la machine, pas celui d'une session). Le plafond est RELU DANS L'ENV À CHAQUE PRISE, comme le budget
+/// de temps : `FORGE_PLAN_MAX_CONCURRENT` n'est donc figé ni au boot ni au premier dry-plan.
+static PLAN_GATE: EngineGate = EngineGate::new("FORGE_PLAN_MAX_CONCURRENT", PLAN_MAX_CONCURRENT_DEFAULT);
 
 /// POST /api/plan {targets, modules?} -> dry-plan INERTE. Spawne `forge.cli campaign --mode propose`
 /// (jamais armé : scope FORCÉ allow_exploit=false/allow_destructive=false, --modules borné aux kinds
@@ -174,8 +166,10 @@ fn plan_slots() -> &'static tokio::sync::Semaphore {
 /// /api/run (campaign/host/modules/plancher exploit) SANS persister de run_job ni ouvrir le slot FIFO.
 /// GOUVERNANCE (S5) : planifier SPAWNE un process moteur, ce n'est donc PAS une lecture — même gate de
 /// rôle que /api/run (`check_operator`, FAIL-CLOSED : un viewer -> 403), spawn BORNÉ dans le temps
-/// (`FORGE_PLAN_TIMEOUT` -> 504 + groupe tué) et nombre de dry-plans EN VOL borné
-/// (`FORGE_PLAN_MAX_CONCURRENT` -> 429). Aucune borne n'est franchie en silence.
+/// (`FORGE_PLAN_TIMEOUT` -> 504 + groupe tué), nombre de dry-plans EN VOL borné
+/// (`FORGE_PLAN_MAX_CONCURRENT` -> 429) et sortie moteur PLAFONNÉE en octets (-> 502
+/// `plan_output_too_large` : elle est recopiée dans la réponse JSON, la borne de temps ne protège pas la
+/// RAM). Aucune borne n'est franchie en silence.
 pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(body): Json<Value>) -> impl IntoResponse {
     // (0) RÔLE OPÉRATEUR — FAIL-CLOSED, MÊME gate que /api/run (identité en session operator|admin ou
     // repli hash env, PLUS la politique source-CIDR quand elle est configurée). Refus AVANT toute
@@ -237,9 +231,9 @@ pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<
     // consomme aucun slot) et AVANT tout fichier temp / spawn. `try_acquire` : JAMAIS d'attente muette —
     // plus de slot => 429 explicite, à l'appelant de réessayer. Le permis est relâché par son `Drop` :
     // retour normal, early-return, panic OU abandon du future (client déconnecté) — cancellation-safe.
-    let _slot = match plan_slots().try_acquire() {
-        Ok(p) => p,
-        Err(_) => {
+    let slot = match PLAN_GATE.try_acquire() {
+        Some(p) => p,
+        None => {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({"error": "plan_busy", "why": "trop de planifications à blanc en cours (FORGE_PLAN_MAX_CONCURRENT) — réessayez dans un instant"})),
@@ -296,69 +290,57 @@ pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<
     }
 
     // L10 FIX — spawn NON bloquant (tokio::process ... .await) : le dry-plan ne stalle plus un worker
-    // Tokio le temps que le moteur planifie. Comportement identique à std::process::Command::output().
-    // S5 — spawn BORNÉ, MÊME mécanique que le watchdog de /api/run (runs_proc::spawn_supervisor) :
-    // groupe de session dédié (setsid) + `tokio::time::timeout` ; au dépassement on coupe TOUT le groupe
-    // (SIGTERM puis SIGKILL après grâce) et on rend 504 — jamais d'attente illimitée, jamais une sortie
-    // tronquée présentée comme un plan complet.
+    // Tokio le temps que le moteur planifie.
+    // S5 — spawn BORNÉ par le MÊME helper que les autres spawns moteur (`bounded_engine_output`, une
+    // seule implémentation des trois bornes) : groupe de session dédié (setsid), budget de temps
+    // (`FORGE_PLAN_TIMEOUT`) avec kill du GROUPE au dépassement -> 504, plafond d'OCTETS collectés en RAM
+    // -> 502 (la sortie est recopiée dans la réponse JSON : sans plafond, un moteur bavard fait enfler le
+    // process), et mort de l'enfant si le client se déconnecte. Jamais d'attente illimitée, jamais une
+    // sortie tronquée présentée comme un plan complet.
     let mut cmd = tokio::process::Command::new(app.python.as_str());
     cmd.args(&argv)
         .current_dir(app.pkg_dir.as_str())
         // parité avec run_create : stdout Python non bufferisé (le dry-plan est collecté d'un bloc,
         // donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
-        .env("PYTHONUNBUFFERED", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    spawn_setsid(&mut cmd); // le PID de l'enfant devient son PGID -> kill du GROUPE possible
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&plan_dir);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.to_string()})));
-        }
-    };
-    let pgid = child.id().map_or(0, |p| p as i32);
+        .env("PYTHONUNBUFFERED", "1");
     let budget = std::time::Duration::from_secs(plan_timeout_secs());
-    let waited = tokio::time::timeout(budget, child.wait_with_output()).await;
+    let waited = bounded_engine_output(&mut cmd, &slot, budget, ENGINE_TEXT_MAX_BYTES, None).await;
     let _ = std::fs::remove_dir_all(&plan_dir); // nettoyage best-effort quel que soit le résultat
     let output = match waited {
-        Ok(r) => r,
-        Err(_) => {
-            // BUDGET DÉPASSÉ : `kill_on_drop` a déjà tué le leader ; on coupe le RESTE du groupe (SIGTERM
-            // puis SIGKILL après grâce, comme le watchdog du run) pour ne laisser aucun petit-enfant.
-            kill_group(pgid);
-            escalate_kill_group(pgid, std::time::Duration::from_secs(CANCEL_GRACE_SECS)).await;
+        Ok(o) => o,
+        Err(EngineBoundErr::Timeout(secs)) => {
             return (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({"error": "plan_timeout", "why": format!("planification à blanc interrompue au-delà de {}s (FORGE_PLAN_TIMEOUT) — moteur arrêté, aucun aperçu partiel rendu", budget.as_secs())})),
+                Json(json!({"error": "plan_timeout", "why": format!("planification à blanc interrompue au-delà de {secs}s (FORGE_PLAN_TIMEOUT) — moteur arrêté, aucun aperçu partiel rendu")})),
             );
+        }
+        Err(EngineBoundErr::TooLarge(max)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "plan_output_too_large", "why": format!("sortie du moteur au-delà de {max} octets — moteur arrêté, aucun aperçu partiel rendu")})),
+            );
+        }
+        Err(e @ EngineBoundErr::Io(_)) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.why()})));
         }
     };
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-            // extraction best-effort des verdicts de la sortie du moteur (propose -> DRY_RUN/VETO).
-            let actions = parse_plan_verdicts(&stdout);
-            (StatusCode::OK, Json(json!({
-                "dry_run": true,
-                "mode": "propose",
-                "targets": targets,
-                "modules": requested_modules,
-                "module_params": module_params,
-                "actions": actions,
-                "exit_ok": o.status.success(),
-                "stdout": stdout,
-                "stderr": stderr,
-                "note": "dry-plan INERTE — aucune action n'a été tirée (exploit/destructif forcés false)"
-            })))
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.to_string()}))),
-    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // extraction best-effort des verdicts de la sortie du moteur (propose -> DRY_RUN/VETO).
+    let actions = parse_plan_verdicts(&stdout);
+    (StatusCode::OK, Json(json!({
+        "dry_run": true,
+        "mode": "propose",
+        "targets": targets,
+        "modules": requested_modules,
+        "module_params": module_params,
+        "actions": actions,
+        "exit_ok": output.status.success(),
+        "stdout": stdout,
+        "stderr": stderr,
+        "note": "dry-plan INERTE — aucune action n'a été tirée (exploit/destructif forcés false)"
+    })))
 }
 
 // =====================================================================================
@@ -490,15 +472,31 @@ pub(crate) fn validate_technique_selection(body: &Value) -> Result<Value, String
 /// groupement par catégorie + `enabled_for_current_scope` via resolve_enabled_kinds). Renvoie le
 /// catalogue JSON parsé, ou une erreur lisible (moteur indisponible / JSON illisible).
 pub(crate) async fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, String> {
-    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : ne stalle plus un worker Tokio.
-    let out = tokio::process::Command::new(app.python.as_str())
-        .args(["-m", "forge.cli", "techniques", "--json"])
+    // L10 FIX — spawn NON bloquant (tokio::process ... .await) : ne stalle plus un worker Tokio.
+    // S5-bis — CE SPAWN EST UN COÛT MACHINE, sur une route de LECTURE ouverte au viewer : il est BORNÉ
+    // comme le dry-plan (slots en vol partagés `ENGINE_GATE`, budget de temps, plafond d'octets, mort de
+    // l'enfant si la requête est abandonnée). Refus EXPLICITE et fail-soft : l'appelant rend son enveloppe
+    // d'erreur habituelle, en NOMMANT la borne franchie.
+    let slot = ENGINE_GATE.try_acquire().ok_or_else(|| {
+        format!(
+            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
+            ENGINE_GATE.env_var(),
+            ENGINE_GATE.max()
+        )
+    })?;
+    let mut cmd = tokio::process::Command::new(app.python.as_str());
+    cmd.args(["-m", "forge.cli", "techniques", "--json"])
         .current_dir(app.pkg_dir.as_str())
-        .env("FORGE_TECHNIQUE_SELECTION", selection.to_string())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("spawn échoué: {e}"))?;
+        .env("FORGE_TECHNIQUE_SELECTION", selection.to_string());
+    let out = bounded_engine_output(
+        &mut cmd,
+        &slot,
+        std::time::Duration::from_secs(engine_timeout_secs()),
+        ENGINE_TEXT_MAX_BYTES,
+        None,
+    )
+    .await
+    .map_err(|e| e.why())?;
     if !out.status.success() {
         return Err(format!(
             "moteur techniques rc={:?}: {}",
@@ -728,14 +726,26 @@ pub(crate) fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
 /// UNIQUE, toujours à jour). Renvoie le tableau `builtins` parsé, ou une erreur lisible (moteur absent /
 /// JSON illisible). Env passthrough sûr ; aucun argv sensible.
 pub(crate) async fn spawn_workflows_builtins(app: &App) -> Result<Vec<Value>, String> {
-    // L10 FIX — spawn NON bloquant (tokio::process ... .output().await) : ne stalle plus un worker Tokio.
-    let out = tokio::process::Command::new(app.python.as_str())
-        .args(["-m", "forge.cli", "workflows", "--json"])
-        .current_dir(app.pkg_dir.as_str())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("spawn échoué: {e}"))?;
+    // L10 FIX — spawn NON bloquant (tokio::process ... .await) : ne stalle plus un worker Tokio.
+    // S5-bis — MÊME borne machine partagée que le catalogue de techniques (cf. spawn_techniques_catalog).
+    let slot = ENGINE_GATE.try_acquire().ok_or_else(|| {
+        format!(
+            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
+            ENGINE_GATE.env_var(),
+            ENGINE_GATE.max()
+        )
+    })?;
+    let mut cmd = tokio::process::Command::new(app.python.as_str());
+    cmd.args(["-m", "forge.cli", "workflows", "--json"]).current_dir(app.pkg_dir.as_str());
+    let out = bounded_engine_output(
+        &mut cmd,
+        &slot,
+        std::time::Duration::from_secs(engine_timeout_secs()),
+        ENGINE_TEXT_MAX_BYTES,
+        None,
+    )
+    .await
+    .map_err(|e| e.why())?;
     if !out.status.success() {
         return Err(format!(
             "moteur workflows rc={:?}: {}",

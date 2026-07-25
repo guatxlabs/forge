@@ -545,36 +545,47 @@ pub(crate) fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Resu
 /// via `ps`/cmdline, cf. le token console de run_create) ; l'argv ne porte que `--source env:...`. Le
 /// collecteur émet `{detections:[{mitre,count,first_ts}]}` sur stdout. Toute erreur -> Err (fail-open),
 /// le stderr éventuel étant RÉDIGÉ du secret avant de remonter.
+/// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (`GET /api/detection/coverage`,
+/// viewer) : il est BORNÉ par le helper partagé (slots en vol `ENGINE_GATE`, budget
+/// `FORGE_ENGINE_TIMEOUT` avec kill du groupe, plafond d'octets, mort de l'enfant si la requête est
+/// abandonnée). Toute borne franchie => `Err` lisible => le FAIL-OPEN déjà documenté de la couverture
+/// (`source_reachable:false` + raison), jamais une requête suspendue.
 pub(crate) async fn collect_via_python(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
-    let py = app.python.as_str().to_string();
-    let pkg_dir = app.pkg_dir.as_str().to_string();
-    let source_json = cfg.to_string();
     let secret = ds_secret(cfg);
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new(&py)
-            .args([
-                "-m", "forge.cli", "detections",
-                "--since", &since.to_string(),
-                "--source", "env:FORGE_DETECTION_SOURCE",
-            ])
-            .current_dir(&pkg_dir)
-            .env("FORGE_DETECTION_SOURCE", &source_json)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("collecteur Python injoignable: {e}"))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            let err = redact_secret(err.trim(), &secret);
-            let err: String = err.chars().take(240).collect();
-            return Err(format!("collecteur Python a échoué (code {:?}): {err}", out.status.code()));
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let parsed: Value = serde_json::from_str(stdout.trim())
-            .map_err(|e| format!("sortie du collecteur illisible (JSON invalide): {e}"))?;
-        Ok(parse_plume_detections(&parsed))
-    })
+    let slot = crate::ENGINE_GATE.try_acquire().ok_or_else(|| {
+        format!(
+            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
+            crate::ENGINE_GATE.env_var(),
+            crate::ENGINE_GATE.max()
+        )
+    })?;
+    let mut cmd = tokio::process::Command::new(app.python.as_str());
+    cmd.args([
+        "-m", "forge.cli", "detections",
+        "--since", &since.to_string(),
+        "--source", "env:FORGE_DETECTION_SOURCE",
+    ])
+    .current_dir(app.pkg_dir.as_str())
+    .env("FORGE_DETECTION_SOURCE", cfg.to_string());
+    let out = crate::bounded_engine_output(
+        &mut cmd,
+        &slot,
+        std::time::Duration::from_secs(crate::engine_timeout_secs()),
+        crate::ENGINE_TEXT_MAX_BYTES,
+        None,
+    )
     .await
-    .unwrap_or_else(|e| Err(format!("tâche collecteur interrompue: {e}")))
+    .map_err(|e| format!("collecteur Python injoignable: {}", redact_secret(&e.why(), &secret)))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = redact_secret(err.trim(), &secret);
+        let err: String = err.chars().take(240).collect();
+        return Err(format!("collecteur Python a échoué (code {:?}): {err}", out.status.code()));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("sortie du collecteur illisible (JSON invalide): {e}"))?;
+    Ok(parse_plume_detections(&parsed))
 }
 
 /// AIGUILLAGE central : collecte les détections de la source CONFIGURÉE (cache App) -> `[(mitre,count,

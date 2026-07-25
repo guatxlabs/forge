@@ -34,10 +34,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::{
-    admin_denied, append_console_ledger, attribution_login, canon_json, check_admin,
-    csv_field, cvss_base_for_severity, engagement_ledger_path, extract_cwe, fetch_purple_coverage, html_escape,
+    admin_denied, append_console_ledger, attribution_login, bounded_engine_output, canon_json, check_admin,
+    csv_field, cvss_base_for_severity, engagement_ledger_path, engine_timeout_secs, extract_cwe,
+    fetch_purple_coverage, html_escape,
     load_engagement, read_fired_techniques, read_ledger_lines, render_pdf_from_html,
-    resolve_identity, sev_css_class, sha_hex, App, REPORT_CSS,
+    resolve_identity, sev_css_class, sha_hex, App, ENGINE_BINARY_MAX_BYTES, ENGINE_GATE, REPORT_CSS,
 };
 
 const SEVERITIES: [&str; 5] = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -796,21 +797,24 @@ fn render_html(data: &Value, preview: bool) -> String {
 /// --stdin`) : la Value du rapport (ISOLÉE à l'engagement) est envoyée sur stdin, les octets .docx
 /// reviennent sur stdout. Réutilise le générateur zipfile stdlib (source unique). Renvoie None (dégrade
 /// -> 501) si python est absent / le module échoue. no-shell : argv FIXE, aucun contenu client en argv.
+/// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (viewer+), au coût par requête
+/// SUPÉRIEUR au dry-plan : il est BORNÉ par le helper partagé (slots en vol `ENGINE_GATE`, budget
+/// `FORGE_ENGINE_TIMEOUT` avec kill du groupe, plafond d'octets sur le DOCX collecté, mort de l'enfant si
+/// la requête est abandonnée). Toute borne franchie => `None` => la dégradation 501 déjà documentée.
 async fn render_docx_via_python(app: &App, data: &Value) -> Option<Vec<u8>> {
-    use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(app.python.as_str())
-        .args(["-m", "forge.report_engagement", "--format", "docx", "--stdin"])
-        .current_dir(app.pkg_dir.as_str())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(data.to_string().as_bytes()).await;
-        drop(stdin);
-    }
-    let out = child.wait_with_output().await.ok()?;
+    let slot = ENGINE_GATE.try_acquire()?;
+    let mut cmd = tokio::process::Command::new(app.python.as_str());
+    cmd.args(["-m", "forge.report_engagement", "--format", "docx", "--stdin"])
+        .current_dir(app.pkg_dir.as_str());
+    let out = bounded_engine_output(
+        &mut cmd,
+        &slot,
+        std::time::Duration::from_secs(engine_timeout_secs()),
+        ENGINE_BINARY_MAX_BYTES,
+        Some(data.to_string().into_bytes()),
+    )
+    .await
+    .ok()?;
     if out.status.success() && !out.stdout.is_empty() {
         Some(out.stdout)
     } else {
@@ -1259,6 +1263,80 @@ mod tests {
                 "valeur légitime {b:?} altérée par la neutralisation"
             );
         }
+    }
+
+
+    /// Faux exécutable (script shell) qui remplace le moteur/l'outil externe dans les tests de bornes —
+    /// aucun process réel n'est lancé, le comportement (lent) est déterministe.
+    #[cfg(unix)]
+    fn stub_bin(tag: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::env::temp_dir();
+        p.push(format!("forge-stub-{tag}-{}.sh", std::process::id()));
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    /// [S5-bis — livrable] `GET /api/engagements/:id/report?format=docx` (viewer+) délègue à
+    /// `python -m forge.report_engagement` : un spawn de process PAR REQUÊTE, au coût SUPÉRIEUR au
+    /// dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) et dégrader sur la voie
+    /// documentée (501 `docx_unavailable`) — jamais une requête suspendue indéfiniment.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global
+    #[tokio::test]
+    async fn docx_delegation_spawn_is_time_bounded() {
+        let _g = crate::testutil::env_lock();
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "1");
+        let led = tmp_ledger("docxbound");
+        let mut app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        seed_finding(&app, 1, "f1", "a.example.com", "HIGH", "x");
+        let (vtok, _o, _a) = seed_roles(&app);
+        app.python = Arc::new(stub_bin("docx-timeout", "sleep 30"));
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "docx".to_string());
+        let started = std::time::Instant::now();
+        let fut = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q));
+        let r = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let r = r.expect("la délégation DOCX DOIT être bornée dans le temps — aucune réponse rendue");
+        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED, "dégradation documentée (501)");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
+        let body = to_json(r).await;
+        assert_eq!(body["error"], "docx_unavailable");
+        let _ = std::fs::remove_file(&led);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5-bis — livrable] `?format=pdf` spawne `wkhtmltopdf`/`weasyprint` (outil SYSTÈME) par requête,
+    /// viewer+ : même borne de temps, même dégradation documentée (None -> 501 `pdf_unavailable`).
+    /// On préfixe le PATH d'un faux `wkhtmltopdf` lent (le reste du PATH est conservé).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn pdf_render_spawn_is_time_bounded() {
+        let _g = crate::testutil::env_lock();
+        let stub_dir = std::env::temp_dir().join(format!("forge-pdfstub-{}", std::process::id()));
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let bin = stub_dir.join("wkhtmltopdf");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{old_path}", stub_dir.display()));
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "1");
+        let started = std::time::Instant::now();
+        let fut = crate::render_pdf_from_html("<html><body>x</body></html>");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+        std::env::set_var("PATH", old_path);
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let _ = std::fs::remove_dir_all(&stub_dir);
+        let got = got.expect("le rendu PDF DOIT être borné dans le temps — aucune réponse rendue");
+        assert!(got.is_none(), "moteur PDF coupé à la borne -> dégradation (None), jamais un PDF partiel");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
     }
 
     /// CSV/JSON round-trip : l'export se reparse et retrouve les valeurs attendues.

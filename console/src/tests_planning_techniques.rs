@@ -822,3 +822,166 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     // Plume (et tout SIEM/IDS) n'est qu'un enrichissement OPTIONNEL de la boucle purple.
     // =============================================================================================
 
+
+    /// [S5-bis — borne de TEMPS sur les AUTRES routes moteur] `GET /api/techniques` spawne un process
+    /// moteur par requête, comme le dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) :
+    /// un moteur qui ne rend jamais la main est COUPÉ et l'appelant reçoit la réponse fail-soft
+    /// documentée de la route (200 + `error: techniques_unavailable`), jamais une attente infinie.
+    /// Sans borne, ce handler ne rend AUCUNE réponse (le `expect` ci-dessous est l'échec attendu).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global
+    #[tokio::test]
+    async fn techniques_catalog_spawn_is_time_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "1");
+        let path = tmp_path("forge-test-techtimeout");
+        let mut app = test_app(&path);
+        app.python = Arc::new(stub_engine("tech-timeout", "sleep 30"));
+        let started = std::time::Instant::now();
+        let fut = techniques_catalog(State(app.clone()), HeaderMap::new(), Query(HashMap::new()));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let resp = resp.expect("GET /api/techniques DOIT être borné dans le temps — aucune réponse rendue");
+        assert_eq!(resp.status(), StatusCode::OK, "contrat fail-soft de la route préservé");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "techniques_unavailable", "erreur EXPLICITE (pas de silence)");
+        assert!(body["why"].as_str().unwrap_or("").contains("FORGE_ENGINE_TIMEOUT"),
+            "le refus NOMME la borne d'exploitation: {}", body["why"]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5-bis] Idem pour `GET /api/workflows` (l'autre route qui spawne le moteur en lecture).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn workflows_list_spawn_is_time_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "1");
+        let path = tmp_path("forge-test-wftimeout");
+        let mut app = test_app(&path);
+        app.python = Arc::new(stub_engine("wf-timeout", "sleep 30"));
+        let started = std::time::Instant::now();
+        let fut = workflows_list(State(app.clone()), HeaderMap::new(), Query(HashMap::new()));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let resp = resp.expect("GET /api/workflows DOIT être borné dans le temps — aucune réponse rendue");
+        assert_eq!(resp.status(), StatusCode::OK, "contrat fail-soft de la route préservé");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "builtins_unavailable");
+        assert!(body["why"].as_str().unwrap_or("").contains("FORGE_ENGINE_TIMEOUT"),
+            "le refus NOMME la borne d'exploitation: {}", body["why"]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5-bis — borne de CONCURRENCE partagée] Les routes de LECTURE qui spawnent le moteur partagent UNE
+    /// borne (`FORGE_ENGINE_MAX_CONCURRENT`) : le nombre de process moteur EN VOL est plafonné quelle que
+    /// soit la route empruntée. Avec 1 slot occupé par /api/techniques, /api/workflows doit refuser
+    /// IMMÉDIATEMENT (fail-soft, borne nommée) au lieu de spawner un N+1e process. Le slot est rendu à la
+    /// fin de la requête précédente.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn engine_spawns_share_one_concurrency_bound() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_ENGINE_MAX_CONCURRENT", "1");
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "2");
+        let path = tmp_path("forge-test-engconc");
+        let mut app = test_app(&path);
+        app.python = Arc::new(stub_engine("eng-conc", "sleep 30"));
+        // 1 process moteur EN VOL (toute la borne) via /api/techniques.
+        let a = app.clone();
+        let inflight = tokio::spawn(async move {
+            techniques_catalog(State(a), HeaderMap::new(), Query(HashMap::new())).await.status()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        // l'AUTRE route est refusée SANS spawner, et TOUT DE SUITE (pas de file d'attente muette).
+        let started = std::time::Instant::now();
+        let fut = workflows_list(State(app.clone()), HeaderMap::new(), Query(HashMap::new()));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), fut).await
+            .expect("la borne de concurrence DOIT refuser sans attendre le moteur");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refus immédiat, pas d'attente");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "builtins_unavailable");
+        assert!(body["why"].as_str().unwrap_or("").contains("FORGE_ENGINE_MAX_CONCURRENT"),
+            "le refus NOMME la borne d'exploitation: {}", body["why"]);
+        assert_eq!(inflight.await.unwrap(), StatusCode::OK, "la requête en vol se termine à sa borne de temps");
+        // slot LIBÉRÉ : la route repasse (et retombe sur la borne de TEMPS, pas sur la borne de concurrence).
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(10),
+            workflows_list(State(app.clone()), HeaderMap::new(), Query(HashMap::new()))).await
+            .expect("slot libéré -> nouvelle requête bornée dans le temps");
+        let body = resp_json(resp).await;
+        std::env::remove_var("FORGE_ENGINE_MAX_CONCURRENT");
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        assert!(body["why"].as_str().unwrap_or("").contains("FORGE_ENGINE_TIMEOUT"),
+            "slot rendu : la requête suivante atteint bien le moteur ({})", body["why"]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [S5-bis — pas d'ORPHELIN] Un client qui coupe la connexion abandonne le future du handler. Le
+    /// process moteur qu'il a spawné NE DOIT PAS survivre (sinon N process orphelins, sans borne). On
+    /// vérifie sur le PID RÉEL de l'enfant (le stub `exec`ute sleep : le leader du groupe EST le
+    /// dormeur). Sans `kill_on_drop`, il survit à l'abandon — c'est l'échec attendu avant correctif.
+    /// PORTÉE MESURÉE : ceci prouve la mort du process ENFANT DIRECT à l'abandon ; les petits-enfants
+    /// ne sont couverts que par le kill de GROUPE, au dépassement du budget de temps.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn engine_child_does_not_outlive_an_abandoned_request() {
+        let _g = env_lock();
+        let path = tmp_path("forge-test-orphan");
+        let pidfile = tmp_path("forge-test-orphan-pid");
+        let mut app = test_app(&path);
+        app.python = Arc::new(stub_engine("orphan", &format!("echo $$ > {pidfile}\nexec sleep 30")));
+        {
+            let fut = techniques_catalog(State(app.clone()), HeaderMap::new(), Query(HashMap::new()));
+            tokio::select! {
+                _ = fut => panic!("le moteur bouchon ne doit pas rendre la main"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(800)) => {}
+            }
+        } // <- future ABANDONNÉ ici (client déconnecté)
+        let pid: i32 = std::fs::read_to_string(&pidfile).expect("pidfile écrit par le stub").trim().parse().expect("pid");
+        let mut alive = true;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if unsafe { libc::kill(pid, 0) } != 0 { alive = false; break; }
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&pidfile);
+        let _ = std::fs::remove_file(app.python.as_str());
+        if alive { unsafe { libc::kill(pid, libc::SIGKILL) }; }
+        assert!(!alive, "process moteur ORPHELIN survivant à l'abandon de la requête (pid {pid})");
+    }
+
+    /// [S5-bis — borne d'OCTETS] La borne de temps ne protège PAS la RAM : la sortie du moteur est
+    /// collectée en mémoire puis RECOPIÉE dans la réponse JSON. Un moteur bavard (ou wedgé en boucle
+    /// d'impression) doit être coupé au plafond d'octets, avec une erreur EXPLICITE — jamais un aperçu
+    /// partiel rendu comme complet, jamais un buffer qui enfle jusqu'à la borne de temps.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_output_is_byte_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_PLAN_TIMEOUT", "60");
+        let ledger = tmp_path("forge-test-plan-bytes");
+        let mut app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        // moteur BAVARD : ~9 Mio sur stdout (au-delà du plafond de 8 Mio), puis il rendrait la main.
+        app.python = Arc::new(stub_engine("plan-bytes", "head -c 9000000 /dev/zero | tr '\\0' 'a'"));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(30),
+            plan(State(app.clone()), conn_info(), bearer_headers(&otok), eng_query(1),
+                Json(json!({"targets": ["a.example.com"]})))).await
+            .expect("réponse rendue").into_response();
+        std::env::remove_var("FORGE_PLAN_TIMEOUT");
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "sortie au-delà du plafond -> 502 explicite");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "plan_output_too_large");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }

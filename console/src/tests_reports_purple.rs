@@ -670,3 +670,35 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger);
     }
 
+
+    /// [S5-bis — borne de TEMPS sur le collecteur de détections] `GET /api/detection/coverage` (viewer)
+    /// délègue au COLLECTEUR PYTHON pour les kinds « messy » : encore un process moteur par requête. Il
+    /// doit être borné dans le temps comme les autres — sinon la même primitive (« un viewer spawne des
+    /// process non bornés ») survit sur cette route. Sans borne, l'appel ne rend JAMAIS la main.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global
+    #[tokio::test]
+    async fn detection_collector_spawn_is_time_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "1");
+        let path = tmp_path("forge-test-detbound");
+        let mut app = test_app(&path);
+        let stub = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = tmp_path("forge-stub-det.sh");
+            std::fs::write(&p, "#!/bin/sh\nsleep 30\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        app.python = Arc::new(stub.clone());
+        let cfg = json!({"kind": "crowdsec", "endpoint": "http://127.0.0.1:9/", "auth_type": "none"});
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(10),
+            collect_detections_with(&app, &cfg, 3600)).await;
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let got = got.expect("le collecteur de détections DOIT être borné dans le temps — aucune réponse rendue");
+        assert!(got.is_err(), "moteur coupé à la borne -> erreur fail-open lisible");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&stub);
+    }

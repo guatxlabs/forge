@@ -689,3 +689,196 @@ mod reap_tests {
     }
 }
 
+
+// =====================================================================================
+// BORNE MACHINE DES SPAWNS MOTEUR (S5-bis) — un process moteur par requête est un COÛT MACHINE, pas
+// une lecture. Trois bornes, une seule implémentation, partagée par TOUTES les routes qui spawnent :
+// nombre EN VOL (`EngineGate`), budget de TEMPS et plafond d'OCTETS collectés (`bounded_engine_output`).
+// Ce qui est GARANTI ici, et rien de plus : (1) au-delà du plafond en vol, la prise ÉCHOUE (jamais de
+// file d'attente muette) ; (2) au-delà du budget, le GROUPE de session est SIGTERM puis SIGKILL ;
+// (3) au-delà du plafond d'octets, la collecte s'arrête et le groupe est tué — aucune sortie partielle
+// n'est rendue comme complète ; (4) `kill_on_drop` tue l'enfant DIRECT si le future est abandonné
+// (client déconnecté) — les petits-enfants ne sont couverts que par le kill de GROUPE (2)/(3).
+// =====================================================================================
+
+/// Plafond de process moteur EN VOL, relu dans l'ENV À CHAQUE PRISE (donc modifiable sans redémarrer,
+/// contrairement à un `OnceLock` dimensionné au premier appel). Valeur d'env absente/invalide/0 => le
+/// défaut du site d'appel. Compteur PROCESS-GLOBAL : la borne est celle de la MACHINE, pas d'une session.
+pub(crate) struct EngineGate {
+    in_flight: std::sync::atomic::AtomicUsize,
+    env_var: &'static str,
+    default_max: usize,
+}
+
+/// Réservation d'un slot. Le slot est rendu par `Drop` : retour normal, early-return, panic OU abandon
+/// du future (client déconnecté) — donc jamais de fuite de slot.
+pub(crate) struct EnginePermit {
+    gate: &'static EngineGate,
+}
+
+impl EngineGate {
+    pub(crate) const fn new(env_var: &'static str, default_max: usize) -> Self {
+        Self { in_flight: std::sync::atomic::AtomicUsize::new(0), env_var, default_max }
+    }
+
+    /// Plafond EFFECTIF au moment de l'appel (lecture d'env, jamais figée).
+    pub(crate) fn max(&self) -> usize {
+        std::env::var(self.env_var)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(self.default_max)
+    }
+
+    /// Prend un slot SANS ATTENDRE. `None` => plafond atteint : à l'appelant de refuser explicitement.
+    pub(crate) fn try_acquire(&'static self) -> Option<EnginePermit> {
+        let max = self.max();
+        self.in_flight
+            .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                if n < max { Some(n + 1) } else { None }
+            })
+            .ok()?;
+        Some(EnginePermit { gate: self })
+    }
+
+    /// Nom de la variable d'env qui règle ce plafond — pour que le refus la NOMME à l'exploitant.
+    pub(crate) fn env_var(&self) -> &'static str {
+        self.env_var
+    }
+}
+
+impl Drop for EnginePermit {
+    fn drop(&mut self) {
+        self.gate.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Slots des spawns moteur de LECTURE (catalogue de techniques, workflows intégrés, rendu du livrable
+/// DOCX/PDF). Distinct des slots du dry-plan : une rafale de lectures ne doit pas affamer l'opérateur,
+/// et réciproquement. Le total de process moteur en vol est donc borné par la somme des deux.
+pub(crate) static ENGINE_GATE: EngineGate = EngineGate::new("FORGE_ENGINE_MAX_CONCURRENT", 4);
+
+/// Budget de temps par défaut d'un spawn moteur de lecture (`FORGE_ENGINE_TIMEOUT`).
+pub(crate) const ENGINE_TIMEOUT_DEFAULT_SECS: u64 = 120;
+
+/// Budget EFFECTIF, relu à l'appel.
+pub(crate) fn engine_timeout_secs() -> u64 {
+    std::env::var("FORGE_ENGINE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(ENGINE_TIMEOUT_DEFAULT_SECS)
+}
+
+/// Plafond d'octets collectés en RAM pour une sortie TEXTE de moteur (catalogue JSON, sortie du
+/// dry-plan). Constante : ce n'est pas un réglage d'exploitation mais une digue anti-OOM.
+pub(crate) const ENGINE_TEXT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Idem pour une sortie BINAIRE (DOCX/PDF du livrable) — plus haut, un rapport est plus gros qu'un JSON.
+pub(crate) const ENGINE_BINARY_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Sortie d'un spawn moteur BORNÉ.
+pub(crate) struct EngineOutput {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+/// Échec d'un spawn borné. Chaque variante est EXPLICITE côté appelant (jamais un silence).
+pub(crate) enum EngineBoundErr {
+    /// budget de temps dépassé (secondes) — le groupe a été tué.
+    Timeout(u64),
+    /// plafond d'octets dépassé (octets) — le groupe a été tué, rien n'est rendu.
+    TooLarge(usize),
+    /// spawn/IO impossible (moteur absent, pipe cassé…).
+    Io(String),
+}
+
+impl EngineBoundErr {
+    /// Message destiné à l'exploitant : il NOMME la borne franchie et la variable qui la règle.
+    pub(crate) fn why(&self) -> String {
+        match self {
+            EngineBoundErr::Timeout(s) => format!("moteur interrompu au-delà de {s}s (FORGE_ENGINE_TIMEOUT) — process arrêté, aucune sortie partielle rendue"),
+            EngineBoundErr::TooLarge(n) => format!("sortie moteur au-delà de {n} octets — process arrêté, aucune sortie partielle rendue"),
+            EngineBoundErr::Io(e) => format!("spawn échoué: {e}"),
+        }
+    }
+}
+
+/// Spawne `cmd` et collecte sa sortie SOUS TROIS BORNES : `budget` (temps), `max_bytes` (octets collectés
+/// par flux) et `kill_on_drop` (abandon du future). Le slot de concurrence est pris PAR L'APPELANT (il
+/// choisit son plafond, son code d'erreur et l'ordre par rapport à ses validations) : passer le permis ici
+/// documente qu'il est TENU pendant tout le spawn. Sur dépassement de temps/octets, le GROUPE de session
+/// (setsid) est SIGTERM puis SIGKILL — petits-enfants compris. stdin optionnel (délégation DOCX).
+pub(crate) async fn bounded_engine_output(
+    cmd: &mut tokio::process::Command,
+    _slot: &EnginePermit,
+    budget: std::time::Duration,
+    max_bytes: usize,
+    stdin_data: Option<Vec<u8>>,
+) -> Result<EngineOutput, EngineBoundErr> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    cmd.stdin(if stdin_data.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    spawn_setsid(cmd); // le PID de l'enfant devient son PGID -> kill du GROUPE possible
+    let mut child = cmd.spawn().map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+    let pgid = child.id().map_or(0, |p| p as i32);
+    let mut stdin = child.stdin.take();
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let work = async {
+        if let (Some(mut w), Some(data)) = (stdin.take(), stdin_data) {
+            let _ = w.write_all(&data).await;
+            drop(w); // EOF pour l'enfant
+        }
+        let cap = max_bytes as u64;
+        let mut ob = Vec::new();
+        let (o, e) = match (out.take(), err.take()) {
+            (Some(o), Some(e)) => (o, e),
+            _ => return Err(EngineBoundErr::Io("pipes stdout/stderr indisponibles".into())),
+        };
+        // lecture CONCURRENTE des deux flux (sinon un pipe plein bloque l'enfant), chacune plafonnée à
+        // max_bytes+1 : un octet de plus suffit à DÉTECTER le dépassement sans collecter davantage.
+        // Celui qui atteint le plafond TUE le groupe : sans ça, on cesse de lire un pipe que l'enfant
+        // continue de remplir -> il se bloque, l'autre lecture n'atteint jamais EOF, et le dépassement
+        // d'octets dégénère en dépassement de temps (mesuré).
+        let (mut to, mut te) = (o.take(cap + 1), e.take(cap + 1));
+        let e_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let n = te.read_to_end(&mut buf).await;
+            if matches!(&n, Ok(k) if *k as u64 > cap) {
+                kill_group(pgid);
+            }
+            (buf, n)
+        });
+        let ro = to.read_to_end(&mut ob).await;
+        if matches!(&ro, Ok(k) if *k as u64 > cap) {
+            kill_group(pgid);
+        }
+        let (eb, re) = e_task.await.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+        let no = ro.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+        let ne = re.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+        if no > max_bytes || ne > max_bytes {
+            return Err(EngineBoundErr::TooLarge(max_bytes));
+        }
+        let status = child.wait().await.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+        Ok(EngineOutput { status, stdout: ob, stderr: eb })
+    };
+    let grace = std::time::Duration::from_secs(CANCEL_GRACE_SECS);
+    match tokio::time::timeout(budget, work).await {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => {
+            kill_group(pgid);
+            escalate_kill_group(pgid, grace).await;
+            Err(e)
+        }
+        Err(_) => {
+            kill_group(pgid);
+            escalate_kill_group(pgid, grace).await;
+            Err(EngineBoundErr::Timeout(budget.as_secs()))
+        }
+    }
+}
