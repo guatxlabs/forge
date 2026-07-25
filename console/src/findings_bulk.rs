@@ -9,8 +9,10 @@
 //! current_triage/triage_allows) via `use crate::*` ; re-exporte `pub(crate)` a la racine — routes de
 //! build_router (`post(findings_bulk_status)`, …) ET tests inline (`super::*`) resolus INCHANGES.
 //!
-//! Echappement CSV : `common::csv_field` — UNE implementation, PARTAGEE avec `reports::render_csv`
-//! (RFC-4180 + neutralisation de l'injection de formule tableur). Plus de jumeau divergent.
+//! Echappement CSV : `common::csv_field` — UNE implementation cote Rust, PARTAGEE avec
+//! `reports::render_csv` (RFC-4180 + neutralisation de l'injection de formule tableur). Le meme controle
+//! existe AUSSI cote moteur Python (`forge/report_engagement.py`) pour le rapport d'engagement ; les
+//! vecteurs de prefixes sont partages (cf. `common::csv_field`).
 use crate::*;
 
 use axum::extract::{ConnectInfo, Query, State};
@@ -340,8 +342,8 @@ pub(crate) async fn findings_bulk_triage(
 }
 
 // `csv_field` (échappement RFC-4180 + neutralisation de formule tableur) vit désormais dans `common.rs` :
-// UNE seule implémentation pour les DEUX exportateurs CSV (ici et `reports::render_csv`). Résolu via
-// `use crate::*` — aucun call site à changer.
+// une seule implémentation pour les deux exportateurs CSV du BINAIRE (ici et `reports::render_csv`).
+// Résolu via `use crate::*` — aucun call site à changer.
 
 /// POST /api/findings/bulk/export {ids:[i64], format:"csv"|"json"} — EXPORTE les findings SÉLECTIONNÉS
 /// (CSV ou JSON), SERVEUR. ISOLATION : ne renvoie QUE les findings de l'engagement ACTIF

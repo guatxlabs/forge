@@ -115,6 +115,44 @@ class TestRedactionInFormats(unittest.TestCase):
         self._assert_clean(doc, "DOCX")
 
 
+class TestCsvFormulaNeutralization(unittest.TestCase):
+    """[CWE-1236] Le CSV du rapport d'engagement est LE livrable que le client ouvre dans un TABLEUR, et
+    `title`/`evidence`/`poc`/`target`/`tool` viennent de la sortie des scanners — donc influençables par la
+    cible. Un champ commençant par `=`, `+`, `-`, `@`, TAB ou CR doit ressortir NEUTRALISÉ (préfixe `'`).
+
+    Les vecteurs sont LUS dans console/testdata/csv_injection_vectors.json — le MÊME fichier que le test
+    Rust de l'autre exportateur du même livrable (console/src/reports.rs::render_csv). Le jeu de préfixes
+    n'est écrit qu'à cet endroit : une divergence entre les deux implémentations fait échouer les deux
+    suites."""
+
+    VECTORS = json.loads(
+        (Path(__file__).resolve().parents[1] / "console" / "testdata" / "csv_injection_vectors.json")
+        .read_text(encoding="utf-8")
+    )
+
+    def _title_cell(self, title):
+        data = sample_data(1, [finding(1, title=title)])
+        rows = list(csv.reader(io.StringIO(R.build_csv(data))))
+        self.assertEqual(len(rows), 2, f"en-tête + 1 finding (CSV cassé par {title!r})")
+        return dict(zip(rows[0], rows[1]))["title"]
+
+    def test_payloads_are_neutralized(self):
+        neutral = self.VECTORS["neutralizer"]
+        for p in self.VECTORS["payloads"]:
+            self.assertEqual(self._title_cell(p), neutral + p,
+                             f"titre {p!r} non neutralisé dans le CSV d'engagement (formule VIVE)")
+
+    def test_dangerous_prefix_set_is_covered_by_the_payloads(self):
+        # garde anti-dérive : chaque préfixe déclaré doit être exercé par au moins un payload.
+        for pref in self.VECTORS["dangerous_prefixes"]:
+            self.assertTrue(any(p.startswith(pref) for p in self.VECTORS["payloads"]),
+                            f"préfixe {pref!r} déclaré mais non exercé")
+
+    def test_benign_titles_are_untouched(self):
+        for b in self.VECTORS["benign"]:
+            self.assertEqual(self._title_cell(b), b, f"titre légitime {b!r} altéré par la neutralisation")
+
+
 class TestRoundTrip(unittest.TestCase):
     def test_csv_round_trip(self):
         f = finding(1, title="XSS stocké", evidence="param q reflété", status="vulnerable")

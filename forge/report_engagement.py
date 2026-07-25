@@ -179,9 +179,27 @@ _CSV_COLS = ["severity", "vuln_class", "cwe", "cvss_score", "cvss_vector", "mitr
              "target", "title", "tool", "campaign", "evidence", "poc", "fix", "ts"]
 
 
+#: Préfixes qu'un tableur interprète comme le début d'une FORMULE (CWE-1236). TAB et CR en font partie :
+#: Excel/LibreOffice les sautent avant d'interpréter le caractère suivant. Jeu VOLONTAIREMENT identique à
+#: `console/src/common.rs::csv_field` — les vecteurs partagés vivent dans
+#: `console/testdata/csv_injection_vectors.json`, lu par les DEUX suites (Rust et Python).
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_field(v):
+    """Neutralise l'injection de formule tableur (CWE-1236) sur UNE cellule : un champ commençant par un
+    préfixe de formule est préfixé d'une apostrophe -> le tableur affiche du TEXTE. Le guillemetage
+    RFC-4180 reste délégué à `csv.writer` (il double les guillemets et quote ce qui doit l'être).
+    Les cellules exportées portent du texte issu des scanners, donc influençable par la cible : la
+    neutralisation n'est jamais optionnelle. PURE."""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in _CSV_FORMULA_PREFIXES else s
+
+
 def build_csv(data_or_findings):
     """Export CSV des findings (déjà rédigés). Accepte soit le dict complet, soit la liste findings.
-    En-tête stable (_CSV_COLS) — round-trip par `csv.reader`. Échappement standard (guillemets)."""
+    En-tête stable (_CSV_COLS) — round-trip par `csv.reader`. Échappement standard (guillemets) et
+    NEUTRALISATION de l'injection de formule tableur par cellule (`_csv_field`, CWE-1236)."""
     if isinstance(data_or_findings, dict):
         findings = data_or_findings.get("findings") or []
         # si on reçoit un dict brut non normalisé, on rédige à la volée (idempotent).
@@ -189,13 +207,16 @@ def build_csv(data_or_findings):
     else:
         findings = [redact_finding(f) for f in (data_or_findings or [])]
     buf = io.StringIO()
+    # Guillemetage laissé à `csv.writer` (QUOTE_MINIMAL) : mesuré, il quote déjà les cellules contenant
+    # un CR/LF, donc une cellule neutralisée reste UNE cellule au round-trip. Les lignes légitimes sortent
+    # donc INCHANGÉES octet pour octet — seul le préfixe des cellules dangereuses est ajouté.
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(_CSV_COLS)
     for f in findings:
         row = []
         for c in _CSV_COLS:
             v = f.get("vuln_class") or f.get("category") if c == "vuln_class" else f.get(c, "")
-            row.append("" if v is None else str(v))
+            row.append(_csv_field(v))
         w.writerow(row)
     return buf.getvalue()
 

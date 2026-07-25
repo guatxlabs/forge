@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "VECTEURS PARTAGÉS — neutralisation de l'injection de formule tableur (CWE-1236) dans les exports CSV.",
+    "Le rapport d'engagement en CSV a DEUX générateurs, dans deux langages : console/src/reports.rs",
+    "(render_csv, via common::csv_field) et forge/report_engagement.py (build_csv, via _csv_field).",
+    "Ce fichier est le SEUL endroit où le jeu de préfixes dangereux est écrit. Il est lu par les DEUX",
+    "suites de tests : console/src/reports.rs::tests::csv_injection_vectors_shared_with_python_exporter",
+    "et tests/test_report_engagement.py::TestCsvFormulaNeutralization. Ajouter/retirer un préfixe ici",
+    "sans corriger LES DEUX implémentations fait échouer LES DEUX suites — c'est le garde anti-dérive.",
+    "Emplacement sous console/ parce que le test Rust l'inclut à la compilation (include_str!) et que",
+    "l'image de build ne copie que console/ (cf. Dockerfile) : un chemin hors du crate casserait le build."
+  ],
+  "neutralizer": "'",
+  "dangerous_prefixes": ["=", "+", "-", "@", "\t", "\r"],
+  "payloads": [
+    "=cmd|' /C calc'!A0",
+    "+1+1",
+    "-2+3",
+    "@SUM(A1)",
+    "\tTAB",
+    "\rCR"
+  ],
+  "benign": [
+    "XSS stocké",
+    "a.example.com",
+    "HIGH",
+    "param q reflété",
+    "curl https://a.example.com/?q=1"
+  ]
+}

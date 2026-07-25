@@ -478,6 +478,9 @@ const CSV_COLS: [&str; 15] = [
 // Échappement CSV : `common::csv_field` (importé ci-dessus) — RFC-4180 + NEUTRALISATION de l'injection de
 // formule tableur (CWE-1236). Ce module n'a plus sa propre variante : le CSV d'engagement est le livrable
 // que le client ouvre dans un tableur, il ne peut pas avoir un garde plus faible que l'export bulk.
+// ATTENTION : ce n'est PAS le seul générateur du CSV d'engagement — `forge/report_engagement.py::build_csv`
+// rend le même livrable (15 mêmes colonnes) pour `python -m forge.report_engagement --format csv`. Les deux
+// neutralisent le même jeu de préfixes, partagé via `console/testdata/csv_injection_vectors.json`.
 
 /// Export CSV des findings (déjà rédigés). En-tête stable CSV_COLS -> round-trip trivial.
 fn render_csv(data: &Value) -> String {
@@ -1190,7 +1193,7 @@ mod tests {
     /// [S6 — CWE-1236] Le CSV d'engagement est LE livrable que le client ouvre dans un TABLEUR. Un `title`
     /// vient de la sortie des scanners (donc influençable par la cible) : s'il commence par `=`, `+`, `-`,
     /// `@`, une TABULATION ou un RETOUR CHARIOT, il doit ressortir NEUTRALISÉ (préfixe `'`) — même garde
-    /// que l'export bulk des findings (source UNIQUE : `common::csv_field`).
+    /// que l'export bulk des findings (`common::csv_field`, l'unique implémentation côté Rust).
     #[tokio::test]
     async fn csv_export_neutralizes_spreadsheet_formula_injection() {
         let led = tmp_ledger("csvinj");
@@ -1213,6 +1216,49 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&led);
+    }
+
+    /// [S6 — CWE-1236] ANTI-DÉRIVE INTER-LANGAGES. Le rapport d'engagement en CSV a DEUX générateurs :
+    /// celui-ci (Rust, `render_csv` via `common::csv_field`) et `forge/report_engagement.py::build_csv`
+    /// (servi par `python -m forge.report_engagement --format csv`). Le jeu de préfixes dangereux n'est
+    /// écrit qu'à UN endroit — `console/testdata/csv_injection_vectors.json` — lu par CETTE assertion ET
+    /// par `tests/test_report_engagement.py::TestCsvFormulaNeutralization`. Toucher le jeu sans corriger
+    /// les deux implémentations fait échouer les DEUX suites (c'est le garde, pas une promesse).
+    #[test]
+    fn csv_injection_vectors_shared_with_python_exporter() {
+        let v: Value = serde_json::from_str(include_str!("../testdata/csv_injection_vectors.json"))
+            .expect("vecteurs CSV partagés lisibles");
+        let neutral = v["neutralizer"].as_str().expect("neutralizer");
+        let strs = |k: &str| -> Vec<String> {
+            v[k].as_array().expect(k).iter().map(|x| x.as_str().expect("str").to_string()).collect()
+        };
+        let prefixes = strs("dangerous_prefixes");
+        let payloads = strs("payloads");
+        let benign = strs("benign");
+        for p in &payloads {
+            assert!(
+                prefixes.iter().any(|pref| p.starts_with(pref.as_str())),
+                "payload {p:?} n'exerce aucun préfixe déclaré (vecteurs incohérents)"
+            );
+            assert_eq!(
+                csv_field(p),
+                format!("\"{neutral}{}\"", p.replace('"', "\"\"")),
+                "payload {p:?} non neutralisé par csv_field"
+            );
+        }
+        for pref in &prefixes {
+            assert!(
+                payloads.iter().any(|p| p.starts_with(pref.as_str())),
+                "préfixe {pref:?} déclaré mais non exercé par un payload"
+            );
+        }
+        for b in &benign {
+            assert_eq!(
+                csv_field(b),
+                format!("\"{}\"", b.replace('"', "\"\"")),
+                "valeur légitime {b:?} altérée par la neutralisation"
+            );
+        }
     }
 
     /// CSV/JSON round-trip : l'export se reparse et retrouve les valeurs attendues.

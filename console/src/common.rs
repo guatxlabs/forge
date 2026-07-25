@@ -115,8 +115,17 @@ pub(crate) fn html_escape(s: &str) -> String {
 }
 
 /// Échappe un champ pour un CSV RFC-4180 **et** neutralise l'injection de formule tableur (CWE-1236) —
-/// SEULE implémentation, partagée par les DEUX exportateurs CSV (`reports::render_csv`, le livrable client,
-/// et `findings_bulk::findings_bulk_export`). Toujours entre guillemets, guillemets internes doublés ; un
+/// seule implémentation CÔTÉ RUST, partagée par les deux exportateurs CSV du binaire (`reports::render_csv`,
+/// le livrable client, et `findings_bulk::findings_bulk_export`). Une TROISIÈME implémentation du même
+/// contrôle existe côté moteur, en Python (`forge/report_engagement.py::_csv_field`, servie par
+/// `python -m forge.report_engagement --format csv`) : le CSV du rapport d'engagement a deux générateurs
+/// dans deux langages. Elles ne peuvent pas dériver EN SILENCE sur le jeu de préfixes dangereux — il est
+/// écrit une seule fois, dans `console/testdata/csv_injection_vectors.json`, et les DEUX suites lisent ce
+/// fichier (`reports::tests::csv_injection_vectors_shared_with_python_exporter` et
+/// `tests/test_report_engagement.py::TestCsvFormulaNeutralization`) : le modifier sans corriger les deux
+/// implémentations fait échouer les deux suites (mesuré). Le GUILLEMETAGE, lui, n'est PAS identique : ici
+/// chaque cellule est toujours quotée, l'exportateur Python s'en remet au minimum RFC-4180 de `csv.writer`.
+/// Toujours entre guillemets, guillemets internes doublés ; un
 /// champ commençant par `=`, `+`, `-`, `@`, une TABULATION ou un RETOUR CHARIOT est préfixé d'une apostrophe
 /// (Excel/LibreOffice ignorent TAB/CR avant d'interpréter le caractère suivant, donc ils font partie du jeu
 /// dangereux). Le tableur affiche alors du TEXTE, jamais une formule — et le champ reste lisible. Les
