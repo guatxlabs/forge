@@ -114,6 +114,23 @@ pub(crate) fn html_escape(s: &str) -> String {
     out
 }
 
+/// Échappe un champ pour un CSV RFC-4180 **et** neutralise l'injection de formule tableur (CWE-1236) —
+/// SEULE implémentation, partagée par les DEUX exportateurs CSV (`reports::render_csv`, le livrable client,
+/// et `findings_bulk::findings_bulk_export`). Toujours entre guillemets, guillemets internes doublés ; un
+/// champ commençant par `=`, `+`, `-`, `@`, une TABULATION ou un RETOUR CHARIOT est préfixé d'une apostrophe
+/// (Excel/LibreOffice ignorent TAB/CR avant d'interpréter le caractère suivant, donc ils font partie du jeu
+/// dangereux). Le tableur affiche alors du TEXTE, jamais une formule — et le champ reste lisible. Les
+/// exports portent du texte issu des scanners, donc influençable par la cible : la neutralisation n'est
+/// jamais optionnelle. PURE. Consolidée depuis `findings_bulk::csv_field` (durci) et `reports::csv_field`
+/// (qui, lui, ne neutralisait RIEN) : le chemin le plus exposé avait le garde le plus faible.
+pub(crate) fn csv_field(s: &str) -> String {
+    let guarded = match s.chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{s}"),
+        _ => s.to_string(),
+    };
+    format!("\"{}\"", guarded.replace('"', "\"\""))
+}
+
 // --- auth opérateur (argon2) : vérification/hachage de mot de passe (feuilles pures) ---
 
 pub(crate) fn verify_pw(pw: &str, hash: &str) -> bool {

@@ -198,7 +198,8 @@ mod findings;
 pub(crate) use crate::findings::*;
 // BULK-OPS + VUES DE REPORTING du modèle ROUGE — god-file `findings.rs` scindé en modules cohésifs (PURE
 // MOVE), tous re-exportés `pub(crate)` à la racine (mêmes résolutions `crate::*`/`super::*` INCHANGÉES) :
-// `findings_bulk` (opérations de masse : findings_bulk_status/assign/triage/export + parse_ids/csv_field)
+// `findings_bulk` (opérations de masse : findings_bulk_status/assign/triage/export + parse_ids ; l'échappement
+// CSV vit dans `common::csv_field`, partagé avec `reports::render_csv`)
 // et `findings_report` (vues lecture-seule : runrecords/campaigns/roe/coverage/attack_matrix + le catalogue
 // ATT&CK). Les routes de build_router (`post(findings_bulk_status)`, `get(coverage)`, `get(attack_matrix)`,
 // …) ET les tests inline (`super::*`) résolvent ces handlers INCHANGÉS.

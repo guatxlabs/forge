@@ -2,12 +2,15 @@
 //! Forge console — BULK-OPS (#8) sur le modele ROUGE (finding) : PURE MOVE extrait de `findings.rs`.
 //! Operations de MASSE sur des findings SELECTIONNES (ids) — statut (`findings_bulk_status`), assignation
 //! (`findings_bulk_assign`), triage (`findings_bulk_triage`) et export CSV/JSON (`findings_bulk_export`),
-//! + les helpers `parse_ids`/`csv_field`. TENANT/ENGAGEMENT-SCOPED FAIL-CLOSED : chaque id est confine a
+//! + le helper `parse_ids`. TENANT/ENGAGEMENT-SCOPED FAIL-CLOSED : chaque id est confine a
 //! l'engagement ACTIF (`engagement_id=?`) — un id d'un AUTRE engagement n'est JAMAIS mute ni exporte.
 //! Reutilise App + les helpers de la racine (check_operator/resolve_view_engagement_id/attribution_login/
 //! append_console_ledger + les validateurs de findings.rs : norm_finding_status/norm_triage/resolve_assignee/
 //! current_triage/triage_allows) via `use crate::*` ; re-exporte `pub(crate)` a la racine — routes de
 //! build_router (`post(findings_bulk_status)`, …) ET tests inline (`super::*`) resolus INCHANGES.
+//!
+//! Echappement CSV : `common::csv_field` — UNE implementation, PARTAGEE avec `reports::render_csv`
+//! (RFC-4180 + neutralisation de l'injection de formule tableur). Plus de jumeau divergent.
 use crate::*;
 
 use axum::extract::{ConnectInfo, Query, State};
@@ -336,16 +339,9 @@ pub(crate) async fn findings_bulk_triage(
     }))).into_response()
 }
 
-/// Échappe un champ pour un CSV RFC-4180 : toujours entre guillemets, les guillemets internes doublés.
-/// Neutralise en passant un éventuel préfixe de FORMULA INJECTION (=,+,-,@) en le préfixant d'une
-/// apostrophe (défense tableur ; le champ reste lisible). PURE.
-fn csv_field(s: &str) -> String {
-    let guarded = match s.chars().next() {
-        Some('=') | Some('+') | Some('-') | Some('@') => format!("'{s}"),
-        _ => s.to_string(),
-    };
-    format!("\"{}\"", guarded.replace('"', "\"\""))
-}
+// `csv_field` (échappement RFC-4180 + neutralisation de formule tableur) vit désormais dans `common.rs` :
+// UNE seule implémentation pour les DEUX exportateurs CSV (ici et `reports::render_csv`). Résolu via
+// `use crate::*` — aucun call site à changer.
 
 /// POST /api/findings/bulk/export {ids:[i64], format:"csv"|"json"} — EXPORTE les findings SÉLECTIONNÉS
 /// (CSV ou JSON), SERVEUR. ISOLATION : ne renvoie QUE les findings de l'engagement ACTIF
@@ -593,6 +589,34 @@ mod tests {
         assert_eq!(csv_field("plain"), "\"plain\"");
         assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
         assert_eq!(csv_field("=SUM(1)"), "\"'=SUM(1)\"");
+        // S6 — TOUS les préfixes de formule tableur sont neutralisés (dont TAB/CR, que les tableurs
+        // ignorent avant d'interpréter le caractère suivant).
+        for p in ["+1+1", "-2+3", "@SUM(A1)", "\t=SUM(1)", "\r=SUM(1)"] {
+            assert_eq!(csv_field(p), format!("\"'{p}\""), "préfixe de formule non neutralisé: {p:?}");
+        }
+    }
+
+    /// [S6 — CWE-1236] L'export CSV de la SÉLECTION neutralise l'injection de formule tableur sur tous les
+    /// préfixes dangereux (`=`, `+`, `-`, `@`, TAB, CR) — MÊME garde que le rapport d'engagement (les deux
+    /// exports partagent `common::csv_field`).
+    #[tokio::test]
+    async fn bulk_export_csv_neutralizes_spreadsheet_formula_injection() {
+        let led = tmp_ledger("export-inj");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "A");
+        let payloads = ["=cmd|' /C calc'!A0", "+1+1", "-2+3", "@SUM(A1)", "\tTAB", "\rCR"];
+        let ids: Vec<i64> = payloads.iter().map(|p| seed_finding(&app, 1, p, "new")).collect();
+        let (_v, otok) = seed_roles(&app);
+        let q = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
+
+        let r = findings_bulk_export(State(app.clone()), bearer(&otok), q,
+            Json(json!({"ids": ids, "format": "csv"}))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let csv = to_text(r).await;
+        for p in payloads {
+            assert!(csv.contains(&format!("\"'{p}\"")), "titre {p:?} non neutralisé dans l'export bulk");
+        }
+        let _ = std::fs::remove_file(&led);
     }
 
     /// BULK STATUS : operator-gated (viewer 403), statut invalide -> 400 (rien muté), applique aux ids DE

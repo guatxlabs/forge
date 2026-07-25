@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use crate::{
     admin_denied, append_console_ledger, attribution_login, canon_json, check_admin,
-    cvss_base_for_severity, engagement_ledger_path, extract_cwe, fetch_purple_coverage, html_escape,
+    csv_field, cvss_base_for_severity, engagement_ledger_path, extract_cwe, fetch_purple_coverage, html_escape,
     load_engagement, read_fired_techniques, read_ledger_lines, render_pdf_from_html,
     resolve_identity, sev_css_class, sha_hex, App, REPORT_CSS,
 };
@@ -475,14 +475,9 @@ const CSV_COLS: [&str; 15] = [
     "tool", "campaign", "evidence", "poc", "fix", "ts",
 ];
 
-/// Échappe un champ CSV (RFC 4180) : guillemets doublés + entourage si virgule/guillemet/retour ligne.
-fn csv_field(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+// Échappement CSV : `common::csv_field` (importé ci-dessus) — RFC-4180 + NEUTRALISATION de l'injection de
+// formule tableur (CWE-1236). Ce module n'a plus sa propre variante : le CSV d'engagement est le livrable
+// que le client ouvre dans un tableur, il ne peut pas avoir un garde plus faible que l'export bulk.
 
 /// Export CSV des findings (déjà rédigés). En-tête stable CSV_COLS -> round-trip trivial.
 fn render_csv(data: &Value) -> String {
@@ -1189,6 +1184,34 @@ mod tests {
         // le ledger NE contient JAMAIS de secret.
         let whole = serde_json::to_string(&entries).unwrap();
         assert!(!whole.contains(S_PWD), "secret fuité dans le ledger");
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// [S6 — CWE-1236] Le CSV d'engagement est LE livrable que le client ouvre dans un TABLEUR. Un `title`
+    /// vient de la sortie des scanners (donc influençable par la cible) : s'il commence par `=`, `+`, `-`,
+    /// `@`, une TABULATION ou un RETOUR CHARIOT, il doit ressortir NEUTRALISÉ (préfixe `'`) — même garde
+    /// que l'export bulk des findings (source UNIQUE : `common::csv_field`).
+    #[tokio::test]
+    async fn csv_export_neutralizes_spreadsheet_formula_injection() {
+        let led = tmp_ledger("csvinj");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        let payloads = ["=cmd|' /C calc'!A0", "+1+1", "-2+3", "@SUM(A1)", "\tTAB", "\rCR"];
+        for p in payloads {
+            seed_finding(&app, 1, p, "a.example.com", "HIGH", "preuve");
+        }
+        let (vtok, _o, _a) = seed_roles(&app);
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "csv".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let csv = to_text(r).await;
+        for p in payloads {
+            assert!(
+                csv.contains(&format!("\"'{p}\"")),
+                "titre {:?} non neutralisé dans le CSV d'engagement",
+                p
+            );
+        }
         let _ = std::fs::remove_file(&led);
     }
 
