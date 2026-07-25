@@ -371,6 +371,22 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
     }
 }
 
+/// Budget de TEMPS par défaut d'un import (s) — `FORGE_IMPORT_TIMEOUT`. DISTINCT du budget des spawns de
+/// LECTURE (`FORGE_ENGINE_TIMEOUT`, 120 s) : parser un export de scanner de 64 Mio (le plafond d'entrée
+/// de cette route) est légitimement plus long qu'un catalogue. Dépassement => le GROUPE moteur est tué et
+/// l'appelant reçoit 504 `import_timeout` (jamais d'insertion partielle rendue comme un import complet).
+/// Valeur d'env invalide ou 0 => ce défaut (jamais « illimité »).
+pub(crate) const IMPORT_TIMEOUT_DEFAULT_SECS: u64 = 600;
+
+/// Budget EFFECTIF d'un import, relu à l'appel (comme les autres bornes : réglable sans redémarrer).
+pub(crate) fn import_timeout_secs() -> u64 {
+    std::env::var("FORGE_IMPORT_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(IMPORT_TIMEOUT_DEFAULT_SECS)
+}
+
 /// POST /api/import — INGESTION de sorties de SCANNERS EXISTANTS (migration Faraday/Trickest/reNgine/
 /// Osmedeus). OPÉRATEUR/ADMIN (check_operator, 403 sinon) + LEDGERISÉ (`console.import`). Corps :
 ///   {campaign, format:"auto"|<fmt>, content:<texte du fichier>, filename?, flag_out_of_scope?}
@@ -467,20 +483,49 @@ pub(crate) async fn import_scan(
         "--json".into(),
     ];
     if flag_oos { argv.push("--flag-out-of-scope".into()); }
-    // L10 FIX — spawn NON bloquant : `tokio::process::Command(...).output().await` (parité runs_proc/exec) ne
-    // stalle plus un worker Tokio pendant que le moteur parse (le parse d'un gros fichier pouvait bloquer le
-    // runtime). Comportement identique : `.output()` collecte stdout/stderr/status à l'identique de std.
-    let spawn = tokio::process::Command::new(app.python.as_str())
-        .args(&argv)
-        .current_dir(app.pkg_dir.as_str())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await;
+    // L10 FIX — spawn NON bloquant (tokio::process ... .await) : le parse d'un gros fichier ne stalle plus
+    // un worker Tokio.
+    // CORRECTIF (borne machine) : ce spawn passe par le SEUL helper qui prend un slot
+    // (`bounded_engine_output`), comme les routes de lecture. Avant, il n'avait NI budget de temps, NI
+    // borne de concurrence, NI mort du process à la déconnexion — mesuré : `HTTP=000` après 40 s alors que
+    // `FORGE_ENGINE_TIMEOUT=5`, et le process moteur survivait au client. Il est operator-gated, donc ce
+    // n'était pas un vecteur viewer : c'était quand même le même primitif non borné.
+    // Budget/plafond PROPRES à l'import (un import légitime est plus long et plus volumineux qu'une
+    // lecture) : `FORGE_IMPORT_TIMEOUT` (défaut 600 s) et le plafond d'octets BINAIRE (64 Mio), aligné sur
+    // la taille maximale acceptée en entrée.
+    let waited = crate::bounded_engine_output(
+        &crate::ENGINE_OPERATOR_GATE,
+        {
+            let mut cmd = tokio::process::Command::new(app.python.as_str());
+            cmd.args(&argv).current_dir(app.pkg_dir.as_str());
+            cmd
+        },
+        std::time::Duration::from_secs(import_timeout_secs()),
+        crate::ENGINE_BINARY_MAX_BYTES,
+        None,
+    )
+    .await;
     // nettoyage IMMÉDIAT — le contenu (secrets potentiels) ne persiste jamais sur disque au-delà du parse.
     let _ = std::fs::remove_dir_all(&import_dir);
-    let out = match spawn {
+    let out = match waited {
         Ok(o) => o,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.to_string()}))).into_response(),
+        // chaque borne franchie NOMME sa variable (jamais un silence ni une cause inventée).
+        Err(e @ crate::EngineBoundErr::Busy { .. }) => {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "import_busy", "why": e.why()}))).into_response()
+        }
+        Err(crate::EngineBoundErr::Timeout(_)) => {
+            return (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error": "import_timeout",
+                "why": format!("import interrompu au-delà de {}s (FORGE_IMPORT_TIMEOUT) — moteur arrêté, aucun finding partiel inséré", import_timeout_secs())}))).into_response()
+        }
+        Err(e @ crate::EngineBoundErr::TooLarge(_)) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": "import_output_too_large", "why": e.why()}))).into_response()
+        }
+        Err(e @ crate::EngineBoundErr::Abandoned) => {
+            return (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error": "import_aborted", "why": e.why()}))).into_response()
+        }
+        Err(e @ crate::EngineBoundErr::Io(_)) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "spawn_failed", "why": e.why()}))).into_response()
+        }
     };
     if !out.status.success() {
         // stderr rédigé/borné (le moteur n'imprime jamais le contenu ni un secret sur stderr).
@@ -988,8 +1033,14 @@ mod idor_tenancy_tests {
     /// L9 — ENTERPRISE ON : un import CIBLANT l'engagement d'un AUTRE tenant est REFUSÉ (résolution tenant-
     /// aware fail-closed, comme run_create) AVANT tout spawn/insertion. Aucun finding n'atterrit dans
     /// l'engagement de B (le défaut historique faisait tomber les findings importés sur l'engagement #1).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn cross_tenant_import_is_refused() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app();
         seed_engagement(&app, 1, 1); // engagement A -> tenant 1
         seed_engagement(&app, 2, 2); // engagement B -> tenant 2

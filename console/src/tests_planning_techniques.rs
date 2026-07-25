@@ -124,8 +124,14 @@ use crate::testutil::*;
     /// preuve que les arguments de l'opérateur sont bien traités (parité run/plan), pas ignorés.
     /// (S5 : la route est operator-gated — les appels passent une session OPÉRATEUR pour atteindre la
     /// validation testée ici ; c'est bien 400 « entrée invalide », pas 403.)
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn plan_threads_and_validates_module_params_extra_args() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let ledger = tmp_path("forge-test-planparams");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
         { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
@@ -674,8 +680,14 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     /// INTÉGRÉS dérivés du registre via le moteur (`forge workflows --json`). Nécessite python3 + forge
     /// (..) comme le test du catalogue de techniques (SOURCE UNIQUE moteur). Chaque entrée porte
     /// `step_kinds` + `step_count` ; les builtins portent `builtin:true` ; le user workflow apparaît.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn workflows_list_returns_builtins_and_user() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let path = tmp_path("forge-test-wf-list");
         let app = test_app(&path);
         {
@@ -711,8 +723,14 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     /// CONTENU du fichier n'apparaît JAMAIS dans le ledger (filename assaini au basename). Un asset
     /// HORS scope serveur est JETÉ. Un format inconnu -> 400. Nécessite python3 + forge (..), comme
     /// le test du catalogue de techniques (le parse partage la SOURCE UNIQUE des parseurs du moteur).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn import_endpoint_operator_gated_ledgered_and_scope_guarded() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let path = tmp_path("forge-test-import-ep");
         let app = test_app_scoped(&path, vec!["example.com".into(), "*.example.com".into()]);
         // Le boot serveur seede TOUJOURS l'engagement #1 depuis le scope serveur (ensure_default_engagement).
@@ -788,8 +806,14 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     /// [catalogue] GET /api/techniques : spawne le moteur, GROUPE par catégorie et reflète l'état activé
     /// du scope. Défaut (bug_bounty) : rce.probe désactivé, sqli.probe activé. Une sélection persistée
     /// (pentest) réactive rce.probe. DÉRIVÉ du registre (SOURCE UNIQUE) — nécessite python3 + forge (..).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn techniques_catalog_groups_by_category_and_reflects_scope() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let path = tmp_path("forge-test-techcat");
         let app = test_app(&path);
         // défaut (aucune sélection persistée -> bug_bounty).
@@ -920,6 +944,43 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = std::fs::remove_file(&ledger);
     }
 
+    /// [BORNE MANQUANTE À L'INVENTAIRE — `POST /api/import`] Cette route spawne le moteur comme les
+    /// autres, mais elle n'avait NI budget de temps, NI plafond de concurrence, NI mort du process à la
+    /// déconnexion : mesuré sur le binaire réel, `HTTP=000` après 40 s avec `FORGE_ENGINE_TIMEOUT=5`, et
+    /// le process moteur survivait au client. Operator-gated (donc pas un vecteur viewer), mais c'est le
+    /// même primitif — et le commit qui prétendait recenser les spawns non bornés l'avait oublié.
+    /// Ici : moteur qui ne rend jamais la main + `FORGE_IMPORT_TIMEOUT=1` -> 504 `import_timeout` qui
+    /// NOMME sa variable, rendu à la borne, et AUCUN finding partiel inséré.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn import_spawn_is_time_bounded() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_IMPORT_TIMEOUT", "1");
+        let path = tmp_path("forge-test-import-bound");
+        let mut app = test_app_scoped(&path, vec!["example.com".into()]);
+        ensure_default_engagement(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
+        { let db = app.db(); upsert_user(&db, "oo", "operator", &hash_pw("pw")).unwrap(); }
+        let (otok, _) = create_session(&app, uid_of(&app, "oo"));
+        app.python = Arc::new(stub_engine("import-timeout", "sleep 30"));
+        let body = json!({"campaign": "imp", "format": "nmap", "content": "<nmaprun/>"});
+        let started = std::time::Instant::now();
+        let fut = import_scan(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body));
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(20), fut).await;
+        std::env::remove_var("FORGE_IMPORT_TIMEOUT");
+        let resp = resp.expect("POST /api/import DOIT être borné dans le temps — aucune réponse rendue");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT, "budget dépassé -> 504 explicite");
+        assert!(started.elapsed() < std::time::Duration::from_secs(15), "réponse rendue à la borne");
+        let body = resp_json(resp).await;
+        assert_eq!(body["error"], "import_timeout");
+        assert!(body["why"].as_str().unwrap_or("").contains("FORGE_IMPORT_TIMEOUT"),
+            "le refus NOMME la borne d'exploitation: {}", body["why"]);
+        { let n: i64 = app.db().query_row("SELECT COUNT(*) FROM finding", [], |r| r.get(0)).unwrap();
+          assert_eq!(n, 0, "une borne franchie n'insère AUCUN finding partiel"); }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
     /// [S5-bis — borne de TEMPS sur les AUTRES routes moteur] `GET /api/techniques` spawne un process
     /// moteur par requête, comme le dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) :
     /// un moteur qui ne rend jamais la main est COUPÉ et l'appelant reçoit la réponse fail-soft
@@ -1023,8 +1084,8 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
     /// process moteur qu'il a spawné NE DOIT PAS survivre (sinon N process orphelins, sans borne). On
     /// vérifie sur le PID RÉEL de l'enfant (le stub `exec`ute sleep : le leader du groupe EST le
     /// dormeur). Sans `kill_on_drop`, il survit à l'abandon — c'est l'échec attendu avant correctif.
-    /// PORTÉE MESURÉE : ceci prouve la mort du process ENFANT DIRECT à l'abandon ; les petits-enfants
-    /// ne sont couverts que par le kill de GROUPE, au dépassement du budget de temps.
+    /// PORTÉE : ce cas ne couvre que l'enfant DIRECT ; le SOUS-ARBRE et la borne de concurrence sont
+    /// couverts par `abandoned_requests_cannot_multiply_engine_processes` juste en dessous.
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
@@ -1052,6 +1113,100 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let _ = std::fs::remove_file(app.python.as_str());
         if alive { unsafe { libc::kill(pid, libc::SIGKILL) }; }
         assert!(!alive, "process moteur ORPHELIN survivant à l'abandon de la requête (pid {pid})");
+    }
+
+    /// [CORRECTIF DE FOND — un slot mesure la vie d'un PROCESS, pas celle d'une REQUÊTE]
+    ///
+    /// SYMPTÔME MESURÉ AVANT (binaire réel, `FORGE_ENGINE_MAX_CONCURRENT=4`) : 20 requêtes viewer
+    /// ABANDONNÉES (`curl -m 0.3`) laissaient 20 process moteur VIVANTS simultanément et la borne ne
+    /// refusait JAMAIS — l'abandon rendait le slot instantanément alors que `kill_on_drop` ne tue que
+    /// l'enfant DIRECT, si bien qu'un PETIT-ENFANT survivait à chaque tour.
+    ///
+    /// CE QUE CE TEST EXERCE (la CLASSE, pas le cas d'origine) :
+    ///   1. le descendant est un PETIT-ENFANT (pas l'enfant direct) — l'étage que `kill_on_drop` ne voit pas ;
+    ///   2. il IGNORE SIGTERM — le chemin gracieux ne suffit pas, il faut l'escalade SIGKILL ;
+    ///   3. les requêtes sont ABANDONNÉES (jamais tenues jusqu'au budget) — le chemin qui traversait la garde ;
+    ///   4. on en enchaîne PLUSIEURS avec un plafond de 1 — donc la seule façon de rester sous la borne
+    ///      est que le slot NE SOIT PAS rendu tant que le sous-arbre respire.
+    /// ASSERTIONS : (a) le nombre de process moteur vivants ne dépasse JAMAIS le plafond ; (b) les
+    /// requêtes suivantes sont REFUSÉES en NOMMANT la variable tant que le sous-arbre vit ; (c) une fois
+    /// l'escalade faite, plus AUCUN descendant ne survit et le slot redevient prenable.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn abandoned_requests_cannot_multiply_engine_processes() {
+        let _g = env_lock();
+        std::env::set_var("FORGE_ENGINE_MAX_CONCURRENT", "1");
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "120"); // le budget ne doit JAMAIS être le sauveur ici
+        let path = tmp_path("forge-test-abandon-bound");
+        let pidfile = tmp_path("forge-test-abandon-pids");
+        let _ = std::fs::remove_file(&pidfile);
+        let mut app = test_app(&path);
+        // moteur bouchon : un PETIT-ENFANT qui IGNORE SIGTERM (python : SIG_IGN) + l'enfant direct qui
+        // dort. Les deux pids sont APPENDÉS au même fichier -> on compte les vivants sans dépendre de
+        // `pgrep` ni du nom des process.
+        app.python = Arc::new(stub_engine(
+            "abandon-bound",
+            &format!(
+                "python3 -c 'import os,signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen(\"{pidfile}\",\"a\").write(str(os.getpid())+chr(10))\ntime.sleep(300)' &\necho $$ >> {pidfile}\nexec sleep 300"
+            ),
+        ));
+        let alive = |pf: &str| -> usize {
+            std::fs::read_to_string(pf)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.trim().parse::<i32>().ok())
+                .filter(|&pid| unsafe { libc::kill(pid, 0) } == 0)
+                .count()
+        };
+        let mut refusals = 0usize;
+        let mut peak = 0usize;
+        for _ in 0..5 {
+            let fut = techniques_catalog(State(app.clone()), HeaderMap::new(), Query(HashMap::new()));
+            let mut refused = false;
+            tokio::select! {
+                r = fut => {
+                    // réponse IMMÉDIATE = refus explicite (le slot est encore tenu par le sous-arbre).
+                    let body = resp_json(r).await;
+                    refused = body["why"].as_str().unwrap_or("").contains("FORGE_ENGINE_MAX_CONCURRENT");
+                    assert!(refused, "réponse immédiate inattendue: {}", body["why"]);
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {}
+            } // <- future ABANDONNÉ ici quand il n'a pas été refusé (client déconnecté)
+            if refused {
+                refusals += 1;
+            }
+            peak = peak.max(alive(&pidfile));
+        }
+        // (a) LA BORNE TIENT EN NOMBRE DE SPAWNS — c'est l'affirmation qui était fausse. Un spawn autorisé
+        // vaut ici DEUX process suivis (l'enfant direct + le petit-enfant), donc plafond=1 spawn <=> au
+        // plus 2 pids vivants. Sans le correctif, les 5 abandons spawnent 5 fois -> jusqu'à 10 vivants.
+        assert!(peak <= 2, "plafond=1 spawn (2 process suivis) mais {peak} process moteur vivants simultanément");
+        // (b) le refus a bien eu lieu tant que le sous-arbre vivait, et il NOMME la variable.
+        assert!(refusals >= 3, "les requêtes suivantes auraient dû être refusées (obtenu {refusals}/4)");
+        // (c) après l'escalade SIGKILL, plus rien ne survit et le slot redevient prenable.
+        let mut left = alive(&pidfile);
+        for _ in 0..80 {
+            if left == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            left = alive(&pidfile);
+        }
+        let pids: Vec<i32> = std::fs::read_to_string(&pidfile).unwrap_or_default().lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok()).collect();
+        for pid in &pids {
+            if unsafe { libc::kill(*pid, 0) } == 0 {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        }
+        std::env::remove_var("FORGE_ENGINE_MAX_CONCURRENT");
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&pidfile);
+        let _ = std::fs::remove_file(app.python.as_str());
+        assert_eq!(left, 0, "un descendant du moteur a survécu à l'abandon MALGRÉ l'escalade SIGKILL");
+        assert!(pids.len() >= 2, "le bouchon doit avoir écrit l'enfant ET le petit-enfant (obtenu {})", pids.len());
     }
 
     /// [S5-bis — borne d'OCTETS] La borne de temps ne protège PAS la RAM : la sortie du moteur est

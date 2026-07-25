@@ -1,17 +1,42 @@
 {
   "_comment": [
-    "VECTEURS PARTAGÉS — neutralisation de l'injection de formule tableur (CWE-1236) dans les exports CSV.",
-    "Le rapport d'engagement en CSV a DEUX générateurs, dans deux langages : console/src/reports.rs",
+    "VECTEURS PARTAGES — neutralisation de l'injection de formule tableur (CWE-1236) dans les exports CSV.",
+    "Le rapport d'engagement en CSV a DEUX generateurs, dans deux langages : console/src/reports.rs",
     "(render_csv, via common::csv_field) et forge/report_engagement.py (build_csv, via _csv_field).",
-    "Ce fichier est le SEUL endroit où le jeu de préfixes dangereux est écrit. Il est lu par les DEUX",
-    "suites de tests : console/src/reports.rs::tests::csv_injection_vectors_shared_with_python_exporter",
-    "et tests/test_report_engagement.py::TestCsvFormulaNeutralization. Ajouter/retirer un préfixe ici",
-    "sans corriger LES DEUX implémentations fait échouer LES DEUX suites — c'est le garde anti-dérive.",
-    "Emplacement sous console/ parce que le test Rust l'inclut à la compilation (include_str!) et que",
-    "l'image de build ne copie que console/ (cf. Dockerfile) : un chemin hors du crate casserait le build."
+    "Ce fichier est le SEUL endroit ou le comportement attendu est ecrit. Il est lu par les DEUX suites :",
+    "console/src/reports.rs::tests::csv_injection_vectors_shared_with_python_exporter et",
+    "tests/test_report_engagement.py::TestCsvFormulaNeutralization. Modifier une entree sans corriger LES",
+    "DEUX implementations fait echouer LES DEUX suites — c'est le garde anti-derive.",
+    "Emplacement sous console/ parce que le test Rust l'inclut a la compilation (include_str!) et que",
+    "l'image de build ne copie que console/ (cf. Dockerfile) : un chemin hors du crate casserait le build.",
+    "",
+    "QUATRE GROUPES, et ce que chacun PINNE :",
+    " - dangerous_prefixes / payloads : le jeu de declencheurs en TETE de cellule (regle historique).",
+    " - swallowed_then_formula : la CLASSE que la regle « premier caractere » laissait passer — un prefixe",
+    "   de caracteres que le tableur AVALE (controles C0/DEL/C1, espaces Unicode, BOM) suivi d'un",
+    "   declencheur. MESURE : un titre commencant par un octet NUL puis =cmd|' /C calc'!A0, ingere par",
+    "   POST /api/ingest, ressortait VIVANT du livrable CSV et LibreOffice Calc 26.2.4.2 l'evaluait",
+    "   (table:formula=\"of:=cmd|' /c calc'!a0\"). Les implementations encodent la CLASSE",
+    "   (is_control/is_whitespace/BOM), pas cette liste : ces entrees sont des ECHANTILLONS de",
+    "   verification, pas la definition.",
+    " - benign_prefixed : contenu de scanner PARFAITEMENT LEGITIME qui est quand meme ALTERE (prefixe",
+    "   apostrophe) parce qu'il commence par un caractere dangereux. C'est le COUT ASSUME de CWE-1236 :",
+    "   il est pinne ICI pour qu'une « amelioration » future ne puisse pas le changer dans UN SEUL langage",
+    "   sans faire echouer les deux suites.",
+    " - benign : contenu qui doit ressortir INCHANGE, octet pour octet.",
+    "",
+    "`cell` = la valeur de la cellule APRES neutralisation et AVANT le guillemetage RFC-4180 (qui, lui,",
+    "differe entre les deux implementations : Rust quote tout, Python s'en remet a csv.writer)."
   ],
   "neutralizer": "'",
-  "dangerous_prefixes": ["=", "+", "-", "@", "\t", "\r"],
+  "dangerous_prefixes": [
+    "=",
+    "+",
+    "-",
+    "@",
+    "\t",
+    "\r"
+  ],
   "payloads": [
     "=cmd|' /C calc'!A0",
     "+1+1",
@@ -20,11 +45,108 @@
     "\tTAB",
     "\rCR"
   ],
+  "swallowed_then_formula": [
+    {
+      "raw": "\u0000=cmd|' /C calc'!A0",
+      "cell": "'\u0000=cmd|' /C calc'!A0",
+      "why": "NUL en tete — MESURE vivant de bout en bout (ingest -> CSV -> LibreOffice 26.2.4.2)"
+    },
+    {
+      "raw": "\u0000\u0000=1+1",
+      "cell": "'\u0000\u0000=1+1",
+      "why": "deux NUL — MESURE vivant sur le meme tableur"
+    },
+    {
+      "raw": "\u000b=1+1",
+      "cell": "'\u000b=1+1",
+      "why": "tabulation verticale (C0)"
+    },
+    {
+      "raw": "\f=1+1",
+      "cell": "'\f=1+1",
+      "why": "saut de page (C0)"
+    },
+    {
+      "raw": "\ufeff=1+1",
+      "cell": "'\ufeff=1+1",
+      "why": "BOM"
+    },
+    {
+      "raw": " =1+1",
+      "cell": "' =1+1",
+      "why": "espace de tete"
+    },
+    {
+      "raw": " \u0000@SUM(A1)",
+      "cell": "' \u0000@SUM(A1)",
+      "why": "espace PUIS NUL PUIS declencheur (le prefixe avale est une SUITE, pas un caractere)"
+    },
+    {
+      "raw": "\u001f-2+3",
+      "cell": "'\u001f-2+3",
+      "why": "separateur d'unite (C0)"
+    },
+    {
+      "raw": "\u007f+1+1",
+      "cell": "'\u007f+1+1",
+      "why": "DEL"
+    },
+    {
+      "raw": "\u00a0=1+1",
+      "cell": "'\u00a0=1+1",
+      "why": "espace insecable (Unicode)"
+    },
+    {
+      "raw": "\u2003=1+1",
+      "cell": "'\u2003=1+1",
+      "why": "cadratin (espace Unicode)"
+    },
+    {
+      "raw": "\u0000texte inoffensif",
+      "cell": "\u0000texte inoffensif",
+      "why": "prefixe avale mais AUCUN declencheur derriere -> on n'altere PAS"
+    },
+    {
+      "raw": " a.example.com",
+      "cell": " a.example.com",
+      "why": "espace de tete sans declencheur -> INCHANGE (la regle ne neutralise pas tout ce qui traine)"
+    }
+  ],
+  "benign_prefixed": [
+    {
+      "raw": "-----BEGIN CERTIFICATE----- expose sur /backup.pem",
+      "cell": "'-----BEGIN CERTIFICATE----- expose sur /backup.pem"
+    },
+    {
+      "raw": "--- a/config.yml fuite via /.git/",
+      "cell": "'--- a/config.yml fuite via /.git/"
+    },
+    {
+      "raw": "@AllowAnonymous sur le controleur Admin",
+      "cell": "'@AllowAnonymous sur le controleur Admin"
+    },
+    {
+      "raw": "+33 6 XX XX XX XX expose dans /contacts.json",
+      "cell": "'+33 6 XX XX XX XX expose dans /contacts.json"
+    },
+    {
+      "raw": "=> redirection ouverte vers //evil.test",
+      "cell": "'=> redirection ouverte vers //evil.test"
+    },
+    {
+      "raw": " - port 443 ouvert (espace de tete, tiret ensuite)",
+      "cell": "' - port 443 ouvert (espace de tete, tiret ensuite)"
+    }
+  ],
   "benign": [
-    "XSS stocké",
+    "XSS stocke",
     "a.example.com",
     "HIGH",
-    "param q reflété",
-    "curl https://a.example.com/?q=1"
+    "param q reflete",
+    "curl https://a.example.com/?q=1",
+    "SSRF via webhook, port 169.254.169.254",
+    "champ \"id\" incremental",
+    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "note: l'en-tete X-Forwarded-For n'est pas filtre"
   ]
 }

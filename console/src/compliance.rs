@@ -706,7 +706,7 @@ async fn evidence_export(State(app): State<App>, headers: HeaderMap, Query(q): Q
         "pdf" => {
             let html = render_evidence_html(&bundle);
             match crate::render_pdf_from_html(&html).await {
-                Some(pdf) => (
+                Ok(pdf) => (
                     StatusCode::OK,
                     [
                         ("content-type", "application/pdf".to_string()),
@@ -715,7 +715,14 @@ async fn evidence_export(State(app): State<App>, headers: HeaderMap, Query(q): Q
                     pdf,
                 )
                     .into_response(),
-                None => (
+                // BORNE franchie sur un moteur PRÉSENT : cause nommée (429/504/502/501), jamais « aucun
+                // moteur détecté » — cf. crate::delegated_render_error.
+                Err(crate::PdfErr::Bound(e)) => crate::delegated_render_error(
+                    "pdf",
+                    "réessayez, ou utilisez ?format=html puis « Imprimer » → « Enregistrer au format PDF », ou ?format=json",
+                    &e,
+                ),
+                Err(crate::PdfErr::NoEngine) => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({
                         "error": "pdf_unavailable",

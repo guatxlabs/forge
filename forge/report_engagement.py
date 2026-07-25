@@ -36,6 +36,7 @@ import io
 import json
 import shutil
 import subprocess
+import unicodedata
 from collections import OrderedDict
 from datetime import datetime, timezone
 
@@ -184,16 +185,48 @@ _CSV_COLS = ["severity", "vuln_class", "cwe", "cvss_score", "cvss_vector", "mitr
 #: `console/src/common.rs::csv_field` — les vecteurs partagés vivent dans
 #: `console/testdata/csv_injection_vectors.json`, lu par les DEUX suites (Rust et Python).
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+#: Déclencheurs proprement dits (le caractère qui fait interpréter le reste comme une formule).
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@")
+
+
+def _swallowed(ch):
+    """Vrai si un tableur AVALE ce caractère avant d'interpréter la cellule. CLASSE, pas liste de cas :
+    tout caractère de CONTRÔLE (catégorie Unicode Cc = C0 0x00-0x1F, DEL, C1 — l'exact équivalent de
+    `char::is_control()` côté Rust), tout ESPACE Unicode (`str.isspace()` <-> `char::is_whitespace()`),
+    et le BOM U+FEFF."""
+    return ch == "﻿" or ch.isspace() or unicodedata.category(ch) == "Cc"
+
+
+def _starts_spreadsheet_formula(s):
+    """Vrai si la cellule serait interprétée comme une FORMULE. MÊME règle en deux temps que
+    `console/src/common.rs::starts_spreadsheet_formula` : (1) premier caractère déclencheur (ou TAB/CR,
+    conservés du jeu historique) ; (2) sinon on avale le préfixe de caractères ignorés par le tableur et
+    on reteste le premier caractère RESTANT.
+    POURQUOI (mesuré) : la règle « premier caractère ∈ jeu dangereux » laissait passer un OCTET NUL en
+    tête. Chemin prouvé de bout en bout sur le binaire réel (`POST /api/ingest` d'un titre
+    `"\\u0000=cmd|' /C calc'!A0"` -> export CSV du livrable -> LibreOffice Calc 26.2.4.2) : la cellule
+    ressortait en `table:formula="of:=cmd|' /c calc'!a0"`, formule VIVANTE."""
+    if not s:
+        return False
+    if s[0] in _CSV_FORMULA_PREFIXES:
+        return True
+    if not _swallowed(s[0]):
+        return False
+    for ch in s[1:]:
+        if _swallowed(ch):
+            continue
+        return ch in _CSV_FORMULA_TRIGGERS
+    return False
 
 
 def _csv_field(v):
-    """Neutralise l'injection de formule tableur (CWE-1236) sur UNE cellule : un champ commençant par un
-    préfixe de formule est préfixé d'une apostrophe -> le tableur affiche du TEXTE. Le guillemetage
+    """Neutralise l'injection de formule tableur (CWE-1236) sur UNE cellule : un champ qui déclencherait
+    une formule est préfixé d'une apostrophe -> le tableur affiche du TEXTE. Le guillemetage
     RFC-4180 reste délégué à `csv.writer` (il double les guillemets et quote ce qui doit l'être).
     Les cellules exportées portent du texte issu des scanners, donc influençable par la cible : la
     neutralisation n'est jamais optionnelle. PURE."""
     s = "" if v is None else str(v)
-    return "'" + s if s[:1] in _CSV_FORMULA_PREFIXES else s
+    return "'" + s if _starts_spreadsheet_formula(s) else s
 
 
 def build_csv(data_or_findings):

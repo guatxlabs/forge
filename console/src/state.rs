@@ -721,7 +721,7 @@ pub(crate) async fn run_report(State(app): State<App>, headers: HeaderMap, Path(
                 render_run_report_html(&store, &id, &job, Some(&purple), &custody)
             };
             match render_pdf_from_html(&html).await {
-                Some(bytes) => (
+                Ok(bytes) => (
                     StatusCode::OK,
                     [
                         ("content-type", "application/pdf".to_string()),
@@ -729,7 +729,13 @@ pub(crate) async fn run_report(State(app): State<App>, headers: HeaderMap, Path(
                     ],
                     bytes,
                 ).into_response(),
-                None => (
+                // BORNE franchie sur un moteur PRÉSENT : cause nommée, jamais « aucun moteur détecté ».
+                Err(crate::PdfErr::Bound(e)) => crate::delegated_render_error(
+                    "pdf",
+                    "réessayez, ou ouvrez ?format=html puis « Imprimer » → « Enregistrer au format PDF »",
+                    &e,
+                ),
+                Err(crate::PdfErr::NoEngine) => (
                     StatusCode::NOT_IMPLEMENTED,
                     Json(json!({
                         "error": "pdf_unavailable",

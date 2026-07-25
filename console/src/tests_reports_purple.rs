@@ -320,8 +320,14 @@ use crate::testutil::*;
     /// [détection RÉTRO-COMPAT bout-en-bout] une source `kind=plume` (endpoint = mock renvoyant le
     /// contrat historique `{detections:[{mitre,count,first_ts}]}`) produit EXACTEMENT la même couverture
     /// que l'ancien chemin Plume : mapping IDENTITÉ, mêmes detected/missed/MTTD que compute_purple_coverage.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn plume_source_yields_same_coverage_backcompat() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app(&tmp_path("det-plume-ledger"));
         let body = r#"{"detections":[{"mitre":"T1110","count":3,"first_ts":1042},{"mitre":"T1190","count":1,"first_ts":1990}]}"#;
         let (addr, handle) = mock_http_once(body.to_string()).await;
@@ -353,8 +359,14 @@ use crate::testutil::*;
     /// [détection generic_http + bearer + mapping] une source `generic_http` avec auth bearer est
     /// interrogée (en-tête `Authorization: Bearer …` transmis) et la réponse aux CHAMPS NATIFS
     /// (results/tech/seen/ts) est remappée puis corrélée — même jointure MITRE que plume.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn generic_http_bearer_fetched_and_mapped() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app(&tmp_path("det-generic-ledger"));
         let body = r#"{"results":[{"tech":"T1110","seen":3,"ts":1042},{"tech":"T1190","seen":1,"ts":1990}]}"#;
         let (addr, handle) = mock_http_once(body.to_string()).await;
@@ -384,8 +396,14 @@ use crate::testutil::*;
 
     /// [détection FAIL-OPEN LISIBLE] une source injoignable (port fermé) => source_reachable:false SANS
     /// aucun detected/missed inventé ; une config kind=none => idem. Le secret n'apparaît nulle part.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn unreachable_source_fails_open_readable() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app(&tmp_path("det-unreach-ledger"));
         set_detection_source(&app, json!({
             "kind": "generic_http",

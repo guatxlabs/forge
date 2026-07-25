@@ -152,6 +152,26 @@ class TestCsvFormulaNeutralization(unittest.TestCase):
         for b in self.VECTORS["benign"]:
             self.assertEqual(self._title_cell(b), b, f"titre légitime {b!r} altéré par la neutralisation")
 
+    def test_swallowed_prefixes_then_formula_are_neutralized(self):
+        """CLASSE des préfixes que le tableur AVALE (contrôles C0/DEL/C1, espaces Unicode, BOM) suivis
+        d'un déclencheur : la règle « premier caractère » les laissait passer. MESURÉ de bout en bout —
+        un titre `\u0000=cmd|' /C calc'!A0` ressortait VIVANT du livrable CSV et LibreOffice Calc
+        26.2.4.2 l'évaluait. Le fichier ne porte que des ÉCHANTILLONS (dont des cas qui ne DOIVENT PAS
+        être altérés) ; la règle, elle, est une classe (`_starts_spreadsheet_formula`)."""
+        for e in self.VECTORS["swallowed_then_formula"]:
+            self.assertEqual(self._title_cell(e["raw"]), e["cell"],
+                             f"préfixe avalé mal traité pour {e['raw']!r} ({e.get('why','')})")
+
+    def test_benign_prefixed_alteration_cost_is_pinned(self):
+        """COÛT ASSUMÉ de CWE-1236 : du contenu de scanner PARFAITEMENT LÉGITIME qui commence par un
+        caractère dangereux EST altéré (préfixe apostrophe). On le PINNE pour qu'une « amélioration »
+        future ne puisse pas le changer dans un seul langage sans faire échouer les deux suites."""
+        neutral = self.VECTORS["neutralizer"]
+        for e in self.VECTORS["benign_prefixed"]:
+            self.assertEqual(self._title_cell(e["raw"]), e["cell"],
+                             f"coût d'altération non conforme pour {e['raw']!r}")
+            self.assertEqual(e["cell"], neutral + e["raw"], f"vecteurs incohérents pour {e['raw']!r}")
+
 
 class TestRoundTrip(unittest.TestCase):
     def test_csv_round_trip(self):

@@ -784,33 +784,77 @@ pub(crate) fn module_web_allowed(kind: &str, exploit: bool, destructive: bool) -
 ///   "  <kind>   exploit=<bool> destructive=<bool>". Best-effort : si python/forge absent, on
 ///   laisse la table en l'état (les lectures /api/modules renverront ce qu'il y a). `forge` est
 ///   importé depuis le parent du cwd console ; on lance depuis FORGE_PKG_DIR si défini, sinon `..`.
-pub(crate) fn populate_modules(store: &crate::store::Store) {
-    let pkg_dir = std::env::var("FORGE_PKG_DIR").unwrap_or_else(|_| "..".to_string());
-    let py = std::env::var("FORGE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+///
+/// CORRECTIF (borne machine) — ce spawn passe par le SEUL helper qui prend un slot
+/// (`bounded_engine_output`, gate OPÉRATEUR) et la fonction est ASYNC. Avant, c'était un
+/// `std::process::Command::output()` BLOQUANT et SANS budget sur le runtime Tokio, avec deux effets
+/// MESURÉS : (1) BOOT MORT — moteur qui pend => la console n'écoute JAMAIS (`ss -ltn` vide, curl 000) ;
+/// (2) FAMINE — 40 `POST /api/modules/refresh` concurrents faisaient passer une lecture VIEWER de 0,21 s
+/// à 11,4 s (×53). Désormais : budget `FORGE_ENGINE_TIMEOUT` (le boot repart fail-soft, table inchangée)
+/// et plafond `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` (les refresh au-delà sont refusés, pas mis en file).
+/// Le VERROU du store n'est JAMAIS tenu à travers un `await` : on sonde d'abord, on écrit ensuite.
+pub(crate) async fn populate_modules(app: &crate::App) -> Option<String> {
+    let (mods, why) = probe_modules(app).await;
+    apply_probed_modules(&app.store(), mods);
+    why
+}
+
+/// Sonde le registre côté moteur — spawn BORNÉ (temps/concurrence/octets), aucune écriture en base.
+/// Renvoie `(modules, borne franchie)` : la seconde composante est `Some(raison)` quand la sonde n'a PAS
+/// eu lieu ou a été coupée, pour que l'appelant le DISE au lieu de rendre un « rafraîchi » silencieux.
+async fn probe_modules(app: &crate::App) -> (Option<Vec<serde_json::Value>>, Option<String>) {
+    let pkg_dir = app.pkg_dir.as_str().to_string();
+    let py = app.python.as_str().to_string();
     // HOT-RELOAD des outils AJOUTÉS PAR L'UI (POST /api/tools) : on pointe `FORGE_TOOLSPECS` du process
     // ENFANT sur le dossier server-managed (fusionné avec un éventuel FORGE_TOOLSPECS de l'opérateur) —
     // le loader Python (`load_env_toolspecs`, fail-soft par fichier) y découvre chaque ToolSpec déclaratif
     // et l'enregistre comme un module natif (`register_spec`), qui ressort donc dans `modules --json`.
     let toolspecs_env = crate::tools::probe_toolspecs_env();
+    let budget = std::time::Duration::from_secs(crate::engine_timeout_secs());
+    let mk = |json: bool| {
+        let mut cmd = tokio::process::Command::new(&py);
+        if json {
+            cmd.args(["-m", "forge.cli", "modules", "--json"]);
+        } else {
+            cmd.args(["-m", "forge.cli", "modules"]);
+        }
+        cmd.current_dir(&pkg_dir).env("FORGE_TOOLSPECS", &toolspecs_env);
+        cmd
+    };
     // 1) essai JSON
-    let parsed = std::process::Command::new(&py)
-        .args(["-m", "forge.cli", "modules", "--json"])
-        .current_dir(&pkg_dir)
-        .env("FORGE_TOOLSPECS", &toolspecs_env)
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { parse_modules_json(&String::from_utf8_lossy(&o.stdout)) } else { None })
-        // 2) repli texte
-        .or_else(|| {
-            std::process::Command::new(&py)
-                .args(["-m", "forge.cli", "modules"])
-                .current_dir(&pkg_dir)
-                .env("FORGE_TOOLSPECS", &toolspecs_env)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| parse_modules_text(&String::from_utf8_lossy(&o.stdout)))
-        });
+    let out = crate::bounded_engine_output(&crate::ENGINE_OPERATOR_GATE, mk(true), budget, crate::ENGINE_TEXT_MAX_BYTES, None).await;
+    if let Ok(o) = &out {
+        if o.status.success() {
+            if let Some(m) = parse_modules_json(&String::from_utf8_lossy(&o.stdout)) {
+                return (Some(m), None);
+            }
+        }
+    }
+    // une borne franchie est DITE (jamais un « registre indisponible » qui ferait diagnostiquer une
+    // install cassée alors qu'on subit une saturation ou un budget).
+    if let Err(e) = &out {
+        eprintln!("[forge] modules: sonde du registre interrompue — {}", e.why());
+        // Une BORNE franchie ne se retente pas : le repli texte paierait le MÊME budget une seconde
+        // fois (mesuré : boot à 10,6 s au lieu de 5,3 s avec deux tentatives bornées à 5 s). Le repli
+        // n'a de sens que si la 1re tentative a échoué pour une raison propre au sous-commande `--json`.
+        if !matches!(e, crate::EngineBoundErr::Io(_)) {
+            return (None, Some(e.why()));
+        }
+    }
+    // 2) repli texte
+    match crate::bounded_engine_output(&crate::ENGINE_OPERATOR_GATE, mk(false), budget, crate::ENGINE_TEXT_MAX_BYTES, None).await {
+        Ok(o) if o.status.success() => (Some(parse_modules_text(&String::from_utf8_lossy(&o.stdout))), None),
+        Ok(o) => (None, Some(format!("registre moteur rc={:?}", o.status.code()))),
+        Err(e) => {
+            eprintln!("[forge] modules: repli texte interrompu — {}", e.why());
+            (None, Some(e.why()))
+        }
+    }
+}
+
+/// UPSERT du résultat de la sonde. PURE base (aucun spawn) : testable sans moteur, et jamais tenue à
+/// travers un `await`.
+fn apply_probed_modules(store: &crate::store::Store, parsed: Option<Vec<serde_json::Value>>) {
     let mods = match parsed {
         Some(m) if !m.is_empty() => m,
         _ => {

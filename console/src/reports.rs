@@ -35,10 +35,12 @@ use std::collections::HashMap;
 
 use crate::{
     admin_denied, append_console_ledger, attribution_login, bounded_engine_output, canon_json, check_admin,
-    csv_field, cvss_base_for_severity, engagement_ledger_path, engine_timeout_secs, extract_cwe,
+    csv_field, cvss_base_for_severity, delegated_render_error, engagement_ledger_path,
+    engine_timeout_secs, extract_cwe,
     fetch_purple_coverage, html_escape,
     load_engagement, read_fired_techniques, read_ledger_lines, render_pdf_from_html,
-    resolve_identity, sev_css_class, sha_hex, App, ENGINE_BINARY_MAX_BYTES, ENGINE_GATE, REPORT_CSS,
+    resolve_identity, sev_css_class, sha_hex, App, EngineBoundErr, ENGINE_BINARY_MAX_BYTES, ENGINE_GATE,
+    REPORT_CSS,
 };
 
 const SEVERITIES: [&str; 5] = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -795,30 +797,40 @@ fn render_html(data: &Value, preview: bool) -> String {
 
 /// Délègue la génération DOCX au générateur Python (`python -m forge.report_engagement --format docx
 /// --stdin`) : la Value du rapport (ISOLÉE à l'engagement) est envoyée sur stdin, les octets .docx
-/// reviennent sur stdout. Réutilise le générateur zipfile stdlib (source unique). Renvoie None (dégrade
-/// -> 501) si python est absent / le module échoue. no-shell : argv FIXE, aucun contenu client en argv.
+/// reviennent sur stdout. Réutilise le générateur zipfile stdlib (source unique). no-shell : argv FIXE,
+/// aucun contenu client en argv.
 /// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (viewer+), au coût par requête
-/// SUPÉRIEUR au dry-plan : il est BORNÉ par le helper partagé (slots en vol `ENGINE_GATE`, budget
-/// `FORGE_ENGINE_TIMEOUT` avec kill du groupe, plafond d'octets sur le DOCX collecté, mort de l'enfant si
-/// la requête est abandonnée). Toute borne franchie => `None` => la dégradation 501 déjà documentée.
-async fn render_docx_via_python(app: &App, data: &Value) -> Option<Vec<u8>> {
-    let slot = ENGINE_GATE.try_acquire()?;
+/// SUPÉRIEUR au dry-plan : il est BORNÉ par le seul helper qui prend un slot (`bounded_engine_output` :
+/// plafond `ENGINE_GATE`, budget `FORGE_ENGINE_TIMEOUT` avec kill du GROUPE, plafond d'octets sur le DOCX
+/// collecté, mort du groupe si la requête est abandonnée).
+/// CAUSE RENDUE EXACTE (correctif) : la borne franchie n'est plus JETÉE. Avant, `try_acquire()?` et
+/// `.ok()?` écrasaient « plafond atteint » et « budget dépassé » en `None`, que l'appelant traduisait en
+/// « générateur DOCX indisponible sur l'hôte — installez python3 » : mesuré, avec python3 INSTALLÉ, deux
+/// lectures viewer tenant les slots suffisaient à annoncer une installation cassée à tout le monde. On
+/// remonte donc l'erreur TYPÉE ; l'appelant en fait un code HTTP et un message par cause.
+async fn render_docx_via_python(app: &App, data: &Value) -> Result<Vec<u8>, EngineBoundErr> {
     let mut cmd = tokio::process::Command::new(app.python.as_str());
     cmd.args(["-m", "forge.report_engagement", "--format", "docx", "--stdin"])
         .current_dir(app.pkg_dir.as_str());
     let out = bounded_engine_output(
-        &mut cmd,
-        &slot,
+        &ENGINE_GATE,
+        cmd,
         std::time::Duration::from_secs(engine_timeout_secs()),
         ENGINE_BINARY_MAX_BYTES,
         Some(data.to_string().into_bytes()),
     )
-    .await
-    .ok()?;
+    .await?;
     if out.status.success() && !out.stdout.is_empty() {
-        Some(out.stdout)
+        Ok(out.stdout)
     } else {
-        None
+        // VRAIE cause « pas installé » : le module a tourné et a échoué (ex. `No module named forge`).
+        // On la rend telle quelle, code de sortie compris, au lieu de la deviner.
+        let err: String = String::from_utf8_lossy(&out.stderr).trim().chars().take(240).collect();
+        Err(EngineBoundErr::Io(format!(
+            "générateur DOCX rc={:?}{}",
+            out.status.code(),
+            if err.is_empty() { String::new() } else { format!(": {err}") }
+        )))
     }
 }
 
@@ -890,7 +902,7 @@ async fn engagement_report(
         "pdf" => {
             let html = render_html(&data, false);
             match render_pdf_from_html(&html).await {
-                Some(bytes) => (
+                Ok(bytes) => (
                     StatusCode::OK,
                     [
                         ("content-type", "application/pdf".to_string()),
@@ -899,7 +911,13 @@ async fn engagement_report(
                     bytes,
                 )
                     .into_response(),
-                None => (
+                // BORNE franchie (saturation/budget/octets) : cause NOMMÉE, jamais « pas de moteur PDF ».
+                Err(crate::PdfErr::Bound(e)) => delegated_render_error(
+                    "pdf",
+                    "réessayez, ou utilisez ?format=html puis « Imprimer » → « Enregistrer au format PDF »",
+                    &e,
+                ),
+                Err(crate::PdfErr::NoEngine) => (
                     StatusCode::NOT_IMPLEMENTED,
                     Json(json!({
                         "error": "pdf_unavailable",
@@ -911,7 +929,7 @@ async fn engagement_report(
             }
         }
         "docx" => match render_docx_via_python(&app, &data).await {
-            Some(bytes) => (
+            Ok(bytes) => (
                 StatusCode::OK,
                 [
                     ("content-type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()),
@@ -920,15 +938,14 @@ async fn engagement_report(
                 bytes,
             )
                 .into_response(),
-            None => (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "error": "docx_unavailable",
-                    "why": "générateur DOCX (python -m forge.report_engagement) indisponible sur l'hôte",
-                    "hint": "installez python3 + le paquet forge, ou utilisez ?format=html/pdf/csv/json"
-                })),
-            )
-                .into_response(),
+            // `docx_unavailable` (501) est désormais RÉSERVÉ au cas où le générateur a réellement été
+            // lancé et a échoué (ou n'a pas pu l'être) : la saturation rend 429, le budget 504, les
+            // octets 502 — chacun avec la variable qui le règle.
+            Err(e) => delegated_render_error(
+                "docx",
+                "réessayez, ou utilisez ?format=html/pdf/csv/json ; si le générateur manque, installez python3 + le paquet forge",
+                &e,
+            ),
         },
         _ => bad("format inconnu"), // inatteignable (validé plus haut)
     }
@@ -1068,8 +1085,14 @@ mod tests {
     }
 
     /// ISOLATION : le rapport JSON de l'engagement A ne contient QUE les findings de A (jamais B).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn report_is_engagement_isolated() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("iso");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1098,8 +1121,14 @@ mod tests {
     /// ENTERPRISE (flag-gated) — ISOLATION TENANT : le rapport d'un engagement d'un tenant NON accordé au
     /// caller est refusé (404, mêmes octets que « inconnu ») ; aucune donnée de l'autre tenant ne fuit.
     /// Community (flag OFF) => no-op : le même rapport est servi normalement (byte-identique).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn report_tenant_isolation_fail_closed() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("tnc");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1137,8 +1166,14 @@ mod tests {
     }
 
     /// RÉDACTION : les secrets d'un finding sont masqués dans HTML, CSV et JSON.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn secrets_redacted_in_html_csv_json() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("redact");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1162,8 +1197,14 @@ mod tests {
 
     /// RÔLE : sous auth engagée, l'anonyme est refusé (403) et le viewer autorisé (200) ; la génération
     /// est LEDGERISÉE (console.report.generate, attribuée) et le ledger ne contient AUCUN secret.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn role_gated_and_ledgered() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("role");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1198,8 +1239,14 @@ mod tests {
     /// vient de la sortie des scanners (donc influençable par la cible) : s'il commence par `=`, `+`, `-`,
     /// `@`, une TABULATION ou un RETOUR CHARIOT, il doit ressortir NEUTRALISÉ (préfixe `'`) — même garde
     /// que l'export bulk des findings (`common::csv_field`, l'unique implémentation côté Rust).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn csv_export_neutralizes_spreadsheet_formula_injection() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("csvinj");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1263,6 +1310,32 @@ mod tests {
                 "valeur légitime {b:?} altérée par la neutralisation"
             );
         }
+        // CLASSE des préfixes AVALÉS par le tableur (contrôles/espaces/BOM) : la règle « premier
+        // caractère » les laissait passer. Le fichier ne porte que des ÉCHANTILLONS ; la règle, elle,
+        // est une classe (`starts_spreadsheet_formula`). Chaque échantillon porte SON attendu, y compris
+        // les cas qui NE DOIVENT PAS être altérés (préfixe avalé sans déclencheur derrière).
+        for e in v["swallowed_then_formula"].as_array().expect("swallowed_then_formula") {
+            let raw = e["raw"].as_str().expect("raw");
+            let cell = e["cell"].as_str().expect("cell");
+            assert_eq!(
+                csv_field(raw),
+                format!("\"{}\"", cell.replace('"', "\"\"")),
+                "préfixe avalé mal traité pour {raw:?} ({})",
+                e["why"].as_str().unwrap_or("")
+            );
+        }
+        // COÛT ASSUMÉ : contenu de scanner LÉGITIME mais commençant par un caractère dangereux — il EST
+        // altéré, et c'est pinné ici pour que le comportement ne puisse pas changer dans un seul langage.
+        for e in v["benign_prefixed"].as_array().expect("benign_prefixed") {
+            let raw = e["raw"].as_str().expect("raw");
+            let cell = e["cell"].as_str().expect("cell");
+            assert_eq!(
+                csv_field(raw),
+                format!("\"{}\"", cell.replace('"', "\"\"")),
+                "coût d'altération non conforme pour le contenu légitime {raw:?}"
+            );
+            assert_eq!(cell, format!("{neutral}{raw}"), "vecteurs incohérents pour {raw:?}");
+        }
     }
 
 
@@ -1280,8 +1353,10 @@ mod tests {
 
     /// [S5-bis — livrable] `GET /api/engagements/:id/report?format=docx` (viewer+) délègue à
     /// `python -m forge.report_engagement` : un spawn de process PAR REQUÊTE, au coût SUPÉRIEUR au
-    /// dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) et dégrader sur la voie
-    /// documentée (501 `docx_unavailable`) — jamais une requête suspendue indéfiniment.
+    /// dry-plan. Il doit être borné dans le TEMPS (`FORGE_ENGINE_TIMEOUT`) — jamais une requête suspendue.
+    /// CAUSE EXACTE (correctif) : le budget dépassé rend 504 `docx_engine_timeout` en NOMMANT la variable,
+    /// et surtout PAS 501 « installez python3 » : python3 était installé, c'est la borne qui a parlé.
+    /// Le 501 reste réservé au cas où le générateur a échoué ou n'a pas pu être lancé (test voisin).
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV process-global
     #[tokio::test]
@@ -1301,10 +1376,65 @@ mod tests {
         let r = tokio::time::timeout(std::time::Duration::from_secs(10), fut).await;
         std::env::remove_var("FORGE_ENGINE_TIMEOUT");
         let r = r.expect("la délégation DOCX DOIT être bornée dans le temps — aucune réponse rendue");
-        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED, "dégradation documentée (501)");
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT, "budget dépassé -> 504 (pas 501 « pas installé »)");
         assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
         let body = to_json(r).await;
-        assert_eq!(body["error"], "docx_unavailable");
+        assert_eq!(body["error"], "docx_engine_timeout", "la cause RENDUE est la borne franchie");
+        let why = body["why"].as_str().unwrap_or("");
+        assert!(why.contains("FORGE_ENGINE_TIMEOUT"), "le message NOMME la variable qui règle la borne: {why}");
+        assert!(!why.contains("installez") && !body["hint"].as_str().unwrap_or("").starts_with("installez"),
+            "une borne franchie ne doit JAMAIS être présentée comme une dépendance manquante: {body}");
+        let _ = std::fs::remove_file(&led);
+        let _ = std::fs::remove_file(app.python.as_str());
+    }
+
+    /// [CAUSE EXACTE — une SATURATION n'est pas une DÉPENDANCE MANQUANTE] Mesuré avant correctif, avec
+    /// python3 INSTALLÉ : deux lectures viewer tenant les slots suffisaient à faire répondre au livrable
+    /// client `501 {"error":"docx_unavailable","hint":"installez python3..."}` — pour TOUT LE MONDE, en
+    /// 7 ms. Un exploitant diagnostiquait une installation cassée pendant qu'il subissait une saturation.
+    /// Ici : plafond ramené à 0 slot disponible (`FORGE_ENGINE_MAX_CONCURRENT=1` + un slot tenu par une
+    /// lecture en vol) -> la réponse doit être 429, NOMMER la variable, et surtout ne PAS parler
+    /// d'installation. Le 501 `docx_unavailable` reste vérifié à côté pour la VRAIE absence de générateur.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn docx_saturation_is_not_reported_as_a_missing_dependency() {
+        let _g = crate::testutil::env_lock();
+        std::env::set_var("FORGE_ENGINE_MAX_CONCURRENT", "1");
+        std::env::set_var("FORGE_ENGINE_TIMEOUT", "3");
+        let led = tmp_ledger("docxbusy");
+        let mut app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        seed_finding(&app, 1, "f1", "a.example.com", "HIGH", "x");
+        let (vtok, _o, _a) = seed_roles(&app);
+        app.python = Arc::new(stub_bin("docx-busy", "sleep 30"));
+        // 1 slot occupé par une lecture EN VOL (le générateur DOCX d'une autre requête).
+        let (a, t) = (app.clone(), vtok.clone());
+        let inflight = tokio::spawn(async move {
+            let mut q = HashMap::new();
+            q.insert("format".to_string(), "docx".to_string());
+            engagement_report(State(a), bearer(&t), Path(1), Query(q)).await.status()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "docx".to_string());
+        let started = std::time::Instant::now();
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refus immédiat, pas d'attente muette");
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "saturation -> 429 (et surtout pas 501)");
+        let body = to_json(r).await;
+        assert_eq!(body["error"], "docx_engine_busy");
+        let txt = format!("{body}");
+        assert!(txt.contains("FORGE_ENGINE_MAX_CONCURRENT"), "le refus NOMME la variable: {txt}");
+        assert!(!txt.contains("indisponible sur l'hôte"), "une saturation ne doit pas se dire « indisponible sur l'hôte »: {txt}");
+        let _ = inflight.await;
+        // les formats PUR-RUST restent servis pendant la saturation (aucune régression de lecture).
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "csv".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        assert_eq!(r.status(), StatusCode::OK, "CSV (pur Rust) sert toujours");
+        std::env::remove_var("FORGE_ENGINE_MAX_CONCURRENT");
+        std::env::remove_var("FORGE_ENGINE_TIMEOUT");
         let _ = std::fs::remove_file(&led);
         let _ = std::fs::remove_file(app.python.as_str());
     }
@@ -1335,13 +1465,26 @@ mod tests {
         std::env::remove_var("FORGE_ENGINE_TIMEOUT");
         let _ = std::fs::remove_dir_all(&stub_dir);
         let got = got.expect("le rendu PDF DOIT être borné dans le temps — aucune réponse rendue");
-        assert!(got.is_none(), "moteur PDF coupé à la borne -> dégradation (None), jamais un PDF partiel");
+        // CAUSE EXACTE : un moteur PDF PRÉSENT mais coupé à la borne remonte `Bound(Timeout)`, jamais
+        // `NoEngine` (qui ferait annoncer « aucun moteur PDF détecté » alors qu'il y en a un).
+        match got {
+            Err(crate::PdfErr::Bound(crate::EngineBoundErr::Timeout(_))) => {}
+            Err(crate::PdfErr::NoEngine) => panic!("borne franchie rendue comme « aucun moteur PDF » — cause FAUSSE"),
+            Err(crate::PdfErr::Bound(e)) => panic!("borne attendue = temps, obtenue: {}", e.why()),
+            Ok(_) => panic!("moteur PDF coupé à la borne -> jamais un PDF partiel"),
+        }
         assert!(started.elapsed() < std::time::Duration::from_secs(8), "réponse rendue à la borne");
     }
 
     /// CSV/JSON round-trip : l'export se reparse et retrouve les valeurs attendues.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn csv_json_round_trip() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("rt");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1374,8 +1517,14 @@ mod tests {
 
     /// PDF/DOCX dégradent GRACIEUSEMENT (status, pas de crash). PDF : 200 (moteur présent) OU 501
     /// documenté. DOCX : python bidon -> 501 déterministe (jamais un crash).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn pdf_and_docx_degrade_gracefully() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("degrade");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1406,8 +1555,14 @@ mod tests {
     }
 
     /// Engagement inconnu -> 404 (jamais les données d'un autre) ; format inconnu -> 400.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn unknown_engagement_404_bad_format_400() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("nf");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1428,8 +1583,14 @@ mod tests {
 
     /// BRANDING : GET viewer OK ; POST admin écrit + ledgerise ; POST viewer/operator refusé (admin).
     /// Le branding global apparaît dans le rapport HTML (nom client).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn branding_admin_gated_and_rendered() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("brand");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1477,8 +1638,14 @@ mod tests {
     /// JSON : 200 + corps JSON valide NON vide (summary.total=0, findings []). DOCX : 200 + .docx
     /// valide (magic ZIP `PK\x03\x04`, non vide, content-type/disposition corrects) quand python est
     /// présent ; 501 documenté (docx_unavailable) s'il est absent — JAMAIS un 200 blanc.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn empty_engagement_json_docx_nonblank() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("empty");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-vide"); // AUCUN finding
@@ -1522,8 +1689,14 @@ mod tests {
     /// AUCUN lien `?format=` ni barre d'actions — le seul contrôle de format est celui du panneau.
     /// Le HTML autonome (sans preview) conserve UNIQUEMENT le bouton « Imprimer » (toujours zéro lien
     /// ?format= : ils dupliqueraient le contrôle et seraient inertes hors serveur).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn preview_has_single_format_control() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("preview");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");
@@ -1551,8 +1724,14 @@ mod tests {
 
     /// LOGO CLIENT OPTIONNEL (régression B9) : sans logo configuré -> AUCUN `<img class="qz">` ni
     /// fallback `/quetzal.svg` (pas de carré vide). Avec un logo -> il est rendu, src ÉCHAPPÉ (anti-XSS).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn client_logo_hidden_when_unset() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let led = tmp_ledger("logo");
         let app = test_app(&led);
         seed_engagement(&app, 1, "eng-A");

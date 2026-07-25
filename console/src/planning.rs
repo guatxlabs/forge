@@ -230,19 +230,11 @@ pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<
     }
     let module_params = Value::Object(module_params);
 
-    // (2c) SLOT de dry-plan (borne de CONCURRENCE) — pris APRÈS les validations (une requête invalide ne
-    // consomme aucun slot) et AVANT tout fichier temp / spawn. `try_acquire` : JAMAIS d'attente muette —
-    // plus de slot => 429 explicite, à l'appelant de réessayer. Le permis est relâché par son `Drop` :
-    // retour normal, early-return, panic OU abandon du future (client déconnecté) — cancellation-safe.
-    let slot = match PLAN_GATE.try_acquire() {
-        Some(p) => p,
-        None => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "plan_busy", "why": "trop de planifications à blanc en cours (FORGE_PLAN_MAX_CONCURRENT) — réessayez dans un instant"})),
-            )
-        }
-    };
+    // (2c) La borne de CONCURRENCE du dry-plan (`PLAN_GATE`) est appliquée par `bounded_engine_output`
+    // au moment du SPAWN — c'est le seul endroit du binaire qui prend et rend un slot, et un slot y
+    // mesure la vie du PROCESS, pas celle de la requête (cf. runs_proc). Ici on n'en prend donc plus :
+    // le refus arrive ci-dessous sous la forme `EngineBoundErr::Busy` -> 429 explicite (jamais d'attente
+    // muette). Conséquence assumée : le dir temp est créé AVANT le refus, et supprimé avec lui.
 
     // (3) dir temp éphémère : scope.json (allow_* FORCÉS false) + targets.json. Nettoyé en fin.
     let stamp = format!("plan-{}-{}", chrono_now_compact(), gen_token().chars().take(8).collect::<String>());
@@ -307,10 +299,24 @@ pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<
         // donc sans effet fonctionnel ici, mais on garde le même contrat d'exécution moteur).
         .env("PYTHONUNBUFFERED", "1");
     let budget = std::time::Duration::from_secs(plan_timeout_secs());
-    let waited = bounded_engine_output(&mut cmd, &slot, budget, ENGINE_TEXT_MAX_BYTES, None).await;
+    let waited = bounded_engine_output(&PLAN_GATE, cmd, budget, ENGINE_TEXT_MAX_BYTES, None).await;
     let _ = std::fs::remove_dir_all(&plan_dir); // nettoyage best-effort quel que soit le résultat
     let output = match waited {
         Ok(o) => o,
+        Err(EngineBoundErr::Busy { .. }) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "plan_busy", "why": "trop de planifications à blanc en cours (FORGE_PLAN_MAX_CONCURRENT) — réessayez dans un instant"})),
+            );
+        }
+        Err(EngineBoundErr::Abandoned) => {
+            // inatteignable en pratique (personne n'attend la réponse d'une requête abandonnée) ; on ne
+            // fabrique surtout pas un aperçu vide qui passerait pour un plan complet.
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({"error": "plan_aborted", "why": "planification à blanc abandonnée — moteur arrêté"})),
+            );
+        }
         Err(EngineBoundErr::Timeout(secs)) => {
             return (
                 StatusCode::GATEWAY_TIMEOUT,
@@ -477,23 +483,17 @@ pub(crate) fn validate_technique_selection(body: &Value) -> Result<Value, String
 pub(crate) async fn spawn_techniques_catalog(app: &App, selection: &Value) -> Result<Value, String> {
     // L10 FIX — spawn NON bloquant (tokio::process ... .await) : ne stalle plus un worker Tokio.
     // S5-bis — CE SPAWN EST UN COÛT MACHINE, sur une route de LECTURE ouverte au viewer : il est BORNÉ
-    // comme le dry-plan (slots en vol partagés `ENGINE_GATE`, budget de temps, plafond d'octets, mort de
-    // l'enfant si la requête est abandonnée). Refus EXPLICITE et fail-soft : l'appelant rend son enveloppe
-    // d'erreur habituelle, en NOMMANT la borne franchie.
-    let slot = ENGINE_GATE.try_acquire().ok_or_else(|| {
-        format!(
-            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
-            ENGINE_GATE.env_var(),
-            ENGINE_GATE.max()
-        )
-    })?;
+    // comme le dry-plan par le SEUL helper qui prend un slot (`bounded_engine_output` : plafond de
+    // process vivants `ENGINE_GATE`, budget de temps, plafond d'octets, mort du GROUPE si la requête est
+    // abandonnée). Refus EXPLICITE et fail-soft : l'appelant rend son enveloppe d'erreur habituelle, en
+    // NOMMANT la borne franchie (`EngineBoundErr::why`).
     let mut cmd = tokio::process::Command::new(app.python.as_str());
     cmd.args(["-m", "forge.cli", "techniques", "--json"])
         .current_dir(app.pkg_dir.as_str())
         .env("FORGE_TECHNIQUE_SELECTION", selection.to_string());
     let out = bounded_engine_output(
-        &mut cmd,
-        &slot,
+        &ENGINE_GATE,
+        cmd,
         std::time::Duration::from_secs(engine_timeout_secs()),
         ENGINE_TEXT_MAX_BYTES,
         None,
@@ -731,18 +731,11 @@ pub(crate) fn workflows_user_map(app: &App) -> serde_json::Map<String, Value> {
 pub(crate) async fn spawn_workflows_builtins(app: &App) -> Result<Vec<Value>, String> {
     // L10 FIX — spawn NON bloquant (tokio::process ... .await) : ne stalle plus un worker Tokio.
     // S5-bis — MÊME borne machine partagée que le catalogue de techniques (cf. spawn_techniques_catalog).
-    let slot = ENGINE_GATE.try_acquire().ok_or_else(|| {
-        format!(
-            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
-            ENGINE_GATE.env_var(),
-            ENGINE_GATE.max()
-        )
-    })?;
     let mut cmd = tokio::process::Command::new(app.python.as_str());
     cmd.args(["-m", "forge.cli", "workflows", "--json"]).current_dir(app.pkg_dir.as_str());
     let out = bounded_engine_output(
-        &mut cmd,
-        &slot,
+        &ENGINE_GATE,
+        cmd,
         std::time::Duration::from_secs(engine_timeout_secs()),
         ENGINE_TEXT_MAX_BYTES,
         None,
@@ -1013,19 +1006,32 @@ pub(crate) fn parse_plan_verdicts(stdout: &str) -> Vec<Value> {
 /// (registre vivant). LECTURE/gouvernance : ne lance aucune campagne, n'arme rien — il rafraîchit
 /// seulement le catalogue de capacités. Gaté par le rôle opérateur (fail-closed) car il modifie une
 /// table d'état serveur. Renvoie le catalogue rafraîchi (même forme que GET /api/modules).
+/// BORNÉ (correctif) : la sonde passe par le helper unique (budget `FORGE_ENGINE_TIMEOUT` + plafond
+/// `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT`) et n'est plus un `std::process` BLOQUANT sur le runtime.
+/// Si la sonde N'A PAS EU LIEU (plafond atteint) ou a été coupée, on ne rend PAS un « rafraîchi »
+/// muet : le catalogue est renvoyé AVEC `probe_error` (et le code 429 quand c'est le plafond), pour
+/// que l'opérateur sache que la table qu'il lit n'a pas été re-sondée.
 pub(crate) async fn modules_refresh(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> impl IntoResponse {
     if !check_operator(&app, &headers, Some(peer.ip())) {
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
-    {
-        let store = app.store();
-        populate_modules(&store); // re-spawn `forge.cli modules --json` + UPSERT dans `module`
-    }
+    let probe_err = populate_modules(&app).await;
     // relit le catalogue pour le renvoyer (transparence : l'opérateur voit l'état post-refresh —
     // l'intention `enabled`/`available_override` est PRÉSERVÉE par le re-probe, cf. populate_modules).
     let store = app.store();
     let mods = modules_catalog(&store);
     drop(store);
-    (StatusCode::OK, Json(json!({"refreshed": mods.len(), "modules": mods})))
+    match probe_err {
+        None => (StatusCode::OK, Json(json!({"refreshed": mods.len(), "modules": mods}))),
+        Some(why) => {
+            let busy = why.contains("FORGE_ENGINE_OPERATOR_MAX_CONCURRENT");
+            let code = if busy { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::OK };
+            (code, Json(json!({
+                "refreshed": mods.len(), "modules": mods,
+                "probe_error": why,
+                "why": "catalogue rendu TEL QU'EN BASE : la sonde du registre n'a pas abouti (table inchangée)",
+            })))
+        }
+    }
 }

@@ -552,13 +552,6 @@ pub(crate) fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Resu
 /// (`source_reachable:false` + raison), jamais une requête suspendue.
 pub(crate) async fn collect_via_python(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
     let secret = ds_secret(cfg);
-    let slot = crate::ENGINE_GATE.try_acquire().ok_or_else(|| {
-        format!(
-            "trop de spawns moteur en cours ({}={}) — réessayez dans un instant",
-            crate::ENGINE_GATE.env_var(),
-            crate::ENGINE_GATE.max()
-        )
-    })?;
     let mut cmd = tokio::process::Command::new(app.python.as_str());
     cmd.args([
         "-m", "forge.cli", "detections",
@@ -568,14 +561,20 @@ pub(crate) async fn collect_via_python(app: &App, cfg: &Value, since: i64) -> Re
     .current_dir(app.pkg_dir.as_str())
     .env("FORGE_DETECTION_SOURCE", cfg.to_string());
     let out = crate::bounded_engine_output(
-        &mut cmd,
-        &slot,
+        &crate::ENGINE_GATE,
+        cmd,
         std::time::Duration::from_secs(crate::engine_timeout_secs()),
         crate::ENGINE_TEXT_MAX_BYTES,
         None,
     )
     .await
-    .map_err(|e| format!("collecteur Python injoignable: {}", redact_secret(&e.why(), &secret)))?;
+    // CAUSE EXACTE : un plafond de concurrence atteint n'est PAS un collecteur « injoignable » — le dire
+    // ferait diagnostiquer une panne de source alors qu'on subit une saturation (c'est exactement le
+    // travers corrigé sur le chemin DOCX). Chaque borne garde donc son propre libellé.
+    .map_err(|e| match e {
+        crate::EngineBoundErr::Busy { .. } => redact_secret(&e.why(), &secret),
+        _ => format!("collecteur Python injoignable: {}", redact_secret(&e.why(), &secret)),
+    })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = redact_secret(err.trim(), &secret);

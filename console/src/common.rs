@@ -125,19 +125,54 @@ pub(crate) fn html_escape(s: &str) -> String {
 /// `tests/test_report_engagement.py::TestCsvFormulaNeutralization`) : le modifier sans corriger les deux
 /// implémentations fait échouer les deux suites (mesuré). Le GUILLEMETAGE, lui, n'est PAS identique : ici
 /// chaque cellule est toujours quotée, l'exportateur Python s'en remet au minimum RFC-4180 de `csv.writer`.
-/// Toujours entre guillemets, guillemets internes doublés ; un
-/// champ commençant par `=`, `+`, `-`, `@`, une TABULATION ou un RETOUR CHARIOT est préfixé d'une apostrophe
-/// (Excel/LibreOffice ignorent TAB/CR avant d'interpréter le caractère suivant, donc ils font partie du jeu
-/// dangereux). Le tableur affiche alors du TEXTE, jamais une formule — et le champ reste lisible. Les
-/// exports portent du texte issu des scanners, donc influençable par la cible : la neutralisation n'est
-/// jamais optionnelle. PURE. Consolidée depuis `findings_bulk::csv_field` (durci) et `reports::csv_field`
-/// (qui, lui, ne neutralisait RIEN) : le chemin le plus exposé avait le garde le plus faible.
+/// Toujours entre guillemets, guillemets internes doublés ; une cellule qui DÉCLENCHERAIT une formule
+/// (cf. `starts_spreadsheet_formula` : le jeu `= + - @`, TAB/CR en tête, ET le même jeu atteint après
+/// avoir avalé un préfixe de caractères que le tableur ignore) est préfixée d'une apostrophe. Le tableur
+/// affiche alors du TEXTE, jamais une formule — et le champ reste lisible. Les exports portent du texte
+/// issu des scanners, donc influençable par la cible : la neutralisation n'est jamais optionnelle. PURE.
+/// Consolidée depuis `findings_bulk::csv_field` (durci) et `reports::csv_field` (qui, lui, ne
+/// neutralisait RIEN) : le chemin le plus exposé avait le garde le plus faible.
 pub(crate) fn csv_field(s: &str) -> String {
-    let guarded = match s.chars().next() {
-        Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{s}"),
-        _ => s.to_string(),
-    };
+    let guarded = if starts_spreadsheet_formula(s) { format!("'{s}") } else { s.to_string() };
     format!("\"{}\"", guarded.replace('"', "\"\""))
+}
+
+/// Déclencheurs de formule tableur (CWE-1236) — le CARACTÈRE qui, en tête de cellule, fait interpréter
+/// le reste comme une formule. Jeu partagé avec le moteur Python via
+/// `console/testdata/csv_injection_vectors.json`.
+const FORMULA_TRIGGERS: [char; 4] = ['=', '+', '-', '@'];
+
+/// Vrai si la cellule serait interprétée comme une FORMULE par un tableur. Règle en DEUX temps, écrite
+/// sur des CLASSES de caractères — pas sur une liste de cas rencontrés. Temps 1 : le premier caractère
+/// est un déclencheur, ou l'un des deux séparateurs historiquement listés (TAB/CR) — conservés tels
+/// quels pour ne rien affaiblir. Temps 2 : sinon, on AVALE tout préfixe de caractères que le tableur
+/// ignore avant d'interpréter — TOUT caractère de CONTRÔLE (`char::is_control`, donc C0 0x00-0x1F, DEL,
+/// C1), TOUT espace Unicode (`char::is_whitespace`) et le BOM U+FEFF — puis on reteste le premier
+/// caractère RESTANT.
+/// POURQUOI (mesuré, pas supposé) : avec la règle « premier caractère ∈ jeu dangereux », une cellule
+/// commençant par un OCTET NUL passait intacte. Chemin PROUVÉ de bout en bout sur le binaire réel :
+/// `POST /api/ingest` d'un titre `" =cmd|' /C calc'!A0"` (le NUL est un échappement JSON valide,
+/// donc atteignable par du contenu influencé par la cible) -> export `?format=csv` du livrable client
+/// -> conversion LibreOffice Calc 26.2.4.2 -> la cellule ressort en `table:formula="of:=cmd|' /c
+/// calc'!a0"`, formule VIVANTE. Mesures voisines sur le même tableur : `\x00\x00=` évalue aussi ;
+/// `\x0b`, `\x0c`, BOM, espace de tête, `\x1f`, `\x7f`, NBSP, U+2000 n'évaluaient PAS `=1+1` chez lui —
+/// on les avale quand même, parce que la garde doit tenir sur la CLASSE (autre tableur, autre version)
+/// et non sur ce qu'UN tableur d'UNE version faisait le jour du test.
+pub(crate) fn starts_spreadsheet_formula(s: &str) -> bool {
+    let mut it = s.chars();
+    match it.next() {
+        None => return false,
+        Some(c) if FORMULA_TRIGGERS.contains(&c) || c == '\t' || c == '\r' => return true,
+        Some(c) if !(c.is_control() || c.is_whitespace() || c == '\u{feff}') => return false,
+        Some(_) => {}
+    }
+    for c in it {
+        if c.is_control() || c.is_whitespace() || c == '\u{feff}' {
+            continue;
+        }
+        return FORMULA_TRIGGERS.contains(&c);
+    }
+    false
 }
 
 // --- auth opérateur (argon2) : vérification/hachage de mot de passe (feuilles pures) ---

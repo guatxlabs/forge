@@ -738,9 +738,10 @@ pub(crate) async fn tools_add(State(app): State<App>, headers: HeaderMap, Json(b
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "tool_write", "why": why}))).into_response();
     }
     // HOT-RELOAD : re-probe (FORGE_TOOLSPECS pointe le dir managé) -> le module apparaît dans la table.
+    // re-probe BORNÉ (gate opérateur + budget) et non bloquant ; le verrou du store n'est pris qu'APRÈS.
+    populate_modules(&app).await;
     let view = {
         let store = app.store();
-        populate_modules(&store);
         sync_user_added_flags(&store);
         user_tool_view(&store, &kind)
     };
@@ -794,7 +795,10 @@ pub(crate) async fn tools_delete(State(app): State<App>, headers: HeaderMap, Pat
     {
         let store = app.store();
         let _ = store.execute("DELETE FROM module WHERE kind=? AND user_added=1", &crate::sql_params![&kind]);
-        populate_modules(&store);
+    }
+    populate_modules(&app).await; // re-probe BORNÉ, hors verrou du store
+    {
+        let store = app.store();
         sync_user_added_flags(&store);
     }
     append_console_ledger(&app, "console.tool.remove", json!({"actor": actor, "kind": kind}));

@@ -427,7 +427,7 @@ pub(crate) async fn serve() {
     // `populate_modules` : INCONDITIONNEL sur CHAQUE instance (upsert idempotent de la table `module`
     // PARTAGÉE, jamais leader-sensible ; hors du verrou DDL car il spawn un process python). En HA les 2
     // réplicas peuplent (upsert ON CONFLICT row-safe). En mono-instance : identique à avant.
-    populate_modules(&app.store());
+    populate_modules(&app).await;
     // OUTILS AJOUTÉS PAR L'UI : re-marque `module.user_added=1` pour les ToolSpecs présents dans le dir
     // server-managed (le re-probe upsert le module mais `user_added` défaute à 0). Idempotent, no-op si
     // aucun outil UI. Garantit que GET/DELETE /api/tools reconnaissent les outils utilisateur après reboot.

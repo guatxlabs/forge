@@ -61,12 +61,30 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `GET /api/runs/:id/events` | Flux **SSE** : lignes de log + transitions de statut du run. |
 | `POST /api/scope-check` | Verdict d'appartenance d'une cible au scope serveur (lecture/gouvernance). |
 
-> **Les routes de lecture qui spawnent le moteur** (`GET /api/techniques`, `GET /api/workflows`, et `GET /api/engagements/:id/report?format=docx|pdf`)
-> lancent **un process par requête**. Elles restent ouvertes au viewer (le SPA en a besoin pour afficher le catalogue,
-> les workflows et le livrable), mais le **coût machine** est borné : nombre de spawns en vol (`FORGE_ENGINE_MAX_CONCURRENT`),
-> budget de temps (`FORGE_ENGINE_TIMEOUT`, groupe tué au dépassement), plafond d'octets collectés, et mort du process
-> enfant si le client se déconnecte. Toute borne franchie est **explicite** : dégradation documentée de la route
-> (`techniques_unavailable` / `builtins_unavailable` / `501`), jamais une attente silencieuse.
+> **Les routes qui spawnent le moteur** lancent **un process par requête**. Inventaire complet, par gate :
+>
+> | Gate (plafond) | Routes | Budget de temps |
+> |---|---|---|
+> | `FORGE_ENGINE_MAX_CONCURRENT` (défaut 4) — lecture, ouverte au viewer | `GET /api/techniques`, `GET /api/workflows`, `GET /api/detection/coverage` (collecteur Python), `GET /api/engagements/:id/report?format=docx\|pdf`, `GET /api/runs/:id/report?format=pdf`, `GET /api/compliance/evidence?format=pdf` (enterprise, flag-gated) | `FORGE_ENGINE_TIMEOUT` (120 s) |
+> | `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` (défaut 2) — opérateur | `POST /api/import`, `POST /api/modules/refresh`, `POST`/`DELETE /api/tools`, et la sonde du registre au BOOT | `FORGE_IMPORT_TIMEOUT` (600 s) pour l'import, `FORGE_ENGINE_TIMEOUT` sinon |
+> | `FORGE_PLAN_MAX_CONCURRENT` (défaut 2) — opérateur | `POST /api/plan` | `FORGE_PLAN_TIMEOUT` (300 s) |
+>
+> Le total de process moteur simultanés est la **somme** des trois plafonds, pas l'un d'eux. Un slot est tenu par la
+> **vie du process** (groupe de session compris), pas par la vie de la requête HTTP : abandonner la requête ne rend
+> donc pas le slot et ne laisse aucun descendant vivant (le groupe est SIGTERM puis SIGKILL, et le slot n'est rendu
+> qu'après sa mort). `POST /api/run` n'est pas dans ce tableau : c'est un run supervisé, avec son propre cycle de vie
+> (`FORGE_RUN_TIMEOUT`, FIFO par engagement).
+>
+> Toute borne franchie est **explicite** et NOMME la variable qui la règle : dégradation documentée de la route
+> (`techniques_unavailable` / `builtins_unavailable`), `429` `*_busy` (plafond), `504` `*_timeout` (budget), `502`
+> (plafond d'octets) — jamais une attente silencieuse, et jamais une cause inventée. En particulier, `501`
+> `docx_unavailable` / `pdf_unavailable` est **réservé** au cas où le générateur est réellement absent ou a échoué :
+> une saturation rend `429 docx_engine_busy`, un budget dépassé `504 docx_engine_timeout`.
+>
+> **Mur-à-mur mesuré** : le temps de réponse d'une requête coupée à sa borne vaut le budget **plus** le temps de mort
+> effective du groupe (SIGTERM, puis SIGKILL après `CANCEL_GRACE_SECS` = 5 s si un membre ignore SIGTERM). Mesuré avec
+> `FORGE_ENGINE_TIMEOUT=5` sur un moteur qui sort au SIGTERM : `GET /api/techniques` répond en **5,11 s**
+> (avant ce correctif : **10,23 s**, parce que l'escalade attendait la grâce entière même sur un groupe déjà mort).
 
 ---
 
@@ -87,7 +105,8 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `POST /api/run` | **Lance une campagne gouvernée et auditée** (spawn `python3 -m forge.cli campaign`). Corps `{campaign, targets[], modules?, mode?, budget?, exhaustive?, reason?, arm?, allow_high_impact?, module_params?}`. Fail-closed : cibles ⊆ scope serveur, **plancher exploit** (exploit/destructif refusés sauf opt-in haut-impact = operator + `arm=true` + `reason`), **FIFO par engagement** (un run vivant *par engagement* ; 2e run sur le même engagement → **409** avec `engagement_id` ; autres engagements en parallèle). `engagement_id` optionnel dans le corps (défaut = engagement actif). Voir [Architecture §3.3](ARCHITECTURE.md#33-le-run-flow--c2-light--gouverné). |
 | `POST /api/runs/:id/cancel` | Annule le run courant. |
 | `POST /api/plan` | **Dry-plan INERTE** (allow_high_impact=false par construction) : montre les verdicts ROE sans rien tirer. **Operator** : il spawne quand même un process moteur, donc même gate que `/api/run` (viewer → **403**), budget de temps borné (`FORGE_PLAN_TIMEOUT`, défaut 300 s → **504** `plan_timeout`, groupe moteur tué), concurrence bornée (`FORGE_PLAN_MAX_CONCURRENT`, défaut 2 → **429** `plan_busy`) et sortie moteur plafonnée en octets (→ **502** `plan_output_too_large`). |
-| `POST /api/modules/refresh` | Re-peuple le catalogue `module` depuis `forge.cli modules`. |
+| `POST /api/modules/refresh` | Re-peuple le catalogue `module` depuis `forge.cli modules`. Spawn **borné** (plafond `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT`, budget `FORGE_ENGINE_TIMEOUT`) : si la sonde n'a pas eu lieu, la réponse porte `probe_error` (et **429** quand c'est le plafond) — le catalogue rendu est alors celui de la base, non re-sondé. |
+| `POST /api/import` | Importe une sortie de scanner (parse par le moteur). Spawn **borné** : plafond `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` (→ **429** `import_busy`), budget `FORGE_IMPORT_TIMEOUT` (défaut 600 s → **504** `import_timeout`, groupe tué, **aucun** finding partiel inséré), plafond d'octets (→ **502**). |
 
 ---
 

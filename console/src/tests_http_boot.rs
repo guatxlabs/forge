@@ -258,8 +258,14 @@ use crate::testutil::*;
     /// EXPLICITEMENT AUTONOME — `source_reachable:false`, `source_configured:false`, `source_kind:"none"`,
     /// AUCUNE métrique fabriquée (detected/missed vides, taux/MTTD nuls), et `techniques_fired` reste
     /// informatif. C'est un état NORMAL (pas une erreur) : la boucle purple est simplement OFF.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn fetch_purple_coverage_standalone_invents_nothing() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app(&tmp_path("standalone-cov-ledger"));
         // cache par défaut = {kind:none} (test_app). On l'affirme pour la lisibilité du test.
         set_detection_source(&app, json!({"kind": "none"}));
@@ -288,8 +294,14 @@ use crate::testutil::*;
     /// [STANDALONE] Une source POSÉE mais INJOIGNABLE se distingue de l'autonome : `source_configured:true`
     /// + `source_reachable:false`. Le SPA peut ainsi afficher une ANOMALIE (source injoignable) là, et un
     /// état NEUTRE (autonome) quand aucune source n'est configurée — sans jamais bloquer l'UI.
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]
     async fn fetch_purple_coverage_configured_but_unreachable_is_distinct() {
+    // SÉRIALISEUR PROCESS-GLOBAL : ce test peut atteindre un spawn moteur, donc le compteur
+    // process-global des slots (`EngineGate`). Sans ce verrou, deux tests parallèles se volent le
+    // slot quand un autre test a posé FORGE_ENGINE_MAX_CONCURRENT=1 — flakiness MESURÉE avant ce
+    // correctif (suite parallèle : 1 à 2 échecs aléatoires par run, y compris avant ce lot).
+    let _engine_gate_guard = crate::testutil::env_lock();
         let app = test_app(&tmp_path("unreachable-cov-ledger"));
         // endpoint bidon fermé -> injoignable, mais une source EST bien configurée.
         set_detection_source(&app, json!({

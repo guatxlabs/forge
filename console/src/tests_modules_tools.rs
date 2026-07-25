@@ -448,6 +448,7 @@ use crate::testutil::*;
     /// [tools endpoint] POST /api/tools admin -> persiste 0600 + HOT-RELOAD (apparaît dans /api/modules) +
     /// ledger `console.tool.add` ; GET /api/tools le liste ; non-admin -> 403 ; DELETE admin le retire mais
     /// REFUSE un built-in (recon.httpx). Spawn le vrai probe python (registre in-tree, dir managé injecté).
+    #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS moteur process-globaux
     #[tokio::test]
     async fn tools_add_list_delete_admin_gated_and_hot_reload() {
         let _g = env_lock();

@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use axum::response::IntoResponse;
 use serde_json::Value;
 
 use crate::{
@@ -19,63 +20,100 @@ use crate::{
     read_ledger_lines, sha_hex, App,
 };
 
+/// Échec de rendu PDF. DEUX causes qui ne doivent JAMAIS être confondues : aucun moteur installé
+/// (`NoEngine` — la dégradation documentée : impression navigateur), ou une BORNE franchie sur un moteur
+/// bien présent (`Bound` — saturation/budget/octets). Les confondre annonçait une installation cassée à
+/// un exploitant qui subissait en fait une saturation (mesuré sur le chemin DOCX, même travers).
+pub(crate) enum PdfErr {
+    NoEngine,
+    Bound(crate::EngineBoundErr),
+}
+
+/// Traduit une borne franchie en réponse HTTP qui NOMME sa cause — un seul endroit pour les deux
+/// livrables délégués (DOCX et PDF), pour qu'aucun des deux ne puisse re-dériver vers une cause inventée.
+/// `kind` = "docx" | "pdf" (préfixe des codes d'erreur historiques), `hint` = la sortie de secours.
+pub(crate) fn delegated_render_error(kind: &str, hint: &str, e: &crate::EngineBoundErr) -> axum::response::Response {
+    let (status, code) = match e {
+        crate::EngineBoundErr::Busy { .. } => (axum::http::StatusCode::TOO_MANY_REQUESTS, "engine_busy"),
+        crate::EngineBoundErr::Timeout(_) => (axum::http::StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
+        crate::EngineBoundErr::TooLarge(_) => (axum::http::StatusCode::BAD_GATEWAY, "engine_output_too_large"),
+        crate::EngineBoundErr::Abandoned => (axum::http::StatusCode::GATEWAY_TIMEOUT, "engine_aborted"),
+        // seule branche « indisponible » : le spawn ou le générateur lui-même a échoué.
+        crate::EngineBoundErr::Io(_) => (axum::http::StatusCode::NOT_IMPLEMENTED, "unavailable"),
+    };
+    (
+        status,
+        axum::response::Json(serde_json::json!({
+            "error": format!("{kind}_{code}"),
+            "why": e.why(),
+            "hint": hint,
+        })),
+    )
+        .into_response()
+}
+
 /// Génère un PDF depuis le HTML brandé en s'appuyant sur un outil SYSTÈME s'il est présent
-/// (wkhtmltopdf ou weasyprint) — AUCUNE dépendance lourde n'est ajoutée au binaire. Retourne None si
+/// (wkhtmltopdf ou weasyprint) — AUCUNE dépendance lourde n'est ajoutée au binaire. `Err(NoEngine)` si
 /// aucun moteur n'est installé (l'appelant documente alors l'impression navigateur). Le HTML est passé
 /// par STDIN (wkhtmltopdf `- -`) ou par un fichier temporaire (weasyprint) ; sortie sur stdout/fichier.
-/// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (viewer+) : il est BORNÉ par le helper
-/// partagé (slots en vol `ENGINE_GATE`, budget `FORGE_ENGINE_TIMEOUT` avec kill du groupe, plafond
-/// d'octets sur le PDF collecté, mort de l'enfant si la requête est abandonnée). Toute borne franchie =>
-/// `None` => la dégradation 501 déjà documentée (impression navigateur).
-pub(crate) async fn render_pdf_from_html(html: &str) -> Option<Vec<u8>> {
+/// S5-bis — CE SPAWN EST UN COÛT MACHINE sur une route de LECTURE (viewer+) : il est BORNÉ par le SEUL
+/// helper qui prend un slot (`bounded_engine_output` : plafond `ENGINE_GATE`, budget
+/// `FORGE_ENGINE_TIMEOUT` avec kill du GROUPE, plafond d'octets sur le PDF collecté, mort du groupe si la
+/// requête est abandonnée). Une borne franchie remonte TYPÉE (`Err(Bound)`), jamais fondue dans « pas de
+/// moteur PDF ».
+pub(crate) async fn render_pdf_from_html(html: &str) -> Result<Vec<u8>, PdfErr> {
     // 1) wkhtmltopdf : lit le HTML sur stdin (`-`), écrit le PDF sur stdout (`-`). Préféré (rendu CSS).
     if which_in_path("wkhtmltopdf") {
-        let slot = crate::ENGINE_GATE.try_acquire()?;
         let mut cmd = tokio::process::Command::new("wkhtmltopdf");
         cmd.args(["--quiet", "--print-media-type", "-", "-"]);
         let out = crate::bounded_engine_output(
-            &mut cmd,
-            &slot,
+            &crate::ENGINE_GATE,
+            cmd,
             std::time::Duration::from_secs(crate::engine_timeout_secs()),
             crate::ENGINE_BINARY_MAX_BYTES,
             Some(html.as_bytes().to_vec()),
         )
         .await
-        .ok()?;
-        if out.status.success() && !out.stdout.is_empty() {
-            return Some(out.stdout);
-        }
-        return None;
+        .map_err(PdfErr::Bound)?;
+        return pdf_or_failure(out, "wkhtmltopdf");
     }
     // 2) weasyprint : HTML d'entrée par fichier temp, PDF en sortie sur stdout (`-`).
     if which_in_path("weasyprint") {
-        let slot = crate::ENGINE_GATE.try_acquire()?;
         let dir = std::env::temp_dir().join(format!("forge-report-{}", gen_token()));
         let _ = std::fs::create_dir_all(&dir);
         let in_path = dir.join("report.html");
         if std::fs::write(&in_path, html).is_err() {
             let _ = std::fs::remove_dir_all(&dir);
-            return None;
+            return Err(PdfErr::Bound(crate::EngineBoundErr::Io("écriture du HTML temporaire impossible".into())));
         }
         let mut cmd = tokio::process::Command::new("weasyprint");
         cmd.arg(&in_path).arg("-"); // stdout
         let out = crate::bounded_engine_output(
-            &mut cmd,
-            &slot,
+            &crate::ENGINE_GATE,
+            cmd,
             std::time::Duration::from_secs(crate::engine_timeout_secs()),
             crate::ENGINE_BINARY_MAX_BYTES,
             None,
         )
-        .await
-        .ok();
+        .await;
         let _ = std::fs::remove_dir_all(&dir);
-        let out = out?;
-        if out.status.success() && !out.stdout.is_empty() {
-            return Some(out.stdout);
-        }
-        return None;
+        return pdf_or_failure(out.map_err(PdfErr::Bound)?, "weasyprint");
     }
-    None
+    Err(PdfErr::NoEngine)
+}
+
+/// Le moteur a tourné : soit il rend des octets, soit on remonte SA cause (code de sortie + stderr),
+/// jamais « aucun moteur détecté » — il y en avait un.
+fn pdf_or_failure(out: crate::EngineOutput, bin: &str) -> Result<Vec<u8>, PdfErr> {
+    if out.status.success() && !out.stdout.is_empty() {
+        return Ok(out.stdout);
+    }
+    let err: String = String::from_utf8_lossy(&out.stderr).trim().chars().take(240).collect();
+    Err(PdfErr::Bound(crate::EngineBoundErr::Io(format!(
+        "{bin} rc={:?}{}",
+        out.status.code(),
+        if err.is_empty() { String::new() } else { format!(": {err}") }
+    ))))
 }
 
 /// Vrai si `bin` est trouvable dans le PATH (lookup pur, sans shell). Sert à n'exposer ?format=pdf
