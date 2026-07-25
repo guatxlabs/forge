@@ -89,3 +89,10 @@ le run reste pilotable (spawn, cancel via `kill_on_drop`, réconciliation au boo
 base) mais **sans** la garantie « couper tout le sous-arbre détaché ». C'est un choix explicite,
 gardé par `cfg`, non-crashant, et sans incidence sur les invariants de gouvernance. Pour cet usage,
 préférer **Linux ou macOS**.
+
+Une capacité est en outre strictement **Linux** : le balayage des descendants qui ont QUITTÉ le groupe
+(`setsid`/double-fork) avant de rendre un slot de la borne moteur. Il repose sur `/proc` (marqueur
+d'environnement hérité) et sur `PR_SET_CHILD_SUBREAPER` (chaîne de parenté fermée) — cf.
+`docs/HTTP_API.md`. Sans `/proc`, le balayage rend une liste **vide** : aucun kill à l'aveugle, et la
+garde retombe sur le kill de groupe seul (donc un descendant détaché peut survivre). Le reste du
+comportement est identique.

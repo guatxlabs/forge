@@ -70,10 +70,26 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 > | `FORGE_PLAN_MAX_CONCURRENT` (défaut 2) — opérateur | `POST /api/plan` | `FORGE_PLAN_TIMEOUT` (300 s) |
 >
 > Le total de process moteur simultanés est la **somme** des trois plafonds, pas l'un d'eux. Un slot est tenu par la
-> **vie du process** (groupe de session compris), pas par la vie de la requête HTTP : abandonner la requête ne rend
-> donc pas le slot et ne laisse aucun descendant vivant (le groupe est SIGTERM puis SIGKILL, et le slot n'est rendu
-> qu'après sa mort). `POST /api/run` n'est pas dans ce tableau : c'est un run supervisé, avec son propre cycle de vie
-> (`FORGE_RUN_TIMEOUT`, FIFO par engagement).
+> **vie du process ET de ses descendants**, pas par la vie de la requête HTTP : abandonner la requête ne rend donc pas
+> le slot, et le slot n'est rendu qu'après la mort du spawn. `POST /api/run` n'est pas dans ce tableau : c'est un run
+> supervisé, avec son propre cycle de vie (`FORGE_RUN_TIMEOUT`, FIFO par engagement).
+>
+> **Ce que « la mort du spawn » couvre, et ce qu'elle ne couvre pas.** Le kill de groupe (`setsid`+`killpg`) est le
+> chemin rapide, mais un descendant peut QUITTER le groupe (`setsid`, double-fork) — mesuré avant correctif :
+> `FORGE_ENGINE_MAX_CONCURRENT=4`, 40 requêtes abandonnées → **40 descendants vivants**, plafond jamais atteint, aucun
+> refus. Le balayage s'appuie donc sur deux propriétés dont un descendant n'hérite pas par choix : un **marqueur
+> d'environnement** unique par spawn (recopié par fork/exec, `setsid` n'y change rien) et la **chaîne de parenté**,
+> fermée par `PR_SET_CHILD_SUBREAPER` sur le leader (un orphelin est réadopté par le leader, pas par `init`). Après
+> correctif, même mesure : **0 descendant vivant** après 40 abandons, et la borne refuse (rafale de 20 requêtes
+> tenues : 16 × `429`, pic de process = 4 = le plafond).
+>
+> **Limites mesurées, pas contournées** : (1) un descendant qui REMPLACE son environnement (`env -i`, re-exec) ET dont
+> le leader est déjà sorti — c'est le cas du chemin nominal — n'est rattachable par aucune des deux propriétés :
+> mesuré, il survit (3 survivants sur une requête servie par un moteur bouchon qui en lance 1 par spawn) ; sur les
+> chemins abandon/budget, où le leader vit encore, il est bien tué (0 survivant). (2) Hors Linux il n'y a pas de
+> `/proc` : le balayage rend une liste vide et la garde retombe sur le kill de groupe seul (cf. `docs/PLATFORMS.md`).
+> (3) Le balayage coûte une passe `/proc` par spawn : mesuré sur cette machine (594 process), `GET /api/techniques`
+> passe d'une médiane de **0,198 s à 0,221 s** (3 rondes entrelacées de 15 mesures, moteur `python3` réel, build debug).
 >
 > Toute borne franchie est **explicite** et NOMME la variable qui la règle : dégradation documentée de la route
 > (`techniques_unavailable` / `builtins_unavailable`), `429` `*_busy` (plafond), `504` `*_timeout` (budget), `502`
@@ -82,9 +98,9 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 > une saturation rend `429 docx_engine_busy`, un budget dépassé `504 docx_engine_timeout`.
 >
 > **Mur-à-mur mesuré** : le temps de réponse d'une requête coupée à sa borne vaut le budget **plus** le temps de mort
-> effective du groupe (SIGTERM, puis SIGKILL après `CANCEL_GRACE_SECS` = 5 s si un membre ignore SIGTERM). Mesuré avec
-> `FORGE_ENGINE_TIMEOUT=5` sur un moteur qui sort au SIGTERM : `GET /api/techniques` répond en **5,11 s**
-> (avant ce correctif : **10,23 s**, parce que l'escalade attendait la grâce entière même sur un groupe déjà mort).
+> effective du spawn (SIGTERM, puis SIGKILL après `CANCEL_GRACE_SECS` = 5 s si un membre ignore SIGTERM). Mesuré avec
+> `FORGE_ENGINE_TIMEOUT=5` sur un moteur qui sort au SIGTERM : `GET /api/techniques` répond en **5,04–5,06 s**
+> (3 mesures consécutives sur le binaire de ce lot ; avant l'ajout du balayage des descendants détachés : **5,00–5,03 s**).
 
 ---
 

@@ -46,6 +46,27 @@ pub(crate) fn spawn_setsid(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// pré-exec du LEADER d'un spawn moteur BORNÉ : `setsid` (comme tout spawn moteur) PLUS
+/// `PR_SET_CHILD_SUBREAPER` (Linux) — le leader devient le point de ré-attachement de ses propres
+/// orphelins. Conséquence : un descendant qui double-forke pour se détacher est ré-attaché AU LEADER
+/// (pas à `init`), donc il reste visible par la chaîne de parenté même s'il a remplacé son
+/// environnement. L'attribut est préservé par `execve` et n'est PAS hérité par les enfants : seul le
+/// leader de CE spawn adopte, jamais un process voisin. Réservé aux spawns BORNÉS (courts) : un run
+/// C2 supervisé garde `spawn_setsid` seul, son cycle de vie et sa récolte étant ceux du superviseur.
+#[cfg(unix)]
+pub(crate) fn spawn_setsid_subreaper(cmd: &mut tokio::process::Command) {
+    spawn_setsid(cmd);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(|| {
+            // best-effort : un noyau sans PR_SET_CHILD_SUBREAPER (< 3.4) laisse la garde sur ses
+            // deux autres appuis (groupe + marqueur d'environnement) au lieu d'échouer le spawn.
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+            Ok(())
+        });
+    }
+}
+
 /// Tue le groupe de process (SIGTERM puis on laisse le watchdog/await récupérer le code).
 /// UNIX : `killpg` via `libc::kill(-pgid, SIGTERM)` — coupe tout le sous-arbre détaché par setsid.
 #[cfg(unix)]
@@ -689,19 +710,228 @@ mod reap_tests {
     }
 }
 
+/// LE DESCENDANT QUI QUITTE LE GROUPE — les deux héritages, exercés SÉPARÉMENT puis de bout en bout.
+///
+/// Le symptôme fermé ici a été mesuré sur le binaire, gate de LECTURE à 4 : 40 requêtes abandonnées
+/// laissaient 40 descendants `setsid` vivants et la borne n'avait JAMAIS refusé. Le kill de groupe ne
+/// pouvait pas les voir : ils n'étaient plus dans le groupe. Ces tests portent sur ce que le descendant
+/// NE CHOISIT PAS — l'environnement dont il hérite, et le parent auquel il est rattaché.
+#[cfg(all(test, target_os = "linux"))]
+mod escaped_descendant_tests {
+    use super::*;
+
+    fn process_gone(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == -1 && *libc::__errno_location() == libc::ESRCH }
+    }
+
+    /// Chemin temporaire SANS métacaractère shell (le bouchon « environ vide » l'écrit depuis `sh`).
+    fn tmpfile(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("forge-esc-{tag}-{}-{}.pid", std::process::id(), crate::gen_token()))
+    }
+
+    /// Attend (borné) qu'un fichier contienne un PID, puis le rend. -1 si rien n'arrive.
+    async fn wait_pid(path: &std::path::Path) -> i32 {
+        for _ in 0..200 {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                if let Ok(v) = s.trim().parse::<i32>() {
+                    return v;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        -1
+    }
+
+    /// Moteur bouchon : DOUBLE-FORK + `setsid`. Le petit-fils quitte le groupe ET devient orphelin,
+    /// publie son PID, puis pend. `scrub` => il se ré-exécute avec un environnement VIDE (il perd donc
+    /// le marqueur hérité : c'est le cas-limite, pas le cas nominal). Le leader pend ensuite.
+    fn escaping_engine(pidfile: &std::path::Path, scrub: bool) -> tokio::process::Command {
+        let payload = if scrub {
+            // `execve` avec un environ VIDE : le marqueur DISPARAÎT du /proc/<pid>/environ du descendant.
+            "os.execve('/bin/sh', ['sh', '-c', 'echo $$ > ' + sys.argv[1] + '; exec sleep 120'], {})"
+        } else {
+            "open(sys.argv[1], 'w').write(str(os.getpid()));  time.sleep(120)"
+        };
+        let script = format!(
+            "import os,sys,time\npid=os.fork()\nif pid==0:\n    os.setsid()\n    if os.fork()>0: os._exit(0)\n    {payload}\nelse:\n    time.sleep(60)\n"
+        );
+        let mut cmd = tokio::process::Command::new("python3");
+        cmd.arg("-c").arg(script).arg(pidfile);
+        cmd
+    }
+
+    /// CANAL 1 — LE MARQUEUR HÉRITÉ. Un process qui porte l'entrée d'environnement du spawn est
+    /// retrouvé même s'il n'est PAS dans l'arbre de parenté du leader (leader inexistant ici : le canal
+    /// « parenté » ne peut rien apporter). Et un token DIFFÉRENT ne le voit pas : pas de kill à
+    /// l'aveugle d'un moteur voisin.
+    #[tokio::test]
+    async fn marker_channel_finds_a_process_outside_the_parent_chain() {
+        let token = crate::gen_token();
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30").env(ENGINE_SPAWN_MARKER_ENV, &token).kill_on_drop(true);
+        spawn_setsid(&mut cmd); // hors du groupe de ce test, comme un évadé
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return, // `sleep` absent : rien à prouver ici
+        };
+        let pid = child.id().expect("pid") as i32;
+        // leader INEXISTANT (PID hors borne) => seul le canal MARQUEUR peut trouver quelque chose.
+        let seen = spawn_descendants(i32::MAX, &token);
+        assert!(seen.contains(&pid), "le marqueur hérité doit rendre le process visible hors chaîne de parenté (vu={seen:?})");
+        // token étranger => invisible (aucun faux positif : un spawn voisin n'est jamais visé).
+        let other = spawn_descendants(i32::MAX, &crate::gen_token());
+        assert!(!other.contains(&pid), "un token différent ne doit JAMAIS voir ce process (vu={other:?})");
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    /// CANAL 2 — LA CHAÎNE DE PARENTÉ. Un descendant qui a REMPLACÉ son environnement (donc invisible
+    /// au marqueur) reste rattaché au leader marqué `PR_SET_CHILD_SUBREAPER`, malgré `setsid` ET le
+    /// double-fork. C'est une forme que le marqueur ne traite pas : elle doit quand même tomber du bon
+    /// côté tant que le leader vit.
+    #[tokio::test]
+    async fn parent_chain_finds_a_descendant_that_replaced_its_environment() {
+        let pidfile = tmpfile("scrub");
+        let _ = std::fs::remove_file(&pidfile);
+        let token = crate::gen_token();
+        let mut cmd = escaping_engine(&pidfile, true);
+        cmd.env(ENGINE_SPAWN_MARKER_ENV, &token).kill_on_drop(true);
+        spawn_setsid_subreaper(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("python3 indisponible — test sauté");
+                return;
+            }
+        };
+        let leader = child.id().expect("pid") as i32;
+        let escapee = wait_pid(&pidfile).await;
+        assert!(escapee > 1, "le descendant à environnement vide doit avoir publié son PID");
+        // marqueur SEUL (leader inexistant) : il ne le voit pas — l'environnement a été remplacé.
+        assert!(
+            !spawn_descendants(i32::MAX, &token).contains(&escapee),
+            "environ remplacé : le canal marqueur ne peut pas le voir (c'est la limite documentée)"
+        );
+        // chaîne de parenté depuis le leader : il le voit — un process ne choisit pas son parent.
+        let seen = spawn_descendants(leader, &token);
+        assert!(seen.contains(&escapee), "le descendant réadopté par le leader doit être vu (vu={seen:?})");
+        let _ = std::fs::remove_file(&pidfile);
+        unsafe { libc::kill(escapee, libc::SIGKILL) };
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    /// DE BOUT EN BOUT, CHEMIN BUDGET — le symptôme d'origine : un descendant `setsid`+double-fork
+    /// survivait au budget dépassé et le slot était rendu quand même. Ici : la borne rend `Timeout`,
+    /// AUCUN descendant ne survit, et le slot est bien RENDU (une prise suivante réussit).
+    #[tokio::test]
+    async fn escaped_descendant_dies_on_budget_and_slot_comes_back() {
+        static GATE: EngineGate = EngineGate::new("FORGE_TEST_ESCAPE_BUDGET_MAX", 1);
+        let pidfile = tmpfile("budget");
+        let _ = std::fs::remove_file(&pidfile);
+        let cmd = escaping_engine(&pidfile, false);
+        let waited = bounded_engine_output(&GATE, cmd, std::time::Duration::from_secs(3), 1 << 20, None).await;
+        assert!(matches!(waited, Err(EngineBoundErr::Timeout(_))), "le leader pend -> budget dépassé");
+        let escapee = std::fs::read_to_string(&pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(-1);
+        if escapee < 0 {
+            eprintln!("python3 indisponible ou fork impossible — test sauté");
+            return;
+        }
+        assert!(process_gone(escapee), "le descendant détaché ({escapee}) doit être mort quand la borne rend la main");
+        // le slot est RENDU : une prise suivante ne doit pas rendre `Busy` (plafond = 1).
+        let mut ok = tokio::process::Command::new("sh");
+        ok.arg("-c").arg("exit 0");
+        let second = bounded_engine_output(&GATE, ok, std::time::Duration::from_secs(5), 1 << 20, None).await;
+        assert!(!matches!(second, Err(EngineBoundErr::Busy { .. })), "slot non rendu après la mort du spawn");
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
+    /// DE BOUT EN BOUT, CHEMIN ABANDON — c'est CE chemin qui a été mesuré à 40 survivants. La tâche du
+    /// handler est ABANDONNÉE (client déconnecté) : le superviseur détaché doit quand même tuer le
+    /// descendant détaché AVANT de rendre le slot.
+    #[tokio::test]
+    async fn escaped_descendant_dies_when_the_request_is_abandoned() {
+        static GATE: EngineGate = EngineGate::new("FORGE_TEST_ESCAPE_ABANDON_MAX", 1);
+        let pidfile = tmpfile("abandon");
+        let _ = std::fs::remove_file(&pidfile);
+        let cmd = escaping_engine(&pidfile, false);
+        let handle = tokio::spawn(async move {
+            let _ = bounded_engine_output(&GATE, cmd, std::time::Duration::from_secs(60), 1 << 20, None).await;
+        });
+        let escapee = wait_pid(&pidfile).await;
+        if escapee < 0 {
+            handle.abort();
+            eprintln!("python3 indisponible — test sauté");
+            return;
+        }
+        handle.abort(); // ABANDON : exactement ce que fait un client qui coupe
+        let mut gone = false;
+        for _ in 0..200 {
+            if process_gone(escapee) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(gone, "abandon client : le descendant détaché ({escapee}) doit être tué, pas laissé vivant");
+        // Le slot est rendu APRÈS la mort du spawn (c'est l'ordre voulu) : on sonde donc le compteur,
+        // borné, au lieu de supposer qu'il est déjà à zéro à l'instant où le descendant meurt.
+        let mut released = false;
+        for _ in 0..200 {
+            if GATE.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(released, "slot non rendu après un abandon");
+        let mut ok = tokio::process::Command::new("sh");
+        ok.arg("-c").arg("exit 0");
+        let second = bounded_engine_output(&GATE, ok, std::time::Duration::from_secs(5), 1 << 20, None).await;
+        assert!(!matches!(second, Err(EngineBoundErr::Busy { .. })), "slot non repris après un abandon");
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
+    /// LE MARQUEUR EST POSÉ PAR LA BORNE, PAS PAR L'APPELANT — et il est UNIQUE par spawn. C'est ce qui
+    /// rend la garde non-énumérée : un futur site d'appel n'a rien à écrire pour en bénéficier, et deux
+    /// spawns simultanés ne peuvent pas se balayer l'un l'autre.
+    #[tokio::test]
+    async fn every_bounded_spawn_carries_its_own_marker_without_the_caller_asking() {
+        static GATE: EngineGate = EngineGate::new("FORGE_TEST_MARKER_MAX", 4);
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg(format!("printf %s \"${ENGINE_SPAWN_MARKER_ENV}\""));
+            let out = bounded_engine_output(&GATE, cmd, std::time::Duration::from_secs(10), 1 << 20, None)
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+            match out {
+                Ok(v) => seen.push(v),
+                Err(_) => return, // `sh` absent : rien à prouver
+            }
+        }
+        assert!(!seen[0].is_empty(), "tout spawn borné doit porter le marqueur (aucun appelant ne l'écrit)");
+        assert_ne!(seen[0], seen[1], "le marqueur doit être UNIQUE par spawn (sinon un spawn balaierait le voisin)");
+    }
+}
+
 
 // =====================================================================================
 // BORNE MACHINE DES SPAWNS MOTEUR (S5-bis) — un process moteur par requête est un COÛT MACHINE, pas
 // une lecture. Trois bornes, une seule implémentation, partagée par TOUTES les routes qui spawnent :
 // nombre de PROCESS vivants (`EngineGate`), budget de TEMPS et plafond d'OCTETS (`bounded_engine_output`).
 //
-// CE QUE LE SLOT MESURE (corrigé) : un slot est tenu par la VIE DU PROCESS (groupe setsid compris),
-// PAS par la vie de la requête HTTP. Avant, le permis appartenait au future du handler : abandonner la
-// requête (client déconnecté) le rendait INSTANTANÉMENT, alors que `kill_on_drop` ne tue que l'enfant
-// DIRECT — un petit-enfant survivait et la borne ne comptait plus rien (mesuré : 20 requêtes abandonnées
-// -> 20 process vivants avec un plafond de 4, sans un seul refus). Désormais le permis est MOVÉ dans un
-// superviseur DÉTACHÉ (`tokio::spawn`) que l'abandon du handler ne peut pas annuler : il tue le groupe,
-// attend sa disparition, PUIS rend le slot.
+// CE QUE LE SLOT MESURE (corrigé DEUX FOIS) : un slot est tenu par la VIE DU PROCESS ET DE SES
+// DESCENDANTS, pas par la vie de la requête HTTP. (1) Avant, le permis appartenait au future du
+// handler : abandonner la requête (client déconnecté) le rendait INSTANTANÉMENT alors que
+// `kill_on_drop` ne tue que l'enfant DIRECT — un petit-enfant survivait et la borne ne comptait plus
+// rien (mesuré : 20 requêtes abandonnées -> 20 process vivants avec un plafond de 4, sans un seul
+// refus). Le permis est donc MOVÉ dans un superviseur DÉTACHÉ (`tokio::spawn`) que l'abandon ne peut
+// pas annuler. (2) Mais tenir le slot « jusqu'à la mort du GROUPE » restait une FORME : un descendant
+// qui QUITTE le groupe (`setsid`/double-fork) n'était ni tué ni compté (mesuré à nouveau : 40
+// descendants vivants après 40 abandons, plafond 4, aucun refus). Le superviseur balaie désormais AUSSI
+// les descendants détachés par deux HÉRITAGES qu'un détachement ne défait pas (marqueur d'environnement
+// + chaîne de parenté fermée par subreaper — cf. `kill_and_reap_spawn`), PUIS rend le slot.
 //
 // PAR CONSTRUCTION (vérifié par le compilateur) : `EnginePermit` et `EngineGate::try_acquire` sont
 // PRIVÉS À CE MODULE — aucun autre fichier ne peut nommer le type, donc aucun ne peut prendre, tenir ni
@@ -840,32 +1070,185 @@ impl EngineBoundErr {
     }
 }
 
-/// Tue le GROUPE puis RÉCOLTE, avant que le slot ne soit rendu. Ordre (et raison de chaque étape) :
-/// (1) l'enfant DIRECT est SIGKILLé puis `wait()` — un zombie non récolté ferait répondre « vivant » à
-/// `group_alive` (cf. son doc-comment) et le slot serait tenu pour rien ; (2) si le GROUPE a encore des
-/// membres (petits-enfants), SIGTERM + sonde pendant la grâce + SIGKILL (`escalate_kill_group`) ;
-/// (3) sonde bornée de la disparition effective. Coût NUL dans le cas nominal (le moteur a rendu la main
-/// et n'a pas laissé de descendant : `group_alive` est faux, on sort sans dormir).
-#[cfg(unix)]
-async fn kill_and_reap_group(child: &mut tokio::process::Child, pgid: i32) {
-    let _ = child.start_kill();
-    let _ = child.wait().await; // récolte l'enfant direct : plus de zombie
-    if pgid <= 1 || !group_alive(pgid) {
-        return;
+// -------------------------------------------------------------------------------------
+// IDENTIFIER UN DESCENDANT QUI A QUITTÉ LE GROUPE — deux propriétés HÉRITÉES, pas une liste de formes
+// -------------------------------------------------------------------------------------
+// Le groupe de session (`setsid`+`killpg`) est le chemin RAPIDE, mais c'est une FORME : `setsid` /
+// double-fork en sortent, donc un descendant détaché n'était ni compté ni tué (mesuré : 40 descendants
+// vivants après 40 requêtes abandonnées, plafond 4, aucun refus). Ce que le descendant ne peut PAS
+// éviter en se détachant, ce sont deux héritages posés AVANT son existence :
+//
+//   1. L'ENVIRONNEMENT. `FORGE_ENGINE_SPAWN=<token unique>` est posé par `bounded_engine_output`
+//      lui-même (pas par l'appelant), et fork/exec recopient l'environnement — `setsid` et le
+//      double-fork n'y changent rien. C'est EXACTEMENT le mécanisme que le moteur Python a dû
+//      construire pour la même raison (`forge/modules/_daemon_reap.py` : « le daemon est souvent
+//      DÉTACHÉ (setsid/double-fork) -> il ÉCHAPPE au reap par groupe de processus »).
+//   2. LA CHAÎNE DE PARENTÉ. Le leader du spawn est marqué `PR_SET_CHILD_SUBREAPER` (Linux) : un
+//      descendant orphelin (double-fork) est ré-attaché AU LEADER au lieu d'`init`. Un process ne
+//      choisit pas son parent — cette propriété tient même si le descendant a REMPLACÉ son
+//      environnement (`env -i`, re-exec avec un environ vide), tant que le leader vit.
+//
+// LIMITES MESURÉES (écrites, pas contournées) :
+//   - hors Linux, `/proc` n'existe pas : les deux scans rendent une liste VIDE et la garde retombe sur
+//     le kill de groupe seul (no-op sûr, jamais de kill à l'aveugle) — cf. docs/PLATFORMS.md ;
+//   - un descendant qui remplace son environnement ET dont le leader est DÉJÀ mort (chemin nominal,
+//     où le leader a rendu la main avant le balayage) n'est plus rattachable : il n'est ni tué ni
+//     compté. Résidu MESURÉ et documenté (`docs/HTTP_API.md`), pas une promesse d'omnipotence.
+
+/// Variable d'environnement portant le marqueur unique d'un spawn moteur borné. Miroir Rust de
+/// `FORGE_RUN_MARKER` (`forge/modules/_daemon_reap.py`).
+pub(crate) const ENGINE_SPAWN_MARKER_ENV: &str = "FORGE_ENGINE_SPAWN";
+
+/// Descendants d'un spawn encore vivants, par les DEUX héritages ci-dessus, en UNE seule passe sur
+/// `/proc` : (a) `environ` porte l'entrée NUL-délimitée COMPLÈTE `FORGE_ENGINE_SPAWN=<token>` (jamais
+/// une sous-chaîne ; le token est unique donc aucun faux positif, et un moteur concurrent n'est jamais
+/// touché) ; (b) le pid descend de `leader` par la chaîne `ppid` (fermée par le subreaper). Exclut
+/// soi-même, `init` et le leader. Best-effort : un `/proc` illisible n'entraîne AUCUN kill.
+#[cfg(target_os = "linux")]
+fn spawn_descendants(leader: i32, token: &str) -> Vec<i32> {
+    let me = std::process::id() as i32;
+    let needle = format!("{ENGINE_SPAWN_MARKER_ENV}={token}").into_bytes();
+    let mut marked: Vec<i32> = Vec::new();
+    let mut parent: Vec<(i32, i32)> = Vec::new();
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return Vec::new(), // pas de /proc -> aucune victime (no-op sûr)
+    };
+    for e in entries.flatten() {
+        let pid = match e.file_name().to_string_lossy().parse::<i32>() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if pid <= 1 || pid == me {
+            continue;
+        }
+        if let Ok(st) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // le champ `comm` peut contenir espaces ET parenthèses -> on coupe à la DERNIÈRE `)`.
+            if let Some((_, tail)) = st.rsplit_once(')') {
+                if let Some(ppid) = tail.split_whitespace().nth(1).and_then(|v| v.parse::<i32>().ok()) {
+                    parent.push((pid, ppid));
+                }
+            }
+        }
+        if let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) {
+            if env.split(|&b| b == 0).any(|entry| entry == needle) {
+                marked.push(pid);
+            }
+        }
     }
-    kill_group(pgid); // SIGTERM au reste du groupe (petits-enfants)
-    escalate_kill_group(pgid, std::time::Duration::from_secs(CANCEL_GRACE_SECS)).await; // -> SIGKILL
+    // fermeture transitive de la parenté depuis le leader (le leader lui-même est exclu du résultat).
+    let mut tree: Vec<i32> = Vec::new();
+    let mut frontier = vec![leader];
+    while let Some(cur) = frontier.pop() {
+        for &(pid, ppid) in &parent {
+            if ppid == cur && pid != leader && !tree.contains(&pid) {
+                tree.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    for pid in tree {
+        if !marked.contains(&pid) {
+            marked.push(pid);
+        }
+    }
+    marked.retain(|&p| p != leader);
+    marked
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_descendants(_leader: i32, _token: &str) -> Vec<i32> {
+    Vec::new() // pas de /proc : aucun kill à l'aveugle (cf. docs/PLATFORMS.md)
+}
+
+/// Vrai si `pid` existe et n'est pas un zombie déjà récolté. `kill(pid,0)` : test d'existence pur.
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    pid > 1 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn signal_all(pids: &[i32], sig: i32) {
+    for &p in pids {
+        if p > 1 {
+            unsafe {
+                libc::kill(p, sig);
+            }
+        }
+    }
+}
+
+/// Tue le spawn ENTIER puis RÉCOLTE, avant que le slot ne soit rendu. Ordre (et raison de chaque étape) :
+/// (0) INVENTAIRE des descendants AVANT tout kill — tant que le leader vit, la chaîne de parenté est
+/// fermée (subreaper) et le marqueur hérité est lisible ; tuer d'abord perdrait l'attribution ;
+/// (1) SIGTERM aux évadés inventoriés (PID exacts) ; (2) l'enfant DIRECT est SIGKILLé puis `wait()` —
+/// un zombie non récolté ferait répondre « vivant » à `group_alive` (cf. son doc-comment) et le slot
+/// serait tenu pour rien ; (3) SIGTERM au GROUPE, et SEULEMENT s'il a encore un membre (signaler un
+/// pgid déjà libéré viserait un PID recyclé, donc étranger) ; (4) grâce PARTAGÉE
+/// (`CANCEL_GRACE_SECS`) pendant laquelle on sonde groupe ET évadés ; (5) SIGKILL des deux, sur un
+/// inventaire RAFRAÎCHI (un descendant peut naître pendant la grâce) ; (6) sonde bornée de la
+/// disparition effective. Le budget d'attente est celui d'AVANT (grâce puis `GROUP_REAP_POLLS`
+/// sondes) : fermer l'évasion n'allonge pas la fenêtre pendant laquelle le slot reste tenu.
+#[cfg(unix)]
+async fn kill_and_reap_spawn(child: &mut tokio::process::Child, pgid: i32, token: &str) {
+    // (0) inventaire AVANT de tuer.
+    let mut victims = spawn_descendants(pgid, token);
+    // (1) SIGTERM aux évadés : des PID EXACTS, relevés à l'instant (jamais un pgid périmé).
+    signal_all(&victims, libc::SIGTERM);
+    // (2) récolte de l'enfant direct AVANT de tester le groupe : un zombie non récolté ferait
+    //     répondre « vivant » à `group_alive` et on signalerait un groupe qui n'existe plus.
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    // (3) le groupe n'est signalé QUE s'il a encore un membre. Signaler un pgid déjà libéré n'est pas
+    //     un no-op inoffensif à terme : un PID recyclé rendrait le signal ÉTRANGER (le chemin nominal
+    //     passe ici avec un leader déjà mort et récolté).
+    let group_live = pgid > 1 && group_alive(pgid);
+    if group_live {
+        kill_group(pgid);
+    }
+    if !group_live && !victims.iter().any(|&p| pid_alive(p)) {
+        return; // cas nominal : rien à attendre, on ne dort pas.
+    }
+    // (4) grâce PARTAGÉE groupe + évadés (même budget qu'avant l'ajout des évadés).
+    let step = std::time::Duration::from_millis(100);
+    let mut waited = std::time::Duration::ZERO;
+    let grace = std::time::Duration::from_secs(CANCEL_GRACE_SECS);
+    while waited < grace {
+        if (pgid <= 1 || !group_alive(pgid)) && !victims.iter().any(|&p| pid_alive(p)) {
+            return; // sorti proprement dans la grâce -> pas de SIGKILL
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+    // (5) dernier ressort : SIGKILL. Inventaire RAFRAÎCHI — un descendant né pendant la grâce hérite
+    // du même marqueur, donc il est vu ici même s'il n'existait pas à l'étape (0).
+    for p in spawn_descendants(pgid, token) {
+        if !victims.contains(&p) {
+            victims.push(p);
+        }
+    }
+    if pgid > 1 && group_alive(pgid) {
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    signal_all(&victims, libc::SIGKILL);
+    // (6) sonde bornée de la disparition effective.
     for _ in 0..GROUP_REAP_POLLS {
-        if !group_alive(pgid) {
+        if (pgid <= 1 || !group_alive(pgid)) && !victims.iter().any(|&p| pid_alive(p)) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    eprintln!("[forge] moteur: groupe {pgid} encore vivant après SIGKILL — slot rendu à la borne d'attente");
+    let survivors: Vec<i32> = victims.into_iter().filter(|&p| pid_alive(p)).collect();
+    eprintln!(
+        "[forge] moteur: spawn {pgid} encore vivant après SIGKILL (groupe={} évadés={survivors:?}) — slot rendu à la borne d'attente",
+        group_alive(pgid)
+    );
 }
 
 #[cfg(not(unix))]
-async fn kill_and_reap_group(child: &mut tokio::process::Child, _pgid: i32) {
+async fn kill_and_reap_spawn(child: &mut tokio::process::Child, _pgid: i32, _token: &str) {
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
@@ -884,9 +1267,18 @@ const GROUP_REAP_POLLS: usize = 50;
 ///
 /// LE SLOT EST TENU PAR LA VIE DU PROCESS, PAS PAR CELLE DE LA REQUÊTE : la supervision tourne dans une
 /// tâche DÉTACHÉE que l'abandon du handler (client déconnecté) ne peut pas annuler. Elle observe cet
-/// abandon (`tx.closed()`), tue le GROUPE, attend sa mort, rend le slot, puis répond. Conséquence
-/// mesurable : quand cette fonction rend la main, le groupe de session du spawn est mort — et un client
-/// qui coupe ne peut donc ni libérer le slot ni laisser un descendant vivant.
+/// abandon (`tx.closed()`), tue le spawn, attend sa mort, rend le slot, puis répond.
+///
+/// CE QUI EST TUÉ, ET COMMENT ON LE TROUVE (cf. `kill_and_reap_spawn`) : le GROUPE de session (chemin
+/// rapide) PLUS tout descendant qui l'a QUITTÉ (`setsid`/double-fork), retrouvé par deux héritages
+/// qu'un détachement ne défait pas — le marqueur d'environnement unique posé ici même, et la chaîne de
+/// parenté fermée par `PR_SET_CHILD_SUBREAPER` sur le leader. Quand cette fonction rend la main, ni le
+/// groupe ni ces descendants ne sont vivants.
+///
+/// RÉSIDU CONNU ET MESURÉ, à ne pas sur-promettre : un descendant qui REMPLACE son environnement
+/// (`env -i`, re-exec) et dont le leader est DÉJÀ mort n'est rattachable par aucun des deux héritages —
+/// il survit, et le slot est rendu. Hors Linux, `/proc` n'existe pas : la garde retombe sur le kill de
+/// groupe seul. Les deux limites sont écrites dans `docs/HTTP_API.md`.
 pub(crate) async fn bounded_engine_output(
     gate: &'static EngineGate,
     mut cmd: tokio::process::Command,
@@ -900,12 +1292,18 @@ pub(crate) async fn bounded_engine_output(
         Some(p) => p,
         None => return Err(EngineBoundErr::Busy { var: gate.env_var(), max: gate.max() }),
     };
+    // MARQUEUR HÉRITÉ — posé ICI, au seul endroit qui prend un slot, jamais par l'appelant : un site
+    // d'appel ne peut donc pas l'oublier, et tout process issu de ce spawn le porte (fork/exec
+    // recopient l'environnement, `setsid`/double-fork n'y changent rien). Token unique par spawn
+    // (CSPRNG) -> le balayage ne peut viser qu'un descendant de CE spawn.
+    let marker = crate::gen_token();
+    cmd.env(ENGINE_SPAWN_MARKER_ENV, &marker);
     cmd.stdin(if stdin_data.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
-    spawn_setsid(&mut cmd); // le PID de l'enfant devient son PGID -> kill du GROUPE possible
+    spawn_setsid_subreaper(&mut cmd); // PGID = PID de l'enfant (kill du GROUPE) + adoption des orphelins
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         // AUCUN process n'existe : rendre le slot ici (drop de `permit`) ne peut rien laisser fuir.
@@ -979,8 +1377,9 @@ pub(crate) async fn bounded_engine_output(
             },
             Err(e) => Err(e),
         };
-        // (3) MORT DU GROUPE puis — et seulement ensuite — RESTITUTION DU SLOT. Unique site de `drop`.
-        kill_and_reap_group(&mut child, pgid).await;
+        // (3) MORT DU SPAWN (groupe + descendants détachés) puis — et seulement ensuite — RESTITUTION
+        // DU SLOT. Unique site de `drop`.
+        kill_and_reap_spawn(&mut child, pgid, &marker).await;
         drop(permit);
         let _ = tx.send(outcome);
     });
