@@ -535,7 +535,7 @@ pub(crate) fn request_is_https(headers: &HeaderMap) -> bool {
 /// `frame-ancestors 'none'` (directive IGNORÉE en `<meta>` mais HONORÉE en en-tête HTTP → anti-
 /// clickjacking effectif, complète `X-Frame-Options: DENY`). Servir une politique IDENTIQUE à la
 /// meta garantit l'ABSENCE de régression : l'intersection meta ∩ en-tête est la meta elle-même.
-pub(crate) const CSP_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+pub(crate) const CSP_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Middleware EN-TÊTES DE SÉCURITÉ — posé comme couche la PLUS EXTERNE du routeur (cf. `build_router`)
 /// pour tamponner TOUTES les réponses : shell SPA statique, JSON d'API, rapports, 421 anti-rebinding
