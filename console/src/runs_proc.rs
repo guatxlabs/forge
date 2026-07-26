@@ -1256,6 +1256,63 @@ async fn kill_and_reap_spawn(child: &mut tokio::process::Child, _pgid: i32, _tok
 /// Sondes de 50 ms après le SIGKILL avant d'abandonner (borne D'ATTENTE, pas une promesse) : 2,5 s.
 const GROUP_REAP_POLLS: usize = 50;
 
+/// Fenêtre de DRAINAGE des pipes APRÈS la mort du process moteur. Ce n'est PAS une attente de fermeture
+/// du pipe : c'est le temps laissé aux lectures pour vider ce que le moteur a écrit AVANT de sortir.
+///
+/// POURQUOI ELLE EXISTE (mesuré). La collecte s'arrêtait quand les pipes atteignaient EOF. Or un
+/// DESCENDANT qui hérite du pipe stdout — le comportement PAR DÉFAUT d'un `fork`/`Popen` SANS
+/// redirection, et `forge/modules/_daemon_reap.py` prouve que des daemons détachés existent dans ce
+/// produit — tient ce pipe ouvert après la sortie du moteur. Attendre EOF facturait alors à une requête
+/// RÉUSSIE le BUDGET MOTEUR ENTIER, et jetait la sortie valide : mesuré sur le binaire, `GET
+/// /api/techniques` avec un descendant qui hérite du pipe et MEURT pourtant au SIGTERM — 5,127–5,136 s
+/// à `FORGE_ENGINE_TIMEOUT=5`, 9,130–9,140 s à 9 (donc indexé sur le BUDGET, pas sur `CANCEL_GRACE_SECS`),
+/// et 120,061 s au DÉFAUT LIVRÉ, corps `{"error":"techniques_unavailable"}` alors que le moteur était
+/// sorti en 0 avec une sortie valide. Le BOOT lui-même (sonde du registre) subissait la même attente :
+/// 120,66 s entre le lancement et le `listen`, contre 1,31 s après ce correctif.
+///
+/// CE QU'ELLE COÛTE, ET CE QU'ELLE COUPE. Sur le chemin nominal (personne d'autre ne tient le pipe),
+/// EOF arrive AVEC la mort du process : la fenêtre n'est jamais consommée (mesuré 0,030–0,040 s de
+/// bout en bout). Quand un descendant tient le pipe, la lecture est COUPÉE au bout de cette fenêtre et
+/// la sortie déjà collectée est rendue — ELLE N'EST PAS TRONQUÉE : contrôle mesuré avec 5 MiB de sortie
+/// valide ET un descendant qui hérite du pipe, corps rendu 5 243 025 octets (`pad` = 5 242 880 exact),
+/// JSON valide, 0,79 s ; le même contrôle AVANT rendait 351 octets d'erreur en 5,13 s, les 5 MiB jetés.
+/// CE QUE ÇA NE CAPTURE PLUS, dit plutôt que tu : une sortie écrite par un DESCENDANT APRÈS la mort du
+/// moteur n'est plus attendue (elle l'était, au prix ci-dessus).
+const PIPE_DRAIN_AFTER_EXIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Pompe un flux du moteur dans `sink` jusqu'à EOF ou dépassement de `cap` (+1 octet suffit à DÉTECTER
+/// le dépassement sans collecter davantage). Le `sink` est PARTAGÉ avec le superviseur : si la lecture
+/// est COUPÉE (descendant qui tient le pipe), ce qui a déjà été lu reste lisible — c'est ce qui permet
+/// de RENDRE la sortie du moteur au lieu de la jeter. Celui qui atteint le plafond TUE le groupe : sans
+/// ça, on cesse de lire un pipe que l'enfant continue de remplir -> il se bloque, et le dépassement
+/// d'OCTETS dégénère en dépassement de TEMPS (mesuré).
+async fn pump_into<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
+    sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    cap: u64,
+    pgid: i32,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 8192];
+    let mut total: u64 = 0;
+    loop {
+        let n = r.read(&mut buf).await?;
+        if n > 0 {
+            total += n as u64;
+            if let Ok(mut s) = sink.lock() {
+                s.extend_from_slice(&buf[..n]);
+            }
+        }
+        if total > cap {
+            kill_group(pgid);
+            return Ok(());
+        }
+        if n == 0 {
+            return Ok(());
+        }
+    }
+}
+
 /// Spawne `cmd` et collecte sa sortie SOUS TROIS BORNES, ET C'EST LE SEUL ENDROIT DU BINAIRE OÙ UN SLOT
 /// DE CONCURRENCE MOTEUR EST PRIS ET RENDU (`EnginePermit` est privé à ce module : le compilateur
 /// interdit à tout autre fichier de nommer, détenir ou libérer un slot).
@@ -1283,9 +1340,20 @@ const GROUP_REAP_POLLS: usize = 50;
 /// LIMITE DE MÊME CLASSE, non couverte : un travail DÉLÉGUÉ À UN NON-DESCENDANT (`systemd-run --user`)
 /// sort du domaine de la propriété (il n'hérite ni du marqueur ni de la parenté) — mesuré : 4 requêtes
 /// abandonnées laissent 5 process vivants et rendent leur slot aussitôt.
-/// COÛT SUR LE CHEMIN NOMINAL : une requête RÉUSSIE dont le moteur laisse un descendant détaché qui
-/// IGNORE SIGTERM tient son slot jusqu'au SIGKILL de `CANCEL_GRACE_SECS` — mesuré 5,164–5,172 s contre
-/// 0,041–0,072 s sans descendant (le descendant est bien tué).
+/// COÛT SUR LE CHEMIN NOMINAL — DEUX FORMES DE DESCENDANT, DEUX PRIX, MESURÉS SÉPARÉMENT (une seule
+/// forme avait été mesurée, et son chiffre généralisé à tort ; cf. `PIPE_DRAIN_AFTER_EXIT`) :
+///   - descendant qui REDIRIGE ses fd (`>/dev/null`) et MEURT au SIGTERM : 0,133–0,146 s ;
+///   - descendant qui REDIRIGE ses fd et IGNORE SIGTERM : il tient le slot jusqu'au SIGKILL de
+///     `CANCEL_GRACE_SECS` — 5,17–5,24 s (INCHANGÉ par ce correctif) ;
+///   - descendant qui HÉRITE du pipe stdout (défaut d'un `fork`/`Popen` sans redirection) : 0,380–0,396 s
+///     APRÈS ce correctif, contre le BUDGET MOTEUR ENTIER avant (5,13 s à `FORGE_ENGINE_TIMEOUT=5`,
+///     9,13 s à 9, 120,061 s au défaut livré) — et la sortie valide était JETÉE ;
+///   - aucun descendant : 0,030–0,040 s.
+/// CE QUE CE CHOIX COÛTE AILLEURS, dit et mesuré : un moteur qui FERME ses deux pipes puis se BLOQUE
+/// n'est plus borné par « EOF + `CANCEL_GRACE_SECS` » mais par `budget` — mesuré à
+/// `FORGE_ENGINE_TIMEOUT=9` : 9,128–9,141 s contre 5,130–5,145 s avant. L'issue est la même (`Timeout`,
+/// groupe tué, aucune sortie partielle rendue) ; seule l'attente change, et elle ne dépasse jamais le
+/// budget annoncé.
 /// Hors Linux, `/proc` n'existe pas : la garde retombe sur le kill de groupe seul. Toutes ces limites
 /// sont écrites dans `docs/HTTP_API.md`.
 pub(crate) async fn bounded_engine_output(
@@ -1327,65 +1395,75 @@ pub(crate) async fn bounded_engine_output(
     // vie est celui du RUNTIME, pas celui du future du handler ; abandonner la requête ne l'annule pas.
     tokio::spawn(async move {
         let mut tx = tx;
-        let pumps = async move {
+        let cap = max_bytes as u64;
+        let out_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let err_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let pipes = match (out, err) {
+            (Some(o), Some(e)) => Some((o, e)),
+            _ => None,
+        };
+        // lecture CONCURRENTE des deux flux (sinon un pipe plein bloque l'enfant), chacune plafonnée à
+        // max_bytes+1 (cf. `pump_into`). Les tâches écrivent dans des tampons PARTAGÉS : ce qui a été lu
+        // reste récupérable même si la lecture est coupée.
+        let (mut o_task, mut e_task) = match pipes {
+            Some((o, e)) => (
+                Some(tokio::spawn(pump_into(o.take(cap + 1), out_sink.clone(), cap, pgid))),
+                Some(tokio::spawn(pump_into(e.take(cap + 1), err_sink.clone(), cap, pgid))),
+            ),
+            None => (None, None),
+        };
+        // stdin écrit dans SA tâche : alimenter le moteur ne séquence plus la lecture de sa sortie.
+        let w_task = tokio::spawn(async move {
             if let (Some(mut w), Some(data)) = (stdin.take(), stdin_data) {
                 let _ = w.write_all(&data).await;
                 drop(w); // EOF pour l'enfant
             }
-            let cap = max_bytes as u64;
-            let mut ob = Vec::new();
-            let (o, e) = match (out, err) {
+        });
+        let work = async {
+            let (ot, et) = match (o_task.as_mut(), e_task.as_mut()) {
                 (Some(o), Some(e)) => (o, e),
                 _ => return Err(EngineBoundErr::Io("pipes stdout/stderr indisponibles".into())),
             };
-            // lecture CONCURRENTE des deux flux (sinon un pipe plein bloque l'enfant), chacune plafonnée à
-            // max_bytes+1 : un octet de plus suffit à DÉTECTER le dépassement sans collecter davantage.
-            // Celui qui atteint le plafond TUE le groupe : sans ça, on cesse de lire un pipe que l'enfant
-            // continue de remplir -> il se bloque, l'autre lecture n'atteint jamais EOF, et le dépassement
-            // d'octets dégénère en dépassement de temps (mesuré).
-            let (mut to, mut te) = (o.take(cap + 1), e.take(cap + 1));
-            let e_task = tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let n = te.read_to_end(&mut buf).await;
-                if matches!(&n, Ok(k) if *k as u64 > cap) {
-                    kill_group(pgid);
-                }
-                (buf, n)
-            });
-            let ro = to.read_to_end(&mut ob).await;
-            if matches!(&ro, Ok(k) if *k as u64 > cap) {
-                kill_group(pgid);
-            }
-            let (eb, re) = e_task.await.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
-            let no = ro.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
-            let ne = re.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
-            if no > max_bytes || ne > max_bytes {
+            // (a) LE TRAVAIL DU MOTEUR SE TERMINE QUAND LE PROCESS MOTEUR SORT — pas quand le dernier
+            //     détenteur du pipe le ferme. C'est la MÊME règle que celle déjà écrite au-dessus pour le
+            //     slot (« tenu par la vie du PROCESS »), appliquée aussi à la COLLECTE.
+            let status = child.wait().await.map_err(|e| EngineBoundErr::Io(e.to_string()))?;
+            // (b) le moteur est SORTI : ce qu'il a écrit est déjà dans le pipe. On draine brièvement puis
+            //     on COUPE — attendre la fermeture d'un pipe HÉRITÉ par un descendant facturerait le
+            //     budget moteur entier à une requête réussie (cf. `PIPE_DRAIN_AFTER_EXIT`).
+            let _ = tokio::time::timeout(PIPE_DRAIN_AFTER_EXIT, async {
+                let _ = (&mut *ot).await;
+                let _ = (&mut *et).await;
+            })
+            .await;
+            ot.abort();
+            et.abort();
+            let ob = out_sink.lock().map(|g| g.clone()).unwrap_or_default();
+            let eb = err_sink.lock().map(|g| g.clone()).unwrap_or_default();
+            if ob.len() > max_bytes || eb.len() > max_bytes {
                 return Err(EngineBoundErr::TooLarge(max_bytes));
             }
-            Ok((ob, eb))
+            Ok(EngineOutput { status, stdout: ob, stderr: eb })
         };
         // ABANDON CLIENT : `tx.closed()` se résout quand le récepteur est libéré, c.-à-d. quand le future
         // du handler est abandonné. On ne rend PAS le slot pour autant — on part tuer le groupe.
-        let collected = tokio::select! {
-            r = tokio::time::timeout(budget, pumps) => match r {
+        let outcome = tokio::select! {
+            r = tokio::time::timeout(budget, work) => match r {
                 Ok(inner) => inner,
                 Err(_) => Err(EngineBoundErr::Timeout(budget.as_secs())),
             },
             _ = tx.closed() => Err(EngineBoundErr::Abandoned),
         };
-        let outcome = match collected {
-            Ok((ob, eb)) => match tokio::time::timeout(
-                std::time::Duration::from_secs(CANCEL_GRACE_SECS),
-                child.wait(),
-            )
-            .await
-            {
-                Ok(Ok(status)) => Ok(EngineOutput { status, stdout: ob, stderr: eb }),
-                Ok(Err(e)) => Err(EngineBoundErr::Io(e.to_string())),
-                Err(_) => Err(EngineBoundErr::Timeout(budget.as_secs())),
-            },
-            Err(e) => Err(e),
-        };
+        // Plus personne n'écoute les pipes : les lectures et l'alimentation stdin sont coupées, quel que
+        // soit le chemin de sortie (une tâche de lecture laissée vivante tiendrait le pipe d'un
+        // descendant jusqu'à la fin des temps).
+        w_task.abort();
+        if let Some(t) = o_task.as_ref() {
+            t.abort();
+        }
+        if let Some(t) = e_task.as_ref() {
+            t.abort();
+        }
         // (3) MORT DU SPAWN (groupe + descendants détachés) puis — et seulement ensuite — RESTITUTION
         // DU SLOT. Unique site de `drop`.
         kill_and_reap_spawn(&mut child, pgid, &marker).await;

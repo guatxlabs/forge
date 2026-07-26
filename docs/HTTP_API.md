@@ -103,13 +103,38 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 > `/proc` : le balayage rend une liste vide et la garde retombe sur le kill de groupe seul (cf. `docs/PLATFORMS.md`).
 > (3) Le balayage coûte une passe `/proc` par spawn : mesuré sur cette machine (594 process), `GET /api/techniques`
 > passe d'une médiane de **0,198 s à 0,221 s** (3 rondes entrelacées de 15 mesures, moteur `python3` réel, build debug).
-> (4) **Le contrat a un coût sur le chemin NOMINAL, pas seulement sur l'abandon** : une requête qui RÉUSSIT mais dont
-> le moteur laisse derrière lui un descendant détaché qui IGNORE SIGTERM tient son slot jusqu'au SIGKILL de la fenêtre
-> de grâce. Mesuré (3 mesures par forme, moteur bouchon rendant une sortie valide puis sortant tout de suite) :
-> aucun descendant → **0,041–0,072 s** ; descendant détaché qui MEURT au SIGTERM → **0,129–0,148 s** ; descendant
-> détaché qui IGNORE SIGTERM → **5,164–5,172 s**, et il est bien TUÉ (0 survivant). Ça compte parce que des daemons
-> détachés EXISTENT dans ce produit (`forge/modules/_daemon_reap.py`) : un module d'exploitant qui daemonise sur une
-> route bornée hérite de ~5 s de latence ET de la mort de son daemon. Le levier est `CANCEL_GRACE_SECS`.
+> (4) **Le contrat a un coût sur le chemin NOMINAL, pas seulement sur l'abandon** — et ce coût DÉPEND DE LA FORME DU
+> DESCENDANT. Le lot précédent n'avait mesuré qu'UNE forme (descendant qui REDIRIGE ses fd) et avait généralisé son
+> chiffre à toutes : **c'était faux de deux ordres de grandeur** pour la forme la plus courante, celle d'un
+> `fork`/`Popen` **sans redirection**, qui HÉRITE du pipe stdout du spawn. La collecte s'arrêtait à l'EOF des pipes ;
+> un descendant qui tient le pipe le repousse indéfiniment, si bien qu'une requête **RÉUSSIE** était facturée le
+> **BUDGET MOTEUR ENTIER** et que la sortie valide du moteur était **JETÉE** (corps `techniques_unavailable` alors que
+> le moteur était sorti en 0). Mesuré sur le binaire, `GET /api/techniques`, 3 mesures par forme, moteur bouchon
+> rendant une sortie valide puis sortant tout de suite :
+>
+> | forme du descendant | AVANT | APRÈS |
+> |---|---|---|
+> | aucun descendant | **0,030–0,040 s** | **0,030–0,040 s** |
+> | redirige ses fd, MEURT au SIGTERM | **0,133–0,146 s** | **0,133–0,146 s** |
+> | redirige ses fd, IGNORE SIGTERM | **5,17–5,24 s** (SIGKILL de `CANCEL_GRACE_SECS`) | **inchangé** |
+> | **hérite du pipe stdout**, meurt au SIGTERM, `FORGE_ENGINE_TIMEOUT=5` | **5,127–5,136 s**, sortie JETÉE | **0,380–0,396 s**, sortie RENDUE |
+> | idem, `FORGE_ENGINE_TIMEOUT=9` | **9,130–9,140 s** (donc indexé sur le BUDGET) | **0,380–0,396 s** |
+> | idem, **défaut livré** (`FORGE_ENGINE_TIMEOUT` non posé = 120 s) | **120,061 s** | **0,386 s** |
+> | idem au BOOT (sonde du registre de modules) | **120,66 s** avant le `listen` | **1,31 s** |
+>
+> La cause est traitée, pas le symptôme : **on n'attend plus la fermeture d'un pipe hérité par un descendant pour
+> rendre la réponse**. Le travail se termine quand le PROCESS MOTEUR sort ; ce qu'il a écrit est ensuite drainé
+> pendant une fenêtre courte (`PIPE_DRAIN_AFTER_EXIT` = 250 ms), puis la lecture est **coupée**. Le levier nommé
+> auparavant (`CANCEL_GRACE_SECS`) n'était pas le bon : c'était `FORGE_ENGINE_TIMEOUT`.
+> **Rien n'est tronqué** : contrôle mesuré avec 5 MiB de sortie valide ET un descendant qui hérite du pipe — corps
+> rendu **5 243 025 octets** (`pad` = 5 242 880 exact), JSON valide, **0,79 s** ; le même contrôle AVANT rendait
+> **351 octets** d'erreur en **5,13 s**, les 5 MiB jetés.
+> **Ce que ce choix coûte ailleurs, dit et mesuré** : un moteur qui FERME ses deux pipes puis se BLOQUE n'est plus
+> borné par « EOF + `CANCEL_GRACE_SECS` » mais par le budget — `FORGE_ENGINE_TIMEOUT=9` : **9,128–9,141 s** contre
+> **5,130–5,145 s** avant. L'issue est identique (`504`, groupe tué, aucune sortie partielle) ; seule l'attente
+> change, et elle ne dépasse jamais le budget annoncé. **Ce qui n'est plus capturé** : une sortie écrite par un
+> DESCENDANT APRÈS la mort du moteur (elle l'était, au prix ci-dessus). Ça compte parce que des daemons détachés
+> EXISTENT dans ce produit (`forge/modules/_daemon_reap.py`).
 >
 > Toute borne franchie est **explicite** et NOMME la variable qui la règle : dégradation documentée de la route
 > (`techniques_unavailable` / `builtins_unavailable`), `429` `*_busy` (plafond), `504` `*_timeout` (budget), `502`
