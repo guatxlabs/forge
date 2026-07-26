@@ -1275,10 +1275,19 @@ const GROUP_REAP_POLLS: usize = 50;
 /// parenté fermée par `PR_SET_CHILD_SUBREAPER` sur le leader. Quand cette fonction rend la main, ni le
 /// groupe ni ces descendants ne sont vivants.
 ///
-/// RÉSIDU CONNU ET MESURÉ, à ne pas sur-promettre : un descendant qui REMPLACE son environnement
-/// (`env -i`, re-exec) et dont le leader est DÉJÀ mort n'est rattachable par aucun des deux héritages —
-/// il survit, et le slot est rendu. Hors Linux, `/proc` n'existe pas : la garde retombe sur le kill de
-/// groupe seul. Les deux limites sont écrites dans `docs/HTTP_API.md`.
+/// RÉSIDU CONNU ET MESURÉ, à ne pas sur-promettre : un descendant qui SE PRIVE DU MARQUEUR et dont le
+/// leader est DÉJÀ mort n'est rattachable par aucun des deux héritages — il survit, et le slot est rendu.
+/// Ce n'est PAS cher pour lui : il n'a pas à jeter son environnement (`env -i`), il lui suffit d'en
+/// retirer UNE variable, celle nommée juste en dessous (`env -u FORGE_ENGINE_SPAWN` -> 7 survivants,
+/// identique à `env -i`, mesuré). L'héritage est PASSIF ; un acte délibéré le défait.
+/// LIMITE DE MÊME CLASSE, non couverte : un travail DÉLÉGUÉ À UN NON-DESCENDANT (`systemd-run --user`)
+/// sort du domaine de la propriété (il n'hérite ni du marqueur ni de la parenté) — mesuré : 4 requêtes
+/// abandonnées laissent 5 process vivants et rendent leur slot aussitôt.
+/// COÛT SUR LE CHEMIN NOMINAL : une requête RÉUSSIE dont le moteur laisse un descendant détaché qui
+/// IGNORE SIGTERM tient son slot jusqu'au SIGKILL de `CANCEL_GRACE_SECS` — mesuré 5,164–5,172 s contre
+/// 0,041–0,072 s sans descendant (le descendant est bien tué).
+/// Hors Linux, `/proc` n'existe pas : la garde retombe sur le kill de groupe seul. Toutes ces limites
+/// sont écrites dans `docs/HTTP_API.md`.
 pub(crate) async fn bounded_engine_output(
     gate: &'static EngineGate,
     mut cmd: tokio::process::Command,

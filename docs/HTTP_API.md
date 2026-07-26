@@ -83,13 +83,33 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 > correctif, même mesure : **0 descendant vivant** après 40 abandons, et la borne refuse (rafale de 20 requêtes
 > tenues : 16 × `429`, pic de process = 4 = le plafond).
 >
-> **Limites mesurées, pas contournées** : (1) un descendant qui REMPLACE son environnement (`env -i`, re-exec) ET dont
-> le leader est déjà sorti — c'est le cas du chemin nominal — n'est rattachable par aucune des deux propriétés :
-> mesuré, il survit (3 survivants sur une requête servie par un moteur bouchon qui en lance 1 par spawn) ; sur les
-> chemins abandon/budget, où le leader vit encore, il est bien tué (0 survivant). (2) Hors Linux il n'y a pas de
+> **Limites mesurées, pas contournées** : (1) un descendant qui SE PRIVE DU MARQUEUR ET dont le leader est déjà sorti
+> — c'est le cas du chemin nominal — n'est rattachable par aucune des deux propriétés : mesuré, il survit. Attention à
+> ce que ça coûte VRAIMENT à l'évadé : **il n'a pas à jeter son environnement**, il lui suffit d'en retirer UNE
+> variable, dont le nom est une constante publique de ce dépôt. Mesuré côte à côte (5 requêtes servies, moteur bouchon
+> qui lance 1 descendant détaché par spawn) : `env -i` → **7 survivants**, `env -u FORGE_ENGINE_SPAWN` → **7
+> survivants** (identique) ; contrôle avec le marqueur conservé → **0 survivant**. L'héritage est PASSIF : un acte
+> délibéré le défait, et le prix de cet acte est d'une seule variable. Sur les chemins abandon/budget, où le leader vit
+> encore, la chaîne de parenté rattrape l'évadé et il est bien tué (0 survivant).
+> (1-bis) **LA DÉLÉGATION À UN NON-DESCENDANT sort du domaine de la propriété** — c'est une limite de même classe
+> pratique que la précédente, et elle n'est refermée par rien aujourd'hui. Le contrat porte sur ce qu'un DESCENDANT
+> hérite ; un travail confié au gestionnaire de services de l'utilisateur (`systemd-run --user`) n'est le descendant de
+> personne, n'hérite ni du marqueur ni de la parenté, et le slot est rendu tout de suite. Mesuré (moteur bouchon
+> `systemd-run --user --collect --unit=… sleep N ; exec sleep 300`, `FORGE_ENGINE_MAX_CONCURRENT=4`, 4 requêtes
+> ABANDONNÉES par un client anonyme) : **5 survivants** (les 4 délégations + la sonde du registre au boot), et la
+> requête suivante est **servie** (le plafond n'est jamais atteint). Le coût client est nul, le coût machine ne l'est
+> pas : c'est le levier de dégradation qui reste ouvert sur une machine où `systemd --user` est disponible.
+> (2) Hors Linux il n'y a pas de
 > `/proc` : le balayage rend une liste vide et la garde retombe sur le kill de groupe seul (cf. `docs/PLATFORMS.md`).
 > (3) Le balayage coûte une passe `/proc` par spawn : mesuré sur cette machine (594 process), `GET /api/techniques`
 > passe d'une médiane de **0,198 s à 0,221 s** (3 rondes entrelacées de 15 mesures, moteur `python3` réel, build debug).
+> (4) **Le contrat a un coût sur le chemin NOMINAL, pas seulement sur l'abandon** : une requête qui RÉUSSIT mais dont
+> le moteur laisse derrière lui un descendant détaché qui IGNORE SIGTERM tient son slot jusqu'au SIGKILL de la fenêtre
+> de grâce. Mesuré (3 mesures par forme, moteur bouchon rendant une sortie valide puis sortant tout de suite) :
+> aucun descendant → **0,041–0,072 s** ; descendant détaché qui MEURT au SIGTERM → **0,129–0,148 s** ; descendant
+> détaché qui IGNORE SIGTERM → **5,164–5,172 s**, et il est bien TUÉ (0 survivant). Ça compte parce que des daemons
+> détachés EXISTENT dans ce produit (`forge/modules/_daemon_reap.py`) : un module d'exploitant qui daemonise sur une
+> route bornée hérite de ~5 s de latence ET de la mort de son daemon. Le levier est `CANCEL_GRACE_SECS`.
 >
 > Toute borne franchie est **explicite** et NOMME la variable qui la règle : dégradation documentée de la route
 > (`techniques_unavailable` / `builtins_unavailable`), `429` `*_busy` (plafond), `504` `*_timeout` (budget), `502`
@@ -99,8 +119,11 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 >
 > **Mur-à-mur mesuré** : le temps de réponse d'une requête coupée à sa borne vaut le budget **plus** le temps de mort
 > effective du spawn (SIGTERM, puis SIGKILL après `CANCEL_GRACE_SECS` = 5 s si un membre ignore SIGTERM). Mesuré avec
-> `FORGE_ENGINE_TIMEOUT=5` sur un moteur qui sort au SIGTERM : `GET /api/techniques` répond en **5,04–5,06 s**
-> (3 mesures consécutives sur le binaire de ce lot ; avant l'ajout du balayage des descendants détachés : **5,00–5,03 s**).
+> `FORGE_ENGINE_TIMEOUT=5` sur un moteur qui sort au SIGTERM : `GET /api/techniques` répond en **5,02–5,06 s**
+> (9 mesures consécutives sur le binaire de ce lot ; avant l'ajout du balayage des descendants détachés : **5,00–5,03 s**).
+> C'est CE chiffre que doivent porter les trois fichiers qui l'énoncent (ici, `docs/CONFIGURATION.md`, `.env.example`) :
+> une valeur rétractée avait survécu dans `.env.example` parce que la recherche de nettoyage portait sur la
+> FORMULATION et pas sur le CHIFFRE.
 
 ---
 
