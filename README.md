@@ -67,7 +67,7 @@ forge demo                                  # ou: python3 -m forge.cli demo
 
 # suite complète (stdlib, zéro réseau) : Python unittest + cargo test de la console
 make test                                   # = python3 -m unittest discover -s tests -t . + (cd console && cargo test)
-python3 -m unittest discover -s tests -t .  # Python seul (1504 tests — compte MESURÉ : `Ran 1504 tests` / `OK (skipped=1)`)
+python3 -m unittest discover -s tests -t .  # Python seul (1509 tests — compte MESURÉ : `Ran 1509 tests` / `OK (skipped=1)`)
 
 # vérifier l'appartenance d'une cible
 forge scope-check app.exemple.test --scope scope.json
@@ -205,7 +205,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
   préréglage — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec se câblent sans
   code) : voir [`docs/DETECTION.md`](docs/DETECTION.md) et [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État (v0.0.1 — 1504 tests Python + 410 tests Rust passent, zéro réseau) — **P1 + P2 complets**
+## État (v0.0.1 — 1509 tests Python + 410 tests Rust passent, zéro réseau) — **P1 + P2 complets**
 
 | Couche | État |
 |---|---|

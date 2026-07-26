@@ -30,8 +30,8 @@ seul est à annuler, pas à « corriger ensuite ».
    - Rust : `cargo test -p forge-console` (ou `cargo test` à la racine du workspace console)
      → **410 tests Rust** (compte MESURÉ : `test result: ok. 410 passed`) doivent rester verts,
      **même nombre, mêmes noms**.
-   - Python : `python3 -m unittest discover -s tests -t .` → **1504 tests Python** (compte MESURÉ :
-     `Ran 1504 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
+   - Python : `python3 -m unittest discover -s tests -t .` → **1509 tests Python** (compte MESURÉ :
+     `Ran 1509 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
    - `cargo build --release` (build communautaire, features par défaut) doit produire un binaire
      **byte-identique** au HEAD précédent : une PURE MOVE ne change ni le code généré ni les
      `include_str!`/assets. (Vérif : `cargo build --release` puis `sha256sum` du binaire
@@ -259,7 +259,7 @@ class FlagAllowlistMixin:
 
 | # | Module migré | Pourquoi cet ordre | Risque | Vérif verte |
 |---|--------------|--------------------|:------:|-------------|
-| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1504 existants inchangés |
+| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1509 existants inchangés |
 | 1 | **`web.py::NucleiScan`** (1 classe, `_refuse` local le plus simple) | Cas le plus isolé → valide le mixin sur un vrai module | Faible | `pytest -k nuclei` + suite complète ; finding de refus byte-identique |
 | 2 | **`recon.py::HttpxFingerprint` puis `NmapServices`** (2 classes, `_refuse` dupliqué ×2) | Élimine la duplication la plus flagrante ; deux classes ⇒ deux commits | Faible | tests `recon`/`module_routes_do_not_conflict` |
 | 3 | **`origin.py::SubfinderEnum`** (gate en 2 points : preview + fire) | Vérifie que le mixin couvre le double appel `check_extra_args` | Faible | tests `origin`/exposure |

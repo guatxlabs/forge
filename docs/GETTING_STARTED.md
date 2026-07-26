@@ -30,12 +30,12 @@ cd console && cargo build --release && cd ..
 
 # 3) suite de tests complète (stdlib côté Python + cargo côté console, zéro réseau)
 make test                  # = python3 -m unittest discover -s tests -t .  +  (cd console && cargo test)
-python3 -m unittest discover -s tests -t .   # Python seul (1504 tests)
+python3 -m unittest discover -s tests -t .   # Python seul (1509 tests)
 ```
 
 > **Ce que tu dois voir** : `pip install -e .` termine sans erreur et `forge --version` répond
 > (version dérivée du fichier [`../VERSION`](../VERSION)). `cargo build --release` produit
-> `console/target/release/forge`. `make test` finit sur **`OK`** (1504 tests Python verts + 410 tests Rust,
+> `console/target/release/forge`. `make test` finit sur **`OK`** (1509 tests Python verts + 410 tests Rust,
 > cargo test de la console). L'empreinte et la matrice de déploiement (Docker / k8s / host / venv)
 > sont détaillées dans [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
