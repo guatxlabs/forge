@@ -51,8 +51,11 @@ Everything must be **green** and **offline** — tests must not touch the networ
 > (`tests/test_console_spa_governance.py`) proves *by execution* that the console's single network door
 > attaches the operator proof: it imports the real API module under `node` with every network primitive
 > instrumented. Text-based checks were tried and measurably fooled (an emptied helper, a look-alike name,
-> even a dead string kept the suite green while every write left without proof). Without `node` those
-> three tests **skip with an explicit message** — the rest of the guard is pure stdlib and still runs.
+> even a dead string kept the suite green while every write left without proof). It also drives the door over a
+> VARIATION plan — every route the server declares, plus generated URL shapes, crossed with the closed set of
+> HTTP methods and a few invented extension methods — so that a proof decision which depends on the URL shows up
+> as an inconsistency rather than having to be guessed. Without `node` those **six tests skip with an explicit
+> message** — the rest of the guard is pure stdlib and still runs.
 > CI sets `FORGE_REQUIRE_JS_RUNTIME=1`, which turns the absence into a **failure**, so the guard can never
 > be silently off there. `FORGE_JS_RUNTIME=<path>` points at a runtime that is not on `PATH`.
 

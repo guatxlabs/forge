@@ -45,6 +45,39 @@ dès qu'on en ajoute une. La propriété a donc été INVERSÉE, et elle ne lit 
       plus écrit ici : il est LU DANS LE SERVEUR (`console/src/auth.rs`), donc renommer d'un seul côté
       fait ÉCHOUER la garde.
 
+  (4) LA PROPRIÉTÉ EST UNE INVARIANCE, ET UNE INVARIANCE SE PROUVE PAR VARIATION — PAS PAR ÉCHANTILLON.
+      La version précédente exerçait la porte sur UNE URL (`/api/__probe__`) et QUATRE formes d'appel,
+      écrites en dur dans la sonde. Mesuré : une condition d'UNE LIGNE sur l'URL dans la porte
+      (`… && String(url).indexOf('/plan') < 0`) laissait la suite 18/18 VERTE pendant que 24 écritures
+      sur 120 partaient NUES — c'est-à-dire l'inversion exacte que ce fichier existe pour interdire.
+      Variante plus large (`/api/(plan|run|panels)`) : 72 nues sur 120, toujours vert. Sur l'axe MÉTHODE,
+      même trou : une porte qui ne prouve que POST/DELETE restait verte, PUT/PATCH/OPTIONS/… nus (90 sur
+      120). L'énumération n'avait pas disparu, elle avait changé d'axe (les ROUTES, puis les FORMES
+      D'ÉCRITURE DE LA PREUVE, puis l'ÉCHANTILLON D'APPEL). AJOUTER DES URL À L'ÉCHANTILLON aurait été le
+      tour suivant de la même faute. Ce qui est vérifié ici n'est donc pas « la preuve est attachée POUR
+      CES URL » mais :
+
+          LA DÉCISION D'ATTACHER LA PREUVE NE DÉPEND PAS DE L'URL,
+          et sur la MÉTHODE elle suit exactement la partition {GET, HEAD} / tout le reste.
+
+      Comment : on FAIT VARIER l'URL — les routes RÉELLEMENT DÉCLARÉES par le serveur (`.route("…")` dans
+      `console/src/*.rs` : le routeur est l'autorité sur ce qui existe) PLUS des URL engendrées (query,
+      fragment, double slash, casse, traversée, absolue, vide) — et on exige que, pour un export et une
+      méthode donnés, la décision soit IDENTIQUE PARTOUT. Une dépendance à l'URL, quelle qu'elle soit, se
+      révèle alors comme une INCOHÉRENCE, sans qu'on ait eu à deviner LAQUELLE. Et on fait varier la
+      MÉTHODE sur l'ensemble FERMÉ des méthodes HTTP standard (GET HEAD POST PUT PATCH DELETE OPTIONS
+      TRACE CONNECT) PLUS des méthodes d'EXTENSION inventées : la règle « mute = tout sauf GET/HEAD » est
+      alors vérifiée sur une PARTITION, pas sur un échantillon. Il n'y a plus « d'élément suivant » sur
+      cet axe : la sonde ne choisit plus ni URL ni méthode, elle reçoit le plan de variation.
+      CE QUE ÇA NE PROUVE PAS, dit plutôt que tu : la MÉTHODE est vérifiée sur une partition FERMÉE
+      (l'ensemble est fini, et une méthode inventée y est incluse) — c'est une preuve complète sur cet
+      axe. L'URL, elle, ne peut pas être quantifiée universellement par un test : ce qui est établi,
+      c'est que la décision est la même sur TOUTES les routes que le serveur déclare et sur les formes
+      qu'une URL peut prendre (vide, `/`, query, fragment, double slash, casse, traversée, slash final,
+      pourcent-encodage, non-ASCII, 2000 caractères, absolue). Une porte qui déciderait sur une propriété
+      d'URL qu'AUCUNE de ces formes n'exhibe resterait invisible ; toute exemption de route, de préfixe,
+      de forme ou de longueur parmi celles-là est vue.
+
 CE QUI RESTE ÉNUMÉRÉ, ET POURQUOI C'EST ACCEPTABLE (dit, pas caché) :
   - la liste des primitives réseau du NAVIGATEUR (`fetch`/`XMLHttpRequest`/`sendBeacon`/`importScripts`/
     `WebSocket`) est une énumération — mais elle est bornée par la plateforme, pas par notre code : elle
@@ -78,7 +111,7 @@ CE QUI RESTE ÉNUMÉRÉ, ET POURQUOI C'EST ACCEPTABLE (dit, pas caché) :
     L'épingle ne regardait QUE `fetch` : mesuré, un fichier hors graphe faisant du XHR n'était NI dans
     le graphe NI épinglé. Elle regarde désormais TOUTE primitive mutante (formulaires compris).
 
-DEUX TROUS DE PÉRIMÈTRE, MESURÉS ET FERMÉS ICI (ils étaient dans la version précédente) :
+TROIS TROUS DE PÉRIMÈTRE, MESURÉS ET FERMÉS ICI :
   - `<script src="/track.js?v=2">` — le cache-busting par query-string est idiomatique. `_resolve` ne
     résolvait pas `track.js?v=2` vers un fichier : le fichier n'était donc PAS un point d'entrée, sortait
     du graphe, et (voir ci-dessus) n'était pas épinglé s'il utilisait autre chose que `fetch`. La query
@@ -87,10 +120,26 @@ DEUX TROUS DE PÉRIMÈTRE, MESURÉS ET FERMÉS ICI (ils étaient dans la version
     `<script src>`). Les blocs inline font maintenant partie des sources scannées.
     HONNÊTETÉ SUR CE POINT : la CSP `script-src 'self'` (sans `unsafe-inline`) BLOQUE déjà ce script au
     runtime — le trou de garde existait, l'exploitation n'existait pas. C'était la CSP qui tenait, pas
-    la garde ; maintenant les deux tiennent, indépendamment.
+    la garde ; maintenant les deux tiennent, indépendamment ;
+  - LE FILTRE D'EXTENSION, qui était la fuite d'À CÔTÉ de la précédente. `_entry_points()` exigeait
+    `p.suffix == ".js"` et le balayage hors-graphe faisait `rglob("*.js")` : un point d'entrée `.mjs`
+    ou `.JS` était invisible DEUX FOIS (ni graphe, ni épingle) — mesuré, suite 18/18 VERTE avec
+    `<script type="module" src="/track.mjs">` faisant du XHR vers `/api/` + `plan`. ET LE FICHIER EST
+    RÉELLEMENT SERVI ET EXÉCUTABLE : relevé sur le binaire, `/track.mjs` -> HTTP 200
+    `application/javascript`, `/track.JS` -> HTTP 200 `text/javascript`, autorisés par `script-src 'self'`.
+    Une LISTE D'EXTENSIONS serait le même piège un cran plus bas (mesuré sur le serveur réel : `.cjs`,
+    `.es6` et `.zzz` sont servis `application/octet-stream`, donc PAS du JavaScript ici — le type MIME
+    du serveur, pas nos suppositions, décide ce qui est exécutable, et il est refusé par `nosniff`).
+    LE FILTRE A DONC ÉTÉ SUPPRIMÉ, DES DEUX CÔTÉS : est point d'entrée TOUT `<script src=…>` qui résout
+    dans `console/web` (le navigateur exécute ce que la page charge, pas ce que son nom suggère), et
+    l'épingle balaye TOUT FICHIER SERVI, quelle que soit son extension. C'est un SUR-ENSEMBLE strict de
+    « ce que le serveur sert comme du JavaScript » : aucune extension, connue ou non, ne peut en sortir.
+    Coût mesuré sur l'arbre réel : ZÉRO faux positif (les 4 woff2, les 2 svg, le css, le webmanifest et
+    la page elle-même ne touchent à aucune primitive réseau). Un binaire qui contiendrait par hasard un
+    de ces identifiants demanderait une épingle explicite : c'est conservateur PAR CONSTRUCTION.
 
 LIMITE DE LA SONDE COMPORTEMENTALE, DITE PLUTÔT QUE TUE : elle a besoin d'un runtime JavaScript (`node`).
-S'il est absent, ces tests-là sont SAUTÉS avec un message explicite — le reste de la garde (périmètre,
+S'il est absent, ces SIX tests-là sont SAUTÉS avec un message explicite (mesuré : `OK (skipped=6)`) — le reste de la garde (périmètre,
 cardinalité, primitives, CSP) est pur-stdlib et continue de tourner. Poser `FORGE_REQUIRE_JS_RUNTIME=1`
 transforme l'absence en ÉCHEC : c'est ce que fait la CI, pour qu'un saut silencieux ne devienne jamais
 une garde éteinte.
@@ -120,7 +169,16 @@ PROBE_SENTINEL = "S3CRET-PROBE-9f2c"
 #: `WebSocket` y est PAR PRÉVENTION : aucune route WS n'existe côté serveur aujourd'hui (donc aucune
 #: conséquence), mais une trame WS ne porte pas d'en-tête par message — si une route WS apparaît un jour,
 #: la question de gouvernance doit être ROUVERTE explicitement, pas héritée en silence.
-_MUTATING_PRIMITIVES = ("fetch", "XMLHttpRequest", "sendBeacon", "importScripts", "WebSocket")
+#: `Worker`/`SharedWorker` : un worker est un SITE D'EXÉCUTION supplémentaire, et son code peut vivre
+#: dans une CHAÎNE (`new Worker(URL.createObjectURL(new Blob([code])))`) — que `_code_only` neutralise
+#: avant tout balayage d'identifiants. Mesuré : cette forme passait la garde ENTIÈRE (18/18 vert) alors
+#: que la variante par FICHIER était bien attrapée. Fermée des DEUX côtés, comme le formulaire : ici par
+#: l'identifiant (aucun worker n'est légitime dans le SPA), et au RUNTIME par la CSP `worker-src 'self'`
+#: — qui REFUSE `blob:` tout en laissant vivre le SERVICE WORKER same-origin (`/sw.js`), lequel serait
+#: cassé par `'none'`.
+_MUTATING_PRIMITIVES = (
+    "fetch", "XMLHttpRequest", "sendBeacon", "importScripts", "WebSocket", "Worker", "SharedWorker",
+)
 #: SOUMISSION DE FORMULAIRE — la primitive mutante que la liste ci-dessus ne nomme pas (aucun identifiant
 #: global : c'est une méthode d'élément). Fermée au runtime par `form-action 'none'` (CSP, épinglée plus
 #: bas) et détectée ici. `onsubmit`/`addEventListener('submit')` ne matchent pas : ce sont des HANDLERS
@@ -132,6 +190,20 @@ _FORM_SUBMISSION = (
 )
 #: directive CSP qui REFUSE la soumission de formulaire, exigée dans les DEUX portées de la politique.
 _CSP_FORM_ACTION = "form-action 'none'"
+#: directive CSP qui gouverne les WORKERS. On n'épingle PAS une valeur littérale (`'none'` casserait le
+#: service worker `/sw.js` que le SPA enregistre) : on exige la PROPRIÉTÉ — la directive existe et
+#: n'autorise aucune source d'où un worker pourrait naître SANS fichier servi (`blob:`, `data:`, `*`).
+#: Sans directive `worker-src`, la politique retombe sur `child-src 'self' blob:` (nécessaire à l'iframe
+#: d'aperçu de rapport) et un worker `blob:` est AUTORISÉ — c'est le trou mesuré.
+_CSP_WORKER_SRC = re.compile(r"worker-src\s+([^;\"]*)")
+_CSP_WORKER_FORBIDDEN = ("blob:", "data:", "*", "'unsafe-inline'", "'unsafe-eval'")
+#: la POLITIQUE elle-même, extraite de chacune des deux portées. On ne cherche PLUS une sous-chaîne dans
+#: le fichier entier : un commentaire qui CITE `form-action 'none'` suffisait alors à faire passer le
+#: test avec une politique relâchée. Ce qui est lu ici est la valeur SERVIE.
+_CSP_CARRIERS = (
+    ("index.html", INDEX_HTML, re.compile(r'http-equiv="Content-Security-Policy"\s+content="([^"]*)"', re.I)),
+    ("auth.rs", AUTH_RS, re.compile(r'CSP_POLICY\s*:\s*&str\s*=\s*"([^"]*)"')),
+)
 #: conteneurs globaux dont un accès CALCULÉ permettrait d'atteindre une primitive sans l'écrire.
 _GLOBAL_CONTAINERS = ("window", "globalThis", "self")
 
@@ -261,13 +333,24 @@ def _resolve(spec, base):
     return p
 
 
+def _read_source(p):
+    """Lit un fichier SERVI comme le ferait le navigateur : octets décodés en UTF-8, les séquences
+    invalides remplacées (jamais une exception). Un fichier n'est pas exclu du périmètre parce qu'il
+    n'est pas du texte propre — c'est précisément ce genre de filtre qui a produit les trous mesurés."""
+    return p.read_bytes().decode("utf-8", errors="replace")
+
+
 def _entry_points():
-    """Points d'entrée DÉCLARÉS par la page servie (`<script src=…>`), quel que soit leur `type`."""
-    html = INDEX_HTML.read_text(encoding="utf-8")
+    """Points d'entrée DÉCLARÉS par la page servie (`<script src=…>`), quel que soit leur `type` ET
+    QUELLE QUE SOIT LEUR EXTENSION. Le filtre `p.suffix == ".js"` d'avant rendait `/track.mjs` et
+    `/track.JS` invisibles alors que le serveur les sert bel et bien en `application/javascript` /
+    `text/javascript` (mesuré). Ce que la page CHARGE comme script est un point d'entrée : le navigateur
+    exécute ce qu'on lui donne, pas ce que le nom de fichier suggère."""
+    html = _read_source(INDEX_HTML)
     entries = []
     for src in _SCRIPT_SRC.findall(html):
         p = _resolve(src, INDEX_HTML)
-        if p is not None and p.suffix == ".js":
+        if p is not None:
             entries.append(p)
     return entries
 
@@ -280,7 +363,7 @@ def _module_graph():
         p = stack.pop()
         if p in seen:
             continue
-        src = p.read_text(encoding="utf-8")
+        src = _read_source(p)
         seen[p] = src
         code = _blank_comments(src)
         for spec in set(_IMPORT_FROM.findall(code)) | set(_IMPORT_BARE.findall(code)):
@@ -293,12 +376,16 @@ def _module_graph():
 def _inline_scripts():
     """Code des blocs `<script>` SANS `src` de la page servie. Ils sont exécutables (la CSP
     `script-src 'self'` les bloque aujourd'hui, mais la garde ne doit pas dépendre de la CSP)."""
-    html = INDEX_HTML.read_text(encoding="utf-8")
+    html = _read_source(INDEX_HTML)
     return [(f"index.html#inline{i + 1}", m.group(1)) for i, m in enumerate(_SCRIPT_INLINE.finditer(html))]
 
 
-def _served_js():
-    return sorted(WEB_DIR.rglob("*.js"))
+def _served_files():
+    """TOUT ce que le serveur SERT depuis `console/web` — sans filtre d'extension. `rglob("*.js")`
+    laissait sortir `.mjs`/`.JS` (servis en JavaScript par le serveur, mesuré) ; une liste d'extensions
+    aurait été le même piège un cran plus bas. Balayer tout est un SUR-ENSEMBLE de « ce que le serveur
+    sert comme du JavaScript » : par construction, aucune extension ne peut en sortir."""
+    return sorted(p for p in WEB_DIR.rglob("*") if p.is_file())
 
 
 def _rel(p):
@@ -480,15 +567,38 @@ class TestOnlyOneDoorToTheNetwork(unittest.TestCase):
         """La détection ci-dessus lit le code ; la CSP, elle, tient au RUNTIME (y compris pour du code
         qu'on n'aurait pas lu). Les deux portées de la politique doivent la porter : la `meta` de la page
         servie et la constante du serveur — une seule des deux laisserait la moitié des réponses ouverte."""
-        for path, needle in ((INDEX_HTML, "Content-Security-Policy"), (AUTH_RS, "CSP_POLICY")):
-            self.assertTrue(path.is_file(), f"{path} introuvable : la garde ne peut pas vérifier la CSP")
-            src = path.read_text(encoding="utf-8")
-            self.assertIn(needle, src, f"{path.name} ne porte plus de politique CSP")
+        for name, policy in _csp_policies():
             self.assertIn(
-                _CSP_FORM_ACTION, src,
-                f"{path.name} : la CSP doit refuser la soumission de formulaire ({_CSP_FORM_ACTION}) — "
-                "c'est la seule primitive d'écriture que la garde ne peut pas nommer par un identifiant",
+                _CSP_FORM_ACTION, policy,
+                f"{name} : la CSP SERVIE doit refuser la soumission de formulaire ({_CSP_FORM_ACTION}) — "
+                f"c'est la seule primitive d'écriture que la garde ne peut pas nommer par un identifiant. "
+                f"Politique lue : {policy}",
             )
+
+    def test_the_csp_refuses_a_worker_born_from_a_blob_in_both_places_that_carry_it(self):
+        """L'AUTRE primitive dont le CODE échappe à toute lecture : `new Worker(URL.createObjectURL(
+        new Blob([code])))`. Le code du worker vit dans une CHAÎNE, que `_code_only` neutralise avant
+        tout balayage — mesuré, cette forme passait la garde ENTIÈRE (18/18 vert). La jambe statique la
+        refuse par identifiant (`_MUTATING_PRIMITIVES`) ; ICI on exige la jambe RUNTIME, dans les DEUX
+        portées : une directive `worker-src` qui n'autorise AUCUNE source d'où un worker pourrait naître
+        sans fichier servi. On n'épingle pas une valeur littérale : `'none'` CASSERAIT le service worker
+        same-origin que le SPA enregistre (`/sw.js`), `'self'` le garde et refuse `blob:`."""
+        for name, policy in _csp_policies():
+            m = _CSP_WORKER_SRC.search(policy)
+            self.assertIsNotNone(
+                m,
+                f"{name} : aucune directive `worker-src` dans la politique SERVIE ({policy}) — elle "
+                "retombe alors sur `child-src 'self' blob:` (nécessaire à l'aperçu de rapport) et un "
+                "worker `blob:` est AUTORISÉ, avec `connect-src 'self'` pour écrire ensuite",
+            )
+            value = m.group(1).strip()
+            self.assertTrue(value, f"{name} : `worker-src` sans valeur")
+            for bad in _CSP_WORKER_FORBIDDEN:
+                self.assertNotIn(
+                    bad, value,
+                    f"{name} : `worker-src {value}` autorise `{bad}` — un worker peut alors naître "
+                    "d'une chaîne, hors de toute lecture de code",
+                )
 
     def test_no_computed_access_to_a_global_container(self):
         """`globalThis['fet'+'ch']` contournerait une lecture d'identifiants. On interdit donc l'accès
@@ -504,13 +614,18 @@ class TestOnlyOneDoorToTheNetwork(unittest.TestCase):
     def test_served_files_outside_the_spa_graph_are_pinned_when_they_touch_the_network(self):
         """Le périmètre est DÉRIVÉ de ce qui est servi. Un fichier servi hors du graphe (le service
         worker) ne peut pas importer le module d'API : il est épinglé par empreinte, donc toute
-        modification — ou tout nouveau fichier de ce genre — se signale au lieu de passer."""
+        modification — ou tout nouveau fichier de ce genre — se signale au lieu de passer.
+        SANS FILTRE D'EXTENSION (cf. docstring) : `rglob("*.js")` laissait `.mjs`/`.JS` hors de l'épingle
+        alors que le serveur les sert en JavaScript. On balaye TOUT ce qui est servi ; mesuré sur l'arbre
+        réel, ça ne produit AUCUN faux positif (fonts woff2, svg, css, webmanifest, page : zéro touche).
+        La PAGE elle-même est exclue : elle est la RACINE du périmètre dérivé (ses `<script src>` sont
+        les points d'entrée, ses blocs inline sont déjà des sources scannées), pas un fichier inconnu."""
         graph_names = {_rel(p) for p in _module_graph()}
-        for p in _served_js():
+        for p in _served_files():
             rel = _rel(p)
-            if rel in graph_names:
+            if rel in graph_names or p == INDEX_HTML:
                 continue
-            src = p.read_text(encoding="utf-8")
+            src = _read_source(p)
             # TOUTE primitive mutante, pas seulement `fetch` : mesuré, un fichier servi hors graphe qui
             # faisait du XHR n'était NI dans le graphe NI épinglé — il n'était vu par personne.
             if not _network_touches(src):
@@ -525,6 +640,82 @@ class TestOnlyOneDoorToTheNetwork(unittest.TestCase):
                 digest, _PINNED_OUT_OF_GRAPH[rel],
                 f"{rel} a changé (empreinte mesurée {digest}) : relis-le et ré-épingle-le sciemment",
             )
+
+
+# --------------------------------------------------------------------------------------
+# PLAN DE VARIATION — la sonde ne choisit NI l'URL NI la méthode ; elle les reçoit (cf. docstring (4))
+# --------------------------------------------------------------------------------------
+#: `.route("/…")` — déclaration de route axum. Le ROUTEUR est l'autorité sur ce qui existe ; on lit
+#: aussi les modules qu'il `merge` (ledger_api, presence, reports, tenancy, sso, scim, …), qui vivent
+#: dans les mêmes sources. Les fichiers de TEST sont exclus : leurs routes n'existent pas en prod.
+_ROUTE_DECL = re.compile(r'\.route\(\s*"(/[^"]*)"')
+#: un segment de paramètre axum (`{id}`, `{login}`, …) — concrétisé pour piloter une URL réelle.
+_ROUTE_PARAM = re.compile(r"\{[^}]*\}")
+
+#: ensemble FERMÉ des méthodes HTTP standard (RFC 9110 §9.3 + RFC 5789 pour PATCH). La règle « mute =
+#: tout sauf GET/HEAD » se vérifie sur CETTE partition, pas sur un échantillon.
+_STANDARD_HTTP_METHODS = (
+    "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT",
+)
+#: méthodes d'EXTENSION — inventées ici exprès. Une porte qui « connaît » les méthodes mutantes par une
+#: liste tombe dessus ; une porte qui applique la règle (`tout sauf GET/HEAD`) les traite correctement
+#: SANS QU'ON Y PENSE, ce qui est exactement ce que la garde promet.
+_EXTENSION_HTTP_METHODS = ("PROPFIND", "PURGE", "QUERY", "FORGE-INVENTED", "M-SEARCH")
+#: `None` = appel SANS objet d'options : exerce la méthode PAR DÉFAUT de chaque export (`write()` poste).
+_PROBE_METHODS = [None] + list(_STANDARD_HTTP_METHODS) + list(_EXTENSION_HTTP_METHODS)
+
+#: URL ENGENDRÉES : des formes qu'une URL peut prendre sans être une route (query, fragment, double
+#: slash, casse, traversée, absolue, vide, très longue). Elles ne servent pas à « couvrir des cas » —
+#: elles servent à ce qu'une DÉPENDANCE À L'URL, quelle qu'elle soit, produise une INCOHÉRENCE.
+_GENERATED_URLS = (
+    "",
+    "/",
+    "/api",
+    "/api/plan?engagement=1",
+    "/api/plan#fragment",
+    "//api/plan",
+    "/API/PLAN",
+    "/api/x/../plan",
+    "/api/plan/",
+    "/api/%70lan",
+    "/api/plän",
+    "/api/" + "z" * 120,
+    "/api/" + "z" * 2000,
+    "/pas/une/route",
+    "https://example.invalid/api/plan",
+    "?campaign=x",
+)
+
+
+def _csp_policies():
+    """La politique CSP RÉELLEMENT SERVIE, dans chacune des DEUX portées qui la portent (la `meta` de la
+    page et la constante du serveur). Extraire la VALEUR — et non chercher une sous-chaîne dans le
+    fichier — est ce qui empêche un commentaire qui cite une directive de tenir lieu de directive."""
+    out = []
+    for name, path, pat in _CSP_CARRIERS:
+        assert path.is_file(), f"{path} introuvable : la garde ne peut pas vérifier la CSP"
+        m = pat.search(path.read_text(encoding="utf-8"))
+        assert m is not None, f"{name} ne porte plus de politique CSP lisible (motif {pat.pattern})"
+        out.append((name, m.group(1)))
+    return out
+
+
+def _server_routes():
+    """Routes RÉELLEMENT DÉCLARÉES par le serveur, lues dans `console/src/*.rs` (le routeur et les
+    modules qu'il fusionne). Rien n'est écrit ici : une route ajoutée demain entre dans la variation
+    sans que ce fichier bouge, et EXEMPTER une route réelle dans la porte devient une incohérence."""
+    out = set()
+    for p in sorted((REPO / "console" / "src").glob("*.rs")):
+        if p.name.startswith("tests_") or p.name == "testutil.rs":
+            continue
+        for route in _ROUTE_DECL.findall(p.read_text(encoding="utf-8")):
+            out.add(_ROUTE_PARAM.sub("1", route))
+    return sorted(out)
+
+
+def _probe_urls():
+    """Le plan de variation d'URL : routes réelles + URL engendrées, dédoublonné et ordonné."""
+    return sorted(set(_server_routes()) | set(_GENERATED_URLS))
 
 
 def _server_proof_header():
@@ -583,9 +774,11 @@ class TestTheDoorAttachesTheProofWhenItRuns(unittest.TestCase):
         if not (WEB_DIR / door).is_file():
             cls.probe = {"fatal": f"la porte réseau n'est pas un fichier importable ({door})"}
             return
+        # PLAN DE VARIATION passé à la sonde (elle n'en choisit aucun élément) : cf. docstring (4).
+        plan = json.dumps({"urls": _probe_urls(), "methods": _PROBE_METHODS})
         out = subprocess.run(
             [runtime, str(JS_PROBE), str(WEB_DIR), door, PROBE_SENTINEL],
-            capture_output=True, text=True, timeout=180,
+            input=plan, capture_output=True, text=True, timeout=300,
         )
         if out.returncode != 0:
             cls.probe = {"fatal": f"sonde en échec (rc={out.returncode}) : {out.stderr.strip()[:2000]}"}
@@ -656,10 +849,88 @@ class TestTheDoorAttachesTheProofWhenItRuns(unittest.TestCase):
 
     def test_at_runtime_the_door_only_ever_uses_one_primitive(self):
         """La cardinalité statique dit qu'un seul module NOMME `fetch` ; ceci dit qu'à l'exécution, rien
-        d'autre ne part (ni XHR, ni beacon, ni WebSocket, ni soumission de formulaire)."""
+        d'autre ne part (ni XHR, ni beacon, ni WebSocket, ni worker, ni soumission de formulaire)."""
         calls = self._calls()
         prims = sorted({c["primitive"] for c in calls})
         self.assertEqual(prims, ["fetch"], f"la porte a émis via une autre primitive que fetch : {prims}")
+
+    # -----------------------------------------------------------------------------------------
+    # L'INVARIANCE, PROUVÉE PAR VARIATION (cf. docstring (4)) — pas par échantillon
+    # -----------------------------------------------------------------------------------------
+    def test_the_decision_to_attach_the_proof_does_not_depend_on_the_url(self):
+        """LA propriété. Pour un export et une méthode DEMANDÉE donnés, ce que la porte décide doit être
+        le MÊME sur TOUTES les URL — routes réelles du serveur comprises. On ne cherche pas une URL
+        privilégiée : toute dépendance à l'URL se manifeste comme une INCOHÉRENCE entre deux URL, et le
+        message la NOMME. C'est ce qui rend inutile de deviner laquelle un contributeur exemptera."""
+        calls = self._calls()
+        by_key = {}
+        for c in calls:
+            key = (c["export"], c["requested"], c["method"])
+            by_key.setdefault(key, {}).setdefault(self._proof_of(c), []).append(c["url"])
+        # NON-VACUITÉ : la variation doit être RÉELLE (sinon « identique partout » est vrai par vide).
+        seen_urls = {c["url"] for c in calls}
+        self.assertGreaterEqual(
+            len(seen_urls), 40,
+            f"la sonde n'a varié que sur {len(seen_urls)} URL : le plan de variation est cassé",
+        )
+        for (export, requested, method), groups in sorted(by_key.items(), key=lambda kv: str(kv[0])):
+            if len(groups) > 1:
+                witness = {str(proof): urls[0] for proof, urls in groups.items()}
+                self.fail(
+                    f"{export}() ne décide PAS la même chose selon l'URL (méthode demandée {requested!r}, "
+                    f"émise {method}) : {witness} — la preuve opérateur doit dépendre de la MÉTHODE seule. "
+                    "Une porte qui exempte une URL rend le dry-plan plus restreint que le tir."
+                )
+
+    def test_the_probe_varies_over_the_routes_the_server_really_declares(self):
+        """Le plan de variation n'est pas inventé : il contient les routes que le SERVEUR déclare. Sans
+        ça, « la décision ne dépend pas de l'URL » ne dirait rien des URL qui existent vraiment — et
+        exempter UNE route réelle passerait."""
+        routes = _server_routes()
+        self.assertGreaterEqual(len(routes), 40, f"routeur illisible : {len(routes)} route(s) trouvée(s)")
+        for must in ("/api/plan", "/api/run", "/api/import", "/api/techniques"):
+            self.assertIn(must, routes, f"{must} absent des routes lues dans console/src/*.rs")
+        emitted = {c["url"] for c in self._calls()}
+        missing = [r for r in routes if not any(r in u for u in emitted)]
+        self.assertEqual(
+            missing, [],
+            f"des routes RÉELLES ne sont pas pilotées par la sonde : {missing[:8]} — la variation ne "
+            "couvre pas ce que le serveur expose",
+        )
+
+    def test_the_proof_follows_the_method_partition_and_nothing_else(self):
+        """Sur la partition FERMÉE des méthodes (standard + extensions inventées), l'ensemble des
+        méthodes qui portent la preuve et celui des méthodes qui ne la portent pas doivent être
+        DISJOINTS et former exactement {tout le reste} / {GET, HEAD}. Une méthode qui se retrouve dans
+        les deux ensembles = la décision dépend d'autre chose que la méthode."""
+        calls = self._calls()
+        with_proof = {c["method"] for c in calls if self._proof_of(c) is not None}
+        without = {c["method"] for c in calls if self._proof_of(c) is None}
+        both = sorted(with_proof & without)
+        self.assertEqual(
+            both, [],
+            f"ces méthodes portent PARFOIS la preuve et parfois non : {both} — la décision dépend d'autre "
+            "chose que la méthode (URL ? forme d'appel ?)",
+        )
+        self.assertEqual(
+            sorted(without), ["GET", "HEAD"],
+            f"les lectures sont exactement GET/HEAD ; observé sans preuve : {sorted(without)}",
+        )
+        # COUVERTURE de la partition : chaque méthode du plan doit avoir été RÉELLEMENT émise, sinon la
+        # partition est vérifiée sur un échantillon (c'est le défaut qu'on ferme ici).
+        emitted = {c["method"] for c in calls}
+        never = [m for m in _STANDARD_HTTP_METHODS + _EXTENSION_HTTP_METHODS if m not in emitted]
+        self.assertEqual(
+            never, [],
+            f"ces méthodes n'ont JAMAIS été émises par un export : {never} — la partition n'est pas "
+            "couverte, la garde retomberait sur un échantillon",
+        )
+        self.assertEqual(
+            sorted(with_proof),
+            sorted(set(_STANDARD_HTTP_METHODS + _EXTENSION_HTTP_METHODS) - {"GET", "HEAD"}),
+            "toute méthode qui n'est ni GET ni HEAD MUTE et doit porter la preuve — y compris une "
+            "méthode d'extension que personne n'avait prévue",
+        )
 
 
 class TestDryPlanIsNotMoreRestrictedThanRun(unittest.TestCase):
