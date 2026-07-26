@@ -365,3 +365,81 @@ use crate::testutil::*;
     // =============================================================================================
 
 
+    // =============================================================================================
+    // DISPATCH CLI — UN ARGV INCONNU NE DOIT PAS DÉMARRER UN SERVEUR.
+    //
+    // Mesuré sur le binaire livré AVANT ce correctif : `forge --help` retombait sur `serve()`, ouvrait
+    // 127.0.0.1:7100 et créait `forge.db`/`-shm`/`-wal` + `toolspecs/` dans le RÉPERTOIRE COURANT, sans
+    // le dire (RC=124 sous `timeout 6`). Ce n'était pas une exception de `--help` : TOUT token non
+    // reconnu retombait sur le boot serveur — même classe que la régression `ledger verify` ci-dessus,
+    // qui avait été fermée UNE SOUS-COMMANDE À LA FOIS. Le défaut est maintenant fail-closed.
+    // =============================================================================================
+
+    /// Un token INCONNU (faute de frappe, sous-commande d'un autre binaire) est REFUSÉ (code 2), il ne
+    /// tombe JAMAIS sur le boot serveur (`None`). La propriété est vérifiée sur une VARIATION de tokens,
+    /// dont ceux qui ont réellement piégé des relecteurs (`--help`, `doctor`).
+    #[test]
+    fn an_unknown_argv_is_refused_instead_of_booting_a_server() {
+        for tok in ["doctor", "statut", "serve", "--verbose", "-x", "migrate-store-typo", "--", "campaign"] {
+            let args = vec!["forge".to_string(), tok.to_string()];
+            let code = dispatch_cli(&args);
+            assert_eq!(
+                code,
+                Some(2),
+                "`forge {tok}` doit être REFUSÉ (code 2) ; `None` = le binaire démarre un serveur et écrit \
+                 une base dans le répertoire courant",
+            );
+        }
+    }
+
+    /// `forge` NU (aucune sous-commande) reste le boot serveur : c'est le contrat historique
+    /// (`ENTRYPOINT forge` en Docker/k8s, `make run`). Le fail-closed ne doit pas le casser.
+    #[test]
+    fn bare_forge_still_boots_the_server() {
+        assert_eq!(dispatch_cli(&["forge".to_string()]), None, "`forge` nu = boot serveur (inchangé)");
+    }
+
+    /// `--help`/`-h`/`help` impriment l'aide et sortent 0.
+    #[test]
+    fn help_prints_and_exits_zero() {
+        for tok in ["--help", "-h", "help"] {
+            assert_eq!(
+                dispatch_cli(&["forge".to_string(), tok.to_string()]),
+                Some(0),
+                "`forge {tok}` doit imprimer l'aide et sortir 0",
+            );
+        }
+    }
+
+    /// L'AIDE NE MENT PAS : chaque sous-commande qu'elle annonce est un arm RÉEL de `dispatch_cli`.
+    /// La liste n'est pas ré-écrite ici — elle est LUE dans `cli_subcommands()`, et confrontée au SOURCE
+    /// du dispatch (`include_str!`), donc une ligne d'aide pour une commande qui n'existe pas échoue, et
+    /// une commande retirée du `match` sans retirer sa ligne échoue aussi.
+    #[test]
+    fn the_help_only_advertises_subcommands_the_dispatch_actually_handles() {
+        let src = include_str!("boot.rs");
+        let listed = crate::boot::cli_subcommands();
+        assert!(listed.len() >= 10, "aide vide ou tronquée : {} entrées", listed.len());
+        for (name, help) in listed {
+            assert!(!help.is_empty(), "sous-commande `{name}` annoncée sans ligne d'aide");
+            // « --version, -V » -> deux alias ; « hashpw <pw> » -> le token est le 1er mot.
+            for alias in name.split(", ") {
+                let tok = alias.split_whitespace().next().unwrap_or("");
+                assert!(!tok.is_empty(), "entrée d'aide vide dans `{name}`");
+                assert!(
+                    src.contains(&format!("\"{tok}\"")),
+                    "l'aide annonce `{tok}` mais aucun arm `Some(\"{tok}\")` ne le dispatche",
+                );
+            }
+        }
+    }
+
+    /// L'aide NOMME l'effet du boot serveur (port + base dans le CWD) : c'est précisément ce que la
+    /// commande la plus universelle taisait.
+    #[test]
+    fn the_help_says_what_running_the_server_does_to_the_current_directory() {
+        let usage = crate::boot::cli_usage();
+        assert!(usage.contains("forge.db"), "l'aide doit dire QUELLE base est créée : {usage}");
+        assert!(usage.contains("127.0.0.1:7100"), "l'aide doit dire QUEL port est ouvert : {usage}");
+        assert!(usage.contains("répertoire courant"), "l'aide doit dire OÙ la base est créée : {usage}");
+    }

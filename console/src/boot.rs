@@ -109,8 +109,69 @@ pub(crate) fn dispatch_cli(args: &[String]) -> Option<i32> {
         Some("upgrade") => {
             Some(run_upgrade_cli(&args[2..]))
         }
-        _ => None,
+        // AIDE : `forge --help` ne DOIT PAS démarrer un serveur. Mesuré sur le binaire livré, avant ce
+        // correctif : `forge --help` retombait sur `serve()`, ouvrait 127.0.0.1:7100 et créait
+        // `forge.db`/`-shm`/`-wal` + `toolspecs/` DANS LE RÉPERTOIRE COURANT, sans le dire. C'est la
+        // commande la plus universelle qu'un premier contributeur tape.
+        Some("--help") | Some("-h") | Some("help") => {
+            print!("{}", cli_usage());
+            Some(0)
+        }
+        // AUCUNE sous-commande (`forge` nu) => boot serveur, comportement historique inchangé.
+        None => None,
+        // ARGV INCONNU : on REFUSE au lieu de servir. Servir sur un argv qu'on n'a pas compris, c'est
+        // ouvrir un port et écrire une base pour une faute de frappe (`forge statut`, `forge doctor`).
+        Some(_) => {
+            eprintln!("forge: sous-commande inconnue: {}", args[1]);
+            eprint!("{}", cli_usage());
+            Some(2)
+        }
     }
+}
+
+/// Aide des sous-commandes. Écrite ICI, à côté du `match` qui les dispatche, pour qu'un ajout de
+/// sous-commande sans ligne d'aide se voie à la relecture du même écran.
+pub(crate) fn cli_usage() -> String {
+    let mut s = String::new();
+    s.push_str(&format!("forge {} — console Forge (serveur HTTP + sous-commandes)\n\n", forge_version()));
+    s.push_str("usage: forge [SOUS-COMMANDE] [OPTIONS]\n\n");
+    s.push_str("Sans sous-commande, forge DÉMARRE LE SERVEUR HTTP (défaut 127.0.0.1:7100) et crée/ouvre\n");
+    s.push_str("la base dans le répertoire courant (FORGE_CONSOLE_DB, défaut ./forge.db).\n\n");
+    s.push_str("Sous-commandes :\n");
+    for (name, help) in cli_subcommands() {
+        s.push_str(&format!("  {name:<24} {help}\n"));
+    }
+    s.push_str("\nConfiguration par variables d'environnement : cf. docs/CONFIGURATION.md\n");
+    s
+}
+
+/// Sous-commandes exposées par `dispatch_cli`, avec leur ligne d'aide. Les arms compilés sous feature
+/// (`migrate-store`, `blob-selftest`) n'y figurent que quand la feature est active — l'aide ne promet
+/// jamais une commande que CE binaire ne connaît pas.
+pub(crate) fn cli_subcommands() -> Vec<(&'static str, &'static str)> {
+    let mut v: Vec<(&'static str, &'static str)> = vec![
+        ("--version, -V", "imprime la version et sort"),
+        ("--help, -h, help", "cette aide"),
+        ("hashpw <pw>", "hash argon2id du viewer (FORGE_CONSOLE_PASS_HASH)"),
+        ("hashpw-operator <pw>", "hash argon2id du rôle opérateur C2"),
+        ("useradd <login> <role>", "crée/réactive un compte (viewer|operator|admin)"),
+        ("findings [--json]", "lecture locale des findings (read-only)"),
+        ("roe [--json]", "lecture locale des règles d'engagement (read-only)"),
+        ("coverage [--json]", "lecture locale de la couverture (read-only)"),
+        ("query <sql|nom>", "lecture locale paramétrée (read-only)"),
+        ("seed-demo [--dir D]", "charge l'engagement de démonstration hors-ligne"),
+        ("migrate --from … --to …", "migre un install existant vers une base cible"),
+    ];
+    #[cfg(feature = "store-postgres")]
+    v.push(("migrate-store --to …", "migre le store SQLite -> Postgres (gouverné)"));
+    v.push(("backup --out …", "archive chiffrée (DB + ledger + clé + manifest)"));
+    v.push(("restore --in …", "restaure une archive chiffrée (vérifiée)"));
+    #[cfg(feature = "object-store")]
+    v.push(("blob-selftest", "aller-retour PUT/GET/DELETE sur le blobstore actif"));
+    v.push(("ledger verify", "vérifie la chaîne du ledger (n'ouvre pas la base)"));
+    v.push(("status [--json]", "version, schéma, backend, tête de ledger (sans serveur)"));
+    v.push(("upgrade --passphrase-env", "upgrade fail-closed avec snapshot + rollback"));
+    v
 }
 
 /// Boot du serveur HTTP — PURE EXTRACTION du corps de main() après le dispatch CLI. Sélection du store

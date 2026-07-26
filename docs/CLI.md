@@ -134,7 +134,20 @@ FORGE_DETECTION_SOURCE='{"kind":"crowdsec","endpoint":"http://127.0.0.1:8080", �
 ## 2. `forge` (binaire Rust)
 
 Lancé **sans argument**, il démarre le serveur (bind `FORGE_CONSOLE_ADDR`, cf.
-[Configuration](CONFIGURATION.md)). Avec un sous-verbe :
+[Configuration](CONFIGURATION.md)) **et crée/ouvre la base dans le répertoire courant**
+(`FORGE_CONSOLE_DB`, défaut `./forge.db`). Avec un sous-verbe :
+
+### `forge --help` (ou `-h`, `help`)
+Imprime la liste des sous-commandes **et ce que fait le lancement sans sous-commande** (port ouvert,
+base créée dans le CWD), puis sort `0`. **Ne démarre rien.**
+
+> **Un argv inconnu est REFUSÉ** (`exit 2`, l'aide sur stderr) — il ne retombe **plus** sur le boot
+> serveur. Avant ce correctif, `forge --help`, `forge doctor` ou n'importe quelle faute de frappe
+> démarraient silencieusement le serveur sur `127.0.0.1:7100` et écrivaient `forge.db`, `forge.db-shm`,
+> `forge.db-wal` et `toolspecs/` dans le répertoire courant. C'est la commande la plus universelle
+> qu'un premier contributeur tape ; elle a piégé trois relectures de suite. La même classe de bug avait
+> déjà été fermée UNE SOUS-COMMANDE À LA FOIS (`forge ledger verify` bootait le serveur et pendait) :
+> le défaut est maintenant fail-closed, donc la classe est fermée d'un coup.
 
 ### `forge --version` (ou `-V`)
 Imprime la version (fichier `VERSION`, `include_str!` à la compilation).
