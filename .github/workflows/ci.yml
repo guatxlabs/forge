@@ -61,7 +61,17 @@ jobs:
       - name: Version drift check (VERSION == pyproject == Cargo.toml)
         run: make check-version
 
+      # La garde de gouvernance du SPA (tests/test_console_spa_governance.py) prouve par EXÉCUTION que
+      # la porte réseau unique attache la preuve opérateur : elle importe le module d'API réel sous un
+      # runtime JavaScript. Sans runtime, ces tests-là se SAUTENT (le reste de la garde est pur-stdlib).
+      # Un saut est acceptable sur un poste de dev, jamais en CI : cette étape échoue si `node` manque,
+      # et `FORGE_REQUIRE_JS_RUNTIME=1` ci-dessous transforme l'absence en ÉCHEC de test plutôt qu'en saut.
+      - name: JavaScript runtime present (garde comportementale du SPA)
+        run: node --version
+
       - name: Unit tests
+        env:
+          FORGE_REQUIRE_JS_RUNTIME: "1"
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
   # ---------------------------------------------------------------------------

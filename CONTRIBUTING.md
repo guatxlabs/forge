@@ -47,6 +47,15 @@ make doctor         # diagnose modules + expected tools/services
 
 Everything must be **green** and **offline** — tests must not touch the network or a real target.
 
+> **One optional tool: a JavaScript runtime (`node`).** The SPA governance guard
+> (`tests/test_console_spa_governance.py`) proves *by execution* that the console's single network door
+> attaches the operator proof: it imports the real API module under `node` with every network primitive
+> instrumented. Text-based checks were tried and measurably fooled (an emptied helper, a look-alike name,
+> even a dead string kept the suite green while every write left without proof). Without `node` those
+> three tests **skip with an explicit message** — the rest of the guard is pure stdlib and still runs.
+> CI sets `FORGE_REQUIRE_JS_RUNTIME=1`, which turns the absence into a **failure**, so the guard can never
+> be silently off there. `FORGE_JS_RUNTIME=<path>` points at a runtime that is not on `PATH`.
+
 ## Code style
 
 - **Python engine** — stdlib only (no runtime deps beyond what's already vendored). Class-based
