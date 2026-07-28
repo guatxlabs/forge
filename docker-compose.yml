@@ -2,7 +2,7 @@
 # =============================================================================
 #
 # Lancer DEPUIS la racine de ce dépôt. La console résout `guatx-core` via une git-dep
-# publique (tag v0.2.0) — aucun crate sibling requis dans le contexte :
+# publique (tag v0.2.1) — aucun crate sibling requis dans le contexte :
 #
 #     docker compose up -d --build
 #

@@ -11,7 +11,7 @@
 #                   FORGE_PKG_DIR), donc l'image runtime a IMPÉRATIVEMENT besoin des deux.
 #
 # CONTEXTE DE BUILD = la RACINE DE CE DÉPÔT. Le crate `console/` résout `guatx-core` via une
-#    git-dep publique ÉPINGLÉE (`git = "https://github.com/guatxlabs/core", tag = "v0.2.0"`,
+#    git-dep publique ÉPINGLÉE (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1"`,
 #    cf. console/Cargo.toml) — core est récupéré depuis GitHub AU BUILD, aucun crate sibling
 #    requis dans le contexte. Un clone STANDALONE de ce dépôt construit directement :
 #
@@ -19,7 +19,7 @@
 #    ou  docker compose ... up -d --build     # (docker-compose.yml, context: .)
 #
 # ── Dépendance `core/` (guatx-core) : git-dep, plus de sibling ────────────────
-#    console/Cargo.toml : `guatx-core = { git = "…/guatxlabs/core", tag = "v0.2.0" }`.
+#    console/Cargo.toml : `guatx-core = { git = "…/guatxlabs/core", tag = "v0.2.1" }`.
 #    Le builder ne copie aucun crate voisin : le contexte est le dépôt lui-même, core est
 #    résolu par cargo depuis GitHub. (Un `console/.cargo/config.toml` local, gitignoré, peut
 #    rediriger la git-dep vers une copie locale du crate pour itérer — jamais dans un clone.)
@@ -54,7 +54,7 @@ FROM rust:1.96-bookworm AS builder
 
 WORKDIR /build
 
-# Le crate console résout guatx-core via git-dep (tag v0.2.0) — aucun sibling à copier.
+# Le crate console résout guatx-core via git-dep (tag v0.2.1) — aucun sibling à copier.
 COPY console/ ./console/
 # VERSION vit à la racine du dépôt : la console la lit à la COMPILATION via
 # `include_str!(CARGO_MANIFEST_DIR "/../VERSION")` = /build/VERSION. Il faut donc la

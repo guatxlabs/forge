@@ -116,7 +116,7 @@ Les autres fichiers **dérivent** leurs vues (le planner son ensemble `QUALIFYIN
 plus aucune recopie qui dériverait.
 
 Chaque module porte un **identifiant MITRE ATT&CK** (le badge dans la console et la clé de jointure
-purple). Le catalogue livré compte **31 modules** couvrant :
+purple). Le catalogue livré compte **77 modules** (compte MESURÉ : `forge modules --json`) couvrant :
 
 - **Recon passif** : `recon.subdomains` (crt.sh), `recon.dns`, `recon.urls` (Wayback), `recon.tech`,
   `recon.waf`, `recon.js_endpoints`.

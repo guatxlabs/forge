@@ -8,7 +8,7 @@ self-deploy détaillé (empreinte mesurée, matrice Docker/k8s/host/venv, export
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 > ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
-> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.0"`, cf.
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1"`, cf.
 > `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
 > les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
 > clone standalone y suffit). Détail : [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.

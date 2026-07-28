@@ -125,7 +125,7 @@ non-correspondance fait échouer le build. Lors d'un bump de version, rafraîchi
 
 ### Le build Docker échoue à récupérer `guatx-core`
 Le **contexte de build est la racine de ce dépôt** ; la console résout `guatx-core` via une git-dep
-publique épinglée (`tag = "v0.2.0"`, cf. `console/Cargo.toml`), **récupérée depuis GitHub au build** —
+publique épinglée (`tag = "v0.2.1"`, cf. `console/Cargo.toml`), **récupérée depuis GitHub au build** —
 le builder a donc besoin d'un **accès réseau à github.com** (ou d'un miroir/cache de registre Cargo). En
 dev monorepo, `console/.cargo/config.toml` (gitignoré) redirige la dép vers le core local. Lancer
 `docker build -t forge:0.0.1 .` **depuis la racine du dépôt**, ou utiliser le compose (`context: .`).
@@ -174,7 +174,7 @@ Pas encore : **stateful single-replica** (SQLite + ledger sur PVC RWO). Profil i
 mono-opérateur / petit MSSP. Voir [`DEPLOYMENT.md`](DEPLOYMENT.md) § Contrainte d'archi.
 
 **Combien de modules et quelles techniques ?**
-31 modules livrés (recon, oracles à preuve, évasion, connecteurs), chacun taggé MITRE ATT&CK.
+77 modules livrés (recon, oracles à preuve, évasion, connecteurs), chacun taggé MITRE ATT&CK.
 Table complète : [MODULES.md](MODULES.md) (générée depuis `forge modules --json`).
 
 **Comment sauvegarder / migrer sans perdre l'audit ?**

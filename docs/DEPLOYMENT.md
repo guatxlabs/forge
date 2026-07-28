@@ -27,7 +27,7 @@ programmées**. La deuxième moitié conserve l'**empreinte mesurée** et la mat
 ## 1. Options de build & run
 
 > ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
-> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.0"`, cf.
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1"`, cf.
 > `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
 > les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
 > clone standalone y suffit). Détail en [§4](#4-contexte-de-build--dépendance-guatx-core).
@@ -696,7 +696,7 @@ défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
 
 Le contexte de build est la **RACINE de ce dépôt**. Le crate `console` résout `guatx-core` via une
 **git-dep publique ÉPINGLÉE** — `guatx-core = { git = "https://github.com/guatxlabs/core", tag =
-"v0.2.0", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
+"v0.2.1", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
 build**, aucun crate sibling n'est requis dans le contexte. Un clone **standalone** de ce dépôt construit
 directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe `context: .`).
 
@@ -714,7 +714,7 @@ directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe 
 
 **Migration `path` → git-dep : FAITE.** La console consommait autrefois `core` en dép `path` (layout
 sibling monorepo), ce qui imposait un contexte de build parent. Le repo public `guatxlabs/core` (tag
-`v0.2.0`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
+`v0.2.1`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
 builder qui copiait le sibling `core/` a **disparu**, et un checkout **standalone** (sans sibling) builde tel quel.
 
 ---
@@ -754,12 +754,18 @@ curl -s http://127.0.0.1:7100/health   # -> {"db":"ok","status":"ok","version":"
 
 Forge lui-même :
 
-| Langage | Périmètre | LOC |
-|---|---|---|
-| Python | moteur, stdlib pur, `deps=[]` | ~5256 |
-| Rust | console | ~4006 |
-| Rust | guatx-core | ~1032 |
-| JS / HTML / CSS | UI | ~3513 |
+Compte MESURÉ sur cet arbre, `wc -l`, `__pycache__/` et `target/` exclus (la commande est donnée
+pour que vous puissiez le refaire) :
+
+| Langage | Périmètre | LOC | Commande |
+|---|---|---|---|
+| Python | moteur, stdlib pur, `deps=[]` | **23 876** | `find forge -name '*.py' -not -path '*__pycache__*' \| xargs wc -l` |
+| Rust | console (tests inclus) | **47 248** | `find console/src -name '*.rs' \| xargs wc -l` |
+| Rust | guatx-core | **9 280** | `find src -name '*.rs' \| xargs wc -l` (dans le dépôt `core`) |
+| JS / HTML / CSS | UI | **10 471** | `find console/web -type f \( -name '*.js' -o -name '*.html' -o -name '*.css' \) \| xargs wc -l` |
+
+> Les chiffres précédemment publiés ici (~5 256 / ~4 006 / ~1 032 / ~3 513) dataient d'un arbre bien
+> antérieur et sous-estimaient le code d'un facteur 2,5 à 12. Ils sont remplacés par la mesure ci-dessus.
 
 **ZÉRO** Java / C / C++ / Go / bash dans le code Forge.
 
@@ -775,11 +781,17 @@ Les outils **ORCHESTRÉS** (jamais embarqués, tous **OPTIONNELS**, auto-neutral
 
 ### Poids
 
-- **Livrable cœur ≈ 5 MB** :
-  - binaire Rust console **4.2 MB** (SQLite bundlé)
-  - Python **196 KB**
-  - web **432 KB**
-- Le **1.6 GB** dans `forge/` = cache Cargo `console/target/` (**NON expédié**).
+Mesuré sur cet arbre (`find … -printf '%s\n' | awk`) :
+
+- **Python** (`forge/`, `__pycache__` exclu) : **1 371 KB**
+- **web** (`console/web/`, tous fichiers) : **877 KB**
+- **binaire Rust console** : **non mesuré** — aucun `console/target/release/forge` n'est présent sur cet
+  arbre, et nous ne publions pas une taille de binaire que nous n'avons pas pesée. Mesurez la vôtre après
+  `cargo build --release` : `ls -l console/target/release/forge`. *(Le chiffre « 4.2 MB » publié
+  précédemment n'a pas de mesure reproductible attachée ; il est retiré plutôt que reconduit.)*
+- Le cache de build `console/target/` pèse **2,8 GB** sur cet arbre — il n'est **jamais expédié**
+  (`.dockerignore`). *(La note précédente parlait de « 1.6 GB dans `forge/` » : le cache n'est pas dans
+  `forge/`, et il a grossi depuis.)*
 - **Image Docker** :
   - **minimale ~150-250 MB** (console + python + nmap)
   - **complète ~350-500 MB** (+ binaires Go PD)

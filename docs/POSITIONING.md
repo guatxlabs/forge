@@ -94,11 +94,11 @@ Où Forge **GAGNE** et où il **PERD**. Vendre la vérité construit la confianc
 | **Boucle purple intégrée (même vendeur)** | 🟢 **Forge×Plume, corrélation ATT&CK, MTTD** | 🔴 | 🟡 via intégrations tierces | 🔴 | 🟡 côté bleu seul |
 | **UI opérateur / dashboards** | 🟢 console + soql + panels | 🟡 | 🟡 | 🟢 | 🟢 |
 | **Safe-by-default** | 🟢 **inerte, opt-in, fail-closed** | 🔴 conçu pour tirer | 🔴 | ⚪ | ⚪ |
-| **Empreinte / déployabilité** | 🟢 cœur ~5 MB, stdlib pur | 🟡 | 🟡 | 🟡 | 🔴 lourd |
+| **Empreinte / déployabilité** | 🟢 un binaire + du Python stdlib (taille du livrable **non re-mesurée**) | 🟡 | 🟡 | 🟡 | 🔴 lourd |
 | | | | | | |
 | **Capacité offensive brute** | 🔴 **faible — pilote, ne fournit pas** | 🟢 énorme | 🟢 élite (C2/post-ex) | 🟡 OSINT | ⚪ |
 | **Maturité / track record** | 🔴 **v0.0.1** | 🟢 20+ ans | 🟢 standard red-team | 🟢 | 🟢 |
-| **Écosystème / modules / communauté** | 🔴 **11 modules** | 🟢 2000+ | 🟢 | 🟢 | 🟢 |
+| **Écosystème / modules / communauté** | 🟡 **77 modules** | 🟢 2000+ | 🟢 | 🟢 | 🟢 |
 | **Post-exploitation / C2 / pivot** | 🔴 **aucun (hors-charte)** | 🟢 | 🟢 | ⚪ | ⚪ |
 
 **Lecture** : Forge est **complémentaire**, pas substituable. Il ne cherche PAS à battre MSF sur la
@@ -113,7 +113,9 @@ signée* — ce qu'aucune ligne de cette table n'a en colonne unique.
 La vérité qui désarme l'objection « c'est juste reNgine avec une autre UI » : comme **orchestrateur
 d'outils piloté depuis une interface**, Forge n'est **PAS unique** — l'OSS mature couvre déjà bien cet
 axe. Le différenciateur de Forge n'est pas l'orchestration : c'est la couche
-**gouvernance + preuve + non-répudiation** qu'aucun projet OSS n'industrialise.
+**gouvernance + preuve + non-répudiation**, que nous n'avons vue industrialisée dans **aucun des projets
+OSS listés ci-dessous** — formulation volontairement bornée à cette liste, parce que « aucun projet OSS »
+tout court n'est pas une affirmation que nous pouvons vérifier.
 
 | Outil | Licence | Ce qu'il fait aussi bien (ou mieux) | Ce qui manque vs Forge |
 |---|---|---|---|
@@ -123,11 +125,16 @@ axe. Le différenciateur de Forge n'est pas l'orchestration : c'est la couche
 | **DefectDojo** (OWASP) | BSD-2 | Vuln management / ASPM : import de scans, dédup, triage, métriques, rapport. | DevSecOps, pas d'orchestration active, pas de scope-guard offensif, pas de ledger d'autorisation. |
 | **Nuclei / ProjectDiscovery** | MIT | Le moteur de scan que Forge pilote. | Une brique, pas un orchestrateur gouverné. |
 | **Metasploit / Sliver / Havoc / Mythic** | BSD/Apache/GPL | Vrais frameworks d'exploitation & C2 (post-ex). | Niche opposée : ils exploitent ; Forge exclut l'exploit et se veut prouvable/auditable — il les pilote. |
+| **MITRE Caldera** | Apache-2.0 (projet à l'Apache Incubator depuis le 20/05/2026) | Émulation d'adversaire autonome, planificateur, abilities mappées ATT&CK, agents multi-OS. **Le plus proche sur « rejouer un adversaire mappé ATT&CK ».** | Pas de gate d'autorisation fail-closed ni de ledger signé tiers-vérifiable ; la boucle de validation côté SIEM n'est pas livrée avec. |
+| **Splunk Attack Range** | Apache-2.0 (Splunk Threat Research Team) | **Attaque → SIEM → validation automatisée de détection, jusqu'en CI/CD.** C'est l'antériorité la plus directe sur la boucle purple. | Il provisionne un **lab** (cloud/local) autour de Splunk ; ce n'est pas un produit souverain auto-hébergé à faible empreinte, et l'autorisation n'y est pas un objet prouvable. |
 
-**Lecture** : comme orchestrateur-UI, Forge n'est **pas unique** (reNgine / Faraday sont matures). Le
-trou que personne ne remplit = **prouver l'autorisation** (scope-guard fail-closed), **prouver
-l'impact** (oracle → preuve), et le rendre **non-répudiable** (ledger Ed25519 chaîné) + la **boucle
-purple**. C'est là, pas sur « une UI par-dessus des outils », que se joue le moat.
+**Lecture** : comme orchestrateur-UI, Forge n'est **pas unique** (reNgine / Faraday sont matures), et la
+**boucle attaque → détection n'est pas neuve non plus** (Caldera, Attack Range, et tout le marché
+BAS/AEV — Cymulate, SafeBreach, Picus — la vendent). Ce que nous n'avons trouvé chez aucun d'eux, c'est
+la combinaison : **prouver l'autorisation** (scope-guard fail-closed), **prouver l'impact**
+(oracle → preuve), le rendre **non-répudiable** (ledger Ed25519 chaîné), et livrer la boucle purple
+**dans un ensemble souverain auto-hébergé** (Forge + Plume, même dépôt, corrélés par technique ATT&CK).
+C'est là, pas sur « une UI par-dessus des outils » ni sur « faire du BAS », que se joue le moat.
 
 ---
 

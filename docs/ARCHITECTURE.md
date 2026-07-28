@@ -18,7 +18,7 @@ Ce dépôt — Forge (rouge) :
 
 Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
   guatx-core     lib Rust NEUTRE, publique — le ~70 % commun (moteur soql v0) ; consommée par la console
-                 en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.0)
+                 en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.1)
   plume          Plume (SOC bleu, public) — détection / BAS  [OPTIONNEL pour Forge]
 ```
 
@@ -26,12 +26,15 @@ Il n'y a **pas de process partagé** entre les couches : le moteur Python et la 
 communiquent par un **contrat HTTP/fichier** (`POST /api/ingest`, JSONL de run-records, ledger
 JSONL sur disque). La console **spawne** le moteur (`python3 -m forge.cli campaign …`) pour les runs
 lancés depuis le web (voir §3, C2-light). La console dépend du crate `guatx-core` via une **git-dep
-publique épinglée** (`tag = "v0.2.0"`, récupérée au build ; la migration depuis l'ancienne dép `path`
+publique épinglée** (`tag = "v0.2.1"`, récupérée au build ; la migration depuis l'ancienne dép `path`
 sibling est faite — voir [`DEPLOYMENT.md`](DEPLOYMENT.md) §4).
 
-**Empreinte** (mesurée) : moteur Python ~5.3 KLOC (`deps=[]`), console Rust ~4 KLOC, `guatx-core`
-~1 KLOC, UI ~3.5 KLOC. Livrable cœur ≈ 5 MB ; image Docker 150-250 MB (mini) à 350-500 MB (full).
-Chiffres et matrice de déploiement : [`DEPLOYMENT.md`](DEPLOYMENT.md) §6.
+**Empreinte** (`wc -l` sur cet arbre, `__pycache__`/`target` exclus) : moteur Python **23,9 KLOC**
+(`deps=[]`), console Rust **47,2 KLOC** (tests inclus), `guatx-core` **9,3 KLOC**, UI **10,5 KLOC**.
+Sources livrées : Python **1 371 KB**, web **877 KB** ; **taille du binaire console : non mesurée** ici
+(pas de `target/release/forge` sur cet arbre). Tailles d'image Docker : **non re-mesurées** —
+les fourchettes historiques (150-250 MB mini / 350-500 MB full) sont conservées à titre indicatif,
+sans mesure attachée. Commandes et détail : [`DEPLOYMENT.md`](DEPLOYMENT.md) §6.
 
 ## 2. Le moteur Python (`forge/`)
 
@@ -87,7 +90,7 @@ class Module:
 orchestrés — l'engine ne les possède pas. Discipline (héritée des collecteurs Plume) : OFF par
 défaut, **auto-neutralisation** si l'outil sous-jacent est absent, **zéro effet de bord en dry-run**.
 
-Les **31 modules livrés** couvrent recon passif/actif, oracles à preuve (IDOR, SSRF, auth/ATO, CORS,
+Les **77 modules livrés** (compte MESURÉ : `forge modules --json`) couvrent recon passif/actif, oracles à preuve (IDOR, SSRF, auth/ATO, CORS,
 SSTI, path-traversal, SQLi, XSS, open-redirect, CSRF, JWT, GraphQL), évasion browser-automation, et
 connecteurs (MSF, Burp). La table complète (générée depuis `forge modules --json`) est dans
 **[MODULES.md](MODULES.md)** ; leur logique « à preuve » dans [Concepts §3](CONCEPTS.md#3-oracles-à-preuve).

@@ -208,7 +208,7 @@ forge doctor --purple      # état des modules + prérequis de la jointure purpl
 Tout ce guide tourne **sans Plume réel** (seed + stub mock-Plume). Pour brancher un **vrai Plume**,
 voir [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (`PLUME_URL` / `PLUME_TOKEN`) — **non requis ici**.
 
-- [`../README.md`](../README.md) — vue d'ensemble, gate ROE à 4 couches, catalogue des 14 modules.
+- [`../README.md`](../README.md) — vue d'ensemble, gate ROE à 4 couches, catalogue de modules.
 - [`../examples/reference-engagement/README.md`](../examples/reference-engagement/README.md) — détail du seed synthétique + la matrice purple attendue.
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — cœur (roe/ledger/engine/schema) + boucle purple.
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — empreinte, matrice Docker/k8s/host/venv, export PDF.

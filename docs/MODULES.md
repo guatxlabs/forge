@@ -8,9 +8,14 @@ tire jamais sans verdict `FIRE`, s'auto-neutralise si son outil sous-jacent est 
 (`available:false`), et ne produit aucun effet de bord en `dry-run`. Le contrat et le modèle de
 gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-registre-de-modules-forgemodules).
 
-> Cette table est **générée** depuis `forge modules --json` (source de vérité : le registre). Pour la
-> régénérer : `python3 -m forge.cli modules --json`. Pour connaître la disponibilité **sur votre
-> machine** (outil présent ou non) : `python3 -m forge.cli doctor`.
+> La source de vérité est le **registre**, pas cette page : `python3 -m forge.cli modules --json`. Pour
+> connaître la disponibilité **sur votre machine** (outil présent ou non) : `python3 -m forge.cli doctor`.
+>
+> ⚠️ **Cette table est un EXTRAIT, pas le catalogue complet.** Mesuré sur cet arbre
+> (`python3 -m forge.cli modules --json | python3 -c "import json,sys;print(len(json.load(sys.stdin)))"`) :
+> le registre compte **77 modules**, dont **32 sont décrits ci-dessous** — les 45 autres existent et sont
+> tirables, mais n'ont pas encore leur ligne ici. Aucun module listé ci-dessous n'est absent du registre
+> (vérifié : 0 entrée fantôme). En cas de doute, croyez la commande, pas la page.
 
 > **Outils embarqués dans l'image `full` (défaut).** Depuis l'ajout de la suite de scanners au
 > `Dockerfile`, le profil `full` livre — en plus de `nmap`/`curl`/`dig`/`httpx`/`nuclei`/`subfinder` —
@@ -31,7 +36,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 - **dépendance** — outil/service attendu (`stdlib` = toujours disponible, pur Python ; sinon
   auto-neutralisé si absent).
 
-## Les 34 modules
+## 32 des 77 modules du registre
 
 | kind | exploit | destructif | ATT&CK | dépendance | description |
 |---|:---:|:---:|---|---|---|

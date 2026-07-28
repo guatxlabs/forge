@@ -39,7 +39,7 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
 - **[Concepts](CONCEPTS.md)** — ROE/scope-guard, ledger tamper-evident, oracles à preuve
   (*tested-unless-proven*), catalogue de modules + techniques (mapping ATT&CK), boucle purple,
   chaînage, découverte backée par évasion.
-- **[Catalogue de modules](MODULES.md)** — les 31 modules livrés : `kind`, capacité (exploit/destructif),
+- **[Catalogue de modules](MODULES.md)** — les 77 modules du registre (32 y sont décrits) : `kind`, capacité (exploit/destructif),
   technique ATT&CK, description, dépendance.
 - **[Ajouter votre propre outil (depuis l'UI)](TOOLS.md)** — déclarer un outil CLI gouverné (ToolSpec
   déclaratif : binaire + argv no-shell + allowlist + params) sans éditer de fichier ni recompiler.

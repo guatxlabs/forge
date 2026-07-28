@@ -23,7 +23,8 @@ Trois invariants la définissent :
    **couverture de détection réelle** et le **MTTD** — technique par technique.
 
 Forge est écrit en **Python pur-stdlib** (le moteur) + **Rust/axum** (la console) + **vanilla-JS**
-(le SPA). Le cœur livrable pèse ~5 MB ; les moteurs offensifs lourds (nmap, nuclei, Metasploit, Burp,
+(le SPA). Le livrable est **un binaire + des sources Python** (Python **1 371 KB** + web **877 KB** mesurés ;
+taille du binaire **non mesurée** — cf. [`DEPLOYMENT.md`](DEPLOYMENT.md) §6) ; les moteurs offensifs lourds (nmap, nuclei, Metasploit, Burp,
 browser-automation) sont **orchestrés en option**, jamais embarqués, et **s'auto-neutralisent** s'ils
 sont absents.
 

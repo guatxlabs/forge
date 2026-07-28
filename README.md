@@ -13,7 +13,7 @@
 
 <img src="docs/media/console-demo.gif" alt="Console Forge — vue d'ensemble, catalogue de modules, findings mappés ATT&CK, lancement de campagne gouverné" width="860">
 
-<sub>Console Forge — dashboard (**77 modules** natifs) · catalogue (modules **exploit/destructif** gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**).</sub>
+<sub>Console Forge — dashboard · catalogue de modules (les **exploit/destructif** sont gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**). Le registre compte **77 modules** — compte MESURÉ par `python3 -m forge.cli modules --json`, pas lu sur cette capture.</sub>
 
 </div>
 
@@ -156,7 +156,7 @@ FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) ./console/target/release/forge &
 #    -> http://127.0.0.1:7100   (UI opérateur dark + API)
 
 # 3) peupler le catalogue de modules côté UI
-forge modules --json                       # liste les 14 modules (kind, mitre, dispo)
+forge modules --json                       # liste les 77 modules du registre (kind, mitre, dispo)
 
 # 4) ingérer une campagne de démonstration (zéro réseau, finding synthétique)
 FORGE_CONSOLE_URL=http://127.0.0.1:7100 FORGE_CONSOLE_TOKEN=$FORGE_CONSOLE_TOKEN \
@@ -207,6 +207,14 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 
 ## État (v0.0.1 — 1513 tests Python + 415 tests Rust passent, zéro réseau) — **P1 + P2 complets**
 
+> **D'où viennent ces deux chiffres.** Python : `python3 -m unittest discover -s tests -t .` →
+> `Ran 1513 tests` / `OK (skipped=1)`. Rust : `cd console && cargo test --offline` →
+> `test result: ok. 415 passed; 0 failed`, **features par défaut**. Le dépôt porte **432** annotations
+> `#[test]`/`#[tokio::test]` : l'écart de 17 est le compte des tests gardés derrière une feature
+> non activée par défaut (`store-postgres`, `encryption`) — 18 gardés, moins 1 en `#[cfg(not(feature
+> = "encryption"))]` qui, lui, tourne. **432 n'est donc PAS un compte de tests exécutés** ; ne le
+> publiez pas comme tel.
+
 | Couche | État |
 |---|---|
 | Gate ROE fail-closed (4 couches) | ✅ construit + testé (10 tests) |
@@ -228,7 +236,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Ledger Ed25519** (signature asymétrique à l'append + `verify_external` par clé publique) | ✅ testé |
 | **Ancrage hors-host** (`anchor.py` : interface `Anchor` + témoin co-signataire + `reconcile`) | ✅ testé (détecte une réécriture re-signée localement) |
 | **Mémoire sémantique** (`JaccardMemory` floue stdlib + bridge FAISS embeddings optionnel) | ✅ Jaccard testé, FAISS dégrade proprement |
-| **Cœur partagé `guatx-core`** (crate Rust **public neutre**, repo séparé `guatxlabs/core` ; console en dépend via git-dep publique épinglée) | ✅ 6 tests Rust, extrait en repo public, console rebâtie |
+| **Cœur partagé `guatx-core`** (crate Rust **public neutre**, repo séparé `guatxlabs/core` ; console en dépend via git-dep publique épinglée) | ✅ extrait en repo public (épinglé `v0.2.1`), console rebâtie ; suite propre au cœur : **161 tests** (compte MESURÉ dans `guatxlabs/core` : 155 unitaires + 5 parité + 1 doctest) |
 | **Wizard 1er déploiement** (self-deploy : provisionne admin/crypto/source de détection/politique opérateur **depuis le navigateur**, auto-désactivant, zéro défaut codé en dur) | ✅ — `GET /api/setup/state` · `POST /api/setup` |
 | **RBAC admin & gouvernance des connecteurs** (comptes `/api/users`, viewer/opérateur/admin ; msf/burp sondés à fire-time, `exploit` fail-safe, jamais de sur-classement) | ✅ — testé en live |
 | **Source de détection infra-agnostique** (plugin configurable dans l'UI : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec, secret write-only) | ✅ — cf. `docs/DETECTION.md` |
@@ -236,8 +244,10 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | **Chiffrement AU REPOS SQLCipher** (image opt-in `--features encryption`, `PRAGMA key` au boot) | ✅ opt-in — `capabilities.sqlcipher` exposé au wizard |
 | Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
 
-**Modules** (extrait ; table générée depuis `forge modules --json`) — le **catalogue complet à jour
-(31 modules)** avec dépendances et statut est dans **[`docs/MODULES.md`](docs/MODULES.md)** :
+**Modules** — le registre compte **77 modules** (compte MESURÉ sur cet arbre :
+`python3 -m forge.cli modules --json` → 77 entrées ; 11 marqués `exploit`, 1 `destructive`, 26 techniques
+ATT&CK distinctes). La table ci-dessous en montre **14** ; [`docs/MODULES.md`](docs/MODULES.md) en décrit
+**32** avec dépendances et statut. **La source de vérité est la commande, pas ces tables** :
 
 | kind | exploit | ATT&CK | description |
 |---|:---:|---|---|
@@ -269,7 +279,7 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 ## Déploiement en production (self-deploy)
 
 Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est la
-racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.2.0`,
+racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.2.1`,
 aucun crate sibling requis ; `console/Cargo.lock` est committé pour des builds reproductibles) :
 
 ```sh
