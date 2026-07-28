@@ -5,7 +5,7 @@
 #   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
 #   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
 #
-# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.0`
+# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.1`
 # (console/Cargo.toml + Cargo.lock épinglé sur le rev du tag). Les jobs cargo la résolvent
 # DIRECTEMENT depuis le repo public — aucun checkout voisin, aucun [patch] : c'est exactement
 # ce qu'un clone standalone fait, donc la CI prouve le build public. (Un `console/.cargo/config.toml`
@@ -101,7 +101,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
-      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.0 (réseau) —
+      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.1 (réseau) —
       # cohérent avec Cargo.lock (source git+tag), identique à un clone standalone.
       - name: cargo test (console)
         working-directory: console

@@ -56,8 +56,8 @@ significant_drop_tightening = "warn"
 
 [dependencies]
 guatx-core = { git = "https://github.com/guatxlabs/core", tag = "v0.2.1", features = ["forge"] }
-# ^ Dép GIT épinglée (repo public LGPL `guatxlabs/core`, tag `v0.2.0`) : un clone forge-only
-#   standalone build dès que core@v0.2.0 est publié. Le tag DOIT être identique sur core/forge/plume.
+# ^ Dép GIT épinglée (repo public LGPL `guatxlabs/core`, tag `v0.2.1`) : un clone forge-only
+#   standalone build contre core@v0.2.1, publié. Le tag DOIT être identique sur core/forge/plume.
 #   DEV monorepo (vitesse du path sans dépendre du core publié) : `console/.cargo/config.toml`
 #   (GITIGNORÉ) porte un `[patch."…/guatxlabs/core"] guatx-core = { path = "../../core" }` qui
 #   override la git-dep vers le core local. Vérifié : `cargo metadata --offline` résout vers le path
