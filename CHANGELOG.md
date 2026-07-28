@@ -9,6 +9,17 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Detection-source fetch never completed its HTTP request.** The console's built-in fetcher
+  (`console/src/net.rs::http_get_blocking`, used by `kind=plume` / `generic_http` over http) wrote its
+  request headers without the terminating blank line, so an RFC-compliant server kept waiting for more
+  headers, the console hit its read timeout, and `GET /api/detection/coverage` reported the source as
+  unreachable (`source_reachable:false`, `error: "lecture réponse échouée: Resource temporarily
+  unavailable (os error 11)"`) even though the SOC was up and answering. Measured byte for byte by
+  replaying the emitted request against `tools/mock_plume.py`: without the blank line, no response in
+  4 s; with it, `HTTP/1.1 200 OK` immediately. The sibling OIDC POST helper (`sso.rs`) already sent the
+  blank line. Now covered end to end by the `purple-e2e` CI job.
+
 ### Notes for open-source builds
 - The Rust console depends on `guatx-core` via a **pinned public git dependency**
   (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1", features = ["forge"]`; see

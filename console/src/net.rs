@@ -189,6 +189,11 @@ pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, a
         }
         _ => {}
     }
+    // LIGNE VIDE DE FIN D'EN-TÊTES (RFC 9112 §2.1) — SANS elle, la requête n'est jamais COMPLÈTE : le
+    // serveur reste bloqué à lire des en-têtes, la console expire en lecture (EAGAIN) et la source
+    // remonte « injoignable » alors qu'elle répond. Miroir EXACT du POST OIDC (sso.rs
+    // ::http_post_form_blocking, qui pousse déjà ce "\r\n" avant son corps).
+    req.push_str("\r\n");
     stream.write_all(req.as_bytes()).map_err(|e| format!("écriture requête échouée: {e}"))?;
     let mut raw = Vec::new();
     // L11 — BUFFERING BORNÉ : `take(MAX_RESPONSE_BYTES)` cape la lecture (anti-OOM sur une réponse illimitée).
