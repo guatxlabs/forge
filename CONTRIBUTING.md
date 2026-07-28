@@ -42,10 +42,22 @@ When in doubt, add a test that proves the invariant still holds.
 make test           # full suite: Python (unittest/pytest) + Rust (cargo test)
 make test-py        # Python engine only (stdlib, zero network)
 make test-rust      # Rust console only (offline)
+make test-purple    # end-to-end purple loop (needs a built console binary — see below)
 make doctor         # diagnose modules + expected tools/services
 ```
 
 Everything must be **green** and **offline** — tests must not touch the network or a real target.
+
+> **The purple loop is tested end to end, not just per side.** `make test-purple`
+> (`scripts/purple_loop_e2e.py`, run by the `purple-e2e` CI job) drives the whole chain on one machine:
+> the engine fires the synthetic `demo.fingerprint` module → the run-records are POSTed to a real
+> console binary (`/api/ingest`) → the console queries the demo SOC stub `tools/mock_plume.py`
+> (`GET /api/coverage/detections?since=…`) → `GET /api/purple/coverage` is checked against expectations
+> *derived from the actual shots* (detected/missed sets, `detection_rate`, per-technique MTTD). It stays
+> inside the "no offensive network I/O" rule: the stub only ever **answers** on 127.0.0.1, the targets are
+> loopback IP literals (so the ROE pins them without any DNS lookup), and `demo.fingerprint` emits a
+> synthetic finding without touching the network. It needs a console binary — pass
+> `CONSOLE_BIN=console/target/debug/forge` if you have not built `--release`.
 
 > **One optional tool: a JavaScript runtime (`node`).** The SPA governance guard
 > (`tests/test_console_spa_governance.py`) proves *by execution* that the console's single network door

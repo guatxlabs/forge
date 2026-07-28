@@ -2,8 +2,10 @@
 # =============================================================================
 #
 # Jobs :
-#   - python  : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
-#   - console : `cargo test` + `cargo build --release` du crate Rust de la console.
+#   - python     : `python3 -m unittest discover` (cœur pur-stdlib, zéro dépendance) ;
+#   - console    : `cargo test` + `cargo build --release` du crate Rust de la console ;
+#   - purple-e2e : la BOUCLE purple de bout en bout (moteur -> ingest -> détections -> couverture)
+#                  contre le SOC de démonstration loopback `tools/mock_plume.py`.
 #
 # Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.1`
 # (console/Cargo.toml + Cargo.lock épinglé sur le rev du tag). Les jobs cargo la résolvent
@@ -118,6 +120,61 @@ jobs:
           path: console/target/release/forge
           if-no-files-found: error
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Purple E2E — la BOUCLE COMPLÈTE (le différenciateur du produit) exécutée pour de vrai :
+  #
+  #     moteur Python (ROE -> fire -> run-record ATT&CK)
+  #       -> POST /api/ingest                        (binaire console produit par le job `console`)
+  #       -> GET  /api/coverage/detections?since=N   (SOC de démo : tools/mock_plume.py)
+  #       -> GET  /api/purple/coverage               (jointure MITRE + detection_rate + MTTD)
+  #
+  # Les deux produits sont testés unitairement chacun de leur côté ; RIEN ne vérifiait que le CONTRAT
+  # entre eux tient. Ce job échoue dès qu'il dérive : nom de champ du run-record, forme de la réponse
+  # du SOC (`{detections:[{mitre,count,first_ts}]}`), sémantique de la fenêtre `since`, jointure
+  # detected/missed, calcul du taux ou du MTTD. Le scénario et les valeurs attendues sont décrits dans
+  # scripts/purple_loop_e2e.py (attentes DÉRIVÉES des tirs réels, pas recopiées d'un run).
+  #
+  # POURQUOI C'EST AUTORISÉ malgré la règle « aucun I/O réseau offensif en CI » — vérifié en LISANT le
+  # code, pas sur parole :
+  #   * tools/mock_plume.py est du LOOPBACK PUR : stdlib (http.server), il ne fait QUE répondre (aucune
+  #     socket cliente dans le fichier), son bind est `--host 127.0.0.1` (défaut ET forcé en argv par le
+  #     driver) et son seed est un fichier local ;
+  #   * la console est bindée sur 127.0.0.1 et sa source de détection (PLUME_URL) pointe ce loopback —
+  #     son unique fetch sortant va donc sur 127.0.0.1 ;
+  #   * le TIR est `demo.fingerprint`, le module de démonstration dont `fire()` fabrique un finding
+  #     SYNTHÉTIQUE sans aucun I/O réseau (forge/modules/demo.py) — aucun outil offensif n'est invoqué ;
+  #   * les cibles sont des IP littérales loopback (127.0.0.x) : le ROE les épingle sans résolution, la
+  #     CI n'émet même pas une requête DNS.
+  # ---------------------------------------------------------------------------
+  purple-e2e:
+    name: purple (E2E boucle forge <-> mock_plume)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # réutilise le binaire RELEASE déjà produit et publié en artefact par le job `console` : la boucle
+    # est exercée sur le binaire qu'on livre, sans payer un second build.
+    needs: [console]
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Récupérer le binaire console (artefact du job `console`)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: forge
+          path: bin
+
+      - name: Rendre le binaire exécutable
+        run: chmod +x bin/forge
+
+      # Aucune dépendance à installer : le moteur Forge et le stub SOC sont stdlib-only.
+      - name: Boucle purple de bout en bout (tir -> ingest -> détections -> couverture)
+        run: python3 scripts/purple_loop_e2e.py --console-bin bin/forge
 
   # ---------------------------------------------------------------------------
   # Console (Postgres) — MATRICE de backend : le job `console` ci-dessus couvre le DÉFAUT SQLite
@@ -330,7 +387,7 @@ jobs:
   ci-ok:
     name: CI
     if: always()   # sinon un job en échec SAUTE ce job au lieu de le faire échouer
-    needs: [python, console, console-postgres, security]
+    needs: [python, console, console-postgres, purple-e2e, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

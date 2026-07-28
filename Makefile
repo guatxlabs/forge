@@ -2,7 +2,7 @@
 # Sûreté d'abord : aucune cible ici ne tire quoi que ce soit contre une cible réelle.
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-py test-rust test-pg check-version install console doctor clean demo demo-purple demo-seed
+.PHONY: help test test-py test-rust test-pg test-purple check-version install console doctor clean demo demo-purple demo-seed
 
 # --- Postgres (Stage 4) : conteneur éphémère pour les tests d'intégration du backend store-postgres ---
 PG_IMAGE      ?= postgres:16
@@ -12,6 +12,10 @@ PG_USER       ?= forge
 PG_PASS       ?= forgepw
 PG_DB         ?= forge
 PG_URL        ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)
+
+# Binaire console utilisé par l'E2E purple (release par défaut ; `CONSOLE_BIN=console/target/debug/forge`
+# pour un build de dev). La cible ne CONSTRUIT rien : elle exerce le binaire qu'on lui donne.
+CONSOLE_BIN ?= console/target/release/forge
 
 # --- Démo hors-ligne (engagement de référence synthétique — TLD .example, aucune cible réelle) ---
 DEMO_DIR   ?= examples/reference-engagement
@@ -29,6 +33,9 @@ test-py:  ## Tests Python (stdlib, zéro réseau)
 
 test-rust:  ## Tests Rust de la console (cargo test, offline)
 	cd console && cargo test
+
+test-purple:  ## E2E de la boucle purple (tir -> ingest -> détections -> couverture) — exige un binaire console
+	python3 scripts/purple_loop_e2e.py --console-bin $(CONSOLE_BIN)
 
 test-pg:  ## Tests d'intégration Postgres (Stage 4) : spin docker PG -> cargo test --features store-postgres -> teardown
 	@echo "[test-pg] démarrage d'un Postgres éphémère ($(PG_IMAGE)) sur :$(PG_PORT)..."

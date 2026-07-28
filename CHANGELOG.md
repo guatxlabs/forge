@@ -20,6 +20,14 @@ All notable changes to Forge are documented here. The format is based on
   4 s; with it, `HTTP/1.1 200 OK` immediately. The sibling OIDC POST helper (`sso.rs`) already sent the
   blank line. Now covered end to end by the `purple-e2e` CI job.
 
+### Added
+- **End-to-end CI for the purple loop** (`purple-e2e` job + `scripts/purple_loop_e2e.py`,
+  `make test-purple`): fires the engine, ingests the run-records into a real console binary, serves
+  detections from the loopback demo stub `tools/mock_plume.py`, and asserts the computed coverage
+  (`detected`/`missed`, `detection_rate`, per-technique MTTD, `since` windowing) against expectations
+  derived from the actual shots. No offensive network I/O: loopback only, synthetic module, loopback IP
+  literals (no DNS lookup).
+
 ### Notes for open-source builds
 - The Rust console depends on `guatx-core` via a **pinned public git dependency**
   (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1", features = ["forge"]`; see
