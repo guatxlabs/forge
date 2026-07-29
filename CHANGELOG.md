@@ -17,8 +17,22 @@ All notable changes to Forge are documented here. The format is based on
   unreachable (`source_reachable:false`, `error: "lecture réponse échouée: Resource temporarily
   unavailable (os error 11)"`) even though the SOC was up and answering. Measured byte for byte by
   replaying the emitted request against `tools/mock_plume.py`: without the blank line, no response in
-  4 s; with it, `HTTP/1.1 200 OK` immediately. The sibling OIDC POST helper (`sso.rs`) already sent the
-  blank line. Now covered end to end by the `purple-e2e` CI job.
+  4 s; with it, `HTTP/1.1 200 OK` immediately. Now covered end to end by the `purple-e2e` CI job.
+
+  **Blast radius — larger than the detection source.** `http_get_blocking` has three production
+  callers, and all three were affected: `detection.rs:531` (detection source) **and `sso.rs:935`
+  (OIDC discovery, `.well-known/openid-configuration`) and `sso.rs:1001` (JWKS)**. OIDC login over
+  plain http therefore could not complete either. Only the token exchange was safe, because it goes
+  through the *POST* helper (`sso.rs::http_post_form_blocking`), which did send the blank line — the
+  omission was an oversight in the GET path, not a convention. An earlier wording of this entry
+  mentioned only the detection source and cited the healthy POST sibling, which wrongly implied SSO
+  was unaffected.
+
+  **Why no test caught it, in either path.** The fetcher's tests only ever targeted
+  `http://127.0.0.1:1/x` — an unreachable port — so they asserted that failure fails; a *successful*
+  fetch was never exercised. And the 18 SSO tests still pass with the bug reintroduced, because their
+  mock IdP does a single `read()` and answers immediately instead of waiting for the end of headers.
+  A green suite proved nothing here; only an end-to-end exchange with an RFC-compliant server did.
 
 ### Added
 - **End-to-end CI for the purple loop** (`purple-e2e` job + `scripts/purple_loop_e2e.py`,

@@ -85,7 +85,16 @@ demo-purple: demo-seed  ## Démo Purple : stub mock-Plume (DEMO, PAS un vrai SOC
 	  PLUME_PID=$$!; trap 'kill $$PLUME_PID 2>/dev/null' EXIT INT TERM; \
 	  sleep 1; \
 	  FORGE_CONSOLE_DB=$(DEMO_DB) FORGE_CONSOLE_SCOPE=$(DEMO_DIR)/scope.json FORGE_PKG_DIR=. \
-	    PLUME_URL=http://127.0.0.1:$(PLUME_PORT) console/target/release/forge
+	    PLUME_URL=http://127.0.0.1:$(PLUME_PORT) \
+	    FORGE_ALLOW_INTERNAL_INTEGRATIONS=1 console/target/release/forge
+# ^ FORGE_ALLOW_INTERNAL_INTEGRATIONS : la deny-list SSRF de la console REFUSE par défaut tout fetch
+#   d'intégration vers une cible interne — 127.0.0.1 en fait partie. Le stub mock-Plume de cette démo
+#   ÉTANT en loopback, sans cette variable la matrice affichait `source_reachable=false` et
+#   `0 détectée / 0 ratée`, alors que README et GETTING_STARTED annoncent « 7 tirées · 4 détectées ·
+#   3 ratées ». MESURÉ : sans la variable -> `deny-list SSRF : … 127.0.0.1 refusé (loopback)`,
+#   fired=7 detected=0 rate=0.0 ; avec -> fired=7 detected=4 missed=3 rate=0.5714, MTTD moy 232,5 s.
+#   Les chiffres promis étaient donc justes ; c'est la démo qui ne pouvait pas les produire.
+#   Le driver E2E (scripts/purple_loop_e2e.py) pose déjà la même variable, sur son seul processus.
 
 clean:  ## Supprime les artefacts de build + la base démo (préserve scope/ledger gitignorés)
 	rm -rf build dist *.egg-info .pytest_cache
