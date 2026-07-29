@@ -49,7 +49,7 @@ All notable changes to Forge are documented here. The format is based on
   notions must not share one name in an API. The matrix stays a **red** view; MTTD and the
   parent-approx marker come from `/api/purple/coverage` as an enrichment, matched on the **exact**
   technique id (the previous « T1595.003 measured under its base T1595 » fallback is gone — it was
-  precisely a parent-approx displayed as the sub-technique's MTTD).
+  precisely a parent-approx displayed as the sub-technique's MTTD). Read `missed` as the list it is: in **fail-open** (`purple_fail_open`) `techniques_fired` is `N` while all three counters are `0` — deriving `missed = fired - detected - parent_approx` there manufactures the very false "missed" that fail-open exists to prevent.
 
 ### Fixed
 - **Detection-source fetch never completed its HTTP request.** The console's built-in fetcher

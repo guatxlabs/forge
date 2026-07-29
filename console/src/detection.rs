@@ -374,7 +374,12 @@ fn mitre_parent_of(tid: &str) -> Option<String> {
 /// avec son propre compteur `techniques_parent_approx`.
 ///
 /// Renvoie l'objet JSON exposé par /api/purple/coverage (hors champ plume_reachable, ajouté par
-/// le handler). INVARIANT : detected + parent_approx + missed == techniques_fired.
+/// le handler). INVARIANT : detected + parent_approx + missed == techniques_fired — SAUF EN FAIL-OPEN,
+/// et cette réserve compte : `purple_fail_open` rend `techniques_fired = N` avec les TROIS compteurs à
+/// 0, délibérément (on ne déclare pas « raté » ce qu'on n'a pas pu interroger). Un consommateur qui
+/// dériverait `missed = fired - detected - parent_approx` fabriquerait donc, en fail-open, exactement
+/// les faux « ratés » que le fail-open existe pour empêcher. `missed` est une LISTE rendue, à lire
+/// telle quelle — jamais à recalculer.
 pub(crate) fn compute_purple_coverage(
     fired: &[(String, Option<i64>)],
     detections: &std::collections::HashMap<String, (i64, i64)>,
