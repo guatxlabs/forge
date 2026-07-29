@@ -113,7 +113,7 @@ CIDR/IP — une IP `out_scope` ne se contourne pas via une URL ou un `host:port`
 - **Validation stricte des entrées** : login/campagne `[A-Za-z0-9._-]{1,64}` (pas de `-` en tête) ;
   hôtes rejetant NUL, whitespace, métacaractères shell et `-` en tête (anti-injection d'option CLI).
   Les cibles sont écrites dans un **fichier** puis passées par chemin, jamais concaténées à un shell.
-- **soql** : compilé en **SQL read-only** (champs allowlistés, valeurs en params liés, un seul
+- **GXQL** : compilé en **SQL read-only** (champs allowlistés, valeurs en params liés, un seul
   SELECT, LIMIT plafonné, connexion `SQLITE_OPEN_READ_ONLY`). Un champ hors allowlist ⇒ 400.
 - **Migration API** : opt-in (`FORGE_ALLOW_API_MIGRATE`, off par défaut) + validation de chemin
   allowlistée (`FORGE_CONSOLE_IMPORT_DIR`, anti path-traversal) + pré-provision uniquement.
@@ -127,18 +127,18 @@ CIDR/IP — une IP `out_scope` ne se contourne pas via une URL ou un `host:port`
 ### 7.1 Dashboards et panels partagés — caveat opérateur multi-tenant
 
 Les **données** rendues par un panel sont filtrées **par ligne** selon les engagements accordés à
-l'appelant : le filtre est injecté par le compilateur SoQL à chaque feuille lisant des données
+l'appelant : le filtre est injecté par le compilateur GXQL à chaque feuille lisant des données
 scopables, il est AND-joint à chaque profondeur, il est **fail-closed** (grant vide ⇒ aucune ligne) et
 la requête de l'utilisateur ne peut pas l'élargir. Un panel partagé affiché par un tenant ne renvoie
 donc que les lignes de ce tenant.
 
-En revanche la **définition** d'un panel (son nom et le **texte** de sa requête SoQL) est une
+En revanche la **définition** d'un panel (son nom et le **texte** de sa requête GXQL) est une
 configuration de console **globale** : les tables `panel`/`dashboard` ne portent pas de colonne
 propriétaire/tenant, donc tout appelant authentifié disposant d'un grant voit la liste des
 définitions.
 
 > ⚠️ **Recommandation** : en déploiement multi-tenant, **ne pas embarquer d'identifiant
-> tenant-sensible en clair dans le texte SoQL d'un panel partagé** (p.ex. le nom de code d'une
+> tenant-sensible en clair dans le texte GXQL d'un panel partagé** (p.ex. le nom de code d'une
 > campagne client). C'est une visibilité de **métadonnée** inhérente au modèle « dashboards
 > partagés », pas une fuite de données. Des dashboards privés par propriétaire/tenant sont une
 > évolution possible du modèle.

@@ -461,7 +461,7 @@ body.role-viewer #act-new,body.role-viewer #mode-toggle{display:none!important}
   .evpager button{min-width:40px}
   .qtable th,.qtable td{padding-top:9px;padding-bottom:9px}
 }
-/* aide a la saisie (completion soql/champs) */
+/* aide a la saisie (completion GXQL/champs) */
 .achint{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px;min-height:0}
 .acchip{font-family:var(--font-mono);font-size:11px;padding:3px 9px;border-radius:var(--pill);background:var(--acc-bg);color:var(--acc);border:1px solid color-mix(in srgb,var(--acc) 28%,transparent);cursor:pointer}
 .acchip:hover{background:var(--acc);color:var(--acc-ink)}
@@ -544,7 +544,7 @@ select.picon{padding:2px 6px!important;background:var(--card);color:var(--fg);bo
 .rangebtn{gap:6px} #rangelbl{font-size:12px}
 /* éditeur de règle présenté en modal (déplacé dans #rule-form-ov à l'ouverture) */
 .rulemodal{background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);box-shadow:0 20px 60px #000a;padding:20px;width:min(620px,94vw);max-height:90vh;overflow:auto}
-/* aide requêtes SOQL (modal) */
+/* aide requêtes GXQL (modal) */
 .helpmodal{width:min(760px,95vw)}
 .helpref{font-family:var(--font-mono);font-size:12px;line-height:1.55;white-space:pre;overflow:auto;max-height:64vh;background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:12px;color:var(--fg);margin:0 0 12px}
 .modal-f span{font-weight:600}

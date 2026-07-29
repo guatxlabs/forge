@@ -31,7 +31,7 @@ data/secrets. In particular:
 - **Ledger integrity** — forging, reordering, truncating, or downgrading a signed engagement
   ledger entry so that `verify()` still passes.
 - **Tenant / engagement isolation** — reading another engagement's or tenant's findings/data
-  (e.g. via the SoQL surface) under the enterprise tenancy model.
+  (e.g. via the GXQL surface) under the enterprise tenancy model.
 - **Secret leakage** — operator session credentials, API keys, or signing keys escaping into a
   finding, the ledger, a report, a log, or an API response.
 - **AuthN/AuthZ** — console authentication bypass, privilege escalation, cross-tenant IDOR.

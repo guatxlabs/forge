@@ -27,7 +27,7 @@ fn cli_query_rows_store(store: &crate::store::Store, sql: &str, params: &[String
         .unwrap_or_default()
 }
 
-/// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/SOQL).
+/// Dispatch des sous-commandes de lecture. Retourne un code de sortie : 0 = OK, 2 = erreur (IO/GXQL).
 pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
     let as_json = cli_flag(args, "json");
     let campaign = cli_opt(args, "campaign");
@@ -103,7 +103,7 @@ pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
             let soql = match soql {
                 Some(s) if !s.is_empty() => s,
                 _ => {
-                    eprintln!("usage: forge query --soql '<pipeline soql>' [--json]");
+                    eprintln!("usage: forge query --soql '<pipeline GXQL>' [--json]");
                     return 2;
                 }
             };
@@ -125,7 +125,7 @@ pub(crate) fn run_read_cli(cmd: &str, args: &[String]) -> i32 {
                     0
                 }
                 Err((_, e)) => {
-                    eprintln!("[forge] query: SOQL invalide: {e}");
+                    eprintln!("[forge] query: GXQL invalide: {e}");
                     2
                 }
             }
@@ -198,7 +198,7 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
                 let soql = match soql {
                     Some(s) if !s.is_empty() => s,
                     _ => {
-                        eprintln!("usage: forge query --soql '<pipeline soql>' [--json]");
+                        eprintln!("usage: forge query --soql '<pipeline GXQL>' [--json]");
                         return 2;
                     }
                 };
@@ -222,7 +222,7 @@ fn run_read_cli_pg(cmd: &str, url: &str, args: &[String], as_json: bool, campaig
                         0
                     }
                     Err((_, e)) => {
-                        eprintln!("[forge] query: SOQL invalide: {e}");
+                        eprintln!("[forge] query: GXQL invalide: {e}");
                         2
                     }
                 }

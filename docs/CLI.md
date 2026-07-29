@@ -170,7 +170,7 @@ forge useradd alice admin              # demande le mot de passe sur STDIN
 
 ### `forge findings | roe | coverage | query [args] [--json]`
 **Parité lecture locale** : lit la MÊME base SQLite que l'API, en **READ-ONLY**, imprime en table
-(défaut) ou JSON (`--json`). Aucune écriture, aucun spawn. `query` prend une requête soql.
+(défaut) ou JSON (`--json`). Aucune écriture, aucun spawn. `query` prend une requête GXQL.
 ```bash
 forge findings --json
 forge query 'search severity=HIGH | fields target,title,mitre'

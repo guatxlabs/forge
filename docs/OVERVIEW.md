@@ -77,7 +77,7 @@ prix dans [`PRICING.md`](PRICING.md).
 | Scope-guard ROE + armement par couche | ✅ tout le cycle de gouvernance |
 | Ledger d'engagement signé + vérif externe | ✅ preuve d'autorisation |
 | Recon, oracles à preuve, connecteurs MSF/Burp | ✅ tout le red-team gouverné |
-| Console (findings / coverage ATT&CK / runs), soql, dashboards, rapports | ✅ tout le store + livrables |
+| Console (findings / coverage ATT&CK / runs), GXQL, dashboards, rapports | ✅ tout le store + livrables |
 | Boucle purple (detected/missed/MTTD) | ⏸️ inerte — **fail-open lisible** : `source_reachable:false`, aucune métrique inventée |
 
 Quand aucune source de détection n'est configurée, l'endpoint de couverture purple répond

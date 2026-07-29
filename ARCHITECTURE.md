@@ -13,7 +13,7 @@ Ce dépôt — Forge (rouge, PUBLIC) : moteur Python (gate ROE, ledger, modules,
   console/        forge (bin Rust) : store rouge + API + dashboards — DÉPEND de guatx-core
 
 Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
-  guatx-core      lib Rust — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur soql ; à étendre
+  guatx-core      lib Rust — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur GXQL ; à étendre
                   (auth/host-guard, query-exec). RIEN d'offensif n'y descend. Consommée par la console
                   en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.1).
   plume           Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
@@ -103,10 +103,10 @@ séparé** dont la charte est le red-team autorisé en général, l'own-infra n'
 - **P3 (v0 fait)** — console Rust `console/` (axum + rusqlite, binaire unique, compile offline) :
   store du modèle rouge (`finding`/`runrecord`), `POST /api/ingest` (token) = point de jonction
   purple, `GET /api/findings|runrecords|coverage`, console opérateur (PWA vanilla-JS). Loop
-  Python↔Rust prouvée (`console_client.py` + `forge campaign --console`). **soql `event→finding`
+  Python↔Rust prouvée (`console_client.py` + `forge campaign --console`). **GXQL `event→finding`
   fait** (`console/src/soql.rs` : `search|stats|fields|sort|head` sur `finding`/`runrecord`,
   compilé en SQL read-only, champs allowlistés, valeurs en params liés, connexion RO ; `GET
-  /api/query` + barre de recherche UI). **Dashboards faits** : panels soql sauvegardés
+  /api/query` + barre de recherche UI). **Dashboards faits** : panels GXQL sauvegardés
   (`panel` table, `/api/panels` CRUD, écriture gatée par token, `/:id/data` ré-exécute la requête),
   viz table/bar/stat dans l'UI. **Auth/RBAC fait** : `host_guard` (anti-DNS-rebinding, Host en
   allowlist) + `auth_guard` (argon2id Basic=opérateur/viewer · Bearer token=agent/admin/écriture ·
@@ -115,6 +115,6 @@ séparé** dont la charte est le red-team autorisé en général, l'own-infra n'
 - **Durcissement (fait)** — ledger **Ed25519** (`signing.py`, `verify_external`) ; **ancrage hors-host**
   (`anchor.py` : interface `Anchor` + `Witness` co-signataire + `reconcile` qui détecte une réécriture
   re-signée localement) ; **mémoire sémantique** (`JaccardMemory` floue stdlib + `memory_faiss.py`
-  embeddings optionnel, `make_memory` dégrade) ; **`guatx-core`** (moteur soql extrait, console dessus).
+  embeddings optionnel, `make_memory` dégrade) ; **`guatx-core`** (moteur GXQL extrait, console dessus).
   Reste à la demande : migration de Plume vers `guatx-core` ; témoin distant en HTTP ; backend à
   embeddings activé (nécessite les dépendances optionnelles correspondantes sur le PYTHONPATH).

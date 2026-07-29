@@ -50,10 +50,10 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `GET /api/modules` | Catalogue de modules (kind, exploit, mitre, disponibilité, gouvernance). |
 | `GET /api/ledger` | Entrées du ledger (depuis le JSONL disque), paginé (`limit`/`offset`). |
 | `GET /api/ledger/verify` | Vérif de la chaîne SHA-256 **côté console** (sans clé privée : `sig_checked:false`). Pour la vérif de signature, voir `forge ledger verify`. |
-| `GET /api/query` · `POST /api/query` | **soql** (type-SPL) → SQL **read-only** (champs allowlistés, params liés, un seul SELECT, LIMIT plafonné, connexion RO). POST pour les requêtes longues. Champ hors allowlist ⇒ **400**. |
+| `GET /api/query` · `POST /api/query` | **GXQL** (type-SPL) → SQL **read-only** (champs allowlistés, params liés, un seul SELECT, LIMIT plafonné, connexion RO). POST pour les requêtes longues. Champ hors allowlist ⇒ **400**. |
 | `GET /api/dashboards` | Liste des dashboards (ordre `position`). |
-| `GET /api/panels` | Liste des panels soql. |
-| `GET /api/panels/:id/data?from=&to=` | Exécute la requête soql du panel (viz table/bar/stat). |
+| `GET /api/panels` | Liste des panels GXQL. |
+| `GET /api/panels/:id/data?from=&to=` | Exécute la requête GXQL du panel (viz table/bar/stat). |
 | `GET /api/runs` | Liste des runs C2-light (récents d'abord). |
 | `GET /api/runs/:id` | Détail d'un run. |
 | `GET /api/runs/:id/report[?format=md\|html\|pdf]` | **Rapport d'engagement**. `md` (défaut), `html` (livrable brandé, CSS print), `pdf` (si moteur PDF présent, sinon `pdf_unavailable`). |
@@ -158,7 +158,7 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 |---|---|
 | `POST /api/ingest` | **Point de jonction** moteur→console : reçoit findings + run-records + couverture + décisions ROE d'une campagne. Dedup au store (`UNIQUE(campaign,target,title)`). |
 | `POST /api/dashboards` · `POST /api/dashboards/:id` · `DELETE /api/dashboards/:id` | CRUD des dashboards. |
-| `POST /api/panels` · `POST /api/panels/:id` · `DELETE /api/panels/:id` | CRUD des panels soql. |
+| `POST /api/panels` · `POST /api/panels/:id` · `DELETE /api/panels/:id` | CRUD des panels GXQL. |
 
 ---
 

@@ -22,7 +22,7 @@ Trois rôles (contrainte applicative ; la table `users` stocke un TEXT) :
 
 | Rôle | Peut | Ne peut pas |
 |---|---|---|
-| **viewer** | Lecture : findings, coverage ATT&CK, purple, runs, ledger, soql, dashboards. | Lancer un run, administrer. |
+| **viewer** | Lecture : findings, coverage ATT&CK, purple, runs, ledger, GXQL, dashboards. | Lancer un run, administrer. |
 | **operator** | Tout viewer **+** lancer/annuler un run C2-light (`/api/run*`), rafraîchir les modules. | Administrer (comptes/settings/gouvernance). |
 | **admin** | Tout **+** administration : comptes, settings, source de détection, gouvernance des connecteurs, backup/restore, setup. | — (superset). |
 

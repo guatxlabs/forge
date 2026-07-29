@@ -92,7 +92,7 @@ Où Forge **GAGNE** et où il **PERD**. Vendre la vérité construit la confianc
 | **Gouvernance / preuve d'autorisation** | 🟢 **Gate ROE + ledger Ed25519 tiers-vérifiable** | 🔴 quasi nul | 🔴 nul | ⚪ N/A | ⚪ N/A |
 | **Audit / chaîne de custody** | 🟢 **append-time, signé** | 🟡 logs locaux | 🟡 logs C2 | 🔴 | 🟡 logs |
 | **Boucle purple intégrée (même vendeur)** | 🟢 **Forge×Plume, corrélation ATT&CK, MTTD** | 🔴 | 🟡 via intégrations tierces | 🔴 | 🟡 côté bleu seul |
-| **UI opérateur / dashboards** | 🟢 console + soql + panels | 🟡 | 🟡 | 🟢 | 🟢 |
+| **UI opérateur / dashboards** | 🟢 console + GXQL + panels | 🟡 | 🟡 | 🟢 | 🟢 |
 | **Safe-by-default** | 🟢 **inerte, opt-in, fail-closed** | 🔴 conçu pour tirer | 🔴 | ⚪ | ⚪ |
 | **Empreinte / déployabilité** | 🟢 un binaire + du Python stdlib (taille du livrable **non re-mesurée**) | 🟡 | 🟡 | 🟡 | 🔴 lourd |
 | | | | | | |

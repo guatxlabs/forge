@@ -15,7 +15,7 @@ tard**, sans rien casser.
 | Ledger d'engagement signé Ed25519 + vérif externe par clé publique | ✅ |
 | Recon passif/actif, oracles à preuve, connecteurs MSF/Burp (gatés ROE) | ✅ |
 | Console : Findings / Coverage ATT&CK / Runs / Ledger | ✅ |
-| soql (recherche type-SPL) + dashboards (panels sauvegardés) | ✅ |
+| GXQL (recherche type-SPL) + dashboards (panels sauvegardés) | ✅ |
 | Rapports d'engagement (md / html / pdf) + section anti-masquage | ✅ |
 | C2-light gouverné (lancement de campagne depuis le web) | ✅ |
 | **Couverture purple (detected / missed / MTTD)** | ⏸️ **inerte — fail-open lisible** |

@@ -63,8 +63,8 @@ export const HELP_TOPICS = [
     ['p', "ISOLATION : le rapport ne reflète QUE l'engagement actif (jamais les données d'un autre). Chaque génération et chaque configuration de branding sont journalisées au ledger. Le branding (nom du commanditaire, logo, prestataire) est réservé au rôle admin ; PDF/DOCX dégradent proprement si le moteur d'impression ou python est absent sur l'hôte."],
     ['p', "Depuis Findings, « Export CSV / JSON » télécharge les findings de l'engagement actif et « Rapport complet » ouvre cette vue."],
   ] },
-  { key: 'explore', title: 'Recherche & Explore (soql)', icon: 'search', doc: 'docs/CONCEPTS.md', view: 'explore', blocks: [
-    ['p', "Requêteur soql (langage de recherche en pipeline) sur les données de l'engagement, ex : search severity=HIGH | stats count by mitre | sort -count | head 20."],
+  { key: 'explore', title: 'Recherche & Explore (GXQL)', icon: 'search', doc: 'docs/CONCEPTS.md', view: 'explore', blocks: [
+    ['p', "Requêteur GXQL (langage de recherche en pipeline) sur les données de l'engagement, ex : search severity=HIGH | stats count by mitre | sort -count | head 20."],
     ['p', "Choisissez une visualisation (table / barres / courbe / stat). Cliquez une valeur pour un drilldown ; « Panneau » enregistre la requête comme panneau réutilisable dans un dashboard."],
   ] },
   { key: 'coverage', title: 'Couverture ATT&CK', icon: 'activity', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'coverage', blocks: [
@@ -93,7 +93,7 @@ export const HELP_TOPICS = [
     ['p', "La signature cryptographique se vérifie hors-console : forge ledger verify --pubkey <clé>."],
   ] },
   { key: 'dashboards', title: 'Dashboards / Vues', icon: 'layout', doc: 'docs/CONCEPTS.md', view: 'dashboards', blocks: [
-    ['p', "Compose des dashboards de panneaux soql (glisser pour réordonner, coin pour redimensionner). Une « vue » est une collection de dashboards — un simple filtre d'affichage local."],
+    ['p', "Compose des dashboards de panneaux GXQL (glisser pour réordonner, coin pour redimensionner). Une « vue » est une collection de dashboards — un simple filtre d'affichage local."],
   ] },
   { key: 'admin', title: 'Administration', icon: 'user', doc: 'docs/ADMINISTRATION.md', view: 'admin', blocks: [
     ['p', "Réservé au rôle admin. Toutes les mutations sont attribuées à votre compte et ledgerisées."],

@@ -17,7 +17,7 @@ Ce dépôt — Forge (rouge) :
   console/web/   SPA vanilla-JS (skin Ember, dark) — findings / coverage / purple / runs / admin
 
 Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
-  guatx-core     lib Rust NEUTRE, publique — le ~70 % commun (moteur soql v0) ; consommée par la console
+  guatx-core     lib Rust NEUTRE, publique — le ~70 % commun (moteur GXQL v0) ; consommée par la console
                  en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.1)
   plume          Plume (SOC bleu, public) — détection / BAS  [OPTIONNEL pour Forge]
 ```
@@ -129,7 +129,7 @@ Détail des rôles et de l'authz par route : [Modèle de sécurité](SECURITY_MO
 
 | Rôle | Peut | Preuve |
 |---|---|---|
-| **viewer** | Lecture (findings, coverage, runs, ledger, soql, dashboards) | session ; ou Basic (hash env `FORGE_CONSOLE_PASS_HASH`) |
+| **viewer** | Lecture (findings, coverage, runs, ledger, GXQL, dashboards) | session ; ou Basic (hash env `FORGE_CONSOLE_PASS_HASH`) |
 | **operator** | Lancer/annuler un run C2-light (`/api/run*`), rafraîchir les modules | session operator|admin ; ou en-tête `X-Forge-Operator` (hash env `FORGE_CONSOLE_OPERATOR_HASH`) + politique source-CIDR |
 | **admin** | Administration : comptes, settings, gouvernance des connecteurs, source de détection, backup/restore, setup | **session admin uniquement** (aucun repli env-hash — attribution individuelle obligatoire) |
 
@@ -170,9 +170,9 @@ Chaque étape est **ledgerisée** (`console.*`). La gouvernance UI (désactiver 
 - **Settings** (table `settings`) : `detection_source`, `operator_policy`, `backup_policy`,
   `session_ttl`, `trusted_proxy`, `backup_last_run`. Configurables **dans l'UI** (admin, ledgerisé).
   Voir [Configuration](CONFIGURATION.md).
-- **soql** : langage de requête type-SPL porté de Plume, compilé en **SQL read-only** (champs
+- **GXQL** : langage de requête type-SPL porté de Plume, compilé en **SQL read-only** (champs
   allowlistés, valeurs en params liés, un seul SELECT, LIMIT plafonné, connexion RO). `GET
-  /api/query`. Les **dashboards** sont des panels soql sauvegardés (viz table/bar/stat).
+  /api/query`. Les **dashboards** sont des panels GXQL sauvegardés (viz table/bar/stat).
 
 ## 4. Le SPA (`console/web/`)
 
@@ -180,7 +180,7 @@ SPA **vanilla-JS** (aucun framework, aucun CDN — CSP stricte), skin « Ember �
 offensive de l'Aurora bleu de Plume). Au boot, il sonde `GET /api/setup/state` :
 `needs_setup:true` ⇒ affiche le **wizard de 1er déploiement** ([FIRST_DEPLOYMENT.md](FIRST_DEPLOYMENT.md)) ;
 sinon il affiche le portail de login puis les onglets **Findings / Coverage ATT&CK / Purple / Runs /
-Ledger / Recherche (soql) / Dashboards / Administration**. Progressive Web App (`sw.js`,
+Ledger / Recherche (GXQL) / Dashboards / Administration**. Progressive Web App (`sw.js`,
 `manifest.webmanifest`).
 
 ## 5. Le modèle de gouvernance (transversal)

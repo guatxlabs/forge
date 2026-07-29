@@ -80,7 +80,7 @@ First public cut of Forge — a governed, proof-oriented red-team engine.
 - **Unified resource profile** (`FORGE_RESOURCE_PROFILE=low|balanced|full`) — one knob sets sane
   resource defaults for constrained or beefy machines, with strict override > profile > default
   precedence and zero governance impact.
-- **Governed console** (Rust/axum): findings, ATT&CK coverage, SoQL explore, dashboards, runs,
+- **Governed console** (Rust/axum): findings, ATT&CK coverage, GXQL explore, dashboards, runs,
   ROE, ledger, admin — session-authenticated, RBAC, loopback-strict by default.
 - **Optional LLM assist** (OpenAI-compatible, off by default, egress-gated, advisory-only).
 - Postgres backend + HA topology, object-store artifacts, and Kubernetes manifests

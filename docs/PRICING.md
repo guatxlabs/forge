@@ -31,7 +31,7 @@ Purple se positionne en **premium justifié** par la couverture mesurée, pas pa
 
 | Tier | Périmètre produit | Pour qui | Ordre de grandeur |
 |---|---|---|---|
-| **Forge Red** | Moteur Forge seul : gate ROE fail-closed, ledger Ed25519 tiers-vérifiable, console + soql + dashboards, connecteurs MSF / Burp / nuclei. **Gouvernance + preuve, sans la boucle purple.** | Équipe red-team / MSSP qui veut auditabilité + chaîne de custody signée. | **Sous** MSF Pro (~15 k$/siège) — la valeur est la gouvernance, pas la capacité. |
+| **Forge Red** | Moteur Forge seul : gate ROE fail-closed, ledger Ed25519 tiers-vérifiable, console + GXQL + dashboards, connecteurs MSF / Burp / nuclei. **Gouvernance + preuve, sans la boucle purple.** | Équipe red-team / MSSP qui veut auditabilité + chaîne de custody signée. | **Sous** MSF Pro (~15 k$/siège) — la valeur est la gouvernance, pas la capacité. |
 | **Forge Purple** ⭐ | Tout Red **+ Plume** (SOC bleu) + boucle de couverture ATT&CK (detected / missed / MTTD réel). **Le différenciateur même-vendeur.** | RSSI / lead purple qui veut chiffrer et combler la couverture défensive. | **Premium au-dessus** de Red — justifié par la valeur de couverture mesurée (≈ tier MSF Pro et au-delà selon le périmètre). |
 | **Enterprise / MSSP** | Purple + multi-engagement, attribution individuelle (comptes utilisateurs), ancrage ledger hors-host (témoin distant), export client brandé (PDF/HTML), onboarding. | Grand compte régulé / MSSP multi-clients. | Sur devis (annuel, par périmètre). |
 

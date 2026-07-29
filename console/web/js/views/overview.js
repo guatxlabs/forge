@@ -23,7 +23,7 @@ export async function loadOverview() {
     if (sumHost) sumHost.innerHTML = '<div class="bad">hors-ligne : ' + esc(e.message) + '</div>';
     $('#status').textContent = 'hors-ligne (' + e.message + ')';
   }
-  // findings par sévérité (via soql stats)
+  // findings par sévérité (via GXQL stats)
   const sevHost = $('#ov-sev .body');
   try {
     const j = await runQ('search | stats count by severity | sort -count', true);

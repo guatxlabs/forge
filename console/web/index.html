@@ -507,10 +507,10 @@
 
   <!-- EXPLORE -->
   <section id="explore" class="card span2" aria-labelledby="exh">
-    <h2 id="exh">Requête (<code>soql</code>)</h2>
+    <h2 id="exh">Requête (<code>GXQL</code>)</h2>
     <div class="qbar">
-      <textarea id="sql" rows="3" aria-label="Requête soql" spellcheck="false"
-        placeholder="soql:  search severity=HIGH | stats count by mitre | sort -count | head 20"></textarea>
+      <textarea id="sql" rows="3" aria-label="Requête GXQL" spellcheck="false"
+        placeholder="GXQL:  search severity=HIGH | stats count by mitre | sort -count | head 20"></textarea>
       <button id="run" type="button">Exécuter</button>
       <button id="qback" type="button" title="Revenir à la requête précédente (drilldown)" hidden>← Retour</button>
       <select id="viz" aria-label="Visualisation"><option value="table">Table</option><option value="bar">Barres</option><option value="line">Courbe</option><option value="stat">Stat</option></select>
@@ -607,7 +607,7 @@
         <button id="view-del" type="button" class="picon" title="Supprimer la vue (les dashboards sont conservés)"></button>
       </div>
       <div class="viewbar-r">
-        <span class="muted">dashboards de panneaux soql — glisser pour réordonner, coin pour redimensionner</span>
+        <span class="muted">dashboards de panneaux GXQL — glisser pour réordonner, coin pour redimensionner</span>
         <button id="dash-edit" type="button" title="Mode édition : déplacer / redimensionner / assigner les panneaux">Édition</button>
         <button id="dash-new" type="button" title="Créer un dashboard">+ Dashboard</button>
       </div>

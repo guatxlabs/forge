@@ -36,7 +36,7 @@ export async function createPanelModal(did = 1, query = '') {
   const r = await modal({
     title: 'Nouveau panneau', okText: 'Créer', fields: [
       { name: 'name', label: 'Titre', required: true, value: 'Panneau' },
-      { name: 'query', label: 'Requête (soql)', type: 'textarea', required: true, value: query, placeholder: 'search severity=HIGH | stats count by mitre | sort -count' },
+      { name: 'query', label: 'Requête (GXQL)', type: 'textarea', required: true, value: query, placeholder: 'search severity=HIGH | stats count by mitre | sort -count' },
       { name: 'viz', label: 'Visualisation', type: 'select', value: 'table', options: VIZOPTS },
       { name: 'descr', label: 'Description (optionnel)', value: '' },
     ],

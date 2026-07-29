@@ -518,7 +518,7 @@ export async function runQuery() {
     renderViz();
     const net = Math.round(performance.now() - t0);
     const nrows = j.stats && typeof j.stats.rows === 'number' ? j.stats.rows : (j.rows ? j.rows.length : 0);
-    $('#qstats').textContent = `${nrows} ligne(s) · total ${net} ms · soql`;
+    $('#qstats').textContent = `${nrows} ligne(s) · total ${net} ms · GXQL`;
     $('#qstats').title = j.compiled || '';
   } catch (e) { $('#qstats').textContent = 'erreur : ' + e.message; }
 }
@@ -536,7 +536,7 @@ if ($('#q')) $('#q').addEventListener('keydown', e => {
 });
 
 // =====================================================================================
-//  Dashboards : panneaux soql (drag réordonner + resize) — schéma Forge (name/viz/col_span/position)
+//  Dashboards : panneaux GXQL (drag réordonner + resize) — schéma Forge (name/viz/col_span/position)
 // =====================================================================================
 // Hiérarchie portée de la console SOC (app.js L949-1316), recalée sur les endpoints RÉELS du backend
 // Forge : modèle PLAT (pas d'entité « view » côté serveur). Chaque dashboard = une tuile avec sa grille

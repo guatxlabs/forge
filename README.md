@@ -129,12 +129,14 @@ routes derrière (a) **host-guard** anti-DNS-rebinding (`Host` en allowlist → 
 **Bearer token** (agent/admin=écriture). Sans hash → mode dev localhost ouvert (les écritures
 restent gatées par le token). Mot de passe **argon2id** via `forge hashpw '...'`.
 Endpoints : `GET /health` · `POST /api/ingest` (token) · `GET /api/findings` · `GET /api/runrecords` ·
-`GET /api/coverage` (rollup ATT&CK) · **`GET /api/query?q=...`** (soql) · **`/api/panels`** (GET liste ·
+`GET /api/coverage` (rollup ATT&CK) · **`GET /api/query?q=...`** (GXQL) · **`/api/panels`** (GET liste ·
 POST créer [token] · DELETE [token] · `GET /api/panels/:id/data`) · `GET /` (console opérateur dark,
-vanilla-JS : barre de recherche soql + **dashboard de panels** table/bar/stat).
+vanilla-JS : barre de recherche GXQL + **dashboard de panels** table/bar/stat).
 Dedup au niveau store (`UNIQUE(campaign,target,title)`). Bind 127.0.0.1 ; auth/RBAC complète = durcissement.
 
-**soql (langage de requête type-SPL, porté de Plume)** — interroge `finding`/`runrecord`,
+**GXQL (langage de requête type-SPL, porté de Plume)** — *GuatX Query Language*, **anciennement
+« SOQL »** : même langage, même syntaxe, seul le nom change ; le drapeau CLI `--soql`, la clé JSON
+`soql` et le module `guatx_core::soql` restent inchangés. Interroge `finding`/`runrecord`,
 compilé en **SQL read-only** (champs en allowlist, valeurs en params liés, un seul SELECT, LIMIT
 plafonné, connexion `SQLITE_OPEN_READ_ONLY`). Exemples :
 ```
@@ -230,8 +232,8 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
 | Mémoire : store JSONL + dedup (`forge/memory.py`) | ✅ — backend à embeddings optionnel à brancher |
 | Boucle purple : run-records ATT&CK + `forge campaign` | ✅ construit + testé |
 | **Console Rust** (`console/`, fork de la colonne Plume) | ✅ — compile offline, ingest+coverage+PWA, intégration Python↔Rust prouvée |
-| **soql `finding`/`runrecord`** (`GET /api/query`, read-only, anti-injection) + barre de recherche UI | ✅ porté de Plume, testé en live |
-| **Dashboards query-driven** (panels soql sauvegardés, viz table/bar/stat, écriture gatée par token) | ✅ testé en live |
+| **GXQL `finding`/`runrecord`** (`GET /api/query`, read-only, anti-injection) + barre de recherche UI | ✅ porté de Plume, testé en live |
+| **Dashboards query-driven** (panels GXQL sauvegardés, viz table/bar/stat, écriture gatée par token) | ✅ testé en live |
 | **Auth/RBAC console** (argon2id Basic=viewer · Bearer=admin · host-guard anti-rebinding) | ✅ porté de Plume, 10/10 en live |
 | **Ledger Ed25519** (signature asymétrique à l'append + `verify_external` par clé publique) | ✅ testé |
 | **Ancrage hors-host** (`anchor.py` : interface `Anchor` + témoin co-signataire + `reconcile`) | ✅ testé (détecte une réécriture re-signée localement) |
