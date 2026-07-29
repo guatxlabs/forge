@@ -21,8 +21,13 @@ l'exporte ISOLÉ à un seul engagement, ou un pipeline CLI) :
                        "fired","dry_run","vetoed","errors"} , ... ],
       "attack":     {"techniques":[{"mitre","kinds":[],"targets":[],"fires"}],
                      "detection_source_configured": bool,
-                     "techniques_fired","techniques_detected","techniques_missed","detection_rate",
+                     # jointure purple à TROIS états : detected-exact / detected-parent-approx / missed.
+                     # `techniques_detected` et `detection_rate` ne comptent QUE l'exact ; le MTTD n'est
+                     # échantillonné que sur l'exact (cf. console/src/detection.rs).
+                     "techniques_fired","techniques_detected","techniques_parent_approx",
+                     "techniques_missed","detection_rate",
                      "detected":[{"mitre","alert_count","mttd_secs"}],
+                     "parent_approx":[{"mitre","parent","fires","parent_alert_count"}],
                      "missed":[{"mitre","fires"}]},
       "custody":    {"ledger_path","entries","head","alg","chain_ok","why","pubkey","actor"}
     }
@@ -434,9 +439,11 @@ def _html_attack(h, attack):
         h.append('<p class="muted">Aucune source de détection configurée — Forge en autonome. '
                  'Matrice détecté/raté indisponible (aucune couverture inventée).</p>')
         return
+    # TROIS ÉTATS rendus séparément — le rapport client ne doit pas dire autre chose que l'API.
     h.append("<h3>Détection (source configurée)</h3><ul>")
     h.append(f'<li>Tirées : {_e(attack.get("techniques_fired", 0))} · '
-             f'Détectées : {_e(attack.get("techniques_detected", 0))} · '
+             f'Détectées EXACTEMENT : {_e(attack.get("techniques_detected", 0))} · '
+             f'Couverture parente approximative : {_e(attack.get("techniques_parent_approx", 0))} · '
              f'Ratées : {_e(attack.get("techniques_missed", 0))}</li></ul>')
     missed = attack.get("missed") or []
     if missed:
@@ -444,9 +451,20 @@ def _html_attack(h, attack):
         for m in missed:
             h.append(f'<li><code>{_e(m.get("mitre"))}</code> — tirée {_e(m.get("fires", 0))}×</li>')
         h.append("</ul>")
+    # ANGLE MORT NOMMÉ : sous-technique tirée, seule la parente est couverte. JAMAIS compté comme
+    # détecté — une règle parente générique ne prouve pas la couverture de ce vecteur.
+    approx = attack.get("parent_approx") or []
+    if approx:
+        h.append("<h3>Couverture parente approximative (angle mort — NON comptée comme détectée)</h3><ul>")
+        for a in approx:
+            h.append(f'<li><code>{_e(a.get("mitre"))}</code> — tirée {_e(a.get("fires", 0))}× ; '
+                     f'aucune règle sur cette sous-technique, seule la parente '
+                     f'<code>{_e(a.get("parent"))}</code> alerte '
+                     f'({_e(a.get("parent_alert_count", 0))} alerte(s)).</li>')
+        h.append("</ul>")
     detected = attack.get("detected") or []
     if detected:
-        h.append("<h3>Techniques détectées</h3><ul>")
+        h.append("<h3>Techniques détectées EXACTEMENT</h3><ul>")
         for d in detected:
             h.append(f'<li><code>{_e(d.get("mitre"))}</code> — {_e(d.get("alert_count", 0))} alerte(s), '
                      f'MTTD {_e(d.get("mttd_secs", "—"))}</li>')

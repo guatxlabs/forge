@@ -18,7 +18,7 @@ walkthrough of what a Forge deliverable looks like.
 | `findings.jsonl` | 6 findings across 5 ATT&CK techniques, with CWE / severity / status (IDOR, SSRF, permissive CORS, predictable reset token, origin exposure, missing headers). |
 | `runrecords.jsonl` | 8 fired ATT&CK run-records (the red-team timeline). Drives the **Coverage** tab and the red side of the **Purple** join. |
 | `roe_decisions.jsonl` | 11 governance decisions: 8 `FIRE` + 2 `VETO` (out-of-scope, exploit-not-armed) + 1 `DRY_RUN`. Feeds `/api/roe` (anti-masking transparency). |
-| `detections.jsonl` | The **blue** side: 4 MITRE-tagged "SOC detections" served by the mock-Plume stub. Deliberately a *subset* of what was fired, so the matrix shows **detected AND missed** rows. |
+| `detections.jsonl` | The **blue** side: 4 MITRE-tagged "SOC detections" served by the mock-Plume stub. Deliberately a *subset* of what was fired, so the matrix shows all **three** states — detected, parent-approx and missed. |
 | `REFERENCE_ENGAGEMENT.md` | A **filled** copy of [`docs/REFERENCE_ENGAGEMENT_TEMPLATE.md`](../../docs/REFERENCE_ENGAGEMENT_TEMPLATE.md) — the redacted lab-style write-up / deliverable. |
 
 ## The purple matrix this produces
@@ -27,15 +27,29 @@ Fired techniques (red, from `runrecords.jsonl`) joined with detections (blue, fr
 
 | ATT&CK | Fired | Detected | MTTD | Status |
 |---|:---:|:---:|---|---|
-| T1595 — Active Scanning | ✅ | ✅ | 4 min | 🟢 detected |
-| T1046 — Network Service Discovery | ✅ | ✅ | 2.5 min | 🟢 detected |
-| T1190 — Exploit Public-Facing App (IDOR + SSRF) | ✅ | ✅ | 3 min | 🟢 detected |
-| T1212 — Exploitation for Credential Access | ✅ | ✅ | 6 min | 🟢 detected |
+| T1595 — Active Scanning | ✅ | ✅ exact | 4 min | 🟢 detected-exact |
+| T1046 — Network Service Discovery | ✅ | ✅ exact | 2.5 min | 🟢 detected-exact |
+| T1190 — Exploit Public-Facing App (IDOR + SSRF) | ✅ | ✅ exact | 3 min | 🟢 detected-exact |
+| T1212 — Exploitation for Credential Access | ✅ | ✅ exact | 6 min | 🟢 detected-exact |
+| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` only (3 alerts) | — | 🟠 **detected-parent-approx** |
 | T1590.005 — Gather Victim Network Info: IPs | ✅ | ❌ | — | 🔴 **missed** |
-| T1595.002 — Vulnerability Scanning | ✅ | ❌ | — | 🔴 **missed** |
 | T1539 — Steal Web Session Cookie (CORS) | ✅ | ❌ | — | 🔴 **missed** |
 
-**7 techniques fired · 4 detected · 3 missed → detection rate 57% · MTTD avg ≈ 3.9 min, max 6 min.**
+**7 techniques fired · 4 detected-exact · 1 parent-approx · 2 missed → detection rate 57% ·
+MTTD avg 232.5 s (≈ 3.9 min), max 360 s (6 min).**
+
+> Measured, not asserted: `forge seed-demo --dir examples/reference-engagement` + `tools/mock_plume.py`
+> + `GET /api/purple/coverage` returns `techniques_fired=7, techniques_detected=4,
+> techniques_parent_approx=1, techniques_missed=2, detection_rate=0.5714285714285714,
+> mttd_avg_secs=232.5, mttd_max_secs=360`.
+>
+> **Read the T1595.002 row carefully** — it is the point of the three-state join. The SOC does alert on
+> `T1595` (Active Scanning), and Forge fired the **sub-technique** `T1595.002` (Vulnerability Scanning).
+> A parent rule is **not proof** that the sub-technique's vector is covered, so it is **not** counted as
+> detected: the rate stays **4/7**, and no MTTD is invented for it. It is not thrown away either — it is
+> a **named blind spot**: *"you fired T1595.002; all you have is a generic T1595 rule."* That row is the
+> deliverable. A two-state matrix would have shown it as a flat `missed`, hiding the fact that a nearby
+> rule exists and only needs narrowing.
 
 ## How to run it
 
@@ -45,7 +59,7 @@ From the repository root:
 # Populated console (Findings / Coverage / Runs) — offline, no SOC needed:
 make demo            # -> http://127.0.0.1:7100
 
-# Full purple loop (adds the detected/missed/MTTD matrix) with the mock-Plume stub:
+# Full purple loop (adds the detected / parent-approx / missed / MTTD matrix) with the mock-Plume stub:
 make demo-purple     # boots tools/mock_plume.py + console with PLUME_URL set
 ```
 

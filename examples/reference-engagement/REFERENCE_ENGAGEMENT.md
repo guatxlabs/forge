@@ -7,8 +7,8 @@
 > touched. It is the human-readable companion to the machine fixtures in this folder, which
 > `make demo` / `make demo-purple` load into the console.
 >
-> The one line that sells it: *"Your SOC missed 3 of the 7 techniques we fired. Here they are, and
-> here is how to close them."*
+> The one line that sells it: *"Your SOC saw 4 of the 7 techniques we fired. One more it only sees
+> through a generic parent rule. Here they are, and here is how to close them."*
 
 ---
 
@@ -60,27 +60,37 @@ One row per action that reached a `FIRE` verdict. Source = run-records + ROE dec
 ## 3. PURPLE coverage matrix (the core deliverable)
 
 Read-only JOIN between Forge run-records (`{mitre}`, `fired=1`) and Plume detections
-(`GET {PLUME_URL}/api/coverage/detections`). MTTD = `first_ts (Plume alert) − ts_fired (Forge)`,
-computed against the **most recent** fire of each technique.
+(`GET {PLUME_URL}/api/coverage/detections`), on **techniques** (multi-technique tags split on both
+sides). MTTD = `first_ts (Plume alert) − ts_fired (Forge)`, computed against the **most recent** fire
+of each technique, and sampled on **exact** detections only.
 
 | ATT&CK technique | Fired | Detected (SOC) | MTTD | Status |
 |---|:---:|:---:|---|---|
-| T1595 — Active Scanning | ✅ | ✅ | 4 min | 🟢 detected |
-| T1046 — Network Service Discovery | ✅ | ✅ | 2.5 min | 🟢 detected |
-| T1190 — Exploit Public-Facing App | ✅ | ✅ | 3 min | 🟢 detected |
-| T1212 — Exploitation for Credential Access | ✅ | ✅ | 6 min | 🟢 detected |
+| T1595 — Active Scanning | ✅ | ✅ exact | 4 min | 🟢 detected-exact |
+| T1046 — Network Service Discovery | ✅ | ✅ exact | 2.5 min | 🟢 detected-exact |
+| T1190 — Exploit Public-Facing App | ✅ | ✅ exact | 3 min | 🟢 detected-exact |
+| T1212 — Exploitation for Credential Access | ✅ | ✅ exact | 6 min | 🟢 detected-exact |
+| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` only (3 alerts) | — | 🟠 **detected-parent-approx** |
 | T1590.005 — Gather Victim Network Info: IP Addresses | ✅ | ❌ | — | 🔴 **missed** |
-| T1595.002 — Vulnerability Scanning | ✅ | ❌ | — | 🔴 **missed** |
 | T1539 — Steal Web Session Cookie | ✅ | ❌ | — | 🔴 **missed** |
 
 **Coverage summary** (matches the live `/api/purple/coverage` output for this seed):
 - Techniques fired: **7**
-- Detected: **4** → **coverage = 57%**
-- Missed: **3** → *(see §7 "how to close")*
-- **MTTD**: avg ≈ **232 s (3.9 min)**, max **360 s (6 min)** over the detected techniques.
+- Detected **exactly**: **4** → **coverage = 57%**
+- **Parent-approx**: **1** (T1595.002) → *not* counted in the rate, no MTTD invented — a **named
+  blind spot**, see §7
+- Missed: **2** → *(see §7 "how to close")*
+- **MTTD**: avg **232.5 s (3.9 min)**, max **360 s (6 min)** over the **exactly** detected techniques.
 
 > This table is the native output of the purple loop (`/api/purple/coverage`). It is the argument no
 > offensive tool alone produces: the **real, measured** SOC detection rate — not an estimate.
+>
+> **Why T1595.002 is amber and not green.** The SOC does alert on `T1595`, and Forge fired the
+> sub-technique `T1595.002`. Calling that "detected" would be a claim we cannot back: a parent rule
+> says nothing about which **vector** it covers, and the MTTD would date the vuln-scan fire against an
+> unrelated alert. So it stays out of the rate and out of the MTTD. It is not silently dropped either
+> — a flat `missed` would have hidden the useful fact that a nearby rule already exists and only needs
+> narrowing. Three states, because two would have to lie in one direction or the other.
 
 ---
 
@@ -138,7 +148,9 @@ out-of-band callback stays `reported_by_tool` until exploitability is proven.
 - **Target**: `shop.lab.example`
 - **Status**: `tested`
 - **Evidence**: no CSP/HSTS; jQuery 1.12.4 (known DOM-XSS sinks) served.
-- **Detected by SOC?**: **no** — 🔴 missed (see §7).
+- **Detected by SOC?**: **not on this sub-technique** — 🟠 parent-approx: the SOC alerts on the parent
+  `T1595` (Active Scanning, 3 alerts) but has no rule for `T1595.002` (Vulnerability Scanning). Not
+  counted as detected (see §3, §7).
 - **Fix**: add CSP + HSTS, upgrade front-end libraries.
 
 ---
@@ -180,22 +192,28 @@ Honest reporting lists the gaps too — zero silent holes. Source = `roe_decisio
 
 The conclusion that turns the matrix into a decision.
 
-1. **Detection gaps**: "Your SOC missed **3** techniques: **T1590.005, T1595.002, T1539**."
+1. **Detection gaps**: "Your SOC missed **2** techniques outright (**T1590.005, T1539**) and covers a
+   third (**T1595.002**) only by its generic parent rule."
    - **T1539 (permissive CORS / cookie theft)** — highest priority: it maps to a MEDIUM finding with
      real cross-origin impact and no detection. Add a rule on anomalous `Origin`-reflected responses
      / credentialed CORS on `/api/*`.
-   - **T1595.002 (vuln scanning)** — add a WAF/log rule for template-scan signatures and 4xx bursts.
+   - **T1595.002 (vuln scanning)** — 🟠 *parent-approx*, the cheapest win on the board: your `T1595`
+     rule already fires on this traffic, it just isn't specific to template scanning. Narrow/duplicate
+     it into a `T1595.002` rule (template-scan signatures, 4xx bursts) and the row turns green — no
+     new telemetry needed.
    - **T1590.005 (passive IP gathering)** — expected blind spot (no traffic to detect); mitigate at
      the asset level (rotate origin, scrub DNS/cert history) rather than via a SOC rule.
 2. **MTTD to reduce**: T1212 (reset-token brute force) detected but slowest at **6 min** — add a
    dedicated rate/velocity rule on the reset endpoint to pull it under the target.
-3. **Posture after remediation**: closing T1539 + T1595.002 raises measured coverage from **57%**
-   (4/7) to **≈ 86%** (6/7).
+3. **Posture after remediation**: closing T1539 + narrowing the parent rule into a real `T1595.002`
+   rule raises measured coverage from **57%** (4/7) to **≈ 86%** (6/7) — and the parent-approx row
+   disappears, because it becomes a proven detection instead of an assumed one.
 4. **Next campaign**: re-fire the missed techniques after the rules ship → **prove** the gap is
    closed (continuous-improvement purple loop).
 
 > **Closing pitch**: *"This engagement cost you a signed, verifiable scope and handed you a number
-> you didn't have: your SOC sees 57% of the techniques we fired, in ~4 minutes. Here are the 3 rules
+> you didn't have: your SOC *provably* sees 57% of the techniques we fired, in ~4 minutes — plus one
+> more it only covers by a generic parent rule, which we do not count for you. Here are the 3 rules
 > to add. We re-fire next run to prove it's closed."*
 
 ---

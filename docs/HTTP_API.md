@@ -44,7 +44,7 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `GET /api/findings/:id` | Détail d'un finding (evidence, PoC, CWE, CVSS, fix, mitre, status). |
 | `GET /api/runrecords` | Run-records ATT&CK (techniques tirées). |
 | `GET /api/coverage` | Rollup de **couverture ATT&CK** : par technique, nb de runs tentés vs tirés. |
-| `GET /api/detection/coverage` (alias `GET /api/purple/coverage`) | Matrice **purple** : JOIN run-records `fired` (red) ↔ détections de la source (blue) → detected / missed / **MTTD**. Fail-open : `source_reachable:false` + `error` si aucune source. |
+| `GET /api/detection/coverage` (alias `GET /api/purple/coverage`) | Matrice **purple** : JOIN run-records `fired` (red) ↔ détections de la source (blue), tags multi-techniques éclatés des deux côtés → **trois** états `detected` (exact) / `parent_approx` (sous-technique tirée, seule la parente couverte) / `missed`, + **MTTD**. `detection_rate` et le MTTD ne comptent QUE l'exact. Fail-open : `source_reachable:false` + `error` si aucune source. |
 | `GET /api/campaigns` | Liste des campagnes. |
 | `GET /api/roe` | Décisions ROE tracées (verdict par action — anti-masquage). |
 | `GET /api/modules` | Catalogue de modules (kind, exploit, mitre, disponibilité, gouvernance). |

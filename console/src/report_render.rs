@@ -842,16 +842,18 @@ Connectez une source (Plume / CrowdSec / FortiGate / Elastic / fichier…) pour 
     }
     let fired = p.get("techniques_fired").and_then(|v| v.as_i64()).unwrap_or(0);
     let detected = p.get("techniques_detected").and_then(|v| v.as_i64()).unwrap_or(0);
+    let approx = p.get("techniques_parent_approx").and_then(|v| v.as_i64()).unwrap_or(0);
     let missed = p.get("techniques_missed").and_then(|v| v.as_i64()).unwrap_or(0);
     let rate = p.get("detection_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let mttd_avg = p.get("mttd_avg_secs").and_then(|v| v.as_f64());
     let mttd_max = p.get("mttd_max_secs").and_then(|v| v.as_i64());
     h.push_str("<ul class=\"plist\">");
     h.push_str(&format!("<li><b>Techniques tirées (red)</b> : {}</li>", fired));
-    h.push_str(&format!("<li><b>Détectées par le SOC (blue)</b> : {} · <b>Taux</b> : {:.0}%</li>", detected, rate * 100.0));
+    h.push_str(&format!("<li><b>Détectées EXACTEMENT par le SOC (blue)</b> : {} · <b>Taux</b> : {:.0}%</li>", detected, rate * 100.0));
+    h.push_str(&format!("<li><b>Couverture parente approximative</b> (non comptée dans le taux) : {}</li>", approx));
     h.push_str(&format!("<li><b>Trous de détection</b> : {}</li>", missed));
     h.push_str(&format!(
-        "<li><b>MTTD moyen</b> : {} · <b>MTTD max</b> : {}</li>",
+        "<li><b>MTTD moyen</b> : {} · <b>MTTD max</b> : {} <span class=\"muted\">(détections exactes uniquement)</span></li>",
         mttd_avg.map(|m| format!("{m:.0}s")).unwrap_or_else(|| "—".into()),
         mttd_max.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
     ));
@@ -865,8 +867,23 @@ Connectez une source (Plume / CrowdSec / FortiGate / Elastic / fichier…) pour 
         }
         h.push_str("</ul>");
     }
+    // ANGLES MORTS NOMMÉS (miroir HTML de render_purple_section) — jamais fondus dans « détecté ».
+    if let Some(arr) = p.get("parent_approx").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        h.push_str("<h3>Couverture parente approximative (angle mort — NON comptée comme détectée)</h3><ul>");
+        for a in arr {
+            let mitre = a.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+            let parent = a.get("parent").and_then(|v| v.as_str()).unwrap_or("?");
+            let fires = a.get("fires").and_then(|v| v.as_i64()).unwrap_or(0);
+            let pc = a.get("parent_alert_count").and_then(|v| v.as_i64()).unwrap_or(0);
+            h.push_str(&format!(
+                "<li><code>{}</code> (tirée {}×) — aucune règle sur CETTE sous-technique ; seule la parente <code>{}</code> alerte ({} alerte(s)). Une règle parente générique ne prouve pas la couverture de ce vecteur.</li>",
+                e(mitre), fires, e(parent), pc,
+            ));
+        }
+        h.push_str("</ul>");
+    }
     if let Some(arr) = p.get("detected").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
-        h.push_str("<h3>Techniques détectées (avec MTTD)</h3><ul>");
+        h.push_str("<h3>Techniques détectées EXACTEMENT (avec MTTD)</h3><ul>");
         for d in arr {
             let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
             let alert_count = d.get("alert_count").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -975,7 +992,7 @@ code,.chip{background:#eef2f0!important;color:#0a6b56!important}\n\
 
 /// Section markdown « Couverture détection (purple) » du rapport : detected / missed / MTTD.
 /// FAIL-OPEN LISIBLE : si `plume_reachable=false`, on l'indique explicitement et on n'affiche
-/// AUCUN détecté/raté (cohérent avec l'endpoint — un SOC muet n'est jamais « tout détecté »).
+/// AUCUN détecté/parent-approx/raté (cohérent avec l'endpoint — un SOC muet n'est jamais « tout détecté »).
 pub(crate) fn render_purple_section(out: &mut Vec<String>, p: &Value) {
     out.push("## Couverture détection (purple)".into());
     out.push(String::new());
@@ -997,15 +1014,19 @@ Aucune couverture n'est inventée._".into());
     }
     let fired = p.get("techniques_fired").and_then(|v| v.as_i64()).unwrap_or(0);
     let detected = p.get("techniques_detected").and_then(|v| v.as_i64()).unwrap_or(0);
+    let approx = p.get("techniques_parent_approx").and_then(|v| v.as_i64()).unwrap_or(0);
     let missed = p.get("techniques_missed").and_then(|v| v.as_i64()).unwrap_or(0);
     let rate = p.get("detection_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let mttd_avg = p.get("mttd_avg_secs").and_then(|v| v.as_f64());
     let mttd_max = p.get("mttd_max_secs").and_then(|v| v.as_i64());
     out.push(format!("- **Techniques tirées (red)** : {fired}"));
-    out.push(format!("- **Détectées par le SOC (blue)** : {detected}  ·  **Taux de détection** : {:.0}%", rate * 100.0));
+    out.push(format!("- **Détectées EXACTEMENT par le SOC (blue)** : {detected}  ·  **Taux de détection** : {:.0}%", rate * 100.0));
+    // Le parent-approx est rendu SÉPARÉMENT et JAMAIS fondu dans le taux : une règle parente
+    // générique ne prouve pas la détection de la sous-technique tirée.
+    out.push(format!("- **Couverture parente approximative (non comptée dans le taux)** : {approx}"));
     out.push(format!("- **Trous de détection (missed)** : {missed}"));
     out.push(format!(
-        "- **MTTD moyen** : {}  ·  **MTTD max** : {}",
+        "- **MTTD moyen** : {}  ·  **MTTD max** : {}  _(échantillonné sur les détections EXACTES uniquement)_",
         mttd_avg.map(|m| format!("{m:.0}s")).unwrap_or_else(|| "—".into()),
         mttd_max.map(|m| format!("{m}s")).unwrap_or_else(|| "—".into()),
     ));
@@ -1022,10 +1043,28 @@ Aucune couverture n'est inventée._".into());
             out.push(String::new());
         }
     }
-    // détail des détections (avec MTTD par technique).
+    // ANGLES MORTS NOMMÉS — sous-technique tirée, seule la parente est couverte. C'est le livrable :
+    // « tu as tiré T1110.001, tu n'as que des règles T1110 génériques ». Rendu AVANT les détections
+    // pour rester une section d'ACTION blue-team, pas une note de bas de page.
+    if let Some(arr) = p.get("parent_approx").and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            out.push("**Couverture parente approximative (angle mort — NON comptée comme détectée)**".into());
+            for a in arr {
+                let mitre = a.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
+                let parent = a.get("parent").and_then(|v| v.as_str()).unwrap_or("?");
+                let fires = a.get("fires").and_then(|v| v.as_i64()).unwrap_or(0);
+                let pc = a.get("parent_alert_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                out.push(format!(
+                    "- `{mitre}` (tirée {fires}×) — aucune règle sur CETTE sous-technique ; seule la parente `{parent}` alerte ({pc} alerte(s)). Une règle parente générique ne prouve pas la couverture de ce vecteur : à confirmer ou à combler."
+                ));
+            }
+            out.push(String::new());
+        }
+    }
+    // détail des détections EXACTES (avec MTTD par technique).
     if let Some(arr) = p.get("detected").and_then(|v| v.as_array()) {
         if !arr.is_empty() {
-            out.push("**Techniques détectées (avec MTTD)**".into());
+            out.push("**Techniques détectées EXACTEMENT (avec MTTD)**".into());
             for d in arr {
                 let mitre = d.get("mitre").and_then(|v| v.as_str()).unwrap_or("?");
                 let alert_count = d.get("alert_count").and_then(|v| v.as_i64()).unwrap_or(0);

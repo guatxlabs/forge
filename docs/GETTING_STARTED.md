@@ -35,7 +35,7 @@ python3 -m unittest discover -s tests -t .   # Python seul (1513 tests)
 
 > **Ce que tu dois voir** : `pip install -e .` termine sans erreur et `forge --version` répond
 > (version dérivée du fichier [`../VERSION`](../VERSION)). `cargo build --release` produit
-> `console/target/release/forge`. `make test` finit sur **`OK`** (1513 tests Python verts + 415 tests Rust,
+> `console/target/release/forge`. `make test` finit sur **`OK`** (1513 tests Python verts + 418 tests Rust,
 > cargo test de la console). L'empreinte et la matrice de déploiement (Docker / k8s / host / venv)
 > sont détaillées dans [`DEPLOYMENT.md`](DEPLOYMENT.md).
 

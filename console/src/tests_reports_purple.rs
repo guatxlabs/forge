@@ -162,8 +162,9 @@ use crate::testutil::*;
         assert_eq!(parse_fire_ts("1970-01-01T00:00:00Z"), Some(0));
     }
 
-    /// [purple] compute_purple_coverage : detected = intersection sur mitre, missed = techniques
-    /// tirées absentes des détections, MTTD = first_detection - dernier tir (tronqué >=0), agrégats.
+    /// [purple] compute_purple_coverage : detected-exact = même technique des deux côtés, missed =
+    /// techniques tirées sans aucune couverture (ni exacte ni parente), MTTD = first_detection -
+    /// dernier tir (tronqué >=0), agrégats. INVARIANT : detected + parent_approx + missed == fired.
     #[test]
     fn compute_purple_coverage_detected_missed_mttd() {
         // T1110 tiré 2× (dernier tir @1000), détecté @1042 (MTTD=42) ; T1190 tiré @2000 détecté @1990
@@ -180,8 +181,17 @@ use crate::testutil::*;
         det.insert("T1190".to_string(), (1i64, 1990i64));
         let cov = compute_purple_coverage(&fired, &det);
         assert_eq!(cov["techniques_fired"], json!(3), "3 techniques distinctes tirées (mitre vide exclu)");
-        assert_eq!(cov["techniques_detected"], json!(2), "T1110 + T1190 détectées");
+        assert_eq!(cov["techniques_detected"], json!(2), "T1110 + T1190 détectées EXACTEMENT");
+        assert_eq!(cov["techniques_parent_approx"], json!(0), "aucune sous-technique tirée ici");
         assert_eq!(cov["techniques_missed"], json!(1), "T1046 = trou de détection");
+        // INVARIANT des trois états : chaque technique tirée tombe dans EXACTEMENT une case.
+        assert_eq!(
+            cov["techniques_detected"].as_i64().unwrap()
+                + cov["techniques_parent_approx"].as_i64().unwrap()
+                + cov["techniques_missed"].as_i64().unwrap(),
+            cov["techniques_fired"].as_i64().unwrap(),
+            "detected + parent_approx + missed == techniques_fired",
+        );
         // taux 2/3.
         let rate = cov["detection_rate"].as_f64().unwrap();
         assert!((rate - 2.0 / 3.0).abs() < 1e-9, "taux de détection = 2/3");
@@ -199,6 +209,8 @@ use crate::testutil::*;
         assert_eq!(t1110["fires"], json!(2));
         assert_eq!(t1110["mttd_secs"], json!(42));
         assert_eq!(t1110["alert_count"], json!(3));
+        assert_eq!(t1110["state"], json!("detected-exact"), "l'état est NOMMÉ dans le contrat");
+        assert_eq!(missed[0]["state"], json!("missed"));
     }
 
     /// [purple FAIL-OPEN] aucune détection (SOC muet, map vide) NE produit PAS « tout détecté » :
@@ -209,11 +221,143 @@ use crate::testutil::*;
         let det = std::collections::HashMap::new();
         let cov = compute_purple_coverage(&fired, &det);
         assert_eq!(cov["techniques_detected"], json!(0), "rien détecté");
+        assert_eq!(cov["techniques_parent_approx"], json!(0), "aucune couverture parente non plus");
         assert_eq!(cov["techniques_missed"], json!(2), "tout en trou de détection");
         assert_eq!(cov["detection_rate"], json!(0.0));
         assert_eq!(cov["mttd_avg_secs"], Value::Null, "aucun MTTD inventé");
         assert_eq!(cov["mttd_max_secs"], Value::Null);
         assert!(cov["detected"].as_array().unwrap().is_empty());
+    }
+
+    /// [purple TROIS ÉTATS — PREUVE 1] Forge tire la SOUS-technique `T1110.001` (module `network.ssh`,
+    /// devinette de mot de passe SSH) ; la source n'a de détection que sur la technique PARENTE `T1110`.
+    ///
+    /// L'état DOIT être `detected-parent-approx`, PAS `detected` — et `detection_rate` NE DOIT PAS
+    /// bouger. Justification MESURÉE : les règles `T1110` livrées avec Plume sont bornées au MAIL
+    /// (`source=mail`), bornées au WEB (`source=web status=401`) ou exigent la DISPERSION d'IP
+    /// (`stats dc(src_ip)`) ; aucune n'attrape un brute-force SSH mono-source. Compter ce
+    /// rapprochement comme « détecté » serait un faux positif, avec un MTTD entre le tir SSH et une
+    /// alerte sans rapport.
+    ///
+    /// Le test ANCRE le taux : la MÊME campagne avec/sans le parent-approx donne le MÊME taux.
+    #[test]
+    fn parent_approx_is_not_detected_and_does_not_move_the_rate() {
+        // T1190 tiré @1000 et détecté @1030 (le SEUL vrai détecté) ; T1110.001 tiré @2000, seule la
+        // parente T1110 est couverte côté bleu.
+        let fired = vec![
+            ("T1190".to_string(), Some(1000)),
+            ("T1110.001".to_string(), Some(2000)),
+        ];
+        let mut det = std::collections::HashMap::new();
+        det.insert("T1190".to_string(), (2i64, 1030i64));
+        det.insert("T1110".to_string(), (9i64, 2005i64)); // parente couverte, sous-technique NON
+        let cov = compute_purple_coverage(&fired, &det);
+
+        // (1) l'état est parent-approx, PAS detected.
+        assert_eq!(cov["techniques_fired"], json!(2));
+        assert_eq!(cov["techniques_detected"], json!(1), "SEUL T1190 est un detected-exact");
+        assert_eq!(cov["techniques_parent_approx"], json!(1), "T1110.001 -> parent-approx");
+        assert_eq!(cov["techniques_missed"], json!(0));
+        let detected: Vec<&str> = cov["detected"].as_array().unwrap().iter()
+            .map(|d| d["mitre"].as_str().unwrap()).collect();
+        assert_eq!(detected, vec!["T1190"], "T1110.001 NE DOIT PAS être dans `detected`");
+        assert!(cov["missed"].as_array().unwrap().is_empty(), "ce n'est pas non plus un `missed` muet");
+
+        // (2) le parent-approx est EXPLOITABLE : liste dédiée, parente nommée, libellé explicite.
+        let ap = &cov["parent_approx"].as_array().unwrap()[0];
+        assert_eq!(ap["mitre"], json!("T1110.001"));
+        assert_eq!(ap["state"], json!("detected-parent-approx"));
+        assert_eq!(ap["parent"], json!("T1110"), "la technique parente est NOMMÉE");
+        assert_eq!(ap["parent_alert_count"], json!(9), "les alertes de la parente restent lisibles");
+        assert_eq!(ap["fires"], json!(1));
+        let why = ap["why"].as_str().unwrap();
+        assert!(why.contains("T1110.001") && why.contains("T1110"), "libellé explicite : {why}");
+        assert!(why.contains("ne prouve pas"), "le libellé dit POURQUOI ce n'est pas un détecté : {why}");
+        assert!(ap.get("mttd_secs").is_none(), "aucun MTTD n'est fabriqué sur un rapprochement approximatif");
+
+        // (3) LE TAUX NE BOUGE PAS : 1 détecté exact / 2 tirées = 50 %.
+        let rate = cov["detection_rate"].as_f64().unwrap();
+        assert!((rate - 0.5).abs() < 1e-9, "taux = detected-exact/tirées = 1/2, obtenu {rate}");
+        // ANCRAGE : retirer la couverture parente ne change PAS le taux (le parent-approx n'y entre
+        // jamais) — seul l'état de T1110.001 passe de parent-approx à missed.
+        let mut det_sans_parent = std::collections::HashMap::new();
+        det_sans_parent.insert("T1190".to_string(), (2i64, 1030i64));
+        let cov2 = compute_purple_coverage(&fired, &det_sans_parent);
+        assert_eq!(cov2["detection_rate"], cov["detection_rate"],
+            "la présence d'une règle PARENTE ne doit RIEN changer au taux vitrine");
+        assert_eq!(cov2["techniques_missed"], json!(1), "sans parente, T1110.001 devient un vrai missed");
+        assert_eq!(cov2["techniques_parent_approx"], json!(0));
+    }
+
+    /// [purple TROIS ÉTATS — PREUVE 2] Un tag `mitre` peut porter PLUSIEURS techniques séparées par
+    /// espace/virgule/point-virgule (NORME SigmaHQ : plusieurs `attack.` par règle). Un tag
+    /// `"T1595.002 T1046"` doit matcher LES DEUX clés, DES DEUX CÔTÉS de la jointure — sinon le
+    /// corpus Sigma FABRIQUE de faux « missed ».
+    #[test]
+    fn multi_technique_tags_split_on_both_sides_of_the_join() {
+        // éclatement pur (les 3 séparateurs + casse + dédup + tokens hors format ignorés).
+        assert_eq!(mitre_techniques("T1595.002 T1046"), vec!["T1595.002", "T1046"]);
+        assert_eq!(mitre_techniques("T1595.002,T1046"), vec!["T1595.002", "T1046"]);
+        assert_eq!(mitre_techniques("T1595.002;T1046"), vec!["T1595.002", "T1046"]);
+        assert_eq!(mitre_techniques("t1046 T1046"), vec!["T1046"], "casse normalisée + dédupliqué");
+        assert_eq!(mitre_techniques("attack.t1046 TA0043 T1046"), vec!["T1046"],
+            "tokens hors format `T####[.###]` ignorés");
+
+        // (a) CÔTÉ BLEU : la source (règle Sigma) répond avec un tag composé ; les deux techniques
+        // tirées SÉPARÉMENT par Forge doivent être détectées.
+        let fired = vec![("T1595.002".to_string(), Some(1000)), ("T1046".to_string(), Some(1000))];
+        let mut det = std::collections::HashMap::new();
+        det.insert("T1595.002 T1046".to_string(), (4i64, 1060i64));
+        let cov = compute_purple_coverage(&fired, &det);
+        assert_eq!(cov["techniques_detected"], json!(2),
+            "un tag bleu composé couvre LES DEUX techniques (sinon faux missed Sigma)");
+        assert_eq!(cov["techniques_missed"], json!(0));
+        assert_eq!(cov["detection_rate"], json!(1.0));
+
+        // (b) CÔTÉ ROUGE : le run-record porte le tag composé ; il compte pour DEUX techniques tirées,
+        // chacune jointe à sa détection.
+        let fired2 = vec![("T1595.002 T1046".to_string(), Some(1000))];
+        let mut det2 = std::collections::HashMap::new();
+        det2.insert("T1046".to_string(), (1i64, 1030i64));
+        let cov2 = compute_purple_coverage(&fired2, &det2);
+        assert_eq!(cov2["techniques_fired"], json!(2), "un tag rouge composé = DEUX techniques tirées");
+        assert_eq!(cov2["techniques_detected"], json!(1), "T1046 détectée");
+        assert_eq!(cov2["techniques_missed"], json!(1), "T1595.002 reste un vrai trou");
+
+        // (c) ANTI-SILENT-DROP : un tag vendeur/custom hors format n'est PAS perdu — il reste joint
+        // verbatim (une technique tirée qui s'évapore rendrait l'angle mort INVISIBLE).
+        let fired3 = vec![("vendor-custom-tech".to_string(), Some(1000))];
+        let cov3 = compute_purple_coverage(&fired3, &std::collections::HashMap::new());
+        assert_eq!(cov3["techniques_fired"], json!(1), "tag hors format conservé");
+        assert_eq!(cov3["missed"].as_array().unwrap()[0]["mitre"], json!("vendor-custom-tech"));
+    }
+
+    /// [purple TROIS ÉTATS — PREUVE 3] Le MTTD n'est échantillonné QUE sur `detected-exact`. Un MTTD
+    /// calculé sur un rapprochement APPROXIMATIF (règle parente) est un chiffre inventé : il daterait
+    /// le tir de la sous-technique contre une alerte qui ne la concerne pas.
+    #[test]
+    fn mttd_ignores_parent_approx_samples() {
+        // T1190 : tir @1000, détection exacte @1010 -> MTTD 10 (le SEUL échantillon légitime).
+        // T1110.001 : tir @2000, seule la parente T1110 alerte @2500 -> un MTTD naïf vaudrait 500 et
+        // ferait exploser moyenne (255) et max (500).
+        let fired = vec![("T1190".to_string(), Some(1000)), ("T1110.001".to_string(), Some(2000))];
+        let mut det = std::collections::HashMap::new();
+        det.insert("T1190".to_string(), (1i64, 1010i64));
+        det.insert("T1110".to_string(), (1i64, 2500i64));
+        let cov = compute_purple_coverage(&fired, &det);
+        assert_eq!(cov["mttd_avg_secs"].as_f64().unwrap(), 10.0,
+            "MTTD moyen = 10s (T1190 seul) — le 500s du parent-approx NE DOIT PAS être échantillonné");
+        assert_eq!(cov["mttd_max_secs"], json!(10), "MTTD max = 10s, pas 500s");
+
+        // preuve par CONTRASTE : la MÊME campagne avec une détection EXACTE sur T1110.001 (au lieu de
+        // la parente) produit bien, elle, un échantillon MTTD de 500.
+        let mut det_exact = std::collections::HashMap::new();
+        det_exact.insert("T1190".to_string(), (1i64, 1010i64));
+        det_exact.insert("T1110.001".to_string(), (1i64, 2500i64));
+        let cov2 = compute_purple_coverage(&fired, &det_exact);
+        assert_eq!(cov2["mttd_max_secs"], json!(500), "la détection EXACTE, elle, est datée");
+        assert_eq!(cov2["mttd_avg_secs"].as_f64().unwrap(), 255.0);
+        assert_eq!(cov2["techniques_parent_approx"], json!(0));
     }
 
     /// [purple FAIL-OPEN LISIBLE] purple_fail_open : plume_reachable=false, raison présente,
@@ -233,10 +377,12 @@ use crate::testutil::*;
         assert_eq!(v["error"], json!("Plume injoignable: timeout"));
         assert_eq!(v["techniques_fired"], json!(2), "T1110+T1046 distinctes, mitre vide exclu");
         assert_eq!(v["techniques_detected"], json!(0));
+        assert_eq!(v["techniques_parent_approx"], json!(0), "aucun parent-approx inventé non plus");
         assert_eq!(v["techniques_missed"], json!(0), "rien classé missed quand la mesure est impossible");
         assert_eq!(v["detection_rate"], json!(0.0));
         assert_eq!(v["mttd_avg_secs"], Value::Null);
         assert!(v["detected"].as_array().unwrap().is_empty());
+        assert!(v["parent_approx"].as_array().unwrap().is_empty());
         assert!(v["missed"].as_array().unwrap().is_empty());
     }
 
@@ -247,19 +393,25 @@ use crate::testutil::*;
         // cas joignable : section avec compteurs + trous.
         let cov = json!({
             "plume_reachable": true,
-            "techniques_fired": 2, "techniques_detected": 1, "techniques_missed": 1,
-            "detection_rate": 0.5, "mttd_avg_secs": 42.0, "mttd_max_secs": 42,
+            "techniques_fired": 3, "techniques_detected": 1, "techniques_parent_approx": 1, "techniques_missed": 1,
+            "detection_rate": 1.0 / 3.0, "mttd_avg_secs": 42.0, "mttd_max_secs": 42,
             "detected": [{"mitre": "T1110", "alert_count": 3, "mttd_secs": 42}],
+            "parent_approx": [{"mitre": "T1110.001", "parent": "T1110", "fires": 1, "parent_alert_count": 3}],
             "missed": [{"mitre": "T1046", "fires": 1}],
         });
         let mut out: Vec<String> = Vec::new();
         render_purple_section(&mut out, &cov);
         let md = out.join("\n");
         assert!(md.contains("## Couverture détection (purple)"));
-        assert!(md.contains("**Techniques tirées (red)** : 2"));
-        assert!(md.contains("**Taux de détection** : 50%"));
+        assert!(md.contains("**Techniques tirées (red)** : 3"));
+        assert!(md.contains("**Taux de détection** : 33%"), "taux = detected-exact / tirées : {md}");
         assert!(md.contains("`T1046` (tirée 1×) — aucune alerte SOC"), "trou de détection listé");
         assert!(md.contains("`T1110` — 3 alerte(s), MTTD 42s"), "détection avec MTTD listée");
+        // le parent-approx est RENDU, dans sa propre section, explicitement hors du taux.
+        assert!(md.contains("Couverture parente approximative"), "section parent-approx rendue : {md}");
+        assert!(md.contains("`T1110.001`") && md.contains("seule la parente `T1110`"),
+            "angle mort NOMMÉ (sous-technique tirée + parente couverte) : {md}");
+        assert!(md.contains("NON comptée comme détectée"), "le rapport dit qu'elle n'est pas un détecté");
 
         // cas fail-open : la section l'indique explicitement, sans détecté/raté.
         let fo = purple_fail_open("", &[("T1110".to_string(), Some(1))], "PLUME_URL non configuré");
@@ -270,6 +422,7 @@ use crate::testutil::*;
         assert!(md2.contains("Mesure indisponible (fail-open)"), "fail-open lisible dans le rapport");
         assert!(md2.contains("PLUME_URL non configuré"));
         assert!(!md2.contains("aucune alerte SOC"), "aucun trou inventé en fail-open");
+        assert!(!md2.contains("Couverture parente approximative"), "aucun parent-approx inventé en fail-open");
     }
 
     /// [purple http] http_get_blocking : pour kind=plume (allow_https=false) une URL https:// est

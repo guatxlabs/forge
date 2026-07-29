@@ -207,11 +207,11 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
   préréglage — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec se câblent sans
   code) : voir [`docs/DETECTION.md`](docs/DETECTION.md) et [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État (v0.0.1 — 1513 tests Python + 415 tests Rust passent, zéro réseau) — **P1 + P2 complets**
+## État (v0.0.1 — 1513 tests Python + 418 tests Rust passent, zéro réseau) — **P1 + P2 complets**
 
 > **D'où viennent ces deux chiffres.** Python : `python3 -m unittest discover -s tests -t .` →
 > `Ran 1513 tests` / `OK (skipped=1)`. Rust : `cd console && cargo test --offline` →
-> `test result: ok. 415 passed; 0 failed`, **features par défaut**. Le dépôt porte **432** annotations
+> `test result: ok. 418 passed; 0 failed`, **features par défaut**. Le dépôt porte **435** annotations
 > `#[test]`/`#[tokio::test]` : l'écart de 17 est le compte des tests gardés derrière une feature
 > non activée par défaut (`store-postgres`, `encryption`) — 18 gardés, moins 1 en `#[cfg(not(feature
 > = "encryption"))]` qui, lui, tourne. **432 n'est donc PAS un compte de tests exécutés** ; ne le

@@ -77,7 +77,7 @@ connecteur désactivé est SKIP **même si son binaire est présent**. Voir
 
 ### La couverture purple répond `source_reachable:false`
 La source de détection est **absente / injoignable / mal configurée** — Forge déclare la mesure
-**impossible** (fail-open lisible) et **n'invente jamais** `detected`/`missed`/`MTTD`. C'est valide en
+**impossible** (fail-open lisible) et **n'invente jamais** `detected`/`parent_approx`/`missed`/`MTTD`. C'est valide en
 standalone. Pour l'activer : *Administration → Source de détection* (ou `PLUME_URL`/`PLUME_TOKEN`),
 puis `forge doctor --purple` pour le préflight. Source **joignable mais vide** (SOC frais) =
 `reachable:true, detections:[]` — également valide. Voir [`DETECTION.md`](DETECTION.md).

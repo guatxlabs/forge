@@ -13,7 +13,8 @@
 ## Rappel du flux
 
 La console Forge `/api/detection/coverage` (alias rétro-compat `/api/purple/coverage`) lit les run-records
-tirés (par `mitre`), interroge la **source de détection configurée**, et **JOIN** → detected / missed /
+tirés (par **technique**, tags multi-techniques éclatés), interroge la **source de détection
+configurée**, et **JOIN** à trois états → detected (exact) / parent_approx / missed /
 MTTD. Pour le préréglage Plume, la source est `GET {PLUME_URL}/api/coverage/detections`.
 
 ## Checklist Plume (à faire avant le « go »)

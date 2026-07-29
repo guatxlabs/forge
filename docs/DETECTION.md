@@ -5,7 +5,8 @@
 
 La boucle **purple** de Forge corrèle les techniques ATT&CK **tirées** en red-team (run-records) aux
 techniques **détectées** par le SOC/IDS/pare-feu, par **égalité d'identifiant MITRE** — puis en déduit
-`detected` / `missed` / **MTTD**. La *corrélation* est infra-neutre et **ne change jamais**. Seule la
+`detected` (exact) / `parent_approx` (sous-technique tirée, seule la parente couverte) / `missed` /
+**MTTD**. La *corrélation* est infra-neutre et **ne change jamais**. Seule la
 **SOURCE** de détection est spécifique à chaque client : c'est un **plugin configurable**, décrit par un
 objet JSON, éditable **dans l'UI** (wizard de 1er déploiement ou panneau *Administration → Source de
 détection*) — **aucun code à écrire**.
@@ -16,7 +17,7 @@ détection*) — **aucun code à écrire**.
 ## Contrat fail-open lisible (invariant de sûreté)
 
 - Une source **absente** ou **injoignable / mal configurée** ⇒ `source_reachable:false` : Forge déclare la
-  mesure **impossible** et **n'invente JAMAIS** `detected` / `missed` / `MTTD`.
+  mesure **impossible** et **n'invente JAMAIS** `detected` / `parent_approx` / `missed` / `MTTD`.
 - Une source **joignable mais vide** (SOC frais, rien détecté) est un état **valide** (`reachable:true`,
   `detections:[]`).
 - Le **secret** d'authentification (clé API / token SIEM) est **write-only** : jamais renvoyé par un GET,

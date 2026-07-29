@@ -28,15 +28,20 @@ export async function loadCoverage() {
 
 // =====================================================================================
 //  DÉTECTION PURPLE — corrélation Forge (red, techniques tirées) vs Plume (blue, détections SOC)
-//  Lecture seule : GET /api/purple/coverage[?campaign=X]. Mesure DÉFENSIVE pure (detected / missed
-//  / MTTD) — expose les trous de détection du SOC. AUCUNE action offensive ici.
-//  Contrat de réponse 200 (cf. blueprint) :
-//    { plume_reachable, plume_url, techniques_fired, techniques_detected, techniques_missed,
-//      detection_rate (0..1), mttd_avg_secs|null, mttd_max_secs|null,
-//      detected:[{mitre,fires,alert_count,first_detection_ts,fire_ts|null,mttd_secs|null}] (tri mitre ASC),
-//      missed:[{mitre,fires,fire_ts|null}], error (présent SEULEMENT si plume_reachable=false) }
+//  Lecture seule : GET /api/purple/coverage[?campaign=X]. Mesure DÉFENSIVE pure (detected-exact /
+//  parent-approx / missed / MTTD) — expose les trous de détection du SOC. AUCUNE action offensive ici.
+//  Contrat de réponse 200 (TROIS ÉTATS, cf. console/src/detection.rs) :
+//    { plume_reachable, plume_url, techniques_fired, techniques_detected, techniques_parent_approx,
+//      techniques_missed, detection_rate (0..1), mttd_avg_secs|null, mttd_max_secs|null,
+//      detected:[{mitre,state:"detected-exact",fires,alert_count,first_detection_ts,fire_ts|null,mttd_secs|null}],
+//      parent_approx:[{mitre,state:"detected-parent-approx",parent,fires,fire_ts|null,parent_alert_count,
+//                      parent_first_detection_ts,why}],
+//      missed:[{mitre,state:"missed",fires,fire_ts|null}], error (présent SEULEMENT si plume_reachable=false) }
+//  `detection_rate` et le MTTD ne comptent QUE `detected` (exact) : une règle PARENTE générique ne
+//  prouve pas la détection de la sous-technique tirée. Le parent-approx est rendu À PART — c'est un
+//  angle mort NOMMÉ, pas du déchet, et on ne le fond JAMAIS dans le vert.
 //  Garantie côté serveur (qu'on REFLÈTE fidèlement, jamais on n'invente) : si plume_reachable=false,
-//  detected=[] missed=[] rate=0 mttd=null detected/missed=0 -> on affiche la mesure comme IMPOSSIBLE
+//  detected=[] parent_approx=[] missed=[] rate=0 mttd=null compteurs=0 -> on affiche la mesure comme IMPOSSIBLE
 //  (FAIL-OPEN LISIBLE), pas comme « 0 % détecté ».
 // =====================================================================================
 export function pcFmtSecs(s) {                                // MTTD : secondes -> libellé court lisible (Xs / Xm Ys / Xh Ym)
@@ -106,6 +111,7 @@ export async function loadPurpleCoverage() {
   // techniques distinctes tirées (toujours informatif, même si mesure impossible)
   const fired = Number(p.techniques_fired || 0);
   const detected = Array.isArray(p.detected) ? p.detected : [];
+  const parentApprox = Array.isArray(p.parent_approx) ? p.parent_approx : [];
   const missed = Array.isArray(p.missed) ? p.missed : [];
 
   // AUTONOME (standalone) : aucune source de détection configurée. État NEUTRE et ATTENDU — Forge ne
@@ -137,14 +143,17 @@ export async function loadPurpleCoverage() {
     const det = document.createElement('div'); det.className = 'pc-fo-detail';
     const reason = (typeof p.error === 'string' && p.error) ? p.error : 'source de détection injoignable';
     const urlTxt = srcUrl ? `cible : ${srcUrl}` : 'endpoint non renseigné';
-    det.textContent = `${reason} — ${urlTxt}. Aucun « détecté » n'est inventé : detected/missed vides, taux et MTTD non mesurés. ${fired} technique(s) distincte(s) tirée(s) côté Forge (information offensive conservée).`;
+    det.textContent = `${reason} — ${urlTxt}. Aucun « détecté » n'est inventé : detected/parent_approx/missed vides, taux et MTTD non mesurés. ${fired} technique(s) distincte(s) tirée(s) côté Forge (information offensive conservée).`;
     fo.append(head, det);
     host.appendChild(fo);
     return;
   }
 
   // ---- source de détection joignable : mesure exploitable -----------------------------------
-  const nDet = detected.length, nMiss = missed.length, total = nDet + nMiss;
+  // TROIS ÉTATS : le dénominateur est le nombre de techniques TIRÉES (exact + parent-approx + missed),
+  // et le numérateur du taux ne compte QUE les `detected` EXACTS — le parent-approx est ailleurs.
+  const nDet = detected.length, nApprox = parentApprox.length, nMiss = missed.length;
+  const total = nDet + nApprox + nMiss;
   const rate = (typeof p.detection_rate === 'number' && isFinite(p.detection_rate)) ? p.detection_rate : (total ? nDet / total : 0);
   const ratePct = Math.round(Math.max(0, Math.min(1, rate)) * 100);
   const mttdMedian = pcMedian(detected.map(d => d.mttd_secs));
@@ -153,7 +162,7 @@ export async function loadPurpleCoverage() {
   const band = document.createElement('div'); band.className = 'pc-band';
   const rateEl = document.createElement('span'); rateEl.className = 'pc-rate'; rateEl.textContent = ratePct + '%';
   const subEl = document.createElement('span'); subEl.className = 'pc-sub';
-  subEl.textContent = `${nDet}/${total || fired} technique(s) détectée(s) par le SOC`;
+  subEl.textContent = `${nDet}/${total || fired} technique(s) détectée(s) EXACTEMENT par le SOC`;
   band.append(rateEl, subEl);
   const sep1 = document.createElement('span'); sep1.className = 'pc-sep'; band.appendChild(sep1);
   const mttdEl = document.createElement('span'); mttdEl.className = 'pc-mttd pc-sub';
@@ -166,19 +175,27 @@ export async function loadPurpleCoverage() {
     gapEl.innerHTML = `<span class="badge destr">${Number(nMiss) || 0} trou(s) de détection</span>`;
     band.appendChild(gapEl);
   }
+  if (nApprox > 0) {
+    const sep3 = document.createElement('span'); sep3.className = 'pc-sep'; band.appendChild(sep3);
+    const apEl = document.createElement('span'); apEl.className = 'pc-sub';
+    apEl.innerHTML = `<span class="badge warn">${Number(nApprox) || 0} couverture(s) parente(s) approximative(s)</span>`;
+    apEl.title = 'Sous-technique tirée alors que seule la technique PARENTE est couverte. Non comptée dans le taux : une règle parente générique ne prouve pas la détection de ce vecteur.';
+    band.appendChild(apEl);
+  }
   host.appendChild(band);
 
   // légende
   const legend = document.createElement('div'); legend.className = 'pc-legend';
-  legend.innerHTML = '<span class="pc-lg"><span class="pc-dot detected"></span>détecté (+MTTD)</span>'
+  legend.innerHTML = '<span class="pc-lg"><span class="pc-dot detected"></span>détecté exact (+MTTD)</span>'
+    + '<span class="pc-lg"><span class="pc-dot approx"></span>parente seule (non compté)</span>'
     + '<span class="pc-lg"><span class="pc-dot missed"></span>raté (trou SOC)</span>'
     + '<span class="pc-lg"><span class="pc-dot unfired"></span>non-tiré (couvert, pas joué)</span>';
   host.appendChild(legend);
 
   // GRIS = techniques couvertes (run-records ATT&CK) mais JAMAIS tirées -> ni détectées ni ratées.
   // On les dérive de /api/coverage (lecture seule, déjà consommé ailleurs). Échec silencieux : la
-  // matrice reste valable sans ces tuiles (detected/missed restent la source de vérité purple).
-  const firedSet = new Set([...detected.map(d => d.mitre), ...missed.map(m => m.mitre)]);
+  // matrice reste valable sans ces tuiles (detected/parent_approx/missed restent la vérité purple).
+  const firedSet = new Set([...detected.map(d => d.mitre), ...parentApprox.map(a => a.mitre), ...missed.map(m => m.mitre)]);
   let unfired = [];
   try {
     const cov = await api(withCampaign('/coverage'));
@@ -192,13 +209,21 @@ export async function loadPurpleCoverage() {
     }
   } catch (e) { /* coverage optionnel : on n'affiche pas les GRIS si indisponible */ }
 
-  // matrice : DÉTECTÉ (vert, +MTTD) puis RATÉ (rouge) puis NON-TIRÉ (gris)
+  // matrice : DÉTECTÉ EXACT (vert, +MTTD) puis PARENTE SEULE (ambre) puis RATÉ (rouge) puis NON-TIRÉ (gris)
   const matrix = document.createElement('div'); matrix.className = 'pc-matrix';
   detected.forEach(d => {
     const mttd = (d.mttd_secs != null && isFinite(d.mttd_secs)) ? `MTTD ${pcFmtSecs(d.mttd_secs)}` : 'MTTD n/d';
     const alerts = `${Number(d.alert_count || 0)} alerte(s)`;
-    matrix.appendChild(pcTile(d.mitre, 'detected', 'détecté', `${mttd} · ${alerts} · ${Number(d.fires || 0)} tir(s)`,
-      `Détecté par le SOC — ${mttd}, première détection ${fmtTs(d.first_detection_ts)}`));
+    matrix.appendChild(pcTile(d.mitre, 'detected', 'détecté exact', `${mttd} · ${alerts} · ${Number(d.fires || 0)} tir(s)`,
+      `Détecté par le SOC sur EXACTEMENT cette technique — ${mttd}, première détection ${fmtTs(d.first_detection_ts)}`));
+  });
+  // ANGLE MORT NOMMÉ — ni vert ni rouge : la parente alerte, ce vecteur-ci n'est pas prouvé couvert.
+  parentApprox.forEach(a => {
+    const parent = String(a.parent || '');
+    matrix.appendChild(pcTile(a.mitre, 'approx', 'parente seule',
+      `parente ${parent} · ${Number(a.parent_alert_count || 0)} alerte(s) · ${Number(a.fires || 0)} tir(s)`,
+      (typeof a.why === 'string' && a.why) ? a.why
+        : `${a.mitre} tirée ; seule la technique parente ${parent} est couverte. Non comptée dans le taux, aucun MTTD calculé.`));
   });
   missed.forEach(m => {
     matrix.appendChild(pcTile(m.mitre, 'missed', 'raté', `${Number(m.fires || 0)} tir(s) · 0 alerte`,

@@ -437,17 +437,24 @@ async fn build_report_data(app: &App, eid: i64) -> Value {
     let runs = read_engagement_runs(app, eid);
     let techniques = aggregate_techniques(app, eid);
 
-    // détection (purple) : fired ISOLÉ à l'engagement -> matrice détecté/raté si source configurée.
+    // détection (purple) : fired ISOLÉ à l'engagement -> matrice à TROIS états (exact / parente-approx
+    // / raté) si une source est configurée.
     let fired = read_fired_techniques(app, Some(eid), None);
     let purple = fetch_purple_coverage(app, fired).await;
+    // Le rapport CLIENT rend les TROIS états de la jointure purple, jamais deux : `detected`
+    // (detected-exact — le seul qui alimente `detection_rate` et le MTTD), `parent_approx`
+    // (sous-technique tirée / seule la parente est couverte — un angle mort NOMMÉ, pas du déchet),
+    // `missed`. Omettre le parent-approx ici ferait dire au rapport autre chose qu'à l'API.
     let attack = json!({
         "techniques": techniques,
         "detection_source_configured": purple.get("source_configured").and_then(|v| v.as_bool()).unwrap_or(false),
         "techniques_fired": purple.get("techniques_fired").cloned().unwrap_or(json!(0)),
         "techniques_detected": purple.get("techniques_detected").cloned().unwrap_or(json!(0)),
+        "techniques_parent_approx": purple.get("techniques_parent_approx").cloned().unwrap_or(json!(0)),
         "techniques_missed": purple.get("techniques_missed").cloned().unwrap_or(json!(0)),
         "detection_rate": purple.get("detection_rate").cloned().unwrap_or(json!(0.0)),
         "detected": purple.get("detected").cloned().unwrap_or(json!([])),
+        "parent_approx": purple.get("parent_approx").cloned().unwrap_or(json!([])),
         "missed": purple.get("missed").cloned().unwrap_or(json!([])),
     });
 
@@ -729,11 +736,14 @@ fn render_html(data: &Value, preview: bool) -> String {
         h.push_str("</tbody></table>");
     }
     if attack.get("detection_source_configured").and_then(|v| v.as_bool()).unwrap_or(false) {
+        // TROIS ÉTATS — le rapport d'engagement rend le parent-approx à part, comme l'API et le
+        // rapport de run. Une surface qui n'en rend que deux dirait autre chose que les autres.
         h.push_str("<h3>Détection (source configurée)</h3><ul>");
         h.push_str(&format!(
-            "<li>Tirées : {} · Détectées : {} · Ratées : {}</li>",
+            "<li>Tirées : {} · Détectées EXACTEMENT : {} · Couverture parente approximative : {} · Ratées : {}</li>",
             attack.get("techniques_fired").and_then(|v| v.as_i64()).unwrap_or(0),
             attack.get("techniques_detected").and_then(|v| v.as_i64()).unwrap_or(0),
+            attack.get("techniques_parent_approx").and_then(|v| v.as_i64()).unwrap_or(0),
             attack.get("techniques_missed").and_then(|v| v.as_i64()).unwrap_or(0)
         ));
         h.push_str("</ul>");
@@ -748,8 +758,21 @@ fn render_html(data: &Value, preview: bool) -> String {
             }
             h.push_str("</ul>");
         }
+        if let Some(ap) = attack.get("parent_approx").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+            h.push_str("<h3>Couverture parente approximative (angle mort — NON comptée comme détectée)</h3><ul>");
+            for a in ap {
+                h.push_str(&format!(
+                    "<li><code>{}</code> — tirée {}× ; aucune règle sur cette sous-technique, seule la parente <code>{}</code> alerte ({} alerte(s)).</li>",
+                    e(a.get("mitre").and_then(|v| v.as_str()).unwrap_or("?")),
+                    a.get("fires").and_then(|v| v.as_i64()).unwrap_or(0),
+                    e(a.get("parent").and_then(|v| v.as_str()).unwrap_or("?")),
+                    a.get("parent_alert_count").and_then(|v| v.as_i64()).unwrap_or(0)
+                ));
+            }
+            h.push_str("</ul>");
+        }
     } else {
-        h.push_str("<p class=\"muted\">Aucune source de détection configurée — Forge en autonome. Matrice détecté/raté indisponible (aucune couverture inventée).</p>");
+        h.push_str("<p class=\"muted\">Aucune source de détection configurée — Forge en autonome. Matrice détecté / parente-approx / raté indisponible (aucune couverture inventée).</p>");
     }
     h.push_str("</section>");
 

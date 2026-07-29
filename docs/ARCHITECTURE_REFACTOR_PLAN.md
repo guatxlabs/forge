@@ -28,7 +28,7 @@ seul est à annuler, pas à « corriger ensuite ».
 
 1. **Vert avant / vert après.** Avant de committer une étape :
    - Rust : `cargo test -p forge-console` (ou `cargo test` à la racine du workspace console)
-     → **415 tests Rust** (compte MESURÉ : `test result: ok. 415 passed`) doivent rester verts,
+     → **418 tests Rust** (compte MESURÉ : `test result: ok. 418 passed`) doivent rester verts,
      **même nombre, mêmes noms**.
    - Python : `python3 -m unittest discover -s tests -t .` → **1513 tests Python** (compte MESURÉ :
      `Ran 1513 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
@@ -102,7 +102,7 @@ ne fait que **~1168 lignes**, dont la seule vraie « fonction-dieu » interne es
   absolu inchangé. Aucun `pub` à ajouter, aucun corps de test touché.
 - **Résultat :** `main.rs` passe de 6065 → **~1168 lignes**. Gain de 80 %.
 - **Risque : TRÈS FAIBLE.** Pur déplacement de texte compilé seulement en `cfg(test)`.
-- **Vérif verte :** `cargo test -p forge-console` → **415 tests, mêmes noms** (compte MESURÉ) ; `cargo build
+- **Vérif verte :** `cargo test -p forge-console` → **418 tests, mêmes noms** (compte MESURÉ) ; `cargo build
   --release` byte-identique (le code non-test est inchangé, tests exclus du build release).
 
 #### Étape 2 — Scinder `tests.rs` par sous-système (miroir des modules source)

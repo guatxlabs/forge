@@ -11,12 +11,17 @@
 
 ## 1. But
 
-La boucle purple mesure « technique T tirée → détectée par Plume ? » par égalité du champ `mitre`
-(cf. [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md)). Une campagne riche en techniques **recon/non-exploit**
-fait tirer un éventail d'ATT&CK distincts (T1595, T1046, T1595.002, T1590.005, T1556) sans franchir
-la barrière d'impact fort. Résultat attendu : une matrice de couverture avec des cases **detected**,
-des cases **missed** (technique tirée, aucune détection corrélée), et des MTTD par technique —
-exactement le livrable purple.
+La boucle purple mesure « technique T tirée → détectée par Plume ? » par égalité de **technique** —
+tags multi-techniques éclatés des deux côtés (cf. [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md)). Une
+campagne riche en techniques **recon/non-exploit** fait tirer un éventail d'ATT&CK distincts (T1595,
+T1046, T1595.002, T1590.005, T1556) sans franchir la barrière d'impact fort. Résultat attendu : une
+matrice de couverture à **trois** cases — **detected** (la source alerte sur exactement cette
+technique ; seule case comptée dans le taux et le MTTD), **parent_approx** (sous-technique tirée dont
+seule la technique **parente** est couverte : un angle mort nommé, pas une détection prouvée),
+**missed** (technique tirée, aucune détection corrélée) — et des MTTD par technique : exactement le
+livrable purple. Une campagne qui tire des sous-techniques (`T1595.002`, `T1110.001`) alors que le SOC
+n'a que des règles génériques (`T1595`, `T1110`) remplit la colonne **parent_approx** : c'est le
+constat le plus vendeur du rapport, et il serait invisible avec une matrice à deux états.
 
 Étape 1 (ce runbook) = **PRÉP + amorce de la matrice MTTD**. Les oracles à preuve d'impact fort
 (IDOR/SSRF/auth/CORS) restent **DRY_RUN/VETO** ici (voir §6) et ne tireront que sur un opt-in

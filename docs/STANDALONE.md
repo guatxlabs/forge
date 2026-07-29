@@ -28,7 +28,7 @@ moitié « blue » (a-t-on été détecté ?) exige une source de détection.
 
 Sans source configurée, l'endpoint de couverture purple (`GET /api/detection/coverage`, alias
 `/api/purple/coverage`) répond **`source_reachable:false`** avec une raison lisible — il **n'invente
-jamais** `detected`/`missed`/`MTTD`. C'est un choix de conception : mieux vaut « mesure impossible »
+jamais** `detected`/`parent_approx`/`missed`/`MTTD`. C'est un choix de conception : mieux vaut « mesure impossible »
 qu'un chiffre faux. Le diagnostic `forge doctor --purple` affiche « boucle purple INCOMPLÈTE » avec
 la ligne exacte qui manque, sans rien tirer.
 
@@ -59,7 +59,7 @@ Aucune migration : brancher une source **à chaud** suffit.
 - **Par env** (rétro-compat/headless) : `PLUME_URL` + `PLUME_TOKEN` (préréglage `kind=plume`), ou
   `FORGE_DETECTION_SOURCE` (JSON pour les kinds riches). Voir [Configuration §1.7](CONFIGURATION.md#17-boucle-purple--source-de-détection-legacy--collecteur).
 
-Dès qu'une source répond, la matrice `detected/missed/MTTD` apparaît sur les techniques déjà tirées —
+Dès qu'une source répond, la matrice `detected/parent_approx/missed/MTTD` apparaît sur les techniques déjà tirées —
 la moitié « red » était déjà là.
 
 ## Standalone hors programme (own-infra / CTF / pentest autorisé)

@@ -55,7 +55,9 @@ prix dans [`PRICING.md`](PRICING.md).
 
 ### Pilier B — Boucle purple même-éditeur
 - Forge (rouge) et Plume (bleu, le SOC) se corrèlent par champ **MITRE**. « Purple » n'est pas un 3ᵉ
-  produit : c'est la boucle. Sortie : par technique → **detected / missed / MTTD**.
+  produit : c'est la boucle. Sortie : par technique → **detected (exact) / parent_approx / missed /
+  MTTD**. Le taux et le MTTD ne comptent que l'exact : une règle parente générique ne prouve pas la
+  détection de la sous-technique tirée.
 - La **source de détection est un plugin configurable** : Plume n'est qu'un préréglage
   (`kind=plume`). CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, un fichier ou une
   commande se câblent **sans code** — voir [`DETECTION.md`](DETECTION.md).

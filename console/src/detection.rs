@@ -32,13 +32,16 @@ use std::time::Duration;
 //
 // Source RED  : table `runrecord` (fired=1) de CETTE console — la technique + l'horodatage du tir.
 // Source BLUE : GET {PLUME_URL}/api/coverage/detections -> [{mitre, count, first_ts}] (epoch s).
-// Jointure    : sur le champ `mitre` commun (ex T1190/T1046/T1110).
-//   detected = techniques tirées présentes côté Plume ; missed = tirées ABSENTES de Plume.
+// Jointure    : sur les TECHNIQUES du champ `mitre` (ex T1190/T1046/T1110.001), tags multi-techniques
+//   ÉCLATÉS des deux côtés (cf. `mitre_techniques`). TROIS ÉTATS : `detected-exact` (même technique),
+//   `detected-parent-approx` (sous-technique tirée, seule la parente est couverte -> angle mort NOMMÉ,
+//   hors taux et hors MTTD), `missed` (rien).
 //   MTTD/tech = first_ts(détection) - ts(tir red) en secondes (>=0 ; négatif tronqué à 0 — une
-//   détection antérieure au tir vient d'un run précédent, on ne « gagne » pas de temps négatif).
+//   détection antérieure au tir vient d'un run précédent, on ne « gagne » pas de temps négatif),
+//   échantillonné UNIQUEMENT sur `detected-exact`.
 //
 // FAIL-OPEN LISIBLE (NON négociable) : si Plume est injoignable / PLUME_URL absent / réponse
-// illisible, on renvoie `plume_reachable:false` et on NE FABRIQUE JAMAIS de detected/missed/MTTD
+// illisible, on renvoie `plume_reachable:false` et on NE FABRIQUE JAMAIS de detected/parent_approx/missed/MTTD
 // (listes vides, agrégats nuls). Un SOC muet ne doit pas se traduire en « tout détecté » NI en
 // « tout raté » — l'opérateur voit explicitement que la mesure n'a pas pu être faite.
 // LECTURE pure : aucun spawn, aucune écriture ; gardée par auth_guard comme le reste de l'API.
@@ -122,7 +125,7 @@ pub(crate) fn parse_fire_ts(ts: &str) -> Option<i64> {
 // les kinds « messy » (et generic_http en https, pour TLS) sont DÉLÉGUÉS au collecteur Python
 // (`forge.cli detections`). Dans TOUS les cas la sortie est normalisée en `[(mitre,count,first_ts)]`
 // puis passée à `compute_purple_coverage` (jointure MITRE INCHANGÉE). Échec/mauvaise config =>
-// FAIL-OPEN LISIBLE (source_reachable:false), jamais de detected/missed/MTTD inventés.
+// FAIL-OPEN LISIBLE (source_reachable:false), jamais de detected/parent_approx/missed/MTTD inventés.
 // ===========================================================================================
 
 /// Résout la config de source de détection : `settings.detection_source` (VERBATIM si objet JSON
@@ -257,68 +260,212 @@ pub(crate) fn apply_kept_secret(app: &App, cfg: &Value, keep_secret: bool) -> Va
 }
 
 
+/// Éclate un tag MITRE en ses techniques DISTINCTES, **sous-technique PRÉSERVÉE**.
+///
+/// POURQUOI : un tag `mitre` peut porter PLUSIEURS techniques séparées par espace/virgule/
+/// point-virgule — c'est la NORME chez SigmaHQ (plusieurs `attack.` par règle), et le champ `mitre`
+/// de Plume le documente lui-même (`daemon/src/handlers/alerts.rs::mitre_parents`). Avec une
+/// jointure par ÉGALITÉ DE CHAÎNE, un tag `"T1595.002 T1046"` ne matche AUCUNE clé côté Forge : le
+/// corpus Sigma FABRIQUE alors de faux « missed ». On éclate donc le tag DES DEUX CÔTÉS de la
+/// jointure (tirs Forge ET détections de la source).
+///
+/// La sous-technique n'est JAMAIS repliée sur sa parente ici : c'est précisément la distinction
+/// `detected-exact` / `detected-parent-approx` qui porte l'information (cf. compute_purple_coverage).
+/// Format accepté : `T` + chiffres, avec une sous-technique optionnelle `.` + chiffres (casse
+/// insensible, normalisée en haut de casse). Un token hors format est ignoré. Dédupliqué, ordre
+/// d'apparition préservé. PUR / testable.
+pub(crate) fn mitre_techniques(tag: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in tag.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        let t = tok.trim().to_ascii_uppercase();
+        let Some(rest) = t.strip_prefix('T') else { continue };
+        let (base, sub) = match rest.split_once('.') {
+            Some((b, s)) => (b, Some(s)),
+            None => (rest, None),
+        };
+        if base.is_empty() || !base.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // une sous-technique doit être un bloc de chiffres unique ("T1110.001.2" est rejeté).
+        if let Some(s) = sub {
+            if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// CLÉS DE JOINTURE d'un tag `mitre` : ses techniques ATT&CK si le tag en contient au moins une,
+/// sinon le tag BRUT (trimé) tel quel.
+///
+/// ANTI-SILENT-DROP (même garantie que `attack_matrix`) : un tag vendeur/custom qui ne ressemble
+/// pas à `T####` ne doit pas DISPARAÎTRE de la mesure — une technique tirée qui s'évapore, c'est un
+/// angle mort rendu INVISIBLE, exactement l'inverse de ce que le produit vend. Il reste donc joint
+/// VERBATIM, comme avant l'éclatement (rétro-compat exacte pour ces tags).
+fn mitre_join_keys(tag: &str) -> Vec<String> {
+    let techs = mitre_techniques(tag);
+    if !techs.is_empty() {
+        return techs;
+    }
+    let raw = tag.trim();
+    if raw.is_empty() { Vec::new() } else { vec![raw.to_string()] }
+}
+
+/// Technique PARENTE d'une SOUS-technique (`T1110.001` -> `T1110`). `None` si le tag n'est pas une
+/// sous-technique bien formée (une technique parente n'a pas elle-même de parente).
+fn mitre_parent_of(tid: &str) -> Option<String> {
+    let (base, sub) = tid.split_once('.')?;
+    let b = base.strip_prefix('T')?;
+    if b.is_empty() || !b.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if sub.is_empty() || !sub.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(base.to_string())
+}
+
 /// Corrélation PURE (testable, sans I/O) red-team(tiré) × blue-team(détecté).
 ///
 /// - `fired` : techniques tirées par Forge -> (mitre, ts_epoch_du_tir Option). Une technique peut
 ///   apparaître plusieurs fois (plusieurs tirs) ; on prend le tir le PLUS RÉCENT pour le MTTD (le SOC
 ///   doit détecter le tir courant), et on compte les tirs.
-/// - `detections` : map mitre -> (count_alertes, first_ts_epoch) renvoyée par Plume.
+/// - `detections` : map mitre -> (count_alertes, first_ts_epoch) renvoyée par la source de détection.
+///
+/// Les tags des DEUX côtés sont éclatés par `mitre_join_keys` (multi-techniques Sigma) avant la
+/// jointure ; côté bleu, deux tags qui retombent sur la MÊME technique sont agrégés (counts sommés,
+/// `first_ts` = min — la PREMIÈRE détection).
+///
+/// TROIS ÉTATS, pas deux :
+///   * `detected-exact` — la source a une détection sur EXACTEMENT la technique tirée ;
+///   * `detected-parent-approx` — Forge a tiré une SOUS-technique (`T1110.001`) et la source n'a de
+///     détection que sur la technique PARENTE (`T1110`) ;
+///   * `missed` — rien, ni exact ni parent.
+///
+/// POURQUOI LE PARENT-APPROX N'EST **PAS** COMPTÉ COMME DÉTECTÉ (invariant de `detection_rate`) :
+/// le tag d'une règle PARENTE ne dit RIEN du VECTEUR qu'elle couvre. La jointure voit un identifiant,
+/// pas une requête de détection : elle ne peut donc pas PROUVER que la sous-technique tirée est
+/// détectée. « Détecté » est une affirmation ; on ne l'émet que quand on l'a mesurée.
+///
+/// Ce n'est pas théorique — cas relevé sur les règles LIVRÉES de plume, `T1110` tagué / `T1110.001`
+/// tiré (module `network.ssh` : devinette de mot de passe SSH). Trois des règles `T1110` livrées
+/// (catalogue `config.d/rules/catalog/`, requêtes relevées verbatim) ne peuvent PAS attraper un
+/// brute-force SSH MONO-SOURCE :
+///   `ca-cred-mail-bruteforce`       : `search source=mail action=failure …`  -> bornée au MAIL,
+///   `ca-cred-web-login-bruteforce`  : `search source=web status=401 …`       -> bornée au WEB,
+///   `ca-cred-distributed-bruteforce`: `search category=auth action=failure | stats dc(src_ip)`
+///                                                                            -> exige la DISPERSION d'IP.
+/// D'autres règles `T1110` sont seedées et POURRAIENT couvrir ce vecteur selon la télémétrie branchée
+/// (`seeds.rs` : `search category=auth action=failure | stats count by src_ip | where count > 15`) —
+/// et c'est exactement le point : selon le corpus ACTIVÉ et les sources branchées, la parente couvre ou
+/// ne couvre pas. La jointure ne peut pas trancher, donc elle ne tranche pas : elle NOMME le doute au
+/// lieu de l'arbitrer en faveur du vendeur. Compter ce rapprochement comme « détecté » produirait un
+/// taux non mesuré et un MTTD calculé entre le tir SSH et une alerte potentiellement sans rapport.
+/// Le taux vitrine ne compte donc QUE `detected-exact`, et le MTTD n'est échantillonné QUE sur
+/// `detected-exact` (un MTTD sur un rapprochement approximatif est un chiffre inventé). Pour faire
+/// passer une sous-technique au vert : taguer une règle DE CETTE sous-technique.
+///
+/// Le parent-approx n'est pas pour autant du DÉCHET : c'est un angle mort NOMMÉ (« tu as tiré
+/// T1110.001, tu n'as que des règles T1110 génériques »), rendu dans sa propre liste `parent_approx`
+/// avec son propre compteur `techniques_parent_approx`.
 ///
 /// Renvoie l'objet JSON exposé par /api/purple/coverage (hors champ plume_reachable, ajouté par
-/// le handler). detected/missed sont des intersections/différences STRICTES sur `mitre`.
+/// le handler). INVARIANT : detected + parent_approx + missed == techniques_fired.
 pub(crate) fn compute_purple_coverage(
     fired: &[(String, Option<i64>)],
     detections: &std::collections::HashMap<String, (i64, i64)>,
 ) -> Value {
-    // agrège les tirs par technique : nb de tirs + horodatage du tir le plus récent (pour MTTD).
-    let mut fired_by: std::collections::BTreeMap<String, (i64, Option<i64>)> = std::collections::BTreeMap::new();
-    for (mitre, ts) in fired {
-        if mitre.is_empty() {
-            continue;
+    // côté BLEU : éclatement des tags multi-techniques + agrégation par technique (count sommé,
+    // first_ts = min : la PREMIÈRE détection, cohérent avec `map_detections`).
+    let mut det_by: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for (tag, (count, first_ts)) in detections {
+        for tech in mitre_join_keys(tag) {
+            let e = det_by.entry(tech).or_insert((0, *first_ts));
+            e.0 += *count;
+            if *first_ts < e.1 {
+                e.1 = *first_ts;
+            }
         }
-        let e = fired_by.entry(mitre.clone()).or_insert((0, None));
-        e.0 += 1;
-        if let Some(t) = ts {
-            // on garde le tir le PLUS RÉCENT (max) -> MTTD calculé contre le dernier tir.
-            e.1 = Some(e.1.map_or(*t, |cur: i64| cur.max(*t)));
+    }
+
+    // côté ROUGE : même éclatement, puis agrégation des tirs par technique (nb de tirs + horodatage
+    // du tir le plus récent, pour le MTTD). Un tir portant 2 techniques compte 1 tir pour CHACUNE.
+    let mut fired_by: std::collections::BTreeMap<String, (i64, Option<i64>)> = std::collections::BTreeMap::new();
+    for (tag, ts) in fired {
+        for tech in mitre_join_keys(tag) {
+            let e = fired_by.entry(tech).or_insert((0, None));
+            e.0 += 1;
+            if let Some(t) = ts {
+                // on garde le tir le PLUS RÉCENT (max) -> MTTD calculé contre le dernier tir.
+                e.1 = Some(e.1.map_or(*t, |cur: i64| cur.max(*t)));
+            }
         }
     }
 
     let mut detected: Vec<Value> = Vec::new();
+    let mut parent_approx: Vec<Value> = Vec::new();
     let mut missed: Vec<Value> = Vec::new();
     let mut mttd_samples: Vec<i64> = Vec::new();
 
     for (mitre, (fires, last_fire_ts)) in &fired_by {
-        match detections.get(mitre) {
-            Some((count, first_ts)) => {
-                // MTTD = première détection - dernier tir. Indisponible si le ts du tir est illisible.
-                // Tronqué à 0 si négatif (détection antérieure = run précédent ; pas de gain négatif).
-                let mttd = last_fire_ts.map(|ft| (*first_ts - ft).max(0));
-                if let Some(m) = mttd {
-                    mttd_samples.push(m);
-                }
-                detected.push(json!({
-                    "mitre": mitre,
-                    "fires": fires,
-                    "alert_count": count,
-                    "first_detection_ts": first_ts,
-                    "fire_ts": last_fire_ts,
-                    "mttd_secs": mttd,
-                }));
+        // (1) DETECTED-EXACT — même technique des deux côtés. Seul état qui alimente le taux et le MTTD.
+        if let Some((count, first_ts)) = det_by.get(mitre) {
+            // MTTD = première détection - dernier tir. Indisponible si le ts du tir est illisible.
+            // Tronqué à 0 si négatif (détection antérieure = run précédent ; pas de gain négatif).
+            let mttd = last_fire_ts.map(|ft| (*first_ts - ft).max(0));
+            if let Some(m) = mttd {
+                mttd_samples.push(m);
             }
-            None => {
-                missed.push(json!({
+            detected.push(json!({
+                "mitre": mitre,
+                "state": "detected-exact",
+                "fires": fires,
+                "alert_count": count,
+                "first_detection_ts": first_ts,
+                "fire_ts": last_fire_ts,
+                "mttd_secs": mttd,
+            }));
+            continue;
+        }
+        // (2) DETECTED-PARENT-APPROX — sous-technique tirée, seule la parente est couverte côté bleu.
+        // AUCUN MTTD n'est émis : on n'a pas de détection de CE vecteur à dater.
+        if let Some(parent) = mitre_parent_of(mitre) {
+            if let Some((count, first_ts)) = det_by.get(&parent) {
+                parent_approx.push(json!({
                     "mitre": mitre,
+                    "state": "detected-parent-approx",
+                    "parent": parent,
                     "fires": fires,
                     "fire_ts": last_fire_ts,
+                    "parent_alert_count": count,
+                    "parent_first_detection_ts": first_ts,
+                    "why": format!(
+                        "{mitre} a été tirée ; la source ne détecte que la technique parente {parent}. \
+Une règle parente générique ne prouve pas la couverture de CE vecteur — non comptée dans le taux, aucun MTTD calculé."
+                    ),
                 }));
+                continue;
             }
         }
+        // (3) MISSED — ni exact ni parent.
+        missed.push(json!({
+            "mitre": mitre,
+            "state": "missed",
+            "fires": fires,
+            "fire_ts": last_fire_ts,
+        }));
     }
 
     let n_fired = fired_by.len() as i64;
     let n_detected = detected.len() as i64;
+    let n_approx = parent_approx.len() as i64;
     let n_missed = missed.len() as i64;
+    // TAUX VITRINE : `detected-exact` UNIQUEMENT (cf. justification ci-dessus). Le parent-approx a son
+    // propre compteur et n'entre JAMAIS au numérateur.
     let detection_rate = if n_fired > 0 { n_detected as f64 / n_fired as f64 } else { 0.0 };
     let mttd_avg = if !mttd_samples.is_empty() {
         Some(mttd_samples.iter().sum::<i64>() as f64 / mttd_samples.len() as f64)
@@ -329,27 +476,31 @@ pub(crate) fn compute_purple_coverage(
 
     json!({
         "techniques_fired": n_fired,
-        "techniques_detected": n_detected,
+        "techniques_detected": n_detected,          // detected-exact SEULEMENT
+        "techniques_parent_approx": n_approx,       // sous-technique tirée, seule la parente est couverte
         "techniques_missed": n_missed,
-        "detection_rate": detection_rate,   // [0,1] — part des techniques tirées détectées par le SOC
-        "mttd_avg_secs": mttd_avg,           // null si aucun échantillon mesurable
-        "mttd_max_secs": mttd_max,           // null si aucun échantillon mesurable
-        "detected": detected,                // techniques tirées ET détectées (avec MTTD)
-        "missed": missed,                    // TROUS de détection : tirées mais jamais alertées
+        "detection_rate": detection_rate,   // [0,1] — part des techniques tirées détectées EXACTEMENT
+        "mttd_avg_secs": mttd_avg,           // null si aucun échantillon mesurable (exact uniquement)
+        "mttd_max_secs": mttd_max,           // null si aucun échantillon mesurable (exact uniquement)
+        "detected": detected,                // techniques tirées ET détectées EXACTEMENT (avec MTTD)
+        "parent_approx": parent_approx,      // ANGLES MORTS NOMMÉS : parente couverte, vecteur non prouvé
+        "missed": missed,                    // TROUS de détection : tirées, ni exact ni parent
     })
 }
 
 /// Construit l'objet de FAIL-OPEN LISIBLE (source_reachable/plume_reachable:false) : compte les
-/// techniques tirées (pour information) mais NE FABRIQUE PAS de detected/missed/MTTD. Réutilisé par
+/// techniques tirées (pour information) mais NE FABRIQUE PAS de detected/parent_approx/missed/MTTD. Réutilisé par
 /// tous les chemins où la mesure n'a pas pu se faire (source absente/injoignable/illisible, lecture DB
 /// échouée). `plume_reachable`/`plume_url` sont conservés (rétro-compat du SPA et du rapport qui les
 /// lisent) et MIROITÉS en `source_reachable`/`source_url` (nommage neutre infra-agnostique). `url` ne
 /// contient JAMAIS le secret (endpoint seul). `reason` a déjà été rédigé par l'appelant.
 pub(crate) fn purple_fail_open(url: &str, fired: &[(String, Option<i64>)], reason: &str) -> Value {
+    // MÊME comptage des techniques distinctes que la mesure réelle (`mitre_join_keys`) : un tag
+    // multi-techniques compte pour chacune de ses techniques, sinon le « pour information » d'un
+    // fail-open contredirait le `techniques_fired` mesuré sur les mêmes tirs.
     let n_fired = fired
         .iter()
-        .filter(|(m, _)| !m.is_empty())
-        .map(|(m, _)| m.clone())
+        .flat_map(|(m, _)| mitre_join_keys(m))
         .collect::<std::collections::BTreeSet<_>>()
         .len() as i64;
     json!({
@@ -360,11 +511,13 @@ pub(crate) fn purple_fail_open(url: &str, fired: &[(String, Option<i64>)], reaso
         "error": reason,
         "techniques_fired": n_fired,
         "techniques_detected": 0,
+        "techniques_parent_approx": 0,
         "techniques_missed": 0,
         "detection_rate": 0.0,
         "mttd_avg_secs": Value::Null,
         "mttd_max_secs": Value::Null,
         "detected": [],
+        "parent_approx": [],
         "missed": [],
     })
 }
@@ -622,7 +775,7 @@ pub(crate) async fn collect_detections_with(app: &App, cfg: &Value, since: i64) 
 
 /// Interroge la SOURCE DE DÉTECTION configurée et corrèle avec les techniques `fired` -> objet de
 /// couverture complet. FAIL-OPEN LISIBLE à chaque étape qui peut échouer (source absente/injoignable/
-/// illisible) : `source_reachable`/`plume_reachable:false` + raison RÉDIGÉE, JAMAIS de detected/missed/
+/// illisible) : `source_reachable`/`plume_reachable:false` + raison RÉDIGÉE, JAMAIS de detected/parent_approx/missed/
 /// MTTD inventés. La jointure MITRE (compute_purple_coverage) est INCHANGÉE quel que soit le `kind`.
 /// Réutilisé par l'endpoint /api/purple/coverage (alias /api/detection/coverage) ET la section purple
 /// du rapport de run. `endpoint`/`source_url` exposés pour la traçabilité NE contiennent jamais le secret.
@@ -683,14 +836,18 @@ pub(crate) async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<
 ///                                       //   true + source_reachable:false => source posée mais injoignable
 ///     "source_url": "...",             // (miroir: plume_url) endpoint pour traçabilité — JAMAIS le secret
 ///     "source_kind": "...",            // kind de la source (none en autonome)
-///     "techniques_fired|detected|missed": i64,
-///     "detection_rate": f64,           // [0,1]
-///     "mttd_avg_secs"|"mttd_max_secs": f64|i64|null,
-///     "detected": [ {mitre, fires, alert_count, first_detection_ts, fire_ts, mttd_secs} ],
-///     "missed":   [ {mitre, fires, fire_ts} ],
+///     "techniques_fired|detected|parent_approx|missed": i64,   // detected = EXACT seulement
+///     "detection_rate": f64,           // [0,1] — detected-exact / fired (parent-approx EXCLU)
+///     "mttd_avg_secs"|"mttd_max_secs": f64|i64|null,           // échantillons detected-exact seulement
+///     "detected":      [ {mitre, state:"detected-exact", fires, alert_count, first_detection_ts, fire_ts, mttd_secs} ],
+///     "parent_approx": [ {mitre, state:"detected-parent-approx", parent, fires, fire_ts,
+///                         parent_alert_count, parent_first_detection_ts, why} ],
+///     "missed":        [ {mitre, state:"missed", fires, fire_ts} ],
 ///     ("error": "...")                 // présent UNIQUEMENT si source_reachable=false (raison lisible)
 ///   }
-/// Si source_reachable=false : detected/missed=[], compteurs/MTTD nuls — jamais de faux détecté/raté.
+/// INVARIANT : techniques_detected + techniques_parent_approx + techniques_missed == techniques_fired.
+/// Si source_reachable=false : detected/parent_approx/missed=[], compteurs/MTTD nuls — jamais de faux
+/// détecté/raté.
 pub(crate) async fn purple_coverage(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : la couverture de détection est calculée sur les tirs de l'engagement actif UNIQUEMENT.
     let eid = resolve_view_engagement_id(&app, &headers, &q);

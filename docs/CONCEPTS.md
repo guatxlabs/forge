@@ -139,15 +139,33 @@ sonde avec `forge doctor` (un module dont l'outil manque est **auto-neutralisé*
 ## 5. La boucle purple
 
 La boucle **purple** corrèle les techniques **tirées** en red (run-records taggés `mitre`) aux
-techniques **détectées** par la défense — par **égalité d'identifiant MITRE** — et en déduit
-`detected` / `missed` / **MTTD**.
+techniques **détectées** par la défense — par **égalité d'identifiant de TECHNIQUE** — et en déduit
+**trois états** + le **MTTD**.
 
 ```
 Forge tire la technique T ─► run-record {mitre: T} ─► console (store rouge)
                                                           │  JOIN lecture seule
-Source de détection (Plume/SIEM/IDS) détecte T ? ─────────┘  sur égalité `mitre`
-   ─►  matrice de couverture ATT&CK : detected / missed / MTTD(T) = first_detection − last_fire
+Source de détection (Plume/SIEM/IDS) détecte T ? ─────────┘  sur la TECHNIQUE
+   ─►  matrice de couverture ATT&CK, TROIS états :
+         detected-exact         → la source alerte sur EXACTEMENT T   (compte dans le taux + MTTD)
+         detected-parent-approx → T est une SOUS-technique et la source n'a que la PARENTE
+         missed                 → ni l'un ni l'autre
+       MTTD(T) = first_detection − last_fire, sur les detected-exact UNIQUEMENT
 ```
+
+**Pourquoi trois états et pas deux.** Un tag multi-techniques (`"T1595.002 T1046"` — la norme chez
+SigmaHQ : plusieurs `attack.` par règle) est **éclaté des deux côtés** de la jointure, sinon le corpus
+Sigma fabrique de faux `missed`. Et une règle taguée de la technique **parente** n'est **pas** une
+preuve de détection de la sous-technique tirée : elle est comptée à part (`parent_approx`), **hors du
+taux vitrine et hors du MTTD**. La jointure voit un **identifiant**, pas une requête de détection :
+elle ne peut donc pas *prouver* que le vecteur tiré est couvert. Exemple mesuré : Forge tire
+`T1110.001` (devinette de mot de passe SSH) ; trois des règles `T1110` livrées avec Plume sont bornées
+au mail, bornées au web, ou exigent une dispersion d'IP — aucune de ces trois n'attrape un brute-force
+SSH mono-source ; d'autres règles `T1110` seedées le pourraient, **selon la télémétrie branchée et les
+règles activées**. C'est précisément pour ça qu'on ne tranche pas : le doute est **nommé** plutôt
+qu'arbitré en faveur du vendeur. Le parent-approx n'est pas du déchet pour autant : c'est un **angle
+mort nommé** (« vous avez tiré `T1110.001`, vous n'avez que des règles `T1110` génériques »), rendu
+dans sa propre liste. Pour passer au vert : taguer une règle **de cette sous-technique**.
 
 Deux invariants :
 - **La corrélation ne change jamais** ; seule la **SOURCE** de détection est spécifique au client.
@@ -155,8 +173,8 @@ Deux invariants :
   `DetectionSource`, préréglages (CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) et mapping
   MITRE : [`DETECTION.md`](DETECTION.md). Prérequis du préréglage Plume : [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).
 - **Fail-open lisible** : source absente/injoignable ⇒ `source_reachable:false`, la mesure est
-  déclarée **impossible** — jamais de `detected`/`missed`/`MTTD` inventé. Source joignable mais vide
-  (SOC frais) = état **valide**.
+  déclarée **impossible** — jamais de `detected`/`parent_approx`/`missed`/`MTTD` inventé. Source
+  joignable mais vide (SOC frais) = état **valide**.
 
 Le **MTTD** est un **time-to-ALERT** (il englobe l'ingest + la cadence d'évaluation des règles), pas
 un time-to-event — à ne pas surinterpréter. Explication détaillée : [`MTTD.md`](MTTD.md).

@@ -30,15 +30,23 @@ un fichier temporaire jetable, jamais dans le dépôt.
 
 CE QUI EST VÉRIFIÉ (chaque attente est DÉRIVÉE, jamais copiée d'un run)
 ----------------------------------------------------------------------
-Le scénario tire 5 actions portant 4 techniques distinctes, et le seed du SOC est ÉCRIT APRÈS le tir,
+Le scénario tire 7 actions portant 6 techniques distinctes, et le seed du SOC est ÉCRIT APRÈS le tir,
 à partir des horodatages RÉELS des run-records — donc les valeurs attendues (MTTD compris) sont
-calculées, pas devinées :
-  T1595  tirée 2 fois (2 cibles)  + détectée par le SOC  -> detected, MTTD = 60 s
-  T1046  tirée 1 fois             + détectée par le SOC  -> detected, MTTD = 30 s
-  T1110  tirée 1 fois, détection présente dans le seed mais DATÉE AVANT la fenêtre `since`
-                                                          -> missed (prouve le filtrage `since`)
-  T1566  tirée 1 fois, absente du SOC                     -> missed
-=> techniques_fired=4, detected=2, missed=2, detection_rate=0.5, mttd_avg=45.0, mttd_max=60.
+calculées, pas devinées. La jointure a TROIS états (detected-exact / detected-parent-approx / missed) :
+  T1595      tirée 2 fois (2 cibles) + détectée par le SOC       -> detected-exact, MTTD = 60 s
+  T1046      tirée 1 fois            + détectée par le SOC       -> detected-exact, MTTD = 30 s
+  T1110      tirée 1 fois, détection présente dans le seed mais DATÉE AVANT la fenêtre `since`
+                                                                 -> missed (prouve le filtrage `since`)
+  T1566      tirée 1 fois, absente du SOC                        -> missed
+  T1552.001  tirée 1 fois ; le SOC n'a de règle QUE sur la parente T1552, servie DANS la fenêtre
+             (mttd apparent 900 s)                               -> detected-parent-approx :
+             NI détectée (le taux ne bouge pas) NI un simple missed (l'angle mort est NOMMÉ), et son
+             MTTD apparent de 900 s NE DOIT PAS entrer dans mttd_avg/mttd_max.
+  T1592.002  tirée 1 fois ; le SOC répond avec un tag MULTI-TECHNIQUES "T1592.002 T1594" (norme
+             SigmaHQ : plusieurs `attack.` par règle)            -> detected-exact des DEUX côtés
+             (sans l'éclatement du tag, la jointure par égalité de chaîne fabriquerait un faux missed)
+=> techniques_fired=6, detected=3, parent_approx=1, missed=2, detection_rate=3/6=0.5,
+   mttd_avg=(60+30+45)/3=45.0, mttd_max=60.
 
 Sortie : une ligne par contrôle, `E2E PURPLE OK` + code 0 si tout tient, sinon la première violation
 et code 1.
@@ -69,11 +77,33 @@ FIRES = [
     ("127.0.0.3", "T1046"),
     ("127.0.0.4", "T1110"),   # détection présente mais HORS fenêtre `since` -> attendue missed
     ("127.0.0.5", "T1566"),   # aucune détection -> attendue missed
+    ("127.0.0.6", "T1552.001"),  # SOUS-technique : le SOC n'a que la parente -> parent-approx
+    ("127.0.0.7", "T1592.002"),  # détectée via un tag SOC MULTI-TECHNIQUES -> detected-exact
 ]
-DETECTED = {"T1595": 60, "T1046": 30}   # technique -> MTTD (s) injecté dans le seed du SOC
+# technique -> MTTD (s) injecté dans le seed du SOC. Ce sont les detected-EXACT attendus.
+DETECTED = {"T1595": 60, "T1046": 30, "T1592.002": 45}
 MISSED_OUT_OF_WINDOW = "T1110"          # détectée AVANT le 1er tir : le `since` doit l'exclure
 MISSED_ABSENT = "T1566"
-ALERT_COUNTS = {"T1595": 3, "T1046": 5, MISSED_OUT_OF_WINDOW: 7}
+
+# --- TROIS ÉTATS : le cas parent/sous-technique --------------------------------------------------
+# Forge tire la SOUS-technique ; le SOC n'a de règle que sur la PARENTE, et son alerte tombe DANS la
+# fenêtre (donc rien ne l'exclut : seule la règle des trois états peut la classer correctement).
+# Ce n'est PAS un « détecté » (une règle parente générique ne prouve pas la couverture du vecteur
+# tiré) et ce n'est pas non plus un simple trou muet : c'est un angle mort NOMMÉ.
+PARENT_APPROX_SUB = "T1552.001"
+PARENT_APPROX_PARENT = "T1552"
+# MTTD APPARENT du rapprochement parent : s'il entrait dans l'échantillon, mttd_max passerait de 60 à
+# 900 et mttd_avg de 45 à 258.75. C'est CE chiffre inventé que la garde doit interdire.
+PARENT_APPROX_APPARENT_MTTD = 900
+
+# --- TAG MULTI-TECHNIQUES (norme SigmaHQ) --------------------------------------------------------
+# Le SOC sert UNE ligne dont le champ `mitre` porte DEUX techniques. Sans éclatement, la jointure par
+# égalité de chaîne ne matche aucune des deux -> faux « missed » fabriqué par le corpus Sigma.
+MULTI_TAG_FIRED = "T1592.002"
+MULTI_TAG_SERVED = "T1592.002 T1594"
+
+ALERT_COUNTS = {"T1595": 3, "T1046": 5, MISSED_OUT_OF_WINDOW: 7,
+                MULTI_TAG_SERVED: 2, PARENT_APPROX_PARENT: 4}
 
 
 class Fail(Exception):
@@ -176,11 +206,16 @@ def fire_engine(workdir):
 def build_seed(run_records, path):
     """Écrit le seed JSONL du SOC à partir des horodatages RÉELS des run-records.
 
-    - technique détectée : `first_ts` = (tir le PLUS RÉCENT de cette technique) + MTTD voulu
-      -> la console doit retrouver EXACTEMENT ce MTTD (elle joint sur le dernier tir) ;
+    - technique détectée EXACTEMENT : `first_ts` = (tir le PLUS RÉCENT de cette technique) + MTTD voulu
+      -> la console doit retrouver EXACTEMENT ce MTTD (elle joint sur le dernier tir). Pour
+      `MULTI_TAG_FIRED`, la ligne servie porte le tag MULTI-TECHNIQUES `MULTI_TAG_SERVED` : le MTTD
+      n'est retrouvé QUE si la console éclate le tag ;
     - `MISSED_OUT_OF_WINDOW` : `first_ts` = (tir le plus ANCIEN) - 3600 -> mock_plume doit l'exclure
-      de la fenêtre `since` que la console dérive du plus ancien tir, donc la technique reste MISSED.
-    Retourne (dict {technique: first_ts} effectivement écrit, horodatage du tir le plus ancien)."""
+      de la fenêtre `since` que la console dérive du plus ancien tir, donc la technique reste MISSED ;
+    - `PARENT_APPROX_PARENT` : servie DANS la fenêtre, à (tir de la SOUS-technique) +
+      `PARENT_APPROX_APPARENT_MTTD`. Rien ne l'exclut : c'est la règle des trois états — et elle
+      seule — qui doit empêcher ce rapprochement de compter comme détecté et de polluer le MTTD.
+    Retourne (dict {tag servi: first_ts} effectivement écrit, horodatage du tir le plus ancien)."""
     ts_by_mitre = {}
     for rec in run_records:
         epoch = iso_to_epoch(rec["ts"])
@@ -189,8 +224,11 @@ def build_seed(run_records, path):
 
     seed = {}
     for mitre, mttd in DETECTED.items():
-        seed[mitre] = max(ts_by_mitre[mitre]) + mttd
+        # le SOC peut servir la technique sous un tag COMPOSÉ (cas Sigma) : la clé du seed est le TAG.
+        tag = MULTI_TAG_SERVED if mitre == MULTI_TAG_FIRED else mitre
+        seed[tag] = max(ts_by_mitre[mitre]) + mttd
     seed[MISSED_OUT_OF_WINDOW] = oldest_fire - 3600
+    seed[PARENT_APPROX_PARENT] = max(ts_by_mitre[PARENT_APPROX_SUB]) + PARENT_APPROX_APPARENT_MTTD
     lines = [json.dumps({"mitre": m, "count": ALERT_COUNTS[m], "first_ts": ts,
                          "rule": "e2e-fixture", "source": "mock_plume (DEMO FIXTURE)"})
              for m, ts in seed.items()]
@@ -317,32 +355,88 @@ def run_e2e(console_bin, workdir, procs):
     expect_eq(cov.get("source_kind"), "plume", "kind de source résolu depuis PLUME_URL")
 
     detected = {d["mitre"]: d for d in cov.get("detected", [])}
+    approx = {a["mitre"]: a for a in cov.get("parent_approx", [])}
     missed = {m["mitre"]: m for m in cov.get("missed", [])}
-    expect_eq(set(detected), set(DETECTED), "`detected` = exactement les techniques vues par le SOC")
+    expect_eq(set(detected), set(DETECTED),
+              "`detected` = exactement les techniques vues EXACTEMENT par le SOC")
+    expect_eq(set(approx), {PARENT_APPROX_SUB},
+              "`parent_approx` = exactement les sous-techniques dont SEULE la parente est couverte")
     expect_eq(set(missed), {MISSED_OUT_OF_WINDOW, MISSED_ABSENT},
               "`missed` = exactement les TROUS de détection (dont celui hors fenêtre)")
 
     n_fired = len({m for _, m in FIRES})
     expect_eq(cov.get("techniques_fired"), n_fired, "techniques_fired = techniques DISTINCTES tirées")
-    expect_eq(cov.get("techniques_detected"), len(DETECTED), "techniques_detected")
+    expect_eq(cov.get("techniques_detected"), len(DETECTED), "techniques_detected (EXACT seulement)")
+    expect_eq(cov.get("techniques_parent_approx"), 1, "techniques_parent_approx")
     expect_eq(cov.get("techniques_missed"), 2, "techniques_missed")
-    # taux ATTENDU dérivé du scénario — et NON du nombre de TIRS (5) : la dérive « rate par tir »
-    # donnerait 3/5=0.6 au lieu de 2/4=0.5, et doit rougir ici.
+    # INVARIANT des trois états : chaque technique tirée tombe dans EXACTEMENT une case.
+    expect_eq(cov.get("techniques_detected") + cov.get("techniques_parent_approx")
+              + cov.get("techniques_missed"), n_fired,
+              "detected + parent_approx + missed == techniques_fired")
+    # taux ATTENDU dérivé du scénario — et NON du nombre de TIRS (7) : la dérive « rate par tir »
+    # donnerait 4/7 au lieu de 3/6=0.5, et doit rougir ici.
     expect_eq(cov.get("detection_rate"), len(DETECTED) / n_fired,
-              "detection_rate = techniques détectées / techniques tirées")
+              "detection_rate = techniques détectées EXACTEMENT / techniques tirées")
+    # LA GARDE DU TAUX : compter le parent-approx comme détecté donnerait 4/6 = 0.666… . On assert le
+    # NON-effet explicitement, sinon la garde ne mord que par ricochet.
+    expect(cov.get("detection_rate") != (len(DETECTED) + 1) / n_fired,
+           "le parent-approx N'ENTRE PAS dans detection_rate",
+           f"un taux de {(len(DETECTED) + 1) / n_fired} signifierait qu'il a été compté comme détecté")
 
     for mitre, mttd in DETECTED.items():
         d = detected[mitre]
+        # le SOC a pu servir cette technique sous un tag COMPOSÉ : la clé du seed est le TAG servi.
+        tag = MULTI_TAG_SERVED if mitre == MULTI_TAG_FIRED else mitre
         expect_eq(d.get("mttd_secs"), mttd, f"MTTD({mitre}) = first_detection_ts - dernier tir")
-        expect_eq(d.get("alert_count"), ALERT_COUNTS[mitre], f"alert_count({mitre}) vient du SOC")
-        expect_eq(d.get("first_detection_ts"), seed[mitre],
+        expect_eq(d.get("alert_count"), ALERT_COUNTS[tag], f"alert_count({mitre}) vient du SOC")
+        expect_eq(d.get("first_detection_ts"), seed[tag],
                   f"first_detection_ts({mitre}) = l'horodatage servi par le SOC")
+        expect_eq(d.get("state"), "detected-exact", f"état NOMMÉ de {mitre}")
     expect_eq(detected["T1595"].get("fires"), 2,
               "les 2 tirs de T1595 sont comptés (agrégation par technique)")
 
+    # --- TAG MULTI-TECHNIQUES : la garde de l'éclatement ------------------------------------------
+    # Le SOC n'a JAMAIS servi la clé nue `T1592.002` : il a servi `"T1592.002 T1594"`. Sans éclatement
+    # côté console, la jointure par égalité de chaîne ne matche rien et fabrique un faux « missed ».
+    expect(MULTI_TAG_FIRED not in {d["mitre"] for d in body["detections"]},
+           "le SOC n'a JAMAIS servi la clé nue — seulement le tag composé",
+           f"détections servies : {sorted(d['mitre'] for d in body['detections'])}")
+    expect(MULTI_TAG_FIRED in detected,
+           "un tag SOC MULTI-TECHNIQUES est ÉCLATÉ : la sous-technique tirée est bien détectée",
+           f"le SOC a servi le tag composé {MULTI_TAG_SERVED!r} ; sans éclatement -> faux missed")
+    expect(MULTI_TAG_SERVED not in detected and MULTI_TAG_SERVED not in missed,
+           "le tag composé n'apparaît JAMAIS tel quel comme une pseudo-technique")
+    expect("T1594" not in detected and "T1594" not in missed,
+           "l'éclatement n'INVENTE pas de technique tirée : T1594 (jamais tirée) reste absente")
+
+    # --- PARENT-APPROX : la garde du troisième état -----------------------------------------------
+    a = approx[PARENT_APPROX_SUB]
+    expect_eq(a.get("state"), "detected-parent-approx", "état NOMMÉ du rapprochement parent")
+    expect_eq(a.get("parent"), PARENT_APPROX_PARENT, "la technique PARENTE est nommée (exploitable)")
+    expect_eq(a.get("parent_alert_count"), ALERT_COUNTS[PARENT_APPROX_PARENT],
+              "les alertes de la parente restent lisibles (information, pas déchet)")
+    expect(PARENT_APPROX_SUB not in detected,
+           "la sous-technique N'EST PAS comptée comme détectée (une règle parente ne le prouve pas)")
+    expect(PARENT_APPROX_SUB not in missed,
+           "…et n'est pas non plus un trou MUET : l'angle mort est NOMMÉ")
+    expect(a.get("mttd_secs") is None,
+           "aucun MTTD n'est fabriqué sur un rapprochement approximatif",
+           f"mttd_secs={a.get('mttd_secs')!r}")
+    expect(isinstance(a.get("why"), str) and PARENT_APPROX_PARENT in a["why"],
+           "le libellé explique l'angle mort, en nommant la parente")
+
+    # MTTD : échantillonné sur les detected-EXACT SEULEMENT. Le rapprochement parent a un MTTD
+    # APPARENT de 900 s ; s'il était échantillonné, max passerait à 900 et la moyenne à 258.75.
     mttds = sorted(DETECTED.values())
-    expect_eq(cov.get("mttd_max_secs"), max(mttds), "mttd_max_secs")
-    expect_eq(cov.get("mttd_avg_secs"), sum(mttds) / len(mttds), "mttd_avg_secs")
+    expect_eq(cov.get("mttd_max_secs"), max(mttds), "mttd_max_secs (détections exactes seulement)")
+    expect_eq(cov.get("mttd_avg_secs"), sum(mttds) / len(mttds), "mttd_avg_secs (exactes seulement)")
+    polluted = sorted(mttds + [PARENT_APPROX_APPARENT_MTTD])
+    expect(cov.get("mttd_max_secs") != max(polluted),
+           "le MTTD APPARENT du parent-approx n'a pas pollué mttd_max",
+           f"un max de {max(polluted)} signifierait qu'il a été échantillonné")
+    expect(cov.get("mttd_avg_secs") != sum(polluted) / len(polluted),
+           "…ni mttd_avg",
+           f"une moyenne de {sum(polluted) / len(polluted)} signifierait qu'il a été échantillonné")
 
 
 if __name__ == "__main__":

@@ -262,10 +262,18 @@ pub(crate) async fn attack_matrix(State(app): State<App>, headers: HeaderMap, Qu
         e.1 += f;
     }
 
-    // buckets tactique -> [cellules]. Une cellule = {id, exercised, detected(=fired>0), runs, fired}.
+    // buckets tactique -> [cellules]. Une cellule = {id, exercised, fired(=fires>0), runs, fires}.
+    //
+    // NOMMAGE (correctif) : ce booléen valait `detected` alors qu'il ne mesure QUE le côté ROUGE —
+    // « au moins un run-record de cette technique a effectivement TIRÉ » (runrecord.fired=1, par
+    // opposition à proposé/véto/dry-run). Il ne dit RIEN de ce que le SOC a vu : la détection bleue
+    // est mesurée ailleurs (/api/purple/coverage, jointure MITRE à trois états). Deux notions
+    // distinctes ne doivent pas porter le même nom dans une API — le booléen s'appelle donc `fired`,
+    // et le COMPTE de tirs (anciennement `fired`) s'appelle `fires`, comme partout dans la couverture
+    // purple (`detected[].fires`, `missed[].fires`).
     let cell = |id: &str, ex: &HashMap<String, (i64, i64)>| -> Value {
-        let (runs, fired) = ex.get(id).copied().unwrap_or((0, 0));
-        json!({"id": id, "exercised": runs > 0, "detected": fired > 0, "runs": runs, "fired": fired})
+        let (runs, fires) = ex.get(id).copied().unwrap_or((0, 0));
+        json!({"id": id, "exercised": runs > 0, "fired": fires > 0, "runs": runs, "fires": fires})
     };
     let mut cells: HashMap<&str, Vec<Value>> = HashMap::new();
     let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -279,10 +287,10 @@ pub(crate) async fn attack_matrix(State(app): State<App>, headers: HeaderMap, Qu
     let mut extra: Vec<(&String, (i64, i64))> =
         exercised.iter().filter(|(id, _)| !placed.contains(*id)).map(|(id, v)| (id, *v)).collect();
     extra.sort_by(|a, b| a.0.cmp(b.0));
-    for (id, (runs, fired)) in extra {
+    for (id, (runs, fires)) in extra {
         let tactic = attack_tactic_for(id).unwrap_or(ATTACK_TACTIC_OTHER);
         cells.entry(tactic).or_default().push(json!({
-            "id": id, "exercised": runs > 0, "detected": fired > 0, "runs": runs, "fired": fired
+            "id": id, "exercised": runs > 0, "fired": fires > 0, "runs": runs, "fires": fires
         }));
     }
 
@@ -420,7 +428,8 @@ mod tests {
         techs.iter().find(|t| t["id"] == id)
     }
 
-    /// MATRICE : grille tactique × technique ENGAGEMENT-SCOPÉE. Vérifie (a) exercé×détecté par colonne,
+    /// MATRICE : grille tactique × technique ENGAGEMENT-SCOPÉE. Vérifie (a) exercé×TIRÉ par colonne
+    /// (`fired` = un run-record a tiré — PAS « le SOC a détecté », qui se mesure sur /api/purple/coverage),
     /// (b) 14 colonnes kill-chain toujours présentes, (c) cellules NON-EXERCÉES du catalogue, (d) id hors
     /// catalogue -> Unmapped/Other (jamais dropé), (e) AUCUNE fuite d'un autre engagement.
     #[tokio::test]
@@ -429,13 +438,13 @@ mod tests {
         let app = test_app(&led);
         seed_engagement(&app, 1, "A");
         seed_engagement(&app, 2, "B");
-        // engagement #1 : T1190 exercé+détecté (2 runs, 1 fired), T1595.002 exercé non détecté (1 run),
-        // T9999 exercé+détecté mais id INCONNU (-> Unmapped/Other).
+        // engagement #1 : T1190 exercé+tiré (2 runs, 1 tir), T1595.002 exercé non tiré (1 run),
+        // T9999 exercé+tiré mais id INCONNU (-> Unmapped/Other).
         seed_runrecord(&app, 1, "T1190", 1);
         seed_runrecord(&app, 1, "T1190", 0);
         seed_runrecord(&app, 1, "T1595.002", 0);
         seed_runrecord(&app, 1, "T9999", 1);
-        // engagement #2 : T1046 détecté — NE DOIT PAS apparaître comme exercé dans la matrice de #1.
+        // engagement #2 : T1046 tiré — NE DOIT PAS apparaître comme exercé dans la matrice de #1.
         seed_runrecord(&app, 2, "T1046", 1);
 
         let q1 = Query(HashMap::from([("engagement".to_string(), "1".to_string())]));
@@ -450,18 +459,21 @@ mod tests {
         }
         assert!(names.contains(&ATTACK_TACTIC_OTHER.to_string()), "Unmapped/Other présent car id inconnu exercé");
 
-        // (a) Initial Access : T1190 exercé+détecté, runs=2, fired=1.
+        // (a) Initial Access : T1190 exercé+tiré, runs=2, fires=1. Le booléen s'appelle `fired` (côté
+        // ROUGE) et NON `detected` : la cellule ne prétend RIEN sur ce que le SOC a vu.
         let ia = tech(col(&v, "Initial Access").unwrap(), "T1190").unwrap();
         assert_eq!(ia["exercised"], true);
-        assert_eq!(ia["detected"], true);
+        assert_eq!(ia["fired"], true);
         assert_eq!(ia["runs"], 2);
-        assert_eq!(ia["fired"], 1);
+        assert_eq!(ia["fires"], 1);
+        assert!(ia.get("detected").is_none(),
+            "`detected` NE DOIT PLUS exister sur la cellule : elle ne mesure pas la détection bleue");
 
-        // Reconnaissance : T1595.002 exercé non détecté ; T1590 catalogué mais NON exercé (cellule grise).
+        // Reconnaissance : T1595.002 exercé non tiré ; T1590 catalogué mais NON exercé (cellule grise).
         let recon = col(&v, "Reconnaissance").unwrap();
         let scan = tech(recon, "T1595.002").unwrap();
         assert_eq!(scan["exercised"], true);
-        assert_eq!(scan["detected"], false);
+        assert_eq!(scan["fired"], false);
         let dns = tech(recon, "T1590").expect("catalogue T1590 présent même non exercé");
         assert_eq!(dns["exercised"], false, "cellule NON-EXERCÉE rendue (pas silencieusement omise)");
 

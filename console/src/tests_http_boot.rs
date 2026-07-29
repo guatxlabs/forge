@@ -256,7 +256,7 @@ use crate::testutil::*;
 
     /// [STANDALONE] fetch_purple_coverage sans source configurée (kind=none) : FAIL-OPEN LISIBLE et
     /// EXPLICITEMENT AUTONOME — `source_reachable:false`, `source_configured:false`, `source_kind:"none"`,
-    /// AUCUNE métrique fabriquée (detected/missed vides, taux/MTTD nuls), et `techniques_fired` reste
+    /// AUCUNE métrique fabriquée (detected/parent_approx/missed vides, taux/MTTD nuls), et `techniques_fired` reste
     /// informatif. C'est un état NORMAL (pas une erreur) : la boucle purple est simplement OFF.
     #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
     #[tokio::test]

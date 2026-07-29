@@ -56,7 +56,7 @@ export const HELP_TOPICS = [
   ] },
   { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
-    ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée » ou « ratée » côté défense."],
+    ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée exacte », « parente seule » (angle mort) ou « ratée » côté défense."],
   ] },
   { key: 'reports', title: "Rapport d'engagement (livrable)", icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'reports', blocks: [
     ['p', "Le LIVRABLE CLIENT agrégé de l'engagement ACTIF : page de garde brandée, résumé exécutif, findings détaillés (secrets rédigés), couverture ATT&CK et annexe chaîne-de-custody. Formats HTML / PDF / DOCX / CSV / JSON — l'aperçu HTML s'affiche dans la vue."],
@@ -72,7 +72,7 @@ export const HELP_TOPICS = [
     ['p', "Une technique tentée mais à 0 tiré est couverte sans résultat côté cible. Pour l'axe défensif (détecté vs raté), voir « Détection purple »."],
   ] },
   { key: 'purple-coverage', title: 'Détection purple', icon: 'layout', doc: 'docs/DETECTION.md', view: 'purple-coverage', blocks: [
-    ['p', "Mesure DÉFENSIVE et OPTIONNELLE : pour chaque technique tirée en red-team, a-t-elle été détectée par votre source BLUE (SOC/IDS/pare-feu) ? Vert = détecté, rouge = trou de détection. Le MTTD mesure le délai tir → alerte."],
+    ['p', "Mesure DÉFENSIVE et OPTIONNELLE : pour chaque technique tirée en red-team, a-t-elle été détectée par votre source BLUE (SOC/IDS/pare-feu) ? TROIS états, pas deux : vert = détecté sur EXACTEMENT cette technique, ambre = seule la technique PARENTE est couverte (vous avez tiré T1110.001, vous n'avez que des règles T1110 génériques — ce n'est PAS une preuve de détection, ce n'est donc pas compté dans le taux), rouge = trou de détection. Le MTTD mesure le délai tir → alerte, sur les détections exactes uniquement."],
     ['p', "Aucune source n'est requise : sans source, Forge tourne en AUTONOME (standalone) et l'état est neutre — ce n'est pas une panne. Si une source est configurée mais injoignable, la mesure est déclarée impossible ; aucun « détecté » n'est inventé."],
     ['h', 'Connecter une source de détection'],
     ['steps', [

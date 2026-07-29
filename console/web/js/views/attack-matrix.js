@@ -1,12 +1,17 @@
 // =====================================================================================
 //  MATRICE ATT&CK PAR ENGAGEMENT (#P2-1) — vraie grille TACTIQUE × TECHNIQUE (kill-chain), pas une
-//  liste classée. Colonnes = tactiques ATT&CK ; cellule = technique, colorée par état :
-//    · exercée + détectée (fired>0)   -> vert   (am-detected)
-//    · exercée, non détectée (fired=0)-> ambre  (am-exercised)
+//  liste classée. Colonnes = tactiques ATT&CK ; cellule = technique, colorée par état ROUGE :
+//    · exercée + TIRÉE (fires>0)      -> vert   (am-fired)
+//    · exercée, non tirée (fires=0)   -> ambre  (am-exercised)
 //    · non exercée (catalogue, 0 run) -> grise  (am-none)
-//  Le MTTD (source de détection / purple) est fusionné best-effort par id de technique et surfacé en
-//  annotation + tooltip. Données : GET /api/attack-matrix (ENGAGEMENT-SCOPÉ côté serveur) + enrichi par
-//  GET /api/purple/coverage (MTTD, optionnel — échec silencieux). AUCUNE donnée d'un autre engagement.
+//  ATTENTION AU NOM : `fired` = « un run-record de cette technique a TIRÉ » (côté ROUGE). Ce n'est PAS
+//  « le SOC l'a détectée » — la détection BLEUE vient de /api/purple/coverage, à trois états
+//  (detected-exact / detected-parent-approx / missed). L'API portait la même étiquette `detected` pour
+//  ces deux notions distinctes ; elle s'appelle désormais `fired`, et le compte de tirs `fires`.
+//  L'enrichissement purple ajoute, best-effort et par id EXACT de technique : le MTTD (détections
+//  EXACTES) et le marqueur « parente seule » (angle mort). Données : GET /api/attack-matrix
+//  (ENGAGEMENT-SCOPÉ côté serveur) + GET /api/purple/coverage (optionnel — échec silencieux).
+//  AUCUNE donnée d'un autre engagement.
 // =====================================================================================
 import { api, withCampaign } from '../core/api.js';
 import { $, esc } from '../core/dom.js';
@@ -57,14 +62,14 @@ function gotoTechnique(mitre) {
   runQuery();
 }
 
-function cellEl(t, mttdById) {
+function cellEl(t, mttdById, approxById) {
   const id = String(t && t.id || '');
   const exercised = !!(t && t.exercised);
-  const detected = !!(t && t.detected);
+  const fired = !!(t && t.fired);                        // côté ROUGE : un run-record a TIRÉ
   const runs = Number(t && t.runs || 0);
-  const fired = Number(t && t.fired || 0);
-  const state = !exercised ? 'am-none' : (detected ? 'am-detected' : 'am-exercised');
-  const stateLabel = !exercised ? 'non exercée' : (detected ? 'détectée' : 'exercée');
+  const fires = Number(t && t.fires || 0);
+  const state = !exercised ? 'am-none' : (fired ? 'am-fired' : 'am-exercised');
+  const stateLabel = !exercised ? 'non exercée' : (fired ? 'tirée' : 'exercée, non tirée');
 
   const cell = document.createElement('div');
   cell.className = 'am-cell ' + state;
@@ -83,32 +88,29 @@ function cellEl(t, mttdById) {
   const lbl = document.createElement('span'); lbl.textContent = stateLabel;
   st.append(dot, lbl); cell.appendChild(st);
 
-  // MTTD : surfacé UNIQUEMENT si mesuré (null-safe). Sur cellule détectée : annotation ; sinon tooltip.
-  const mttd = mttdByIdGet(mttdById, id);
+  // ENRICHISSEMENT BLEU (purple, optionnel) : MTTD surfacé UNIQUEMENT s'il a été MESURÉ sur une
+  // détection EXACTE de CETTE technique. Le rapprochement « parente seule » est signalé comme tel et
+  // n'affiche JAMAIS de MTTD — il n'y a pas de détection de ce vecteur à dater.
+  const mttd = mttdById && mttdById.has(id) ? mttdById.get(id) : null;
+  const approx = approxById && approxById.get(id);
   const meta = document.createElement('div'); meta.className = 'am-meta';
   if (exercised) {
-    let m = `${fired}/${runs} tir/run`;
-    if (detected && mttd != null) m += ` · MTTD ${pcFmtSecs(mttd)}`;
+    let m = `${fires}/${runs} tir/run`;
+    if (mttd != null) m += ` · MTTD ${pcFmtSecs(mttd)}`;
+    else if (approx) m += ` · SOC : parente ${approx.parent} seule`;
     meta.textContent = m;
     cell.appendChild(meta);
   }
 
   const nmT = nm ? ` — ${nm}` : '';
-  const mttdT = (detected && mttd != null) ? ` · MTTD ${pcFmtSecs(mttd)}` : (detected ? ' · MTTD n/d' : '');
-  cell.title = `${id}${nmT} — ${stateLabel} (${runs} run(s), ${fired} tir(s))${mttdT}. Cliquer pour filtrer les findings.`;
+  let socT = '';
+  if (mttd != null) socT = ` · SOC : détecté exact, MTTD ${pcFmtSecs(mttd)}`;
+  else if (approx) socT = ` · SOC : seule la technique parente ${approx.parent} est couverte — la détection de CE vecteur n'est pas prouvée (non comptée dans le taux)`;
+  cell.title = `${id}${nmT} — ${stateLabel} (${runs} run(s), ${fires} tir(s))${socT}. Cliquer pour filtrer les findings.`;
   const go = () => gotoTechnique(id);
   cell.onclick = go;
   cell.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
   return cell;
-}
-
-// MTTD by id : tolère T1595.003 mesuré sous sa base T1595 (repli), sinon exact.
-function mttdByIdGet(map, id) {
-  if (!map) return null;
-  if (map.has(id)) return map.get(id);
-  const dot = id.indexOf('.');
-  if (dot > 0 && map.has(id.slice(0, dot))) return map.get(id.slice(0, dot));
-  return null;
 }
 
 export async function loadAttackMatrix() {
@@ -121,22 +123,30 @@ export async function loadAttackMatrix() {
 
   const tactics = data && Array.isArray(data.tactics) ? data.tactics : [];
 
-  // MTTD best-effort : /api/purple/coverage (mesure défensive optionnelle). Échec/standalone => pas de
-  // MTTD affiché, la grille reste valable (exercé/détecté sont la source de vérité).
+  // ENRICHISSEMENT BLEU best-effort : /api/purple/coverage (mesure défensive optionnelle).
+  // Échec/standalone => pas de MTTD ni de marqueur affiché, la grille reste valable (exercé/tiré sont
+  // la source de vérité ROUGE). Le rapprochement se fait sur l'id EXACT de la technique : le repli
+  // « T1595.003 mesuré sous sa base T1595 » a été RETIRÉ — c'était précisément le parent-approx
+  // affiché comme un MTTD de la sous-technique, un chiffre qui ne mesure pas ce qu'il prétend.
   const mttdById = new Map();
+  const approxById = new Map();
   try {
     const p = await api(withCampaign('/purple/coverage'));
     const det = p && Array.isArray(p.detected) ? p.detected : [];
     det.forEach(d => { if (d && d.mitre != null && d.mttd_secs != null && isFinite(d.mttd_secs)) mttdById.set(String(d.mitre), Number(d.mttd_secs)); });
-  } catch (e) { /* MTTD optionnel */ }
+    const ap = p && Array.isArray(p.parent_approx) ? p.parent_approx : [];
+    ap.forEach(a => { if (a && a.mitre != null) approxById.set(String(a.mitre), { parent: String(a.parent || ''), why: String(a.why || '') }); });
+  } catch (e) { /* enrichissement purple optionnel */ }
 
   // agrégats pour le bandeau (sur l'ensemble des tactiques).
-  let totalTech = 0, exTech = 0, detTech = 0;
+  let totalTech = 0, exTech = 0, firedTech = 0;
   const mttdSamples = [];
   tactics.forEach(t => (t.techniques || []).forEach(x => {
     totalTech++;
     if (x.exercised) exTech++;
-    if (x.detected) { detTech++; const mv = mttdByIdGet(mttdById, String(x.id || '')); if (mv != null) mttdSamples.push(mv); }
+    if (x.fired) firedTech++;
+    const mv = mttdById.get(String(x.id || ''));
+    if (mv != null) mttdSamples.push(mv);
   }));
 
   host.replaceChildren();
@@ -146,7 +156,7 @@ export async function loadAttackMatrix() {
   const rate = document.createElement('span'); rate.className = 'pc-rate';
   rate.textContent = totalTech ? Math.round(exTech / totalTech * 100) + '%' : '—';
   const sub = document.createElement('span'); sub.className = 'pc-sub';
-  sub.textContent = `${exTech}/${totalTech} technique(s) exercée(s) · ${detTech} détectée(s)`;
+  sub.textContent = `${exTech}/${totalTech} technique(s) exercée(s) · ${firedTech} tirée(s)`;
   band.append(rate, sub);
   const med = pcMedian(mttdSamples);
   if (med != null) {
@@ -159,8 +169,8 @@ export async function loadAttackMatrix() {
 
   // légende.
   const legend = document.createElement('div'); legend.className = 'pc-legend';
-  legend.innerHTML = '<span class="pc-lg"><span class="am-dot detected"></span>exercée + détectée</span>'
-    + '<span class="pc-lg"><span class="am-dot exercised"></span>exercée, non détectée</span>'
+  legend.innerHTML = '<span class="pc-lg"><span class="am-dot fired"></span>exercée + tirée</span>'
+    + '<span class="pc-lg"><span class="am-dot exercised"></span>exercée, non tirée</span>'
     + '<span class="pc-lg"><span class="am-dot none"></span>non exercée (couverture manquante)</span>';
   host.appendChild(legend);
 
@@ -179,7 +189,7 @@ export async function loadAttackMatrix() {
       const empty = document.createElement('div'); empty.className = 'am-empty'; empty.textContent = '—';
       col.appendChild(empty);
     } else {
-      techs.forEach(x => col.appendChild(cellEl(x, mttdById)));
+      techs.forEach(x => col.appendChild(cellEl(x, mttdById, approxById)));
     }
     grid.appendChild(col);
   });

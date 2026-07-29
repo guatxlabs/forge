@@ -9,6 +9,48 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **The purple join now has THREE states, not two — and the headline rate got stricter.** The join
+  between fired techniques (red) and SOC detections (blue) was a plain **string equality** on the
+  `mitre` tag, which produced two measured defects.
+
+  **(a) Parent vs sub-technique.** Forge fires `T1110.001` (module `network.ssh`, SSH password
+  guessing); a SOC that only has a `T1110` rule scored a flat `missed`. Naively normalising to the
+  parent would have scored `detected` — and that would have been an **unmeasured** claim: the join sees
+  an *identifier*, not a detection query, so it cannot prove the fired vector is covered. Read one by
+  one, three of the shipped `T1110` rules are `ca-cred-mail-bruteforce` (`search source=mail
+  action=failure …`, mail only), `ca-cred-web-login-bruteforce` (`search source=web status=401 …`, web
+  only) and `ca-cred-distributed-bruteforce` (`search category=auth action=failure | stats
+  dc(src_ip)`, needs IP spread) — none of those three catches a single-source SSH brute force. Other
+  seeded `T1110` rules might, depending on which rules are enabled and which telemetry is wired. That
+  ambiguity is the point: the join does not arbitrate it in the vendor's favour, it **names** it. So a
+  parent match is now its own state,
+  `detected-parent-approx`: it is **excluded from `detection_rate`** and **excluded from MTTD**
+  sampling (a MTTD computed between an SSH fire and an unrelated alert is an invented number), and it
+  is surfaced in its own `parent_approx` list with the parent named and an explicit reason — a *named
+  blind spot*, which is the product, not waste.
+
+  **(b) Multi-technique tags.** A `mitre` tag may carry several techniques separated by space, comma
+  or semicolon — the norm at SigmaHQ (several `attack.` per rule). A tag `"T1595.002 T1046"` matched
+  **neither** key, so a Sigma corpus manufactured false `missed`. Tags are now **split on both sides**
+  of the join (fired records and detections), sub-technique preserved. A tag that parses to no
+  technique at all is still joined verbatim — a fired technique must never silently vanish.
+
+  New/renamed contract on `GET /api/detection/coverage` (alias `/api/purple/coverage`):
+  `techniques_parent_approx` and `parent_approx[]` added; every row carries its `state`
+  (`detected-exact` / `detected-parent-approx` / `missed`); `techniques_detected` and
+  `detection_rate` now count **exact matches only**. Invariant: `detected + parent_approx + missed ==
+  techniques_fired`. Report (markdown/HTML/JSON/`forge/report_engagement.py`), console UI and the
+  bundled reference engagement all render the third state.
+- **`GET /api/attack-matrix`: cell field `detected` renamed to `fired`, and the fire count `fired` to
+  `fires`.** That boolean never measured detection — it was `runrecord.fired > 0`, i.e. *the red side
+  actually shot*, as opposed to proposed/vetoed/dry-run. It sat next to the genuinely blue `detected`
+  of the purple coverage under the same name, and the UI rendered it as « détectée ». Two distinct
+  notions must not share one name in an API. The matrix stays a **red** view; MTTD and the
+  parent-approx marker come from `/api/purple/coverage` as an enrichment, matched on the **exact**
+  technique id (the previous « T1595.003 measured under its base T1595 » fallback is gone — it was
+  precisely a parent-approx displayed as the sub-technique's MTTD).
+
 ### Fixed
 - **Detection-source fetch never completed its HTTP request.** The console's built-in fetcher
   (`console/src/net.rs::http_get_blocking`, used by `kind=plume` / `generic_http` over http) wrote its
@@ -38,8 +80,10 @@ All notable changes to Forge are documented here. The format is based on
 - **End-to-end CI for the purple loop** (`purple-e2e` job + `scripts/purple_loop_e2e.py`,
   `make test-purple`): fires the engine, ingests the run-records into a real console binary, serves
   detections from the loopback demo stub `tools/mock_plume.py`, and asserts the computed coverage
-  (`detected`/`missed`, `detection_rate`, per-technique MTTD, `since` windowing) against expectations
-  derived from the actual shots. No offensive network I/O: loopback only, synthetic module, loopback IP
+  (`detected`/`parent_approx`/`missed`, `detection_rate`, per-technique MTTD, `since` windowing)
+  against expectations derived from the actual shots — including the two guards of the three-state
+  join: a fired sub-technique whose parent alone is covered must not move the rate, and its apparent
+  MTTD must not be sampled; a multi-technique SOC tag must match every technique it carries. No offensive network I/O: loopback only, synthetic module, loopback IP
   literals (no DNS lookup).
 
 ### Notes for open-source builds
