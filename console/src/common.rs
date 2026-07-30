@@ -151,7 +151,7 @@ const FORMULA_TRIGGERS: [char; 4] = ['=', '+', '-', '@'];
 /// caractère RESTANT.
 /// POURQUOI (mesuré, pas supposé) : avec la règle « premier caractère ∈ jeu dangereux », une cellule
 /// commençant par un OCTET NUL passait intacte. Chemin PROUVÉ de bout en bout sur le binaire réel :
-/// `POST /api/ingest` d'un titre `" =cmd|' /C calc'!A0"` (le NUL est un échappement JSON valide,
+/// `POST /api/ingest` d'un titre `"\x00=cmd|' /C calc'!A0"` (le NUL est un échappement JSON valide,
 /// donc atteignable par du contenu influencé par la cible) -> export `?format=csv` du livrable client
 /// -> conversion LibreOffice Calc 26.2.4.2 -> la cellule ressort en `table:formula="of:=cmd|' /c
 /// calc'!a0"`, formule VIVANTE. Mesures voisines sur le même tableur : `\x00\x00=` évalue aussi ;

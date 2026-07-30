@@ -1,0 +1,22 @@
+# Déclaration des BINAIRES suivis. Deux effets, tous deux voulus.
+#
+# 1. git cesse de traiter ces fichiers comme du texte : pas de normalisation de fin de ligne,
+#    pas de tentative de diff/merge ligne à ligne sur des octets.
+#
+# 2. `scripts/check_no_stray_nul.py` s'appuie sur cette déclaration. Sa règle : tout fichier
+#    suivi contenant un octet NUL doit être déclaré ici. POURQUOI — mesuré sur ce dépôt :
+#    un unique NUL dans un commentaire de `console/src/common.rs` suffisait à faire classer
+#    le fichier en `data`, et `grep` SANS `-a` y trouvait 0 occurrence d'un motif présent 9
+#    fois. Tout balayage de secrets sautait donc ce fichier EN SILENCE.
+#
+# Corollaire à respecter : cette liste doit rester ÉTROITE. La garde vérifie aussi la
+# réciproque (un fichier déclaré ici DOIT réellement contenir un NUL), précisément pour qu'un
+# joker sur du code source — `*.rs binary` — ne puisse pas la désarmer d'une ligne.
+#
+# Vérifié à l'ajout : les 6 fichiers couverts contiennent bien un NUL, et aucun autre fichier
+# suivi n'en contient. Rejouer après toute modification de l'arbre :
+#     python3 scripts/check_no_stray_nul.py
+
+*.woff2 binary
+*.gif   binary
+*.png   binary
