@@ -104,7 +104,7 @@ séparé** dont la charte est le red-team autorisé en général, l'own-infra n'
   store du modèle rouge (`finding`/`runrecord`), `POST /api/ingest` (token) = point de jonction
   purple, `GET /api/findings|runrecords|coverage`, console opérateur (PWA vanilla-JS). Loop
   Python↔Rust prouvée (`console_client.py` + `forge campaign --console`). **GXQL `event→finding`
-  fait** (`console/src/soql.rs` : `search|stats|fields|sort|head` sur `finding`/`runrecord`,
+  fait** (`console/src/query.rs` : `search|stats|fields|sort|head` sur `finding`/`runrecord`,
   compilé en SQL read-only, champs allowlistés, valeurs en params liés, connexion RO ; `GET
   /api/query` + barre de recherche UI). **Dashboards faits** : panels GXQL sauvegardés
   (`panel` table, `/api/panels` CRUD, écriture gatée par token, `/:id/data` ré-exécute la requête),
