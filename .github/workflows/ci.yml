@@ -386,6 +386,115 @@ jobs:
           /tmp/gitleaks detect --source . --config "$GITHUB_WORKSPACE/.gitleaks-ci.toml" --no-banner --redact --exit-code 1
 
   # ---------------------------------------------------------------------------
+  # Licence — conformité de ce que le dépôt REDISTRIBUE. Forge embarque quatre
+  # `.woff2` (Inter, JetBrains Mono) sous OFL-1.1, dont la clause 2 exige que chaque
+  # copie porte l'avis de copyright ET le texte de la licence. Ces quatre fichiers ont
+  # déjà été redistribués SANS aucun texte d'OFL : le défaut est réel, pas théorique,
+  # et rien en CI ne l'aurait dit.
+  #
+  # La garde est DÉRIVÉE, pas énumérée. Une liste figée de chemins ne protège que
+  # contre la suppression de ce qui est déjà connu ; elle ne dit RIEN d'une police
+  # AJOUTÉE demain sans sa licence — c'est exactement le défaut qui est passé.
+  # Elle part donc des polices PRÉSENTES et exige, PAR FAMILLE, une licence et un avis.
+  # ---------------------------------------------------------------------------
+  licence:
+    name: licence (tiers redistribués)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Les deux ANCRES dont la garde dérivée se sert. Si l'une disparaît, la garde
+      # ci-dessous perd sa référence : on l'exige explicitement plutôt que de la
+      # laisser échouer par effet de bord.
+      - name: Les ancres de licence du dépôt sont présentes et non vides
+        run: |
+          set -eu
+          for f in LICENSE THIRD-PARTY-NOTICES.md; do
+            [ -s "$f" ] || { echo "::error file=$f::fichier de licence manquant ou vide"; exit 1; }
+          done
+
+      - name: Toute police redistribuée est couverte par une licence et un avis
+        # DEUX exigences PAR FAMILLE — le découpage `-latin` / `-latin-ext` n'est pas
+        # une famille, une licence couvre la famille pas le sous-ensemble :
+        #   1. un texte de licence NON VIDE, dans le dossier de la police, dont
+        #      l'AVIS DE COPYRIGHT nomme la famille ;
+        #   2. une section `## <Famille>` dans THIRD-PARTY-NOTICES.md.
+        #
+        # Pourquoi ces deux formes précises, et pas plus simple :
+        #   * « un OFL quelconque dans le dossier » suffirait à un dossier qui en
+        #     contient déjà un pour une AUTRE famille : la garde passerait alors que
+        #     la famille ajoutée n'est couverte par rien. D'où le test sur la ligne
+        #     `Copyright` du texte, qui est aussi exactement ce que la clause 2 exige.
+        #   * un `grep` de SOUS-CHAÎNE sur les avis serait muet pour « inter », que
+        #     contiennent « interactif », « interdit », « interface »… La suppression
+        #     de la section « ## Inter » resterait donc VERTE. La comparaison porte
+        #     sur les TITRES de section, par ÉGALITÉ.
+        #
+        # Les polices sont énumérées par TYPE, pas par extension : la signature du
+        # format (4 premiers octets) puis, en second filet, la description de `file`.
+        # Une police ajoutée sous un autre nom, un autre dossier, ou sans extension
+        # est donc couverte par construction. Un fichier mal classé rend le build
+        # ROUGE plutôt que muet — la garde échoue du bon côté.
+        #
+        # Le point 2 prouve que la famille est RECENSÉE, pas que le recensement soit
+        # exact : la version, l'amont et l'avis de copyright restent une relecture
+        # humaine (ils se lisent dans la table `name` de la police, pas dans son nom
+        # de fichier). Trois mutations vérifiées ROUGES : texte de licence supprimé,
+        # section d'avis retirée, police ajoutée sans licence.
+        run: |
+          set -eu
+          status=0
+
+          # Univers = ce que le dépôt SUIT, donc ce qu'il redistribue.
+          fonts=""
+          while IFS= read -r -d '' f; do
+            magic=$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')
+            case "$magic" in
+              # wOF2       wOFF       OTTO       TrueType   'true'     ttcf
+              774f4632|774f4646|4f54544f|00010000|74727565|74746366) ;;
+              *) file -b "$f" | grep -qiE 'font data|font format|opentype|truetype' || continue ;;
+            esac
+            fonts="$fonts$f
+          "
+          done < <(git ls-files -z)
+
+          [ -n "$fonts" ] || { echo "::error::aucune police détectée — ce contrôle est devenu muet, le réparer"; exit 1; }
+
+          # Normalise pour comparer « jetbrains-mono » (nom de fichier) et
+          # « JetBrains Mono » (titre de section) : minuscules, sans séparateur.
+          # `[ _-]` et non `' -_'` : dans un intervalle, ` -_` va de l'espace au
+          # souligné et emporte chiffres, majuscules et ponctuation.
+          norm() { tr '[:upper:]' '[:lower:]' | sed 's/[ _-]//g'; }
+
+          headings=$(grep -E '^#{2,} ' THIRD-PARTY-NOTICES.md | sed -E 's/^#+ +//' | norm)
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            slug=$(printf '%s' "${base%.*}" | sed -E 's/-latin(-ext)?$//' | norm)
+            [ -n "$slug" ] || { echo "::error file=$f::aucune famille dérivable de ce nom de fichier"; status=1; continue; }
+
+            printf '%s\n' "$headings" | grep -qxF "$slug" \
+              || { echo "::error file=$f::famille « $slug » redistribuée sans section « ## <famille> » dans THIRD-PARTY-NOTICES.md"; status=1; }
+
+            found=""
+            for lic in "$dir"/OFL* "$dir"/LICEN[CS]E* "$dir"/COPYING*; do
+              [ -s "$lic" ] || continue
+              cp=$(grep -i '^copyright' "$lic" | norm) || true
+              case "$cp" in *"$slug"*) found=$lic; break ;; esac
+            done
+            [ -n "$found" ] \
+              || { echo "::error file=$f::aucun texte de licence non vide dont l'avis de copyright nomme « $slug » dans $dir"; status=1; }
+          done <<EOF
+          $fonts
+          EOF
+
+          exit $status
+
+  # ---------------------------------------------------------------------------
   # POINT D'ENTRÉE UNIQUE du ruleset — nom STABLE `CI`. Un ruleset sur `main` doit
   # exiger CE check, JAMAIS les noms générés `python (unittest)` / `console (...)`
   # / `security (...)` : le jour où l'un est renommé, réordonné ou ajouté (matrice,
@@ -398,7 +507,11 @@ jobs:
   ci-ok:
     name: CI
     if: always()   # sinon un job en échec SAUTE ce job au lieu de le faire échouer
-    needs: [python, console, console-postgres, purple-e2e, security]
+    # Tout job ajouté au workflow doit l'être AUSSI dans cette liste : un job absent
+    # de `needs` s'exécute, échoue… et ne bloque RIEN, puisque le seul contrôle exigé
+    # par le ruleset est `CI`, qui ne le regarde pas. À vérifier avant d'affirmer
+    # qu'un contrôle « est en CI ».
+    needs: [python, console, console-postgres, purple-e2e, security, licence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -18,7 +18,8 @@ une console qui appelle un CDN tiers signale l'engagement en cours à ce tiers.
 - **Amont** : <https://github.com/rsms/inter>
 - **Version** : 4.001 — la table `name` de la police porte
   `Version 4.001;git-66647c0bb`
-- **Copyright** : `Copyright (c) 2016 The Inter Project Authors`
+- **Copyright** : `Copyright 2016 The Inter Project Authors` — le texte OFL amont
+  écrit la même chose avec un `(c)` que la table `name` n'a pas
 
 ## JetBrains Mono
 
