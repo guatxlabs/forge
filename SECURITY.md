@@ -8,14 +8,13 @@ in that governance is a serious bug, and we want to hear about it.
 
 **Do not open a public issue for a security vulnerability.**
 
-Report privately via **GitHub Security Advisories** — it is the only channel we monitor:
-
-- **GitHub Security Advisories** — the "Report a vulnerability" button on the repository's
-   **Security** tab (preferred; keeps the report and fix coordinated and private).
-
+Report privately via **GitHub Security Advisories** — the "Report a vulnerability" button on
+this repository's **Security** tab. This keeps the report, the discussion and the fix coordinated
+and private, and lets us credit you on disclosure. It is the only channel we monitor, so please use
+it rather than a public issue, a pull request, or a direct message.
 
 Please include: affected version/commit, a description, reproduction steps or a PoC, and the
-impact. Encrypt if you can; we will provide a key on request.
+impact. GitHub Security Advisories are private end-to-end, so no additional encryption is needed.
 
 We aim to **acknowledge within 3 business days** and to agree on a remediation timeline with
 you. We practise **coordinated disclosure** and will credit you (unless you prefer to remain
@@ -53,13 +52,17 @@ data/secrets. In particular:
 
 ## Supported versions
 
-Forge is pre-1.0. Security fixes land on `main` and in the latest tagged release. Older tags are
-not maintained; please upgrade.
+Forge is pre-1.0 and has **no tagged release yet**. Security fixes land on `main`, which is the
+only thing maintained, so please cite a `main` commit when you report.
 
 | Version | Supported |
 |---------|-----------|
-| `main` / latest release | ✅ |
-| older tags | ❌ |
+| `main` | ✅ |
+| tagged releases | none exist yet |
+
+This section will name supported versions once tags exist — not before. Announcing per-version
+support while no version exists would be a false promise, and would send a reporter looking for a
+release number they cannot find.
 
 ## Hardening & audits
 
