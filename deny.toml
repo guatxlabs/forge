@@ -1,0 +1,99 @@
+# cargo-deny — conformité de licence, bans et provenance des dépendances du crate Rust.
+#
+# POURQUOI CE FICHIER EXISTE. `forge` exécutait `cargo audit --deny warnings` — les AVIS de
+# sécurité — mais n'avait aucune conformité de LICENCE, là où `plume` et `ocular` en ont chacun
+# une. Ce sont deux questions distinctes : un avis dit « cette dépendance est vulnérable », une
+# licence dit « avons-nous le droit de redistribuer ce binaire ». `forge` est publié sous
+# AGPL-3.0-or-later et distribue un binaire qui embarque tout son graphe : une dépendance
+# arrivant sous une licence incompatible est un défaut de conformité que rien ne signalait.
+#
+# LANCER DEPUIS LA RACINE DU DÉPÔT :
+#
+#     cargo deny --locked --all-features --manifest-path console/Cargo.toml \
+#       check licenses bans sources
+#
+# et NON depuis `console/` : `--config` vaut par défaut `<cwd>/deny.toml`, or ce fichier vit à
+# la racine et il n'y a pas de `console/deny.toml`. Lancé depuis `console/`, cargo-deny ne
+# trouverait PAS cette configuration — il ne remonte pas dans les dossiers parents.
+#
+# `--all-features` N'EST PAS DÉCORATIF, c'est mesuré (2026-08-03). Les dépendances des features
+# opt-in sont `optional` et n'entrent pas dans le graphe par défaut :
+#   · sans le drapeau : 185 crates examinés ;
+#   · avec le drapeau : 239, soit 54 de plus ;
+#   · et la licence `CDLA-Permissive-2.0` (`webpki-roots`, le paquet de racines CA de Mozilla,
+#     tiré par `store-postgres`) N'APPARAÎT QUE sous `--all-features`.
+# Prouvé par mutation : cette entrée retirée de la liste, le contrôle sort 4 en nommant
+# `webpki-roots@1.0.9` avec le drapeau, et sort 0 sans lui. Un contrôle limité aux features par
+# défaut rendrait donc « conforme » sans avoir lu la licence d'une dépendance réellement livrée
+# aux déploiements Postgres.
+#
+# RÉSERVE MESURÉE, écrite plutôt que découverte : le sous-arbre de la feature `object-store`
+# (`rust-s3` et ses dépendances) n'apparaît PAS dans le graphe de cargo-deny, même avec
+# `--all-features`, alors que `cargo tree --all-features` l'y montre. L'écart vient de
+# cargo-deny, pas du manifeste, et il n'a pas été élucidé ici. Conséquence à connaître : les
+# licences de ce sous-arbre ne sont pas contrôlées par cette étape. Leurs AVIS le sont, eux,
+# par `cargo audit`, qui lit `Cargo.lock` — lequel contient bien les 290 crates, `rust-s3` et
+# `quick-xml` compris (c'est d'ailleurs de là que viennent les ignores quick-xml datés de
+# `console/.cargo/audit.toml`).
+#
+# PÉRIMÈTRE : `licenses bans sources`, PAS `advisories`. Les avis sont déjà couverts par
+# `cargo audit --deny warnings` dans le même job, avec ses ignores justifiés et datés dans
+# `console/.cargo/audit.toml`. Les dupliquer n'ajouterait rien et importerait une fragilité
+# réelle — cargo-deny 0.18.2 échoue à parser un avis portant un score CVSS 4.0. Aucune section
+# `[advisories]` n'est donc écrite ici : une section que personne n'exécute est un décor, pas
+# une garde, et se lit à tort comme une couverture.
+
+[bans]
+multiple-versions = "warn"
+# `wildcards` reste en AVERTISSEMENT, et c'est une décision mesurée, pas un défaut de rigueur.
+# En `deny`, le contrôle échoue sur UNE dépendance et une seule (vérifié le 2026-08-03) :
+# `guatx-core`, déclarée sans borne de version parce qu'elle est épinglée par TAG git
+# (`tag = "v0.2.2"`). Un tag est un ancrage PLUS strict qu'une borne semver, pas plus lâche :
+# refuser ce joker punirait l'épinglage le plus serré du manifeste. La provenance de cette
+# dépendance est par ailleurs contrôlée pour de bon par `[sources]` ci-dessous.
+wildcards = "warn"
+
+[licenses]
+# Signale une entrée devenue inutile plutôt que de la laisser pourrir dans la liste : une
+# autorisation qui ne correspond plus à rien donne l'illusion d'une couverture plus large que
+# le graphe réel.
+unused-allowed-license = "warn"
+# Tout ce qui n'est pas listé est REFUSÉ. La liste doit donc couvrir non seulement les licences
+# des dépendances tierces, mais aussi celles du PROJET LUI-MÊME et de son cœur :
+#   · `AGPL-3.0` : le crate `forge` de ce dépôt (`license =` dans console/Cargo.toml) ;
+#   · `LGPL-3.0` : `guatx-core`, tiré comme dépendance, donc présent dans le graphe et évalué
+#     comme n'importe quelle autre.
+# Les y ajouter n'élargit rien vers un tiers : ce sont les licences de notre propre code.
+#
+# FORME SPDX — écrite « nue » (`AGPL-3.0`, `LGPL-3.0`) et non `-or-later`, parce que cargo-deny
+# la REFUSE ici (erreur de désérialisation « expected a <bare-gnu-license> »). La forme nue
+# couvre bien nos crates déclarées `-or-later` : l'outil évalue lui-même la sémantique
+# « ou ultérieure ». C'est la forme déjà retenue dans `plume/deny.toml` — une seule vérité dans
+# la famille de dépôts.
+#
+# LISTE MESURÉE SUR CE GRAPHE, pas recopiée. Les entrées `MPL-2.0`, `CC0-1.0` et
+# `Unicode-DFS-2016` que porte `plume` ont été RETIRÉES : `cargo-deny` les signale « non
+# rencontrées » sur le graphe de `forge`, y compris toutes features activées. Les garder
+# pré-autoriserait des licences qu'aucune dépendance n'utilise ici ; les retirer fait qu'une
+# dépendance arrivant demain sous MPL-2.0 exige une décision explicite au lieu de passer.
+#
+# N'y figurent pas non plus `BSD-1-Clause`, `BSL-1.0`, `Unlicense` et `LGPL-2.1` : les crates
+# concernés (`fiat-crypto`, `ryu`, `whoami`, `aho-corasick`, `memchr`, `byteorder`, `r-efi`)
+# les offrent dans une expression `OR` que `MIT` ou `Apache-2.0` satisfont déjà. Vérifié : le
+# contrôle passe sans elles.
+allow = [
+  "AGPL-3.0", "LGPL-3.0",
+  "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+  "Unicode-3.0", "CDLA-Permissive-2.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# `unknown-git = "deny"` refuse toute source git hors de cette liste — y compris, sans cette
+# entrée, la seule que le projet utilise réellement. Mesuré dans `console/Cargo.lock` : une
+# unique source git, `git+https://github.com/guatxlabs/core?tag=v0.2.2`. L'autoriser NOMMÉMENT
+# est le but du réglage — le dépôt de notre cœur est admis, tout autre dépôt git reste refusé.
+# Une git-dep ajoutée à la sauvette échoue donc le contrôle.
+allow-git = ["https://github.com/guatxlabs/core"]

@@ -244,14 +244,19 @@ jobs:
   #      => unmaintained/yanked/vuln advisories FAIL the job). It reads console/Cargo.lock ONLY: no
   #      build happens and the guatx-core git-dep is never fetched, so core's own tree is NOT audited
   #      here (core carries its own CI).
-  #   2) gitleaks     — secret scan of the tree + history, with an ephemeral config (written below,
+  #   2) cargo-deny   — LICENCE, bans et provenance des dépendances du même crate (`deny.toml` à la
+  #      racine). Axe DISTINCT du précédent : cargo-audit dit si une dépendance est vulnérable,
+  #      cargo-deny si l'on a le droit de la redistribuer dans un binaire AGPL. Il manquait ici
+  #      alors que `plume` et `ocular` en ont chacun un. Lancé `--all-features`, sur les manifestes
+  #      DÉCOUVERTS par `git ls-files` — voir le commentaire de l'étape.
+  #   3) gitleaks     — secret scan of the tree + history, with an ephemeral config (written below,
   #      NOT committed) that extends the default ruleset. Every suppression in it is scoped to ONE
   #      RULE **and** to the exact fixture file that trips it — see the comment on that step.
   # (The Python engine is stdlib-only — zero third-party deps — so there is no pip dependency tree to
   #  audit; the Rust crate is the only supply-chain surface, covered by cargo-audit above.)
   # ---------------------------------------------------------------------------
   security:
-    name: security (cargo-audit + gitleaks)
+    name: security (cargo-audit + cargo-deny + gitleaks)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -283,6 +288,59 @@ jobs:
       - name: cargo audit (console crate — deny warnings)
         working-directory: console
         run: cargo audit --deny warnings
+
+      # Conformité de LICENCE des dépendances — l'axe qui manquait. `forge` scannait les AVIS
+      # (cargo-audit, juste au-dessus) mais pas les licences, là où `plume` et `ocular` en ont
+      # chacun une : asymétrie entre dépôts publiés, sur un binaire AGPL qui embarque tout son
+      # graphe. « Cette dépendance est-elle vulnérable » et « avons-nous le droit de la
+      # redistribuer » sont deux questions, et une seule était posée.
+      #
+      # LES MANIFESTES SONT DÉCOUVERTS, PAS NOMMÉS. `forge` n'a qu'un crate aujourd'hui, mais
+      # nommer `console/Cargo.toml` ici laisserait le prochain crate hors contrôle sans que
+      # rien ne le dise — le cas s'est produit dans `plume`, où cargo-deny ne couvrait qu'un
+      # manifeste sur quatre, dont pas celui installé chez les clients. La liste vient donc de
+      # `git ls-files`, et zéro manifeste trouvé fait ÉCHOUER l'étape plutôt que la rendre
+      # verte à vide.
+      #
+      # `--all-features` PORTE, mesuré le 2026-08-03 : les deps des features opt-in sont
+      # `optional` et n'entrent pas dans le graphe par défaut — 185 crates examinés sans le
+      # drapeau, 239 avec. La licence `CDLA-Permissive-2.0` (`webpki-roots`) N'APPARAÎT QUE
+      # sous ce drapeau : sans lui, le contrôle déclarerait « conforme » une chaîne dont il n'a
+      # pas lu toutes les licences. La réserve sur le sous-arbre `object-store`, elle aussi
+      # mesurée, est écrite dans `deny.toml` — la lire avant de croire ce job exhaustif.
+      #
+      # Binaire ÉPINGLÉ par version + sha256, comme gitleaks plus bas : `cargo install`
+      # recompilerait l'outil à chaque exécution pour le même résultat, et sans vérifier quoi
+      # que ce soit. Version et empreinte identiques à celles de `plume` — une seule vérité
+      # dans la famille de dépôts.
+      - name: Licences, bans et sources des dépendances (cargo-deny, binaire épinglé)
+        run: |
+          set -euo pipefail
+          CD_VER=0.18.2
+          CD_SHA=43c4a79c4b9fd1fcb3dddb305a1b4d8f7ac4a72accd61bb50a0b698789ca894c
+          CD_TGZ="cargo-deny-${CD_VER}-x86_64-unknown-linux-musl"
+          curl -sSfL -o /tmp/cargo-deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CD_VER}/${CD_TGZ}.tar.gz"
+          echo "${CD_SHA}  /tmp/cargo-deny.tgz" | sha256sum -c -
+          tar -xzf /tmp/cargo-deny.tgz --strip-components=1 -C /tmp "${CD_TGZ}/cargo-deny"
+
+          statut=0
+          nb=0
+          while IFS= read -r manifeste; do
+            [ -n "$manifeste" ] || continue
+            nb=$((nb + 1))
+            echo "::group::cargo-deny ${manifeste}"
+            if ! /tmp/cargo-deny --locked --all-features --manifest-path "$manifeste" \
+                 check --config "$GITHUB_WORKSPACE/deny.toml" licenses bans sources; then
+              echo "::error file=${manifeste}::licence, ban ou source de dépendance refusée"
+              statut=1
+            fi
+            echo "::endgroup::"
+          done < <(git ls-files '*Cargo.toml' 'Cargo.toml')
+
+          # Un contrôle qui n'a rien eu à contrôler n'est pas vert : c'est une sonde cassée.
+          [ "$nb" -gt 0 ] || { echo "::error::aucun manifeste Cargo trouvé — ce contrôle est devenu muet, le réparer"; exit 1; }
+          echo "$nb manifeste(s) contrôlé(s)"
+          exit $statut
 
       # Config gitleaks ÉPHÉMÈRE (runner-only, jamais committée) : `extend.useDefault` + des
       # allowlists SCOPÉES À LA RÈGLE.
