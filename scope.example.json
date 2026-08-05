@@ -8,6 +8,28 @@
   "allow_destructive": false,
   "known_creds": [],
   "idor_targets": [],
+    "_comment_auth": "OPTIONNEL (SECRET) — CONTEXTE AUTHENTIFIÉ par-engagement. C'est CE bloc qui arme les oracles de contrôle d'accès (access_control.idor, auth.takeover) : sans lui ils rendent « config manquante » et NE TESTENT RIEN. Il PRIME sur les champs plats 'known_creds'/'idor_targets' ci-dessus, qu'il remplace. Deux parties : (1) 'accounts' = TES PROPRES comptes de test, LABELLISÉS — le label 'attacker' désigne la session qui rejoue, 'victim' le propriétaire de la ressource ; chaque compte accepte 'headers', 'cookies' et/ou 'bearer' comme le bloc 'session'. (2) 'idor_targets' = ressources possédées par la VICTIME, décrites par {url, owner, marker}. Le 'marker' est une chaîne qui n'apparaît QUE dans les données de la victime (son e-mail, un identifiant de commande) : l'oracle le cherche dans la réponse obtenue avec la session de l'attaquant. C'est le chemin PRÉFÉRÉ — le différentiel de contenu seul ne sait pas distinguer « B accède à la ressource PRIVÉE de A » de « A et B sont tous deux légitimement autorisés sur une ressource PARTAGÉE » ; le marqueur, lui, prouve l'appartenance. Les URLs doivent être IN-SCOPE (scope-guard fail-closed par URL). Le ledger ne journalise QUE les labels et un COMPTE de cibles, jamais un secret ni une URL. Ne teste QUE des comptes qui t'appartiennent.",
+    "_example_auth": {
+      "accounts": [
+        {
+          "label": "attacker",
+          "headers": {
+            "Authorization": "Bearer <TOKEN_COMPTE_A>"
+          }
+        },
+        {
+          "label": "victim",
+          "cookies": "sid=<VALEUR_COMPTE_B>"
+        }
+      ],
+      "idor_targets": [
+        {
+          "url": "https://app.example.com/api/orders/<ID_DE_LA_VICTIME>",
+          "owner": "victim",
+          "marker": "<CHAINE_PRESENTE_UNIQUEMENT_CHEZ_LA_VICTIME>"
+        }
+      ]
+    },
   "_comment_triage": "OPTIONNEL — couche de VUE du rapport (dédup / cluster-bruit / score / rang des findings). Défaut SÛR (triage actif, auto_hide=false : rien n'est masqué ni supprimé, tout reste auditable). Ne touche NI le ledger NI les findings bruts. Clés : enabled (on/off), auto_hide (bool), cluster_min_size (gabarit répété >= n -> cluster-bruit), noise_threshold (0..1, score>=seuil et sévérité<MEDIUM -> likely_noise), dup_jaccard (0..1, quasi-dup), shingle_k. Toute clé absente/illisible retombe sur le défaut. Exemple: \"triage\": {\"enabled\": true, \"auto_hide\": false, \"cluster_min_size\": 5, \"noise_threshold\": 0.6}.",
   "_comment_session": "OPTIONNEL (SECRET) — matériel d'authentification attaché par les modules recon/oracle UNIQUEMENT aux requêtes vers des hôtes IN-SCOPE (scope-guard). JAMAIS journalisé dans le ledger, ni dans un finding/rapport. 'session' = défaut global ; 'sessions' = map hôte->matériel (l'hôte le plus spécifique gagne, puis le défaut). Chaque matériel accepte 'headers' (dict), 'cookies' (dict OU 'a=b; c=d') et/ou 'bearer' (jeton -> Authorization: Bearer). Exemple: \"session\": {\"cookies\": \"sid=<VALUE>\", \"headers\": {\"X-CSRF\": \"<VALUE>\"}}, \"sessions\": {\"app.example.com\": {\"bearer\": \"<TOKEN>\"}}. NE PAS committer de vrais secrets — utiliser un scope local git-ignoré ; les targets.json[].attrs.session portent une session par-cible.",
   "notes": "Engagement autorisé uniquement. Renseigner in_scope (globs hostname ou CIDR). Passer allow_exploit/allow_destructive à true seulement si le ROE écrit l'autorise."
