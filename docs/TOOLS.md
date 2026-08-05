@@ -226,6 +226,17 @@ moteur → l'opérateur l'active **explicitement**. Les dossiers hôte existent 
 le bind par défaut **ne crée pas** de dossier root-owned, et un dossier **vide** monté est inoffensif (aucun
 outil chargé tant que rien n'est déposé — cf. §4/§5(a) : binaire absent → `skipped`).
 
+### (d) Installer/mettre à jour un outil **du catalogue Forge** sans rebuild — `forge tools`
+
+Les trois voies ci-dessus servent à apporter **votre** outil. Pour les binaires que Forge connaît déjà
+(httpx, nuclei, subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf), il
+existe une voie dédiée : `forge tools install|update|remove <nom>`. Elle télécharge la version du
+**manifeste** [`forge/tools.json`](../forge/tools.json), **vérifie son SHA256 épinglé**, et pose le
+binaire dans le volume outils persistant `/data/tools/bin` — en tête du `PATH`, devant le
+`/usr/local/bin` baké. Utile pour (a) rattraper un outil omis par un build `mini`, (b) mettre à jour
+sans reconstruire l'image. Aucune URL arbitraire n'est acceptée et chaque acte est journalisé au ledger.
+Voir [TOOLS_LIFECYCLE.md](TOOLS_LIFECYCLE.md).
+
 **Exemple — ajouter `myfuzzer` sans redémarrage (montage déjà actif) :**
 
 ```bash

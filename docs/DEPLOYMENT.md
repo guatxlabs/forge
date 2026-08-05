@@ -808,10 +808,22 @@ Mesuré sur cet arbre (`find … -printf '%s\n' | awk`) :
   liveness : cf. [§1](#1-options-de-build--run), [§4](#4-contexte-de-build--dépendance-guatx-core),
   [§5](#5-liveness-health--en-tête-host).
 
-**Supply-chain — pins SHA256.** Les archives ProjectDiscovery ne sont plus récupérées « par tag » non
-vérifiées : chaque `.zip` est **épinglé par digest** (ARG `*_SHA256_amd64` / `*_SHA256_arm64`, issus des
-`*_checksums.txt` officiels) et validé par `sha256sum -c` — toute non-correspondance **fait échouer le
-build**. Bump de version = rafraîchir version **et** digest.
+**Supply-chain — pins SHA256, source unique.** Les archives d'outils ne sont jamais récupérées « par
+tag » non vérifiées : chaque archive est **épinglée par digest, par architecture**, et validée par
+`sha256sum -c` — toute non-correspondance **fait échouer le build**. Versions, digests, gabarits d'URL
+et membres d'archive vivent dans un **manifeste unique**, [`forge/tools.json`](../forge/tools.json), lu
+par le `Dockerfile` **au build** *et* par l'installeur **runtime** (`forge tools install|update|remove`).
+Il n'y a donc plus de pin recopié entre `Dockerfile` et `docker-compose.yml` : **bumper une version =
+éditer ce seul fichier** (version + digests issus du `*_checksums.txt` amont). Un outil sans pin pour
+l'architecture cible est **écarté du plan** (jamais téléchargé non vérifié) ; le groupe socle `core`
+(httpx/nuclei/subfinder) est en plus gardé par `--require-complete core`, qui fait échouer le build
+plutôt que produire une image amputée. Garde anti-régression : `tests/test_tools_manifest.py`.
+
+**Outils au runtime, sans rebuild.** `forge tools list|install|update|remove` installe un outil du
+manifeste dans le **volume outils persistant** `/data/tools/bin` (forge-owned uid 10001, en tête du
+PATH devant le `/usr/local/bin` baké), après vérification du SHA256 pin, et **journalise** l'acte au
+ledger d'engagement. Vide par défaut → comportement identique à la baseline `FORGE_TOOLS_PROFILE`.
+Détail : [`docs/TOOLS_LIFECYCLE.md`](TOOLS_LIFECYCLE.md).
 
 #### k3s / k8s ✅
 

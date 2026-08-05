@@ -32,11 +32,14 @@
 #    exclut ~1.6 GB de `console/target/`, les *.db/*.jsonl/ledger/secrets — cf. ce fichier.
 #
 # ── Profils d'outils (FORGE_TOOLS_PROFILE=full|mini) ─────────────────────────
-#    `full` (défaut) : embarque httpx/nuclei/subfinder (téléchargés + VÉRIFIÉS SHA256) et
-#      un moteur PDF (weasyprint, pip, pur-Python) → `?format=pdf` clé-en-main.
+#    `full` (défaut) : embarque les outils du MANIFESTE `forge/tools.json` (téléchargés +
+#      VÉRIFIÉS SHA256) et un moteur PDF (weasyprint, pip, pur-Python) → `?format=pdf` clé-en-main.
 #    `mini` : OMET ces outils ; les modules dégradent proprement (available:false, déjà géré)
 #      et `?format=pdf` répond `pdf_unavailable` (l'impression navigateur reste dispo).
 #      Build mini : `docker build --build-arg FORGE_TOOLS_PROFILE=mini .`
+#    Le profil reste une décision de BUILD. Pour ajouter/mettre à jour un outil SANS rebuild,
+#      cf. `forge tools install|update|remove` (volume outils persistant /data/tools, en tête du
+#      PATH) — même manifeste, même vérification SHA256, journalisé au ledger.
 #
 # Services EXTERNES (jamais embarqués ici — montés/réseau, cf. docker-compose.yml & ENV) :
 #   - automatisation navigateur (HTTP, :8080)    → FORGE_BROWSER_URL
@@ -87,48 +90,17 @@ FROM debian:bookworm-slim AS runtime
 # Profil d'outils : `full` (défaut, embarque httpx/nuclei/subfinder + moteur PDF) ou `mini`
 # (les omet ; les modules dégradent en available:false — déjà géré côté engine).
 ARG FORGE_TOOLS_PROFILE=full
-
-# Versions pinnées des outils ProjectDiscovery (suite Go, binaires statiques).
-ARG HTTPX_VERSION=1.6.9
-ARG NUCLEI_VERSION=3.3.7
-ARG SUBFINDER_VERSION=2.6.7
 ARG TARGETARCH=amd64
 
-# Empreintes SHA256 des archives officielles (par arch), issues des `*_checksums.txt`
-# signés de chaque release ProjectDiscovery. Elles ÉPINGLENT le binaire téléchargé : le
-# build ÉCHOUE en cas de non-correspondance (plus de `curl`-par-tag non vérifié). Pour
-# mettre à jour lors d'un bump de version :
-#   curl -fsSL https://github.com/projectdiscovery/<tool>/releases/download/v<VER>/<tool>_<VER>_checksums.txt
-ARG HTTPX_SHA256_amd64=c8d36461b5d736e88c3f9104fed15f2112eb7263dbda35fd08aa5a771bddfb5f
-ARG HTTPX_SHA256_arm64=8cf124b4f62236ff3149b83a8bfc70203fcda3dfda6606013751b229b3e0aa95
-ARG NUCLEI_SHA256_amd64=725ef892fcffd1b03ad4f0874942fc4b623c0419b6b6c6c91fe4a5a65671f77c
-ARG NUCLEI_SHA256_arm64=a07744736613c73fa2c3aef63e176941e3de95fa76feb4870551a1c444ce7704
-ARG SUBFINDER_SHA256_amd64=d988a481d3037c55e685afee023eb104a81a77dd2691fb902b59019a365f6103
-ARG SUBFINDER_SHA256_arm64=07b7fa2c2cfe6770df9cdfc0ab761a33bbaaf7146add51ea44e806953edc2d88
-
-# Suite ÉTENDUE de scanners (profil `full` uniquement) — binaires Go/Rust téléchargés + VÉRIFIÉS SHA256.
-# Versions pinnées (bump = re-télécharger l'asset + recalculer sha256sum). Pins amd64 UNIQUEMENT :
-# le bloc d'installation ci-dessous se court-circuite proprement sur les autres arches (les modules
-# correspondants dégradent alors en available:false — déjà géré par l'engine). Chaque digest a été
-# calculé sur l'asset officiel EXACT et le binaire exécuté (--version) avant d'être épinglé ici.
-ARG DNSX_VERSION=1.3.0
-ARG DNSX_SHA256_amd64=1415020474886151a4820c62b9e68a315cc062f7f111a2fd13fda99047a809a6
-ARG NAABU_VERSION=2.6.1
-ARG NAABU_SHA256_amd64=018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90
-ARG KATANA_VERSION=1.6.1
-ARG KATANA_SHA256_amd64=503754f1bd370c3ef287df6998e317baed2dd75bdd13ea64034f09b80ca393f3
-ARG AMASS_VERSION=5.1.1
-ARG AMASS_SHA256_amd64=5e22b5f0239e7eb79439d60d43d3cd20dca2478588bc2242e91ab0c4f8fa40dd
-ARG GAU_VERSION=2.2.4
-ARG GAU_SHA256_amd64=10e2e248c37cafb0be3f6d2931125296b95cd4186066d596d47fa417237529a9
-ARG GOSPIDER_VERSION=1.1.6
-ARG GOSPIDER_SHA256_amd64=41bdd76aff8d063655dc473f035ca7659f8549fbf264be5185f50d288666f93d
-ARG DALFOX_VERSION=3.1.2
-ARG DALFOX_SHA256_amd64=ef48d30c183cead88eb89da10bdc1a7fa58a484d175319096075b470f3652fd4
-ARG FEROXBUSTER_VERSION=2.13.1
-ARG FEROXBUSTER_SHA256_amd64=7985c00e6803b0f25d5e9139f7472279f3f4d891429627a5cedc629e53992d80
-ARG FFUF_VERSION=2.2.1
-ARG FFUF_SHA256_amd64=86307885810d3c36ba4a3e9ba5178c2d9027bba0dd7f4ea39e39e7c972b62396
+# ── MANIFESTE UNIQUE des outils téléchargés — `forge/tools.json` ─────────────────────────────
+# Les versions et les empreintes SHA256 des binaires de sécurité (httpx, nuclei, subfinder, dnsx,
+# naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf) NE SONT PLUS des ARG codés en dur
+# ici (ni recopiés dans docker-compose.yml) : elles vivent dans `forge/tools.json`, LU par ce
+# Dockerfile au build ET par l'installeur runtime (`forge tools install|update`). Une seule copie,
+# donc plus de divergence Dockerfile↔compose possible (garde : tests/test_tools_manifest.py).
+# Bump d'une version = éditer `forge/tools.json` (version + digests du `*_checksums.txt` amont).
+# L'intégrité reste identique : chaque archive est vérifiée par `sha256sum -c` contre le pin de son
+# architecture ; pas de pin -> l'outil est ÉCARTÉ du plan (jamais téléchargé non vérifié).
 
 LABEL org.opencontainers.image.title="forge" \
       org.opencontainers.image.description="Forge red-team console (ROE fail-closed + ledger tamper-evident) — usage autorisé uniquement." \
@@ -186,38 +158,61 @@ RUN set -eux; \
         echo "[build] store-postgres absent des features -> pg_dump non installé (image community inchangée)"; \
     fi
 
-# Outils offensifs ProjectDiscovery (httpx / nuclei / subfinder), versions ET DIGESTS pinnés.
-# Binaires Go statiques → simple téléchargement+install (pas de runtime Go embarqué).
-# ── Profil : `full` uniquement. En `mini`, ce bloc s'auto-court-circuite (exit 0) et les
-#    modules recon/web dégradent en available:false (déjà géré par l'engine, cf. runner.available).
-# ── Supply-chain : chaque archive est VÉRIFIÉE par sha256sum contre le pin ARG de l'arch ;
-#    toute non-correspondance (ou pin manquant) FAIT ÉCHOUER le build (set -e + exit 1).
-# Si tu préfères les MONTER depuis l'hôte (toolkit existant) plutôt que les embarquer,
-# construis en `mini` et bind-monte /usr/local/bin/{httpx,nuclei,subfinder} via compose.
+# Le MANIFESTE + son lecteur, copiés AVANT le bloc d'installation (le reste du package `forge/`
+# arrive plus bas). `toolsmanifest.py` est un script AUTONOME (stdlib, zéro import relatif) : il
+# tourne donc ici, avant que le package ne soit en place. Cette COPY précoce est aussi la bonne
+# invalidation de cache : bumper un pin dans tools.json ré-exécute le téléchargement, et rien d'autre.
+COPY forge/tools.json forge/toolsmanifest.py /opt/forge/forge/
+
+# Outils offensifs téléchargés (binaires Go/Rust statiques) — LE PLAN VIENT DU MANIFESTE.
+# Un SEUL bloc pour toute la suite (socle ProjectDiscovery httpx/nuclei/subfinder + suite étendue
+# dnsx/naabu/katana/amass/gau/gospider/dalfox/feroxbuster/ffuf) : le manifeste porte, par outil,
+# la version, l'URL, le membre d'archive et le digest PAR ARCHITECTURE — il n'y a plus de valeurs
+# recopiées dans ce fichier, donc plus rien à garder synchronisé.
+# ── Profil : `full` uniquement. En `mini`, le bloc s'auto-court-circuite (exit 0) et les modules
+#    dégradent en available:false (déjà géré par l'engine, cf. runner.available).
+# ── Supply-chain (INCHANGÉE) : chaque archive est VÉRIFIÉE par `sha256sum -c` contre le pin de son
+#    architecture ; toute non-correspondance FAIT ÉCHOUER le build (set -e). Un outil sans pin pour
+#    l'arch cible est ÉCARTÉ du plan (jamais téléchargé non vérifié) et signalé sur stderr — c'est
+#    le cas de la suite étendue hors amd64, exactement comme avant. `--require-complete core`
+#    garde le socle : un pin manquant sur httpx/nuclei/subfinder fait ÉCHOUER le build, jamais une
+#    image silencieusement amputée.
+# ── Les trois `${FORGE_BUILD_*:-…}` ne sont PAS des réglages opérateur : ce sont les seams qui
+#    permettent au test `tests/test_tools_manifest.py` d'EXÉCUTER cette boucle hors Docker (curl/
+#    sha256sum/unzip/tar stubés) et de prouver qu'elle consomme le manifeste correctement. Non
+#    positionnés (le cas du build réel), les défauts s'appliquent → comportement inchangé.
+# Si tu préfères MONTER les binaires depuis l'hôte plutôt que les embarquer, construis en `mini` et
+# bind-monte /opt/tools via compose (déjà en tête du PATH).
 RUN set -eux; \
+    MANIFEST_PY="${FORGE_BUILD_MANIFEST_PY:-/opt/forge/forge/toolsmanifest.py}"; \
+    BINDIR="${FORGE_BUILD_BINDIR:-/usr/local/bin}"; \
+    STAGE="${FORGE_BUILD_STAGE:-/var/tmp/forge-tools}"; \
     if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
-        echo "[forge] FORGE_TOOLS_PROFILE=${FORGE_TOOLS_PROFILE} (mini) -> outils ProjectDiscovery OMIS ; modules recon/web -> available:false."; \
+        echo "[forge] FORGE_TOOLS_PROFILE=${FORGE_TOOLS_PROFILE} (mini) -> outils téléchargés OMIS ; modules recon/web -> available:false."; \
         exit 0; \
     fi; \
     case "${TARGETARCH}" in \
-      amd64) HX_SHA="${HTTPX_SHA256_amd64}"; NU_SHA="${NUCLEI_SHA256_amd64}"; SF_SHA="${SUBFINDER_SHA256_amd64}";; \
-      arm64) HX_SHA="${HTTPX_SHA256_arm64}"; NU_SHA="${NUCLEI_SHA256_arm64}"; SF_SHA="${SUBFINDER_SHA256_arm64}";; \
+      amd64|arm64) ;; \
       *) echo "[forge] FATAL: TARGETARCH=${TARGETARCH} non supporté (amd64|arm64) pour les pins SHA256." >&2; exit 1;; \
     esac; \
-    base="https://github.com/projectdiscovery"; \
-    fetch() { \
-        name="$1"; ver="$2"; sha="$3"; \
-        if [ -z "${sha}" ]; then echo "[forge] FATAL: pin SHA256 absent pour ${name}/${TARGETARCH} — refus de télécharger non vérifié." >&2; exit 1; fi; \
-        url="${base}/${name}/releases/download/v${ver}/${name}_${ver}_linux_${TARGETARCH}.zip"; \
-        curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors --connect-timeout 30 --max-time 300 "$url" -o "/tmp/${name}.zip"; \
-        echo "${sha}  /tmp/${name}.zip" | sha256sum -c -; \
-        unzip -o "/tmp/${name}.zip" "${name}" -d /usr/local/bin/; \
-        chmod +x "/usr/local/bin/${name}"; \
-        rm -f "/tmp/${name}.zip"; \
-    }; \
-    fetch httpx "${HTTPX_VERSION}" "${HX_SHA}"; \
-    fetch nuclei "${NUCLEI_VERSION}" "${NU_SHA}"; \
-    fetch subfinder "${SUBFINDER_VERSION}" "${SF_SHA}"
+    rm -rf "$STAGE"; mkdir -p "$STAGE"; \
+    python3 "$MANIFEST_PY" --arch "${TARGETARCH}" --profile full --require-complete core > "$STAGE/plan.tsv"; \
+    while read -r name version archive sha strip member bin url; do \
+        [ -n "$name" ] || continue; \
+        echo "[forge] outil ${name} ${version} (${archive}, ${TARGETARCH})"; \
+        rm -rf "$STAGE/x"; mkdir -p "$STAGE/x"; \
+        curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors \
+             --connect-timeout 30 --max-time 300 "$url" -o "$STAGE/archive.bin"; \
+        echo "${sha}  $STAGE/archive.bin" | sha256sum -c -; \
+        case "$archive" in \
+          zip)    unzip -o -j "$STAGE/archive.bin" "$member" -d "$STAGE/x" ;; \
+          tar.gz) tar -xzf "$STAGE/archive.bin" --strip-components="$strip" -C "$STAGE/x" "$member" ;; \
+          *) echo "[forge] FATAL: format d'archive inconnu '${archive}' pour ${name}" >&2; exit 1 ;; \
+        esac; \
+        install -m 0755 "$STAGE/x/${member##*/}" "$BINDIR/$bin"; \
+        rm -f "$STAGE/archive.bin"; \
+    done < "$STAGE/plan.tsv"; \
+    rm -rf "$STAGE"
 
 # =============================================================================
 # Suite ÉTENDUE de scanners (profil `full` uniquement) — pour que les modules du catalogue
@@ -227,7 +222,8 @@ RUN set -eux; \
 #   apt        : whatweb, masscan, wafw00f, wfuzz, sqlmap, gobuster
 #   git+wrap   : testssl.sh (drwetter/testssl.sh, sondé "testssl.sh"), nikto (sullo/nikto, "nikto")
 #   release Go : dnsx, naabu, katana (ProjectDiscovery), amass (OWASP), gau, gospider, dalfox,
-#                feroxbuster, ffuf  — binaires statiques, digests SHA256 pinnés (ARG ci-dessus)
+#                feroxbuster, ffuf — DÉJÀ installés PLUS HAUT par la boucle pilotée par le manifeste
+#                (`forge/tools.json`, groupe `extended`) ; ils ne sont plus décrits ici.
 # NON installés (par design) : zap-baseline (web.zap_baseline, prefer_docker → image zaproxy/zap-stable),
 #   Burp (burp.py) et Metasploit (msf.py) restent des SERVICES EXTERNES pilotés via ENV/réseau, jamais
 #   cuits dans l'image ; theHarvester (recon.theharvester) est OMIS ici (son PyPI est un placeholder v0.0.1
@@ -237,7 +233,7 @@ RUN set -eux; \
 # en available:false (déjà géré par l'engine). Le profil `mini` reste donc BYTE-IDENTIQUE à avant.
 # =============================================================================
 
-# (1) Outils packagés apt + dépendances runtime des binaires/scripts installés plus bas :
+# (1) Outils packagés apt + dépendances runtime des binaires/scripts installés ailleurs :
 #   - libpcap0.8                    : requis par naabu (release Go liée à libpcap) ;
 #   - perl + libnet-ssleay/json/xml : requis par nikto (nikto.pl + modules Perl JSON/XML::Writer/SSL) ;
 #   - procps (ps) + bsdmainutils (hexdump) + openssl : requis par testssl.sh au runtime ;
@@ -279,47 +275,6 @@ RUN set -eux; \
     git -C /opt/nikto checkout -q "${NIKTO_SHA}"; \
     ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto; \
     rm -rf /opt/testssl.sh/.git /opt/nikto/.git
-
-# (3) Binaires release (Go/Rust), digests SHA256 pinnés — amd64 uniquement (pins calculés+vérifiés).
-#   Sur une arche non-amd64 le bloc se court-circuite : les modules dégradent en available:false (les
-#   outils apt/git ci-dessus, eux, restent dispo sur toute arche). Toute non-correspondance SHA -> build
-#   ÉCHOUE (sha256sum -c). Noms sur PATH = noms sondés : dnsx/naabu/katana/amass/gau/gospider/dalfox/
-#   feroxbuster (recon.*, xss.dalfox) et ffuf (recon.content, binary="ffuf").
-RUN set -eux; \
-    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
-        echo "[forge] mini -> binaires Go étendus OMIS ; modules recon/xss/fuzz -> available:false."; \
-        exit 0; \
-    fi; \
-    if [ "${TARGETARCH}" != "amd64" ]; then \
-        echo "[forge] TARGETARCH=${TARGETARCH}: binaires Go étendus (dnsx/naabu/katana/amass/gau/gospider/dalfox/feroxbuster/ffuf) OMIS (pins amd64 uniquement) -> available:false sur cette arche ; outils apt/git restent dispo."; \
-        exit 0; \
-    fi; \
-    cd /tmp; B=/usr/local/bin; \
-    dl() { \
-        curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors \
-            --connect-timeout 30 --max-time 300 "$1" -o "$3"; \
-        echo "$2  $3" | sha256sum -c -; \
-    }; \
-    dl "https://github.com/projectdiscovery/dnsx/releases/download/v${DNSX_VERSION}/dnsx_${DNSX_VERSION}_linux_amd64.zip" "${DNSX_SHA256_amd64}" dnsx.zip; \
-    unzip -o dnsx.zip dnsx -d "$B/"; \
-    dl "https://github.com/projectdiscovery/naabu/releases/download/v${NAABU_VERSION}/naabu_${NAABU_VERSION}_linux_amd64.zip" "${NAABU_SHA256_amd64}" naabu.zip; \
-    unzip -o naabu.zip naabu -d "$B/"; \
-    dl "https://github.com/projectdiscovery/katana/releases/download/v${KATANA_VERSION}/katana_${KATANA_VERSION}_linux_amd64.zip" "${KATANA_SHA256_amd64}" katana.zip; \
-    unzip -o katana.zip katana -d "$B/"; \
-    dl "https://github.com/owasp-amass/amass/releases/download/v${AMASS_VERSION}/amass_linux_amd64.tar.gz" "${AMASS_SHA256_amd64}" amass.tgz; \
-    tar -xzf amass.tgz --strip-components=1 -C "$B" "amass_linux_amd64/amass"; \
-    dl "https://github.com/lc/gau/releases/download/v${GAU_VERSION}/gau_${GAU_VERSION}_linux_amd64.tar.gz" "${GAU_SHA256_amd64}" gau.tgz; \
-    tar -xzf gau.tgz -C "$B" gau; \
-    dl "https://github.com/jaeles-project/gospider/releases/download/v${GOSPIDER_VERSION}/gospider_v${GOSPIDER_VERSION}_linux_x86_64.zip" "${GOSPIDER_SHA256_amd64}" gospider.zip; \
-    unzip -o -j gospider.zip "*/gospider" -d "$B/"; \
-    dl "https://github.com/hahwul/dalfox/releases/download/v${DALFOX_VERSION}/dalfox-v${DALFOX_VERSION}-linux-x86_64.tar.gz" "${DALFOX_SHA256_amd64}" dalfox.tgz; \
-    tar -xzf dalfox.tgz --strip-components=1 -C "$B" "dalfox-v${DALFOX_VERSION}-linux-x86_64/dalfox"; \
-    dl "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/x86_64-linux-feroxbuster.tar.gz" "${FEROXBUSTER_SHA256_amd64}" ferox.tgz; \
-    tar -xzf ferox.tgz -C "$B" feroxbuster; \
-    dl "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" "${FFUF_SHA256_amd64}" ffuf.tgz; \
-    tar -xzf ffuf.tgz -C "$B" ffuf; \
-    chmod +x "$B/dnsx" "$B/naabu" "$B/katana" "$B/amass" "$B/gau" "$B/gospider" "$B/dalfox" "$B/feroxbuster" "$B/ffuf"; \
-    rm -f /tmp/*.zip /tmp/*.tgz
 
 # Moteur PDF (weasyprint) — profil `full` uniquement, pour que `?format=pdf` marche clé-en-main.
 # ── weasyprint est PUR-PYTHON (pip), il n'ajoute NI Go NI Ruby (la claim de composition tient).
@@ -377,7 +332,15 @@ COPY examples/         /opt/forge/examples/
 #                        confiance opérateur ; chargés au boot / à la re-sonde du catalogue.
 #   /opt/toolspecs     → ToolSpecs déclaratifs JSON/YAML (via FORGE_TOOLSPECS) — gouvernés, ZÉRO code ;
 #                        fusionnés avec le dossier server-managed (les specs opérateur restent chargés).
-RUN mkdir -p /data/db /data/ledger /data/scope /opt/tools /opt/forge/plugins /opt/toolspecs
+#
+# /data/tools → VOLUME OUTILS PERSISTANT (surcouche runtime, cf. `forge tools install|update|remove`).
+#   Contrairement au /usr/local/bin baké — qui appartient à root et disparaît à chaque recreate du
+#   conteneur — ce dossier appartient à l'utilisateur `forge` (uid 10001) et SURVIT au recreate (volume
+#   nommé, cf. docker-compose.yml). `/data/tools/bin` est AJOUTÉ AU PATH (ENV plus bas), DEVANT le
+#   /usr/local/bin baké : un outil installé/mis à jour au runtime prime sur la baseline SANS rebuild.
+#   VIDE par défaut → aucun effet : le PATH y résout `None` et la baseline reste seule en vigueur.
+RUN mkdir -p /data/db /data/ledger /data/scope /data/tools/bin /data/tools/state \
+             /opt/tools /opt/forge/plugins /opt/toolspecs
 
 # Utilisateur non-root (least privilege) — la console bind un port haut (>1024), pas besoin de root.
 # Les dossiers de montage opt-in sont chownés au user pour rester LISIBLES même sous un bind `:ro`
@@ -392,17 +355,22 @@ USER forge
 # bind `./tools:/opt/tools:ro`) est résolu par `runner.tool` (shutil.which) SANS rebuild. Dossier
 # opérateur-contrôlé (vide dans l'image par défaut) : le préfixer est sûr et voulu (il n'ombre rien tant
 # que l'opérateur n'y dépose pas délibérément un binaire homonyme). Le reste du PATH système est préservé.
+# Puis /data/tools/bin (volume outils persistant, forge-owned) : ce que `forge tools install|update`
+# y écrit PRIME sur le /usr/local/bin baké — un outil se met à jour sans rebuild. L'ORDRE est délibéré :
+# le bind-mount opérateur (/opt/tools) reste le plus explicite et garde la priorité qu'il a toujours eue.
+# Vides tous les deux par défaut → la résolution est IDENTIQUE à aujourd'hui tant que rien n'y est déposé.
 # FORGE_CONSOLE_ADDR : bind LOOPBACK-STRICT par défaut (safe-by-default). Auparavant `0.0.0.0:7100` →
 # un `docker run --network=host forge` SANS l'override de compose exposait la console sur tout le LAN.
 # Défaut = 127.0.0.1:7100 ; exposer sur toutes les interfaces est un OPT-IN EXPLICITE (compose fixe déjà
 # 127.0.0.1 explicitement ; k8s remet 0.0.0.0:7100 explicitement dans le Deployment console — sûr derrière
 # ClusterIP + NetworkPolicy default-deny + PSA — pour que le Service atteigne le conteneur dans le pod).
-ENV PATH="/opt/tools:${PATH}" \
+ENV PATH="/opt/tools:/data/tools/bin:${PATH}" \
     FORGE_CONSOLE_ADDR=127.0.0.1:7100 \
     FORGE_CONSOLE_DB=/data/db/forge.db \
     FORGE_CONSOLE_LEDGER=/data/ledger/engagement.jsonl \
     FORGE_CONSOLE_SCOPE=/data/scope/scope.json \
     FORGE_CONSOLE_WEB=/opt/forge/console/web \
+    FORGE_TOOLS_DIR=/data/tools \
     FORGE_PKG_DIR=/opt/forge \
     FORGE_PYTHON=python3 \
     FORGE_RUN_TIMEOUT=900 \
@@ -435,8 +403,10 @@ EXPOSE 7100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7100/health', timeout=3).getcode()==200 else 1)"]
 
-# Persistance hors cycle de vie du conteneur.
-VOLUME ["/data/db", "/data/ledger", "/data/scope"]
+# Persistance hors cycle de vie du conteneur. /data/tools = volume OUTILS (surcouche runtime) :
+# ce que `forge tools install|update` y écrit survit à un recreate du conteneur, contrairement au
+# /usr/local/bin baké. Vide par défaut → aucun changement de comportement.
+VOLUME ["/data/db", "/data/ledger", "/data/scope", "/data/tools"]
 
 # tini = PID 1 (reaping propre des enfants `python3 -m forge.cli` spawnés par la console).
 ENTRYPOINT ["/usr/bin/tini", "--"]

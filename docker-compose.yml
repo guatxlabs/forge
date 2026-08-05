@@ -46,14 +46,14 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Profil d'image : `full` (défaut, httpx/nuclei/subfinder vérifiés SHA256 + moteur PDF
+        # Profil d'image : `full` (défaut, outils du manifeste vérifiés SHA256 + moteur PDF
         # weasyprint) ou `mini` (les omet ; modules -> available:false, ?format=pdf -> pdf_unavailable).
         # Override : `FORGE_TOOLS_PROFILE=mini docker compose -f docker-compose.yml build`.
         FORGE_TOOLS_PROFILE: "${FORGE_TOOLS_PROFILE:-full}"
-        # Pins repropagés au Dockerfile (cohérence build reproductible).
-        HTTPX_VERSION: "1.6.9"
-        NUCLEI_VERSION: "3.3.7"
-        SUBFINDER_VERSION: "2.6.7"
+        # PAS de pin d'outil ici. Les versions et les digests SHA256 vivaient en DOUBLE (ici ET dans
+        # le Dockerfile) — deux copies d'un pin = divergence silencieuse garantie. Source de vérité
+        # UNIQUE : `forge/tools.json`, lu par le Dockerfile au build ET par `forge tools install|update`
+        # au runtime. Bumper une version = éditer ce seul fichier (garde : tests/test_tools_manifest.py).
     image: forge:0.0.1
     container_name: forge
     restart: unless-stopped
@@ -181,6 +181,13 @@ services:
       # Persistance hors cycle de vie du conteneur (dont le scope/ROE de l'engagement #1, stocké en DB).
       - forge-db:/data/db
       - forge-ledger:/data/ledger
+      # VOLUME OUTILS (surcouche runtime) : ce que `forge tools install|update` télécharge — après
+      # VÉRIFICATION du SHA256 pin du manifeste, et JOURNALISÉ au ledger — atterrit dans
+      # /data/tools/bin, forge-owned (uid 10001) et DÉJÀ en tête du PATH de l'image (cf. Dockerfile).
+      # Il SURVIT à un recreate du conteneur, contrairement au /usr/local/bin baké : installer ou
+      # mettre à jour un outil ne demande donc plus de rebuild. VIDE par défaut → strictement aucun
+      # effet : la baseline bakée par `FORGE_TOOLS_PROFILE` reste seule en vigueur.
+      - forge-tools:/data/tools
       # PÉRIMÈTRE (ROE) : PAR DÉFAUT non monté → aucun fichier hôte requis. L'engagement #1 démarre avec un
       # scope VIDE (fail-closed) et l'assistant web (ou l'éditeur d'engagement) le renseigne — persisté en DB.
       # OPTIONNEL : pour amorcer #1 depuis un fichier hôte AVEC AUTORISATION, décommenter la ligne suivante
@@ -341,6 +348,9 @@ networks:
 volumes:
   forge-db:
   forge-ledger:
+  # Outils installés/mis à jour AU RUNTIME (`forge tools install|update`) — persistants, forge-owned,
+  # en tête du PATH devant le /usr/local/bin baké. Vide tant qu'aucune action opérateur n'a eu lieu.
+  forge-tools:
   # Données Postgres (utilisé UNIQUEMENT sous le profil "postgres" + l'override — cf. docs/DEPLOYMENT.md).
   forge-pg:
 

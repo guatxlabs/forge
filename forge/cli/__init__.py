@@ -11,6 +11,10 @@ Commandes :
   ledger pubkey --ledger L            imprime la clé publique Ed25519 brute (hex) du ledger
   ledger keygen --ledger L [--force]  crée/rotationne DÉLIBÉRÉMENT la paire Ed25519 du ledger
   modules                             liste les modules enregistrés
+  tools list                          état des outils externes (manifeste forge/tools.json)
+  tools install|update|remove NAME    cycle de vie d'un outil AU RUNTIME, sans rebuild — SHA256 pin
+                                      du manifeste vérifié avant toute pose sur le PATH, acte
+                                      journalisé au ledger (--ledger ou FORGE_CONSOLE_LEDGER)
   doctor [--purple]                   diagnostic : modules opérationnels (ou préflight boucle purple)
   demo                                démonstration bout-en-bout, sans aucune cible réelle
 
@@ -42,6 +46,9 @@ from .purple import (_purple_get, _parse_detections, _count_mitre_tagged,  # noq
                      _configured_source, _doctor_source_preflight, cmd_doctor_purple)
 from .catalog import (_load_technique_selection, _parse_map,  # noqa: F401
                       cmd_techniques, cmd_workflows, cmd_detections, cmd_import)
+from .tools import (cmd_tools_list, cmd_tools_install,  # noqa: F401
+                    cmd_tools_update, cmd_tools_remove)
+from . import tools as _tools_cli
 
 
 def cmd_scope_check(args):
@@ -329,6 +336,7 @@ def build_parser():
     im.add_argument("--console", help="URL console pour ingérer aussi les findings (POST /api/ingest)")
     im.add_argument("--console-token", dest="console_token", help="token bearer console (sinon env FORGE_CONSOLE_TOKEN)")
     im.set_defaults(fn=cmd_import)
+    _tools_cli.add_parser(sub)         # `forge tools list|install|update|remove` (cf. cli/tools.py)
     dm = sub.add_parser("demo"); dm.set_defaults(fn=cmd_demo)
     de = sub.add_parser("detections")
     de.add_argument("--source", required=True, help="config de source : env:NOM | @fichier | JSON littéral (voie privilégiée: env, pour ne pas fuiter le secret via argv)")

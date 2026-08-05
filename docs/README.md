@@ -43,6 +43,10 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
   technique ATT&CK, description, dépendance.
 - **[Ajouter votre propre outil (depuis l'UI)](TOOLS.md)** — déclarer un outil CLI gouverné (ToolSpec
   déclaratif : binaire + argv no-shell + allowlist + params) sans éditer de fichier ni recompiler.
+- **[Cycle de vie des outils](TOOLS_LIFECYCLE.md)** — le **binaire** (là où `TOOLS.md` traite de sa
+  déclaration) : manifeste unique `forge/tools.json` (versions + pins SHA256 par architecture), lu par
+  le build *et* par `forge tools install|update|remove` — installer ou mettre à jour un outil sans
+  rebuild, digest vérifié avant toute pose sur le `PATH`, acte journalisé au ledger.
 
 ### 2. Déployer & exploiter
 

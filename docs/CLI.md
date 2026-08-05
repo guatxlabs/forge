@@ -102,6 +102,34 @@ d'écraser sans `--force`. Imprime la clé publique.
 Liste les modules enregistrés (`kind`, exploit, destructif, available). `--json` = table complète
 (kind, cls, exploit, destructive, web_allowed, available, mitre, description). Voir [MODULES.md](MODULES.md).
 
+### `forge tools list [--json]`
+État des outils externes du **manifeste** [`forge/tools.json`](../forge/tools.json) : version cible,
+résolution `PATH`, provenance (`runtime` = couche persistante / `baseline` = binaire baké dans l'image /
+`absent`), et si un pin SHA256 existe pour l'architecture courante. **Lecture seule** : ne crée rien, ne
+télécharge rien et **n'exécute aucun outil** (la version installée est lue dans le reçu déposé à
+l'installation — lister ne doit pas être une exécution).
+
+### `forge tools install|update|remove <NAME> [--ledger <L>] [--actor <A>] [--json]`
+Cycle de vie d'un outil **au runtime, sans rebuild**. Le binaire est posé dans le volume outils
+persistant (`/data/tools/bin` dans l'image, `FORGE_TOOLS_DIR` sinon), placé **en tête du `PATH`** devant
+le `/usr/local/bin` baké.
+- `install` : télécharge la version du manifeste, **vérifie son SHA256 épinglé** (calculé sur le flux),
+  extrait un seul membre, pose atomiquement en `0755`. Déjà installé ⇒ no-op.
+- `update` : repose la version **du manifeste** (après un bump de `forge/tools.json`). Il n'existe pas
+  d'update « vers la dernière version amont » : ce serait un téléchargement non épinglé.
+- `remove` : retire de la couche runtime ; la baseline bakée reste intacte (le `PATH` y retombe).
+
+Fail-closed : nom hors manifeste, pin absent pour l'architecture, digest non concordant, ou **ledger non
+résoluble** (`--ledger` / `FORGE_CONSOLE_LEDGER`) ⇒ **refus**, rien n'est posé sur le `PATH`. Il n'existe
+**ni `--url` ni `--sha256`** : la source vient du manifeste, c'est l'allowlist. Chaque acte — y compris
+un refus d'intégrité — est **journalisé** au ledger (`tools.install`/`.update`/`.remove`/`.refused`).
+Détail complet : [TOOLS_LIFECYCLE.md](TOOLS_LIFECYCLE.md).
+```bash
+forge tools list
+forge tools install nuclei --ledger /data/ledger/engagement.jsonl --actor alice
+forge ledger verify --ledger /data/ledger/engagement.jsonl
+```
+
 ### `forge doctor [--json] [--purple] [--timeout <s>]`
 Diagnostic **lecture seule** (ne tire rien, ne touche ni scope ni ledger).
 - Sans `--purple` : pour chaque module, dit s'il est **OPÉRATIONNEL** (sonde `.available`) + l'outil

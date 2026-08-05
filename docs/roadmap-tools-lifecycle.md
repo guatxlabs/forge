@@ -1,6 +1,18 @@
 # Roadmap — Cycle de vie des outils : installer-ou-non + mise à jour à la demande (hybride)
 
-**Statut : PLANIFIÉ** — design approuvé par le mainteneur le 2026-07-04, non encore construit. Ce document consigne la décision pour ne pas la perdre.
+**Statut : LARGEMENT CONSTRUIT** — design approuvé le 2026-07-04, briques 1/2/3 + CLI livrées.
+Documentation utilisateur : [`docs/TOOLS_LIFECYCLE.md`](TOOLS_LIFECYCLE.md). Ce document reste la trace
+de la DÉCISION ; l'état d'avancement est récapitulé ci-dessous.
+
+| Brique | État | Où |
+|---|---|---|
+| 1. Manifeste unique (fin de la duplication Dockerfile↔compose) | **fait** | `forge/tools.json` + `forge/toolsmanifest.py` ; garde `tests/test_tools_manifest.py` |
+| 2. Volume outils persistant + précédence PATH | **fait** | `/data/tools/bin` (Dockerfile `VOLUME`/`ENV PATH`/`FORGE_TOOLS_DIR`, compose `forge-tools`) |
+| 3. Intégrité des installs runtime (versions du manifeste) | **fait** | `forge/toolsinstall.py` — SHA256 pin vérifié en streaming, fail-closed, ledger obligatoire |
+| 4. Surface console — **CLI** | **fait** | `forge tools list\|install\|update\|remove` (`forge/cli/tools.py`) |
+| 4. Surface console — **API + panneau UI** | à faire | `console/` (hors périmètre du lot) |
+| 5. Sonde de version | **partiel** | version installée lue dans le reçu (`list` n'exécute rien) ; pas de `httpx -version` |
+| 4bis. UX d'intégrité hors-manifeste | **non fait, délibérément** | aucun chemin vers un download non épinglé tant qu'elle n'existe pas |
 
 ## Problème
 Aujourd'hui les outils de sécurité externes (httpx, nuclei, subfinder ; nmap est apt-installé à part) ne sont installés qu'au **build** via le toggle Dockerfile `FORGE_TOOLS_PROFILE=full|mini`. Les versions sont des ARG codés en dur, **dupliqués** entre `Dockerfile` et `docker-compose.yml`. Il n'existe **aucun** moyen d'installer un outil omis, ni de mettre à jour un outil, sans reconstruire l'image. Besoin du mainteneur : (a) choisir si chaque outil est installé ou non, et (b) mettre à jour les outils à la demande.

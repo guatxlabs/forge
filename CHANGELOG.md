@@ -9,6 +9,53 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Cycle de vie des outils — un manifeste unique, et une surcouche runtime qui n'ouvre aucune porte.**
+  Les versions et les empreintes SHA256 des douze binaires de sécurité téléchargés (httpx, nuclei,
+  subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf) étaient des `ARG`
+  codés en dur **dupliqués** entre `Dockerfile` et `docker-compose.yml`. Deux copies d'un pin, c'est
+  une divergence silencieuse qui attend son heure — et il n'existait aucun moyen d'installer un outil
+  omis, ni d'en mettre un à jour, sans reconstruire l'image.
+
+  **Source unique : `forge/tools.json`.** Version, gabarit d'URL, format d'archive, membre à extraire,
+  nom posé sur le `PATH`, et un digest **par architecture**. Le `Dockerfile` le lit au build (via
+  `forge/toolsmanifest.py`, script autonome stdlib) et l'installeur runtime lit le même fichier.
+  Le compose ne propage plus aucun pin. Bumper une version = éditer ce seul fichier. Une garde statique
+  échoue si une version, un digest ou une URL d'outil réapparaît dans le `Dockerfile` ou le compose.
+
+  **La baseline du build ne change pas** : mêmes binaires, mêmes versions, mêmes digests, même
+  `sha256sum -c` qui fait échouer le build en cas d'écart. Deux garde-fous s'ajoutent : un outil sans
+  pin pour l'architecture cible est **écarté du plan** (jamais téléchargé non vérifié) et signalé, et
+  le groupe socle passe par `--require-complete core` — un pin manquant sur httpx/nuclei/subfinder fait
+  échouer le build plutôt que produire une image amputée. Comme un `docker build` n'est pas jouable en
+  CI, la boucle d'installation du `Dockerfile` est **extraite et réellement exécutée** par la suite de
+  tests, avec `curl`/`sha256sum`/`unzip`/`tar` doublés : on vérifie l'URL téléchargée, le digest
+  présenté, le membre extrait, la profondeur de `--strip-components` et le nom du binaire posé — et
+  qu'un digest non concordant fait tout échouer sans rien installer.
+
+  **Surcouche runtime : `forge tools list|install|update|remove`.** Le binaire atterrit dans
+  `/data/tools/bin` — volume persistant, propriété de l'utilisateur `forge`, en tête du `PATH` devant le
+  `/usr/local/bin` baké : mettre à jour un outil ne demande plus de rebuild, et l'install survit à un
+  *recreate* du conteneur. Installer un binaire au runtime dans un outil offensif est précisément la
+  capacité qui annule une gouvernance si elle est mal posée, donc : SHA256 épinglé **calculé sur le
+  flux** et comparé avant que quoi que ce soit n'atteigne le `PATH` (écart ⇒ refus, temporaire détruit,
+  refus **journalisé**) ; source **allowlistée** par le manifeste — il n'existe ni `--url` ni
+  `--sha256`, et un nom hors manifeste ne déclenche aucune requête ; HTTPS strict, redirection quittant
+  HTTPS refusée ; **aucun shell ni sous-processus** (`urllib` + `zipfile`/`tarfile`, un seul membre
+  extrait vers une destination que nous calculons — un membre nommé `../../evil` ne sort pas du
+  répertoire outils) ; **ledger obligatoire** (`tools.install`/`.update`/`.remove`/`.refused`, chaînés
+  et signés) — sans ledger résoluble, l'action est refusée : pas de changement de capacité sans trace.
+
+  Aucune élévation : l'outil installé reste soumis au scope-guard ROE fail-closed, au plancher exploit
+  et au même contrat `Module`. Et **le défaut est un no-op** : rien n'est créé ni sondé à l'import,
+  aucun module du moteur n'importe l'installeur, le volume est vide tant qu'aucune action opérateur
+  n'a eu lieu — la résolution `PATH` est alors identique à la baseline.
+
+  Volontairement **non construit** : l'installation d'une version *hors* manifeste (elle supposerait
+  d'accepter un digest saisi à la main — tant qu'elle n'existe pas, il n'y a aucun chemin vers un
+  téléchargement non épinglé), l'API admin et le panneau UI de la console, et la sonde de version par
+  exécution du binaire. Documentation : `docs/TOOLS_LIFECYCLE.md`.
+
 ### Changed
 - **The purple join now has THREE states, not two — and the headline rate got stricter.** The join
   between fired techniques (red) and SOC detections (blue) was a plain **string equality** on the

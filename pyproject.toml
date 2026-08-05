@@ -31,6 +31,13 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["forge", "forge.modules"]
 
+# `forge/tools.json` — MANIFESTE des outils externes (versions + pins SHA256 + gabarits d'URL). C'est
+# de la DONNÉE, pas du code : sans cette déclaration, un `pip install` produirait un paquet où
+# `forge tools list|install` ne trouverait plus son manifeste (et le Dockerfile, qui le lit AU BUILD
+# depuis le dépôt, ne le remarquerait pas). Cf. forge/toolsmanifest.py.
+[tool.setuptools.package-data]
+forge = ["tools.json"]
+
 # --- mypy : gate de typage scopé au COEUR de sûreté (ROE / ledger / planner / engine) ---
 # mypy est un outil de DEV uniquement (jamais une dépendance runtime — cf. `dependencies = []`). Installer
 # dans un venv jetable puis lancer le gate :
