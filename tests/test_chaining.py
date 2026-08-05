@@ -36,6 +36,7 @@ from forge.session import SessionStore                     # noqa: E402
 from forge import techniques                               # noqa: E402
 from forge.modules import registry                         # noqa: E402
 from forge.modules.recon_surface import JsEndpoints, HistoricalUrls  # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 SUB = techniques.DISCOVERY_SUBDOMAIN_MARKER
 EP = techniques.DISCOVERY_ENDPOINT_MARKER
@@ -264,7 +265,11 @@ class TestScopeLockedChaining(unittest.TestCase):
         with _swap_registry(_stubs(**{"recon.subdomains": subs})):
             eng2 = _armed_auto(scope(in_scope=("app.test", "*.example.com"), out_scope=("evil.example.com",)))
             eng2.campaign([Target("app.test", "url")], HeuristicBrain(), Planner(), max_waves=3)
-        self.assertTrue(all(r["verdict"] == VETO for r in eng2.results if r["target"] == evil))
+        # `all(...)` sur une compréhension est VRAI À VIDE : pendant le flake DNS, cette moitié du test
+        # passait sans rien prouver. On exige d'abord que des actions aient été évaluées.
+        evil_res2 = [r for r in eng2.results if r["target"] == evil]
+        self.assertTrue(evil_res2, "out_scope : les actions chaînées auraient dû être évaluées (puis vétoées)")
+        self.assertTrue(all(r["verdict"] == VETO for r in evil_res2))
 
     def test_module_never_emits_out_of_scope_endpoint(self):
         # recon.js_endpoints n'émet de finding PAR-ENDPOINT que pour des cibles in-scope (verrou

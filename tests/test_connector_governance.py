@@ -21,6 +21,7 @@ from forge.roe import Scope, Action                            # noqa: E402
 from forge.engine import Engine                                # noqa: E402
 from forge.modules import registry                             # noqa: E402
 from forge.schema import Finding                               # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 # --- DÉTERMINISME DNS (anti-flake) — voir tests/test_roe.py pour le détail --------------------------
@@ -30,19 +31,6 @@ from forge.schema import Finding                               # noqa: E402
 # les assertions FIRE de façon intermittente. On force un NXDOMAIN immédiat (résultat garanti d'un `.test`),
 # rendant les preuves réellement hermétiques/déterministes sans toucher au comportement testé (désactivation
 # console vs présence host) : le verdict FIRE est identique (hôte inconnu -> non-privé -> tir).
-_gai_patch = None
-
-
-def setUpModule():
-    global _gai_patch
-    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
-                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test)"))
-    _gai_patch.start()
-
-
-def tearDownModule():
-    if _gai_patch is not None:
-        _gai_patch.stop()
 
 
 class _PresentModule(registry.Module):

@@ -40,6 +40,7 @@ from forge.planner import Planner as _Planner                 # noqa: E402
 from forge import console_client                              # noqa: E402
 from forge.console_client import IncrementalIngest            # noqa: E402
 from forge.cli.engine import _Terminate                       # noqa: E402  (arrêt gracieux réel du CLI)
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 # --- DÉTERMINISME DNS (anti-flake) — voir tests/test_roe.py pour le détail --------------------------
@@ -52,19 +53,6 @@ from forge.cli.engine import _Terminate                       # noqa: E402  (arr
 # checkpoint testé — le verdict FIRE reste identique (hôte inconnu -> non-privé -> tir, pin vide).
 # NB : forcer une IP RÉSOLUE (routable) serait pire — le probe de couverture du moteur tenterait une VRAIE
 # connexion vers cette IP (create_connection) et ré-introduirait une latence/dépendance réseau.
-_gai_patch = None
-
-
-def setUpModule():
-    global _gai_patch
-    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
-                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test)"))
-    _gai_patch.start()
-
-
-def tearDownModule():
-    if _gai_patch is not None:
-        _gai_patch.stop()
 
 
 # --- stubs moteur (repris de test_engine_iterative, zéro réseau) ------------------------------------

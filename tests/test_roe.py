@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import unittest.mock as _mock                                 # noqa: E402
 import forge.roe as _roe_mod                                  # noqa: E402
 from forge.roe import Scope, Roe, Action, VETO, DRY_RUN, FIRE  # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 # --- DÉTERMINISME DNS (anti-flake) — neutralise le SEUL point d'I/O réseau de la gate ROE ------------
@@ -20,19 +21,6 @@ from forge.roe import Scope, Roe, Action, VETO, DRY_RUN, FIRE  # noqa: E402
 # branche hôte-inconnu -> verdict). Les tests qui vérifient une résolution SPÉCIFIQUE (privé / IP publique /
 # timeout / out_scope) re-patchent `getaddrinfo` LOCALEMENT : leur `with mock.patch.object` prime puis
 # restaure CE défaut à la sortie (imbrication propre) -> ces preuves-là restent intactes et significatives.
-_gai_patch = None
-
-
-def setUpModule():
-    global _gai_patch
-    _gai_patch = _mock.patch.object(_roe_mod.socket, "getaddrinfo",
-                                    side_effect=_roe_mod.socket.gaierror("mocked NXDOMAIN (.test/.example)"))
-    _gai_patch.start()
-
-
-def tearDownModule():
-    if _gai_patch is not None:
-        _gai_patch.stop()
 
 
 def mk(in_scope=("app.test",), exploit=False, destructive=False):
