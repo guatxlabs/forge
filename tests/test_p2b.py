@@ -18,6 +18,7 @@ from forge import browser_client as bc                    # noqa: E402
 from forge.modules.registry import Module                 # noqa: E402
 from forge.modules.access_control import IdorDifferential  # noqa: E402
 from tests._tmp import temp_dir  # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 # pointe le client browser vers un port mort -> available() == False (connection refused, instantané)
 os.environ["FORGE_BROWSER_URL"] = "http://127.0.0.1:1"

@@ -35,6 +35,7 @@ from forge import modules as mods                             # noqa: E402
 from forge import techniques                                  # noqa: E402
 from forge.modules.oracle import Oracle                       # noqa: E402
 from forge.modules.recon_surface import PassiveSurface        # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 SECRET = "S3CR3T-forge-9f8e7d"                                # jeton témoin unique, cherché partout
 

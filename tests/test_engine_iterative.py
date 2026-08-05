@@ -22,6 +22,7 @@ from forge.planner import Planner                            # noqa: E402
 from forge.graph import EngagementGraph                      # noqa: E402
 from forge.schema import Target, Finding                     # noqa: E402
 from forge.modules import registry                           # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 def scope(in_scope=("app.test",), exploit=True, destructive=False):

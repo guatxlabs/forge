@@ -29,6 +29,7 @@ from forge.modules import msf as msfmod                     # noqa: E402
 from forge.modules import burp as burpmod                   # noqa: E402
 from forge.modules.msf import MsfModule, mp_pack, mp_unpack # noqa: E402
 from forge.modules.burp import BurpScan                     # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 # =============================================================================================

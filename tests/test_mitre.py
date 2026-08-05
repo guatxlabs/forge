@@ -14,6 +14,7 @@ from forge.roe import Scope, Action                            # noqa: E402
 from forge.engine import Engine                                # noqa: E402
 from forge.modules.registry import register, Module, REGISTRY  # noqa: E402
 from forge import purple                                       # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 def scope(in_scope=("app.test",), exploit=False):

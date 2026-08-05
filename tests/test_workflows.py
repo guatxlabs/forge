@@ -27,6 +27,7 @@ from forge.brain import AutoPentestBrain                        # noqa: E402
 from forge.planner import Planner                               # noqa: E402
 from forge.schema import Target, Finding                        # noqa: E402
 from forge.modules import registry                              # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 class _PresentFiring(registry.Module):

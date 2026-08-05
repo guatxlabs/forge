@@ -16,6 +16,7 @@ from forge.modules import evasion as evasionmod            # noqa: E402
 from forge.modules.web import NucleiScan                   # noqa: E402
 from forge.modules.access_control import IdorDifferential  # noqa: E402
 from forge.modules.origin import OriginFind                # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 class TestRunnerTool(unittest.TestCase):

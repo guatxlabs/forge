@@ -31,6 +31,7 @@ from forge.modules.registry import REGISTRY                   # noqa: E402
 from forge.modules.toolspec import ExternalToolModule         # noqa: E402
 from forge.roe import Scope, Action                           # noqa: E402
 from forge.engine import Engine                               # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 # Les 28 modules-fichiers que l'ANCIEN __init__.py importait explicitement (pin « no missing module »).
 OLD_EXPLICIT_MODULES = {

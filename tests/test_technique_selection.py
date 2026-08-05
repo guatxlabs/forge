@@ -26,6 +26,7 @@ from forge.brain import AutoPentestBrain, HeuristicBrain        # noqa: E402
 from forge.planner import Planner                               # noqa: E402
 from forge.schema import Target, Finding                        # noqa: E402
 from forge.modules import registry                              # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 SEL_REASON = "sélection profil/catégorie/technique"             # sous-chaîne de la raison du SKIP-sélection
 

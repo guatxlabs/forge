@@ -11,6 +11,7 @@ from forge.engine import Engine                             # noqa: E402
 from forge.schema import Target                             # noqa: E402
 from forge import runner, purple, report                    # noqa: E402
 from tests._tmp import temp_dir  # noqa: E402
+from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 
 def scope(in_scope=("app.test",), exploit=False):
