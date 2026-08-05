@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge.ledger import Ledger, _entry_hash, GENESIS  # noqa: E402
 from forge.anchor import Witness, WitnessAnchor, verify_witness_receipt, reconcile  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 def _resign_all(ledger):
@@ -32,7 +33,7 @@ def _resign_all(ledger):
 
 class TestAnchor(unittest.TestCase):
     def setUp(self):
-        self.path = Path(tempfile.mkdtemp(prefix="forge-anchor-")) / "l.jsonl"
+        self.path = temp_dir(self, "forge-anchor-") / "l.jsonl"
 
     def test_witness_receipt_verifies(self):
         w = Witness()

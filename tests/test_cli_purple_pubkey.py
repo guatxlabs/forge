@@ -9,7 +9,6 @@ import io
 import os
 import re
 import sys
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -19,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import cli               # noqa: E402
 from forge import signing           # noqa: E402
 from forge.ledger import Ledger     # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 # Cible garantie injoignable : rien n'écoute sur le port loopback 1 -> connexion refusée immédiate.
 UNREACHABLE = "http://127.0.0.1:1"
@@ -94,7 +94,7 @@ class TestDoctorPurple(unittest.TestCase):
 @unittest.skipUnless(signing._HAVE_ED, "Ed25519 requis (cryptography absent -> repli HMAC)")
 class TestLedgerPubkey(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-pubkey-"))
+        self.dir = temp_dir(self, "forge-pubkey-")
         self.path = self.dir / "l.jsonl"
 
     def _sign_ledger(self):
@@ -136,7 +136,7 @@ class TestLedgerPubkey(unittest.TestCase):
 @unittest.skipUnless(signing._HAVE_ED, "Ed25519 requis (cryptography absent -> repli HMAC)")
 class TestLedgerKeygen(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-keygen-"))
+        self.dir = temp_dir(self, "forge-keygen-")
         self.path = self.dir / "l.jsonl"
         self.kp = Path(str(self.path) + ".ed25519")
 

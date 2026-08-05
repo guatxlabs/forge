@@ -42,6 +42,7 @@ from forge.memory import Memory                              # noqa: E402
 from forge.schema import Finding                             # noqa: E402
 from forge.modules import registry                           # noqa: E402
 from forge import runner                                     # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 # --- stub module : fire() DORT une durée fixée par cible puis rend un finding déterministe -----------
@@ -159,8 +160,7 @@ class TestDeterminism(unittest.TestCase):
             os.environ["FORGE_PARALLELISM"] = self._saved_env
 
     def test_parallel_equals_serial_ledger_and_state(self):
-        import tempfile
-        d = Path(tempfile.mkdtemp(prefix="g3-det-"))
+        d = temp_dir(self, "g3-det-")
         try:
             eng_s, led_s = _run_wave(1, d / "serial.ledger")     # SÉRIEL (référence)
             eng_p, led_p = _run_wave(8, d / "parallel.ledger")   # PARALLÈLE (pool 8, complétion désordonnée)

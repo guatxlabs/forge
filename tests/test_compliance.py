@@ -8,7 +8,6 @@ touches the community engine.
 """
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from forge import compliance_signer as cs  # noqa: E402
 from forge import ledger as L  # noqa: E402
 from forge import signing  # noqa: E402
 from forge.ledger import Ledger  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 def _payload():
@@ -123,7 +123,7 @@ class TestReanchoredLedgerCrossLanguage(unittest.TestCase):
         return L._canon(rec), h
 
     def test_reanchored_console_ledger_verifies_and_detects_tamper(self):
-        d = Path(tempfile.mkdtemp(prefix="forge-comp-"))
+        d = temp_dir(self, "forge-comp-")
         p = d / "l.jsonl"
         # checkpoint R @ genesis (seq 0), then two re-linked survivors (their original seq 4,5 preserved).
         cp = {"reanchor": True, "purged_ledger_entries": 3, "segment_sha256": "ab" * 32}

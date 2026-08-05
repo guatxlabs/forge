@@ -18,7 +18,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import signing  # noqa: E402
 from forge import signing_pkcs11  # noqa: E402  (module load must NOT import python-pkcs11)
 from forge.ledger import Ledger  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 _HAVE_ED = signing._HAVE_ED
 if _HAVE_ED:
@@ -36,7 +36,7 @@ if _HAVE_ED:
 
 class TestDefaultPathStaysStdlibOnly(unittest.TestCase):
     def setUp(self):
-        self.base = str(Path(tempfile.mkdtemp(prefix="forge-p11-default-")) / "l")
+        self.base = str(temp_dir(self, "forge-p11-default-") / "l")
 
     @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
     def test_default_signer_is_localfile_and_imports_no_pkcs11(self):
@@ -161,7 +161,7 @@ def _fake_module(tamper=False, der=True):
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestMockedPkcs11Driver(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-p11-mock-"))
+        self.dir = temp_dir(self, "forge-p11-mock-")
         self._orig_import = signing_pkcs11._import_pkcs11
         self.cfg = {"module": "/fake/libsofthsm2.so", "token_label": "forge", "key_label": "forge-ledger", "pin": "1234"}
 
@@ -253,7 +253,7 @@ class TestPkcs11LibAbsentError(unittest.TestCase):
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestPkcs11Wiring(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-p11-wire-"))
+        self.dir = temp_dir(self, "forge-p11-wire-")
         self._orig_import = signing_pkcs11._import_pkcs11
 
     def tearDown(self):
@@ -328,7 +328,7 @@ class TestLiveSoftHSMRoundTrip(unittest.TestCase):
         self.module = _find_softhsm_module()
         if not self.module:
             self.skipTest("libsofthsm2.so introuvable (poser FORGE_TEST_SOFTHSM_MODULE)")
-        self.tokendir = Path(tempfile.mkdtemp(prefix="forge-softhsm-"))
+        self.tokendir = temp_dir(self, "forge-softhsm-")
         self.conf = self.tokendir / "softhsm2.conf"
         self.conf.write_text(f"directories.tokendir = {self.tokendir}\nobjectstore.backend = file\n")
         os.environ["SOFTHSM2_CONF"] = str(self.conf)

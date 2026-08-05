@@ -15,13 +15,13 @@ The module is SEPARABLE + FLAG-GATED: with nothing configured the default build 
 """
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import signing  # noqa: E402
 from forge.ledger import Ledger  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 _HAVE_ED = signing._HAVE_ED
 if _HAVE_ED:
@@ -50,7 +50,7 @@ _EXEC_SIGN_SCRIPT = (
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestLocalFileSignerByteIdentical(unittest.TestCase):
     def setUp(self):
-        self.base = str(Path(tempfile.mkdtemp(prefix="forge-lfs-")) / "l")
+        self.base = str(temp_dir(self, "forge-lfs-") / "l")
 
     def test_localfilesigner_is_byte_identical_to_ed25519signer(self):
         # Create the on-disk key, then load it three ways: the raw Ed25519Signer (today), LocalFileSigner, and
@@ -85,7 +85,7 @@ class TestLocalFileSignerByteIdentical(unittest.TestCase):
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestRemoteSignerVerifiesExternally(unittest.TestCase):
     def setUp(self):
-        self.path = Path(tempfile.mkdtemp(prefix="forge-remote-")) / "l.jsonl"
+        self.path = temp_dir(self, "forge-remote-") / "l.jsonl"
 
     def test_remote_signature_accepted_by_standard_external_verifier(self):
         sign_fn, pub = _remote_keypair()
@@ -126,7 +126,7 @@ class TestRemoteSignerVerifiesExternally(unittest.TestCase):
 
 class TestRemoteSignerFailClosed(unittest.TestCase):
     def setUp(self):
-        self.path = Path(tempfile.mkdtemp(prefix="forge-fc-")) / "l.jsonl"
+        self.path = temp_dir(self, "forge-fc-") / "l.jsonl"
 
     def test_unreachable_remote_signer_writes_no_entry(self):
         # The backend raises (e.g. KMS down). append() MUST raise a clean RemoteSignerError and write NOTHING —
@@ -206,7 +206,7 @@ class TestExecSignerNoShell(unittest.TestCase):
 
     @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
     def test_exec_signer_end_to_end_no_shell_verifies_externally(self):
-        d = Path(tempfile.mkdtemp(prefix="forge-exec-"))
+        d = temp_dir(self, "forge-exec-")
         priv = Ed25519PrivateKey.generate()
         pub = priv.public_key().public_bytes_raw().hex()
         keyfile = d / "k.ed25519"

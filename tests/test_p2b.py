@@ -2,7 +2,6 @@
 import json
 import os
 import sys
-import tempfile
 import threading
 import unittest
 import urllib.parse
@@ -18,6 +17,7 @@ from forge import modules as mods                         # noqa: E402
 from forge import browser_client as bc                    # noqa: E402
 from forge.modules.registry import Module                 # noqa: E402
 from forge.modules.access_control import IdorDifferential  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 # pointe le client browser vers un port mort -> available() == False (connection refused, instantané)
 os.environ["FORGE_BROWSER_URL"] = "http://127.0.0.1:1"
@@ -53,7 +53,7 @@ class TestEvasion(unittest.TestCase):
 
 class TestMemory(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-mem-"))
+        self.dir = temp_dir(self, "forge-mem-")
 
     def _f(self, target="app.test", title="IDOR"):
         return Finding(target=target, title=title, severity="HIGH")

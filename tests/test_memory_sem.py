@@ -1,12 +1,12 @@
 """Mémoire sémantique — dedup floue Jaccard (même cible + titre similaire) + fabrique make_memory."""
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge.memory import Memory, JaccardMemory, make_memory  # noqa: E402
 from forge.schema import Finding  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 def f(target, title, sev="HIGH"):
@@ -15,7 +15,7 @@ def f(target, title, sev="HIGH"):
 
 class TestJaccard(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-jac-"))
+        self.dir = temp_dir(self, "forge-jac-")
 
     def test_near_duplicate_same_target_deduped(self):
         m = JaccardMemory(self.dir / "m.jsonl", threshold=0.8)

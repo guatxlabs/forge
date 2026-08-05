@@ -1,6 +1,5 @@
 """P2 — preuves planner coverage-safe, cerveau, runner, campagne gatée, boucle purple."""
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from forge.brain import HeuristicBrain                      # noqa: E402
 from forge.engine import Engine                             # noqa: E402
 from forge.schema import Target                             # noqa: E402
 from forge import runner, purple, report                    # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 def scope(in_scope=("app.test",), exploit=False):
@@ -317,7 +317,7 @@ class TestPurple(unittest.TestCase):
         eng.execute(a)
         self.assertEqual(len(eng.run_records), 1)
         self.assertEqual(eng.run_records[0]["mitre"], "T1190")
-        d = Path(tempfile.mkdtemp(prefix="forge-purple-"))
+        d = temp_dir(self, "forge-purple-")
         n = purple.emit(d / "rr.jsonl", eng.run_records)
         self.assertEqual(n, 1)
         self.assertTrue((d / "rr.jsonl").exists())

@@ -12,13 +12,13 @@ Proves the ledger signing key is created SAFELY:
 import os
 import stat
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import signing  # noqa: E402
 from forge import portability  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 _HAVE_ED = signing._HAVE_ED
 _POSIX = portability.is_posix()
@@ -50,7 +50,7 @@ class _EnvGuard:
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestFreshKeyIsBornRestricted(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp(prefix="forge-keyprot-"))
+        self.d = temp_dir(self, "forge-keyprot-")
         self.base = str(self.d / "ledger")
 
     @unittest.skipUnless(_POSIX, "perms POSIX requises")
@@ -113,7 +113,7 @@ class TestFreshKeyIsBornRestricted(unittest.TestCase):
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestPreexistingKeyReadNeverRewritten(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp(prefix="forge-keyro-"))
+        self.d = temp_dir(self, "forge-keyro-")
         self.base = str(self.d / "ledger")
         self._restore_dir_mode = None
 
@@ -158,7 +158,7 @@ class TestPreexistingKeyReadNeverRewritten(unittest.TestCase):
 @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestConfigurablePath(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp(prefix="forge-keypath-"))
+        self.d = temp_dir(self, "forge-keypath-")
         self.base = str(self.d / "ledger")
 
     def test_default_path_is_sibling(self):
@@ -182,7 +182,7 @@ class TestConfigurablePath(unittest.TestCase):
 @unittest.skipUnless(_HAVE_ED and _POSIX, "perms POSIX + Ed25519 requis")
 class TestFailClosedOnPermsFailure(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp(prefix="forge-keyfail-"))
+        self.d = temp_dir(self, "forge-keyfail-")
         self.base = str(self.d / "ledger")
 
     def test_chmod_failure_raises_and_leaves_no_key(self):

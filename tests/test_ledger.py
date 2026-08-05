@@ -1,18 +1,18 @@
 """Preuves de tamper-evidence du ledger. `python -m unittest -v`."""
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge.ledger import Ledger  # noqa: E402
 from forge import signing  # noqa: E402
+from tests._tmp import temp_dir  # noqa: E402
 
 
 class TestLedger(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-test-"))
+        self.dir = temp_dir(self, "forge-test-")
         self.path = self.dir / "l.jsonl"
 
     def _seed(self):
@@ -144,7 +144,7 @@ class TestLedger(unittest.TestCase):
 @unittest.skipUnless(signing._HAVE_ED, "cryptography/Ed25519 indisponible")
 class TestEd25519(unittest.TestCase):
     def setUp(self):
-        self.path = Path(tempfile.mkdtemp(prefix="forge-ed-")) / "l.jsonl"
+        self.path = temp_dir(self, "forge-ed-") / "l.jsonl"
 
     def test_default_is_ed25519_and_verifies(self):
         led = Ledger(self.path)                                            # pas de key -> Ed25519 par défaut
@@ -195,7 +195,7 @@ class TestMixedAlgs(unittest.TestCase):
     et toujours détecter une altération. Reproduit le bug « CASSÉ ❌ » dès l'entrée sha256-console."""
 
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-mixed-"))
+        self.dir = temp_dir(self, "forge-mixed-")
         self.path = self.dir / "l.jsonl"
 
     def _append_console_entry(self, led, kind, detail):
@@ -304,7 +304,7 @@ class TestDowngradeAttack(unittest.TestCase):
     du kind moteur en 'console.*' tout en gardant la signature ed25519/hmac est lui aussi refusé."""
 
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-downgrade-"))
+        self.dir = temp_dir(self, "forge-downgrade-")
         self.path = self.dir / "l.jsonl"
 
     def _seed(self):
@@ -472,7 +472,7 @@ class TestTruncationHWM(unittest.TestCase):
     documenté -> ancrage hors-host)."""
 
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="forge-hwm-"))
+        self.dir = temp_dir(self, "forge-hwm-")
         self.path = self.dir / "l.jsonl"
         self.hwm = Path(str(self.path) + ".hwm")
 
