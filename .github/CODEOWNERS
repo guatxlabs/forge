@@ -50,8 +50,8 @@
 # ---- Modules & oracles — GARDÉ (chaque module est une CAPACITÉ offensive déclarée) --------
 # Un module qui s'élargit une capacité sans passer par le ROE annule la gouvernance entière.
 /forge/modules/                         @guatxlabs
-/forge/toolcatalog.py                   @guatxlabs
-/forge/toolspec.py                      @guatxlabs
+/forge/modules/toolspec.py              @guatxlabs
+/toolspecs/                             @guatxlabs
 
 # ---- Ressources, égress, IA (bornes d'exécution et sorties réseau) ------------------------
 /forge/resource_profile.py              @guatxlabs
@@ -106,7 +106,7 @@
 # ==========================================================================================
 /tests/                                 @guatxlabs
 /console/Cargo.toml                     @guatxlabs
-/console/deny.toml                      @guatxlabs
+/console/.cargo/audit.toml              @guatxlabs
 /pyproject.toml                         @guatxlabs
 /Dockerfile                             @guatxlabs
 /k8s/                                   @guatxlabs
