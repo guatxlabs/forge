@@ -31,7 +31,36 @@ use serde_json::{json, Value};
 pub(crate) enum ReconcileScope {
     All,
     #[cfg_attr(not(feature = "store-postgres"), allow(dead_code))]
-    BootOwner { me: String },
+    BootOwner {
+        me: String,
+        /// `run_id` des runs VIVANTS de CETTE instance, lus dans `app.run_state` par l'appelant.
+        /// Voir `live_runs_bind` : ils sont EXCLUS du reap. Vide = comportement historique.
+        live_run_ids: Vec<String>,
+    },
+}
+
+/// Fragment SQL + params LIÉS excluant les runs vivants (idiome maison, cf. `tenancy::tenants_in_bind`
+/// et `notifications.rs`). Liste vide -> fragment VIDE (aucune exclusion, aucun placeholder).
+///
+/// POURQUOI — le boot-reconcile repose sur une hypothèse écrite noir sur blanc dans son commentaire :
+/// « ce process neuf a un run_state VIDE ». Elle est vraie AU BOOT, mais l'appel ne se fait PAS au
+/// boot : sous HA `is_leader` est faux au démarrage, donc le reconcile est différé au premier tick où
+/// le bail est acquis — jusqu'à `HEARTBEAT_TICK_SECS` plus tard, **après** le bind HTTP. Un
+/// `POST /api/runs` dans cette fenêtre prend le spawn direct (`runs.rs`, `!ha_enabled || is_leader`)
+/// et crée un run `running` / `owner_instance=me`. Le tick arrive ensuite et, l'UPDATE étant
+/// owner-scopé sur `me`, il tue son PROPRE moteur vivant puis le marque `failed`.
+///
+/// L'owner-scoping protège les PAIRS vivants ; rien ne protégeait les MIENS. On ne suppose donc plus
+/// l'hypothèse : on la VÉRIFIE, en excluant ce que `run_state` déclare vivant. Fenêtre étroite
+/// (<= un tick) mais elle s'ouvre pile après un failover — quand un opérateur relance le run qui
+/// vient de mourir.
+fn live_runs_bind(live: &[String]) -> (String, Vec<crate::store::Param>) {
+    if live.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", live.len()).collect::<Vec<_>>().join(",");
+    let params = live.iter().map(|r| crate::store::Param::from(r.as_str())).collect();
+    (format!(" AND run_id NOT IN ({placeholders})"), params)
 }
 
 /// Réconcilie les run_job 'running' au boot : un process spawné qui n'a pas survécu au reboot de la
@@ -60,14 +89,21 @@ pub(crate) fn reconcile_runs(store: &crate::store::Store, scope: ReconcileScope)
                 |r| r.get_i64(0).map(|p| p as i32),
             )
             .unwrap_or_default(),
-        ReconcileScope::BootOwner { me } => store
-            .query_lax(
-                "SELECT pid FROM run_job WHERE status='running' AND pid>1
-                   AND (owner_instance=? OR owner_instance IS NULL)",
-                &crate::sql_params![me.as_str()],
-                |r| r.get_i64(0).map(|p| p as i32),
-            )
-            .unwrap_or_default(),
+        ReconcileScope::BootOwner { me, live_run_ids } => {
+            let (excl, excl_params) = live_runs_bind(live_run_ids);
+            let mut params = vec![crate::store::Param::from(me.as_str())];
+            params.extend(excl_params);
+            store
+                .query_lax(
+                    &format!(
+                        "SELECT pid FROM run_job WHERE status='running' AND pid>1
+                           AND (owner_instance=? OR owner_instance IS NULL){excl}"
+                    ),
+                    &params,
+                    |r| r.get_i64(0).map(|p| p as i32),
+                )
+                .unwrap_or_default()
+        }
     };
     // 2) couper tout groupe encore vivant (best-effort ; SIGTERM via killpg). kill_group ignore <=1.
     for pgid in &orphan_pgids {
@@ -91,14 +127,21 @@ pub(crate) fn reconcile_runs(store: &crate::store::Store, scope: ReconcileScope)
                 &crate::sql_params![],
             )
             .unwrap_or(0),
-        ReconcileScope::BootOwner { me } => store
-            .execute(
-                "UPDATE run_job SET status='failed', finished=datetime('now'), pid=-1,
-                   detail=COALESCE(NULLIF(detail,''),'')||' [reconciled: boot leader — orphelin owner-scopé]'
-                 WHERE status='running' AND (owner_instance=? OR owner_instance IS NULL)",
-                &crate::sql_params![me.as_str()],
-            )
-            .unwrap_or(0),
+        ReconcileScope::BootOwner { me, live_run_ids } => {
+            let (excl, excl_params) = live_runs_bind(live_run_ids);
+            let mut params = vec![crate::store::Param::from(me.as_str())];
+            params.extend(excl_params);
+            store
+                .execute(
+                    &format!(
+                        "UPDATE run_job SET status='failed', finished=datetime('now'), pid=-1,
+                           detail=COALESCE(NULLIF(detail,''),'')||' [reconciled: boot leader — orphelin owner-scopé]'
+                         WHERE status='running' AND (owner_instance=? OR owner_instance IS NULL){excl}"
+                    ),
+                    &params,
+                )
+                .unwrap_or(0)
+        }
     };
     if n > 0 {
         println!(
@@ -453,9 +496,23 @@ pub(crate) async fn leader_tick_loop(app: App) {
         // 0) BOOT-RECONCILE (une seule fois, à la 1re prise de leadership) — mes propres orphelins (owner=me
         //    OU NULL legacy) d'un crash antérieur -> 'failed' + killpg local. Différé du boot (cf. supra).
         if !boot_reconciled {
+            // Les runs VIVANTS de cette instance sont lus AVANT de prendre le store (aucune garde
+            // `store` tenue à travers un `.await`). Ils sont exclus du reap : le boot-reconcile
+            // suppose un `run_state` vide, or ce tick peut survenir APRÈS le bind HTTP — donc après
+            // qu'un run local ait démarré. Cf. `live_runs_bind`.
+            let live_run_ids: Vec<String> = {
+                let st = app.run_state.lock().await;
+                st.current.values().map(|h| h.run_id.clone()).collect()
+            };
+            if !live_run_ids.is_empty() {
+                println!(
+                    "[forge] boot-reconcile: {} run(s) local(aux) VIVANT(s) exclu(s) du reap (démarrés avant la prise de bail)",
+                    live_run_ids.len()
+                );
+            }
             {
                 let store = app.store();
-                reconcile_runs(&store, ReconcileScope::BootOwner { me: me.clone() });
+                reconcile_runs(&store, ReconcileScope::BootOwner { me: me.clone(), live_run_ids });
             }
             boot_reconciled = true;
         }
@@ -808,5 +865,59 @@ mod wave_b_tests {
         assert!(pgids.contains(&100), "mon pgid est killable");
         assert!(pgids.contains(&300), "un pgid legacy (NULL, même hôte historiquement) est killable");
         assert!(!pgids.contains(&200), "un pgid cross-host (autre owner) n'est JAMAIS signalé au killpg");
+    }
+
+    /// L'owner-scoping protège les runs des PAIRS vivants ; il ne protégeait PAS les MIENS.
+    ///
+    /// Le boot-reconcile est différé au 1er tick où le bail est acquis — donc potentiellement APRÈS le
+    /// bind HTTP. Un `POST /api/runs` dans cette fenêtre crée un run `running` / `owner=me` : le tick
+    /// arrivait ensuite et tuait son propre moteur vivant. On exclut donc ce que `run_state` déclare
+    /// vivant. Ici on exerce le VRAI constructeur de fragment (`live_runs_bind`), pas une copie.
+    #[test]
+    fn boot_owner_reconcile_spares_my_own_live_runs() {
+        let m = mem();
+        insert_run(&m, "orphan", "running", 1, Some("me"), 1); // crash antérieur -> DOIT être réapé
+        insert_run(&m, "live", "running", 2, Some("me"), 2);   // démarré à l'instant -> DOIT survivre
+        insert_run(&m, "peer", "running", 3, Some("other"), 3);
+
+        let live = vec!["live".to_string()];
+        let (excl, excl_params) = live_runs_bind(&live);
+        assert!(!excl.is_empty(), "une liste non vide DOIT produire un fragment");
+        let mut params = vec![crate::store::Param::from("me")];
+        params.extend(excl_params);
+        let n = Store::sqlite(m.lock().unwrap())
+            .execute(
+                &format!(
+                    "UPDATE run_job SET status='failed', finished=datetime('now'), pid=-1
+                     WHERE status='running' AND (owner_instance=? OR owner_instance IS NULL){excl}"
+                ),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(n, 1, "seul l'orphelin est flippé");
+        assert_eq!(status_of(&m, "orphan"), "failed", "l'orphelin d'un crash antérieur reste réapé");
+        assert_eq!(status_of(&m, "live"), "running", "MON run vivant n'est PAS tué par mon propre reconcile");
+        assert_eq!(status_of(&m, "peer"), "running", "le run d'un pair reste protégé (owner-scoping)");
+    }
+
+    /// Aucun run vivant (le cas du BOOT authentique) => fragment VIDE, zéro placeholder : la requête
+    /// est alors littéralement celle d'avant. Le correctif ne peut donc pas régresser le cas nominal.
+    #[test]
+    fn live_runs_bind_is_a_noop_when_nothing_is_alive() {
+        let (excl, params) = live_runs_bind(&[]);
+        assert_eq!(excl, "", "liste vide -> aucune clause ajoutée");
+        assert!(params.is_empty(), "liste vide -> aucun paramètre lié");
+    }
+
+    /// Le nombre de placeholders DOIT égaler le nombre de params liés — sinon la requête échoue à
+    /// l'exécution (même invariant que `tenancy::tenants_in_bind`).
+    #[test]
+    fn live_runs_bind_placeholders_match_params() {
+        for n in 1..=4 {
+            let live: Vec<String> = (0..n).map(|i| format!("run-{i}")).collect();
+            let (excl, params) = live_runs_bind(&live);
+            assert_eq!(excl.matches('?').count(), n, "n placeholders pour n run_id");
+            assert_eq!(params.len(), n, "n params liés pour n run_id");
+        }
     }
 }
