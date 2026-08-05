@@ -1322,6 +1322,7 @@ fn rand_hex(nbytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::tmp_path;
     use crate::App;
     use rusqlite::Connection;
     use std::net::SocketAddr;
@@ -1359,18 +1360,6 @@ mod tests {
     }
     fn bearer_hdr(tok: &str) -> String {
         format!("Authorization: Bearer {tok}\r\n")
-    }
-
-    fn tmp_path(name: &str) -> String {
-        let mut p = std::env::temp_dir();
-        let uniq = format!(
-            "{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        );
-        p.push(uniq);
-        p.to_string_lossy().into_owned()
     }
 
     /// App backed by an in-memory DB (mirrors sso::tests::sso_test_app).

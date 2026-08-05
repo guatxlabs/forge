@@ -32,12 +32,57 @@ use serde_json::Value;
         ONCE.call_once(|| std::env::set_var(crate::ALLOW_INTERNAL_INTEGRATIONS_ENV, "1"));
     }
 
+    /// Préfixe des racines de test — sert AUSSI de motif de ramassage (cf. `tmp_root`).
+    const TMP_ROOT_PREFIX: &str = "forge-console-testrun-";
+    /// Âge à partir duquel une racine est réputée abandonnée. Généreux À DESSEIN : il doit être
+    /// supérieur à la plus longue exécution plausible, sinon on supprimerait sous les pieds d'un
+    /// `cargo test` concurrent (autre binaire de test, autre worktree) qui tourne encore.
+    const TMP_ROOT_STALE_SECS: u64 = 6 * 3600;
+
+    /// Racine UNIQUE par process de test, sous le tempdir de l'OS.
+    ///
+    /// Mesuré le 2026-08-05 (P7.1-a) : une exécution complète de `cargo test` abandonnait
+    /// **34 entrées / 200 Kio** éparpillées dans le tempdir, et rien ne les reprenait — donc la
+    /// consommation croissait à chaque exécution. Ici `/tmp` est en zram : c'est de la RAM.
+    ///
+    /// Deux effets : tout ce que les tests sèment est REGROUPÉ sous une racine, et les racines des
+    /// exécutions précédentes sont ramassées au premier appel. Le tempdir cesse donc de croître.
+    ///
+    /// Pourquoi pas un garde RAII rendu par `tmp_path` : ~290 sites d'appel consomment la `String`
+    /// telle quelle ; un type-garde imposerait une réécriture massive pour 200 Kio, sur une suite de
+    /// 385 tests dont beaucoup couvrent le ledger et la conformité. Pourquoi pas un hook de sortie :
+    /// libtest ne droppe pas les `static`, et Rust n'expose pas d'`atexit` sans dépendance nouvelle.
+    /// Le compromis retenu BORNE la fuite à une exécution au lieu de la laisser s'accumuler.
+    fn tmp_root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let base = std::env::temp_dir();
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for e in entries.flatten() {
+                    if !e.file_name().to_string_lossy().starts_with(TMP_ROOT_PREFIX) {
+                        continue;
+                    }
+                    let stale = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().map(|d| d.as_secs() > TMP_ROOT_STALE_SECS).unwrap_or(false))
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_dir_all(e.path());
+                    }
+                }
+            }
+            let root = base.join(format!("{}{}", TMP_ROOT_PREFIX, std::process::id()));
+            std::fs::create_dir_all(&root).expect("mkdir racine de test");
+            root
+        })
+        .as_path()
+    }
+
     pub(crate) fn tmp_path(name: &str) -> String {
-        let mut p = std::env::temp_dir();
         let uniq = format!("{}-{}-{}", name, std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-        p.push(uniq);
-        p.to_string_lossy().into_owned()
+        tmp_root().join(uniq).to_string_lossy().into_owned()
     }
 
     /// Crée un dossier temporaire unique.

@@ -1116,6 +1116,7 @@ fn pct_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::tmp_path;
     use crate::App;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use rusqlite::Connection;
@@ -1238,18 +1239,6 @@ byHb5g3JqJSE6WJSuyEQrUob
             }
         }
         None
-    }
-
-    fn tmp_path(name: &str) -> String {
-        let mut p = std::env::temp_dir();
-        let uniq = format!(
-            "{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        );
-        p.push(uniq);
-        p.to_string_lossy().into_owned()
     }
 
     /// App backed by an in-memory DB (mirrors crate::tests::test_app; that helper is in a sibling module,

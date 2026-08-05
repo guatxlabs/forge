@@ -741,23 +741,12 @@ async fn evidence_export(State(app): State<App>, headers: HeaderMap, Query(q): Q
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::tmp_path;
     use rusqlite::Connection;
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, Mutex as AsyncMutex};
-
-    fn tmp_path(name: &str) -> String {
-        let mut p = std::env::temp_dir();
-        let uniq = format!(
-            "{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        );
-        p.push(uniq);
-        p.to_string_lossy().into_owned()
-    }
 
     /// App backed by an in-memory DB (mirrors scim::tests::scim_test_app) + migrate (tenant_id column).
     fn test_app(ledger_path: &str) -> App {

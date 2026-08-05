@@ -469,6 +469,7 @@ pub(crate) fn scim_tenant_grants_for_group(app: &App, display: &str) -> Vec<(i64
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::tmp_path;
     use rusqlite::Connection;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
@@ -476,16 +477,6 @@ mod tests {
     use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
     /// Cross-platform temp path (no hardcoded /tmp — portability guard).
-    fn tmp_path(name: &str) -> String {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        p.to_string_lossy().into_owned()
-    }
 
     /// App backed by an in-memory DB (mirrors sso.rs's `sso_test_app`; the crate helper is in a sibling
     /// module not reachable here). Fields are crate-private but visible to this descendant module.
