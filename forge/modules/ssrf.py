@@ -83,13 +83,24 @@ class SsrfCallback(Oracle):
         if method == "GET":
             sep = "&" if "?" in action.target else "?"
             inj = f"{action.target}{sep}{urllib.parse.urlencode({param: cb_url})}"
-            self._fetch(inj, headers=headers, method="GET")
+            i_st, _i_body = self._fetch(inj, headers=headers, method="GET")
         else:
             inj = action.target
-            self._fetch(inj, headers=headers, method=method,
-                        data=urllib.parse.urlencode({param: cb_url}))
+            i_st, _i_body = self._fetch(inj, headers=headers, method=method,
+                                        data=urllib.parse.urlencode({param: cb_url}))
         # 2) interroger le collecteur — la PREUVE est ici, pas dans la réponse de la cible
         cs, cbody = self._fetch(check_url, timeout=action.params.get("callback_timeout", 15))
+        # AUCUN VERDICT sans les DEUX jambes. Un collecteur MUET ne dit rien sur la réception du
+        # callback : il n'a pas été interrogé. Et le statut de l'injection était jeté — une injection
+        # jamais partie suivie d'un collecteur vide produisait « aucun callback reçu », parfaitement
+        # crédible. C'est la seule preuve out-of-band du catalogue : elle ne tolère pas l'à-peu-près.
+        if i_st is None or cs is None:
+            return [self.degraded(
+                target=inj,
+                title="SSRF non testé — injection ou collecteur injoignable (aucune réponse)",
+                evidence=(f"cible={i_st} collecteur={cs} : au moins une jambe n'a pas répondu ; "
+                          f"l'absence de callback OBSERVÉ n'est pas l'absence de SSRF."),
+                poc=self.dry(action))]
         received = (cs == 200 and token in (cbody or ""))
         return [self.proof(
             target=inj, proven=received,

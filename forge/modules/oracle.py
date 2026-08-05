@@ -131,6 +131,20 @@ class Oracle(Module):
             category=self.cwe, status="tested", tool=self.tool,
             evidence=evidence, poc=poc)
 
+    def degraded(self, *, target, title, evidence, poc):
+        """Finding de DÉGRADATION GRACIEUSE (`status='skipped'`) : scope-refus, outil optionnel absent
+        ou réseau indisponible. Estampille kind/mitre/cwe/tool/fix comme un finding normal (INFO).
+
+        Défini sur `Oracle` et non sur `ScopeGuardedOracle` : tout oracle qui rend un verdict à partir
+        d'une réponse doit pouvoir dire « je n'ai pas pu vérifier », y compris ceux qui n'ont pas de
+        scope-guard propre (`SsrfCallback`). La distinction avec `skip()` porte sur le STATUS, et c'est
+        elle qui compte pour l'opérateur : `skipped` = pas vérifié, `tested` = vérifié, rien trouvé."""
+        return self.finding(
+            target=target, title=title, severity="INFO",
+            category=self.cwe, cwe=self.cwe, mitre=self.mitre,
+            fix=self.fix, status="skipped", tool=self.tool,
+            evidence=evidence, poc=poc)
+
     # --- seam réseau bas-niveau : UN SEUL saut, SANS suivi auto de redirection ---
     @staticmethod
     def _raw_open(req, timeout=15):
@@ -332,11 +346,5 @@ class ScopeGuardedOracle(ScopeGuardMixin, Oracle):
             evidence="La cible n'appartient pas au périmètre in-scope ; aucune requête émise (fail-closed).",
             poc=self.dry(action))
 
-    def degraded(self, *, target, title, evidence, poc):
-        """Finding de DÉGRADATION GRACIEUSE (`status='skipped'`) : scope-refus, outil optionnel absent
-        ou réseau indisponible. Estampille kind/mitre/cwe/tool/fix comme un finding normal (INFO)."""
-        return self.finding(
-            target=target, title=title, severity="INFO",
-            category=self.cwe, cwe=self.cwe, mitre=self.mitre,
-            fix=self.fix, status="skipped", tool=self.tool,
-            evidence=evidence, poc=poc)
+    # `degraded()` vit désormais sur `Oracle` (héritée telle quelle, corps identique) : les oracles
+    # sans scope-guard propre en ont besoin aussi pour refuser de conclure sur un réseau muet.

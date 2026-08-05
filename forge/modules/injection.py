@@ -165,14 +165,24 @@ class SstiEval(InjectionOracle):
         # n'a rien prouvé (le déterministe reste PRIMAIRE).
         templates = list(_SSTI_TEMPLATES) + self._llm_extra_payloads(action)
         evaluated, matched_syntax, where = False, "", action.target
+        seen_network = False
         for tmpl in templates:
             payload = tmpl.replace("N", str(n)).replace("M", str(m))
             where, st, body = self._send(action, param, payload, method)
+            if st is not None:
+                seen_network = True
             # PREUVE : le PRODUIT apparaît dans la réponse -> l'expression a été ÉVALUÉE côté serveur.
             # (une simple réflexion brute renverrait `n*m` littéral, jamais le produit.)
             if prod_s in (body or ""):
                 evaluated, matched_syntax = True, tmpl
                 break
+        # AUCUNE réponse sur AUCUNE sonde => AUCUN VERDICT : le produit ne peut pas apparaître dans un
+        # corps vide, donc « SSTI non confirmé » certifierait des sondes jamais émises.
+        if not seen_network:
+            return [self.degraded(
+                target=where, title="SSTI non testé — réseau indisponible (dégradation gracieuse)",
+                evidence=f"Aucune réponse sur {len(templates)} sonde(s) (transport indisponible) ; offline-safe.",
+                poc=self.dry(action))]
         return [self.proof(
             target=where, proven=evaluated,
             title=("SSTI CONFIRMÉ — le moteur de template a évalué l'expression injectée"
@@ -251,12 +261,21 @@ class PathTraversal(InjectionOracle):
                 poc=self.dry(action))]
         method = str(action.params.get("method", "GET")).upper()
         read, matched, where = False, "", action.target
+        seen_network = False
         for payload in self._payloads(action):
             where, st, body = self._send(action, param, payload, method)
+            if st is not None:
+                seen_network = True
             # PREUVE : le marqueur BÉNIGN du canari revient -> le paramètre lit un fichier via traversal.
             if marker in (body or ""):
                 read, matched = True, payload
                 break
+        # Même contrat que SSTI : un canari ne peut pas revenir d'un serveur qui n'a jamais répondu.
+        if not seen_network:
+            return [self.degraded(
+                target=where, title="Path traversal non testé — réseau indisponible (dégradation gracieuse)",
+                evidence="Aucune réponse du serveur sur aucune sonde (transport indisponible) ; offline-safe.",
+                poc=self.dry(action))]
         return [self.proof(
             target=where, proven=read,
             title=("Path traversal CONFIRMÉ — lecture d'un canari bénin via traversal"
@@ -396,12 +415,15 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
         where, base_st, base_body = self._send(action, param, value, method)
         base_hash = _body_hash(base_body)
         base_sign, _ = self._dbms_from_error(base_body)
+        seen_network = base_st is not None
 
         # (A) différentiel BOOLÉEN : VRAI ~= baseline (même corps normalisé, même statut) ET FAUX ≠ VRAI.
         bool_confirmed, bool_ctx = False, ""
         for ptrue, pfalse in _BOOL_PAIRS:
             _, t_st, t_body = self._send(action, param, value + ptrue, method)
             _, f_st, f_body = self._send(action, param, value + pfalse, method)
+            if t_st is not None or f_st is not None:
+                seen_network = True
             same_true = (t_st == base_st and _normalize_body(t_body) and _body_hash(t_body) == base_hash)
             differs = _body_hash(f_body) != _body_hash(t_body)
             if same_true and differs:
@@ -412,8 +434,19 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
         #     On n'extrait QUE la version du SGBD (jamais de données). Signature déjà présente en
         #     baseline -> non probante (l'app affiche cette erreur en temps normal).
         _, e_st, e_body = self._send(action, param, value + "'", method)
+        if e_st is not None:
+            seen_network = True
         err_sign, err_version = self._dbms_from_error(e_body)
         error_confirmed = bool(err_sign) and not base_sign
+
+        # AUCUNE réponse nulle part => AUCUN VERDICT. Asymétrie qui avait mis la puce à l'oreille : cet
+        # oracle dégrade DÉJÀ proprement quand le corroborateur OPTIONNEL sqlmap manque, mais rendait un
+        # « SQLi non confirmé » confiant quand le canal de détection PRIMAIRE — le réseau — était mort.
+        if not seen_network:
+            return [self.degraded(
+                target=where, title="SQLi non testé — réseau indisponible (dégradation gracieuse)",
+                evidence="Aucune réponse du serveur (ni baseline ni sondes booléennes/erreur) ; offline-safe.",
+                poc=self.dry(action))]
 
         proven = bool_confirmed or error_confirmed
         tech = ", ".join(t for t in (

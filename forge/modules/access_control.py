@@ -180,6 +180,16 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                 continue
             r_att = self._fetch(url, attacker)               # (status, body, content_type)
             r_anon = self._fetch(url, {})
+            # CIBLE INJOIGNABLE => AUCUN VERDICT (att_ok/anon_denied/marker_hit tous faux sur un corps
+            # vide -> « IDOR non confirmé » pour une requête jamais partie).
+            if r_att[0] is None or r_anon[0] is None:
+                findings.append(self.degraded(
+                    target=url,
+                    title="IDOR non testé — cible injoignable (aucune réponse)",
+                    evidence=(f"Au moins une sonde n'a pas répondu (attaquant={r_att[0]}, "
+                              f"anonyme={r_anon[0]}) : le différentiel cross-compte n'a pas pu être évalué."),
+                    poc=self.dry(action)))
+                continue
             att_ok = r_att[0] in self._OK
             anon_denied = r_anon[0] in self._DENY
             marker_hit = bool(marker) and att_ok and (marker in (r_att[1] or ""))
@@ -321,6 +331,17 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             ra = self._fetch(url, A.get("headers", {}))
             rb = self._fetch(url, B.get("headers", {}))
             ru = self._fetch(url, {})
+            # CIBLE INJOIGNABLE => AUCUN VERDICT. Le différentiel exige les TROIS réponses ; sans elles
+            # `same` et `anon_denied` sont faux par construction et l'oracle rendrait « IDOR non
+            # confirmé » pour des requêtes jamais parties. Absence de réponse != absence de vuln.
+            if ra[0] is None or rb[0] is None or ru[0] is None:
+                findings.append(self.degraded(
+                    target=url,
+                    title="IDOR non testé — cible injoignable (aucune réponse)",
+                    evidence=(f"Au moins une des trois sondes n'a pas répondu (A={ra[0]}, B={rb[0]}, "
+                              f"anon={ru[0]}) : le différentiel de contenu exige les trois."),
+                    poc=self.dry(action)))
+                continue
             same = self._same_object(ra, rb)
             anon_denied = ru[0] in self._DENY
             # PREUVE NETTE requise : B lit l'objet de A (même corps normalisé) ET l'anon est refusé.
@@ -356,6 +377,17 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             before = self._fetch(url, A.get("headers", {}), method="GET")
             wb = self._fetch(url, B.get("headers", {}), method=method, body=body)
             after = self._fetch(url, A.get("headers", {}), method="GET")
+            # CIBLE INJOIGNABLE => AUCUN VERDICT. L'oracle d'EFFET compare avant/après : sans les trois
+            # réponses, `mutated` est faux par construction et le « IDOR write non confirmé » (chemin
+            # CRITICAL) certifierait une écriture cross-compte jamais tentée.
+            if before[0] is None or wb[0] is None or after[0] is None:
+                findings.append(self.degraded(
+                    target=url,
+                    title=f"IDOR write {method} non testé — cible injoignable (aucune réponse)",
+                    evidence=(f"Au moins une sonde n'a pas répondu (avant={before[0]}, "
+                              f"write_B={wb[0]}, après={after[0]}) : l'oracle d'effet exige les trois."),
+                    poc=self.dry(action)))
+                continue
             # B a-t-il été accepté ? (2xx) et l'objet de A a-t-il muté ?
             b_accepted = wb[0] in (200, 201, 202, 204, 206)
             mutated = (before[0] in self._OK and after[0] in self._OK
@@ -476,6 +508,16 @@ class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
             r_low = self._fetch(url, low.get("headers", {}), method=method)
             r_admin = self._fetch(url, admin.get("headers", {}), method=method)
             r_anon = self._fetch(url, {}, method=method)
+            # CIBLE INJOIGNABLE => AUCUN VERDICT. Le titre négatif affirme « fonction non atteinte par le
+            # bas-privilège » — une conclusion sur l'autorisation, alors qu'aucune requête n'a abouti.
+            if r_low[0] is None or r_admin[0] is None or r_anon[0] is None:
+                findings.append(self.degraded(
+                    target=url,
+                    title="Privesc non testée — fonction injoignable (aucune réponse)",
+                    evidence=(f"Au moins une sonde n'a pas répondu (bas-priv={r_low[0]}, "
+                              f"admin={r_admin[0]}, anon={r_anon[0]}) : la preuve exige les trois."),
+                    poc=self.dry(action)))
+                continue
             low_ok = r_low[0] in self._OK
             admin_ok = r_admin[0] in self._OK
             anon_denied = r_anon[0] in self._DENY

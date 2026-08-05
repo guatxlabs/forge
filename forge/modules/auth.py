@@ -156,6 +156,17 @@ class AuthTakeover(ScopeGuardedOracle):
             # --- SONDES (in-scope) : attaquant + contrôle anonyme (toujours) ; propriétaire (si compte) ---
             ws, wbody, _ = self._fetch(url, headers=attacker)
             anon_s, anon_body, _ = self._fetch(url, headers={})
+            # CIBLE INJOIGNABLE => AUCUN VERDICT : marqueur et différentiel sont faux par construction
+            # sur un corps vide, donc « ATO non confirmé » certifierait un test jamais émis — sur la
+            # classe la plus grave du catalogue.
+            if ws is None or anon_s is None:
+                findings.append(self.degraded(
+                    target=url,
+                    title="ATO non testé — cible injoignable (aucune réponse)",
+                    evidence=(f"Au moins une sonde n'a pas répondu (attaquant={ws}, anonyme={anon_s}) ; "
+                              f"aucun verdict rendu."),
+                    poc=self.dry(action)))
+                continue
             att_ok = ws in (200, 206)
             anon_denied = anon_s in (401, 403)
 
@@ -255,11 +266,28 @@ class AuthTakeover(ScopeGuardedOracle):
         # On NE modifie PAS self.destructive (déclaration de capacité, lue par le ROE avant fire) — c'est
         # le module qui est gardé `destructive=True` par prudence (un reset MUTE la victime).
         if bp and bp.get("url"):
-            self._fetch(bp["url"], headers=bp.get("headers", {}),
-                        method=str(bp.get("method", "POST")).upper(),
-                        data=(urllib.parse.urlencode(bp["body"]) if isinstance(bp.get("body"), dict)
-                              else bp.get("body")))
+            bp_st, _bp_body, _bp_ct = self._fetch(
+                bp["url"], headers=bp.get("headers", {}),
+                method=str(bp.get("method", "POST")).upper(),
+                data=(urllib.parse.urlencode(bp["body"]) if isinstance(bp.get("body"), dict)
+                      else bp.get("body")))
+            # L'étape de bypass est la PRÉMISSE du test. Son statut était jeté : si elle n'est jamais
+            # partie, un whoami « pas la victime » ne prouve rien — et une garde posée sur le seul
+            # whoami ne l'aurait pas vu.
+            if bp_st is None:
+                return [self.degraded(
+                    target=bp["url"],
+                    title="ATO non testé — étape de bypass injoignable (aucune réponse)",
+                    evidence=("Le flux de bypass n'a reçu aucune réponse ; le whoami qui suit ne peut "
+                              "rien conclure sur la prise de contrôle."),
+                    poc=self.dry(action))]
         ws, wbody, _ = self._fetch(whoami, headers=sess)
+        if ws is None:
+            return [self.degraded(
+                target=whoami,
+                title="ATO non testé — whoami injoignable (aucune réponse)",
+                evidence="Aucune réponse de l'endpoint whoami (transport indisponible) ; aucun verdict rendu.",
+                poc=self.dry(action))]
         attacker = p.get("attacker_marker")
         # PREUVE NETTE : whoami accordé (2xx), contient le marqueur VICTIME, et — si fourni — PAS celui
         # de l'attaquant (sinon on regarde juste sa propre session : faux positif classique).

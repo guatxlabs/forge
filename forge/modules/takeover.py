@@ -198,6 +198,17 @@ class SubdomainTakeover(ScopeGuardedOracle):
             low = (body or "").lower()
             fingerprint_hit = any(sig in low for sig in signs)
         dangling_nxdomain = (not cname_resolves)
+        # La cible CNAME RÉSOUT (donc pas de NXDOMAIN) : le SEUL canal de preuve restant est le
+        # fingerprint HTTP de non-réclamation. S'il n'a pas pu être émis, le titre négatif affirmerait
+        # « ressource réclamée/servie » — exactement ce qui n'a pas été vérifié. `seen_http` ne gardait
+        # jusqu'ici que l'ÉVIDENCE, jamais le verdict.
+        if not seen_http and not dangling_nxdomain:
+            return [self.degraded(
+                target=host,
+                title="subdomain.takeover non testé — sonde HTTP injoignable (dégradation gracieuse)",
+                evidence=(f"{host} -> CNAME {cname} ({service}) résout, mais aucune réponse HTTP : le "
+                          f"fingerprint de non-réclamation n'a pas pu être lu ; aucun verdict rendu."),
+                poc=self.dry(action))]
         proven = fingerprint_hit or dangling_nxdomain
         method = ("fingerprint de non-réclamation" if fingerprint_hit else "") + \
                  (" + " if (fingerprint_hit and dangling_nxdomain) else "") + \

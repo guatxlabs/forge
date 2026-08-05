@@ -103,9 +103,21 @@ class TestSsrfCallbackOracle(unittest.TestCase):
         self.assertEqual(f[0].severity, "INFO")
         self.assertIn("aucun callback reçu", f[0].title)
 
-    def test_tested_when_collector_error(self):
+    def test_collector_unreachable_degrades_to_skipped(self):
+        """Ce test AFFIRMAIT le bug : il exigeait `status='tested'` quand le collecteur est injoignable.
+
+        Or un collecteur muet ne dit RIEN sur la réception du callback — il n'a pas été interrogé.
+        Rendre « SSRF non confirmé — aucun callback reçu » dans ce cas, c'est certifier l'absence
+        d'une vulnérabilité sur la foi d'une sonde qui n'a jamais abouti. `skipped` dit la vérité."""
         f, _, _ = self._fire((200, "ok"), (None, ""))       # collecteur injoignable
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("injoignable", f[0].title)
+
+    def test_a_real_empty_collector_is_still_a_verdict(self):
+        """Contrôle NÉGATIF : un collecteur qui RÉPOND sans le token reste un vrai « non confirmé »."""
+        f, _, _ = self._fire((200, "ok"), (200, "aucun hit"))
         self.assertEqual(f[0].status, "tested")
+        self.assertIn("aucun callback reçu", f[0].title)
 
     def test_missing_config_is_info_skip(self):
         f = SsrfCallback().fire(Action("ssrf.callback", "https://app.test", params={"param": "url"}))
