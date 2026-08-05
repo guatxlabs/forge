@@ -1,0 +1,118 @@
+# CODEOWNERS — carte de propriété par sous-système (GABARIT DE CROISSANCE)
+#
+# Forge est un projet solo AUJOURD'HUI : tous les chemins pointent vers le seul mainteneur. Le
+# fichier est structuré par sous-système malgré tout, pour qu'une équipe qui grandit puisse
+# réattribuer boîte par boîte SANS restructurer — il suffit de remplacer @guatxlabs sur les lignes
+# concernées par de vrais handles GitHub (@alice, @equipe/securite).
+#
+# Les sous-systèmes marqués GARDÉ portent une propriété de SÛRETÉ : ils doivent conserver le
+# mainteneur (ou un handle security-owner) comme relecteur REQUIS même après délégation. Pour un
+# outil offensif, ce n'est pas une politesse d'organisation : ce sont les endroits où une revue
+# distraite transforme le produit en arme non gouvernée.
+#
+# Syntaxe : <glob>  <owner...> — la DERNIÈRE règle qui matche gagne. Le catch-all reste en tête.
+#
+# TODO(croissance) : remplacer @guatxlabs par de vrais handles ; ajouter un security-owner sur les
+# chemins GARDÉS.
+
+# ---- Catch-all (tout ce que le mainteneur possède jusqu'à réattribution) ------------------
+*                                       @guatxlabs
+
+# ---- Docs & méta --------------------------------------------------------------------------
+/README.md                              @guatxlabs
+/ARCHITECTURE.md                        @guatxlabs
+/CONTRIBUTING.md                        @guatxlabs
+/docs/                                  @guatxlabs
+
+# ==========================================================================================
+# MOTEUR PYTHON
+# ==========================================================================================
+
+# ---- Gate ROE + périmètre — GARDÉ (LE cœur de sûreté : rien ne tire sans son verdict) -----
+/forge/roe.py                           @guatxlabs
+/forge/pin.py                           @guatxlabs
+/forge/session.py                       @guatxlabs
+
+# ---- Ledger & signature — GARDÉ (tamper-evidence : toute la valeur d'audit tient là) ------
+/forge/ledger.py                        @guatxlabs
+/forge/signing.py                       @guatxlabs
+/forge/signing_pkcs11.py                @guatxlabs
+/forge/anchor.py                        @guatxlabs
+/forge/compliance_signer.py             @guatxlabs
+
+# ---- Orchestration (boucle, plan, ordonnancement) ----------------------------------------
+/forge/engine.py                        @guatxlabs
+/forge/planner.py                       @guatxlabs
+/forge/brain.py                         @guatxlabs
+/forge/runner.py                        @guatxlabs
+/forge/graph.py                         @guatxlabs
+
+# ---- Modules & oracles — GARDÉ (chaque module est une CAPACITÉ offensive déclarée) --------
+# Un module qui s'élargit une capacité sans passer par le ROE annule la gouvernance entière.
+/forge/modules/                         @guatxlabs
+/forge/toolcatalog.py                   @guatxlabs
+/forge/toolspec.py                      @guatxlabs
+
+# ---- Ressources, égress, IA (bornes d'exécution et sorties réseau) ------------------------
+/forge/resource_profile.py              @guatxlabs
+/forge/throttle.py                      @guatxlabs
+/forge/llm.py                           @guatxlabs
+/forge/triage.py                        @guatxlabs
+
+# ---- Restitution -------------------------------------------------------------------------
+/forge/report.py                        @guatxlabs
+/forge/report_engagement.py             @guatxlabs
+/forge/purple.py                        @guatxlabs
+/forge/cli/                             @guatxlabs
+
+# ==========================================================================================
+# CONSOLE RUST
+# ==========================================================================================
+
+# ---- Auth / RBAC / SSO / SCIM / tenancy — GARDÉ (frontière d'identité) --------------------
+/console/src/auth.rs                    @guatxlabs
+/console/src/sso/                       @guatxlabs
+/console/src/scim/                      @guatxlabs
+/console/src/tenancy.rs                 @guatxlabs
+/console/src/rbac.rs                    @guatxlabs
+/console/src/secret_env.rs              @guatxlabs
+
+# ---- Conformité / ledger / sauvegarde — GARDÉ (rétention légale, WORM, crypto) ------------
+/console/src/compliance/                @guatxlabs
+/console/src/compliance_policy.rs       @guatxlabs
+/console/src/compliance_evidence.rs     @guatxlabs
+/console/src/backup/                    @guatxlabs
+/console/src/backup_crypto.rs           @guatxlabs
+
+# ---- Runs / HA / process — GARDÉ (spawn, killpg, réconciliation : effets de bord OS) ------
+/console/src/runs/                      @guatxlabs
+/console/src/runs_proc.rs               @guatxlabs
+/console/src/runs_ha.rs                 @guatxlabs
+/console/src/ha/                        @guatxlabs
+/console/src/boot.rs                    @guatxlabs
+
+# ---- Requête / store — GARDÉ (points d'étranglement SQL, connexion read-only) -------------
+/console/src/store.rs                   @guatxlabs
+/console/src/net.rs                     @guatxlabs
+
+# ---- Restitution & UI --------------------------------------------------------------------
+/console/src/findings/                  @guatxlabs
+/console/src/reports/                   @guatxlabs
+/console/src/report_render.rs           @guatxlabs
+/console/web/                           @guatxlabs
+
+# ==========================================================================================
+# TESTS, BUILD, DÉPLOIEMENT, CI
+# ==========================================================================================
+/tests/                                 @guatxlabs
+/console/Cargo.toml                     @guatxlabs
+/console/deny.toml                      @guatxlabs
+/pyproject.toml                         @guatxlabs
+/Dockerfile                             @guatxlabs
+/k8s/                                   @guatxlabs
+/deploy/                                @guatxlabs
+
+# ---- CI & politiques de sécurité — GARDÉ (l'allowlist gitleaks vit ici) -------------------
+# Un élargissement d'allowlist doit être relu comme du code de sécurité : c'est ce qui décide
+# quels secrets le dépôt a le droit de contenir.
+/.github/                               @guatxlabs
