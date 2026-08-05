@@ -370,6 +370,9 @@ jobs:
           id = "private-key"
           [rules.allowlist]
           paths = [
+            # Chemin ACTUEL (extraction des modules de test) + chemin MORT conservé : gitleaks
+            # scanne TOUS les commits, l'ancien blob reste donc dans l'historique.
+            '''^console/src/sso/tests\.rs$''',
             '''^console/src/sso\.rs$''',
             '''^tests/test_redact\.py$''',
           ]
@@ -379,6 +382,7 @@ jobs:
           id = "aws-access-token"
           [rules.allowlist]
           paths = [
+            '''^console/src/reports/tests\.rs$''',
             '''^console/src/reports\.rs$''',
             '''^tests/test_redact\.py$''',
             '''^tests/test_report_engagement\.py$''',
