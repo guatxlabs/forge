@@ -259,6 +259,43 @@ class TestSqliProbeOracle(unittest.TestCase):
             if r_run:
                 r_run()
 
+    def test_vulnerable_via_authorization_differential(self):
+        """BYPASS D'AUTHENTIFICATION — la forme de SQLi à plus fort impact, que le module ne VOYAIT PAS.
+
+        Le différentiel de contenu (A) suppose « VRAI ressemble à la baseline » : c'est vrai d'un
+        endpoint qui RETOURNE DES DONNÉES. Une injection qui bascule une DÉCISION D'AUTORISATION fait
+        l'inverse — elle transforme un refus en succès, donc VRAI DIFFÈRE de la baseline et (A) reste
+        muet. Il fallait AUSSI une paire disjonctive : toutes les paires étaient conjonctives, or un
+        `AND` préserve la condition d'origine et ne peut pas produire de bypass.
+
+        Mesuré sur OWASP Juice Shop (`POST /rest/user/login`, param `email`) : baseline 401/26 o,
+        VRAI 200/799 o (JWT admin), FAUX 401/26 o. L'application a elle-même validé la découverte en
+        passant son challenge « Login Admin » (catégorie Injection) à résolu."""
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            payload = urllib.parse.unquote_plus(str(data or url))
+            if "OR '1'='1" in payload:
+                return (200, '{"authentication":{"token":"eyJhbGciOi..."}}')
+            return (401, '{"error":"Invalid email or password."}')
+        f = self._fire(fake, params={"method": "POST"})
+        self.assertEqual(f[0].status, "vulnerable")
+        self.assertEqual(f[0].severity, "HIGH")
+        self.assertIn("AUTORISATION", f[0].title)
+        self.assertIn("401 -> 200", f[0].evidence)
+
+    def test_authorization_differential_needs_the_false_probe_to_stay_denied(self):
+        """CONTRÔLE NÉGATIF : un endpoint qui répond 200 à TOUT ne doit pas passer pour vulnérable.
+
+        Sans l'exigence « le FAUX reproduit le refus », n'importe quelle cible permissive suffirait à
+        déclencher un verdict — on aurait échangé un faux négatif contre un faux positif."""
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            payload = urllib.parse.unquote_plus(str(data or url))
+            if "'1'='1" in payload or "'1'='2" in payload or "1=1" in payload or "1=2" in payload:
+                return (200, '{"ok":true,"n":%d}' % len(payload))   # 200 à tout, corps variable
+            return (401, '{"error":"denied"}')
+        f = self._fire(fake, params={"method": "POST"})
+        self.assertEqual(f[0].status, "tested")
+        self.assertNotIn("AUTORISATION", f[0].title)
+
     def test_vulnerable_via_boolean_differential(self):
         # VRAI (`AND '1'='1`) ~= baseline ; FAUX (`AND '1'='2`) diffère -> différentiel booléen fiable.
         def fake(url, headers=None, timeout=15, method="GET", data=None):

