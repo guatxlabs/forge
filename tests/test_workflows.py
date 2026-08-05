@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """WORKFLOWS ÉDITABLES & SAUVEGARDÉS (pipelines composés sans code) — DÉRIVÉS du registre unique
 (`forge/techniques.py`). Ce fichier PROUVE les exigences :
 

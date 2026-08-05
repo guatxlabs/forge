@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Exécuteur d'outils externes.
 
 Lance un outil via le binaire local s'il est présent, sinon via `docker run --rm` — sans

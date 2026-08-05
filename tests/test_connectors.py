@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P2 (connecteurs) — Metasploit (msfrpcd) + Burp Suite REST. Hermétique : aucun service RÉEL.
 
 Deux stubs HTTP stdlib (http.server en thread) :

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """subdomain.takeover — oracle de PRISE DE CONTRÔLE DE SOUS-DOMAINE à PREUVE MINIMALE (T1584.001 /
 CWE-350).
 

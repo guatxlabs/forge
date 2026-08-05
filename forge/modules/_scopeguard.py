@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Scope-guard fail-closed — implémentation CANONIQUE et UNIQUE (source de vérité).
 
 Le scope-guard fail-closed était recopié VERBATIM dans quatre bases de modules

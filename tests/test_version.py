@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Source de vérité UNIQUE de la version : `forge.__version__` == fichier `VERSION` (racine).
 
 Garde-fou anti-dérive entre le fichier VERSION et le fallback codé en dur dans forge/__init__.py.

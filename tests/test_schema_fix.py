@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT SCHEMA/FIX — remédiation (`fix`) + CWE dédié + CVSS de base sur le modèle Finding.
 
 Couvre :

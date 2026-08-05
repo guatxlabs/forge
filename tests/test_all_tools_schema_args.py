@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """FEATURE (généralisée) — SCHÉMA d'args + drapeaux de débit + allowlist extra_args pour TOUS les outils.
 
 Étend les garanties déjà prouvées pour nmap/nuclei à l'ENSEMBLE du catalogue OSS (toolcatalog.py) ET

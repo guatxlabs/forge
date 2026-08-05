@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modules de recon — wrappers réels sur des outils externes via le runner.
 
 Recon = non-exploit, mais touche quand même le réseau -> reste gaté (in-scope + armé requis).

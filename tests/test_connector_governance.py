@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """GOUVERNANCE CONNECTEUR (#4) — enforcement AU TIR de la désactivation console, côté moteur.
 
 La console (Rust) gouverne l'intention opérateur sur chaque connecteur (`enabled` / `available_override`)

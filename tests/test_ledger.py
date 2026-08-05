@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Preuves de tamper-evidence du ledger. `python -m unittest -v`."""
 import json
 import sys

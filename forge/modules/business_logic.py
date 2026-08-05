@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """business_logic.scan — SCAFFOLD SEMI-AUTOMATISÉ de checks de logique métier (T1190 / CWE-840).
 
 PENTEST-ONLY. La logique métier est le domaine le MOINS automatisable : la plupart des abus exigent un

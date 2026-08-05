@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT ENGINE ITÉRATIF — campagne plan->observe->replan + cerveau qui lit le graphe (chaînage).
 
 Preuves (toutes HERMÉTIQUES — modules stubés, ZÉRO réseau) :

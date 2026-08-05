@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Contexte d'authentification PAR-ENGAGEMENT (R5) — l'oracle IDOR teste l'accès cross-compte.
 
 Prouve la tranche verticale IDOR câblée sur le bloc `scope.auth` :

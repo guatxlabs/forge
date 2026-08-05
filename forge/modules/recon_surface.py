@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modules PASSIFS de cartographie de surface d'attaque — énumération en lecture seule, verrouillée
 au périmètre, NON destructive et sans exploitation.
 

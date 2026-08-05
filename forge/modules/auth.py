@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """auth.takeover — oracle ATO/auth-bypass à PREUVE (T1212 / CWE-287, CWE-640).
 
 L'« account takeover théorique » est un classique vétoé. Cet oracle exige une PREUVE concrète :

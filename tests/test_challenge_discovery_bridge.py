@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT PONT CHALLENGE -> DÉCOUVERTE BACKED-BROWSER — le trou « WAF -> 0 endpoint -> 0 oracle » comblé.
 
 Quand la recon plain-HTTP d'un host IN-SCOPE est CHALLENGÉE par un WAF/challenge managé (Cloudflare

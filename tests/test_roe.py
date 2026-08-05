@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Preuves fail-closed de la gate ROE. `python -m unittest -v` (stdlib, zéro dépendance)."""
 import sys
 import unittest

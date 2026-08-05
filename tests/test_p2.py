@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P2 — preuves planner coverage-safe, cerveau, runner, campagne gatée, boucle purple."""
 import sys
 import unittest

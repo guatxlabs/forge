@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """origin.find — trouver l'IP d'origine derrière un CDN/WAF.
 
 Le gros levier : si l'origine réelle est joignable hors-Cloudflare, on contourne TOUT le WAF.

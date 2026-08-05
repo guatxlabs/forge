@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ledger d'engagement append-time, tamper-evident — la preuve ROE de Forge.
 
 Chaque acte (décision ROE, armement, approbation, finding, run-record) est chaîné :

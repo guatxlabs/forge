@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ANTI-REBINDING END-TO-END (T8) — preuves que les chokepoints de CONNEXION se connectent à l'IP
 ÉPINGLÉE par le ROE au fire-time, au lieu de re-résoudre le hostname (fenêtre de DNS-rebinding).
 

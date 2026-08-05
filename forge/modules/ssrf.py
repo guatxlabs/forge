@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ssrf.callback — oracle SSRF à PREUVE par callback VÉRIFIÉ (T1190 / CWE-918).
 
 Le SSRF aveugle est la plaie des rapports rejetés : « le serveur a peut-être fait une requête » n'est

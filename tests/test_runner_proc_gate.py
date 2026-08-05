@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """R4 — GARDE-FOU MÉMOIRE : BORNE LE NB DE SOUS-PROCESS OUTILS SIMULTANÉS.
 
 `runner._PROC_GATE` (sémaphore borné à plafond DYNAMIQUE `max_concurrent_procs()`) enveloppe le

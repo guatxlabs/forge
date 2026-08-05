@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Mémoire d'engagement — store + dedup + recherche des findings.
 
 v0 : store JSONL local + dedup par clé normalisée (cible, titre/catégorie). Pur-stdlib,

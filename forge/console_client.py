@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Client de la console Forge — POST des findings + run-records vers le store Rust.
 
 Ferme la boucle : moteur Python (engine) -> console (`forge`, port 7100) -> store +

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Session authentifiée GOUVERNÉE (forge/session.py + câblage engine/oracle/recon).
 
 Prouve les trois garanties DURES du support de session (le matériel d'auth est SECRET) :

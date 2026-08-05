@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """FEATURE A — arguments d'outils RICHES et SÛRS par-run pilotés par un SCHÉMA servi à l'UI.
 
 Garanties prouvées (subprocess MOCKÉ — zéro I/O réel) :

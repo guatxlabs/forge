@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT MIGRATION-SUPERSET — wrapper GÉNÉRIQUE d'outils externes (`forge/modules/toolspec.py`) + le
 catalogue d'outils OSS PRÉ-WRAPPÉS (`forge/modules/toolcatalog.py`).
 

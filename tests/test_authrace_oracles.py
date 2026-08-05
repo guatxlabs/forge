@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT AUTH-FLOW / RACE — oracles de VÉRIFICATION `race.condition` (Race/TOCTOU) et `oauth.flow`
 (faiblesses de flux OAuth/OIDC).
 

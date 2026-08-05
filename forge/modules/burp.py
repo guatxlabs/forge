@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Connecteur Burp Suite (`burp.scan`) — PILOTE la REST API de Burp, ne fabrique aucun payload.
 
 Forge n'ajoute pas de capacité offensive : il PARLE à la REST API de Burp Suite Professional/

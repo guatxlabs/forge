@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Contrat de base des collecteurs de détection — pont INFRA-AGNOSTIQUE de la boucle purple.
 
 La console Rust interroge nativement (en clair, http) les sources `plume`/`generic_http`. Pour tout

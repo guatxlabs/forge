@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """framework.exposure — oracle de SURFACE DE FRAMEWORK EXPOSÉE à PREUVE MINIMALE (T1592.002 / CWE-200).
 
 Détecte des surfaces de framework sensibles JOIGNABLES et FUYANTES sur un hôte in-scope, sans jamais

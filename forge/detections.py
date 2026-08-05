@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Compat shim — le collecteur monolithique historique a été ÉCLATÉ en paquet `forge.collectors`
 (une classe par `kind`, contrat `fetch()`/`doctor()` fail-open lisible ; cf. `forge/collectors/base.py`).
 

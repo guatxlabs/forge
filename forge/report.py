@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Rapport markdown + section transparence (anti-masquage).
 
 Le rapport prouve ce qui a été tiré, simulé, vétoé, et jamais tenté : zéro lacune

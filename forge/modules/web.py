@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Module web — scan par templates nuclei (`web.nuclei`).
 
 Ce fichier n'enregistre plus QUE `web.nuclei`. La classe qualifiante IDOR/BOLA

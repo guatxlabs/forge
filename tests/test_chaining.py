@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT CHAÎNAGE discovery -> verification — la campagne S'AUTO-ALIMENTE, scope-locked et bornée.
 
 Preuves (toutes HERMÉTIQUES — modules stubés / réseau mocké au seam, ZÉRO I/O réel) :

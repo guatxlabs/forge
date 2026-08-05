@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ENTERPRISE — Row-level multi-tenancy (SEPARABLE, FLAG-GATED module).
 //!
 //! Open-core discipline: this module is an ENTERPRISE feature. The COMMUNITY (default) build behaves as

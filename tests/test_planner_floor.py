@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """M4 — le PLANCHER anti-starvation du planner couvre TOUTE classe payable (`bug_bounty_eligible`).
 
 Avant le fix, `Planner.ev`/`order` ne planchaient que les 12 jetons de classe `qualifying=True`

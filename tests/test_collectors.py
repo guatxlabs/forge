@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests du paquet `forge.collectors` — collecteurs de détection infra-agnostiques (une classe par
 `kind`) + sous-commande `forge.cli detections`.
 

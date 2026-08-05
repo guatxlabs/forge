@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modules Forge — système de plugins DROP-IN (auto-découverte + FORGE_PLUGINS + ToolSpec JSON/YAML).
 
 Importer ce package ENREGISTRE tous les modules, SANS liste d'imports câblée à la main :

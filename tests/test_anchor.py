@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ancrage hors-host — témoin co-signataire + reconcile détecte une réécriture re-signée localement."""
 import json
 import sys

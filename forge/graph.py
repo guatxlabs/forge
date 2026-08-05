@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Graphe d'engagement — le world-model partagé.
 
 L'état structuré qui manque à un LLM seul : hosts → services → findings, avec arêtes typées.

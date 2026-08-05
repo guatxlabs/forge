@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests du collecteur de détections infra-agnostique (forge/detections.py + `forge.cli detections`).
 
 Couvre : normalisation `[{mitre,count,first_ts}]`, agrégation (count sommé, first_ts=min), mapping de

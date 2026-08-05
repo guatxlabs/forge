@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT TOKEN/API — oracles de VÉRIFICATION token/API à PREUVE COMPTE-OPÉRATEUR
 (`jwt.weakness`, `graphql.access`).
 

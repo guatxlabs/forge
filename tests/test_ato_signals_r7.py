@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """R7 — l'oracle ATO/takeover confirme désormais un takeover cross-compte sur PLUSIEURS signaux à
 faible taux de faux positifs (au-delà du seul marqueur d'identité de R5b), l'evidence NOMMANT lequel
 a tiré :

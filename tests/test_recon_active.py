@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT REACHABILITY ACTIVE — modules recon.content / recon.secrets / recon.waf.
 
 Modules ACTIFS mais STRICTEMENT gouvernés : scope-locked (fail-closed), rate-limités, lecture/

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ledger PRIVATE-key protection — audit F2 (no readable window) + F1 (configurable path). `pytest`.
 
 Proves the ledger signing key is created SAFELY:

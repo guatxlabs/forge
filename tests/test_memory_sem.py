@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Mémoire sémantique — dedup floue Jaccard (même cible + titre similaire) + fabrique make_memory."""
 import sys
 import unittest

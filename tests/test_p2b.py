@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P2 (suite) — évasion (browser-automation) + mémoire/dedup. Hermétique (aucun service réel)."""
 import json
 import os

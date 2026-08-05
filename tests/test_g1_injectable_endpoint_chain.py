@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """G1 — CHAÎNE D'EXPLOITATION AUTONOME : le crawl découvre une SURFACE INJECTABLE (url+param) que le
 cerveau branche aux oracles à injection, qui prennent alors leur CHEMIN DE TEST RÉEL au lieu d'émettre
 « … non testé — config manquante ».

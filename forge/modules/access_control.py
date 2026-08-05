@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """access_control.idor — la classe qualifiante n°1 : IDOR/BOLA (oracle différentiel 2-comptes).
 
 Oracle différentiel (A possède l'objet, B le récupère-t-il ?

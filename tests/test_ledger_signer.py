@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ENTERPRISE (E3 COMPLIANCE) — PLUGGABLE LEDGER SIGNER. `python -m unittest -v`.
 
 Proves the ledger's Ed25519 signer is PLUGGABLE without weakening verify:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT SURFACE — catalogue ATT&CK structuré (`forge/techniques.py`).
 
 Deux garanties :

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """G3 — PARALLÉLISME INTRA-VAGUE BORNÉ, LEDGER/INGEST SÉRIALISÉ DÉTERMINISTE.
 
 L'exécuteur du moteur exécute les TIRS bloquants (module.fire/dry) dans un pool de threads BORNÉ

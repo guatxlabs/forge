@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT INJECTION/PROTOCOLE (flux HTTP) — trois oracles de VÉRIFICATION à PREUVE MINIMALE & BÉNIGNE
 (`request_smuggling.probe`, `cache_poisoning.probe`, `header_injection.probe`).
 

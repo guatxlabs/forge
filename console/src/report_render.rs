@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Rendu des rapports d'engagement (run-report) — extrait de main.rs (PURE MOVE, Wave 2).
 //! Purs constructeurs de chaînes : markdown (`render_run_report_md`) + HTML brandé autonome
 //! (`render_run_report_html`, CSS `REPORT_CSS`), génération PDF via outil système présent

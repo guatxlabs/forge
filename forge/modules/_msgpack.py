@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Codec MessagePack minimal auto-contenu (pur stdlib) — encode/décode le sous-ensemble msgpack
 suffisant pour l'API msfrpcd (nil/bool/int signé/str utf-8/bin/array/map). Zéro dépendance dure.
 Extrait de `msf.py` : aucun couplage à Metasploit, réutilisable tel quel.

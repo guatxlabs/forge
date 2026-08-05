@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT FORGE-MITRE — boucle purple : tout tir porte un ATT&CK NON VIDE + run_id/campaign.
 
 Valeur défensive (purple-team) : pour mesurer detected/missed/MTTD, Plume corrèle « technique T

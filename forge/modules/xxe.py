@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """xxe.probe — oracle XXE (XML External Entity) à PREUVE BÉNIGNE (T1190 / CWE-611).
 
 Détecte le TRAITEMENT d'entités externes XML par un marqueur STRICTEMENT BÉNIGN — VÉRIFICATION pour

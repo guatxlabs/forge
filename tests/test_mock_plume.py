@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """mock_plume (DEMO FIXTURE stub of the Plume SOC detections API) — hermetic, stdlib only.
 
 Boots the stub on an ephemeral localhost port in a background thread and drives the SAME contract

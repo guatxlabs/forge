@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modules ACTIFS de reachability/discovery — énumération STRICTEMENT gouvernée : verrouillée au
 périmètre (fail-closed), rate-limitée, en LECTURE/ÉNUMÉRATION SEULE (aucune exploitation, aucune
 mutation). Ils DÉGRADENT proprement (`status='skipped'`) quand l'outil externe optionnel ou le

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """rce.probe — VÉRIFICATION d'exécution de code distante GOUVERNÉE, à PREUVE BÉNIGNE (T1059 / CWE-78).
 
 PENTEST-ONLY et gardé derrière le PLANCHER OPT-IN EXPLOIT/FORT-IMPACT : cet oracle CONFIRME qu'une

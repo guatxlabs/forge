@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT REGISTRY — `forge/techniques.py` comme REGISTRE DÉCLARATIF UNIQUE des techniques + le GARDE-FOU
 qui rend la taxonomie SCALABLE : une nouvelle technique = UN module @register + UNE entrée de table,
 et elle apparaît AUTOMATIQUEMENT dans le catalogue (groupé par catégorie), le pipeline pentest ordonné,

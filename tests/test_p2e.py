@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P2 (runner + parsing) — exécuteur d'outils, parsing JSONL nuclei, host-header origin.
 
 Hermétique : on stub `runner.tool` (aucun outil externe lancé, aucun réseau) ou on exerce le

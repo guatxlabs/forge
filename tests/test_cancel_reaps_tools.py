@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """E4 — UN CANCEL NE LAISSE AUCUN OUTIL ORPHELIN.
 
 Symptôme (T29, live) : `POST /api/runs/<id>/cancel` marquait la base 'cancelled' mais le moteur Python

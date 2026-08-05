@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Ancrage hors-host du ledger — interface `Anchor` + témoin (witness) co-signataire.
 
 POURQUOI : la clé privée du ledger vit sur le host Forge. Un attaquant qui root ce host obtient

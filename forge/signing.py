@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Signature du ledger — Ed25519 à l'append (asymétrique) avec repli HMAC (stdlib).
 
 Asymétrique = un vérificateur EXTERNE (Plume, un auditeur) valide la preuve d'engagement avec la

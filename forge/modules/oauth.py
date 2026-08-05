@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT AUTH-FLOW / RACE — oracle de VÉRIFICATION des faiblesses de FLUX OAuth/OIDC à PREUVE MINIMALE,
 verrouillé sur le PROPRE flux de l'opérateur (`oauth.flow`).
 

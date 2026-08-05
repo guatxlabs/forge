@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Isolation PAR ENGAGEMENT au niveau du MOTEUR — le socle sur lequel repose la concurrence des runs
 côté console.
 

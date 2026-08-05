@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests des sous-commandes CLI ajoutées : `doctor --purple` (préflight boucle purple) et
 `ledger pubkey` / `ledger keygen`.
 

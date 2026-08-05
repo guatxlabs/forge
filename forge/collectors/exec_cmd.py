@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteur `exec` — INTÉGRATION DE CONFIANCE (admin uniquement).
 
 Exécute une commande CONFIGURÉE qui imprime des événements natifs en JSON sur stdout (ex un script

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """cors.credentials — oracle CORS-with-credentials à PREUVE (T1539 / CWE-942, CWE-346).
 
 Une mauvaise config CORS n'est exploitable QUE si l'origine attaquante peut LIRE une réponse

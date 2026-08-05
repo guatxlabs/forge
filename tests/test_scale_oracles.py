@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT SCALE — les nouvelles classes de vuln self-describing (`access_control.privesc`, `xxe.probe`,
 `rfi.probe`, `ssrf.xspa`, `xss.stored`, `rce.probe`, `business_logic.scan`) + l'enrichissement
 scope-tie de `recon.secrets`.

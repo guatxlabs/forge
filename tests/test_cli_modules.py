@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """CLI `forge modules --json` — le catalogue machine-lisible exposé à la console/UI.
 
 Couvre le RÉSIDU web_allowed : chaque row doit porter `web_allowed`, dérivé comme côté console

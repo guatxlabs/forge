@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteur `file_jsonl` : lit un fichier JSONL d'événements NATIFS (une ligne = un objet JSON) et
 les normalise via `mapping` (chemins pointés ou `table`/`field`). Utile pour ingérer un export d'un
 SIEM/pare-feu, un tap de collecteur maison, ou une fixture de test. Lignes vides / non-objet ignorées.

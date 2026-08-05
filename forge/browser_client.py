@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Client stdlib du service externe d'automatisation navigateur.
 
 Le service (HTTP, port 8080) est la couche ACCÈS/ÉVASION : franchir

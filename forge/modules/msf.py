@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Connecteur Metasploit (`msf.module`) — PILOTE msfrpcd, ne génère AUCUN payload.
 
 Forge ne développe pas de capacité offensive ici : il PARLE à msfrpcd (le démon RPC de

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modules d'évasion — atteindre les cibles derrière Cloudflare/WAF via browser-automation.
 
 Le plus gros déblocage offensif réel : beaucoup de programmes ne tiennent que sur Cloudflare/

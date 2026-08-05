@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Modèle de données rouge de Forge (stdlib only).
 
 Aligné sur un modèle de `Finding` éprouvé, + champs orientés engagement :

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """web.security_headers — oracle d'AUDIT des en-têtes HTTP de sécurité (durcissement).
 
 Une revue manuelle de la console Forge a montré que des en-têtes de durcissement manquaient et

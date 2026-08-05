@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ENTERPRISE (E3 COMPLIANCE) — pluggable checkpoint signer + WORM decision. `python -m unittest -v`.
 
 Proves: (a) sign→verify with the PUBLIC KEY ONLY (non-repudiation); (b) any tamper (payload/sig/pub) fails;

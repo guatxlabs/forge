@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """E2 — `recon.amass` NE LAISSE PLUS de daemon `amass engine` fuité (pprof exposé sur :6060).
 
 amass v4 `enum` démarre un daemon `amass engine` DÉTACHÉ qui SURVIT à la fin de l'enum et ÉCHAPPE au

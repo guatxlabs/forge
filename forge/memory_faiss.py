@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Backend mémoire à EMBEDDINGS (dedup sémantique) — optionnel.
 
 Stack sentence-transformers (all-MiniLM-L6-v2) + index FAISS. Dedup par similarité cosinus >=

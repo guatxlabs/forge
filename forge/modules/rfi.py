@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """rfi.probe — oracle RFI (Remote File Inclusion) à PREUVE BÉNIGNE (T1190 / CWE-98).
 
 Prouve que l'application VA CHERCHER et INCLUT une ressource DISTANTE contrôlée par l'opérateur —

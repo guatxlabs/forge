@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P2 (fin) — graphe d'engagement (world-model) + module origin.find. Hermétique."""
 import sys
 import unittest

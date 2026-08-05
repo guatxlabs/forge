@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteurs Elasticsearch / OpenSearch. `POST {endpoint}` (URL `_search` d'un index de détections)
 avec le corps `query` (dict) — sinon un range par défaut sur `@timestamp >= since`. Les hits sont lus
 dans `hits.hits` (défaut) ; chaque hit étant `{_source:{...}}`, les chemins `mapping` visent

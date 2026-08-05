@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteurs HTTP génériques : `generic_http` (JSON piloté par config) et `plume` (préréglage —
 contrat Plume historique : `GET {endpoint}/api/coverage/detections?since=N` -> `{detections:[{mitre,
 count,first_ts}]}`, Basic auth, mapping IDENTITÉ).

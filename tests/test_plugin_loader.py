@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """DROP-IN plugin system — auto-découverte in-tree + FORGE_PLUGINS + ToolSpec JSON/YAML (loader.py).
 
 Garanties prouvées (aucune I/O réelle — subprocess/scope mockés) :

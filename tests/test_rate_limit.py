@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """FEATURE B — conscience & contrôle du débit (rate-limit) : throttle scope.rate + drapeaux de débit
 par-outil + back-off 429/Retry-After.
 

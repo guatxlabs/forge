@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT INJECTION — trois oracles de VÉRIFICATION d'injection server-side à PREUVE BÉNIGNE
 (`ssti.eval`, `path.traversal`, `sqli.probe`).
 

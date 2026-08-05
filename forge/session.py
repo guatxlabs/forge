@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Support de SESSION authentifiée GOUVERNÉE — matériel de requête SECRET attaché aux requêtes
 IN-SCOPE uniquement.
 

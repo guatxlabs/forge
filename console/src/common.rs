@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Helpers "feuilles" SANS ÉTAT extraits de main.rs (Wave-2 — PURE MOVE, corps/signatures inchangés).
 //! Crypto/hash, échappement HTML, mapping CWE/CVSS, pagination, et les VALIDATEURS purs des entrées.
 //! Zéro état App, zéro I/O. Ré-exportés au crate root (`pub(crate) use crate::common::*;`) pour que

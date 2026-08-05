@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Durcissement SÛRETÉ-CRITIQUE (audit F1/F2/F3/L2/L3) — tests hermétiques (zéro réseau réel).
 
   F1  scope-guard de REDIRECTION : le seam de fetch des oracles (`Oracle._http`) NE SUIT PAS les

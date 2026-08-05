@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT CLI --param + SONDES GOUVERNÉES curl/dig.
 
 Deux ajouts UX aux tool-args de Forge :

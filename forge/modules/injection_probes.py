@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT INJECTION/PROTOCOLE (server-side) — quatre oracles de VÉRIFICATION d'injection à PREUVE BÉNIGNE
 (`nosql.probe`, `lucene.probe`, `cmdi.probe`, `prototype_pollution.probe`).
 

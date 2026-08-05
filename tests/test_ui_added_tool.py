@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """OUTIL AJOUTÉ PAR L'UI (« add a tool from the web UI ») — le ToolSpec DÉCLARATIF que persiste l'endpoint
 `POST /api/tools` (un fichier JSON dans le dir server-managed `FORGE_TOOLSPECS`) est chargé par
 `load_toolspec_file` et gouverné EXACTEMENT comme un module natif.

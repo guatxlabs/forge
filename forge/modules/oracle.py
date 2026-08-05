@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Base commune des modules-oracles à PREUVE (`Oracle`) — factorise le squelette répété par les
 quatre vérificateurs à preuve : `access_control.idor`, `ssrf.callback`, `auth.takeover`,
 `cors.credentials`.

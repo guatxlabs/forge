@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT CLIENT-FLOW — trois oracles de VÉRIFICATION client-side / flux de requête à PREUVE MINIMALE
 et IMPACTANTE (`xss.reflected`, `redirect.open`, `csrf.state_change`).
 

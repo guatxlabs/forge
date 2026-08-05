@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT RECON/EXPOSURE/TAKEOVER — les trois oracles NATIFS ajoutés (`subdomain.takeover`,
 `framework.exposure`, `ssrf.cloud_metadata`) : chacun
 

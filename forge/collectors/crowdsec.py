@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteur CrowdSec (LAPI). `GET {endpoint}/v1/decisions` (défaut) ou `/v1/alerts` avec l'en-tête
 `X-Api-Key`. CrowdSec émet des SCÉNARIOS (`crowdsecurity/ssh-bf`, ...), PAS des techniques MITRE :
 le `mapping.table` {scénario -> 'Txxxx'} est donc REQUIS — on ne devine aucune technique.

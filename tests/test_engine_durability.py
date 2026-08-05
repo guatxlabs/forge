@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT DURABILITÉ — un run tué/timeout ne perd plus TOUT le travail accompli (fix D1).
 
 Symptôme reproduit (live) : un run complet (43 modules -> 534 actions en vague 2) heurtait le watchdog

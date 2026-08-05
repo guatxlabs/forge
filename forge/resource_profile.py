@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Profil de ressources unifié — `FORGE_RESOURCE_PROFILE=low|balanced|full`.
 
 UN SEUL bouton fixe des DÉFAUTS sains sur TOUS les leviers de ressources à la fois, pour qu'un

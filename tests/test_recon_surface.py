@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT SURFACE PASSIVE — modules de cartographie de surface d'attaque en lecture seule.
 
 Couvre les 5 modules passifs (recon.subdomains / recon.dns / recon.js_endpoints / recon.urls /

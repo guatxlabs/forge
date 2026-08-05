@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """P3 — client console (payload). Hermétique (pas de réseau ; l'ingest live est testé à part)."""
 import os
 import sys

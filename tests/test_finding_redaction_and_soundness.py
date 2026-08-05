@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Remédiation d'audit (A1 rédaction centrale · B3 union idor_targets∪urls · dédup attacker-headers).
 
 Preuves (toutes HERMÉTIQUES — `_fetch`/réseau mocké au seam, ZÉRO I/O réel) :

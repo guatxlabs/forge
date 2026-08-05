@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Planner coverage-safe — le joyau du moteur.
 
 Ordonne les actions par espérance de valeur EV = value*confidence/cost, MAIS applique un

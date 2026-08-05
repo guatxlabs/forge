@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """GARDE-FOU du refactor de dédup (base Oracle + registre unique techniques.py).
 
 Ce fichier est la PREUVE que le refactor n'a RIEN changé d'observable :

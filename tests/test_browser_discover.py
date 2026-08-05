@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT DÉCOUVERTE BACKED-BROWSER — `evasion.discover` (forge/modules/evasion.py).
 
 Comble le trou « cible derrière WAF -> recon HTTP challengée -> 0 endpoint -> 0 oracle » : une voie

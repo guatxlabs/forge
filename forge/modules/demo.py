@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Module de démonstration — illustre le contrat SANS aucune capacité offensive live.
 
 v0 ne livre AUCUN module qui attaque réellement (sûreté d'abord). Ce module montre la

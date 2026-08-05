@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Registre de modules d'attaque — le contrat que tout module Forge respecte.
 
 Un module = deux méthodes seulement :

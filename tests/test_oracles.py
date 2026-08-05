@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT ORACLES — oracles à PREUVE self-contained (ssrf.callback, auth.takeover, cors.credentials).
 
 Contrat commun (calqué sur access_control.idor) :

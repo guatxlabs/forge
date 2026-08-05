@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT F3 — oracle `web.security_headers` : audit des en-têtes HTTP de sécurité + cookies.
 
 Contrat (aligné sur les modules Forge, cf. test_oracles) :

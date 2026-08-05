@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Boucle purple — run-records ATT&CK que Plume consomme pour valider la détection.
 
 Chaque action TIRÉE produit un run-record taggé `mitre`. Plume ingère sa propre télémétrie

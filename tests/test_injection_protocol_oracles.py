@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """LOT INJECTION/PROTOCOLE — les 7 nouvelles classes d'attaque self-describing :
 `nosql.probe`, `lucene.probe`, `cmdi.probe`, `prototype_pollution.probe` (injection server-side,
 `injection_probes.py`) + `request_smuggling.probe`, `cache_poisoning.probe`, `header_injection.probe`

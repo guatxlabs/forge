@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Collecteurs syslog/filterlog : `fortigate_syslog`, `pfsense`, `opnsense`.
 
 Ces infras émettent du SYSLOG texte (FortiGate) ou des lignes filterlog (pf/OPNsense), JAMAIS taggées

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """SÉLECTION DE TECHNIQUES PAR-SCOPE + PROFILS + PENTEST AUTOMATISÉ — tout DÉRIVÉ de la table unique
 (`forge/techniques.py`), sans câblage par-technique. Ce fichier PROUVE les 4 exigences :
 
