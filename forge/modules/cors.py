@@ -68,6 +68,20 @@ class CorsCredentials(ScopeGuardedOracle):
         hdr = dict(action.params.get("auth_headers", {}))
         hdr["Origin"] = origin
         st, body, resp_h = self._fetch(action.target, headers=hdr)
+        # CIBLE INJOIGNABLE => AUCUN VERDICT. Sans réponse, les en-têtes sont vides, donc `reflects` et
+        # `creds_ok` sont faux et l'oracle conclurait « CORS non exploitable » : un test qui n'a jamais
+        # eu lieu serait rendu indiscernable d'un test propre. Pour un outil de sécurité c'est le pire
+        # des deux mondes — l'opérateur coche une ligne qu'il n'a pas vérifiée. On dégrade explicitement.
+        # (Observé le 2026-08-05 : une cible sans schéma, `host:port`, produisait `HTTP None` et un
+        # « non exploitable » INFO parfaitement crédible.)
+        if st is None:
+            return [self.degraded(
+                target=action.target,
+                title="CORS non testé — cible injoignable (aucune réponse)",
+                evidence=(f"Aucune réponse de {action.target!r} : la cible doit être une URL COMPLÈTE "
+                          f"(schéma inclus, p.ex. https://hôte/chemin). Aucun verdict n'est rendu — "
+                          f"absence de réponse n'est pas absence de vulnérabilité."),
+                poc=self.dry(action))]
         acao = (resp_h.get("access-control-allow-origin") or "").strip()
         acac = (resp_h.get("access-control-allow-credentials") or "").strip().lower()
         # PREUVE : reflet EXACT de l'origine attaquante (pas '*', que les navigateurs refusent avec

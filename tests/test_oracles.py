@@ -216,6 +216,26 @@ class TestCorsCredentialsOracle(unittest.TestCase):
         self.assertEqual(f[0].severity, "INFO")
         self.assertIn("non testé", f[0].title)
 
+    def test_unreachable_target_is_skipped_never_a_verdict(self):
+        """CIBLE INJOIGNABLE => `skipped`, JAMAIS « non exploitable ».
+
+        Sans réponse, les en-têtes sont vides, donc `reflects` et `creds_ok` sont faux : l'oracle
+        rendait « CORS non exploitable » `status='tested'` — un test qui n'a jamais eu lieu, rendu
+        indiscernable d'un test propre. Observé en vrai le 2026-08-05 sur une cible `host:port` sans
+        schéma. La distinction qui compte n'est pas la sévérité (INFO des deux côtés) mais le STATUS :
+        `skipped` dit « je n'ai pas pu vérifier », `tested` dit « j'ai vérifié, rien trouvé »."""
+        f = self._fire((None, "", {}))
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("injoignable", f[0].title)
+        self.assertNotIn("non exploitable", f[0].title)
+
+    def test_a_real_negative_is_still_tested(self):
+        """Contrôle NÉGATIF du correctif : une VRAIE réponse sans en-tête CORS reste un verdict.
+        Sinon on aurait échangé un faux négatif contre un aveuglement généralisé."""
+        f = self._fire((200, "{}", {}))
+        self.assertEqual(f[0].status, "tested")
+        self.assertIn("non exploitable", f[0].title)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
