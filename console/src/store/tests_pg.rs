@@ -1,0 +1,842 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! `store` — module de test PG EXTRAIT (PURE MOVE depuis `console/src/store.rs`).
+//! Corps IDENTIQUE ; ENFANT de `store`, il voit donc toujours ses items privés.
+//! Renommé `pg_tests` -> `tests_pg` : `tests/test_portability_guard.py` n'exclut
+//! que les fichiers `tests.rs` / `tests_*` et scannerait l'autre nom (garde au ROUGE).
+use super::*;
+
+    use super::*;
+
+    // Both DB integration tests DROP/CREATE the SAME tables on the shared TEST_PG_URL database. Under
+    // cargo's default test parallelism they race (one's DROP CASCADE tears down tables the other is mid-
+    // flight on). Serialize the two DB-touching tests on this process-local mutex — NO new crate (no
+    // serial_test). `unwrap_or_else(|e| e.into_inner())` recovers the guard even if a prior test panicked
+    // while holding it (a poisoned mutex must not cascade the whole PG suite into failures). The pure
+    // translator unit tests (no server) don't lock.
+    static PG_DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn pg_translate_placeholders_basic() {
+        assert_eq!(translate_placeholders("SELECT * FROM t WHERE a=? AND b=?"),
+                   "SELECT * FROM t WHERE a=$1 AND b=$2");
+        assert_eq!(translate_placeholders("INSERT INTO t(a,b,c) VALUES(?,?,?)"),
+                   "INSERT INTO t(a,b,c) VALUES($1,$2,$3)");
+        // No placeholders -> verbatim.
+        assert_eq!(translate_placeholders("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn pg_translate_placeholders_skips_string_literals() {
+        // A `?` inside a single-quoted literal is NOT a placeholder.
+        assert_eq!(translate_placeholders("SELECT '?' , ? , 'a?b' , ?"),
+                   "SELECT '?' , $1 , 'a?b' , $2");
+        // Doubled '' escape inside a literal keeps the literal boundary correct.
+        assert_eq!(translate_placeholders("UPDATE t SET s='it''s ?' WHERE id=?"),
+                   "UPDATE t SET s='it''s ?' WHERE id=$1");
+    }
+
+    #[test]
+    fn pg_rewrite_datetime_now_and_full_translate() {
+        // `datetime('now')` outside a literal -> portable CAST; placeholders still numbered after.
+        assert_eq!(
+            translate_sql("INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now'))"),
+            "INSERT INTO settings(key,value,updated) VALUES($1,$2,CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // Multiple occurrences all rewritten; case-insensitive on the function name.
+        assert_eq!(
+            rewrite_datetime_now("VALUES(1,DATETIME('now'),datetime('now'))"),
+            "VALUES(1,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // A `datetime('now')` INSIDE a single-quoted data literal is left VERBATIM.
+        assert_eq!(
+            rewrite_datetime_now("UPDATE t SET note='ran datetime(''now'') once' WHERE id=1"),
+            "UPDATE t SET note='ran datetime(''now'') once' WHERE id=1"
+        );
+        // Non-ASCII literal round-trips intact (byte-preserving).
+        assert_eq!(
+            rewrite_datetime_now("INSERT INTO tenant(name,created) VALUES('Défaut',datetime('now'))"),
+            "INSERT INTO tenant(name,created) VALUES('Défaut',CAST(CURRENT_TIMESTAMP AS TEXT))"
+        );
+        // No datetime token -> only placeholder translation happens.
+        assert_eq!(translate_sql("SELECT * FROM t WHERE a=?"), "SELECT * FROM t WHERE a=$1");
+    }
+
+    // Acquire a fresh Store on the shared client. Each op MUST be in its own scope so the guard drops
+    // before the next Store locks (a std Mutex is non-reentrant — mirrors one `App::store()` per op).
+    fn pg_client_or_skip() -> Option<postgres::Client> {
+        match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => Some(connect_postgres(&u).expect("connect TEST_PG_URL")),
+            _ => {
+                eprintln!("[pg_seam_end_to_end] TEST_PG_URL unset — skipping (set it to run against a real Postgres)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn pg_seam_end_to_end() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = match pg_client_or_skip() {
+            Some(c) => c,
+            None => return,
+        };
+        let m = std::sync::Mutex::new(client);
+
+        // 1) DDL: reset test tables, then apply the REAL PG_SCHEMA (proves the schema DDL runs on PG).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute_batch(
+                "DROP TABLE IF EXISTS seam_mixed; DROP TABLE IF EXISTS seam_auto;
+                 DROP TABLE IF EXISTS finding CASCADE;",
+            ).expect("drop test tables");
+            s.execute_batch(crate::schema::PG_SCHEMA).expect("apply PG_SCHEMA");
+            s.execute_batch(
+                "CREATE TABLE seam_auto(
+                   id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT,
+                   score DOUBLE PRECISION, active BIGINT);
+                 CREATE TABLE seam_mixed(i BIGINT, r DOUBLE PRECISION, s TEXT, b BYTEA, n TEXT);",
+            ).expect("create seam test tables");
+        }
+
+        // 2) execute(INSERT) + last_insert_id() on the SAME session-pinned client (IDENTITY column).
+        let (id1, id2);
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n = s.execute(
+                "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                &crate::sql_params!["alpha", 1.5_f64, true],
+            ).expect("insert alpha");
+            assert_eq!(n, 1, "one row inserted");
+            id1 = s.last_insert_id();
+            assert!(id1 > 0, "IDENTITY id assigned (lastval on same session): {id1}");
+            s.execute(
+                "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                &crate::sql_params!["beta", 2.5_f64, false],
+            ).expect("insert beta");
+            id2 = s.last_insert_id();
+            drop(s);
+            assert!(id2 > id1, "second id strictly greater: {id2} > {id1}");
+        }
+
+        // 3) Bool binding read-back (Param::Bool -> BIGINT 0/1, NOT PG bool) + typed getters.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let (active_alpha, bool_alpha): (i64, bool) = s.query_row(
+                "SELECT active FROM seam_auto WHERE name=?",
+                &crate::sql_params!["alpha"],
+                |r| Ok((r.get_i64(0)?, r.get_bool(0)?)),
+            ).expect("read alpha active");
+            assert_eq!(active_alpha, 1, "Bool(true) bound as BIGINT 1");
+            assert!(bool_alpha, "get_bool reads BIGINT 1 as true");
+            let active_beta: i64 = s.query_row(
+                "SELECT active FROM seam_auto WHERE name=?",
+                &crate::sql_params!["beta"],
+                |r| r.get_i64(0),
+            ).expect("read beta active");
+            drop(s);
+            assert_eq!(active_beta, 0, "Bool(false) bound as BIGINT 0");
+        }
+
+        // 4) query (strict, all rows) + query_lax (skip a mapping error) + query_opt (Some/None).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let all: Vec<String> = s.query(
+                "SELECT name FROM seam_auto ORDER BY id",
+                &crate::sql_params![],
+                |r| r.get_str(0),
+            ).expect("query all names");
+            assert_eq!(all, vec!["alpha".to_string(), "beta".to_string()]);
+
+            // query_lax: closure returns Err for "beta" -> that row is SKIPPED, "alpha" kept.
+            let kept: Vec<String> = s.query_lax(
+                "SELECT name FROM seam_auto ORDER BY id",
+                &crate::sql_params![],
+                |r| {
+                    let name = r.get_str(0)?;
+                    if name == "beta" { Err(StoreError::Backend("skip".into())) } else { Ok(name) }
+                },
+            ).expect("query_lax");
+            assert_eq!(kept, vec!["alpha".to_string()], "query_lax skips the erroring row");
+
+            // query_opt: present -> Some, absent -> None.
+            let present: Option<i64> = s.query_opt(
+                "SELECT id FROM seam_auto WHERE name=?",
+                &crate::sql_params!["alpha"],
+                |r| r.get_i64(0),
+            ).expect("query_opt present");
+            assert_eq!(present, Some(id1));
+            let absent: Option<i64> = s.query_opt(
+                "SELECT id FROM seam_auto WHERE name=?",
+                &crate::sql_params!["nope"],
+                |r| r.get_i64(0),
+            ).expect("query_opt absent");
+            drop(s);
+            assert_eq!(absent, None);
+        }
+
+        // 5) get_value on a column PER type (BIGINT/DOUBLE/TEXT/BYTEA/NULL) + a nullable-column read.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO seam_mixed(i, r, s, b, n) VALUES(?,?,?,?,?)",
+                &crate::sql_params![42_i64, 3.5_f64, "hello", vec![1_u8, 2_u8], Option::<String>::None],
+            ).expect("insert seam_mixed");
+            s.query_row(
+                "SELECT i, r, s, b, n FROM seam_mixed",
+                &crate::sql_params![],
+                |r| {
+                    // Dynamic dispatch on the PG column type -> neutral Value (matches SQLite).
+                    assert_eq!(r.get_value(0)?, Value::Int(42));
+                    assert_eq!(r.get_value(1)?, Value::Real(3.5));
+                    assert_eq!(r.get_value(2)?, Value::Text("hello".into()));
+                    assert_eq!(r.get_value(3)?, Value::Blob(vec![1, 2]));
+                    assert_eq!(r.get_value(4)?, Value::Null);
+                    // value_to_json parity with SoQL-over-SQLite (blob/null -> JSON null).
+                    assert_eq!(value_to_json(&r.get_value(0)?), serde_json::json!(42));
+                    assert_eq!(value_to_json(&r.get_value(3)?), serde_json::Value::Null);
+                    // Typed getters + nullable-column read.
+                    assert_eq!(r.get_i64(0)?, 42);
+                    assert_eq!(r.get_f64(1)?, 3.5);
+                    assert_eq!(r.get_str(2)?, "hello");
+                    assert_eq!(r.get_blob(3)?, vec![1, 2]);
+                    assert_eq!(r.get_opt_str(4)?, None, "nullable column reads back None");
+                    // by-name variants dispatch identically.
+                    assert_eq!(r.get_value_by("i")?, Value::Int(42));
+                    assert_eq!(r.get_opt_str_by("n")?, None);
+                    Ok(())
+                },
+            ).expect("read seam_mixed row");
+        }
+
+        // 6) ON CONFLICT DO NOTHING upsert on the REAL finding table (UNIQUE(campaign,target,title)).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n1 = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &crate::sql_params!["2026-01-01", "c1", "t1", "dup-title", "LOW"],
+            ).expect("first finding insert");
+            assert_eq!(n1, 1, "first insert creates the row");
+            let fid = s.last_insert_id();
+            assert!(fid > 0, "finding IDENTITY id: {fid}");
+            let n2 = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &crate::sql_params!["2026-01-02", "c1", "t1", "dup-title", "HIGH"],
+            ).expect("duplicate finding insert");
+            assert_eq!(n2, 0, "duplicate (campaign,target,title) is a no-op via ON CONFLICT DO NOTHING");
+            // Row count is still 1 for that key, and severity unchanged (DO NOTHING, not DO UPDATE).
+            let sev: String = s.query_row(
+                "SELECT severity FROM finding WHERE campaign=? AND target=? AND title=?",
+                &crate::sql_params!["c1", "t1", "dup-title"],
+                |r| r.get_str(0),
+            ).expect("read finding severity");
+            drop(s);
+            assert_eq!(sev, "LOW", "DO NOTHING left the original row untouched");
+        }
+
+        // 7) transaction COMMIT — inserted row persists.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.with_tx(|tx| {
+                tx.execute(
+                    "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                    &crate::sql_params!["committed", 9.0_f64, 1_i64],
+                )?;
+                Ok(())
+            }).expect("tx commit");
+        }
+        {
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap())).query_row(
+                "SELECT COUNT(*) FROM seam_auto WHERE name=?",
+                &crate::sql_params!["committed"],
+                |r| r.get_i64(0),
+            ).expect("count committed");
+            assert_eq!(cnt, 1, "committed row persisted");
+        }
+
+        // 8) transaction ROLLBACK — closure returns Err, the insert is undone.
+        {
+            
+            let res: StoreResult<()> = (Store::postgres(m.lock().unwrap())).with_tx(|tx| {
+                tx.execute(
+                    "INSERT INTO seam_auto(name, score, active) VALUES(?,?,?)",
+                    &crate::sql_params!["rolledback", 9.0_f64, 1_i64],
+                )?;
+                Err(StoreError::Backend("force rollback".into()))
+            });
+            assert!(res.is_err(), "with_tx surfaces the closure error");
+        }
+        {
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap())).query_row(
+                "SELECT COUNT(*) FROM seam_auto WHERE name=?",
+                &crate::sql_params!["rolledback"],
+                |r| r.get_i64(0),
+            ).expect("count rolledback");
+            assert_eq!(cnt, 0, "rolled-back row absent");
+        }
+    }
+
+    /// WHOLE-APP round-trip on a REAL Postgres (Stage 2b batch 5) — proves the WIRED backend behaves:
+    /// apply `PG_SCHEMA`, run the SHARED boot seeders (dashboard #1 / engagement #1 / tenant #1 / module
+    /// catalog) through the seam, provision + read back a login, and drive a run/ingest round-trip
+    /// (run_job + finding + runrecord + roe_decision) — every `datetime('now')` site exercising the
+    /// seam's Postgres dialect rewrite. Also proves settings read/write and that `is_postgres()` is true.
+    /// Each op is its own `Store` scope (the shared std Mutex is non-reentrant) — the same
+    /// one-`App::store()`-per-op discipline the runtime uses.
+    #[test]
+    fn pg_boot_seed_login_run_roundtrip() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = match pg_client_or_skip() {
+            Some(c) => c,
+            None => return,
+        };
+        let m = std::sync::Mutex::new(client);
+
+        // 0) Clean slate: drop the base tables, then apply the REAL PG_SCHEMA (the boot DDL branch).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            assert!(s.is_postgres(), "backend routed to Postgres");
+            s.execute_batch(
+                "DROP TABLE IF EXISTS finding CASCADE; DROP TABLE IF EXISTS runrecord CASCADE;
+                 DROP TABLE IF EXISTS roe_decision CASCADE; DROP TABLE IF EXISTS run_job CASCADE;
+                 DROP TABLE IF EXISTS run_log CASCADE; DROP TABLE IF EXISTS module CASCADE;
+                 DROP TABLE IF EXISTS dashboard CASCADE; DROP TABLE IF EXISTS panel CASCADE;
+                 DROP TABLE IF EXISTS engagement CASCADE; DROP TABLE IF EXISTS tenant CASCADE;
+                 DROP TABLE IF EXISTS tenant_grant CASCADE; DROP TABLE IF EXISTS settings CASCADE;
+                 DROP TABLE IF EXISTS users CASCADE; DROP TABLE IF EXISTS session CASCADE;
+                 DROP TABLE IF EXISTS finding_template CASCADE; DROP TABLE IF EXISTS campaign CASCADE;
+                 DROP TABLE IF EXISTS ledger_entry CASCADE;",
+            ).expect("drop base tables");
+            s.execute_batch(crate::schema::PG_SCHEMA).expect("apply PG_SCHEMA");
+        }
+
+        // 1) BOOT SEEDING through the seam — the SAME seeder functions main.rs calls at boot.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::schema::ensure_default_dashboard(&s);
+            // Portable temp path (no hardcoded /tmp — respects TMPDIR / platform temp dir). The value is
+            // an inert ledger-path label here (never opened by this seeding test): behaviour-neutral.
+            let eng_ledger = std::env::temp_dir().join("forge-pg-eng.jsonl");
+            crate::schema::ensure_default_engagement(&s, &["a.example.com".to_string()], "grey", &eng_ledger.to_string_lossy());
+            crate::schema::ensure_default_tenant(&s);
+            // module catalog (populate_modules spawns python; here we seed one row via the shared upsert).
+            crate::schema::upsert_probed_module(&s, "recon.web", false, false, true, "T1595", "web recon", "[]", "[]");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let dash: i64 = s.query_row("SELECT COUNT(*) FROM dashboard WHERE id=1", &crate::sql_params![], |r| r.get_i64(0)).unwrap();
+            let eng: i64 = s.query_row("SELECT COUNT(*) FROM engagement WHERE id=1", &crate::sql_params![], |r| r.get_i64(0)).unwrap();
+            let ten: i64 = s.query_row("SELECT COUNT(*) FROM tenant WHERE id=1", &crate::sql_params![], |r| r.get_i64(0)).unwrap();
+            let modl: i64 = s.query_row("SELECT COUNT(*) FROM module WHERE kind=?", &crate::sql_params!["recon.web"], |r| r.get_i64(0)).unwrap();
+            drop(s);
+            assert_eq!((dash, eng, ten, modl), (1, 1, 1, 1), "boot seeding landed in PG");
+        }
+
+        // 1b) IDENTITY sequence desync fix: the seeders inserted an EXPLICIT id=1 into
+        // dashboard/engagement/tenant, which on PG does NOT advance the GENERATED-BY-DEFAULT IDENTITY
+        // sequence. advance_pg_identity_sequences() setval's each to max(id); the NEXT runtime
+        // INSERT-without-id must then yield id>1 (not a colliding id=1 -> duplicate key). This is the
+        // exact boot ordering main.rs uses (seed -> advance).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::schema::advance_pg_identity_sequences(&s);
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO dashboard(name,descr,position,created,updated) \
+                 VALUES(?,?,?,CAST(CURRENT_TIMESTAMP AS TEXT),CAST(CURRENT_TIMESTAMP AS TEXT))",
+                &crate::sql_params!["dash2", "second", 1_i64],
+            ).expect("runtime dashboard insert (no id)");
+            let new_id = s.last_insert_id();
+            drop(s);
+            assert!(new_id > 1, "IDENTITY advanced past seeded id=1 (got {new_id}) — no duplicate-key collision");
+        }
+
+        // 2) LOGIN provisioning — upsert_user_store uses `datetime('now')` (seam rewrite) + ON CONFLICT.
+        {
+            
+            let role = crate::state::upsert_user_store(&(Store::postgres(m.lock().unwrap())), "admin", "admin", "argon2-hash-placeholder")
+                .expect("provision admin");
+            assert_eq!(role, "admin");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let (login, role): (String, String) = s.query_row(
+                "SELECT login, role FROM users WHERE login=?",
+                &crate::sql_params!["admin"],
+                |r| Ok((r.get_str(0)?, r.get_str(1)?)),
+            ).expect("read back admin");
+            assert_eq!((login.as_str(), role.as_str()), ("admin", "admin"), "admin login readable in PG");
+            // `created` was written via datetime('now') -> CAST(CURRENT_TIMESTAMP AS TEXT): a non-empty TEXT.
+            let created: String = s.query_row("SELECT created FROM users WHERE login=?", &crate::sql_params!["admin"], |r| r.get_str(0)).unwrap();
+            drop(s);
+            assert!(!created.is_empty(), "datetime('now') rewrite produced a timestamp: {created:?}");
+        }
+
+        // 3) RUN CREATE — run_job insert (run_create path) uses datetime('now') + ON CONFLICT(run_id).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            s.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id)
+                 VALUES(?,?,datetime('now'),'running',?,?,?,?,?,?,datetime('now'),?)
+                 ON CONFLICT(run_id) DO UPDATE SET status='running', pid=excluded.pid, started=excluded.started",
+                &crate::sql_params!["run-1", "camp", "grey", 4242_i64, "admin", "manual", "[\"a.example.com\"]", "[\"recon.web\"]", 1_i64],
+            ).expect("run_job insert");
+        }
+
+        // 4) INGEST — finding (ON CONFLICT DO NOTHING) + runrecord + roe_decision + run_job upsert.
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let n = s.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                &crate::sql_params!["2026-07-09", "camp", "a.example.com", "IDOR", "HIGH", "idor", "T1190", "vulnerable",
+                    "ev", "oracle.idor", "poc", "fix", "run-1", "CWE-639", "", 0.0_f64, 1_i64],
+            ).expect("finding insert");
+            assert_eq!(n, 1, "finding inserted");
+            s.execute(
+                "INSERT INTO runrecord(ts,campaign,target,kind,mitre,fired,detail,run_id,engagement_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                &crate::sql_params!["2026-07-09", "camp", "a.example.com", "recon.web", "T1595", 1_i64, "d", "run-1", 1_i64],
+            ).expect("runrecord insert");
+            s.execute(
+                "INSERT INTO roe_decision(ts,campaign,run_id,action_id,target,kind,verdict,exploit,destructive,reasons,engagement_id)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                &crate::sql_params!["2026-07-09", "camp", "run-1", "a1", "a.example.com", "recon.web", "FIRE", 0_i64, 0_i64, "[]", 1_i64],
+            ).expect("roe_decision insert");
+            s.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps)
+                 VALUES(?,?,datetime('now'),'done',?,?,?,?,?,?,?)
+                 ON CONFLICT(run_id) DO UPDATE SET status='done', mode=excluded.mode, fired=excluded.fired",
+                &crate::sql_params!["run-1", "camp", "grey", 1_i64, 0_i64, 0_i64, 0_i64, "[]", "{}"],
+            ).expect("run_job upsert (ingest)");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let f: i64 = s.query_row("SELECT COUNT(*) FROM finding WHERE run_id=?", &crate::sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rr: i64 = s.query_row("SELECT COUNT(*) FROM runrecord WHERE run_id=?", &crate::sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rd: i64 = s.query_row("SELECT COUNT(*) FROM roe_decision WHERE run_id=?", &crate::sql_params!["run-1"], |r| r.get_i64(0)).unwrap();
+            let rj: String = s.query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params!["run-1"], |r| r.get_str(0)).unwrap();
+            drop(s);
+            assert_eq!((f, rr, rd), (1, 1, 1), "run produced finding/runrecord/roe_decision rows in PG");
+            assert_eq!(rj, "done", "run_job upsert transitioned running->done in PG");
+        }
+
+        // 5) SETTINGS read/write round-trip (settings_set_store uses datetime('now') -> seam rewrite).
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            crate::state::settings_set_store(&s, "detection_source", "{\"kind\":\"none\"}").expect("settings write");
+        }
+        {
+            let s = Store::postgres(m.lock().unwrap());
+            let v = crate::state::settings_get_store(&s, "detection_source");
+            drop(s);
+            assert_eq!(v.as_deref(), Some("{\"kind\":\"none\"}"), "settings round-trip in PG");
+        }
+    }
+
+    /// STAGE 4 HA — read reconnect+retry (`postgres_reconnectable` / `pg_run_read`). Proves an idempotent
+    /// READ op transparently RECONNECTS+RETRIES when the pinned session is torn down (the deterministic
+    /// analogue of a PG restart /
+    /// failover), WITHOUT restarting the server: capture the pinned client's backend PID, terminate THAT
+    /// backend from a SEPARATE connection (so the pinned client is dead but the test's own connection is
+    /// not), then assert the NEXT op on the reconnectable store SUCCEEDS and now runs on a NEW backend PID
+    /// (proving the healed client was swapped into the shared Mutex). Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_reconnect_after_session_terminated() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_reconnect_after_session_terminated] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+
+        // Baseline: the reconnectable store works, and capture the pinned session's backend PID.
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            assert_eq!(s.query_row("SELECT 1", &crate::sql_params![], |r| r.get_i64(0)).unwrap(), 1);
+            s.query_row("SELECT pg_backend_pid()", &crate::sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection (NOT the reconnecting store — avoids cascading the
+        // self-terminate through its retry), then WAIT until the backend is actually GONE from
+        // pg_stat_activity. `pg_terminate_backend` returns once the SIGTERM is SENT, not once the backend
+        // has exited — polling to disappearance removes that race so the next pinned-store op is guaranteed
+        // to hit a dead session (deterministic reconnect).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            // pid is a trusted integer from pg_backend_pid() — INTERPOLATE it. A bound `?::int` makes
+            // Postgres infer the param as int4 and tokio-postgres rejects the i64 bind (WrongType
+            // Int4/i64); that error, if swallowed, would leave the backend ALIVE and make this test pass
+            // WITHOUT ever terminating the session (a vacuous reconnect test). Assert the kill ran.
+            ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &crate::sql_params![])
+                .expect("pg_terminate_backend must actually run");
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &crate::sql_params![],
+                        |r| r.get_i64(0),
+                    )
+                    .expect("poll pg_stat_activity");
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
+            assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
+        }
+
+        // The NEXT op on the pinned store MUST reconnect once and succeed (would error without HA).
+        {
+            
+            let two: i64 = (Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url))
+                .query_row("SELECT 2", &crate::sql_params![], |r| r.get_i64(0))
+                .expect("store op reconnects after the pinned session was terminated");
+            assert_eq!(two, 2);
+        }
+
+        // The reconnect SWAPPED the healed client INTO the shared Mutex — proven pid-reuse-immune: a
+        // NON-reconnectable store on the SAME mutex now SUCCEEDS. If the swap had NOT persisted (e.g. the
+        // reconnect healed only a local client), the mutex would still hold the DEAD client and this
+        // no-retry store would ERROR. (A pid comparison is unreliable: PostgreSQL recycles backend pids.)
+        {
+            
+            let four: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
+                .query_row("SELECT 4", &crate::sql_params![], |r| r.get_i64(0))
+                .expect("shared mutex holds the healed client (non-reconnectable store succeeds)");
+            assert_eq!(four, 4);
+        }
+        let _ = pid; // captured only to terminate the pinned session above
+    }
+
+    /// STAGE 4 HA — WRITE break MUST NOT auto-re-apply (`pg_run_write`). Proves the write path's
+    /// at-most-once contract: an `execute(INSERT)` whose pinned session is torn down mid-flight returns
+    /// an ERROR to the caller (never a silent success), the failed statement is NEVER auto-retried (so the
+    /// row is not duplicated), and the held client is HEALED so the NEXT op works. Deterministic analogue
+    /// of a PG restart/failover, same technique as `pg_reconnect_after_session_terminated`: capture the
+    /// pinned backend PID, terminate THAT backend from a SEPARATE connection, wait until it is gone, then
+    /// drive a WRITE on the reconnectable store. Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_write_break_does_not_duplicate() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_write_break_does_not_duplicate] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+
+        // Fresh single-row-per-tag probe table on the pinned session; capture that session's backend PID.
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute_batch(
+                "DROP TABLE IF EXISTS dup_probe; CREATE TABLE dup_probe(id BIGINT GENERATED BY DEFAULT AS IDENTITY, tag TEXT)",
+            )
+            .expect("create dup_probe");
+            s.query_row("SELECT pg_backend_pid()", &crate::sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection, then WAIT until it is actually gone (SIGTERM is
+        // async): guarantees the next pinned-store op hits a DEAD session (deterministic break).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            // pid is a trusted integer from pg_backend_pid() — interpolate it (binding `?::int` fails with
+            // a WrongType Int4/i64 mismatch that would be silently swallowed, leaving the backend alive).
+            let killed = ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &crate::sql_params![]);
+            assert!(killed.is_ok(), "pg_terminate_backend must actually run: {killed:?}");
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &crate::sql_params![],
+                        |r| r.get_i64(0),
+                    )
+                    .expect("poll pg_stat_activity");
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
+            assert!(gone, "terminated backend {pid} did not disappear from pg_stat_activity");
+        }
+
+        // WRITE on the DEAD session: the caller MUST receive an error — the write is NOT silently retried
+        // and NOT silently reported as success. (`pg_run_write` reconnects for the NEXT op but returns the
+        // ORIGINAL error without re-executing.)
+        {
+            
+            let r = (Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url)).execute(
+                "INSERT INTO dup_probe(tag) VALUES(?)",
+                &crate::sql_params!["broke"],
+            );
+            assert!(r.is_err(), "write against a torn-down session surfaces an error (no silent success)");
+        }
+
+        // The failed write was NEVER auto-re-applied: exactly ZERO rows for that tag (at-most-once — the
+        // statement never reached a live backend, and `pg_run_write` did not retry it). Must never be >= 1
+        // (a retry would have produced a row) and never == 2 (a duplicate). Runs on the HEALED client that
+        // `pg_run_write` swapped into the shared Mutex — a NON-reconnectable store proves the heal persisted.
+        {
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
+                .query_row(
+                    "SELECT count(*) FROM dup_probe WHERE tag = ?",
+                    &crate::sql_params!["broke"],
+                    |r| r.get_i64(0),
+                )
+                .expect("shared mutex holds the healed client after the broken WRITE");
+            assert_eq!(cnt, 0, "the broken write was neither applied nor auto-duplicated");
+        }
+
+        // The healed client is fully usable for subsequent WRITES too (a real INSERT now lands exactly once).
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute("INSERT INTO dup_probe(tag) VALUES(?)", &crate::sql_params!["ok"])
+                .expect("write on the healed client succeeds");
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM dup_probe WHERE tag = ?", &crate::sql_params!["ok"], |r| r.get_i64(0))
+                .unwrap();
+            drop(s);
+            assert_eq!(cnt, 1, "post-heal write landed exactly once");
+        }
+        let _ = pid;
+    }
+
+    /// STAGE 4 HA — a transaction that hits a broken connection FAILS AS A WHOLE (`with_tx` + `pg_run_write`):
+    /// no mid-tx reconnect, no partial commit. Break the session INSIDE `with_tx` (kill the pinned backend
+    /// between two statements of the closure), assert `with_tx` returns an ERROR, and assert NEITHER
+    /// statement's row is present (the whole tx is gone — the reconnect never continued the old `BEGIN`).
+    /// Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_tx_break_fails_whole_no_partial_commit() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_tx_break_fails_whole_no_partial_commit] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        let m = std::sync::Mutex::new(connect_postgres(&url).expect("connect pinned client"));
+        let killer_url = url.clone();
+
+        {
+            let s = Store::postgres_reconnectable(m.lock().unwrap_or_else(|e| e.into_inner()), &url);
+            s.execute_batch("DROP TABLE IF EXISTS tx_probe; CREATE TABLE tx_probe(tag TEXT)")
+                .expect("create tx_probe");
+
+            let res: StoreResult<()> = s.with_tx(|tx| {
+                // First statement lands inside the BEGIN.
+                tx.execute("INSERT INTO tx_probe(tag) VALUES(?)", &crate::sql_params!["first"])?;
+                // Tear down THIS session's backend from a separate connection, wait until gone, so the
+                // NEXT tx statement hits a dead connection mid-transaction.
+                let pid: i64 = tx
+                    .query_row("SELECT pg_backend_pid()", &crate::sql_params![], |r| r.get_i64(0))?;
+                let k = std::sync::Mutex::new(connect_postgres(&killer_url).expect("connect killer"));
+                let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+                // pid is trusted (from pg_backend_pid) — interpolate; a bound `?::int` mismatches i64/Int4.
+                ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &crate::sql_params![])
+                    .expect("terminate the in-tx backend");
+                for _ in 0..200 {
+                    let alive: i64 = ks
+                        .query_row(&format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"), &crate::sql_params![], |r| r.get_i64(0))
+                        .expect("poll pg_stat_activity");
+                    if alive == 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
+                // Second statement on the now-dead session: pg_run_write errors (and heals for next op),
+                // the `?` bubbles the error out of the closure -> with_tx best-effort ROLLBACKs + surfaces it.
+                tx.execute("INSERT INTO tx_probe(tag) VALUES(?)", &crate::sql_params!["second"])?;
+                Ok(())
+            });
+            drop(s);
+            assert!(res.is_err(), "a tx that hits a broken connection fails as a whole");
+        }
+
+        // NEITHER row is present: the BEGIN died with its session, no partial commit, the reconnect never
+        // continued the tx. Runs on the healed client.
+        {
+            
+            let cnt: i64 = (Store::postgres(m.lock().unwrap_or_else(|e| e.into_inner())))
+                .query_row("SELECT count(*) FROM tx_probe", &crate::sql_params![], |r| r.get_i64(0))
+                .expect("healed client reads back the tx_probe table");
+            assert_eq!(cnt, 0, "no row from the broken tx committed (whole-tx failure, no partial/duplicate)");
+        }
+    }
+
+    /// POOL — CONCURRENT WRITERS do NOT serialise (the whole point of the pool). Build a `PgPool` of
+    /// `N` clients, fire `N` threads that EACH check out a client and run a SLOW insert
+    /// (`… SELECT ?::text FROM pg_sleep(D) … RETURNING id`) at the same time, and assert:
+    ///   (a) every insert returns a DISTINCT new id via `execute_returning_id` (no lastval/session dep);
+    ///   (b) exactly `N` rows land — none lost, none duplicated;
+    ///   (c) wall-clock is ~1×D, NOT `N`×D — proving the writers ran in PARALLEL on different pooled
+    ///       connections rather than serialising on one client (a single-client backend would take N×D).
+    /// Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_pool_concurrent_writers() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_pool_concurrent_writers] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        const N: usize = 8;
+        const SLEEP_S: f64 = 0.4;
+
+        // Connect N clients OFF any runtime (the sync client drives its own block_on) and build the pool.
+        let clients: Vec<postgres::Client> =
+            (0..N).map(|_| connect_postgres(&url).expect("connect pool client")).collect();
+        let pool = std::sync::Arc::new(PgPool::new(url.clone(), clients));
+        assert_eq!(pool.size(), N, "pool holds N clients");
+
+        // Fresh probe table (own scope so the guard drops before the threads check out).
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute_batch(
+                "DROP TABLE IF EXISTS pool_probe; \
+                 CREATE TABLE pool_probe(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, tag TEXT)",
+            )
+            .expect("create pool_probe");
+        }
+
+        // N threads, each: check out a client, run a SLOW insert returning its id. If the pool truly
+        // parallelises, all N sleeps overlap -> ~1×SLEEP_S; if it serialised on one client -> N×SLEEP_S.
+        let start = std::time::Instant::now();
+        let ids: Vec<i64> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..N)
+                .map(|i| {
+                    let pool = std::sync::Arc::clone(&pool);
+                    scope.spawn(move || {
+                        let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+                        s.execute_returning_id(
+                            "INSERT INTO pool_probe(tag) SELECT ?::text FROM pg_sleep(0.4)",
+                            &crate::sql_params![format!("w{i}")],
+                        )
+                        .expect("concurrent slow insert returns its id")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("writer thread panicked")).collect()
+        });
+        let elapsed = start.elapsed().as_secs_f64();
+
+        // (a) distinct ids.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), N, "every concurrent insert got a DISTINCT id: {ids:?}");
+
+        // (b) exactly N rows, none lost/duplicated.
+        {
+            
+            let cnt: i64 = (Store::postgres_reconnectable(pool.checkout(), &pool.url))
+                .query_row("SELECT count(*) FROM pool_probe", &crate::sql_params![], |r| r.get_i64(0))
+                .expect("count pool_probe");
+            assert_eq!(cnt, N as i64, "exactly N rows persisted (no lost/duplicate writes)");
+        }
+
+        // (c) parallel, not serial: wall-clock well under the serialised bound N×SLEEP_S. Half of it is a
+        // generous margin (parallel ~= SLEEP_S + overhead; serial would be ~N×SLEEP_S = {:.1}s).
+        let serial_bound = N as f64 * SLEEP_S;
+        eprintln!(
+            "[pg_pool_concurrent_writers] {N} writers, {SLEEP_S}s each: wall={elapsed:.2}s \
+             (serialised would be ~{serial_bound:.1}s) ; ids={ids:?}"
+        );
+        assert!(
+            elapsed < serial_bound * 0.5,
+            "concurrent writers ran in PARALLEL: {elapsed:.2}s (serialised would be ~{serial_bound:.1}s)"
+        );
+    }
+
+    /// POOL — a BROKEN pooled connection is HEALED in place on its next use. Size-1 pool so the checked-
+    /// out slot is DETERMINISTIC: capture the slot's backend PID, terminate it from a separate connection,
+    /// wait until it is gone, then assert the NEXT checkout+op RECONNECTS+SUCCEEDS (read reconnect+retry)
+    /// and a subsequent WRITE lands on the healed slot. Gated on `TEST_PG_URL`.
+    #[test]
+    fn pg_pool_slot_heals_after_break() {
+        let _g = PG_DB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = match std::env::var("TEST_PG_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("[pg_pool_slot_heals_after_break] TEST_PG_URL unset — skipping");
+                return;
+            }
+        };
+        // Size-1 pool: every checkout returns the SAME slot -> deterministic target for the kill/heal.
+        let pool = std::sync::Arc::new(PgPool::new(
+            url.clone(),
+            vec![connect_postgres(&url).expect("connect single pool client")],
+        ));
+
+        let pid: i64 = {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute_batch("DROP TABLE IF EXISTS pool_heal; CREATE TABLE pool_heal(tag TEXT)")
+                .expect("create pool_heal");
+            s.query_row("SELECT pg_backend_pid()", &crate::sql_params![], |r| r.get_i64(0)).unwrap()
+        };
+
+        // Kill THAT backend from a throwaway connection, wait until it disappears (SIGTERM is async).
+        {
+            let k = std::sync::Mutex::new(connect_postgres(&url).expect("connect killer"));
+            let ks = Store::postgres(k.lock().unwrap_or_else(|e| e.into_inner()));
+            ks.execute(&format!("SELECT pg_terminate_backend({pid})"), &crate::sql_params![])
+                .expect("pg_terminate_backend runs");
+            let mut gone = false;
+            for _ in 0..200 {
+                let alive: i64 = ks
+                    .query_row(
+                        &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"),
+                        &crate::sql_params![],
+                        |r| r.get_i64(0),
+                    )
+                    .expect("poll pg_stat_activity");
+                if alive == 0 {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            drop(ks); // ks last-used inside the poll loop; release after the loop, before the assert
+            assert!(gone, "terminated backend {pid} did not disappear");
+        }
+
+        // Next checkout on the (now-dead) slot: an idempotent READ reconnects+retries and succeeds.
+        {
+            
+            let two: i64 = (Store::postgres_reconnectable(pool.checkout(), &pool.url))
+                .query_row("SELECT 2", &crate::sql_params![], |r| r.get_i64(0))
+                .expect("pooled slot reconnects+retries the read after its backend was terminated");
+            assert_eq!(two, 2);
+        }
+        // The healed slot serves subsequent WRITES too (reconnect swapped a fresh client into the slot).
+        {
+            let s = Store::postgres_reconnectable(pool.checkout(), &pool.url);
+            s.execute("INSERT INTO pool_heal(tag) VALUES(?)", &crate::sql_params!["ok"])
+                .expect("write on the healed pooled slot lands");
+            let cnt: i64 = s
+                .query_row("SELECT count(*) FROM pool_heal WHERE tag=?", &crate::sql_params!["ok"], |r| r.get_i64(0))
+                .unwrap();
+            drop(s);
+            assert_eq!(cnt, 1, "post-heal write landed exactly once on the pooled slot");
+        }
+    }

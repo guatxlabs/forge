@@ -155,7 +155,7 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
         // /api/report/branding (config admin-éditable). Secrets rédigés dans tous les formats.
         .merge(reports::routes())
-        // ENTERPRISE (separable, flag-gated) — TENANT ADMIN surface (console/src/tenancy.rs) : CRUD tenant
+        // ENTERPRISE (separable, flag-gated) — TENANT ADMIN surface (console/src/tenancy/admin_api.rs) : CRUD tenant
         // (create/rename/archive) + gestion des grants, PLATFORM-ADMIN gated + ledgerisé `console.tenant.*`.
         // Fusionné AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route
         // refuse (403 enterprise_disabled) tant que le flag n'est pas engagé => community byte-identique
