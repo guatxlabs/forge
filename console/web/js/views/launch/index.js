@@ -20,7 +20,7 @@ import { LC_LIVE, followRun, lcStopLive, probeC2State, reattachRunningRun } from
 import { loadRuns } from './runs-list.js';
 import { cancelRun, submitRun } from './submit.js';
 import { lcApproveAndRun, lcDryPlan, lcScopeAddTarget, lcScopeCheck, lcSyncApproveBtn } from './scope-plan.js';
-import { renderResourceProfile } from './resource.js';
+import { loadResourceCatalog, renderResourceProfile } from './resource.js';
 
 // Surface publique du package (importée par d'autres vues / core) — index.js est le point d'entrée
 // unique qui remplace l'ancien js/views/launch.js :
@@ -39,6 +39,9 @@ export async function loadLaunch() {
     lcModulesLoaded = true;
   }
   renderLaunchModules();
+  // RESSOURCES (R3) : catalogue des leviers réglables + défauts du profil (source de vérité = moteur).
+  // Chargé une seule fois par session de page ; échec => les champs restent réglables, sans défauts affichés.
+  loadResourceCatalog();
   if (!lcC2Probed) { lcC2Probed = true; probeC2State(); }   // sonde l'état opérateur une fois (évite de marteler /api/run)
   loadRuns();
   // si un run est déjà suivi, on garde le flux ; sinon on tente de raccrocher le run courant.

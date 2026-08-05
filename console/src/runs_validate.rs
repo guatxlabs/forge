@@ -11,6 +11,9 @@
 use crate::error;
 use crate::*;
 
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
 use serde_json::Value;
 
 /// Valide les params PAR-MODULE du corps /api/run. Forme attendue :
@@ -210,68 +213,170 @@ pub(crate) fn high_impact_gate(
 //  R3 — PROFIL DE RESSOURCES + OVERRIDES PAR-LEVIER (Launch UI -> env du moteur).
 //
 //  CHOIX DE RESSOURCE UNIQUEMENT : ne touche NI le scope, NI le ROE, NI le plancher d'exploit, NI
-//  aucune bascule de capacité. On ne fait QUE poser les variables d'environnement que le moteur (R1,
-//  `forge/resource_profile.py`) LIT DÉJÀ, en préservant la précédence STRICTE `override > profil >
-//  défaut`. Champ ABSENT/vide/illisible => la variable N'EST PAS posée => le défaut du profil (ou le
-//  défaut-code) s'applique. `balanced` (profil par défaut) SANS override => AUCUNE variable posée =>
-//  comportement byte-identique à aujourd'hui (no-op).
+//  l'allowlist de sévérité nuclei, NI le planner coverage-safe, NI aucune bascule de capacité. On ne
+//  fait QUE poser les variables d'environnement que le moteur (R1, `forge/resource_profile.py`) LIT
+//  DÉJÀ, en préservant la précédence STRICTE `override > profil > défaut`. Champ ABSENT/vide/illisible
+//  => la variable N'EST PAS posée => le défaut du profil (ou le défaut-code) s'applique. `balanced`
+//  (profil par défaut) SANS override => AUCUNE variable posée => byte-identique à aujourd'hui (no-op).
 //
-//  Bornes (garde-fous anti-abus, alignées sur les clamps du moteur) :
-//    parallelism  ∈ [1, 64]   (engine._parallelism clamp) ; run_timeout ∈ [1, 604800] (≤ 7 jours) ;
-//    tools_profile ∈ {mini, full} ; profile ∈ {low, full} honoré (balanced => None, no-op).
+//  ANTI-INJECTION (le point dur) : le corps N'EST JAMAIS ITÉRÉ. C'est l'ALLOWLIST `RESOURCE_KNOBS` qui
+//  est parcourue, et pour chaque levier connu on va CHERCHER sa clé dans le corps. Conséquences :
+//    * une clé inconnue du corps (`allow_private`, `PATH`, `LD_PRELOAD`, `FORGE_CONSOLE_TOKEN`…) est
+//      IGNORÉE — elle ne peut atteindre NI l'environnement du moteur NI le blob spawn_spec ;
+//    * chaque valeur est TYPÉE (i64 / enum fermé) et BORNÉE [min, max] — pas de chaîne libre ;
+//    * le NOM de la variable d'environnement est une constante `&'static str` du binaire, jamais une
+//      donnée venue du client (aucune variable arbitraire n'est constructible).
+//
+//  GOUVERNANCE — deux leviers de la table moteur sont VOLONTAIREMENT ABSENTS de l'allowlist :
+//    * `nuclei_severity` : c'est une ALLOWLIST DE SÉVÉRITÉ (gouvernance), réglable par param de module
+//      validé, jamais par le canal « ressources » ;
+//    * `rate_per_sec`    : le débit est porté par le scope/ROE (champ `rate` du run, écrit dans
+//      scope.json) — documentation-only côté profil.
+//  Les exposer ici reviendrait à élargir une capacité depuis un réglage de confort : interdit.
 // ===========================================================================================
 
-/// Options de ressources RÉSOLUES depuis le corps /api/run (`body["resource"]`). Chaque champ `None`
+/// Un levier de ressource ENTIER réglable depuis l'UI de lancement. `key` = clé acceptée dans
+/// `body["resource"]` (et dans le blob spawn_spec) ; `knob` = nom du levier dans la table moteur
+/// (`forge/resource_profile.py`, utilisé pour afficher le défaut du profil) ; `env` = variable
+/// d'environnement posée sur le process moteur ; `[min, max]` = bornes serveur (⊆ clamps du moteur).
+pub(crate) struct ResourceKnob {
+    pub(crate) key: &'static str,
+    pub(crate) knob: &'static str,
+    pub(crate) env: &'static str,
+    pub(crate) min: i64,
+    pub(crate) max: i64,
+    pub(crate) label: &'static str,
+    pub(crate) hint: &'static str,
+}
+
+/// ALLOWLIST des leviers ENTIERS — LA seule liste dont un `/api/run` peut faire poser une variable
+/// d'environnement. Bornes alignées sur les clamps du moteur : parallélisme `engine._parallelism`
+/// [1,64] · profondeur de traversal `injection.PathTraversal._payloads` [1,12] · `llm.max_tokens`
+/// [16,8192] · `llm.num_ctx` [0,131072]. Les libellés sont ceux vus par l'OPÉRATEUR (l'UI ne réinvente
+/// aucun nom de variable). `run_timeout` garde sa clé HISTORIQUE (blobs spawn_spec déjà écrits).
+pub(crate) const RESOURCE_KNOBS: &[ResourceKnob] = &[
+    ResourceKnob { key: "parallelism", knob: "parallelism", env: "FORGE_PARALLELISM", min: 1, max: 64,
+        label: "Actions simultanées",
+        hint: "Actions tirées en parallèle dans une vague. Plus haut = plus rapide, plus gourmand en CPU/RAM." },
+    ResourceKnob { key: "max_concurrent_procs", knob: "max_concurrent_procs", env: "FORGE_MAX_CONCURRENT_PROCS", min: 1, max: 64,
+        label: "Processus outils simultanés",
+        hint: "Garde-fou mémoire : nombre d'outils externes (nmap, nuclei…) vivants en même temps." },
+    ResourceKnob { key: "action_timeout", knob: "action_timeout_secs", env: "FORGE_ACTION_TIMEOUT_SECS", min: 1, max: 86_400,
+        label: "Délai max par action (s)",
+        hint: "Au-delà, l'outil de CETTE action est coupé. Court = coupe vite sur machine lente ou lien mince." },
+    ResourceKnob { key: "run_timeout", knob: "run_timeout_secs", env: "FORGE_RUN_TIMEOUT", min: 1, max: 604_800,
+        label: "Délai max du run (s)",
+        hint: "Watchdog du run complet. Le plafond serveur global reste appliqué en plus." },
+    ResourceKnob { key: "crawl_max_endpoints", knob: "crawl_max_endpoints", env: "FORGE_CRAWL_MAX_ENDPOINTS", min: 1, max: 5_000,
+        label: "Pages explorées au maximum",
+        hint: "Nombre d'endpoints retenus par la découverte de surface." },
+    ResourceKnob { key: "crawl_max_params", knob: "crawl_max_params", env: "FORGE_CRAWL_MAX_PARAMS", min: 1, max: 50,
+        label: "Paramètres testés par page",
+        hint: "Nombre de paramètres sondés sur chaque endpoint." },
+    ResourceKnob { key: "crawl_max_depth", knob: "crawl_max_depth", env: "FORGE_CRAWL_MAX_DEPTH", min: 1, max: 12,
+        label: "Profondeur d'exploration",
+        hint: "Profondeur des variantes de chemin testées. Moins profond = moins de requêtes." },
+    ResourceKnob { key: "content_fanout_max", knob: "content_fanout_max", env: "FORGE_CONTENT_FANOUT_MAX", min: 1, max: 500,
+        label: "Cibles enchaînées au maximum",
+        hint: "Plafond du fan-out cibles × scanners quand une découverte en déclenche d'autres." },
+    ResourceKnob { key: "discovery_max_fanout", knob: "discovery_max_fanout", env: "FORGE_DISCOVERY_MAX_FANOUT", min: 1, max: 500,
+        label: "Services/ports sondés au maximum",
+        hint: "Plafond des services découverts et des ports re-sondés en HTTP." },
+    ResourceKnob { key: "llm_max_tokens", knob: "llm_max_tokens", env: "FORGE_LLM_MAX_TOKENS", min: 16, max: 8_192,
+        label: "IA — longueur de réponse max",
+        hint: "Sans effet tant que l'assistance IA n'est pas activée dans le scope." },
+    ResourceKnob { key: "llm_num_ctx", knob: "llm_num_ctx", env: "FORGE_LLM_NUM_CTX", min: 0, max: 131_072,
+        label: "IA — fenêtre de contexte",
+        hint: "0 = laisser le modèle décider (aucune option envoyée). Une valeur finie borne la RAM du modèle local." },
+    ResourceKnob { key: "llm_enrich_max_endpoints", knob: "llm_enrich_max_endpoints", env: "FORGE_LLM_ENRICH_MAX_ENDPOINTS", min: 0, max: 100,
+        label: "IA — endpoints enrichis par vague",
+        hint: "0 = aucun appel IA. Les payloads suggérés restent confirmés par les oracles déterministes." },
+    ResourceKnob { key: "triage_max_items", knob: "triage_max_items", env: "FORGE_TRIAGE_MAX_ITEMS", min: 1, max: 500,
+        label: "Synthèse — findings listés",
+        hint: "Taille du top affiché dans la synthèse. AUCUN finding n'est supprimé (le rapport garde tout)." },
+    ResourceKnob { key: "triage_max_clusters", knob: "triage_max_clusters", env: "FORGE_TRIAGE_MAX_CLUSTERS", min: 1, max: 500,
+        label: "Synthèse — groupes de bruit listés",
+        hint: "Nombre de clusters de bruit surfacés dans la synthèse. Aucun finding n'est supprimé." },
+];
+
+/// Variable d'env du PROFIL (`low|balanced|full`) et du profil d'outils — les deux leviers non entiers.
+pub(crate) const ENV_RESOURCE_PROFILE: &str = "FORGE_RESOURCE_PROFILE";
+pub(crate) const ENV_TOOLS_PROFILE: &str = "FORGE_TOOLS_PROFILE";
+/// Profils honorés comme OVERRIDE (le défaut `balanced` ne pose RIEN — no-op).
+pub(crate) const RESOURCE_PROFILE_OVERRIDES: [&str; 2] = ["low", "full"];
+/// Valeurs honorées pour le profil d'outils Docker.
+pub(crate) const TOOLS_PROFILE_VALUES: [&str; 2] = ["mini", "full"];
+/// Leviers de la table moteur VOLONTAIREMENT NON réglables ici (gouvernance) — affichés en lecture
+/// seule dans l'UI avec la raison, pour que l'opérateur sache où ils se règlent VRAIMENT.
+pub(crate) const GOVERNED_KNOBS: [(&str, &str, &str); 2] = [
+    ("nuclei_severity", "Sévérité nuclei",
+     "gouvernance : allowlist de sévérité — se règle dans les paramètres du module nuclei, pas ici"),
+    ("rate_per_sec", "Débit requêtes/s",
+     "gouvernance : le débit est porté par le scope/ROE — champ « Débit req/s » du lancement"),
+];
+
+/// Options de ressources RÉSOLUES depuis le corps /api/run (`body["resource"]`). Une entrée ABSENTE
 /// signifie « ne pas poser cette variable » (le défaut du profil s'applique). Pur data — aucune décision
 /// de gouvernance ne dépend de ces valeurs.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct ResourceOptions {
-    pub(crate) profile: Option<String>,       // FORGE_RESOURCE_PROFILE — "low"|"full" ; "balanced"/absent => None (no-op)
-    pub(crate) parallelism: Option<i64>,      // FORGE_PARALLELISM      — [1, 64]
-    pub(crate) run_timeout: Option<i64>,      // FORGE_RUN_TIMEOUT      — [1, 604800]
-    pub(crate) tools_profile: Option<String>, // FORGE_TOOLS_PROFILE    — "mini"|"full"
+    pub(crate) profile: Option<String>,        // FORGE_RESOURCE_PROFILE — "low"|"full" ; "balanced"/absent => None (no-op)
+    pub(crate) tools_profile: Option<String>,  // FORGE_TOOLS_PROFILE    — "mini"|"full"
+    /// Leviers entiers retenus, clés ⊆ `RESOURCE_KNOBS[].key` (BTreeMap => ordre déterministe).
+    pub(crate) ints: std::collections::BTreeMap<&'static str, i64>,
 }
 
 impl ResourceOptions {
-    /// Paires (variable d'env, valeur) à poser sur le process moteur. Un champ `None` => AUCUNE entrée
-    /// (donc la variable n'est pas posée -> défaut du profil). C'est l'UNIQUE dérivation appliquée au
-    /// `Command` du moteur (cf. `claim_and_spawn`). `balanced` sans override => vecteur VIDE (no-op).
+    /// Valeur retenue pour un levier entier (`None` = non renseigné => défaut du profil).
+    pub(crate) fn int(&self, key: &str) -> Option<i64> {
+        self.ints.get(key).copied()
+    }
+
+    /// Paires (variable d'env, valeur) à poser sur le process moteur. Une entrée absente => AUCUNE
+    /// paire (donc la variable n'est pas posée -> défaut du profil). C'est l'UNIQUE dérivation appliquée
+    /// au `Command` du moteur (cf. `claim_and_spawn`). `balanced` sans override => vecteur VIDE (no-op).
+    /// Les NOMS de variables viennent TOUS de constantes du binaire (jamais du corps de la requête).
     pub(crate) fn env_pairs(&self) -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = Vec::new();
         if let Some(p) = &self.profile {
-            out.push(("FORGE_RESOURCE_PROFILE", p.clone()));
-        }
-        if let Some(n) = self.parallelism {
-            out.push(("FORGE_PARALLELISM", n.to_string()));
-        }
-        if let Some(n) = self.run_timeout {
-            out.push(("FORGE_RUN_TIMEOUT", n.to_string()));
+            out.push((ENV_RESOURCE_PROFILE, p.clone()));
         }
         if let Some(t) = &self.tools_profile {
-            out.push(("FORGE_TOOLS_PROFILE", t.clone()));
+            out.push((ENV_TOOLS_PROFILE, t.clone()));
+        }
+        // ordre = ordre de l'ALLOWLIST (déterministe, indépendant de l'ordre des clés du client).
+        for k in RESOURCE_KNOBS {
+            if let Some(n) = self.ints.get(k.key) {
+                out.push((k.env, n.to_string()));
+            }
         }
         out
     }
 
     /// Sérialise en `Value` (objet plat) pour le blob `run_job.spawn_spec` du chemin HA pending. Les
-    /// champs `None` sont émis en `null` (round-trip fidèle via `from_value`).
+    /// leviers non renseignés sont émis en `null` (round-trip fidèle via `from_value`).
     pub(crate) fn to_value(&self) -> Value {
-        serde_json::json!({
-            "profile": self.profile, "parallelism": self.parallelism,
-            "run_timeout": self.run_timeout, "tools_profile": self.tools_profile,
-        })
+        let mut m = serde_json::Map::new();
+        m.insert("profile".into(), match &self.profile { Some(p) => Value::String(p.clone()), None => Value::Null });
+        m.insert("tools_profile".into(), match &self.tools_profile { Some(t) => Value::String(t.clone()), None => Value::Null });
+        for k in RESOURCE_KNOBS {
+            m.insert(k.key.into(), match self.ints.get(k.key) { Some(n) => Value::from(*n), None => Value::Null });
+        }
+        Value::Object(m)
     }
 
     /// Reconstruit depuis un `Value` (objet plat produit par `to_value`). RE-VALIDE via `parse_resource_options`
-    /// (mêmes bornes/fail-open) — un blob corrompu retombe donc sur les défauts (aucune variable posée).
+    /// (mêmes bornes/allowlist/fail-open) — un blob corrompu ou LEGACY (écrit avant l'ajout d'un levier)
+    /// retombe donc sur les défauts pour ce qu'il ne porte pas (aucune variable posée).
     pub(crate) fn from_value(v: &Value) -> Self {
         parse_resource_options(&serde_json::json!({ "resource": v }))
     }
 }
 
 /// Parse `body["resource"]` en `ResourceOptions` validées. FAIL-OPEN sur garbage (un champ invalide =>
-/// `None` => défaut du profil), JAMAIS d'erreur : un choix de ressource malformé ne doit pas bloquer un
-/// lancement (le moteur retombe sur le profil/défaut). Absent/non-objet => tout `None` (no-op).
+/// absent => défaut du profil), JAMAIS d'erreur : un choix de ressource malformé ne doit pas bloquer un
+/// lancement (le moteur retombe sur le profil/défaut). Absent/non-objet => tout vide (no-op).
+/// ANTI-INJECTION : on itère l'ALLOWLIST, jamais les clés du corps (cf. en-tête de section).
 pub(crate) fn parse_resource_options(body: &Value) -> ResourceOptions {
     let obj = match body.get("resource") {
         Some(Value::Object(m)) => m,
@@ -283,30 +388,125 @@ pub(crate) fn parse_resource_options(body: &Value) -> ResourceOptions {
         .get("profile")
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| s == "low" || s == "full");
-    // parallélisme : entier borné [1, 64] (clamp moteur). Hors bornes/illisible => None.
-    let parallelism = obj
-        .get("parallelism")
-        .and_then(|v| v.as_i64())
-        .filter(|n| *n >= 1 && *n <= 64);
-    // watchdog run-timeout (s) : entier borné [1, 604800]. Hors bornes/illisible => None. NB : c'est un
-    // DÉFAUT pour le snapshot moteur — le watchdog Rust reste plafonné par le cap serveur global.
-    let run_timeout = obj
-        .get("run_timeout")
-        .and_then(|v| v.as_i64())
-        .filter(|n| *n >= 1 && *n <= 604_800);
+        .filter(|s| RESOURCE_PROFILE_OVERRIDES.contains(&s.as_str()));
     // profil d'outils Docker : "mini"|"full" uniquement. Autre => None.
     let tools_profile = obj
         .get("tools_profile")
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| s == "mini" || s == "full");
-    ResourceOptions { profile, parallelism, run_timeout, tools_profile }
+        .filter(|s| TOOLS_PROFILE_VALUES.contains(&s.as_str()));
+    // leviers entiers : pour CHAQUE levier de l'allowlist, on lit sa clé (si présente), on exige un
+    // entier et on le borne. Hors bornes / non entier / absent => rien (défaut du profil).
+    let mut ints = std::collections::BTreeMap::new();
+    for k in RESOURCE_KNOBS {
+        if let Some(n) = obj.get(k.key).and_then(|v| v.as_i64()).filter(|n| *n >= k.min && *n <= k.max) {
+            ints.insert(k.key, n);
+        }
+    }
+    ResourceOptions { profile, tools_profile, ints }
+}
+
+/// GET /api/resource-profile — CATALOGUE des leviers de ressources pour l'UI de lancement (lecture
+/// pure, aucun effet de bord). Deux moitiés :
+///   * `knobs` / `governed` / `*_choices` : l'ALLOWLIST SERVEUR (bornes + libellés opérateur) — c'est
+///     elle qui fait foi sur ce qui est réglable, donc l'UI ne peut pas proposer autre chose ;
+///   * `profiles` : la TABLE DU MOTEUR (`python -m forge.resource_profile`, SOURCE DE VÉRITÉ des
+///     défauts) — l'UI AFFICHE ces valeurs au lieu d'en garder une copie qui dériverait.
+/// Le moteur est interrogé en LECTURE SEULE (argv FIXE, sans shell, sans donnée client, borné dans le
+/// temps). S'il est indisponible : `engine_ok=false` + `profiles:{}` — l'UI reste utilisable (les
+/// champs restent réglables, seuls les défauts affichés manquent).
+pub(crate) async fn resource_profile_catalog(State(app): State<App>) -> Response {
+    let knobs: Vec<Value> = RESOURCE_KNOBS
+        .iter()
+        .map(|k| serde_json::json!({
+            "key": k.key, "knob": k.knob, "env": k.env,
+            "min": k.min, "max": k.max, "label": k.label, "hint": k.hint,
+        }))
+        .collect();
+    let governed: Vec<Value> = GOVERNED_KNOBS
+        .iter()
+        .map(|(knob, label, why)| serde_json::json!({"knob": knob, "label": label, "why": why}))
+        .collect();
+    let engine = engine_resource_catalog(&app).await;
+    let profiles = engine
+        .as_ref()
+        .and_then(|v| v.get("profiles"))
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let default_profile = engine
+        .as_ref()
+        .and_then(|v| v.get("default_profile"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("balanced")
+        .to_string();
+    (StatusCode::OK, Json(serde_json::json!({
+        "engine_ok": engine.is_some(),
+        "env_var": ENV_RESOURCE_PROFILE,
+        "default_profile": default_profile,
+        "profiles": profiles,
+        "profile_choices": [
+            {"value": "balanced", "label": "balanced (défaut — comportement inchangé)"},
+            {"value": "low", "label": "low (machine faible)"},
+            {"value": "full", "label": "full (grosse machine)"},
+        ],
+        "tools_profile_choices": [
+            {"value": "mini", "label": "mini (léger)"},
+            {"value": "full", "label": "full (complet)"},
+        ],
+        "knobs": knobs,
+        "governed": governed,
+    }))).into_response()
+}
+
+/// Interroge le moteur pour la table des profils (`python -m forge.resource_profile` -> JSON sur
+/// stdout). Argv FIXE (aucune donnée client, aucun shell), borné à 10 s, stdout borné. `None` si
+/// l'interpréteur/moteur est absent, sort en erreur, dépasse le délai ou n'émet pas de JSON.
+///
+/// MÉMOÏSÉ pour la durée du process (la table de profils est une CONSTANTE du moteur) : un rafraîchis-
+/// sement de l'UI ne relance donc pas un interpréteur, et cette route de lecture ne peut pas servir de
+/// tapis roulant à spawns. Seuls les SUCCÈS sont mis en cache (un moteur momentanément indisponible
+/// sera re-tenté), la clé inclut l'interpréteur ET la racine du paquet (isolation entre Apps de test).
+async fn engine_resource_catalog(app: &App) -> Option<Value> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Value>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = format!("{}\u{1}{}", app.python.as_str(), app.pkg_dir.as_str());
+    if let Ok(c) = cache.lock() {
+        if let Some(v) = c.get(&key) {
+            return Some(v.clone());
+        }
+    }
+    let parsed = engine_resource_catalog_uncached(app).await?;
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, parsed.clone());
+    }
+    Some(parsed)
+}
+
+/// Le spawn proprement dit (sans cache) — séparé pour rester lisible et testable isolément.
+async fn engine_resource_catalog_uncached(app: &App) -> Option<Value> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new(app.python.as_str())
+            .args(["-m", "forge.resource_profile"])
+            .current_dir(app.pkg_dir.as_str())
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() || out.stdout.len() > 256 * 1024 {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&out.stdout).ok().filter(|v| v.is_object())
 }
 
 #[cfg(test)]
 mod resource_tests {
     use super::*;
+    use crate::testutil::*;
     use serde_json::json;
 
     /// (a) NO-OP : balanced sans override (et corps sans `resource`) => AUCUNE variable d'env posée =>
@@ -321,6 +521,8 @@ mod resource_tests {
         let opts = parse_resource_options(&json!({"resource": {"profile": "balanced"}}));
         assert_eq!(opts.profile, None, "balanced n'est PAS honoré comme override (défaut)");
         assert!(opts.env_pairs().is_empty(), "balanced + rien => aucune variable => no-op");
+        // ... et le blob spawn_spec d'un tel run se relit en no-op (round-trip du chemin HA pending).
+        assert!(ResourceOptions::from_value(&opts.to_value()).env_pairs().is_empty());
     }
 
     /// (b) OVERRIDE ATTEINT LE MOTEUR : profile=low pose FORGE_RESOURCE_PROFILE=low ; un pool renseigné
@@ -331,8 +533,8 @@ mod resource_tests {
             "resource": {"profile": "low", "parallelism": 8, "run_timeout": 3600, "tools_profile": "mini"}
         }));
         assert_eq!(opts.profile.as_deref(), Some("low"));
-        assert_eq!(opts.parallelism, Some(8));
-        assert_eq!(opts.run_timeout, Some(3600));
+        assert_eq!(opts.int("parallelism"), Some(8));
+        assert_eq!(opts.int("run_timeout"), Some(3600));
         assert_eq!(opts.tools_profile.as_deref(), Some("mini"));
         let env = opts.env_pairs();
         assert!(env.contains(&("FORGE_RESOURCE_PROFILE", "low".to_string())), "profil low posé");
@@ -342,19 +544,20 @@ mod resource_tests {
     }
 
     /// (b-bis) BLANK/ABSENT => variable ABSENTE : profile=full seul ne pose QUE FORGE_RESOURCE_PROFILE
-    /// (les overrides non renseignés restent None -> variables non posées -> défaut du profil).
+    /// (les overrides non renseignés restent absents -> variables non posées -> défaut du profil).
     #[test]
     fn full_profile_alone_sets_only_profile_var() {
         let opts = parse_resource_options(&json!({"resource": {"profile": "full"}}));
         let env = opts.env_pairs();
         assert_eq!(env, vec![("FORGE_RESOURCE_PROFILE", "full".to_string())]);
         // aucune des variables d'override par-levier n'est présente
-        assert!(!env.iter().any(|(k, _)| *k == "FORGE_PARALLELISM"));
-        assert!(!env.iter().any(|(k, _)| *k == "FORGE_RUN_TIMEOUT"));
-        assert!(!env.iter().any(|(k, _)| *k == "FORGE_TOOLS_PROFILE"));
+        for k in RESOURCE_KNOBS {
+            assert!(!env.iter().any(|(name, _)| *name == k.env), "{} ne doit pas être posée", k.env);
+        }
+        assert!(!env.iter().any(|(k, _)| *k == ENV_TOOLS_PROFILE));
     }
 
-    /// GARBAGE / HORS-BORNES => fail-open vers None (défaut profil), JAMAIS de variable posée avec une
+    /// GARBAGE / HORS-BORNES => fail-open vers absent (défaut profil), JAMAIS de variable posée avec une
     /// valeur invalide : parallélisme hors [1,64], run_timeout <=0, profils inconnus sont tous ignorés.
     #[test]
     fn garbage_and_out_of_bounds_fail_open() {
@@ -364,8 +567,158 @@ mod resource_tests {
         assert_eq!(opts, ResourceOptions::default(), "tout garbage => défaut => aucune variable");
         assert!(opts.env_pairs().is_empty());
         // borne haute parallélisme respectée (64 OK, 65 rejeté)
-        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 64}})).parallelism, Some(64));
-        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 65}})).parallelism, None);
+        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 64}})).int("parallelism"), Some(64));
+        assert_eq!(parse_resource_options(&json!({"resource": {"parallelism": 65}})).int("parallelism"), None);
+    }
+
+    /// (c) TOUS les leviers de l'allowlist sont réglables ET bornés : min/max acceptés, min-1/max+1
+    /// REJETÉS, type non entier (chaîne, float, bool, null) REJETÉ. Balaie la table entière — un levier
+    /// ajouté sans bornes cohérentes fait rougir ce test.
+    #[test]
+    fn every_allowlisted_knob_is_bounded_and_typed() {
+        for k in RESOURCE_KNOBS {
+            let at_min = parse_resource_options(&json!({"resource": {k.key: k.min}}));
+            assert_eq!(at_min.int(k.key), Some(k.min), "{}: min accepté", k.key);
+            assert_eq!(at_min.env_pairs(), vec![(k.env, k.min.to_string())], "{}: pose SA variable", k.key);
+            assert_eq!(parse_resource_options(&json!({"resource": {k.key: k.max}})).int(k.key), Some(k.max), "{}: max accepté", k.key);
+            assert_eq!(parse_resource_options(&json!({"resource": {k.key: k.min - 1}})).int(k.key), None, "{}: sous la borne rejeté", k.key);
+            assert_eq!(parse_resource_options(&json!({"resource": {k.key: k.max + 1}})).int(k.key), None, "{}: au-dessus de la borne rejeté", k.key);
+            for bad in [json!("8"), json!(1.5), json!(true), json!(null), json!([1]), json!({"v": 1})] {
+                assert_eq!(parse_resource_options(&json!({"resource": {k.key: bad}})).int(k.key), None,
+                           "{}: valeur non entière rejetée", k.key);
+            }
+        }
+    }
+
+    /// (d) GOUVERNANCE — ANTI-INJECTION : une clé HORS allowlist ne peut RIEN poser dans l'environnement
+    /// du moteur. On envoie un corps hostile (bascules de capacité, variables d'env sensibles, noms de
+    /// leviers gouvernés) : le résultat doit être le DÉFAUT, donc zéro variable.
+    #[test]
+    fn unknown_and_governance_keys_never_reach_env() {
+        let hostile = json!({"resource": {
+            // bascules de CAPACITÉ (elles ont leur propre gate, jamais ce canal)
+            "allow_private": true, "allow_exploit": true, "allow_destructive": true,
+            "high_impact": true, "arm": true, "exhaustive": true, "mode": "auto",
+            // leviers GOUVERNÉS de la table moteur (volontairement hors allowlist)
+            "nuclei_severity": "info,low,medium,high,critical", "rate_per_sec": 10000,
+            // variables d'environnement sensibles / injection d'env arbitraire
+            "FORGE_CONSOLE_TOKEN": "leak", "PATH": "/tmp/evil", "LD_PRELOAD": "/tmp/x.so",
+            "PYTHONPATH": "/tmp", "FORGE_RESOURCE_PROFILE": "full",
+            // scope / ROE
+            "in_scope": ["evil.test"], "out_scope": [], "scope": {"in_scope": ["evil.test"]},
+        }});
+        let opts = parse_resource_options(&hostile);
+        assert_eq!(opts, ResourceOptions::default(), "aucune clé hors allowlist retenue");
+        assert!(opts.env_pairs().is_empty(), "aucune variable d'environnement posée");
+        // même chose sur le chemin HA (blob spawn_spec re-validé à la relecture)
+        assert!(ResourceOptions::from_value(hostile.get("resource").unwrap()).env_pairs().is_empty());
+    }
+
+    /// (d-bis) L'ENSEMBLE des variables posables est CLOS : quelles que soient les valeurs du corps, les
+    /// noms de variables produits appartiennent à l'allowlist compilée (et commencent tous par FORGE_).
+    /// Les leviers GOUVERNÉS (sévérité nuclei, débit) n'y figurent JAMAIS.
+    #[test]
+    fn env_name_set_is_closed_and_governance_knobs_absent() {
+        let mut allowed: Vec<&str> = vec![ENV_RESOURCE_PROFILE, ENV_TOOLS_PROFILE];
+        allowed.extend(RESOURCE_KNOBS.iter().map(|k| k.env));
+        // unicité + préfixe FORGE_ + clés uniques
+        let mut sorted = allowed.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), allowed.len(), "noms de variables dupliqués dans l'allowlist");
+        assert!(allowed.iter().all(|e| e.starts_with("FORGE_")), "variable hors namespace FORGE_");
+        let mut keys: Vec<&str> = RESOURCE_KNOBS.iter().map(|k| k.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), RESOURCE_KNOBS.len(), "clés de leviers dupliquées");
+        // aucun levier gouverné dans l'allowlist (ni par clé, ni par nom de levier moteur)
+        for (knob, _, _) in GOVERNED_KNOBS {
+            assert!(!RESOURCE_KNOBS.iter().any(|k| k.key == knob || k.knob == knob),
+                    "{knob} est un levier de GOUVERNANCE — il ne doit pas être réglable par le canal ressources");
+        }
+        // un corps qui renseigne TOUT ne produit que des variables de l'allowlist
+        let mut body = serde_json::Map::new();
+        body.insert("profile".into(), json!("low"));
+        body.insert("tools_profile".into(), json!("mini"));
+        for k in RESOURCE_KNOBS {
+            body.insert(k.key.into(), json!(k.max));
+        }
+        let env = parse_resource_options(&json!({"resource": Value::Object(body)})).env_pairs();
+        assert_eq!(env.len(), allowed.len(), "toutes les variables de l'allowlist sont posables");
+        for (name, _) in &env {
+            assert!(allowed.contains(name), "{name} hors allowlist");
+        }
+    }
+
+    /// (e) ROUND-TRIP spawn_spec (chemin HA pending) : tous les leviers survivent à la sérialisation,
+    /// et un blob LEGACY (écrit avant l'ajout des nouveaux leviers) se relit sans rien inventer.
+    #[test]
+    fn spawn_spec_round_trip_and_legacy_blob() {
+        let mut body = serde_json::Map::new();
+        body.insert("profile".into(), json!("low"));
+        body.insert("tools_profile".into(), json!("mini"));
+        for k in RESOURCE_KNOBS {
+            body.insert(k.key.into(), json!(k.min));
+        }
+        let opts = parse_resource_options(&json!({"resource": Value::Object(body)}));
+        assert_eq!(ResourceOptions::from_value(&opts.to_value()), opts, "round-trip fidèle");
+        // blob LEGACY : uniquement les 4 champs historiques -> relu tel quel, rien d'autre inventé.
+        let legacy = json!({"profile": "full", "parallelism": 12, "run_timeout": 7200, "tools_profile": "full"});
+        let back = ResourceOptions::from_value(&legacy);
+        assert_eq!(back.profile.as_deref(), Some("full"));
+        assert_eq!(back.int("parallelism"), Some(12));
+        assert_eq!(back.int("run_timeout"), Some(7200));
+        assert_eq!(back.ints.len(), 2, "aucun levier fabriqué à partir d'un blob legacy");
+    }
+
+    /// (f) CATALOGUE `/api/resource-profile` : la moitié SERVEUR (allowlist + bornes + libellés + leviers
+    /// gouvernés) est toujours servie, même si le moteur est injoignable (interpréteur bidon) — l'UI
+    /// reste utilisable, `engine_ok=false` et `profiles` vide. Les libellés sont opérateur, pas du code.
+    #[tokio::test]
+    async fn catalog_serves_allowlist_without_engine() {
+        let mut app = test_app(&tmp_path("rescat.jsonl"));
+        app.python = std::sync::Arc::new("/nonexistent/python-forge-test".into());
+        let resp = resource_profile_catalog(State(app)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+        let v: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["engine_ok"], json!(false), "moteur injoignable => engine_ok=false");
+        assert_eq!(v["profiles"], json!({}), "aucun défaut fabriqué sans le moteur");
+        assert_eq!(v["default_profile"], json!("balanced"));
+        let knobs = v["knobs"].as_array().expect("knobs");
+        assert_eq!(knobs.len(), RESOURCE_KNOBS.len(), "tous les leviers exposés");
+        for (i, k) in RESOURCE_KNOBS.iter().enumerate() {
+            assert_eq!(knobs[i]["key"], json!(k.key));
+            assert_eq!(knobs[i]["env"], json!(k.env));
+            assert_eq!(knobs[i]["min"], json!(k.min));
+            assert_eq!(knobs[i]["max"], json!(k.max));
+            let label = knobs[i]["label"].as_str().unwrap_or("");
+            assert!(!label.is_empty() && !label.contains('_'),
+                    "libellé opérateur attendu (pas un nom de variable) : {label}");
+        }
+        // les leviers de gouvernance sont annoncés comme NON réglables, avec la raison.
+        let gov = v["governed"].as_array().expect("governed");
+        assert_eq!(gov.len(), GOVERNED_KNOBS.len());
+        assert!(gov.iter().any(|g| g["knob"] == json!("nuclei_severity")));
+        assert!(gov.iter().any(|g| g["knob"] == json!("rate_per_sec")));
+    }
+
+    /// (g) L'UI DE LANCEMENT est câblée sur ce catalogue : elle ne code en dur NI les défauts de profil
+    /// NI la liste des leviers (source de vérité = le moteur via /api/resource-profile). Garde-fou
+    /// anti-régression sur les marqueurs du front (le catalogue est fetché, les champs sont générés).
+    #[test]
+    fn launch_ui_reads_catalog_instead_of_hardcoding() {
+        let js = include_str!("../web/js/views/launch/resource.js");
+        assert!(js.contains("/resource-profile"), "l'UI n'interroge pas le catalogue serveur");
+        assert!(js.contains("collectResourceBody"), "collecte du corps `resource` absente");
+        assert!(!js.contains("RES_PRESETS"), "table de profils codée en dur encore présente dans l'UI");
+        // aucune valeur de profil recopiée dans le front (les défauts viennent du moteur)
+        for lit in ["'medium,high,critical'", "crawl_max_endpoints: 25", "parallelism: 12"] {
+            assert!(!js.contains(lit), "valeur de profil dupliquée dans l'UI : {lit}");
+        }
+        let index = include_str!("../web/index.html");
+        assert!(index.contains("id=\"lc-resprofile\""), "sélecteur de profil absent de l'UI");
+        assert!(index.contains("id=\"lc-res-overrides\""), "conteneur des overrides par-levier absent");
     }
 }
 

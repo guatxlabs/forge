@@ -700,12 +700,13 @@ mod wave_b_tests {
             body_targets: serde_json::json!(["a.example.com", "b.example.com"]),
             rate: Some(25),
             allow_private: true,
-            resource: crate::ResourceOptions {
-                profile: Some("low".into()),
-                parallelism: Some(8),
-                run_timeout: Some(1800),
-                tools_profile: Some("mini".into()),
-            },
+            // R3 — ressources : profil + overrides par-levier (⊆ allowlist `RESOURCE_KNOBS`). Construit
+            // via le PARSEUR (allowlist + bornes) plutôt qu'à la main : ajouter un levier à l'allowlist
+            // ne casse pas ce round-trip, et on prouve le chemin réel (corps client -> spec -> blob).
+            resource: crate::parse_resource_options(&serde_json::json!({"resource": {
+                "profile": "low", "tools_profile": "mini",
+                "parallelism": 8, "run_timeout": 1800, "max_concurrent_procs": 2,
+            }})),
             // R5b — bloc auth non trivial : doit survivre au round-trip SANS perte (labels + matériel + cibles).
             eng_auth: Some(serde_json::json!({
                 "accounts": [{"label": "attacker", "bearer": "TOK"}, {"label": "victim", "cookies": {"sid": "v"}}],
@@ -737,7 +738,7 @@ mod wave_b_tests {
         assert_eq!(round.rate, spec.rate);
         assert_eq!(round.allow_private, spec.allow_private);
         assert_eq!(round.resource, spec.resource, "R3 — profil+overrides ressources survit au round-trip");
-        assert_eq!(round.resource.env_pairs().len(), 4, "les 4 variables d'env sont dérivables après round-trip");
+        assert_eq!(round.resource.env_pairs().len(), 5, "les 5 variables d'env (profil, outils, 3 leviers) sont dérivables après round-trip");
         assert_eq!(round.eng_auth, spec.eng_auth, "R5b — bloc auth {{accounts,idor_targets}} survit au round-trip SANS perte");
         // blob corrompu -> None (le leader marque failed et passe au suivant).
         assert!(RunSpawnSpec::from_value(&serde_json::json!({"garbage": 1})).is_none(), "spec sans run_id/eng_id => None");

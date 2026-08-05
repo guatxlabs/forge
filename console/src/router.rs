@@ -115,6 +115,10 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         //     PUR DATA (aucune exécution). DefaultBodyLimit relevé (fichiers de scan volumineux possibles).
         .route("/api/import", post(import_scan).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         // --- C2-light : lancement gouverné/audité (opérateur fail-closed sur run/cancel) ---
+        // RESSOURCES (R3) : catalogue LECTURE des leviers réglables au lancement (allowlist serveur +
+        // défauts du profil lus dans le moteur). Aucune écriture, aucune capacité — l'UI y lit ce
+        // qu'elle a le droit de proposer et les défauts à afficher.
+        .route("/api/resource-profile", get(resource_profile_catalog))
         .route("/api/run", post(run_create))
         .route("/api/runs", get(runs_list))
         .route("/api/runs/{id}", get(run_detail))

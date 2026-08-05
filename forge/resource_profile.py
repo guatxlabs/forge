@@ -152,15 +152,39 @@ _INT_KNOBS = frozenset({
     "triage_max_clusters", "rate_per_sec", "max_concurrent_procs",
 })
 
-# Variables d'environnement PRÉEXISTANTES qui priment sur le profil (rétro-compat). Pour l'audit
-# (snapshot du run), on lit ces overrides afin de refléter les valeurs RÉELLEMENT en vigueur.
-_ENV_OVERRIDES = {
+# ---------------------------------------------------------------------------------------------------
+# OVERRIDE PAR-LEVIER (variable d'environnement) — le canal par lequel un opérateur règle UN levier
+# ponctuellement sans changer de profil. C'est aussi le SEUL canal dont dispose la console au spawn du
+# moteur (R3, `ResourceOptions::env_pairs` côté Rust) : un levier absent de cette table n'est réglable
+# QUE par le profil. `resolve()` les consulte APRÈS l'override explicite de l'appelant (param de module,
+# clé de scope) et AVANT la valeur de profil -> précédence STRICTE :
+#
+#     override explicite (param/scope)  >  override d'env (ce tableau)  >  profil  >  défaut-code
+#
+# Les 4 premières entrées PRÉEXISTAIENT (rétro-compat : `FORGE_PARALLELISM`, `FORGE_RUN_TIMEOUT`,
+# `FORGE_TOOLS_PROFILE`, `FORGE_MAX_CONCURRENT_PROCS` — cette dernière ENFORCÉE par `runner._PROC_GATE`,
+# R4). Les autres sont ADDITIVES : aucune n'est définie par défaut -> variable absente -> `None` ->
+# fail-through vers le profil -> comportement BYTE-IDENTIQUE tant qu'un opérateur n'en pose aucune.
+#
+# EXCLUS VOLONTAIREMENT (ce sont de la GOUVERNANCE, pas de la ressource — jamais réglables par ce canal) :
+#   * `nuclei_severity` : allowlist de sévérité, réglable par PARAM DE MODULE (validé) — pas par env ;
+#   * `rate_per_sec`    : le débit est porté par le scope/ROE (documentation-only ici, cf. en-tête).
+# ---------------------------------------------------------------------------------------------------
+ENV_OVERRIDES: dict[str, str] = {
     "parallelism": "FORGE_PARALLELISM",
+    "action_timeout_secs": "FORGE_ACTION_TIMEOUT_SECS",
     "run_timeout_secs": "FORGE_RUN_TIMEOUT",
     "tools_profile": "FORGE_TOOLS_PROFILE",
-    # R4 : plafond de sous-process outils ENFORCÉ par `runner._PROC_GATE`. Exposé ici pour que le
-    # snapshot d'audit reflète le plafond RÉELLEMENT en vigueur quand l'opérateur pose l'override.
-    # Non défini (défaut) -> None -> résout la valeur de profil : snapshot BYTE-IDENTIQUE à avant R4.
+    "crawl_max_endpoints": "FORGE_CRAWL_MAX_ENDPOINTS",
+    "crawl_max_params": "FORGE_CRAWL_MAX_PARAMS",
+    "crawl_max_depth": "FORGE_CRAWL_MAX_DEPTH",
+    "content_fanout_max": "FORGE_CONTENT_FANOUT_MAX",
+    "discovery_max_fanout": "FORGE_DISCOVERY_MAX_FANOUT",
+    "llm_max_tokens": "FORGE_LLM_MAX_TOKENS",
+    "llm_num_ctx": "FORGE_LLM_NUM_CTX",
+    "llm_enrich_max_endpoints": "FORGE_LLM_ENRICH_MAX_ENDPOINTS",
+    "triage_max_items": "FORGE_TRIAGE_MAX_ITEMS",
+    "triage_max_clusters": "FORGE_TRIAGE_MAX_CLUSTERS",
     "max_concurrent_procs": "FORGE_MAX_CONCURRENT_PROCS",
 }
 
@@ -201,10 +225,17 @@ def resolve(knob: str, *, override: Any = None, profile: Any = None, default: An
     Retourne le PREMIER candidat non-None (après coercition de type). Un override GARBAGE sur un
     levier entier (non coercible) est ignoré et l'on retombe sur le profil puis le défaut (fail-open).
     `profile` : nom de profil explicite (sinon `active_profile()` lit l'env). `default` : le
-    défaut-code que l'appelant passe TOUJOURS pour garantir un fallback même hors table."""
+    défaut-code que l'appelant passe TOUJOURS pour garantir un fallback même hors table.
+
+    L'OVERRIDE D'ENV du levier (`ENV_OVERRIDES[knob]`, s'il en a un) s'intercale entre l'override
+    explicite et le profil : un appelant qui lit DÉJÀ la variable lui-même (engine `FORGE_PARALLELISM`,
+    runner `FORGE_MAX_CONCURRENT_PROCS`) obtient la MÊME valeur (idempotent) ; les leviers qui n'avaient
+    aucun canal d'override en gagnent un, INERTE tant que la variable n'est pas posée."""
     prof = active_profile() if profile is None else _normalize(profile)
     prof_val = PROFILES.get(prof, {}).get(knob)
-    for candidate in (override, prof_val, default):
+    env_name = ENV_OVERRIDES.get(knob)
+    env_val = os.environ.get(env_name) if env_name else None
+    for candidate in (override, env_val, prof_val, default):
         coerced = _coerce(knob, candidate)
         if coerced is not None:
             return coerced
@@ -232,7 +263,29 @@ def active_snapshot() -> dict[str, Any]:
     knobs: dict[str, Any] = {}
     table = PROFILES[prof]
     for knob in table:
-        env_name = _ENV_OVERRIDES.get(knob)
-        ov = os.environ.get(env_name) if env_name else None
-        knobs[knob] = resolve(knob, override=ov, profile=prof, default=table[knob])
+        # `resolve` consulte LUI-MÊME `ENV_OVERRIDES[knob]` -> le snapshot reflète l'override d'env
+        # RÉELLEMENT en vigueur (valeur identique à l'ancien passage explicite d'`override=`).
+        knobs[knob] = resolve(knob, profile=prof, default=table[knob])
     return {"profile": prof, "knobs": knobs}
+
+
+def catalog() -> dict[str, Any]:
+    """CATALOGUE lisible par une autre couche (la console Rust l'expose à l'UI de lancement via
+    `GET /api/resource-profile`, cf. `console/src/runs_validate.rs`) — profils, défauts par levier,
+    variable d'env de chaque levier. Cette table est la SOURCE DE VÉRITÉ : l'UI AFFICHE ces valeurs au
+    lieu d'en garder une copie qui dériverait. Pure lecture, déterministe, aucun effet de bord."""
+    return {
+        "env_var": ENV_VAR,
+        "default_profile": DEFAULT_PROFILE,
+        "profiles": {name: dict(knobs) for name, knobs in PROFILES.items()},
+        "env_overrides": dict(ENV_OVERRIDES),
+        "int_knobs": sorted(_INT_KNOBS),
+    }
+
+
+if __name__ == "__main__":  # pragma: no cover - point d'entrée `python -m forge.resource_profile`
+    # Émet le catalogue en JSON sur stdout (consommé par la console pour l'UI de lancement). Lecture
+    # PURE : n'exécute aucun run, ne touche ni scope ni ROE, n'écrit rien.
+    import json as _json
+
+    print(_json.dumps(catalog(), sort_keys=True))
