@@ -310,8 +310,48 @@ class Scope:
             s = s.split(":", 1)[0]
         return s
 
-    def _match(self, target: str, patterns: Iterable[Any]) -> bool:
+    # Ports implicites — seuls ceux dont le scheme détermine le port SANS ambiguïté.
+    _SCHEME_PORTS = {"http": 80, "https": 443}
+
+    @staticmethod
+    def _port(value: Any) -> int | None:
+        """Port de `value` : explicite (`:NNNN`) sinon déduit du scheme, sinon None (= indéterminé).
+
+        Miroir exact du découpage de `_host` pour que les deux ne divergent jamais sur une même
+        entrée. None n'est PAS « n'importe quel port » : c'est « on ne sait pas », et les deux
+        appelants en tirent des conclusions opposées (cf. `is_in_scope`)."""
+        s = str(value).strip().casefold()
+        scheme = ""
+        if "://" in s:
+            scheme, s = s.split("://", 1)
+        s = s.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if "@" in s:
+            s = s.rsplit("@", 1)[1]
+        raw = ""
+        if s.startswith("["):                                 # [IPv6]:port
+            rest = s.split("]", 1)[1] if "]" in s else ""
+            raw = rest[1:] if rest.startswith(":") else ""
+        elif s.count(":") == 1:                               # host:port (pas IPv6 nu)
+            raw = s.split(":", 1)[1]
+        if raw:
+            try:
+                p = int(raw)
+            except ValueError:
+                return None                                   # `host:abc` -> indéterminé, pas 0
+            return p if 0 < p < 65536 else None
+        return Scope._SCHEME_PORTS.get(scheme)
+
+    def _match(self, target: str, patterns: Iterable[Any], *,
+               unknown_port_matches: bool = False) -> bool:
+        """Le motif décide de la granularité : SANS port il porte sur l'hôte entier (comportement
+        historique), AVEC un port il ne porte que sur ce port.
+
+        `unknown_port_matches` tranche le cas « le motif exige un port, la cible n'en révèle aucun ».
+        Il n'y a pas de réponse neutre, donc chaque appelant choisit celle qui va vers la sûreté :
+        False côté in_scope (on n'élargit pas un périmètre sur une supposition), True côté out_scope
+        (un port indéterminable ne doit pas servir d'échappatoire à une interdiction)."""
         host = self._host(target)
+        tport = self._port(target)
         for p in patterns:
             if not isinstance(p, str):                        # pattern non-string => fail-closed (ignore)
                 continue
@@ -329,14 +369,21 @@ class Scope:
             except ValueError:
                 pass
             ph = self._host(p)                                # hôte canonique des deux côtés
-            if fnmatch.fnmatch(host, ph) or host == ph:       # glob hostname normalisé
+            if not (fnmatch.fnmatch(host, ph) or host == ph):  # glob hostname normalisé
+                continue
+            pport = self._port(p)
+            if pport is None:                                 # motif host-level => tous les ports
+                return True
+            if tport == pport:                                # motif port-level => CE port seulement
+                return True
+            if tport is None and unknown_port_matches:
                 return True
         return False
 
     def is_in_scope(self, target: str) -> bool:
         if not target:
             return False
-        if self._match(target, self.out_scope):               # out_scope l'emporte toujours
+        if self._match(target, self.out_scope, unknown_port_matches=True):   # l'emporte toujours
             return False
         return self._match(target, self.in_scope)
 
