@@ -156,8 +156,24 @@ async fn reap_orphaned_spawn(pgid: i32, mut child: tokio::process::Child, run_di
     let _ = std::fs::remove_dir_all(run_dir);
 }
 
-/// Supprime les répertoires temporaires `forge-run-*` (scope.json/targets.json par run) restés dans
-/// le tempdir après une interruption (crash/reboot console) — best-effort, jamais fatal.
+/// Préfixes des dirs temp éphémères : un par RUN (`runs_proc`) et un par DRY-PLAN (`planning`).
+pub(crate) const RUN_DIR_PREFIXES: [&str; 2] = ["forge-run-", "forge-plan-"];
+
+/// Âge à partir duquel un dir temp est réputé ABANDONNÉ. Doit dépasser la plus longue exécution
+/// plausible, sinon on supprime sous les pieds d'un run vivant : le watchdog plafonne un run à
+/// `FORGE_RUN_TIMEOUT` (défaut 3600 s), on prend le double.
+const RUN_DIR_STALE_SECS: u64 = 2 * 3600;
+
+/// Supprime les dirs temp de run/plan (`scope.json`/`targets.json`) restés dans le tempdir après une
+/// interruption (crash/reboot console) — best-effort, jamais fatal.
+///
+/// SEUIL D'ÂGE (2026-08-05) : la version initiale supprimait TOUT `forge-run-*` sans condition. Deux
+/// collisions réelles sur une SEULE instance, sans tempdir partagé :
+///   - `planning.rs` nommait ses dirs de dry-plan avec le MÊME préfixe `forge-run-` — un plan en vol
+///     perdait ses fichiers ; le préfixe est désormais distinct, et les deux sont couverts ici ;
+///   - le boot-reconcile du leader-tick est un one-shot qui peut se déclencher APRÈS le bind HTTP,
+///     donc après qu'un run local ait démarré.
+/// Le seuil ne supprime jamais PLUS qu'avant : aucune régression possible sur le cas nominal.
 pub(crate) fn purge_stale_run_dirs() {
     let tmp = std::env::temp_dir();
     if let Ok(entries) = std::fs::read_dir(&tmp) {
@@ -165,12 +181,22 @@ pub(crate) fn purge_stale_run_dirs() {
         for e in entries.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("forge-run-") && e.path().is_dir() && std::fs::remove_dir_all(e.path()).is_ok() {
+            if !RUN_DIR_PREFIXES.iter().any(|p| name.starts_with(p)) || !e.path().is_dir() {
+                continue;
+            }
+            // Métadonnée illisible ou horloge incohérente => on NE supprime PAS (fail-closed : ne
+            // jamais détruire sur une information qu'on n'a pas su lire).
+            let stale = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|d| d.as_secs() > RUN_DIR_STALE_SECS).unwrap_or(false))
+                .unwrap_or(false);
+            if stale && std::fs::remove_dir_all(e.path()).is_ok() {
                 purged += 1;
             }
         }
         if purged > 0 {
-            println!("[forge] reconcile: {purged} dir(s) temp forge-run-* purgé(s)");
+            println!("[forge] reconcile: {purged} dir(s) temp de run/plan abandonné(s) purgé(s)");
         }
     }
 }
@@ -1475,5 +1501,61 @@ pub(crate) async fn bounded_engine_output(
         Ok(r) => r,
         // le superviseur ne peut disparaître qu'à l'arrêt du runtime ; on ne rend jamais un faux succès.
         Err(_) => Err(EngineBoundErr::Io("superviseur de spawn moteur perdu".into())),
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    /// `purge_stale_run_dirs` n'avait AUCUN test — et le test le plus proche l'ÉVITAIT explicitement
+    /// (« on n'appelle pas reconcile_runs pour éviter killpg/purge »). La suite savait donc la fonction
+    /// dangereuse à exécuter, et contournait au lieu de garder. Ce test la garde.
+    ///
+    /// La propriété qui compte n'est pas « ça supprime » mais **« ça ne supprime PAS ce qui est vivant »**.
+    #[test]
+    fn purge_epargne_les_dirs_recents_et_ramasse_les_abandonnes() {
+        let tmp = std::env::temp_dir();
+        let uniq = std::process::id();
+        let vivants = [
+            tmp.join(format!("forge-run-vivant-{uniq}")),
+            tmp.join(format!("forge-plan-vivant-{uniq}")),
+        ];
+        let abandonnes = [
+            tmp.join(format!("forge-run-abandonne-{uniq}")),
+            tmp.join(format!("forge-plan-abandonne-{uniq}")),
+        ];
+        for d in vivants.iter().chain(abandonnes.iter()) {
+            std::fs::create_dir_all(d).expect("mkdir fixture");
+            std::fs::write(d.join("scope.json"), b"{}").expect("write fixture");
+        }
+        let vieux = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(RUN_DIR_STALE_SECS + 600);
+        for d in &abandonnes {
+            std::fs::File::open(d).expect("open dir").set_modified(vieux).expect("set mtime");
+        }
+
+        purge_stale_run_dirs();
+
+        for d in &vivants {
+            assert!(d.is_dir(), "un dir RÉCENT ne doit jamais être purgé : {}", d.display());
+            let _ = std::fs::remove_dir_all(d);
+        }
+        for d in &abandonnes {
+            assert!(!d.exists(), "un dir ABANDONNÉ doit être purgé : {}", d.display());
+        }
+    }
+
+    /// Le préfixe des dry-plans doit rester DISTINCT de celui des runs (la collision d'origine), tout
+    /// en restant couvert par la purge — sinon on échange une collision contre une fuite.
+    #[test]
+    fn les_deux_prefixes_sont_distincts_et_couverts() {
+        assert_eq!(RUN_DIR_PREFIXES.len(), 2);
+        assert!(!RUN_DIR_PREFIXES[1].starts_with(RUN_DIR_PREFIXES[0]),
+                "le préfixe de plan ne doit pas être un sous-préfixe de celui des runs");
+        for name in ["forge-run-42", "forge-plan-abc"] {
+            assert!(RUN_DIR_PREFIXES.iter().any(|p| name.starts_with(p)),
+                    "{name} doit rester couvert par la purge");
+        }
     }
 }

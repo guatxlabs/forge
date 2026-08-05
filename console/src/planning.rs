@@ -238,7 +238,9 @@ pub(crate) async fn plan(State(app): State<App>, ConnectInfo(peer): ConnectInfo<
 
     // (3) dir temp éphémère : scope.json (allow_* FORCÉS false) + targets.json. Nettoyé en fin.
     let stamp = format!("plan-{}-{}", chrono_now_compact(), gen_token().chars().take(8).collect::<String>());
-    let plan_dir = std::env::temp_dir().join(format!("forge-run-{stamp}"));
+    // Préfixe DISTINCT de celui des runs : `purge_stale_run_dirs` balayait `forge-run-*` sans
+    // condition d'âge et emportait donc les dirs de plan EN VOL (collision de préfixe, 2026-08-05).
+    let plan_dir = std::env::temp_dir().join(format!("forge-plan-{stamp}"));
     if let Err(e) = std::fs::create_dir_all(&plan_dir) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "mkdir_failed", "why": e.to_string()})));
     }
