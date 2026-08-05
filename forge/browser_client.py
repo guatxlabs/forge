@@ -84,9 +84,58 @@ def vision_click_os(strategy="turnstile", threshold=0.55, tab=DEFAULT_TAB, timeo
 
 def intercept_modify(find, replace, pattern, target="url", tab=DEFAULT_TAB, timeout=45):
     """Arme la réécriture find->replace dans une requête en vol (url|body). 'pattern' (glob URL)
-    est REQUIS par l'API. La preuve cross-account se récupère ensuite via /intercept-dump."""
+    est REQUIS par l'API. La preuve cross-account se récupère ensuite via intercept_dump()."""
     return _req("POST", "/intercept-modify", {"pattern": pattern, "find": find, "replace": replace,
                                               "target": target, "tab": tab}, timeout=timeout)
+
+
+def intercept_dump(tab=DEFAULT_TAB, limit=15, timeout=45):
+    """LIT les requêtes réécrites ET LEURS RÉPONSES. C'est l'étape qui CONCLUT un test d'accès :
+    `intercept_modify` ne fait qu'ARMER la réécriture — la réponse du serveur EST le test
+    (FORBIDDEN => contrôle d'accès appliqué ; données d'autrui => IDOR). Sans ce wrapper un module
+    ne pouvait qu'armer et s'arrêter avant la preuve, donc n'émettre aucun verdict."""
+    return _req("POST", "/intercept-dump", {"tab": tab, "limit": limit}, timeout=timeout)
+
+
+def intercept_clear(tab=DEFAULT_TAB, timeout=30):
+    """Désarme l'interception (à appeler après chaque probe : une réécriture qui traîne
+    contaminerait les requêtes suivantes et fausserait le verdict)."""
+    return _req("POST", "/intercept-clear", {"tab": tab}, timeout=timeout)
+
+
+def fill(selector, text, tab=DEFAULT_TAB, timeout=30):
+    """Remplit un champ (login/signup). L'API attend `text` (pas `value`)."""
+    return _req("POST", "/fill", {"selector": selector, "text": text, "tab": tab}, timeout=timeout)
+
+
+def click(selector, tab=DEFAULT_TAB, timeout=30):
+    """Clic DOM (Playwright). Pour un Turnstile interactif il faut vision_click_os/os_click :
+    un clic DOM ne franchit pas l'iframe cross-origin (isTrusted)."""
+    return _req("POST", "/click", {"selector": selector, "tab": tab}, timeout=timeout)
+
+
+def os_click(x, y, tab=DEFAULT_TAB, aim_min=0.6, aim_max=1.2, click=True, fast=False, timeout=60):
+    """Clic OS (xdotool X11) à des coords ÉCRAN Xvfb — événement réel, traverse les iframes."""
+    return _req("POST", "/os-click", {"x": x, "y": y, "tab": tab, "aim_min": aim_min,
+                                      "aim_max": aim_max, "click": click, "fast": fast},
+                timeout=timeout)
+
+
+def new_context(width=1920, height=1080, force=False, timeout=60):
+    """Contexte frais (cookies/localStorage effacés) — isole un 2e compte pour un test A/B
+    cross-account. BLOQUE si d'autres tabs sont actives, sauf force=True."""
+    return _req("POST", "/new-context", {"width": width, "height": height, "force": force},
+                timeout=timeout)
+
+
+def cookies(timeout=30):
+    """Cookies du contexte courant (GET). Utile pour vérifier qu'une session est bien établie."""
+    return _req("GET", "/cookies", timeout=timeout)
+
+
+def evaluate(script, tab=DEFAULT_TAB, timeout=30):
+    """Exécute du JS dans la page. ⚠️ pas de fetch/Promise supporté côté service."""
+    return _req("POST", "/evaluate", {"script": script, "tab": tab}, timeout=timeout)
 
 
 def goto(url, tab=DEFAULT_TAB, wait=5, timeout=45):
