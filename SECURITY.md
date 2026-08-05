@@ -8,10 +8,15 @@ in that governance is a serious bug, and we want to hear about it.
 
 **Do not open a public issue for a security vulnerability.**
 
-Report privately via **GitHub Security Advisories** — the "Report a vulnerability" button on
-this repository's **Security** tab. This keeps the report, the discussion and the fix coordinated
-and private, and lets us credit you on disclosure. It is the only channel we monitor, so please use
-it rather than a public issue, a pull request, or a direct message.
+Report privately, via either channel:
+
+1. **GitHub Security Advisories** *(preferred)* — the "Report a vulnerability" button on this
+   repository's **Security** tab. It keeps the report, the discussion and the fix coordinated and
+   private end-to-end, and lets us credit you on disclosure.
+2. **Email** — `security@guatx.com`, if you would rather not use a GitHub account, or if the issue
+   concerns the repository itself.
+
+Please use one of these rather than a public issue, a pull request, or a direct message.
 
 Please include: affected version/commit, a description, reproduction steps or a PoC, and the
 impact. GitHub Security Advisories are private end-to-end, so no additional encryption is needed.
