@@ -800,6 +800,37 @@
     <div id="admin-addtool-body"><div class="muted">chargement…</div></div>
   </section>
 
+  <!-- ADMINISTRATION — cycle de vie des OUTILS (binaires externes du manifeste, réservé role=admin).
+       GET/POST /api/tools/runtime (check_admin, 403 sinon), ledgerisé `console.tools.*`. Le panneau
+       n'expose AUCUN champ de saisie : uniquement des actions attachées à une ligne du manifeste. Il
+       n'existe ni champ URL, ni champ empreinte, ni champ version — parce que ni l'API ni l'installeur
+       n'en acceptent : la source est calculée depuis forge/tools.json, qui EST l'allowlist. -->
+  <section id="admin-toolsrt" class="card span2" aria-labelledby="adm-trt-h">
+    <div class="panelhead">
+      <h2 id="adm-trt-h">Administration — cycle de vie des outils <span id="admin-toolsrt-count" class="badge"></span></h2>
+      <span class="qbar">
+        <button id="admin-toolsrt-reload" class="k-theme" type="button" title="Recharger l'état des outils (lecture seule : n'exécute aucun outil)">Rafraîchir</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Installer / mettre à jour / retirer les <b>binaires de sécurité externes</b> (httpx, nuclei, subfinder…) <b>sans reconstruire l'image</b>. La version et le <b>SHA256 par architecture</b> viennent du <b>manifeste unique</b> <code>forge/tools.json</code> : <b>il n'existe aucun paramètre d'URL, de version ou d'empreinte</b>, ici comme dans <code>forge tools</code> — un téléchargement non épinglé n'est pas « refusé », il est <b>inexprimable</b>. Le digest est calculé <b>sur le flux</b> et comparé au pin <b>avant</b> toute pose sur le <code>PATH</code> ; un écart ⇒ refus, temporaire détruit, refus <b>journalisé</b>. Un outil <b>non épinglé</b> pour l'architecture courante n'a pas de bouton. <b>Admin-only</b>, chaque action est <b>attribuée</b> et <b>ledgerisée</b>. Détails : <code>docs/TOOLS_LIFECYCLE.md</code>.</p>
+    <div id="admin-toolsrt-body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ADMINISTRATION — canal de notification SORTANT (webhook, réservé role=admin). GET/POST
+       /api/notify/channel + POST /api/notify/channel/test (check_admin, 403 sinon), ledgerisés. OFF PAR
+       DÉFAUT : sans config, aucun octet ne quitte le processus. Le jeton est WRITE-ONLY (jamais re-servi
+       par GET). Le corps sortant passe par le rédacteur des rapports puis par la neutralisation des URL. -->
+  <section id="admin-notify" class="card span2" aria-labelledby="adm-nch-h">
+    <div class="panelhead">
+      <h2 id="adm-nch-h">Administration — canal de notification <span id="admin-notify-state" class="badge mut">—</span></h2>
+      <span class="qbar">
+        <button id="admin-notify-reload" class="k-theme" type="button" title="Recharger la configuration du canal (jeton rédigé)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Miroir <b>hors-processus</b> des notifications in-app (assignation / triage) vers un <b>webhook</b>. C'est de l'<b>egress depuis un outil offensif</b>, donc gouverné comme celui du LLM : <b>off par défaut</b>, opt-in explicite et ledgerisé. Ce qui part est <b>minimal et rédigé</b> — le texte passe par le <b>rédacteur des rapports</b> puis par la <b>neutralisation des URL</b> (une URL de cible porte en général l'identifiant de la victime). Les cibles <b>internes</b> (loopback, RFC1918, métadonnées cloud) sont <b>refusées</b> sauf <code>FORGE_ALLOW_INTERNAL_INTEGRATIONS=1</code>, et un <b>jeton</b> n'est jamais envoyé <b>en clair vers une cible publique</b>. Chaque envoi est <b>journalisé</b> (canal, destinataire <b>rédigé</b>, issue) — <b>jamais le contenu</b>. SMTP et SLA : <b>non construits</b>, et pourquoi — cf. <code>docs/ADMINISTRATION.md</code>.</p>
+    <div id="admin-notify-body"><div class="muted">chargement…</div></div>
+  </section>
+
   <!-- ADMINISTRATION — source de détection (boucle purple, réservé role=admin). GET/POST /api/detection/source
        (check_admin, 403 sinon), ledgerisé ; le SECRET est WRITE-ONLY (affiché ••• une fois posé, jamais
        renvoyé par GET). Test de joignabilité via POST /api/detection/test. Même composant que le wizard (étape 3). -->

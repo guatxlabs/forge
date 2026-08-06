@@ -143,6 +143,11 @@ fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, f
             "engagement_id": engagement_id, "finding_id": finding_id, "text": text, "read": 0,
         }),
     });
+    // CANAL SORTANT (opt-in, OFF PAR DÉFAUT) — la notification in-app est DÉJÀ créée et diffusée ; ceci
+    // n'en est qu'un miroir hors-processus. NO-OP TOTAL sans config (aucune requête, aucune tâche), et
+    // best-effort quand il est armé : le corps part RÉDIGÉ (secrets + URL de cible) et un échec d'envoi
+    // n'a aucun effet ici. Cf. console/src/notify_channels.rs.
+    crate::notify_channels::dispatch(app, recipient, engagement_id, finding_id, kind, &text);
 }
 
 /// HOOK ASSIGN (single) — notifie le NOUVEL assigné qu'un finding lui a été attribué (best-effort). Résout

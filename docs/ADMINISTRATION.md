@@ -142,6 +142,39 @@ est référencé par `backup_policy.passphrase_env` ; la passphrase n'est jamais
 
 ---
 
+## 5bis. Canal de notification sortant (webhook)
+
+Les notifications **in-app** (assignation / triage) ne quittent jamais le processus. Ce canal en fait
+un miroir vers un endpoint HTTP. C'est de l'**egress depuis un outil offensif** — un finding porte des
+preuves — donc il est gouverné exactement comme l'egress LLM du moteur.
+
+*Administration → canal de notification* (admin, ledgerisé) · `GET`/`POST /api/notify/channel`,
+`POST /api/notify/channel/test`.
+
+| Garantie | Mise en œuvre | En cas d'écart |
+|---|---|---|
+| **OFF par défaut** | aucune clé `settings.notify_channel` ⇒ canal inerte | aucun octet ne sort ; un déploiement qui ne touche à rien est inchangé |
+| **Rédaction du corps** | `redact::redact_secrets` (**le rédacteur des rapports**, pas une 2e copie) **puis** neutralisation des URL absolues | un JWT / une clef cloud / une URL de cible ne peut pas partir |
+| **Anti-SSRF** | deny-list d'intégration **partagée** sur l'IP **résolue** (anti-rebinding) | loopback / RFC1918 / link-local / métadonnées / ULA refusés, sauf `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` |
+| **Jeton write-only** | jamais re-servi par `GET` (`secret_set` seul), jamais loggé, jamais ledgerisé | `keep_secret:true` pour éditer l'endpoint sans le retaper |
+| **Pas de credential en clair sur un réseau public** | la console n'a **aucun client TLS** (build openssl-free) ⇒ transport clair ⇒ un jeton + une cible **publique** = **refus** | viser un collecteur interne, ou retirer le jeton du canal |
+| **Journalisation de l'ENVOI, pas du contenu** | ledger `console.notify.dispatch` : canal, **destinataire rédigé** (`scheme://authority` — le chemin d'un webhook Slack/Teams **est** un credential), événement, issue | le texte du message n'apparaît nulle part |
+| **Best-effort** | tâche détachée et bornée | un échec d'envoi n'affecte ni la notification in-app ni la mutation qui l'a déclenchée |
+
+**Pourquoi il n'y a pas de SMTP.** Sans client TLS, `AUTH LOGIN/PLAIN` mettrait le mot de passe SMTP
+en base64 sur le fil : on protégerait le secret **au repos** pendant qu'on le fuit **en vol**, à chaque
+envoi. Le seul cas restant — un relais on-prem sans authentification — est déjà couvert, mieux, par un
+webhook vers un collecteur interne. Rouvrir ce chantier suppose d'abord un **seam TLS** dans la console
+(décision d'architecture : elle touche le socle openssl-free), ou une délégation au moteur Python
+(`smtplib` + `ssl`), qui est une autre couche.
+
+**Pourquoi il n'y a pas encore de SLA.** Un SLA de triage est un **ordonnanceur** (balayage périodique
+des findings en retard), pas un canal — le patron à reprendre est celui du scheduler de sauvegarde. Il
+n'a de sens qu'une fois le canal éprouvé, et le livrer en même temps aurait mêlé deux risques
+indépendants.
+
+---
+
 ## 6. Migration de données
 
 Reprendre un install existant (systemd/bare-metal) vers Docker/autre cible **sans perdre l'audit**.

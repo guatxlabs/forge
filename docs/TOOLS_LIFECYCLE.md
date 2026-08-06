@@ -51,6 +51,7 @@ amont), puis soit reconstruire l'image, soit — sans rebuild — `forge tools u
 |---|---|---|
 | `Dockerfile` (`python3 forge/toolsmanifest.py --arch … --profile full`) | au **build** | baseline bakée dans `/usr/local/bin`, selon `FORGE_TOOLS_PROFILE` |
 | `forge tools list\|install\|update\|remove` | au **runtime** | surcouche persistante dans `/data/tools/bin` |
+| console — `GET/POST /api/tools/runtime` + panneau **Administration → cycle de vie des outils** | au **runtime** | pilote la CLI ci-dessus, admin-only + ledgerisé (§3.1) |
 
 ---
 
@@ -95,6 +96,31 @@ Hors conteneur, le répertoire par défaut est `<data_dir>/tools` ; `FORGE_TOOLS
 > l'activer, montez un volume sur `/data/tools` — un PVC si vous voulez que les installs survivent au
 > redémarrage du pod, un `emptyDir` si des installs éphémères par pod vous suffisent. Rien d'autre à
 > changer : `FORGE_TOOLS_DIR` et le `PATH` viennent déjà de l'image.
+
+### 3.1 Depuis la console (API + panneau)
+
+La même chose, sans shell dans le conteneur. `Administration → cycle de vie des outils` liste le
+manifeste (version cible, version installée lue **dans le reçu**, provenance runtime/baseline/absent,
+chemin résolu, présence du pin pour l'architecture) et attache trois actions à chaque ligne.
+
+```
+GET  /api/tools/runtime                              # état (n'exécute aucun outil)
+POST /api/tools/runtime  {"action":"install","name":"nuclei"}
+```
+
+**Le corps n'accepte QUE `{action, name}`.** Tout autre champ — `url`, `sha256`, `digest`, `version` —
+fait **échouer** la requête en 400, avant le moindre sous-processus. Ce n'est pas un filtrage
+silencieux : c'est la même propriété qu'en CLI, exprimée à l'étage HTTP. Le `name` doit en outre
+figurer dans le manifeste **tel que le moteur le rapporte** (`forge tools list --json`) ; si cette
+sonde n'aboutit pas, la mutation est **refusée** plutôt que tentée à l'aveugle. L'`argv` est fixe et
+construit côté serveur. Un outil sans pin pour l'architecture courante n'a **aucun bouton** dans le
+panneau : il n'existe pas de chemin, même cosmétique, vers un téléchargement non vérifié.
+
+Gouvernance : **admin-only** (`check_admin`, 403 sinon — installer un binaire est au moins aussi
+privilégié que déclarer un outil via `/api/tools`, et exige une attribution individuelle), spawn
+**borné** (budget de temps, plafond de concurrence, cap d'octets, kill de groupe), et **double
+journalisation** — `console.tools.install|update|remove` (qui a demandé quoi, et l'issue) en plus de
+l'entrée `tools.install` que l'installeur écrit lui-même avec **le digest vérifié**.
 
 ### Ce que ça ne fait pas
 
@@ -146,7 +172,8 @@ et l'acteur :
   digest saisi par l'opérateur (ou récupéré puis confirmé). C'est une UX d'intégrité à part entière,
   laissée à une itération dédiée plutôt que bâclée : tant qu'elle n'existe pas, il n'y a **aucun**
   chemin vers un téléchargement non épinglé.
-- **API et panneau console.** Le cycle de vie est exposé en **CLI** uniquement. L'API admin auditée et
-  le panneau UI (versions installée/cible, boutons install/update/remove) restent à faire.
+- ~~**API et panneau console.**~~ **Livré** (§3.1) : `GET/POST /api/tools/runtime` + le panneau
+  `Administration → cycle de vie des outils`. La contrainte qui rendait ce chantier délicat est tenue —
+  la route n'accepte qu'un **nom du manifeste**, jamais une URL ni une empreinte.
 - **Sonde de version par exécution.** `forge tools list` ne lance **rien** : la version installée est
   lue dans le reçu déposé à l'installation. Lister ne doit pas être une exécution.

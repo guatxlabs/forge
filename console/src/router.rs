@@ -71,6 +71,12 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // allowlist), le persiste dans le dir server-managed + HOT-RELOAD le catalogue ; GET liste les
         // outils UI ; DELETE :kind en retire un (jamais un built-in). Ne collisionne pas avec /api/modules.
         .route("/api/tools", get(tools_list).post(tools_add))
+        // CYCLE DE VIE DES OUTILS (binaires du manifeste) — DÉCLARÉ AVANT `/api/tools/{kind}` : le
+        // segment STATIQUE `runtime` prime sur le paramètre (matchit), donc aucune collision avec le
+        // DELETE d'un outil déclaré par l'UI. Routes DANS console/src/tools_runtime.rs. ADMIN-ONLY,
+        // ledgerisé. GET = état (n'exécute rien) ; POST {action,name} = install/update/remove — le corps
+        // n'accepte QUE ces deux champs : ni URL, ni empreinte, ni version (la source vient du manifeste).
+        .merge(tools_runtime::routes())
         .route("/api/tools/{kind}", axum::routing::delete(tools_delete))
         .route("/api/campaigns", get(campaigns))
         // ENGAGEMENT (objet de 1re classe) : liste + compteurs (viewer) ; create = OPÉRATEUR ; edit/
@@ -150,6 +156,13 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // filtré sur mon user_id. Fail-closed au user_id de l'appelant (jamais celles d'un autre). Émission
         // sur les hooks assign/triage de findings.rs (best-effort, grant-scopée).
         .merge(notifications::routes())
+        // CANAL SORTANT des notifications (webhook) — routes DANS console/src/notify_channels.rs,
+        // fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard. GET/POST
+        // /api/notify/channel = config ADMIN-ONLY (secret write-only, jamais re-servi) ; POST
+        // /api/notify/channel/test = un envoi de vérification avec la config STOCKÉE (l'endpoint n'est
+        // JAMAIS un paramètre de requête — sinon la route deviendrait un proxy SSRF pour admin). OFF par
+        // défaut : sans config, aucun octet ne quitte le processus.
+        .merge(notify_channels::routes())
         // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
         // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST

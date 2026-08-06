@@ -86,6 +86,12 @@ mod presence;
 // main.rs n'y contribue que la ligne `mod` + le `merge` des routes. Émet sur les hooks assign/triage de
 // findings.rs (best-effort, grant-scopé), réutilise App + le bus App.events (topic dédié) — zéro champ App.
 mod notifications;
+// CANAL DE NOTIFICATION SORTANT (webhook) — la SEULE sortie de la couche notifications. Même discipline
+// que notifications/presence : logique + handlers dans son PROPRE module ; main.rs n'y contribue que la
+// ligne `mod` + le `merge` des routes. OFF PAR DÉFAUT (opt-in admin ledgerisé, miroir de `scope.llm.
+// enabled`), corps RÉDIGÉ par la surface des rapports (redact.rs) + neutralisation des URL de cible,
+// deny-list SSRF d'intégration PARTAGÉE (net::reject_internal_addr), secret write-only. Zéro champ App.
+mod notify_channels;
 // HA (#10 Wave A/B) — leader lease + heartbeat + run-leader (enqueue/claim/spawn), PG-only + opt-in
 // FORGE_HA. The MODULE is now compiled UNCONDITIONALLY because Wave B routes the SHARED run-flow through
 // its PORTABLE predicates (`ha_enabled`/`is_leader`/`my_instance_id`) — in the community build those
@@ -288,6 +294,11 @@ pub(crate) use crate::users::*;
 // HOT-RELOADENT le catalogue via `populate_modules`. Re-exporté `pub(crate)` pour build_router + tests.
 mod tools;
 pub(crate) use crate::tools::{tools_add, tools_delete, tools_list};
+// CYCLE DE VIE DES OUTILS depuis l'UI (brique 4 de docs/TOOLS_LIFECYCLE.md) — pilote la CLI DÉJÀ
+// gouvernée `forge tools install|update|remove` (manifeste unique + SHA256 épinglé + ledger). N'ajoute
+// AUCUNE capacité : la route n'accepte QU'UN NOM du manifeste, jamais une URL ni une empreinte — un
+// téléchargement non épinglé reste INEXPRIMABLE. Admin-only + ledgerisé ; spawn via le helper borné.
+mod tools_runtime;
 // ÉTAT PARTAGÉ (`App`) + substrat couplé (structs App/RunState/RunHandle/RunEvent/LedgerHead/Engagement,
 // SCHEMA+migrate()+ensure_default_*/populate_modules, resolve_web_dir/load_server_scope, settings_get/set,
 // now_epoch, sous-système DÉTECTION/purple + run_report) extrait de main.rs (PURE MOVE, stage `state`). Les
