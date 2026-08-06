@@ -274,6 +274,20 @@ def build_parser():
     engage.add_argument("--mode", choices=["propose", "auto"], default="propose")
     engage.add_argument("--ledger"); engage.add_argument("--report")
     engage.add_argument("--reason"); engage.add_argument("--memory")
+    # Backend de dedup du store mémoire. `exact` (défaut) = comportement HISTORIQUE, inchangé. Les
+    # autres backends existaient (`memory.make_memory`) mais n'avaient AUCUN appelant de production :
+    # le moteur recevait toujours un `Memory` exact. Ces deux drapeaux les rendent atteignables sans
+    # rien changer par défaut.
+    engage.add_argument("--memory-mode", dest="memory_mode",
+                        choices=["exact", "jaccard", "embeddings"], default="exact",
+                        help="backend de dedup de --memory : exact (défaut, clé normalisée) ; jaccard "
+                             "(dedup floue stdlib : même cible + titre similaire) ; embeddings (dedup "
+                             "sémantique, exige sentence-transformers ET un modèle DÉJÀ en cache local "
+                             "sauf --memory-allow-download — dégrade vers jaccard si indisponible)")
+    engage.add_argument("--memory-allow-download", dest="memory_allow_download", action="store_true",
+                        help="AUTORISE la sortie réseau qui télécharge le modèle d'embeddings "
+                             "(--memory-mode embeddings). Sans ce drapeau, le modèle est chargé "
+                             "HORS-LIGNE : absent du cache local -> repli jaccard, aucun egress.")
     engage.add_argument("--toolspec", action="append", default=[], metavar="FILE",
                         help="charge un ToolSpec déclaratif (JSON/YAML) et l'enregistre comme module gouverné "
                              "AVANT le plan ; répétable. Fail-CLOSED : spec invalide -> erreur nommant le fichier. "

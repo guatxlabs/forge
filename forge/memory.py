@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Mémoire d'engagement — store + dedup + recherche des findings.
 
-v0 : store JSONL local + dedup par clé normalisée (cible, titre/catégorie). Pur-stdlib,
-hermétique. La dedup évite de re-rapporter le même finding à chaque scan.
+Trois backends derrière UNE interface (`store` / `seen` / `search`), du plus strict au plus tolérant :
+`Memory` (clé exacte : cible + catégorie + titre normalisé), `JaccardMemory` (dedup FLOUE stdlib :
+même cible + trigrammes similaires) et `memory_faiss.EmbeddingMemory` (dedup SÉMANTIQUE, OPT-IN, dont
+le chargement de modèle est un egress gouverné). `make_memory` (bas de fichier) les fabrique et fixe
+la politique : LE REPLI STDLIB EST LE DÉFAUT.
 
-Backend de production (à brancher, P2 suite) : un index vectoriel de findings (dedup
-sémantique au seuil 0.85, knowledge base + retour de triage). L'interface ci-dessous
-(store/seen/search) est volontairement compatible pour swap ultérieur.
+Store JSONL local, pur-stdlib, hermétique. La dedup évite de re-rapporter le même finding à chaque scan.
 """
 import json
 import re
@@ -135,23 +136,39 @@ class JaccardMemory(Memory):
         return True
 
 
-def make_memory(path=None, mode="auto", threshold=0.85):
-    """Fabrique de mémoire. mode : 'exact' | 'jaccard' | 'faiss' | 'auto'.
+# Modes qui demandent EXPLICITEMENT le backend à embeddings. `'faiss'` est l'alias HISTORIQUE de
+# `'embeddings'` (le nom du module est historique ; il n'y a pas d'index FAISS — cf. memory_faiss).
+_EMBEDDING_MODES = ("embeddings", "faiss")
 
-    'faiss'/'auto' tente le backend embeddings (dedup sémantique) ;
-    dégrade proprement vers Jaccard (stdlib) si sentence-transformers/faiss sont absents.
+
+def make_memory(path=None, mode="auto", threshold=0.85, allow_download=False):
+    """Fabrique de mémoire. mode : 'exact' | 'jaccard' | 'embeddings' (alias 'faiss') | 'auto'.
+
+    LE REPLI STDLIB EST LE DÉFAUT, et il l'est SANS CONDITION : `'auto'` rend `JaccardMemory` et ne
+    TENTE MÊME PAS l'import du backend à embeddings. C'est délibéré — charger un encodeur est un EGRESS
+    (téléchargement du modèle), et `'auto'` basculait auparavant sur ce backend dès que
+    `sentence-transformers` se TROUVAIT installé dans l'environnement, pour une raison quelconque : le
+    défaut sortait alors sur le réseau sans que personne ne l'ait demandé.
+
+    `'embeddings'` est l'OPT-IN explicite. Même là, le modèle est chargé HORS-LIGNE (cache local) sauf
+    `allow_download=True`, second opt-in qui autorise la sortie réseau. Toute indisponibilité
+    (dépendance absente, modèle non caché, erreur quelconque) DÉGRADE vers Jaccard (stdlib) avec une
+    note sur stderr — jamais une exception, jamais un run cassé.
     """
-    if mode in ("faiss", "auto"):
+    if mode in _EMBEDDING_MODES:
         try:
             from .memory_faiss import EmbeddingMemory
-            return EmbeddingMemory(path, threshold=threshold)
-        except Exception:  # noqa: BLE001
-            if mode == "faiss":
-                import sys
-                print("[forge] backend embeddings indisponible -> repli Jaccard (stdlib)", file=sys.stderr)
+            return EmbeddingMemory(path, threshold=threshold, allow_download=allow_download)
+        except Exception as e:  # noqa: BLE001
+            import sys
+            print(f"[forge] backend embeddings indisponible ({type(e).__name__}) -> repli Jaccard "
+                  f"(stdlib){'' if allow_download else ' ; modèle chargé hors-ligne (cache local seul)'}",
+                  file=sys.stderr)
             # le seuil par défaut (0.85) vise les embeddings ; Jaccard-trigrammes sature plus bas,
             # on le borne à 0.8 pour rester discriminant (sinon quasi aucun fuzzy-merge).
             return JaccardMemory(path, threshold=min(threshold, 0.8))
-    if mode == "jaccard":
-        return JaccardMemory(path, threshold=min(threshold, 0.8))   # même borne Jaccard que le repli
+    # `auto` (le DÉFAUT) rejoint `jaccard` : le meilleur backend atteignable SANS egress ni dépendance.
+    # Même borne de seuil que le repli ci-dessus (les trigrammes saturent plus bas que les embeddings).
+    if mode in ("jaccard", "auto"):
+        return JaccardMemory(path, threshold=min(threshold, 0.8))
     return Memory(path)

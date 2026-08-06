@@ -21,9 +21,12 @@ Principe de gouvernance (miroir EXACT de `scope.allow_private` / `scope.triage`)
   4. FAIL-OPEN + BORNÉ. Endpoint absent / lent / erreur / timeout => capté, sauté, résultat IA-1
      inchangé, AUCUN crash. Timeout court, UN SEUL appel par run (batché sur la synthèse, PAS par
      finding), petit modèle par défaut, `keep_alive` court (le modèle n'est pas épinglé en RAM).
-  5. AUCUNE FUITE DE SECRET. `api_key` est un secret WRITE-ONLY (comme le matériel de session) : jamais
-     renvoyé par `to_dict()` (GET config), jamais journalisé, jamais dans le ledger. La sortie LLM est
-     re-passée au rédacteur unique (`forge.redact`) avant rendu.
+  5. AUCUNE FUITE DE SECRET, DANS LES DEUX SENS. `api_key` est un secret WRITE-ONLY (comme le matériel
+     de session) : jamais renvoyé par `to_dict()` (GET config), jamais journalisé, jamais dans le ledger.
+     La sortie LLM est re-passée au rédacteur unique (`forge.redact`) avant rendu — ET le prompt SORTANT
+     l'est aussi (`LLMClient._redact_messages`, dernière barrière avant l'egress) : il porte de la donnée
+     attaquant-influencée (URL crawlée complète, `title`/`target` bruts des findings) qui peut contenir
+     un jeton de session, une clé d'API ou un `user:pass@` d'URL.
 
 STDLIB ONLY (`urllib`) — aucune dépendance nouvelle. Généralisé depuis le pattern éprouvé de
 `deepsearch.ollama()` (urllib chat, stream=False, timeout) vers l'API OpenAI-compatible
@@ -282,12 +285,34 @@ class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
 
+    @staticmethod
+    def _redact_messages(messages: Any) -> list[Any]:
+        """Rédige le prompt SORTANT via la surface UNIQUE `forge.redact` — DERNIÈRE barrière avant
+        l'egress. La sortie LLM était déjà rédigée AU RETOUR (`enrich_triage`/`enrich_payloads`) ; l'ALLER
+        ne l'était PAS, et il porte de la donnée ATTAQUANT-INFLUENCÉE non rédigée :
+          - `_payload_messages` envoie l'URL COMPLÈTE de la cible crawlée (`action.target`) — une URL
+            découverte peut porter `?session_token=…`, `?api_key=…` ou `scheme://user:pass@` ;
+          - `_assist_messages` envoie `title`/`target` lus en ATTRIBUTS BRUTS sur les findings
+            (`triage.py` : `getattr(f, "target")`, PAS `Finding.to_dict()` qui, lui, rédige).
+        Le ledger d'egress était pourtant scrupuleux (il ne journalise que `target_host`, jamais l'URL) :
+        le prompt fuyait donc PLUS que sa propre trace d'audit. On rédige ICI, au point où les messages
+        deviennent des octets, pour qu'AUCUN futur chemin de prompt ne puisse contourner la garde.
+        Idempotent et sûr sur les prompts bénins : les deux prompts SYSTÈME sont byte-identiques après
+        rédaction. Tolérant (un message non-dict / non-str passe tel quel), ne lève jamais."""
+        out: list[Any] = []
+        for m in (messages or []):
+            if isinstance(m, dict) and isinstance(m.get("content"), str):
+                out.append({**m, "content": redact_secrets(m["content"])})
+            else:
+                out.append(m)
+        return out
+
     def _build_request(self, messages: list[dict[str, str]]) -> "urllib.request.Request":
         cfg = self.config
         url = cfg.base_url.rstrip("/") + "/v1/chat/completions"
         payload: dict[str, Any] = {
             "model": cfg.model,
-            "messages": messages,
+            "messages": self._redact_messages(messages),   # rédaction AVANT egress (cf. _redact_messages)
             "temperature": cfg.temperature,
             "max_tokens": cfg.max_tokens,
             "stream": False,

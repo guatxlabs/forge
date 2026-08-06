@@ -50,6 +50,8 @@ Exécute une **liste d'actions** via la gate ROE.
 | `--report <R>` | Écrit le rapport markdown (sinon stdout). |
 | `--reason <txt>` | Motif journalisé à l'armement. |
 | `--memory <M>` | Store mémoire (dedup des findings). |
+| `--memory-mode exact\|jaccard\|embeddings` | Backend de dedup de `--memory`. `exact` (défaut) : clé normalisée cible+catégorie+titre. `jaccard` : dedup floue stdlib (même cible + titre similaire). `embeddings` : dedup sémantique — exige `sentence-transformers` **et** un modèle déjà en cache local ; dégrade vers `jaccard` si indisponible. |
+| `--memory-allow-download` | Autorise la sortie réseau qui télécharge le modèle d'embeddings. Sans ce drapeau, le modèle est chargé **hors-ligne** : absent du cache → repli `jaccard`, aucun egress. |
 ```bash
 forge run --scope scope.json --actions actions.json \
     --arm --approve demo.fingerprint:app.test --ledger engagements/e1.jsonl --report rapport.md

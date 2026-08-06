@@ -14,7 +14,7 @@ from ..report import build_report
 from ..schema import Target
 from ..brain import HeuristicBrain, AutoPentestBrain
 from ..planner import Planner
-from ..memory import Memory
+from ..memory import make_memory
 from .. import purple
 from .. import console_client
 from .. import workflows
@@ -94,11 +94,23 @@ def cmd_plan(args):
     return 0
 
 
+def _make_memory(args):
+    """Store mémoire du run, ou None si `--memory` absent (comportement inchangé). Le BACKEND de dedup
+    vient de `--memory-mode` (défaut `exact` == comportement historique) ; `--memory-allow-download`
+    est l'opt-in d'egress du backend `embeddings`. `make_memory` dégrade seul vers le repli stdlib si
+    le backend demandé est indisponible — la CLI n'a donc aucun cas d'erreur à traiter ici."""
+    if not getattr(args, "memory", None):
+        return None
+    return make_memory(args.memory,
+                       mode=getattr(args, "memory_mode", "exact") or "exact",
+                       allow_download=bool(getattr(args, "memory_allow_download", False)))
+
+
 def cmd_run(args):
     _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
-    memory = Memory(args.memory) if args.memory else None
+    memory = _make_memory(args)
     engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory)
     if args.arm:
         engine.arm(f"forge run --arm ({args.reason or 'cli'})")
@@ -143,7 +155,7 @@ def cmd_campaign(args):
     _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
-    memory = Memory(args.memory) if args.memory else None
+    memory = _make_memory(args)
     # ÉMISSION PROGRESSIVE : la console pompe le stdout du moteur ligne à ligne vers le flux SSE du run.
     # On branche un callback qui imprime CHAQUE ligne d'avancement immédiatement (flush) pour que les
     # verdicts/SKIP par action et les bannières de vague STREAMENT en direct (au lieu du seul récap final).
