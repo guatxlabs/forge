@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — CLIENT HTTP-OUT (fetcher intégré) extrait de main.rs (PURE MOVE). Regroupe le schéma
 //! d'authentification du fetcher (`HttpAuth`), sa construction depuis la config source (`parse_http_auth`),
-//! le GET HTTP/1.1 minimal et BLOQUANT sur socket TCP brut (`http_get_blocking`, aucune dépendance HTTP
-//! lourde ni TLS/openssl) et le décodage `chunked` (`dechunk`). Réutilise les helpers de source de
+//! le GET HTTP/1.1 minimal et BLOQUANT (`http_get_blocking`, aucune dépendance HTTP lourde), la garde
+//! SSRF d'intégration (`reject_internal_addr`/`resolve_guarded_with`) et le décodage
+//! `chunked` (`dechunk`). Le TRANSPORT est délégué au seam `crate::tls` — `http://` (clair GOUVERNÉ) et
+//! `https://` (TLS VÉRIFIÉ) sont donc tous deux servis ici. Réutilise les helpers de source de
 //! détection (`ds_auth_type`/`ds_secret`) restés à la racine de crate via `use crate::*`, et est re-exporté
 //! à la racine par `pub(crate) use crate::net::*` — les appelants inter-modules (`crate::http_get_blocking`,
 //! `crate::HttpAuth`, `crate::dechunk` depuis sso/scim/detection) ET les tests inline de main.rs (`super::*`)
@@ -75,16 +77,12 @@ pub(crate) fn integration_ip_denied(ip: &IpAddr) -> Option<&'static str> {
     }
 }
 
-/// Garde fail-closed d'une cible d'INTÉGRATION résolue. Vérifie l'adresse EXACTE que l'on s'apprête à
-/// contacter (resolve-then-check-then-connect la MÊME `addr` => neutralise le DNS-rebinding POUR CETTE
-/// connexion : le contrôle porte sur l'IP effectivement connectée, pas sur un 2e lookup). No-op si
-/// l'escape-hatch env est posé. Renvoie `Err(raison)` pour refuser. À appeler AVANT `connect_timeout`.
-/// La décision de refus PURE est déléguée à `reject_internal_addr` (testable sans toucher l'env global).
-pub(crate) fn guard_integration_addr(addr: &SocketAddr) -> Result<(), String> {
-    if crate::env_flag_enabled(ALLOW_INTERNAL_INTEGRATIONS_ENV) {
-        return Ok(());
-    }
-    reject_internal_addr(addr)
+/// LA lecture de l'escape-hatch d'environnement — un seul endroit dans tout le crate. Les trois sorties
+/// la consultent au bord (leur fonction publique) et passent ensuite le booléen en PARAMÈTRE jusqu'à la
+/// décision ; aucune couche profonde ne relit `std::env`. C'est ce qui rend la deny-list testable de
+/// façon déterministe, sans muter une variable process-globale.
+pub(crate) fn internal_targets_allowed() -> bool {
+    crate::env_flag_enabled(ALLOW_INTERNAL_INTEGRATIONS_ENV)
 }
 
 /// Décision de refus PURE (SANS lecture d'env) : `Err(raison)` si l'adresse est interne/privée/métadonnées,
@@ -101,8 +99,32 @@ pub(crate) fn reject_internal_addr(addr: &SocketAddr) -> Result<(), String> {
     }
 }
 
-/// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici (le client TCP brut ne fait
-/// pas de TLS — un endpoint mTLS passe par un kind délégué au collecteur Python).
+/// Résolution + deny-list SSRF en UN geste — LE goulot des sorties qui partent d'une URL (fetcher de
+/// détection, discovery/JWKS/token OIDC). Résout `host:port`, puis applique la deny-list à l'adresse
+/// EXACTE que l'on va connecter — c'est cette adresse-là, et pas un 2e lookup, qui part ensuite dans
+/// `tls::connect` (anti-DNS-rebinding). Une seule copie de ce geste : impossible de résoudre sans garder.
+///
+/// PUR vis-à-vis de l'ENVIRONNEMENT : l'autorisation des cibles internes est un PARAMÈTRE, pas une
+/// lecture de `std::env` (elle est faite une fois au bord, par [`internal_targets_allowed`]). Même
+/// patron que `notify_channels::plan_delivery`, et pour la même raison : le binaire de test POSE
+/// globalement l'escape-hatch (les mocks OIDC/webhook bindent sur loopback) et ne l'unset jamais — sans
+/// ce paramètre, la direction « refus par défaut » ne serait pas testable de bout en bout.
+pub(crate) fn resolve_guarded_with(host: &str, port: u16, allow_internal: bool) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("résolution {host}:{port} échouée: {e}"))?
+        .next()
+        .ok_or_else(|| format!("aucune adresse pour {host}:{port}"))?;
+    if !allow_internal {
+        reject_internal_addr(&addr)?;
+    }
+    Ok(addr)
+}
+
+/// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici : le seam TLS n'installe
+/// AUCUN certificat client (`with_no_client_auth`) — un endpoint mTLS passe par un kind délégué au
+/// collecteur Python.
 pub(crate) enum HttpAuth {
     None,
     Basic(String),                         // base64 de user:pass -> `Authorization: Basic ...`
@@ -130,48 +152,36 @@ pub(crate) fn parse_http_auth(cfg: &Value) -> HttpAuth {
 }
 
 /// GET HTTP/1.1 minimal et BLOQUANT (lancé via spawn_blocking) — pas de dépendance HTTP lourde.
-/// Ne gère QUE `http://host[:port]/path` (le service bind en HTTP clair, derrière Traefik/forward-auth
-/// en prod ; pour TLS, viser un endpoint interne http:// OU un kind délégué au collecteur Python).
-/// `auth` porte le schéma d'authentification (none/basic/bearer/api_key_header). `allow_https` : si
-/// faux (kind=plume, rétro-compat EXACTE) une URL https:// est refusée avec le message historique ;
-/// si vrai (generic_http) une URL https:// est refusée avec un message d'aiguillage (TLS non géré
-/// nativement) — le chemin generic_http+https est de toute façon délégué au Python en amont. Renvoie
-/// le corps (string) en cas de 200, sinon Err. Timeout dur (connect + lecture).
-pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration, allow_https: bool) -> Result<String, String> {
+/// Gère `http://host[:port]/path` **et** `https://host[:port]/path` : le transport vient du seam
+/// `crate::tls` (en https, le certificat du pair est VÉRIFIÉ — chaîne + nom d'hôte — avant qu'un seul
+/// octet applicatif ne parte). `auth` porte le schéma d'authentification (none/basic/bearer/
+/// api_key_header). Renvoie le corps (string) en cas de 200, sinon Err. Timeout dur (connect +
+/// handshake + lecture).
+///
+/// HISTORIQUE — cette fonction REFUSAIT `https://` faute de client TLS, et ce refus était la source de
+/// vérité citée partout ailleurs (« la console ne parle pas TLS »). Il est OBSOLÈTE depuis le seam.
+pub(crate) fn http_get_blocking(url: &str, auth: &HttpAuth, timeout: Duration) -> Result<String, String> {
+    http_get_blocking_with(url, auth, timeout, internal_targets_allowed())
+}
+
+/// Cœur de [`http_get_blocking`], avec l'autorisation des cibles internes en PARAMÈTRE (cf.
+/// [`resolve_guarded_with`]) : c'est ce qui rend la deny-list SSRF de CE fetcher testable de bout en
+/// bout, sans dépendre de l'état d'une variable d'environnement process-globale.
+pub(crate) fn http_get_blocking_with(
+    url: &str,
+    auth: &HttpAuth,
+    timeout: Duration,
+    allow_internal: bool,
+) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let rest = if let Some(r) = url.strip_prefix("http://") {
-        r
-    } else if url.strip_prefix("https://").is_some() {
-        return Err(if allow_https {
-            "HTTPS non géré nativement par le fetcher intégré — viser un endpoint http:// interne, \
-             ou un kind délégué au collecteur Python (elastic/exec) pour le TLS".to_string()
-        } else {
-            "PLUME_URL doit commencer par http:// (TLS non géré côté console — utiliser un endpoint interne)".to_string()
-        });
-    } else {
-        return Err("l'endpoint doit commencer par http:// (ou https:// pour un kind délégué)".to_string());
-    };
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let host = authority.split(':').next().unwrap_or(authority);
-    let port: u16 = authority.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(80);
-    // résolution + connexion avec timeout (évite un blocage si la source est down).
-    use std::net::ToSocketAddrs;
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("résolution {host}:{port} échouée: {e}"))?
-        .next()
-        .ok_or_else(|| format!("aucune adresse pour {host}:{port}"))?;
+    let t = crate::tls::split_url(url)?;
     // SSRF defense-in-depth (INTÉGRATION console) : cet appelant est un fetch d'URL CONFIGURÉE (source de
     // détection / OIDC), jamais une cible scope-guardée du moteur — on refuse donc loopback/link-local/
     // métadonnées/RFC1918/ULA sur l'IP RÉSOLUE que l'on va connecter (anti-DNS-rebinding), sauf escape-hatch.
-    guard_integration_addr(&addr)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connexion {addr} échouée: {e}"))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // Le TLS ne remplace PAS cette garde : chiffrer un fetch vers 169.254.169.254 ne le rend pas légitime.
+    let addr = resolve_guarded_with(&t.host, t.port, allow_internal)?;
+    let mut stream = crate::tls::connect(&addr, &t.host, t.scheme, timeout)?;
+    let (authority, path) = (&t.authority, &t.path);
     let mut req = format!(
         "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-detection\r\nAccept: application/json\r\nConnection: close\r\n"
     );
@@ -307,7 +317,7 @@ mod dechunk_tests {
 
 #[cfg(test)]
 mod ssrf_tests {
-    use super::{guard_integration_addr, integration_ip_denied, reject_internal_addr};
+    use super::{integration_ip_denied, reject_internal_addr};
     use std::net::{IpAddr, SocketAddr};
 
     fn ip(s: &str) -> IpAddr {
@@ -353,15 +363,55 @@ mod ssrf_tests {
         assert!(reject_internal_addr(&sa("8.8.8.8")).is_ok(), "public autorisé");
     }
 
-    /// L'ESCAPE-HATCH `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` fait passer une cible interne via la garde
-    /// complète `guard_integration_addr` (SIEM/IdP privé on-prem légitime). On POSE la var et on la laisse
-    /// posée : c'est l'état DÉSIRÉ par tout le binaire de test (les mocks OIDC loopback des tests SSO en
-    /// dépendent), donc AUCUN test ne l'unset -> pas de course sur l'env process-global. La direction
-    /// « refus par défaut » est prouvée par `reject_internal_addr` (pur) ci-dessus.
+    /// LA DENY-LIST MORD DANS LE FETCHER LUI-MÊME, pas seulement dans la fonction pure — et le seam TLS
+    /// n'y change RIEN : une cible interne est refusée en `http://` COMME en `https://`, AVANT toute
+    /// connexion et donc avant tout handshake. (Chiffrer un fetch vers 169.254.169.254 ne le rend pas
+    /// légitime.) Déterministe : `allow_internal` est un PARAMÈTRE, pas une lecture d'env.
+    /// MUTATION : retirer `reject_internal_addr(&addr)?` de `resolve_guarded_with` -> ce test rougit.
+    #[test]
+    fn fetcher_applies_the_deny_list_over_both_schemes() {
+        use crate::HttpAuth;
+        use std::time::Duration;
+        let t = Duration::from_millis(200);
+        for url in [
+            "http://127.0.0.1:9/x",
+            "https://127.0.0.1:9/x",
+            "http://169.254.169.254/latest/meta-data",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.1.2.3/x",
+        ] {
+            let e = super::http_get_blocking_with(url, &HttpAuth::None, t, false)
+                .expect_err("cible interne refusée");
+            assert!(e.contains("deny-list SSRF"), "refus SSRF attendu pour {url}, obtenu: {e}");
+        }
+        // Avec l'autorisation explicite (collecteur on-prem), la garde laisse passer : l'échec restant
+        // est de CONNEXION (port fermé), plus un refus de politique.
+        let e = super::http_get_blocking_with("http://127.0.0.1:9/x", &HttpAuth::None, t, true)
+            .expect_err("port fermé");
+        assert!(!e.contains("deny-list"), "escape-hatch : plus de refus de politique, obtenu: {e}");
+    }
+
+    /// `resolve_guarded_with` est LE goulot résolution+garde : impossible d'obtenir une adresse interne
+    /// sans autorisation explicite. MUTATION : retirer le `if !allow_internal { … }` -> ce test rougit.
+    #[test]
+    fn resolve_guarded_is_the_single_chokepoint() {
+        assert!(super::resolve_guarded_with("127.0.0.1", 9, false).is_err(), "loopback refusé par défaut");
+        assert!(super::resolve_guarded_with("127.0.0.1", 9, true).is_ok(), "autorisé explicitement");
+    }
+
+    /// L'ESCAPE-HATCH `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` est LU (`internal_targets_allowed`) et
+    /// COMPOSÉ tel quel avec la garde — c'est la composition EXACTE de la production (lecture au bord,
+    /// booléen passé en paramètre) : une cible interne passe alors, SIEM/IdP privé on-prem légitime. On
+    /// POSE la var et on la laisse posée : c'est l'état DÉSIRÉ par tout le binaire de test (les mocks
+    /// OIDC/webhook loopback en dépendent), donc AUCUN test ne l'unset -> pas de course sur l'env
+    /// process-global. La direction « refus par défaut » est prouvée par `reject_internal_addr` (pur) et
+    /// par `fetcher_applies_the_deny_list_over_both_schemes` (bout en bout) ci-dessus.
     #[test]
     fn escape_hatch_env_allows_internal() {
         crate::testutil::allow_internal_integrations_once(); // pose la var UNE fois (jamais unset)
-        assert!(guard_integration_addr(&sa("169.254.169.254")).is_ok(), "escape-hatch autorise métadonnées");
-        assert!(guard_integration_addr(&sa("10.1.2.3")).is_ok(), "escape-hatch autorise RFC1918");
+        assert!(super::internal_targets_allowed(), "l'escape-hatch est bien lu depuis l'env");
+        let allow = super::internal_targets_allowed();
+        assert!(super::resolve_guarded_with("169.254.169.254", 80, allow).is_ok(), "métadonnées autorisées");
+        assert!(super::resolve_guarded_with("10.1.2.3", 80, allow).is_ok(), "RFC1918 autorisé");
     }
 }

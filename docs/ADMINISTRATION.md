@@ -157,16 +157,20 @@ preuves — donc il est gouverné exactement comme l'egress LLM du moteur.
 | **Rédaction du corps** | `redact::redact_secrets` (**le rédacteur des rapports**, pas une 2e copie) **puis** neutralisation des URL absolues | un JWT / une clef cloud / une URL de cible ne peut pas partir |
 | **Anti-SSRF** | deny-list d'intégration **partagée** sur l'IP **résolue** (anti-rebinding) | loopback / RFC1918 / link-local / métadonnées / ULA refusés, sauf `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` |
 | **Jeton write-only** | jamais re-servi par `GET` (`secret_set` seul), jamais loggé, jamais ledgerisé | `keep_secret:true` pour éditer l'endpoint sans le retaper |
-| **Pas de credential en clair sur un réseau public** | la console n'a **aucun client TLS** (build openssl-free) ⇒ transport clair ⇒ un jeton + une cible **publique** = **refus** | viser un collecteur interne, ou retirer le jeton du canal |
+| **Transport `https://` vérifié** | seam TLS unique (`console/src/tls.rs`) — chaîne (racines Mozilla) **et** nom d'hôte vérifiés, handshake abouti **avant** le premier octet | Slack / Teams / PagerDuty sont joignables ; **aucune** option n'accepte un certificat non fiable |
+| **Pas de credential en clair sur un réseau public** | un jeton + une cible **publique** en `http://` = **refus** ; en `https://` = autorisé (le jeton est protégé) ; en `http://` vers un collecteur **interne** autorisé = inchangé | passer en `https://`, viser un collecteur interne (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`), ou retirer le jeton |
 | **Journalisation de l'ENVOI, pas du contenu** | ledger `console.notify.dispatch` : canal, **destinataire rédigé** (`scheme://authority` — le chemin d'un webhook Slack/Teams **est** un credential), événement, issue | le texte du message n'apparaît nulle part |
 | **Best-effort** | tâche détachée et bornée | un échec d'envoi n'affecte ni la notification in-app ni la mutation qui l'a déclenchée |
 
-**Pourquoi il n'y a pas de SMTP.** Sans client TLS, `AUTH LOGIN/PLAIN` mettrait le mot de passe SMTP
-en base64 sur le fil : on protégerait le secret **au repos** pendant qu'on le fuit **en vol**, à chaque
-envoi. Le seul cas restant — un relais on-prem sans authentification — est déjà couvert, mieux, par un
-webhook vers un collecteur interne. Rouvrir ce chantier suppose d'abord un **seam TLS** dans la console
-(décision d'architecture : elle touche le socle openssl-free), ou une délégation au moteur Python
-(`smtplib` + `ssl`), qui est une autre couche.
+**Pourquoi il n'y a toujours pas de SMTP** — et le seam TLS n'y change rien. STARTTLS est une élévation
+**négociée** : la session débute en clair et se hisse sur une commande échangée en clair, ce qui est une
+classe d'**injection de commandes en clair** (CVE-2011-0411 et sa descendance). Et le SMTP réel se pratique
+en TLS **opportuniste** contre des relais à certificat auto-signé : le servir honnêtement demanderait soit
+d'accepter des certificats non fiables — l'échappatoire de vérification que ce socle refuse par principe —,
+soit d'imposer aux relais de mail une PKI qu'ils n'ont pas. Débuter un client TLS par le protocole aux pires
+sémantiques d'élévation serait le mauvais ordre. Le cas restant — un relais on-prem sans authentification —
+est déjà couvert, mieux, par un webhook vers un collecteur interne ; un vrai besoin SMTP se délègue au
+moteur Python (`smtplib` + `ssl`), qui est une autre couche.
 
 ---
 

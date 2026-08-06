@@ -10,6 +10,36 @@ All notable changes to Forge are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Seam TLS sortant — la console parle `https://`, et le vérifie.** La console avait exactement trois
+  sorties TCP, toutes en socket brut, donc **en clair** : l'échange de jeton OIDC (`sso/mod.rs`), le
+  webhook de notification (`notify_channels.rs`) et le fetcher de source de détection (`net.rs`). La plus
+  grave était la première : le POST au token endpoint porte le **`client_secret`**
+  (`Authorization: Basic`) **et** le **`code`** d'autorisation — `docs/DEPLOYMENT.md` le concédait et
+  prescrivait un **proxy TLS d'egress** en contournement.
+
+  **Un seul point de sortie** (`console/src/tls.rs`), partagé par les trois : clair (**gouverné**) ou TLS
+  avec **vérification complète du certificat** — chaîne jusqu'aux racines Mozilla (`webpki-roots`) **et**
+  nom d'hôte —, le **handshake aboutissant avant le premier octet applicatif**. Face à un pair non prouvé,
+  l'appelant n'obtient aucun flux, donc n'écrit aucun secret. **Aucune échappatoire de vérification** n'est
+  livrée : ni option, ni ENV, ni feature ; une garde de source interdit au crate d'ouvrir l'API dangereuse
+  de rustls. Le contournement par proxy TLS est **caduc** ; Slack / Teams / PagerDuty deviennent joignables
+  ; une source de détection `https` est servie **en Rust**, sans spawn Python sur une route de lecture.
+
+  **Les gardes existantes restent.** La deny-list SSRF s'applique à l'IP **résolue**, en `http://` comme en
+  `https://` (chiffrer un fetch vers `169.254.169.254` n'en fait pas une cible légitime). Le refus
+  « secret + cible publique en clair » s'**assouplit exactement** : autorisé en `https://`, toujours refusé
+  en `http://`. Le clair vers un collecteur **interne** explicitement autorisé est inchangé.
+
+  **Pas de SMTP** — refusé indépendamment du TLS : STARTTLS est une élévation **négociée** (classe
+  d'injection de commandes en clair, CVE-2011-0411 et sa descendance) et le SMTP réel se pratique en TLS
+  opportuniste contre des relais auto-signés. **Pas de mTLS** (aucun certificat client) ni de lecture du
+  magasin d'AC système — une AC d'entreprise n'est donc pas reprise automatiquement (cf. DEPLOYMENT §3quater).
+
+  **Coût : 6 crates nets** (`ring`, `rustls`, `rustls-pki-types`, `rustls-webpki`, `untrusted`,
+  `webpki-roots`), ≈ +20 s CPU à froid, **aucun nouveau prérequis machine** (`ring` compile de l'asm/C via
+  `cc`, déjà exigé par `rusqlite/bundled`). **openssl-freedom préservée et vérifiée par commande** : aucun
+  `openssl-sys` / `native-tls` / `aws-lc-rs` / `schannel` / `security-framework` dans la fermeture, build
+  par défaut comme sous `store-postgres` (qui partage la même pile, une seule version de `rustls`).
 - **Cycle de vie des outils — un manifeste unique, et une surcouche runtime qui n'ouvre aucune porte.**
   Les versions et les empreintes SHA256 des douze binaires de sécurité téléchargés (httpx, nuclei,
   subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf) étaient des `ARG`

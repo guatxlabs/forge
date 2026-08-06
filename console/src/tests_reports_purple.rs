@@ -425,18 +425,24 @@ use crate::testutil::*;
         assert!(!md2.contains("Couverture parente approximative"), "aucun parent-approx inventé en fail-open");
     }
 
-    /// [purple http] http_get_blocking : pour kind=plume (allow_https=false) une URL https:// est
-    /// rejetée (TLS non géré, rétro-compat EXACTE) avec un message lisible mentionnant http://.
+    /// [purple http] http_get_blocking : le SCHÉMA est un jeu fermé {http, https}. Un `https://` n'est
+    /// PLUS refusé (le seam TLS le sert — un `PLUME_URL` en https est désormais légitime) : il échoue
+    /// ici sur la RÉSOLUTION de l'hôte bidon, pas sur le schéma. Tout autre schéma reste refusé net,
+    /// AVANT le moindre octet réseau.
     #[test]
-    fn http_get_blocking_rejects_non_http() {
+    fn http_get_blocking_scheme_is_a_closed_set() {
+        // Schéma hors jeu -> refus de PARSING (aucune résolution, aucune connexion).
+        let e = http_get_blocking("ftp://plume:7000/x", &HttpAuth::None, Duration::from_millis(50))
+            .expect_err("schéma hors jeu -> Err");
+        assert!(e.contains("http:// ou https://"), "message lisible sur le jeu fermé, obtenu: {e}");
+        // https accepté au parsing : l'échec restant est de RÉSOLUTION, plus un refus de schéma.
         let e = http_get_blocking(
-            "https://plume:7000/api/coverage/detections",
+            "https://plume-hote-inexistant.invalid:7000/api/coverage/detections",
             &HttpAuth::None,
             Duration::from_millis(50),
-            false, // allow_https=false (chemin plume)
-        );
-        assert!(e.is_err(), "https non géré (plume) -> Err");
-        assert!(e.unwrap_err().contains("http://"), "message lisible mentionnant http://");
+        )
+        .expect_err("hôte .invalid -> Err de résolution");
+        assert!(e.contains("résolution"), "https doit passer le parsing et échouer plus loin, obtenu: {e}");
     }
 
     // =============================================================================================

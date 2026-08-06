@@ -279,10 +279,16 @@ pub(crate) use crate::engagements::*;
 // `crate::admin_denied`, `crate::Identity` …) ET les tests inline (`super::*`) résolvent INCHANGÉS.
 mod auth;
 pub(crate) use crate::auth::*;
-// CLIENT HTTP-OUT (fetcher intégré std-only, sans TLS/openssl) : HttpAuth + parse_http_auth +
-// http_get_blocking + dechunk, extraits de main.rs (PURE MOVE). Re-exporté `pub(crate)` à la racine pour
-// que les appelants inter-modules (`crate::http_get_blocking`, `crate::HttpAuth`, `crate::dechunk` depuis
-// sso/scim/detection) ET les tests inline (`super::*`) résolvent INCHANGÉS.
+// SEAM TLS SORTANT — LE point de sortie TCP de la console (clair GOUVERNÉ ou TLS VÉRIFIÉ). Partagé par
+// les TROIS sorties : échange de jeton OIDC (sso), webhook de notification (notify_channels), fetcher de
+// source de détection (net). Une seule implémentation TLS, donc une seule politique de confiance à
+// vérifier. Pas de re-export à plat : les appelants passent par `crate::tls::…` (le seam se voit).
+mod tls;
+// CLIENT HTTP-OUT (fetcher intégré) : HttpAuth + parse_http_auth + http_get_blocking + dechunk + la
+// deny-list SSRF d'intégration, extraits de main.rs (PURE MOVE). Le transport lui-même est délégué au
+// seam `tls` ci-dessus (http:// ET https://). Re-exporté `pub(crate)` à la racine pour que les appelants
+// inter-modules (`crate::http_get_blocking`, `crate::HttpAuth`, `crate::dechunk` depuis sso/scim/
+// detection) ET les tests inline (`super::*`) résolvent INCHANGÉS.
 mod net;
 pub(crate) use crate::net::*;
 // ADMINISTRATION WEB DES COMPTES (#4) — CRUD des comptes réservé check_admin + GOUVERNANCE opérateur des

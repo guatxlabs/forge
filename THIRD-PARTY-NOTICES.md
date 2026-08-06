@@ -87,3 +87,23 @@ aucun JS/CSS tiers n'est embarqué (aucun bundle minifié, aucun en-tête
 Toute mise à jour d'une police doit **reprendre son fichier de licence en même
 temps que le binaire**, et mettre à jour la version indiquée ci-dessus — la
 version se lit dans la table `name`, pas dans le nom de fichier.
+
+## Racines de confiance Mozilla (`webpki-roots`) — embarquées dans le binaire
+
+Le **seam TLS sortant** (`console/src/tls.rs`, cf. [`docs/DEPLOYMENT.md`
+§3quater](docs/DEPLOYMENT.md)) vérifie les certificats contre les racines
+**compilées dans le binaire**, jamais contre le magasin du système — c'est ce
+qui garde la posture « zéro bibliothèque système » (pas de `schannel`, pas de
+`security-framework`, pas d'`openssl`). Ces racines sont donc, elles aussi, un
+composant tiers **redistribué**.
+
+- **Emplacement** : compilé dans le binaire depuis la dépendance cargo
+  `webpki-roots` (déclarée dans `console/Cargo.toml`, épinglée dans
+  `console/Cargo.lock`) — pas un fichier suivi dans ce dépôt.
+- **Contenu** : le magasin de confiance CA de Mozilla (NSS), converti en
+  ancres de confiance.
+- **Licence** : `CDLA-Permissive-2.0` (autorisée nommément dans `deny.toml`).
+- **Amont** : <https://github.com/rustls/webpki-roots>
+
+Une mise à jour de cette dépendance change **l'ensemble des autorités que la
+console accepte** : ce n'est pas un bump de routine, et il se relit comme tel.

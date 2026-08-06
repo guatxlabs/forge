@@ -604,44 +604,52 @@ l'URL authorize (state + nonce + challenge persistés server-side) et 302 vers l
 cryptographiquement l'ID token** — signature **RS256 via la JWKS de l'IdP** (kid exact ; `none`/HS\*
 rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et binding du `nonce`.
 
-> #### ⚠️ Transport SSO — TLS d'egress OBLIGATOIRE
+> #### ✅ Transport SSO — `https://` natif, vérifié (le proxy TLS d'egress n'est PLUS requis)
 >
-> **Le fetcher OIDC intégré du console est HTTP-only.** Discovery, JWKS **et** l'échange de token passent
-> par le client HTTP interne de la console, qui **REJETTE `https://`** (`http_get_blocking` :
-> « HTTPS non géré nativement par le fetcher intégré » ; `http_post_form_blocking` :
-> « token endpoint must be http:// (TLS terminated upstream) »). **Un issuer `https://` exige donc
-> aujourd'hui un proxy TLS d'egress** — la console ne parle pas TLS elle-même sur ce chemin.
+> **La console parle TLS elle-même.** Discovery, JWKS **et** l'échange de token passent par le **seam TLS
+> unique** (`console/src/tls.rs`) : un `issuer` en **`https://`** est joint **directement**, avec
+> **vérification complète du certificat** — chaîne jusqu'aux racines Mozilla (`webpki-roots`) **et** nom
+> d'hôte — **le handshake aboutissant AVANT le premier octet applicatif**. Pointez `issuer` sur l'endpoint
+> `https://` de votre IdP.
 >
-> **Conséquence à connaître.** Au callback, la console POST vers le **token endpoint** de l'IdP le
+> **Ce que cela corrige.** Au callback, la console POST vers le **token endpoint** de l'IdP le
 > **`client_secret`** (`Authorization: Basic`, client_secret_basic) **et** le **`code`** d'autorisation.
-> Ce POST partant en **HTTP clair**, ce hop **doit** être protégé au transport : soit l'IdP est joint via
-> **TLS terminé par un proxy d'egress**, soit il vit sur un **segment interne de confiance**. Sans cela,
-> `client_secret` + `code` transitent en clair et sont interceptables sur le réseau.
+> Auparavant ce POST partait en **HTTP clair** et ce hop devait être protégé par un proxy TLS d'egress ou
+> un segment interne de confiance. **Ce contournement est caduc** : en `https://`, un MITM obtient une
+> connexion en échec, jamais le secret. La suite de tests contient le contrôle correspondant (une chaîne
+> non ancrée dans une racine de confiance fait échouer la connexion).
 >
-> **Ce qui protège déjà (défense en profondeur, indépendant du transport) :**
+> **Ce qui n'a PAS changé (défense en profondeur, indépendante du transport) :**
 > - le **`client_secret` est write-only** — jamais renvoyé, **jamais loggé, jamais ledgerisé** (rédigé) ;
-> - la **deny-list SSRF** console (`guard_integration_addr`) bloque loopback / link-local
+> - la **deny-list SSRF** console (`net::resolve_guarded_with`) bloque loopback / link-local
 >   (169.254.169.254) / RFC1918 / ULA / unspecified sur l'**IP résolue** de connexion (anti-DNS-rebinding),
->   pour discovery, JWKS **et** le POST token — sauf escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS` ;
+>   pour discovery, JWKS **et** le POST token — sauf escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS`.
+>   **Le TLS ne la remplace pas** : chiffrer un fetch vers `169.254.169.254` n'en fait pas une cible
+>   légitime, et le refus tombe **avant** toute connexion, donc avant tout handshake ;
 > - les endpoints discovery (`token`/`jwks`/`authorization`) sont **pinnés à l'origine de l'issuer**
 >   (anti-SSRF, un document de discovery hostile ne peut pas rediriger ailleurs) ;
-> - l'**ID token reste validé RS256/JWKS** quel que soit le transport de fetch — mais cela garantit
->   l'**intégrité** du token, **pas la confidentialité** du `client_secret`/`code` sur le fil. D'où
->   l'exigence de TLS d'egress ci-dessus.
+> - l'**ID token reste validé RS256/JWKS** quel que soit le transport de fetch (intégrité du token) ; le
+>   TLS y ajoute désormais la **confidentialité** du `client_secret`/`code` sur le fil.
 >
-> **Patterns recommandés (choisir un) :**
-> - **proxy TLS-terminant d'egress** devant l'IdP — un Envoy/nginx/`ghostunnel`/`stunnel` (sidecar ou
->   service) qui écoute en `http://` côté console et **fait le TLS** vers l'IdP `https://`. Pointer alors
->   `issuer` sur l'endpoint `http://` local du proxy ;
-> - **service-mesh mTLS** (Istio / Linkerd) — le sidecar chiffre le hop console→IdP de façon transparente ;
-> - **oauth2-proxy** (déjà recommandé comme pont pour les IdP SAML, §3ter.2) placé devant, qui gère le TLS
->   amont vers l'IdP ;
-> - à défaut, un **IdP sur segment interne de confiance** (réseau isolé, pas d'écoute possible).
+> **`http://` reste accepté, mais gouverné.** Un IdP **on-prem** en clair reste joignable : il doit être
+> une **cible interne** ET l'escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` doit être posé
+> explicitement. Un IdP **public** en `http://` est donc, en pratique, refusé par la deny-list. Les
+> patterns proxy TLS d'egress / service-mesh mTLS / oauth2-proxy **restent utilisables** si votre
+> topologie les impose déjà — ils ne sont simplement plus **nécessaires**.
 >
-> **Amélioration future (hors périmètre de ce durcissement).** Un client **rustls** natif dans le fetcher
-> du console (`console/src`) supprimerait cette contrainte en parlant `https://` directement, tout en
-> gardant la posture openssl-free (rustls/ring). Noté comme évolution possible ; **non implémenté**
-> aujourd'hui — la recommandation reste le proxy TLS d'egress.
+> **Aucune échappatoire de vérification.** Il n'existe ni option, ni variable d'environnement, ni drapeau
+> de build pour accepter un certificat non fiable (auto-signé, chaîne inconnue, mauvais nom d'hôte) : un
+> TLS qui ne vérifie rien est du clair déguisé, et c'est précisément par là que les échappatoires entrent.
+>
+> **Limite à connaître — AC d'entreprise.** Les racines de confiance sont les racines **Mozilla compilées**
+> (`webpki-roots`) ; le **magasin système n'est PAS lu** (c'est ce qui garde la posture sans dépendance OS :
+> pas de `schannel`, pas de `security-framework`, pas d'`openssl`). Un IdP dont le certificat est émis par
+> une **AC privée d'entreprise** n'est donc **pas** vérifiable en l'état. Trois issues, toutes explicites :
+> (1) présenter un certificat émis par une AC **publiquement reconnue** ; (2) traiter l'IdP comme une cible
+> **interne** en `http://` sous `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` (clair **gouverné**, segment de
+> confiance) ; (3) conserver un **proxy TLS-terminant** d'egress. Un knob « AC supplémentaire » (fichier PEM
+> ajouté aux racines) serait une évolution légitime — ce n'est **pas** une échappatoire de vérification —
+> mais il n'est **pas** livré aujourd'hui.
 
 **Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
 Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →
@@ -654,9 +662,16 @@ mapping). L'IdP reste ainsi **la** source de vérité des rôles, sans double-ad
 
 Forge n'implémente **PAS** de SAML natif en-process — **choix délibéré**, pas une lacune :
 
-- **Posture pure-Rust / openssl-free.** La pile SAML Rust (**`samael`**) tire **openssl + libxmlsec1 + une
-  toolchain C**, ce qui casserait la posture openssl-free de Forge (auth 100 % Rust, `rustls`/`ring`, jamais
-  native-tls/openssl — cf. la même discipline que le backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
+- **Posture openssl-free.** La pile SAML Rust (**`samael`**) tire **openssl + libxmlsec1**, donc deux
+  **bibliothèques système** à installer, versionner et patcher sur chaque hôte — c'est exactement ce que la
+  posture openssl-free de Forge refuse (`rustls`/`ring`, jamais native-tls/openssl — même discipline que le
+  backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
+  **Précision d'honnêteté :** « openssl-free » ne veut **pas** dire « 100 % Rust ». `ring` — le provider
+  crypto de `rustls`, et donc du seam TLS sortant — embarque de l'**assembleur et du C** compilés par `cc`.
+  La différence n'est pas « zéro C », elle est **« zéro dépendance système »** : ce C-là est **vendu avec le
+  crate et compilé par cargo** (et `cc` + une chaîne C sont de toute façon déjà exigés par
+  `rusqlite/bundled`), là où openssl/libxmlsec1 sont des `.so` de l'hôte. Le refus de `samael` tient sur ce
+  critère-là, pas sur un absolu « pure-Rust ».
 - **Surface d'attaque.** Vérifier soi-même les signatures **XML-DSig** + le **C14N exclusif** est
   précisément la classe de foot-gun **XML-Signature-Wrapping (XSW)** — un contournement d'auth livré à
   répétition **même par des piles SAML matures**. Forge garde son **unique** surface d'auth pure-Rust et
@@ -689,6 +704,56 @@ Si un **contrat** exige un SAML **en-process** (pas de pont possible), une futur
 le build **community restant openssl-free par défaut** (même discipline opt-in que `store-postgres` /
 `encryption`). **Non implémentée aujourd'hui** : documentée comme **disponible sur demande**, pas livrée. Le
 défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
+
+---
+
+## 3quater. Seam TLS sortant — la console parle `https://`, et le vérifie
+
+**Décision : pas de clair.** La console avait exactement **trois** sorties TCP, toutes en socket brut :
+l'échange de jeton OIDC, le webhook de notification, et le fetcher de source de détection. Elles passent
+désormais toutes par **un seul seam** — `console/src/tls.rs` — qui parle `http://` (clair **gouverné**) ou
+`https://` (**TLS vérifié**). Une seule implémentation, donc **une seule politique de confiance** à
+vérifier.
+
+| Sortie | Fichier | Avant | Maintenant |
+|---|---|---|---|
+| Échange de jeton OIDC (`client_secret` + `code`) | `sso/mod.rs` | clair, proxy TLS d'egress **prescrit** | `https://` natif, certificat vérifié — proxy **plus requis** ([§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc)) |
+| Webhook de notification | `notify_channels.rs` | collecteur on-prem **seulement** | Slack / Teams / PagerDuty joignables en `https://` |
+| Fetcher de source de détection | `net.rs` | `https://` **refusé** (ou délégué au Python) | servi **en Rust**, sans spawn sur une route de lecture |
+
+**Ce qui est garanti — et ce qui ne l'est pas.**
+
+- **Vérification complète, sans échappatoire.** Chaîne jusqu'aux racines Mozilla compilées
+  (`webpki-roots`) **et** nom d'hôte. Le **handshake aboutit avant le premier octet applicatif** : face à
+  un pair non prouvé, l'appelant n'obtient **aucun flux**, donc n'écrit **aucun secret**. Il n'existe ni
+  option, ni ENV, ni feature pour accepter un certificat non fiable — un test de **garde de source**
+  interdit au crate d'ouvrir l'API dangereuse de rustls.
+- **La deny-list SSRF reste en amont** (`net::resolve_guarded_with`) et s'applique à l'**IP résolue** que
+  l'on va connecter, en `http://` **comme** en `https://`. Chiffrer un fetch vers `169.254.169.254` n'en
+  fait pas une cible légitime.
+- **Le clair reste possible là où il est gouverné** : cible **interne** + `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`.
+  Un **secret** vers une cible **publique** en `http://` reste **refusé** ; en `https://` il est autorisé.
+- **Pas de SMTP** — refusé indépendamment du TLS (STARTTLS est une élévation *négociée* ; cf.
+  [`ADMINISTRATION.md` §5bis](ADMINISTRATION.md)). **Pas de mTLS** : le seam n'installe aucun certificat
+  client (`with_no_client_auth`) — un endpoint mTLS reste délégué au collecteur Python.
+- **Limite : AC d'entreprise.** Les racines sont celles **compilées** ; le **magasin système n'est pas
+  lu** (c'est ce qui évite `schannel` / `security-framework` / `openssl`). Un certificat émis par une AC
+  privée n'est donc pas vérifiable en l'état — voir les trois issues en [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
+
+**Coût mesuré & openssl-freedom.** L'ajout pèse **6 crates nets** — `ring`, `rustls`, `rustls-pki-types`,
+`rustls-webpki`, `untrusted`, `webpki-roots` — et **≈ +20 s CPU** de compilation à froid. **Aucun nouveau
+prérequis machine** : `ring` compile de l'asm/C via `cc`, déjà exigé par `rusqlite/bundled`. La feature
+`store-postgres` **partage** exactement cette pile (une seule version de `rustls`, aucun conflit).
+
+⚠️ `rustls` est épinglé `default-features = false, features = ["ring", …]` : sa feature **par défaut** est
+le provider `aws-lc-rs` (présent en **optionnel non activé** dans `Cargo.lock`), qui tirerait une toolchain
+C/cmake et casserait la posture. Vérifiez-le après toute évolution des dépendances :
+
+```sh
+cd console
+cargo tree -e normal,build --no-dedupe | grep -niE "openssl|native-tls|aws-lc|schannel|security-framework"
+# aucune ligne => openssl-freedom préservée (idem avec --features store-postgres)
+```
 
 ---
 
@@ -760,14 +825,17 @@ pour que vous puissiez le refaire) :
 | Langage | Périmètre | LOC | Commande |
 |---|---|---|---|
 | Python | moteur, stdlib pur, `deps=[]` | **23 876** | `find forge -name '*.py' -not -path '*__pycache__*' \| xargs wc -l` |
-| Rust | console (tests inclus) | **47 248** | `find console/src -name '*.rs' \| xargs wc -l` |
+| Rust | console (tests inclus) | **51 749** | `find console/src -name '*.rs' \| xargs wc -l` |
 | Rust | guatx-core | **9 280** | `find src -name '*.rs' \| xargs wc -l` (dans le dépôt `core`) |
 | JS / HTML / CSS | UI | **10 471** | `find console/web -type f \( -name '*.js' -o -name '*.html' -o -name '*.css' \) \| xargs wc -l` |
 
 > Les chiffres précédemment publiés ici (~5 256 / ~4 006 / ~1 032 / ~3 513) dataient d'un arbre bien
 > antérieur et sous-estimaient le code d'un facteur 2,5 à 12. Ils sont remplacés par la mesure ci-dessus.
 
-**ZÉRO** Java / C / C++ / Go / bash dans le code Forge.
+**ZÉRO** Java / C / C++ / Go / bash dans le code Forge — *le code de Forge*. La **fermeture de
+dépendances**, elle, contient du C/asm compilé par cargo : l'amalgame **SQLite** (`rusqlite/bundled`) et
+l'asm de **`ring`** (provider crypto du seam TLS). « openssl-free » ne signifie donc pas « zéro C » mais
+**« zéro bibliothèque système à installer »** — ce C-là est vendu avec les crates et bâti par cargo.
 
 Les outils **ORCHESTRÉS** (jamais embarqués, tous **OPTIONNELS**, auto-neutralisés si absents) :
 

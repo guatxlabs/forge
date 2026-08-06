@@ -26,11 +26,16 @@
 //!     or returned by any GET (redacted / omitted);
 //!   - flag OFF or SSO unconfigured => `/api/sso/*` disabled (404 / 403) and LOCAL login is unchanged.
 //!
-//! TLS note: OIDC discovery / JWKS / token endpoints are fetched via the crate's existing plaintext HTTP
-//! client (`crate::http_get_blocking` + a sibling POST helper). Per the repo's transport discipline (see
-//! `http_get_blocking`), TLS is terminated upstream (reverse proxy) — point the issuer at the IdP's
-//! internal `http://` endpoint (or a TLS-terminating forward proxy). The ID token itself is still fully
-//! cryptographically validated (RS256 over JWKS), independent of the fetch transport.
+//! TRANSPORT: OIDC discovery / JWKS / token endpoints are fetched through the crate's SINGLE outbound
+//! seam (`crate::tls`, via `crate::http_get_blocking` and the sibling POST helper below). An `https://`
+//! issuer is spoken NATIVELY, with FULL certificate verification (chain to the Mozilla roots + hostname)
+//! completed BEFORE any application byte leaves. This is the reason the seam exists: the token POST
+//! carries the `client_secret` (`Authorization: Basic`, client_secret_basic) AND the authorization
+//! `code` — in the clear, both were interceptable on the wire, and the deployment docs had to prescribe
+//! an egress TLS proxy as a workaround. That workaround is obsolete; point `issuer` straight at the
+//! IdP's `https://` endpoint. Plaintext `http://` remains accepted ONLY for a governed on-prem IdP
+//! (internal target + the explicit `FORGE_ALLOW_INTERNAL_INTEGRATIONS` escape hatch). The ID token is
+//! still fully cryptographically validated (RS256 over JWKS) on top, independent of the transport.
 
 use crate::App;
 use axum::{
@@ -932,7 +937,7 @@ struct Discovery {
 fn discover_blocking(issuer: String, timeout: Duration) -> Result<Discovery, String> {
     let base = issuer.trim_end_matches('/');
     let url = format!("{base}/.well-known/openid-configuration");
-    let body = crate::http_get_blocking(&url, &crate::HttpAuth::None, timeout, true)?;
+    let body = crate::http_get_blocking(&url, &crate::HttpAuth::None, timeout)?;
     let v: Value = serde_json::from_str(&body).map_err(|e| format!("bad discovery JSON: {e}"))?;
     let disc_issuer = v.get("issuer").and_then(|x| x.as_str()).unwrap_or("");
     if disc_issuer.trim_end_matches('/') != base {
@@ -998,42 +1003,54 @@ fn origin_of(url: &str) -> Option<(String, String, u16)> {
 
 /// Fetch the JWKS document. Blocking — call via `spawn_blocking`.
 fn fetch_jwks_blocking(jwks_uri: String, timeout: Duration) -> Result<Value, String> {
-    let body = crate::http_get_blocking(&jwks_uri, &crate::HttpAuth::None, timeout, true)?;
+    let body = crate::http_get_blocking(&jwks_uri, &crate::HttpAuth::None, timeout)?;
     serde_json::from_str(&body).map_err(|e| format!("bad JWKS JSON: {e}"))
 }
 
 /// Minimal blocking HTTP/1.1 POST of an `application/x-www-form-urlencoded` body with optional
-/// `Authorization: Basic` (client_secret_basic). Plaintext `http://` only (TLS terminated upstream, per
-/// the crate's transport discipline — mirrors `http_get_blocking`). Anti-CRLF-injection on the header.
+/// `Authorization: Basic` (client_secret_basic).
+///
+/// THE MOST SENSITIVE EGRESS OF THE WHOLE CONSOLE: this request carries the `client_secret` in an
+/// `Authorization: Basic` header AND the one-time authorization `code` in the body. Its transport comes
+/// from the SINGLE seam (`crate::tls`): with an `https://` token endpoint the peer's certificate is
+/// verified (chain + hostname) and the handshake COMPLETES before the first byte of this request is
+/// written — a MITM gets a failed connection, never the secret. `http://` is still accepted, but only a
+/// governed internal target survives the SSRF deny-list. Anti-CRLF-injection on the header.
 fn http_post_form_blocking(url: &str, basic_b64: &str, body: &str, timeout: Duration) -> Result<String, String> {
+    http_post_form_blocking_with(
+        url,
+        basic_b64,
+        body,
+        timeout,
+        crate::net::internal_targets_allowed(),
+    )
+}
+
+/// Core of [`http_post_form_blocking`] with the internal-target authorisation as a PARAMETER (mirrors
+/// `net::http_get_blocking_with` / `notify_channels::plan_delivery`): the SSRF deny-list on THE most
+/// sensitive egress of the console must be provable end-to-end, and the test binary engages the escape
+/// hatch process-globally for its loopback mocks.
+fn http_post_form_blocking_with(
+    url: &str,
+    basic_b64: &str,
+    body: &str,
+    timeout: Duration,
+    allow_internal: bool,
+) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| "token endpoint must be http:// (TLS terminated upstream)".to_string())?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let host = authority.split(':').next().unwrap_or(authority);
-    let port: u16 = authority.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(80);
+    let t = crate::tls::split_url(url)?;
+    let (authority, path) = (t.authority.as_str(), t.path.as_str());
     let no_crlf = |s: &str| !s.contains('\r') && !s.contains('\n');
     if !no_crlf(basic_b64) || !no_crlf(authority) {
         return Err("refusing CRLF in request header".to_string());
     }
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}:{port} failed: {e}"))?
-        .next()
-        .ok_or_else(|| format!("no address for {host}:{port}"))?;
     // SSRF defense-in-depth (CONSOLE integration): the OIDC token endpoint is an admin/discovery-configured
     // URL the console fetches itself — NOT an engine scope-guarded target. Reject internal/metadata/private
     // targets on the RESOLVED connect IP (anti-DNS-rebinding), unless the escape hatch is set. Same guard as
     // the GET client so discovery/JWKS (via http_get_blocking) and this token POST are covered identically.
-    crate::guard_integration_addr(&addr)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {addr} failed: {e}"))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // TLS does NOT replace this: an encrypted fetch of 169.254.169.254 is still an SSRF.
+    let addr = crate::resolve_guarded_with(&t.host, t.port, allow_internal)?;
+    let mut stream = crate::tls::connect(&addr, &t.host, t.scheme, timeout)?;
     let mut req = format!(
         "POST {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: forge-sso\r\nAccept: application/json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()

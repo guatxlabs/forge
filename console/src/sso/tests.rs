@@ -200,6 +200,30 @@ byHb5g3JqJSE6WJSuyEQrUob
         );
     }
 
+    /// THE MOST SENSITIVE EGRESS (client_secret + authorization code) STAYS BEHIND THE SSRF DENY-LIST,
+    /// and the TLS seam changes nothing about that: an internal/metadata target is refused over
+    /// `http://` AND over `https://`, before any connection — so before any handshake and before the
+    /// `Authorization: Basic` header could be written anywhere. Deterministic (`allow_internal` is a
+    /// PARAMETER, not an env read — the test binary engages the hatch globally for its mocks).
+    /// MUTATION: drop `reject_internal_addr` from `net::resolve_guarded_with` -> this test flips RED.
+    #[test]
+    fn token_post_keeps_the_ssrf_deny_list_over_both_schemes() {
+        let t = Duration::from_millis(200);
+        for url in [
+            "http://169.254.169.254/token",
+            "https://169.254.169.254/token",
+            "http://127.0.0.1:9/token",
+            "https://10.1.2.3/token",
+        ] {
+            let e = http_post_form_blocking_with(url, "c2VjcmV0", "grant_type=authorization_code", t, false)
+                .expect_err("internal target refused");
+            assert!(e.contains("deny-list SSRF"), "SSRF refusal expected for {url}, got: {e}");
+        }
+        // A non-http(s) scheme is refused at parsing, before anything at all.
+        let e = http_post_form_blocking_with("gopher://idp/token", "", "x=1", t, true).expect_err("scheme");
+        assert!(e.contains("http:// ou https://"), "closed scheme set expected, got: {e}");
+    }
+
     /// Write an SSO config directly into settings (bypasses the admin route — for flow tests).
     fn set_config(app: &App, issuer: &str, allowed: Vec<&str>, provisioning: &str, default_role: &str, user_claim: &str) {
         let cfg = json!({

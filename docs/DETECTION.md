@@ -51,10 +51,13 @@ ledgerisé). Objet JSON :
 
 ### Où c'est exécuté
 
-- Les kinds **http en clair** `plume` / `generic_http` sont interrogés **nativement par la console Rust**
-  (fetcher intégré, http-only, jointure MITRE inchangée).
-- Tout le reste — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, fichier, exec, ou generic_http en
-  https/mTLS** — est **délégué au collecteur Python** `forge.collectors` (protocoles/parsing riches),
+- Les kinds `plume` / `generic_http` sont interrogés **nativement par la console Rust** (fetcher intégré,
+  jointure MITRE inchangée), en **`http://` comme en `https://`** : le transport vient du **seam TLS**
+  (`console/src/tls.rs`), certificat **vérifié** (chaîne + nom d'hôte). Une source `https` ne déclenche
+  donc plus de spawn Python sur une route de **lecture**.
+- Tout le reste — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, fichier, exec, ou `auth.type=mtls`**
+  (le seam n'installe aucun certificat client) — est **délégué au collecteur Python** `forge.collectors`
+  (protocoles/parsing riches),
   invoqué par la console (`python3 -m forge.cli detections --since N --source env:FORGE_DETECTION_SOURCE`).
   La console reste un **joignteur** infra-neutre : la sortie de tout kind est normalisée en
   `[{mitre,count,first_ts}]` puis passée à la **même** corrélation.

@@ -121,8 +121,9 @@ pub(crate) fn parse_fire_ts(ts: &str) -> Option<i64> {
 // par un objet JSON `{kind, endpoint?, auth?:{type,secret}, query?, mapping?}` rangé dans
 // `settings.detection_source`. `kind` ∈ {plume, generic_http, crowdsec, fortigate_syslog, pfsense,
 // opnsense, file_jsonl, elastic, exec, none} ; `auth.type` ∈ {none, basic, bearer, api_key_header,
-// mtls}. Les kinds `plume`/`generic_http` (http) sont interrogés EN RUST (fetcher intégré ci-dessous) ;
-// les kinds « messy » (et generic_http en https, pour TLS) sont DÉLÉGUÉS au collecteur Python
+// mtls}. Les kinds `plume`/`generic_http` sont interrogés EN RUST (fetcher intégré ci-dessous), en
+// http:// COMME en https:// (le seam TLS `crate::tls` porte le transport) ;
+// les kinds « messy » (et `auth.type=mtls`, hors périmètre du seam) sont DÉLÉGUÉS au collecteur Python
 // (`forge.cli detections`). Dans TOUS les cas la sortie est normalisée en `[(mitre,count,first_ts)]`
 // puis passée à `compute_purple_coverage` (jointure MITRE INCHANGÉE). Échec/mauvaise config =>
 // FAIL-OPEN LISIBLE (source_reachable:false), jamais de detected/parent_approx/missed/MTTD inventés.
@@ -670,10 +671,11 @@ pub(crate) fn generic_http_url(endpoint: &str, query: Option<&Value>, since: i64
     }
 }
 
-/// Fetch + normalisation EN RUST d'une source http (`plume` ou `generic_http` en clair). `is_plume` :
-/// URL = `{endpoint}/api/coverage/detections?since=N` + mapping IDENTITÉ + http-only (rétro-compat
-/// EXACTE) ; sinon URL = endpoint + `query`, mapping configuré, https autorisé (aiguillé au Python en
-/// amont). BLOQUANT (à lancer via spawn_blocking).
+/// Fetch + normalisation EN RUST d'une source http(s) (`plume` ou `generic_http`). `is_plume` :
+/// URL = `{endpoint}/api/coverage/detections?since=N` + mapping IDENTITÉ ; sinon URL = endpoint +
+/// `query` + mapping configuré. Les DEUX acceptent désormais `https://` (le seam TLS porte le
+/// transport, certificat VÉRIFIÉ) — un `PLUME_URL` en https n'est plus refusé.
+/// BLOQUANT (à lancer via spawn_blocking).
 pub(crate) fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Result<Vec<(String, i64, i64)>, String> {
     let endpoint = ds_endpoint(cfg);
     if endpoint.is_empty() {
@@ -686,7 +688,7 @@ pub(crate) fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Resu
     } else {
         generic_http_url(&endpoint, cfg.get("query"), since)
     };
-    let body = http_get_blocking(&url, &auth, timeout, !is_plume)?;
+    let body = http_get_blocking(&url, &auth, timeout)?;
     let parsed: Value = serde_json::from_str(body.trim())
         .map_err(|e| format!("réponse illisible (JSON invalide): {e}"))?;
     if is_plume {
@@ -697,7 +699,8 @@ pub(crate) fn rust_http_collect(cfg: &Value, since: i64, is_plume: bool) -> Resu
 }
 
 /// Délègue la collecte au COLLECTEUR PYTHON pour les kinds « messy » (crowdsec/fortigate_syslog/
-/// pfsense/opnsense/file_jsonl/elastic/exec, et generic_http en https pour le TLS). Même patron de
+/// pfsense/opnsense/file_jsonl/elastic/exec). `generic_http` en https N'EN FAIT PLUS PARTIE : le seam
+/// TLS le sert en Rust. Même patron de
 /// spawn no-shell que populate_modules (`python3 -m forge.cli detections --since N --source ...`).
 /// La config (AVEC secret) est passée par ENV `FORGE_DETECTION_SOURCE` (jamais en argv -> pas de fuite
 /// via `ps`/cmdline, cf. le token console de run_create) ; l'argv ne porte que `--source env:...`. Le
@@ -753,8 +756,12 @@ pub(crate) async fn collect_detections(app: &App, since: i64) -> Result<Vec<(Str
 }
 
 /// Dispatch sur `kind` d'une config source DONNÉE (utilisé aussi par POST /api/detection/test pour
-/// tester une config fournie sans la persister). `plume`/`generic_http`(http) -> fetch Rust ;
-/// generic_http(https) + kinds messy -> collecteur Python. Résultat -> jointure MITRE INCHANGÉE.
+/// tester une config fournie sans la persister). `plume`/`generic_http` (http:// ET https://) -> fetch
+/// Rust ; kinds messy -> collecteur Python. Résultat -> jointure MITRE INCHANGÉE.
+///
+/// L'AIGUILLAGE https -> Python A ÉTÉ RETIRÉ : il n'existait QUE parce que le fetcher Rust ne parlait pas
+/// TLS. Le seam `crate::tls` le fait désormais, donc une source https est servie EN RUST — sans spawn de
+/// processus sur une route de LECTURE, et avec la même deny-list SSRF que le reste.
 pub(crate) async fn collect_detections_with(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
     match ds_kind(cfg).as_str() {
         "none" | "" => {
@@ -762,10 +769,6 @@ pub(crate) async fn collect_detections_with(app: &App, cfg: &Value, since: i64) 
         }
         kind @ ("plume" | "generic_http") => {
             let is_plume = kind == "plume";
-            // generic_http en https -> délégué au Python (TLS non géré par le fetcher intégré).
-            if !is_plume && ds_endpoint(cfg).starts_with("https://") {
-                return collect_via_python(app, cfg, since).await;
-            }
             let cfg_owned = cfg.clone();
             tokio::task::spawn_blocking(move || rust_http_collect(&cfg_owned, since, is_plume))
                 .await

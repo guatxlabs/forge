@@ -22,22 +22,25 @@
 //!   4. SECRET WRITE-ONLY — le token du canal suit le motif maison (`detection_source`, contexte auth
 //!      d'engagement) : jamais re-servi en lecture (`GET` rend `secret_set: bool`), jamais journalisé,
 //!      jamais ledgerisé. `keep_secret:true` le conserve sans le retaper.
-//!   5. PAS DE CREDENTIAL EN CLAIR SUR UN RÉSEAU PUBLIC — la console n'a PAS de client TLS (le build par
-//!      défaut est openssl-free ; `rustls` n'entre que sous la feature `store-postgres`). Le transport
-//!      est donc du HTTP clair, comme pour TOUTE intégration de cette console. Conséquence assumée et
-//!      APPLIQUÉE ici : un token de canal ne traverse JAMAIS un réseau public en clair — si un secret est
-//!      configuré ET que la cible résolue est PUBLIQUE, l'envoi est REFUSÉ. Un relais/collecteur on-prem
-//!      (cible interne + escape-hatch explicite) reste le cas servi, exactement comme la source de
-//!      détection authentifiée d'aujourd'hui.
+//!   5. PAS DE CREDENTIAL EN CLAIR SUR UN RÉSEAU PUBLIC — la règle n'a pas changé, sa CONSÉQUENCE si.
+//!      La console parle désormais TLS nativement (seam `crate::tls`, certificat VÉRIFIÉ), donc :
+//!        - `https://` vers une cible PUBLIQUE avec un secret => AUTORISÉ. C'est ce qui rend Slack /
+//!          Teams / PagerDuty joignables, alors que le canal livré jusqu'ici ne pouvait atteindre qu'un
+//!          collecteur on-prem ;
+//!        - `http://` (clair) vers une cible PUBLIQUE avec un secret => TOUJOURS REFUSÉ. Le jeton
+//!          partirait sur le fil ; aucune raison n'a jamais justifié ça, et le TLS n'en crée pas une ;
+//!        - `http://` vers un collecteur INTERNE explicitement autorisé
+//!          (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) => inchangé, avec ou sans secret. C'est le clair
+//!          GOUVERNÉ, exactement comme la source de détection authentifiée on-prem d'aujourd'hui.
 //!   6. ON JOURNALISE L'ENVOI, PAS LE CONTENU — le ledger porte le canal, le DESTINATAIRE RÉDIGÉ
 //!      (`scheme://authority` — le PATH et la QUERY sont JETÉS : une URL de webhook style Slack porte
 //!      son jeton dans le chemin), l'événement, les identifiants, et succès/échec. Jamais le texte.
 //!   7. BEST-EFFORT — l'envoi ne casse ni ne ralentit la notification in-app : il part dans une tâche
 //!      détachée (bornée en temps), et son échec n'a AUCUN effet sur la mutation appelante.
 //!
-//! NON CONSTRUIT, DÉLIBÉRÉMENT (cf. docs) : le canal SMTP. Voir la note en fin de fichier — un client
-//! SMTP sur socket brut ne peut faire ni STARTTLS ni AUTH sans envoyer le mot de passe en clair, ce qui
-//! reviendrait à protéger le secret AU REPOS pendant qu'on le fuit EN VOL.
+//! NON CONSTRUIT, DÉLIBÉRÉMENT (cf. docs) : le canal SMTP. Voir la note en fin de fichier — il reste
+//! refusé INDÉPENDAMMENT du seam TLS : STARTTLS est une élévation NÉGOCIÉE, pas un transport chiffré
+//! d'emblée.
 //!
 //! CONSOMMATEUR EN AVAL : le SLA de triage (`notify_sla.rs`) n'ouvre PAS un second chemin de sortie —
 //! il entre par `notifications::emit`, donc par [`dispatch`] ci-dessous, donc par CES rédactions.
@@ -253,7 +256,12 @@ pub(crate) fn target_redacted(endpoint: &str) -> String {
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Delivery {
     pub(crate) addr: SocketAddr,
+    /// Transport décidé par le plan : clair (GOUVERNÉ) ou TLS vérifié. C'est aussi ce qui autorise —
+    /// ou non — un secret vers une cible publique.
+    pub(crate) scheme: crate::tls::Scheme,
     pub(crate) authority: String,
+    /// Nom d'hôte SEUL (sans port) : ce contre quoi le certificat du pair est vérifié en TLS.
+    pub(crate) host: String,
     pub(crate) path: String,
     /// En-tête d'auth déjà formé (`Nom: valeur`), ou `None`. Jamais loggé.
     pub(crate) auth_header: Option<String>,
@@ -274,33 +282,16 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
         return Err(format!("canal '{}' non supporté (seul 'webhook' existe)", ch_kind(cfg)));
     }
     let endpoint = ch_endpoint(cfg);
-    let rest = match endpoint.strip_prefix("http://") {
-        Some(r) => r,
-        None => {
-            return Err(if endpoint.starts_with("https://") {
-                "HTTPS non géré nativement par la console (build openssl-free, aucun client TLS) — \
-                 viser un endpoint http:// interne, ou terminer le TLS sur un relais devant l'endpoint"
-                    .to_string()
-            } else {
-                "l'endpoint du webhook doit commencer par http://".to_string()
-            });
-        }
-    };
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (rest[..i].to_string(), rest[i..].to_string()),
-        None => (rest.to_string(), "/".to_string()),
-    };
-    if authority.is_empty() || authority.contains('\r') || authority.contains('\n') {
-        return Err("autorité d'endpoint invalide (vide ou CRLF) — refusé".to_string());
-    }
-    let host = authority.split(':').next().unwrap_or(&authority).to_string();
-    let port: u16 = authority.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(80);
+    // Découpage PARTAGÉ (seam) : http:// ET https:// sont reconnus, tout le reste est refusé.
+    let t = crate::tls::split_url(&endpoint)
+        .map_err(|e| format!("endpoint de webhook invalide : {e}"))?;
+    let (authority, host, path) = (t.authority.clone(), t.host.clone(), t.path.clone());
     use std::net::ToSocketAddrs;
-    let addr = (host.as_str(), port)
+    let addr = (host.as_str(), t.port)
         .to_socket_addrs()
-        .map_err(|e| format!("résolution {host}:{port} échouée: {e}"))?
+        .map_err(|e| format!("résolution {host}:{} échouée: {e}", t.port))?
         .next()
-        .ok_or_else(|| format!("aucune adresse pour {host}:{port}"))?;
+        .ok_or_else(|| format!("aucune adresse pour {host}:{}", t.port))?;
     // ANTI-SSRF : on garde l'ADRESSE que l'on va effectivement connecter (resolve-then-check-then-connect
     // => le DNS-rebinding ne peut pas décaler la cible entre le contrôle et la connexion).
     let internal = crate::net::reject_internal_addr(&addr).err();
@@ -309,15 +300,18 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
             return Err(why.clone());
         }
     }
-    // CREDENTIAL EN CLAIR — le transport est du HTTP clair (pas de client TLS dans ce build). Un jeton de
-    // canal ne traverse donc jamais un réseau PUBLIC : s'il y a un secret et que la cible n'est PAS une
-    // cible interne explicitement autorisée, on refuse plutôt que de le mettre sur le fil.
+    // CREDENTIAL EN CLAIR — un jeton de canal ne traverse JAMAIS un réseau public EN CLAIR. La condition
+    // s'est ASSOUPLIE avec le seam TLS, sans se relâcher : ce qui est refusé, c'est le CLAIR vers une
+    // cible PUBLIQUE avec un secret. En `https://` le jeton est protégé par une session dont le
+    // certificat a été vérifié -> une cible publique (Slack/Teams/PagerDuty) devient légitime. En
+    // `http://` vers une cible publique, le refus est INCHANGÉ. Le clair vers un collecteur INTERNE
+    // explicitement autorisé reste servi (cas on-prem gouverné).
     let secret = ch_secret(cfg);
-    if !secret.is_empty() && internal.is_none() {
+    if !secret.is_empty() && internal.is_none() && !t.scheme.is_tls() {
         return Err(
             "secret de canal configuré vers une cible PUBLIQUE en HTTP clair — refusé (le jeton \
-             partirait en clair). Viser un collecteur interne (avec FORGE_ALLOW_INTERNAL_INTEGRATIONS=1) \
-             ou retirer le secret du canal."
+             partirait en clair). Utiliser https:// (TLS vérifié), viser un collecteur interne (avec \
+             FORGE_ALLOW_INTERNAL_INTEGRATIONS=1), ou retirer le secret du canal."
                 .to_string(),
         );
     }
@@ -336,7 +330,7 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
         }
         Some(format!("{name}: {value}"))
     };
-    Ok(Delivery { addr, authority, path, auth_header })
+    Ok(Delivery { addr, scheme: t.scheme, authority, host, path, auth_header })
 }
 
 // =====================================================================================
@@ -344,14 +338,13 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
 // =====================================================================================
 
 /// POST bloquant du corps JSON. Miroir de `net::http_get_blocking` / `sso::http_post_form_blocking` :
-/// socket TCP brut, timeouts connect+read+write, réponse LUE BORNÉE (on ne veut que le statut).
-/// Renvoie le code de statut, ou une erreur NOMMÉE. Ne loggue ni le corps ni l'en-tête d'auth.
+/// transport pris au seam PARTAGÉ `crate::tls` (clair GOUVERNÉ ou TLS VÉRIFIÉ — en https le handshake,
+/// donc la vérification du certificat, aboutit AVANT que l'en-tête d'auth ne soit écrit), timeouts
+/// connect+handshake+read+write, réponse LUE BORNÉE (on ne veut que le statut). Renvoie le code de
+/// statut, ou une erreur NOMMÉE. Ne loggue ni le corps ni l'en-tête d'auth.
 fn post_blocking(d: &Delivery, body: &[u8], timeout: Duration) -> Result<u16, String> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let mut stream = TcpStream::connect_timeout(&d.addr, timeout).map_err(|e| format!("connexion {} échouée: {e}", d.addr))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    let mut stream = crate::tls::connect(&d.addr, &d.host, d.scheme, timeout)?;
     let mut req = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: forge-notify\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         d.path,
@@ -657,15 +650,19 @@ pub(crate) async fn channel_test(State(app): State<App>, headers: HeaderMap) -> 
 // =====================================================================================
 //  CE QUI N'EST PAS CONSTRUIT, ET POURQUOI (décision, pas oubli)
 //
-//  SMTP — REFUSÉ en l'état. Un client SMTP ici ne peut parler que TCP clair : le build par défaut est
-//  openssl-free et n'embarque AUCUN client TLS (`rustls` n'entre que sous la feature `store-postgres`,
-//  et `net::http_get_blocking` REFUSE déjà https:// pour cette exacte raison). Sans STARTTLS, `AUTH
-//  LOGIN/PLAIN` met le mot de passe SMTP en base64 sur le fil : on protégerait le secret AU REPOS
-//  (write-only, comme ici) pendant qu'on le FUIT EN VOL, à chaque envoi. Un relais on-prem sans auth est
-//  le seul cas restant, et il est déjà couvert — mieux — par le webhook vers un collecteur interne.
-//  Reprendre ce chantier suppose d'abord un SEAM TLS dans la console (décision d'architecture : elle
-//  toucherait le socle openssl-free documenté), ou une délégation au moteur Python (`smtplib` + `ssl`),
-//  qui est une couche différente.
+//  SMTP — TOUJOURS REFUSÉ, et le seam TLS N'Y CHANGE RIEN. L'argument d'hier (« la console n'a pas de
+//  client TLS ») est caduc ; celui d'aujourd'hui tient tout seul, et il est plus fort :
+//    - STARTTLS est une élévation NÉGOCIÉE : la session DÉBUTE en clair et se hisse sur une commande
+//      échangée en clair. C'est une classe d'INJECTION DE COMMANDES EN CLAIR (CVE-2011-0411 et toute sa
+//      descendance : ce que l'attaquant injecte avant le handshake est traité APRÈS, dans la session
+//      chiffrée). Le seam, lui, ne connaît qu'un TLS d'emblée, vérifié avant le premier octet ;
+//    - le SMTP réel se pratique en TLS OPPORTUNISTE contre des relais à certificat auto-signé. Le servir
+//      honnêtement demanderait soit d'accepter des certificats non fiables — l'échappatoire de
+//      vérification que ce chantier REFUSE par principe —, soit d'imposer une PKI que les relais de mail
+//      n'ont pas. Les deux sont de mauvaises réponses.
+//  Débuter un client TLS par le protocole aux PIRES sémantiques d'élévation serait le mauvais ordre. Un
+//  relais on-prem sans auth reste couvert — mieux — par le webhook vers un collecteur interne ; et un
+//  vrai besoin SMTP se délègue au moteur Python (`smtplib` + `ssl`), qui est une autre couche.
 //
 //  SLA — LIVRÉ DEPUIS, dans son PROPRE module (`notify_sla.rs`), et pas ici : un SLA est un
 //  ORDONNANCEUR (balayage périodique), pas un canal. Il réutilise le patron de `backup_sched.rs` et
@@ -791,21 +788,29 @@ mod tests {
         assert!(plan_delivery(&cfg_webhook("http://127.0.0.1:9/hook", None), true).is_ok());
     }
 
-    /// HTTPS est refusé avec un message d'aiguillage (pas de client TLS dans ce build) — jamais une
-    /// tentative silencieuse en clair vers le port 443.
+    /// HTTPS est SERVI (seam TLS) : le plan aboutit, retient le port 443 par défaut et marque le
+    /// transport comme chiffré. Un schéma hors {http, https} reste refusé. MUTATION : retirer la
+    /// branche `https://` de `tls::split_url` -> ce test rougit.
     #[test]
-    fn https_endpoint_is_refused_with_guidance() {
-        let e = plan_delivery(&cfg_webhook("https://hooks.example/x", None), true).unwrap_err();
-        assert!(e.contains("HTTPS non géré"), "message d'aiguillage attendu, obtenu: {e}");
+    fn https_endpoint_is_planned_over_tls() {
+        // 8.8.8.8 : cible PUBLIQUE, résolution triviale et sans DNS -> le plan ne dépend pas du réseau.
+        let d = plan_delivery(&cfg_webhook("https://8.8.8.8/hook", None), false).expect("https planifié");
+        assert!(d.scheme.is_tls(), "transport chiffré attendu");
+        assert_eq!(d.addr.port(), 443, "port par défaut du schéma https");
+        assert_eq!(d.host, "8.8.8.8", "hôte de vérification du certificat");
+        // Schéma hors jeu fermé -> refus net (jamais une tentative silencieuse).
+        let e = plan_delivery(&cfg_webhook("ftp://hooks.example/x", None), true).unwrap_err();
+        assert!(e.contains("endpoint de webhook invalide"), "refus de schéma attendu, obtenu: {e}");
     }
 
     // =============================================================================
     //  GARDE 5 — pas de credential en clair vers une cible publique
     // =============================================================================
 
-    /// Un secret de canal + une cible PUBLIQUE en HTTP clair => REFUS. La même config vers une cible
-    /// INTERNE explicitement autorisée passe. MUTATION : retirer le bloc `!secret.is_empty() &&
-    /// internal.is_none()` -> ce test rougit (le jeton partirait en clair sur Internet).
+    /// Un secret de canal + une cible PUBLIQUE en HTTP CLAIR => REFUS (inchangé). La même config vers
+    /// une cible INTERNE explicitement autorisée passe (clair GOUVERNÉ on-prem). MUTATION : retirer le
+    /// bloc `!secret.is_empty() && internal.is_none() && !t.scheme.is_tls()` -> ce test rougit (le jeton
+    /// partirait en clair sur Internet).
     #[test]
     fn secret_never_crosses_a_public_network_in_the_clear() {
         let e = plan_delivery(&cfg_webhook("http://8.8.8.8/hook", Some("s3cr3t-de-canal")), false).unwrap_err();
@@ -813,6 +818,31 @@ mod tests {
         let ok = plan_delivery(&cfg_webhook("http://127.0.0.1:9/hook", Some("s3cr3t-de-canal")), true);
         assert!(ok.is_ok(), "collecteur interne autorisé : le secret est acceptable, obtenu: {ok:?}");
         assert!(ok.unwrap().auth_header.unwrap().starts_with("Authorization: Bearer "));
+    }
+
+    /// L'ASSOUPLISSEMENT, et sa borne. Le MÊME secret vers la MÊME cible publique :
+    ///   - en `https://` => AUTORISÉ (le jeton part dans une session dont le certificat est vérifié) ;
+    ///   - en `http://`  => REFUSÉ.
+    /// C'est exactement ce qui rend Slack/Teams/PagerDuty joignables sans rouvrir le clair. MUTATION :
+    /// remplacer `!t.scheme.is_tls()` par `false` (assouplir aussi le clair) -> la 2e moitié rougit ;
+    /// retirer la condition entière -> la 2e moitié rougit ; garder l'ancien refus sans le prédicat de
+    /// schéma -> la 1re moitié rougit.
+    #[test]
+    fn secret_towards_a_public_target_is_allowed_over_tls_only() {
+        const SECRET: &str = "jeton-de-canal-slack";
+        let over_tls = plan_delivery(&cfg_webhook("https://8.8.8.8/services/T00/B11/XXX", Some(SECRET)), false)
+            .expect("https + secret vers cible publique : légitime");
+        assert!(over_tls.scheme.is_tls());
+        assert_eq!(
+            over_tls.auth_header.as_deref(),
+            Some(&format!("Authorization: Bearer {SECRET}")[..]),
+            "le jeton est bien porté par la requête"
+        );
+        let in_the_clear = plan_delivery(&cfg_webhook("http://8.8.8.8/services/T00/B11/XXX", Some(SECRET)), false);
+        assert!(
+            in_the_clear.unwrap_err().contains("en clair"),
+            "le même jeton en http vers la même cible publique reste REFUSÉ"
+        );
     }
 
     // =============================================================================

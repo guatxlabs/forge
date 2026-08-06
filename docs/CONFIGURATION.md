@@ -108,7 +108,7 @@ ci-dessous sont des **replis** :
 |---|---|---|---|
 | `PLUME_URL` | **[PURPLE]** Préréglage rétro-compat `kind=plume` (utilisé seulement si `settings.detection_source` est absent). `http://` interne uniquement. | *(vide = purple OFF)* | `http://plume-internal:8000` |
 | `PLUME_TOKEN` | **[SECRET][PURPLE]** Basic auth = `base64("user:pass")`. | *(vide)* | `dXNlcjpwYXNz` |
-| `FORGE_DETECTION_SOURCE` | **[SECRET]** Spécification JSON complète d'une source (kinds « riches » : https/mTLS/exec). La console la passe **par ENV** au collecteur Python (jamais en argv). | *(vide)* | `{"kind":"crowdsec",…}` |
+| `FORGE_DETECTION_SOURCE` | **[SECRET]** Spécification JSON complète d'une source (kinds « riches » : crowdsec/elastic/syslog/mTLS/exec). La console la passe **par ENV** au collecteur Python (jamais en argv). | *(vide)* | `{"kind":"crowdsec",…}` |
 
 Modèle complet et préréglages : [`DETECTION.md`](DETECTION.md). Prérequis Plume :
 [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).
