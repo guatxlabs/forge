@@ -155,6 +155,45 @@ use super::*;
 
     /// [BACKUP crypto] une MAUVAISE passphrase échoue proprement (tag AEAD) et n'écrit RIEN sur disque.
     #[test]
+    /// UNE SAUVEGARDE NON CHIFFRÉE NE DOIT PAS POUVOIR EXISTER — au niveau du CŒUR, pas seulement de
+    /// l'API HTTP.
+    ///
+    /// Une archive contient la base ENTIÈRE, donc tout matériel d'authentification stocké (bearers,
+    /// cookies, en-têtes des comptes de test par engagement). C'est INHÉRENT : une sauvegarde doit
+    /// restaurer fidèlement, la rédiger ferait perdre le contexte à la restauration. La garantie n'est
+    /// donc pas « pas de secret dans l'archive » mais « **aucune archive en clair ne peut exister** ».
+    ///
+    /// Le fail-closed était bien codé, mais RIEN NE L'ÉPINGLAIT : le test existant vérifie la couche
+    /// HTTP (400 sur passphrase absente), pas `run_backup_core` — qu'empruntent la CLI hors-ligne ET le
+    /// planificateur. Neutraliser la garde laissait les 17 tests de sauvegarde verts (mesuré le
+    /// 2026-08-06). Ce test ferme ce trou pour les trois chemins.
+    #[test]
+    fn backup_core_refuses_to_write_anything_without_a_passphrase() {
+        let src_dir = tmp_dir("forge-bk-nopass-src");
+        let (src_db, src_ledger, _key) = seed_backup_source(&src_dir, 2);
+        let out = tmp_path("forge-bk-nopass.age");
+        let err = run_backup_core(&BackupOpts {
+            out: out.clone(), passphrase: String::new(), db: src_db.clone(),
+            ledger: Some(src_ledger.clone()), ts: None, actor: "test".to_string(),
+        })
+        .expect_err("passphrase vide -> la sauvegarde DOIT échouer (fail-closed)");
+        assert!(err.contains("passphrase"), "l'erreur doit nommer la cause : {err}");
+        assert!(!std::path::Path::new(&out).exists(),
+                "AUCUN fichier ne doit être écrit — pas même un plaintext temporaire : {out}");
+
+        // Contrôle POSITIF : la même sauvegarde AVEC passphrase réussit et produit une archive
+        // qui n'est PAS lisible en clair (sinon ce test passerait sur un chiffrement inopérant).
+        run_backup_core(&BackupOpts {
+            out: out.clone(), passphrase: "p".repeat(24), db: src_db,
+            ledger: Some(src_ledger), ts: None, actor: "test".to_string(),
+        })
+        .expect("avec passphrase -> ok");
+        let raw = std::fs::read(&out).expect("archive écrite");
+        assert!(!raw.windows(6).any(|w| w == b"SQLite"),
+                "l'archive ne doit pas contenir l'en-tête SQLite en clair");
+        let _ = std::fs::remove_file(&out);
+    }
+
     fn backup_wrong_passphrase_fails_and_writes_nothing() {
         let src_dir = tmp_dir("forge-bk-wp-src");
         let (src_db, src_ledger, _key) = seed_backup_source(&src_dir, 2);
