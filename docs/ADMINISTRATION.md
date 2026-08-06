@@ -168,10 +168,42 @@ webhook vers un collecteur interne. Rouvrir ce chantier suppose d'abord un **sea
 (décision d'architecture : elle touche le socle openssl-free), ou une délégation au moteur Python
 (`smtplib` + `ssl`), qui est une autre couche.
 
-**Pourquoi il n'y a pas encore de SLA.** Un SLA de triage est un **ordonnanceur** (balayage périodique
-des findings en retard), pas un canal — le patron à reprendre est celui du scheduler de sauvegarde. Il
-n'a de sens qu'une fois le canal éprouvé, et le livrer en même temps aurait mêlé deux risques
-indépendants.
+---
+
+## 5ter. SLA de triage
+
+Un **ordonnanceur**, pas un canal : un balayage périodique signale les findings dont le **cycle de
+triage** est resté ouvert au-delà du budget de leur sévérité. Il **n'ouvre aucune sortie** — ce qu'il
+trouve remonte par la **porte des notifications**, et hérite donc du canal ci-dessus et de **ses**
+rédactions. Même discipline que le scheduler de sauvegarde (politique déclarative, fail-open, ledger).
+
+*Administration → SLA de triage* (admin, ledgerisé) · `GET`/`POST /api/notify/sla`.
+
+**Ce que « en retard » veut dire** — dérivé des **seuls champs que le modèle porte déjà**, aucune
+colonne nouvelle : un finding dont `triage` ∈ {`new`, `triaging`, `reopened`} (le cycle attend encore
+une décision) et dont l'âge depuis `finding.ts` dépasse le budget configuré pour **sa sévérité**.
+`confirmed` n'est pas en retard : la décision est prise, ce qui reste est la remédiation — une autre
+horloge, qui exigerait un propriétaire de correctif que ce modèle n'a pas.
+
+| Garantie | Mise en œuvre | En cas d'écart |
+|---|---|---|
+| **OFF par défaut** | aucune clé `settings.sla_policy` ⇒ balayage **no-op total** ; `enabled` sans budget positif reste **inerte** | aucune notification, aucune ligne de ledger |
+| **Aucun egress nouveau** | remontée via `notifications::emit` ⇒ mêmes rédactions (secrets **puis** URL de cible) que le canal | le SLA n'a ni socket, ni URL, ni secret à lui |
+| **Leader-only sous HA** | `ha::is_leader` lu à chaque tick | N réplicas enverraient N notifications identiques |
+| **Une notification par finding** | dédup **dans la requête** (`NOT EXISTS … kind='finding.sla'`) | pas de rappel toutes les 15 min ; le plafond de balayage n'est pas consommé par du déjà-traité |
+| **Grant-scopé** | hérité de l'émission : un destinataire sans grant sur l'engagement ne reçoit rien | l'isolation multi-tenant n'est pas contournée par une tâche de fond |
+| **Non assigné ⇒ jamais diffusé** | escalade vers **un** login nommé (`escalate_to`) ou personne | un SLA qui écrit à tout le monde est un SLA qu'on désactive |
+| **Ne casse jamais rien** | `spawn_blocking` + fail-open ; toute erreur capturée dans le rapport et ledgerisée `console.notify.sla.error` | un balayage ne peut ni bloquer ni faire échouer un run |
+| **Ledger sans contenu** | `console.notify.sla.sweep` : compteurs seuls | ni titre de finding, ni cible |
+
+L'horloge part de la **date de création** parce que c'est la seule date que la ligne porte : il n'y a pas
+de `triage_updated`, et en inventer une pour un SLA reviendrait à faire porter au schéma une fonction
+périphérique. Conséquence assumée : **pas de ré-armement** après réouverture (une notification par
+finding, à vie) — le compromis privilégie l'absence de spam.
+
+Le `GET` porte aussi `overdue_now` : un **aperçu en lecture seule** (il ne notifie personne) du nombre de
+findings actuellement en retard selon la politique **enregistrée** — de quoi calibrer des budgets sans
+armer la politique et regarder qui se fait spammer.
 
 ---
 

@@ -827,8 +827,23 @@
         <button id="admin-notify-reload" class="k-theme" type="button" title="Recharger la configuration du canal (jeton rédigé)">Recharger</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Miroir <b>hors-processus</b> des notifications in-app (assignation / triage) vers un <b>webhook</b>. C'est de l'<b>egress depuis un outil offensif</b>, donc gouverné comme celui du LLM : <b>off par défaut</b>, opt-in explicite et ledgerisé. Ce qui part est <b>minimal et rédigé</b> — le texte passe par le <b>rédacteur des rapports</b> puis par la <b>neutralisation des URL</b> (une URL de cible porte en général l'identifiant de la victime). Les cibles <b>internes</b> (loopback, RFC1918, métadonnées cloud) sont <b>refusées</b> sauf <code>FORGE_ALLOW_INTERNAL_INTEGRATIONS=1</code>, et un <b>jeton</b> n'est jamais envoyé <b>en clair vers une cible publique</b>. Chaque envoi est <b>journalisé</b> (canal, destinataire <b>rédigé</b>, issue) — <b>jamais le contenu</b>. SMTP et SLA : <b>non construits</b>, et pourquoi — cf. <code>docs/ADMINISTRATION.md</code>.</p>
+    <p class="muted" style="margin:0 0 10px">Miroir <b>hors-processus</b> des notifications in-app (assignation / triage) vers un <b>webhook</b>. C'est de l'<b>egress depuis un outil offensif</b>, donc gouverné comme celui du LLM : <b>off par défaut</b>, opt-in explicite et ledgerisé. Ce qui part est <b>minimal et rédigé</b> — le texte passe par le <b>rédacteur des rapports</b> puis par la <b>neutralisation des URL</b> (une URL de cible porte en général l'identifiant de la victime). Les cibles <b>internes</b> (loopback, RFC1918, métadonnées cloud) sont <b>refusées</b> sauf <code>FORGE_ALLOW_INTERNAL_INTEGRATIONS=1</code>, et un <b>jeton</b> n'est jamais envoyé <b>en clair vers une cible publique</b>. Chaque envoi est <b>journalisé</b> (canal, destinataire <b>rédigé</b>, issue) — <b>jamais le contenu</b>. SMTP : <b>non construit</b>, et pourquoi — cf. <code>docs/ADMINISTRATION.md</code>.</p>
     <div id="admin-notify-body"><div class="muted">chargement…</div></div>
+  </section>
+
+  <!-- ADMINISTRATION — SLA DE TRIAGE (réservé role=admin). GET/POST /api/notify/sla (check_admin, 403
+       sinon), ledgerisé. OFF PAR DÉFAUT : sans politique, le balayage périodique est un no-op total.
+       Ce panneau arme une HORLOGE, pas un canal : la remontée emprunte la porte des notifications (et
+       donc, si le canal sortant est armé, ses rédactions). LEADER-ONLY sous HA. -->
+  <section id="admin-sla" class="card span2" aria-labelledby="adm-sla-h">
+    <div class="panelhead">
+      <h2 id="adm-sla-h">Administration — SLA de triage <span id="admin-sla-state" class="badge mut">—</span></h2>
+      <span class="qbar">
+        <button id="admin-sla-reload" class="k-theme" type="button" title="Recharger la politique SLA + l'aperçu des retards (lecture seule : ne notifie personne)">Recharger</button>
+      </span>
+    </div>
+    <p class="muted" style="margin:0 0 10px">Signale les findings dont le <b>cycle de triage</b> est resté <b>ouvert</b> (<code>new</code>, <code>triaging</code>, <code>reopened</code>) au-delà du <b>budget de leur sévérité</b>. L'horloge part de la <b>date de création</b> du finding — <b>aucune colonne nouvelle</b> : sévérité, état de triage et date suffisent. <b>Off par défaut</b> ; sans budget positif la politique reste <b>inerte</b>. Un finding en retard produit <b>au plus une</b> notification, <b>jamais une par balayage</b>. La remontée emprunte la <b>porte des notifications</b> : elle est <b>grant-scopée</b> (multi-tenant) et, si le <b>canal sortant</b> est armé, elle hérite de ses <b>rédactions</b> — le SLA <b>n'ouvre aucune sortie</b> qui lui soit propre. Un finding en retard <b>non assigné</b> est <b>compté</b> mais jamais diffusé, sauf escalade vers <b>un</b> login nommé. Sous <b>HA</b>, seul le <b>leader</b> balaie (N réplicas enverraient N notifications). Un balayage ne peut <b>ni bloquer ni faire échouer</b> un run.</p>
+    <div id="admin-sla-body"><div class="muted">chargement…</div></div>
   </section>
 
   <!-- ADMINISTRATION — source de détection (boucle purple, réservé role=admin). GET/POST /api/detection/source

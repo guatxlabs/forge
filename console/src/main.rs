@@ -92,6 +92,12 @@ mod notifications;
 // enabled`), corps RÉDIGÉ par la surface des rapports (redact.rs) + neutralisation des URL de cible,
 // deny-list SSRF d'intégration PARTAGÉE (net::reject_internal_addr), secret write-only. Zéro champ App.
 mod notify_channels;
+// SLA DE TRIAGE — ORDONNANCEUR (pas un canal) : balayage périodique des findings dont le cycle de triage
+// est resté OUVERT au-delà du budget de leur sévérité, remontés par la porte des notifications (donc par
+// le canal sortant et SES rédactions — zéro chemin d'egress nouveau). Même discipline que backup_sched :
+// politique déclarative en settings, OFF PAR DÉFAUT, fail-open, ledgerisé. LEADER-ONLY sous HA (N
+// réplicas = N notifications). main.rs n'y contribue que la ligne `mod`, le `merge` des routes et le spawn.
+mod notify_sla;
 // HA (#10 Wave A/B) — leader lease + heartbeat + run-leader (enqueue/claim/spawn), PG-only + opt-in
 // FORGE_HA. The MODULE is now compiled UNCONDITIONALLY because Wave B routes the SHARED run-flow through
 // its PORTABLE predicates (`ha_enabled`/`is_leader`/`my_instance_id`) — in the community build those

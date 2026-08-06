@@ -559,6 +559,15 @@ pub(crate) async fn serve() {
     // déplace `app` (with_state).
     tokio::spawn(backup_scheduler_loop(app.clone()));
 
+    // BALAYAGE SLA DE TRIAGE (fail-open) : tâche périodique qui, SI une politique `settings.sla_policy`
+    // existe et est ARMÉE, signale les findings dont le triage est resté OUVERT au-delà du budget de leur
+    // sévérité — par la porte des NOTIFICATIONS (donc par le canal sortant et ses rédactions ; aucun
+    // chemin d'egress nouveau). Sans politique -> ne fait rien. LEADER-ONLY sous HA (`ha::is_leader` lu à
+    // chaque tick) : N réplicas balayant la même table enverraient N notifications identiques. Un échec
+    // est capturé/ledgerisé mais ne fait JAMAIS crasher la console ni échouer un run. Cloné AVANT que
+    // build_router ne déplace `app` (with_state).
+    tokio::spawn(crate::notify_sla::sla_sweep_loop(app.clone()));
+
     // Câblage du routeur extrait dans build_router (parité stricte prod/test : ce qui est gaté ici
     // l'est aussi dans les tests d'intégration). ConnectInfo est branché au serve pour que les
     // handlers C2 (run/cancel/refresh) reçoivent l'IP du pair (contrainte source-CIDR opérateur).

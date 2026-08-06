@@ -35,9 +35,12 @@
 //!   7. BEST-EFFORT — l'envoi ne casse ni ne ralentit la notification in-app : il part dans une tâche
 //!      détachée (bornée en temps), et son échec n'a AUCUN effet sur la mutation appelante.
 //!
-//! NON CONSTRUIT, DÉLIBÉRÉMENT (cf. docs) : le canal SMTP et le moteur de SLA. Voir la note en fin de
-//! fichier — un client SMTP sur socket brut ne peut faire ni STARTTLS ni AUTH sans envoyer le mot de
-//! passe en clair, ce qui reviendrait à protéger le secret AU REPOS pendant qu'on le fuit EN VOL.
+//! NON CONSTRUIT, DÉLIBÉRÉMENT (cf. docs) : le canal SMTP. Voir la note en fin de fichier — un client
+//! SMTP sur socket brut ne peut faire ni STARTTLS ni AUTH sans envoyer le mot de passe en clair, ce qui
+//! reviendrait à protéger le secret AU REPOS pendant qu'on le fuit EN VOL.
+//!
+//! CONSOMMATEUR EN AVAL : le SLA de triage (`notify_sla.rs`) n'ouvre PAS un second chemin de sortie —
+//! il entre par `notifications::emit`, donc par [`dispatch`] ci-dessous, donc par CES rédactions.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -664,9 +667,9 @@ pub(crate) async fn channel_test(State(app): State<App>, headers: HeaderMap) -> 
 //  toucherait le socle openssl-free documenté), ou une délégation au moteur Python (`smtplib` + `ssl`),
 //  qui est une couche différente.
 //
-//  SLA — DIFFÉRÉ. Un SLA de triage est un ORDONNANCEUR (balayage périodique des findings en retard),
-//  pas un canal : le patron à réutiliser est `backup_sched.rs`, et il n'a de sens qu'une fois le canal
-//  éprouvé en production. Le livrer en même temps aurait mêlé deux risques indépendants.
+//  SLA — LIVRÉ DEPUIS, dans son PROPRE module (`notify_sla.rs`), et pas ici : un SLA est un
+//  ORDONNANCEUR (balayage périodique), pas un canal. Il réutilise le patron de `backup_sched.rs` et
+//  emprunte CE canal par la porte des notifications — il n'ajoute donc aucun chemin d'egress.
 // =====================================================================================
 
 #[cfg(test)]

@@ -163,6 +163,12 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // JAMAIS un paramètre de requête — sinon la route deviendrait un proxy SSRF pour admin). OFF par
         // défaut : sans config, aucun octet ne quitte le processus.
         .merge(notify_channels::routes())
+        // SLA DE TRIAGE — routes DANS console/src/notify_sla.rs, fusionnées AVANT le fallback + le
+        // route_layer => héritent de l'auth_guard/host_guard. GET/POST /api/notify/sla = politique
+        // ADMIN-ONLY (budgets par sévérité) ; le GET porte AUSSI `overdue_now`, un APERÇU en LECTURE
+        // SEULE qui ne notifie personne (calibrer les budgets sans armer la politique). OFF par défaut :
+        // sans politique, le balayage périodique est un no-op total.
+        .merge(notify_sla::routes())
         // LIVRABLE CLIENT (rapport d'engagement agrégé, brandé) : routes définies DANS console/src/
         // reports.rs. Fusionnées AVANT le fallback + le route_layer => héritent de l'auth_guard/host_guard.
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST

@@ -63,6 +63,10 @@ const MAX_TEXT: usize = 512;
 /// Kinds de notification RECONNUS (jeu fermé — cohérent avec le schéma). PURE.
 pub(crate) const KIND_ASSIGNED: &str = "finding.assigned";
 pub(crate) const KIND_TRIAGE: &str = "finding.triage";
+/// SLA DE TRIAGE — émis par le balayage périodique (`notify_sla.rs`), jamais par une action humaine.
+/// Sert AUSSI de clé de DÉDUP : le balayage ne re-signale pas un finding qui porte déjà une ligne de ce
+/// kind (cf. `notify_sla::scan_overdue`).
+pub(crate) const KIND_SLA: &str = "finding.sla";
 
 // =====================================================================================
 //  ÉMISSION — appelée depuis les hooks assign/triage de findings.rs (best-effort, grant-scopée, no-self).
@@ -104,16 +108,21 @@ fn finding_assignee(app: &App, id: i64, eid: i64) -> Option<i64> {
 ///     triage, déjà réussie + ledgerisée) N'EST NI CASSÉE NI FAUSSÉE, et on NE double PAS le ledger.
 ///
 /// Le guard `store` est libéré AVANT `app.events.send` (aucun verrou tenu à travers l'envoi SSE).
-fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, finding_id: i64, kind: &str, text: String) {
+///
+/// Rend `true` SI ET SEULEMENT SI une ligne a réellement été créée — `false` pour chacun des NO-OP
+/// ci-dessus (auto-notification, absence de grant, échec d'insert best-effort). Les appelants humains
+/// (assign/triage) ignorent cette valeur ; le balayage SLA s'en sert pour COMPTER honnêtement ce qui a
+/// été remonté et ce qui a été supprimé, sans jamais dupliquer les règles d'émission.
+fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, finding_id: i64, kind: &str, text: String) -> bool {
     // Anti auto-notification (pas de spam pour sa propre action).
     if actor_uid == Some(recipient) {
-        return;
+        return false;
     }
     // GRANT-SCOPED (enterprise) : on ne notifie QUE quelqu'un réellement sur l'engagement. `tenancy::enabled`
     // + `user_has_engagement_grant` acquièrent+libèrent EUX-MÊMES le Mutex de connexion -> appelés AVANT de
     // tenir un guard `store`. Community => enabled=false => contrôle sauté (aucun grant n'existe, single user).
     if tenancy::enabled(app) && !tenancy::user_has_engagement_grant(app, recipient, engagement_id) {
-        return;
+        return false;
     }
     // Texte borné (défense anti-abus ; le rendu client l'ÉCHAPPE — jamais interprété comme HTML).
     let text = if text.len() > MAX_TEXT { text.chars().take(MAX_TEXT).collect() } else { text };
@@ -129,7 +138,7 @@ fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, f
                 // BEST-EFFORT : la mutation assign/triage a déjà réussi. On lowarn et on abandonne la notif —
                 // jamais de panique, jamais de faux échec propagé à l'appelant, jamais de ledger doublé.
                 eprintln!("[notifications] insert best-effort échoué (mutation préservée): {e}");
-                return;
+                return false;
             }
         }
     };
@@ -148,6 +157,18 @@ fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, f
     // best-effort quand il est armé : le corps part RÉDIGÉ (secrets + URL de cible) et un échec d'envoi
     // n'a aucun effet ici. Cf. console/src/notify_channels.rs.
     crate::notify_channels::dispatch(app, recipient, engagement_id, finding_id, kind, &text);
+    true
+}
+
+/// HOOK SLA — le balayage périodique (`notify_sla.rs`) signale UN dépassement de budget de triage.
+///
+/// C'est LA porte par laquelle un SLA remonte : il n'a ni socket, ni URL, ni secret à lui. En passant
+/// par [`emit`] il hérite, sans les réécrire, du grant-scope (enterprise), du caractère best-effort, de
+/// l'event SSE, ET du miroir sortant RÉDIGÉ (`notify_channels::dispatch` — secrets puis URL de cible).
+/// `actor_uid = None` : l'auteur est le système, il n'y a donc pas d'auto-notification à supprimer.
+/// Rend `true` si une notification a bien été créée (cf. [`emit`]).
+pub(crate) fn notify_sla_breach(app: &App, recipient: i64, engagement_id: i64, finding_id: i64, text: &str) -> bool {
+    emit(app, recipient, None, engagement_id, finding_id, KIND_SLA, text.to_string())
 }
 
 /// HOOK ASSIGN (single) — notifie le NOUVEL assigné qu'un finding lui a été attribué (best-effort). Résout

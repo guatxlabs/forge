@@ -12,15 +12,16 @@ import { loadAdminConnectors } from './admin/connectors.js';
 import { loadAddTool } from './admin/addtool.js';
 import { loadAdminToolsRuntime } from './admin/toolsruntime.js';
 import { loadAdminNotifyChannel } from './admin/notifychannel.js';
+import { loadAdminNotifySla } from './admin/notifysla.js';
 import { loadAdminDetection } from './admin/detection.js';
 import { backupCreate, backupRestore, loadAdminBackup } from './admin/backup.js';
 import { loadConsolePanel } from './admin/console.js';
 import { loadAdminNetwork } from './admin/network.js';
 
 // Vue #admin : charge comptes, POLITIQUE RÉSEAU (master global), connecteurs, AJOUT D'OUTIL, CYCLE DE VIE
-// DES OUTILS (binaires du manifeste), source de détection, CANAL DE NOTIFICATION SORTANT, sauvegarde ET la
+// DES OUTILS (binaires du manifeste), source de détection, CANAL DE NOTIFICATION SORTANT, SLA DE TRIAGE, sauvegarde ET la
 // Console Forge in-UI (runner gouverné P5) — tous réservés au role admin (le serveur reste l'autorité).
-export function loadAdmin() { loadAdminUsers(); loadAdminNetwork(); loadAdminConnectors(); loadAddTool(); loadAdminToolsRuntime(); loadAdminDetection(); loadAdminNotifyChannel(); loadAdminBackup(); loadConsolePanel(); }
+export function loadAdmin() { loadAdminUsers(); loadAdminNetwork(); loadAdminConnectors(); loadAddTool(); loadAdminToolsRuntime(); loadAdminDetection(); loadAdminNotifyChannel(); loadAdminNotifySla(); loadAdminBackup(); loadConsolePanel(); }
 
 // --- Câblage des actions de la vue #admin (les handlers vivent dans les modules de domaine) ---
 if ($('#admin-new')) $('#admin-new').addEventListener('click', adminCreateUser);
@@ -29,6 +30,7 @@ if ($('#admin-conn-reload')) $('#admin-conn-reload').addEventListener('click', l
 if ($('#admin-addtool-reload')) $('#admin-addtool-reload').addEventListener('click', loadAddTool);
 if ($('#admin-toolsrt-reload')) $('#admin-toolsrt-reload').addEventListener('click', loadAdminToolsRuntime);
 if ($('#admin-notify-reload')) $('#admin-notify-reload').addEventListener('click', loadAdminNotifyChannel);
+if ($('#admin-sla-reload')) $('#admin-sla-reload').addEventListener('click', loadAdminNotifySla);
 if ($('#admin-det-reload')) $('#admin-det-reload').addEventListener('click', loadAdminDetection);
 if ($('#bk-create')) $('#bk-create').addEventListener('click', backupCreate);
 if ($('#bk-restore')) $('#bk-restore').addEventListener('click', backupRestore);
