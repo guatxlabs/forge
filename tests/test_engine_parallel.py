@@ -330,5 +330,97 @@ class TestCancelComposesWithMultipleInflight(unittest.TestCase):
         self.assertEqual(errors, [], f"le snapshot du registre doit être thread-safe (aucune erreur) : {errors}")
 
 
+class TestSlidingWindowDoesNotStallOnASlowHead(unittest.TestCase):
+    """Une action LENTE EN TÊTE ne doit PAS immobiliser le pool.
+
+    L'application des résultats est SÉRIELLE et ORDONNÉE (c'est l'invariant de déterminisme, prouvé
+    par `TestDeterminism`). La conséquence piège : si la fenêtre de SOUMISSION est égale au pool, on
+    attend la tête pour ré-alimenter — les workers qui ont fini restent au repos. Chaque lot était
+    donc payé au prix de sa plus lente action.
+
+    Mesuré avant correctif, 12 actions dont une lente par lot (1,2 s contre 0,05 s), pool=4 :
+    **3,90 s pour un plancher sériel de 4,05 s**. Après (fenêtre = 2 x pool) : **2,47 s**.
+
+    Ce test n'est PAS chronométré — un test au wall-clock serait flaky sous charge. Il mesure la
+    propriété STRUCTURELLE qui produit le gain : combien d'actions ont DÉMARRÉ pendant que la tête
+    est encore bloquée. Avec une fenêtre égale au pool : `pool`. Avec `2 x pool` : le double."""
+
+    POOL = 4
+
+    def _run_with_blocked_head(self):
+        started = []
+        lock = threading.Lock()
+        release_head = threading.Event()
+
+        class Stub(registry.Module):
+            kind = "demo.window"
+            exploit = False
+            web_allowed = True
+            mitre = "T9999"
+
+            def dry(self, action):
+                return "dry"
+
+            def fire(self, action):
+                with lock:
+                    started.append(action.target)
+                    is_head = len(started) == 1
+                if is_head:
+                    release_head.wait(timeout=10)   # la TÊTE bloque jusqu'au relâchement
+                return [Finding(target=action.target, title="ok", severity="INFO",
+                                category="recon", status="tested")]
+
+        saved = registry.REGISTRY.get("demo.window")
+        registry.REGISTRY["demo.window"] = Stub
+        prev = os.environ.get("FORGE_PARALLELISM")
+        os.environ["FORGE_PARALLELISM"] = str(self.POOL)
+        try:
+            targets = [f"h{i}.test" for i in range(4 * self.POOL)]
+            sc = Scope({"mode": "grey", "in_scope": ["*.test"], "allow_exploit": True})
+            eng = Engine(sc, mode="auto")
+            eng.arm("test")
+            acts = [Action(kind="demo.window", target=t) for t in targets]
+            th = threading.Thread(target=eng.run, args=(acts,), daemon=True)
+            th.start()
+            # Laisse la fenêtre se remplir, tête toujours bloquée.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with lock:
+                    if len(started) >= 2 * self.POOL:
+                        break
+                time.sleep(0.02)
+            with lock:
+                during_head = len(started)
+            release_head.set()
+            th.join(timeout=20)
+            return during_head, targets
+        finally:
+            release_head.set()
+            os.environ.pop("FORGE_PARALLELISM", None) if prev is None else os.environ.__setitem__("FORGE_PARALLELISM", prev)
+            if saved is None:
+                registry.REGISTRY.pop("demo.window", None)
+            else:
+                registry.REGISTRY["demo.window"] = saved
+
+    def test_pool_keeps_working_while_the_head_is_blocked(self):
+        during_head, _ = self._run_with_blocked_head()
+        self.assertGreaterEqual(
+            during_head, 2 * self.POOL,
+            f"seules {during_head} actions avaient démarré pendant que la tête bloquait : la fenêtre "
+            f"de soumission est retombée à la taille du pool, donc une action lente ré-immobilise les "
+            f"workers (régression du lot verrouillé)")
+
+    def test_the_window_stays_BOUNDED(self):
+        """Contrôle NÉGATIF : la fenêtre ne doit pas devenir « tout soumettre ».
+
+        Sans borne, un cancel/watchdog trouverait un nombre ARBITRAIRE d'actions déjà tirées au-delà
+        du point d'application — c'est précisément ce que le découpage en lots protégeait."""
+        during_head, targets = self._run_with_blocked_head()
+        self.assertLess(
+            during_head, len(targets),
+            "la fenêtre a soumis TOUTES les actions : le travail au-delà du point d'application n'est "
+            "plus borné")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

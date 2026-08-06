@@ -528,39 +528,61 @@ class Engine:
                       checkpoint: "Callable[[], None] | None", checkpoint_every: int,
                       pool: int) -> list[dict[str, Any]]:
         """Chemin PARALLÈLE borné (G3). Les TIRS bloquants (`_decide_blocking`, sans effet de bord) sont
-        soumis à un `ThreadPoolExecutor(max_workers=pool)`, traités par LOTS de `pool` ; leurs résultats
-        sont APPLIQUÉS (`_apply`) SÉRIELLEMENT, DANS L'ORDRE d'action, sur le thread principal — d'où le
-        déterminisme identique au sériel (ledger/ingest/decision/findings ordonnés). Le lot borne le
-        nombre de tirs EN VOL à `pool` (au plus un lot d'avance) : la borne « travail après cancel »
-        reste analogue au sériel (au plus un lot au-delà du dernier checkpoint), et l'émission + le
-        checkpoint intra-vague conservent EXACTEMENT la même cadence (mêmes frontières `n`).
+        soumis à un `ThreadPoolExecutor(max_workers=pool)` en FENÊTRE GLISSANTE ; leurs résultats sont
+        APPLIQUÉS (`_apply`) SÉRIELLEMENT, DANS L'ORDRE d'action, sur le thread principal — d'où le
+        déterminisme identique au sériel (ledger/ingest/decision/findings ordonnés).
+
+        POURQUOI UNE FENÊTRE ET NON DES LOTS. La version en lots soumettait `pool` tirs, les drainait
+        TOUS, puis seulement soumettait les suivants : chaque lot était donc payé au prix de sa plus
+        LENTE action, workers libres à l'arrêt pendant ce temps. Mesuré sur 12 actions dont une lente
+        par lot (1,2 s contre 0,05 s), pool=4 : **3,90 s pour un plancher sériel de 4,05 s** — 4 % de
+        gain, autant dire aucun. La fenêtre garde `pool` tirs EN VOL en permanence : une action lente
+        n'immobilise plus que SON worker.
+
+        BORNES INCHANGÉES : au plus `pool` tirs en vol (même plafond qu'un lot), donc la borne
+        « travail après cancel » reste du même ordre — au plus `pool` actions au-delà du point
+        d'application courant. L'émission et le checkpoint intra-vague gardent EXACTEMENT la même
+        cadence : `n` s'incrémente une fois par action appliquée, aux mêmes frontières.
 
         COMPOSITION E3/E4 (cancel/timeout) : plusieurs tirs EN VOL enregistrent chacun leur pgid dans le
         registre verrouillé de `runner` ; un SIGTERM watchdog coupe TOUS les groupes en vol (E4) et
         `_run_checkpoint` lève `_Terminate` à la frontière d'action -> on ne DÉMARRE plus de lot ; le
         `finally` ferme l'exécuteur (annule les tirs en file). D1 : `_apply` étant sériel et ordonné, les
         offsets d'ingest et le compteur `n` sont identiques au sériel (aucun finding perdu ni doublé)."""
+        from collections import deque
         from concurrent.futures import ThreadPoolExecutor
         out: list[dict[str, Any]] = []
         n = 0
         total = len(actions)
         ex = ThreadPoolExecutor(max_workers=pool, thread_name_prefix="forge-wave")
         try:
-            i = 0
-            while i < total:
-                batch = actions[i:i + pool]
-                # PHASE 1 (parallèle) : soumettre les tirs bloquants du lot (bornés à `pool` en vol).
-                futures = [ex.submit(self._decide_blocking, a) for a in batch]
-                # PHASE 2 (sérielle, ordre d'action) : drainer EN ORDRE et appliquer les mutations.
-                for fut in futures:
-                    pending = fut.result()           # propage une exception worker (ex. dry() qui lève) — mirror sériel
-                    res = self._apply(pending)
-                    self._emit_result(res)
-                    out.append(res)
-                    n += 1
-                    if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
-                        self._run_checkpoint(checkpoint)   # peut lever _Terminate (BaseException) -> arrêt gracieux
-                i += pool
+            # FENÊTRE DE SOUMISSION > POOL — le point clé. On draine EN ORDRE d'action (déterminisme),
+            # donc une action LENTE EN TÊTE bloque le réapprovisionnement : avec une fenêtre égale au
+            # pool, les workers qui ont fini attendent la tête au lieu d'attaquer la suite. Une fenêtre
+            # de `2 x pool` laisse l'exécuteur enfiler du travail d'avance : les workers libérés
+            # démarrent l'action suivante sans attendre que la tête soit appliquée.
+            # CONTREPARTIE, assumée et bornée : le « travail au-delà du point d'application » passe de
+            # `pool` à `2 x pool` actions. C'est ce qui peut avoir été TIRÉ en trop si un cancel/watchdog
+            # tombe — borné, petit, et sans effet sur le déterminisme (l'application reste ordonnée).
+            window = max(pool, 2 * pool)
+            inflight: deque = deque()
+            nxt = 0
+            while nxt < total and len(inflight) < window:
+                inflight.append(ex.submit(self._decide_blocking, actions[nxt]))
+                nxt += 1
+            while inflight:
+                pending = inflight.popleft().result()   # propage une exception worker — mirror sériel
+                # RÉ-ALIMENTATION IMMÉDIATE : on remplit la fenêtre AVANT l'application sérielle, pour
+                # que l'écriture ledger/ingest ne laisse jamais un worker au repos.
+                while nxt < total and len(inflight) < window:
+                    inflight.append(ex.submit(self._decide_blocking, actions[nxt]))
+                    nxt += 1
+                res = self._apply(pending)
+                self._emit_result(res)
+                out.append(res)
+                n += 1
+                if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
+                    self._run_checkpoint(checkpoint)   # peut lever _Terminate (BaseException) -> arrêt gracieux
             return out
         finally:
             _shutdown_executor(ex)
