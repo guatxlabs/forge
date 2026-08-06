@@ -728,7 +728,7 @@ use crate::testutil::*;
                 "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
             }
         });
-        let s = auth_summary_json(&scope_v).expect("résumé présent");
+        let s = auth_summary_json(&scope_v, 0).expect("résumé présent");
         let blob = s.to_string();
         assert!(!blob.contains("S3CR3T-tok"), "bearer JAMAIS exposé");
         assert!(!blob.contains("hidden-val"), "valeur d'en-tête JAMAIS exposée");
@@ -741,7 +741,65 @@ use crate::testutil::*;
         assert_eq!(s["idor_targets"][0]["url"], json!("https://app.test/api/me"));
         assert_eq!(s["idor_targets"][0]["marker"], json!("MK"));
         // aucun bloc auth => None (=> champ absent du payload liste => byte-identique).
-        assert!(auth_summary_json(&json!({"mode": "grey", "in_scope": ["app.test"]})).is_none());
+        assert!(auth_summary_json(&json!({"mode": "grey", "in_scope": ["app.test"]}), 0).is_none());
+    }
+
+    /// [ÉCHÉANCE — L'ÉDITEUR VOIT LA SESSION MOURIR AVANT LE RUN] Le résumé porte `expires_at` /
+    /// `expired`, calculés depuis le tampon non secret posé au scellement. Sans ça, l'opérateur n'avait
+    /// AUCUN moyen de savoir qu'il s'apprêtait à lancer une campagne désarmée : le matériel est scellé,
+    /// donc illisible par l'éditeur, et le rapport ne le disait qu'à la fin — vide.
+    /// MUTATION-PROVABLE : retirer `expires_at`/`expired` du résumé -> ROUGE.
+    #[test]
+    fn auth_summary_tells_the_editor_which_account_is_dead() {
+        use base64::Engine as _;
+        let b = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let jwt = |exp: i64| format!("{}.{}.sig", b(r#"{"alg":"HS256"}"#), b(&format!(r#"{{"exp":{exp}}}"#)));
+        let scope_v = json!({
+            "mode": "grey", "in_scope": ["app.test"],
+            "auth": {"accounts": [{"label": "attacker", "bearer": jwt(1_600_000_000), "exp": 1_600_000_000i64},
+                                  {"label": "opaque", "cookies": "sid=rien-de-lisible"}]}
+        });
+        let s = auth_summary_json(&scope_v, 1_700_000_000).expect("résumé présent");
+        assert_eq!(s["accounts"][0]["expires_at"], json!(1_600_000_000));
+        assert_eq!(s["accounts"][0]["expired"], json!(true), "échéance dépassée => l'éditeur le DIT");
+        // INCONNU n'est JAMAIS présenté comme expiré (ni comme valide) : `expires_at` est null.
+        assert_eq!(s["accounts"][1]["expires_at"], Value::Null);
+        assert_eq!(s["accounts"][1]["expired"], json!(false));
+        // ... et avant l'échéance, rien n'est signalé (contrôle négatif : pas d'alarme permanente).
+        let early = auth_summary_json(&scope_v, 1_500_000_000).expect("résumé présent");
+        assert_eq!(early["accounts"][0]["expired"], json!(false));
+        // le JETON lui-même n'entre JAMAIS dans le résumé (contrat inchangé).
+        assert!(!s.to_string().contains(&jwt(1_600_000_000)));
+    }
+
+    /// [ÉCHÉANCE — SURVIE À L'ALLER-RETOUR DE L'ÉDITEUR] Le tampon `exp` doit traverser la canonicalisation
+    /// ET la fusion d'édition. Sans ça, la première sauvegarde de l'éditeur (qui ne renvoie jamais les
+    /// secrets, donc reprend le matériel STOCKÉ) effacerait l'échéance et l'avertissement disparaîtrait en
+    /// silence — le mode de panne « effacement discret » que ce module interdit.
+    /// MUTATION-PROVABLE : retirer la reprise de `exp` de `validate_auth_block` ou de
+    /// `merge_auth_for_update` -> ROUGE.
+    #[test]
+    fn expiry_stamp_survives_canonicalisation_and_edit_merge() {
+        // (1) canonicalisation : `exp` préservé, mais il ne SUFFIT pas à faire exister un compte vide.
+        let v = validate_auth_block(Some(&json!({"accounts": [
+            {"label": "attacker", "bearer": "TOK", "exp": 1_600_000_000i64},
+            {"label": "fantome", "exp": 1_600_000_000i64}
+        ]}))).expect("bloc valide").expect("bloc présent");
+        assert_eq!(v["accounts"].as_array().unwrap().len(), 1, "un compte réduit à un `exp` reste DROPPÉ");
+        assert_eq!(v["accounts"][0]["exp"], json!(1_600_000_000));
+
+        // (2) fusion d'édition : le client renvoie le compte SANS son secret (`keep_existing`) — le
+        //     matériel ET son échéance viennent du STOCKÉ, et une valeur inventée par le client ne prime pas.
+        let stored = json!({"auth": {"accounts": [{"label": "attacker", "bearer": "forge:fenc1:ZZZ", "exp": 1_600_000_000i64}]}});
+        let incoming = json!({"auth": {"accounts": [{"label": "attacker", "keep_existing": true, "exp": 9_999_999_999i64}]}});
+        let merged = merge_auth_for_update(&stored, &incoming).expect("fusion").expect("bloc présent");
+        assert_eq!(merged["accounts"][0]["bearer"], json!("forge:fenc1:ZZZ"), "matériel repris du stocké");
+        assert_eq!(merged["accounts"][0]["exp"], json!(1_600_000_000), "échéance du STOCKÉ, pas celle du client");
+
+        // (3) stocké SANS échéance => on retire (mieux vaut INCONNU qu'une échéance d'un autre jeton).
+        let stored = json!({"auth": {"accounts": [{"label": "attacker", "bearer": "forge:fenc1:ZZZ"}]}});
+        let merged = merge_auth_for_update(&stored, &incoming).expect("fusion").expect("bloc présent");
+        assert!(merged["accounts"][0].get("exp").is_none(), "aucune échéance héritée d'ailleurs");
     }
 
     /// [R5b — ANTI-EFFACEMENT SILENCIEUX] Le contexte d'authentification SURVIT à une édition qui ne parle

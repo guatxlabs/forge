@@ -99,7 +99,8 @@ connecteurs (MSF, Burp). La table complète (générée depuis `forge modules --
 ### 2.4 Les collecteurs de détection (`forge/collectors/`)
 
 Pour la boucle purple, les sources BLUE « riches » (CrowdSec, Elastic/OpenSearch, syslog/filterlog,
-fichier, exec, ou HTTP en **mTLS**) sont **déléguées** au collecteur Python
+fichier, exec, ou HTTP en **mTLS** — le seam présente bien un certificat client, mais une identité de
+PROCESSUS, pas par-source) sont **déléguées** au collecteur Python
 (`forge.cli detections --source …`). Chaque `kind` a une classe qui normalise sa source native en
 `[{mitre, count, first_ts}]` et respecte le **contrat fail-open lisible** (`reachable` distingue
 « joignable mais vide » de « injoignable »). Kinds : `plume, generic_http, crowdsec, elastic,

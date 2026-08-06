@@ -29,9 +29,13 @@ Liaison : le moteur construit un `SessionStore` depuis le scope (+ matériel par
 de chaque `fire()` de module via `using(store)` (contexte thread-local restauré en sortie). Les
 chokepoints HTTP partagés (`Oracle._http`, `PassiveSurface._http_get`) consultent `current()` et
 fusionnent les en-têtes de session scope-guardés SOUS ceux de l'appelant. Zéro dépendance (stdlib)."""
+import base64
 import contextlib
 import fnmatch
+import json
+import re
 import threading
+import time
 
 from .roe import Scope
 
@@ -223,6 +227,15 @@ class AuthAccount:
     def is_empty(self):
         return self._session.is_empty()
 
+    def expires_at(self):
+        """Échéance (epoch s) LISIBLE du matériel de ce compte, ou None (INCONNU — cookie opaque).
+        SECRET : rend un entier, jamais un fragment de jeton."""
+        return headers_expiry(self.headers())
+
+    def is_expired(self, now=None):
+        """True seulement si l'échéance est lisible ET dépassée (cf. `headers_expired`)."""
+        return headers_expired(self.headers(), now=now)
+
     def as_param(self):
         """Forme consommée par l'oracle IDOR : {label, headers}. SECRET — les headers portent le
         matériel d'auth (jamais journalisé tel quel ; le PoC/evidence est rédigé à la source)."""
@@ -233,6 +246,84 @@ class AuthAccount:
         return f"<forge.AuthAccount label={self.label!r} {self._session!r}>"
 
     __str__ = __repr__
+
+
+# =================================================================================================
+#  PÉREMPTION DU MATÉRIEL D'AUTHENTIFICATION — lire la date d'expiration AUTO-DÉCLARÉE d'un jeton.
+#
+#  POURQUOI. Le matériel d'auth ARME les oracles de contrôle d'accès (`access_control.idor`,
+#  `auth.takeover`, `access_control.privesc`). Une session qui expire en cours de campagne ne produit
+#  PAS d'erreur : les conjonctions de preuve s'effondrent toutes à False et l'oracle rend « rien
+#  trouvé » — un rapport PROPRE et VIDE qui ressemble à « la cible est saine ». C'est le mode d'échec
+#  le plus cher du projet. Ces helpers donnent le premier des deux signaux qui le rendent VISIBLE :
+#  la PÉREMPTION LISIBLE DANS LE JETON LUI-MÊME, connue AVANT d'émettre la moindre requête.
+#  (Le second signal — « la cible répond au compte authentifié comme à l'anonyme » — vit dans
+#  `modules/oracle.py` : il se lit sur les sondes DÉJÀ tirées, sans requête supplémentaire.)
+#
+#  CE QUE CE CODE NE FAIT PAS. Aucune vérification de SIGNATURE : on ne valide pas le jeton, on LIT
+#  une date auto-déclarée. C'est suffisant et c'est le bon niveau : le jeton est celui de l'opérateur
+#  (pas d'adversaire à contrer ici), et un `exp` dépassé signifie que le SERVEUR le refusera. Un
+#  jeton illisible/non-JWT (cookie de session opaque) rend `None` = INCONNU — jamais « expiré » :
+#  on n'accuse JAMAIS sans preuve, l'inconnu retombe sur la détection au tir.
+#  SECRET : ces fonctions ne rendent QU'UN ENTIER (epoch) ou un booléen. Jamais le jeton, jamais un
+#  fragment de jeton — rien d'ici ne peut atterrir dans un log, un finding ou le ledger.
+# =================================================================================================
+# Un JWT commence TOUJOURS par le base64url de `{"` -> `eyJ`. Discriminant simple et sûr : on ne
+# tente de décoder QUE ce qui a la forme d'un JWT, jamais un cookie opaque quelconque.
+_JWT_RX = re.compile(r"eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*")
+
+# Grâce (s) appliquée AVANT de déclarer un matériel périmé : notre horloge peut être EN AVANCE sur
+# celle du serveur. La grâce pousse la déclaration PLUS TARD (jamais plus tôt) — on préfère rater une
+# péremption de 30 s (la détection au tir la rattrape) que d'accuser à tort un jeton encore valide.
+_EXPIRY_GRACE = 60.0
+
+
+def _b64url_json(seg):
+    """dict depuis un segment base64url (padding restauré), ou None. Ne lève JAMAIS."""
+    try:
+        raw = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+        obj = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:            # noqa: BLE001  (jeton arbitraire : tout échec = « illisible »)
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def jwt_expiry(token):
+    """`exp` (epoch secondes, int) du PAYLOAD d'un JWT, ou None si absent/illisible/non-JWT.
+    AUCUNE vérification de signature (cf. le bloc ci-dessus). Ne lève JAMAIS."""
+    payload = _b64url_json(str(token or "").split(".")[1]) if str(token or "").count(".") >= 2 else None
+    exp = (payload or {}).get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None                                  # `exp` absent ou non numérique -> INCONNU
+    return int(exp)
+
+
+def material_expiry(values):
+    """La PLUS PROCHE échéance (epoch) parmi les JWT trouvés dans des chaînes arbitraires (valeurs
+    d'en-tête, de cookie, bearer nu), ou None si aucune n'est lisible. Le jeton peut être ENROBÉ
+    (`Bearer <jwt>`, `sid=<jwt>; other=1`) : on extrait les sous-chaînes de forme JWT. Ne lève JAMAIS."""
+    best = None
+    for v in values or ():
+        for tok in _JWT_RX.findall(str(v or "")):
+            exp = jwt_expiry(tok)
+            if exp is not None and (best is None or exp < best):
+                best = exp
+    return best
+
+
+def headers_expiry(headers):
+    """Échéance la plus proche du matériel porté par un dict d'EN-TÊTES DE REQUÊTE (la forme que les
+    oracles manipulent : `Authorization`, `Cookie`, en-têtes maison). None = INCONNU."""
+    return material_expiry((headers or {}).values())
+
+
+def headers_expired(headers, now=None, grace=_EXPIRY_GRACE):
+    """True SEULEMENT si le matériel porte une échéance LISIBLE et DÉPASSÉE (grâce d'horloge incluse).
+    INCONNU (cookie opaque, pas de JWT) -> False : jamais d'accusation sans preuve."""
+    exp = headers_expiry(headers)
+    if exp is None:
+        return False
+    return (time.time() if now is None else float(now)) >= exp + float(grace)
 
 
 class AuthContext:
@@ -307,6 +398,21 @@ class AuthContext:
         return {"accounts": [a.label for a in self.accounts],
                 "idor_targets": len(self.idor_targets)}
 
+    def expired_labels(self, now=None):
+        """LABELS des comptes dont le matériel porte une échéance LISIBLE et DÉPASSÉE. Vue SÛRE
+        (des labels et rien d'autre) destinée au ledger et à la ligne d'avancement du run : c'est ce
+        qui rend une session morte VISIBLE avant que le rapport ne soit vide."""
+        return [a.label for a in self.accounts if a.is_expired(now=now)]
+
+    def expiry_census(self, now=None):
+        """Recensement SÛR {label: 'expired'|'valid'|'unknown'} — 'unknown' = matériel sans échéance
+        lisible (cookie opaque), le cas majoritaire hors JWT. Aucun secret (labels + verdicts)."""
+        out = {}
+        for a in self.accounts:
+            exp = a.expires_at()
+            out[a.label] = "unknown" if exp is None else ("expired" if a.is_expired(now=now) else "valid")
+        return out
+
     def __repr__(self):
         return (f"<forge.AuthContext accounts={len(self.accounts)} "
                 f"idor_targets={len(self.idor_targets)}>")
@@ -330,6 +436,22 @@ def attacker_headers_from_params(accounts):
         if str(a.get("label", "")).strip().lower() == "attacker":
             return a.get("headers", {}) or {}
     return accounts[0].get("headers", {}) or {}
+
+
+def attacker_label_from_params(accounts):
+    """LABEL du compte ATTAQUANT parmi les comptes SÉRIALISÉS `{label, headers}` — MIROIR EXACT de la
+    sélection de `attacker_headers_from_params` (labellisé 'attacker' sinon le 1er). `""` si aucun
+    compte ou compte sans label.
+
+    Même raison d'être que son jumeau : la sélection de compte est une surface sensible et ne doit
+    exister qu'à UN endroit. Sert à NOMMER le compte dans un finding de dégradation (« matériel du
+    compte 'attacker' inutilisable ») — un LABEL, jamais un secret. Pur, ne lève jamais."""
+    if not accounts:
+        return ""
+    for a in accounts:
+        if str(a.get("label", "")).strip().lower() == "attacker":
+            return str(a.get("label", "")).strip()
+    return str(accounts[0].get("label", "")).strip()
 
 
 # --- liaison ambiante (thread-local) : le moteur LIE le store autour de chaque fire() --------------

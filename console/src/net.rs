@@ -166,9 +166,13 @@ pub(crate) fn reject_cleartext_secret(
     )
 }
 
-/// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici : le seam TLS n'installe
-/// AUCUN certificat client (`with_no_client_auth`) — un endpoint mTLS passe par un kind délégué au
-/// collecteur Python.
+/// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici, et la raison a CHANGÉ :
+/// le seam TLS installe désormais un certificat client (`tls::CLIENT_CERT_VAR` / `tls::CLIENT_KEY_VAR`,
+/// via `with_client_auth_cert`), donc un endpoint mTLS est joignable EN RUST. Mais cette identité est
+/// celle du PROCESSUS — une seule politique de confiance pour tout le binaire, cf. `tls::client_config`
+/// — alors que `auth.type` est un réglage PAR SOURCE. Ce qui reste délégué au collecteur Python, c'est
+/// donc le cas d'une identité PROPRE À UNE SOURCE, pas le mTLS en soi. `HttpAuth` ne décrit que des
+/// en-têtes ; le transport, mTLS compris, n'a jamais rien à y faire.
 pub(crate) enum HttpAuth {
     None,
     Basic(String),                         // base64 de user:pass -> `Authorization: Basic ...`
@@ -192,7 +196,8 @@ impl HttpAuth {
 
 /// Construit l'`HttpAuth` du fetcher intégré depuis la config source. `basic`/`bearer` prennent
 /// `auth.secret` ; `api_key_header` prend `auth.header` (défaut `X-API-Key`) + `auth.secret`. `none`,
-/// `mtls` ou un type inconnu => aucun en-tête (le TLS/mTLS relève d'un kind délégué au Python).
+/// `mtls` ou un type inconnu => aucun en-tête (le mTLS relève du TRANSPORT : il est servi par
+/// l'identité cliente du seam quand elle est configurée, jamais par un en-tête).
 pub(crate) fn parse_http_auth(cfg: &Value) -> HttpAuth {
     let auth = cfg.get("auth");
     let atype = ds_auth_type(cfg);

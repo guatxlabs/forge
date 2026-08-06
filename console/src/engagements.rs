@@ -305,6 +305,17 @@ pub(crate) fn validate_auth_block(v: Option<&Value>) -> Result<Option<Value>, St
                 };
                 let mut acc = serde_json::Map::new();
                 acc.insert("label".into(), json!(label));
+                // ÉCHÉANCE (`exp`, epoch s) — champ NON SECRET posé par le SCELLEMENT
+                // (`field_crypto::stamp_auth_expiry`), préservé ici pour que la forme canonique
+                // fasse un aller-retour SANS PERTE : sans cette ligne, le tampon d'un compte dont le
+                // matériel est resté scellé (édition « garder l'existant ») serait effacé à chaque
+                // sauvegarde et l'avertissement de péremption disparaîtrait en silence. Une valeur
+                // fournie par un client n'a AUCUNE autorité : dès qu'un matériel EN CLAIR accompagne
+                // le compte, le scellement RECALCULE (ou retire) ce champ. N'entre PAS dans
+                // `has_material` : un compte réduit à un `exp` reste un compte vide, donc droppé.
+                if let Some(e) = o.get("exp").and_then(Value::as_i64) {
+                    acc.insert("exp".into(), json!(e));
+                }
                 let mut has_material = false;
                 if let Some(h) = o.get("headers").filter(|x| !x.is_null()) {
                     let m = str_map(h, &format!("accounts[{i}].headers"))?;
@@ -436,6 +447,15 @@ pub(crate) fn merge_auth_for_update(stored_scope: &Value, incoming_scope: &Value
                     }
                 }
             }
+            // ÉCHÉANCE : le matériel repris est celui du STOCKÉ, donc son tampon `exp` l'est aussi —
+            // il PRIME sur toute valeur envoyée par le client (qui ne peut pas l'avoir recalculée,
+            // n'ayant jamais reçu le matériel). Absent côté stocké => on retire : mieux vaut
+            // « inconnu » qu'une échéance héritée d'un autre jeton. Si l'appelant fournit en plus du
+            // matériel EN CLAIR, le scellement RECALCULERA depuis ce clair et écrasera ce report.
+            match src.get("exp").and_then(Value::as_i64) {
+                Some(e) => { o.insert("exp".to_string(), json!(e)); }
+                None => { o.remove("exp"); }
+            }
         }
     }
     validate_auth_block(Some(&merged))
@@ -457,12 +477,19 @@ pub(crate) fn auth_ledger_summary(auth: &Value) -> Value {
 
 /// RÉSUMÉ RÉDIGÉ du bloc `auth` d'un scope_json pour l'éditeur (R5b). Renvoie `None` si aucun bloc auth
 /// (=> champ absent du payload, byte-identique à l'historique). Sinon un objet SANS AUCUN secret :
-///   { accounts: [ {label, has_headers, header_keys:[…], has_cookies, has_bearer} ],
+///   { accounts: [ {label, has_headers, header_keys:[…], has_cookies, has_bearer,
+///                  expires_at, expired} ],
 ///     idor_targets: [ {url, owner, marker} ] }
 /// Les VALEURS de bearer/cookies/headers ne sont JAMAIS incluses — seuls les NOMS d'en-têtes (non
 /// secrets, utiles pour ré-afficher les lignes) + des booléens de présence. url/owner/marker sont de la
 /// config non secrète (l'opérateur les a fournis), servis tels quels. Fonction PURE (aucune I/O).
-pub(crate) fn auth_summary_json(scope_v: &Value) -> Option<Value> {
+///
+/// `expires_at` / `expired` (`now` = horloge de l'appelant, injectée pour garder la fonction PURE et
+/// le test DÉTERMINISTE) rendent VISIBLE, AVANT tout lancement, un matériel qui ne s'authentifiera
+/// plus. `expires_at: null` = INCONNU (cookie opaque, ou base pas encore re-scellée) : l'absence
+/// d'échéance n'est JAMAIS présentée comme une validité — `expired` reste alors `false` et c'est le
+/// moteur qui tranchera au tir. Ni l'un ni l'autre n'est un secret (cf. `field_crypto`).
+pub(crate) fn auth_summary_json(scope_v: &Value, now: i64) -> Option<Value> {
     let auth = scope_v.get("auth")?.as_object()?;
     let mut accounts: Vec<Value> = Vec::new();
     if let Some(arr) = auth.get("accounts").and_then(|x| x.as_array()) {
@@ -477,12 +504,15 @@ pub(crate) fn auth_summary_json(scope_v: &Value) -> Option<Value> {
                 _ => false,
             }).unwrap_or(false);
             let has_bearer = o.get("bearer").and_then(|b| b.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
+            let expires_at = o.get("exp").and_then(Value::as_i64);
             accounts.push(json!({
                 "label": o.get("label").and_then(|x| x.as_str()).unwrap_or(""),
                 "has_headers": !header_keys.is_empty(),
                 "header_keys": header_keys,
                 "has_cookies": has_cookies,
                 "has_bearer": has_bearer,
+                "expires_at": expires_at,
+                "expired": expires_at.is_some_and(|e| e + 60 <= now),
             }));
         }
     }
@@ -564,7 +594,7 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
         // secrètes (bearer/cookies/headers) ne sont JAMAIS exposées ; seuls les NOMS d'en-têtes (non
         // secrets) + des booléens de présence le sont. url/owner/marker (config non secrète) tels quels.
         // Champ ABSENT quand l'engagement n'a pas de bloc auth => payload BYTE-IDENTIQUE à l'historique.
-        if let Some(summary) = auth_summary_json(&scope_v) {
+        if let Some(summary) = auth_summary_json(&scope_v, crate::state::now_epoch()) {
             o["auth"] = summary;
         }
         if expose_tenant {

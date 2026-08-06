@@ -20,6 +20,7 @@
 //!      vérificateur maison. Un TLS qui ne vérifie rien est du clair déguisé — c'est précisément par là
 //!      que les échappatoires entrent. `tls_source_carries_no_verification_escape_hatch` fige ça au
 //!      niveau SOURCE (le crate n'a pas le droit d'ouvrir l'API `dangerous` de rustls).
+//!
 //!   2bis. **CA PRIVÉE D'ENTREPRISE — une ANCRE DE PLUS, JAMAIS un contrôle DE MOINS.** Le magasin de
 //!      CA du SYSTÈME n'est PAS lu (c'est ce qui évite `schannel`/`security-framework`/`openssl` —
 //!      invariant #4). Sans knob, un déploiement dont l'IdP OIDC ou le collecteur est signé par la CA
@@ -36,6 +37,29 @@
 //!          accepte des ancres supplémentaires SANS jamais toucher à l'API `dangerous` de rustls.
 //!      FAIL-CLOSED : un PEM configuré mais illisible/invalide fait ÉCHOUER LE BOOT ([`preflight`]) ;
 //!      il ne dégrade JAMAIS en silence vers « pas d'ancre » (l'opérateur croirait sa CA en place).
+//!
+//!   2ter. **IDENTITÉ CLIENTE (mTLS) — ce que NOUS présentons, quand le pair l'EXIGE.** Le seam
+//!      n'installait AUCUN certificat client (`with_no_client_auth`), et un endpoint mTLS — IdP OIDC
+//!      d'entreprise, collecteur derrière un service-mesh — restait donc DÉLÉGUÉ au collecteur Python.
+//!      Ce délégué n'existe plus : [`CLIENT_CERT_VAR`] / [`CLIENT_KEY_VAR`] (motif maison `<VAR>` +
+//!      jumeau `_FILE`, comme l'ancre d'entreprise) posent une chaîne et sa clé, et rustls les présente
+//!      NATIVEMENT (`with_client_auth_cert`) — aucune dépendance nouvelle, aucune bibliothèque système.
+//!      Deux choses à ne pas confondre : présenter une identité est une AUTHENTIFICATION DE NOUS vers le
+//!      pair ; ça ne touche EN RIEN la vérification du certificat SERVEUR, qui reste pleine (invariant
+//!      #2) — `mtls_client_certificate_is_presented_and_accepted` s'appuie d'ailleurs sur l'ancre
+//!      d'entreprise pour vérifier le serveur de test.
+//!      **LA CLÉ PRIVÉE EST LE SECRET LE PLUS SENSIBLE DE CE BINAIRE**, et le cœur du travail n'est pas
+//!      le handshake mais son confinement : elle n'apparaît NI dans un log, NI dans une erreur, NI au
+//!      boot, NI nulle part ailleurs. Tout échec qui la touche est CLASSÉ, jamais CITÉ
+//!      ([`invalid_key_msg`]) — y compris l'erreur de la bibliothèque, qui recopie volontiers la ligne
+//!      fautive. `client_key_material_never_leaks_into_an_error` et
+//!      `client_key_material_never_leaks_into_the_boot_line` BALAIENT les sorties à la recherche d'un
+//!      fragment du corps de la clé.
+//!      FAIL-CLOSED : une identité à MOITIÉ configurée (cert sans clé, ou l'inverse), un PEM illisible,
+//!      ou une clé qui NE CORRESPOND PAS au certificat font ÉCHOUER LE BOOT ([`preflight`]) en nommant
+//!      la variable — jamais un mTLS silencieusement absent qui se découvrirait au premier handshake
+//!      sous la forme d'une « connexion refusée » qui ne désigne pas la cause.
+//!
 //!   3. **Le handshake décide AVANT le premier octet applicatif** — [`connect`] le mène à son terme, donc
 //!      un certificat non fiable fait échouer la CONNEXION, pas une lecture ultérieure. Aucune requête
 //!      (donc aucun secret) n'est écrite sur une session dont le pair n'est pas prouvé.
@@ -180,44 +204,54 @@ const HANDSHAKE_ROUNDS: usize = 8;
 /// la variable directe prime, le jumeau `_FILE` est le repli.
 pub(crate) const EXTRA_CA_VAR: &str = "FORGE_EXTRA_CA_PEM";
 
-/// Résout le PEM d'ancres supplémentaires depuis l'environnement.
-/// `Ok(None)` = RIEN de configuré (cas de l'immense majorité des installs — aucune ancre ajoutée).
-/// `Ok(Some(pem))` = PEM à parser. `Err` = configuré mais INEXPLOITABLE.
+/// Résout un PEM depuis l'environnement selon le MOTIF MAISON : `<VAR>` porte le PEM VERBATIM,
+/// `<VAR>_FILE` porte un CHEMIN (montage Docker/k8s) — la variable directe prime, le jumeau est le
+/// repli. `what` nomme ce qu'on chargeait, pour un message d'échec qui SITUE le problème.
+/// `Ok(None)` = RIEN de configuré. `Ok(Some(pem))` = PEM à parser. `Err` = configuré mais INEXPLOITABLE.
+///
+/// ⚠️ AUCUN chemin d'ici ne met le CONTENU dans un message — seulement le NOM de la variable et le KIND
+/// d'erreur d'E/S. Ce n'est pas de la coquetterie : cette fonction sert AUSSI à résoudre la CLÉ PRIVÉE
+/// cliente ([`CLIENT_KEY_VAR`]), et un `format!` de confort ici la déverserait dans les journaux.
 ///
 /// POURQUOI PAS `secret_env::secret_from_env` TEL QUEL, alors qu'on en suit le motif : ce helper est
 /// FAIL-SOFT par contrat (un `<VAR>_FILE` illisible rend `None` + un avertissement, pour que le repli
 /// de l'appelant — auto-génération, refus — s'engage). Ici, `None` signifierait « pas d'ancre
-/// d'entreprise » : l'opérateur croirait sa CA installée, et le premier handshake vers son IdP
-/// échouerait sans que rien ne désigne le PEM. C'est la DÉGRADATION SILENCIEUSE que tout ce travail
-/// interdit. On duplique donc la PRÉCÉDENCE (identique, testée) mais pas la POLITIQUE D'ÉCHEC : ici un
-/// PEM configuré et illisible est une ERREUR, remontée jusqu'au boot.
-pub(crate) fn extra_ca_pem_from_env() -> Result<Option<String>, String> {
+/// d'entreprise » / « pas d'identité cliente » : l'opérateur croirait sa CA (ou son certificat) en
+/// place, et le premier handshake vers son IdP échouerait sans que rien ne désigne le PEM. C'est la
+/// DÉGRADATION SILENCIEUSE que tout ce travail interdit. On duplique donc la PRÉCÉDENCE (identique,
+/// testée) mais pas la POLITIQUE D'ÉCHEC : ici un PEM configuré et illisible est une ERREUR, remontée
+/// jusqu'au boot.
+fn pem_from_env(var: &str, what: &str) -> Result<Option<String>, String> {
     // 1) Variable directe posée & non blanche : c'est le PEM lui-même.
-    if let Ok(v) = std::env::var(EXTRA_CA_VAR) {
+    if let Ok(v) = std::env::var(var) {
         if !v.trim().is_empty() {
             return Ok(Some(v));
         }
     }
     // 2) `<VAR>_FILE` : la variable porte un CHEMIN, le PEM vit dans le fichier monté.
-    let file_var = format!("{EXTRA_CA_VAR}_FILE");
+    let file_var = format!("{var}_FILE");
     let path = match std::env::var(&file_var) {
         Ok(p) if !p.trim().is_empty() => p,
-        _ => return Ok(None), // 3) rien de configuré — aucune ancre supplémentaire, cas par défaut
+        _ => return Ok(None), // 3) rien de configuré — cas par défaut
     };
     match std::fs::read_to_string(&path) {
         Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
         Ok(_) => Err(format!(
-            "{file_var} désigne un fichier VIDE — aucune ancre de confiance n'en sortirait, et le \
-             déploiement croirait sa CA d'entreprise installée. Refus (fail-closed)."
+            "{file_var} désigne un fichier VIDE — {what} n'en sortirait pas, et le déploiement croirait \
+             sa configuration en place. Refus (fail-closed)."
         )),
-        // On nomme la VARIABLE et le KIND d'erreur d'E/S, jamais le contenu (un PEM n'est pas secret,
-        // mais la discipline « on ne recrache pas ce qu'on lit » est la même partout).
+        // On nomme la VARIABLE et le KIND d'erreur d'E/S, jamais le contenu.
         Err(e) => Err(format!(
-            "{file_var} illisible ({}) — impossible de charger la CA d'entreprise. Refus (fail-closed) \
-             plutôt que de démarrer SANS l'ancre que l'opérateur croit avoir posée.",
+            "{file_var} illisible ({}) — impossible de charger {what}. Refus (fail-closed) plutôt que \
+             de démarrer SANS ce que l'opérateur croit avoir posé.",
             e.kind()
         )),
     }
+}
+
+/// Résout le PEM d'ancres supplémentaires depuis l'environnement (motif maison, cf. [`pem_from_env`]).
+pub(crate) fn extra_ca_pem_from_env() -> Result<Option<String>, String> {
+    pem_from_env(EXTRA_CA_VAR, "l'ancre de confiance d'entreprise")
 }
 
 /// Parse un PEM en ancres de confiance. FAIL-CLOSED de bout en bout : un bloc mal formé, un contenu
@@ -240,17 +274,176 @@ fn parse_extra_anchors(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDe
     Ok(out)
 }
 
+// =================================================================================================
+//  IDENTITÉ CLIENTE — le certificat que NOUS présentons quand le pair l'EXIGE (mTLS)
+// =================================================================================================
+
+/// Variable portant la CHAÎNE de certificats CLIENTE au format PEM (feuille D'ABORD, intermédiaires
+/// ensuite). MOTIF MAISON `secret_env` : `FORGE_CLIENT_CERT_PEM_FILE` porte un CHEMIN — la variable
+/// directe prime, le jumeau `_FILE` est le repli. Un certificat est PUBLIC (le pair le reçoit sur le
+/// fil) : ses échecs de parsing peuvent donc être détaillés, contrairement à ceux de la clé.
+pub(crate) const CLIENT_CERT_VAR: &str = "FORGE_CLIENT_CERT_PEM";
+
+/// Variable portant la CLÉ PRIVÉE de cette chaîne (PEM PKCS#8, PKCS#1 ou SEC1).
+///
+/// ⚠️ **C'EST LE SECRET LE PLUS SENSIBLE QUE CE BINAIRE MANIPULE** — davantage qu'un `client_secret`
+/// OIDC ou qu'un jeton d'ingest : elle ne s'expire pas d'elle-même et elle SIGNE notre identité auprès
+/// de tout pair mTLS. Elle ne doit apparaître NI dans un log, NI dans une erreur, NI dans le ledger, NI
+/// dans un finding, NI dans une réponse d'API, NI dans un message de diagnostic au boot. Les seuls
+/// chemins qui la touchent sont [`pem_from_env`] (qui ne cite jamais le contenu), [`parse_client_key`]
+/// et [`client_auth_error`] (qui CLASSENT l'échec au lieu de le CITER). La forme `_FILE` est la forme
+/// RECOMMANDÉE : l'environnement d'un processus se lit dans `/proc/<pid>/environ` et se recopie dans
+/// tout dump de configuration ; un fichier monté root-only, non.
+pub(crate) const CLIENT_KEY_VAR: &str = "FORGE_CLIENT_KEY_PEM";
+
+/// Identité cliente RÉSOLUE, sous sa forme PEM, telle que l'opérateur l'a fournie.
+///
+/// **NE DÉRIVE PAS `Debug`, et ne doit jamais en dériver** : c'est ce qui rend impossible d'imprimer la
+/// clé « par accident » (un `dbg!`, un `{:?}` dans un `Result`, un log d'erreur générique). Même raison
+/// que l'absence de `Debug` sur [`Conn`]. Le type est éphémère : il vit le temps de bâtir la config
+/// TLS et rien ne le stocke.
+pub(crate) struct ClientIdentityPem {
+    /// Chaîne de certificats (PUBLIQUE).
+    cert: String,
+    /// Clé privée (SECRÈTE — cf. [`CLIENT_KEY_VAR`]).
+    key: String,
+}
+
+/// Résout l'identité cliente depuis l'environnement, FAIL-CLOSED sur la MOITIÉ.
+///
+/// `Ok(None)` = rien de configuré (cas de l'immense majorité des installs : aucun certificat client
+/// présenté, comportement byte-identique à avant). `Ok(Some(id))` = les DEUX moitiés sont là.
+///
+/// UNE SEULE DES DEUX => `Err`. C'est le cas qu'il fallait trancher : un certificat sans clé ne peut
+/// rien signer, une clé sans certificat ne prouve aucune identité, et dans les deux cas rustls
+/// n'enverrait tout simplement PAS de certificat. Le pair mTLS refuserait alors la connexion et
+/// l'opérateur lirait « connexion refusée » — un message qui ne désigne pas la variable manquante. On
+/// meurt donc au boot, en la nommant.
+pub(crate) fn client_identity_from_env() -> Result<Option<ClientIdentityPem>, String> {
+    let cert = pem_from_env(CLIENT_CERT_VAR, "le certificat client (mTLS)")?;
+    // `Some(_)`/`is_some()` UNIQUEMENT sur la clé : sa valeur ne doit transiter par aucun message.
+    let key = pem_from_env(CLIENT_KEY_VAR, "la clé privée cliente (mTLS)")?;
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some(ClientIdentityPem { cert, key })),
+        (Some(_), None) => Err(format!(
+            "{CLIENT_CERT_VAR} est posé mais ni {CLIENT_KEY_VAR} ni {CLIENT_KEY_VAR}_FILE — un \
+             certificat client SANS SA CLÉ ne peut rien signer : aucune identité ne serait présentée, \
+             et un pair mTLS refuserait la connexion sans que rien ne désigne la cause. Refus \
+             (fail-closed)."
+        )),
+        (None, Some(_)) => Err(format!(
+            "{CLIENT_KEY_VAR} est posé mais ni {CLIENT_CERT_VAR} ni {CLIENT_CERT_VAR}_FILE — une clé \
+             privée SANS SON CERTIFICAT ne prouve aucune identité : aucune identité ne serait \
+             présentée, et un pair mTLS refuserait la connexion sans que rien ne désigne la cause. \
+             Refus (fail-closed)."
+        )),
+    }
+}
+
+/// Parse la CHAÎNE de certificats CLIENTE. FAIL-CLOSED : bloc mal formé ou aucun `CERTIFICATE` => `Err`.
+/// Le détail de l'erreur est ADMIS ici — un certificat client est public, le pair le reçoit sur le fil.
+fn parse_client_certs(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let mut out = Vec::new();
+    for item in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        out.push(item.map_err(|e| {
+            format!("{CLIENT_CERT_VAR} : PEM invalide ({e:?}) — aucun certificat client chargé (fail-closed)")
+        })?);
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "{CLIENT_CERT_VAR} : aucun bloc CERTIFICATE dans le PEM fourni — refus (fail-closed). Une \
+             chaîne cliente se fournit en PEM `-----BEGIN CERTIFICATE-----`, feuille d'abord."
+        ));
+    }
+    Ok(out)
+}
+
+/// Message d'échec portant sur la CLÉ PRIVÉE : NOMME la variable et la NATURE du défaut, JAMAIS le
+/// contenu. `reason` est choisi dans un jeu FERMÉ de littéraux (tous les appels sont dans ce fichier) —
+/// **aucune donnée ne peut transiter par ce paramètre**, c'est ce qui rend le confinement vérifiable
+/// par relecture en plus du balayage de `client_key_material_never_leaks_into_an_error`.
+fn invalid_key_msg(reason: &str) -> String {
+    format!(
+        "{CLIENT_KEY_VAR} : clé privée cliente inexploitable — {reason}. Refus (fail-closed). Aucun \
+         extrait de la clé n'est journalisé, ici ni ailleurs : cette variable porte le secret le plus \
+         sensible du binaire."
+    )
+}
+
+/// Parse la CLÉ PRIVÉE cliente (PKCS#8 / PKCS#1 / SEC1).
+///
+/// ⚠️ AUCUN message d'ici ne porte le moindre octet du PEM — ni la valeur, ni un fragment, ni l'erreur
+/// de la bibliothèque. Ce dernier point est le piège, et il est MESURÉ, pas supposé :
+/// `rustls::pki_types::pem::Error::IllegalSectionStart` recopie la LIGNE fautive et `Base64Decode`
+/// recopie un octet du corps. Propager `{e:?}` « pour aider au diagnostic » serait donc déverser du
+/// matériel de clé dans les journaux. On CLASSE l'échec (jeu fermé de raisons), on ne le CITE pas.
+fn parse_client_key(pem: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let mut keys = rustls::pki_types::PrivateKeyDer::pem_slice_iter(pem.as_bytes());
+    let first = match keys.next() {
+        Some(Ok(k)) => k,
+        Some(Err(_)) => return Err(invalid_key_msg("PEM illisible ou corrompu")),
+        None => {
+            return Err(invalid_key_msg(
+                "aucun bloc de clé privée (« PRIVATE KEY », « RSA PRIVATE KEY » ou « EC PRIVATE KEY »)",
+            ))
+        }
+    };
+    // Plusieurs clés dans un même PEM : laquelle présenter ? Aucune réponse défendable => refus, plutôt
+    // qu'un « la première gagne » que l'opérateur ne pourrait pas deviner.
+    match keys.next() {
+        None => {}
+        Some(Ok(_)) => {
+            return Err(invalid_key_msg(
+                "PLUSIEURS clés privées dans le même PEM — laquelle présenter serait arbitraire",
+            ))
+        }
+        Some(Err(_)) => return Err(invalid_key_msg("PEM illisible ou corrompu après la première clé")),
+    }
+    Ok(first)
+}
+
+/// Traduit un échec d'installation du certificat client. Comme [`parse_client_key`] : on CLASSE, on ne
+/// CITE pas. `rustls::Error::General` porte une chaîne fournie par le fournisseur crypto — rien ne
+/// garantit CONTRACTUELLEMENT qu'elle restera exempte de matériel, et on ne parie pas là-dessus pour un
+/// secret de ce niveau.
+///
+/// Le cas qui compte est le DÉPAREILLAGE : rustls compare les `SubjectPublicKeyInfo` de la clé et du
+/// certificat (`CertifiedKey::from_der` -> `keys_match`) et rend `InconsistentKeys`. C'est exactement la
+/// faute qu'un opérateur commet en renouvelant l'un sans l'autre, et elle DOIT tuer le boot.
+fn client_auth_error(e: &rustls::Error) -> String {
+    if matches!(e, rustls::Error::InconsistentKeys(_)) {
+        return format!(
+            "{CLIENT_KEY_VAR} ne correspond PAS à {CLIENT_CERT_VAR} — la clé fournie n'est pas celle du \
+             certificat (SubjectPublicKeyInfo différents). Refus (fail-closed) : une identité \
+             dépareillée ne se découvrirait qu'au premier handshake mTLS, sous la forme d'une \
+             « connexion refusée » qui ne désigne pas la cause."
+        );
+    }
+    invalid_key_msg("refusée par le fournisseur crypto `ring` (format ou algorithme non supporté)")
+}
+
 /// Bâtit un `ClientConfig` : provider `ring` EXPLICITE + racines Mozilla `webpki-roots` + les ancres
 /// SUPPLÉMENTAIRES éventuelles + vérificateur webpki STANDARD (chaîne + nom d'hôte + validité) +
-/// aucun certificat client.
+/// l'identité CLIENTE éventuelle.
 ///
 /// Le provider est passé EXPLICITEMENT plutôt que pris du défaut de process : c'est ce qui garantit
 /// qu'aucun autre backend crypto (aws-lc-rs) ne puisse être installé sous nos pieds par une dépendance
 /// tierce. `with_root_certificates` installe le vérificateur webpki standard — il n'y a, dans ce crate,
 /// AUCUN chemin qui le remplace, et AJOUTER une ancre ne le change pas : `roots` est l'ENSEMBLE des
-/// émetteurs de confiance, pas un interrupteur de vérification. Le PEM est un PARAMÈTRE (jamais une
-/// lecture d'env ici) — c'est ce qui rend le couple de tests déterministe.
-pub(crate) fn build_client_config(extra_ca_pem: Option<&str>) -> Result<Arc<rustls::ClientConfig>, String> {
+/// émetteurs de confiance, pas un interrupteur de vérification. Les PEM sont des PARAMÈTRES (jamais une
+/// lecture d'env ici) — c'est ce qui rend les couples de tests déterministes.
+///
+/// `client_identity` = `None` (cas par défaut, immense majorité des installs) reproduit exactement
+/// l'ancien `with_no_client_auth`. `Some(..)` installe la chaîne + la clé : rustls ne les présentera
+/// QUE si le pair DEMANDE un certificat, et la vérification du certificat SERVEUR n'en est pas
+/// affectée d'un iota.
+pub(crate) fn build_client_config(
+    extra_ca_pem: Option<&str>,
+    client_identity: Option<&ClientIdentityPem>,
+) -> Result<Arc<rustls::ClientConfig>, String> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if roots.is_empty() {
@@ -268,45 +461,91 @@ pub(crate) fn build_client_config(extra_ca_pem: Option<&str>) -> Result<Arc<rust
         }
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| format!("configuration TLS invalide: {e}"))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+    let cfg = match client_identity {
+        None => builder.with_no_client_auth(),
+        Some(id) => {
+            let certs = parse_client_certs(&id.cert)?;
+            // `key` n'est JAMAIS mis dans un message : `with_client_auth_cert` la consomme, et l'erreur
+            // éventuelle passe par `client_auth_error`, qui classe sans citer.
+            let key = parse_client_key(&id.key)?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| client_auth_error(&e))?
+        }
+    };
     Ok(Arc::new(cfg))
 }
 
 /// Config client TLS PARTAGÉE DU PROCESSUS, construite UNE fois (`OnceLock`) depuis l'environnement.
-/// Une seule politique de confiance pour tout le binaire — y compris les ancres d'entreprise.
+/// Une seule politique de confiance pour tout le binaire — ancres d'entreprise ET identité cliente
+/// comprises. Les PEM résolus meurent avec cet appel : rien ne conserve la clé privée sous forme de
+/// texte au-delà de la construction.
 fn client_config() -> Result<Arc<rustls::ClientConfig>, String> {
     static CFG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-    CFG.get_or_init(|| build_client_config(extra_ca_pem_from_env()?.as_deref()))
-        .clone()
+    CFG.get_or_init(|| {
+        build_client_config(
+            extra_ca_pem_from_env()?.as_deref(),
+            client_identity_from_env()?.as_ref(),
+        )
+    })
+    .clone()
 }
 
-/// CONTRÔLE AU BOOT des ancres d'entreprise. Appelé AVANT que quoi que ce soit ne démarre, pour qu'un
-/// PEM illisible/invalide tue le boot BRUYAMMENT au lieu de se découvrir au premier handshake, des
-/// heures plus tard, sous la forme d'un « certificat inconnu » qui ne désigne pas la vraie cause.
+/// CONTRÔLE AU BOOT de TOUTE la matière TLS configurable — ancres d'entreprise ET identité cliente
+/// (mTLS). Appelé AVANT que quoi que ce soit ne démarre, pour qu'un PEM illisible/invalide, une
+/// identité à moitié posée ou une clé dépareillée tuent le boot BRUYAMMENT, au lieu de se découvrir au
+/// premier handshake, des heures plus tard, sous la forme d'un « certificat inconnu » ou d'une
+/// « connexion refusée » qui ne désignent pas la vraie cause.
 ///
-/// `Ok(None)` : aucune ancre configurée — boot STRICTEMENT silencieux (byte-identique pour l'immense
-/// majorité des installs). `Ok(Some(ligne))` : ancres chargées, à annoncer. `Err(raison)` : FATAL.
+/// UN SEUL préflight, délibérément : le seam a UNE politique (une config, un `OnceLock`), donc UN point
+/// où elle est contrôlée. Ajouter un second contrôle pour l'identité cliente aurait ouvert la porte à
+/// deux ordres de boot divergents.
+///
+/// `Ok(None)` : rien de configuré — boot STRICTEMENT silencieux (byte-identique pour l'immense majorité
+/// des installs). `Ok(Some(lignes))` : une ligne par élément chargé, à annoncer. `Err(raison)` : FATAL.
+///
+/// ⚠️ La ligne d'annonce de l'identité cliente ne porte AUCUN octet de la clé : elle dit qu'une clé a
+/// été chargée et depuis quelle variable, rien d'autre
+/// (`client_key_material_never_leaks_into_the_boot_line`).
 pub(crate) fn preflight() -> Result<Option<String>, String> {
     let pem = extra_ca_pem_from_env()?;
+    let identity = client_identity_from_env()?;
     let count = match &pem {
         Some(p) => parse_extra_anchors(p)?.len(),
         None => 0,
     };
+    let chain_len = match &identity {
+        Some(id) => parse_client_certs(&id.cert)?.len(),
+        None => 0,
+    };
     // Construit RÉELLEMENT la config : un PEM qui parse mais dont un certificat n'est pas une ancre
-    // exploitable doit tomber ICI, au boot, pas au premier egress.
-    build_client_config(pem.as_deref())?;
-    if count == 0 {
+    // exploitable, ou une clé qui ne correspond pas au certificat, doivent tomber ICI, au boot, pas au
+    // premier egress.
+    build_client_config(pem.as_deref(), identity.as_ref())?;
+    let mut lines: Vec<String> = Vec::new();
+    if count > 0 {
+        lines.push(format!(
+            "[forge] TLS — {count} ancre(s) de confiance d'ENTREPRISE chargée(s) depuis {EXTRA_CA_VAR} \
+             (en PLUS des racines Mozilla). La vérification reste PLEINE : chaîne validée, nom d'hôte \
+             vérifié, expiration honorée — une ancre de plus, aucun contrôle de moins."
+        ));
+    }
+    if identity.is_some() {
+        lines.push(format!(
+            "[forge] TLS — IDENTITÉ CLIENTE (mTLS) armée : chaîne de {chain_len} certificat(s) depuis \
+             {CLIENT_CERT_VAR}, clé privée chargée depuis {CLIENT_KEY_VAR} (jamais journalisée, sous \
+             aucune forme). Elle n'est présentée QUE si le pair la DEMANDE ; la vérification du \
+             certificat SERVEUR reste pleine et inchangée."
+        ));
+    }
+    if lines.is_empty() {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "[forge] TLS — {count} ancre(s) de confiance d'ENTREPRISE chargée(s) depuis {EXTRA_CA_VAR} \
-         (en PLUS des racines Mozilla). La vérification reste PLEINE : chaîne validée, nom d'hôte \
-         vérifié, expiration honorée — une ancre de plus, aucun contrôle de moins."
-    )))
+    Ok(Some(lines.join("\n")))
 }
 
 /// LE point de sortie TCP de la console. Connecte `addr` — **déjà résolue ET déjà passée par la

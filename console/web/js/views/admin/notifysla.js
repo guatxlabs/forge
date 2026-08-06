@@ -76,11 +76,18 @@ export async function loadAdminNotifySla() {
   form.appendChild(rowE); form.appendChild(rowB); form.appendChild(rowX);
   host.appendChild(form);
 
-  const state = el('div', (data && data.overdue_now) ? 'det-testres bad' : 'det-testres muted');
+  // Le rouge se declenche AUSSI sur `capped` : un apercu tronque n'est pas rassurant, il est INCONNU.
+  // Sans ca, « 0 en retard » sur une fenetre saturee se lit comme « tout va bien » — exactement la
+  // panne de surveillance silencieuse corrigee cote serveur.
+  const state = el('div', (data && (data.overdue_now || data.capped)) ? 'det-testres bad' : 'det-testres muted');
   state.textContent = `Apercu (lecture seule, ne notifie personne) : ${data && data.overdue_now || 0} finding(s) `
     + `actuellement en retard selon la politique ENREGISTREE — deja signales compris. `
     + `Etats de triage consideres comme OUVERTS : ${(data && data.open_triage || []).join(', ')}. `
-    + `Au plus ${data && data.max_sweep_rows || 0} findings examines par balayage.`;
+    + `Au plus ${data && data.max_sweep_rows || 0} findings examines par balayage.`
+    + (data && data.capped
+        ? ` ATTENTION : apercu TRONQUE au plafond (${data && data.max_sweep_rows || 0} lignes lues) —`
+          + ` il peut rester des retards NON COMPTES au-dela de la fenetre.`
+        : '');
   host.appendChild(state);
 
   const note = el('div', 'muted');

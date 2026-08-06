@@ -196,6 +196,8 @@ horloge, qui exigerait un propriétaire de correctif que ce modèle n'a pas.
 | **Aucun egress nouveau** | remontée via `notifications::emit` ⇒ mêmes rédactions (secrets **puis** URL de cible) que le canal | le SLA n'a ni socket, ni URL, ni secret à lui |
 | **Leader-only sous HA** | `ha::is_leader` lu à chaque tick | N réplicas enverraient N notifications identiques |
 | **Une notification par finding** | dédup **dans la requête** (`NOT EXISTS … kind='finding.sla'`) | pas de rappel toutes les 15 min ; le plafond de balayage n'est pas consommé par du déjà-traité |
+| **Le plafond ne rend pas le SLA inerte** | il porte sur les **lignes lues** (500) : la requête n'en lit que ce qui *peut* être en retard — triage ouvert, **sévérité budgétée**, jamais signalé | sans le filtre de sévérité, 500 `LOW` sans budget masqueraient **à vie** les `CRITICAL` d'`id` supérieur |
+| **Une troncature se dit** | rapport et ledger portent `scanned` + `capped` ; un balayage tronqué est ledgerisé **même sans notification** | « rien en retard » et « je n'ai pas regardé » ne doivent jamais se ressembler |
 | **Grant-scopé** | hérité de l'émission : un destinataire sans grant sur l'engagement ne reçoit rien | l'isolation multi-tenant n'est pas contournée par une tâche de fond |
 | **Non assigné ⇒ jamais diffusé** | escalade vers **un** login nommé (`escalate_to`) ou personne | un SLA qui écrit à tout le monde est un SLA qu'on désactive |
 | **Ne casse jamais rien** | `spawn_blocking` + fail-open ; toute erreur capturée dans le rapport et ledgerisée `console.notify.sla.error` | un balayage ne peut ni bloquer ni faire échouer un run |
@@ -208,7 +210,14 @@ finding, à vie) — le compromis privilégie l'absence de spam.
 
 Le `GET` porte aussi `overdue_now` : un **aperçu en lecture seule** (il ne notifie personne) du nombre de
 findings actuellement en retard selon la politique **enregistrée** — de quoi calibrer des budgets sans
-armer la politique et regarder qui se fait spammer.
+armer la politique et regarder qui se fait spammer. Il est compté sur la **même fenêtre** que le
+balayage (`max_sweep_rows`) et porte donc le même `capped` : un aperçu tronqué le dit.
+
+**Limite assumée du plafond** — le filtre de sévérité supprime le cas structurel (une sévérité sans
+budget ne peut pas être en retard, donc n'est pas lue). Il reste un résidu : 500 findings d'une sévérité
+**budgétée mais encore dans les temps**, d'`id` inférieur, occupent la fenêtre d'un tick. Le retard
+d'`id` supérieur est vu au balayage suivant dès que ces lignes sortent du triage ouvert — et, en
+attendant, `capped: true` le signale au lieu de laisser croire à une base saine.
 
 ---
 
@@ -233,3 +242,39 @@ La voie API (`POST /api/setup/migrate`) est **pré-provision uniquement** et **d
 
 Post-migration : `GET /api/ledger/verify` (chaîne intègre côté console) **et** `forge ledger verify`
 (signatures OK ⇒ la clé `.ed25519` a voyagé, en `0600`).
+
+## 7. Comptes de test d'un engagement — quand la session meurt
+
+Le bloc `auth` d'un engagement porte les **comptes de test** (`attacker` / `victim`) qui **arment**
+les oracles de contrôle d'accès (IDOR, ATO, privesc). Sans matériel valide, ces oracles ne trouvent
+rien — et jusqu'ici ils ne le disaient pas : le run rendait un **rapport propre et vide**,
+indiscernable d'une cible saine.
+
+**Où le voir, du plus tôt au plus tard :**
+
+| Quand | Où | Ce qui apparaît |
+|---|---|---|
+| **Avant** de lancer | éditeur d'engagement (`GET /api/engagements`) | `auth.accounts[].expires_at` (epoch) et `expired` (booléen) |
+| **Au lancement** | réponse de `POST /api/run` | `warnings[] = {code: "auth_context_expired", accounts: […]}` |
+| **Au lancement** | ledger `console.run.start` | champ `auth_expired` : **labels** des comptes périmés |
+| **Pendant** le run | log live (SSE) | ligne `[AUTH] matériel d'authentification EXPIRÉ pour […]` |
+| **Pendant** le run | ledger `engine.auth_expired` | labels + recensement `expired` / `valid` / `unknown` |
+| **Dans le rapport** | findings | un finding **`status='skipped'`** par cible, titre « … non testé — matériel d'authentification … » |
+
+**Un run n'est PAS bloqué** par des comptes périmés : une campagne fait aussi du recon, des en-têtes,
+du SSRF — refuser le lancement serait une sur-portée. Le run part, et **nomme** ce qu'il ne peut pas
+tester.
+
+**Lire les états.** `expires_at: null` = **inconnu** (cookie opaque sans échéance lisible, ou base pas
+encore re-scellée) — ce n'est **pas** une validité : le moteur retestera au tir. Seul un compte dont
+l'échéance est **lue et dépassée** est signalé ; on n'accuse jamais sans preuve.
+
+**Remède (aucune ressaisie inutile).** Ré-éditer l'engagement et **re-coller le matériel du seul
+compte mort** : les autres comptes sont repris automatiquement par label (`keep_existing`), leurs
+secrets n'ayant jamais été re-servis en lecture. Il n'existe **pas** de renouvellement automatique —
+ni mot de passe stocké, ni `refresh_token` : voir [Modèle de sécurité §5.2](SECURITY_MODEL.md) pour le
+raisonnement complet.
+
+> **Note d'exploitation** — un finding `skipped` est en sévérité `INFO` ; la triage native peut le
+> marquer « BRUIT probable ». Il n'est **jamais masqué** (aucun filtre ne supprime de finding), mais
+> c'est le signal **au niveau du run** (ledger + log live + `warnings`) qui doit servir d'alerte.

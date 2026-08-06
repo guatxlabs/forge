@@ -52,7 +52,7 @@
 //! sans la clé sans protéger un seul credential. `users.pass_hash` (argon2id) et `session.token_sha`
 //! (SHA-256) ne sont PAS chiffrés : ce sont des empreintes à sens unique, pas du matériel rejouable.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::backup_crypto::{aead_open, aead_seal, backup_derive_key, BACKUP_KEY_LEN, BACKUP_NONCE_LEN, BACKUP_SALT_LEN};
 
@@ -257,6 +257,108 @@ pub(crate) fn material_census(auth: &Value) -> (usize, usize) {
     (sealed, clear)
 }
 
+// =====================================================================================
+//  ÉCHÉANCE DU MATÉRIEL — tampon NON SECRET posé au scellement, lisible SANS la clé
+//
+//  POURQUOI ICI, ET PAS DANS L'ÉDITEUR. Une session morte se manifestait jusqu'ici par un rapport
+//  PROPRE et VIDE en fin de campagne. Pour la voir AVANT de lancer, il faut savoir si le matériel
+//  est périmé — or au repos il est SCELLÉ : ni l'éditeur ni le lanceur ne peuvent le lire (ils n'ont
+//  pas la clé, et c'est le but). Le SEUL instant où la console voit le clair est le SCELLEMENT.
+//  On y calcule donc, une fois, la date de péremption AUTO-DÉCLARÉE du jeton (claim `exp` d'un JWT)
+//  et on la range à côté du label.
+//
+//  POURQUOI C'EST SÛR DE LA STOCKER EN CLAIR. `exp` est un HORODATAGE, pas du matériel : il ne
+//  rejoue rien, ne signe rien, ne s'authentifie nulle part. Il vit avec `label` et `idor_targets`,
+//  déjà délibérément en clair (cf. le périmètre mesuré en tête de module). L'invariant « aucun
+//  nouveau champ de MATÉRIEL persisté en clair » est donc tenu : ce champ n'est pas du matériel.
+//  Un lecteur de la base apprend QUAND un jeton expire — valeur d'exploitation nulle.
+//
+//  AUCUNE VÉRIFICATION DE SIGNATURE : on ne valide pas le jeton, on LIT sa date. Miroir EXACT de
+//  `forge/session.py::jwt_expiry` (le moteur refait le calcul sur le clair au tir — la console ne
+//  fait pas autorité, elle AVERTIT). Un cookie opaque -> aucune échéance -> champ absent = INCONNU,
+//  jamais « expiré » : on n'accuse pas sans preuve.
+// =====================================================================================
+
+/// Grâce (s) avant de déclarer un matériel périmé : notre horloge peut être EN AVANCE sur celle du
+/// serveur. Pousse la déclaration PLUS TARD, jamais plus tôt. Miroir de `session._EXPIRY_GRACE`.
+const EXPIRY_GRACE_SECS: i64 = 60;
+
+/// `exp` (epoch s) du PAYLOAD d'un JWT, ou `None` (absent, illisible, non-JWT). PURE, ne panique
+/// jamais. Un JWT commence toujours par le base64url de `{"` -> `eyJ` ; on ne décode donc que ce qui
+/// en a la forme, jamais un cookie opaque quelconque.
+pub(crate) fn jwt_exp(s: &str) -> Option<i64> {
+    use base64::Engine as _;
+    if !s.starts_with("eyJ") {
+        return None;
+    }
+    let seg = s.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(seg.as_bytes()).ok()?;
+    let payload: Value = serde_json::from_slice(&raw).ok()?;
+    match payload.get("exp")? {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        _ => None, // `exp` non numérique -> INCONNU (jamais une date fabriquée)
+    }
+}
+
+/// Échéance la PLUS PROCHE parmi les feuilles de matériel EN CLAIR d'UN compte, ou `None`.
+/// Réutilise `map_material` (la définition UNIQUE du périmètre de matériel) sur un bloc à un seul
+/// compte : impossible que la lecture d'échéance et le chiffrement divergent sur « qu'est-ce qu'une
+/// feuille de matériel ». Les feuilles DÉJÀ scellées sont ignorées (illisibles sans la clé).
+fn account_expiry(acc: &Value) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    let _ = map_material(&json!({"accounts": [acc.clone()]}), |s| {
+        if !is_sealed(s) {
+            if let Some(e) = jwt_exp(s) {
+                best = Some(best.map_or(e, |b: i64| b.min(e)));
+            }
+        }
+        Ok(s.to_string())
+    });
+    best
+}
+
+/// POSE (ou RETIRE) le tampon `exp` sur chaque compte portant du matériel EN CLAIR.
+///
+/// - compte avec ≥1 feuille EN CLAIR  => `exp` RECALCULÉ depuis ce clair : posé s'il est lisible,
+///   RETIRÉ sinon. C'est ce qui empêche un client de MENTIR en postant un `exp` arbitraire à côté
+///   d'un jeton : le matériel fraîchement fourni fait toujours foi ;
+/// - compte entièrement SCELLÉ (matériel repris tel quel à l'édition) => INTOUCHÉ, le tampon posé
+///   lors d'un scellement précédent est PRÉSERVÉ (il ne peut plus être recalculé sans la clé).
+pub(crate) fn stamp_auth_expiry(auth: &Value) -> Value {
+    let mut out = auth.clone();
+    let Some(accounts) = out.get_mut("accounts").and_then(|a| a.as_array_mut()) else { return out };
+    for acc in accounts.iter_mut() {
+        let (_, clear) = material_census(&json!({"accounts": [acc.clone()]}));
+        if clear == 0 {
+            continue; // rien de lisible ici : on PRÉSERVE le tampon existant
+        }
+        let exp = account_expiry(acc);
+        if let Some(o) = acc.as_object_mut() {
+            match exp {
+                Some(e) => { o.insert("exp".into(), json!(e)); }
+                None => { o.remove("exp"); }
+            }
+        }
+    }
+    out
+}
+
+/// LABELS des comptes dont le tampon `exp` est DÉPASSÉ à l'instant `now` (grâce incluse). PURE et
+/// SANS CLÉ : c'est ce qui permet à l'éditeur ET au lanceur de dire la vérité sur un matériel qu'ils
+/// ne peuvent pas lire. Un compte sans tampon (cookie opaque, base pas encore re-scellée) n'est
+/// JAMAIS listé — inconnu n'est pas expiré.
+pub(crate) fn auth_expired_labels(auth: &Value, now: i64) -> Vec<String> {
+    auth.get("accounts")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|acc| acc.get("exp").and_then(Value::as_i64).is_some_and(|e| e + EXPIRY_GRACE_SECS <= now))
+                .map(|acc| acc.get("label").and_then(Value::as_str).unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// SCELLE le matériel EN CLAIR d'un bloc `auth` canonique. IDEMPOTENT : une feuille DÉJÀ enveloppée est
 /// laissée telle quelle (c'est ce qui rend la fusion d'édition et la migration ré-exécutables sans
 /// double chiffrement). Toutes les feuilles scellées lors d'UN appel partagent UN sel (donc UNE
@@ -266,6 +368,11 @@ pub(crate) fn material_census(auth: &Value) -> (usize, usize) {
 /// mais RIEN à sceller (bloc `idor_targets`-seul, ou déjà entièrement scellé) => `Ok` inchangé : un
 /// opérateur sans contexte auth n'a JAMAIS besoin de poser une clé.
 pub(crate) fn seal_auth_block(auth: &Value, key: Option<&str>) -> Result<Value, String> {
+    // ÉCHÉANCE : le scellement est le DERNIER instant où la console voit le matériel EN CLAIR — donc
+    // le seul où la date de péremption peut être lue. On la tamponne AVANT de chiffrer (cf. le bloc
+    // « ÉCHÉANCE DU MATÉRIEL » ci-dessus). Sans matériel clair, `stamp_auth_expiry` est un no-op
+    // strict : le bloc rendu reste byte-identique et aucune clé n'est requise.
+    let auth = &stamp_auth_expiry(auth);
     let (_, clear) = material_census(auth);
     if clear == 0 {
         return Ok(auth.clone()); // rien à faire — aucune clé requise (no-op strict)

@@ -739,6 +739,48 @@ rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et bind
 > Les autres issues restent valables si votre topologie les impose déjà : AC publiquement reconnue, cible
 > **interne** en `http://` sous `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` (clair **gouverné**), ou **proxy
 > TLS-terminant** d'egress.
+>
+> **mTLS — `FORGE_CLIENT_CERT_PEM` / `FORGE_CLIENT_KEY_PEM` (livré).** Symétrique du knob ci-dessus, et
+> il ne faut pas les confondre : l'ancre d'entreprise sert à **vérifier le pair**, l'identité cliente
+> sert à **nous authentifier auprès de lui**. Le seam n'installait aucun certificat client, et un
+> endpoint qui en **exige** un — IdP OIDC d'entreprise, collecteur derrière un service-mesh — restait
+> délégué au collecteur Python. C'est fini : rustls présente nativement la chaîne fournie
+> (`with_client_auth_cert`), **sans dépendance nouvelle et sans bibliothèque système**.
+>
+> ```bash
+> FORGE_CLIENT_CERT_PEM_FILE=/etc/forge/client.pem   # chaîne cliente : feuille D'ABORD, puis intermédiaires
+> FORGE_CLIENT_KEY_PEM_FILE=/etc/forge/client.key    # clé privée — fichier 0600, root-only
+> ```
+>
+> **La forme `_FILE` est la bonne pour la clé**, et ce n'est pas un détail de style : l'environnement
+> d'un processus se lit dans `/proc/<pid>/environ`, se recopie dans les dumps de configuration, les
+> inspections de conteneur et les rapports d'incident. La forme verbatim (`FORGE_CLIENT_KEY_PEM=…`)
+> existe pour le 12-factor, elle n'est pas recommandée.
+>
+> **La clé privée n'apparaît nulle part.** C'est le secret le plus sensible que le binaire manipule — il
+> ne s'expire pas de lui-même et il signe notre identité auprès de tout pair mTLS. Elle n'est écrite ni
+> au boot, ni dans un log, ni dans une erreur, ni dans le ledger, ni dans une réponse d'API : un refus
+> dit **que** la clé est invalide (et **quelle variable** est en cause), jamais **ce qu'elle contient** —
+> pas même un fragment. La ligne de boot annonce la longueur de la chaîne et les noms des variables, rien
+> d'autre. Deux tests **balaient** les sorties (succès et échec) à la recherche du moindre fragment du
+> corps de la clé.
+>
+> **Ce que ce knob N'EST PAS.** Présenter une identité ne relâche **rien** de la vérification du
+> certificat **serveur** : chaîne, nom d'hôte et expiration restent vérifiés à l'identique. Et le
+> certificat n'est envoyé **que si le pair le DEMANDE** — le poser ne change **rien** pour les endpoints
+> ordinaires (un test le fige).
+>
+> **FAIL-CLOSED au boot.** Les deux variables vont **ensemble ou pas du tout**. Une **moitié** seule, un
+> PEM **illisible**, ou une **clé qui ne correspond pas au certificat** (comparaison des
+> `SubjectPublicKeyInfo` — la faute qu'on commet en renouvelant l'un sans l'autre) font **échouer le
+> démarrage** (`[forge] FATAL …`, code 2) en **nommant la variable**. Jamais un mTLS silencieusement
+> absent, qui se découvrirait au premier handshake sous la forme d'une « connexion refusée » ne
+> désignant pas la cause. Rien de configuré ⇒ **aucune** ligne au boot, comportement inchangé.
+>
+> Un **couple** de tests fige le mécanisme contre un serveur de test qui **exige** un certificat client
+> (`WebPkiClientVerifier`) : avec l'identité, le pair nous authentifie et la session porte des octets
+> applicatifs ; **sans** elle, la connexion ne porte rien. Sans la moitié négative, on ne saurait pas si
+> ce serveur exige réellement quoi que ce soit.
 
 **Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
 Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →
@@ -823,11 +865,16 @@ vérifier.
 - **Le clair reste possible là où il est gouverné** : cible **interne** + `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`.
   Un **secret** vers une cible **publique** en `http://` reste **refusé** ; en `https://` il est autorisé.
 - **Pas de SMTP** — refusé indépendamment du TLS (STARTTLS est une élévation *négociée* ; cf.
-  [`ADMINISTRATION.md` §5bis](ADMINISTRATION.md)). **Pas de mTLS** : le seam n'installe aucun certificat
-  client (`with_no_client_auth`) — un endpoint mTLS reste délégué au collecteur Python.
-- **Limite : AC d'entreprise.** Les racines sont celles **compilées** ; le **magasin système n'est pas
-  lu** (c'est ce qui évite `schannel` / `security-framework` / `openssl`). Un certificat émis par une AC
-  privée n'est donc pas vérifiable en l'état — voir les trois issues en [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
+  [`ADMINISTRATION.md` §5bis](ADMINISTRATION.md)).
+- **mTLS : livré.** Le seam installe désormais un **certificat client** quand l'opérateur en fournit un
+  (`FORGE_CLIENT_CERT_PEM` / `FORGE_CLIENT_KEY_PEM`, natif rustls `with_client_auth_cert` — aucune
+  dépendance nouvelle) ; voir [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
+  Ce qui reste délégué au collecteur Python, c'est une identité **propre à une source** : celle du seam
+  est celle du **processus**.
+- **AC d'entreprise : fournie explicitement.** Les racines sont celles **compilées** ; le **magasin
+  système n'est pas lu** (c'est ce qui évite `schannel` / `security-framework` / `openssl`). Un
+  certificat émis par une AC privée se rend vérifiable en posant `FORGE_EXTRA_CA_PEM` — cf.
+  [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
 
 **Coût mesuré & openssl-freedom.** L'ajout pèse **6 crates nets** — `ring`, `rustls`, `rustls-pki-types`,
 `rustls-webpki`, `untrusted`, `webpki-roots` — et **≈ +20 s CPU** de compilation à froid. **Aucun nouveau

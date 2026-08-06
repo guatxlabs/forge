@@ -77,7 +77,9 @@ ledgerisé). Objet JSON :
 > aurait tué cet usage sans le déplacer : une CA d'entreprise fournit une **ancre**, pas un **écouteur
 > TLS** — un collecteur qui n'en expose aucun n'aurait plus eu aucune voie.
 - Tout le reste — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, fichier, exec, ou `auth.type=mtls`**
-  (le seam n'installe aucun certificat client) — est **délégué au collecteur Python** `forge.collectors`
+  (le seam sait désormais présenter un certificat client, mais cette identité est celle du **PROCESSUS**,
+  pas de la source : deux sources exigeant deux certificats distincts ne sont pas représentables) — est
+  **délégué au collecteur Python** `forge.collectors`
   (protocoles/parsing riches),
   invoqué par la console (`python3 -m forge.cli detections --since N --source env:FORGE_DETECTION_SOURCE`).
   La console reste un **joignteur** infra-neutre : la sortie de tout kind est normalisée en

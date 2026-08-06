@@ -156,6 +156,7 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         seule (GET). Scope-guard fail-closed PAR-URL (aucune requête hors périmètre). Le PoC/evidence
         est RÉDIGÉ à la source (les en-têtes de l'attaquant y affleureraient sinon)."""
         attacker = self._attacker_headers(accounts)
+        attacker_label = _session.attacker_label_from_params(accounts)
         findings = []
         for t in targets:
             url = (t or {}).get("url")
@@ -179,6 +180,15 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                               "l'attaquant pour rejouer la requête cross-compte."),
                     poc=self.dry(action)))
                 continue
+            # MATÉRIEL PÉRIMÉ => AUCUN VERDICT, AUCUNE REQUÊTE. Un `exp` dépassé est une preuve
+            # AUTONOME que l'oracle est désarmé : tirer produirait trois refus et un « IDOR non
+            # confirmé » qui certifierait un test cross-compte jamais réellement authentifié.
+            if self.auth_expired(attacker):
+                findings.append(self.auth_dead(
+                    target=url, label=attacker_label, why=self.WHY_EXPIRED,
+                    title="IDOR non testé — matériel d'authentification de l'attaquant EXPIRÉ",
+                    poc=self.dry(action)))
+                continue
             r_att = self._fetch(url, attacker)               # (status, body, content_type)
             r_anon = self._fetch(url, {})
             # CIBLE INJOIGNABLE => AUCUN VERDICT (att_ok/anon_denied/marker_hit tous faux sur un corps
@@ -189,6 +199,15 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                     title="IDOR non testé — cible injoignable (aucune réponse)",
                     evidence=(f"Au moins une sonde n'a pas répondu (attaquant={r_att[0]}, "
                               f"anonyme={r_anon[0]}) : le différentiel cross-compte n'a pas pu être évalué."),
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL INERTE => AUCUN VERDICT. La cible traite l'attaquant EXACTEMENT comme un
+            # anonyme : sa session n'est pas reconnue, donc l'absence de marqueur victime ne prouve
+            # rien du contrôle d'accès (elle ne fait que refléter une requête non authentifiée).
+            if self.auth_inert((r_att[0], r_att[1]), (r_anon[0], r_anon[1])):
+                findings.append(self.auth_dead(
+                    target=url, label=attacker_label, why=self.WHY_INERT,
+                    title="IDOR non testé — matériel d'authentification de l'attaquant SANS EFFET",
                     poc=self.dry(action)))
                 continue
             att_ok = r_att[0] in self._OK
@@ -319,6 +338,7 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         à MARQUEUR (`_fire` sur `idor_targets={url, owner, marker}`, où B doit voir un marqueur PROPRE à A)
         est PRÉFÉRÉ : il prouve l'appartenance à A et élimine ce faux positif de ressource partagée."""
         findings = []
+        dead = self.expired_account(A, B)        # matériel PÉRIMÉ d'un des deux comptes (aucun réseau)
         for url in urls:
             # SCOPE-GUARD PAR-URL fail-closed — une URL (souvent une IDOR chaînée/énumérée) hors
             # périmètre : AUCUN I/O vers elle (le matériel secret ne peut pas quitter le périmètre).
@@ -327,6 +347,15 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                     target=url,
                     title="IDOR non testé — URL hors périmètre (scope-guard fail-closed)",
                     evidence="Cette URL n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL PÉRIMÉ => AUCUN VERDICT, AUCUNE REQUÊTE. Le différentiel exige DEUX sessions
+            # vivantes : si celle de A (propriétaire) ou celle de B (attaquant) est morte, « corps
+            # identiques » et « anon refusé » ne décrivent plus un contrôle d'accès.
+            if dead is not None:
+                findings.append(self.auth_dead(
+                    target=url, label=dead, why=self.WHY_EXPIRED,
+                    title="IDOR non testé — matériel d'authentification EXPIRÉ (différentiel 2 comptes)",
                     poc=self.dry(action)))
                 continue
             ra = self._fetch(url, A.get("headers", {}))
@@ -341,6 +370,18 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                     title="IDOR non testé — cible injoignable (aucune réponse)",
                     evidence=(f"Au moins une des trois sondes n'a pas répondu (A={ra[0]}, B={rb[0]}, "
                               f"anon={ru[0]}) : le différentiel de contenu exige les trois."),
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL INERTE => AUCUN VERDICT. Si un des deux comptes est traité comme un anonyme,
+            # « B lit la même chose que A » ne dit plus rien du contrôle d'accès : les deux peuvent
+            # simplement lire la même page de refus.
+            inert = self.auth_inert_among(
+                [(str(A.get("label", "")), (ra[0], ra[1])), (str(B.get("label", "")), (rb[0], rb[1]))],
+                (ru[0], ru[1]))
+            if inert is not None:
+                findings.append(self.auth_dead(
+                    target=url, label=inert, why=self.WHY_INERT,
+                    title="IDOR non testé — matériel d'authentification SANS EFFET (différentiel 2 comptes)",
                     poc=self.dry(action)))
                 continue
             same = self._same_object(ra, rb)
@@ -366,6 +407,7 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         (l'écriture de B a muté l'objet d'un autre user). write -> destructif : gardé par le ROE."""
         body = action.params.get("body")
         findings = []
+        dead = self.expired_account(A, B)        # matériel PÉRIMÉ d'un des deux comptes (aucun réseau)
         for url in urls:
             # SCOPE-GUARD PAR-URL fail-closed — jamais d'écriture vers une URL hors périmètre.
             if not self._in_scope(action, url):
@@ -373,6 +415,15 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                     target=url,
                     title="IDOR write non testé — URL hors périmètre (scope-guard fail-closed)",
                     evidence="Cette URL n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL PÉRIMÉ => AUCUNE ÉCRITURE ÉMISE. L'oracle d'effet conclurait « write non
+            # confirmé » sur une mutation cross-compte que la session morte n'a jamais pu tenter.
+            # (Ce chemin n'a PAS de sonde anonyme : seule la péremption lisible est détectable ici.)
+            if dead is not None:
+                findings.append(self.auth_dead(
+                    target=url, label=dead, why=self.WHY_EXPIRED,
+                    title=f"IDOR write {method} non testé — matériel d'authentification EXPIRÉ",
                     poc=self.dry(action)))
                 continue
             before = self._fetch(url, A.get("headers", {}), method="GET")
@@ -497,6 +548,9 @@ class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
         low, admin = accounts[0], accounts[1]
         marker = action.params.get("admin_marker")
         findings = []
+        # MATÉRIEL PÉRIMÉ d'un des deux comptes-opérateur (aucun réseau) : la preuve de privesc exige
+        # le compte BAS-PRIVILÈGE vivant (il doit atteindre la fonction) ET l'ADMIN vivant (baseline).
+        dead = self.expired_account(low, admin)
         for url in urls:
             # (1bis) SCOPE-GUARD PAR-URL fail-closed — une admin_url hors périmètre : AUCUN I/O vers elle.
             if not self._in_scope(action, url):
@@ -504,6 +558,12 @@ class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
                     target=url,
                     title="Privesc non testé — fonction admin hors périmètre (scope-guard fail-closed)",
                     evidence="Cette fonction admin-only n'est pas in-scope ; aucune requête émise (fail-closed).",
+                    poc=self.dry(action)))
+                continue
+            if dead is not None:
+                findings.append(self.auth_dead(
+                    target=url, label=dead, why=self.WHY_EXPIRED,
+                    title="Privesc non testée — matériel d'authentification EXPIRÉ",
                     poc=self.dry(action)))
                 continue
             r_low = self._fetch(url, low.get("headers", {}), method=method)
@@ -517,6 +577,18 @@ class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
                     title="Privesc non testée — fonction injoignable (aucune réponse)",
                     evidence=(f"Au moins une sonde n'a pas répondu (bas-priv={r_low[0]}, "
                               f"admin={r_admin[0]}, anon={r_anon[0]}) : la preuve exige les trois."),
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL INERTE => AUCUN VERDICT : un compte traité comme un anonyme ne peut ni
+            # atteindre la fonction (bas-priv) ni servir de baseline (admin).
+            inert = self.auth_inert_among(
+                [(str(low.get("label", "")), (r_low[0], r_low[1])),
+                 (str(admin.get("label", "")), (r_admin[0], r_admin[1]))],
+                (r_anon[0], r_anon[1]))
+            if inert is not None:
+                findings.append(self.auth_dead(
+                    target=url, label=inert, why=self.WHY_INERT,
+                    title="Privesc non testée — matériel d'authentification SANS EFFET",
                     poc=self.dry(action)))
                 continue
             low_ok = r_low[0] in self._OK

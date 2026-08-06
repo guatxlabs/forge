@@ -46,6 +46,11 @@
 //!      sans grant sur l'engagement ne reçoit RIEN. Un finding en retard NON ASSIGNÉ n'a pas de
 //!      destinataire : il est COMPTÉ mais ne notifie personne, sauf si un `escalate_to` (UN login, pas
 //!      une diffusion) est explicitement configuré.
+//!   7. LE PLAFOND NE REND PAS LE SLA INERTE, ET NE MENT PAS — [`MAX_SWEEP_ROWS`] borne les lignes LUES.
+//!      Une ligne lue pour rien en cache une autre INDÉFINIMENT (`id ASC` est stable) : la requête ne lit
+//!      donc que ce qui PEUT être en retard (triage ouvert + sévérité BUDGÉTÉE + jamais signalé), et ce
+//!      qu'elle a dû tronquer, elle le DIT (`scanned`/`capped`, ledgerisés même sans notification). Une
+//!      surveillance qui s'éteint en silence est pire que pas de surveillance : on croit être couvert.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -64,9 +69,17 @@ pub(crate) const SETTINGS_KEY: &str = "sla_policy";
 /// de triage a du sens. Sous-ensemble STRICT de `findings::TRIAGE_STATES` (jeu fermé).
 pub(crate) const OPEN_TRIAGE: &[&str] = &["new", "triaging", "reopened"];
 
-/// Plafond dur du nombre de findings examinés par balayage. Borne le travail de fond ET le nombre de
-/// notifications qu'un seul tick peut produire. La dédup étant DANS la requête (garde 5), un finding
-/// déjà signalé ne consomme pas ce budget — le plafond ne peut donc pas « affamer » les suivants.
+/// Plafond dur du nombre de findings LUS par balayage. Borne le travail de fond ET le nombre de
+/// notifications qu'un seul tick peut produire.
+///
+/// IL PORTE SUR LES LIGNES LUES, PAS SUR LES RETARDS TROUVÉS — d'où deux gardes, parce qu'une ligne
+/// lue pour rien est une ligne qui en cache une autre, indéfiniment (`id ASC` est stable) :
+///   - ce qui ne peut PAS être en retard ne doit pas être lu : la dédup (garde 5) écarte le déjà
+///     signalé, et [`budgeted_severities`] écarte les sévérités SANS budget — sans quoi 500 findings
+///     `LOW` d'id bas rendraient le SLA inerte À VIE sur les `CRITICAL` d'id supérieur ;
+///   - ce qui reste tronqué se DIT : le rapport porte `scanned`/`capped` et un balayage tronqué est
+///     ledgerisé même sans notification. « Rien en retard » et « je n'ai pas regardé » ne doivent
+///     jamais se ressembler.
 pub(crate) const MAX_SWEEP_ROWS: i64 = 500;
 
 /// Borne d'un budget de sévérité (heures). ~10 ans : au-delà, ce n'est plus un SLA, c'est une faute de
@@ -120,6 +133,18 @@ pub(crate) fn budget_hours(policy: &Value, severity: &str) -> i64 {
         .and_then(|v| v.as_i64())
         .filter(|&n| n > 0)
         .unwrap_or(0)
+}
+
+/// Sévérités dont le budget est STRICTEMENT positif — le SEUL ensemble sur lequel un retard est
+/// possible. Les valeurs viennent du jeu FERMÉ [`crate::report_render::REPORT_SEVERITIES`] (jamais de
+/// la base, jamais du corps HTTP) : ce qui part en paramètre lié est une constante du binaire. Vide =
+/// politique inerte (rien ne peut être en retard) — l'appelant ne doit alors RIEN lire. PURE.
+pub(crate) fn budgeted_severities(policy: &Value) -> Vec<&'static str> {
+    crate::report_render::REPORT_SEVERITIES
+        .iter()
+        .copied()
+        .filter(|s| budget_hours(policy, s) > 0)
+        .collect()
 }
 
 /// Login à notifier pour un finding en retard NON ASSIGNÉ. Vide = personne (le finding est compté, pas
@@ -225,20 +250,49 @@ pub(crate) fn breach_text(o: &Overdue) -> String {
     )
 }
 
+/// Ce qu'un balayage a trouvé ET ce qu'il a réellement REGARDÉ. Les deux, parce que `breaches.len()`
+/// seul ne dit pas si le plafond a mordu : un balayage qui bute sur [`MAX_SWEEP_ROWS`] sans trouver un
+/// seul retard rendrait `0` — indiscernable d'une base saine.
+pub(crate) struct Scan {
+    /// Les findings EN RETARD retenus (déjà filtrés par le prédicat [`overdue`]).
+    pub(crate) breaches: Vec<Overdue>,
+    /// Nombre de lignes LUES. `>= limit` ⇒ la requête a été TRONQUÉE : il peut rester des retards non vus.
+    pub(crate) scanned: i64,
+}
+
 /// Balaie les findings au triage OUVERT et rend ceux EN RETARD, borné à `limit`.
 ///
-/// `only_unnotified` place la DÉDUP DANS LA REQUÊTE (`NOT EXISTS` sur `notification.kind='finding.sla'`)
-/// : le balayage réel ne voit que des findings jamais signalés (garde 5), tandis que l'aperçu admin
-/// (GET) compte TOUT ce qui est en retard, y compris le déjà-signalé. Les états de triage sont LIÉS en
-/// paramètres (jamais interpolés) ; seul le nombre de `?` est construit.
+/// TROIS filtres, dans l'ordre où ils coûtent :
+///   - `triage IN (…)` — seul un cycle OUVERT peut être en retard ;
+///   - `UPPER(TRIM(severity)) IN (…)` — SEULES les sévérités qui ont un budget. Normalisation IDENTIQUE
+///     à celle de [`budget_hours`] (trim + majuscules) : le pré-filtre SQL ne peut donc pas écarter une
+///     ligne que le prédicat Rust aurait retenue. Sans lui, un `LOW` sans budget est candidat à jamais
+///     et mange le plafond (cf. [`MAX_SWEEP_ROWS`]). Politique SANS budget ⇒ AUCUNE requête ;
+///   - `only_unnotified` — la DÉDUP, DANS la requête (`NOT EXISTS` sur `notification.kind='finding.sla'`)
+///     : le balayage réel ne voit que des findings jamais signalés (garde 5), tandis que l'aperçu admin
+///     (GET) compte TOUT ce qui est en retard, y compris le déjà-signalé.
+///
+/// L'ÂGE, lui, reste filtré en Rust : `finding.ts` accepte trois formes (`@epoch`, entier nu, ISO-8601,
+/// cf. `compliance_policy::parse_ts_epoch`) qu'aucune comparaison SQL portable ne classe correctement —
+/// un pré-filtre sur la date écarterait des retards RÉELS. [`overdue`] reste l'autorité.
+///
+/// Les états de triage et les sévérités sont LIÉS en paramètres (jamais interpolés) ; seul le NOMBRE
+/// de `?` est construit, et il vient de deux jeux fermés du binaire.
 pub(crate) fn scan_overdue(
     store: &crate::store::Store,
     policy: &Value,
     now: i64,
     limit: i64,
     only_unnotified: bool,
-) -> Result<Vec<Overdue>, String> {
-    let placeholders = vec!["?"; OPEN_TRIAGE.len()].join(",");
+) -> Result<Scan, String> {
+    let sevs = budgeted_severities(policy);
+    if sevs.is_empty() {
+        // Aucun budget ⇒ rien ne PEUT être en retard. On ne lit pas la table (et on n'émet pas un
+        // `IN ()` — syntaxe invalide sur les deux backends).
+        return Ok(Scan { breaches: Vec::new(), scanned: 0 });
+    }
+    let triage_ph = vec!["?"; OPEN_TRIAGE.len()].join(",");
+    let sev_ph = vec!["?"; sevs.len()].join(",");
     let dedup = if only_unnotified {
         " AND NOT EXISTS (SELECT 1 FROM notification n WHERE n.finding_id=finding.id AND n.kind=?)"
     } else {
@@ -246,9 +300,10 @@ pub(crate) fn scan_overdue(
     };
     let sql = format!(
         "SELECT id,engagement_id,title,severity,triage,ts,assignee FROM finding \
-         WHERE triage IN ({placeholders}){dedup} ORDER BY id ASC LIMIT ?"
+         WHERE triage IN ({triage_ph}) AND UPPER(TRIM(severity)) IN ({sev_ph}){dedup} ORDER BY id ASC LIMIT ?"
     );
     let mut params: Vec<crate::store::Param> = OPEN_TRIAGE.iter().map(|s| crate::store::Param::Text((*s).to_string())).collect();
+    params.extend(sevs.iter().map(|s| crate::store::Param::Text((*s).to_string())));
     if only_unnotified {
         params.push(crate::store::Param::Text(crate::notifications::KIND_SLA.to_string()));
     }
@@ -266,13 +321,15 @@ pub(crate) fn scan_overdue(
             ))
         })
         .map_err(|e| format!("lecture des findings échouée: {e}"))?;
-    Ok(rows
+    let scanned = rows.len() as i64;
+    let breaches = rows
         .into_iter()
         .filter_map(|(id, eid, title, severity, triage, ts, assignee)| {
             let (age_secs, budget_secs) = overdue(policy, &severity, &triage, &ts, now)?;
             Some(Overdue { id, engagement_id: eid, title, severity, assignee, age_secs, budget_secs })
         })
-        .collect())
+        .collect();
+    Ok(Scan { breaches, scanned })
 }
 
 /// UN balayage. Rend un rapport JSON — et ne rend JAMAIS `Err` : toute défaillance est CAPTURÉE dans le
@@ -304,18 +361,21 @@ pub(crate) fn sweep_once(app: &App, is_leader: bool) -> Value {
         let store = app.store();
         store.query_row("SELECT id FROM users WHERE login=?", &crate::sql_params![escalate.clone()], |r| r.get_i64(0)).ok()
     };
-    let breaches = {
+    let scan = {
         let store = app.store();
         scan_overdue(&store, &policy, now, MAX_SWEEP_ROWS, true)
     };
-    let breaches = match breaches {
-        Ok(b) => b,
+    let Scan { breaches, scanned } = match scan {
+        Ok(s) => s,
         Err(why) => {
             // FAIL-OPEN : on trace et on rend la main. Jamais de panic, jamais d'erreur propagée.
             append_console_ledger(app, "console.notify.sla.error", json!({"actor": "sla-sweeper", "why": why}));
             return json!({"error": why, "notified": 0});
         }
     };
+    // TRONCATURE : le plafond porte sur les lignes LUES. `breaches.len()` ne peut pas la révéler (un
+    // balayage tronqué qui ne trouve aucun retard rendrait 0) — seul `scanned` le peut.
+    let capped = scanned >= MAX_SWEEP_ROWS;
     let mut notified = 0i64;
     let mut unassigned = 0i64;
     let mut suppressed = 0i64;
@@ -336,22 +396,27 @@ pub(crate) fn sweep_once(app: &App, is_leader: bool) -> Value {
         }
     }
     // On ne ledgerise QUE les balayages qui ONT PRODUIT quelque chose : un tick toutes les 15 min qui ne
-    // trouve rien n'est pas un événement d'audit, c'est du bruit qui noierait la chaîne.
-    if notified > 0 {
+    // trouve rien n'est pas un événement d'audit, c'est du bruit qui noierait la chaîne. UNE exception :
+    // un balayage TRONQUÉ, même muet, EST un événement — c'est le seul endroit où un exploitant peut
+    // apprendre que son SLA regarde une fenêtre trop étroite plutôt qu'une base saine.
+    if notified > 0 || capped {
         append_console_ledger(app, "console.notify.sla.sweep", json!({
             "actor": "sla-sweeper",
             "overdue": breaches.len(),
+            "scanned": scanned,
             "notified": notified,
             "unassigned": unassigned,
             "suppressed": suppressed,
+            "capped": capped,
         }));
     }
     json!({
         "overdue": breaches.len(),
+        "scanned": scanned,
         "notified": notified,
         "unassigned": unassigned,
         "suppressed": suppressed,
-        "capped": breaches.len() as i64 >= MAX_SWEEP_ROWS,
+        "capped": capped,
     })
 }
 
@@ -399,11 +464,16 @@ pub(crate) async fn sla_get(State(app): State<App>, headers: HeaderMap) -> Respo
         return admin_denied().into_response();
     }
     let now: i64 = crate::chrono_now_compact().parse().unwrap_or(0);
-    let (policy, overdue_now) = {
+    let (policy, overdue_now, capped) = {
         let store = app.store();
         let policy = resolve_policy(&store);
-        let n = scan_overdue(&store, &policy, now, MAX_SWEEP_ROWS, false).map(|v| v.len()).unwrap_or(0);
-        (policy, n)
+        // Même plafond que le balayage — donc même devoir d'honnêteté : `overdue_now` est un compte
+        // SUR UNE FENÊTRE, et `capped` dit quand cette fenêtre a été atteinte. Un aperçu qui affiche
+        // « 0 en retard » sans dire qu'il s'est arrêté à 500 lignes ferait calibrer à l'aveugle.
+        let scan = scan_overdue(&store, &policy, now, MAX_SWEEP_ROWS, false).ok();
+        let n = scan.as_ref().map(|s| s.breaches.len() as i64).unwrap_or(0);
+        let capped = scan.map(|s| s.scanned >= MAX_SWEEP_ROWS).unwrap_or(false);
+        (policy, n, capped)
     };
     (
         StatusCode::OK,
@@ -411,6 +481,7 @@ pub(crate) async fn sla_get(State(app): State<App>, headers: HeaderMap) -> Respo
             "policy": policy,
             "enabled": sla_enabled(&policy),
             "overdue_now": overdue_now,
+            "capped": capped,
             "severities": crate::report_render::REPORT_SEVERITIES,
             "open_triage": OPEN_TRIAGE,
             "max_sweep_rows": MAX_SWEEP_ROWS,
@@ -514,6 +585,27 @@ mod tests {
     fn epoch_to_ts(epoch: i64) -> String {
         let c = rusqlite::Connection::open_in_memory().unwrap();
         c.query_row("SELECT datetime(?, 'unixepoch')", rusqlite::params![epoch], |r| r.get::<_, String>(0)).unwrap()
+    }
+
+    /// Sème `n` findings au triage OUVERT en UNE transaction. Le plafond de balayage se compte en
+    /// centaines : `MAX_SWEEP_ROWS` INSERT autonomes coûteraient plus cher que le test lui-même.
+    fn seed_bulk(app: &App, eid: i64, prefix: &str, severity: &str, age_hours: i64, n: i64) {
+        let now: i64 = crate::chrono_now_compact().parse().unwrap();
+        let ts = epoch_to_ts(now - age_hours * 3600);
+        let db = app.db();
+        db.execute_batch("BEGIN").unwrap();
+        {
+            let mut st = db
+                .prepare(
+                    "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,engagement_id,triage)
+                     VALUES(?,'c','t.example',?,?,'','T1','tested','','','',?,'new')",
+                )
+                .unwrap();
+            for i in 0..n {
+                st.execute(rusqlite::params![ts, format!("{prefix}-{i}"), severity, eid]).unwrap();
+            }
+        }
+        db.execute_batch("COMMIT").unwrap();
     }
 
     fn seed_engagement(app: &App, id: i64) {
@@ -692,9 +784,82 @@ mod tests {
         let now: i64 = crate::chrono_now_compact().parse().unwrap();
         let store = app.store();
         let p = resolve_policy(&store);
-        assert_eq!(scan_overdue(&store, &p, now, MAX_SWEEP_ROWS, true).unwrap().len(), 0);
-        assert_eq!(scan_overdue(&store, &p, now, MAX_SWEEP_ROWS, false).unwrap().len(), 1, "l'aperçu, lui, le compte");
+        assert_eq!(scan_overdue(&store, &p, now, MAX_SWEEP_ROWS, true).unwrap().breaches.len(), 0);
+        assert_eq!(scan_overdue(&store, &p, now, MAX_SWEEP_ROWS, false).unwrap().breaches.len(), 1, "l'aperçu, lui, le compte");
         drop(store);
+        let _ = std::fs::remove_file(&led);
+    }
+
+    // =============================================================================
+    //  GARDE 5bis — LE PLAFOND NE DOIT PAS RENDRE LE SLA INERTE
+    // =============================================================================
+
+    /// [`MAX_SWEEP_ROWS`] borne les LIGNES LUES, pas les retards trouvés. Une sévérité SANS budget ne
+    /// peut JAMAIS être en retard : si de tels findings restent candidats en SQL, ils consomment le
+    /// plafond et un retard réel d'`id` supérieur n'est jamais vu — pas « ce tick-ci » mais À VIE
+    /// (`id ASC` est stable, et rien ne les retire de la file : la dédup n'efface que le DÉJÀ NOTIFIÉ).
+    /// C'est le SLA silencieusement inerte, la panne qui ne se voit pas.
+    /// MUTATION : retirer le filtre de sévérité de `scan_overdue` -> ce test rougit (`notified` = 0).
+    #[test]
+    fn severities_without_budget_cannot_starve_the_sweep() {
+        let led = testutil::tmp_path("sla-starve.jsonl");
+        let app = testutil::test_app(&led);
+        seed_engagement(&app, 1);
+        let uid = seed_user(&app, "bob");
+        // Bruit : un plafond ENTIER de findings LOW (aucun budget), ids 1..=MAX_SWEEP_ROWS.
+        seed_bulk(&app, 1, "bruit", "LOW", 9_000, MAX_SWEEP_ROWS);
+        // Le retard RÉEL arrive après — donc d'id supérieur au plafond.
+        let f = seed_finding(&app, 1, "en retard", "HIGH", "new", 48);
+        assign(&app, f, uid);
+        set_policy(&app, &policy(24)); // budget HIGH seulement
+
+        let r = sweep_once(&app, true);
+        assert_eq!(r["notified"], 1, "le retard HIGH doit être vu malgré {MAX_SWEEP_ROWS} LOW sans budget: {r}");
+        assert_eq!(notif_count(&app, uid), 1);
+        assert_eq!(r["scanned"], 1, "seules les sévérités BUDGÉTÉES sont lues");
+
+        // Le cas LIMITE du même filtre : une politique SANS aucun budget ne lit RIEN et rend un `Scan`,
+        // jamais une erreur.
+        // CE QUE CE TEST NE PROUVE PAS (mesuré, pas supposé) : retirer le court-circuit
+        // `sevs.is_empty()` de `scan_overdue` LAISSE CE TEST VERT sur SQLite. `… IN ()` y est une
+        // extension ACCEPTÉE (0 ligne, vérifié : SQLite 3.53), là où PostgreSQL la rejette comme une
+        // erreur de syntaxe. Le court-circuit est donc une garde de PORTABILITÉ — c'est le build
+        // `store-postgres` qui la rendrait rouge, pas celui-ci, et l'assertion ci-dessous ne vaut que
+        // comme non-régression du contrat de retour (`Ok`, 0 ligne, 0 retard).
+        {
+            let store = app.store();
+            let inert = scan_overdue(&store, &json!({"enabled": true}), 0, MAX_SWEEP_ROWS, false).unwrap();
+            assert!(budgeted_severities(&json!({"enabled": true})).is_empty(), "prémisse : aucun budget");
+            assert_eq!(inert.scanned, 0, "aucun budget => aucune ligne lue");
+            assert!(inert.breaches.is_empty());
+        }
+        let _ = std::fs::remove_file(&led);
+    }
+
+    /// LE RÉSIDU, RENDU VISIBLE — le plafond porte sur les lignes LUES, et des findings d'une sévérité
+    /// BUDGÉTÉE mais encore DANS les temps le consomment légitimement. Ce qui ne doit JAMAIS arriver,
+    /// c'est que la troncature soit SILENCIEUSE : sans elle, « aucun retard » et « je n'ai pas regardé »
+    /// sont indiscernables. Le rapport porte `scanned`/`capped`, et un balayage tronqué est LEDGERISÉ
+    /// même sans notification.
+    /// MUTATION : recalculer `capped` depuis `breaches.len()` (l'ancien calcul) -> ce test rougit
+    /// (0 retard >= 500 est faux, alors que le balayage a bien buté sur le plafond).
+    #[test]
+    fn a_truncated_sweep_says_so_and_is_ledgered() {
+        let led = testutil::tmp_path("sla-capped.jsonl");
+        let app = testutil::test_app(&led);
+        seed_engagement(&app, 1);
+        // Un plafond entier de HIGH ENCORE DANS LES TEMPS (1 h sur un budget de 24 h) : budgétés, donc
+        // légitimement lus, mais aucun n'est en retard.
+        seed_bulk(&app, 1, "jeune", "HIGH", 1, MAX_SWEEP_ROWS);
+        set_policy(&app, &policy(24));
+
+        let r = sweep_once(&app, true);
+        assert_eq!(r["overdue"], 0, "aucun retard trouvé");
+        assert_eq!(r["scanned"], MAX_SWEEP_ROWS, "…mais le plafond a bel et bien mordu");
+        assert_eq!(r["capped"], true, "un balayage tronqué le DIT: {r}");
+        let l = ledger_text(&led);
+        assert!(l.contains("console.notify.sla.sweep"), "troncature non tracée: {l}");
+        assert!(l.contains("\"capped\":true"), "troncature non tracée: {l}");
         let _ = std::fs::remove_file(&led);
     }
 

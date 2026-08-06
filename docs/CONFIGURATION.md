@@ -90,7 +90,7 @@ prix d'un backend crypto système à la compilation (image `encryption`).
 Voir [`DEPLOYMENT.md` §1.6](DEPLOYMENT.md#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut)
 (champ), [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION.md#6-image-encryption-chiffrement-au-repos--sqlcipher-opt-in) (SQLCipher).
 
-### 1.4bis Egress sortant — ancres de confiance TLS
+### 1.4bis Egress sortant — confiance TLS et identité cliente
 
 Les **trois** sorties TCP de la console (échange de jeton OIDC, webhook de notification, fetcher de
 source de détection) passent par un **seam TLS unique** (`console/src/tls.rs`) dont la vérification est
@@ -98,10 +98,22 @@ source de détection) passent par un **seam TLS unique** (`console/src/tls.rs`) 
 lu** (posture sans dépendance OS : pas de `schannel`/`security-framework`/`openssl`), donc une **AC
 privée d'entreprise** doit être **fournie explicitement**.
 
+Deux directions à ne pas confondre : `FORGE_EXTRA_CA_PEM` sert à **vérifier le pair** ; `FORGE_CLIENT_*`
+sert à **nous authentifier auprès de lui** (mTLS). Poser la seconde ne relâche rien de la première.
+
 | Variable | Sens | Défaut | Exemple |
 |---|---|---|---|
 | `FORGE_EXTRA_CA_PEM` | Ancres de confiance **SUPPLÉMENTAIRES** au format **PEM verbatim** (un ou plusieurs blocs `CERTIFICATE`), **ajoutées** aux racines Mozilla — jamais substituées. Pour un IdP OIDC ou un collecteur signé par l'AC privée de l'organisation. **La vérification reste PLEINE** : ce n'est **pas** un interrupteur, il n'existe toujours aucun moyen d'accepter une chaîne inconnue, un mauvais nom d'hôte ou un certificat périmé. **FAIL-CLOSED** : un PEM illisible/vide/invalide **tue le boot** (`FATAL`, code 2) plutôt que de dégrader en silence vers « pas d'ancre ». Accepte `FORGE_EXTRA_CA_PEM_FILE` (un **chemin**). | *(vide = racines Mozilla seules)* | `-----BEGIN CERTIFICATE-----…` |
+| `FORGE_CLIENT_CERT_PEM` | **Chaîne de certificats CLIENTE** (PEM, **feuille d'abord**, intermédiaires ensuite) que la console **présente au pair qui l'exige** (mTLS). Elle n'est envoyée **que si le pair la demande** : la poser ne change **rien** pour les endpoints ordinaires. Publique — le pair la reçoit sur le fil. Accepte `FORGE_CLIENT_CERT_PEM_FILE` (un **chemin**). | *(vide = aucun certificat présenté)* | `-----BEGIN CERTIFICATE-----…` |
+| `FORGE_CLIENT_KEY_PEM` | **[SECRET — le plus sensible du binaire]** Clé privée de la chaîne ci-dessus (PKCS#8, PKCS#1 ou SEC1). Elle n'apparaît **nulle part** : ni au boot, ni dans un log, ni dans une erreur, ni dans le ledger, ni dans une réponse d'API. Un refus dit **que** la clé est invalide, jamais **ce qu'elle contient**. **Préférer franchement `FORGE_CLIENT_KEY_PEM_FILE`** (un **chemin** vers un fichier `0600`) : l'environnement d'un processus se lit dans `/proc/<pid>/environ` et se recopie dans tout dump de configuration. | *(vide = aucun certificat présenté)* | `/etc/forge/client.key` via `…_FILE` |
 | `FORGE_ALLOW_INTERNAL_INTEGRATIONS` | Autorise les fetches d'**intégration** à joindre une cible **interne/privée** (SIEM/IdP on-prem). Absent/faux ⇒ deny-list SSRF (loopback, RFC1918, link-local, métadonnées cloud, ULA). **Ne couvre pas** l'envoi d'un secret en clair vers une cible **publique** : ce refus-là n'a **aucune** échappatoire. | *(vide = refusé)* | `1` |
+
+**Les deux `FORGE_CLIENT_*` vont ensemble, ou aucune.** Un certificat sans clé ne peut rien signer,
+une clé sans certificat ne prouve aucune identité : dans les deux cas rustls n'enverrait tout
+simplement rien, et le pair mTLS refuserait la connexion avec un message qui ne désigne pas la
+variable manquante. Le boot **meurt** donc (`FATAL`, code 2) sur une identité à moitié posée, sur un
+PEM illisible, et sur une **clé qui ne correspond pas au certificat** (comparaison des
+`SubjectPublicKeyInfo`) — la faute qu'on commet en renouvelant l'un sans l'autre.
 
 ### 1.5 Migration via API (opt-in, pré-provision)
 

@@ -453,3 +453,132 @@ fn settings_secrets_inventory_covers_every_module_key() {
     }
     assert_eq!(keys.len(), 3, "inventaire figé — ajouter une intégration à secret impose de l'inscrire ici");
 }
+
+// =====================================================================================
+//  ÉCHÉANCE DU MATÉRIEL (tampon `exp`) — rendre une session morte VISIBLE AVANT le run
+//
+//  Le scellement a mis le matériel hors de portée du lanceur ET de l'éditeur : ni l'un ni l'autre ne
+//  peut donc VOIR qu'un jeton est périmé, et un run parti avec des comptes morts rend un rapport
+//  PROPRE et VIDE. Le tampon `exp`, calculé au SCELLEMENT (dernier instant où le clair est visible)
+//  et rangé à côté du label, referme ce trou SANS jamais persister un nouveau credential.
+// =====================================================================================
+
+/// JWT de test, signature bidon (jamais vérifiée : on ne LIT qu'une date auto-déclarée).
+fn jwt_with_exp(exp: i64) -> String {
+    use base64::Engine as _;
+    let b = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+    format!("{}.{}.c2ln", b(r#"{"alg":"HS256","typ":"JWT"}"#), b(&format!(r#"{{"sub":"u1","exp":{exp}}}"#)))
+}
+
+/// [LECTURE DE L'ÉCHÉANCE] `jwt_exp` lit une date, et RIEN d'autre : tout ce qui n'est pas un JWT à
+/// `exp` numérique rend `None` = INCONNU. INCONNU n'est JAMAIS « expiré » — sinon tout engagement à
+/// cookies opaques serait déclaré mort et l'avertissement deviendrait du bruit qu'on apprend à ignorer.
+#[test]
+fn expiry_is_read_only_when_it_is_really_there() {
+    assert_eq!(crate::field_crypto::jwt_exp(&jwt_with_exp(1700000000)), Some(1700000000));
+    for junk in ["", "opaque-session-cookie", "not.a.jwt", "eyJhbGciOiJIUzI1NiJ9", "forge:fenc1:AAAA"] {
+        assert_eq!(crate::field_crypto::jwt_exp(junk), None, "matériel non-JWT => INCONNU : {junk}");
+    }
+    // `exp` présent mais non numérique -> INCONNU (jamais une date fabriquée).
+    use base64::Engine as _;
+    let b = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+    let bad = format!("{}.{}.x", b(r#"{"alg":"none"}"#), b(r#"{"exp":"demain"}"#));
+    assert_eq!(crate::field_crypto::jwt_exp(&bad), None);
+}
+
+/// [TAMPON POSÉ AU SCELLEMENT] Sceller un bloc `auth` calcule `exp` depuis le CLAIR (dernier instant
+/// où il est lisible) et le range à côté du label. Le matériel, lui, part en enveloppe.
+/// MUTATION-PROVABLE : retirer `stamp_auth_expiry` de `seal_auth_block` -> plus de tampon -> ROUGE.
+#[test]
+fn sealing_stamps_the_expiry_it_will_no_longer_be_able_to_read() {
+    const KEY: &str = "cle-de-champ-echeance";
+    let dead = jwt_with_exp(1_600_000_000); // très largement dépassé
+    let auth = json!({"accounts": [
+        {"label": "attacker", "bearer": dead},
+        {"label": "opaque", "cookies": "sid=cookie-sans-echeance"}
+    ]});
+    let sealed = crate::field_crypto::seal_auth_block(&auth, Some(KEY)).expect("scellement");
+    assert_eq!(sealed["accounts"][0]["exp"], json!(1_600_000_000), "échéance lue AVANT chiffrement");
+    assert!(sealed["accounts"][1].get("exp").is_none(), "cookie opaque => AUCUN tampon (inconnu)");
+    assert!(crate::field_crypto::is_sealed(sealed["accounts"][0]["bearer"].as_str().unwrap()),
+            "le matériel, lui, est bien SCELLÉ");
+    // Le tampon est LISIBLE SANS LA CLÉ — c'est tout l'intérêt (le lanceur et l'éditeur ne l'ont pas).
+    assert_eq!(crate::field_crypto::auth_expired_labels(&sealed, 1_700_000_000), vec!["attacker".to_string()]);
+    assert!(crate::field_crypto::auth_expired_labels(&sealed, 1_500_000_000).is_empty(),
+            "avant l'échéance : rien n'est signalé");
+    // Grâce d'horloge : à l'instant PILE de l'expiration, on n'accuse pas encore.
+    assert!(crate::field_crypto::auth_expired_labels(&sealed, 1_600_000_000).is_empty(), "grâce d'horloge");
+}
+
+/// [IDEMPOTENCE / MATÉRIEL DÉJÀ SCELLÉ] Re-sceller un bloc dont le matériel est DÉJÀ en enveloppe
+/// PRÉSERVE le tampon : sans cette règle, chaque sauvegarde de l'éditeur (qui ne renvoie jamais les
+/// secrets) effacerait l'échéance et l'avertissement disparaîtrait en silence — exactement le mode de
+/// panne « effacement discret » que ce module interdit.
+#[test]
+fn resealing_preserves_a_stamp_it_can_no_longer_recompute() {
+    const KEY: &str = "cle-de-champ-idempotence";
+    let auth = json!({"accounts": [{"label": "attacker", "bearer": jwt_with_exp(1_600_000_000)}]});
+    let once = crate::field_crypto::seal_auth_block(&auth, Some(KEY)).expect("1er scellement");
+    let twice = crate::field_crypto::seal_auth_block(&once, Some(KEY)).expect("2e scellement");
+    assert_eq!(twice, once, "re-scellement = no-op strict, tampon inclus");
+    // Un `exp` MENSONGER posté à côté d'un matériel EN CLAIR n'a aucune autorité : le clair fait foi.
+    let liar = json!({"accounts": [{"label": "attacker", "bearer": jwt_with_exp(1_600_000_000), "exp": 9_999_999_999i64}]});
+    let sealed = crate::field_crypto::seal_auth_block(&liar, Some(KEY)).expect("scellement");
+    assert_eq!(sealed["accounts"][0]["exp"], json!(1_600_000_000), "le matériel fourni fait foi, pas le client");
+    // ... et un matériel SANS échéance lisible RETIRE le tampon (jamais d'échéance héritée d'un autre jeton).
+    let opaque = json!({"accounts": [{"label": "attacker", "bearer": "opaque-token", "exp": 9_999_999_999i64}]});
+    let sealed = crate::field_crypto::seal_auth_block(&opaque, Some(KEY)).expect("scellement");
+    assert!(sealed["accounts"][0].get("exp").is_none(), "matériel illisible => INCONNU, pas l'ancien tampon");
+}
+
+/// [PREUVE D'ILLISIBILITÉ SUR DISQUE — volet échéance] Le tampon `exp` est DÉLIBÉRÉMENT en clair sur
+/// disque (c'est un horodatage, pas un credential : il ne rejoue rien). Ce test fige les deux moitiés
+/// du contrat, sur les octets réels du fichier + `-wal` + `-shm` :
+///   - le JETON complet et sa CHARGE UTILE (le segment base64url qui contient `exp`) sont ABSENTS ;
+///   - l'ENTIER d'échéance, lui, est PRÉSENT (sinon rien ne serait visible avant le run).
+/// CONTRE-EXEMPLE INTÉGRÉ : la même sonde TROUVE le jeton quand la même valeur est écrite sans
+/// scellement — sans quoi « le jeton est absent » pourrait passer au vert pour de mauvaises raisons.
+#[test]
+fn expiry_stamp_is_readable_on_disk_while_the_token_is_not() {
+    const KEY: &str = "cle-de-champ-disque-echeance";
+    let path = tmp_path("forge-fieldcrypto-expiry.db");
+    let token = jwt_with_exp(1_600_000_000);
+    let payload_seg = token.split('.').nth(1).unwrap().to_string(); // porte le claim `exp`
+    let scope = json!({
+        "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+        "auth": {"accounts": [{"label": "attacker", "bearer": token.clone()}],
+                 "idor_targets": [{"url": "https://app.test/api/orders/1", "owner": "victim", "marker": "MK-1"}]}
+    });
+    {
+        let conn = file_db(&path);
+        let (canon, mode) = validate_engagement_scope(&scope, Some(KEY)).expect("scope armé valide");
+        conn.execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(80,'echeance','active',?,?,'',datetime('now'),datetime('now'))",
+            rusqlite::params![mode, canon],
+        )
+        .unwrap();
+    }
+    let bytes = on_disk_bytes(&path);
+    assert!(!contains(&bytes, &token), "JETON LISIBLE SUR DISQUE dans {path}");
+    assert!(!contains(&bytes, &payload_seg), "CHARGE UTILE DU JETON LISIBLE SUR DISQUE dans {path}");
+    assert!(contains(&bytes, "1600000000"), "le tampon d'échéance doit rester lisible SANS la clé");
+    assert!(contains(&bytes, "attacker"), "les LABELS restent en clair (contrat inchangé)");
+
+    // CONTRE-EXEMPLE — la sonde disque DÉTECTE bien un jeton écrit en clair.
+    {
+        let conn = Connection::open(&path).expect("réouverture");
+        conn.execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(81,'en-clair','active','grey',?,'',datetime('now'),datetime('now'))",
+            rusqlite::params![scope.to_string()],
+        )
+        .unwrap();
+    }
+    assert!(contains(&on_disk_bytes(&path), &token),
+            "CONTRE-EXEMPLE EN ÉCHEC : la sonde ne détecte pas un jeton pourtant écrit en clair — \
+             l'assertion d'illisibilité ci-dessus ne prouverait alors RIEN");
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{path}{s}"));
+    }
+}

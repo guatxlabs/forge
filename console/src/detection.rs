@@ -123,7 +123,9 @@ pub(crate) fn parse_fire_ts(ts: &str) -> Option<i64> {
 // opnsense, file_jsonl, elastic, exec, none} ; `auth.type` ∈ {none, basic, bearer, api_key_header,
 // mtls}. Les kinds `plume`/`generic_http` sont interrogés EN RUST (fetcher intégré ci-dessous), en
 // http:// COMME en https:// (le seam TLS `crate::tls` porte le transport) ;
-// les kinds « messy » (et `auth.type=mtls`, hors périmètre du seam) sont DÉLÉGUÉS au collecteur Python
+// les kinds « messy » (et `auth.type=mtls` : le seam SAIT présenter un certificat client, mais son
+// identité est celle du PROCESSUS — deux sources exigeant deux certificats distincts ne sont pas
+// représentables ici) sont DÉLÉGUÉS au collecteur Python
 // (`forge.cli detections`). Dans TOUS les cas la sortie est normalisée en `[(mitre,count,first_ts)]`
 // puis passée à `compute_purple_coverage` (jointure MITRE INCHANGÉE). Échec/mauvaise config =>
 // FAIL-OPEN LISIBLE (source_reachable:false), jamais de detected/parent_approx/missed/MTTD inventés.

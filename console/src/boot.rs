@@ -180,11 +180,17 @@ pub(crate) fn cli_subcommands() -> Vec<(&'static str, &'static str)> {
 /// (heartbeat/leader-tick/cache-poll/présence puis backup-scheduler) puis bind + serve. L'ordre des étapes,
 /// l'ordre des spawns et le gating HA sont STRICTEMENT inchangés par rapport à l'ancien main() monolithique.
 pub(crate) async fn serve() {
-    // ANCRES DE CONFIANCE D'ENTREPRISE (FORGE_EXTRA_CA_PEM / _FILE) — CONTRÔLÉES EN PREMIER, avant la
-    // base, avant le store, avant le moindre egress. Un PEM configuré mais illisible/invalide est FATAL
-    // ici : sans ça, il dégraderait en « pas d'ancre » et le déploiement ne le découvrirait qu'au premier
-    // handshake vers son IdP/collecteur privé, sous la forme d'un « émetteur inconnu » qui ne désigne pas
-    // la cause. Aucune ancre configurée => AUCUNE ligne imprimée (boot byte-identique).
+    // MATIÈRE TLS CONFIGURABLE — ancres de confiance d'ENTREPRISE (FORGE_EXTRA_CA_PEM / _FILE) ET
+    // IDENTITÉ CLIENTE mTLS (FORGE_CLIENT_CERT_PEM / FORGE_CLIENT_KEY_PEM, + jumeaux _FILE) — CONTRÔLÉES
+    // EN PREMIER, avant la base, avant le store, avant le moindre egress. Un PEM configuré mais
+    // illisible/invalide, une identité à MOITIÉ posée, ou une clé qui ne correspond pas au certificat
+    // sont FATAUX ici : sans ça, ils dégraderaient en « pas d'ancre » / « pas de mTLS » et le
+    // déploiement ne le découvrirait qu'au premier handshake vers son IdP/collecteur privé, sous la
+    // forme d'un « émetteur inconnu » ou d'une « connexion refusée » qui ne désignent pas la cause.
+    // UN SEUL préflight pour les deux (`tls::preflight` rend une ligne par élément chargé) — le seam a
+    // UNE politique, donc UN point de contrôle. Rien de configuré => AUCUNE ligne imprimée (boot
+    // byte-identique pour l'immense majorité des installs). La clé privée n'apparaît dans AUCUNE des
+    // deux sorties, ni la ligne d'annonce ni le FATAL (cf. `tls::invalid_key_msg` et ses balayages).
     match crate::tls::preflight() {
         Ok(Some(line)) => println!("{line}"),
         Ok(None) => {}

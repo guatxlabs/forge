@@ -346,6 +346,15 @@ pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec, field_key: 
     Ok(doc)
 }
 
+/// LABELS des comptes du bloc `auth` d'un engagement dont le matériel est PÉRIMÉ à `now`, ou vide.
+///
+/// PURE et SANS CLÉ (le lanceur n'a pas à déchiffrer pour avertir) : lit le tampon `exp` non secret
+/// posé au scellement. Aucun bloc auth, ou aucune échéance connue => vecteur VIDE => le run part
+/// EXACTEMENT comme avant (ni champ de ledger, ni `warnings` : payloads byte-identiques).
+pub(crate) fn auth_expiry_warning(eng_auth: Option<&Value>, now: i64) -> Vec<String> {
+    eng_auth.map(|a| crate::field_crypto::auth_expired_labels(a, now)).unwrap_or_default()
+}
+
 #[allow(clippy::significant_drop_tightening)]
 pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservation: RunReservation<'_>) -> (StatusCode, Json<Value>) {
     let run_id = spec.run_id.as_str();
@@ -529,8 +538,21 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     // CONTEXTE AUTH (R5b) : atteste QUE le run est parti ARMÉ (labels des comptes + nombre de cibles) —
     // miroir de `AuthContext.ledger_summary()` moteur. JAMAIS un secret, JAMAIS une URL de cible. Champ
     // ABSENT quand l'engagement n'a pas de contexte => entrée byte-identique à l'historique.
+    // MATÉRIEL PÉRIMÉ — le DIRE AU LANCEMENT. Un run parti avec des comptes expirés ne casse pas :
+    // il désarme les oracles de contrôle d'accès et rend un rapport PROPRE et VIDE qui ressemble à
+    // « cible saine » (le mode d'échec qui a coûté une campagne). Lu SANS la clé de champ, depuis le
+    // tampon `exp` non secret posé au scellement. On N'EMPÊCHE PAS le run : une campagne fait aussi
+    // du recon, du header, du SSRF — bloquer serait une sur-portée, et le moteur re-détecte de toute
+    // façon au tir (`skipped` + `degraded`). On NOMME, à trois endroits : ledger (ci-dessous),
+    // réponse de lancement (`warnings`) et éditeur d'engagement (`auth_summary_json`).
+    let auth_expired = auth_expiry_warning(spec.eng_auth.as_ref(), crate::state::now_epoch());
     if let Some(a) = &spec.eng_auth {
         start_detail["auth_context"] = crate::auth_ledger_summary(a);
+        // Champ ABSENT quand rien n'est périmé => entrée de ledger byte-identique à l'historique.
+        // SÛR : des LABELS, jamais un jeton (même contrat que `auth_ledger_summary`).
+        if !auth_expired.is_empty() {
+            start_detail["auth_expired"] = json!(auth_expired);
+        }
     }
     append_run_ledger_path(app, &spec.eng_ledger_path, "console.run.start", start_detail);
 
@@ -551,7 +573,17 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     // superviseur détaché : pompe stdout/stderr -> run_log + SSE ; watchdog ; finalisation atomique + libération slot.
     spawn_supervisor(app.clone(), child, run_id.to_string(), spec.eng_id, pgid, run_dir, spec.eng_ledger_path.clone());
 
-    (StatusCode::ACCEPTED, Json(json!({"run_id": run_id, "status": "running", "campaign": spec.campaign, "mode": spec.mode, "high_impact": spec.high_impact, "auto_pentest": spec.auto_pentest})))
+    let mut accepted = json!({"run_id": run_id, "status": "running", "campaign": spec.campaign, "mode": spec.mode, "high_impact": spec.high_impact, "auto_pentest": spec.auto_pentest});
+    // AVERTISSEMENT DE LANCEMENT (champ ABSENT si rien n'est périmé => réponse byte-identique à
+    // l'historique). C'est la seule surface que l'opérateur regarde à coup sûr au moment du clic.
+    if !auth_expired.is_empty() {
+        accepted["warnings"] = json!([{
+            "code": "auth_context_expired",
+            "accounts": auth_expired,
+            "why": "le matériel d'authentification de ces comptes porte une date d'expiration DÉPASSÉE : les oracles de contrôle d'accès (IDOR/ATO/privesc) rendront 'skipped' (non testé) au lieu d'un verdict. Rafraîchir le matériel dans le bloc `auth` de l'engagement pour que ce run prouve quoi que ce soit en cross-compte."
+        }]);
+    }
+    (StatusCode::ACCEPTED, Json(accepted))
 }
 
 /// Détache le superviseur du run : pompe stdout/stderr ligne à ligne vers run_log+SSE, applique le
@@ -703,6 +735,28 @@ mod scope_doc_contract_tests {
         s.eng_auth = Some(sealed);
         let with = build_run_scope_doc("run-x", &s, Some(KEY)).unwrap();
         assert_eq!(with["auth"], auth, "le bloc auth est OUVERT pour le moteur (round-trip verbatim)");
+    }
+
+    /// [MATÉRIEL PÉRIMÉ — LE LANCEMENT LE DIT] Un run parti avec des comptes expirés ne casse pas : il
+    /// DÉSARME les oracles de contrôle d'accès et rend un rapport propre et vide. Le lanceur le NOMME
+    /// (ledger `console.run.start.auth_expired` + `warnings` de la réponse), SANS la clé de champ et
+    /// SANS bloquer le run (une campagne fait aussi du recon : bloquer serait une sur-portée).
+    /// MUTATION-PROVABLE : rendre `auth_expiry_warning` toujours vide -> ROUGE.
+    #[test]
+    fn auth_expiry_warning_names_dead_accounts_without_the_key() {
+        use base64::Engine as _;
+        let b = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let jwt = |exp: i64| format!("{}.{}.sig", b(r#"{"alg":"HS256"}"#), b(&format!(r#"{{"exp":{exp}}}"#)));
+        let auth = json!({"accounts": [{"label": "attacker", "bearer": jwt(1_600_000_000)},
+                                       {"label": "victim", "bearer": jwt(1_900_000_000)},
+                                       {"label": "opaque", "cookies": "sid=rien-de-lisible"}]});
+        // SCELLÉ (l'état réel en base) : l'avertissement se lit SANS jamais ouvrir le matériel.
+        let sealed = crate::field_crypto::seal_auth_block(&auth, Some("cle-de-champ-warning")).unwrap();
+        assert_eq!(auth_expiry_warning(Some(&sealed), 1_700_000_000), vec!["attacker".to_string()],
+                   "seul le compte PROUVÉ périmé est nommé (ni le valide, ni l'opaque)");
+        // Aucun bloc auth, ou rien de périmé => VIDE => run byte-identique à l'historique.
+        assert!(auth_expiry_warning(None, 1_700_000_000).is_empty());
+        assert!(auth_expiry_warning(Some(&sealed), 1_500_000_000).is_empty());
     }
 
     /// [FAIL-CLOSED — LE RUN NE PART PAS SANS SON CONTEXTE] Un bloc `auth` SCELLÉ que la console ne peut

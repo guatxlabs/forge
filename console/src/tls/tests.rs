@@ -85,6 +85,70 @@ const LIVE_KEY_DER_B64: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg
 /// Nom d'hôte porté par la feuille EXPIRÉE (SAN DNS).
 const EXPIRED_HOST: &str = "expired.test";
 
+// ---------------------------------------------------------------------------------------------
+//  Matériel de test #3 : une AC CLIENTE et la feuille CLIENTE qu'elle signe — c'est-à-dire NOTRE
+//  identité, celle que la console PRÉSENTE quand le pair l'exige (mTLS).
+//
+//  POURQUOI UNE TROISIÈME AC PLUTÔT QUE RÉUTILISER LA FEUILLE #1 : rustls-webpki vérifie un certificat
+//  CLIENT avec `KeyUsage::client_auth()`. La feuille #1 porte l'EKU `serverAuth` — un serveur mTLS la
+//  refuserait pour la MAUVAISE raison (mauvais EKU), et le test positif ne pourrait jamais passer au
+//  vert. La feuille ci-dessous porte donc `clientAuth`, `CA:FALSE`, SAN `forge-console-client`.
+//  ECDSA P-256, 100 ans. Les DEUX PEM sont sous la forme EXACTE que l'opérateur pose dans
+//  `FORGE_CLIENT_CERT_PEM` / `FORGE_CLIENT_KEY_PEM`.
+// ---------------------------------------------------------------------------------------------
+
+/// AC CLIENTE de test — la seule autorité dont le serveur jetable accepte une identité.
+const CLIENT_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBpjCCAUugAwIBAgIUMmdTBaKLbBnKfkCI2frFc6tHmkkwCgYIKoZIzj0EAwIw
+HzEdMBsGA1UEAwwUZm9yZ2UtdGVzdC1jbGllbnQtY2EwIBcNMjYwODA2MjA1MDM0
+WhgPMjEyNjA3MTMyMDUwMzRaMB8xHTAbBgNVBAMMFGZvcmdlLXRlc3QtY2xpZW50
+LWNhMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBw17zdcRfGmx0Kk3IbDhlEix
+ocfg4dQm/5yJckauHBkMLI7beneDpMqWxfknX7wmnA/vgTKU6/8/4dJ81TV34qNj
+MGEwHQYDVR0OBBYEFLLQHTO6Q3uwM6XkyhsoZ5rth8FGMB8GA1UdIwQYMBaAFLLQ
+HTO6Q3uwM6XkyhsoZ5rth8FGMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQD
+AgEGMAoGCCqGSM49BAMCA0kAMEYCIQDJoBKS3ANEbnMWsKei7MDSVMRnpww0Abmf
+qugLXSQUYAIhALQblMuM/Hh/LnPlojVnWEc/AesYkW7HYg3UT0c6XIb6
+-----END CERTIFICATE-----
+";
+
+/// NOTRE certificat client (feuille signée par l'AC ci-dessus, EKU `clientAuth`).
+const CLIENT_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIB2zCCAYCgAwIBAgIUcPqy/p8W65zS/31VmD8+sVKmPRAwCgYIKoZIzj0EAwIw
+HzEdMBsGA1UEAwwUZm9yZ2UtdGVzdC1jbGllbnQtY2EwIBcNMjYwODA2MjA1MDM0
+WhgPMjEyNjA3MTMyMDUwMzRaMB8xHTAbBgNVBAMMFGZvcmdlLWNvbnNvbGUtY2xp
+ZW50MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmxcZcz7tAqOIW5KG1t8x1IPt
+EGQvIaNwxivbgzEH8nrh/nL8vFmbpaxV3uysgMgrR0ZUw7hmv7Wam7Ote5uiJ6OB
+lzCBlDAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggr
+BgEFBQcDAjAfBgNVHREEGDAWghRmb3JnZS1jb25zb2xlLWNsaWVudDAdBgNVHQ4E
+FgQUvXjB2B4Ybha/cSP3zB3ka8gUDC4wHwYDVR0jBBgwFoAUstAdM7pDe7AzpeTK
+Gyhnmu2HwUYwCgYIKoZIzj0EAwIDSQAwRgIhAOtlb5BCDV7ZIus0VfcVNGliRCc5
+sy00MalAoxFxQuIvAiEAtT1D9RMn7mG7j9IPO/xSj4EWZTjhuyfgJfGEDZfP4fI=
+-----END CERTIFICATE-----
+";
+
+/// La CLÉ PRIVÉE de ce certificat (PKCS#8). Matériel de TEST : elle ne protège rien. C'est néanmoins
+/// elle que balaient `client_key_material_never_leaks_into_*` — le corps base64 ci-dessous ne doit
+/// apparaître dans AUCUNE sortie du binaire.
+const CLIENT_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTEnZxFJkDk8i6Z3O
+/t///C9i97J54ksHJT/YALJQqV+hRANCAASbFxlzPu0Co4hbkobW3zHUg+0QZC8h
+o3DGK9uDMQfyeuH+cvy8WZulrFXe7KyAyCtHRlTDuGa/tZqbs617m6In
+-----END PRIVATE KEY-----
+";
+
+/// Une clé P-256 VALIDE mais SANS AUCUN RAPPORT avec `CLIENT_CERT_PEM` — le DÉPAREILLAGE, c'est-à-dire
+/// la faute qu'un opérateur commet en renouvelant l'un sans l'autre.
+const OTHER_CLIENT_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgI0v6wqNHlW/qVi2B
+zJW63jG8eE2HjkwXLFJYN3Zvfy2hRANCAAQBlJTUCQGSP3ynivSC8obhWvbRTS/j
+ObqpcRRfnOQWWtD4eXOH3y1tDCIwQfKAhlldvXnhD9GkwSCNTOaw9qwG
+-----END PRIVATE KEY-----
+";
+
+/// Octets applicatifs que le serveur mTLS n'écrit QU'APRÈS avoir authentifié le pair. Les lire est la
+/// preuve, côté client, d'avoir été accepté.
+const MTLS_BANNER: &[u8] = b"FORGE-MTLS-OK";
+
 fn b64(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(s).expect("base64 de fixture")
 }
@@ -145,6 +209,142 @@ fn spawn_tls_server(
         }
     });
     (addr, h)
+}
+
+/// Verdict SERVEUR d'une connexion mTLS — la moitié serveur de la mesure. Sans elle, un test client qui
+/// échoue ne dirait pas si c'est le pair qui a refusé, ou n'importe quoi d'autre.
+struct MtlsVerdict {
+    /// Le handshake est-il allé à son terme côté serveur ?
+    handshake_ok: bool,
+    /// Le serveur a-t-il reçu et vérifié un certificat CLIENT ?
+    peer_authenticated: bool,
+}
+
+/// Serveur TLS jetable qui **EXIGE** un certificat client, ancré sur [`CLIENT_CA_PEM`]. Il sert la même
+/// chaîne serveur que les autres (feuille #1 + AC #1), donc le client la vérifie EXACTEMENT comme
+/// ailleurs, via l'ancre d'entreprise — les deux authentifications restent bien distinctes.
+///
+/// ⚠️ LA BANNIÈRE EST ÉCRITE DÈS QUE LE HANDSHAKE ABOUTIT, sans regarder `peer_certificates()`, et ce
+/// détail est TOUT le test négatif. Première version : le serveur n'écrivait la bannière QUE s'il avait
+/// vu un certificat client. La mutation de contrôle (remplacer `WebPkiClientVerifier` par
+/// `with_no_client_auth`) restait alors VERTE — un constat sur le test, pas un succès : le refus venait
+/// de CE `if`, pas de l'EXIGENCE du pair, et le test ne prouvait donc rien sur `with_client_auth_cert`.
+/// La bannière ne mesure plus qu'une chose, la bonne : « la session porte des octets applicatifs ». Le
+/// verdict `peer_authenticated` reste rendu à part, pour le test POSITIF.
+fn spawn_mtls_server() -> (SocketAddr, std::thread::JoinHandle<MtlsVerdict>) {
+    use rustls::pki_types::pem::PemObject;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("addr locale");
+    let chain = vec![
+        rustls::pki_types::CertificateDer::from(b64(UNTRUSTED_CERT_DER_B64)),
+        rustls::pki_types::CertificateDer::from(b64(UNTRUSTED_CA_DER_B64)),
+    ];
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(b64(
+        UNTRUSTED_KEY_DER_B64,
+    )));
+    // Magasin d'AC CLIENTES : la seule autorité dont ce serveur accepte une identité.
+    let mut client_roots = rustls::RootCertStore::empty();
+    for der in rustls::pki_types::CertificateDer::pem_slice_iter(CLIENT_CA_PEM.as_bytes()) {
+        client_roots.add(der.expect("AC cliente de test")).expect("ancre cliente");
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // ⚠️ C'EST LA LIGNE QUI DONNE SON SENS AU COUPLE : `WebPkiClientVerifier` (par opposition à
+    // `with_no_client_auth`, utilisé par l'autre serveur jetable) EXIGE un certificat client. La
+    // remplacer fait passer au VERT le test négatif — c'est la mutation qui prouve qu'il mesure bien
+    // une EXIGENCE du pair et pas un hasard.
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(client_roots),
+        provider.clone(),
+    )
+    .build()
+    .expect("vérificateur de certificat client");
+    let cfg = Arc::new(
+        rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("versions TLS")
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(chain, key)
+            .expect("chaîne+clé serveur de test"),
+    );
+    let h = std::thread::spawn(move || {
+        let refused = MtlsVerdict { handshake_ok: false, peer_authenticated: false };
+        let Ok((mut sock, _)) = listener.accept() else { return refused };
+        sock.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        sock.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        let Ok(mut session) = rustls::ServerConnection::new(cfg) else { return refused };
+        // Handshake mené à terme : c'est ICI que le certificat client est exigé et vérifié. Un client
+        // sans identité fait échouer ce `complete_io` (rustls y flushe l'alerte avant de rendre l'erreur,
+        // donc le client la voit) — et c'est POUR ÇA que la bannière plus bas n'est jamais atteinte.
+        let mut rounds = 0usize;
+        while session.is_handshaking() {
+            rounds += 1;
+            if rounds > 8 || session.complete_io(&mut sock).is_err() {
+                return refused;
+            }
+        }
+        let peer_authenticated = matches!(session.peer_certificates(), Some(c) if !c.is_empty());
+        // INCONDITIONNEL (cf. le doc ci-dessus) : ce que la bannière mesure, c'est que le handshake a
+        // abouti — donc que le pair n'a RIEN exigé qu'on n'ait fourni.
+        if session.writer().write_all(MTLS_BANNER).is_err() {
+            return MtlsVerdict { handshake_ok: true, peer_authenticated };
+        }
+        let _ = session.complete_io(&mut sock);
+        MtlsVerdict { handshake_ok: true, peer_authenticated }
+    });
+    (addr, h)
+}
+
+/// Aboutissement MESURÉ côté client : le handshake, PUIS la première lecture APPLICATIVE.
+///
+/// POURQUOI PAS SEULEMENT `connect_with` — et c'est la subtilité de tout ce couple : en TLS 1.3 le
+/// client considère son handshake terminé dès qu'il a envoyé son `Finished`. Le VERDICT du serveur sur
+/// notre certificat (alerte `certificate_required`) n'arrive qu'ENSUITE. Un test qui s'arrêterait à
+/// `connect_with` mesurerait donc « on a parlé », pas « on a été accepté ». On lit la bannière que le
+/// serveur n'écrit qu'après nous avoir authentifiés : c'est la seule mesure qui vaut pour les deux
+/// versions du protocole.
+fn mtls_read_banner(addr: &SocketAddr, cfg: Arc<rustls::ClientConfig>) -> Result<String, String> {
+    let mut conn = connect_with(addr, UNTRUSTED_HOST, Scheme::Https, Duration::from_secs(5), Some(cfg))?;
+    let mut buf = [0u8; 64];
+    let n = conn
+        .read(&mut buf)
+        .map_err(|e| format!("lecture applicative refusée: {e}"))?;
+    if n == 0 {
+        return Err("le pair a fermé sans un seul octet applicatif".to_string());
+    }
+    Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+}
+
+/// Construit une identité cliente à partir de deux PEM. Les champs sont privés au module `tls` — un
+/// `mod tests` enfant y accède, la production non : elle ne peut fabriquer une identité QUE par
+/// [`client_identity_from_env`].
+fn identity(cert_pem: &str, key_pem: &str) -> ClientIdentityPem {
+    ClientIdentityPem { cert: cert_pem.to_string(), key: key_pem.to_string() }
+}
+
+/// Toutes les FENÊTRES de 12 caractères du CORPS base64 d'une clé PEM (en-têtes exclus).
+///
+/// POURQUOI DES FENÊTRES ET PAS UNE SENTINELLE : une sortie qui ne recopierait « qu'un bout » de la clé
+/// est tout aussi disqualifiante, et une sentinelle unique ne l'attraperait pas. 12 caractères de
+/// l'alphabet base64 ≈ 72 bits : aucune collision fortuite avec un message d'erreur en français.
+fn key_body_windows(key_pem: &str) -> Vec<String> {
+    let body: Vec<char> = key_pem
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("-----"))
+        .flat_map(|l| l.trim().chars())
+        .collect();
+    assert!(body.len() > 40, "fixture de clé inattendue ({} car.)", body.len());
+    body.windows(12).map(|w| w.iter().collect()).collect()
+}
+
+/// Assertion de CONFINEMENT : aucun fragment du corps de `key_pem` n'apparaît dans `haystack`.
+fn assert_no_key_material(haystack: &str, key_pem: &str, what: &str) {
+    for w in key_body_windows(key_pem) {
+        assert!(
+            !haystack.contains(&w),
+            "FUITE DE CLÉ PRIVÉE dans {what} : le fragment {w:?} du corps de la clé apparaît dans la \
+             sortie.\nSortie complète : {haystack}"
+        );
+    }
 }
 
 // =============================================================================================
@@ -232,7 +432,7 @@ fn tls_handshake_rejects_untrusted_certificate() {
 #[test]
 fn enterprise_ca_pem_makes_its_own_chain_verify() {
     let (addr, server) = spawn_untrusted_tls_server(1);
-    let cfg = build_client_config(Some(&untrusted_ca_pem())).expect("config avec ancre d'entreprise");
+    let cfg = build_client_config(Some(&untrusted_ca_pem()), None).expect("config avec ancre d'entreprise");
     // `.is_ok()` plutôt que `expect` : `Conn` n'implémente PAS `Debug` (une session TLS ne doit pas
     // pouvoir être imprimée par accident). On capture donc l'erreur AVANT pour la diagnostiquer.
     let r = connect_with(&addr, UNTRUSTED_HOST, Scheme::Https, Duration::from_secs(5), Some(cfg));
@@ -257,7 +457,7 @@ fn enterprise_ca_pem_makes_its_own_chain_verify() {
 fn enterprise_ca_pem_still_rejects_another_ca() {
     let (addr, server) = spawn_untrusted_tls_server(2);
     // PEM d'entreprise VALIDE et bien chargé… mais c'est l'AC #2, qui n'a rien signé ici.
-    let cfg = build_client_config(Some(ENTERPRISE_CA2_PEM)).expect("config avec l'AUTRE ancre");
+    let cfg = build_client_config(Some(ENTERPRISE_CA2_PEM), None).expect("config avec l'AUTRE ancre");
     let err = connect_with(&addr, UNTRUSTED_HOST, Scheme::Https, Duration::from_secs(5), Some(cfg))
         .err()
         .expect("une ancre SANS RAPPORT ne rend pas la chaîne fiable");
@@ -279,7 +479,7 @@ fn enterprise_ca_pem_still_rejects_another_ca() {
 #[test]
 fn enterprise_ca_pem_still_verifies_the_hostname() {
     let (addr, server) = spawn_untrusted_tls_server(2);
-    let cfg = build_client_config(Some(&untrusted_ca_pem())).expect("config avec ancre d'entreprise");
+    let cfg = build_client_config(Some(&untrusted_ca_pem()), None).expect("config avec ancre d'entreprise");
     // La feuille porte SAN `untrusted.test` ; on demande à vérifier `autre.test`.
     let err = connect_with(&addr, "autre.test", Scheme::Https, Duration::from_secs(5), Some(cfg))
         .err()
@@ -312,7 +512,7 @@ fn enterprise_ca_pem_still_verifies_the_hostname() {
 #[test]
 fn enterprise_ca_pem_still_honours_expiry() {
     let timeout = Duration::from_secs(5);
-    let cfg = || build_client_config(Some(ENTERPRISE_CA2_PEM)).expect("config avec ancre d'entreprise #2");
+    let cfg = || build_client_config(Some(ENTERPRISE_CA2_PEM), None).expect("config avec ancre d'entreprise #2");
 
     // (1) MESURE — même ancre, feuille EXPIRÉE : REFUS, et le refus NOMME l'expiration.
     let (addr, server) = spawn_tls_server(EXPIRED_CERT_DER_B64, ENTERPRISE_CA2_DER_B64, EXPIRED_KEY_DER_B64, 1);
@@ -363,15 +563,15 @@ fn enterprise_ca_pem_fails_closed_when_unusable() {
     let _g = crate::testutil::env_lock();
 
     // --- PARSING (PUR) ---
-    assert!(build_client_config(None).is_ok(), "aucun PEM => config standard, cas par défaut");
+    assert!(build_client_config(None, None).is_ok(), "aucun PEM => config standard, cas par défaut");
     for bad in ["ceci n'est pas du PEM", "", "-----BEGIN CERTIFICATE-----\nzzzz\n-----END CERTIFICATE-----\n"] {
         assert!(
-            build_client_config(Some(bad)).is_err(),
+            build_client_config(Some(bad), None).is_err(),
             "PEM inexploitable accepté en silence: {bad:?}"
         );
     }
     // Un PEM qui ne porte QUE des blocs d'un autre type n'est pas « zéro ancre, tant pis » : c'est un refus.
-    let e = build_client_config(Some("-----BEGIN PRIVATE KEY-----\nMIG=\n-----END PRIVATE KEY-----\n"))
+    let e = build_client_config(Some("-----BEGIN PRIVATE KEY-----\nMIG=\n-----END PRIVATE KEY-----\n"), None)
         .expect_err("aucun bloc CERTIFICATE => refus");
     assert!(e.contains(EXTRA_CA_VAR), "le refus doit NOMMER la variable, obtenu: {e}");
 
@@ -421,7 +621,7 @@ fn enterprise_ca_pem_fails_closed_when_unusable() {
 /// les deux, rien ne vérifiait que le PEM SORTI DE L'ENV est utilisable pour un vrai handshake — un
 /// `_FILE` lu avec un BOM, une fin de ligne mangée, une précédence inversée passeraient toutes les
 /// assertions d'égalité et casseraient l'unique usage réel. La composition testée ici est
-/// EXACTEMENT celle de `client_config()` : `build_client_config(extra_ca_pem_from_env()?.as_deref())`.
+/// EXACTEMENT celle de `client_config()` : `build_client_config(extra_ca_pem_from_env()?.as_deref(), client_identity_from_env()?.as_ref())`.
 ///
 /// POURQUOI UN TEST À PART, et c'est le point : la jointure vivait d'abord DANS
 /// `enterprise_ca_pem_fails_closed_when_unusable`, et les mutations n'y arrivaient JAMAIS — les
@@ -446,7 +646,7 @@ fn enterprise_ca_pem_from_env_reaches_a_real_handshake() {
     // POSITIF : la variable posée, la chaîne du serveur devient fiable.
     std::env::set_var(EXTRA_CA_VAR, untrusted_ca_pem());
     let (addr, server) = spawn_untrusted_tls_server(1);
-    let cfg = build_client_config(extra_ca_pem_from_env().expect("Ok").as_deref())
+    let cfg = build_client_config(extra_ca_pem_from_env().expect("Ok").as_deref(), None)
         .expect("config bâtie DEPUIS l'environnement");
     // `Conn` n'implémente pas `Debug` (une session TLS ne doit pas pouvoir être imprimée par
     // accident) : on capture l'erreur avant d'assertir.
@@ -466,7 +666,7 @@ fn enterprise_ca_pem_from_env_reaches_a_real_handshake() {
     // AILLEURS (racines par défaut polluées, config héritée) plutôt que de la variable : variable
     // retirée, la MÊME chaîne redevient refusée.
     let (addr, server) = spawn_untrusted_tls_server(1);
-    let cfg = build_client_config(extra_ca_pem_from_env().expect("Ok").as_deref())
+    let cfg = build_client_config(extra_ca_pem_from_env().expect("Ok").as_deref(), None)
         .expect("config standard, sans ancre d'entreprise");
     let refused =
         connect_with(&addr, UNTRUSTED_HOST, Scheme::Https, Duration::from_secs(5), Some(cfg)).is_err();
@@ -474,6 +674,320 @@ fn enterprise_ca_pem_from_env_reaches_a_real_handshake() {
     assert!(
         refused,
         "sans {EXTRA_CA_VAR}, la même chaîne DOIT redevenir refusée — sinon la confiance ne vient pas de la variable"
+    );
+}
+
+// =============================================================================================
+//  2ter. mTLS — L'IDENTITÉ QUE NOUS PRÉSENTONS
+//
+//  Le COUPLE, et il est indissociable : sans le NÉGATIF, on ne saurait pas si le serveur de test EXIGE
+//  réellement un certificat — le positif passerait au vert même contre un pair qui n'en demande aucun,
+//  et ne prouverait donc RIEN sur `with_client_auth_cert`. Les deux tests partagent le MÊME serveur
+//  ([`spawn_mtls_server`]) et le MÊME chemin client ([`mtls_read_banner`]) : la seule variable entre
+//  eux est la présence de l'identité.
+// =============================================================================================
+
+/// [POSITIF] Identité cliente configurée => le pair mTLS nous AUTHENTIFIE et la session porte des
+/// octets applicatifs. Mesuré des DEUX côtés : le serveur confirme avoir vu un certificat client, le
+/// client lit la bannière que le serveur n'écrit qu'après.
+///
+/// MUTATION : faire ignorer `client_identity` par `build_client_config` (retomber sur
+/// `with_no_client_auth`) -> ce test rougit.
+#[test]
+fn mtls_client_certificate_is_presented_and_accepted() {
+    let (addr, server) = spawn_mtls_server();
+    let id = identity(CLIENT_CERT_PEM, CLIENT_KEY_PEM);
+    // L'ancre d'entreprise sert à vérifier le SERVEUR ; l'identité sert à nous authentifier AUPRÈS de
+    // lui. Les deux dans la même config, et elles ne se marchent pas dessus.
+    let cfg = build_client_config(Some(&untrusted_ca_pem()), Some(&id)).expect("config avec identité cliente");
+    let banner = mtls_read_banner(&addr, cfg);
+    let v = server.join().expect("thread serveur");
+    assert!(v.handshake_ok, "le handshake mTLS doit aboutir côté serveur");
+    assert!(
+        v.peer_authenticated,
+        "le serveur mTLS doit avoir AUTHENTIFIÉ le pair (certificat client reçu et vérifié)"
+    );
+    assert_eq!(
+        banner.as_deref(),
+        Ok(std::str::from_utf8(MTLS_BANNER).expect("bannière ascii")),
+        "le client doit lire les octets applicatifs que le pair n'écrit qu'après nous avoir acceptés"
+    );
+}
+
+/// [NÉGATIF] AUCUNE identité configurée, MÊME serveur => le pair nous REFUSE et la session ne porte
+/// AUCUN octet applicatif. C'est ce test qui donne son sens au positif : il établit que le serveur
+/// EXIGE bien quelque chose.
+///
+/// MUTATION : remplacer `WebPkiClientVerifier` par `with_no_client_auth` dans [`spawn_mtls_server`]
+/// -> ce test rougit (le pair anonyme serait accepté).
+#[test]
+fn mtls_peer_refuses_us_without_a_client_certificate() {
+    let (addr, server) = spawn_mtls_server();
+    // MÊME config que le positif, à l'identité près.
+    let cfg = build_client_config(Some(&untrusted_ca_pem()), None).expect("config SANS identité cliente");
+    let outcome = mtls_read_banner(&addr, cfg);
+    let v = server.join().expect("thread serveur");
+    // L'ASSERTION QUI PORTE LA PREUVE : le pair EXIGE un certificat, donc le handshake n'aboutit pas et
+    // la session ne porte AUCUN octet applicatif. La bannière étant écrite dès que le handshake aboutit
+    // (cf. `spawn_mtls_server`), un pair qui n'exigerait rien la ferait lire ici -> rouge.
+    assert!(
+        outcome.is_err(),
+        "sans certificat client, la session ne doit porter AUCUN octet applicatif — obtenu: {outcome:?}"
+    );
+    assert!(!v.handshake_ok, "le handshake ne doit PAS aboutir face à un pair qui exige un certificat");
+    assert!(!v.peer_authenticated, "le serveur mTLS ne doit avoir authentifié PERSONNE");
+}
+
+/// PAS DE RUPTURE POUR LES INSTALLS EXISTANTES, et il faut le dire explicitement : une identité
+/// configurée n'est PRÉSENTÉE QUE si le pair la DEMANDE. Contre un serveur ordinaire (celui des autres
+/// tests, `with_no_client_auth`), le handshake aboutit exactement comme avant.
+///
+/// MUTATION : rendre l'identité obligatoire côté client (échouer quand le pair n'en demande pas)
+/// -> ce test rougit.
+#[test]
+fn client_identity_does_not_disturb_a_peer_that_never_asks() {
+    let (addr, server) = spawn_untrusted_tls_server(1);
+    let id = identity(CLIENT_CERT_PEM, CLIENT_KEY_PEM);
+    let cfg = build_client_config(Some(&untrusted_ca_pem()), Some(&id)).expect("config avec identité");
+    // `.err()` : on capture l'erreur AVANT d'assertir — `Conn` n'implémente pas `Debug` (une session TLS
+    // ne doit pas pouvoir être imprimée par accident), donc pas d'`expect` sur le `Ok`.
+    let err = connect_with(&addr, UNTRUSTED_HOST, Scheme::Https, Duration::from_secs(5), Some(cfg)).err();
+    server.join().expect("thread serveur");
+    assert!(
+        err.is_none(),
+        "un pair qui ne demande pas de certificat client doit rester joignable, obtenu: {}",
+        err.unwrap_or_default()
+    );
+}
+
+/// FAIL-CLOSED sur la MOITIÉ : un certificat sans clé (ou l'inverse) tue le boot en NOMMANT la variable
+/// manquante. Sans ça, rustls ne présenterait simplement rien et l'opérateur lirait « connexion
+/// refusée » — un message qui ne désigne pas la vraie cause.
+///
+/// MUTATION : rendre `Ok(None)` au lieu de `Err` quand une seule des deux est posée -> ce test rougit.
+#[test]
+fn client_identity_fails_closed_when_only_half_configured() {
+    // Même anti-contamination que les tests d'ancre : on fige le `OnceLock` du processus AVANT de
+    // toucher l'environnement (cf. `enterprise_ca_pem_fails_closed_when_unusable`).
+    let _ = client_config().expect("config de processus");
+    let _g = crate::testutil::env_lock();
+    let vars = [
+        CLIENT_CERT_VAR.to_string(),
+        format!("{CLIENT_CERT_VAR}_FILE"),
+        CLIENT_KEY_VAR.to_string(),
+        format!("{CLIENT_KEY_VAR}_FILE"),
+    ];
+    for v in &vars {
+        std::env::remove_var(v);
+    }
+    assert!(
+        client_identity_from_env().expect("rien de posé => Ok").is_none(),
+        "rien configuré => aucune identité, cas par défaut"
+    );
+
+    // CERT seul.
+    std::env::set_var(CLIENT_CERT_VAR, CLIENT_CERT_PEM);
+    // `.err().expect(..)` et non `expect_err` : `ClientIdentityPem` n'implémente PAS `Debug` — la
+    // CONTRAINTE fait son travail jusque dans les tests, qui ne peuvent pas imprimer une clé « pour voir ».
+    let e = client_identity_from_env().err().expect("certificat sans clé => refus");
+    assert!(e.contains(CLIENT_KEY_VAR), "le refus doit NOMMER la variable manquante, obtenu: {e}");
+    assert!(preflight().is_err(), "le boot doit MOURIR sur une identité à moitié posée");
+    std::env::remove_var(CLIENT_CERT_VAR);
+
+    // CLÉ seule.
+    std::env::set_var(CLIENT_KEY_VAR, CLIENT_KEY_PEM);
+    let e = client_identity_from_env().err().expect("clé sans certificat => refus");
+    assert!(e.contains(CLIENT_CERT_VAR), "le refus doit NOMMER la variable manquante, obtenu: {e}");
+    assert_no_key_material(&e, CLIENT_KEY_PEM, "le refus « clé sans certificat »");
+    assert!(preflight().is_err(), "le boot doit MOURIR sur une identité à moitié posée");
+    std::env::remove_var(CLIENT_KEY_VAR);
+
+    // Les DEUX : plus de refus.
+    std::env::set_var(CLIENT_CERT_VAR, CLIENT_CERT_PEM);
+    std::env::set_var(CLIENT_KEY_VAR, CLIENT_KEY_PEM);
+    assert!(
+        client_identity_from_env().expect("les deux posées => Ok").is_some(),
+        "CONTRE-EXEMPLE EN ÉCHEC : les deux moitiés posées doivent être ACCEPTÉES — sinon les refus \
+         ci-dessus ne prouvent rien sur la MOITIÉ"
+    );
+    for v in &vars {
+        std::env::remove_var(v);
+    }
+}
+
+/// FAIL-CLOSED sur le DÉPAREILLAGE : une clé VALIDE mais qui n'est pas celle du certificat est refusée
+/// à la CONSTRUCTION de la config, donc au boot. C'est la faute qu'on commet en renouvelant l'un sans
+/// l'autre ; elle ne doit pas se découvrir au premier handshake.
+///
+/// PUR (aucun env) : les deux PEM sont des paramètres. CONTRE-EXEMPLE INTÉGRÉ — la MÊME chaîne avec sa
+/// VRAIE clé est acceptée, sinon « refusé » pourrait venir de n'importe quoi d'autre.
+///
+/// MUTATION : traiter l'erreur de `with_client_auth_cert` comme « pas d'identité » -> ce test rougit.
+#[test]
+fn client_identity_fails_closed_when_the_key_does_not_match_the_certificate() {
+    let e = build_client_config(None, Some(&identity(CLIENT_CERT_PEM, OTHER_CLIENT_KEY_PEM)))
+        .expect_err("clé dépareillée => refus");
+    assert!(e.contains(CLIENT_KEY_VAR) && e.contains(CLIENT_CERT_VAR), "le refus doit NOMMER les deux variables, obtenu: {e}");
+    assert_no_key_material(&e, OTHER_CLIENT_KEY_PEM, "le refus de dépareillage");
+    // CONTRE-EXEMPLE : même certificat, VRAIE clé => accepté.
+    assert!(
+        build_client_config(None, Some(&identity(CLIENT_CERT_PEM, CLIENT_KEY_PEM))).is_ok(),
+        "CONTRE-EXEMPLE EN ÉCHEC : la paire APPARIÉE doit être acceptée — sinon le refus ci-dessus ne \
+         prouve rien sur le dépareillage"
+    );
+}
+
+/// LE CŒUR DU TRAVAIL, et ce n'est pas le handshake : **la clé privée ne fuit dans AUCUNE erreur.**
+///
+/// On BALAIE la sortie plutôt que de relire le code : chaque message produit par un chemin qui TOUCHE
+/// la clé est passé au crible des fenêtres de 12 caractères de son corps base64. Le piège visé est
+/// précis et mesuré — `rustls::pki_types::pem::Error` recopie la LIGNE fautive
+/// (`IllegalSectionStart`) et un octet du corps (`Base64Decode`) ; propager `{e:?}` « pour aider au
+/// diagnostic » déverserait donc du matériel de clé dans les journaux. Chaque refus doit dire QUE la
+/// clé est invalide, jamais en montrer un fragment.
+///
+/// PUR (aucun env) — les chemins env/boot sont balayés par les deux tests suivants, ISOLÉS pour qu'une
+/// assertion antérieure ne puisse pas les faire avorter sous mutation.
+///
+/// MUTATION : interpoler le PEM (ou l'erreur brute de la bibliothèque) dans `invalid_key_msg` /
+/// `parse_client_key` -> ce test rougit.
+#[test]
+fn client_key_material_never_leaks_into_an_error() {
+    // Le corps de la clé, injecté dans des PEM cassés de plusieurs façons. Chaque cas DOIT échouer —
+    // sinon on ne balaierait rien du tout (assertion explicite ci-dessous).
+    let body: String = CLIENT_KEY_PEM
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let broken: Vec<(&str, String)> = vec![
+        // corps pollué par un caractère hors alphabet base64 -> `Base64Decode`
+        ("corps base64 corrompu", format!("-----BEGIN PRIVATE KEY-----\n{body}%\n-----END PRIVATE KEY-----\n")),
+        // en-tête malformé (4 tirets) -> `IllegalSectionStart`, qui recopie la LIGNE
+        ("en-tête PEM malformé", format!("-----BEGIN PRIVATE KEY----\n{body}\n-----END PRIVATE KEY-----\n")),
+        // fin de section absente -> `MissingSectionEnd`
+        ("fin de section absente", format!("-----BEGIN PRIVATE KEY-----\n{body}\n")),
+        // aucun bloc de clé : le corps est là, mais sous une étiquette qui n'en est pas une
+        ("aucun bloc de clé", format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n")),
+        // DEUX clés -> ambiguïté refusée
+        ("deux clés", format!("{CLIENT_KEY_PEM}{CLIENT_KEY_PEM}")),
+        // clé valide mais DÉPAREILLÉE -> `client_auth_error`
+        ("clé dépareillée", OTHER_CLIENT_KEY_PEM.to_string()),
+    ];
+    for (what, key_pem) in &broken {
+        let e = build_client_config(None, Some(&identity(CLIENT_CERT_PEM, key_pem)))
+            .expect_err(&format!("clé inexploitable ({what}) => refus attendu"));
+        assert!(
+            e.contains(CLIENT_KEY_VAR),
+            "le refus doit NOMMER la variable ({what}), obtenu: {e}"
+        );
+        assert_no_key_material(&e, key_pem, &format!("le refus « {what} »"));
+        // Et le corps de la VRAIE clé non plus (les cas construits le contiennent verbatim).
+        assert_no_key_material(&e, CLIENT_KEY_PEM, &format!("le refus « {what} »"));
+    }
+}
+
+/// La clé ne fuit pas non plus dans la LIGNE DE BOOT — celle que l'opérateur voit, copie dans un ticket
+/// et colle dans un rapport d'incident. ISOLÉ de son jumeau « erreur » pour qu'aucune assertion
+/// antérieure ne puisse le faire avorter sous mutation.
+///
+/// MUTATION : mettre la clé (ou son empreinte étendue) dans la ligne de `preflight` -> ce test rougit.
+#[test]
+fn client_key_material_never_leaks_into_the_boot_line() {
+    let _ = client_config().expect("config de processus");
+    let _g = crate::testutil::env_lock();
+    let file_var = format!("{CLIENT_KEY_VAR}_FILE");
+    std::env::remove_var(&file_var);
+    std::env::remove_var(format!("{CLIENT_CERT_VAR}_FILE"));
+    std::env::set_var(CLIENT_CERT_VAR, CLIENT_CERT_PEM);
+    std::env::set_var(CLIENT_KEY_VAR, CLIENT_KEY_PEM);
+    let line = preflight().expect("identité valide => preflight OK");
+    std::env::remove_var(CLIENT_CERT_VAR);
+    std::env::remove_var(CLIENT_KEY_VAR);
+    let line = line.expect("identité armée => une ligne de boot est annoncée");
+    assert!(line.contains(CLIENT_CERT_VAR) && line.contains(CLIENT_KEY_VAR), "la ligne doit nommer les variables, obtenue: {line}");
+    assert_no_key_material(&line, CLIENT_KEY_PEM, "la ligne de boot");
+}
+
+/// La clé ne fuit pas non plus quand le boot MEURT à cause d'elle — le pire moment, parce que ce
+/// message-là part dans stderr, journald et le ticket de l'exploitant. ISOLÉ pour la même raison.
+///
+/// MUTATION : interpoler le PEM dans le message FATAL -> ce test rougit.
+#[test]
+fn client_key_material_never_leaks_when_the_boot_dies_on_it() {
+    let _ = client_config().expect("config de processus");
+    let _g = crate::testutil::env_lock();
+    std::env::remove_var(format!("{CLIENT_KEY_VAR}_FILE"));
+    std::env::remove_var(format!("{CLIENT_CERT_VAR}_FILE"));
+    std::env::set_var(CLIENT_CERT_VAR, CLIENT_CERT_PEM);
+    // Clé VALIDE mais dépareillée : le boot doit mourir, en nommant les variables et rien d'autre.
+    std::env::set_var(CLIENT_KEY_VAR, OTHER_CLIENT_KEY_PEM);
+    let fatal = preflight().expect_err("clé dépareillée => le boot MEURT");
+    std::env::remove_var(CLIENT_CERT_VAR);
+    std::env::remove_var(CLIENT_KEY_VAR);
+    assert!(fatal.contains(CLIENT_KEY_VAR), "le FATAL doit NOMMER la variable, obtenu: {fatal}");
+    assert_no_key_material(&fatal, OTHER_CLIENT_KEY_PEM, "le message FATAL de boot");
+}
+
+/// [JOINTURE] DE LA VARIABLE JUSQU'AU HANDSHAKE mTLS — le scénario que vit réellement l'exploitant.
+///
+/// Même raison d'être que `enterprise_ca_pem_from_env_reaches_a_real_handshake` : les tests ci-dessus
+/// prouvent les moitiés SÉPARÉMENT (« l'env rend bien les deux PEM » d'un côté, « une identité passée
+/// EN PARAMÈTRE fait aboutir le mTLS » de l'autre). Entre les deux, rien ne vérifiait que les PEM
+/// SORTIS DE L'ENV — via le jumeau `_FILE`, celui que recommande la doc pour la clé — sont utilisables
+/// pour un vrai handshake. La composition testée est EXACTEMENT celle de `client_config()`.
+///
+/// CONTRE-EXEMPLE INTÉGRÉ : variables retirées, le MÊME serveur nous refuse. Sans lui, l'aboutissement
+/// pourrait venir d'ailleurs que des variables.
+///
+/// MUTATION : faire rendre `Ok(None)` à `client_identity_from_env` -> ce test rougit.
+#[test]
+fn client_identity_from_env_reaches_a_real_mtls_handshake() {
+    let _ = client_config().expect("config de processus");
+    let _g = crate::testutil::env_lock();
+    let cert_file = format!("{CLIENT_CERT_VAR}_FILE");
+    let key_file = format!("{CLIENT_KEY_VAR}_FILE");
+    for v in [CLIENT_CERT_VAR, CLIENT_KEY_VAR] {
+        std::env::remove_var(v);
+    }
+    // Forme `_FILE` — celle que la doc recommande pour la clé (un fichier monté root-only plutôt qu'un
+    // secret lisible dans /proc/<pid>/environ).
+    let cert_path = crate::testutil::tmp_path("forge-client-cert.pem");
+    let key_path = crate::testutil::tmp_path("forge-client-key.pem");
+    std::fs::write(&cert_path, CLIENT_CERT_PEM).expect("écriture fixture");
+    std::fs::write(&key_path, CLIENT_KEY_PEM).expect("écriture fixture");
+    std::env::set_var(&cert_file, &cert_path);
+    std::env::set_var(&key_file, &key_path);
+
+    // POSITIF : les variables posées, le pair mTLS nous authentifie.
+    let (addr, server) = spawn_mtls_server();
+    let cfg = build_client_config(
+        extra_ca_pem_from_env().expect("Ok").as_deref().or(Some(&untrusted_ca_pem())),
+        client_identity_from_env().expect("Ok").as_ref(),
+    )
+    .expect("config bâtie DEPUIS l'environnement");
+    let banner = mtls_read_banner(&addr, cfg);
+    let v = server.join().expect("thread serveur");
+    assert!(v.peer_authenticated, "l'identité posée dans l'env doit nous faire AUTHENTIFIER");
+    assert!(banner.is_ok(), "la session doit porter des octets applicatifs, obtenu: {banner:?}");
+
+    // CONTRE-EXEMPLE : variables retirées, le MÊME serveur nous refuse.
+    std::env::remove_var(&cert_file);
+    std::env::remove_var(&key_file);
+    let (addr, server) = spawn_mtls_server();
+    let cfg = build_client_config(
+        Some(&untrusted_ca_pem()),
+        client_identity_from_env().expect("Ok").as_ref(),
+    )
+    .expect("config standard, sans identité");
+    let refused = mtls_read_banner(&addr, cfg).is_err();
+    let v = server.join().expect("thread serveur");
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+    assert!(
+        refused && !v.peer_authenticated,
+        "sans {CLIENT_CERT_VAR}/{CLIENT_KEY_VAR}, le MÊME pair DOIT nous refuser — sinon l'aboutissement \
+         ci-dessus ne vient pas des variables"
     );
 }
 

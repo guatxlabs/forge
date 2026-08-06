@@ -146,6 +146,123 @@ class Oracle(Module):
             fix=self.fix, status="skipped", tool=self.tool,
             evidence=evidence, poc=poc)
 
+    # =============================================================================================
+    #  MATÉRIEL D'AUTHENTIFICATION MORT => AUCUN VERDICT (jumeau de « cible injoignable »)
+    #
+    #  Le matériel d'auth ARME les oracles de contrôle d'accès. Quand il n'authentifie plus, les
+    #  conjonctions de preuve s'effondrent toutes à False et `proof(proven=False, …)` estampille
+    #  `status='tested'` avec un titre qui AFFIRME l'absence de vulnérabilité : le rapport est PROPRE
+    #  et VIDE, indiscernable d'une cible saine. C'est le mode d'échec le plus cher du projet — le
+    #  même défaut de classe que « cible injoignable », mais silencieux au lieu d'être muet.
+    #
+    #  DEUX signaux, aucun n'émet la moindre requête supplémentaire :
+    #    (1) PÉREMPTION LISIBLE — le jeton porte un `exp` dépassé (`session.headers_expired`). Connue
+    #        AVANT tout réseau : on ne tire même pas.
+    #    (2) MATÉRIEL INERTE — la cible répond au compte authentifié EXACTEMENT comme à la sonde
+    #        ANONYME (même statut de BARRIÈRE + même corps), sur les sondes DÉJÀ tirées.
+    #
+    #  POURQUOI LA BARRIÈRE, ET PAS N'IMPORTE QUEL STATUT. `_AUTH_BARRIER` ne retient que les statuts
+    #  qui signifient « tu n'es pas autorisé » (401/403) ou « va t'authentifier » (3xx vers un login).
+    #  Un 404/5xx identique des deux côtés dit « l'objet n'existe pas / le serveur casse », PAS que la
+    #  session est morte — le retenir aurait transformé tout vrai négatif en aveuglement (c'est le
+    #  contrôle négatif de `tests/test_unreachable_no_verdict.py`). Un 2xx est exclu pour la raison
+    #  SYMÉTRIQUE : le compte a bien obtenu de l'accès (et une ressource PUBLIQUE répond 200 à tout le
+    #  monde sans que rien ne soit mort — cf. `test_no_false_positive_on_public_200`).
+    #
+    #  AMBIGUÏTÉ RÉSIDUELLE, ASSUMÉE ET NOMMÉE. « 403 identique pour l'attaquant et pour l'anonyme »
+    #  peut aussi être une cible DURCIE qui ne discrimine pas ses refus (session vivante, accès
+    #  légitimement refusé). Les deux cas sont INDISTINGUABLES depuis la réponse — et c'est
+    #  exactement pourquoi le verdict honnête est « je n'ai pas pu tester » (`skipped`) et non
+    #  « testé, rien trouvé » (`tested`). L'evidence NOMME les deux lectures possibles.
+    # =============================================================================================
+    _AUTH_BARRIER = (401, 403, 301, 302, 303, 307, 308)
+
+    WHY_EXPIRED = ("le jeton porte une date d'expiration (`exp`) DÉPASSÉE — il ne peut plus "
+                   "authentifier ; AUCUNE requête n'a été émise avec ce matériel")
+    WHY_INERT = ("la cible a répondu au compte authentifié EXACTEMENT comme à la sonde ANONYME "
+                 "(même statut de refus, même corps) — le matériel n'a acheté AUCUN accès")
+
+    @staticmethod
+    def auth_expired(headers, now=None):
+        """(1) Le matériel porte-t-il une échéance LISIBLE et DÉPASSÉE ? Délègue à la source unique
+        `session.headers_expired`. INCONNU (cookie opaque, aucun JWT) -> False : jamais d'accusation
+        sans preuve — le signal (2) prendra le relais au tir."""
+        return _session.headers_expired(headers, now=now)
+
+    @classmethod
+    def auth_inert(cls, auth_resp, anon_resp):
+        """(2) Le matériel d'auth n'a-t-il RIEN acheté ? `auth_resp`/`anon_resp` = `(status, body)`.
+
+        True SEULEMENT si : les deux sondes ont répondu, le statut du compte authentifié est une
+        BARRIÈRE d'authentification/autorisation, il est IDENTIQUE à celui de l'anonyme, et le corps
+        est identique. Tout le reste -> False (comportement historique préservé : une différence avec
+        l'anonyme PROUVE que la session est reconnue).
+
+        `_AUTH_BARRIER` est le SEUL filtre de statut, et il porte les DEUX exclusions : un 2xx (le
+        compte a OBTENU de l'accès — session vivante, et une ressource publique répond 200 à tout le
+        monde) et un 404/5xx (l'objet ou le serveur, pas la session) n'y sont pas. Une seconde garde
+        « st_a in (200, 206) » a existé ici : la mutation l'a montrée INERTE (le filtre de barrière la
+        subsumait), donc supprimée — une garde qui ne peut pas tirer n'est pas de la défense en
+        profondeur, c'est un leurre pour l'auditeur."""
+        st_a, body_a = auth_resp
+        st_anon, body_anon = anon_resp
+        if st_a is None or st_anon is None:      # cible injoignable : couvert par l'autre garde
+            return False
+        if st_a not in cls._AUTH_BARRIER:        # ni accès obtenu (2xx), ni 404/5xx
+            return False
+        return st_a == st_anon and (body_a or "") == (body_anon or "")
+
+    @classmethod
+    def expired_account(cls, *accounts):
+        """LABEL du 1er compte SÉRIALISÉ `{label, headers}` dont le matériel porte une échéance
+        LISIBLE et DÉPASSÉE, sinon None. Sert aux chemins MULTI-COMPTES (différentiel 2 comptes IDOR,
+        write, privesc) : UN seul jeton périmé suffit à priver le différentiel de son sens, et le
+        constat se fait AVANT toute requête. SECRET : rend un LABEL (`''` si le compte n'en porte
+        pas), jamais un fragment de matériel."""
+        for a in accounts:
+            if cls.auth_expired((a or {}).get("headers", {})):
+                return str((a or {}).get("label", ""))
+        return None
+
+    @classmethod
+    def auth_inert_among(cls, probes, anon_resp):
+        """Variante MULTI-COMPTES : LABEL du 1er compte INERTE parmi `probes` = [(label, (status,
+        body))], ou None.
+
+        GARDE ANTI-FAUX-POSITIF (c'est elle qui rend le signal utilisable sur une cible DURCIE) : si
+        UN des comptes du MÊME jeu de sondes a OBTENU DE L'ACCÈS (2xx) sur la MÊME URL, on ne rend
+        AUCUN verdict d'inertie. Une cible qui laisse entrer l'un et refuse l'autre DISCRIMINE
+        démontrablement, et la lecture honnête du refus est alors l'AUTORISATION, pas une session
+        morte — c'est le cas d'un privesc correctement bloqué (admin 200 / bas-privilège 403) ou d'un
+        IDOR correctement bloqué (A 200 / B 403). Le verdict d'inertie est réservé au cas où PERSONNE
+        n'entre et où tout le monde ressemble à l'anonyme : la lecture « le contexte d'authentification
+        est mort » domine alors (les comptes d'une campagne sont capturés ensemble et expirent
+        ensemble). Résiduel ASSUMÉ : un SEUL compte mort parmi plusieurs, sans `exp` lisible, reste
+        indétectable au tir — seule la péremption lisible (`auth_expired`) le rattrape."""
+        if any(st in (200, 206) for _lbl, (st, _b) in probes):
+            return None
+        for label, r in probes:
+            if cls.auth_inert(r, anon_resp):
+                return label
+        return None
+
+    def auth_dead(self, *, target, title, label, why, poc):
+        """Finding `status='skipped'` : l'oracle est DÉSARMÉ, il refuse de rendre un verdict.
+
+        SECRET : n'expose QUE le LABEL du compte (jamais un en-tête, un cookie, un bearer, ni un
+        fragment de jeton) — le contrat du bloc `auth` (labels + compteurs, rien d'autre) tient
+        jusque dans les findings de dégradation."""
+        return self.degraded(
+            target=target, title=title,
+            evidence=(f"compte {label or '<sans label>'!r} : {why}. Un oracle de contrôle d'accès "
+                      "DÉSARMÉ ne peut RIEN conclure : rendre « rien trouvé » serait un faux négatif "
+                      "silencieux (rapport propre et vide sur une cible jamais testée). Ce finding "
+                      "dit « je n'ai pas pu tester » (status=skipped). Lecture alternative possible : "
+                      "cible durcie qui ne discrimine pas ses refus — indistinguable depuis la "
+                      "réponse, d'où le refus de conclure. Remède : rafraîchir le matériel de ce "
+                      "compte dans le bloc `auth` de l'engagement, puis relancer."),
+            poc=poc)
+
     # --- seam réseau bas-niveau : UN SEUL saut, SANS suivi auto de redirection ---
     @staticmethod
     def _raw_open(req, timeout=15):

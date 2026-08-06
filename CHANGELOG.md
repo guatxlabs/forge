@@ -177,8 +177,10 @@ All notable changes to Forge are documented here. The format is based on
 
   **Pas de SMTP** — refusé indépendamment du TLS : STARTTLS est une élévation **négociée** (classe
   d'injection de commandes en clair, CVE-2011-0411 et sa descendance) et le SMTP réel se pratique en TLS
-  opportuniste contre des relais auto-signés. **Pas de mTLS** (aucun certificat client) ni de lecture du
-  magasin d'AC système — une AC d'entreprise n'est donc pas reprise automatiquement (cf. DEPLOYMENT §3quater).
+  opportuniste contre des relais auto-signés. **Pas de lecture du magasin d'AC système** — une AC
+  d'entreprise n'est donc pas reprise AUTOMATIQUEMENT ; elle se fournit explicitement (cf. plus bas,
+  `FORGE_EXTRA_CA_PEM`). Le **mTLS**, annoncé absent dans une version antérieure de cette entrée, est
+  livré plus bas dans cette même release non publiée.
 
   **Coût : 6 crates nets** (`ring`, `rustls`, `rustls-pki-types`, `rustls-webpki`, `untrusted`,
   `webpki-roots`), ≈ +20 s CPU à froid, **aucun nouveau prérequis machine** (`ring` compile de l'asm/C via

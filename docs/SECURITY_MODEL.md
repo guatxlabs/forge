@@ -99,6 +99,70 @@ CIDR/IP — une IP `out_scope` ne se contourne pas via une URL ou un `host:port`
   ledger dédié) et désactivable (`FORGE_DURATIONS=0`). Il ne pilote **que** l'ordre de soumission du
   préchauffage — aucune décision de tir n'en dépend.
 
+### 5.1 Péremption du matériel d'authentification — « rien trouvé » n'est pas « pas testé »
+
+Le bloc `auth` d'un engagement (comptes de test `attacker`/`victim`) **arme** les oracles de contrôle
+d'accès : `access_control.idor`, `auth.takeover`, `access_control.privesc`. Quand la session qu'il
+porte n'authentifie plus, ces oracles **ne plantent pas** — toutes leurs conjonctions de preuve
+s'effondrent à `False`, et le run rend un **rapport propre et vide** qui ressemble à « la cible est
+saine ». C'est un faux négatif **silencieux**, et il coûte une campagne entière.
+
+**Ce qui se passe désormais.** Un oracle désarmé rend `status='skipped'` (« je n'ai pas pu tester »),
+jamais `tested` (« testé, rien trouvé ». Deux signaux, **aucun n'émet de requête supplémentaire** :
+
+| Signal | Détection | Effet |
+|---|---|---|
+| **Péremption lisible** | le jeton porte un claim `exp` dépassé (`session.jwt_expiry`) | finding `skipped` **avant** tout réseau — aucune requête émise |
+| **Matériel inerte** | la cible répond au compte authentifié **exactement** comme à la sonde anonyme (même statut de **barrière** 401/403/3xx, même corps) | finding `skipped`, verdict refusé |
+
+Trois surfaces le disent, du plus tôt au plus tard : l'**éditeur d'engagement** (`expires_at` /
+`expired` par compte), le **lancement** (`warnings` de la réponse + `console.run.start.auth_expired`
+au ledger), puis le **run** (`engine.auth_expired` + ligne d'avancement `[AUTH]` en direct, et un
+finding `skipped` par cible).
+
+**Ce que ces signaux ne prouvent pas** (nommé, pas passé sous silence) :
+- *Barrière uniquement* — 404/5xx identiques des deux côtés disent l'**objet** ou le **serveur**, pas
+  la session ; un 2xx dit que le compte a **obtenu** de l'accès. Ni l'un ni l'autre ne déclenche.
+- *Garde anti-faux-positif* — si un compte du même jeu de sondes **entre** (2xx) sur la même URL, la
+  cible discrimine démontrablement et aucun verdict d'inertie n'est rendu (sinon un privesc
+  correctement bloqué deviendrait « non testé »).
+- *Ambiguïté résiduelle assumée* — « 403 identique pour l'authentifié et l'anonyme » peut aussi être
+  une cible **durcie qui ne discrimine pas ses refus**. Les deux lectures sont indistinguables depuis
+  la réponse : c'est précisément pourquoi le verdict honnête est « je n'ai pas pu tester ».
+- *Hors de portée* — un **seul** compte mort parmi plusieurs, dont le matériel n'est **pas** un JWT
+  (cookie opaque), reste indétectable au tir ; une page de login rendue en **200** pour tout le monde
+  aussi (indistinguable d'une ressource publique). Un `exp` inconnu n'est **jamais** présenté comme
+  une validité.
+
+**Tampon `exp` au repos.** Une fois scellé, le matériel est illisible par la console — donc ni
+l'éditeur ni le lanceur ne peuvent voir qu'un jeton est mort. L'échéance est donc lue **au
+scellement** (dernier instant où le clair est visible) et rangée à côté du `label`. C'est un
+**horodatage, pas un credential** : il ne rejoue rien, ne signe rien, ne s'authentifie nulle part —
+l'invariant « aucun nouveau champ de **matériel** persisté en clair » est tenu. Aucune vérification
+de signature n'est faite : on **lit** une date auto-déclarée, on ne valide pas un jeton.
+
+### 5.2 Renouvellement automatique de session — REFUSÉ, et pourquoi
+
+« Faire tourner les sessions expirées sans ressaisie » **n'est pas implémenté, délibérément**. Les
+deux voies possibles dégradent la posture qu'on vient de durcir :
+
+1. **Rejouer un login** exigerait de persister un **mot de passe** — on troquerait un secret court et
+   révocable contre un secret **permanent** qui ouvre bien plus que la session qu'il remplace.
+   Refusé, sans condition.
+2. **Rafraîchir via un `refresh_token`** fourni par l'exploitant évite le mot de passe, mais :
+   - le `refresh_token` est **plus durable** que le jeton d'accès qu'il régénère — on stockerait le
+     credential le plus fort pour préserver le plus faible ;
+   - les `refresh_token` **rotatifs** sont à usage unique : un échec de persistance après
+     consommation **détruit** le compte de test de l'opérateur. L'outil casserait ce qu'il protège ;
+   - l'endpoint de jeton (IdP) est **presque toujours hors du périmètre** de l'engagement. Le
+     rafraîchir obligerait à émettre du trafic authentifié **hors scope-guard** — exactement
+     l'invariant fail-closed que rien ne doit assouplir.
+
+**Ce qui reste acquis sans ressaisie** : à l'édition d'un engagement, le matériel **non ressaisi est
+repris par compte** (`keep_existing`, cf. anti-effacement silencieux) — seul le compte réellement mort
+doit être re-collé. Le renouvellement pourra être reconsidéré si, et seulement si, l'endpoint de jeton
+entre dans le périmètre déclaré et que la rotation est traitée transactionnellement.
+
 ## 6. Gestion des secrets
 
 - **Jamais renvoyés** par un GET, **jamais journalisés**, **jamais ledgerisés**. Traités comme des

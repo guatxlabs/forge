@@ -76,13 +76,10 @@ class AuthTakeover(ScopeGuardedOracle):
     def _attacker_label(accounts):
         """Le LABEL du compte attaquant (miroir de `_attacker_headers` : compte 'attacker' si présent,
         sinon le 1er). Sert au garde anti-faux-positif du signal status-delta : on ne flag JAMAIS
-        l'attaquant lisant SA PROPRE ressource (owner == label attaquant)."""
-        if not accounts:
-            return ""
-        for a in accounts:
-            if str(a.get("label", "")).strip().lower() == "attacker":
-                return str(a.get("label", "")).strip()
-        return str(accounts[0].get("label", "")).strip()
+        l'attaquant lisant SA PROPRE ressource (owner == label attaquant) — et à NOMMER le compte dans
+        un finding de dégradation. DÉLÈGUE à la SOURCE UNIQUE `session.attacker_label_from_params`
+        (même sélection byte-identique que `_attacker_headers`, plus deux copies à faire diverger)."""
+        return _session.attacker_label_from_params(accounts)
 
     @staticmethod
     def _account_headers(accounts, label):
@@ -152,6 +149,16 @@ class AuthTakeover(ScopeGuardedOracle):
                               "l'attaquant pour rejouer la requête cross-compte."),
                     poc=self.dry(action)))
                 continue
+            # MATÉRIEL PÉRIMÉ => AUCUN VERDICT, AUCUNE REQUÊTE. Sur la classe la PLUS GRAVE du
+            # catalogue, « ATO non confirmé » avec une session morte certifie un test jamais
+            # authentifié : les trois signaux (marqueur/status-delta/content-diff) sont faux par
+            # construction dès que la session de l'attaquant n'est plus reconnue.
+            if self.auth_expired(attacker):
+                findings.append(self.auth_dead(
+                    target=url, label=attacker_label, why=self.WHY_EXPIRED,
+                    title="ATO non testé — matériel d'authentification de l'attaquant EXPIRÉ",
+                    poc=self.dry(action)))
+                continue
             owner_diff = owner.strip().lower() != str(attacker_label).strip().lower()
 
             # --- SONDES (in-scope) : attaquant + contrôle anonyme (toujours) ; propriétaire (si compte) ---
@@ -166,6 +173,15 @@ class AuthTakeover(ScopeGuardedOracle):
                     title="ATO non testé — cible injoignable (aucune réponse)",
                     evidence=(f"Au moins une sonde n'a pas répondu (attaquant={ws}, anonyme={anon_s}) ; "
                               f"aucun verdict rendu."),
+                    poc=self.dry(action)))
+                continue
+            # MATÉRIEL INERTE => AUCUN VERDICT : la cible traite l'attaquant EXACTEMENT comme un
+            # anonyme (session non reconnue). Les trois signaux seraient faux pour cette seule
+            # raison, et « aucun signal cross-compte concluant » serait un faux négatif silencieux.
+            if self.auth_inert((ws, wbody), (anon_s, anon_body)):
+                findings.append(self.auth_dead(
+                    target=url, label=attacker_label, why=self.WHY_INERT,
+                    title="ATO non testé — matériel d'authentification de l'attaquant SANS EFFET",
                     poc=self.dry(action)))
                 continue
             att_ok = ws in (200, 206)
@@ -263,6 +279,14 @@ class AuthTakeover(ScopeGuardedOracle):
                     title="ATO non testé — URL (whoami/bypass) hors périmètre (scope-guard fail-closed)",
                     evidence="L'URL whoami/bypass n'est pas in-scope ; aucune requête émise (fail-closed).",
                     poc=self.dry(action))]
+        # MATÉRIEL PÉRIMÉ => AUCUN VERDICT, AUCUNE REQUÊTE (chemin config-driven historique). Le
+        # whoami rendrait « pas la victime » parce que la session attaquant est morte, pas parce que
+        # le flux de bypass a échoué. Pas de sonde anonyme ici : seule la péremption est détectable.
+        if self.auth_expired(sess):
+            return [self.auth_dead(
+                target=whoami, label="attacker_session_headers", why=self.WHY_EXPIRED,
+                title="ATO non testé — session attaquant EXPIRÉE (params.attacker_session_headers)",
+                poc=self.dry(action))]
         # le flag destructif réel suit le flux : un GET-only n'est pas destructif, un reset l'est.
         # On NE modifie PAS self.destructive (déclaration de capacité, lue par le ROE avant fire) — c'est
         # le module qui est gardé `destructive=True` par prudence (un reset MUTE la victime).

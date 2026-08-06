@@ -286,6 +286,20 @@ class Engine:
         self._auth_ledgered = True
         if self.ledger is not None:
             self.ledger.append("engine.auth_context", self.auth_context.ledger_summary())
+        # MATÉRIEL PÉRIMÉ — le DIRE au RUN, pas seulement finding par finding. Un jeton dont l'`exp`
+        # est dépassé désarme les oracles de contrôle d'accès : sans ce signal, le run se déroule
+        # normalement et rend un rapport PROPRE et VIDE qui ressemble à « cible saine ». Émis une
+        # seule fois (même garde que l'événement ci-dessus), et UNIQUEMENT quand la péremption est
+        # PROUVÉE (`exp` lisible et dépassé) : aucun bruit sur du matériel opaque. SÛR : des LABELS
+        # et un compteur, JAMAIS un jeton (même contrat que `ledger_summary`).
+        dead = self.auth_context.expired_labels()
+        if not dead:
+            return
+        if self.ledger is not None:
+            self.ledger.append("engine.auth_expired",
+                               {"accounts": dead, "census": self.auth_context.expiry_census()})
+        self._emit(f"[AUTH] matériel d'authentification EXPIRÉ pour {dead} — les oracles de contrôle "
+                   "d'accès rendront 'skipped' (non testé), JAMAIS 'rien trouvé'")
 
     # --- armement délégué (gestes journalisés) ---
     def arm(self, reason: str = "armed by operator") -> None:
