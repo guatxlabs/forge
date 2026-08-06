@@ -109,6 +109,20 @@ def _parallelism() -> int:
     return min(v, 64)
 
 
+def _action_cost(action: Action) -> float:
+    """Coût d'une action, NORMALISÉ pour servir de clé de palier (cf. `Engine._preheat_order`).
+    Un coût absent / non numérique / NaN / <= 0 vaut 1.0 (neutre) : les paliers restent comparables
+    et ordonnables, aucune vague ne peut faire lever le tri. Miroir du `max(action.cost, 0.01)` du
+    planner, côté ordonnancement."""
+    try:
+        c = float(getattr(action, "cost", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if c != c or c <= 0.0:                             # NaN (c != c) ou coût nul/négatif -> neutre
+        return 1.0
+    return c
+
+
 def _shutdown_executor(ex: Any) -> None:
     """Ferme l'exécuteur SANS attendre (`wait=False`) et ANNULE les tâches encore en file d'attente
     (`cancel_futures`) — sur un arrêt gracieux (_Terminate) ou une exception, on ne DÉMARRE plus de
@@ -544,13 +558,46 @@ class Engine:
         d'application courant. L'émission et le checkpoint intra-vague gardent EXACTEMENT la même
         cadence : `n` s'incrémente une fois par action appliquée, aux mêmes frontières.
 
+        PUIS : PRÉCHAUFFER LES PLUS LONGUES (`_preheat_order`). La fenêtre a supprimé le blocage de
+        TÊTE, mais rien n'ORDONNAIT le travail — et l'ordre d'arrivée est PATHOLOGIQUE par construction.
+        Le planner trie par EV = value*confidence/cost : un coût ÉLEVÉ (== une action LENTE, cf. la
+        table `brain._CONTENT_SCANNER_EV` qui annote littéralement « LENT » / « TRÈS LENT ») donne une
+        EV BASSE, donc une place en FIN DE VAGUE. Les plus lentes démarrent donc en dernier, quand il ne
+        reste plus rien pour occuper les autres workers : le pool se vide en fin de vague (le classique
+        « longest processing time first » de l'ordonnancement). On met désormais ces actions au four EN
+        AVANCE, dans une part BORNÉE de la fenêtre. Mesuré (`tests/bench_engine_parallel_order.py`,
+        pool=4, 52 actions ordonnées par le VRAI planner dont 6 lentes rejetées en queue par l'EV,
+        plancher théorique travail/pool = 1,80 s, plancher sériel 7,25 s) : **2,45 s -> 1,83 s**, soit
+        -25 % et 1,02x le plancher théorique au lieu de 1,36x. Sur une vague dont la queue lente
+        remplit déjà le pool, ou dont les coûts sont uniformes, il n'y a RIEN à gagner et le banc
+        mesure un no-op (3,08 s et 1,21 s, inchangés) : c'est voulu et structurel, `_preheat_order`
+        rend une liste vide dans ces deux cas et `_fill` retombe sur la fenêtre glissante d'avant.
+
+        L'ORDRE RÉORDONNÉ EST CELUI DE LA SOUMISSION, JAMAIS CELUI DE L'APPLICATION. On draine par
+        INDICE D'ACTION croissant (`head`) quoi qu'il arrive : `_apply` reste sériel et dans l'ordre
+        d'action, donc ledger/ingest/décisions/findings sortent exactement comme en sériel. La TÊTE est
+        de plus soumise avec une PISTE d'au moins `pool + 1` actions d'avance (`_fill`) — jamais
+        d'inversion de priorité : on n'attend jamais un résultat dont le tir n'aurait pas été soumis
+        depuis longtemps.
+
+        BORNES INCHANGÉES : au plus `2 x pool` tirs soumis-non-appliqués (invariant `len(futures) <=
+        window`), donc la borne « travail après cancel » est la MÊME qu'avant en NOMBRE. Ce qui change
+        est sa COMPOSITION : les actions tirées d'avance ne forment plus un préfixe contigu de la
+        vague — au plus `pool - 1` actions de la QUEUE peuvent avoir été tirées tôt. Sans conséquence
+        sur la gouvernance (chaque tir passe la gate ROE complète dans `_decide_blocking` : hors-scope
+        = VETO, plancher exploit = VETO, technique désactivée = SKIP) ni sur la couverture (un tir non
+        APPLIQUÉ n'entre ni au ledger ni aux findings — le planner coverage-safe garde exactement les
+        mêmes garanties : on ne touche NI ce qui est planifié, NI l'ordre dans lequel c'est appliqué,
+        seulement l'ordre de mise au four). L'émission et le checkpoint intra-vague gardent EXACTEMENT
+        la même cadence : `n` s'incrémente une fois par action appliquée, aux mêmes frontières.
+
         COMPOSITION E3/E4 (cancel/timeout) : plusieurs tirs EN VOL enregistrent chacun leur pgid dans le
         registre verrouillé de `runner` ; un SIGTERM watchdog coupe TOUS les groupes en vol (E4) et
         `_run_checkpoint` lève `_Terminate` à la frontière d'action -> on ne DÉMARRE plus de lot ; le
         `finally` ferme l'exécuteur (annule les tirs en file). D1 : `_apply` étant sériel et ordonné, les
         offsets d'ingest et le compteur `n` sont identiques au sériel (aucun finding perdu ni doublé)."""
         from collections import deque
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import Future, ThreadPoolExecutor
         out: list[dict[str, Any]] = []
         n = 0
         total = len(actions)
@@ -565,18 +612,53 @@ class Engine:
             # `pool` à `2 x pool` actions. C'est ce qui peut avoir été TIRÉ en trop si un cancel/watchdog
             # tombe — borné, petit, et sans effet sur le déterminisme (l'application reste ordonnée).
             window = max(pool, 2 * pool)
-            inflight: deque = deque()
-            nxt = 0
-            while nxt < total and len(inflight) < window:
-                inflight.append(ex.submit(self._decide_blocking, actions[nxt]))
-                nxt += 1
-            while inflight:
-                pending = inflight.popleft().result()   # propage une exception worker — mirror sériel
+            futures: dict[int, Future] = {}            # indice d'action -> tir soumis (drainé par indice)
+            # PRÉCHAUFFAGE : les actions LONGUES mises au four d'avance. Plafond `pool - 1` -> (a) il
+            # reste TOUJOURS au moins `pool + 1` slots de piste, (b) un groupe d'actions longues qui
+            # remplit le pool À LUI SEUL n'est JAMAIS préchauffé : drainé en bloc en fin de vague il ne
+            # laisse aucun worker au repos, il n'y a rien à y gagner (mesuré : -1,2 % si on le fait).
+            preheat: deque = deque(self._preheat_order(actions, pool - 1))
+            runway = window - len(preheat)             # profondeur soumise EN ORDRE D'INDICE
+
+            def _fill(head: int) -> None:
+                """Remplit la fenêtre en DEUX ÉTAGES. Invariant : `len(futures) <= window` — même
+                plafond de travail en avance qu'avant l'ordonnancement.
+
+                (1) PISTE (`runway`) — les prochaines actions EN ORDRE D'INDICE, tête comprise, au moins
+                    `pool + 1` d'avance. C'est ce qui rend l'ordonnancement SÛR : la tête est soumise
+                    LONGTEMPS avant d'être attendue, jamais juste-à-temps. Un exécuteur est une FILE
+                    FIFO : soumettre la tête en dernier la mettrait DERRIÈRE le travail long déjà en
+                    file, et le drainage (ordonné) attendrait une action longue à CHAQUE pas. Mesuré :
+                    par durée décroissante SANS piste, la forme « queue-large » du banc passe de
+                    3,08 s à 4,86 s (-58 %) — la version naïve est PIRE que pas d'ordonnancement.
+                (2) PRÉCHAUFFAGE (le reste de la fenêtre) — les actions les plus LONGUES de la vague,
+                    mises au four EN AVANCE pour ne pas se retrouver seules en fin de vague pendant que
+                    le pool se vide. Soumises APRÈS la piste : les workers prennent d'abord le travail
+                    court dont le drainage a besoin, puis s'installent sur le travail long.
+
+                Quand le préchauffage est épuisé (ou vide), la piste reprend TOUTE la fenêtre : on
+                retombe alors exactement sur la fenêtre glissante en ordre d'indice d'avant."""
+                limit = min(total, head + (runway if preheat else window))
+                for i in range(head, limit):           # (1) PISTE — ordre d'indice, la tête d'abord
+                    if i in futures:
+                        continue
+                    if len(futures) >= window:         # (la tête passe toujours : len <= window-1 ici)
+                        break
+                    futures[i] = ex.submit(self._decide_blocking, actions[i])
+                while len(futures) < window and preheat:    # (2) PRÉCHAUFFAGE — les plus longues d'abord
+                    i = preheat.popleft()
+                    if i in futures:                   # déjà couverte par la piste — ne consomme rien
+                        continue
+                    futures[i] = ex.submit(self._decide_blocking, actions[i])
+
+            _fill(0)
+            head = 0
+            while head < total:
+                pending = futures.pop(head).result()   # propage une exception worker — mirror sériel
+                head += 1
                 # RÉ-ALIMENTATION IMMÉDIATE : on remplit la fenêtre AVANT l'application sérielle, pour
                 # que l'écriture ledger/ingest ne laisse jamais un worker au repos.
-                while nxt < total and len(inflight) < window:
-                    inflight.append(ex.submit(self._decide_blocking, actions[nxt]))
-                    nxt += 1
+                _fill(head)
                 res = self._apply(pending)
                 self._emit_result(res)
                 out.append(res)
@@ -586,6 +668,59 @@ class Engine:
             return out
         finally:
             _shutdown_executor(ex)
+
+    def _preheat_order(self, actions: list[Action], capacity: int) -> list[int]:
+        """Indices des actions à PRÉCHAUFFER (mettre au four d'avance), LES PLUS LONGUES D'ABORD, dans
+        la limite de `capacity` slots. Ne touche JAMAIS l'ordre d'APPLICATION (`_run_parallel` draine
+        par indice croissant) : c'est une priorité de SOUMISSION, rien d'autre.
+
+        PALIER COMPLET OU RIEN — la règle contre-intuitive, et c'est la mesure qui l'a imposée. On
+        préchauffe un palier de coût ENTIER ou pas du tout. Préchauffer la MOITIÉ d'un palier casse le
+        groupe d'actions longues qui, restées ensemble en fin de vague, remplissaient le pool à elles
+        seules : les rescapées se retrouvent seules à la toute fin, à 2 workers sur 4. Mesuré sur la
+        forme « queue-large » du banc (4 actions très lentes en queue, pool=4) : préchauffer 2 des 4
+        fait passer 3,08 s -> 3,58 s (-16 %) — PIRE que ne rien faire.
+
+        `capacity` VAUT `pool - 1`, et ce n'est pas un réglage : c'est la condition EXACTE sous laquelle
+        le préchauffage peut rapporter quelque chose. Un palier d'au moins `pool` actions longues occupe
+        déjà tout le pool quand on le draine en bloc — il ne laisse aucun worker au repos, le mettre au
+        four plus tôt ne raccourcit rien (mesuré : -1,2 % à cause de la piste raccourcie). Seul un
+        palier STRICTEMENT plus petit que le pool laisse des workers à vide en fin de vague.
+
+        Le palier le MOINS cher n'est jamais préchauffé (rien à y gagner par définition), donc une vague
+        à coût UNIQUE rend une liste VIDE -> `_fill` retombe sur la fenêtre glissante en ordre d'indice,
+        BYTE-IDENTIQUE à avant l'ordonnancement. C'est le cas de toute vague pilotée à la main / par la
+        CLI, où `cost` garde son défaut 1.0 : zéro changement, zéro risque.
+
+        D'OÙ VIENT L'ESTIMATION DE DURÉE — de `action.cost`, que le dépôt PORTE DÉJÀ. C'est le
+        dénominateur de l'EV du planner (`value*confidence/cost`), et le cerveau le renseigne
+        explicitement comme un coût de TEMPS : `brain._CONTENT_SCANNER_EV` annote ses coûts
+        « quasi-instantané » (1.0) / « LENT » (2.0) / « TRÈS LENT » (3.0), et les actions d'oracle
+        montent à 2-3 quand elles enchaînent plusieurs requêtes (`access_control.idor`, `auth.takeover`).
+        Aucune table nouvelle, aucune mesure à persister : on lit le seul champ de coût que le moteur
+        transporte déjà d'un bout à l'autre. Les deux alternatives ont été écartées faute de porteur :
+        le ledger et les run-records n'horodatent qu'à la SECONDE (`isoformat(timespec="seconds")`) et
+        ne portent aucune durée par action — il aurait fallu inventer l'instrumentation ET son stockage ;
+        et une table statique par famille de module aurait recopié, à côté de `cost`, une information
+        que `cost` porte déjà (la dérive garantie que `techniques.py` a justement supprimée ailleurs).
+
+        DÉTERMINISTE : les indices d'un même palier sortent en ORDRE D'INDICE, les paliers du plus
+        cher au moins cher. Deux exécutions de la même vague préchauffent donc exactement le même
+        ensemble, dans le même ordre. Pur, ne lève jamais : un `cost` non numérique / NaN / <= 0 est
+        traité comme neutre (1.0), comme le `max(action.cost, 0.01)` du planner."""
+        if capacity <= 0:
+            return []
+        costs = [_action_cost(a) for a in actions]
+        tiers = sorted(set(costs), reverse=True)
+        if len(tiers) < 2:                             # coût unique -> rien à préchauffer (identité)
+            return []
+        out: list[int] = []
+        for tier in tiers[:-1]:                        # jamais le palier le MOINS cher
+            members = [i for i, c in enumerate(costs) if c == tier]
+            if len(out) + len(members) > capacity:     # PALIER COMPLET OU RIEN (cf. supra)
+                break
+            out.extend(members)
+        return out
 
     def _run_checkpoint(self, checkpoint: "Callable[[], None] | None") -> None:
         """Invoque le callback de checkpoint (flush incrémental console) en BEST-EFFORT : une exception

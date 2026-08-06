@@ -24,6 +24,11 @@ Preuves (HERMÉTIQUES — modules stubés, cibles = IP LITTÉRALES publiques don
 
   4. GOUVERNANCE INTACTE EN PARALLÈLE : une cible hors-scope (VETO) et un plancher exploit (VETO) gatent
      CHAQUE action même sous parallélisme ; un kind sans module devient un engine.error tracé.
+
+  5. PRÉCHAUFFAGE DES ACTIONS LONGUES : les actions au coût le plus élevé (== les plus lentes) sont
+     SOUMISES d'avance au lieu d'attendre leur tour en fin de vague. Prouvé sur l'ordre de DÉMARRAGE
+     OBSERVÉ (propriété STRUCTURELLE, pas un chronomètre) + contrôle négatif : l'ordre d'APPLICATION
+     ne bouge pas d'un pouce, et le ledger reste identique au sériel MÊME quand les coûts diffèrent.
 """
 import json
 import os
@@ -420,6 +425,206 @@ class TestSlidingWindowDoesNotStallOnASlowHead(unittest.TestCase):
             during_head, len(targets),
             "la fenêtre a soumis TOUTES les actions : le travail au-delà du point d'application n'est "
             "plus borné")
+
+
+_PREHEAT_FAST = [f"198.51.100.{i}" for i in range(1, 41)]      # 40 actions COURTES (cost 1.0)
+_PREHEAT_SLOW = [f"203.0.113.{i}" for i in range(1, 4)]        # 3 actions LONGUES (cost 3.0), EN QUEUE
+
+
+class TestLongestFirstPreheat(unittest.TestCase):
+    """LES ACTIONS LONGUES SONT MISES AU FOUR D'AVANCE — et RIEN D'AUTRE ne bouge.
+
+    LE PROBLÈME. `_apply` est sériel et ORDONNÉ (invariant de déterminisme). La fenêtre glissante a
+    réglé le blocage de TÊTE, mais rien n'ORDONNAIT le travail : le planner trie par
+    EV = value*confidence/cost, donc un coût ÉLEVÉ (== une action LENTE : `brain._CONTENT_SCANNER_EV`
+    annote littéralement ses coûts « LENT » / « TRÈS LENT ») donne une EV BASSE et une place en FIN DE
+    VAGUE. Quand ces actions démarrent enfin, il ne reste plus rien pour occuper les autres workers.
+
+    CE QUI EST PROUVÉ ICI, ET COMMENT. Aucun chronomètre : un test au wall-clock est flaky sous charge.
+    On mesure la propriété STRUCTURELLE qui produit le gain — la POSITION des actions longues dans
+    l'ordre de DÉMARRAGE observé. Elle est déterministe : un `ThreadPoolExecutor` est une FILE FIFO,
+    les `2 x pool` premiers éléments dépilés sont donc exactement les `2 x pool` premiers SOUMIS, quel
+    que soit l'ordonnancement de l'OS. Le chiffrage au wall-clock, lui, vit dans le banc
+    `tests/bench_engine_parallel_order.py` (pool=4, 52 actions ordonnées par le VRAI planner :
+    2,45 s -> 1,83 s, soit -25 %, à 1,02x le plancher théorique travail/pool au lieu de 1,36x).
+    """
+
+    POOL = 4
+    WINDOW = 2 * POOL
+    KIND = "demo.preheat"
+
+    def setUp(self):
+        self._saved_env = os.environ.get("FORGE_PARALLELISM")
+
+    def tearDown(self):
+        if self._saved_env is None:
+            os.environ.pop("FORGE_PARALLELISM", None)
+        else:
+            os.environ["FORGE_PARALLELISM"] = self._saved_env
+
+    def _actions(self):
+        """Vague à la forme de PRODUCTION : la masse d'actions courtes devant, les longues (coût 3.0,
+        le `cost` que le cerveau pose sur testssl/auth.takeover) rejetées EN QUEUE par l'EV."""
+        acts = [Action(self.KIND, ip, cost=1.0) for ip in _PREHEAT_FAST]
+        acts += [Action(self.KIND, ip, cost=3.0) for ip in _PREHEAT_SLOW]
+        return acts
+
+    def _run(self, pool, mutate=False, ledger_path=None):
+        """Joue la vague et rend (ordre de DÉMARRAGE observé, engine, ledger).
+
+        `mutate=True` RETIRE l'ordonnancement (`_preheat_order` -> liste vide) : c'est la preuve par
+        MUTATION, le moteur retombe alors sur la fenêtre glissante en ordre d'indice."""
+        started = []
+        lock = threading.Lock()
+        kind = self.KIND
+
+        class Stub(registry.Module):
+            exploit = False
+            mitre = "T1190"
+
+            def dry(self, action):
+                return "dry"
+
+            def fire(self, action):
+                with lock:                      # ordre d'ENTRÉE dans le tir == ordre de DÉMARRAGE
+                    started.append(action.target)
+                return [Finding(target=action.target, title=f"hit:{action.target}",
+                                severity="LOW", category="demo", mitre="T1190")]
+
+        saved_mod = registry.REGISTRY.get(kind)
+        registry.REGISTRY[kind] = type("StubPreheat", (Stub,), {"kind": kind})
+        saved_order = Engine._preheat_order
+        if mutate:
+            Engine._preheat_order = lambda _self, _acts, _cap: []
+        os.environ["FORGE_PARALLELISM"] = str(pool)
+        try:
+            ledger = Ledger(ledger_path) if ledger_path else None
+            eng = Engine(_scope_preheat(), ledger=ledger, mode="auto", memory=Memory(),
+                         campaign="camp", run_id="run-1")
+            eng.arm("test préchauffage")
+            eng.run(self._actions())
+            return started, eng, ledger
+        finally:
+            Engine._preheat_order = saved_order
+            if saved_mod is None:
+                registry.REGISTRY.pop(kind, None)
+            else:
+                registry.REGISTRY[kind] = saved_mod
+
+    # --- (1) LA PROPRIÉTÉ QUI PRODUIT LE GAIN ----------------------------------------------------
+    def test_the_slowest_actions_start_within_the_first_window(self):
+        """Les 3 actions LONGUES sont en QUEUE de vague (indices 40-42) et démarrent pourtant en TÊTE :
+        elles sont mises au four d'avance, elles ne se retrouvent plus seules à la fin pendant que le
+        pool se vide.
+
+        SEUIL À `2 x fenêtre` ET NON À LA FENÊTRE EXACTE. L'ensemble SOUMIS d'avance, lui, est exact et
+        vérifié séparément (`test_the_preheat_stays_inside_the_bounded_window` : `_preheat_order` rend
+        EXACTEMENT [40, 41, 42]). Ce qu'on observe ici est l'ordre d'ENTRÉE dans `fire()`, qui suit
+        l'ordre de dépilement FIFO de l'exécuteur À UNE COURSE PRÈS : entre le moment où un worker
+        dépile son élément et celui où il prend le verrou d'enregistrement, un autre worker peut le
+        doubler. La marge absorbe cette course sans rien concéder au pouvoir discriminant : mesuré
+        4-8 avec ordonnancement, >= 32 sans (cf. le test de MUTATION juste en dessous)."""
+        started, eng, _ = self._run(self.POOL)
+        self.assertEqual(len(started), len(_PREHEAT_FAST) + len(_PREHEAT_SLOW))
+        positions = {t: started.index(t) for t in _PREHEAT_SLOW}
+        self.assertLess(
+            max(positions.values()), 2 * self.WINDOW,
+            f"les actions longues démarrent en positions {sorted(positions.values())} : elles ne sont "
+            f"PAS préchauffées, le pool se videra en fin de vague en les attendant")
+        # résultats COMPLETS (le préchauffage ne perd ni ne double rien)
+        self.assertEqual(len(eng.findings), len(_PREHEAT_FAST) + len(_PREHEAT_SLOW))
+
+    def test_MUTATION_without_preheat_the_slow_actions_start_at_the_very_end(self):
+        """PREUVE PAR MUTATION : on retire l'ordonnancement -> le test ci-dessus DOIT rougir. Sans
+        préchauffage, les actions longues ne sont soumises que quand la fenêtre glissante les atteint,
+        c'est-à-dire à `2 x pool` actions de la fin."""
+        started, _eng, _ = self._run(self.POOL, mutate=True)
+        positions = {t: started.index(t) for t in _PREHEAT_SLOW}
+        self.assertGreaterEqual(
+            min(positions.values()), len(_PREHEAT_FAST) - self.WINDOW,
+            "sans ordonnancement, une action longue de la QUEUE ne peut pas démarrer tôt — si elle le "
+            "fait, la mutation ne mute rien et le test de gain ne prouve rien")
+        self.assertGreaterEqual(max(positions.values()), self.WINDOW,
+                                "la mutation DOIT faire échouer la propriété prouvée ci-dessus")
+
+    # --- (2) CONTRÔLE NÉGATIF : L'ORDRE D'APPLICATION N'A PAS BOUGÉ -------------------------------
+    def test_application_order_is_STILL_the_action_order(self):
+        """L'ORDRE D'APPLICATION EST L'INVARIANT : réordonner la SOUMISSION ne doit RIEN changer à
+        l'ordre dans lequel findings / results / ledger sortent. On le vérifie sur la vague qui a
+        EFFECTIVEMENT été réordonnée (les longues ont démarré en tête, cf. le test précédent)."""
+        expected = [a.target for a in self._actions()]                # == l'ordre d'ACTION
+        started, eng, _ = self._run(self.POOL)
+        self.assertNotEqual(started, expected,
+                            "la vague n'a PAS été réordonnée : ce contrôle ne contrôle rien")
+        self.assertEqual([f.target for f in eng.findings], expected,
+                         "les findings DOIVENT sortir dans l'ordre d'action, pas dans l'ordre de tir")
+        self.assertEqual([r["target"] for r in eng.results], expected)
+        self.assertEqual([r["target"] for r in eng.run_records], expected)
+        self.assertEqual([d["target"] for d in eng.roe_decisions()], expected)
+
+    def test_ledger_is_identical_to_serial_even_with_heterogeneous_costs(self):
+        """LE MAKE-OR-BREAK, SUR LE CHEMIN RÉORDONNÉ. `TestDeterminism` compare sériel et pool=8 sur une
+        vague à coût UNIFORME — où `_preheat_order` rend une liste vide et ne réordonne donc RIEN. Cette
+        preuve-ci rejoue la même comparaison sur une vague à coûts HÉTÉROGÈNES, celle qui exerce
+        vraiment le préchauffage : même ORDRE, même CONTENU, chaîne append-only intègre des deux côtés."""
+        d = temp_dir(self, "g3-preheat-")
+        _st_s, eng_s, led_s = self._run(1, ledger_path=d / "serial.ledger")     # SÉRIEL (référence)
+        st_p, eng_p, led_p = self._run(8, ledger_path=d / "parallel.ledger")    # PARALLÈLE réordonné
+
+        self.assertNotEqual(st_p, [a.target for a in self._actions()],
+                            "la vague parallèle n'a pas été réordonnée : la preuve serait vide")
+        self.assertEqual(_ledger_shape(d / "parallel.ledger"), _ledger_shape(d / "serial.ledger"),
+                         "l'ordre/contenu du ledger DOIT rester identique au sériel malgré le "
+                         "réordonnancement des SOUMISSIONS")
+        self.assertEqual([_strip_ts(f.to_dict()) for f in eng_p.findings],
+                         [_strip_ts(f.to_dict()) for f in eng_s.findings])
+        self.assertEqual([_strip_ts(r) for r in eng_p.run_records],
+                         [_strip_ts(r) for r in eng_s.run_records])
+        self.assertEqual(eng_p.roe_decisions(), eng_s.roe_decisions())
+        self.assertTrue(led_s.verify()["ok"])
+        self.assertTrue(led_p.verify()["ok"])
+
+    # --- (3) LA BORNE DE TRAVAIL EN AVANCE N'A PAS BOUGÉ ------------------------------------------
+    def test_the_preheat_stays_inside_the_bounded_window(self):
+        """Le préchauffage ne doit pas devenir « tout soumettre » : il est plafonné à `pool - 1`
+        actions, donc au plus `2 x pool` tirs restent soumis-non-appliqués — la MÊME borne de travail
+        au-delà du point d'application qu'avant l'ordonnancement (c'est elle qui borne le travail
+        gaspillé quand un cancel/watchdog tombe)."""
+        eng = Engine(_scope_preheat(), mode="auto")
+        # EXACT (aucune course, fonction pure) : le préchauffage == les 3 actions longues de la QUEUE.
+        self.assertEqual(eng._preheat_order(self._actions(), self.POOL - 1), [40, 41, 42])
+        for pool in (2, 4, 8, 12):
+            with self.subTest(pool=pool):
+                idx = eng._preheat_order(self._actions(), pool - 1)
+                self.assertLessEqual(len(idx), pool - 1)
+                self.assertEqual(len(set(idx)), len(idx), "aucun indice préchauffé deux fois")
+        # coûts UNIFORMES -> AUCUN préchauffage : on retombe exactement sur la fenêtre glissante d'avant.
+        flat = [Action(self.KIND, ip) for ip in _PREHEAT_FAST]        # cost = défaut 1.0 partout
+        self.assertEqual(eng._preheat_order(flat, self.POOL - 1), [],
+                         "une vague à coût uniforme ne doit RIEN réordonner (chemin historique intact)")
+        # un palier qui remplit le pool À LUI SEUL n'a rien à gagner -> pas préchauffé non plus.
+        big = [Action(self.KIND, ip, cost=1.0) for ip in _PREHEAT_FAST[:10]]
+        big += [Action(self.KIND, ip, cost=3.0) for ip in _PREHEAT_FAST[10:10 + self.POOL]]
+        self.assertEqual(eng._preheat_order(big, self.POOL - 1), [],
+                         "un palier de `pool` actions longues occupe déjà tout le pool : rien à gagner")
+
+    def test_a_broken_cost_never_breaks_the_ordering(self):
+        """`cost` vient d'un cerveau (voire d'un LLM) : il peut arriver absurde. Un coût NaN / négatif /
+        non numérique est traité comme neutre — le tri reste total, la vague part quand même."""
+        eng = Engine(_scope_preheat(), mode="auto")
+        acts = [Action(self.KIND, _PREHEAT_FAST[0], cost=float("nan")),
+                Action(self.KIND, _PREHEAT_FAST[1], cost=-5.0),
+                Action(self.KIND, _PREHEAT_FAST[2], cost=0.0),
+                Action(self.KIND, _PREHEAT_FAST[3], cost=1.0),
+                Action(self.KIND, _PREHEAT_FAST[4], cost=9.0)]
+        acts[0].cost = "beaucoup"                          # coût carrément non numérique
+        idx = eng._preheat_order(acts, 3)
+        self.assertEqual(idx, [4], "seul le coût 9.0 est un palier supérieur ; les coûts cassés = 1.0")
+
+
+def _scope_preheat():
+    return Scope({"mode": "grey", "in_scope": _PREHEAT_FAST + _PREHEAT_SLOW,
+                  "allow_exploit": True, "allow_destructive": False})
 
 
 if __name__ == "__main__":
