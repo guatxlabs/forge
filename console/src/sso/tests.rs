@@ -240,6 +240,66 @@ byHb5g3JqJSE6WJSuyEQrUob
         crate::settings_set(&db, CFG_KEY, &cfg.to_string()).unwrap();
     }
 
+    /// [AT REST — « ILLISIBLE » N'EST PAS « NON CONFIGURÉ »] THE reason the `client_secret` was left out
+    /// of the first at-rest encryption pass, and the reason the order had to be "fallible first, sealed
+    /// second". `load_config` returned an `Option`: a failed decryption would have collapsed into `None`,
+    /// i.e. `403 sso_unconfigured` — a working SSO would have quietly become "never configured", and the
+    /// admin would have gone hunting at the IdP instead of looking at his field key.
+    ///
+    /// The signature is now `Result<Option<_>, _>` and the THREE outcomes are measured here, one against
+    /// the others (a single one proves nothing — the point is that they are DISTINCT).
+    ///
+    /// MUTATION : make `load_config` swallow the decryption error back into `Ok(None)` -> this test reds.
+    #[tokio::test]
+    async fn a_sealed_client_secret_that_will_not_open_is_not_reported_as_unconfigured() {
+        const OTHER_KEY: &str = "une-cle-de-champ-qui-nest-pas-celle-du-processus";
+        let ledger = tmp_path("sso-atrest-ledger");
+        let app = sso_test_app(&ledger);
+        engage_flag(&app);
+        // The process key is the ONE the production read path will use.
+        let process_key = crate::field_crypto::test_install_process_key();
+
+        // (1) NOT CONFIGURED — no settings row at all.
+        assert!(matches!(load_config(&app), Ok(None)), "aucune config => Ok(None)");
+        assert!(!login_available(&app), "rien de configuré => pas de bouton SSO");
+
+        // (2) CONFIGURED and READABLE — sealed with the process key, opens, flow usable.
+        set_config(&app, "https://idp.example", vec!["http://localhost/app"], "match", "viewer", "email");
+        let raw = crate::settings_get(&app.db(), CFG_KEY).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let sealed = crate::field_crypto::seal_config_secret(
+            &v, crate::field_crypto::SSO_SECRET_PATH, Some(process_key),
+        )
+        .expect("scellement");
+        crate::settings_set(&app.db(), CFG_KEY, &sealed.to_string()).unwrap();
+        let cfg = load_config(&app).expect("s'ouvre").expect("configurée");
+        assert_eq!(cfg.client_secret, "s3cr3t-value", "le secret ouvert est bien celui posé");
+        assert!(login_available(&app), "config utilisable => bouton SSO offert");
+
+        // (3) CONFIGURED but UNREADABLE — sealed with ANOTHER key. THE case that used to be inexpressible.
+        let wrong = crate::field_crypto::seal_config_secret(
+            &v, crate::field_crypto::SSO_SECRET_PATH, Some(OTHER_KEY),
+        )
+        .expect("scellement avec une autre clé");
+        crate::settings_set(&app.db(), CFG_KEY, &wrong.to_string()).unwrap();
+        // `expect_err` est indisponible : `SsoConfig` n'implémente PAS `Debug` (une config porteuse de
+        // secret ne doit pas pouvoir être imprimée par accident). On discrimine donc à la main — ce qui
+        // rend d'ailleurs les TROIS issues visibles côte à côte, ce que ce test doit mesurer.
+        let e = match load_config(&app) {
+            Err(e) => e,
+            Ok(None) => panic!("RÉGRESSION : un chiffré ILLISIBLE se présente comme « non configuré »"),
+            Ok(Some(_)) => panic!("une autre clé ne doit PAS ouvrir l'enveloppe"),
+        };
+        assert_eq!(e, crate::field_crypto::ERR_UNSEAL, "refus NOMMÉ attendu, obtenu: {e}");
+        // …and the route says 503 (server-side configuration fault), never 403 "unconfigured".
+        let r = login_start(State(app.clone()), Query(HashMap::new())).await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "503 attendu, jamais un 403 sso_unconfigured");
+        // The button stays offered: a NAMED failure must not vanish into a hidden button.
+        assert!(login_available(&app), "config présente mais illisible => toujours annoncée");
+
+        let _ = std::fs::remove_file(&ledger);
+    }
+
     /// Forge an ID token (RS256) with `pem`, embedding the given claims (incl. `email_verified`).
     #[allow(clippy::too_many_arguments)]
     fn make_id_token(pem: &str, kid: &str, iss: &str, aud: &str, sub: &str, email: &str, email_verified: bool, nonce: &str, exp_offset: i64) -> String {
@@ -556,6 +616,10 @@ byHb5g3JqJSE6WJSuyEQrUob
     // ------------------------------------------------------------------------------------------------
     #[tokio::test]
     async fn client_secret_redacted_on_config_get() {
+        // Secret d'intégration CHIFFRÉ AU REPOS : ce test traverse un handler HTTP, il lui faut donc
+        // la clé de champ du processus de test (le refus fail-closed « clé absente » est couvert par
+        // l'API PURE de `field_crypto`).
+        crate::field_crypto::test_install_process_key();
         let ledger = tmp_path("sso-cfg-ledger");
         let app = sso_test_app(&ledger);
         engage_flag(&app);
@@ -593,11 +657,21 @@ byHb5g3JqJSE6WJSuyEQrUob
         assert!(body_of(&g).contains("\"client_secret_set\":true"), "secret presence flagged: {}", body_of(&g));
         assert!(!body_of(&g).contains("\"client_secret\""), "no client_secret key at all: {}", body_of(&g));
 
-        // But the secret IS persisted (write-only store).
+        // The secret IS persisted (write-only store) — but NOT IN THE CLEAR. It used to be stored
+        // VERBATIM (this assertion read `stored.contains("top-secret-oidc")`); it is now sealed at rest
+        // with `field_crypto` (XChaCha20-Poly1305 + argon2id, key FORGE_FIELD_KEY). BEHAVIOUR CHANGE,
+        // named in CHANGELOG.md + docs/ADMINISTRATION.md.
         {
-            
             let stored = crate::settings_get(&app.db(), CFG_KEY).unwrap();
-            assert!(stored.contains("top-secret-oidc"), "secret persisted verbatim in settings");
+            assert!(!stored.contains("top-secret-oidc"), "client_secret STILL IN THE CLEAR in settings: {stored}");
+            let raw = crate::field_crypto::config_field_raw(
+                &serde_json::from_str::<Value>(&stored).expect("stored config is json"),
+                crate::field_crypto::SSO_SECRET_PATH,
+            );
+            assert!(crate::field_crypto::is_sealed(&raw), "the stored secret must be an envelope: {raw}");
+            // ROUND-TRIP through the PRODUCTION read path: `load_config` opens it, so the flow still works.
+            let cfg = load_config(&app).expect("the sealed secret opens").expect("configured");
+            assert_eq!(cfg.client_secret, "top-secret-oidc", "the opened secret is the one that was set");
         }
         // Ledger never carries the secret.
         let lines = crate::read_ledger_lines(&ledger);
@@ -965,7 +1039,7 @@ byHb5g3JqJSE6WJSuyEQrUob
         let app = sso_test_app(&ledger);
         engage_flag(&app);
         set_config(&app, "http://idp", vec!["http://localhost/app"], "auto", "admin", "sub");
-        let cfg = load_config(&app).expect("config loads");
+        let cfg = load_config(&app).expect("le secret s'ouvre").expect("config configurée");
         assert_eq!(cfg.default_role, "operator", "[L6] SSO default_role=admin bounded to operator at load");
         let _ = std::fs::remove_file(&ledger);
     }

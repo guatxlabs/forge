@@ -703,15 +703,42 @@ rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et bind
 > de build pour accepter un certificat non fiable (auto-signé, chaîne inconnue, mauvais nom d'hôte) : un
 > TLS qui ne vérifie rien est du clair déguisé, et c'est précisément par là que les échappatoires entrent.
 >
-> **Limite à connaître — AC d'entreprise.** Les racines de confiance sont les racines **Mozilla compilées**
-> (`webpki-roots`) ; le **magasin système n'est PAS lu** (c'est ce qui garde la posture sans dépendance OS :
-> pas de `schannel`, pas de `security-framework`, pas d'`openssl`). Un IdP dont le certificat est émis par
-> une **AC privée d'entreprise** n'est donc **pas** vérifiable en l'état. Trois issues, toutes explicites :
-> (1) présenter un certificat émis par une AC **publiquement reconnue** ; (2) traiter l'IdP comme une cible
-> **interne** en `http://` sous `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` (clair **gouverné**, segment de
-> confiance) ; (3) conserver un **proxy TLS-terminant** d'egress. Un knob « AC supplémentaire » (fichier PEM
-> ajouté aux racines) serait une évolution légitime — ce n'est **pas** une échappatoire de vérification —
-> mais il n'est **pas** livré aujourd'hui.
+> **AC privée d'entreprise — `FORGE_EXTRA_CA_PEM` (livré).** Les racines de confiance sont les racines
+> **Mozilla compilées** (`webpki-roots`) ; le **magasin système n'est PAS lu**, et il ne le sera pas :
+> c'est ce qui garde la posture sans dépendance OS (pas de `schannel`, pas de `security-framework`, pas
+> d'`openssl`). Un IdP — ou un collecteur — signé par l'**AC privée de l'organisation** n'était donc pas
+> vérifiable, et les seules issues qui restaient étaient mauvaises, dont le **retour au clair**.
+>
+> L'opérateur peut désormais **fournir explicitement** ses propres ancres :
+>
+> ```bash
+> FORGE_EXTRA_CA_PEM_FILE=/etc/forge/entreprise-ca.pem   # un CHEMIN (montage Docker/k8s, ConfigMap)
+> # ou, à plat :
+> FORGE_EXTRA_CA_PEM="-----BEGIN CERTIFICATE-----\n…"    # le PEM VERBATIM (motif <VAR> / <VAR>_FILE maison)
+> ```
+>
+> Le PEM peut porter **plusieurs** blocs `CERTIFICATE` (chaîne d'AC intermédiaires incluse). Les ancres
+> sont **AJOUTÉES** aux racines Mozilla, jamais substituées.
+>
+> **Ce que ce knob N'EST PAS.** Ce n'est **pas** une échappatoire de vérification, et c'est une distinction
+> de fond, pas de vocabulaire : la vérification reste **PLEINE**. Chaîne validée jusqu'à une ancre, **nom
+> d'hôte vérifié**, **expiration honorée**. On élargit l'ensemble des émetteurs de confiance ; on ne
+> relâche **aucun** contrôle. Il n'existe toujours ni option, ni variable, ni drapeau de build pour
+> accepter un certificat auto-signé, une chaîne inconnue, un mauvais nom d'hôte ou un certificat périmé —
+> et la garde de **source** qui interdit au crate d'ouvrir l'API `dangerous` de rustls reste en place.
+> Quatre tests le figent : l'AC fournie fait **aboutir** son propre handshake ; une **autre** AC le laisse
+> **échouer** ; le **nom d'hôte** est toujours vérifié, ancre en place ; un certificat **expiré** est
+> toujours refusé, ancre en place.
+>
+> **FAIL-CLOSED au boot.** Un PEM configuré mais **illisible, vide ou invalide** fait **échouer le
+> démarrage** (`[forge] FATAL …`, code 2). Il ne dégrade **jamais** en silence vers « pas d'ancre » : sinon
+> l'opérateur croirait sa CA installée et découvrirait le contraire des heures plus tard, sous la forme
+> d'un « émetteur inconnu » qui ne désigne pas la cause. Rien de configuré ⇒ **aucune** ligne au boot,
+> comportement inchangé.
+>
+> Les autres issues restent valables si votre topologie les impose déjà : AC publiquement reconnue, cible
+> **interne** en `http://` sous `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` (clair **gouverné**), ou **proxy
+> TLS-terminant** d'egress.
 
 **Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
 Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →

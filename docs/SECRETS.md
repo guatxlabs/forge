@@ -27,7 +27,7 @@ La valeur d'un secret n'est **jamais** journalisée ni passée sur `argv`.
 | Variable | Rôle | Consommé par |
 |----------|------|--------------|
 | `FORGE_CONSOLE_TOKEN` | Bearer d'ingestion `/api/ingest` | console (Rust) + client `console_client` (Python) |
-| `FORGE_FIELD_KEY` | Chiffrement de **champ** du matériel d'authentification d'engagement (bearers/cookies/en-têtes des comptes de test) — **build par défaut** | console (Rust) |
+| `FORGE_FIELD_KEY` | Chiffrement de **champ** du matériel d'authentification d'engagement (bearers/cookies/en-têtes des comptes de test) **et des trois secrets d'intégration** (source de détection, canal de notification, `client_secret` SSO) — **build par défaut** | console (Rust) |
 | `FORGE_DB_KEY` | Clé SQLCipher au repos (image `--features encryption`) | console (Rust) |
 | `FORGE_BACKUP_PASSPHRASE` | Passphrase des sauvegardes chiffrées (nommée par `policy.passphrase_env`) | console (Rust) — backup/restore/scheduler/upgrade |
 | `FORGE_COMPLIANCE_ARCHIVE_KEY` | Passphrase d'archive de purge gouvernée | console (Rust) |
@@ -44,11 +44,11 @@ Chacune accepte `<VAR>_FILE`. Exemple : la console lit `FORGE_CONSOLE_TOKEN`, si
 
 ### Déjà write-only via l'UI — n'ont **jamais** besoin d'un `.env`
 
-> ⚠️ **« Write-only » décrit la SURFACE D'API, pas le repos.** Ces secrets ne sont jamais re-servis par
-> une lecture, jamais journalisés, jamais ledgerisés — mais ils sont stockés **en clair** dans la table
-> `settings` sauf si la base entière est chiffrée (`--features encryption` + `FORGE_DB_KEY`). Le
-> chiffrement de **champ** (`FORGE_FIELD_KEY`) ne couvre à ce jour **que** le matériel d'authentification
-> d'engagement — voir « Ce qui n'est pas encore chiffré au repos » ci-dessous.
+> ⚠️ **« Write-only » décrit la SURFACE D'API, pas le repos** — les deux sont désormais couverts, mais
+> ce sont bien **deux** propriétés. Ces secrets ne sont jamais re-servis par une lecture, jamais
+> journalisés, jamais ledgerisés (surface d'API) **et** ils sont chiffrés dans la table `settings` par le
+> chiffrement de **champ** (`FORGE_FIELD_KEY`, build par défaut) — voir « Ce qui est chiffré au repos »
+> ci-dessous. `--features encryption` + `FORGE_DB_KEY` (base entière) reste composable par-dessus.
 
 - **Secret de la source de détection** (`settings.detection_source`) : saisi au wizard du 1er
   déploiement ou dans *Administration → Source de détection*, stocké **write-only** en base (jamais
@@ -67,18 +67,34 @@ Chacune accepte `<VAR>_FILE`. Exemple : la console lit `FORGE_CONSOLE_TOKEN`, si
 | Idem, en transit interne vers le moteur | `run_job.spawn_spec` (chemin HA *pending*) | **chiffré** (hérité) — et purgé au claim |
 | Mots de passe de comptes | `users.pass_hash` | **hash argon2id** — sans objet (sens unique) |
 | Jetons de session | `session.token_sha` | **SHA-256** — sans objet (sens unique) |
-| Secret de la source de détection | `settings.detection_source` → `auth.secret` | **en clair** |
-| Jeton du canal de notification | `settings.notify_channel` → `auth.secret` | **en clair** |
-| SSO `client_secret` | `settings.sso.config` → `client_secret` | **en clair** |
+| Secret de la source de détection | `settings.detection_source` → `auth.secret` | **chiffré** (`FORGE_FIELD_KEY`) |
+| Jeton du canal de notification | `settings.notify_channel` → `auth.secret` | **chiffré** (`FORGE_FIELD_KEY`) |
+| SSO `client_secret` | `settings.sso.config` → `client_secret` | **chiffré** (`FORGE_FIELD_KEY`) |
 
-Les trois dernières lignes sont un **écart connu et assumé**, pas un oubli. Ce sont des **jetons
-d'intégration vers l'infrastructure de l'opérateur lui-même** — classe de risque distincte des
-credentials d'engagement, qui sont des **sessions vivantes sur l'estate d'un client**. Les chiffrer
-demande de rendre faillibles leurs points d'usage (`ds_secret`, `ch_secret`, `sso::load_config`), dont
-le dernier renvoie aujourd'hui `Option` : un déchiffrement raté y deviendrait « non configuré », donc
-une **dégradation silencieuse** — exactement le mode de panne que le fail-closed du chiffrement de champ
-existe pour interdire. C'est un changement à part entière, pas un ajout de trois lignes. En attendant,
-**`--features encryption` + `FORGE_DB_KEY` les couvre** (chiffrement intégral).
+**Les trois dernières lignes viennent de basculer** — elles étaient « en clair », consignées comme un
+écart **connu et assumé**. La raison de l'écart était technique et réelle : les sceller **exige** de
+rendre faillibles leurs points d'usage (`ds_secret`, `ch_secret`, `sso::load_config`), or le dernier
+renvoyait un `Option` — un déchiffrement raté y serait devenu « **SSO non configuré** », c'est-à-dire
+la **dégradation silencieuse** que le fail-closed du chiffrement de champ existe pour interdire.
+
+L'ordre imposé a donc été respecté : **d'abord la faillibilité, ensuite le scellement.**
+
+- `sso::load_config` rend désormais `Result<Option<SsoConfig>, String>` — **trois** issues distinctes :
+  `Ok(None)` = non configuré (403 `sso_unconfigured`), `Ok(Some)` = utilisable, `Err` = **configuré mais
+  illisible** (503 `sso_secret_unreadable`). Un secret qui n'ouvre pas ne peut plus se faire passer pour
+  une console jamais configurée.
+- Le secret de source et le jeton de canal sont ouverts à leur **point d'usage unique**
+  (`collect_detections_with`, `deliver_blocking`) : sans clé, l'intégration **refuse** de partir avec une
+  raison nommée, plutôt que de se présenter **sans authentification** — un 401 que l'admin
+  diagnostiquerait comme une panne de SIEM.
+- Une base existante est **convertie au boot**, en place et idempotemment
+  (`migrate_seal_settings_secrets`). Sans clé, rien n'est converti mais le clair restant est **compté et
+  annoncé** — jamais tu.
+
+Le périmètre reste **mesuré** : seule la **valeur** du secret est scellée. `kind`, `endpoint`,
+`auth.type`, `issuer`, `client_id` restent lisibles au repos — l'admin doit pouvoir ré-éditer sa config
+sans la clé, et ce ne sont pas des credentials. `--features encryption` + `FORGE_DB_KEY` (chiffrement
+**intégral**) reste **composable** par-dessus.
 
 ## Docker Compose
 

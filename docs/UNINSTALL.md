@@ -83,8 +83,9 @@ Selon `FORGE_CONSOLE_DB` / `FORGE_CONSOLE_LEDGER` / `FORGE_CONSOLE_SCOPE` (cf.
 # Base SQLite (+ WAL/SHM)
 rm -f forge.db forge.db-wal forge.db-shm
 
-# Ledger d'engagement + sa clé de signature (0600) — DESTRUCTIF pour l'auditabilité
-rm -f engagement.jsonl engagement.jsonl.ed25519
+# Ledger d'engagement + ses sidecars (clé de signature 0600, high-water-mark, durées observées)
+# — DESTRUCTIF pour l'auditabilité
+rm -f engagement.jsonl engagement.jsonl.ed25519 engagement.jsonl.hwm engagement.jsonl.durations
 
 # Scope actif (périmètre autorisé) + fichiers de secrets
 rm -f scope.json *.env *.key
@@ -135,7 +136,9 @@ supprimer explicitement (§4) si voulu.
 - [ ] Sauvegarde chiffrée réalisée si l'audit doit survivre ([`BACKUP.md`](BACKUP.md)).
 - [ ] Conteneur/service arrêté et supprimé.
 - [ ] Volumes/dossiers de données supprimés (DB + WAL/SHM).
-- [ ] Ledger `engagement.jsonl` **et** clé `engagement.jsonl.ed25519` purgés (effacement sûr).
+- [ ] Ledger `engagement.jsonl` **et** ses sidecars (`.ed25519`, `.hwm`, `.durations`) purgés
+      (effacement sûr pour la clé). Le `.durations` ne contient **que** des durées agrégées **par kind
+      de module** — aucune cible, aucun hôte, aucune URL — mais il se supprime avec le reste.
 - [ ] Scope actif + fichiers `.env`/`.key` (secrets, hashes argon2id) purgés.
 - [ ] Image(s) Docker supprimée(s).
 - [ ] Outils orchestrés retirés si non utilisés ailleurs.

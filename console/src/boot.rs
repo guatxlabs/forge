@@ -180,6 +180,19 @@ pub(crate) fn cli_subcommands() -> Vec<(&'static str, &'static str)> {
 /// (heartbeat/leader-tick/cache-poll/présence puis backup-scheduler) puis bind + serve. L'ordre des étapes,
 /// l'ordre des spawns et le gating HA sont STRICTEMENT inchangés par rapport à l'ancien main() monolithique.
 pub(crate) async fn serve() {
+    // ANCRES DE CONFIANCE D'ENTREPRISE (FORGE_EXTRA_CA_PEM / _FILE) — CONTRÔLÉES EN PREMIER, avant la
+    // base, avant le store, avant le moindre egress. Un PEM configuré mais illisible/invalide est FATAL
+    // ici : sans ça, il dégraderait en « pas d'ancre » et le déploiement ne le découvrirait qu'au premier
+    // handshake vers son IdP/collecteur privé, sous la forme d'un « émetteur inconnu » qui ne désigne pas
+    // la cause. Aucune ancre configurée => AUCUNE ligne imprimée (boot byte-identique).
+    match crate::tls::preflight() {
+        Ok(Some(line)) => println!("{line}"),
+        Ok(None) => {}
+        Err(msg) => {
+            eprintln!("[forge] FATAL {msg}");
+            std::process::exit(2);
+        }
+    }
     let db_path = std::env::var("FORGE_CONSOLE_DB").unwrap_or_else(|_| "forge.db".to_string());
     let conn = Connection::open(&db_path).expect("open db");
     // CHIFFREMENT AU REPOS (opt-in, feature `encryption`) : si FORGE_DB_KEY est posé, `PRAGMA key`
@@ -499,6 +512,16 @@ pub(crate) async fn serve() {
         let key = crate::field_crypto::key_from_env();
         let rep = crate::field_crypto::migrate_seal_engagement_auth(&app.store(), key.as_deref());
         if let Some(line) = crate::field_crypto::boot_status_line(&rep, key.is_some()) {
+            println!("{line}");
+        }
+        // SECRETS D'INTÉGRATION (jeton de source de détection, jeton de canal de notification,
+        // `client_secret` SSO) — mêmes contrat et discipline, sur la table `settings`. Ces trois-là
+        // avaient été écartés du premier lot parce que les sceller EXIGEAIT de rendre leurs chemins de
+        // lecture FAILLIBLES (`sso::load_config` rendait un `Option` : un déchiffrement échoué y serait
+        // devenu « SSO non configuré »). C'est fait — ils sont donc scellés ici. Aucune intégration à
+        // secret => aucune ligne imprimée (boot byte-identique).
+        let rep = crate::field_crypto::migrate_seal_settings_secrets(&app.store(), key.as_deref());
+        if let Some(line) = crate::field_crypto::settings_boot_status_line(&rep, key.is_some()) {
             println!("{line}");
         }
     }

@@ -68,6 +68,7 @@ d'évaluation ⇒ `VETO` (fail-closed).
 | `report.py` | Rapport markdown d'engagement + section **anti-masquage** (tiré / simulé / vétoé / jamais tenté). |
 | `memory.py`, `memory_faiss.py` | Mémoire : store JSONL + dedup (`JaccardMemory` floue stdlib, bridge FAISS optionnel qui dégrade proprement). |
 | `session.py` | **Session gouvernée** (SECRET) : matériel d'auth attaché **uniquement** aux requêtes in-scope, jamais journalisé/ledgerisé/versé dans un finding. |
+| `durations.py` | **Durées de tir observées, agrégées PAR KIND** (jamais par cible : ce serait un journal de reconnaissance persistant). Sidecar `<ledger>.durations` — **par engagement**, taille bornée, seuil de confiance + médiane. Alimente le SEUL ordre de **soumission** du préchauffage intra-vague (`engine._preheat_key`) ; repli exact sur `action.cost` sans mesure. Aucune décision de tir n'en dépend. |
 | `runner.py`, `browser_client.py`, `console_client.py` | Runner (binaire local ou docker, sans install), client browser-automation (`FORGE_BROWSER_URL`), client d'ingestion console. |
 
 ### 2.3 Le registre de modules (`forge/modules/`)

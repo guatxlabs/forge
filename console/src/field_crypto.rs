@@ -318,6 +318,107 @@ pub(crate) fn at_rest_label(auth: &Value) -> &'static str {
 }
 
 // =====================================================================================
+//  SECRETS D'INTÉGRATION — un CHAMP unique dans une config `settings` (JSON)
+// =====================================================================================
+//
+//  Les trois secrets d'INTÉGRATION (jeton de source de détection, jeton de canal de notification,
+//  `client_secret` SSO) vivent dans la table `settings`, chacun à UN chemin de champ dans son objet
+//  de config. Ils avaient été écartés du premier lot de chiffrement pour une raison TECHNIQUE réelle :
+//  les sceller EXIGE de rendre leurs chemins de lecture FAILLIBLES — or `sso::load_config` rendait un
+//  `Option`, et un déchiffrement échoué y serait devenu « SSO non configuré », c'est-à-dire exactement
+//  la dégradation SILENCIEUSE que ce module interdit. L'ordre a donc été : d'abord rendre les chemins
+//  faillibles avec un échec LISIBLE, ensuite sceller. Ce bloc est la seconde moitié.
+//
+//  ZÉRO nouvelle crypto : [`seal_str`] / [`unseal_str`] ci-dessus, MÊME clé (`FORGE_FIELD_KEY`), MÊME
+//  format d'enveloppe `forge:fenc1:` que le matériel d'authentification d'engagement.
+
+/// Chemin du secret dans une config de SOURCE DE DÉTECTION (`settings.detection_source`).
+pub(crate) const DS_SECRET_PATH: &[&str] = &["auth", "secret"];
+/// Chemin du secret dans une config de CANAL DE NOTIFICATION (`settings.notify_channel`) — même forme.
+pub(crate) const CH_SECRET_PATH: &[&str] = &["auth", "secret"];
+/// Chemin du `client_secret` dans la config OIDC (`settings.sso_config`) — à plat, pas sous `auth`.
+pub(crate) const SSO_SECRET_PATH: &[&str] = &["client_secret"];
+
+/// Valeur BRUTE du champ (telle qu'AU REPOS : possiblement une enveloppe). Ne déchiffre RIEN et n'exige
+/// AUCUNE clé — c'est ce qui permet aux booléens `secret_set` et à la réinjection `keep_secret` de
+/// fonctionner sans jamais manipuler le plaintext.
+pub(crate) fn config_field_raw(cfg: &Value, path: &[&str]) -> String {
+    let mut cur = cfg;
+    for k in path {
+        match cur.get(k) {
+            Some(v) => cur = v,
+            None => return String::new(),
+        }
+    }
+    cur.as_str().unwrap_or("").to_string()
+}
+
+/// Applique `f` à la valeur du champ `path` et rend la config MODIFIÉE. Champ absent ou vide => la
+/// config est rendue INCHANGÉE (rien à transformer — jamais une clé exigée pour une config sans secret).
+fn map_config_field<F>(cfg: &Value, path: &[&str], f: F) -> Result<Value, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    debug_assert!(!path.is_empty(), "chemin de champ vide");
+    let cur = config_field_raw(cfg, path);
+    if cur.is_empty() {
+        return Ok(cfg.clone());
+    }
+    let next = f(&cur)?;
+    // Descente en écriture : chaque segment intermédiaire DOIT déjà être un objet — il l'est, puisque
+    // `config_field_raw` vient d'y lire une chaîne non vide.
+    let mut out = cfg.clone();
+    let mut node = &mut out;
+    for k in &path[..path.len() - 1] {
+        node = node.get_mut(k).ok_or_else(|| "chemin de champ disparu".to_string())?;
+    }
+    let last = path[path.len() - 1];
+    node.as_object_mut()
+        .ok_or_else(|| "conteneur de champ non-objet".to_string())?
+        .insert(last.to_string(), Value::String(next));
+    Ok(out)
+}
+
+/// SCELLE le secret d'une config d'intégration. IDEMPOTENT (une valeur DÉJÀ enveloppée est laissée
+/// telle quelle — c'est ce qui rend la migration et la réinjection `keep_secret` rejouables sans
+/// double chiffrement). Config SANS secret => no-op strict, AUCUNE clé requise.
+///
+/// FAIL-CLOSED : un secret EN CLAIR à sceller et `key = None` => `Err(ERR_KEY_MISSING)`. On refuse de
+/// persister un credential en clair en faisant croire au chiffrement.
+pub(crate) fn seal_config_secret(cfg: &Value, path: &[&str], key: Option<&str>) -> Result<Value, String> {
+    map_config_field(cfg, path, |cur| {
+        if is_sealed(cur) {
+            return Ok(cur.to_string());
+        }
+        let passphrase = key.ok_or_else(|| ERR_KEY_MISSING.to_string())?;
+        let mut salt = [0u8; BACKUP_SALT_LEN];
+        getrandom::fill(&mut salt).map_err(|e| format!("CSPRNG (sel de champ) indisponible: {e}"))?;
+        seal_str(cur, passphrase, &salt)
+    })
+}
+
+/// OUVRE le secret d'une config d'intégration, au POINT D'USAGE (construction de l'en-tête d'auth,
+/// POST au token endpoint, passage au collecteur Python).
+///
+/// FAIL-CLOSED, et c'est TOUT L'INTÉRÊT de l'ordre suivi : une enveloppe + `key = None` =>
+/// `Err(ERR_KEY_MISSING)` ; une enveloppe qui n'ouvre pas => `Err(ERR_UNSEAL)`. L'appelant REFUSE alors
+/// l'opération avec une raison NOMMÉE — il ne repart JAMAIS avec un secret vide, ce qui se présenterait
+/// comme « pas d'authentification configurée » (source de détection anonyme, SSO non configuré) et
+/// serait indistinguable d'un problème de configuration.
+///
+/// PASS-THROUGH : une valeur NON enveloppée est rendue telle quelle, sans exiger de clé — une base pas
+/// encore migrée continue de fonctionner après un upgrade en place.
+pub(crate) fn open_config_secret(cfg: &Value, path: &[&str], key: Option<&str>) -> Result<Value, String> {
+    map_config_field(cfg, path, |cur| {
+        if !is_sealed(cur) {
+            return Ok(cur.to_string());
+        }
+        let passphrase = key.ok_or_else(|| ERR_KEY_MISSING.to_string())?;
+        unseal_str(cur, passphrase)
+    })
+}
+
+// =====================================================================================
 //  MIGRATION AU BOOT — les bases existantes portent du matériel EN CLAIR
 // =====================================================================================
 
@@ -391,6 +492,80 @@ pub(crate) fn migrate_seal_engagement_auth(store: &crate::store::Store, key: Opt
         }
     }
     rep
+}
+
+/// Les TROIS lignes `settings` qui portent un secret d'INTÉGRATION, avec le chemin de leur champ.
+/// Liste FERMÉE : ajouter une intégration porteuse de secret sans l'inscrire ici la laisserait EN CLAIR
+/// au repos, et `settings_secrets_inventory_covers_every_module_key` le fait ROUGIR.
+pub(crate) const SETTINGS_SECRETS: &[(&str, &[&str])] = &[
+    ("detection_source", DS_SECRET_PATH),
+    ("notify_channel", CH_SECRET_PATH),
+    ("sso.config", SSO_SECRET_PATH),
+];
+
+/// Scelle les secrets d'INTÉGRATION en clair déjà présents dans la table `settings` (jeton de source de
+/// détection, jeton de canal, `client_secret` SSO). Même contrat que
+/// [`migrate_seal_engagement_auth`] : IDEMPOTENTE, portable sur les deux backends, et SANS CLÉ elle ne
+/// convertit rien mais COMPTE le clair restant pour que l'appelant l'annonce BRUYAMMENT.
+///
+/// POURQUOI AU BOOT : chiffrer à l'écriture sans traiter le passé laisserait les lignes existantes
+/// lisibles tout en affichant un système « chiffré au repos ». Une base upgradée est convertie en place.
+pub(crate) fn migrate_seal_settings_secrets(store: &crate::store::Store, key: Option<&str>) -> MigrationReport {
+    let mut rep = MigrationReport::default();
+    for (skey, path) in SETTINGS_SECRETS {
+        let Some(raw) = crate::settings_get_store(store, skey) else { continue };
+        let Ok(cfg) = serde_json::from_str::<Value>(&raw) else { continue };
+        let cur = config_field_raw(&cfg, path);
+        if cur.is_empty() {
+            continue; // config sans secret (ou clé absente) : rien à chiffrer
+        }
+        rep.with_material += 1;
+        if is_sealed(&cur) {
+            continue; // déjà scellé
+        }
+        let Some(passphrase) = key else {
+            rep.still_plaintext += 1; // pas de clé : on ne peut pas convertir — l'appelant le CRIE
+            continue;
+        };
+        match seal_config_secret(&cfg, path, Some(passphrase)) {
+            Ok(sealed) => {
+                // Écriture CIBLÉE. Un échec laisse la ligne EN CLAIR et est compté comme tel : jamais
+                // un rapport « migré » sur une écriture qui n'a pas pris.
+                if crate::settings_set_store(store, skey, &sealed.to_string()).is_ok() {
+                    rep.sealed_now += 1;
+                } else {
+                    rep.still_plaintext += 1;
+                }
+            }
+            Err(_) => rep.unreadable += 1,
+        }
+    }
+    rep
+}
+
+/// Ligne d'ÉTAT du scellement des secrets d'INTÉGRATION au boot. Même discipline que
+/// [`boot_status_line`] : `None` quand aucune intégration ne porte de secret (boot byte-identique),
+/// sinon on annonce — et BRUYAMMENT quand le clair subsiste.
+pub(crate) fn settings_boot_status_line(rep: &MigrationReport, key_present: bool) -> Option<String> {
+    if rep.with_material == 0 {
+        return None;
+    }
+    if !key_present {
+        return Some(format!(
+            "[forge] ⚠️ SECRETS D'INTÉGRATION EN CLAIR AU REPOS — {} configuration(s) (source de détection / canal de notification / SSO) portent un secret, et {KEY_VAR} n'est pas posée : ils RESTENT en clair dans la table settings. Poser {KEY_VAR} (ou {KEY_VAR}_FILE) puis redémarrer pour les chiffrer en place.",
+            rep.with_material
+        ));
+    }
+    if rep.unreadable > 0 {
+        return Some(format!(
+            "[forge] ⚠️ CHIFFREMENT DE CHAMP (intégrations) — {} configuration(s) avec secret ; {} scellée(s) à ce boot ; {} ILLISIBLE(S) (la clé {KEY_VAR} ne correspond pas au chiffré stocké) : l'intégration concernée REFUSERA de partir plutôt que de se présenter sans authentification.",
+            rep.with_material, rep.sealed_now, rep.unreadable
+        ));
+    }
+    Some(format!(
+        "[forge] CHIFFREMENT DE CHAMP (intégrations) — {} configuration(s) avec secret, chiffré AU REPOS (clé {KEY_VAR}) ; {} scellée(s) à ce boot.",
+        rep.with_material, rep.sealed_now
+    ))
 }
 
 /// Ligne d'ÉTAT à imprimer au boot. Le silence n'est jamais une option : soit on annonce que le

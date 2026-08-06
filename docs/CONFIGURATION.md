@@ -56,6 +56,7 @@ via le [wizard](FIRST_DEPLOYMENT.md)).
 |---|---|---|---|
 | `FORGE_PKG_DIR` | Racine du package python `forge` spawné par la console (cwd du spawn). | `..` | `/opt/forge` |
 | `FORGE_PYTHON` | Interpréteur pour `python3 -m forge.cli`. | `python3` | `python3` |
+| `FORGE_DURATIONS` | Kill-switch du **magasin de durées observées** (`<ledger>.durations`, sidecar du ledger de l'engagement — donc **par engagement**, supprimé avec lui). Il agrège la durée des tirs **PAR KIND DE MODULE UNIQUEMENT** (jamais par cible/hôte/URL : ce serait un journal de reconnaissance survivant à l'engagement), en taille **bornée** (≤ 256 kinds, agrégat fixe par kind, ~quelques Kio). Il sert **uniquement** à l'ordre de SOUMISSION du préchauffage intra-vague (`engine._preheat_key`) — **aucune** décision de tir, de scope ou de ROE n'en dépend. `0`/`off`/`false`/`no` ⇒ aucun fichier, aucune mesure, préchauffage sur `action.cost` (comportement d'avant la version). Sans `--ledger`, il n'y a de toute façon aucun fichier. | *(actif)* | `0` |
 | `FORGE_RUN_TIMEOUT` | Budget max (s) d'un run C2-light (watchdog). | `1800` (binaire) · `900` (image) | `900` |
 | `FORGE_PLAN_TIMEOUT` | Budget max (s) d'un **dry-plan** (`POST /api/plan`, inerte). Au dépassement : le **groupe** moteur est tué et l'appelant reçoit `504 plan_timeout` (jamais d'aperçu partiel). Valeur invalide ou `0` → défaut. | `300` | `60` |
 | `FORGE_PLAN_MAX_CONCURRENT` | Nombre de **dry-plans en vol** simultanés (chacun spawne un process moteur). Au-delà : `429 plan_busy` — erreur explicite, **pas** de file d'attente muette. **Relue à chaque dry-plan** (comme `FORGE_PLAN_TIMEOUT`) : une modification prend effet sans redémarrer. Valeur invalide ou `0` → défaut. | `2` | `4` |
@@ -79,7 +80,7 @@ via le [wizard](FIRST_DEPLOYMENT.md)).
 
 | Variable | Sens | Défaut | Exemple |
 |---|---|---|---|
-| `FORGE_FIELD_KEY` | **[SECRET]** Passphrase de **chiffrement de champ** du **matériel d'authentification** d'engagement (bearers/cookies/en-têtes des comptes de test). **Build PAR DÉFAUT** — AEAD pur Rust, aucune dépendance ajoutée. Requise **uniquement** si un engagement porte un contexte `auth` : sans elle, toute écriture de matériel est refusée (**503** `field_key_missing`) et un run dont le matériel est scellé **refuse de démarrer** (jamais un contexte vide en silence). Accepte `FORGE_FIELD_KEY_FILE`. | *(vide)* | *(passphrase forte)* |
+| `FORGE_FIELD_KEY` | **[SECRET]** Passphrase de **chiffrement de champ**. Couvre (a) le **matériel d'authentification** d'engagement (bearers/cookies/en-têtes des comptes de test) et (b) les **trois secrets d'intégration** : jeton de source de détection, jeton de canal de notification, `client_secret` SSO. **Build PAR DÉFAUT** — AEAD pur Rust, aucune dépendance ajoutée. Requise **uniquement** si l'un de ces secrets est posé : sans elle, toute écriture est refusée (**503** `field_key_missing`), un run dont le matériel est scellé **refuse de démarrer**, et une intégration dont le secret est scellé **refuse de partir** (jamais un contexte ni une authentification vides en silence). Accepte `FORGE_FIELD_KEY_FILE`. | *(vide)* | *(passphrase forte)* |
 | `FORGE_DB_KEY` | **[SECRET]** Clé SQLCipher (chiffrement **intégral**). La console émet `PRAGMA key` **avant toute requête**. Sans elle (sur build chiffré), la base est **illisible** (fail-closed). **Ignorée** sur le build par défaut (base en clair). | *(vide)* | *(passphrase forte)* |
 
 Les deux couches sont **indépendantes et composables** : `FORGE_FIELD_KEY` protège les credentials
@@ -88,6 +89,19 @@ prix d'un backend crypto système à la compilation (image `encryption`).
 
 Voir [`DEPLOYMENT.md` §1.6](DEPLOYMENT.md#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut)
 (champ), [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION.md#6-image-encryption-chiffrement-au-repos--sqlcipher-opt-in) (SQLCipher).
+
+### 1.4bis Egress sortant — ancres de confiance TLS
+
+Les **trois** sorties TCP de la console (échange de jeton OIDC, webhook de notification, fetcher de
+source de détection) passent par un **seam TLS unique** (`console/src/tls.rs`) dont la vérification est
+**pleine et sans échappatoire** : chaîne, nom d'hôte, validité. Le magasin de CA du **système n'est pas
+lu** (posture sans dépendance OS : pas de `schannel`/`security-framework`/`openssl`), donc une **AC
+privée d'entreprise** doit être **fournie explicitement**.
+
+| Variable | Sens | Défaut | Exemple |
+|---|---|---|---|
+| `FORGE_EXTRA_CA_PEM` | Ancres de confiance **SUPPLÉMENTAIRES** au format **PEM verbatim** (un ou plusieurs blocs `CERTIFICATE`), **ajoutées** aux racines Mozilla — jamais substituées. Pour un IdP OIDC ou un collecteur signé par l'AC privée de l'organisation. **La vérification reste PLEINE** : ce n'est **pas** un interrupteur, il n'existe toujours aucun moyen d'accepter une chaîne inconnue, un mauvais nom d'hôte ou un certificat périmé. **FAIL-CLOSED** : un PEM illisible/vide/invalide **tue le boot** (`FATAL`, code 2) plutôt que de dégrader en silence vers « pas d'ancre ». Accepte `FORGE_EXTRA_CA_PEM_FILE` (un **chemin**). | *(vide = racines Mozilla seules)* | `-----BEGIN CERTIFICATE-----…` |
+| `FORGE_ALLOW_INTERNAL_INTEGRATIONS` | Autorise les fetches d'**intégration** à joindre une cible **interne/privée** (SIEM/IdP on-prem). Absent/faux ⇒ deny-list SSRF (loopback, RFC1918, link-local, métadonnées cloud, ULA). **Ne couvre pas** l'envoi d'un secret en clair vers une cible **publique** : ce refus-là n'a **aucune** échappatoire. | *(vide = refusé)* | `1` |
 
 ### 1.5 Migration via API (opt-in, pré-provision)
 

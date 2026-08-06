@@ -122,6 +122,50 @@ pub(crate) fn resolve_guarded_with(host: &str, port: u16, allow_internal: bool) 
     Ok(addr)
 }
 
+// =====================================================================================
+//  UN SECRET D'INTÉGRATION NE TRAVERSE PAS UN RÉSEAU PUBLIC EN CLAIR — règle PARTAGÉE
+// =====================================================================================
+
+/// UNE seule implémentation de la règle, pour les DEUX egress de la console qui portent un secret :
+/// le webhook de notification (`notify_channels::plan_delivery`) et le fetcher de source de détection
+/// ([`http_get_blocking_with`]). Elle vivait en copie INLINE dans le premier, et n'existait PAS DU TOUT
+/// dans le second — un `generic_http`/`plume` en `http://` vers une source PUBLIQUE mettait donc son
+/// `Authorization:` en clair sur Internet, sans qu'aucune garde ne s'y oppose. C'était le clair
+/// résiduel le plus grave qui restait : il est fermé ici, et la règle se vérifie désormais UNE fois.
+///
+/// LA RÈGLE, et ses bornes exactes :
+///   - pas de secret => rien à protéger, OK (le fetch anonyme en clair reste servi) ;
+///   - `https://` => le secret part dans une session dont le certificat est VÉRIFIÉ (chaîne + nom +
+///     validité, ancres Mozilla ET, si configurée, la CA privée d'entreprise — cf. `tls::EXTRA_CA_VAR`).
+///     C'est la VOIE PROPRE, et depuis le knob de CA d'entreprise elle est ouverte même à un
+///     collecteur/IdP interne signé par l'organisation ;
+///   - `http://` vers une cible PUBLIQUE avec un secret => REFUS, et **aucune** variable d'environnement
+///     ne l'ouvre. Le jeton partirait sur le fil ; rien ne justifie ça ;
+///   - `http://` vers une cible INTERNE explicitement autorisée => SERVI (clair GOUVERNÉ on-prem). Voir
+///     `docs/ADMINISTRATION.md` : ce cas N'A PAS été resserré, délibérément — un collecteur on-prem qui
+///     n'expose AUCUN écouteur TLS (le déploiement Plume de référence, `PLUME_URL`/`PLUME_TOKEN`) n'a
+///     alors plus aucune voie, et le knob de CA d'entreprise ne l'aide pas (il fournit une ancre, pas un
+///     écouteur). Le resserrer aurait tué l'usage au lieu de le déplacer.
+pub(crate) fn reject_cleartext_secret(
+    scheme: crate::tls::Scheme,
+    has_secret: bool,
+    target_is_internal: bool,
+) -> Result<(), String> {
+    if !has_secret || scheme.is_tls() {
+        return Ok(());
+    }
+    if target_is_internal {
+        return Ok(()); // clair GOUVERNÉ on-prem — l'accès interne a déjà été autorisé en amont
+    }
+    Err(
+        "secret d'intégration configuré vers une cible PUBLIQUE en HTTP clair — refusé (le jeton \
+         partirait en clair sur le fil). Utiliser https:// (TLS vérifié ; une CA privée d'entreprise \
+         se fournit via FORGE_EXTRA_CA_PEM), viser un collecteur interne (avec \
+         FORGE_ALLOW_INTERNAL_INTEGRATIONS=1), ou retirer le secret."
+            .to_string(),
+    )
+}
+
 /// Schéma d'authentification HTTP du fetcher intégré. `mtls` n'est PAS ici : le seam TLS n'installe
 /// AUCUN certificat client (`with_no_client_auth`) — un endpoint mTLS passe par un kind délégué au
 /// collecteur Python.
@@ -130,6 +174,20 @@ pub(crate) enum HttpAuth {
     Basic(String),                         // base64 de user:pass -> `Authorization: Basic ...`
     Bearer(String),                        // token -> `Authorization: Bearer ...`
     ApiKeyHeader { name: String, value: String }, // en-tête d'API arbitraire (ex: X-API-Key: ...)
+}
+
+impl HttpAuth {
+    /// Ce schéma mettra-t-il RÉELLEMENT un secret sur le fil ? Miroir EXACT des gardes du `match` qui
+    /// écrit les en-têtes plus bas (une valeur vide n'émet aucun en-tête, donc ne porte aucun secret) —
+    /// les deux doivent rester d'accord, sinon on refuserait un fetch anonyme ou on laisserait passer
+    /// un jeton.
+    pub(crate) fn carries_secret(&self) -> bool {
+        match self {
+            HttpAuth::None => false,
+            HttpAuth::Basic(v) | HttpAuth::Bearer(v) => !v.is_empty(),
+            HttpAuth::ApiKeyHeader { name, value } => !name.is_empty() && !value.is_empty(),
+        }
+    }
 }
 
 /// Construit l'`HttpAuth` du fetcher intégré depuis la config source. `basic`/`bearer` prennent
@@ -180,6 +238,11 @@ pub(crate) fn http_get_blocking_with(
     // métadonnées/RFC1918/ULA sur l'IP RÉSOLUE que l'on va connecter (anti-DNS-rebinding), sauf escape-hatch.
     // Le TLS ne remplace PAS cette garde : chiffrer un fetch vers 169.254.169.254 ne le rend pas légitime.
     let addr = resolve_guarded_with(&t.host, t.port, allow_internal)?;
+    // PAS DE SECRET EN CLAIR VERS UNE CIBLE PUBLIQUE — règle PARTAGÉE avec le webhook de notification
+    // (cf. `reject_cleartext_secret`). Ce site ne l'avait PAS : une source de détection publique en
+    // `http://` avec un bearer/basic mettait son `Authorization:` sur le fil. Le refus tombe AVANT le
+    // connect, donc avant qu'un seul octet ne parte.
+    reject_cleartext_secret(t.scheme, auth.carries_secret(), reject_internal_addr(&addr).is_err())?;
     let mut stream = crate::tls::connect(&addr, &t.host, t.scheme, timeout)?;
     let (authority, path) = (&t.authority, &t.path);
     let mut req = format!(
@@ -389,6 +452,65 @@ mod ssrf_tests {
         let e = super::http_get_blocking_with("http://127.0.0.1:9/x", &HttpAuth::None, t, true)
             .expect_err("port fermé");
         assert!(!e.contains("deny-list"), "escape-hatch : plus de refus de politique, obtenu: {e}");
+    }
+
+    /// LA RÈGLE PARTAGÉE « pas de secret en clair vers une cible publique », PURE et exhaustive. Elle
+    /// gouverne DEUX egress (webhook de notification + fetcher de source de détection) ; la prouver ici
+    /// une fois vaut pour les deux.
+    ///
+    /// MUTATION : rendre `Ok(())` inconditionnel -> ce test rougit (2 assertions).
+    #[test]
+    fn cleartext_secret_rule_is_exhaustive() {
+        use crate::tls::Scheme::{Http, Https};
+        use super::reject_cleartext_secret;
+        // Sans secret : le clair reste servi, interne comme public (fetch anonyme, webhook sans jeton).
+        assert!(reject_cleartext_secret(Http, false, false).is_ok(), "pas de secret, cible publique");
+        assert!(reject_cleartext_secret(Http, false, true).is_ok(), "pas de secret, cible interne");
+        // En TLS : le secret est protégé par une session au certificat VÉRIFIÉ -> servi partout.
+        assert!(reject_cleartext_secret(Https, true, false).is_ok(), "secret + https public : la voie propre");
+        assert!(reject_cleartext_secret(Https, true, true).is_ok(), "secret + https interne (CA d'entreprise)");
+        // LE REFUS : clair + secret + cible PUBLIQUE. Aucune variable d'environnement ne l'ouvre.
+        let e = reject_cleartext_secret(Http, true, false).expect_err("clair + secret + public => refus");
+        assert!(e.contains("en clair"), "refus nommé attendu, obtenu: {e}");
+        assert!(e.contains("FORGE_EXTRA_CA_PEM"), "le refus doit indiquer la VOIE PROPRE, obtenu: {e}");
+        // NON RESSERRÉ, DÉLIBÉRÉMENT : clair + secret vers un collecteur INTERNE déjà autorisé. Le
+        // resserrer tuerait le déploiement on-prem de référence (PLUME_URL/PLUME_TOKEN sans écouteur
+        // TLS) ; cf. le doc de `reject_cleartext_secret` et docs/ADMINISTRATION.md.
+        assert!(reject_cleartext_secret(Http, true, true).is_ok(), "clair GOUVERNÉ on-prem : conservé");
+    }
+
+    /// LE FETCHER APPLIQUE la règle — pas seulement la fonction pure. Une source de détection PUBLIQUE
+    /// en `http://` avec un bearer est refusée AVANT le connect (donc avant qu'un octet ne parte), et le
+    /// message ne recrache PAS le jeton. C'était le trou : ce site n'avait aucune garde de ce genre.
+    ///
+    /// MUTATION : retirer l'appel `reject_cleartext_secret(...)` de `http_get_blocking_with` -> rouge.
+    #[test]
+    fn fetcher_refuses_a_secret_in_the_clear_towards_a_public_target() {
+        use crate::HttpAuth;
+        use std::time::Duration;
+        const TOKEN: &str = "JETON-SOURCE-NE-DOIT-PAS-PARTIR";
+        let t = Duration::from_millis(200);
+        // 8.8.8.8 : cible PUBLIQUE, résolue sans DNS -> le test ne dépend pas du réseau, et le refus
+        // tombe avant toute tentative de connexion.
+        for auth in [
+            HttpAuth::Bearer(TOKEN.to_string()),
+            HttpAuth::Basic(TOKEN.to_string()),
+            HttpAuth::ApiKeyHeader { name: "X-API-Key".into(), value: TOKEN.into() },
+        ] {
+            let e = super::http_get_blocking_with("http://8.8.8.8/api/alerts", &auth, t, false)
+                .expect_err("secret en clair vers une cible publique => refus");
+            assert!(e.contains("en clair"), "refus credential-en-clair attendu, obtenu: {e}");
+            assert!(!e.contains(TOKEN), "le refus ne doit PAS recracher le jeton: {e}");
+        }
+        // CONTRÔLE : la MÊME cible publique en clair SANS secret reste servie par la politique — l'échec
+        // qui subsiste est de CONNEXION, pas de politique. Sans ce contrôle, le refus ci-dessus pourrait
+        // venir de n'importe quoi d'autre sur ce chemin.
+        let e = super::http_get_blocking_with("http://8.8.8.8:9/x", &HttpAuth::None, t, false)
+            .expect_err("port fermé");
+        assert!(!e.contains("en clair"), "sans secret, aucun refus de politique, obtenu: {e}");
+        // `carries_secret` est le prédicat exact des en-têtes émis : une valeur VIDE n'émet rien.
+        assert!(!HttpAuth::Bearer(String::new()).carries_secret(), "valeur vide => aucun en-tête, aucun secret");
+        assert!(!HttpAuth::None.carries_secret());
     }
 
     /// `resolve_guarded_with` est LE goulot résolution+garde : impossible d'obtenir une adresse interne

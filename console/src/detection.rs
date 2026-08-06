@@ -190,10 +190,50 @@ pub(crate) fn ds_auth_type(cfg: &Value) -> String {
         .unwrap_or("none").trim().to_string()
 }
 
-/// Secret d'auth (`auth.secret`) — MANIÉ COMME UN SECRET DE SESSION : lu UNIQUEMENT pour construire
-/// l'en-tête d'auth du fetch et pour la rédaction ; jamais renvoyé/journalisé/ledgerisé.
+/// Secret d'auth (`auth.secret`) TEL QU'AU REPOS — possiblement une ENVELOPPE `forge:fenc1:…` depuis
+/// que ce champ est chiffré au repos (`field_crypto`). MANIÉ COMME UN SECRET DE SESSION : jamais
+/// renvoyé/journalisé/ledgerisé.
+///
+/// ⚠️ CE N'EST PAS LE PLAINTEXT. N'utiliser que pour les usages qui n'en ont pas besoin — le booléen
+/// `secret_set` (« un secret est-il posé ? ») et la réinjection `keep_secret` (qui recopie l'enveloppe
+/// telle quelle, sans jamais l'ouvrir). Pour METTRE le secret sur le fil, passer par
+/// [`open_source_config`], qui est FAILLIBLE — c'est tout l'intérêt.
 pub(crate) fn ds_secret(cfg: &Value) -> String {
-    cfg.get("auth").and_then(|a| a.get("secret")).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    crate::field_crypto::config_field_raw(cfg, crate::field_crypto::DS_SECRET_PATH)
+}
+
+/// Config de source avec son secret OUVERT, pour le POINT D'USAGE (en-tête d'auth du fetch Rust,
+/// passage au collecteur Python, rédaction des messages d'erreur).
+///
+/// FAILLIBLE, DÉLIBÉRÉMENT : sans la clé, ou si l'enveloppe n'ouvre pas, on rend `Err` NOMMÉE plutôt
+/// qu'un secret vide. Un secret vide se présenterait comme « source anonyme » et la collecte partirait
+/// SANS authentification — un 401 diagnostiqué comme une panne de SIEM, alors que la cause est une clé
+/// de champ absente. C'est exactement la dégradation silencieuse que le chiffrement de champ interdit.
+pub(crate) fn open_source_config(cfg: &Value) -> Result<Value, String> {
+    crate::field_crypto::open_config_secret(
+        cfg,
+        crate::field_crypto::DS_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    )
+}
+
+/// Config de source avec son secret SCELLÉ, pour la PERSISTANCE. IDEMPOTENT (une valeur déjà
+/// enveloppée — cas de la réinjection `keep_secret` — est laissée telle quelle). Config sans secret =>
+/// no-op, aucune clé requise. FAIL-CLOSED : un secret en clair à sceller sans clé => `Err`, on refuse
+/// de persister un credential en clair.
+pub(crate) fn seal_source_config(cfg: &Value) -> Result<Value, String> {
+    crate::field_crypto::seal_config_secret(
+        cfg,
+        crate::field_crypto::DS_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    )
+}
+
+/// Secret PLAINTEXT destiné à la RÉDACTION des messages (défense en profondeur). BEST-EFFORT : si
+/// l'enveloppe n'ouvre pas, on retombe sur la valeur brute — un message ne peut de toute façon pas
+/// porter un plaintext que le processus n'a jamais su produire.
+pub(crate) fn ds_secret_for_redaction(cfg: &Value) -> String {
+    open_source_config(cfg).map(|c| ds_secret(&c)).unwrap_or_else(|_| ds_secret(cfg))
 }
 
 /// Remplace toute occurrence du secret par `[secret rédigé]` dans un message destiné à une réponse/au
@@ -763,6 +803,12 @@ pub(crate) async fn collect_detections(app: &App, since: i64) -> Result<Vec<(Str
 /// TLS. Le seam `crate::tls` le fait désormais, donc une source https est servie EN RUST — sans spawn de
 /// processus sur une route de LECTURE, et avec la même deny-list SSRF que le reste.
 pub(crate) async fn collect_detections_with(app: &App, cfg: &Value, since: i64) -> Result<Vec<(String, i64, i64)>, String> {
+    // POINT D'USAGE UNIQUE du secret de source : il est OUVERT ici, une fois, pour les DEUX chemins en
+    // aval (fetch Rust et collecteur Python — ce dernier reçoit la config par ENV et ne saurait pas
+    // ouvrir une enveloppe). FAILLIBLE À DESSEIN : clé absente ou enveloppe illisible => `Err` NOMMÉE,
+    // qui ressort en fail-open LISIBLE (`source_reachable:false` + raison). Jamais une collecte partie
+    // SANS authentification, qui se lirait comme un SIEM en panne.
+    let cfg = &open_source_config(cfg)?;
     match ds_kind(cfg).as_str() {
         "none" | "" => {
             Err("source de détection non configurée (kind=none) — couverture indisponible".to_string())
@@ -825,7 +871,7 @@ pub(crate) async fn fetch_purple_coverage(app: &App, fired: Vec<(String, Option<
         // `kind` et `source_configured` pour que le SPA/rapport rende l'état AUTONOME (source absente,
         // normal) distinctement d'une source configurée mais injoignable (anomalie).
         Err(e) => {
-            let mut fo = purple_fail_open(&disp, &fired, &redact_secret(&e, &ds_secret(&cfg)));
+            let mut fo = purple_fail_open(&disp, &fired, &redact_secret(&e, &ds_secret_for_redaction(&cfg)));
             if let Value::Object(ref mut m) = fo {
                 m.insert("source_kind".into(), json!(kind));
                 m.insert("source_configured".into(), json!(source_configured));
@@ -885,7 +931,10 @@ pub(crate) async fn detection_test(State(app): State<App>, headers: HeaderMap, J
     } else {
         app.detection_config()
     };
-    let secret = ds_secret(&cfg);
+    // RÉDACTION : il faut le PLAINTEXT pour pouvoir le masquer — `ds_secret` ne rend plus qu'une
+    // enveloppe. Best-effort : si elle n'ouvre pas, on n'a jamais su produire ce plaintext, donc aucun
+    // message ne peut le porter.
+    let secret = ds_secret_for_redaction(&cfg);
     let kind = ds_kind(&cfg);
     // since=0 : test « prends tout » (le but est de vérifier la joignabilité, pas une fenêtre précise).
     let result = collect_detections_with(&app, &cfg, 0).await;
@@ -985,9 +1034,24 @@ pub(crate) async fn detection_source_set(State(app): State<App>, headers: Header
         )
             .into_response();
     }
-    // WRITE-ONLY : si keep_secret et aucun nouveau secret fourni, réinjecte le secret déjà posé.
+    // WRITE-ONLY : si keep_secret et aucun nouveau secret fourni, réinjecte le secret déjà posé (sous
+    // sa forme AU REPOS — l'enveloppe est recopiée telle quelle, jamais ouverte pour être re-scellée).
     let keep = body.get("keep_secret").and_then(|v| v.as_bool()).unwrap_or(false);
     let cfg = apply_kept_secret(&app, &incoming, keep);
+    // CHIFFREMENT AU REPOS du secret d'intégration, AVANT la persistance. Fail-closed : sans clé de
+    // champ, on REFUSE d'écrire un jeton en clair dans `settings` (503 nommé), on ne le fait pas
+    // « quand même ». Idempotent sur une valeur déjà scellée (chemin keep_secret).
+    let cfg = match seal_source_config(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if crate::field_crypto::is_key_missing(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (code, Json(json!({"error": "field_key_missing", "why": e}))).into_response();
+        }
+    };
     {
         // Écriture ISOLÉE (le bloc n'appelle aucun autre helper `&Connection`) -> routée par le seam pour
         // la portabilité PG. SQL/params/erreur VERBATIM de `settings_set` (INSERT..ON CONFLICT déjà

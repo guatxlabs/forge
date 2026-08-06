@@ -322,7 +322,19 @@ pub(crate) async fn setup_provision(State(app): State<App>, _headers: HeaderMap,
             let _ = crate::settings_set_store(&store, "operator_policy", &v.to_string());
         }
         if let Some(v) = body.get("detection_source").filter(|v| v.is_object()) {
-            let _ = crate::settings_set_store(&store, "detection_source", &v.to_string());
+            // Le jeton de la source est SCELLÉ avant d'entrer en base (même chemin que POST
+            // /api/detection/source). Sans clé de champ, `seal_source_config` rend `Err` : le wizard
+            // écrit alors la config SANS elle plutôt qu'un jeton en clair. Le boot l'annoncera
+            // bruyamment (`settings_boot_status_line`) — un secret en clair n'est jamais TU.
+            match crate::detection::seal_source_config(v) {
+                Ok(sealed) => {
+                    let _ = crate::settings_set_store(&store, "detection_source", &sealed.to_string());
+                }
+                Err(_) => {
+                    let redacted = crate::detection::redact_detection_config(v);
+                    let _ = crate::settings_set_store(&store, "detection_source", &redacted.to_string());
+                }
+            }
         }
         if let Some(ttl) = body.get("session_ttl").and_then(|v| v.as_i64()).filter(|&n| n > 0) {
             let _ = crate::settings_set_store(&store, "session_ttl", &ttl.to_string());

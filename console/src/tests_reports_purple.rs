@@ -646,6 +646,10 @@ use crate::testutil::*;
     /// (non secret) conservé. Flux réel via build_router (provision admin -> cookie -> GET).
     #[tokio::test]
     async fn detection_source_get_redacts_secret_and_admin_gated() {
+        // Secret d'intégration CHIFFRÉ AU REPOS : ce test traverse un handler HTTP, il lui faut donc
+        // la clé de champ du processus de test (le refus fail-closed « clé absente » est couvert par
+        // l'API PURE de `field_crypto`).
+        crate::field_crypto::test_install_process_key();
         let ledger = tmp_path("det-src-get-ledger");
         let app = test_app(&ledger);
         let router = build_router(app.clone(), "web");
@@ -780,6 +784,10 @@ use crate::testutil::*;
     /// sans le re-saisir, et le secret n'apparaît JAMAIS dans une réponse ni le ledger.
     #[tokio::test]
     async fn detection_source_set_admin_gated_ledgered_and_write_only_secret() {
+        // Secret d'intégration CHIFFRÉ AU REPOS : ce test traverse un handler HTTP, il lui faut donc
+        // la clé de champ du processus de test (le refus fail-closed « clé absente » est couvert par
+        // l'API PURE de `field_crypto`).
+        crate::field_crypto::test_install_process_key();
         let ledger = tmp_path("det-src-set-ledger");
         let app = test_app(&ledger);
         let router = build_router(app.clone(), "web");
@@ -815,10 +823,24 @@ use crate::testutil::*;
         assert!(!b.contains(secret), "la réponse de sauvegarde ne DOIT jamais contenir le secret : {b}");
         assert!(b.contains("\"saved\":true"));
         {
-            
             let stored = settings_get(&app.db(), "detection_source").expect("detection_source persisté");
-            assert!(stored.contains("generic_http"), "config persistée");
-            assert!(stored.contains(secret), "secret persisté verbatim côté serveur (jamais renvoyé)");
+            assert!(stored.contains("generic_http"), "config persistée (la partie NON secrète reste lisible)");
+            // RUPTURE DE COMPORTEMENT NOMMÉE (CHANGELOG.md + docs/ADMINISTRATION.md) : ce secret était
+            // persisté VERBATIM (l'assertion lisait `stored.contains(secret)`). Il est désormais SCELLÉ
+            // au repos par `field_crypto` — même clé, même enveloppe que le matériel d'engagement.
+            assert!(!stored.contains(secret), "secret ENCORE EN CLAIR dans settings : {stored}");
+            let raw = crate::field_crypto::config_field_raw(
+                &serde_json::from_str::<Value>(&stored).expect("config stockée = json"),
+                crate::field_crypto::DS_SECRET_PATH,
+            );
+            assert!(crate::field_crypto::is_sealed(&raw), "le secret stocké doit être une enveloppe : {raw}");
+            // ALLER-RETOUR par le CHEMIN DE PRODUCTION : `open_source_config` le rouvre -> le fetch
+            // authentifié fonctionne toujours.
+            let opened = crate::detection::open_source_config(
+                &serde_json::from_str::<Value>(&stored).unwrap(),
+            )
+            .expect("l'enveloppe s'ouvre");
+            assert_eq!(crate::ds_secret(&opened), secret, "le secret ouvert est celui qui a été posé");
         }
         let last = read_ledger_lines(&ledger).pop().expect("ledger source.set");
         assert_eq!(last["kind"], "console.detection.source.set");
@@ -834,10 +856,17 @@ use crate::testutil::*;
         let r = http_raw(addr, &post_req("/api/detection/source", &cfg2, &format!("Cookie: forge_session={tok}\r\n"))).await;
         assert_eq!(parse_status(&r), 200, "keep_secret -> 200 : {r}");
         {
-            
             let stored = settings_get(&app.db(), "detection_source").expect("detection_source persisté");
             assert!(stored.contains("soc.local:9/y"), "endpoint mis à jour");
-            assert!(stored.contains(secret), "secret conservé via keep_secret (write-only) : {stored}");
+            assert!(!stored.contains(secret), "secret ENCORE EN CLAIR après keep_secret : {stored}");
+            // Le secret est CONSERVÉ — mesuré par l'OUVERTURE, pas par une sous-chaîne. Le chemin
+            // keep_secret recopie l'ENVELOPPE telle quelle (jamais ouverte pour être re-scellée), donc
+            // il fonctionne même sans clé de champ.
+            let opened = crate::detection::open_source_config(
+                &serde_json::from_str::<Value>(&stored).unwrap(),
+            )
+            .expect("l'enveloppe conservée s'ouvre");
+            assert_eq!(crate::ds_secret(&opened), secret, "secret conservé via keep_secret (write-only)");
         }
         // 4) GET ne renvoie JAMAIS le secret, même après le round-trip keep_secret.
         let r = http_raw(addr, &get_req("/api/detection/source", &format!("Cookie: forge_session={tok}\r\n"))).await;

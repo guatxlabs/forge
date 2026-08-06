@@ -46,7 +46,7 @@ Exécute une **liste d'actions** via la gate ROE.
 | `--arm` | Arme l'engagement (couche 1). Sans lui, tout reste `DRY_RUN`. |
 | `--approve <KIND:TARGET> …` | Approuve des actions (couche 4). |
 | `--mode propose\|auto` | `propose` (défaut, approbation requise) ou `auto` (approuve tout). |
-| `--ledger <L>` | Ledger d'engagement (JSONL) — chaque décision y est scellée + checkpoint en fin. |
+| `--ledger <L>` | Ledger d'engagement (JSONL) — chaque décision y est scellée + checkpoint en fin. Écrit aussi ses **sidecars** : `<L>.ed25519` (clé de signature, `0600`), `<L>.hwm` (anti-troncature) et `<L>.durations` (durées de tir agrégées **par kind de module**, jamais par cible — voir `FORGE_DURATIONS` dans [Configuration](CONFIGURATION.md)). |
 | `--report <R>` | Écrit le rapport markdown (sinon stdout). |
 | `--reason <txt>` | Motif journalisé à l'armement. |
 | `--memory <M>` | Store mémoire (dedup des findings). |

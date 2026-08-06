@@ -89,6 +89,15 @@ CIDR/IP — une IP `out_scope` ne se contourne pas via une URL ou un `host:port`
 - **Sauvegardes** : **toujours chiffrées** (argon2id + XChaCha20-Poly1305), l'archive embarque la clé
   de signature ET la base. AEAD authentifie corps **et** en-tête ; une passphrase absente/mauvaise ⇒
   refus, rien écrit. Voir [`BACKUP.md`](BACKUP.md).
+- **Magasin de durées** (`<ledger>.durations`, sidecar du ledger) : agrégat **par kind de module**
+  (`web.testssl` → n observations + anneau de durées), **jamais par cible**. Une agrégation par cible
+  aurait été un **journal de reconnaissance persistant après l'engagement** (quels hôtes existaient,
+  lesquels étaient lents, lesquels filtraient) ; c'est pour cela qu'elle n'existe pas. La garde est
+  **structurelle**, pas déclarative : `DurationStore.record()` refuse toute clé qui n'est pas un
+  identifiant de module (une IP littérale, un `host:port`, une URL ou un chemin sont rejetés), à
+  l'écriture **comme à la relecture** d'un fichier trafiqué. Portée **par engagement** (il suit le
+  ledger dédié) et désactivable (`FORGE_DURATIONS=0`). Il ne pilote **que** l'ordre de soumission du
+  préchauffage — aucune décision de tir n'en dépend.
 
 ## 6. Gestion des secrets
 

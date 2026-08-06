@@ -20,6 +20,22 @@
 //!      vérificateur maison. Un TLS qui ne vérifie rien est du clair déguisé — c'est précisément par là
 //!      que les échappatoires entrent. `tls_source_carries_no_verification_escape_hatch` fige ça au
 //!      niveau SOURCE (le crate n'a pas le droit d'ouvrir l'API `dangerous` de rustls).
+//!   2bis. **CA PRIVÉE D'ENTREPRISE — une ANCRE DE PLUS, JAMAIS un contrôle DE MOINS.** Le magasin de
+//!      CA du SYSTÈME n'est PAS lu (c'est ce qui évite `schannel`/`security-framework`/`openssl` —
+//!      invariant #4). Sans knob, un déploiement dont l'IdP OIDC ou le collecteur est signé par la CA
+//!      privée de l'organisation n'avait que de mauvaises issues, dont le retour au clair. Le knob
+//!      [`EXTRA_CA_VAR`] fournit donc des ancres SUPPLÉMENTAIRES, explicitement posées par l'opérateur.
+//!      La DISTINCTION est tout le sujet, et elle est prouvée par un COUPLE de tests :
+//!        - AJOUTER une ancre ÉLARGIT l'ensemble des émetteurs de confiance. La chaîne est toujours
+//!          validée jusqu'à une ancre, le nom d'hôte toujours vérifié, l'expiration toujours honorée —
+//!          `enterprise_ca_pem_makes_its_own_chain_verify` (l'ancre fournie fait ABOUTIR le handshake)
+//!          FACE À `enterprise_ca_pem_still_rejects_another_ca`, `…_still_verifies_the_hostname` et
+//!          `…_still_honours_expiry` (les trois autres contrôles MORDENT toujours, ancre en place) ;
+//!        - RELÂCHER un contrôle (accepter n'importe quelle chaîne, ne plus vérifier le nom, ignorer
+//!          l'expiration) reste INTERDIT et le demeure au niveau SOURCE. `with_root_certificates`
+//!          accepte des ancres supplémentaires SANS jamais toucher à l'API `dangerous` de rustls.
+//!      FAIL-CLOSED : un PEM configuré mais illisible/invalide fait ÉCHOUER LE BOOT ([`preflight`]) ;
+//!      il ne dégrade JAMAIS en silence vers « pas d'ancre » (l'opérateur croirait sa CA en place).
 //!   3. **Le handshake décide AVANT le premier octet applicatif** — [`connect`] le mène à son terme, donc
 //!      un certificat non fiable fait échouer la CONNEXION, pas une lecture ultérieure. Aucune requête
 //!      (donc aucun secret) n'est écrite sur une session dont le pair n'est pas prouvé.
@@ -154,32 +170,143 @@ impl Write for Conn {
 /// fasse tourner la boucle indéfiniment. Franchie => erreur nommée, jamais une attente infinie.
 const HANDSHAKE_ROUNDS: usize = 8;
 
-/// Config client TLS PARTAGÉE, construite UNE fois (`OnceLock`) : provider `ring` EXPLICITE + racines
-/// Mozilla `webpki-roots` + vérificateur webpki STANDARD (chaîne + nom d'hôte) + aucun certificat client.
+// =================================================================================================
+//  ANCRES DE CONFIANCE SUPPLÉMENTAIRES — la CA privée d'entreprise
+// =================================================================================================
+
+/// Variable d'environnement portant le PEM des ancres de confiance SUPPLÉMENTAIRES (CA privée
+/// d'entreprise). MOTIF MAISON `secret_env` : la variable porte le PEM VERBATIM,
+/// `FORGE_EXTRA_CA_PEM_FILE` porte un CHEMIN vers le fichier PEM (montage Docker/k8s ConfigMap) —
+/// la variable directe prime, le jumeau `_FILE` est le repli.
+pub(crate) const EXTRA_CA_VAR: &str = "FORGE_EXTRA_CA_PEM";
+
+/// Résout le PEM d'ancres supplémentaires depuis l'environnement.
+/// `Ok(None)` = RIEN de configuré (cas de l'immense majorité des installs — aucune ancre ajoutée).
+/// `Ok(Some(pem))` = PEM à parser. `Err` = configuré mais INEXPLOITABLE.
+///
+/// POURQUOI PAS `secret_env::secret_from_env` TEL QUEL, alors qu'on en suit le motif : ce helper est
+/// FAIL-SOFT par contrat (un `<VAR>_FILE` illisible rend `None` + un avertissement, pour que le repli
+/// de l'appelant — auto-génération, refus — s'engage). Ici, `None` signifierait « pas d'ancre
+/// d'entreprise » : l'opérateur croirait sa CA installée, et le premier handshake vers son IdP
+/// échouerait sans que rien ne désigne le PEM. C'est la DÉGRADATION SILENCIEUSE que tout ce travail
+/// interdit. On duplique donc la PRÉCÉDENCE (identique, testée) mais pas la POLITIQUE D'ÉCHEC : ici un
+/// PEM configuré et illisible est une ERREUR, remontée jusqu'au boot.
+pub(crate) fn extra_ca_pem_from_env() -> Result<Option<String>, String> {
+    // 1) Variable directe posée & non blanche : c'est le PEM lui-même.
+    if let Ok(v) = std::env::var(EXTRA_CA_VAR) {
+        if !v.trim().is_empty() {
+            return Ok(Some(v));
+        }
+    }
+    // 2) `<VAR>_FILE` : la variable porte un CHEMIN, le PEM vit dans le fichier monté.
+    let file_var = format!("{EXTRA_CA_VAR}_FILE");
+    let path = match std::env::var(&file_var) {
+        Ok(p) if !p.trim().is_empty() => p,
+        _ => return Ok(None), // 3) rien de configuré — aucune ancre supplémentaire, cas par défaut
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
+        Ok(_) => Err(format!(
+            "{file_var} désigne un fichier VIDE — aucune ancre de confiance n'en sortirait, et le \
+             déploiement croirait sa CA d'entreprise installée. Refus (fail-closed)."
+        )),
+        // On nomme la VARIABLE et le KIND d'erreur d'E/S, jamais le contenu (un PEM n'est pas secret,
+        // mais la discipline « on ne recrache pas ce qu'on lit » est la même partout).
+        Err(e) => Err(format!(
+            "{file_var} illisible ({}) — impossible de charger la CA d'entreprise. Refus (fail-closed) \
+             plutôt que de démarrer SANS l'ancre que l'opérateur croit avoir posée.",
+            e.kind()
+        )),
+    }
+}
+
+/// Parse un PEM en ancres de confiance. FAIL-CLOSED de bout en bout : un bloc mal formé, un contenu
+/// sans aucun `CERTIFICATE`, ou un certificat que le vérificateur refuse comme ancre => `Err`. Il
+/// n'existe AUCUN chemin qui ignore un bloc en silence et rende quand même une liste amputée.
+fn parse_extra_anchors(pem: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let mut out = Vec::new();
+    for item in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        out.push(item.map_err(|e| {
+            format!("{EXTRA_CA_VAR} : PEM invalide ({e:?}) — aucune ancre chargée (fail-closed)")
+        })?);
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "{EXTRA_CA_VAR} : aucun bloc CERTIFICATE dans le PEM fourni — refus (fail-closed). Une CA \
+             d'entreprise se fournit en PEM `-----BEGIN CERTIFICATE-----`."
+        ));
+    }
+    Ok(out)
+}
+
+/// Bâtit un `ClientConfig` : provider `ring` EXPLICITE + racines Mozilla `webpki-roots` + les ancres
+/// SUPPLÉMENTAIRES éventuelles + vérificateur webpki STANDARD (chaîne + nom d'hôte + validité) +
+/// aucun certificat client.
 ///
 /// Le provider est passé EXPLICITEMENT plutôt que pris du défaut de process : c'est ce qui garantit
 /// qu'aucun autre backend crypto (aws-lc-rs) ne puisse être installé sous nos pieds par une dépendance
 /// tierce. `with_root_certificates` installe le vérificateur webpki standard — il n'y a, dans ce crate,
-/// AUCUN chemin qui le remplace.
+/// AUCUN chemin qui le remplace, et AJOUTER une ancre ne le change pas : `roots` est l'ENSEMBLE des
+/// émetteurs de confiance, pas un interrupteur de vérification. Le PEM est un PARAMÈTRE (jamais une
+/// lecture d'env ici) — c'est ce qui rend le couple de tests déterministe.
+pub(crate) fn build_client_config(extra_ca_pem: Option<&str>) -> Result<Arc<rustls::ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if roots.is_empty() {
+        // Fail-closed : sans racine, TOUT certificat serait non vérifiable — on refuse de bâtir une
+        // config plutôt que de laisser un appelant croire qu'il parle TLS.
+        return Err("aucune racine CA compilée (webpki-roots vide) — TLS refusé".to_string());
+    }
+    if let Some(pem) = extra_ca_pem {
+        for der in parse_extra_anchors(pem)? {
+            // `add` VALIDE le certificat comme ancre (il doit être une CA exploitable) : un PEM qui
+            // porte autre chose est REFUSÉ ici, pas silencieusement rangé dans le magasin.
+            roots.add(der).map_err(|e| {
+                format!("{EXTRA_CA_VAR} : certificat refusé comme ancre de confiance ({e}) — fail-closed")
+            })?;
+        }
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("configuration TLS invalide: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(cfg))
+}
+
+/// Config client TLS PARTAGÉE DU PROCESSUS, construite UNE fois (`OnceLock`) depuis l'environnement.
+/// Une seule politique de confiance pour tout le binaire — y compris les ancres d'entreprise.
 fn client_config() -> Result<Arc<rustls::ClientConfig>, String> {
     static CFG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-    CFG.get_or_init(|| {
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        if roots.is_empty() {
-            // Fail-closed : sans racine, TOUT certificat serait non vérifiable — on refuse de bâtir une
-            // config plutôt que de laisser un appelant croire qu'il parle TLS.
-            return Err("aucune racine CA compilée (webpki-roots vide) — TLS refusé".to_string());
-        }
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let cfg = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|e| format!("configuration TLS invalide: {e}"))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Ok(Arc::new(cfg))
-    })
-    .clone()
+    CFG.get_or_init(|| build_client_config(extra_ca_pem_from_env()?.as_deref()))
+        .clone()
+}
+
+/// CONTRÔLE AU BOOT des ancres d'entreprise. Appelé AVANT que quoi que ce soit ne démarre, pour qu'un
+/// PEM illisible/invalide tue le boot BRUYAMMENT au lieu de se découvrir au premier handshake, des
+/// heures plus tard, sous la forme d'un « certificat inconnu » qui ne désigne pas la vraie cause.
+///
+/// `Ok(None)` : aucune ancre configurée — boot STRICTEMENT silencieux (byte-identique pour l'immense
+/// majorité des installs). `Ok(Some(ligne))` : ancres chargées, à annoncer. `Err(raison)` : FATAL.
+pub(crate) fn preflight() -> Result<Option<String>, String> {
+    let pem = extra_ca_pem_from_env()?;
+    let count = match &pem {
+        Some(p) => parse_extra_anchors(p)?.len(),
+        None => 0,
+    };
+    // Construit RÉELLEMENT la config : un PEM qui parse mais dont un certificat n'est pas une ancre
+    // exploitable doit tomber ICI, au boot, pas au premier egress.
+    build_client_config(pem.as_deref())?;
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "[forge] TLS — {count} ancre(s) de confiance d'ENTREPRISE chargée(s) depuis {EXTRA_CA_VAR} \
+         (en PLUS des racines Mozilla). La vérification reste PLEINE : chaîne validée, nom d'hôte \
+         vérifié, expiration honorée — une ancre de plus, aucun contrôle de moins."
+    )))
 }
 
 /// LE point de sortie TCP de la console. Connecte `addr` — **déjà résolue ET déjà passée par la
@@ -194,13 +321,32 @@ fn client_config() -> Result<Arc<rustls::ClientConfig>, String> {
 /// `verify_host` est le nom d'hôte de l'URL (jamais l'IP résolue) : c'est lui qui est présenté en SNI et
 /// contre lequel le certificat est vérifié.
 pub(crate) fn connect(addr: &SocketAddr, verify_host: &str, scheme: Scheme, timeout: Duration) -> Result<Conn, String> {
+    connect_with(addr, verify_host, scheme, timeout, None)
+}
+
+/// Cœur de [`connect`], avec la POLITIQUE DE CONFIANCE en PARAMÈTRE (`None` => la config partagée du
+/// processus, bâtie depuis l'environnement). Même patron exact que
+/// `net::http_get_blocking_with(_, allow_internal)` et `notify_channels::plan_delivery(_, allow_internal)`,
+/// et pour la même raison : ce qui décide d'un REFUS doit être injectable, sinon la direction du refus
+/// (« cette chaîne-là passe, cette autre non ») n'est pas mesurable de façon déterministe. La
+/// production n'a qu'UN appelant, [`connect`], qui passe `None`.
+pub(crate) fn connect_with(
+    addr: &SocketAddr,
+    verify_host: &str,
+    scheme: Scheme,
+    timeout: Duration,
+    cfg: Option<Arc<rustls::ClientConfig>>,
+) -> Result<Conn, String> {
     let sock = TcpStream::connect_timeout(addr, timeout).map_err(|e| format!("connexion {addr} échouée: {e}"))?;
     sock.set_read_timeout(Some(timeout)).ok();
     sock.set_write_timeout(Some(timeout)).ok();
     if !scheme.is_tls() {
         return Ok(Conn::Plain(sock));
     }
-    let cfg = client_config()?;
+    let cfg = match cfg {
+        Some(c) => c,
+        None => client_config()?,
+    };
     let server_name = rustls::pki_types::ServerName::try_from(verify_host.to_string())
         .map_err(|_| format!("nom d'hôte TLS invalide: {verify_host}"))?;
     let mut session = rustls::ClientConnection::new(cfg, server_name)

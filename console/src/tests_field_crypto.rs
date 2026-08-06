@@ -256,3 +256,200 @@ fn field_sealed_database_survives_the_encrypted_backup_round_trip() {
         }
     }
 }
+
+// =================================================================================================
+//  SECRETS D'INTÉGRATION (source de détection / canal de notification / client_secret SSO)
+//
+//  Ces trois-là étaient les DERNIERS credentials vivants encore EN CLAIR au repos. Ils avaient été
+//  écartés du premier lot pour une raison technique réelle : les sceller EXIGEAIT de rendre leurs
+//  chemins de lecture FAILLIBLES — `sso::load_config` rendait un `Option`, où un déchiffrement échoué
+//  se serait présenté comme « SSO non configuré ». L'ordre suivi a donc été : d'abord la faillibilité
+//  avec un échec LISIBLE, ensuite le scellement. Les tests ci-dessous mesurent les DEUX moitiés.
+// =================================================================================================
+
+/// Les trois configs d'intégration, chacune avec son canari, telles qu'un admin les pose.
+fn integration_configs(ds: &str, ch: &str, sso: &str) -> Vec<(&'static str, &'static [&'static str], Value)> {
+    vec![
+        (
+            "detection_source",
+            crate::field_crypto::DS_SECRET_PATH,
+            json!({"kind": "generic_http", "endpoint": "https://siem.example/api/alerts",
+                   "auth": {"type": "bearer", "secret": ds}}),
+        ),
+        (
+            "notify_channel",
+            crate::field_crypto::CH_SECRET_PATH,
+            json!({"kind": "webhook", "enabled": true, "endpoint": "https://hooks.example/x",
+                   "auth": {"type": "bearer", "secret": ch}}),
+        ),
+        (
+            "sso.config",
+            crate::field_crypto::SSO_SECRET_PATH,
+            json!({"issuer": "https://idp.example", "client_id": "forge-console",
+                   "client_secret": sso, "redirect_uri": "https://console.example/api/sso/callback"}),
+        ),
+    ]
+}
+
+/// [PREUVE D'ILLISIBILITÉ SUR DISQUE] Aucun des trois secrets d'intégration n'apparaît dans les octets
+/// du fichier SQLite quand il est écrit par le chemin de production (scellement AVANT persistance).
+///
+/// CONTRE-EXEMPLE INTÉGRÉ (ce qui rend le test non vacuous) : la MÊME sonde, sur la MÊME base, TROUVE
+/// les canaris quand les mêmes valeurs sont écrites SANS scellement. Si le scellement disparaît, ce test
+/// rougit ; si la sonde cesse de fonctionner, le contre-exemple rougit.
+/// MUTATION-PROVABLE : retirer `seal_config_secret` du chemin d'écriture -> ROUGE immédiat.
+#[test]
+fn integration_secrets_are_absent_from_the_sqlite_file_on_disk() {
+    const KEY: &str = "cle-de-champ-integrations-disque";
+    const DS: &str = "DISK-CANARY-DS-SECRET-q1w2";
+    const CH: &str = "DISK-CANARY-CH-SECRET-e3r4";
+    const SSO: &str = "DISK-CANARY-SSO-SECRET-t5y6";
+    let path = tmp_path("forge-fieldcrypto-settings-disk.db");
+
+    {
+        let app = test_app_on_file(&path);
+        for (skey, field, cfg) in integration_configs(DS, CH, SSO) {
+            // CHEMIN DE PRODUCTION : la config est SCELLÉE puis persistée (exactement ce que font
+            // `detection_source_set`, `channel_set` et `sso::config_set`).
+            let sealed = crate::field_crypto::seal_config_secret(&cfg, field, Some(KEY)).expect("scellement");
+            crate::settings_set_store(&app.store(), skey, &sealed.to_string()).expect("persistance");
+        }
+        drop(app); // fermeture = tout est poussé sur le disque
+    }
+
+    let bytes = on_disk_bytes(&path);
+    assert!(!bytes.is_empty(), "le fichier de base doit exister et être non vide");
+    for canary in [DS, CH, SSO] {
+        assert!(!contains(&bytes, canary), "SECRET D'INTÉGRATION LISIBLE SUR DISQUE : '{canary}' dans {path}");
+    }
+    // Le NON-SECRET reste lisible : l'admin doit pouvoir ré-éditer sa config sans la clé. C'est le
+    // périmètre MESURÉ du chiffrement, pas un chiffrement « de tout ».
+    assert!(contains(&bytes, "siem.example"), "l'endpoint (non secret) reste lisible");
+    assert!(contains(&bytes, "forge-console"), "le client_id (non secret) reste lisible");
+    assert!(contains(&bytes, "bearer"), "le TYPE d'auth (non secret) reste lisible");
+
+    // CONTRE-EXEMPLE — la sonde DÉTECTE bien le clair quand il y en a.
+    {
+        let app = test_app_on_file(&path);
+        for (skey, _, cfg) in integration_configs(DS, CH, SSO) {
+            crate::settings_set_store(&app.store(), &format!("{skey}.enclair"), &cfg.to_string()).unwrap();
+        }
+        drop(app);
+    }
+    let bytes = on_disk_bytes(&path);
+    for canary in [DS, CH, SSO] {
+        assert!(
+            contains(&bytes, canary),
+            "CONTRE-EXEMPLE EN ÉCHEC : la sonde disque ne détecte pas '{canary}' pourtant écrit en clair — \
+             l'assertion d'illisibilité ci-dessus ne prouverait alors RIEN"
+        );
+    }
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{path}{s}"));
+    }
+}
+
+/// [MIGRATION D'UNE BASE HÉRITÉE] Les configs d'intégration écrites AVANT cette version portent leur
+/// secret EN CLAIR. La passe de boot les SCELLE EN PLACE, idempotemment. Sans clé, rien n'est converti
+/// mais l'état est COMPTÉ et ANNONCÉ — jamais tu, jamais maquillé en « chiffré ».
+///
+/// MUTATION-PROVABLE : neutraliser l'écriture de `migrate_seal_settings_secrets` -> le canari reste en
+/// clair dans la colonne -> ROUGE.
+#[test]
+fn legacy_integration_secrets_are_sealed_in_place_at_boot() {
+    const KEY: &str = "cle-de-champ-migration-integrations";
+    const DS: &str = "LEGACY-DS-CANARY-a1";
+    const CH: &str = "LEGACY-CH-CANARY-b2";
+    const SSO: &str = "LEGACY-SSO-CANARY-c3";
+    let path = tmp_path("forge-fieldcrypto-settings-migrate.db");
+    let app = test_app_on_file(&path);
+
+    // Base « héritée » : les trois configs sont écrites EN CLAIR, comme le faisait la version d'avant.
+    for (skey, _, cfg) in integration_configs(DS, CH, SSO) {
+        crate::settings_set_store(&app.store(), skey, &cfg.to_string()).unwrap();
+    }
+    // ... plus une config SANS secret : elle ne doit JAMAIS être comptée ni touchée.
+    crate::settings_set_store(&app.store(), "notify_channel.vide", &json!({"kind": "none"}).to_string()).unwrap();
+
+    // (a) SANS CLÉ : rien n'est converti, mais le clair est COMPTÉ et l'annonce de boot le CRIE.
+    let rep = crate::field_crypto::migrate_seal_settings_secrets(&app.store(), None);
+    assert_eq!(rep.with_material, 3, "les trois configs à secret sont comptées");
+    assert_eq!((rep.sealed_now, rep.still_plaintext), (0, 3), "le clair restant est COMPTÉ, jamais tu");
+    let line = crate::field_crypto::settings_boot_status_line(&rep, false).expect("annonce de boot obligatoire");
+    assert!(line.contains("EN CLAIR"), "l'annonce nomme le problème: {line}");
+    assert!(line.contains(crate::field_crypto::KEY_VAR), "l'annonce nomme la variable à poser: {line}");
+
+    // (b) AVEC CLÉ : conversion en place, le canari QUITTE la colonne, la valeur reste EXPLOITABLE.
+    let rep = crate::field_crypto::migrate_seal_settings_secrets(&app.store(), Some(KEY));
+    assert_eq!((rep.with_material, rep.sealed_now, rep.still_plaintext), (3, 3, 0));
+    for ((skey, field, _), canary) in integration_configs(DS, CH, SSO).into_iter().zip([DS, CH, SSO]) {
+        let stored = crate::settings_get_store(&app.store(), skey).expect("ligne présente");
+        assert!(!stored.contains(canary), "'{canary}' encore en clair après migration : {stored}");
+        let v: Value = serde_json::from_str(&stored).unwrap();
+        assert!(crate::field_crypto::is_sealed(&crate::field_crypto::config_field_raw(&v, field)), "enveloppe attendue");
+        let opened = crate::field_crypto::open_config_secret(&v, field, Some(KEY)).expect("ouverture post-migration");
+        assert_eq!(crate::field_crypto::config_field_raw(&opened, field), canary, "valeur intacte après migration");
+    }
+
+    // (c) IDEMPOTENCE : rejouée à chaque boot, la passe ne re-chiffre RIEN (aucun churn d'écriture).
+    let before = crate::settings_get_store(&app.store(), "detection_source").unwrap();
+    let rep = crate::field_crypto::migrate_seal_settings_secrets(&app.store(), Some(KEY));
+    assert_eq!((rep.with_material, rep.sealed_now, rep.still_plaintext), (3, 0, 0), "2e passe = no-op");
+    assert_eq!(before, crate::settings_get_store(&app.store(), "detection_source").unwrap(), "aucun ré-chiffrement");
+
+    drop(app);
+    for s in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{path}{s}"));
+    }
+}
+
+/// [FAILLIBILITÉ — LA MOITIÉ QUI DEVAIT VENIR EN PREMIER] Un secret d'intégration scellé qui n'ouvre
+/// PAS produit une erreur NOMMÉE, jamais un secret vide ni une config « absente ».
+///
+/// C'est la raison technique qui avait fait écarter ces trois champs du premier lot : un déchiffrement
+/// échoué qui se présente comme « non configuré » est indistinguable d'une console jamais configurée —
+/// l'admin part chercher chez son IdP au lieu de regarder sa clé de champ.
+///
+/// MUTATION : faire rendre `Ok(String::new())` à `open_config_secret` quand la clé manque -> ce test
+/// rougit sur les deux premières assertions.
+#[test]
+fn an_unopenable_integration_secret_is_a_named_error_never_an_empty_one() {
+    const KEY: &str = "la-bonne-cle-de-champ";
+    const OTHER: &str = "une-autre-cle-de-champ";
+    let (_, field, cfg) = integration_configs("s-ds", "s-ch", "s-sso").remove(0);
+    let sealed = crate::field_crypto::seal_config_secret(&cfg, field, Some(KEY)).expect("scellement");
+
+    // 1) CLÉ ABSENTE -> refus NOMMÉ (et reconnaissable par `is_key_missing`, ce qui donne un 503 dédié).
+    let e = crate::field_crypto::open_config_secret(&sealed, field, None).expect_err("clé absente => Err");
+    assert!(crate::field_crypto::is_key_missing(&e), "refus « clé absente » reconnaissable: {e}");
+    // 2) MAUVAISE CLÉ -> refus NOMMÉ, distinct du précédent.
+    let e = crate::field_crypto::open_config_secret(&sealed, field, Some(OTHER)).expect_err("mauvaise clé => Err");
+    assert_eq!(e, crate::field_crypto::ERR_UNSEAL, "refus « illisible » attendu: {e}");
+    // 3) BONNE CLÉ -> aller-retour exact (CONTRE-EXEMPLE : sans lui, « Err » pourrait venir de partout).
+    let opened = crate::field_crypto::open_config_secret(&sealed, field, Some(KEY)).expect("bonne clé");
+    assert_eq!(crate::field_crypto::config_field_raw(&opened, field), "s-ds");
+
+    // 4) PASS-THROUGH — une config PAS ENCORE MIGRÉE (secret en clair) s'ouvre SANS clé : un upgrade en
+    //    place continue de fonctionner jusqu'à la passe de boot.
+    let plain = crate::field_crypto::open_config_secret(&cfg, field, None).expect("clair => pass-through");
+    assert_eq!(crate::field_crypto::config_field_raw(&plain, field), "s-ds");
+    // 5) SANS SECRET — aucune clé n'est jamais exigée d'une console qui n'a pas d'intégration authentifiée.
+    let bare = json!({"kind": "generic_http", "endpoint": "https://siem.example/x"});
+    assert!(crate::field_crypto::seal_config_secret(&bare, field, None).is_ok(), "no-op strict, sans clé");
+    assert!(crate::field_crypto::open_config_secret(&bare, field, None).is_ok(), "no-op strict, sans clé");
+    // 6) IDEMPOTENCE du scellement (chemin `keep_secret` : l'enveloppe est recopiée, jamais re-scellée).
+    let twice = crate::field_crypto::seal_config_secret(&sealed, field, Some(KEY)).expect("re-scellement");
+    assert_eq!(twice, sealed, "une valeur déjà scellée est laissée telle quelle");
+}
+
+/// [INVENTAIRE COMPLET] La liste FERMÉE `SETTINGS_SECRETS` doit couvrir les clés `settings` réellement
+/// utilisées par les modules. Renommer `notify_channels::SETTINGS_KEY` ou `sso::CFG_KEY` sans mettre
+/// l'inventaire à jour laisserait ce secret EN CLAIR au repos, en silence — ce test l'en empêche.
+#[test]
+fn settings_secrets_inventory_covers_every_module_key() {
+    let keys: Vec<&str> = crate::field_crypto::SETTINGS_SECRETS.iter().map(|(k, _)| *k).collect();
+    for expected in ["detection_source", crate::notify_channels::SETTINGS_KEY, crate::sso::CFG_KEY] {
+        assert!(keys.contains(&expected), "clé settings porteuse de secret hors inventaire : {expected}");
+    }
+    assert_eq!(keys.len(), 3, "inventaire figé — ajouter une intégration à secret impose de l'inscrire ici");
+}

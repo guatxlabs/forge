@@ -10,6 +10,107 @@ All notable changes to Forge are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Une CA privée d'entreprise devient vérifiable — sans lire le magasin système, et sans relâcher un
+  seul contrôle** (`FORGE_EXTRA_CA_PEM` / `FORGE_EXTRA_CA_PEM_FILE`). Le seam TLS livré juste avant
+  vérifie contre les racines **Mozilla compilées** ; le magasin de CA du **système n'est pas lu**, et
+  c'est exactement ce qui évite `schannel`, `security-framework` et `openssl`. Cette posture avait un
+  prix documenté : un déploiement dont l'IdP OIDC ou le collecteur est signé par **sa propre AC**
+  n'avait que de **mauvaises** issues — dont le **retour au clair**, précisément ce que « pas de clair »
+  refuse.
+
+  **La distinction est tout le sujet.** Ce knob **AJOUTE une ancre** que l'opérateur **fournit
+  explicitement** ; il ne **retire aucun contrôle**. La chaîne est toujours validée jusqu'à une ancre, le
+  **nom d'hôte** toujours vérifié, l'**expiration** toujours honorée. `with_root_certificates` accepte des
+  ancres supplémentaires **sans jamais toucher** à l'API `dangerous` de rustls — la garde de **source**
+  qui interdit au crate de l'ouvrir reste **verte**, inchangée.
+
+  **Prouvé par un COUPLE, pas par une affirmation.** Le test de rejet existant (fixture AC non fiable +
+  feuille signée) reste rouge-quand-muté, et **quatre** tests l'encadrent : la **même** AC fournie en PEM
+  fait **ABOUTIR** le handshake (le knob opère) ; une **AUTRE** AC le laisse **ÉCHOUER** (il vérifie, il
+  ne gobe pas) ; le **nom d'hôte** hors SAN est refusé **ancre en place** ; une feuille **EXPIRÉE** signée
+  par l'ancre fournie est refusée **ancre en place**, avec pour contre-exemple la **même** ancre + le
+  **même** sujet + le **même** SAN sur une feuille **non expirée**, qui aboutit — la seule variable entre
+  les deux moitiés étant la fenêtre de validité.
+
+  **Fail-closed au boot** : un PEM configuré mais illisible, vide ou invalide **tue le démarrage**
+  (`[forge] FATAL`, code 2), il ne dégrade **jamais** vers « pas d'ancre » — sinon l'opérateur croirait sa
+  CA installée et découvrirait le contraire au premier handshake, sous un « émetteur inconnu » qui ne
+  désigne pas la cause. C'est la **seule** différence assumée avec le motif maison `secret_env`, qui est
+  fail-**soft** par contrat. Rien de configuré ⇒ **aucune** ligne au boot. **Zéro nouvelle dépendance**
+  (le parseur PEM est déjà dans `rustls-pki-types`) ; openssl-freedom vérifiée par commande (**0** hit).
+
+- **Les trois derniers secrets en clair au repos sont scellés — mais la faillibilité d'abord.** Le jeton
+  de **source de détection**, le jeton de **canal de notification** et le **`client_secret` SSO** vivaient
+  en clair dans `settings`. Ils avaient été écartés du premier lot de chiffrement de champ pour une raison
+  technique **réelle**, consignée : les sceller **exige** de rendre faillibles `ds_secret`, `ch_secret` et
+  `sso::load_config` — or ce dernier rendait un **`Option`**, où un déchiffrement raté serait devenu
+  « **SSO non configuré** », soit la **dégradation silencieuse** que tout ce travail interdit.
+
+  L'ordre imposé a été suivi. **(1) Faillibilité, avec un échec LISIBLE** : `sso::load_config` rend
+  désormais `Result<Option<SsoConfig>, String>` — **trois** issues distinctes : `Ok(None)` = non configuré
+  (**403** `sso_unconfigured`), `Ok(Some)` = utilisable, `Err` = **configuré mais illisible** (**503**
+  `sso_secret_unreadable`). Les deux autres secrets sont ouverts à leur **point d'usage unique**
+  (`collect_detections_with`, `deliver_blocking`) : sans clé, l'intégration **refuse de partir** avec une
+  raison nommée, au lieu de se présenter **sans authentification** — un 401 que l'admin diagnostiquerait
+  comme une panne de SIEM. **(2) Scellement** : `field_crypto` réutilisé tel quel — **même** clé
+  (`FORGE_FIELD_KEY`), **même** enveloppe `forge:fenc1:`, **aucune** ré-implémentation d'AEAD.
+
+  **Illisibilité prouvée SUR LES OCTETS DU DISQUE** (fichier `.db` + `-wal` + `-shm`), avec son
+  contre-exemple : la **même** sonde, sur la **même** base, **trouve** les canaris quand les mêmes valeurs
+  sont écrites sans scellement — sans quoi « absent » pourrait l'être pour la mauvaise raison. Une base
+  existante est **convertie au boot**, en place et idempotemment ; sans clé, rien n'est converti mais le
+  clair restant est **compté et annoncé** — jamais tu. Périmètre **mesuré** : seule la **valeur** du
+  secret est scellée ; `kind`, `endpoint`, `auth.type`, `issuer`, `client_id` restent lisibles (l'admin
+  doit pouvoir ré-éditer sa config sans la clé, et ce ne sont pas des credentials).
+- **Le préchauffage intra-vague sait enfin ce qu'est une action LENTE — il la MESURE.** L'ordonnancement
+  des soumissions (`engine._preheat_order`) estimait la lenteur avec `action.cost`, parce que c'était le
+  seul porteur EXISTANT. Or `cost` est une donnée de **gouvernance** (le prix qu'on accepte de payer),
+  pas une mesure de **durée** : les deux corrèlent souvent, rien ne le garantit — et le cerveau ne
+  renseigne un coût explicite que pour les kinds de sa table, **tout le reste part au défaut 1.0**, y
+  compris des modules réellement lents. Le résidu était consigné avec son bloqueur : « ni le ledger ni
+  les run-records n'horodatent à mieux que la seconde ». C'est ce bloqueur qui est levé.
+
+  **Instrumentation** : `engine._decide_blocking` chronomètre le **tir** à l'horloge **monotone**
+  (`time.monotonic`, jamais l'heure murale). Le **dry-run n'est PAS chronométré**, délibérément :
+  `dry()` est sans effet de bord par contrat, donc quasi instantané — mesurer une campagne non armée
+  apprendrait que `web.testssl` prend 3 ms et **empoisonnerait** le magasin. **Prix mesuré, pas
+  affirmé** : `1,23 µs` par observation en boucle serrée, et un écart **sous le bruit** (`-0,1 ms` sur
+  24 tirs) en mur-à-mur — à comparer à des **secondes** pour un vrai outil.
+
+  **Stockage — l'agrégat est PAR KIND, JAMAIS PAR CIBLE** (`forge/durations.py`). Ce n'est pas une
+  contrainte subie : un magasin de durées par-cible serait un **journal de reconnaissance persistant
+  après l'engagement** (« combien de temps l'hôte X a mis à répondre »), et le préchauffage n'a de toute
+  façon besoin que du kind. La garde est **structurelle** — `record()` refuse toute clé qui n'est pas un
+  identifiant de module, à l'écriture comme à la relecture d'un fichier trafiqué — et **prouvée sur les
+  octets écrits**, pas sur l'API. Taille **bornée** : ≤ 256 kinds (éviction déterministe), agrégat de
+  **taille fixe** par kind (compteur + anneau de 8 durées) — 10 000 tirs n'écrivent pas un octet de plus
+  que 10.
+
+  **Confiance sans modèle** : sous 3 observations, le kind n'a **pas** d'estimation (n=1 est du bruit) ;
+  au-delà, c'est la **médiane** de l'anneau (un tir qui échoue en 3 ms ne fait pas passer un kind lent
+  pour rapide), **quantifiée** à un chiffre significatif pour que deux kinds de lenteur comparable
+  restent dans le **même palier** — sans quoi la règle « palier complet ou rien » scinderait le groupe
+  d'actions lentes qu'elle existe pour protéger. Pas d'apprentissage, pas de seuil réglable.
+
+  **Repli EXACT** : sans magasin, ou avec un magasin sans aucune observation, `_preheat_key` rend
+  `action.cost` pour toute action — **mêmes paliers, même ordre, comportement d'avant à l'identique**.
+  C'est la première propriété testée, et sa mutation (casser le repli) rougit.
+
+  **Gain mesuré, et dit honnêtement** (`tests/bench_engine_parallel_order.py`, pool=4, 5 répétitions,
+  deux invocations indépendantes, dispersion intra-série ≤ 1,3 %) : sur les formes où `cost` **dit
+  vrai**, la durée observée ne rapporte **RIEN** — `straggler` 1,84 s → 1,83/1,84 s (dans le bruit),
+  `queue-large` et `uniform` inchangés. Elle ne rapporte **que** là où
+  `cost` **ment** — nouvelle forme `cost-lies` (un module lent resté au coût par défaut, un module
+  rapide sur-annoté) : `index` 1,88 s, `cost` **1,92 s** (le préchauffage par coût est alors **pire que
+  ne rien faire**), **observed 1,60 s** — soit **-16,8 %** contre le coût et **1,05x** le plancher
+  travail/pool au lieu de 1,26x. Le gain réel de ce chantier n'est donc pas « c'est plus rapide », c'est
+  « l'ordonnancement ne dépend plus d'une donnée qui n'a jamais promis d'être une durée ».
+
+  **Invariants intacts** : l'ordre d'**APPLICATION** ne bouge pas (ledger/findings/décisions identiques
+  au sériel, chaîne vérifiée des deux côtés), seul l'ordre de **SOUMISSION** change ; scope, ROE et
+  ledger restent fail-closed ; **zéro nouvelle dépendance**. Le magasin est **gelé** pour la durée d'un
+  run : deux runs sur le même magasin préchauffent à l'identique (le prix assumé : c'est le run
+  **suivant** qui profite des mesures, pas les vagues suivantes du même run).
 - **Chiffrement au repos du matériel d'authentification — dans le build PAR DÉFAUT, sans OpenSSL.** Le
   volet réseau venait d'être fermé (seam TLS) ; restait le repos. `docs/DEPLOYMENT.md` §1.5 le concédait :
   le build par défaut stocke la base **en clair**, et cette base porte désormais le **contexte auth
@@ -131,6 +232,43 @@ All notable changes to Forge are documented here. The format is based on
   exécution du binaire. Documentation : `docs/TOOLS_LIFECYCLE.md`.
 
 ### Changed
+- **Un secret de source de détection ne part plus en clair vers une cible PUBLIQUE** (installs existantes
+  — rupture **NOMMÉE**). Le fetcher de source n'avait **aucune** garde de ce genre : une source
+  `plume`/`generic_http` en **`http://`** vers une adresse **publique**, portant un `auth.secret`, mettait
+  son en-tête `Authorization:` **sur le fil**. Le canal de notification, lui, refusait déjà ce cas — la
+  règle existait donc, en **copie inline** dans un seul des deux egress. Elle est désormais **partagée**
+  (`net::reject_cleartext_secret`, une implémentation, vérifiée une fois) et **appliquée aux deux**. Le
+  refus tombe **avant la connexion** et **aucune** variable d'environnement ne l'ouvre. Correctifs :
+  passer la source en **`https://`** (une AC privée se fournit via `FORGE_EXTRA_CA_PEM`), ou retirer le
+  secret.
+
+  **Ce qui N'A PAS été resserré, et pourquoi — mesuré, pas supposé.** L'option envisagée était d'exiger
+  `https` **dès qu'un secret est configuré**, l'échappatoire ne couvrant plus que le cas *sans* secret.
+  Mesure faite : cela casse le déploiement **on-prem de référence** — un collecteur interne authentifié
+  qui n'expose **aucun écouteur TLS** (`PLUME_URL`/`PLUME_TOKEN` sur un segment privé, encodé par deux
+  tests existants). La CA d'entreprise n'aide pas ici : elle fournit une **ancre**, pas un **écouteur**.
+  Le resserrement aurait donc **tué** l'usage au lieu de le déplacer. `http://` + secret vers une cible
+  **interne** explicitement autorisée (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) reste donc **servi** — c'est
+  le clair **gouverné**, et il est nommé comme tel.
+
+- **Les secrets d'intégration ne sont plus persistés verbatim** (installs existantes — rupture
+  **NOMMÉE**). `settings.detection_source → auth.secret`, `settings.notify_channel → auth.secret` et
+  `settings.sso.config → client_secret` étaient stockés **en clair** ; ils sont désormais **scellés**
+  (`FORGE_FIELD_KEY`). Conséquences pratiques : (a) sans clé de champ, **poser** l'un de ces secrets par
+  l'API renvoie **503** `field_key_missing` au lieu de l'écrire en clair ; (b) un outil externe qui lisait
+  ces valeurs directement dans la base n'y trouvera plus qu'une enveloppe ; (c) `FORGE_FIELD_KEY` devient
+  un secret à **conserver** pour ces intégrations aussi — la perdre les rend illisibles, et l'intégration
+  **refuse de partir** plutôt que de se présenter sans authentification. Le chemin `keep_secret` (éditer
+  l'endpoint sans retaper le jeton) fonctionne **sans clé** : il recopie l'enveloppe telle quelle.
+- **Un nouveau fichier apparaît à côté du ledger d'un engagement : `<ledger>.durations`** (installs
+  existantes — rupture NOMMÉE). Sidecar au même titre que `<ledger>.hwm` et `<ledger>.ed25519`, créé au
+  premier `forge run`/`forge campaign` qui reçoit `--ledger` **et** tire au moins une action. Il porte
+  **uniquement** des durées agrégées **par kind de module** (aucune cible, aucun hôte, aucune URL), pèse
+  quelques Kio au plus, n'est **pas** un secret, et n'est **pas** dans la chaîne d'auditabilité (le
+  perdre ne casse rien : le préchauffage retombe sur `action.cost`). Conséquences pratiques : les
+  scripts de purge doivent l'inclure (`docs/UNINSTALL.md` mis à jour), et une exploitation qui n'en veut
+  pas pose `FORGE_DURATIONS=0` (aucun fichier créé, comportement d'avant à l'identique). Sans
+  `--ledger`, rien ne change : aucun fichier n'a jamais été écrit.
 - **The purple join now has THREE states, not two — and the headline rate got stricter.** The join
   between fired techniques (red) and SOC detections (blue) was a plain **string equality** on the
   `mitre` tag, which produced two measured defects.

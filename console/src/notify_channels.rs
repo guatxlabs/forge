@@ -22,7 +22,10 @@
 //!   4. SECRET WRITE-ONLY — le token du canal suit le motif maison (`detection_source`, contexte auth
 //!      d'engagement) : jamais re-servi en lecture (`GET` rend `secret_set: bool`), jamais journalisé,
 //!      jamais ledgerisé. `keep_secret:true` le conserve sans le retaper.
-//!   5. PAS DE CREDENTIAL EN CLAIR SUR UN RÉSEAU PUBLIC — la règle n'a pas changé, sa CONSÉQUENCE si.
+//!   5. PAS DE CREDENTIAL EN CLAIR SUR UN RÉSEAU PUBLIC — règle PARTAGÉE (`net::reject_cleartext_secret`),
+//!      plus une copie locale : le fetcher de source de détection l'applique désormais AUSSI (il n'avait
+//!      RIEN, et mettait son `Authorization:` en clair vers une source publique). La règle n'a pas changé
+//!      pour CE site, sa CONSÉQUENCE si.
 //!      La console parle désormais TLS nativement (seam `crate::tls`, certificat VÉRIFIÉ), donc :
 //!        - `https://` vers une cible PUBLIQUE avec un secret => AUTORISÉ. C'est ce qui rend Slack /
 //!          Teams / PagerDuty joignables, alors que le canal livré jusqu'ici ne pouvait atteindre qu'un
@@ -132,10 +135,39 @@ fn ch_auth_header(cfg: &Value) -> String {
     if h.is_empty() { "X-Forge-Token".to_string() } else { h.to_string() }
 }
 
-/// Secret du canal — MANIÉ COMME UN SECRET DE SESSION : lu UNIQUEMENT pour construire l'en-tête
-/// d'auth de l'envoi. Jamais renvoyé par une lecture d'API, jamais loggé, jamais ledgerisé.
+/// Secret du canal TEL QU'AU REPOS — possiblement une ENVELOPPE `forge:fenc1:…` depuis que ce champ
+/// est chiffré au repos (`field_crypto`). MANIÉ COMME UN SECRET DE SESSION : jamais renvoyé par une
+/// lecture d'API, jamais loggé, jamais ledgerisé.
+///
+/// ⚠️ CE N'EST PAS LE PLAINTEXT. Réservé aux usages qui n'en ont pas besoin : le booléen `secret_set`
+/// et la réinjection `keep_secret` (qui recopie l'enveloppe telle quelle). Pour METTRE le jeton sur le
+/// fil, la config passe d'abord par [`open_channel_config`], qui est FAILLIBLE.
 pub(crate) fn ch_secret(cfg: &Value) -> String {
-    cfg.get("auth").and_then(|a| a.get("secret")).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    crate::field_crypto::config_field_raw(cfg, crate::field_crypto::CH_SECRET_PATH)
+}
+
+/// Config de canal avec son jeton OUVERT, pour le POINT D'USAGE (construction de l'en-tête d'auth).
+///
+/// FAILLIBLE, DÉLIBÉRÉMENT : sans la clé de champ, ou si l'enveloppe n'ouvre pas, on rend `Err` NOMMÉE
+/// plutôt qu'un jeton vide. Un jeton vide partirait comme un webhook ANONYME — le collecteur répondrait
+/// 401 et l'admin diagnostiquerait un problème d'endpoint, pas une clé de champ absente.
+pub(crate) fn open_channel_config(cfg: &Value) -> Result<Value, String> {
+    crate::field_crypto::open_config_secret(
+        cfg,
+        crate::field_crypto::CH_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    )
+}
+
+/// Config de canal avec son jeton SCELLÉ, pour la PERSISTANCE. IDEMPOTENT (valeur déjà enveloppée
+/// laissée telle quelle — chemin `keep_secret`). Sans secret => no-op, aucune clé requise. FAIL-CLOSED :
+/// un jeton en clair à sceller sans clé => `Err`.
+pub(crate) fn seal_channel_config(cfg: &Value) -> Result<Value, String> {
+    crate::field_crypto::seal_config_secret(
+        cfg,
+        crate::field_crypto::CH_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    )
 }
 
 /// Copie de la config SANS le secret (ce qui peut être rendu à un client admin). Le reste est conservé
@@ -300,21 +332,13 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
             return Err(why.clone());
         }
     }
-    // CREDENTIAL EN CLAIR — un jeton de canal ne traverse JAMAIS un réseau public EN CLAIR. La condition
-    // s'est ASSOUPLIE avec le seam TLS, sans se relâcher : ce qui est refusé, c'est le CLAIR vers une
-    // cible PUBLIQUE avec un secret. En `https://` le jeton est protégé par une session dont le
-    // certificat a été vérifié -> une cible publique (Slack/Teams/PagerDuty) devient légitime. En
-    // `http://` vers une cible publique, le refus est INCHANGÉ. Le clair vers un collecteur INTERNE
-    // explicitement autorisé reste servi (cas on-prem gouverné).
+    // CREDENTIAL EN CLAIR — un jeton de canal ne traverse JAMAIS un réseau public EN CLAIR. La règle
+    // était CODÉE ICI, en copie unique ; elle vit désormais dans `net::reject_cleartext_secret`, PARTAGÉE
+    // avec le fetcher de source de détection (qui ne l'avait pas du tout). Sémantique INCHANGÉE pour ce
+    // site : https vers une cible publique => servi (Slack/Teams/PagerDuty) ; http vers une cible
+    // publique avec un secret => refusé ; http vers un collecteur interne autorisé => servi.
     let secret = ch_secret(cfg);
-    if !secret.is_empty() && internal.is_none() && !t.scheme.is_tls() {
-        return Err(
-            "secret de canal configuré vers une cible PUBLIQUE en HTTP clair — refusé (le jeton \
-             partirait en clair). Utiliser https:// (TLS vérifié), viser un collecteur interne (avec \
-             FORGE_ALLOW_INTERNAL_INTEGRATIONS=1), ou retirer le secret du canal."
-                .to_string(),
-        );
-    }
+    crate::net::reject_cleartext_secret(t.scheme, !secret.is_empty(), internal.is_some())?;
     let auth_header = if secret.is_empty() {
         None
     } else {
@@ -382,6 +406,10 @@ fn post_blocking(d: &Delivery, body: &[u8], timeout: Duration) -> Result<u16, St
 /// valeur explicite. Rend `Ok(status)` ou `Err(raison NOMMÉE)` — la raison est destinée au ledger et à
 /// l'admin ; elle ne contient jamais le corps ni le secret.
 pub(crate) fn deliver_blocking(cfg: &Value, payload: &Value, allow_internal: bool) -> Result<u16, String> {
+    // POINT D'USAGE UNIQUE du jeton de canal : OUVERT ici, une fois, juste avant le plan. `plan_delivery`
+    // reste donc PURE et reçoit un secret en clair — c'est ce qui garde ses tests déterministes.
+    // FAILLIBLE : clé absente / enveloppe illisible => `Err` NOMMÉE, ledgerisée comme un échec d'envoi.
+    let cfg = &open_channel_config(cfg)?;
     let d = plan_delivery(cfg, allow_internal)?;
     let body = serde_json::to_vec(payload).map_err(|e| format!("sérialisation du corps échouée: {e}"))?;
     post_blocking(&d, &body, SEND_TIMEOUT)
@@ -595,6 +623,19 @@ pub(crate) async fn channel_set(State(app): State<App>, headers: HeaderMap, Json
     };
     let keep = body.get("keep_secret").and_then(|v| v.as_bool()).unwrap_or(false);
     let cfg = apply_kept_secret(&app, &canon, keep);
+    // CHIFFREMENT AU REPOS du jeton, AVANT la persistance. Fail-closed : sans clé de champ on REFUSE
+    // d'écrire un jeton en clair dans `settings` (503 nommé). Idempotent sur le chemin `keep_secret`.
+    let cfg = match seal_channel_config(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if crate::field_crypto::is_key_missing(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (code, Json(json!({"error": "field_key_missing", "why": e}))).into_response();
+        }
+    };
     {
         let store = app.store();
         if let Err(e) = crate::settings_set_store(&store, SETTINGS_KEY, &cfg.to_string()) {
@@ -808,9 +849,10 @@ mod tests {
     // =============================================================================
 
     /// Un secret de canal + une cible PUBLIQUE en HTTP CLAIR => REFUS (inchangé). La même config vers
-    /// une cible INTERNE explicitement autorisée passe (clair GOUVERNÉ on-prem). MUTATION : retirer le
-    /// bloc `!secret.is_empty() && internal.is_none() && !t.scheme.is_tls()` -> ce test rougit (le jeton
-    /// partirait en clair sur Internet).
+    /// une cible INTERNE explicitement autorisée passe (clair GOUVERNÉ on-prem). La règle est désormais
+    /// PARTAGÉE avec le fetcher de source de détection (`net::reject_cleartext_secret`) — ce test mesure
+    /// qu'elle est bien CÂBLÉE ICI. MUTATION : retirer l'appel `net::reject_cleartext_secret(...)` de
+    /// `plan_delivery` -> ce test rougit (le jeton partirait en clair sur Internet).
     #[test]
     fn secret_never_crosses_a_public_network_in_the_clear() {
         let e = plan_delivery(&cfg_webhook("http://8.8.8.8/hook", Some("s3cr3t-de-canal")), false).unwrap_err();
@@ -956,6 +998,9 @@ mod tests {
     /// `auth.remove("secret")` de `redact_channel_config` -> ce test rougit.
     #[tokio::test]
     async fn channel_secret_is_write_only_and_keepable() {
+        // Le jeton est CHIFFRÉ AU REPOS : ce test traverse le handler HTTP, il lui faut donc la clé de
+        // champ du processus de test (le refus fail-closed « clé absente » est couvert par l'API PURE).
+        crate::field_crypto::test_install_process_key();
         let led = testutil::tmp_path("notif-wo.jsonl");
         let app = testutil::test_app(&led);
         let adm = testutil::admin_session(&app, "adm");

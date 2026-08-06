@@ -53,7 +53,7 @@ use std::time::Duration;
 
 /// settings KV key holding the OIDC provider config (JSON object). `client_secret` is stored here
 /// verbatim (same substrate as `detection_source`'s secret) but is NEVER returned/logged/ledgered.
-const CFG_KEY: &str = "sso.config";
+pub(crate) const CFG_KEY: &str = "sso.config";
 /// Requested OIDC scopes (space-separated). `openid` is mandatory; email/profile feed user mapping.
 const SCOPES: &str = "openid email profile";
 /// Lifetime of a pending-auth row (state/nonce/verifier) — short-lived, one-time. Purged on expiry.
@@ -78,7 +78,11 @@ pub fn enabled(app: &App) -> bool {
 /// PRE-AUTH login screen (surfaced via `GET /api/setup/state`). PUBLIC signal — not a secret (it reveals
 /// only that SSO is offered, exactly what the button itself does). false in the community default.
 pub fn login_available(app: &App) -> bool {
-    enabled(app) && load_config(app).is_some()
+    // A config that EXISTS but whose sealed secret will not open still counts as "offered": hiding the
+    // button would turn a NAMED failure into a silent disappearance, and the admin would go hunting at
+    // the IdP. Clicking it yields the named 503 below instead. Only `Ok(None)` — genuinely unconfigured
+    // — hides it.
+    enabled(app) && !matches!(load_config(app), Ok(None))
 }
 
 /// HTTP fetch timeout for discovery / JWKS / token exchange (env `FORGE_SSO_HTTP_TIMEOUT`, default 10s).
@@ -128,20 +132,53 @@ fn clamp_sso_default_role(role: &str) -> String {
     .to_string()
 }
 
-/// Load + validate the stored config. Returns `None` (UNCONFIGURED) if issuer/client_id/client_secret/
-/// redirect_uri is missing — the flow is disabled until an admin sets them.
-fn load_config(app: &App) -> Option<SsoConfig> {
+/// The RAW stored `client_secret`, exactly as it sits AT REST — i.e. possibly a `forge:fenc1:…`
+/// envelope. Requires NO key: used for the write-only `client_secret_set` boolean and to carry the
+/// existing secret forward on an edit that omits it (the envelope is copied verbatim, never opened).
+fn stored_client_secret_raw(app: &App) -> String {
     let raw = {
         let store = app.store();
-        crate::settings_get_store(&store, CFG_KEY)?
+        crate::settings_get_store(&store, CFG_KEY)
     };
-    let v: Value = serde_json::from_str(&raw).ok()?;
+    raw.and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| crate::field_crypto::config_field_raw(&v, crate::field_crypto::SSO_SECRET_PATH))
+        .unwrap_or_default()
+}
+
+/// Load + validate the stored config, DECRYPTING the `client_secret` at rest.
+///
+/// THREE OUTCOMES, and keeping them apart is the whole point of this signature:
+///   - `Ok(None)`  — UNCONFIGURED: issuer/client_id/client_secret/redirect_uri missing. The flow is
+///     disabled until an admin sets them (403 `sso_unconfigured`).
+///   - `Ok(Some)`  — usable config, `client_secret` in the clear IN MEMORY only.
+///   - `Err(why)`  — CONFIGURED but the sealed secret CANNOT BE OPENED (field key absent, or the
+///     ciphertext does not match it). This used to be IMPOSSIBLE TO EXPRESS: the function returned an
+///     `Option`, so a failed decryption would have collapsed into `None` — i.e. "SSO not configured",
+///     which is exactly the SILENT DEGRADATION this whole workstream forbids. An admin would have seen
+///     his working SSO quietly become "unconfigured" and gone looking at the IdP. Making this path
+///     FALLIBLE, with a NAMED failure, is what had to happen BEFORE the secret could be sealed at all.
+fn load_config(app: &App) -> Result<Option<SsoConfig>, String> {
+    let raw = {
+        let store = app.store();
+        match crate::settings_get_store(&store, CFG_KEY) {
+            Some(r) => r,
+            None => return Ok(None),
+        }
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else { return Ok(None) };
     let issuer = v.get("issuer").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let client_id = v.get("client_id").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let client_secret = v.get("client_secret").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let redirect_uri = v.get("redirect_uri").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    // AT REST: the secret is an envelope. Opening it is FALLIBLE and its failure is PROPAGATED — never
+    // folded into `None`. Legacy plaintext (base not yet migrated) passes through untouched.
+    let opened = crate::field_crypto::open_config_secret(
+        &v,
+        crate::field_crypto::SSO_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    )?;
+    let client_secret = crate::field_crypto::config_field_raw(&opened, crate::field_crypto::SSO_SECRET_PATH);
     if issuer.is_empty() || client_id.is_empty() || client_secret.is_empty() || redirect_uri.is_empty() {
-        return None; // unconfigured — fail-closed
+        return Ok(None); // unconfigured — fail-closed
     }
     let allowed_redirect_uris = v
         .get("allowed_redirect_uris")
@@ -160,7 +197,7 @@ fn load_config(app: &App) -> Option<SsoConfig> {
     // Default TRUE (fail-closed): absent/malformed => require email_verified. Only an explicit `false`
     // (bool) opts out.
     let require_email_verified = v.get("require_email_verified").and_then(|x| x.as_bool()).unwrap_or(true);
-    Some(SsoConfig {
+    Ok(Some(SsoConfig {
         issuer,
         client_id,
         client_secret,
@@ -170,7 +207,7 @@ fn load_config(app: &App) -> Option<SsoConfig> {
         default_role,
         user_claim,
         require_email_verified,
-    })
+    }))
 }
 
 // `err` / `disabled` consolidés dans `common` (corps + signatures byte-identiques à compliance/scim — dedup Wave).
@@ -198,8 +235,10 @@ async fn login_start(State(app): State<App>, Query(q): Query<HashMap<String, Str
         return disabled();
     }
     let cfg = match load_config(&app) {
-        Some(c) => c,
-        None => return err(StatusCode::FORBIDDEN, "sso_unconfigured", "OIDC SSO not configured"),
+        Ok(Some(c)) => c,
+        Ok(None) => return err(StatusCode::FORBIDDEN, "sso_unconfigured", "OIDC SSO not configured"),
+        // CONFIGURED but unreadable — a SERVER-side configuration fault (503), NEVER "unconfigured".
+        Err(why) => return err(StatusCode::SERVICE_UNAVAILABLE, "sso_secret_unreadable", why),
     };
     // Return target: explicit ?return_to, else the first allowlisted URI, else same-origin root.
     let return_to = q
@@ -287,8 +326,10 @@ async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<Ha
         return disabled();
     }
     let cfg = match load_config(&app) {
-        Some(c) => c,
-        None => return err(StatusCode::FORBIDDEN, "sso_unconfigured", "OIDC SSO not configured"),
+        Ok(Some(c)) => c,
+        Ok(None) => return err(StatusCode::FORBIDDEN, "sso_unconfigured", "OIDC SSO not configured"),
+        // CONFIGURED but unreadable — a SERVER-side configuration fault (503), NEVER "unconfigured".
+        Err(why) => return err(StatusCode::SERVICE_UNAVAILABLE, "sso_secret_unreadable", why),
     };
     // The IdP may redirect back with an error (access_denied, etc.) — fail-closed, no session.
     if let Some(e) = q.get("error") {
@@ -528,8 +569,10 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
     // Fail-closed default: require email_verified unless the admin explicitly sends `false`.
     let require_email_verified = body.get("require_email_verified").and_then(|v| v.as_bool()).unwrap_or(true);
 
-    // client_secret is WRITE-ONLY: keep the existing one if the request omits it.
-    let existing_secret = load_config(&app).map(|c| c.client_secret).unwrap_or_default();
+    // client_secret is WRITE-ONLY: keep the existing one if the request omits it. Read it AT REST
+    // (envelope verbatim) rather than through `load_config` — carrying it forward needs no field key,
+    // and re-sealing an already-sealed value is a no-op.
+    let existing_secret = stored_client_secret_raw(&app);
     let new_secret = body
         .get("client_secret")
         .and_then(|v| v.as_str())
@@ -551,6 +594,24 @@ async fn config_set(State(app): State<App>, headers: HeaderMap, Json(body): Json
         "user_claim": user_claim,
         "require_email_verified": require_email_verified,
     });
+    // AT-REST ENCRYPTION of the client_secret, BEFORE persisting. Fail-closed: with no field key we
+    // REFUSE to write the secret in the clear (503 named), we do not write it "anyway". Idempotent on an
+    // already-sealed value (the write-only carry-forward path).
+    let cfg = match crate::field_crypto::seal_config_secret(
+        &cfg,
+        crate::field_crypto::SSO_SECRET_PATH,
+        crate::field_crypto::key_from_env().as_deref(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if crate::field_crypto::is_key_missing(&e) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return err(code, "field_key_missing", e);
+        }
+    };
     {
         let store = app.store();
         if let Err(e) = crate::settings_set_store(&store, CFG_KEY, &cfg.to_string()) {

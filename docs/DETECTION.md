@@ -22,6 +22,13 @@ détection*) — **aucun code à écrire**.
   `detections:[]`).
 - Le **secret** d'authentification (clé API / token SIEM) est **write-only** : jamais renvoyé par un GET,
   jamais journalisé, jamais ledgerisé (traité comme un secret de session, rédigé en profondeur).
+- **Il est aussi chiffré AU REPOS** (`FORGE_FIELD_KEY`, build par défaut) : `settings.detection_source`
+  ne porte plus le jeton en clair. Sans clé de champ, l'écriture est refusée (**503** `field_key_missing`)
+  et la collecte **refuse de partir** avec une raison nommée — plutôt que d'interroger la source **sans
+  authentification** et de faire diagnostiquer un 401 comme une panne de SIEM. Une base existante est
+  convertie **au boot**, en place ; le clair qui subsiste faute de clé est **compté et annoncé**.
+- **Un jeton ne part jamais en clair vers une source PUBLIQUE.** Règle **partagée** avec le canal de
+  notification (`net::reject_cleartext_secret`) — voir la note de rupture ci-dessous.
 
 ## Le modèle `DetectionSource`
 
@@ -53,8 +60,22 @@ ledgerisé). Objet JSON :
 
 - Les kinds `plume` / `generic_http` sont interrogés **nativement par la console Rust** (fetcher intégré,
   jointure MITRE inchangée), en **`http://` comme en `https://`** : le transport vient du **seam TLS**
-  (`console/src/tls.rs`), certificat **vérifié** (chaîne + nom d'hôte). Une source `https` ne déclenche
-  donc plus de spawn Python sur une route de **lecture**.
+  (`console/src/tls.rs`), certificat **vérifié** (chaîne + nom d'hôte + validité ; une **AC privée
+  d'entreprise** se fournit via `FORGE_EXTRA_CA_PEM`). Une source `https` ne déclenche donc plus de spawn
+  Python sur une route de **lecture**.
+
+> ⚠️ **RUPTURE NOMMÉE — un secret de source ne part plus en clair vers une cible PUBLIQUE.** Le fetcher
+> n'avait **aucune** garde de ce genre : une source `generic_http`/`plume` en **`http://`** vers une
+> adresse **publique**, avec un `auth.secret`, mettait son en-tête `Authorization:` **sur le fil**. C'est
+> désormais **refusé avant la connexion**, par la même règle que le canal de notification, et **aucune**
+> variable d'environnement ne l'ouvre. Correctifs : passer la source en **`https://`** (une AC privée se
+> fournit via `FORGE_EXTRA_CA_PEM`), ou retirer le secret.
+>
+> **Ce qui N'A PAS changé, délibérément** : `http://` **+ secret** vers un collecteur **interne**
+> autorisé (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) reste **servi**. C'est le déploiement on-prem de
+> référence (`PLUME_URL`/`PLUME_TOKEN` sur un segment privé). Exiger `https://` dès qu'un secret est posé
+> aurait tué cet usage sans le déplacer : une CA d'entreprise fournit une **ancre**, pas un **écouteur
+> TLS** — un collecteur qui n'en expose aucun n'aurait plus eu aucune voie.
 - Tout le reste — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, fichier, exec, ou `auth.type=mtls`**
   (le seam n'installe aucun certificat client) — est **délégué au collecteur Python** `forge.collectors`
   (protocoles/parsing riches),
