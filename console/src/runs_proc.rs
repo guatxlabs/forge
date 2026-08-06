@@ -287,7 +287,15 @@ pub(crate) fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
 ///   - `allow_private` = EFFECTIF (master global AND opt-in engagement, calculé server-side dans run_create) ;
 ///     le moteur le lit (défaut False si absent) et VÉTO toute cible privée/loopback OU qui RÉSOUT en privé.
 /// INVARIANT : on ne touche JAMAIS in_scope/out_scope ici — uniquement les bascules de capacité/politique.
-pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec) -> Value {
+///
+/// `field_key` = passphrase de CHIFFREMENT DE CHAMP (cf. `field_crypto`). Le bloc `auth` porté par le
+/// spec est SCELLÉ (il vient tel quel de `engagement.scope_json`, et transite scellé jusque dans le blob
+/// `run_job.spawn_spec` du chemin HA pending) : c'est ICI, à l'unique point d'USAGE, qu'il est OUVERT —
+/// pour être écrit dans le `scope.json` 0600 du run, lu par le moteur. FAIL-CLOSED : si le matériel est
+/// scellé et que la clé manque ou ne correspond pas, on rend `Err` et le run NE DÉMARRE PAS. Partir avec
+/// un bloc `auth` VIDE désarmerait les oracles de contrôle d'accès EN SILENCE — c'est exactement le mode
+/// de panne qui a coûté une campagne, donc il n'existe aucun repli « au mieux » sur ce chemin.
+pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec, field_key: Option<&str>) -> Result<Value, String> {
     let scope_comment = if spec.high_impact {
         format!("scope généré par la console pour {run_id} — HAUT-IMPACT GOUVERNÉ (allow_exploit/destructive=true, autorisé par operator armé)")
     } else {
@@ -333,9 +341,9 @@ pub(crate) fn build_run_scope_doc(run_id: &str, spec: &RunSpawnSpec) -> Value {
     // BYTE-IDENTIQUE à l'historique (no-op strict pour les engagements sans auth). SECRET : ce fichier
     // temp local du run porte le matériel d'auth ; il n'est jamais journalisé (le moteur rédige findings/ledger).
     if let Some(auth) = &spec.eng_auth {
-        doc["auth"] = auth.clone();
+        doc["auth"] = crate::field_crypto::unseal_auth_block(auth, field_key)?;
     }
-    doc
+    Ok(doc)
 }
 
 #[allow(clippy::significant_drop_tightening)]
@@ -363,7 +371,19 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
     // (false par défaut). INVARIANT : on ne touche QUE allow_exploit/destructive — in_scope/out_scope (le
     // périmètre) restent dictés par le scope de l'engagement, le scope-guard du moteur reste seul juge.
     // Construction EXTRAITE (fonction PURE, testable) : le CONTRAT scope.json est ainsi vérifiable en test.
-    let scope_doc = build_run_scope_doc(run_id, spec);
+    // OUVERTURE DU MATÉRIEL D'AUTH (chiffré au repos) — unique point de déchiffrement du chemin de run.
+    // FAIL-CLOSED LISIBLE : clé absente/mauvaise => on NETTOIE (dir temp + un-claim) et on rend une 5xx
+    // NOMMÉE plutôt que de spawner un moteur avec un contexte d'authentification vide, qui aurait l'air
+    // de tourner tout en ne testant plus RIEN en cross-compte.
+    let scope_doc = match build_run_scope_doc(run_id, spec, crate::field_crypto::key_from_env().as_deref()) {
+        Ok(d) => d,
+        Err(why) => {
+            let _ = std::fs::remove_dir_all(&run_dir);
+            unclaim_running_on_failure(app, run_id, ha);
+            let code = if crate::field_crypto::is_key_missing(&why) { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::INTERNAL_SERVER_ERROR };
+            return (code, Json(json!({"error": "auth_context_sealed", "engagement_id": spec.eng_id, "why": why})));
+        }
+    };
     // Chaque cible porte les params par-module dans `attrs.module_params` (passthrough sûr, doublon volontaire).
     let targets_doc: Vec<Value> = spec.targets.iter()
         .map(|h| json!({"host": h, "kind": "host", "attrs": {"module_params": spec.module_params.clone()}}))
@@ -645,15 +665,16 @@ mod scope_doc_contract_tests {
     /// (roe.Scope) lit exactement cette clé (défaut False si absente).
     #[test]
     fn scope_doc_carries_effective_allow_private_and_preserves_scope() {
-        let on = build_run_scope_doc("run-x", &spec(false, true));
+        // aucun bloc auth ici => aucune clé de champ requise (no-op strict, cf. field_crypto).
+        let on = build_run_scope_doc("run-x", &spec(false, true), None).unwrap();
         assert_eq!(on["allow_private"], json!(true), "allow_private effectif=true écrit tel quel");
-        let off = build_run_scope_doc("run-x", &spec(false, false));
+        let off = build_run_scope_doc("run-x", &spec(false, false), None).unwrap();
         assert_eq!(off["allow_private"], json!(false), "allow_private effectif=false écrit tel quel (fail-closed)");
         // in_scope/out_scope INTOUCHÉS par la politique réseau (seul allow_private varie).
         assert_eq!(off["in_scope"], json!(["10.0.0.5"]));
         assert_eq!(off["out_scope"], json!(["out.example"]));
         // orthogonal au haut-impact : allow_private ne dépend pas de allow_exploit/destructive.
-        let hi = build_run_scope_doc("run-x", &spec(true, false));
+        let hi = build_run_scope_doc("run-x", &spec(true, false), None).unwrap();
         assert_eq!(hi["allow_exploit"], json!(true));
         assert_eq!(hi["allow_private"], json!(false), "politique réseau indépendante du haut-impact");
     }
@@ -661,21 +682,50 @@ mod scope_doc_contract_tests {
     /// CONTEXTE AUTH PAR-ENGAGEMENT (R5b) : le scope.json du run PORTE le bloc `auth` de l'engagement
     /// UNIQUEMENT s'il existe -> le moteur (AuthContext.from_scope) alimente les oracles IDOR/ATO. ABSENT
     /// (eng_auth=None) => AUCUN champ `auth` => scope.json byte-identique à l'historique (no-op strict).
+    ///
+    /// CHIFFREMENT AU REPOS : le bloc arrive SCELLÉ (il vient de `engagement.scope_json`) et c'est ce
+    /// writer qui l'OUVRE, pour le seul fichier 0600 du run. Le clair n'existe qu'ici.
     #[test]
     fn scope_doc_emits_auth_block_only_when_present() {
-        // (1) sans auth (le défaut du helper) => aucun champ `auth` (no-op byte-identique).
-        let none = build_run_scope_doc("run-x", &spec(false, false));
+        const KEY: &str = "cle-de-champ-du-test-scope-doc";
+        // (1) sans auth (le défaut du helper) => aucun champ `auth` (no-op byte-identique), sans clé.
+        let none = build_run_scope_doc("run-x", &spec(false, false), None).unwrap();
         assert!(none.get("auth").is_none(), "eng_auth=None => aucun champ auth dans le scope.json");
 
-        // (2) avec auth => bloc {accounts, idor_targets} propagé TEL QUEL au moteur.
+        // (2) avec auth SCELLÉ => le moteur reçoit le bloc EN CLAIR, valeurs verbatim.
         let mut s = spec(false, false);
         let auth = json!({
             "accounts": [{"label": "attacker", "bearer": "TOK"}, {"label": "victim", "cookies": {"sid": "v"}}],
             "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
         });
-        s.eng_auth = Some(auth.clone());
-        let with = build_run_scope_doc("run-x", &s);
-        assert_eq!(with["auth"], auth, "le bloc auth de l'engagement est propagé au scope.json du run");
+        let sealed = crate::field_crypto::seal_auth_block(&auth, Some(KEY)).unwrap();
+        assert_ne!(sealed, auth, "le spec transporte du CHIFFRÉ (pas le credential)");
+        s.eng_auth = Some(sealed);
+        let with = build_run_scope_doc("run-x", &s, Some(KEY)).unwrap();
+        assert_eq!(with["auth"], auth, "le bloc auth est OUVERT pour le moteur (round-trip verbatim)");
+    }
+
+    /// [FAIL-CLOSED — LE RUN NE PART PAS SANS SON CONTEXTE] Un bloc `auth` SCELLÉ que la console ne peut
+    /// pas ouvrir (clé absente, ou mauvaise clé) fait ÉCHOUER la construction du scope.json — le run est
+    /// refusé. Il ne part JAMAIS avec un `auth` vide/partiel : le moteur aurait alors l'air de tourner
+    /// tout en ne testant plus rien en cross-compte (le mode de panne silencieux qu'on refuse).
+    /// MUTATION-PROVABLE : remplacer le `?` de `unseal_auth_block` par un `unwrap_or_default()` ou par
+    /// l'omission du champ `auth` fait passer ce test AU ROUGE.
+    #[test]
+    fn scope_doc_refuses_rather_than_running_with_an_empty_auth_context() {
+        const KEY: &str = "cle-de-champ-du-test-refus";
+        let mut s = spec(false, false);
+        let auth = json!({"accounts": [{"label": "attacker", "bearer": "TOK-SECRET"}], "idor_targets": []});
+        s.eng_auth = Some(crate::field_crypto::seal_auth_block(&auth, Some(KEY)).unwrap());
+
+        let e = build_run_scope_doc("run-x", &s, None).expect_err("scellé + pas de clé => run REFUSÉ");
+        assert!(crate::field_crypto::is_key_missing(&e), "refus typé -> 503 field_key_missing");
+        let e = build_run_scope_doc("run-x", &s, Some("mauvaise-cle")).expect_err("mauvaise clé => run REFUSÉ");
+        assert_eq!(e, crate::field_crypto::ERR_UNSEAL);
+
+        // Le contre-exemple qui prouve que le refus vient bien du scellé : AVEC la bonne clé, ça passe.
+        let ok = build_run_scope_doc("run-x", &s, Some(KEY)).expect("bonne clé => run construit");
+        assert_eq!(ok["auth"]["accounts"][0]["bearer"], json!("TOK-SECRET"));
     }
 
     /// [SECRET — R5b] Le dir temp d'un run et les fichiers d'entrée du moteur sont PRIVÉS au propriétaire.

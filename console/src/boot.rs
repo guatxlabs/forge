@@ -485,6 +485,23 @@ pub(crate) async fn serve() {
         ensure_default_tenant(&app.store());
         advance_pg_identity_sequences(&app.store());
     }
+    // CHIFFREMENT DE CHAMP AU REPOS — le matériel d'authentification par-engagement (bearer/cookies/
+    // en-têtes des comptes de test) est chiffré à l'écriture depuis cette version. Une base ANTÉRIEURE le
+    // porte EN CLAIR : on la convertit ICI, en place, idempotemment. Sans clé on ne convertit rien mais
+    // on l'ANNONCE — laisser croire au chiffrement serait pire que le clair assumé. Aucun engagement
+    // armé => aucune ligne imprimée (boot byte-identique pour l'immense majorité des installs).
+    //
+    // HA : lancé sur CHAQUE instance, hors du verrou DDL (comme `populate_modules`). Deux réplicas qui
+    // scellent la MÊME ligne en même temps écrivent deux chiffrés VALIDES et équivalents (sels/nonces
+    // distincts) — dernier arrivé gagne, aucune corruption possible : on ne fait jamais de
+    // lecture-modification-écriture d'une valeur déjà scellée, seulement du clair vers du chiffré.
+    {
+        let key = crate::field_crypto::key_from_env();
+        let rep = crate::field_crypto::migrate_seal_engagement_auth(&app.store(), key.as_deref());
+        if let Some(line) = crate::field_crypto::boot_status_line(&rep, key.is_some()) {
+            println!("{line}");
+        }
+    }
     // `populate_modules` : INCONDITIONNEL sur CHAQUE instance (upsert idempotent de la table `module`
     // PARTAGÉE, jamais leader-sensible ; hors du verrou DDL car il spawn un process python). En HA les 2
     // réplicas peuplent (upsert ON CONFLICT row-safe). En mono-instance : identique à avant.

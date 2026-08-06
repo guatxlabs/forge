@@ -301,3 +301,28 @@ witness alone doesn't protect the key. Turn on **both** and forging the audit tr
 
 Both controls are **opt-in**: the community default stays local + `NullAnchor` (byte-identical and
 dependency-free). See `forge/anchor.py` for the threat model behind the witness anchor.
+
+---
+
+## Data-at-rest secrets — what you must keep, and what breaks if you don't
+
+The custody discussion above is about the **ledger signing key** (integrity). Two *other* secrets
+govern **confidentiality at rest**. They are independent of each other and of the signing key, and a
+restore is only fully successful when you still hold the ones you used:
+
+| Secret | Protects | If you lose it |
+|---|---|---|
+| `FORGE_FIELD_KEY` (+ `_FILE`) | The **authentication material** of engagements — bearers, cookies and header values of the operator's test accounts (`scope_json.auth`). Chiffrement de champ, **build par défaut**, AEAD pur Rust. | The database stays fully intact and readable; only that material stays **sealed**. Runs on those engagements **refuse to start** (never a silently empty auth context). Recovery = **re-enter** the material in the engagement editor. |
+| `FORGE_DB_KEY` | The **whole SQLite file** (SQLCipher, image `encryption` only). | The database is **unreadable**. No partial recovery. |
+| Backup passphrase | The **archive** (`forge backup`), which carries the DB snapshot + ledger + signing key. | The archive is **unrecoverable** — there is no plaintext path out. |
+
+**They compose, and they are checked independently.** Restoring an archive with the right passphrase
+onto a host that lacks `FORGE_FIELD_KEY` yields a complete, working install whose auth material is
+still sealed — which is the intended fail-closed behaviour, not corruption. Store the field key
+wherever you store the backup passphrase: they are needed together to bring an engagement back
+**armed**.
+
+> **Rotation.** Sealing is per-write and idempotent: material already sealed under an old key is left
+> alone. To move an engagement to a new key, set the new `FORGE_FIELD_KEY` and **re-enter** its
+> material in the editor — the console then seals it under the new key. There is no in-place bulk
+> re-key, deliberately: it would require holding both keys at once in the process.

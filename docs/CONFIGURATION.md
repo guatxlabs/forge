@@ -75,13 +75,19 @@ via le [wizard](FIRST_DEPLOYMENT.md)).
 > dry-plan, dégradation `501` pour le livrable) — **aucune sortie partielle n'est rendue comme complète**.
 > Ce n'est pas un réglage d'exploitation mais une digue anti-OOM : ces valeurs sont des constantes du binaire.
 
-### 1.4 Chiffrement au repos (image `encryption` uniquement)
+### 1.4 Chiffrement au repos
 
 | Variable | Sens | Défaut | Exemple |
 |---|---|---|---|
-| `FORGE_DB_KEY` | **[SECRET]** Clé SQLCipher. La console émet `PRAGMA key` **avant toute requête**. Sans elle (sur build chiffré), la base est **illisible** (fail-closed). **Ignorée** sur le build par défaut (base en clair). | *(vide)* | *(passphrase forte)* |
+| `FORGE_FIELD_KEY` | **[SECRET]** Passphrase de **chiffrement de champ** du **matériel d'authentification** d'engagement (bearers/cookies/en-têtes des comptes de test). **Build PAR DÉFAUT** — AEAD pur Rust, aucune dépendance ajoutée. Requise **uniquement** si un engagement porte un contexte `auth` : sans elle, toute écriture de matériel est refusée (**503** `field_key_missing`) et un run dont le matériel est scellé **refuse de démarrer** (jamais un contexte vide en silence). Accepte `FORGE_FIELD_KEY_FILE`. | *(vide)* | *(passphrase forte)* |
+| `FORGE_DB_KEY` | **[SECRET]** Clé SQLCipher (chiffrement **intégral**). La console émet `PRAGMA key` **avant toute requête**. Sans elle (sur build chiffré), la base est **illisible** (fail-closed). **Ignorée** sur le build par défaut (base en clair). | *(vide)* | *(passphrase forte)* |
 
-Voir [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION.md#6-image-encryption-chiffrement-au-repos--sqlcipher-opt-in).
+Les deux couches sont **indépendantes et composables** : `FORGE_FIELD_KEY` protège les credentials
+**dans le build par défaut** (openssl-freedom intacte) ; `FORGE_DB_KEY` chiffre **tout le reste**, au
+prix d'un backend crypto système à la compilation (image `encryption`).
+
+Voir [`DEPLOYMENT.md` §1.6](DEPLOYMENT.md#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut)
+(champ), [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION.md#6-image-encryption-chiffrement-au-repos--sqlcipher-opt-in) (SQLCipher).
 
 ### 1.5 Migration via API (opt-in, pré-provision)
 

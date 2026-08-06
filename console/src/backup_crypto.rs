@@ -153,12 +153,39 @@ pub(crate) fn backup_parse_header(archive: &[u8]) -> Result<BackupHeader, String
     Ok(BackupHeader { m_cost, t_cost, p_cost, salt, nonce, header_len: o })
 }
 
+/// CŒUR AEAD — SCELLE `msg` sous (clé 32o, nonce 24o) en XChaCha20-Poly1305, avec `aad` lié comme
+/// DONNÉE ASSOCIÉE (altérer l'AAD OU le corps fait échouer le tag Poly1305). Renvoie ciphertext‖tag.
+///
+/// EXTRAIT de `backup_encrypt` (corps VERBATIM) pour être partagé SANS DUPLICATION avec le chiffrement
+/// de CHAMP au repos (`field_crypto.rs`) : il n'existe qu'UNE implémentation d'AEAD dans la console, et
+/// les deux appelants (archive de sauvegarde, champ de base) l'exercent. PUR : aucune I/O, aucun log ;
+/// ne dérive PAS la clé (l'appelant le fait — `backup_derive_key`) et ne la conserve pas.
+pub(crate) fn aead_seal(key: &[u8; BACKUP_KEY_LEN], nonce: &[u8; BACKUP_NONCE_LEN], aad: &[u8], msg: &[u8]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|e| format!("clé AEAD invalide: {e}"))?;
+    cipher
+        .encrypt(XNonce::from_slice(nonce), Payload { msg, aad })
+        .map_err(|_| "chiffrement AEAD échoué".to_string())
+}
+
+/// CŒUR AEAD — OUVRE `ct` (ciphertext‖tag) sous (clé, nonce, aad). Toute altération de l'AAD ou du corps,
+/// comme une clé fausse, rend `Err` : il n'existe AUCUN chemin qui rende un plaintext non authentifié.
+/// L'erreur est VOLONTAIREMENT générique (« tag invalide ») — chaque appelant l'habille de son propre
+/// message de domaine (l'archive parle de passphrase, le champ parle de clé de champ). PUR.
+pub(crate) fn aead_open(key: &[u8; BACKUP_KEY_LEN], nonce: &[u8; BACKUP_NONCE_LEN], aad: &[u8], ct: &[u8]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|e| format!("clé AEAD invalide: {e}"))?;
+    cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad })
+        .map_err(|_| "tag AEAD invalide".to_string())
+}
+
 /// Chiffre `plaintext` (l'archive tar) : génère sel+nonce CSPRNG, dérive la clé argon2id, chiffre en
 /// XChaCha20-Poly1305 avec l'en-tête lié en AAD. Renvoie header || ciphertext‖tag. Passphrase vide
 /// REFUSÉE (fail-closed). Il n'existe PAS de variante non chiffrée.
 pub(crate) fn backup_encrypt(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
     if passphrase.is_empty() {
         return Err("passphrase vide — refus de chiffrer (fail-closed)".to_string());
     }
@@ -171,15 +198,12 @@ pub(crate) fn backup_encrypt(plaintext: &[u8], passphrase: &str) -> Result<Vec<u
     getrandom::fill(&mut nonce).map_err(|e| format!("CSPRNG (nonce) indisponible: {e}"))?;
     let mut key = backup_derive_key(passphrase, &salt, m_cost, t_cost, p_cost)?;
     let header = backup_build_header(m_cost, t_cost, p_cost, &salt, &nonce);
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|e| format!("clé AEAD invalide: {e}"))?;
-    let ct = cipher
-        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad: &header })
-        .map_err(|_| "chiffrement AEAD échoué".to_string())?;
+    let ct = aead_seal(&key, &nonce, &header, plaintext);
     // hygiène : efface la clé dérivée du stack dès qu'elle n'est plus nécessaire (le cipher en détient
     // sa propre copie interne, zeroizée à son Drop). La clé n'a JAMAIS quitté ce périmètre.
     for b in key.iter_mut() { *b = 0; }
     let mut out = header;
-    out.extend_from_slice(&ct);
+    out.extend_from_slice(&ct?);
     Ok(out)
 }
 
@@ -187,8 +211,6 @@ pub(crate) fn backup_encrypt(plaintext: &[u8], passphrase: &str) -> Result<Vec<u
 /// AEAD (en-tête en AAD). Une MAUVAISE passphrase OU un octet altéré (en-tête ou corps) => Err propre
 /// (tag Poly1305 invalide) — l'appelant n'écrit alors RIEN. Passphrase vide REFUSÉE (fail-closed).
 pub(crate) fn backup_decrypt(archive: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
     if passphrase.is_empty() {
         return Err("passphrase vide — refus de déchiffrer (fail-closed)".to_string());
     }
@@ -196,9 +218,9 @@ pub(crate) fn backup_decrypt(archive: &[u8], passphrase: &str) -> Result<Vec<u8>
     let header = &archive[..hdr.header_len];
     let ct = &archive[hdr.header_len..];
     let mut key = backup_derive_key(passphrase, &hdr.salt, hdr.m_cost, hdr.t_cost, hdr.p_cost)?;
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|e| format!("clé AEAD invalide: {e}"))?;
-    let pt = cipher
-        .decrypt(XNonce::from_slice(&hdr.nonce), Payload { msg: ct, aad: header })
+    // le message de domaine de l'ARCHIVE est conservé VERBATIM (aead_open rend un « tag invalide »
+    // générique, réhabillé ici) — la sortie observable de `backup_decrypt` est inchangée.
+    let pt = aead_open(&key, &hdr.nonce, header, ct)
         .map_err(|_| "déchiffrement AEAD échoué — mauvaise passphrase ou archive altérée (tag invalide)".to_string());
     for b in key.iter_mut() { *b = 0; }
     pt
@@ -266,5 +288,35 @@ mod tests {
         assert_eq!(backup_decrypt(&b, "pw").unwrap(), pt, "round-trip AEAD (b)");
         assert!(backup_encrypt(&pt, "").is_err(), "passphrase vide REFUSÉE (fail-closed)");
         assert!(backup_decrypt(&a, "").is_err(), "passphrase vide REFUSÉE au déchiffrement");
+    }
+
+    /// [CŒUR AEAD — CONTRAT DE L'AAD] `aead_seal`/`aead_open` sont désormais PARTAGÉS par deux
+    /// appelants (archive de sauvegarde, champ de base). Leur contrat central est que la DONNÉE
+    /// ASSOCIÉE est LIÉE : un ciphertext scellé sous l'AAD `A` ne s'ouvre PAS sous l'AAD `B`, même à
+    /// clé et nonce IDENTIQUES. C'est ce qui interdit de recycler un corps d'un contexte vers un autre.
+    ///
+    /// POURQUOI CE TEST EXISTE : la preuve par mutation a montré que retirer l'AAD des DEUX faces
+    /// laissait toute la suite au VERT — les tests d'altération existants ne touchaient que le corps
+    /// (déjà couvert par le tag), donc AUCUN test ne dépendait du LIEN lui-même. Le voici, au niveau où
+    /// la propriété vit : la primitive. MUTATION-PROVABLE : passer `aad: b""` dans `aead_seal` ET
+    /// `aead_open` fait passer ce test AU ROUGE.
+    #[test]
+    fn aead_binds_its_associated_data() {
+        let key = [7u8; BACKUP_KEY_LEN];
+        let nonce = [11u8; BACKUP_NONCE_LEN];
+        let msg = b"corps a proteger";
+
+        let ct = aead_seal(&key, &nonce, b"contexte-A", msg).expect("scellement");
+        assert_eq!(aead_open(&key, &nonce, b"contexte-A", &ct).expect("ouverture"), msg, "round-trip sous le MÊME AAD");
+        assert!(aead_open(&key, &nonce, b"contexte-B", &ct).is_err(), "AAD DIFFÉRENT => tag invalide (lien AAD)");
+        assert!(aead_open(&key, &nonce, b"", &ct).is_err(), "AAD RETIRÉ => tag invalide (lien AAD)");
+        assert!(aead_open(&key, &nonce, b"contexte-A2", &ct).is_err(), "AAD à peine modifié => tag invalide");
+
+        // ... et les autres entrées restent bien authentifiées (clé, nonce, corps).
+        assert!(aead_open(&[8u8; BACKUP_KEY_LEN], &nonce, b"contexte-A", &ct).is_err(), "mauvaise clé");
+        assert!(aead_open(&key, &[12u8; BACKUP_NONCE_LEN], b"contexte-A", &ct).is_err(), "mauvais nonce");
+        let mut tampered = ct.clone();
+        tampered[0] ^= 0x01;
+        assert!(aead_open(&key, &nonce, b"contexte-A", &tampered).is_err(), "corps altéré");
     }
 }

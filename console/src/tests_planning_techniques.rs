@@ -430,9 +430,10 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert_eq!(before["in_scope"], json!(false), "scope vide -> HORS scope");
 
         // ÉDITE : in-scope NON VIDE (example.com) + mode black.
+        // aucun bloc `auth` ici => aucune clé de chiffrement de champ requise (no-op strict).
         let v = engagement_do_update(&app, 1, "opr", &json!({
             "scope_json": {"mode": "black", "in_scope": ["example.com"], "out_scope": []}
-        })).expect("edit ok");
+        }), None).expect("edit ok");
         assert_eq!(v["action"], "edit");
 
         // PERSISTÉ : load_engagement + la liste RE-EXPOSENT le scope (« reload shows it ») + mode effectif.
@@ -452,7 +453,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         assert_eq!(after["engagement_id"], json!(1));
 
         // ZONE VIDE = INCHANGÉ : un update sans scope_json (rename seul) ne touche pas le scope.
-        engagement_do_update(&app, 1, "opr", &json!({"name": "renamed"})).expect("rename ok");
+        engagement_do_update(&app, 1, "opr", &json!({"name": "renamed"}), None).expect("rename ok");
         let eng2 = load_engagement(&app.store(), 1).unwrap();
         assert_eq!(eng2.scope_in, vec!["example.com".to_string()], "scope inchangé quand scope_json absent");
 

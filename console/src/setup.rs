@@ -290,8 +290,15 @@ pub(crate) async fn setup_provision(State(app): State<App>, _headers: HeaderMap,
     // VIDE (rien lançable tant que l'opérateur ne le renseigne pas dans l'UI).
     let scope_provided = body.get("scope_json").map(|v| v.is_object()).unwrap_or(false);
     if scope_provided {
-        if let Err(e) = validate_engagement_scope(body.get("scope_json").unwrap()) {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_scope", "why": e}))).into_response();
+        // MÊME clé de champ que l'écriture réelle plus bas (`engagement_do_update`) : le pré-check doit
+        // échouer sur EXACTEMENT ce que l'écriture refuserait, sinon il validerait un scope que le
+        // provisioning rejetterait ensuite — après avoir créé l'admin.
+        match validate_engagement_scope(body.get("scope_json").unwrap(), crate::field_crypto::key_from_env().as_deref()) {
+            Ok(_) => {}
+            Err(e) if crate::field_crypto::is_key_missing(&e) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "field_key_missing", "why": e}))).into_response()
+            }
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_scope", "why": e}))).into_response(),
         }
     }
     // argon2id est coûteux -> hash HORS mutex DB (ne pas geler l'API pendant le KDF).
@@ -333,7 +340,7 @@ pub(crate) async fn setup_provision(State(app): State<App>, _headers: HeaderMap,
     let mut scope_set = false;
     if scope_provided {
         let upd = json!({"scope_json": body.get("scope_json").cloned().unwrap_or_else(|| json!({}))});
-        match engagement_do_update(&app, 1, &login, &upd) {
+        match engagement_do_update(&app, 1, &login, &upd, crate::field_crypto::key_from_env().as_deref()) {
             Ok(_) => scope_set = true,
             Err((code, why)) => return (code, Json(json!({"error": "scope_write_failed", "why": why}))).into_response(),
         }

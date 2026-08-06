@@ -15,7 +15,7 @@ programmées**. La deuxième moitié conserve l'**empreinte mesurée** et la mat
 
 **Table des matières**
 
-1. [Options de build & run](#1-options-de-build--run) — mini/full, Docker, docker-compose, natif/systemd, image `encryption`
+1. [Options de build & run](#1-options-de-build--run) — mini/full, Docker, docker-compose, natif/systemd, image `encryption` (§1.5), chiffrement de **champ** du matériel d'auth (§1.6, build par défaut)
 2. [Premier boot — le wizard web](#2-premier-boot--le-wizard-web) — admin, crypto, source de détection, politique opérateur
 3. [Données — migration & sauvegardes chiffrées](#3-données--migration--sauvegardes-chiffrées)
 4. [Contexte de build & dépendance `guatx-core`](#4-contexte-de-build--dépendance-guatx-core)
@@ -122,6 +122,11 @@ Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans
 
 ### 1.5 Image `encryption` (chiffrement AU REPOS — SQLCipher, opt-in)
 
+> ℹ️ Le **matériel d'authentification** (bearers/cookies/en-têtes des comptes de test d'un engagement)
+> est chiffré **par champ**, dans le build **par défaut**, sans SQLCipher — cf.
+> [§1.6](#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut). SQLCipher ci-dessous
+> chiffre **tout le reste** en plus, au prix d'un backend crypto système à la compilation.
+
 Le build **par défaut** stocke la base SQLite **en clair** (`capabilities.sqlcipher:false`). Pour un
 chiffrement au repos, compiler la console avec la feature `encryption` puis fournir la clé au boot :
 
@@ -145,6 +150,63 @@ existant en clair → chiffré = **Runbook B** de [`docs/MIGRATION.md`](MIGRATIO
 
 > **À part** la crypto AU REPOS (opt-in), le **ledger d'engagement** est signé **Ed25519** (asymétrique,
 > vérifiable par un tiers avec la seule clé publique) **par défaut** — aucune action requise.
+
+### 1.6 Chiffrement de CHAMP du matériel d'authentification (build par défaut)
+
+Le `scope_json` d'un engagement peut porter un **contexte d'authentification** (`auth.accounts[]`) :
+les **bearers, cookies et valeurs d'en-tête des comptes de test** de l'opérateur — c'est-à-dire des
+**sessions authentifiées sur l'estate d'un client**. C'est la seule donnée de la base qui soit un
+*credential vivant*. Elle est **chiffrée au repos dans le build par défaut**, sans SQLCipher et **sans
+aucune dépendance supplémentaire** : la pile AEAD **pur Rust** déjà embarquée (XChaCha20-Poly1305 +
+argon2id — celle qui chiffre les sauvegardes) est réutilisée. L'`openssl-freedom` du build est intacte.
+
+```sh
+# La clé suit le motif maison <VAR>_FILE (cf. « Secrets sans .env en clair ») :
+FORGE_FIELD_KEY=<passphrase forte>          # ... OU, mieux :
+FORGE_FIELD_KEY_FILE=/run/secrets/forge_field_key   # secret Docker/k8s monté root, l'env ne porte qu'un CHEMIN
+```
+
+**Ce qui est chiffré, et ce qui ne l'est pas** (périmètre délibéré) :
+
+| Donnée | Au repos | Pourquoi |
+|---|---|---|
+| `auth.accounts[].bearer` / `.cookies` / valeurs de `.headers` | **chiffré** | credential rejouable |
+| `auth.accounts[].label`, **noms** d'en-têtes/cookies | clair | non secrets ; l'éditeur les ré-affiche **sans la clé** |
+| `auth.idor_targets[]` (`url`/`owner`/`marker`) | clair | config déjà re-servie en clair par l'API |
+| `users.pass_hash` (argon2id), `session.token_sha` (SHA-256) | clair | empreintes à **sens unique**, pas du matériel rejouable |
+
+**Fail-closed — trois règles, aucune dégradation silencieuse :**
+
+1. **Aucun contexte auth ⇒ aucune clé requise.** Une install qui n'arme pas de contexte n'est
+   **jamais** affectée : comportement et payloads inchangés.
+2. **Écrire du matériel sans clé ⇒ `503 field_key_missing`.** On ne persiste **jamais** un credential
+   en clair « en attendant ». Le message nomme la variable à poser. *(Re-cadrer un périmètre sans
+   ressaisir de matériel reste possible sans la clé : rien de nouveau n'est à chiffrer.)*
+3. **Lancer un run dont le matériel ne s'ouvre pas ⇒ le run est REFUSÉ** (`auth_context_sealed`).
+   Partir avec un contexte auth **vide** désarmerait les oracles de contrôle d'accès en silence : le
+   moteur aurait l'air de tourner sans plus rien tester en cross-compte. Il n'existe aucun repli.
+
+**Migration d'un install existant : automatique, au boot.** Les lignes antérieures portent le matériel
+en clair ; la console les **scelle en place** au démarrage (idempotent, rejouable). Sans clé, rien
+n'est converti et le boot le **crie** — laisser croire au chiffrement serait pire que le clair assumé :
+
+```
+[forge] ⚠️ MATÉRIEL D'AUTHENTIFICATION EN CLAIR AU REPOS — 2 engagement(s) … FORGE_FIELD_KEY n'est pas posée …
+[forge] CHIFFREMENT DE CHAMP ARMÉ — 2 engagement(s) avec matériel d'authentification, chiffré AU REPOS …
+```
+
+L'état est aussi **visible dans le produit** : `GET /api/engagements` rend `auth.at_rest` ∈
+`sealed | plaintext | mixed | none` (aucun secret — juste l'état).
+
+> ⚠️ **CUSTODY — `FORGE_FIELD_KEY` est un secret à conserver, au même titre que la passphrase de
+> sauvegarde.** Une sauvegarde restaurée sur une machine sans cette clé rend une base **intacte** dont
+> le matériel d'auth reste **scellé** : les runs de ces engagements refuseront de démarrer jusqu'à ce
+> que la clé soit fournie. Les deux secrets sont **indépendants** et **tous deux requis** (cf.
+> [`docs/KEY_CUSTODY.md`](KEY_CUSTODY.md)). Perdre la clé n'entraîne aucune perte d'autre donnée : il
+> suffit de **ressaisir** le matériel d'authentification dans l'éditeur d'engagement.
+
+Les deux couches **se composent** : `--features encryption` (SQLCipher) par-dessus des champs scellés
+reste valide — le champ est alors chiffré deux fois, ce qui est sans effet de bord.
 
 ---
 

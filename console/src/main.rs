@@ -169,6 +169,12 @@ mod backup_sched;
 mod dbmigrate;
 pub(crate) use crate::backup::*;
 pub(crate) use crate::dbmigrate::*;
+// CHIFFREMENT DE CHAMP AU REPOS (matériel d'authentification d'engagement) — réutilise la KDF argon2id
+// et le cœur AEAD XChaCha20-Poly1305 EXTRAITS de `backup_crypto` (zéro réimplémentation, zéro nouvelle
+// dépendance : la pile AEAD pur-Rust est déjà dans le build par défaut). PAS de glob re-export : les
+// appelants passent par le chemin qualifié `crate::field_crypto::…`, pour que le point où un credential
+// est scellé/ouvert soit VISIBLE au site d'appel plutôt que dissous dans l'espace de noms racine.
+mod field_crypto;
 // Sous-système CLI (useradd/seed-demo/findings|roe|coverage|query/ledger verify) extrait de main.rs
 // (PURE MOVE, Wave 2). Re-exporté à la racine pour que le dispatch de main() ET les tests inline
 // (`super::*`) résolvent run_*_cli/print_table/cli_* INCHANGÉS, et que backup/dbmigrate continuent de
@@ -475,6 +481,10 @@ mod tests_net_policy;
 mod tests_ledger;
 #[cfg(test)]
 mod tests_runs_engagement;
+// CHIFFREMENT DE CHAMP AU REPOS — tests au niveau où la propriété se prouve : les OCTETS du fichier
+// SQLite, la migration d'une base héritée, et le round-trip de sauvegarde par-dessus.
+#[cfg(test)]
+mod tests_field_crypto;
 #[cfg(test)]
 mod tests_tenancy_rbac;
 #[cfg(test)]

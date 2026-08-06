@@ -27,6 +27,7 @@ La valeur d'un secret n'est **jamais** journalisée ni passée sur `argv`.
 | Variable | Rôle | Consommé par |
 |----------|------|--------------|
 | `FORGE_CONSOLE_TOKEN` | Bearer d'ingestion `/api/ingest` | console (Rust) + client `console_client` (Python) |
+| `FORGE_FIELD_KEY` | Chiffrement de **champ** du matériel d'authentification d'engagement (bearers/cookies/en-têtes des comptes de test) — **build par défaut** | console (Rust) |
 | `FORGE_DB_KEY` | Clé SQLCipher au repos (image `--features encryption`) | console (Rust) |
 | `FORGE_BACKUP_PASSPHRASE` | Passphrase des sauvegardes chiffrées (nommée par `policy.passphrase_env`) | console (Rust) — backup/restore/scheduler/upgrade |
 | `FORGE_COMPLIANCE_ARCHIVE_KEY` | Passphrase d'archive de purge gouvernée | console (Rust) |
@@ -43,12 +44,41 @@ Chacune accepte `<VAR>_FILE`. Exemple : la console lit `FORGE_CONSOLE_TOKEN`, si
 
 ### Déjà write-only via l'UI — n'ont **jamais** besoin d'un `.env`
 
+> ⚠️ **« Write-only » décrit la SURFACE D'API, pas le repos.** Ces secrets ne sont jamais re-servis par
+> une lecture, jamais journalisés, jamais ledgerisés — mais ils sont stockés **en clair** dans la table
+> `settings` sauf si la base entière est chiffrée (`--features encryption` + `FORGE_DB_KEY`). Le
+> chiffrement de **champ** (`FORGE_FIELD_KEY`) ne couvre à ce jour **que** le matériel d'authentification
+> d'engagement — voir « Ce qui n'est pas encore chiffré au repos » ci-dessous.
+
 - **Secret de la source de détection** (`settings.detection_source`) : saisi au wizard du 1er
   déploiement ou dans *Administration → Source de détection*, stocké **write-only** en base (jamais
   relu en clair, jamais journalisé). Les variables `PLUME_*` / `FORGE_DETECTION_SOURCE` ne sont qu'un
   **repli rétro-compat** pour un pilotage hors-UI.
 - **SSO `client_secret`** : réglé dans les settings via l'UI, **write-only**, jamais réémis. Aucune
   variable d'env, donc aucun `.env`, n'est nécessaire pour lui.
+- **Jeton du canal de notification** (`settings.notify_channel` → `auth.secret`) : même motif
+  write-only (`GET` rend `secret_set: bool`), même réserve sur le repos.
+
+### Ce qui est chiffré au repos — état MESURÉ
+
+| Donnée | Emplacement | Au repos (build par défaut) |
+|---|---|---|
+| Matériel d'auth d'engagement (bearer/cookies/en-têtes) | `engagement.scope_json` → `auth.accounts[]` | **chiffré** (`FORGE_FIELD_KEY`) |
+| Idem, en transit interne vers le moteur | `run_job.spawn_spec` (chemin HA *pending*) | **chiffré** (hérité) — et purgé au claim |
+| Mots de passe de comptes | `users.pass_hash` | **hash argon2id** — sans objet (sens unique) |
+| Jetons de session | `session.token_sha` | **SHA-256** — sans objet (sens unique) |
+| Secret de la source de détection | `settings.detection_source` → `auth.secret` | **en clair** |
+| Jeton du canal de notification | `settings.notify_channel` → `auth.secret` | **en clair** |
+| SSO `client_secret` | `settings.sso.config` → `client_secret` | **en clair** |
+
+Les trois dernières lignes sont un **écart connu et assumé**, pas un oubli. Ce sont des **jetons
+d'intégration vers l'infrastructure de l'opérateur lui-même** — classe de risque distincte des
+credentials d'engagement, qui sont des **sessions vivantes sur l'estate d'un client**. Les chiffrer
+demande de rendre faillibles leurs points d'usage (`ds_secret`, `ch_secret`, `sso::load_config`), dont
+le dernier renvoie aujourd'hui `Option` : un déchiffrement raté y deviendrait « non configuré », donc
+une **dégradation silencieuse** — exactement le mode de panne que le fail-closed du chiffrement de champ
+existe pour interdire. C'est un changement à part entière, pas un ajout de trois lignes. En attendant,
+**`--features encryption` + `FORGE_DB_KEY` les couvre** (chiffrement intégral).
 
 ## Docker Compose
 

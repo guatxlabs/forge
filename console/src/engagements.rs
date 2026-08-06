@@ -179,7 +179,15 @@ pub(crate) fn derive_engagement_ledger_path(app: &App, id: i64, tenant_id: i64) 
 /// Valide/canonicalise le scope d'un engagement depuis un objet `{mode?, in_scope?, out_scope?}`.
 /// mode ∈ {white,grey,black} (défaut grey). in_scope/out_scope = tableaux (≤256) de motifs bornés.
 /// Renvoie (scope_json canonique, mode). Fonction PURE (aucune I/O).
-pub(crate) fn validate_engagement_scope(v: &Value) -> Result<(String, String), String> {
+///
+/// `field_key` = passphrase de CHIFFREMENT DE CHAMP (cf. `field_crypto`), passée EXPLICITEMENT plutôt
+/// que lue de l'environnement ici : c'est CETTE fonction qui produit la chaîne `scope_json` PERSISTÉE,
+/// donc le seul goulot par lequel du matériel d'authentification peut atteindre le disque. Sceller ICI
+/// rend structurellement IMPOSSIBLE d'écrire un credential en clair par un chemin oublié — et le
+/// paramètre explicite fait qu'un nouvel appelant ne peut pas « oublier » la question.
+/// FAIL-CLOSED : matériel en clair + `field_key = None` => `Err(field_crypto::ERR_KEY_MISSING)` (les
+/// handlers le traduisent en 503, pas en 400 : c'est un défaut de configuration SERVEUR).
+pub(crate) fn validate_engagement_scope(v: &Value, field_key: Option<&str>) -> Result<(String, String), String> {
     if !v.is_object() {
         return Err("scope_json attendu : objet {mode?, in_scope?, out_scope?}".into());
     }
@@ -222,6 +230,14 @@ pub(crate) fn validate_engagement_scope(v: &Value) -> Result<(String, String), S
     // on retombe EXACTEMENT sur l'expression historique (BYTE-IDENTIQUE : aucun champ `auth` ajouté),
     // pour qu'un engagement sans auth reste un no-op strict. `Session.from_scope` côté moteur lit ce bloc.
     let auth = validate_auth_block(v.get("auth"))?;
+    // CHIFFREMENT AU REPOS — le matériel d'auth (bearer/cookies/valeurs d'en-tête) est SCELLÉ ici, juste
+    // avant de devenir la chaîne persistée. Idempotent : le matériel repris d'un bloc STOCKÉ (fusion
+    // anti-effacement) est déjà enveloppé et n'est pas re-chiffré. Un bloc sans matériel (cibles seules)
+    // n'exige AUCUNE clé -> no-op strict pour qui n'arme pas de contexte auth.
+    let auth = match auth {
+        None => None,
+        Some(a) => Some(crate::field_crypto::seal_auth_block(&a, field_key)?),
+    };
     let canonical = match auth {
         None => json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope}).to_string(),
         Some(a) => json!({"mode": mode, "in_scope": in_scope, "out_scope": out_scope, "auth": a}).to_string(),
@@ -484,7 +500,15 @@ pub(crate) fn auth_summary_json(scope_v: &Value) -> Option<Value> {
     if accounts.is_empty() && targets.is_empty() {
         return None;
     }
-    Some(json!({"accounts": accounts, "idor_targets": targets}))
+    // ÉTAT AU REPOS (`sealed` | `plaintext` | `mixed` | `none`) — non secret, calculé SANS la clé. C'est
+    // ce qui rend le chiffrement HONNÊTE dans le produit : une base pas encore migrée le DIT (`plaintext`)
+    // au lieu de laisser croire que le matériel est protégé. Champ additif, présent UNIQUEMENT quand un
+    // bloc auth existe (donc absent du payload d'un engagement sans contexte => byte-identique).
+    Some(json!({
+        "accounts": accounts,
+        "idor_targets": targets,
+        "at_rest": crate::field_crypto::at_rest_label(&Value::Object(auth.clone())),
+    }))
 }
 
 /// Liste des engagements + compteurs agrégés (findings/runs) — aucune donnée d'un autre engagement n'est
@@ -577,7 +601,13 @@ pub(crate) async fn engagements_create(
     // scope_json : {mode?, in_scope?, out_scope?}. Absent -> scope VIDE (fail-closed : rien lançable tant
     // qu'un in_scope n'est pas défini). mode explicite (body.mode) prime sur celui du scope si fourni.
     let scope_v = body.get("scope_json").cloned().unwrap_or_else(|| json!({}));
-    let (scope_json, scope_mode) = match validate_engagement_scope(&scope_v) {
+    let (scope_json, scope_mode) = match validate_engagement_scope(&scope_v, crate::field_crypto::key_from_env().as_deref()) {
+        // FAIL-CLOSED LISIBLE : « clé de champ absente » n'est PAS une requête invalide — c'est une
+        // install qui n'a pas de quoi chiffrer le credential qu'on lui demande de garder. 503 + un code
+        // d'erreur dédié, pour que l'opérateur sache qu'il lui manque FORGE_FIELD_KEY et non un champ.
+        Err(e) if crate::field_crypto::is_key_missing(&e) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "field_key_missing", "why": e}))).into_response()
+        }
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_scope", "why": e}))).into_response(),
     };
@@ -668,7 +698,10 @@ pub(crate) async fn engagements_create(
 /// ÉDITE un engagement (name/mode/scope/status). GARDE-FOU fail-closed : on ne peut pas ARCHIVER le
 /// DERNIER engagement actif. Check + mutations sous un seul guard DB (atomique). Ledgerise l'action
 /// EFFECTIVE (edit|archive|activate). Retourne la vue ou (code, message).
-pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
+/// `field_key` = passphrase de CHIFFREMENT DE CHAMP, passée explicitement (jamais lue de l'env ici) :
+/// l'édition est le chemin qui FUSIONNE du matériel stocké (déjà scellé) avec du matériel ressaisi (en
+/// clair), donc celui où l'oubli du scellement serait le plus discret.
+pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value, field_key: Option<&str>) -> Result<Value, (StatusCode, String)> {
     // scope_json COURANT lu avec le statut (même aller-retour DB) : il porte le bloc `auth` STOCKÉ, dont la
     // fusion anti-effacement a besoin (les secrets ne sont jamais re-servis en lecture, donc jamais renvoyés
     // par un client faisant read-modify-write). Cf. merge_auth_for_update.
@@ -705,7 +738,13 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
                 None => { o.remove("auth"); }
             }
         }
-        let (sj, m) = validate_engagement_scope(&sv).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        // FAIL-CLOSED LISIBLE : 503 `field_key_missing` (défaut de configuration serveur) plutôt qu'un
+        // 400 « scope invalide » — l'édition est correcte, c'est l'install qui ne peut pas la chiffrer.
+        let (sj, m) = validate_engagement_scope(&sv, field_key)
+            .map_err(|e| {
+                let code = if crate::field_crypto::is_key_missing(&e) { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST };
+                (code, e)
+            })?;
         new_scope = Some(sj);
         new_mode = Some(m);
         new_auth = resolved;
@@ -960,7 +999,7 @@ pub(crate) async fn engagements_update(
     let res = if is_delete {
         engagement_do_delete(&app, id, &actor)
     } else {
-        engagement_do_update(&app, id, &actor, &body)
+        engagement_do_update(&app, id, &actor, &body, crate::field_crypto::key_from_env().as_deref())
     };
     match res {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),

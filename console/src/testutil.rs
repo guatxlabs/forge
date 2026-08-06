@@ -186,6 +186,19 @@ use serde_json::Value;
         a
     }
 
+    /// App de test dont la base vit SUR FICHIER (et non en mémoire). Indispensable aux tests qui doivent
+    /// inspecter les OCTETS ÉCRITS SUR DISQUE — une base `:memory:` ne prouverait rien sur le repos.
+    /// Le chemin est celui de l'appelant (qui reste responsable du nettoyage, `-wal`/`-shm` compris).
+    pub(crate) fn test_app_on_file(db_path: &str) -> App {
+        let mut a = test_app("");
+        let conn = Connection::open(db_path).expect("open file db");
+        conn.execute_batch(SCHEMA).expect("schema");
+        migrate(&conn);
+        a.db = Arc::new(Mutex::new(conn));
+        a.db_path = Arc::new(db_path.to_string());
+        a
+    }
+
     /// Construit un HeaderMap avec un X-Forge-Operator (repli bootstrap env-hash).
     pub(crate) fn operator_headers(pw: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

@@ -609,20 +609,34 @@ use crate::testutil::*;
     // PRÉSERVE le bloc `auth`), round-trip store/load lossless, résumé RÉDIGÉ pour l'UI, et no-op strict
     // (aucun bloc auth => scope_json byte-identique, aucun champ `auth`). MUTATION-PROVABLE : retirer la
     // préservation de `auth` dans validate_engagement_scope fait passer ces tests AU ROUGE.
+    //
+    // CHIFFREMENT AU REPOS (field_crypto) : depuis que le matériel est SCELLÉ avant persistance, ces
+    // tests portent la clé de champ EXPLICITEMENT (paramètre, jamais l'environnement -> aucune course
+    // entre tests parallèles) et vérifient que le clair n'atteint plus la chaîne stockée.
     // =====================================================================================
+
+    /// Clé de chiffrement de champ des tests d'engagement. PASSÉE EN PARAMÈTRE partout : l'environnement
+    /// est global au processus et la suite est multi-thread — le paramètre explicite rend ces tests
+    /// déterministes et indépendants de l'ordre d'exécution.
+    const FIELD_KEY: &str = "cle-de-champ-des-tests-engagement";
 
     /// validate_engagement_scope PRÉSERVE le bloc `auth` (round-trip lossless des valeurs) ET l'omet
     /// quand il est vide/absent (byte-identique à l'historique => no-op strict).
+    ///
+    /// CHIFFREMENT AU REPOS : la chaîne PERSISTÉE ne porte plus les credentials en clair — le matériel
+    /// (bearer/cookies/valeurs d'en-tête) y est SCELLÉ, la structure non secrète (labels, NOMS
+    /// d'en-têtes, cibles) reste lisible sans la clé, et le round-trip reste LOSSLESS.
     #[test]
     fn engagement_scope_preserves_auth_block_or_omits_it() {
-        // (a) NO-OP : sans bloc auth, la sortie est EXACTEMENT la chaîne historique (aucun champ `auth`).
+        // (a) NO-OP : sans bloc auth, la sortie est EXACTEMENT la chaîne historique (aucun champ `auth`),
+        //     et AUCUNE clé de champ n'est requise (un opérateur sans contexte auth n'est jamais puni).
         let plain = json!({"mode": "grey", "in_scope": ["app.test"], "out_scope": []});
-        let (canon_plain, _m) = validate_engagement_scope(&plain).expect("scope plain valide");
+        let (canon_plain, _m) = validate_engagement_scope(&plain, None).expect("scope plain valide");
         let expect_plain = json!({"mode": "grey", "in_scope": ["app.test"], "out_scope": []}).to_string();
         assert_eq!(canon_plain, expect_plain, "sans auth => scope_json byte-identique (no-op)");
         assert!(!canon_plain.contains("auth"), "aucun champ auth injecté sur un scope sans auth");
 
-        // (b) avec un bloc auth non trivial => PRÉSERVÉ (labels, matériel, cibles) VERBATIM.
+        // (b) avec un bloc auth non trivial => matériel SCELLÉ, structure PRÉSERVÉE, round-trip lossless.
         let with_auth = json!({
             "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
             "auth": {
@@ -633,27 +647,38 @@ use crate::testutil::*;
                 "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK-9z"}]
             }
         });
-        let (canon, _m) = validate_engagement_scope(&with_auth).expect("scope+auth valide");
+        let (canon, _m) = validate_engagement_scope(&with_auth, Some(FIELD_KEY)).expect("scope+auth valide");
+        // AUCUN credential dans la chaîne qui part en base.
+        for canary in ["S3CR3T-tok", "V1CT1M", "abc"] {
+            assert!(!canon.contains(canary), "matériel '{canary}' EN CLAIR dans le scope_json persisté: {canon}");
+        }
         let v: Value = serde_json::from_str(&canon).unwrap();
         let a = v.get("auth").expect("bloc auth préservé");
-        assert_eq!(a["accounts"][0]["label"], json!("attacker"));
-        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer préservé VERBATIM");
-        assert_eq!(a["accounts"][1]["cookies"]["sid"], json!("V1CT1M"), "cookie préservé VERBATIM");
-        assert_eq!(a["accounts"][1]["headers"]["X-CSRF"], json!("abc"), "header préservé VERBATIM");
+        assert_eq!(a["accounts"][0]["label"], json!("attacker"), "label lisible SANS la clé");
+        assert!(a["accounts"][1]["headers"].get("X-CSRF").is_some(), "NOM d'en-tête lisible SANS la clé");
         assert_eq!(a["idor_targets"][0]["url"], json!("https://app.test/api/me"));
         assert_eq!(a["idor_targets"][0]["marker"], json!("MK-9z"));
+        // ... et le matériel se retrouve VERBATIM une fois ouvert (round-trip lossless).
+        let open = crate::field_crypto::unseal_auth_block(a, Some(FIELD_KEY)).expect("ouverture");
+        assert_eq!(open["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer verbatim après round-trip");
+        assert_eq!(open["accounts"][1]["cookies"]["sid"], json!("V1CT1M"), "cookie verbatim après round-trip");
+        assert_eq!(open["accounts"][1]["headers"]["X-CSRF"], json!("abc"), "header verbatim après round-trip");
+
+        // (b') FAIL-CLOSED : le MÊME scope SANS clé de champ est REFUSÉ — jamais persisté en clair.
+        let e = validate_engagement_scope(&with_auth, None).expect_err("matériel + pas de clé => REFUS");
+        assert!(crate::field_crypto::is_key_missing(&e), "refus typé -> 503 field_key_missing, pas un 400");
 
         // (c) un compte SANS matériel d'auth est DROPPÉ ; un bloc totalement vide => OMIS (no-op).
         let empty_material = json!({
             "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
             "auth": {"accounts": [{"label": "ghost"}], "idor_targets": []}
         });
-        let (canon_e, _m) = validate_engagement_scope(&empty_material).expect("valide");
+        let (canon_e, _m) = validate_engagement_scope(&empty_material, None).expect("valide");
         assert!(!canon_e.contains("auth"), "compte sans matériel + aucune cible => bloc auth OMIS (no-op)");
 
         // (d) forme invalide => Err (400 en amont).
         let bad = json!({"mode": "grey", "in_scope": ["app.test"], "auth": {"accounts": "not-an-array"}});
-        assert!(validate_engagement_scope(&bad).is_err(), "accounts non-tableau => refus");
+        assert!(validate_engagement_scope(&bad, Some(FIELD_KEY)).is_err(), "accounts non-tableau => refus");
     }
 
     /// ROUND-TRIP STORE/LOAD : un engagement dont le scope_json PORTE un bloc auth le rend via
@@ -669,7 +694,7 @@ use crate::testutil::*;
                 "idor_targets": [{"url": "https://app.test/api/me", "owner": "victim", "marker": "MK"}]
             }
         });
-        let (canon, mode) = validate_engagement_scope(&with_auth).expect("valide");
+        let (canon, mode) = validate_engagement_scope(&with_auth, Some(FIELD_KEY)).expect("valide");
         app.db().execute(
             "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
              VALUES(41,'eng-auth','active',?,?, '', datetime('now'),datetime('now'))",
@@ -677,8 +702,12 @@ use crate::testutil::*;
         ).unwrap();
         let eng = load_engagement(&app.store(), 41).expect("engagement chargé");
         let a = eng.auth.expect("eng.auth = Some (bloc préservé au chargement)");
-        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer intact après store/load");
-        assert_eq!(a["idor_targets"][0]["marker"], json!("MK"));
+        // Le bloc chargé est encore SCELLÉ : il le reste jusqu'au point d'usage (le scope.json 0600 du
+        // run) — et il traverse donc scellé le blob `run_job.spawn_spec` du chemin HA pending.
+        assert!(!a.to_string().contains("S3CR3T-tok"), "eng.auth reste CHIFFRÉ en mémoire jusqu'au run");
+        let open = crate::field_crypto::unseal_auth_block(&a, Some(FIELD_KEY)).expect("ouverture");
+        assert_eq!(open["accounts"][0]["bearer"], json!("S3CR3T-tok"), "bearer intact après store/load");
+        assert_eq!(a["idor_targets"][0]["marker"], json!("MK"), "cible lisible SANS la clé");
 
         // engagement SANS auth => eng.auth = None (=> le run flow n'émet aucun champ auth => no-op).
         insert_test_engagement(&app, 42, &["app.test"], "grey", "");
@@ -733,25 +762,41 @@ use crate::testutil::*;
                 "idor_targets": [{"url": "https://app.test/api/orders/1", "owner": "victim", "marker": "MK-1"}]
             }
         });
-        let (canon, mode) = validate_engagement_scope(&seed).expect("scope+auth valide");
+        let (canon, mode) = validate_engagement_scope(&seed, Some(FIELD_KEY)).expect("scope+auth valide");
         app.db().execute(
             "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
              VALUES(1,'arme','active',?,?,?,datetime('now'),datetime('now'))",
             rusqlite::params![mode, canon, ledger],
         ).unwrap();
+        // Bloc `auth` TEL QU'IL EST STOCKÉ (donc SCELLÉ) — sert aux assertions de structure/effacement.
         let auth_of = |app: &App| -> Value {
             let s: String = app.db().query_row("SELECT scope_json FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
             serde_json::from_str::<Value>(&s).unwrap().get("auth").cloned().unwrap_or(Value::Null)
         };
+        // ... et le MÊME bloc OUVERT, pour vérifier que la fusion a préservé les VALEURS. Le scope_json
+        // stocké est aussi vérifié SANS credential en clair à chaque étape (canaris ci-dessous).
+        let auth_open = |app: &App| -> Value {
+            crate::field_crypto::unseal_auth_block(&auth_of(app), Some(FIELD_KEY)).expect("ouverture du bloc stocké")
+        };
+        let assert_no_plaintext = |app: &App, step: &str| {
+            let s: String = app.db().query_row("SELECT scope_json FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+            for canary in ["S3CR3T-tok", "csrf-val", "V1CT1M", "ROTATED"] {
+                assert!(!s.contains(canary), "[{step}] matériel '{canary}' EN CLAIR dans scope_json: {s}");
+            }
+        };
+        assert_no_plaintext(&app, "seed");
 
         // (a) ÉDITION DU PÉRIMÈTRE — aucune clé `auth` dans le scope entrant => contexte PRÉSERVÉ INTACT.
+        // NOTE : cette édition ne ressaisit AUCUN matériel -> tout est déjà scellé -> AUCUNE clé requise.
+        // C'est la propriété qui fait qu'un opérateur peut re-cadrer un périmètre sans détenir la clé.
         engagement_do_update(&app, 1, "opr", &json!({
             "scope_json": {"mode": "grey", "in_scope": ["app.test", "api.app.test"], "out_scope": []}
-        })).expect("édition de périmètre acceptée");
-        let a = auth_of(&app);
+        }), None).expect("édition de périmètre acceptée");
+        let a = auth_open(&app);
         assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "le bearer SURVIT à une édition de périmètre");
         assert_eq!(a["accounts"][1]["cookies"], json!("sid=V1CT1M"), "les cookies SURVIVENT");
-        assert_eq!(a["idor_targets"][0]["marker"], json!("MK-1"), "les cibles SURVIVENT");
+        assert_eq!(auth_of(&app)["idor_targets"][0]["marker"], json!("MK-1"), "les cibles SURVIVENT (en clair)");
+        assert_no_plaintext(&app, "edition-perimetre");
         {   // le périmètre, lui, a bien été redéfini (l'édition n'est pas un no-op déguisé)
             let eng = load_engagement(&app.store(), 1).expect("engagement rechargé");
             assert_eq!(eng.scope_in, vec!["app.test".to_string(), "api.app.test".to_string()]);
@@ -759,25 +804,34 @@ use crate::testutil::*;
 
         // (b) ÉDITION DU CONTEXTE — l'éditeur renvoie les comptes SANS secrets (il ne les a jamais reçus) :
         //     `keep_existing` reprend le matériel manquant par label ; un champ RESSAISI remplace l'ancien.
-        engagement_do_update(&app, 1, "opr", &json!({
+        let ressaisie = json!({
             "scope_json": {"mode": "grey", "in_scope": ["app.test"], "out_scope": [], "auth": {
                 "accounts": [{"label": "attacker", "keep_existing": true},
                              {"label": "victim", "keep_existing": true, "cookies": "sid=ROTATED"}],
                 "idor_targets": [{"url": "https://app.test/api/orders/2", "owner": "victim", "marker": "MK-2"}]
             }}
-        })).expect("édition du contexte acceptée");
-        let a = auth_of(&app);
+        });
+        // FAIL-CLOSED : ressaisir du matériel EN CLAIR sans clé est REFUSÉ (503), et l'état stocké
+        // n'est PAS touché — on ne dégrade pas un contexte armé parce qu'une clé manque.
+        let (code, why) = engagement_do_update(&app, 1, "opr", &ressaisie, None).expect_err("ressaisie sans clé => REFUS");
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "défaut de CONFIG serveur, pas requête invalide");
+        assert!(crate::field_crypto::is_key_missing(&why));
+        assert_eq!(auth_open(&app)["accounts"][1]["cookies"], json!("sid=V1CT1M"), "refus => état INCHANGÉ");
+
+        engagement_do_update(&app, 1, "opr", &ressaisie, Some(FIELD_KEY)).expect("édition du contexte acceptée");
+        let a = auth_open(&app);
         assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "matériel non ressaisi REPRIS par label");
         assert_eq!(a["accounts"][0]["headers"]["X-CSRF"], json!("csrf-val"), "en-têtes non ressaisis REPRIS");
         assert_eq!(a["accounts"][1]["cookies"], json!("sid=ROTATED"), "un champ RESSAISI remplace l'ancien");
-        assert_eq!(a["idor_targets"][0]["marker"], json!("MK-2"), "les cibles suivent l'éditeur");
-        assert!(!a.to_string().contains("keep_existing"), "marqueur de PROTOCOLE jamais persisté");
+        assert_eq!(auth_of(&app)["idor_targets"][0]["marker"], json!("MK-2"), "les cibles suivent l'éditeur");
+        assert!(!auth_of(&app).to_string().contains("keep_existing"), "marqueur de PROTOCOLE jamais persisté");
+        assert_no_plaintext(&app, "edition-contexte");
 
         // (c) EFFACEMENT EXPLICITE — bloc auth fourni SANS compte exploitable ni cible => contexte supprimé.
         engagement_do_update(&app, 1, "opr", &json!({
             "scope_json": {"mode": "grey", "in_scope": ["app.test"], "out_scope": [],
                            "auth": {"accounts": [{"label": "attacker"}], "idor_targets": []}}
-        })).expect("effacement accepté");
+        }), None).expect("effacement accepté");
         assert_eq!(auth_of(&app), Value::Null, "bloc vide => contexte EFFACÉ (l'éditeur fait autorité)");
         let _ = std::fs::remove_file(&ledger);
     }
@@ -794,6 +848,10 @@ use crate::testutil::*;
         const COOKIE: &str = "LEAK-CANARY-COOKIE-7y";
         const HDRVAL: &str = "LEAK-CANARY-HEADER-5z";
         let ledger = tmp_path("forge-test-auth-leak");
+        // Ce test traverse les HANDLERS HTTP, seul endroit qui lit la clé de champ dans l'environnement.
+        // `test_install_process_key` la POSE une fois pour le processus (jamais ne l'enlève -> aucune
+        // course avec les autres tests, qui passent tous leur clé en paramètre).
+        let field_key = crate::field_crypto::test_install_process_key();
         let app = test_app_scoped(&ledger, vec!["app.test".into()]);
         { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
         insert_test_engagement(&app, 1, &["app.test"], "grey", &ledger); // ancre #1 (jamais le dernier actif)
@@ -847,6 +905,22 @@ use crate::testutil::*;
             }
         }
         assert!(attested, "le ledger atteste le contexte armé par LABELS + COMPTEUR (jamais par son contenu)");
+
+        // (c) AU REPOS : la colonne `scope_json` elle-même ne porte AUCUN canari — la non-fuite ne vaut
+        //     pas que pour les SORTIES (API/ledger), elle vaut aussi pour ce qui DORT dans la base. Le
+        //     résumé servi à l'éditeur ANNONCE cet état (`at_rest`), pour que ce soit vérifiable dans le
+        //     produit et pas seulement ici.
+        let stored: String = {
+            let db = app.db();
+            db.query_row("SELECT scope_json FROM engagement WHERE id=?", rusqlite::params![new_id], |r| r.get(0)).unwrap()
+        };
+        for canary in [BEARER, COOKIE, HDRVAL] {
+            assert!(!stored.contains(canary), "matériel '{canary}' EN CLAIR au repos dans engagement.scope_json");
+        }
+        assert_eq!(found["auth"]["at_rest"], json!("sealed"), "l'éditeur voit l'état AU REPOS (honnêteté)");
+        let auth: Value = serde_json::from_str::<Value>(&stored).unwrap()["auth"].clone();
+        let open = crate::field_crypto::unseal_auth_block(&auth, Some(field_key)).expect("ouverture");
+        assert_eq!(open["accounts"][0]["bearer"], json!(BEARER), "chiffré, mais toujours exploitable");
         let _ = std::fs::remove_file(&ledger);
         let _ = std::fs::remove_file(&dedicated);
     }

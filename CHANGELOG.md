@@ -10,6 +10,50 @@ All notable changes to Forge are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Chiffrement au repos du matériel d'authentification — dans le build PAR DÉFAUT, sans OpenSSL.** Le
+  volet réseau venait d'être fermé (seam TLS) ; restait le repos. `docs/DEPLOYMENT.md` §1.5 le concédait :
+  le build par défaut stocke la base **en clair**, et cette base porte désormais le **contexte auth
+  par-engagement** — bearers, cookies et valeurs d'en-tête des **comptes de test** de l'opérateur,
+  c'est-à-dire des **sessions authentifiées sur l'estate d'un client**. Le chiffrement intégral existait
+  (feature `encryption`) mais exige un **backend crypto système/openssl à la compilation** : l'activer par
+  défaut aurait cassé l'openssl-freedom.
+
+  **Chiffrement de CHAMP** (`console/src/field_crypto.rs`) avec la pile AEAD **pur Rust déjà embarquée**
+  (`chacha20poly1305` + `argon2`, deps non optionnelles — celles des sauvegardes) : **ZÉRO nouvelle
+  dépendance**, openssl-freedom **vérifiée à 0 occurrence** après coup. La KDF argon2id et le cœur AEAD
+  ont été **EXTRAITS** de `backup_crypto.rs` (`aead_seal`/`aead_open`) plutôt que réécrits — il n'existe
+  qu'**une** implémentation de crypto symétrique dans la console, et elle a maintenant un test de contrat
+  sur le **lien AAD** (la preuve par mutation a montré qu'aucun test n'en dépendait).
+
+  **Un seul goulot d'écriture** : `validate_engagement_scope` produit la chaîne `scope_json` persistée,
+  donc sceller là rend structurellement impossible d'écrire un credential en clair par un chemin oublié.
+  **Un seul point d'ouverture** : le `scope.json` **0600** du run. Entre les deux, le matériel reste
+  chiffré — y compris dans le blob `run_job.spawn_spec` du chemin HA *pending*, qui devient donc chiffré
+  au repos lui aussi, en plus d'être purgé au claim.
+
+  **Périmètre MESURÉ** : scellés `bearer` / `cookies` / **valeurs** d'en-tête. Laissés en clair, à dessein,
+  les `label`, les **noms** d'en-têtes et les `idor_targets` — l'API les re-sert **déjà** en clair à
+  l'éditeur, donc les sceller rendrait l'éditeur illisible sans la clé **sans protéger un seul credential**.
+  `users.pass_hash` (argon2id) et `session.token_sha` (SHA-256) ne sont **pas** chiffrés : ce sont des
+  empreintes à sens unique, pas du matériel rejouable.
+
+  **FAIL-CLOSED, sans dégradation silencieuse** — on venait de corriger un bug où le contexte auth
+  s'effaçait en silence, et ça a coûté une campagne : (1) **aucun contexte auth ⇒ aucune clé requise**
+  (no-op strict, payloads inchangés) ; (2) **écrire du matériel sans clé ⇒ `503 field_key_missing`**
+  nommant la variable — jamais de credential persisté en clair « en attendant » ; (3) **matériel scellé
+  illisible ⇒ le run REFUSE de démarrer** (`auth_context_sealed`) plutôt que de partir avec un `auth`
+  vide qui désarmerait les oracles de contrôle d'accès sans le dire.
+
+  **Migration traitée, pas ignorée** : les bases existantes sont **scellées en place au boot**
+  (idempotent, rejouable, compté). Sans clé, rien n'est converti et le boot le **crie** — donner
+  l'illusion du chiffrement serait pire que le clair assumé. L'état est aussi lisible **dans le produit**
+  (`auth.at_rest` ∈ `sealed|plaintext|mixed|none`).
+
+  **Clé** : `FORGE_FIELD_KEY`, via le motif maison `<VAR>_FILE` déjà supporté. **Custody** : c'est un
+  secret à conserver **avec** la passphrase de sauvegarde — une base restaurée sans lui est intacte mais
+  son matériel reste scellé (round-trip sauvegarde vérifié). Perdre la clé ne perd **aucune autre donnée** :
+  il suffit de ressaisir le matériel. Les deux couches **composent** (`--features encryption` par-dessus
+  reste valide). Docs : `DEPLOYMENT.md` §1.6, `CONFIGURATION.md` §1.4, `KEY_CUSTODY.md`.
 - **Seam TLS sortant — la console parle `https://`, et le vérifie.** La console avait exactement trois
   sorties TCP, toutes en socket brut, donc **en clair** : l'échange de jeton OIDC (`sso/mod.rs`), le
   webhook de notification (`notify_channels.rs`) et le fetcher de source de détection (`net.rs`). La plus
