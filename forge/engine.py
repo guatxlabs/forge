@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -110,7 +111,7 @@ def _parallelism() -> int:
 
 
 def _action_cost(action: Action) -> float:
-    """Coût d'une action, NORMALISÉ pour servir de clé de palier (cf. `Engine._preheat_order`).
+    """Coût d'une action, NORMALISÉ pour servir de clé de palier de REPLI (cf. `Engine._preheat_key`).
     Un coût absent / non numérique / NaN / <= 0 vaut 1.0 (neutre) : les paliers restent comparables
     et ordonnables, aucune vague ne peut faire lever le tri. Miroir du `max(action.cost, 0.01)` du
     planner, côté ordonnancement."""
@@ -212,10 +213,18 @@ class Engine:
     def __init__(self, scope: Scope, ledger: "Ledger | None" = None, mode: str = "propose",
                  memory: Any = None, graph: EngagementGraph | None = None,
                  campaign: str | None = None, run_id: str | None = None,
-                 progress: "Callable[[str], None] | None" = None) -> None:
+                 progress: "Callable[[str], None] | None" = None,
+                 durations: Any = None) -> None:
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
+        # DURÉES OBSERVÉES PAR KIND (`durations.DurationStore` | None) — la seule chose qu'elles
+        # pilotent est l'ORDRE DE SOUMISSION du préchauffage (`_preheat_key`) ; AUCUNE décision de tir
+        # n'en dépend. None (défaut : CLI directe sans `--ledger`, tests) => aucune mesure enregistrée,
+        # aucun fichier, et `_preheat_key` retombe sur `action.cost` — comportement byte-identique à
+        # avant l'instrumentation. Cf. `forge/durations.py` pour la portée par-engagement et la garde
+        # de non-identification (agrégat PAR KIND, jamais par cible).
+        self.durations = durations
         self.graph = graph if graph is not None else EngagementGraph()
         self.roe = Roe(scope, ledger=ledger, mode=mode)
         # SESSION GOUVERNÉE (SECRET) : store d'authentification dérivé du scope (`session` défaut global
@@ -369,6 +378,13 @@ class Engine:
         pending = _Pending(action, decision=decision, module=module, is_fire=True)
         if decision.pinned_ips:
             action.params["_pinned_ips"] = list(decision.pinned_ips)
+        # INSTRUMENTATION DE DURÉE (horloge MONOTONE — jamais l'heure murale, qu'un NTP peut faire
+        # reculer). On chronomètre EXACTEMENT ce qui occupe un worker du pool : le tir bloquant, liaison
+        # des contextes thread-local comprise. Enregistré même si le tir LÈVE (le worker a bien été
+        # occupé ; la médiane de l'anneau absorbe un échec isolé). Le DRY-RUN n'est PAS chronométré, et
+        # c'est délibéré : `dry()` est sans effet de bord par contrat, donc quasi instantané — mesurer
+        # une campagne non armée EMPOISONNERAIT le magasin en apprenant que `web.testssl` prend 3 ms.
+        t0 = time.monotonic()
         try:
             with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions), \
                     pin.using(action.target, action.params.get("_pinned_ips")):
@@ -381,7 +397,22 @@ class Engine:
                 pending.bucket_rate = float(getattr(_bucket, "rate", 0.0) or 0.0)
         except Exception as e:  # noqa: BLE001 — capturée -> FIRE_ERROR à l'application (miroir M6 sériel)
             pending.fire_exc = e
+        finally:
+            self._record_duration(action.kind, time.monotonic() - t0)
         return pending
+
+    def _record_duration(self, kind: str, seconds: float) -> None:
+        """Verse UNE durée observée au magasin par-engagement, s'il est branché. No-op strict sinon
+        (une comparaison à None : c'est tout ce que coûte l'instrumentation quand elle est éteinte).
+        Best-effort : un magasin en défaut ne doit JAMAIS avorter un tir. Appelé depuis les workers de
+        tir -> `DurationStore.record` est verrouillé. Ne passe QUE le kind : aucune cible ne sort d'ici."""
+        store = self.durations
+        if store is None:
+            return
+        try:
+            store.record(kind, seconds)
+        except Exception:  # noqa: BLE001 — cache de performance : jamais une cause d'échec de run
+            pass
 
     def _apply(self, pending: _Pending) -> dict[str, Any]:
         """PHASE 2 (SÉRIELLE, thread principal, ordre d'action) : applique les MUTATIONS d'état d'un
@@ -573,6 +604,17 @@ class Engine:
         mesure un no-op (3,08 s et 1,21 s, inchangés) : c'est voulu et structurel, `_preheat_order`
         rend une liste vide dans ces deux cas et `_fill` retombe sur la fenêtre glissante d'avant.
 
+        « LENTE » SE MESURE MAINTENANT (`_preheat_key`) : la durée OBSERVÉE du kind, quand le magasin
+        par-engagement en porte une, prime sur `action.cost` — qui reste le repli EXACT quand aucune
+        mesure n'existe. Sur une vague dont les coûts DISENT VRAI, les deux donnent le même ordre et le
+        même mur-à-mur (banc « straggler » : 1,84 s par coût, 1,83 s par durée — du bruit). L'écart
+        n'apparaît QUE là où `cost` MENT, c'est-à-dire quand il n'est pas corrélé à la durée réelle —
+        typiquement un module lent resté au `cost` par DÉFAUT (1.0), le cas de tout kind absent de la
+        table du cerveau. Banc « cost-lies » (pool=4, 5 répétitions) : 1,88 s sans ordonnancement,
+        **1,92 s par coût** (préchauffer par coût y est PIRE que ne rien faire — il met au four les
+        actions rapides et raccourcit la piste), **1,60 s par durée observée**, soit -16,8 % et 1,05x
+        le plancher travail/pool au lieu de 1,26x.
+
         L'ORDRE RÉORDONNÉ EST CELUI DE LA SOUMISSION, JAMAIS CELUI DE L'APPLICATION. On draine par
         INDICE D'ACTION croissant (`head`) quoi qu'il arrive : `_apply` reste sériel et dans l'ordre
         d'action, donc ledger/ingest/décisions/findings sortent exactement comme en sériel. La TÊTE est
@@ -692,35 +734,58 @@ class Engine:
         BYTE-IDENTIQUE à avant l'ordonnancement. C'est le cas de toute vague pilotée à la main / par la
         CLI, où `cost` garde son défaut 1.0 : zéro changement, zéro risque.
 
-        D'OÙ VIENT L'ESTIMATION DE DURÉE — de `action.cost`, que le dépôt PORTE DÉJÀ. C'est le
-        dénominateur de l'EV du planner (`value*confidence/cost`), et le cerveau le renseigne
-        explicitement comme un coût de TEMPS : `brain._CONTENT_SCANNER_EV` annote ses coûts
-        « quasi-instantané » (1.0) / « LENT » (2.0) / « TRÈS LENT » (3.0), et les actions d'oracle
-        montent à 2-3 quand elles enchaînent plusieurs requêtes (`access_control.idor`, `auth.takeover`).
-        Aucune table nouvelle, aucune mesure à persister : on lit le seul champ de coût que le moteur
-        transporte déjà d'un bout à l'autre. Les deux alternatives ont été écartées faute de porteur :
-        le ledger et les run-records n'horodatent qu'à la SECONDE (`isoformat(timespec="seconds")`) et
-        ne portent aucune durée par action — il aurait fallu inventer l'instrumentation ET son stockage ;
-        et une table statique par famille de module aurait recopié, à côté de `cost`, une information
-        que `cost` porte déjà (la dérive garantie que `techniques.py` a justement supprimée ailleurs).
+        D'OÙ VIENT L'ESTIMATION DE DURÉE — cf. `_preheat_key` : la durée OBSERVÉE du kind quand le
+        magasin par-engagement en porte une, `action.cost` sinon.
 
         DÉTERMINISTE : les indices d'un même palier sortent en ORDRE D'INDICE, les paliers du plus
-        cher au moins cher. Deux exécutions de la même vague préchauffent donc exactement le même
-        ensemble, dans le même ordre. Pur, ne lève jamais : un `cost` non numérique / NaN / <= 0 est
-        traité comme neutre (1.0), comme le `max(action.cost, 0.01)` du planner."""
+        long au plus court. Deux exécutions de la même vague AVEC LE MÊME MAGASIN préchauffent donc
+        exactement le même ensemble, dans le même ordre (le magasin est GELÉ pour la durée du run, cf.
+        `durations.DurationStore`). Le tri porte sur des flottants, jamais sur l'ordre d'insertion d'un
+        dict. Pur, ne lève jamais : un `cost` non numérique / NaN / <= 0 est traité comme neutre (1.0),
+        comme le `max(action.cost, 0.01)` du planner."""
         if capacity <= 0:
             return []
-        costs = [_action_cost(a) for a in actions]
-        tiers = sorted(set(costs), reverse=True)
-        if len(tiers) < 2:                             # coût unique -> rien à préchauffer (identité)
+        keys = [self._preheat_key(a) for a in actions]
+        tiers = sorted(set(keys), reverse=True)
+        if len(tiers) < 2:                             # clé unique -> rien à préchauffer (identité)
             return []
         out: list[int] = []
-        for tier in tiers[:-1]:                        # jamais le palier le MOINS cher
-            members = [i for i, c in enumerate(costs) if c == tier]
+        for tier in tiers[:-1]:                        # jamais le palier le PLUS COURT
+            members = [i for i, c in enumerate(keys) if c == tier]
             if len(out) + len(members) > capacity:     # PALIER COMPLET OU RIEN (cf. supra)
                 break
             out.extend(members)
         return out
+
+    def _preheat_key(self, action: Action) -> float:
+        """Estimation de LENTEUR d'une action — la clé de palier de `_preheat_order`.
+
+        DEUX SOURCES, DANS CET ORDRE.
+          1. LA DURÉE OBSERVÉE du kind (`durations.DurationStore.estimate`), en secondes quantifiées,
+             mesurée par `_record_duration` sur les tirs des runs PRÉCÉDENTS de CE MÊME engagement.
+             C'est la seule mesure de DURÉE du dépôt.
+          2. À DÉFAUT, `action.cost` — donnée de GOUVERNANCE réutilisée en proxy de durée. Le cerveau
+             la renseigne comme un coût de TEMPS (`brain._CONTENT_SCANNER_EV` annote ses coûts
+             « quasi-instantané » 1.0 / « LENT » 2.0 / « TRÈS LENT » 3.0), mais rien ne le GARANTIT :
+             un module cher-mais-rapide se fait préchauffer pour rien, un module gratuit-mais-lent
+             immobilise le pool. C'est précisément ce que (1) corrige, quand (1) existe.
+
+        REPLI EXACT — LA PROPRIÉTÉ QUI COMPTE. Sans magasin, ou avec un magasin SANS AUCUNE observation,
+        cette fonction rend `_action_cost(action)` pour TOUTE action : `_preheat_order` calcule alors
+        exactement les mêmes paliers qu'avant l'instrumentation, donc le même ensemble préchauffé, donc
+        le même ordre de soumission. Zéro donnée observée == comportement d'hier, à l'identique.
+
+        UNITÉS : les deux sources cohabitent dans la MÊME liste de clés quand une partie seulement des
+        kinds est observée. C'est assumé et documenté : `cost` est alors lu comme des secondes, ce qui
+        n'a pas d'exactitude numérique mais garde le bon SENS (les deux échelles croissent avec la
+        lenteur) — une mesure déclasse toujours une supposition pour le kind qu'elle concerne. Calibrer
+        l'une sur l'autre serait un MODÈLE, et un modèle n'a pas sa place dans un ordre de soumission."""
+        store = self.durations
+        if store is not None:
+            est = store.estimate(action.kind)
+            if est is not None:
+                return est
+        return _action_cost(action)
 
     def _run_checkpoint(self, checkpoint: "Callable[[], None] | None") -> None:
         """Invoque le callback de checkpoint (flush incrémental console) en BEST-EFFORT : une exception

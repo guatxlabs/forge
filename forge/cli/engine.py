@@ -15,6 +15,7 @@ from ..schema import Target
 from ..brain import HeuristicBrain, AutoPentestBrain
 from ..planner import Planner
 from ..memory import make_memory
+from ..durations import DurationStore
 from .. import purple
 from .. import console_client
 from .. import workflows
@@ -106,18 +107,34 @@ def _make_memory(args):
                        allow_download=bool(getattr(args, "memory_allow_download", False)))
 
 
+def _make_durations(args):
+    """Magasin de DURÉES OBSERVÉES par kind, sidecar `<ledger>.durations` — donc PAR ENGAGEMENT (la
+    console donne à chaque engagement son ledger dédié), donc supprimé avec lui. Rend None sans
+    `--ledger` : aucun fichier créé, préchauffage sur `action.cost` comme avant. `FORGE_DURATIONS=0`
+    l'éteint. Alimente UNIQUEMENT l'ordre de SOUMISSION du préchauffage — jamais une décision de tir."""
+    return DurationStore.for_ledger(getattr(args, "ledger", None))
+
+
+def _save_durations(store):
+    """Persiste les durées mesurées par ce run (best-effort, jamais une cause d'échec)."""
+    if store is not None:
+        store.save()
+
+
 def cmd_run(args):
     _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = _make_memory(args)
-    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory)
+    durations = _make_durations(args)
+    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, durations=durations)
     if args.arm:
         engine.arm(f"forge run --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
         engine.approve(ap)
     actions = _load_actions(args.actions) if args.actions else _demo_actions(scope)
     engine.run(actions)
+    _save_durations(durations)             # durées observées -> sidecar par-engagement (ordre de soumission)
     if ledger is not None:                 # scelle la fin de run : checkpoint (ancré si anchor configuré)
         ledger.checkpoint(note="forge run end")
     cov = engine.coverage()
@@ -156,13 +173,15 @@ def cmd_campaign(args):
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = _make_memory(args)
+    durations = _make_durations(args)
     # ÉMISSION PROGRESSIVE : la console pompe le stdout du moteur ligne à ligne vers le flux SSE du run.
     # On branche un callback qui imprime CHAQUE ligne d'avancement immédiatement (flush) pour que les
     # verdicts/SKIP par action et les bannières de vague STREAMENT en direct (au lieu du seul récap final).
     # `flush=True` complète PYTHONUNBUFFERED posé par la console au spawn (sortie non bufferisée).
     def _progress(line):
         print(line, flush=True)
-    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, progress=_progress)
+    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, progress=_progress,
+                    durations=durations)
     if args.arm:
         engine.arm(f"forge campaign --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
@@ -296,6 +315,9 @@ def cmd_campaign(args):
             except (ValueError, OSError):
                 pass
 
+    # DURÉES OBSERVÉES : persistées même sur un arrêt watchdog (on est passé par le `except _Terminate`),
+    # pour que le travail de mesure d'un run coupé profite quand même au run suivant.
+    _save_durations(durations)
     if ledger is not None:                 # scelle la fin de campagne : checkpoint (ancré si anchor configuré)
         ledger.checkpoint(note="forge campaign end")
     cov = engine.coverage()

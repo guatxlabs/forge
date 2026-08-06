@@ -9,41 +9,63 @@ le planner trie par EV = value*confidence/cost : un coût ÉLEVÉ (== une action
 donc une place en FIN DE VAGUE. Les actions les plus longues arrivent systématiquement en dernier :
 quand elles démarrent, il ne reste plus rien pour occuper les autres workers, qui se vident.
 
-Ce banc chiffre ce trou sur trois FORMES de vague, à stubs de durée FIXÉE (aucun réseau, aucun DNS :
+Ce banc chiffre ce trou sur quatre FORMES de vague, à stubs de durée FIXÉE (aucun réseau, aucun DNS :
 les cibles sont des IP littérales publiques RFC5737) :
 
   A. `straggler`  — la forme RÉELLE d'une vague ordonnée par le planner : beaucoup d'actions courtes
-                    devant, une poignée de très lentes (testssl/nikto/feroxbuster) en QUEUE.
+                    devant, une poignée de très lentes (testssl/nikto/feroxbuster) en QUEUE. Les coûts
+                    y DISENT VRAI (ils viennent de la table annotée du cerveau).
   B. `queue-large` — la queue lente contient AU MOINS `pool` actions : elles remplissent le pool à
                     elles seules. CONTRÔLE : l'ordonnancement ne peut pas y gagner grand-chose.
   C. `uniform`    — toutes les actions ont la même durée ET le même coût. CONTRÔLE NÉGATIF : aucun
                     ordonnancement possible, donc AUCUNE régression tolérée.
+  D. `cost-lies`  — LE CAS QUI SÉPARE `cost` DE LA DURÉE MESURÉE, et il n'a rien d'artificiel : le
+                    cerveau ne renseigne un `cost` explicite que pour les kinds de sa table ; TOUT LE
+                    RESTE part au DÉFAUT 1.0, y compris des modules réellement lents. La forme met donc
+                    en scène (1) un kind LENT resté à `cost=1.0` (non annoté) et (2) un kind RAPIDE
+                    sur-annoté `cost=3.0` — leurres exacts l'un de l'autre. `cost` y désigne les
+                    MAUVAISES actions à préchauffer ; la durée observée désigne les bonnes.
 
-STRATÉGIES COMPARÉES. Le banc pilote le seam `Engine._preheat_order` (le SEUL point qui décide de
-QUOI est mis au four d'avance ; l'ordre d'APPLICATION n'en dépend jamais) :
+STRATÉGIES COMPARÉES. Le banc pilote le seam `Engine._preheat_order` / `Engine._preheat_key` (les
+SEULS points qui décident de QUOI est mis au four d'avance ; l'ordre d'APPLICATION n'en dépend jamais) :
 
   - `index`    : préchauffage VIDE -> `_fill` retombe sur la fenêtre glissante en ordre d'indice,
-                 c'est-à-dire le comportement AVANT ce chantier. C'est à la fois la MESURE DE
+                 c'est-à-dire le comportement AVANT tout ordonnancement. C'est à la fois la MESURE DE
                  RÉFÉRENCE et la MUTATION (retirer l'ordonnancement doit faire disparaître le gain).
-  - `duration` : le seam LIVRÉ — les paliers de `action.cost` les plus élevés, palier complet ou rien.
-  - `serial`   : `FORGE_PARALLELISM=1`, le plancher sériel, pour situer les deux autres.
+  - `cost`     : préchauffage sur les paliers de `action.cost` (palier complet ou rien) — l'état livré
+                 AVANT l'instrumentation de durée. (Cette stratégie s'appelait `duration` ; renommée
+                 parce que c'est précisément ce qu'elle N'EST PAS.)
+  - `observed` : préchauffage sur la DURÉE MESURÉE par kind (`forge/durations.py`). Le magasin est
+                 rempli honnêtement — par des runs de CHAUFFE réels, chronométrés puis JETÉS, jusqu'à
+                 ce que chaque kind de la vague ait franchi le seuil de confiance. Aucune valeur n'est
+                 injectée à la main : c'est le chemin `record -> save -> load` du produit.
+  - `serial`   : `FORGE_PARALLELISM=1`, le plancher sériel, pour situer les autres.
 
-CHIFFRES MESURÉS (pool=4, 5 répétitions, médiane) — `index -> duration` :
-  straggler    2,45 s -> 1,83 s  (-25 %) | 1,36x -> 1,02x le plancher travail/pool | sériel 7,24 s
-  queue-large  3,08 s -> 3,08 s  (no-op) | déjà à 1,03x du plancher : rien à gagner, rien à perdre
-  uniform      1,21 s -> 1,21 s  (no-op) | coût unique -> aucun préchauffage, chemin historique
-À pool=8 le gain s'étend : straggler -19 %, queue-large -15 % (à 8 workers, la queue lente ne
-remplit plus le pool à elle seule). À pool=2 tout est déjà au plancher : no-op partout.
+CHIFFRES MESURÉS (pool=4, 5 répétitions, médiane ; DEUX invocations indépendantes, dispersion
+intra-série <= 1,3 % et écart inter-série <= 0,01 s — les deux séries sont données quand elles
+diffèrent) :
+  straggler    index 2,46 s -> cost 1,84 s (-25 %)  -> observed 1,83/1,84 s  (+0,1/+0,3 % vs cost)
+  queue-large  index 3,09 s -> cost 3,09 s (no-op)  -> observed 3,09 s       (-0,1/-0,0 % vs cost)
+  uniform      index 1,21 s -> cost 1,21/1,22 s     -> observed 1,21 s       (+0,1/+0,2 % vs cost)
+  cost-lies    index 1,88 s -> cost 1,92 s (-2,1 %) -> observed 1,60 s       (+16,8 % vs cost)
+                              ^^^ préchauffer par COÛT y est PIRE que ne rien faire
+  plancher sériel : straggler 7,28 s · queue-large 12,07 s · uniform 4,83 s · cost-lies 6,15 s
+LECTURE HONNÊTE : sur les trois formes où `cost` dit vrai, la durée observée ne rapporte RIEN — elle
+retrouve exactement le même ordre, au bruit près. Elle ne rapporte que là où `cost` MENT, et c'est le
+seul endroit où elle prétend rapporter quelque chose. Le résidu levé n'est donc pas « le préchauffage
+va plus vite », c'est « le préchauffage ne dépend plus d'une donnée qui n'a jamais promis d'être une
+durée ». Voir aussi `--overhead` : le prix de l'instrumentation, mesuré au lieu d'être affirmé.
 
 Le banc n'est PAS collecté par pytest/unittest (préfixe `bench_`, pas `test_`) : il se lance à la
 main, il dort pour de vrai, et un chiffre au wall-clock n'a rien à faire dans une suite. Les tests
-de non-régression correspondants sont STRUCTURELS (ordre de DÉMARRAGE observé), dans
-`tests/test_engine_parallel.py`.
+de non-régression correspondants sont STRUCTURELS (ordre de DÉMARRAGE observé, repli exact, gardes du
+magasin), dans `tests/test_engine_parallel.py` et `tests/test_engine_durations.py`.
 
 Usage :
-    python3 tests/bench_engine_parallel_order.py                  # 3 formes, pool=4, 3 répétitions
+    python3 tests/bench_engine_parallel_order.py                  # 4 formes, pool=4, 3 répétitions
     python3 tests/bench_engine_parallel_order.py --repeat 5 --pool 8
-    python3 tests/bench_engine_parallel_order.py --shape straggler --no-serial
+    python3 tests/bench_engine_parallel_order.py --shape cost-lies --no-serial
+    python3 tests/bench_engine_parallel_order.py --overhead        # prix de l'instrumentation
 """
 from __future__ import annotations
 
@@ -51,11 +73,13 @@ import argparse
 import os
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from forge.durations import DurationStore                    # noqa: E402
 from forge.engine import Engine                              # noqa: E402
 from forge.modules import registry                           # noqa: E402
 from forge.planner import Planner                            # noqa: E402
@@ -76,6 +100,16 @@ KINDS = {
     "recon.content":        {"ev": (0.4, 0.4, 2.0), "secs": 0.60},   # feroxbuster/ffuf — LENT
     "web.nikto":            {"ev": (0.35, 0.4, 2.0), "secs": 0.60},  # LENT
     "web.testssl":          {"ev": (0.3, 0.4, 3.0), "secs": 1.20},   # TRÈS LENT
+}
+
+# Table de la forme `cost-lies` — MÊMES kinds, MÊMES durées, COÛTS MENTEURS. Le mensonge n'est pas
+# inventé pour le banc : `web.testssl` y garde le `cost=1.0` PAR DÉFAUT que le cerveau donne à tout
+# kind absent de sa table (alors qu'il est le plus lent), et `recon.content` porte un `cost=3.0`
+# alors qu'il répond ici en 30 ms. Les `value*confidence` restent BAS pour les deux, donc l'EV les
+# rejette tous deux en QUEUE de vague — exactement la situation où le préchauffage doit trancher.
+COST_LIES = {
+    "web.testssl":   {"ev": (0.3, 0.4, 1.0), "secs": 1.20},   # LENT, mais coût laissé au DÉFAUT
+    "recon.content": {"ev": (0.2, 0.3, 3.0), "secs": 0.03},   # RAPIDE, mais coût SUR-annoté
 }
 
 # cibles = IP LITTÉRALES publiques (RFC5737 TEST-NET-2/3) -> `resolve_target_ips` court-circuite,
@@ -140,7 +174,15 @@ SHAPES = {
                     ("recon.content", 4), ("web.nikto", 4), ("web.testssl", 4)],
     # C — CONTRÔLE NÉGATIF : durée ET coût uniformes -> aucun ordonnancement possible.
     "uniform":     [("web.nuclei", 24)],
+    # D — `cost` MENT : les 3 actions réellement lentes (testssl) sont à `cost=1.0`, les 3 leurres
+    #     rapides (content) à `cost=3.0`. Le préchauffage par coût vise les leurres ; par durée, juste.
+    "cost-lies":   [("recon.httpx", 10), ("web.security_headers", 10), ("recon.tech", 10),
+                    ("recon.waf", 10), ("web.nuclei", 6),
+                    ("web.testssl", 3), ("recon.content", 3)],
 }
+
+# Formes dont les coûts sont RÉÉCRITS par `COST_LIES` (les durées, elles, ne changent pas).
+LYING_SHAPES = frozenset({"cost-lies"})
 
 
 def _scope(targets):
@@ -152,10 +194,13 @@ def build_wave(shape):
     """Construit la vague d'une forme, ORDONNÉE PAR LE VRAI PLANNER (c'est l'ordre de production).
     Retourne (actions, targets, kinds, travail_total_secondes)."""
     _SECS.clear()
+    table = dict(KINDS)
+    if shape in LYING_SHAPES:                     # coûts menteurs, durées inchangées
+        table.update(COST_LIES)
     acts, targets, kinds, work = [], [], [], 0.0
     for kind, count in SHAPES[shape]:
-        v, c, cost = KINDS[kind]["ev"]
-        secs = KINDS[kind]["secs"]
+        v, c, cost = table[kind]["ev"]
+        secs = table[kind]["secs"]
         kinds.append(kind)
         for host in _HOSTS[:count]:
             _SECS[f"{kind}|{host}"] = secs
@@ -175,8 +220,10 @@ def _order_index(_self, _actions, _capacity):
     return []
 
 
-def _measure(shape, pool, strategy):
-    """Un run chronométré. `strategy` ∈ {'index', 'duration', 'serial'}. Rend (wall, nb_findings)."""
+def _run_once(shape, pool, strategy, store=None):
+    """UN run chronométré. `strategy` ∈ {'index', 'cost', 'observed', 'serial'} ; `store` est le magasin
+    de durées branché sur le moteur (obligatoire pour 'observed', utilisé aussi par la CHAUFFE).
+    Rend (wall, nb_findings, nb_actions)."""
     actions, targets, kinds, _work = build_wave(shape)
     # `_preheat_order` peut être ABSENT (mesure AVANT, seam pas encore posé) : l'ordre d'action est
     # alors DÉJÀ le comportement — rien à neutraliser, la stratégie 'index' est le code tel quel.
@@ -187,7 +234,7 @@ def _measure(shape, pool, strategy):
         Engine._preheat_order = _order_index          # neutralise le seam (mutation)
     try:
         with _swap(kinds):
-            eng = Engine(_scope(targets), mode="auto")
+            eng = Engine(_scope(targets), mode="auto", durations=store)
             eng.arm("bench ordonnancement")
             t0 = time.monotonic()
             eng.run(list(actions))
@@ -202,6 +249,63 @@ def _measure(shape, pool, strategy):
             os.environ["FORGE_PARALLELISM"] = prev_env
 
 
+def _warm_store(shape, pool, path, max_rounds=6):
+    """Remplit le magasin PAR DES RUNS RÉELS, chronométrés puis JETÉS, jusqu'à ce que CHAQUE kind de la
+    vague ait franchi le seuil de confiance. Aucune durée n'est écrite à la main : on emprunte le
+    chemin du produit (`record` pendant le tir -> `save` -> `load` au run suivant). Rend le magasin
+    rechargé, ou lève si le seuil reste hors d'atteinte (un banc qui mesure un magasin vide mentirait)."""
+    _a, _t, kinds, _w = build_wave(shape)
+    for _ in range(max_rounds):
+        store = DurationStore.load(path)
+        if all(store.estimate(k) is not None for k in kinds):
+            return store
+        _run_once(shape, pool, "observed", store=store)     # run de CHAUFFE (temps ignoré)
+        store.save()
+    store = DurationStore.load(path)
+    missing = [k for k in kinds if store.estimate(k) is None]
+    raise AssertionError(f"chauffe insuffisante : {missing} sans estimation après {max_rounds} runs")
+
+
+def _measure(shape, pool, strategy, workdir):
+    """Un point de mesure. Pour 'observed', la CHAUFFE précède et n'est PAS comptée."""
+    if strategy != "observed":
+        return _run_once(shape, pool, strategy)
+    path = Path(workdir) / f"{shape}.durations"
+    store = _warm_store(shape, pool, path)
+    return _run_once(shape, pool, "observed", store=store)
+
+
+# --- prix de l'instrumentation (mesuré, pas affirmé) ---------------------------------------------
+def bench_overhead(pool, repeat):
+    """LE COÛT DE MESURER. Deux chiffres, parce qu'ils répondent à deux questions différentes :
+
+      (1) `record()` seul, en boucle serrée — le prix BRUT d'une observation (verrou + anneau) ;
+      (2) la MÊME vague jouée avec et sans magasin branché, magasin VIDE des deux côtés : le
+          préchauffage est alors IDENTIQUE (aucune estimation), donc l'écart de mur-à-mur ne contient
+          QUE l'instrumentation. La forme `uniform` est choisie exprès : elle ne préchauffe rien.
+    """
+    print(f"pool={pool}  répétitions={repeat}\n=== prix de l'instrumentation ===")
+    store = DurationStore()
+    n = 200_000
+    t0 = time.monotonic()
+    for _ in range(n):
+        store.record("web.nuclei", 0.123)
+    per_call = (time.monotonic() - t0) / n
+    print(f"  record() seul            {per_call * 1e9:8.0f} ns/appel  ({n} appels)")
+
+    off, on = [], []
+    for _ in range(repeat):
+        off.append(_run_once("uniform", pool, "cost")[0])
+        on.append(_run_once("uniform", pool, "cost", store=DurationStore())[0])
+    m_off, m_on = statistics.median(off), statistics.median(on)
+    _a, _t, _k, work = build_wave("uniform")
+    print(f"  vague sans magasin       {m_off:8.3f}s  (min {min(off):.3f} / max {max(off):.3f})")
+    print(f"  vague avec magasin       {m_on:8.3f}s  (min {min(on):.3f} / max {max(on):.3f})")
+    print(f"  --> écart {(m_on - m_off) * 1000:+.1f} ms sur {len(_a)} tirs "
+          f"({(m_on - m_off) / max(len(_a), 1) * 1e6:+.1f} µs/tir) — à comparer au travail réel "
+          f"({work / len(_a) * 1000:.0f} ms/tir dans ce banc, des SECONDES pour un vrai outil)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -210,36 +314,51 @@ def main():
     ap.add_argument("--shape", action="append", choices=sorted(SHAPES),
                     help="limiter à une/des forme(s) (défaut : toutes)")
     ap.add_argument("--no-serial", action="store_true", help="ne pas mesurer le plancher sériel")
+    ap.add_argument("--overhead", action="store_true",
+                    help="mesurer le PRIX de l'instrumentation au lieu des formes de vague")
     args = ap.parse_args()
 
+    if args.overhead:
+        bench_overhead(args.pool, args.repeat)
+        return
+
     shapes = args.shape or list(SHAPES)
-    strategies = ["index", "duration"] + ([] if args.no_serial else ["serial"])
+    strategies = ["index", "cost", "observed"] + ([] if args.no_serial else ["serial"])
     has_seam = hasattr(Engine, "_preheat_order")
     print(f"pool={args.pool}  répétitions={args.repeat}  "
           f"seam _preheat_order={'PRÉSENT' if has_seam else 'ABSENT (mesure AVANT)'}")
     if not has_seam:
-        strategies = [s for s in strategies if s != "duration"]
+        strategies = [s for s in strategies if s not in ("cost", "observed")]
 
-    for shape in shapes:
-        _a, _t, _k, work = build_wave(shape)
-        floor = work / args.pool
-        print(f"\n=== forme « {shape} » — {len(_a)} actions, travail total {work:.2f}s, "
-              f"plancher théorique (travail/pool) {floor:.2f}s ===")
-        results = {}
-        for strat in strategies:
-            walls = []
-            for _ in range(args.repeat):
-                wall, nfind, nact = _measure(shape, args.pool, strat)
-                assert nfind == nact, f"{nfind} findings pour {nact} actions — résultat INCOMPLET"
-                walls.append(wall)
-            results[strat] = statistics.median(walls)
-            print(f"  {strat:<9} médiane {results[strat]:6.2f}s   "
-                  f"(min {min(walls):.2f} / max {max(walls):.2f})")
-        if "index" in results and "duration" in results:
-            before, after = results["index"], results["duration"]
-            gain = (before - after) / before * 100 if before else 0.0
-            print(f"  --> gain ordonnancement : {before:.2f}s -> {after:.2f}s  ({gain:+.1f}%)  "
-                  f"| distance au plancher : {before / floor:.2f}x -> {after / floor:.2f}x")
+    with tempfile.TemporaryDirectory(prefix="forge-bench-durations-") as workdir:
+        for shape in shapes:
+            _a, _t, _k, work = build_wave(shape)
+            floor = work / args.pool
+            print(f"\n=== forme « {shape} » — {len(_a)} actions, travail total {work:.2f}s, "
+                  f"plancher théorique (travail/pool) {floor:.2f}s ===")
+            results = {}
+            for strat in strategies:
+                walls = []
+                for _ in range(args.repeat):
+                    wall, nfind, nact = _measure(shape, args.pool, strat, workdir)
+                    assert nfind == nact, f"{nfind} findings pour {nact} actions — résultat INCOMPLET"
+                    walls.append(wall)
+                results[strat] = statistics.median(walls)
+                spread = (max(walls) - min(walls)) / results[strat] * 100 if results[strat] else 0.0
+                print(f"  {strat:<9} médiane {results[strat]:6.2f}s   "
+                      f"(min {min(walls):.2f} / max {max(walls):.2f}, dispersion {spread:.1f}%)")
+            _report_gain(results, "index", "cost", "ordonnancement par coût", floor)
+            _report_gain(results, "cost", "observed", "durée observée vs coût", floor)
+
+
+def _report_gain(results, before_key, after_key, label, floor):
+    """Une ligne de comparaison entre deux stratégies mesurées (no-op si l'une manque)."""
+    if before_key not in results or after_key not in results:
+        return
+    before, after = results[before_key], results[after_key]
+    gain = (before - after) / before * 100 if before else 0.0
+    print(f"  --> {label} : {before:.2f}s -> {after:.2f}s  ({gain:+.1f}%)  "
+          f"| distance au plancher : {before / floor:.2f}x -> {after / floor:.2f}x")
 
 
 if __name__ == "__main__":
