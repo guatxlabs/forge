@@ -65,6 +65,9 @@ EXPECTED_KINDS = {
     "ssti.eval", "path.traversal", "sqli.probe",
     # oracles client-side / flux de requête à preuve minimale (clientflow.py)
     "xss.reflected", "redirect.open", "csrf.state_change",
+    # oracle d'EXÉCUTION XSS confirmée par le navigateur gouverné (xssexec.py) — complément de
+    # xss.reflected/xss.stored : eux prouvent le REFLET exécutable, lui prouve que ça a TOURNÉ.
+    "xss.execution",
     # oracles token/API à preuve compte-opérateur (tokenapi.py)
     "jwt.weakness", "graphql.access",
     # LOT SCALE — nouvelles classes de vuln, chacune self-describing (une entrée technique + un module)
