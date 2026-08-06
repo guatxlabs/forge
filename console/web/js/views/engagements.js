@@ -152,7 +152,8 @@ export async function engagementEditModal(e) {
   const vals = await modal({
     title: 'Éditer « ' + e.name + ' »', okText: 'Enregistrer', wide: true,
     message: 'Scope actuel — mode ' + (e.mode || 'grey') + ' · in-scope: ' + curInTxt + ' · out-of-scope: ' + curOutTxt
-      + '. Renommer / changer le mode / redéfinir le scope : laisser une zone scope VIDE la laisse INCHANGÉE ; y saisir des hôtes REMPLACE la liste (un hôte par ligne).',
+      + '. Renommer / changer le mode / redéfinir le scope : laisser une zone scope VIDE la laisse INCHANGÉE ; y saisir des hôtes REMPLACE la liste (un hôte par ligne). '
+      + 'Le contexte d\'authentification (comptes de test + cibles idor) est CONSERVÉ ici — il s\'édite avec le bouton « Contexte auth ».',
     fields: [
       { name: 'name', label: 'Nom', type: 'text', value: e.name, required: true },
       { name: 'mode', label: 'Mode', type: 'select', value: e.mode, options: [{ value: 'white', label: 'white' }, { value: 'grey', label: 'grey' }, { value: 'black', label: 'black' }] },
@@ -220,6 +221,21 @@ function _acctRow(container, seed) {
   row.appendChild(mk('Bearer', bearer));
   row.appendChild(mk('Cookies', cookies, 'forme « nom=valeur; nom2=valeur2 ».'));
   row.appendChild(mk('En-têtes', headers, 'un « Nom: valeur » par ligne.'));
+  // CONSERVATION DU MATÉRIEL DÉJÀ ENREGISTRÉ — les secrets ne sont JAMAIS re-servis en lecture : sans ce
+  // drapeau, ouvrir cet éditeur pour corriger un marqueur SUPPRIMERAIT les comptes (un compte sans matériel
+  // est droppé) et désarmerait les oracles. Coché par défaut sur un compte déjà enregistré ; le serveur
+  // reprend alors, par label, ce qui n'a pas été ressaisi (cf. merge_auth_for_update).
+  const hasStored = !!(s.has_bearer || s.has_cookies || (Array.isArray(s.header_keys) && s.header_keys.length));
+  if (hasStored) {
+    const keepWrap = document.createElement('label'); keepWrap.className = 'modal-f auth-keep';
+    const keep = document.createElement('input'); keep.type = 'checkbox'; keep.dataset.k = 'keep'; keep.checked = true;
+    const sp = document.createElement('span'); sp.textContent = 'Conserver le matériel enregistré';
+    keepWrap.appendChild(sp); keepWrap.appendChild(keep);
+    const kh = document.createElement('small'); kh.className = 'modal-fhint';
+    kh.textContent = 'Décocher efface ce qui n\'est pas ressaisi ci-dessus.';
+    keepWrap.appendChild(kh);
+    row.appendChild(keepWrap);
+  }
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'k-theme danger'; rm.textContent = 'Retirer';
   rm.onclick = () => row.remove(); row.appendChild(rm);
   container.appendChild(row);
@@ -240,8 +256,11 @@ function _tgtRow(container, seed) {
   const owner = document.createElement('input'); owner.dataset.k = 'owner'; owner.value = s.owner || '';
   const marker = document.createElement('input'); marker.dataset.k = 'marker'; marker.value = s.marker || '';
   row.appendChild(mk('URL (in-scope)', url, 'https://app/api/orders/1', 'ressource possédée par la victime (whoami/objet).'));
-  row.appendChild(mk('Owner', owner, 'victim'));
-  row.appendChild(mk('Marqueur', marker, 'donnée privée de la victime', 'preuve : présence dans la réponse de l\'attaquant.'));
+  row.appendChild(mk('Owner', owner, 'victim', 'label du compte PROPRIÉTAIRE de cette ressource.'));
+  row.appendChild(mk('Marqueur', marker, 'e-mail de la victime, n° de commande…',
+    'chaîne présente UNIQUEMENT dans les données de la VICTIME — jamais dans celles de l\'attaquant, ni dans une page commune. '
+    + 'La retrouver dans la réponse obtenue avec la session de l\'attaquant PROUVE l\'accès cross-compte ; sans marqueur, un simple '
+    + 'écart de contenu ne distingue pas une ressource privée d\'une ressource légitimement partagée.'));
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'k-theme danger'; rm.textContent = 'Retirer';
   rm.onclick = () => row.remove(); row.appendChild(rm);
   container.appendChild(row);
@@ -262,7 +281,8 @@ export async function engagementAuthModal(e) {
   const msg = document.createElement('p'); msg.className = 'modal-msg';
   msg.textContent = 'Comptes de test de L\'OPÉRATEUR (attacker/victim) + cibles idor. La session de l\'attaquant est rejouée '
     + 'contre chaque cible ; un marqueur de la victime dans sa réponse prouve un accès/takeover cross-compte (oracles IDOR & ATO). '
-    + 'Secrets jamais réaffichés : ressaisir un champ pour le conserver, le laisser vide efface ce matériel. Le périmètre (in/out) est inchangé.';
+    + 'Les secrets ne sont JAMAIS réaffichés : un compte déjà enregistré garde son matériel tant que « Conserver » reste coché — '
+    + 'ressaisir un champ le remplace, décocher l\'efface. Le périmètre (in/out) est inchangé.';
   form.appendChild(msg);
 
   const accHead = document.createElement('div'); accHead.className = 'auth-sec-head';
@@ -305,12 +325,17 @@ export async function engagementAuthModal(e) {
       const bearer = String(g('bearer'));
       const cookies = String(g('cookies')).trim();
       const headers = _parseHeaderLines(g('headers'));
+      const keepEl = r.querySelector('[data-k="keep"]');
+      const keep = !!(keepEl && keepEl.checked);
       const acc = { label };
       let has = false;
       if (bearer.trim()) { acc.bearer = bearer; has = true; }
       if (cookies) { acc.cookies = cookies; has = true; }
       if (Object.keys(headers).length) { acc.headers = headers; has = true; }
-      if (label && has) accounts.push(acc);          // un compte sans matériel est ignoré (le serveur le drop aussi)
+      // `keep_existing` : le serveur reprend, PAR LABEL, le matériel non ressaisi (les secrets ne sont jamais
+      // re-servis, ce formulaire ne peut donc pas les renvoyer). Sans matériel NI conservation => compte ignoré.
+      if (keep) acc.keep_existing = true;
+      if (label && (has || keep)) accounts.push(acc);
     });
     const idor_targets = [];
     tgtBox.querySelectorAll('.auth-row').forEach(r => {
@@ -319,9 +344,12 @@ export async function engagementAuthModal(e) {
       if (!url) return;
       idor_targets.push({ url, owner: String(g('owner')).trim(), marker: String(g('marker')).trim() });
     });
-    // scope_json COMPLET (préserve mode/in/out de l'engagement) + auth OMIS si vide (=> no-op serveur).
+    // scope_json COMPLET (préserve mode/in/out de l'engagement). Le bloc `auth` est TOUJOURS transmis, même
+    // vide : c'est CET éditeur qui fait autorité sur le contexte (un bloc vide = effacement explicite).
+    // L'omettre signifierait « je ne parle pas d'auth » et le serveur PRÉSERVERAIT l'existant (cf.
+    // merge_auth_for_update) — on ne pourrait alors plus jamais vider le contexte depuis l'UI.
     const scope_json = { mode: e.mode || 'grey', in_scope: Array.isArray(e.in_scope) ? e.in_scope : [], out_scope: Array.isArray(e.out_scope) ? e.out_scope : [] };
-    if (accounts.length || idor_targets.length) scope_json.auth = { accounts, idor_targets };
+    scope_json.auth = { accounts, idor_targets };
     close();
     engagementMutate(e.id, { scope_json }, (accounts.length || idor_targets.length) ? 'Contexte auth enregistré (secrets rédigés côté moteur).' : 'Contexte auth vidé.');
   };
@@ -360,9 +388,16 @@ export async function loadEngagements() {
     if (e.id === active) tr.classList.add('eg-active-row');
     const c = e.counts || {};
     const isActive = e.status === 'active';
+    // BADGE « contexte auth armé » (résumé RÉDIGÉ servi par l'API : labels + cibles, aucun secret). Rend
+    // VISIBLE, sans ouvrir de modale, l'état qui décide si les oracles de contrôle d'accès testent ou
+    // rendent « config manquante » — l'absence de ce signal est ce qui laissait des engagements désarmés.
+    const authBadge = e.auth
+      ? ' <span class="badge ok" title="' + esc('Contexte auth : comptes ' + ((e.auth.accounts || []).map(x => x.label).join(', ') || '—')
+        + ' · ' + ((e.auth.idor_targets || []).length) + ' cible(s) idor') + '">auth</span>'
+      : '';
     tr.innerHTML =
       '<td class="numcol">' + e.id + '</td>' +
-      '<td>' + esc(e.name) + (e.id === active ? ' <span class="badge">actif</span>' : '') + (e.classification ? ' ' + TLP_BADGE(e.classification) : '') + '</td>' +
+      '<td>' + esc(e.name) + (e.id === active ? ' <span class="badge">actif</span>' : '') + (e.classification ? ' ' + TLP_BADGE(e.classification) : '') + authBadge + '</td>' +
       '<td><code>' + esc(e.mode) + '</code></td>' +
       '<td><span class="badge ' + (isActive ? 'ok' : 'mut') + '">' + esc(e.status) + '</span></td>' +
       '<td>' + (c.findings != null ? c.findings : 0) + '</td>' +
@@ -375,7 +410,7 @@ export async function loadEngagements() {
     };
     mkBtn('Basculer', 'k-theme', 'Rendre cet engagement actif', () => switchEngagement(e.id), e.id === active);
     mkBtn('Éditer', 'k-theme', 'Renommer / mode / scope (operator)', () => engagementEditModal(e));
-    mkBtn('Auth', 'k-theme', 'Contexte d\'authentification (comptes de test + cibles IDOR/ATO) — operator', () => engagementAuthModal(e));
+    mkBtn('Contexte auth', 'k-theme', 'Comptes de test (attacker/victim) + cibles idor qui ARMENT les oracles de contrôle d\'accès — operator', () => engagementAuthModal(e));
     if (isActive) {
       mkBtn('Archiver', 'k-theme', 'Archiver (admin) — refusé si dernier actif', async () => {
         if (await confirmModal('Archiver « ' + e.name + ' » ?', { okText: 'Archiver' })) engagementMutate(e.id, { status: 'archived' }, 'Engagement archivé.');

@@ -354,6 +354,91 @@ pub(crate) fn validate_auth_block(v: Option<&Value>) -> Result<Option<Value>, St
     Ok(Some(json!({"accounts": accounts, "idor_targets": targets})))
 }
 
+/// Vrai si un champ de MATÉRIEL d'auth (`headers`/`cookies`/`bearer`) est ABSENT au sens de la fusion :
+/// clé absente, `null`, chaîne vide/blanche, ou objet vide. C'est CE prédicat qui décide si la valeur
+/// STOCKÉE doit être reprise (l'opérateur n'a rien ressaisi) ou si la nouvelle valeur prime. PUR.
+fn auth_material_missing(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.trim().is_empty(),
+        Some(Value::Object(m)) => m.is_empty(),
+        Some(_) => true, // type inattendu -> traité comme absent (validate_auth_block tranchera)
+    }
+}
+
+/// FUSION du bloc `auth` lors d'une ÉDITION d'engagement (R5b) — ANTI-EFFACEMENT SILENCIEUX.
+///
+/// Le matériel d'auth n'est JAMAIS re-servi en lecture (cf. `auth_summary_json`) : un client qui fait
+/// read-modify-write sur `scope_json` ne PEUT PAS renvoyer les secrets qu'il n'a jamais reçus. Sans
+/// fusion, deux gestes ordinaires DÉTRUISAIENT donc le contexte d'authentification en silence :
+///   (1) « redéfinir le périmètre » (l'éditeur de scope n'envoie pas de bloc `auth`) effaçait comptes
+///       ET cibles -> les oracles de contrôle d'accès retombaient sur « config manquante » ;
+///   (2) « corriger un marqueur » (l'éditeur auth renvoie les comptes SANS leurs secrets) supprimait
+///       tous les comptes (un compte sans matériel est droppé) -> même effet.
+/// Règles (PUR, aucune I/O) :
+///   - clé `auth` ABSENTE du scope entrant  => le bloc STOCKÉ est PRÉSERVÉ tel quel (l'appelant ne
+///     parle pas d'auth : on ne touche à rien) ;
+///   - `auth: null`                          => EFFACEMENT explicite ;
+///   - `auth: {…}`                           => autorité de l'appelant, avec reprise par-compte du
+///     matériel NON ressaisi quand le compte porte `keep_existing: true` (appariement par `label`,
+///     insensible à la casse ; seuls `headers`/`cookies`/`bearer` manquants sont repris). Un bloc
+///     vide (`{accounts:[], idor_targets:[]}`) vaut EFFACEMENT (validate_auth_block -> None).
+/// `keep_existing` est un marqueur de PROTOCOLE : il n'est jamais persisté (validate_auth_block
+/// reconstruit chaque compte à partir des seules clés connues).
+pub(crate) fn merge_auth_for_update(stored_scope: &Value, incoming_scope: &Value) -> Result<Option<Value>, String> {
+    let stored_auth = stored_scope.get("auth");
+    let incoming = match incoming_scope.get("auth") {
+        None => return validate_auth_block(stored_auth), // ABSENT => on PRÉSERVE le bloc stocké
+        Some(Value::Null) => return Ok(None),            // null explicite => EFFACEMENT
+        Some(x) => x,
+    };
+    let mut merged = incoming.clone();
+    if let Some(accs) = merged.get_mut("accounts").and_then(|a| a.as_array_mut()) {
+        for acc in accs.iter_mut() {
+            let keep = acc.get("keep_existing").and_then(|v| v.as_bool()).unwrap_or(false);
+            if let Some(o) = acc.as_object_mut() {
+                o.remove("keep_existing"); // marqueur de protocole — jamais persisté
+            }
+            if !keep {
+                continue;
+            }
+            let label = acc.get("label").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+            if label.is_empty() {
+                continue; // sans label, aucun appariement sûr -> jamais d'héritage croisé de matériel
+            }
+            let src = stored_auth
+                .and_then(|a| a.get("accounts"))
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.iter().find(|s| {
+                    s.get("label").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase() == label
+                }));
+            let (Some(src), Some(o)) = (src, acc.as_object_mut()) else { continue };
+            for k in ["headers", "cookies", "bearer"] {
+                if auth_material_missing(o.get(k)) {
+                    if let Some(v) = src.get(k).filter(|v| !auth_material_missing(Some(v))) {
+                        o.insert(k.to_string(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+    validate_auth_block(Some(&merged))
+}
+
+/// RÉSUMÉ SÛR du bloc `auth` pour le LEDGER (R5b) — miroir EXACT de `AuthContext.ledger_summary()` côté
+/// moteur : QUE les LABELS des comptes + un COMPTEUR de cibles. Aucun secret (jamais un bearer, un
+/// cookie ni une valeur d'en-tête) et aucune URL (une URL de cible porte souvent un identifiant de la
+/// victime). Sert à attester QU'un contexte d'auth a été armé/lancé, jamais AVEC QUOI. Fonction PURE.
+pub(crate) fn auth_ledger_summary(auth: &Value) -> Value {
+    let accounts: Vec<Value> = auth
+        .get("accounts")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().map(|x| x.get("label").cloned().unwrap_or_else(|| json!(""))).collect())
+        .unwrap_or_default();
+    let targets = auth.get("idor_targets").and_then(|t| t.as_array()).map_or(0, |t| t.len());
+    json!({"accounts": accounts, "idor_targets": targets})
+}
+
 /// RÉSUMÉ RÉDIGÉ du bloc `auth` d'un scope_json pour l'éditeur (R5b). Renvoie `None` si aucun bloc auth
 /// (=> champ absent du payload, byte-identique à l'historique). Sinon un objet SANS AUCUN secret :
 ///   { accounts: [ {label, has_headers, header_keys:[…], has_cookies, has_bearer} ],
@@ -565,13 +650,17 @@ pub(crate) async fn engagements_create(
         }
     }
     // genèse : 1re entrée dans le ledger DÉDIÉ du nouvel engagement (isolation) + trace console globale.
-    append_run_ledger_path(&app, &ledger_path, "console.engagement.create", json!({
+    let mut detail = json!({
         "actor": actor, "engagement_id": id, "name": name, "mode": mode, "allow_private": allow_private != 0,
-    }));
+    });
+    // CONTEXTE AUTH (R5b) : résumé SÛR (labels + compteur de cibles) quand l'engagement naît déjà armé.
+    // Aucun secret, aucune URL. Champ ABSENT sans bloc auth => entrée byte-identique à l'historique.
+    if let Ok(Some(a)) = validate_auth_block(scope_v.get("auth")) {
+        detail["auth"] = auth_ledger_summary(&a);
+    }
+    append_run_ledger_path(&app, &ledger_path, "console.engagement.create", detail.clone());
     if ledger_path != app.ledger_path.as_str() {
-        append_console_ledger(&app, "console.engagement.create", json!({
-            "actor": actor, "engagement_id": id, "name": name, "mode": mode, "allow_private": allow_private != 0,
-        }));
+        append_console_ledger(&app, "console.engagement.create", detail);
     }
     (StatusCode::OK, Json(json!({"ok": true, "engagement": {"id": id, "name": name, "status": "active", "mode": mode, "allow_private": allow_private != 0}}))).into_response()
 }
@@ -580,9 +669,13 @@ pub(crate) async fn engagements_create(
 /// DERNIER engagement actif. Check + mutations sous un seul guard DB (atomique). Ledgerise l'action
 /// EFFECTIVE (edit|archive|activate). Retourne la vue ou (code, message).
 pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value) -> Result<Value, (StatusCode, String)> {
-    let cur_status: String = {
+    // scope_json COURANT lu avec le statut (même aller-retour DB) : il porte le bloc `auth` STOCKÉ, dont la
+    // fusion anti-effacement a besoin (les secrets ne sont jamais re-servis en lecture, donc jamais renvoyés
+    // par un client faisant read-modify-write). Cf. merge_auth_for_update.
+    let (cur_status, cur_scope): (String, String) = {
         let store = app.store();
-        store.query_row("SELECT status FROM engagement WHERE id=?", &crate::sql_params![id], |r| r.get_str(0))
+        store.query_row("SELECT status, scope_json FROM engagement WHERE id=?", &crate::sql_params![id],
+            |r| Ok((r.get_str(0)?, r.get_opt_str(1)?.unwrap_or_default())))
             .map_err(|_| (StatusCode::NOT_FOUND, format!("engagement {id} introuvable")))?
     };
     let new_name: Option<String> = match body.get("name") {
@@ -597,10 +690,25 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
     };
     let mut new_scope: Option<String> = None;
     let mut new_mode: Option<String> = None;
+    // Bloc `auth` EFFECTIF après fusion — sert au résumé SÛR ledgerisé plus bas (labels + compteur).
+    let mut new_auth: Option<Value> = None;
     if let Some(sv) = body.get("scope_json") {
-        let (sj, m) = validate_engagement_scope(sv).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        // ANTI-EFFACEMENT SILENCIEUX : le contexte d'authentification stocké est PRÉSERVÉ quand l'appelant
+        // ne parle pas d'auth (édition du périmètre), et le matériel non ressaisi est REPRIS par compte
+        // (`keep_existing`). Sans ça, redéfinir le scope désarmait les oracles de contrôle d'accès.
+        let stored_v: Value = serde_json::from_str(&cur_scope).unwrap_or_else(|_| json!({}));
+        let resolved = merge_auth_for_update(&stored_v, sv).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let mut sv = sv.clone();
+        if let Some(o) = sv.as_object_mut() {
+            match &resolved {
+                Some(a) => { o.insert("auth".into(), a.clone()); }
+                None => { o.remove("auth"); }
+            }
+        }
+        let (sj, m) = validate_engagement_scope(&sv).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         new_scope = Some(sj);
         new_mode = Some(m);
+        new_auth = resolved;
     }
     if let Some(m) = body.get("mode").and_then(|v| v.as_str()) {
         if !matches!(m, "white" | "grey" | "black") {
@@ -672,12 +780,18 @@ pub(crate) fn engagement_do_update(app: &App, id: i64, actor: &str, body: &Value
     let action = if new_status.as_deref() == Some("archived") { "archive" }
         else if new_status.as_deref() == Some("active") && cur_status == "archived" { "activate" }
         else { "edit" };
-    append_console_ledger(app, &format!("console.engagement.{action}"), json!({
+    let mut detail = json!({
         "actor": actor, "engagement_id": id,
         "name": new_name, "mode": new_mode, "status": new_status, "scope_changed": new_scope.is_some(),
         "classification": new_class,
         "allow_private": new_allow_private.map(|v| v != 0),
-    }));
+    });
+    // CONTEXTE AUTH (R5b) : on atteste QU'un contexte est armé (labels + nombre de cibles), JAMAIS avec quoi
+    // — miroir de `AuthContext.ledger_summary()` moteur. Champ ABSENT sans bloc auth => byte-identique.
+    if let Some(a) = &new_auth {
+        detail["auth"] = auth_ledger_summary(a);
+    }
+    append_console_ledger(app, &format!("console.engagement.{action}"), detail);
     Ok(json!({"ok": true, "engagement_id": id, "action": action}))
 }
 

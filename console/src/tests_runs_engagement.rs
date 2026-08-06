@@ -714,3 +714,139 @@ use crate::testutil::*;
         // aucun bloc auth => None (=> champ absent du payload liste => byte-identique).
         assert!(auth_summary_json(&json!({"mode": "grey", "in_scope": ["app.test"]})).is_none());
     }
+
+    /// [R5b — ANTI-EFFACEMENT SILENCIEUX] Le contexte d'authentification SURVIT à une édition qui ne parle
+    /// pas d'auth (redéfinir le périmètre), et le matériel NON RESSAISI est REPRIS par label quand le compte
+    /// porte `keep_existing` — indispensable puisque les secrets ne sont jamais re-servis en lecture : un
+    /// client faisant read-modify-write ne PEUT PAS les renvoyer. Un bloc `auth` explicitement sans compte
+    /// exploitable ni cible EFFACE (autorité de l'éditeur). MUTATION-PROVABLE : retirer la fusion de
+    /// `engagement_do_update` fait passer ce test AU ROUGE dès la 1re édition (le bearer disparaît).
+    #[test]
+    fn engagement_edit_preserves_auth_and_merges_kept_material() {
+        let ledger = tmp_path("forge-test-auth-merge");
+        let app = test_app_scoped(&ledger, vec!["app.test".into()]);
+        let seed = json!({
+            "mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+            "auth": {
+                "accounts": [{"label": "attacker", "bearer": "S3CR3T-tok", "headers": {"X-CSRF": "csrf-val"}},
+                             {"label": "victim", "cookies": "sid=V1CT1M"}],
+                "idor_targets": [{"url": "https://app.test/api/orders/1", "owner": "victim", "marker": "MK-1"}]
+            }
+        });
+        let (canon, mode) = validate_engagement_scope(&seed).expect("scope+auth valide");
+        app.db().execute(
+            "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
+             VALUES(1,'arme','active',?,?,?,datetime('now'),datetime('now'))",
+            rusqlite::params![mode, canon, ledger],
+        ).unwrap();
+        let auth_of = |app: &App| -> Value {
+            let s: String = app.db().query_row("SELECT scope_json FROM engagement WHERE id=1", [], |r| r.get(0)).unwrap();
+            serde_json::from_str::<Value>(&s).unwrap().get("auth").cloned().unwrap_or(Value::Null)
+        };
+
+        // (a) ÉDITION DU PÉRIMÈTRE — aucune clé `auth` dans le scope entrant => contexte PRÉSERVÉ INTACT.
+        engagement_do_update(&app, 1, "opr", &json!({
+            "scope_json": {"mode": "grey", "in_scope": ["app.test", "api.app.test"], "out_scope": []}
+        })).expect("édition de périmètre acceptée");
+        let a = auth_of(&app);
+        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "le bearer SURVIT à une édition de périmètre");
+        assert_eq!(a["accounts"][1]["cookies"], json!("sid=V1CT1M"), "les cookies SURVIVENT");
+        assert_eq!(a["idor_targets"][0]["marker"], json!("MK-1"), "les cibles SURVIVENT");
+        {   // le périmètre, lui, a bien été redéfini (l'édition n'est pas un no-op déguisé)
+            let eng = load_engagement(&app.store(), 1).expect("engagement rechargé");
+            assert_eq!(eng.scope_in, vec!["app.test".to_string(), "api.app.test".to_string()]);
+        }
+
+        // (b) ÉDITION DU CONTEXTE — l'éditeur renvoie les comptes SANS secrets (il ne les a jamais reçus) :
+        //     `keep_existing` reprend le matériel manquant par label ; un champ RESSAISI remplace l'ancien.
+        engagement_do_update(&app, 1, "opr", &json!({
+            "scope_json": {"mode": "grey", "in_scope": ["app.test"], "out_scope": [], "auth": {
+                "accounts": [{"label": "attacker", "keep_existing": true},
+                             {"label": "victim", "keep_existing": true, "cookies": "sid=ROTATED"}],
+                "idor_targets": [{"url": "https://app.test/api/orders/2", "owner": "victim", "marker": "MK-2"}]
+            }}
+        })).expect("édition du contexte acceptée");
+        let a = auth_of(&app);
+        assert_eq!(a["accounts"][0]["bearer"], json!("S3CR3T-tok"), "matériel non ressaisi REPRIS par label");
+        assert_eq!(a["accounts"][0]["headers"]["X-CSRF"], json!("csrf-val"), "en-têtes non ressaisis REPRIS");
+        assert_eq!(a["accounts"][1]["cookies"], json!("sid=ROTATED"), "un champ RESSAISI remplace l'ancien");
+        assert_eq!(a["idor_targets"][0]["marker"], json!("MK-2"), "les cibles suivent l'éditeur");
+        assert!(!a.to_string().contains("keep_existing"), "marqueur de PROTOCOLE jamais persisté");
+
+        // (c) EFFACEMENT EXPLICITE — bloc auth fourni SANS compte exploitable ni cible => contexte supprimé.
+        engagement_do_update(&app, 1, "opr", &json!({
+            "scope_json": {"mode": "grey", "in_scope": ["app.test"], "out_scope": [],
+                           "auth": {"accounts": [{"label": "attacker"}], "idor_targets": []}}
+        })).expect("effacement accepté");
+        assert_eq!(auth_of(&app), Value::Null, "bloc vide => contexte EFFACÉ (l'éditeur fait autorité)");
+        let _ = std::fs::remove_file(&ledger);
+    }
+
+    /// [R5b — NON-FUITE, bout en bout] Le matériel d'auth POSTé par l'opérateur ne ressort NI d'une LECTURE
+    /// (`GET /api/engagements`) NI du LEDGER tamper-evident. La lecture ne rend qu'un RÉSUMÉ RÉDIGÉ (labels,
+    /// NOMS d'en-têtes, booléens de présence) ; le ledger ne reçoit que des LABELS + un COMPTEUR (miroir de
+    /// `AuthContext.ledger_summary()` moteur), et aucune URL de cible (elle porte souvent un identifiant de
+    /// la victime). MUTATION-PROVABLE : servir `scope_json` brut dans la liste, ou ledgeriser le bloc `auth`
+    /// au lieu de son résumé, fait passer ce test AU ROUGE.
+    #[tokio::test]
+    async fn engagement_auth_material_never_leaks_to_reads_or_ledger() {
+        const BEARER: &str = "LEAK-CANARY-BEARER-9x";
+        const COOKIE: &str = "LEAK-CANARY-COOKIE-7y";
+        const HDRVAL: &str = "LEAK-CANARY-HEADER-5z";
+        let ledger = tmp_path("forge-test-auth-leak");
+        let app = test_app_scoped(&ledger, vec!["app.test".into()]);
+        { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); }
+        insert_test_engagement(&app, 1, &["app.test"], "grey", &ledger); // ancre #1 (jamais le dernier actif)
+        let (otok, _) = create_session(&app, uid_of(&app, "opr"));
+
+        // CRÉATION armée : bearer + cookie + valeur d'en-tête (3 canaris) + une cible idor.
+        let body = json!({"name": "arme", "scope_json": {"mode": "grey", "in_scope": ["app.test"], "auth": {
+            "accounts": [{"label": "attacker", "bearer": BEARER, "headers": {"X-CSRF": HDRVAL}},
+                         {"label": "victim", "cookies": format!("sid={COOKIE}")}],
+            "idor_targets": [{"url": "https://app.test/api/orders/1", "owner": "victim", "marker": "MK"}]
+        }}});
+        let r = engagements_create(State(app.clone()), conn_info(), bearer_headers(&otok), Json(body)).await;
+        assert_eq!(r.status(), StatusCode::OK, "création acceptée");
+        let new_id = resp_json(r).await["engagement"]["id"].as_i64().expect("id du nouvel engagement");
+
+        // ÉDITION (chemin `console.engagement.edit`, qui ledgerise le résumé) — sans reparler d'auth.
+        let r = engagements_update(State(app.clone()), conn_info(), bearer_headers(&otok), Path(new_id),
+            Json(json!({"scope_json": {"mode": "grey", "in_scope": ["app.test", "api.app.test"], "out_scope": []}}))).await;
+        assert_eq!(r.status(), StatusCode::OK, "édition acceptée");
+
+        // (a) LECTURE : le payload complet de la liste ne porte AUCUN canari.
+        let r = engagements_list(State(app.clone()), bearer_headers(&otok)).await.into_response();
+        let list = resp_json(r).await;
+        let blob = list.to_string();
+        for canary in [BEARER, COOKIE, HDRVAL] {
+            assert!(!blob.contains(canary), "GET /api/engagements ne doit JAMAIS re-servir un secret ({canary})");
+        }
+        // …mais l'éditeur peut RÉ-AFFICHER la structure (sans quoi il effacerait ce qu'il ne voit pas).
+        let found = list["engagements"].as_array().unwrap().iter()
+            .find(|e| e["id"].as_i64() == Some(new_id)).cloned().expect("engagement listé");
+        assert_eq!(found["auth"]["accounts"][0]["label"], json!("attacker"));
+        assert_eq!(found["auth"]["accounts"][0]["has_bearer"], json!(true), "présence exposée, valeur JAMAIS");
+        assert_eq!(found["auth"]["accounts"][0]["header_keys"], json!(["X-CSRF"]), "NOM d'en-tête (non secret)");
+        assert_eq!(found["auth"]["accounts"][1]["has_cookies"], json!(true));
+        assert_eq!(found["auth"]["idor_targets"][0]["marker"], json!("MK"), "config non secrète servie telle quelle");
+
+        // (b) LEDGER (console + ledger DÉDIÉ de l'engagement) : labels + compteur, jamais un secret/URL.
+        let dedicated: String = {
+            let db = app.db();
+            db.query_row("SELECT ledger_path FROM engagement WHERE id=?", rusqlite::params![new_id], |r| r.get(0)).unwrap()
+        };
+        let mut attested = false;
+        for f in [ledger.clone(), dedicated.clone()] {
+            let txt = std::fs::read_to_string(&f).unwrap_or_default();
+            for canary in [BEARER, COOKIE, HDRVAL] {
+                assert!(!txt.contains(canary), "le ledger {f} ne doit JAMAIS porter un secret ({canary})");
+            }
+            assert!(!txt.contains("api/orders"), "le ledger {f} ne doit porter AUCUNE URL de cible idor");
+            if txt.contains("\"attacker\"") && txt.contains("\"idor_targets\":1") {
+                attested = true; // résumé SÛR présent : labels + COMPTEUR
+            }
+        }
+        assert!(attested, "le ledger atteste le contexte armé par LABELS + COMPTEUR (jamais par son contenu)");
+        let _ = std::fs::remove_file(&ledger);
+        let _ = std::fs::remove_file(&dedicated);
+    }

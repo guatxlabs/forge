@@ -377,12 +377,19 @@ pub(crate) fn enqueue_pending(app: &App, spec: &RunSpawnSpec) -> (StatusCode, Js
 /// Renvoie true SSI EXACTEMENT une ligne a été claimée. `pid`/`started` réels sont posés APRÈS le spawn
 /// (claim_and_spawn). TOUJOURS compilé : référencé par claim_and_spawn dans une branche `if ha` que
 /// l'optimiseur élague en community (HA off, const-fold) -> byte-identique ; exercé sur SQLite par cargo test.
+///
+/// SECRET (R5b) : le claim PURGE `spawn_spec` (`=''`). Le blob porte `eng_auth` — le matériel d'auth des
+/// comptes de test de l'opérateur — et n'existe que pour permettre au leader de RECONSTRUIRE le spec ; il
+/// l'a déjà fait quand il arrive ici (`claim_pending_tick` parse AVANT de claimer). Le garder reviendrait à
+/// laisser des bearer/cookies AU REPOS dans `run_job` bien après la fin du run. La durée de vie du secret
+/// en base est donc bornée à la fenêtre 'pending'. Aucun chemin ne relit le blob après le claim (un échec
+/// post-claim marque la ligne 'failed' — jamais un retour à 'pending').
 pub(crate) fn claim_run_running(store: &crate::store::Store, spec: &RunSpawnSpec, owner: &str) -> bool {
     store
         .execute(
             "INSERT INTO run_job(run_id,campaign,ts,status,mode,pid,started_by,reason,targets,modules,started,engagement_id,owner_instance)
              VALUES(?,?,datetime('now'),'running',?,-1,?,?,?,?,'',?,?)
-             ON CONFLICT(run_id) DO UPDATE SET status='running', owner_instance=excluded.owner_instance
+             ON CONFLICT(run_id) DO UPDATE SET status='running', owner_instance=excluded.owner_instance, spawn_spec=''
                WHERE run_job.status='pending'",
             &crate::sql_params![
                 spec.run_id.as_str(), spec.campaign.as_str(), spec.mode.as_str(), spec.started_by.as_str(), spec.reason.as_str(),
@@ -802,6 +809,33 @@ mod wave_b_tests {
         // engagement DISTINCT -> claim OK.
         assert!(claim_run_running(&Store::sqlite(m.lock().unwrap()), &spec_for("run-c", 2), "inst-B"), "engagement distinct -> claim OK");
         assert_eq!(status_of(&m, "run-c"), "running");
+    }
+
+    /// [SECRET — R5b] Le blob `spawn_spec` (qui porte `eng_auth` : bearer/cookies des comptes de test de
+    /// l'opérateur) est PURGÉ par le claim. Il n'existe que pour laisser le leader RECONSTRUIRE le spec ;
+    /// une fois la ligne passée 'running', le garder laisserait le matériel d'auth AU REPOS dans `run_job`
+    /// longtemps après la fin du run. MUTATION-PROVABLE : retirer `spawn_spec=''` du DO UPDATE fait passer
+    /// ce test AU ROUGE. La ligne encore 'pending' le conserve (le leader en a besoin) — vérifié aussi.
+    #[test]
+    fn claim_purges_the_spawn_spec_blob() {
+        let m = mem();
+        let blob = json!({"run_id": "run-p", "eng_id": 7,
+                          "eng_auth": {"accounts": [{"label": "attacker", "bearer": "AT-REST-CANARY"}]}}).to_string();
+        Store::sqlite(m.lock().unwrap())
+            .execute("INSERT INTO run_job(run_id,status,engagement_id,owner_instance,spawn_spec) VALUES('run-p','pending',7,NULL,?)",
+                     &crate::sql_params![blob.as_str()])
+            .unwrap();
+        let spec_blob = |m: &std::sync::Mutex<rusqlite::Connection>| -> String {
+            Store::sqlite(m.lock().unwrap())
+                .query_row("SELECT spawn_spec FROM run_job WHERE run_id='run-p'", &crate::sql_params![], |r| r.get_str(0))
+                .unwrap_or_default()
+        };
+        // TANT QUE 'pending' : le blob est CONSERVÉ (c'est la seule source de reconstruction du leader).
+        assert!(spec_blob(&m).contains("AT-REST-CANARY"), "le pending conserve son blob (reconstruction leader)");
+        // Le claim (pending -> running) le PURGE.
+        assert!(claim_run_running(&Store::sqlite(m.lock().unwrap()), &spec_for("run-p", 7), "leader"), "claim du pending");
+        assert_eq!(status_of(&m, "run-p"), "running");
+        assert_eq!(spec_blob(&m), "", "spawn_spec purgé au claim — aucun matériel d'auth au repos après coup");
     }
 
     /// (Fix #2) SCÉNARIO DOUBLE-RUN DU FLAP : un leader périmé DIRECT-claime un run pour l'engagement E

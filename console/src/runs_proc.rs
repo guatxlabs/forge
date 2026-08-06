@@ -201,6 +201,50 @@ pub(crate) fn purge_stale_run_dirs() {
     }
 }
 
+/// Crée le dir temp d'un run/plan en PRIVÉ (`0700` sur unix) — jamais `0755` par défaut d'umask.
+///
+/// SECRET (R5b) : depuis que le `scope.json` d'un run peut porter le CONTEXTE D'AUTHENTIFICATION de
+/// l'engagement (bearer/cookies/en-têtes des comptes de test de l'opérateur), ce dir vit dans un tempdir
+/// PARTAGÉ (`/tmp`) où tout compte local peut lister et lire ce qui est world-readable. Le mode est posé
+/// À LA CRÉATION (pas par un `chmod` a posteriori) : aucune fenêtre pendant laquelle le dir serait
+/// lisible par autrui. Non-unix : comportement inchangé (`create_dir_all`).
+pub(crate) fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Écrit un fichier d'entrée du moteur en PRIVÉ (`0600` sur unix) — `scope.json` / `targets.json`.
+///
+/// SECRET (R5b) : `scope.json` porte le matériel d'auth de l'opérateur. Le mode est demandé À LA
+/// CRÉATION (`OpenOptions::mode`) pour qu'il n'existe AUCUN instant où le fichier serait world-readable ;
+/// `truncate` garantit qu'un chemin réutilisé ne conserve pas de queue d'un contenu précédent. Non-unix :
+/// comportement inchangé (`fs::write`).
+pub(crate) fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
+}
+
 /// Écrit une ligne de log de run en base ET la diffuse aux abonnés SSE.
 pub(crate) fn push_run_log(app: &App, run_id: &str, stream: &str, line: &str) {
     {
@@ -309,8 +353,9 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
         return (StatusCode::CONFLICT, Json(json!({"error": "run_in_progress", "engagement_id": spec.eng_id, "why": format!("un run est déjà 'running' pour l'engagement #{} (garde d'unicité DB cross-instance — au plus un 'running' par engagement, tous réplicas confondus)", spec.eng_id)})));
     }
     // (4) dir temp par run : scope.json (allow_exploit/destructive suivent l'opt-in) + targets.json.
+    // dir PRIVÉ (0700) : le scope.json peut porter le contexte d'auth de l'engagement (cf. create_private_dir).
     let run_dir = std::env::temp_dir().join(format!("forge-run-{run_id}"));
-    if let Err(e) = std::fs::create_dir_all(&run_dir) {
+    if let Err(e) = create_private_dir(&run_dir) {
         unclaim_running_on_failure(app, run_id, ha); // HA : la ligne 'running' claimée pré-spawn -> 'failed'
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "mkdir_failed", "why": e.to_string()})));
     }
@@ -325,8 +370,9 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
         .collect();
     let scope_path = run_dir.join("scope.json");
     let targets_path = run_dir.join("targets.json");
-    if std::fs::write(&scope_path, serde_json::to_vec(&scope_doc).unwrap()).is_err()
-        || std::fs::write(&targets_path, serde_json::to_vec(&Value::Array(targets_doc)).unwrap()).is_err()
+    // Fichiers PRIVÉS (0600) : scope.json porte le matériel d'auth quand l'engagement est armé (cf. write_private_file).
+    if write_private_file(&scope_path, &serde_json::to_vec(&scope_doc).unwrap()).is_err()
+        || write_private_file(&targets_path, &serde_json::to_vec(&Value::Array(targets_doc)).unwrap()).is_err()
     {
         let _ = std::fs::remove_dir_all(&run_dir);
         unclaim_running_on_failure(app, run_id, ha); // HA : la ligne 'running' claimée pré-spawn -> 'failed'
@@ -449,7 +495,7 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
             "note": "opt-in haut-impact GOUVERNÉ honoré (operator+arm+reason) ; scope-guard moteur inchangé (hors-scope = VETO)"
         }));
     }
-    append_run_ledger_path(app, &spec.eng_ledger_path, "console.run.start", json!({
+    let mut start_detail = json!({
         "run_id": run_id, "engagement_id": spec.eng_id, "campaign": spec.campaign, "mode": spec.mode, "actor": spec.actor, "by": "operator",
         "targets": spec.body_targets, "modules": spec.requested_modules,
         "module_params": spec.module_params,
@@ -459,7 +505,14 @@ pub(crate) async fn claim_and_spawn(app: &App, spec: &RunSpawnSpec, mut reservat
         "reason": spec.reason, "arm_requested": spec.arm,
         "high_impact": spec.high_impact,
         "exploit_floor": if spec.high_impact { "lifted via governed high-impact opt-in (allow_exploit=true allow_destructive=true)" } else { "forced allow_exploit=false allow_destructive=false" }
-    }));
+    });
+    // CONTEXTE AUTH (R5b) : atteste QUE le run est parti ARMÉ (labels des comptes + nombre de cibles) —
+    // miroir de `AuthContext.ledger_summary()` moteur. JAMAIS un secret, JAMAIS une URL de cible. Champ
+    // ABSENT quand l'engagement n'a pas de contexte => entrée byte-identique à l'historique.
+    if let Some(a) = &spec.eng_auth {
+        start_detail["auth_context"] = crate::auth_ledger_summary(a);
+    }
+    append_run_ledger_path(app, &spec.eng_ledger_path, "console.run.start", start_detail);
 
     // PROMOTION réservation -> run vivant. run_state publié AVANT de retirer la réservation (aucune fenêtre
     // où ni la réservation ni le run vivant ne seraient visibles). Aucun `.await` sous le verrou std.
@@ -623,6 +676,35 @@ mod scope_doc_contract_tests {
         s.eng_auth = Some(auth.clone());
         let with = build_run_scope_doc("run-x", &s);
         assert_eq!(with["auth"], auth, "le bloc auth de l'engagement est propagé au scope.json du run");
+    }
+
+    /// [SECRET — R5b] Le dir temp d'un run et les fichiers d'entrée du moteur sont PRIVÉS au propriétaire.
+    /// `scope.json` peut porter le CONTEXTE D'AUTH de l'engagement (bearer/cookies/en-têtes des comptes de
+    /// test de l'opérateur) et vit dans un tempdir PARTAGÉ : au mode par défaut d'umask (0755/0644), TOUT
+    /// compte local du système pourrait le lire. La propriété gardée est « aucun bit groupe/autres » —
+    /// vraie quel que soit l'umask du process. MUTATION-PROVABLE : revenir à `create_dir_all`/`fs::write`
+    /// fait passer ce test AU ROUGE sur un umask usuel (0022).
+    #[cfg(unix)]
+    #[test]
+    fn run_temp_dir_and_engine_input_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::PathBuf::from(crate::testutil::tmp_path("forge-test-private-run"));
+        create_private_dir(&dir).expect("création du dir temp privé");
+        let dmode = std::fs::metadata(&dir).expect("stat dir").permissions().mode();
+        assert_eq!(dmode & 0o077, 0, "dir temp de run : aucun accès groupe/autres (0700)");
+        assert_eq!(dmode & 0o700, 0o700, "…tout en restant utilisable par le propriétaire");
+
+        let f = dir.join("scope.json");
+        write_private_file(&f, br#"{"auth":{"accounts":[{"label":"attacker","bearer":"TOK"}]}}"#)
+            .expect("écriture du fichier privé");
+        let fmode = std::fs::metadata(&f).expect("stat scope.json").permissions().mode();
+        assert_eq!(fmode & 0o077, 0, "scope.json : aucun accès groupe/autres (il porte le matériel d'auth)");
+        assert_eq!(fmode & 0o600, 0o600, "…lisible/écrivable par le propriétaire (la console et le moteur)");
+
+        // TRUNCATE : un chemin réutilisé ne conserve aucune queue d'un contenu précédent (pas de secret résiduel).
+        write_private_file(&f, b"{}").expect("réécriture");
+        assert_eq!(std::fs::read_to_string(&f).expect("relecture"), "{}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
