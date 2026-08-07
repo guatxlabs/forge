@@ -345,8 +345,9 @@ mod store;
 // BLOBSTORE SEAM (readiness-dossier #12) — store d'artefacts backend-agnostique (archive de backup
 // offsite, exports/évidence). Le build PAR DÉFAUT (community) ne compile QUE `LocalFsBlobStore`
 // (système de fichiers, AUCUNE dép nouvelle) : chemin par défaut inchangé. `S3BlobStore` (S3/MinIO) +
-// sa dép `rust-s3` vivent DERRIÈRE la feature OPT-IN `object-store` (openssl-free : sync-rustls-tls ->
-// attohttpc + rustls/ring). Référencé fully-qualified (`crate::blob::…`) — pas de glob re-export.
+// sa dép `rust-s3` vivent DERRIÈRE la feature OPT-IN `object-store` — SEULE feature qui ROMPT
+// l'openssl-freedom (attohttpc -> rustls/default -> aws-lc, transitif ; docs/DEPLOYMENT.md
+// §3quater.1). Référencé fully-qualified (`crate::blob::…`) — pas de glob re-export.
 mod blob;
 // CONSOLE FORGE IN-UI (roadmap P5) — POST /api/console/exec : runner GOUVERNÉ, admin-only, ledgerisé,
 // STREAMÉ (SSE) d'un ALLOWLIST STRICT de sous-commandes `forge` (status/ledger verify/read-*/backup/

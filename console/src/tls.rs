@@ -63,10 +63,15 @@
 //!   3. **Le handshake décide AVANT le premier octet applicatif** — [`connect`] le mène à son terme, donc
 //!      un certificat non fiable fait échouer la CONNEXION, pas une lecture ultérieure. Aucune requête
 //!      (donc aucun secret) n'est écrite sur une session dont le pair n'est pas prouvé.
-//!   4. **openssl-freedom préservée.** `rustls` est épinglé sur le provider `ring`
-//!      (`default-features = false`) : ni `aws-lc-rs`, ni `native-tls`, ni `openssl-sys`, ni `schannel`,
-//!      ni `security-framework` dans la fermeture. Les racines viennent de `webpki-roots` (données
+//!   4. **openssl-freedom préservée — AU BUILD PAR DÉFAUT ET SOUS `store-postgres`.** `rustls` est
+//!      épinglé sur le provider `ring` (`default-features = false`) : ni `aws-lc-rs`, ni `native-tls`,
+//!      ni `openssl-sys`, ni `schannel`, ni `security-framework` dans la fermeture — 0 occurrence
+//!      MESURÉE (`scripts/check_openssl_freedom.py`). Les racines viennent de `webpki-roots` (données
 //!      pures), jamais du magasin système — donc aucune dépendance OS.
+//!      ⚠️ PAS sous `--features object-store` : `attohttpc` (via `rust-s3`) demande `rustls/DEFAULT`,
+//!      et l'unification de features de cargo rallume `aws-lc-rs` jusque sur CETTE dépendance-ci. Le
+//!      provider UTILISÉ reste `ring` (choisi explicitement plus bas), mais `aws-lc-sys` est bel et
+//!      bien compilé et lié. L'épinglage local ne protège pas d'une dépendance TRANSITIVE.
 //!
 //! CE QU'IL NE FAIT PAS. Il ne décide pas QUI l'on a le droit de joindre : la deny-list SSRF
 //! (`net::reject_internal_addr`, via `net::resolve_guarded_with`) reste en amont et s'applique à

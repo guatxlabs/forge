@@ -22,12 +22,22 @@ use crate::testutil::*;
         });
         tokio::time::sleep(Duration::from_millis(60)).await;
 
-        // 1) fresh install -> needs_setup:true, sqlcipher:false (build par défaut), joignable SANS auth.
+        // 1) fresh install -> needs_setup:true, joignable SANS auth.
         let r = http_raw(addr, &get_req("/api/setup/state", "")).await;
         assert_eq!(parse_status(&r), 200, "setup/state public: {r}");
         assert!(body_of(&r).contains("\"needs_setup\":true"), "fresh -> needs_setup:true : {}", body_of(&r));
         assert!(body_of(&r).contains("\"provisioned\":false"));
-        assert!(body_of(&r).contains("\"sqlcipher\":false"), "build par défaut -> sqlcipher:false");
+        // `capabilities.sqlcipher` ANNONCE la CONFIGURATION DE COMPILATION (setup.rs:
+        // `cfg!(feature = "encryption")`) : true sous `--features encryption`, false dans le build par
+        // défaut. L'assertion DOIT donc dépendre de la même config, pas figer une seule des deux :
+        // codée en dur à `false`, elle échouait sur TOUT hôte compilé avec la feature — un test qui
+        // affirme l'absence de SQLCipher en étant exécuté sous la feature qui l'ACTIVE.
+        let expected_sqlcipher = cfg!(feature = "encryption");
+        assert!(
+            body_of(&r).contains(&format!("\"sqlcipher\":{expected_sqlcipher}")),
+            "capabilities.sqlcipher doit refléter la feature de compilation (attendu {expected_sqlcipher}) : {}",
+            body_of(&r)
+        );
 
         // 2) POST /api/setup SANS auth -> 200 + cookie posé + settings persistés.
         let setup_body = json!({

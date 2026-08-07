@@ -37,7 +37,7 @@ All notable changes to Forge are documented here. The format is based on
   CA installée et découvrirait le contraire au premier handshake, sous un « émetteur inconnu » qui ne
   désigne pas la cause. C'est la **seule** différence assumée avec le motif maison `secret_env`, qui est
   fail-**soft** par contrat. Rien de configuré ⇒ **aucune** ligne au boot. **Zéro nouvelle dépendance**
-  (le parseur PEM est déjà dans `rustls-pki-types`) ; openssl-freedom vérifiée par commande (**0** hit).
+  (le parseur PEM est déjà dans `rustls-pki-types`) ; openssl-freedom du build PAR DÉFAUT vérifiée par commande (**0** hit).
 
 - **Les trois derniers secrets en clair au repos sont scellés — mais la faillibilité d'abord.** Le jeton
   de **source de détection**, le jeton de **canal de notification** et le **`client_secret` SSO** vivaient
@@ -121,7 +121,7 @@ All notable changes to Forge are documented here. The format is based on
 
   **Chiffrement de CHAMP** (`console/src/field_crypto.rs`) avec la pile AEAD **pur Rust déjà embarquée**
   (`chacha20poly1305` + `argon2`, deps non optionnelles — celles des sauvegardes) : **ZÉRO nouvelle
-  dépendance**, openssl-freedom **vérifiée à 0 occurrence** après coup. La KDF argon2id et le cœur AEAD
+  dépendance**, openssl-freedom du build PAR DÉFAUT **vérifiée à 0 occurrence** après coup. La KDF argon2id et le cœur AEAD
   ont été **EXTRAITS** de `backup_crypto.rs` (`aead_seal`/`aead_open`) plutôt que réécrits — il n'existe
   qu'**une** implémentation de crypto symétrique dans la console, et elle a maintenant un test de contrat
   sur le **lien AAD** (la preuve par mutation a montré qu'aucun test n'en dépendait).

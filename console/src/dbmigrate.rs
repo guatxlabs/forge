@@ -216,10 +216,50 @@ pub(crate) fn resolve_key(key_env: Option<&str>) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// plaintext -> CHIFFRÉ : attache une base cible chiffrée (PRAGMA KEY) et exporte via
-/// sqlcipher_export(). Compilé UNIQUEMENT avec la feature `encryption`.
+/// Encode un chemin de fichier en URI SQLite LECTURE SEULE (`file:…?mode=ro`). Le chemin est d'abord
+/// canonicalisé (absolu, sans `..` ni double slash de tête qui serait lu comme une AUTORITÉ d'URI),
+/// puis les trois caractères réservés de la syntaxe URI SQLite sont percent-encodés : `%` (l'échappement
+/// lui-même), `?` (début de query) et `#` (début de fragment) — sans quoi un chemin contenant `?`
+/// verrait sa fin interprétée comme des paramètres. Compilé UNIQUEMENT avec `encryption`.
 #[cfg(feature = "encryption")]
-pub(crate) fn migrate_copy_encrypted(src: &Connection, target: &str, key_env: Option<&str>) -> Result<bool, String> {
+pub(crate) fn sqlite_uri_ro(path: &str) -> String {
+    let abs = std::path::Path::new(path)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    let mut out = String::with_capacity(abs.len() + 16);
+    out.push_str("file:");
+    for ch in abs.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3f"),
+            '#' => out.push_str("%23"),
+            c => out.push(c),
+        }
+    }
+    out.push_str("?mode=ro");
+    out
+}
+
+/// plaintext -> CHIFFRÉ : exporte la base source vers une cible SQLCipher via sqlcipher_export().
+/// Compilé UNIQUEMENT avec la feature `encryption`.
+///
+/// ⚠️ SENS DE L'EXPORT — la CIBLE CHIFFRÉE est `main` (ouverte RW+CREATE, `PRAGMA key` en premier),
+/// et la source plaintext est ATTACHÉE en lecture seule. L'inverse (attacher la cible depuis la
+/// connexion source, ce que faisait la version initiale) est IMPOSSIBLE PAR CONSTRUCTION : `run_migration`
+/// ouvre la source avec SQLITE_OPEN_READ_ONLY et SQLite propage `db->openFlags` aux bases ATTACHÉES
+/// (attach.c : `flags = db->openFlags`). La cible héritait donc de READONLY *sans* CREATE ->
+/// `unable to open database` sur un fichier neuf, et « attempt to write a readonly database » même sur
+/// un fichier pré-créé. L'URI `?mode=rwc` ne rattrape rien : SQLite REFUSE toute remontée de privilège
+/// d'une base attachée (`access mode not allowed: rwc`, SQLITE_PERM). Ce chemin `--encrypt` n'a donc
+/// JAMAIS pu produire de cible, sur AUCUN hôte, SQLCipher présent ou non.
+///
+/// L'invariant « la source n'est jamais mutée » est PRÉSERVÉ : elle est attachée via `file:…?mode=ro`
+/// (SQLite n'autorise que la RÉTROGRADATION d'accès, jamais l'inverse) — la migration fonctionne même
+/// si le dossier de l'install source est en 0500. `KEY ''` est OBLIGATOIRE sur cet ATTACH : sans lui,
+/// SQLCipher appliquerait la clé de `main` à la source et la lirait comme une base chiffrée.
+#[cfg(feature = "encryption")]
+pub(crate) fn migrate_copy_encrypted(src_db: &str, target: &str, key_env: Option<&str>) -> Result<bool, String> {
     let key = resolve_key(key_env)
         .ok_or_else(|| "clé de chiffrement absente (--key-env non résolu / variable d'ENV vide)".to_string())?;
     if std::path::Path::new(target).exists() {
@@ -232,18 +272,27 @@ pub(crate) fn migrate_copy_encrypted(src: &Connection, target: &str, key_env: Op
             std::fs::create_dir_all(parent).map_err(|e| format!("création du dossier cible échouée: {e}"))?;
         }
     }
-    src.execute("ATTACH DATABASE ?1 AS encrypted KEY ?2", rusqlite::params![target, key])
-        .map_err(|e| format!("ATTACH de la cible chiffrée échoué: {e}"))?;
-    let export = src.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()));
-    let _ = src.execute("DETACH DATABASE encrypted", []);
-    export.map_err(|e| format!("sqlcipher_export('encrypted') échoué: {e}"))?;
+    let dst = Connection::open_with_flags(
+        target,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("ouverture de la cible chiffrée '{target}' impossible: {e}"))?;
+    // PRAGMA key AVANT tout autre statement (contrat SQLCipher).
+    dst.pragma_update(None, "key", &key)
+        .map_err(|e| format!("PRAGMA key sur la cible chiffrée échoué: {e}"))?;
+    dst.execute("ATTACH DATABASE ?1 AS plaintext KEY ''", rusqlite::params![sqlite_uri_ro(src_db)])
+        .map_err(|e| format!("ATTACH read-only de la source plaintext échoué: {e}"))?;
+    // sqlcipher_export(cible, source) : copie LOGIQUE intégrale plaintext -> chiffré.
+    let export = dst.query_row("SELECT sqlcipher_export('main', 'plaintext')", [], |_| Ok(()));
+    let _ = dst.execute("DETACH DATABASE plaintext", []);
+    export.map_err(|e| format!("sqlcipher_export('main', 'plaintext') échoué: {e}"))?;
     Ok(true)
 }
 
 /// Build PAR DÉFAUT (sans `encryption`) : le chiffrement au repos n'est PAS compilé -> erreur CLAIRE
 /// (recompiler avec `--features encryption`). Aucune dépendance SQLCipher n'est tirée par ce chemin.
 #[cfg(not(feature = "encryption"))]
-pub(crate) fn migrate_copy_encrypted(_src: &Connection, _target: &str, _key_env: Option<&str>) -> Result<bool, String> {
+pub(crate) fn migrate_copy_encrypted(_src_db: &str, _target: &str, _key_env: Option<&str>) -> Result<bool, String> {
     Err("chiffrement au repos NON compilé dans ce build — recompiler avec `--features encryption` (SQLCipher)".to_string())
 }
 
@@ -321,9 +370,12 @@ pub(crate) fn run_migration(opts: &MigrateOpts) -> Result<Value, String> {
         None
     };
 
-    // (3) copie de la base.
+    // (3) copie de la base. Chemin CHIFFRÉ : la cible est `main` et la source est ATTACHÉE en
+    // lecture seule (cf. migrate_copy_encrypted) — on lui passe donc le CHEMIN source, pas la
+    // connexion read-only : une base attachée hérite des openFlags de `main` et serait, depuis
+    // `src`, en READONLY sans CREATE (impossible à créer/écrire).
     let encrypted = if opts.encrypt {
-        migrate_copy_encrypted(&src, &opts.to, opts.key_env.as_deref())?
+        migrate_copy_encrypted(&src_db, &opts.to, opts.key_env.as_deref())?
     } else {
         migrate_copy_plaintext(&src, &opts.to)?
     };
@@ -632,12 +684,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src_dir);
     }
 
+    /// Écrit un message VISIBLE dans la sortie de `cargo test` MÊME SANS `--nocapture` : libtest
+    /// n'intercepte que les macros `print!`/`eprint!` (via `io::set_output_capture`), jamais les
+    /// écritures DIRECTES sur le handle global. Un test sauté DOIT se voir : un saut silencieux fait
+    /// croire à une couverture qui n'existe pas — c'est pire qu'un rouge.
+    #[cfg(feature = "encryption")]
+    fn announce(msg: &str) {
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "{msg}");
+        let _ = err.flush();
+    }
+
+    /// CAPACITÉ RÉELLE de chiffrement au repos DU BINAIRE COURANT — pas la présence d'un fichier ni
+    /// d'une variable d'ENV : on ouvre une base, on pose une clé, on écrit, et on VÉRIFIE qu'elle est
+    /// illisible sans la clé et lisible avec. Seule la capacité observée prédit l'échec.
+    ///
+    /// (`ldconfig | grep sqlcipher` ne prédit RIEN : `rusqlite/bundled-sqlcipher` COMPILE l'amalgame
+    /// SQLCipher DANS le binaire — il n'existe aucun `libsqlcipher.so` à trouver. Le cas que cette
+    /// sonde couvre réellement est l'inverse : un build qui compile sous la feature mais que
+    /// `SQLITE3_LIB_DIR`/pkg-config ont lié à un SQLite système SANS codec.)
+    ///
+    /// `Ok(version)` si la capacité est là ; `Err(pourquoi)` sinon.
+    #[cfg(feature = "encryption")]
+    fn sqlcipher_capability() -> Result<String, String> {
+        let dir = tmp_dir("forge-sqlcipher-capability");
+        let probe = format!("{dir}/capability.db");
+        let verdict = (|| -> Result<String, String> {
+            let c = Connection::open(&probe).map_err(|e| format!("ouverture de la sonde impossible: {e}"))?;
+            let version: String = c.query_row("PRAGMA cipher_version", [], |r| r.get(0)).map_err(|e| {
+                format!("`PRAGMA cipher_version` ne rend rien ({e}) — ce binaire n'embarque aucun codec SQLCipher")
+            })?;
+            c.pragma_update(None, "key", "capability-probe-key")
+                .map_err(|e| format!("`PRAGMA key` refusé: {e}"))?;
+            c.execute_batch("CREATE TABLE t(a); INSERT INTO t VALUES(1);")
+                .map_err(|e| format!("écriture dans une base chiffrée impossible: {e}"))?;
+            drop(c);
+            let plain = Connection::open(&probe).map_err(|e| format!("réouverture impossible: {e}"))?;
+            if plain.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0)).is_ok() {
+                return Err("la base sonde reste lisible SANS clé — le codec ne chiffre rien".to_string());
+            }
+            drop(plain);
+            let keyed = Connection::open(&probe).map_err(|e| format!("réouverture impossible: {e}"))?;
+            keyed.pragma_update(None, "key", "capability-probe-key")
+                .map_err(|e| format!("`PRAGMA key` refusé à la relecture: {e}"))?;
+            keyed.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("relecture AVEC la clé impossible: {e}"))?;
+            Ok(version)
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        verdict
+    }
+
     /// [MIGRATION chiffrement — build chiffré] plaintext -> SQLCipher -> relecture avec la clé. GARDÉ
     /// derrière `#[cfg(feature="encryption")]` : SKIP (non compilé) dans la suite par défaut, pour ne
     /// PAS faire dépendre celle-ci de SQLCipher/openssl. Exécuté seulement via `--features encryption`.
+    ///
+    /// GARDE D'HÔTE : sous la feature, on sonde la CAPACITÉ RÉELLE (`sqlcipher_capability`) avant de
+    /// tester. Capacité absente -> le test s'ANNONCE sauté, avec la raison, sur la sortie non capturée
+    /// (jamais un vert silencieux). Capacité présente -> il s'exécute INTÉGRALEMENT, l'annonce le dit,
+    /// et aucune défaillance n'est avalée.
     #[cfg(feature = "encryption")]
     #[test]
     fn migrate_encrypted_roundtrip_reads_back_with_key() {
+        match sqlcipher_capability() {
+            Ok(v) => announce(&format!(
+                "[dbmigrate] SQLCipher DISPONIBLE ({v}) — migrate_encrypted_roundtrip_reads_back_with_key EXÉCUTÉ intégralement"
+            )),
+            Err(why) => {
+                announce(&format!(
+                    "[dbmigrate] SKIP migrate_encrypted_roundtrip_reads_back_with_key — SQLCipher indisponible sur cet hôte : {why}"
+                ));
+                return;
+            }
+        }
         let src_dir = tmp_dir("forge-mig-enc");
         let src_db = format!("{src_dir}/forge.db");
         seed_old_source_db(&src_db);

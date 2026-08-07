@@ -158,7 +158,8 @@ les **bearers, cookies et valeurs d'en-tête des comptes de test** de l'opérate
 **sessions authentifiées sur l'estate d'un client**. C'est la seule donnée de la base qui soit un
 *credential vivant*. Elle est **chiffrée au repos dans le build par défaut**, sans SQLCipher et **sans
 aucune dépendance supplémentaire** : la pile AEAD **pur Rust** déjà embarquée (XChaCha20-Poly1305 +
-argon2id — celle qui chiffre les sauvegardes) est réutilisée. L'`openssl-freedom` du build est intacte.
+argon2id — celle qui chiffre les sauvegardes) est réutilisée. L'`openssl-freedom` du build **par défaut**
+reste intacte ([§3quater.1](#perimetre-de-l-openssl-freedom) — 0 occurrence mesurée).
 
 ```sh
 # La clé suit le motif maison <VAR>_FILE (cf. « Secrets sans .env en clair ») :
@@ -310,10 +311,16 @@ Le stockage d'artefacts (archive de backup offsite, exports/évidence) passe par
 backend-agnostique (`console/src/blob.rs`). Le build **PAR DÉFAUT (community)** ne compile que
 `LocalFsBlobStore` (**système de fichiers**, aucune dépendance nouvelle) : le chemin par défaut (aucun
 artefact S3 configuré) est **inchangé**. L'implémentation **S3/MinIO** (`S3BlobStore`) et sa dépendance
-`rust-s3` vivent **derrière la feature Cargo `object-store`** (OFF par défaut). La feature est
-**openssl-free** : `rust-s3` en `sync-rustls-tls` → TLS via **rustls** (provider `ring`) + `attohttpc`,
-**jamais** native-tls/openssl. Le build community (feature OFF) ne pull **aucune** dép S3 et reste
-byte-identique.
+`rust-s3` vivent **derrière la feature Cargo `object-store`** (OFF par défaut). Le build community
+(feature OFF) ne pull **aucune** dép S3 et reste byte-identique.
+
+⚠️ **Cette feature est le SEUL périmètre où l'openssl-freedom du dépôt ne tient pas** — et c'était
+affirmé ici à tort. `rust-s3` est bien câblé en `sync-rustls-tls` (donc **ni** `native-tls`, **ni**
+`openssl`), mais la chaîne `attohttpc → rustls/DEFAULT` tire **`aws-lc-rs`/`aws-lc-sys`** : **12**
+occurrences interdites mesurées, contre **0** au build par défaut. La chaîne est **transitive** — pas
+réparable sans forker `rust-s3`/`attohttpc`. Conséquence pratique : construire avec `object-store`
+exige une toolchain **C + cmake** au build (rien de plus au runtime). Détail, mesures et garde
+automatique : [§3quater.1](#perimetre-de-l-openssl-freedom).
 
 **Sélection runtime** : `S3BlobStore` est choisi **uniquement** si la feature est compilée **ET** l'ENV
 S3 est configuré ; sinon `LocalFsBlobStore` (racine `FORGE_BLOB_DIR`, défaut `blobs/` sibling de la base).
@@ -369,9 +376,10 @@ Feature OFF (défaut), la sous-commande `blob-selftest` n'existe pas et seul le 
 
 Le backend PAR DÉFAUT est **SQLite** (fichier local, zéro dépendance) — **inchangé**. Un backend
 **Postgres** OPT-IN existe derrière la feature Cargo `store-postgres` : plusieurs instances **console
-stateless** peuvent partager **UNE** base Postgres. Le backend PG est **openssl-free** (TLS `rustls` +
-provider `ring`, jamais native-tls/openssl) ; le build community (feature OFF) ne compile **aucune** dép
-Postgres et reste byte-identique.
+stateless** peuvent partager **UNE** base Postgres. Le backend PG est **openssl-free** — TLS `rustls` +
+provider `ring`, jamais native-tls/openssl, **0** occurrence interdite mesurée sous
+`--features store-postgres` ([§3quater.1](#perimetre-de-l-openssl-freedom)) ; le build community (feature
+OFF) ne compile **aucune** dép Postgres et reste byte-identique.
 
 ### 3bis.1 Build & run avec Postgres
 
@@ -795,22 +803,27 @@ Forge n'implémente **PAS** de SAML natif en-process — **choix délibéré**, 
 
 - **Posture openssl-free.** La pile SAML Rust (**`samael`**) tire **openssl + libxmlsec1**, donc deux
   **bibliothèques système** à installer, versionner et patcher sur chaque hôte — c'est exactement ce que la
-  posture openssl-free de Forge refuse (`rustls`/`ring`, jamais native-tls/openssl — même discipline que le
-  backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
+  posture openssl-free du **build par défaut** refuse (`rustls`/`ring`, jamais native-tls/openssl — même
+  discipline que le backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
   **Précision d'honnêteté :** « openssl-free » ne veut **pas** dire « 100 % Rust ». `ring` — le provider
   crypto de `rustls`, et donc du seam TLS sortant — embarque de l'**assembleur et du C** compilés par `cc`.
-  La différence n'est pas « zéro C », elle est **« zéro dépendance système »** : ce C-là est **vendu avec le
-  crate et compilé par cargo** (et `cc` + une chaîne C sont de toute façon déjà exigés par
+  La différence n'est pas « zéro C », elle est **« zéro bibliothèque système »** : ce C-là est **vendu avec
+  le crate et compilé par cargo** (et `cc` + une chaîne C sont de toute façon déjà exigés par
   `rusqlite/bundled`), là où openssl/libxmlsec1 sont des `.so` de l'hôte. Le refus de `samael` tient sur ce
   critère-là, pas sur un absolu « pure-Rust ».
+  **Et la posture est PÉRIMÉTRÉE** : elle vaut pour le build par défaut et `store-postgres`, **pas** pour
+  `object-store` — cf. [§3quater.1](#perimetre-de-l-openssl-freedom). Ce qu'accepter `samael` ajouterait
+  reste néanmoins d'une autre nature : deux `.so` **de l'hôte**, là où le débordement `object-store` est du
+  C **vendu et compilé par cargo**.
 - **Surface d'attaque.** Vérifier soi-même les signatures **XML-DSig** + le **C14N exclusif** est
   précisément la classe de foot-gun **XML-Signature-Wrapping (XSW)** — un contournement d'auth livré à
-  répétition **même par des piles SAML matures**. Forge garde son **unique** surface d'auth pure-Rust et
-  minimale plutôt que d'ajouter cette dette.
+  répétition **même par des piles SAML matures**. Forge garde son **unique** surface d'auth, minimale et
+  sans bibliothèque système, plutôt que d'ajouter cette dette.
 
 **Pattern supporté : mettre un pont OIDC DEVANT Forge.** Le pont termine le SAML contre l'IdP du client et
 présente de l'**OIDC** à Forge. Forge ne parle **jamais** que l'OIDC qu'il valide déjà (RS256/JWKS,
-groups→rôles) → openssl-free préservé, **zéro nouvelle dépendance, zéro nouvelle surface d'attaque**. Ponts
+groups→rôles) → openssl-freedom du build par défaut préservée, **zéro nouvelle dépendance, zéro nouvelle
+surface d'attaque**. Ponts
 éprouvés : **Dex** (connecteur SAML), **Keycloak identity brokering** (broker l'IdP SAML du client, expose
 de l'OIDC à Forge), ou **oauth2-proxy**.
 
@@ -833,7 +846,9 @@ mapping `groups → rôles` inchangé. C'est la voie recommandée pour tout IdP 
 Si un **contrat** exige un SAML **en-process** (pas de pont possible), une future feature Cargo **`saml`**
 (backend `samael`) pourra être ajoutée — produisant une **variante de build openssl + libxmlsec1** distincte,
 le build **community restant openssl-free par défaut** (même discipline opt-in que `store-postgres` /
-`encryption`). **Non implémentée aujourd'hui** : documentée comme **disponible sur demande**, pas livrée. Le
+`encryption` / `object-store` : le contrat porte sur le **build par défaut**, chaque feature répond du
+sien — et `object-store` déborde déjà, cf. [§3quater.1](#perimetre-de-l-openssl-freedom)).
+**Non implémentée aujourd'hui** : documentée comme **disponible sur demande**, pas livrée. Le
 défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
 
 ---
@@ -876,20 +891,83 @@ vérifier.
   certificat émis par une AC privée se rend vérifiable en posant `FORGE_EXTRA_CA_PEM` — cf.
   [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
 
-**Coût mesuré & openssl-freedom.** L'ajout pèse **6 crates nets** — `ring`, `rustls`, `rustls-pki-types`,
+**Coût mesuré.** L'ajout pèse **6 crates nets** — `ring`, `rustls`, `rustls-pki-types`,
 `rustls-webpki`, `untrusted`, `webpki-roots` — et **≈ +20 s CPU** de compilation à froid. **Aucun nouveau
 prérequis machine** : `ring` compile de l'asm/C via `cc`, déjà exigé par `rusqlite/bundled`. La feature
 `store-postgres` **partage** exactement cette pile (une seule version de `rustls`, aucun conflit).
 
 ⚠️ `rustls` est épinglé `default-features = false, features = ["ring", …]` : sa feature **par défaut** est
-le provider `aws-lc-rs` (présent en **optionnel non activé** dans `Cargo.lock`), qui tirerait une toolchain
-C/cmake et casserait la posture. Vérifiez-le après toute évolution des dépendances :
+le provider `aws-lc-rs`, qui tire une toolchain C/cmake. Ce qui suit dit exactement où cet épinglage
+**tient** et où il est **débordé**.
+
+<a id="perimetre-de-l-openssl-freedom"></a>
+
+### 3quater.1 Périmètre de l'openssl-freedom — vrai par défaut, FAUX sous `object-store`
+
+**L'invariant.** *La fermeture de dépendances du crate console ne contient aucune bibliothèque système de
+crypto/TLS : ni `openssl`, ni `native-tls`, ni `aws-lc`, ni `schannel`, ni `security-framework`.*
+
+**Il est PÉRIMÉTRÉ, et le périmètre fait partie de l'énoncé.** Mesuré le 2026-08-07 :
+
+| Périmètre de build | Occurrences interdites | L'invariant |
+|---|---|---|
+| **build par défaut** (community) | **0** | **tient** |
+| `--features store-postgres` | **0** | **tient** |
+| `--features encryption` | **0** | tient *(SQLCipher exige un backend crypto au BUILD, pas une lib système en plus dans la fermeture)* |
+| `--features object-store` | **12** | **FAUX** |
+| `--all-features` | **20** | **FAUX** |
+
+**Pourquoi ce n'est pas réparable ici** — c'est l'information utile, pas l'aveu. La chaîne est
+**transitive** et aucun maillon ne nous appartient :
+
+```
+object-store → rust-s3 (`sync-rustls-tls`) → attohttpc (`tls-rustls`) → `__rustls`
+             → rustls/DEFAULT → aws-lc-rs → aws-lc-sys
+```
+
+`attohttpc` déclare pourtant `rustls` en `default-features = false` — mais sa feature interne `__rustls`,
+**seule porte d'entrée** de `tls-rustls`, réactive explicitement `rustls/default`, dont le provider par
+défaut est `aws-lc-rs`. `attohttpc` expose bien une variante `-ring` (`tls-rustls-webpki-roots-ring`), mais
+`rust-s3/sync-rustls-tls` câble **en dur** `attohttpc/tls-rustls` : elle est **inatteignable** depuis notre
+manifeste, et l'ajouter en plus ne retirerait rien — **les features cargo sont ADDITIVES**. Il faudrait
+forker ou patcher `rust-s3`/`attohttpc`. Le choix assumé est donc de **corriger l'affirmation**, pas de
+pourchasser la dépendance : un invariant énoncé trop largement est un défaut de véracité plus grave que la
+dépendance elle-même.
+
+**Ce que `object-store` déborde exactement.** Pas seulement son propre sous-arbre : l'**unification de
+features** de cargo propage `aws-lc-rs` à **toutes** les instances de `rustls` du graphe — y compris la
+nôtre, épinglée `["ring"]`. Le code appelle toujours `rustls::crypto::ring::default_provider()`
+**explicitement** (cf. `console/src/tls.rs`), donc le provider **utilisé au runtime reste `ring`** ; mais
+`aws-lc-sys` est bel et bien **compilé et lié** dans ce binaire-là. C'est ce que dit le compte de 20 sous
+`--all-features` contre 12 sous `object-store` seul.
+
+**Ce que ça change pour un exploitant.** Le binaire **community** livré (build par défaut) et la variante
+**Postgres** ne demandent **aucune** bibliothèque de crypto/TLS à l'hôte — c'est la promesse, elle tient.
+Un binaire construit **avec `object-store`** compile en plus `aws-lc-sys` : prévoir la toolchain
+**C + cmake** au build. Rien à installer au **runtime** dans les deux cas (aws-lc est *vendu* par le crate,
+pas emprunté au système), donc c'est un coût de **build**, pas de déploiement.
+
+**La garde, pas la phrase.** Cette page se périme toute seule à la prochaine dépendance ajoutée. Le
+contrôle est donc **exécuté**, à la main comme en CI (job `console` de `.github/workflows/ci.yml`) :
 
 ```sh
+# depuis la racine du dépôt — exige 0 sur les périmètres contractuels, AFFICHE les exclus
+python3 scripts/check_openssl_freedom.py
+
+# prouve que la garde MORD encore (exige 0 sur le périmètre connu sale : elle doit rougir)
+python3 scripts/check_openssl_freedom.py --self-test-red
+
+# la mesure brute, périmètre par périmètre, si l'on veut la refaire à la main
 cd console
-cargo tree -e normal,build --no-dedupe | grep -niE "openssl|native-tls|aws-lc|schannel|security-framework"
-# aucune ligne => openssl-freedom préservée (idem avec --features store-postgres)
+cargo tree -e normal,build --no-dedupe | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+cargo tree -e normal,build --no-dedupe --features store-postgres | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+cargo tree -e normal,build --no-dedupe --all-features | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+# attendu : 0, 0, 20
 ```
+
+En cas de rouge, le script **nomme** le périmètre cassé **et** la chaîne d'introduction (`cargo tree -i`) —
+il ne dit pas seulement « échec ». Élargir ses exclusions sans corriger cette section, c'est refaire
+exactement le trou qu'il vient de boucher.
 
 ---
 
@@ -972,6 +1050,10 @@ pour que vous puissiez le refaire) :
 dépendances**, elle, contient du C/asm compilé par cargo : l'amalgame **SQLite** (`rusqlite/bundled`) et
 l'asm de **`ring`** (provider crypto du seam TLS). « openssl-free » ne signifie donc pas « zéro C » mais
 **« zéro bibliothèque système à installer »** — ce C-là est vendu avec les crates et bâti par cargo.
+Et l'affirmation est **périmétrée** : elle vaut pour le build par défaut et `--features store-postgres`
+(**0** occurrence mesurée), **pas** pour `--features object-store` (**12**, via `aws-lc-sys`, qui ajoute
+**cmake** aux prérequis de build). Mesures, chaîne et garde automatique :
+[§3quater.1](#perimetre-de-l-openssl-freedom).
 
 Les outils **ORCHESTRÉS** (jamais embarqués, tous **OPTIONNELS**, auto-neutralisés si absents) :
 

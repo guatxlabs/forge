@@ -4,8 +4,14 @@
 //! SEAM ADDITIF. Le build PAR DÉFAUT (community) ne compile QUE `LocalFsBlobStore` (système de
 //! fichiers, AUCUNE dépendance nouvelle) : le chemin par défaut (aucun artefact configuré) ne change
 //! RIEN au comportement existant. L'implémentation S3/MinIO (`S3BlobStore`) ET sa dépendance vivent
-//! DERRIÈRE la feature OPT-IN `object-store` (`cargo build --features object-store`), openssl-free
-//! (rust-s3 en `sync-rustls-tls` -> attohttpc + rustls/ring, ZÉRO openssl). Quand la feature n'est PAS
+//! DERRIÈRE la feature OPT-IN `object-store` (`cargo build --features object-store`).
+//! ⚠️ SEUL PÉRIMÈTRE OÙ L'OPENSSL-FREEDOM NE TIENT PAS, et l'ancienne version de ce commentaire
+//! affirmait le contraire : `rust-s3` est bien en `sync-rustls-tls` (ni native-tls ni openssl), mais
+//! `attohttpc/tls-rustls` active sa feature interne `__rustls`, laquelle réactive `rustls/DEFAULT` et
+//! tire donc `aws-lc-rs`/`aws-lc-sys` — 12 occurrences mesurées, contre 0 au build par défaut.
+//! Transitif, non réparable sans forker `rust-s3`/`attohttpc` ; périmètre EXCLU et documenté
+//! (docs/DEPLOYMENT.md §3quater.1), mesuré en CI par `scripts/check_openssl_freedom.py`.
+//! Quand la feature n'est PAS
 //! compilée, tout le code S3 disparaît (cfg-gated) -> binaire par défaut inchangé.
 //!
 //! MODÈLE : un artefact est référencé par URL/clé (jamais stocké en BLOB dans la base). La sélection
@@ -127,7 +133,9 @@ impl BlobStore for LocalFsBlobStore {
 // ===========================================================================================
 // S3 / MinIO — DERRIÈRE la feature `object-store` UNIQUEMENT. rust-s3 en `sync-rustls-tls` : client
 // SYNCHRONE (attohttpc, colle au modèle bloquant du moteur backup, appelé via spawn_blocking) + TLS
-// rustls/ring (AUCUN openssl). Path-style forcé (MinIO). Config 100 % ENV (aucun secret en base/ledger).
+// rustls — mais provider `aws-lc-rs` IMPOSÉ par attohttpc, PAS `ring` (cf. en-tête de module et
+// docs/DEPLOYMENT.md §3quater.1). AUCUN openssl/native-tls pour autant. Path-style forcé (MinIO).
+// Config 100 % ENV (aucun secret en base/ledger).
 // ===========================================================================================
 
 /// Config S3/MinIO lue depuis l'ENV (aucun secret persisté en base/ledger). `region` par défaut

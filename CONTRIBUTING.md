@@ -77,7 +77,9 @@ Everything must be **green** and **offline** — tests must not touch the networ
   oracles over the `Oracle` base; scope-guard via `ScopeGuardMixin`; `argparse` with usage
   examples; `log(msg, level)` with `[*] [+] [!] [-] [VULN]` prefixes; **no shell** (fixed argv,
   never `sh -c`). New tool kinds register declaratively (`@register` + `forge/techniques.py`).
-- **Rust console** — `openssl`-free (rustls/ring); errors via `ApiError`; the `Store` seam for
+- **Rust console** — `openssl`-free (rustls/ring) **in the default and `store-postgres` builds, NOT
+  under `--features object-store`** (transitive `aws-lc`, see `docs/DEPLOYMENT.md` §3quater.1); guard:
+  `python3 scripts/check_openssl_freedom.py`. Errors via `ApiError`; the `Store` seam for
   DB access (no raw driver types at call sites); every SQL value bound as a `Param`.
 - **Web SPA** — no `innerHTML` with untrusted data; render via `textContent` / the `safeHtml`
   tagged template / `esc()`. Writes go through the authenticated `write()` helper.

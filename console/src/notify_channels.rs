@@ -332,13 +332,15 @@ pub(crate) fn plan_delivery(cfg: &Value, allow_internal: bool) -> Result<Deliver
             return Err(why.clone());
         }
     }
-    // CREDENTIAL EN CLAIR — un jeton de canal ne traverse JAMAIS un réseau public EN CLAIR. La règle
-    // était CODÉE ICI, en copie unique ; elle vit désormais dans `net::reject_cleartext_secret`, PARTAGÉE
-    // avec le fetcher de source de détection (qui ne l'avait pas du tout). Sémantique INCHANGÉE pour ce
-    // site : https vers une cible publique => servi (Slack/Teams/PagerDuty) ; http vers une cible
-    // publique avec un secret => refusé ; http vers un collecteur interne autorisé => servi.
+    // CREDENTIAL EN CLAIR — un jeton de canal ne traverse JAMAIS un RÉSEAU en clair, public ou privé.
+    // La règle était CODÉE ICI, en copie unique ; elle vit désormais dans `net::reject_cleartext_secret`,
+    // PARTAGÉE avec le fetcher de source de détection (qui ne l'avait pas du tout). Elle a été RESSERRÉE
+    // le 2026-08-07 : le critère n'est plus « la cible est-elle interne ? » mais « le paquet quitte-t-il
+    // la machine ? ». Un jeton de canal vers une IP de LAN en `http://` est désormais REFUSÉ — l'autorisation
+    // d'ATTEINDRE l'interne (`internal`, ci-dessus) reste distincte et n'emporte plus le droit d'y envoyer
+    // un secret en clair. Seul le loopback subsiste, et par la physique (cf. le doc de la règle).
     let secret = ch_secret(cfg);
-    crate::net::reject_cleartext_secret(t.scheme, !secret.is_empty(), internal.is_some())?;
+    crate::net::reject_cleartext_secret(t.scheme, !secret.is_empty(), addr.ip().is_loopback())?;
     let auth_header = if secret.is_empty() {
         None
     } else {

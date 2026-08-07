@@ -227,7 +227,7 @@ Les snapshots `pre-upgrade-*` écrits par `upgrade` sont des archives de backup 
 | Jamais de migration sans filet | Snapshot pré-upgrade **chiffré + chain-vérifié** obligatoire, sinon ABORT |
 | Jamais de base à moitié migrée | Tout échec 2–4 → **RESTORE** à l'état exact d'avant, exit non-zéro |
 | Rejeu sûr | Idempotent (migrate additif ; même-version → skip + vérif) |
-| Community byte-identique | Nouvelles sous-commandes **additives** ; flux existants inchangés ; **openssl-free** |
+| Community byte-identique | Nouvelles sous-commandes **additives** ; flux existants inchangés ; **openssl-free** (build community — cf. `DEPLOYMENT.md` §3quater.1) |
 | Crypto auditée | Réutilise argon2id + XChaCha20-Poly1305 du backup (aucun nouveau chemin crypto) |
 | Secrets protégés | Passphrase via **ENV** (jamais argv) ; URL Postgres **rédigée** dans log/ledger |
 | Auditable | `console.backup` / `console.upgrade` / `console.restore` chaînés au ledger tamper-evident |

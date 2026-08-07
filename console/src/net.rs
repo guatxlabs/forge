@@ -139,29 +139,49 @@ pub(crate) fn resolve_guarded_with(host: &str, port: u16, allow_internal: bool) 
 ///     validité, ancres Mozilla ET, si configurée, la CA privée d'entreprise — cf. `tls::EXTRA_CA_VAR`).
 ///     C'est la VOIE PROPRE, et depuis le knob de CA d'entreprise elle est ouverte même à un
 ///     collecteur/IdP interne signé par l'organisation ;
-///   - `http://` vers une cible PUBLIQUE avec un secret => REFUS, et **aucune** variable d'environnement
-///     ne l'ouvre. Le jeton partirait sur le fil ; rien ne justifie ça ;
-///   - `http://` vers une cible INTERNE explicitement autorisée => SERVI (clair GOUVERNÉ on-prem). Voir
-///     `docs/ADMINISTRATION.md` : ce cas N'A PAS été resserré, délibérément — un collecteur on-prem qui
-///     n'expose AUCUN écouteur TLS (le déploiement Plume de référence, `PLUME_URL`/`PLUME_TOKEN`) n'a
-///     alors plus aucune voie, et le knob de CA d'entreprise ne l'aide pas (il fournit une ancre, pas un
-///     écouteur). Le resserrer aurait tué l'usage au lieu de le déplacer.
+///   - `http://` avec un secret vers TOUTE adresse ROUTABLE — publique **ou privée** — => REFUS, et
+///     **aucune** variable d'environnement ne l'ouvre. `FORGE_ALLOW_INTERNAL_INTEGRATIONS` autorise
+///     à ATTEINDRE une adresse interne ; il n'a jamais autorisé à y envoyer un secret en clair, et
+///     depuis ce resserrement il ne le fait plus ;
+///   - `http://` avec un secret vers le LOOPBACK (`127.0.0.0/8`, `::1`) => SERVI. **Seule exception
+///     survivante à « pas de clair », et elle tient par la PHYSIQUE, pas par une politique** : le
+///     paquet ne traverse aucune interface réseau, donc il n'y a pas de fil sur lequel intercepter
+///     quoi que ce soit. Et quiconque peut lire le loopback de cette machine peut déjà lire la
+///     mémoire et la configuration du processus, où le secret vit de toute façon en clair. Exiger TLS
+///     d'un sidecar co-localisé n'achèterait rien de réel.
+///
+/// HISTORIQUE DE LA DÉCISION, pour qu'elle ne soit pas re-litigée à l'envers. Le clair vers une cible
+/// interne ROUTABLE a d'abord été CONSERVÉ (2026-08-06), au motif — mesuré — qu'un collecteur on-prem
+/// sans écouteur TLS n'aurait plus aucune voie, l'ancre d'entreprise fournissant « une ancre, pas un
+/// écouteur ». Deux faits ont renversé l'arbitrage (2026-08-07) :
+///   1. la mesure invoquée portait sur deux tests dont les fixtures sont des mocks HTTP de LOOPBACK
+///      (`testutil::mock_http_once` binde `127.0.0.1:0`) — ils éprouvent le parsing des détections,
+///      pas une contrainte de déploiement. Le coût constaté était un coût de FIXTURES, et l'exception
+///      loopback le laisse d'ailleurs intact : ces tests passent inchangés ;
+///   2. le dépôt n'a AUCUNE install déployée — donc aucune dette de compatibilité, et fermer avant
+///      publication est gratuit là où fermer après serait une rupture.
+/// Reste le seul coût réel : un collecteur interne joint par son IP de LAN doit terminer TLS. Ce
+/// n'est plus un cul-de-sac depuis que le seam accepte une CA privée (`tls::EXTRA_CA_VAR`) : un
+/// certificat auto-signé ou signé par la CA de l'organisation est VÉRIFIÉ. On fournit la moitié
+/// cliente ; monter l'écouteur est du travail ordinaire, pas une impasse.
 pub(crate) fn reject_cleartext_secret(
     scheme: crate::tls::Scheme,
     has_secret: bool,
-    target_is_internal: bool,
+    target_is_loopback: bool,
 ) -> Result<(), String> {
     if !has_secret || scheme.is_tls() {
         return Ok(());
     }
-    if target_is_internal {
-        return Ok(()); // clair GOUVERNÉ on-prem — l'accès interne a déjà été autorisé en amont
+    if target_is_loopback {
+        return Ok(()); // le paquet ne quitte pas la machine — cf. le doc ci-dessus
     }
     Err(
-        "secret d'intégration configuré vers une cible PUBLIQUE en HTTP clair — refusé (le jeton \
-         partirait en clair sur le fil). Utiliser https:// (TLS vérifié ; une CA privée d'entreprise \
-         se fournit via FORGE_EXTRA_CA_PEM), viser un collecteur interne (avec \
-         FORGE_ALLOW_INTERNAL_INTEGRATIONS=1), ou retirer le secret."
+        "secret d'intégration configuré vers une cible ROUTABLE en HTTP clair — refusé (le jeton \
+         partirait en clair sur le fil). Un réseau PRIVÉ ne change rien : \
+         FORGE_ALLOW_INTERNAL_INTEGRATIONS autorise à ATTEINDRE une adresse interne, jamais à y \
+         envoyer un secret en clair. Utiliser https:// (TLS vérifié ; un certificat auto-signé ou \
+         une CA privée d'entreprise se fournit via FORGE_EXTRA_CA_PEM), viser un service co-localisé \
+         sur 127.0.0.1, ou retirer le secret."
             .to_string(),
     )
 }
@@ -247,7 +267,7 @@ pub(crate) fn http_get_blocking_with(
     // (cf. `reject_cleartext_secret`). Ce site ne l'avait PAS : une source de détection publique en
     // `http://` avec un bearer/basic mettait son `Authorization:` sur le fil. Le refus tombe AVANT le
     // connect, donc avant qu'un seul octet ne parte.
-    reject_cleartext_secret(t.scheme, auth.carries_secret(), reject_internal_addr(&addr).is_err())?;
+    reject_cleartext_secret(t.scheme, auth.carries_secret(), addr.ip().is_loopback())?;
     let mut stream = crate::tls::connect(&addr, &t.host, t.scheme, timeout)?;
     let (authority, path) = (&t.authority, &t.path);
     let mut req = format!(
@@ -459,29 +479,62 @@ mod ssrf_tests {
         assert!(!e.contains("deny-list"), "escape-hatch : plus de refus de politique, obtenu: {e}");
     }
 
-    /// LA RÈGLE PARTAGÉE « pas de secret en clair vers une cible publique », PURE et exhaustive. Elle
-    /// gouverne DEUX egress (webhook de notification + fetcher de source de détection) ; la prouver ici
-    /// une fois vaut pour les deux.
+    /// LA RÈGLE PARTAGÉE « pas de secret en clair sur un RÉSEAU », PURE et exhaustive. Elle gouverne
+    /// DEUX egress (webhook de notification + fetcher de source de détection) ; la prouver ici une
+    /// fois vaut pour les deux. Le 3ᵉ paramètre est `target_is_loopback`, et le changement de nom
+    /// EST le resserrement : le critère n'est plus « la cible est-elle interne ? » mais « le paquet
+    /// quitte-t-il la machine ? ».
     ///
     /// MUTATION : rendre `Ok(())` inconditionnel -> ce test rougit (2 assertions).
     #[test]
     fn cleartext_secret_rule_is_exhaustive() {
         use crate::tls::Scheme::{Http, Https};
         use super::reject_cleartext_secret;
-        // Sans secret : le clair reste servi, interne comme public (fetch anonyme, webhook sans jeton).
-        assert!(reject_cleartext_secret(Http, false, false).is_ok(), "pas de secret, cible publique");
-        assert!(reject_cleartext_secret(Http, false, true).is_ok(), "pas de secret, cible interne");
+        // Sans secret : le clair reste servi partout (fetch anonyme, webhook sans jeton).
+        assert!(reject_cleartext_secret(Http, false, false).is_ok(), "pas de secret, cible routable");
+        assert!(reject_cleartext_secret(Http, false, true).is_ok(), "pas de secret, loopback");
         // En TLS : le secret est protégé par une session au certificat VÉRIFIÉ -> servi partout.
-        assert!(reject_cleartext_secret(Https, true, false).is_ok(), "secret + https public : la voie propre");
-        assert!(reject_cleartext_secret(Https, true, true).is_ok(), "secret + https interne (CA d'entreprise)");
-        // LE REFUS : clair + secret + cible PUBLIQUE. Aucune variable d'environnement ne l'ouvre.
-        let e = reject_cleartext_secret(Http, true, false).expect_err("clair + secret + public => refus");
+        assert!(reject_cleartext_secret(Https, true, false).is_ok(), "secret + https routable : la voie propre");
+        assert!(reject_cleartext_secret(Https, true, true).is_ok(), "secret + https loopback");
+        // LE REFUS : clair + secret + toute cible ROUTABLE. Aucune variable d'environnement ne l'ouvre.
+        let e = reject_cleartext_secret(Http, true, false).expect_err("clair + secret + routable => refus");
         assert!(e.contains("en clair"), "refus nommé attendu, obtenu: {e}");
         assert!(e.contains("FORGE_EXTRA_CA_PEM"), "le refus doit indiquer la VOIE PROPRE, obtenu: {e}");
-        // NON RESSERRÉ, DÉLIBÉRÉMENT : clair + secret vers un collecteur INTERNE déjà autorisé. Le
-        // resserrer tuerait le déploiement on-prem de référence (PLUME_URL/PLUME_TOKEN sans écouteur
-        // TLS) ; cf. le doc de `reject_cleartext_secret` et docs/ADMINISTRATION.md.
-        assert!(reject_cleartext_secret(Http, true, true).is_ok(), "clair GOUVERNÉ on-prem : conservé");
+        // LA SEULE EXCEPTION SURVIVANTE : clair + secret vers le LOOPBACK. Elle tient par la PHYSIQUE
+        // (le paquet ne traverse aucune interface) et non par une politique ; cf. le doc de la règle.
+        assert!(reject_cleartext_secret(Http, true, true).is_ok(), "clair + secret vers 127.0.0.1 : servi");
+    }
+
+    /// LE RESSERREMENT DU 2026-08-07, éprouvé sur des ADRESSES RÉELLES et non sur un booléen — sans
+    /// quoi on ne prouverait que l'arithmétique de la fonction pure, jamais que les APPELANTS
+    /// classent correctement. C'est précisément là qu'était le relâchement : le critère était
+    /// « interne » (donc 192.168.x, 10.x, ULA… tous exemptés), il est désormais « loopback ».
+    ///
+    /// MUTATION : rebrancher les appelants sur `reject_internal_addr(&addr).is_err()` -> rouge, car
+    /// une IP de LAN redevient exemptée.
+    #[test]
+    fn a_secret_in_the_clear_to_a_private_lan_address_is_now_refused() {
+        use crate::tls::Scheme::Http;
+        use super::reject_cleartext_secret;
+        use std::net::SocketAddr;
+        // Ces adresses sont TOUTES « internes » au sens de `reject_internal_addr` — c'est exactement
+        // ce qui les exemptait AVANT. Aucune n'est le loopback : le paquet quitte la machine.
+        for a in ["192.168.1.10:8080", "10.0.0.5:80", "172.16.0.9:8080", "[fd00::1]:80"] {
+            let addr: SocketAddr = a.parse().expect("adresse de test");
+            assert!(reject_internal_addr(&addr).is_err(), "prérequis : {a} est bien classée INTERNE");
+            let e = reject_cleartext_secret(Http, true, addr.ip().is_loopback())
+                .expect_err("secret en clair vers une IP de LAN doit être REFUSÉ, adresse: {a}");
+            assert!(e.contains("ROUTABLE"), "le refus doit dire pourquoi, obtenu: {e}");
+        }
+        // CONTRE-EXEMPLE, sinon « tout est refusé » passerait ce test pour la mauvaise raison.
+        for a in ["127.0.0.1:8080", "[::1]:80"] {
+            let addr: SocketAddr = a.parse().expect("adresse de test");
+            assert!(reject_internal_addr(&addr).is_err(), "le loopback reste INTERNE pour l'anti-SSRF");
+            assert!(
+                reject_cleartext_secret(Http, true, addr.ip().is_loopback()).is_ok(),
+                "le loopback reste servi : {a}"
+            );
+        }
     }
 
     /// LE FETCHER APPLIQUE la règle — pas seulement la fonction pure. Une source de détection PUBLIQUE
@@ -516,6 +569,47 @@ mod ssrf_tests {
         // `carries_secret` est le prédicat exact des en-têtes émis : une valeur VIDE n'émet rien.
         assert!(!HttpAuth::Bearer(String::new()).carries_secret(), "valeur vide => aucun en-tête, aucun secret");
         assert!(!HttpAuth::None.carries_secret());
+    }
+
+    /// LE FETCHER APPLIQUE LE RESSERREMENT du 2026-08-07 — et ce test existe parce que le test de la
+    /// fonction PURE ne suffisait pas : il calcule `is_loopback` LUI-MÊME et ne touche donc jamais les
+    /// appelants. Vérifié par mutation : rebrancher les DEUX appelants sur l'ancien critère
+    /// `reject_internal_addr(&addr).is_err()` laissait toute la suite VERTE. Un test qui reproduit la
+    /// composition au lieu de l'APPELER ne prouve rien sur le câblage — c'est ici qu'on l'appelle.
+    ///
+    /// MUTATION : remettre `reject_internal_addr(&addr).is_err()` en 3ᵉ argument dans
+    /// `http_get_blocking_with` -> une IP de LAN redevient exemptée -> ce test rougit.
+    #[test]
+    fn fetcher_refuses_a_secret_in_the_clear_towards_a_private_lan_address() {
+        use crate::HttpAuth;
+        use std::time::Duration;
+        const TOKEN: &str = "JETON-LAN-NE-DOIT-PAS-PARTIR";
+        let t = Duration::from_millis(200);
+        let auth = HttpAuth::Bearer(TOKEN.to_string());
+        // `allow_internal = true` : l'escape-hatch d'ACCÈS est ACCORDÉ, et c'est tout l'intérêt du
+        // test — on prouve qu'il n'emporte PLUS le droit d'envoyer un secret en clair. Ces adresses
+        // sont littérales, donc aucune résolution DNS : le test ne dépend pas du réseau.
+        // PAS d'IPv6 littéral ici, et ce n'est pas un oubli : `tls::split_url` ne gère pas les
+        // crochets RFC 3986 — `http://[fd00::1]/api` devient l'hôte `[fd00` et le port `80`, puis
+        // échoue à la RÉSOLUTION. Découvert par ce test. Le défaut est FAIL-CLOSED (on n'atteint
+        // jamais la cible, donc aucun contournement de garde), mais il rend les littéraux IPv6
+        // inadressables pour les sources de détection et les webhooks. Traité à part.
+        for url in ["http://192.168.1.10/api/alerts", "http://10.0.0.5/api", "http://172.16.0.9/api"] {
+            let e = super::http_get_blocking_with(url, &auth, t, true)
+                .expect_err("secret en clair vers une IP de LAN doit être REFUSÉ");
+            assert!(e.contains("ROUTABLE"), "refus « cible routable » attendu pour {url}, obtenu: {e}");
+            assert!(!e.contains(TOKEN), "le refus ne doit PAS recracher le jeton: {e}");
+        }
+        // CONTRE-EXEMPLE : la même IP de LAN, MÊME secret, mais en `https://` -> la politique laisse
+        // passer et l'échec qui subsiste est de CONNEXION. Sans lui, « ça refuse » pourrait venir de
+        // l'anti-SSRF ou de n'importe quoi d'autre sur ce chemin.
+        let e = super::http_get_blocking_with("https://192.168.1.10:9/api", &auth, t, true)
+            .expect_err("port fermé");
+        assert!(!e.contains("ROUTABLE"), "en https la politique ne refuse pas, obtenu: {e}");
+        // Et le LOOPBACK reste servi en clair avec secret : l'exception survivante, au niveau APPELANT.
+        let e = super::http_get_blocking_with("http://127.0.0.1:9/api", &auth, t, true)
+            .expect_err("port fermé");
+        assert!(!e.contains("ROUTABLE"), "le loopback en clair reste servi, obtenu: {e}");
     }
 
     /// `resolve_guarded_with` est LE goulot résolution+garde : impossible d'obtenir une adresse interne

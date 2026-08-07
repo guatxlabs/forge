@@ -78,6 +78,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Console — tests + build release du crate Rust (core résolu via la git-dep publique).
+  # Porte aussi la garde d'INVARIANT openssl-freedom (deux premières étapes, fail-fast) : c'est ce
+  # job qui répond du build par défaut, donc c'est ici que l'invariant qui le décrit est MESURÉ.
   # ---------------------------------------------------------------------------
   console:
     name: console (cargo test + build --release)
@@ -102,6 +104,31 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('console/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
+
+      # L'invariant « zéro bibliothèque système de crypto/TLS » (ni openssl, ni native-tls, ni aws-lc,
+      # ni schannel, ni security-framework dans la fermeture) était AFFIRMÉ dans une vingtaine
+      # d'endroits du dépôt, et NULLE PART MESURÉ. Il était vrai pour le build par défaut et pour
+      # `store-postgres` (0 occurrence), et FAUX pour `object-store` (12) et `--all-features` (20) —
+      # via une chaîne TRANSITIVE `rust-s3 -> attohttpc -> rustls/DEFAULT -> aws-lc-rs`. L'affirmation
+      # a été périmétrée dans la doc ; cette garde est ce qui l'empêche de se re-périmer EN SILENCE,
+      # parce qu'une phrase de doc ne se re-mesure pas toute seule à la prochaine dépendance ajoutée.
+      #
+      # Placée AVANT `cargo test` pour FAIL-FAST : `cargo tree` ne compile rien (quelques secondes),
+      # là où découvrir la régression après 10 min de build ne l'aurait pas rendue plus vraie. Elle
+      # n'exige 0 QUE sur les périmètres contractuels (défaut, `store-postgres`) ; elle MESURE ET
+      # AFFICHE les périmètres exclus sans les exiger, pour que l'exclusion reste visible.
+      # `--locked` : la garde mesure l'arbre verrouillé, elle ne réécrit jamais Cargo.lock.
+      - name: Invariant openssl-freedom (périmètres défaut + store-postgres)
+        run: python3 scripts/check_openssl_freedom.py
+
+      # ET LA GARDE DOIT PROUVER QU'ELLE MORD. Un contrôle incapable d'échouer est un décor : si la
+      # détection se casse (motif mort, format de `cargo tree` changé), le contrôle ci-dessus passerait
+      # au vert en annonçant exactement le contraire de la réalité, et rien ne le dirait. L'auto-test
+      # exige 0 sur le périmètre CONNU SALE (`--all-features`) et ne rend 0 que si la garde a bien
+      # ROUGI. Il rougit donc dans les deux cas qui demandent un humain : détection cassée, OU chaîne
+      # réparée en amont — auquel cas l'exclusion documentée doit être retirée.
+      - name: La garde mord encore (auto-test rouge sur le périmètre exclu)
+        run: python3 scripts/check_openssl_freedom.py --self-test-red
 
       # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.1 (réseau) —
       # cohérent avec Cargo.lock (source git+tag), identique à un clone standalone.
@@ -180,7 +207,9 @@ jobs:
   # Console (Postgres) — MATRICE de backend : le job `console` ci-dessus couvre le DÉFAUT SQLite
   # (feature OFF) ; ce job couvre le backend Postgres OPT-IN (`--features store-postgres`) contre un
   # vrai Postgres 16 (service container). Prouve le seam PG + le reconnect+retry HA (Stage 4). Le build
-  # community reste byte-identique/openssl-free — c'est le job `console` qui le garde vert.
+  # community reste byte-identique/openssl-free — c'est le job `console` qui le garde vert, et la garde
+  # `scripts/check_openssl_freedom.py` qu'il exécute couvre AUSSI le périmètre `store-postgres` (0 hit
+  # attendu ici comme au défaut ; le périmètre qui déborde est `object-store`, exclu et documenté).
   # ---------------------------------------------------------------------------
   console-postgres:
     name: console (postgres — cargo test --features store-postgres)
@@ -375,6 +404,11 @@ jobs:
             '''^console/src/sso/tests\.rs$''',
             '''^console/src/sso\.rs$''',
             '''^tests/test_redact\.py$''',
+            # Fixtures mTLS : `CLIENT_KEY_PEM` & co. sont annotées « matériel de TEST : elle ne
+            # protège rien », et servent de CANARI aux tests `client_key_material_never_leaks_into_*`
+            # qui assertent que ce corps n'apparaît dans AUCUNE sortie. Autrement dit : ce fichier
+            # doit contenir une clé qui ressemble à une vraie, sinon la garde ne prouve rien.
+            '''^console/src/tls/tests\.rs$''',
           ]
 
           # Constante AWS canonique du self-test de rédaction + corpus rédaction/rapport.
@@ -411,7 +445,14 @@ jobs:
           [[rules]]
           id = "jwt"
           [rules.allowlist]
-          paths = ['''^tests/.*\.py$''']
+          paths = [
+            '''^tests/.*\.py$''',
+            # `CANARY_BEARER` : jetons de test dont le payload décode en {"sub":"victim"} et la
+            # signature en base64("signaturedetest"). Ils existent pour PROUVER qu'un secret de
+            # canal/SLA ne fuit pas dans un corps de notification — les retirer désarmerait la garde.
+            '''^console/src/notify_channels\.rs$''',
+            '''^console/src/notify_sla\.rs$''',
+          ]
 
           # Les faux jetons fournisseur du corpus de rédaction — et de NULLE PART ailleurs.
           [[rules]]

@@ -73,7 +73,7 @@
 /console/src/auth.rs                    @guatxlabs
 /console/src/sso/                       @guatxlabs
 /console/src/scim/                      @guatxlabs
-/console/src/tenancy.rs                 @guatxlabs
+/console/src/tenancy/                    @guatxlabs
 /console/src/rbac.rs                    @guatxlabs
 /console/src/secret_env.rs              @guatxlabs
 
@@ -92,7 +92,7 @@
 /console/src/boot.rs                    @guatxlabs
 
 # ---- Requête / store — GARDÉ (points d'étranglement SQL, connexion read-only) -------------
-/console/src/store.rs                   @guatxlabs
+/console/src/store/                      @guatxlabs
 /console/src/net.rs                     @guatxlabs
 
 # ---- Restitution & UI --------------------------------------------------------------------
