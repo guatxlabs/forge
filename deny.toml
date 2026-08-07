@@ -12,29 +12,80 @@
 #     cargo deny --locked --all-features --manifest-path console/Cargo.toml \
 #       check licenses bans sources
 #
-# et NON depuis `console/` : `--config` vaut par défaut `<cwd>/deny.toml`, or ce fichier vit à
-# la racine et il n'y a pas de `console/deny.toml`. Lancé depuis `console/`, cargo-deny ne
-# trouverait PAS cette configuration — il ne remonte pas dans les dossiers parents.
+# CE QUI EST VRAI DU CHARGEMENT DE CE FICHIER, mesuré le 2026-08-07 avec cargo-deny 0.18.2 (le
+# binaire épinglé de la CI), et non plus supposé — la version précédente de ce commentaire
+# affirmait deux choses fausses :
+#   · le défaut de `--config` n'est PAS `<cwd>/deny.toml` mais « le dossier du manifeste, PUIS
+#     les dossiers PARENTS » (`cargo deny list --help` le dit, et la mesure le confirme) ;
+#   · cargo-deny REMONTE donc bien dans les parents : lancé depuis `console/` SANS `--config`, il
+#     trouve ce fichier-ci. Prouvé par mutation — en retirant `AGPL-3.0`/`LGPL-3.0` de la liste
+#     `allow` d'une copie isolée, le contrôle lancé depuis `console/` échoue en nommant `forge` et
+#     `guatx-core` ; il chargeait donc bien CETTE configuration.
+# LE PIÈGE RÉEL est ailleurs : un `--config` RELATIF est résolu depuis le dossier du MANIFESTE,
+# pas depuis le `cwd`. `--config deny.toml` lancé depuis la racine cherche `console/deny.toml`,
+# ne le trouve pas, et RETOMBE EN SILENCE (simple `[WARN]`) sur la configuration PAR DÉFAUT de
+# cargo-deny — qui, elle, refuse `AGPL-3.0-or-later` et sort 4. D'où le chemin ABSOLU
+# (`$GITHUB_WORKSPACE/deny.toml`) dans `.github/workflows/ci.yml`.
 #
-# `--all-features` N'EST PAS DÉCORATIF, c'est mesuré (2026-08-03). Les dépendances des features
-# opt-in sont `optional` et n'entrent pas dans le graphe par défaut :
-#   · sans le drapeau : 185 crates examinés ;
-#   · avec le drapeau : 239, soit 54 de plus ;
-#   · et la licence `CDLA-Permissive-2.0` (`webpki-roots`, le paquet de racines CA de Mozilla,
-#     tiré par `store-postgres`) N'APPARAÎT QUE sous `--all-features`.
-# Prouvé par mutation : cette entrée retirée de la liste, le contrôle sort 4 en nommant
-# `webpki-roots@1.0.9` avec le drapeau, et sort 0 sans lui. Un contrôle limité aux features par
-# défaut rendrait donc « conforme » sans avoir lu la licence d'une dépendance réellement livrée
-# aux déploiements Postgres.
+# `--all-features` N'EST PAS DÉCORATIF, c'est mesuré. Les dépendances des features opt-in sont
+# `optional` et n'entrent pas dans le graphe par défaut — REMESURÉ le 2026-08-07 :
+#   · sans le drapeau : 201 crates examinés ;
+#   · avec le drapeau : 239, soit 38 de plus (`postgres`, `tokio-postgres`, `bytes`,
+#     `openssl-sys` de SQLCipher…), tous réellement livrés aux déploiements Postgres/chiffrés.
+# CORRECTION DU MÊME COUP : ce commentaire portait « 185 crates sans le drapeau » et affirmait que
+# `CDLA-Permissive-2.0` (`webpki-roots`) « N'APPARAÎT QUE sous --all-features ». Les deux sont
+# devenus FAUX quand le seam TLS sortant a rendu `rustls`/`webpki-roots` NON optionnelles : mesuré
+# ce jour, `webpki-roots` est dans le graphe PAR DÉFAUT, et AUCUNE licence n'est aujourd'hui
+# exclusive au drapeau. Ce qui justifie `--all-features` n'est donc plus une licence de plus mais
+# 38 CRATES de plus — une chiffre à revérifier plutôt qu'à recopier.
 #
-# RÉSERVE MESURÉE, écrite plutôt que découverte : le sous-arbre de la feature `object-store`
-# (`rust-s3` et ses dépendances) n'apparaît PAS dans le graphe de cargo-deny, même avec
-# `--all-features`, alors que `cargo tree --all-features` l'y montre. L'écart vient de
-# cargo-deny, pas du manifeste, et il n'a pas été élucidé ici. Conséquence à connaître : les
-# licences de ce sous-arbre ne sont pas contrôlées par cette étape. Leurs AVIS le sont, eux,
-# par `cargo audit`, qui lit `Cargo.lock` — lequel contient bien les 290 crates, `rust-s3` et
-# `quick-xml` compris (c'est d'ailleurs de là que viennent les ignores quick-xml datés de
-# `console/.cargo/audit.toml`).
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# EXCLUSION EXPLICITE — CE QUE CETTE ÉTAPE NE CONTRÔLE PAS : le sous-arbre `object-store`.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Ce n'est plus une réserve « non élucidée » : la cause est ÉTABLIE (2026-08-07, cargo-deny
+# 0.18.2), et la conséquence était plus grave que la réserve ne le laissait croire.
+#
+# LA CAUSE. cargo-deny (via `krates`) perd une dépendance OPTIONNELLE dont le nom de PAQUET
+# diffère du nom de sa cible `[lib]`. `rust-s3` est exactement ce cas : paquet `rust-s3`,
+# `[lib] name = "s3"`. La feature déclare le PAQUET (`object-store = ["dep:rust-s3"]`) tandis que
+# l'arête résolue de `cargo metadata` porte le nom de la LIB (`"name": "s3"`) : l'appariement par
+# nom échoue, la feature est tenue pour désactivée, et tout le sous-arbre disparaît. Établi par
+# MUTATION, un seul facteur changé à chaque fois :
+#     manifeste réel (`optional`, `dep:rust-s3`)      --all-features -> 239 crates, ABSENT
+#     syntaxe implicite (`object-store = ["rust-s3"]`) --all-features -> 239 crates, ABSENT
+#     dépendance rendue NON optionnelle                (sans drapeau) -> 250 crates, PRÉSENT
+#     dépendance renommée `s3 = { package = "rust-s3" }` --all-features -> 287 crates, PRÉSENT
+# Ce n'est donc NI `--all-features` (qui porte : 201 -> 239), NI la syntaxe `dep:`, NI un
+# `targets` restreint (il n'y en a pas), NI une exclusion. `cargo metadata --all-features` voit,
+# lui, les 290 crates du `Cargo.lock`.
+#
+# CE QUE ÇA CACHAIT — le vert de cette étape n'était pas « conforme », il était « pas regardé ».
+# 51 crates échappent, et DEUX ne satisfont pas la liste `allow` : `attohttpc 0.30.1` (MPL-2.0)
+# et `tiny-keccak 2.0.2` (CC0-1.0). Vérifié en rendant le sous-arbre visible (dépendance
+# renommée) puis en relançant CE fichier-ci : `licenses FAILED`, code 4, ces deux crates nommés.
+# Les deux sont désormais autorisés NOMMÉMENT ci-dessous, avec leur justification de
+# compatibilité AGPL.
+#
+# COMPENSATION — un contrôle qui, lui, atteint le sous-arbre :
+#
+#     python3 scripts/check_dep_licenses.py                 # câblé en CI, job `security`
+#     python3 scripts/check_dep_licenses.py --self-test-red # prouve qu'il MORD
+#
+# Il refait le contrôle de licence sur `cargo metadata --all-features --locked` (les 290 crates),
+# en LISANT la liste `allow` de CE fichier — une seule vérité de politique, deux moteurs pour
+# l'appliquer. Tant que la réparation à la source n'est pas faite, c'est le SEUL contrôle qui lise
+# les licences de ce sous-arbre. Les `bans` et `sources` de ce sous-arbre, eux, restent NON
+# contrôlés — c'est l'exclusion qui subsiste, et elle est écrite ici plutôt que sous-entendue.
+#
+# RÉPARATION À LA SOURCE, connue et mesurée, non appliquée ici : déclarer la dépendance sous le
+# nom de sa lib dans `console/Cargo.toml` — `s3 = { package = "rust-s3", … }` avec
+# `object-store = ["dep:s3"]`. cargo-deny passe alors de 239 à 287 crates. Le jour où ce sera
+# fait : retirer ce bloc, et `scripts/check_dep_licenses.py --self-test-red` rougira pour le
+# rappeler. Cf. docs/DEPLOYMENT.md §3quater.2.
+#
+# Les AVIS de sécurité de ce sous-arbre sont, eux, bien couverts : `cargo audit` lit `Cargo.lock`,
+# qui contient les 290 crates, `rust-s3` et `quick-xml` compris (c'est de là que viennent les
+# ignores quick-xml datés de `console/.cargo/audit.toml`).
 #
 # PÉRIMÈTRE : `licenses bans sources`, PAS `advisories`. Les avis sont déjà couverts par
 # `cargo audit --deny warnings` dans le même job, avec ses ignores justifiés et datés dans
@@ -71,21 +122,44 @@ unused-allowed-license = "warn"
 # « ou ultérieure ». C'est la forme déjà retenue dans `plume/deny.toml` — une seule vérité dans
 # la famille de dépôts.
 #
-# LISTE MESURÉE SUR CE GRAPHE, pas recopiée. Les entrées `MPL-2.0`, `CC0-1.0` et
-# `Unicode-DFS-2016` que porte `plume` ont été RETIRÉES : `cargo-deny` les signale « non
-# rencontrées » sur le graphe de `forge`, y compris toutes features activées. Les garder
-# pré-autoriserait des licences qu'aucune dépendance n'utilise ici ; les retirer fait qu'une
-# dépendance arrivant demain sous MPL-2.0 exige une décision explicite au lieu de passer.
+# LISTE MESURÉE SUR CE GRAPHE, pas recopiée. `Unicode-DFS-2016`, que porte `plume`, a été RETIRÉE :
+# aucune dépendance de `forge` ne l'utilise. La garder pré-autoriserait une licence absente ; la
+# retirer fait qu'une dépendance arrivant demain sous cette licence exige une décision explicite au
+# lieu de passer.
 #
-# N'y figurent pas non plus `BSD-1-Clause`, `BSL-1.0`, `Unlicense` et `LGPL-2.1` : les crates
-# concernés (`fiat-crypto`, `ryu`, `whoami`, `aho-corasick`, `memchr`, `byteorder`, `r-efi`)
-# les offrent dans une expression `OR` que `MIT` ou `Apache-2.0` satisfont déjà. Vérifié : le
-# contrôle passe sans elles.
+# CORRECTION DU 2026-08-07 — `MPL-2.0` et `CC0-1.0` avaient été retirées de cette liste au motif
+# que « cargo-deny les signale non rencontrées, y compris toutes features activées ». C'ÉTAIT UNE
+# MESURE PRISE À TRAVERS L'ANGLE MORT décrit en tête de fichier : les deux SONT rencontrées, dans
+# le sous-arbre `object-store` que cargo-deny ne descend pas. Elles sont réintroduites ci-dessous
+# NOMMÉMENT — pas pour faire taire un rouge, mais parce que le graphe les contient réellement et
+# que leur compatibilité avec l'AGPL a été vérifiée :
+#   · `MPL-2.0` — `attohttpc 0.30.1`, le client HTTP de `rust-s3`. Copyleft PAR FICHIER, et
+#     GPL/AGPL-compatible PAR CONSTRUCTION : la MPL-2.0 §3.3 autorise la distribution d'un
+#     « Larger Work » sous une « Secondary License » (GPL/LGPL/AGPL), SAUF si le code porte la
+#     notice « Incompatible With Secondary Licenses » de l'Exhibit B. VÉRIFIÉ : aucun fichier
+#     source d'`attohttpc` ne porte cette notice (seul le texte de licence la cite, en tant que
+#     modèle). Obligation qui subsiste : les fichiers MPL restent sous MPL et leur source doit
+#     rester disponible — ce que l'AGPL impose déjà.
+#   · `CC0-1.0` — `tiny-keccak 2.0.2`, tiré par `aws-lc-rs`. Renonciation au domaine public :
+#     aucune obligation de réciprocité, donc rien qui puisse entrer en conflit avec l'AGPL.
+# CONSÉQUENCE ATTENDUE, ET VOULUE : `unused-allowed-license = "warn"` ci-dessus fait émettre à
+# cargo-deny deux `warning[license-not-encountered]` sur ces entrées (mesuré : « licenses ok »,
+# 0 erreur, 2 avertissements, 239 notes). Cet avertissement est FAUX — les deux licences sont
+# rencontrées — et c'est justement pour cela qu'on le garde : il est la signature visible de
+# l'angle mort dans la sortie de l'outil lui-même. Il disparaîtra le jour où le manifeste sera
+# réparé. `scripts/check_dep_licenses.py`, lui, les rencontre bel et bien.
+#
+# N'y figurent pas `BSD-1-Clause`, `BSL-1.0`, `Unlicense`, `MIT-0` et `LGPL-2.1` : les crates
+# concernés (`fiat-crypto`, `ryu`, `whoami`, `aho-corasick`, `memchr`, `byteorder`, `r-efi`,
+# `dunce`, `s2n-bignum` vendu dans `aws-lc-sys`) les offrent dans une expression `OR` que `MIT` ou
+# `Apache-2.0` satisfont déjà. Vérifié sur les 290 crates : le contrôle passe sans elles.
 allow = [
   "AGPL-3.0", "LGPL-3.0",
   "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
   "Unicode-3.0", "CDLA-Permissive-2.0",
+  # Atteignables UNIQUEMENT sous `object-store`, donc invisibles à cargo-deny (cf. en-tête).
+  "MPL-2.0", "CC0-1.0",
 ]
 
 [sources]

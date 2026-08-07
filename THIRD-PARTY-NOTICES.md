@@ -107,3 +107,34 @@ composant tiers **redistribué**.
 
 Une mise à jour de cette dépendance change **l'ensemble des autorités que la
 console accepte** : ce n'est pas un bump de routine, et il se relit comme tel.
+
+## Ce que la feature `object-store` ajoute à ce que vous redistribuez
+
+Ce dépôt ne vendorise pas ses dépendances Rust (cf. plus haut), mais **un binaire
+en redistribue le code compilé**. Le build **par défaut** n'appelle rien de
+particulier ici : tout son graphe est permissif (MIT / Apache-2.0 / ISC / BSD /
+Unicode-3.0), sans obligation d'attribution au-delà de ce que l'AGPL impose déjà.
+
+Le build `--features object-store` (S3/MinIO), lui, ajoute **51 crates** — et deux
+d'entre eux appellent une obligation qui ne se voit pas dans le champ `license` :
+
+- **`attohttpc` (MPL-2.0)** — le client HTTP de `rust-s3`. Copyleft **par
+  fichier** : quiconque distribue un binaire construit avec cette feature doit
+  garder les avis MPL et **rendre disponible le source de ces fichiers-là** (leur
+  version amont non modifiée suffit — nous ne les modifions pas). La MPL-2.0 §3.3
+  autorise explicitement le « Larger Work » sous AGPL, et `attohttpc` **ne porte
+  pas** la notice « Incompatible With Secondary Licenses » (vérifié fichier par
+  fichier) : il n'y a donc pas de conflit, seulement une obligation à honorer.
+- **`aws-lc-sys` (~69 Mo de C vendu — BoringSSL/OpenSSL)** — sa licence est une
+  conjonction de sept termes (ISC, Apache-2.0, MIT, BSD-3-Clause, MIT-0). Son
+  fichier `LICENSE`, qui recense l'origine de chaque portion, **doit voyager avec
+  toute redistribution binaire**. Deux points vérifiés parce qu'ils sont le risque
+  réel et non le risque supposé : le code dérivé d'OpenSSL y est **relicencié
+  Apache-2.0** (aucune trace de la clause publicitaire incompatible GPL), et la
+  bibliothèque `jitterentropy`, double BSD-3-Clause **ou** GPLv2, est
+  **expressément distribuée sous BSD-3-Clause et non sous GPLv2** par AWS.
+
+Ces 51 crates sont ceux que `cargo-deny` **ne lit pas** (cause, chiffres et garde
+compensatoire : [`docs/DEPLOYMENT.md`
+§3quater.2](docs/DEPLOYMENT.md#perimetre-de-l-audit-de-licences)). Leurs licences
+sont contrôlées par `python3 scripts/check_dep_licenses.py`, câblé en CI.

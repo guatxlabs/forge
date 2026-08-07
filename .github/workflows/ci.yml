@@ -277,7 +277,15 @@ jobs:
   #      racine). Axe DISTINCT du précédent : cargo-audit dit si une dépendance est vulnérable,
   #      cargo-deny si l'on a le droit de la redistribuer dans un binaire AGPL. Il manquait ici
   #      alors que `plume` et `ocular` en ont chacun un. Lancé `--all-features`, sur les manifestes
-  #      DÉCOUVERTS par `git ls-files` — voir le commentaire de l'étape.
+  #      DÉCOUVERTS par `git ls-files` — voir le commentaire de l'étape. ⚠️ IL N'EST PAS EXHAUSTIF :
+  #      239 crates examinés sur 290, le sous-arbre `object-store` lui échappe (cause établie, cf.
+  #      l'en-tête de `deny.toml`) — d'où le point 2bis, qui n'est pas un doublon mais le
+  #      complément qui atteint ce sous-arbre.
+  #   2bis) check_dep_licenses.py — les LICENCES du graphe COMPLET (290 crates, via
+  #      `cargo metadata --all-features`), contre la MÊME liste `allow` lue dans `deny.toml`. Sans
+  #      elle, deux crates non autorisés (`attohttpc` MPL-2.0, `tiny-keccak` CC0-1.0) passaient
+  #      sans être lus. Son auto-test rouge suit immédiatement : une garde qui ne peut pas échouer
+  #      est un décor.
   #   3) gitleaks     — secret scan of the tree + history, with an ephemeral config (written below,
   #      NOT committed) that extends the default ruleset. Every suppression in it is scoped to ONE
   #      RULE **and** to the exact fixture file that trips it — see the comment on that step.
@@ -285,7 +293,7 @@ jobs:
   #  audit; the Rust crate is the only supply-chain surface, covered by cargo-audit above.)
   # ---------------------------------------------------------------------------
   security:
-    name: security (cargo-audit + cargo-deny + gitleaks)
+    name: security (cargo-audit + cargo-deny + licences graphe complet + gitleaks)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -331,12 +339,18 @@ jobs:
       # `git ls-files`, et zéro manifeste trouvé fait ÉCHOUER l'étape plutôt que la rendre
       # verte à vide.
       #
-      # `--all-features` PORTE, mesuré le 2026-08-03 : les deps des features opt-in sont
-      # `optional` et n'entrent pas dans le graphe par défaut — 185 crates examinés sans le
-      # drapeau, 239 avec. La licence `CDLA-Permissive-2.0` (`webpki-roots`) N'APPARAÎT QUE
-      # sous ce drapeau : sans lui, le contrôle déclarerait « conforme » une chaîne dont il n'a
-      # pas lu toutes les licences. La réserve sur le sous-arbre `object-store`, elle aussi
-      # mesurée, est écrite dans `deny.toml` — la lire avant de croire ce job exhaustif.
+      # `--all-features` PORTE, mesuré : les deps des features opt-in sont `optional` et
+      # n'entrent pas dans le graphe par défaut — 201 crates examinés sans le drapeau, 239 avec.
+      #
+      # ⚠️ CETTE ÉTAPE N'EST PAS EXHAUSTIVE, ET LE CHIFFRE LE DIT : 239 crates examinés pour 290
+      # dans `Cargo.lock`. cargo-deny perd le sous-arbre `object-store` — cause ÉTABLIE le
+      # 2026-08-07 (dépendance OPTIONNELLE dont le nom de paquet `rust-s3` diffère du nom de sa
+      # `[lib]`, `s3` : l'appariement feature <-> arête échoue), démonstration par mutation et
+      # conséquences dans l'en-tête de `deny.toml`. Ce qui échappait n'était pas anodin :
+      # `attohttpc` (MPL-2.0) et `tiny-keccak` (CC0-1.0) auraient FAIT ÉCHOUER ce contrôle. Ne
+      # pas lire ce job comme couvrant tout le graphe — l'étape suivante est ce qui le couvre.
+      # Chemin `--config` ABSOLU, et pas relatif : un `--config` relatif est résolu depuis le
+      # dossier du MANIFESTE et retombe EN SILENCE sur la config par défaut de cargo-deny.
       #
       # Binaire ÉPINGLÉ par version + sha256, comme gitleaks plus bas : `cargo install`
       # recompilerait l'outil à chaque exécution pour le même résultat, et sans vérifier quoi
@@ -370,6 +384,32 @@ jobs:
           [ "$nb" -gt 0 ] || { echo "::error::aucun manifeste Cargo trouvé — ce contrôle est devenu muet, le réparer"; exit 1; }
           echo "$nb manifeste(s) contrôlé(s)"
           exit $statut
+
+      # CE QUI COUVRE L'ANGLE MORT DE L'ÉTAPE PRÉCÉDENTE. cargo-deny examine 239 crates sur les
+      # 290 du `Cargo.lock` : il perd tout le sous-arbre `object-store`, et deux des crates
+      # perdus (`attohttpc` MPL-2.0, `tiny-keccak` CC0-1.0) l'auraient fait ÉCHOUER. Laisser
+      # croire que l'audit de licence couvre tout serait une affirmation plus large que ce
+      # qu'elle recouvre — c'est le défaut réparé ici.
+      #
+      # Cette garde refait le contrôle de LICENCE sur `cargo metadata --all-features --locked`,
+      # qui rend bien les 290 crates, en LISANT la liste `allow` de `deny.toml` : une seule
+      # vérité de politique, deux moteurs pour l'appliquer. `--cargo-deny` lui passe le binaire
+      # déjà téléchargé plus haut, pour qu'elle IMPRIME le différentiel exact (les 51 crates
+      # manquants, nommés) au lieu de le décrire. Elle est fail-closed : cargo en échec, graphe
+      # implausible, `deny.toml` illisible ou évaluateur SPDX muet rendent 2, jamais 0.
+      - name: Licences du graphe COMPLET (couvre le sous-arbre que cargo-deny ne descend pas)
+        run: python3 scripts/check_dep_licenses.py --cargo-deny /tmp/cargo-deny
+
+      # ET ELLE DOIT PROUVER QU'ELLE MORD. Même doctrine que l'auto-test openssl-freedom du job
+      # `console` : un contrôle incapable d'échouer est un décor. L'auto-test rejoue le contrôle
+      # en retirant de la politique les licences atteignables UNIQUEMENT sous `object-store`
+      # (`MPL-2.0`, `CC0-1.0`) et n'est vert que si la garde a rougi EN NOMMANT `attohttpc` et
+      # `tiny-keccak` — c'est-à-dire seulement si elle atteint vraiment le sous-arbre qu'elle
+      # prétend couvrir. Il rougit donc dans les deux cas qui demandent un humain : évaluation
+      # cassée, OU sous-arbre disparu (feature retirée, rust-s3 remplacé) — auquel cas
+      # l'exclusion documentée dans `deny.toml` doit être retirée.
+      - name: La garde de licence mord encore (auto-test rouge sur l'angle mort)
+        run: python3 scripts/check_dep_licenses.py --self-test-red
 
       # Config gitleaks ÉPHÉMÈRE (runner-only, jamais committée) : `extend.useDefault` + des
       # allowlists SCOPÉES À LA RÈGLE.

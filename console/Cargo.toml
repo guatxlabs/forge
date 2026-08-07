@@ -46,7 +46,7 @@ store-postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:bytes"]
 # Conséquence build : cmake + toolchain C requis. Rien de plus au runtime. Détail : docs/DEPLOYMENT.md
 # §3quater.1 ; garde automatique : `python3 scripts/check_openssl_freedom.py` (câblée en CI).
 # N'activer que pour un offsite/artefacts S3 (`cargo build --features object-store`).
-object-store = ["dep:rust-s3"]
+object-store = ["dep:s3"]
 
 # Wave-1 lints: only lints that are GREEN under `-D warnings` today are locked in (so CI can enforce
 # them without churn). `await_holding_lock` guards the deferred CONC-1 work (never hold a std Mutex
@@ -147,7 +147,14 @@ bytes = { version = "1", optional = true }
 # n'est pas réparable ici (chaîne transitive ; la variante `tls-rustls-webpki-roots-ring` d'attohttpc est
 # inatteignable, `rust-s3` câblant `tls-rustls` en dur). Cf. le commentaire de la feature `object-store`
 # en tête de fichier + docs/DEPLOYMENT.md §3quater.1.
-rust-s3 = { version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
+# ⚠️ DÉCLARÉE SOUS LE NOM `s3`, VIA `package = "rust-s3"` — ce n'est PAS cosmétique. Le paquet
+# s'appelle `rust-s3` mais sa `[lib]` s'appelle `s3` ; or cargo-deny (via `krates`) PERD une
+# dépendance OPTIONNELLE dont le nom de paquet diffère du nom de lib : la feature déclare le paquet,
+# l'arête résolue porte le nom de la lib, l'appariement échoue et TOUT le sous-arbre disparaît de
+# l'audit. Mesuré : 239 crates vus avant, 287 après ce renommage. Deux crates y échappaient — et ils
+# FAISAIENT ÉCHOUER l'audit (attohttpc MPL-2.0, tiny-keccak CC0-1.0), sans que personne le voie.
+# Le code n'est pas touché : l'extern s'appelait DÉJÀ `s3` (nom de lib), il continue.
+s3 = { package = "rust-s3", version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
 
 [dev-dependencies]
 # Tests SSO uniquement : `use_pem` (from_rsa_pem) sert à SIGNER l'ID token du mock IdP en RS256. Reste

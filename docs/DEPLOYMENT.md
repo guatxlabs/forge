@@ -969,6 +969,107 @@ En cas de rouge, le script **nomme** le périmètre cassé **et** la chaîne d'i
 il ne dit pas seulement « échec ». Élargir ses exclusions sans corriger cette section, c'est refaire
 exactement le trou qu'il vient de boucher.
 
+<a id="perimetre-de-l-audit-de-licences"></a>
+
+### 3quater.2 Périmètre de l'audit de LICENCES — `cargo-deny` ne descend pas dans `object-store`
+
+C'est **le même sous-arbre** qu'au §3quater.1, et ce n'est pas une coïncidence : `object-store` est la
+seule feature dont la fermeture n'est pas entièrement lue par l'outillage. Là il s'agissait de crypto ;
+ici il s'agit du **droit de redistribuer** — le dépôt est publié sous `AGPL-3.0-or-later` et le binaire
+embarque tout son graphe.
+
+**L'angle mort, en chiffres.** Mesuré le 2026-08-07 avec `cargo-deny 0.18.2`, le binaire épinglé de la CI :
+
+| Ce qui est lu | Crates examinés |
+|---|---|
+| `cargo-deny --all-features` (job `security`) | **239** |
+| `cargo metadata --all-features` / `Cargo.lock` | **290** |
+| **écart** | **51 crates, jamais lus par l'audit officiel** |
+
+**La cause, établie par mutation — pas déduite.** `cargo-deny` (via `krates`) perd une dépendance
+**optionnelle** dont le nom de **paquet** diffère du nom de sa cible `[lib]`. `rust-s3` est exactement ce
+cas : paquet `rust-s3`, `[lib] name = "s3"`. La feature déclare le paquet
+(`object-store = ["dep:rust-s3"]`) alors que l'arête résolue de `cargo metadata` porte le nom de la lib
+(`"name": "s3"`) : l'appariement par nom échoue, la feature est tenue pour **désactivée**, et tout ce qui
+pend dessous disparaît. Un seul facteur changé à chaque mesure :
+
+| Manifeste | Invocation | Crates vus | Sous-arbre |
+|---|---|---|---|
+| réel (`optional`, `dep:rust-s3`) | `--all-features` | 239 | **absent** |
+| syntaxe implicite (`object-store = ["rust-s3"]`) | `--all-features` | 239 | **absent** |
+| dépendance rendue **non** optionnelle | *(sans drapeau)* | 250 | **présent** |
+| dépendance renommée `s3 = { package = "rust-s3" }` | `--all-features` | 287 | **présent** |
+
+Ce n'est donc **ni** `--all-features` (le drapeau porte : 201 → 239), **ni** la syntaxe `dep:`, **ni** un
+`targets` restreint dans `deny.toml` (il n'y en a pas), **ni** une exclusion explicite.
+
+**Ce que ça cachait — le vert n'était pas « conforme », il était « pas regardé ».** Deux des 51 crates ne
+satisfont pas la liste `allow` telle qu'elle était écrite : `attohttpc 0.30.1` (**MPL-2.0**) et
+`tiny-keccak 2.0.2` (**CC0-1.0**). Vérifié en rendant le sous-arbre visible puis en relançant le
+cargo-deny de la CI avec la `deny.toml` du dépôt : `licenses FAILED`, code 4, ces deux crates nommés. Pire,
+`deny.toml` **justifiait le retrait de `MPL-2.0`** de sa liste par « cargo-deny la signale non
+rencontrée » — une décision prise **à travers** l'angle mort.
+
+**Compatibilité AGPL du sous-arbre : vérifiée, et elle tient.** 51 crates, aucune licence propriétaire,
+aucun copyleft inconciliable :
+
+- **MIT / Apache-2.0 / ISC / BSD-2 / BSD-3 / MIT-0 / Unicode-3.0** (48 crates) — permissives, entrantes
+  vers l'AGPLv3 sans réserve (Apache-2.0 est compatible GPLv3/AGPLv3, pas GPLv2 — sans objet ici).
+- **MPL-2.0** — `attohttpc` seul. Copyleft **par fichier**, GPL/AGPL-compatible **par construction** : la
+  §3.3 autorise le « Larger Work » sous une *Secondary License* (GPL/LGPL/AGPL) **sauf** notice
+  « Incompatible With Secondary Licenses » (Exhibit B). **Vérifié : aucun fichier source d'`attohttpc` ne
+  porte cette notice.** Obligation qui subsiste : les fichiers MPL restent sous MPL, source disponible —
+  ce que l'AGPL impose déjà.
+- **CC0-1.0** — `tiny-keccak` seul. Renonciation au domaine public, aucune réciprocité.
+- **`aws-lc-sys 0.43.0`** mérite son propre regard : ~69 Mo de **C vendu** (BoringSSL, lui-même fork
+  d'OpenSSL) sous une expression à sept conjonctions,
+  `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`.
+  Les deux pièges attendus sont **absents**, vérifiés dans l'arbre vendu et non sur la foi du champ SPDX :
+  · le code dérivé d'OpenSSL/SSLeay est **relicencié Apache-2.0** par AWS — **zéro** occurrence de la
+  clause publicitaire « All advertising materials… » (celle qui rend l'ancienne licence OpenSSL
+  incompatible GPL) dans les 69 Mo ; · `third_party/jitterentropy` est double BSD-3-Clause **ou** GPLv2,
+  et le `LICENSE` **élit expressément la BSD-3-Clause et NON la GPLv2** — c'est la seule mention de GPL de
+  tout le crate (9 fichiers, tous des en-têtes de cette bibliothèque).
+
+**Verdict : aucune incompatibilité avec `AGPL-3.0-or-later`.** `MPL-2.0` et `CC0-1.0` sont désormais
+autorisées **nommément** dans `deny.toml`, avec leur justification.
+
+**La compensation, parce que l'exclusion subsiste.** `cargo-deny` reste aveugle tant que le manifeste
+n'est pas réparé : ses contrôles `bans` et `sources` ne couvrent **pas** ces 51 crates. Ce qui est
+couvert, et par quoi :
+
+| Axe | Sur les 239 | Sur les 51 de `object-store` |
+|---|---|---|
+| **Avis de sécurité** | `cargo audit` (lit `Cargo.lock`) | ✅ **oui** — les 290 crates |
+| **Licences** | `cargo deny check licenses` | ✅ **oui** — `scripts/check_dep_licenses.py` |
+| **Bans / versions multiples** | `cargo deny check bans` | ❌ **non** — exclusion assumée |
+| **Provenance (registre/git)** | `cargo deny check sources` | ❌ **non** — exclusion assumée |
+
+```sh
+# depuis la racine — refait le contrôle de licence sur les 290 crates, avec la liste `allow`
+# LUE dans deny.toml (une seule vérité de politique, deux moteurs pour l'appliquer)
+python3 scripts/check_dep_licenses.py
+
+# prouve que la garde MORD encore : elle doit rougir en nommant attohttpc et tiny-keccak
+python3 scripts/check_dep_licenses.py --self-test-red
+
+# le différentiel EXACT, si le binaire cargo-deny est là (la CI le lui passe)
+python3 scripts/check_dep_licenses.py --cargo-deny /tmp/cargo-deny
+```
+
+**La réparation à la source, connue et mesurée, volontairement non appliquée ici.** Une ligne de
+`console/Cargo.toml` suffit — déclarer la dépendance sous le nom de sa lib :
+
+```toml
+s3 = { package = "rust-s3", version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
+# et : object-store = ["dep:s3"]
+```
+
+Mesuré : `cargo-deny` passe de 239 à **287** crates et voit `rust-s3`, `attohttpc` et `aws-lc-sys`. Elle
+touche le manifeste et le `Cargo.lock` — donc un rebuild et une revue à part entière. Le jour où elle sera
+faite : retirer ce paragraphe **et** l'exclusion de `deny.toml` ; `check_dep_licenses.py --self-test-red`
+rougira de lui-même pour le rappeler.
+
 ---
 
 ## 4. Contexte de build & dépendance `guatx-core`
