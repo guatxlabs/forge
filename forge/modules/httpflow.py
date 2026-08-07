@@ -53,6 +53,7 @@ from .oracle import ScopeGuardedOracle
 from .clientflow import ClientFlowOracle
 from .registry import register
 from .. import pin as _pin
+from .. import session as _session
 from .. import techniques
 
 
@@ -218,6 +219,23 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
                 evidence="Aucune connexion établie (baseline ni variantes) ; transport indisponible ; offline-safe.",
                 poc=self.dry(action))]
 
+        # (5b) NE PAS FAIRE SEMBLANT — cet oracle ne juge QUE des TIMINGS : il n'a aucun corps ni
+        # en-tête à inspecter, donc aucun moyen propre de voir qu'un WAF s'est interposé. Or derrière
+        # un challenge managé, c'est le WAF qui répond : la baseline comme les variantes mesurent le
+        # temps de réponse du WAF, jamais celui du back-end — « aucun hang différentiel » ne dit alors
+        # RIEN sur la désync. Le store gouverné porte cet état (posé par evasion.* quand le
+        # franchissement échoue, ou par un oracle HTTP qui a vu la signature) : CHALLENGED -> skipped.
+        store = _session.current()
+        if store is not None and store.clearance_state(action.target) == store.CHALLENGED:
+            return [self.degraded(
+                target=action.target,
+                title="Request-Smuggling non testé — challenge/WAF managé interposé (timing non concluant)",
+                evidence=("L'hôte est marqué CHALLENGED (défi managé constaté et NON franchi) : les mesures "
+                          "de timing portent sur le WAF, pas sur le back-end — aucun verdict de désync n'est "
+                          "possible. `skipped` (« pas vérifié »), jamais `tested` (« rien trouvé »). "
+                          "Router le franchissement (evasion.turnstile/evasion.discover) puis rejouer."),
+                poc=self.dry(action))]
+
         proven = bool(hung) and base_status == "ok"
         return [self.proof(
             target=action.target, proven=proven,
@@ -337,6 +355,12 @@ class CachePoisoningProbe(ClientFlowOracle):
             base = cand
             if c_st is not None:
                 break
+        # NE PAS FAIRE SEMBLANT : si le CONTRÔLE revient du WAF (challenge managé), tout le
+        # différentiel qui suit compare deux réponses de WAF -> aucun verdict de cache poisoning
+        # n'est possible. `skipped`, jamais `tested`. (Signature STRICTE : un 403 nu reste un verdict.)
+        blocked = self._challenge_degraded(action, action.target, c_st, c_body, c_pairs)
+        if blocked is not None:
+            return [blocked]
         control_reflects = bool(self._reflected_in(c_pairs, c_body, marker))
         seen_network = c_st is not None
 
@@ -449,6 +473,11 @@ class HeaderInjectionProbe(ClientFlowOracle):
                 break
         if c_st is not None:
             seen_network = True
+        # NE PAS FAIRE SEMBLANT : contrôle rendu par le WAF -> les sondes host/CRLF qui suivent ne
+        # toucheront jamais l'application. `skipped`, jamais `tested` (signature STRICTE).
+        blocked = self._challenge_degraded(action, action.target, c_st, c_body, c_pairs)
+        if blocked is not None:
+            return [blocked]
         control_reflects_host = bool(self._reflected_in(c_pairs, c_body, mhost))
         host_confirmed, host_hdr, host_where = False, "", ""
         for hh in _HOST_HEADERS:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
+from . import infra_urls
 from . import modules as mods
 from . import pin
 from . import purple
@@ -155,6 +156,7 @@ class Phase(enum.Enum):
     NO_MODULE = "no_module"                    # aucun module enregistré pour le kind
     GOVERNANCE_DISABLED = "governance_disabled"  # connecteur désactivé (console)
     TECHNIQUE_DESELECTED = "technique_deselected"  # technique hors sélection par-scope
+    INFRA_NON_TARGET = "infra_non_target"      # cible = namespace d'edge RÉSERVÉ (CDN/WAF) — pas une cible
     UNAVAILABLE = "unavailable"                # outil/service sous-jacent absent
     DECIDED = "decided"                        # verdict rendu par la gate ROE (VETO/DRY_RUN/FIRE)
     FIRE_ERROR = "fire_error"                  # M6 — exception LEVÉE pendant le tir (module.fire/post-traitement)
@@ -199,6 +201,7 @@ class _Pending:
     action: Action
     simple_res: dict[str, Any] | None = None
     simple_ledger_error: bool = False            # chemin simple -> engine.error (NO_MODULE)
+    simple_non_target: str = ""                  # famille d'infra reconnue -> CONSTAT unique dans _apply
     decision: Any = None                         # roe.Decision — log `roe.decision` différé à _apply
     module: Any = None
     output: Any = None                           # sortie dry() (DRY_RUN) ; None (VETO)
@@ -274,6 +277,11 @@ class Engine:
         # PROFIL DE RESSOURCES ACTIF (audit) — rempli au lancement de campaign() (snapshot profil +
         # leviers effectifs). None tant qu'aucune campagne n'a démarré (run() direct des tests).
         self.resource_profile: dict[str, Any] | None = None
+        # NON-CIBLES D'INFRASTRUCTURE RECONNUES (`infra_urls`) : {cible: famille d'edge}. Le CONSTAT est
+        # DIT UNE FOIS par cible (ligne de progression + entrée ledger `engine.non_target`), mais CHAQUE
+        # action visée reste un SKIP nommé dans `results` -> comptée dans `coverage()['errors']` et LISTÉE
+        # dans le rapport. Reconnu != supprimé : rien n'est écarté en silence.
+        self.non_targets: dict[str, str] = {}
 
     # --- usage du contexte d'authentification (audit) ---
     def _ledger_auth_use(self) -> None:
@@ -363,6 +371,27 @@ class Engine:
                              output=None, phase=Phase.TECHNIQUE_DESELECTED).to_dict()
             return _Pending(action, simple_res=res)
 
+        # NON-CIBLE D'INFRASTRUCTURE (défense en profondeur, ZÉRO réseau) : la cible est une URL d'un
+        # namespace d'edge RÉSERVÉ (Cloudflare `/cdn-cgi/`, défi Akamai/Incapsula…) — terminée à l'edge,
+        # aucun code applicatif derrière, donc rien à tester. C'est le MUR pris pour la cible : sur un run
+        # réel, l'URL de défi Cloudflare capturée par la découverte backed-browser a mangé 85 des 1573
+        # tirs (5,4 %) et fait planter `origin.find`. Les modules de surface l'écartent déjà à l'ÉMISSION
+        # (elle n'entre pas dans le graphe) ; cette gate couvre TOUTES les autres voies (crawlers
+        # spec-driven, proposition directe, console) d'où une telle cible pourrait encore arriver.
+        #
+        # RECONNU != SUPPRIMÉ (contrat coverage-safe) : verdict SKIP — « je n'ai pas vérifié » — avec une
+        # raison NOMMÉE (famille + pourquoi + les deux échappatoires), comptée dans `coverage()['errors']`
+        # et LISTÉE dans le rapport. Jamais un `tested` (« j'ai vérifié, rien trouvé »), jamais un silence.
+        # Vérifié AVANT `available` : « ce n'est pas une cible » explique mieux la classe entière de skips
+        # que « l'outil est absent ». Échappatoires : motif in_scope nommant le chemin, ou
+        # FORGE_ALLOW_INFRA_TARGETS=1 (un endpoint d'edge PEUT être une vraie cible sur certains engagements).
+        family = infra_urls.classify(action.target, allow_patterns=self.scope.in_scope)
+        if family:
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP, reasons=[infra_urls.skip_reason(family)],
+                             output=None, phase=Phase.INFRA_NON_TARGET).to_dict()
+            return _Pending(action, simple_res=res, simple_non_target=family)
+
         if getattr(module, "available", True) is False:
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                              verdict=Verdict.SKIP,
@@ -415,6 +444,21 @@ class Engine:
             self._record_duration(action.kind, time.monotonic() - t0)
         return pending
 
+    def _note_non_target(self, target: str, family: str) -> None:
+        """CONSTAT UNIQUE par cible non-ciblable : « ce n'est pas une cible, c'est le mur ». Dit UNE FOIS
+        (ligne de progression + entrée ledger `engine.non_target`) au lieu d'être redécouvert action après
+        action. Les actions SUIVANTES sur cette cible restent chacune un SKIP nommé dans `results` —
+        c'est le constat qui est unique, pas la traçabilité. Appelé depuis `_apply` : thread principal,
+        ordre d'action déterministe (le ledger reste mono-écrivain et reproductible)."""
+        if target in self.non_targets:
+            return                                       # déjà constaté -> on ne le redit pas
+        self.non_targets[target] = family
+        reason = infra_urls.skip_reason(family)
+        self._emit(f"[NON-CIBLE] {target} — {reason}")
+        if self.ledger:
+            self.ledger.append("engine.non_target",
+                               {"target": target, "family": family, "reason": reason})
+
     def _record_duration(self, kind: str, seconds: float) -> None:
         """Verse UNE durée observée au magasin par-engagement, s'il est branché. No-op strict sinon
         (une comparaison à None : c'est tout ce que coûte l'instrumentation quand elle est éteinte).
@@ -441,6 +485,8 @@ class Engine:
             self.results.append(pending.simple_res)
             if pending.simple_ledger_error and self.ledger:
                 self.ledger.append("engine.error", pending.simple_res)
+            if pending.simple_non_target:
+                self._note_non_target(action.target, pending.simple_non_target)
             return pending.simple_res
 
         decision = pending.decision
@@ -1169,7 +1215,11 @@ class Engine:
         dry = [r for r in self.results if r["verdict"] == DRY_RUN]
         vetoed = [r for r in self.results if r["verdict"] == VETO]
         errors = [r for r in self.results if r["verdict"] in ("ERROR", "SKIP")]
-        return {"fired": fired, "dry_run": dry, "vetoed": vetoed, "errors": errors}
+        # `non_targets` est ADDITIF (les consommateurs — report.py, console_client — lisent des clés
+        # FIXES) : agrégat {cible: famille} des non-cibles d'infra RECONNUES. Chaque action visée est
+        # DÉJÀ comptée+listée dans `errors` (SKIP nommé) ; cette clé donne le constat en une ligne.
+        return {"fired": fired, "dry_run": dry, "vetoed": vetoed, "errors": errors,
+                "non_targets": dict(self.non_targets)}
 
     def roe_decisions(self, start: int = 0) -> list[dict[str, Any]]:
         """Trace ROE sérialisable : un verdict par action évaluée (anti-masquage).

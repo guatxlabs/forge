@@ -47,6 +47,8 @@ from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
 from ..roe import Scope
 from .. import browser_client as bc
+from .. import clearance as _clearance
+from .. import session as _session
 from .. import techniques
 
 
@@ -92,6 +94,39 @@ class ClientFlowOracle(ScopeGuardedOracle):
         `forge` + 12 hex — quasi impossible à rencontrer par coïncidence dans une réponse."""
         h = hashlib.sha256(f"{target}|{param}|forge-{salt}".encode()).hexdigest()
         return "forge" + h[:12]
+
+    # --- « je n'ai pas pu vérifier » ≠ « j'ai vérifié, rien trouvé » -------------------------------
+    def _challenge_degraded(self, action, target, status, body, pairs):
+        """Finding de DÉGRADATION (`status='skipped'`) si la réponse jugée est un CHALLENGE MANAGÉ —
+        l'oracle n'a PAS vu l'application, il ne peut RIEN conclure. `None` sinon (chemin historique).
+
+        POURQUOI. Sur une cible derrière Cloudflare, chaque sonde reprenait un `403 cf-mitigated:
+        challenge` et l'oracle rendait `proof(proven=False)` -> `status='tested'`, dont le titre AFFIRME
+        l'absence de vulnérabilité. Sur l'évaluation réelle : 2410 findings, 2404 INFO, 0 vulnérable —
+        un rapport propre et VIDE, indiscernable d'une cible saine, alors que le site n'avait jamais
+        été regardé. C'est le mode d'échec le plus cher du dépôt.
+
+        PORTÉE VOLONTAIREMENT ÉTROITE (ne pas casser le 0 faux positif en élargissant) : la décision
+        s'appuie sur `clearance.response_is_challenge`, STRICTEMENT plus exigeant que
+        `techniques.looks_like_challenge` — un **403 NU reste un verdict applicatif** sur lequel
+        l'oracle conclut comme avant. Il faut une SIGNATURE explicite (en-tête `cf-mitigated`/DataDome,
+        ou interstitiel de challenge dans le corps) pour taire l'oracle.
+
+        EFFET DE BORD ASSUMÉ : l'hôte est marqué CHALLENGED dans le store gouverné, ce qui propage
+        l'abstention aux modules qui n'ont PAS de corps à juger (sonde de TIMING du smuggling)."""
+        if not _clearance.response_is_challenge(status, body, pairs):
+            return None
+        store = _session.current()
+        if store is not None:
+            store.mark_challenged(target)
+        return self.degraded(
+            target=target,
+            title=f"{self.kind} non testé — challenge/WAF managé interposé (aucune conclusion possible)",
+            evidence=(f"HTTP {status} portant une signature de challenge managé : la réponse vient du "
+                      f"WAF, PAS de l'application — cet oracle n'a rien pu observer et s'abstient "
+                      f"(`skipped`, pas `tested`). Router le franchissement (evasion.turnstile / "
+                      f"evasion.discover récoltent la clearance vers la session gouvernée) puis rejouer."),
+            poc=self.dry(action))
 
     def _send_h(self, action, param, payload, method="GET", follow_redirects=True, base=None):
         """Émet l'injection et renvoie (où, status, body, pairs). GET -> payload dans la query ; autre
@@ -198,6 +233,9 @@ class XssReflected(ClientFlowOracle):
                 target=where, title="XSS reflected non testé — réseau indisponible (dégradation gracieuse)",
                 evidence="Aucune réponse du serveur (transport indisponible) ; offline-safe.",
                 poc=self.dry(action))]
+        blocked = self._challenge_degraded(action, where, st, body, _pairs)
+        if blocked is not None:                          # challenge managé : on n'a pas vu l'app -> skipped
+            return [blocked]
         body = body or ""
         reflected = marker in body
         unescaped = _reflected_unescaped(body, marker)
@@ -296,6 +334,9 @@ class OpenRedirect(ClientFlowOracle):
                 target=where, title="Open redirect non testé — réseau indisponible (dégradation gracieuse)",
                 evidence="Aucune réponse du serveur (transport indisponible) ; offline-safe.",
                 poc=self.dry(action))]
+        blocked = self._challenge_degraded(action, where, st, body, pairs)
+        if blocked is not None:                          # challenge managé : on n'a pas vu l'app -> skipped
+            return [blocked]
         body = body or ""
         location = self._get(pairs, "Location") or ""
         attacker_host = Scope._host(attacker)
@@ -441,6 +482,9 @@ class CsrfStateChange(ClientFlowOracle):
                 target=probe, title="CSRF non testé — réseau indisponible (dégradation gracieuse)",
                 evidence="Aucune réponse du serveur au probe GET non destructif ; offline-safe.",
                 poc=self.dry(action))]
+        blocked = self._challenge_degraded(action, probe, st, body, pairs)
+        if blocked is not None:                          # challenge managé : on n'a pas vu l'app -> skipped
+            return [blocked]
         critical, crit_why = self._is_critical(action)
         ss_absent, ss_why = self._samesite_absent(pairs, action)
         csrf_absent, csrf_why = self._csrf_absent(body, pairs, action)
@@ -506,18 +550,19 @@ class XssStored(ClientFlowOracle):
 
     def _persist(self, action, store_url, param, payload):
         """Persiste le marqueur (compte opérateur) : POST par défaut (ou params.store_method) dans un
-        champ persistant. GET -> query ; autre -> corps urlencodé. Renvoie (status, body). En-têtes
-        explicites priment ; session gouvernée scope-guardée fusionnée SOUS eux par `Oracle._http`."""
+        champ persistant. GET -> query ; autre -> corps urlencodé. Renvoie (status, body, pairs) —
+        le corps et les en-têtes servent à détecter un CHALLENGE MANAGÉ sur l'étape de persistance
+        (sans eux, un marqueur bloqué par le WAF n'atteignait jamais le champ et l'oracle concluait
+        « pas de reflet » : un verdict fabriqué). En-têtes explicites priment ; session gouvernée
+        scope-guardée fusionnée SOUS eux par `Oracle._http`."""
         headers = dict(action.params.get("headers", {}))
         method = str(action.params.get("store_method", "POST")).upper()
         if method == "GET":
             sep = "&" if "?" in store_url else "?"
             url = f"{store_url}{sep}{urllib.parse.urlencode({param: payload})}"
-            st, _body, _pairs = self._fetch(url, headers=headers, method="GET")
-            return st
-        st, _body, _pairs = self._fetch(store_url, headers=headers, method=method,
-                                        data=urllib.parse.urlencode({param: payload}))
-        return st
+            return self._fetch(url, headers=headers, method="GET")
+        return self._fetch(store_url, headers=headers, method=method,
+                           data=urllib.parse.urlencode({param: payload}))
 
     def dry(self, action):
         param = action.params.get("param", "?")
@@ -561,12 +606,15 @@ class XssStored(ClientFlowOracle):
         marker = self._marker(store_url, param, "storedxss")
         payload = marker + _XSS_PROBE
         # 1) PERSISTER le marqueur bénin (compte opérateur, son propre champ) — non destructif.
-        pst = self._persist(action, store_url, param, payload)
+        pst, pbody, ppairs = self._persist(action, store_url, param, payload)
         if pst is None:
             return [self.degraded(
                 target=store_url, title="XSS stored non testé — persistance indisponible (dégradation gracieuse)",
                 evidence="Aucune réponse du serveur à la persistance du marqueur (transport indisponible) ; offline-safe.",
                 poc=self.dry(action))]
+        blocked = self._challenge_degraded(action, store_url, pst, pbody, ppairs)
+        if blocked is not None:                          # persistance interceptée par le WAF -> skipped
+            return [blocked]
         # 2) RE-RENDRE une AUTRE vue via le module navigateur et lire le DOM effectif.
         rst, dom = self._browser_render(view_url, tab=action.params.get("tab", bc.DEFAULT_TAB))
         if rst is None or not dom:

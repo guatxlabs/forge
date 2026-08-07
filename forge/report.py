@@ -4,6 +4,25 @@
 Le rapport prouve ce qui a été tiré, simulé, vétoé, et jamais tenté : zéro lacune
 silencieuse. Section dédiée listant chaque verdict ROE.
 
+ACTIONNABLE-D'ABORD (LOT REPORT-LEAD) — une évaluation réelle a émis **2410 findings : 2404 INFO,
+6 LOW, 0 ≥ MEDIUM** et ce module en a fait un rapport de **17 424 lignes** où « rien d'exploitable »
+ne se déduisait que d'un défilement. Le triage NATIF (`forge/triage.py`) avait pourtant classé
+2410 → 77 actionnables / 2333 bruit : il TOURNAIT, mais son verdict n'était consommé QUE pour
+ORDONNER `tr.ranked` — que ce module rendait ensuite EN ENTIER. `auto_hide` était lu, rangé dans la
+synthèse, IMPRIMÉ comme étiquette… et jamais consommé (knob mort). Corrigé ici :
+
+  - le rapport OUVRE sur **Verdict** (une ligne : actionnable ou « rien d'actionnable trouvé »), puis
+    **Findings actionnables** à la forme attendue par un triager (titre, sévérité, CWE, CVSS, endpoint
+    + méthode, reproduction, COMMANDE REJOUABLE, observation, correctif) — assemblés depuis les champs
+    que le dépôt produisait DÉJÀ (`poc`/`evidence`/`cwe`/`cvss_vector`/`fix`) et que ce rapport jetait ;
+  - les **`skipped`** (trous de couverture) MONTENT dans leur propre section, avant tout le bruit —
+    ils étaient pénalisés par le poids `degraded` du noise-score et enterrés en bas du rang ;
+  - le bruit de reconnaissance DESCEND en **annexe**, jamais supprimé : la vue `pentest` (DÉFAUT) la
+    rend EXHAUSTIVE, la vue `bounty` replie les répétitions de gabarit en les COMPTANT et en disant
+    où les récupérer. Le plan d'annexe porte un invariant de PARTITION vérifié et RENDU (fail-loud).
+
+La sévérité vient TOUJOURS du finding : aucune section ne relève un item pour paraître utile.
+
 PARITÉ CONSOLE (LOT REPORT-PARITY) — le livrable CLI ne doit plus « perdre » silencieusement le
 contenu-moat que le rapport console porte. On ajoute donc, sans casser le squelette existant :
   - un EN-TÊTE d'engagement (périmètre du scope + empreinte d'intégrité du ledger : head + clé
@@ -18,6 +37,7 @@ from .schema import SEVERITIES
 from . import signing
 from . import triage as _triage
 from . import llm as _llm
+from . import report_view as _view
 
 
 def _engagement_header(engine):
@@ -111,12 +131,20 @@ def _console_report_pointer(engine):
     ]
 
 
-def _triage_section(result):
+def _triage_section(result, view=_view.DEFAULT_VIEW):
     """Section TRANSPARENCE du triage (miroir du bucket anti-lacune) : dit que le triage a TOURNÉ, combien
     de findings sont actionnables vs bruit/dup, et les top clusters + leurs raisons. Purement DÉRIVÉ du
-    `triage_summary` (aucun finding masqué : c'est une VUE). Vide si le triage est désactivé sans bruit."""
+    `triage_summary` (aucun finding masqué : c'est une VUE). Vide si le triage est désactivé sans bruit.
+
+    `view` est rendu ICI aussi : le lecteur doit pouvoir savoir, sans quitter la section, QUELLE vue a
+    produit l'annexe et comment obtenir l'autre — une vue non annoncée serait un masquage silencieux."""
     s = result.summary
     out = ["## Triage des findings (dédup / cluster-bruit / rang)", ""]
+    other = _view.VIEW_PENTEST if view == _view.VIEW_BOUNTY else _view.VIEW_BOUNTY
+    out += [f"- **Vue de rendu** : `{view}` "
+            + ("(annexe EXHAUSTIVE — tous les findings rendus)" if view == _view.VIEW_PENTEST
+               else "(annexe REPLIÉE aux représentants — repli compté et nommé)")
+            + f". Autre vue : `--view {other}` / `FORGE_REPORT_VIEW={other}`.", ""]
     if not s.get("enabled"):
         out += ["_Triage désactivé (`scope.triage.enabled=false`) — findings bruts, aucun classement._", ""]
         return out
@@ -124,7 +152,7 @@ def _triage_section(result):
         f"- **{s['total']} findings** → **{s['actionable']} actionnables**, "
         f"**{s['noise']} classés bruit**, **{s['duplicates']} dup(s)** "
         f"(regroupés en **{s.get('num_clusters', 0)} cluster(s)** à haute cardinalité).",
-        f"- **Auto-masquage** : {'ACTIVÉ' if s.get('auto_hide') else 'DÉSACTIVÉ (défaut sûr — rien retiré, tout reste auditable)'}.",
+        f"- **Auto-masquage** : {'ACTIVÉ (`auto_hide=true` → vue `bounty` : les répétitions de gabarit sont repliées, COMPTÉES et NOMMÉES en annexe)' if s.get('auto_hide') else 'DÉSACTIVÉ (défaut sûr — rien retiré, tout reste auditable)'}.",
         "",
     ]
     clusters = s.get("clusters") or []
@@ -186,7 +214,43 @@ def _assist_section(engine, tr):
     return out
 
 
-def build_report(engine, title="Forge — rapport d'engagement"):
+def _scope_line(engine):
+    """Périmètre autorisé en une chaîne courte, pour l'étape 1 des reproductions. '' si pas de scope."""
+    scope = getattr(engine, "scope", None)
+    items = [str(s) for s in (getattr(scope, "in_scope", None) or [])] if scope is not None else []
+    return ", ".join(f"`{s}`" for s in items[:6]) + (" …" if len(items) > 6 else "")
+
+
+def _lead_sections(engine, findings, tr, view):
+    """L'EN-TÊTE ACTIONNABLE — ce qu'un opérateur (pentester ou chasseur) doit lire EN PREMIER.
+
+    Renvoie `(lignes, buckets, keep_idxs)`. IDENTIQUE dans les deux vues : le public change la longueur
+    de l'ANNEXE, pas la tête du rapport. `keep_idxs` = les indices déjà présentés ici (actionnables +
+    non vérifiés) — la vue `bounty` ne les repliera jamais."""
+    buckets = _view.bucket_findings(findings, tr)
+    items = {k: _view.group_items(findings, buckets[k]) for k in ("exploitable", "qualify")}
+    scope_line = _scope_line(engine)
+
+    out = _view.render_verdict(findings, buckets, items, view)
+    lines, nxt = _view.render_actionable(
+        findings, items["exploitable"], "## Actionnable — à reporter",
+        "_Aucun finding de sévérité ≥ MEDIUM et aucune exploitabilité prouvée. "
+        "**Rien d'actionnable à reporter.** Aucun item n'est relevé en sévérité pour combler la section._",
+        scope_line, start=1)
+    out += lines
+    lines, _ = _view.render_actionable(
+        findings, items["qualify"], "## Signal à qualifier (exploitabilité NON démontrée)",
+        "_Aucun finding LOW ni hit d'outil tiers._", scope_line, start=nxt)
+    out += lines
+    out += _view.render_unverified(findings, buckets["unverified"])
+    keep = list(buckets["exploitable"]) + list(buckets["qualify"]) + list(buckets["unverified"])
+    return out, buckets, keep
+
+
+def build_report(engine, title="Forge — rapport d'engagement", view=None):
+    """Rapport markdown d'un run. `view` : `pentest` (défaut, annexe EXHAUSTIVE) ou `bounty` (annexe
+    repliée aux représentants, repli COMPTÉ et NOMMÉ). Voir `report_view.resolve_view` pour la
+    précédence (argument > `$FORGE_REPORT_VIEW` > `scope.triage.view` > `scope.triage.auto_hide`)."""
     out = [f"# {title}", ""]
     out += _engagement_header(engine)                # en-tête d'engagement (parité console)
     cov = engine.coverage()
@@ -194,7 +258,16 @@ def build_report(engine, title="Forge — rapport d'engagement"):
     # TRIAGE (couche de VUE, post-collecte) : dédup + cluster-bruit + score + rang. N'ANNOTE et ne CLASSE
     # que le RENDU — les `engine.findings` bruts et le ledger restent INTACTS (aucune mutation). Config
     # portée par `scope.triage` (défaut sûr : ON, auto_hide OFF). `len(ranked) == len(engine.findings)`.
-    tr = _triage.triage(list(engine.findings), getattr(getattr(engine, "scope", None), "triage", None))
+    scope_triage = getattr(getattr(engine, "scope", None), "triage", None)
+    findings = list(engine.findings)
+    tr = _triage.triage(findings, scope_triage)
+    view = _view.resolve_view(view, scope_triage)
+
+    # --- EN-TÊTE ACTIONNABLE : verdict -> actionnables -> à qualifier -> couverture NON vérifiée.
+    #     Le bruit de reconnaissance vient APRÈS (annexe), jamais avant. Les `skipped` REMONTENT :
+    #     un « je n'ai pas pu vérifier » borne ce que l'absence de finding permet de conclure.
+    lead, buckets, keep_idxs = _lead_sections(engine, findings, tr, view)
+    out += lead
 
     # --- synthèse findings ---
     by_sev = {s: 0 for s in SEVERITIES}
@@ -206,27 +279,36 @@ def build_report(engine, title="Forge — rapport d'engagement"):
     out.append("")
 
     # --- triage : synthèse transparente (dit que le triage a tourné + top clusters/actionnables) ---
-    out += _triage_section(tr)
+    out += _triage_section(tr, view)
 
     # --- assist LLM IA-2 (OPT-IN, advisory) : ENRICHIT la synthèse IA-1 sans jamais la réécrire. VIDE
     #     si OFF (défaut) => rapport BYTE-IDENTIQUE ; egress ledgeré + gate externe gérés dans forge/llm.py.
     out += _assist_section(engine, tr)
 
-    # --- findings détaillés (RANG actionnable-d'abord : VUE explicite du triage, PAS un tri silencieux —
-    #     chaque finding porte son annotation de triage, et le raw `engine.findings` reste inchangé) ---
-    out += ["## Findings", ""]
+    # --- ANNEXE : findings détaillés (RANG actionnable-d'abord : VUE explicite du triage, PAS un tri
+    #     silencieux — chaque finding porte son annotation de triage, et le raw `engine.findings` reste
+    #     inchangé). Le PLAN d'annexe décide quoi rendre/replier et porte l'invariant de PARTITION ;
+    #     `render_annex_accounting` l'IMPRIME (fail-loud) — rendus + repliés == total, toujours dit.
+    plan = _view.annex_plan(findings, tr, view, keep_idxs=keep_idxs)
+    out += [f"## Findings — annexe complète ({len(findings)} émis, vue `{view}`)", ""]
+    out += _view.render_annex_accounting(plan)
     if not engine.findings:
         out += ["_Aucun finding._", ""]
-    for f in tr.ranked:
+    for i in plan.rendered:
+        f = findings[i]
         a = tr.annotation_for(f)
         flag = " · **BRUIT probable**" if a.get("likely_noise") else ""
-        out += [f"### [{f.severity}] {f.title} — `{f.target}`",
-                f"- **Catégorie** : {f.category or '—'}  ·  **ATT&CK** : {f.mitre or '—'}  ·  **Statut** : {f.status}",
+        # RÉDACTION (défense en profondeur) : `Finding.to_dict()` est le chokepoint du LEDGER, mais le
+        # rapport lit les ATTRIBUTS bruts — un finding construit hors du chemin `Module.finding` (plugin,
+        # importateur, test) faisait donc FUIR `evidence`/`poc` non rédigés dans le markdown. Tout champ
+        # texte passe désormais par la surface unique `forge.redact` (idempotent, jamais moins masquant).
+        out += [f"### [{f.severity}] {_view._txt(f.title)} — `{_view._txt(f.target)}`",
+                f"- **Catégorie** : {_view._txt(f.category) or '—'}  ·  **ATT&CK** : {_view._txt(f.mitre) or '—'}  ·  **Statut** : {f.status}",
                 f"- **Triage** : bruit={a.get('score', 0.0)}  ·  cluster={('c%d' % a['cluster_id']) if a.get('cluster_id') is not None else '—'}"
                 f"  ·  {a.get('reason', '—') or '—'}{flag}",
-                f"- **Outil** : {f.tool or '—'}",
-                f"- **Preuve** : {f.evidence or '—'}",
-                f"- **PoC** : `{f.poc or '—'}`", ""]
+                f"- **Outil** : {_view._txt(f.tool) or '—'}",
+                f"- **Preuve** : {_view._txt(f.evidence) or '—'}",
+                f"- **PoC** : `{_view._txt(f.poc) or '—'}`", ""]
 
     # --- transparence ROE (anti-masquage) ---
     out += ["## Couverture & transparence (ROE / anti-masquage)", ""]

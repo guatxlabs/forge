@@ -146,9 +146,22 @@ class OriginFind(FlagAllowlistMixin, Module):
         _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
         return argv + extra
 
+    @staticmethod
+    def _domain_of(target):
+        """HÔTE de la cible (scheme/port/chemin/userinfo retirés) — `origin.find` énumère un DOMAINE,
+        pas une URL. La cible peut arriver sous forme d'URL COMPLÈTE quand elle est CHAÎNÉE depuis un
+        endpoint découvert : `subfinder -d <url>` et surtout `socket.gethostbyname(<url>)` n'ont alors
+        aucun sens — et l'IDNA REFUSE tout label > 63 octets, ce qui a fait planter le module sur
+        `https://…/cdn-cgi/challenge-platform/h/b/fo/<long token>` (UnicodeEncodeError('idna', …,
+        'label too long') — une exception qui n'est PAS une OSError, donc non couverte par le
+        `except OSError` de la boucle de résolution). Délègue à `Scope._host` (source unique de la
+        canonicalisation d'hôte du moteur : aucune 2e implémentation à faire diverger). Pur."""
+        return Scope._host(target)
+
     def dry(self, action):
-        return (f"subfinder -d {action.target} -silent + préfixes passifs (origin./direct./cpanel.…) "
-                f"| resolve | drop-CF | httpx -H 'Host: {action.target}' (vérifie l'origine avant flag HIGH)")
+        domain = self._domain_of(action.target) or action.target
+        return (f"subfinder -d {domain} -silent + préfixes passifs (origin./direct./cpanel.…) "
+                f"| resolve | drop-CF | httpx -H 'Host: {domain}' (vérifie l'origine avant flag HIGH)")
 
     def _skipped(self, action, title, evidence):
         """Dégradation gracieuse : outil (subfinder/httpx) ou réseau indisponible -> finding
@@ -165,10 +178,38 @@ class OriginFind(FlagAllowlistMixin, Module):
                               "Aucun processus lancé (fail-closed).")]
 
     def fire(self, action):
-        domain = action.target
+        """GARDE GÉNÉRIQUE — une exception au tir devient un `skipped` NOMMÉ, jamais une remontée brute.
+
+        Le reste du moteur tient déjà ce contrat (chaque module dégrade en `status='skipped'` quand son
+        outil/réseau lâche) ; `origin.find` y échappait par un chemin : la boucle de résolution ne
+        rattrapait que `OSError`, et `socket.gethostbyname` lève un `UnicodeEncodeError` (IDNA, label
+        > 63 octets) sur une cible URL. Sur 1573 tirs d'un run réel, c'était la SEULE exception remontée
+        — devenue un `ERROR` opaque au lieu d'un « je n'ai pas pu vérifier » exploitable.
+
+        La garde est ICI, pas dans l'engine : l'engine transforme déjà une exception de tir en
+        `ExecResult(ERROR)` traçable (il ne PERD rien), mais un ERROR ne porte NI finding, NI statut
+        `skipped`, donc il n'entre ni dans la mémoire de dédup ni dans le rapport de findings. Le rendre
+        `skipped` ICI le fait apparaître LÀ OÙ ON LIT ce qui n'a pas été vérifié. `except Exception` est
+        délibérément large : le contrat est « aucune exception ne sort du tir », pas « ces exceptions-là »."""
+        try:
+            return self._fire(action)
+        except Exception as e:                            # noqa: BLE001 — contrat : rien ne sort brut du tir
+            return [self._skipped(
+                action, f"{self.kind} non exécuté — exception au tir ({type(e).__name__})",
+                f"Exception CAPTURÉE pendant le tir sur {action.target!r} : {e!r}. "
+                f"Dégradation gracieuse : non testé (aucun verdict aveugle).")]
+
+    def _fire(self, action):
+        # HÔTE, jamais l'URL : une cible chaînée depuis un endpoint découvert arrive sous forme d'URL
+        # complète. Le pipeline (subfinder -d, socket.gethostbyname, en-tête Host) attend un NOM D'HÔTE.
+        domain = self._domain_of(action.target)
         # EXTRA_ARGS gouvernés : un drapeau subfinder libre hors allowlist (ou non-liste) -> refus fail-closed.
         if (refused := self.gate_extra_args(action)):
             return refused
+        if not domain:                                    # cible sans hôte exploitable -> jamais de tir aveugle
+            return [self._skipped(action, f"{self.kind} non exécuté — cible sans hôte résoluble",
+                                  f"Aucun nom d'hôte extractible de {action.target!r} "
+                                  f"(aucun processus lancé, aucune résolution tentée).")]
         # Scope reconstruit depuis les params injectés par l'engine (miroir IDOR engine.py:130-134).
         # Quand le scope EST fourni (chemin de production : l'engine injecte TOUJOURS in_scope/out_scope),
         # on applique un filtre FAIL-CLOSED sur chaque IP résolue : in_scope vide => is_in_scope()==False
@@ -296,6 +337,8 @@ class OriginFind(FlagAllowlistMixin, Module):
                 poc=f"curl -sI -H 'Host: {domain}' http://{ip}"))
         if not findings:
             findings.append(self.finding(
-                target=domain, title="Aucune origine hors-CDN trouvée", severity="INFO",
+                # `action.target` (et non l'hôte canonicalisé) : la cible du finding reste EXACTEMENT
+                # celle de l'action — le nœud du graphe/la dédup ne bougent pas d'un iota.
+                target=action.target, title="Aucune origine hors-CDN trouvée", severity="INFO",
                 category="origin-exposure", status="tested", tool="subfinder+httpx", poc=self.dry(action)))
         return findings

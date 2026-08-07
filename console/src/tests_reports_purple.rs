@@ -6,10 +6,21 @@
 use super::*;
 use crate::testutil::*;
 
-    /// [parité lecture] render_run_report_md : miroir markdown de build_report — synthèse par
-    /// sévérité (findings du run), findings détaillés, transparence ROE (compteurs run_job + verdicts).
+    /// [parité lecture] `render_run_report_md` — CINQ SOUS-CHAÎNES vérifiées, pas un miroir.
+    ///
+    /// ⚠️ PORTÉE EXACTE, corrigée le 2026-08-07 : ce test s'appelait
+    /// `run_report_markdown_mirrors_build_report` et sa doc annonçait un « miroir markdown de
+    /// build_report ». Il n'en vérifie rien de tel — il assert le titre, UNE ligne du tableau de
+    /// sévérité, UN en-tête de finding et DEUX lignes de transparence ROE. C'est utile comme
+    /// non-régression de rendu, et ça ne prouve AUCUNE parité de structure.
+    ///
+    /// Constaté à la mesure : `forge/report.py` a été restructuré en profondeur (verdict en tête,
+    /// sections « Actionnable » / « Signal à qualifier » / « Couverture NON vérifiée », annexe avec
+    /// comptabilité) et ce test est resté VERT. Un test dont le nom promet plus que ce qu'il couvre
+    /// est pire qu'un test absent : il fait croire la parité surveillée. La divergence Rust↔Python
+    /// est donc RÉELLE et non couverte ici — elle est suivie à part, pas masquée par ce nom.
     #[test]
-    fn run_report_markdown_mirrors_build_report() {
+    fn run_report_markdown_renders_title_severity_finding_and_roe_transparency() {
         let path = tmp_path("forge-test-report");
         let app = test_app(&path);
         {

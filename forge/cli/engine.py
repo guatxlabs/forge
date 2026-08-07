@@ -51,6 +51,16 @@ def _parse_cli_params(param_args):
     return out
 
 
+def _report_view(args):
+    """Vue de rendu du rapport demandée en ligne de commande (`--view pentest|bounty`), ou None.
+
+    `getattr` TOLÉRANT à dessein : tant que le parseur (`forge/cli/__init__.py`, hors de ce module)
+    n'expose pas `--view`, on renvoie None et `report.build_report` retombe sur `$FORGE_REPORT_VIEW`
+    puis `scope.triage.view` / `scope.triage.auto_hide` puis le défaut `pentest`. Aucune vue n'est
+    donc imposée en silence, et l'ajout du drapeau au parseur suffira à l'activer."""
+    return getattr(args, "view", None)
+
+
 def _load_actions(path):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out = []
@@ -140,7 +150,7 @@ def cmd_run(args):
     cov = engine.coverage()
     print(f"Tirées={len(cov['fired'])}  Simulées={len(cov['dry_run'])}  "
           f"Refusées={len(cov['vetoed'])}  Erreurs={len(cov['errors'])}  Findings={len(engine.findings)}")
-    rep = build_report(engine)
+    rep = build_report(engine, view=_report_view(args))
     if args.report:
         Path(args.report).write_text(rep, encoding="utf-8")
         print(f"Rapport -> {args.report}")
@@ -341,7 +351,7 @@ def cmd_campaign(args):
     # sur un arrêt watchdog (partial=True) le statut reste 'running' pour que le superviseur console le
     # marque honnêtement 'timeout' (compteurs non nuls déjà persistés par les flushes incrémentaux).
     _flush(partial=terminated)
-    rep = build_report(engine)
+    rep = build_report(engine, view=_report_view(args))
     if args.report:
         Path(args.report).write_text(rep, encoding="utf-8")
         print(f"Rapport -> {args.report}")

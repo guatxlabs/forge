@@ -13,6 +13,16 @@ WAF qui bloque curl. Ces modules parlent au service browser-automation (port 808
 Auto-neutralisation (`available`) si le service ne répond pas. Tout reste gaté par le ROE.
 Rappel : passer Cloudflare ≠ une faille — c'est un enabler à chaîner vers un impact (IDOR/ATO).
 
+ROUTAGE DU FRANCHISSEMENT (le verrou qui comptait) — franchir le défi ne servait à RIEN tant que
+le reste du moteur tirait en HTTP brut : mesuré sur une évaluation réelle, `evasion.turnstile` a
+réussi son clic 25 fois pendant que les modules HTTP reprenaient un `403 cf-mitigated: challenge`
+— 1573 actions, **9 URLs distinctes atteintes**, contenu du site jamais vu. `evasion.turnstile` et
+`evasion.discover` RÉCOLTENT désormais la session navigateur (cookies de clearance + User-Agent
+EXACT — indissociables : un `cf_clearance` rejoué sous l'UA d'urllib est inopérant) vers le
+`SessionStore` gouverné via `_adopt_clearance`. Les ~40 modules HTTP en profitent SANS ÊTRE MODIFIÉS
+(`Oracle._http` fusionne déjà le matériel scope-guardé). Échec du franchissement -> l'hôte est marqué
+CHALLENGED et les modules en aval rendent `skipped`, jamais `tested`.
+
 evasion.discover est la RÉPONSE au trou « WAF -> recon curl challengé -> 0 endpoint -> 0 oracle » :
 sur une cible IN-SCOPE protégée, il pilote le browser gouverné (session authentifiée SECRÈTE vivant
 DANS le service, jamais lue/loggée/reportée ici), passe le challenge, et RE-VALIDE fail-closed chaque
@@ -24,9 +34,12 @@ import re
 import time
 import urllib.parse
 
+from .oracle import Oracle
 from .registry import register, Module
 from .recon_surface import PassiveSurface, JsEndpoints, _host_only
 from .. import browser_client as bc
+from .. import clearance
+from .. import session as _session
 from .. import techniques
 
 
@@ -54,6 +67,71 @@ class _EvasionBase(Module):
     def available(self):
         return self._health_cached()             # service browser joignable ? (memoïsé TTL court)
 
+    # =============================================================================================
+    #  ROUTAGE DU FRANCHISSEMENT — faire PROFITER au reste du moteur ce que le navigateur a obtenu.
+    #
+    #  Sans ça, franchir le défi ne servait à RIEN : `evasion.turnstile` cliquait la case avec succès
+    #  (mesuré : 25 tirs, `{'found': True, 'clicked': True, 'method': 'os/xdotool'}`) pendant que les
+    #  ~40 modules HTTP continuaient de tirer en clair et reprenaient un `403 cf-mitigated: challenge`.
+    #  Bilan mesuré de cette évaluation : 1573 actions, **9 URLs distinctes atteintes**, contenu du
+    #  site JAMAIS vu, 2410 findings dont 0 vulnérable. On récolte donc la session navigateur vers le
+    #  `SessionStore` gouverné : les modules HTTP en profitent SANS ÊTRE MODIFIÉS (`Oracle._http`
+    #  fusionne déjà le matériel scope-guardé sous les en-têtes de l'appelant).
+    # =============================================================================================
+    @staticmethod
+    def _browser_material(url, tab):
+        """Matériel de session RÉCOLTÉ sur le navigateur pour l'hôte de `url` (cookies + User-Agent
+        EXACT), ou None. Deux lectures du service, jamais fatales. Aucun secret ne sort d'ici : le
+        dict rendu est consommé par `adopt_clearance` et n'est JAMAIS journalisé/reporté tel quel."""
+        try:
+            _st, cookie_payload = bc.cookies()
+        except Exception:                                # noqa: BLE001 (service hostile/absent)
+            cookie_payload = None
+        try:
+            _st, ua_payload = bc.evaluate("navigator.userAgent", tab=tab)
+        except Exception:                                # noqa: BLE001
+            ua_payload = None
+        return clearance.material_for_host(cookie_payload, ua_payload, _host_only(url))
+
+    def _adopt_clearance(self, url, tab):
+        """RÉCOLTE la session navigateur et l'INSTALLE dans le `SessionStore` lié par le moteur.
+        Renvoie un dict de télémétrie SÛR (booléens, NOMS de cookies, raison) — jamais une valeur.
+
+        Le scope-guard est celui de `SessionStore.adopt_clearance` (`is_in_scope` fait foi) : un
+        cookie de clearance ne peut PHYSIQUEMENT pas s'attacher à un hôte hors périmètre. Hors moteur
+        (appel direct dev/test) aucun store n'est lié -> no-op total, aucune erreur."""
+        store = _session.current()
+        if store is None:
+            return {"adopted": False, "why": "aucun SessionStore lié (appel direct hors moteur)"}
+        material = self._browser_material(url, tab)
+        if material is None:
+            return {"adopted": False,
+                    "why": ("aucun cookie navigateur pour cet hôte, ou User-Agent illisible — un "
+                            "cookie de clearance est lié à l'UA qui l'a obtenu : sans l'UA EXACT il "
+                            "serait INOPÉRANT, on refuse donc de le router (pas de fausse route)")}
+        adopted = store.adopt_clearance(url, material)
+        return {"adopted": adopted,
+                "why": ("" if adopted else "hôte hors périmètre — adoption refusée (scope-guard)"),
+                "cookies": clearance.cookie_names(material),
+                "clearance_cookies": clearance.clearance_names(material)}
+
+    @staticmethod
+    def _plain_http_reach(url):
+        """PREUVE DE PORTÉE, pas d'intention : re-tire `url` par le chemin de tir du RESTE du moteur
+        (`Oracle._http` — le chokepoint que ~40 modules partagent), matériel adopté compris. Renvoie
+        (status, is_challenge, taille_du_corps).
+
+        On mesure ici EXACTEMENT ce qui compte : le moteur voit-il enfin le site ? Un test qui
+        vérifierait « le cookie est bien copié » ne prouverait rien.
+
+        NOTE — on n'emprunte PAS `PassiveSurface._http_get` : celui-ci pose un défaut
+        `User-Agent: forge-surface` quand l'appelant n'en fournit pas, et ce défaut BAT (setdefault)
+        l'UA récolté, ce qui rendrait la clearance inopérante. Cf. le rapport de mission."""
+        st, body, hdrs = Oracle._http(url, timeout=15, maxlen=200000)
+        if st is None:
+            return None, False, 0
+        return st, clearance.response_is_challenge(st, body, hdrs), len(body or "")
+
 
 @register("evasion.xhr")
 class EvasionXhr(_EvasionBase):
@@ -79,25 +157,57 @@ class EvasionXhr(_EvasionBase):
 
 @register("evasion.turnstile")
 class EvasionTurnstile(_EvasionBase):
+    """Franchit le Turnstile interactif ET **ROUTE** le franchissement vers le reste du moteur.
+
+    Le module cliquait la case avec succès puis JETAIT le résultat : la session qui passait le défi
+    vivait dans le service browser, et les modules HTTP continuaient de reprendre un 403. Il RÉCOLTE
+    désormais cookies + User-Agent EXACT vers le `SessionStore` gouverné (scope-guardé), puis VÉRIFIE
+    la portée par un tir HTTP BRUT sur la cible — le chemin qu'empruntent les autres modules.
+
+    NE JAMAIS FAIRE SEMBLANT : si la vérification ne rend pas du CONTENU (200 hors challenge), le
+    finding est `status='skipped'` (« je n'ai pas pu vérifier »), l'hôte est marqué CHALLENGED, et les
+    modules en aval s'abstiennent de conclure. Jamais `tested` sur un franchissement non prouvé."""
+
     kind = "evasion.turnstile"
     exploit = False                              # franchir une case ≠ exploit ; enabler d'accès
     mitre = "T1556"
-    description = ("Franchit le Cloudflare Turnstile interactif via vision-click-os "
-                  "(détection template + clic OS X11) — enabler d'accès.")
+    description = ("Franchit le Cloudflare Turnstile interactif via vision-click-os (détection template "
+                  "+ clic OS X11) PUIS route cookies+User-Agent vers la session gouvernée — enabler d'accès.")
 
     def dry(self, action):
         return (f"POST {bc.base_url()}/goto {{url:{action.target}}} ; "
-                f"POST /vision-click-os {{strategy:turnstile}}   # 1 essai, IP propre")
+                f"POST /vision-click-os {{strategy:turnstile}} ; GET /cookies ; "
+                f"POST /evaluate {{script:navigator.userAgent}}"
+                f"   # 1 essai, IP propre ; puis récolte de la clearance vers la session gouvernée")
 
     def fire(self, action):
-        bc.goto(action.target, tab=action.params.get("tab", bc.DEFAULT_TAB))
+        tab = action.params.get("tab", bc.DEFAULT_TAB)
+        url = PassiveSurface._url(action.target)         # scheme garanti (cible hôte nu -> https://)
+        bc.goto(action.target, tab=tab)
         st, resp = bc.vision_click_os(strategy=action.params.get("strategy", "turnstile"),
-                                      threshold=action.params.get("threshold", 0.55),
-                                      tab=action.params.get("tab", bc.DEFAULT_TAB))
+                                      threshold=action.params.get("threshold", 0.55), tab=tab)
+        # (1) RÉCOLTE : la clearance rejoint le store gouverné (scope-guardé) -> les modules en profitent.
+        harvest = self._adopt_clearance(url, tab)
+        # (2) PREUVE DE PORTÉE : le moteur voit-il enfin le site en HTTP brut ? (pas « le cookie est copié »)
+        reach_st, reach_challenge, reach_len = self._plain_http_reach(url)
+        reached = reach_st is not None and 200 <= reach_st < 400 and not reach_challenge
+        store = _session.current()
+        if not reached and store is not None:
+            store.mark_challenged(url)                   # aucun module en aval ne conclura sur cet hôte
+        evidence = (
+            f"vision-click-os: {str(resp)[:900]} ; clearance_adoptée={harvest['adopted']}"
+            f"{' (' + harvest['why'] + ')' if harvest.get('why') else ''} ; "
+            f"cookies_récoltés={harvest.get('cookies') or '—'} ; "
+            f"cookies_de_clearance={harvest.get('clearance_cookies') or 'aucun reconnu'} ; "
+            f"portée_HTTP_brut=HTTP {reach_st} challenge={reach_challenge} corps={reach_len}o "
+            f"(re-tir par le chemin partagé des modules) ; SECRET: aucune valeur de cookie ni d'UA ici")
         return [self.finding(
-            target=action.target, title="Tentative de franchissement Turnstile (vision-click-os)",
-            severity="INFO", category="access", mitre="T1556", status="tested",
-            tool="browser-automation:/vision-click-os", evidence=str(resp)[:1500], poc=self.dry(action))]
+            target=action.target,
+            title=("Turnstile franchi ET routé — le moteur atteint la cible en HTTP brut" if reached
+                   else "Franchissement Turnstile NON confirmé — le moteur ne voit toujours pas la cible"),
+            severity="INFO", category="access", mitre="T1556",
+            status=("tested" if reached else "skipped"),
+            tool="browser-automation:/vision-click-os", evidence=evidence, poc=self.dry(action))]
 
 
 @register("evasion.idor_intercept")
@@ -214,26 +324,44 @@ class EvasionDiscover(_EvasionBase, PassiveSurface):
         except Exception:                        # noqa: BLE001
             pass
 
+        # (3b) ROUTAGE DU FRANCHISSEMENT — la découverte trouvait les endpoints, puis les ORACLES
+        #      chaînés dessus retiraient en HTTP brut et reprenaient un 403 : la cartographie était
+        #      juste, la vérification aveugle. On récolte donc la clearance (cookies + UA EXACT) vers
+        #      le store gouverné AVANT d'émettre les endpoints, pour que les oracles de la vague
+        #      suivante tirent avec le matériel qui passe. Scope-guardé ; SECRET (noms seuls).
+        harvest = self._adopt_clearance(url, tab)
+
         # (4) EXTRACTION du rendu : DOM (liens/forms) + routes JS + XHR/fetch capturés — hôtes IN-SCOPE seuls.
         _cst, content = bc.content(tab=tab)
         _dst, captured = bc.capture_dump(tab=tab)
         html = self._as_text(content)
         if not html and not captured:
+            # NE PAS FAIRE SEMBLANT : rendu vide = challenge non franchi. On MARQUE l'hôte pour que les
+            # modules en aval rendent `skipped` au lieu d'un `tested` qui affirmerait « rien trouvé ».
+            store = _session.current()
+            if store is not None:
+                store.mark_challenged(url)
             return [self._skipped(
                 page, "evasion.discover non concluant — rendu vide après navigation",
-                "Aucun contenu rendu ni requête capturée (challenge non franchi / IP flaggée / page vide).",
+                "Aucun contenu rendu ni requête capturée (challenge non franchi / IP flaggée / page vide) ; "
+                "hôte marqué CHALLENGED — les modules en aval s'abstiendront de conclure.",
                 self.dry(action))]
 
+        harvest_ev = (f"clearance_adoptée={harvest['adopted']}"
+                      f"{' (' + harvest['why'] + ')' if harvest.get('why') else ''} ; "
+                      f"cookies_de_clearance={harvest.get('clearance_cookies') or 'aucun reconnu'}")
         endpoints = self._extract(action, url, html, captured)
         if not endpoints:
             return [self._finding(
                 page, "evasion.discover — aucun endpoint in-scope extrait",
-                "Navigation OK (challenge franchi) mais aucun endpoint in-scope détecté dans le DOM/JS/trafic.",
+                "Navigation OK (challenge franchi) mais aucun endpoint in-scope dans le DOM/JS/trafic. "
+                + harvest_ev,
                 self.dry(action))]
 
-        # ÉVIDENCE : UNIQUEMENT des URLs d'endpoints in-scope (jamais le matériel de session ni le dump brut).
-        evidence = (f"{len(endpoints)} endpoint(s) in-scope découvert(s) via browser (challenge franchi) : "
-                    + ", ".join(endpoints[:20]))
+        # ÉVIDENCE : UNIQUEMENT des URLs d'endpoints in-scope + des NOMS de cookies (jamais le matériel
+        # de session lui-même, jamais le dump réseau brut).
+        evidence = (f"{len(endpoints)} endpoint(s) in-scope découvert(s) via browser (challenge franchi) ; "
+                    f"{harvest_ev} : " + ", ".join(endpoints[:20]))
         summary = self._finding(
             page, f"evasion.discover — {len(endpoints)} endpoint(s) in-scope via browser", evidence,
             self.dry(action))

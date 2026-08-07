@@ -42,6 +42,7 @@ import urllib.request
 
 from ._scopeguard import ScopeGuardMixin, web_url_candidates
 from .registry import register, Module
+from .. import infra_urls
 from .. import pin as _pin
 from .. import resource_profile
 from .. import runner
@@ -158,11 +159,24 @@ class PassiveSurface(ScopeGuardMixin, Module):
         CONNECTE à l'IP épinglée AU LIEU de re-résoudre le DNS — Host/SNI/cert restent l'hôte d'origine
         (TLS non affaibli). Pin ABSENT (hôte non épinglé, ex crt.sh/Wayback, ou aucun contexte lié) ->
         `urllib.request.urlopen` NORMAL, BYTE-IDENTIQUE à l'historique."""
-        req_headers = dict(headers or {"User-Agent": "forge-surface"})
+        # ORDRE DE PRÉCÉDENCE (le bug qu'il corrige) : appelant > session gouvernée > DÉFAUT DE POLITESSE.
+        # Le défaut `User-Agent: forge-surface` était posé AVANT la fusion de session, donc le
+        # `setdefault` en aval ne pouvait plus le remplacer : l'UA du NAVIGATEUR, récolté avec le cookie
+        # de franchissement, perdait systématiquement. Or un `cf_clearance` est lié à l'UA EXACT — sous
+        # un autre UA il est INOPÉRANT. Mesuré, même store, même URL : `Oracle._http` -> 200 avec contenu,
+        # `PassiveSurface._http_get` -> 403 vide. Toute la recon (js_endpoints/content/tech/urls/
+        # subdomains) restait donc DEHORS pendant que les ~40 oracles passaient — et émettait le marqueur
+        # « découverte HTTP challengée » sur une cible pourtant franchie. Le défaut est désormais posé
+        # EN DERNIER : il ne s'applique que si NI l'appelant NI la session n'ont fourni d'UA.
+        req_headers = dict(headers or {})
         store = _session.current()
         if store is not None:                            # scope-guard PAR-URL : {} si url hors-scope
             for k, v in store.headers_for(url).items():
                 req_headers.setdefault(k, v)             # les en-têtes explicites de l'appelant priment
+        # Défaut de politesse EN DERNIER RECOURS. Hors-scope, `headers_for` rend {} (scope-guard INTACT) :
+        # la requête part avec ce seul UA et AUCUN matériel — le cookie de clearance ne peut physiquement
+        # pas fuiter vers un tiers.
+        req_headers.setdefault("User-Agent", "forge-surface")
         req = urllib.request.Request(url, headers=req_headers)
         # ANTI-REBINDING : hôte épinglé par le ROE -> opener partagé (connexion PAR-IP) ; sinon urlopen normal
         # (byte-identique). L'override reste None : le dial consulte le pin thread-local PAR hôte, donc un
@@ -219,13 +233,37 @@ class PassiveSurface(ScopeGuardMixin, Module):
     # borne PARTAGÉE du nombre de findings PAR-ENDPOINT émis (fan-out) — le chaînage relira ces cibles.
     MAX_ENDPOINTS = 25
 
-    def _endpoint_findings(self, action, urls, marker):
+    def _partition_infra(self, action, urls):
+        """(gardées, écartées[(url, famille)]) — point UNIQUE de reconnaissance des non-cibles d'edge
+        pour ce module (émission d'endpoints ET récupération de JS référencé). Pur, sans réseau.
+        L'échappatoire « le périmètre nomme le namespace » est lue depuis le scope injecté."""
+        allow = action.params.get("in_scope", ())
+        kept, dropped = [], []
+        for u in urls:
+            fam = infra_urls.classify(u, allow_patterns=allow)
+            (dropped.append((u, fam)) if fam else kept.append(u))
+        return kept, dropped
+
+    def _endpoint_findings(self, action, urls, marker, extra_dropped=()):
         """Findings informatifs PAR-ENDPOINT in-scope (dédupliqués, RE-VALIDÉS fail-closed, bornés à
         MAX_ENDPOINTS) : chaque endpoint devient une cible du graphe que le cerveau CHAÎNE vers les
         oracles de vérification (edge C). Le TITRE porte `marker` (partagé avec le détecteur du cerveau,
         techniques.DISCOVERY_*). Cartographie de surface seule — aucun endpoint n'est appelé ici, et un
-        endpoint dont l'hôte sortirait du périmètre est ÉCARTÉ (jamais émis)."""
-        out = []
+        endpoint dont l'hôte sortirait du périmètre est ÉCARTÉ (jamais émis).
+
+        NON-CIBLES D'INFRASTRUCTURE (`infra_urls`) : une URL d'un namespace d'edge RÉSERVÉ (Cloudflare
+        `/cdn-cgi/`, défi Akamai/Incapsula…) n'est PAS un endpoint applicatif — c'est le MUR. La
+        découverte backed-browser capture la requête que le navigateur émet vers le CDN pour résoudre
+        SON PROPRE défi ; adoptée comme cible, elle a mangé 85 des 1573 tirs d'un run réel. Elle est
+        écartée ICI, avant d'entrer dans le graphe — mais JAMAIS en silence : un CONSTAT unique
+        (`status='skipped'`, marqueur partagé) est émis, qui NOMME la famille, COMPTE les URLs écartées
+        et rappelle les deux échappatoires. `skipped` = « je n'ai pas vérifié », jamais `tested`.
+
+        `extra_dropped` : non-cibles écartées PLUS TÔT par l'appelant (ex. les `<script src>` d'edge que
+        `recon.js_endpoints` refuse de récupérer) — fusionnées dans le MÊME constat, pour qu'il en reste
+        UN SEUL par action au lieu d'un par point d'écart."""
+        out, dropped = [], list(extra_dropped)
+        allow = action.params.get("in_scope", ())            # échappatoire 1 : le périmètre nomme le namespace
         # Cap RÉSOLU par profil de ressources (`crawl_max_endpoints`) : override éventuel > profil >
         # défaut-classe (`self.MAX_ENDPOINTS`, préservant un éventuel override de sous-classe). `balanced`
         # == 25 == défaut -> byte-identique ; `low` réduit (10), `full` élargit (50).
@@ -233,13 +271,33 @@ class PassiveSurface(ScopeGuardMixin, Module):
         for u in list(dict.fromkeys(urls)):                  # dédup en préservant l'ordre
             if len(out) >= max_endpoints:
                 break
+            # NON-CIBLE reconnue AVANT le scope-guard : elle ne consomme pas le budget d'endpoints
+            # (le cap reste disponible pour de VRAIS endpoints applicatifs).
+            if (fam := infra_urls.classify(u, allow_patterns=allow)):
+                dropped.append((u, fam))
+                continue
             if not self._host_in_scope(action, _host_only(u)):   # défense en profondeur (fail-closed)
                 continue
             out.append(self._finding(
                 u, f"{marker} : {u}",
                 "Endpoint in-scope référencé (cartographie de surface — jamais appelé ici).",
                 f"# endpoint in-scope à vérifier : {u}"))
+        if dropped:
+            out.append(self._infra_non_target_finding(action, dropped))
         return out
+
+    def _infra_non_target_finding(self, action, dropped):
+        """CONSTAT UNIQUE des non-cibles d'infra écartées de la cartographie (`status='skipped'`).
+        Dit-le une fois, clairement : combien, quelles familles, quelles URLs (bornées), et comment
+        les tester quand même. C'est ce qui rend l'écart VISIBLE au lieu d'une troncature silencieuse."""
+        families = sorted({fam for _u, fam in dropped})
+        detail = " ; ".join(infra_urls.skip_reason(f) for f in families)
+        urls = ", ".join(u for u, _f in dropped[:5]) + (" …" if len(dropped) > 5 else "")
+        return self._skipped(
+            action.target,
+            f"{infra_urls.NON_TARGET_MARKER} — {len(dropped)} endpoint(s) écarté(s) de la cartographie",
+            f"Famille(s) : {', '.join(families)}. {detail} URL(s) écartée(s) : {urls}",
+            f"# non-cible(s) d'edge reconnue(s) ({len(dropped)}) — non ajoutée(s) au graphe : {urls}")
 
     def dry(self, action):
         raise NotImplementedError
@@ -489,6 +547,12 @@ class JsEndpoints(PassiveSurface):
             absu = urllib.parse.urljoin(self._url(page), src)
             if absu.startswith("http") and self._host_in_scope(action, _host_only(absu)):
                 js_urls.append(absu)
+        # NON-CIBLES D'INFRASTRUCTURE, 2e point d'écart : une page derrière un challenge managé référence
+        # les SCRIPTS DE L'EDGE (`/cdn-cgi/challenge-platform/scripts/…`). Depuis que la recon franchit le
+        # défi (cf. l'ordre de précédence d'UA dans `_http_get`), ces scripts sont IN-SCOPE par l'hôte et
+        # seraient récupérés : effort perdu et requêtes de plus vers le CDN (le « hammering » qui se
+        # remarque sur un vrai programme). On ne les récupère PAS ; ils rejoignent le MÊME constat unique.
+        js_urls, dropped_js = self._partition_infra(action, js_urls)
         for ju in js_urls[:self.MAX_JS]:
             jst, jbody, _ = self._http_get(ju, timeout=action.params.get("timeout", 20))
             if jst is not None and jbody:
@@ -529,7 +593,9 @@ class JsEndpoints(PassiveSurface):
         # la page. Émises comme findings par-endpoint que le cerveau vérifie via les oracles.
         base = self._url(page).rstrip("/")
         endpoints = sorted(inscope_urls) + [base + p for p in sorted_paths]
-        return [summary] + self._endpoint_findings(action, endpoints, techniques.DISCOVERY_ENDPOINT_MARKER)
+        return [summary] + self._endpoint_findings(action, endpoints,
+                                                   techniques.DISCOVERY_ENDPOINT_MARKER,
+                                                   extra_dropped=dropped_js)
 
 
 # =================================================================================================

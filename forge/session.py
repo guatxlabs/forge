@@ -28,7 +28,13 @@ garanties DURES :
 Liaison : le moteur construit un `SessionStore` depuis le scope (+ matériel par-cible) et le LIE autour
 de chaque `fire()` de module via `using(store)` (contexte thread-local restauré en sortie). Les
 chokepoints HTTP partagés (`Oracle._http`, `PassiveSurface._http_get`) consultent `current()` et
-fusionnent les en-têtes de session scope-guardés SOUS ceux de l'appelant. Zéro dépendance (stdlib)."""
+fusionnent les en-têtes de session scope-guardés SOUS ceux de l'appelant. Zéro dépendance (stdlib).
+
+FRANCHISSEMENT DE CHALLENGE (`adopt_clearance`) — le matériel de session n'est plus seulement DÉCLARÉ
+par l'opérateur : il peut aussi être RÉCOLTÉ à runtime sur la session navigateur qui vient de franchir
+un défi Cloudflare/DataDome (`forge.clearance` + `modules/evasion.py`). Mêmes trois garanties, sans
+exception — le scope-guard vaut identiquement pour un cookie de clearance et pour un cookie d'auth.
+L'adoption FUSIONNE (elle n'écrase pas) : l'authentification déclarée par l'opérateur survit."""
 import base64
 import contextlib
 import fnmatch
@@ -84,6 +90,34 @@ class Session:
     def is_empty(self):
         return not (self._headers or self._cookies or self._bearer)
 
+    def with_fallback(self, other):
+        """Nouvelle `Session` fusionnée : le matériel de `self` (DÉCLARÉ par l'opérateur) PRIME, celui
+        de `other` (RÉCOLTÉ à runtime — cf. `SessionStore.adopt_clearance`) ne comble QUE les trous.
+
+        POURQUOI UNE FUSION ET NON UN REMPLACEMENT. Adopter du matériel de franchissement en ÉCRASANT
+        la session de l'hôte DÉTRUIRAIT l'authentification de l'opérateur : les oracles de contrôle
+        d'accès (IDOR/ATO) redeviendraient anonymes et rendraient « rien trouvé » — le mode d'échec
+        le plus cher du dépôt (un rapport propre et vide, indiscernable d'une cible saine). On fusionne
+        donc au grain du COOKIE (et non de l'en-tête `Cookie` entier) : `sid` de l'opérateur ET
+        `cf_clearance` du navigateur partent ensemble dans la MÊME requête.
+
+        Précédence, cohérente avec tout le dépôt (« l'explicite prime ») : en-têtes de `self` d'abord
+        (comparaison insensible à la casse — jamais de doublon `User-Agent`/`user-agent`), cookies de
+        `self` par NOM (les noms de cookie, eux, sont sensibles à la casse : RFC 6265), bearer de `self`
+        s'il existe. Corollaire ASSUMÉ : un opérateur qui fixe SON `User-Agent` garde le sien, même si
+        cela rend une clearance liée à l'UA du navigateur inopérante — on ne renverse jamais un choix
+        explicite dans son dos. Pur : ne mute NI `self` NI `other`."""
+        if other is None:
+            return self
+        headers = dict(self._headers)
+        for k, v in other._headers.items():
+            if not _has_header(headers, k):
+                headers[k] = v
+        cookies = dict(other._cookies)
+        cookies.update(self._cookies)                    # les cookies de l'opérateur priment par NOM
+        return Session({"headers": headers, "cookies": cookies,
+                        "bearer": self._bearer or other._bearer})
+
     def request_headers(self):
         """En-têtes de requête à INJECTER (copie fraîche à chaque appel) : en-têtes bruts + `Cookie`
         (si cookies) + `Authorization: Bearer` (si bearer). N'écrase jamais un `Cookie`/`Authorization`
@@ -126,6 +160,11 @@ class SessionStore:
         self.scope = scope
         self._default = _coerce(default)
         self._per_host = {}
+        # ÉTAT DE FRANCHISSEMENT PAR-HÔTE (aucun secret : {hôte canonique: 'cleared'|'challenged'}).
+        # C'est le canal par lequel « le défi n'a PAS été franchi » remonte jusqu'aux modules qui
+        # n'ont PAS de corps de réponse à inspecter (sonde de TIMING du smuggling) pour qu'ils rendent
+        # `skipped` (« je n'ai pas pu vérifier ») au lieu de `tested` (« j'ai vérifié, rien trouvé »).
+        self._clearance = {}
         for host, sess in (per_host or {}).items():
             self.add_host_session(host, sess)
 
@@ -189,6 +228,71 @@ class SessionStore:
         """En-têtes de session à injecter pour `url` (scope-guardés), ou {} (jamais None)."""
         s = self.session_for(url)
         return s.request_headers() if s is not None else {}
+
+    # =============================================================================================
+    #  FRANCHISSEMENT DE CHALLENGE — router vers les modules HTTP ce que le NAVIGATEUR a obtenu.
+    #
+    #  Le trou mesuré : sur une cible derrière Cloudflare, `evasion.turnstile` FRANCHIT le défi (clic
+    #  OS confirmé) pendant que le reste du moteur continue de tirer en HTTP brut et reprend un
+    #  403 `cf-mitigated: challenge`. 1573 actions, 9 URLs distinctes atteintes, contenu du site jamais
+    #  vu. La capacité existait ; elle n'était pas ROUTÉE. `adopt_clearance` EST la route : le matériel
+    #  du navigateur (cookies de clearance + User-Agent EXACT) rejoint le store, et les ~40 modules
+    #  qui passent par `Oracle._http` en profitent SANS ÊTRE MODIFIÉS.
+    # =============================================================================================
+    CLEARED = "cleared"                 # défi franchi ET matériel adopté pour cet hôte
+    CHALLENGED = "challenged"           # défi CONSTATÉ et NON franchi -> aucun module ne peut conclure
+    UNKNOWN = "unknown"                 # rien d'observé -> comportement historique (l'oracle conclut)
+
+    def adopt_clearance(self, url, material):
+        """ADOPTE pour l'hôte de `url` du matériel de FRANCHISSEMENT récolté à runtime (cookies de
+        clearance + User-Agent exact du navigateur). Retourne True si l'adoption a eu lieu.
+
+        GARDE-FOUS (fail-closed, SECRET) :
+          - SCOPE-GUARD DUR, identique à `session_for` : hors-scope -> no-op + False. Un `cf_clearance`
+            qui partirait vers un tiers serait une FUITE DE SESSION vers un hôte non autorisé ; le
+            matériel ne peut PHYSIQUEMENT pas quitter le périmètre déclaré (`is_in_scope` fait foi) ;
+          - L'EXISTANT PRIME et SURVIT : on fusionne sous la session RÉSOLUE pour cet hôte
+            (`_match` : exacte > glob > DÉFAUT GLOBAL). Poser une session par-hôte sans fusionner
+            masquerait le défaut global pour cet hôte (`_match` s'arrête au par-hôte) et ferait perdre
+            l'authentification de l'opérateur en silence — cf. `Session.with_fallback` ;
+          - matériel vide/illisible -> no-op + False (jamais d'adoption fantôme).
+        SECRET : ne journalise/retourne aucun matériel — juste un booléen."""
+        if self.scope is None or not self.scope.is_in_scope(url):
+            return False
+        host = Scope._host(url)
+        if not host:
+            return False
+        harvested = _coerce(material)
+        if harvested is None or harvested.is_empty():
+            return False
+        existing = self._match(host)                     # inclut le défaut global (ne pas le perdre)
+        self._per_host[host] = (existing.with_fallback(harvested) if existing is not None
+                                else harvested)
+        self._clearance[host] = self.CLEARED
+        return True
+
+    def mark_challenged(self, url):
+        """ENREGISTRE qu'un challenge managé a été CONSTATÉ sur l'hôte de `url` et NON franchi.
+        Retourne True si l'état a été posé. Scope-guardé (on ne suit que le périmètre déclaré) et
+        SANS SECRET : on ne stocke qu'un hostname et un mot. C'est ce que lisent les modules qui n'ont
+        pas de corps de réponse à juger, pour rendre `skipped` plutôt qu'un `tested` mensonger."""
+        if self.scope is None or not self.scope.is_in_scope(url):
+            return False
+        host = Scope._host(url)
+        if not host:
+            return False
+        self._clearance[host] = self.CHALLENGED
+        return True
+
+    def clearance_state(self, url):
+        """`'cleared'` | `'challenged'` | `'unknown'` pour l'hôte de `url`. `'unknown'` est le défaut
+        et signifie « rien d'observé » : les modules gardent alors leur comportement historique."""
+        host = Scope._host(url)
+        return self._clearance.get(host, self.UNKNOWN) if host else self.UNKNOWN
+
+    def clearance_census(self):
+        """Recensement SÛR {hôte: état} du franchissement (hostnames + verdicts, aucun secret)."""
+        return dict(self._clearance)
 
     def hosts_with_session(self):
         """Résumé SÛR (aucun secret) : hôtes portant une session par-hôte + présence d'un défaut global."""
