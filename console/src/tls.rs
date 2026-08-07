@@ -142,15 +142,58 @@ pub(crate) fn split_url(url: &str) -> Result<Target, String> {
     if authority.is_empty() || authority.contains('\r') || authority.contains('\n') {
         return Err("autorité d'endpoint invalide (vide ou CR/LF) — refusé".to_string());
     }
-    let host = authority.split(':').next().unwrap_or(authority);
+    // LITTÉRAL IPv6 — `authority.split(':').next()` découpait au PREMIER deux-points, donc
+    // `[fd00::1]:8080` rendait l'hôte `[fd00` et un port illisible qui retombait silencieusement sur
+    // le défaut. Conséquence : tout littéral IPv6 échouait à la RÉSOLUTION, rendant les collecteurs
+    // et webhooks IPv6-only INADRESSABLES. Le défaut était fail-closed (on n'atteignait jamais la
+    // cible, aucune garde contournée), mais c'était bien un trou fonctionnel. Découvert en écrivant
+    // le test du resserrement « pas de secret en clair ».
+    //
+    // RFC 3986 §3.2.2 : un littéral IPv6 est entre CROCHETS, et seuls les deux-points qui SUIVENT le
+    // crochet fermant délimitent un port. `host` est rendu SANS crochets (c'est la forme que
+    // `to_socket_addrs` accepte), `authority` les GARDE (c'est la forme exigée de l'en-tête `Host:`,
+    // RFC 7230 §5.4).
+    let (host, port_str) = if let Some(after_open) = authority.strip_prefix('[') {
+        let close = after_open
+            .find(']')
+            .ok_or_else(|| "autorité IPv6 sans crochet fermant — refusé".to_string())?;
+        let inside = &after_open[..close];
+        let tail = &after_open[close + 1..];
+        if tail.is_empty() {
+            (inside, None)
+        } else {
+            let p = tail.strip_prefix(':').ok_or_else(|| {
+                "autorité IPv6 : caractères parasites après le crochet fermant — refusé".to_string()
+            })?;
+            (inside, Some(p))
+        }
+    } else {
+        let mut parts = authority.split(':');
+        let h = parts.next().unwrap_or(authority);
+        let p = parts.next();
+        // Plus d'un deux-points SANS crochets : c'est un IPv6 mal formé (`fd00::1`), pas un
+        // `hôte:port`. Le REFUSER plutôt que d'en deviner une lecture — une autorité ambiguë qu'on
+        // interprète est la porte ouverte à une cible différente de celle qu'on croit contrôler.
+        if parts.next().is_some() {
+            return Err(
+                "autorité d'endpoint ambiguë (plusieurs « : » sans crochets) — un littéral IPv6 \
+                 s'écrit entre crochets, ex. https://[fd00::1]:8443/ — refusé"
+                    .to_string(),
+            );
+        }
+        (h, p)
+    };
     if host.is_empty() {
         return Err("hôte d'endpoint vide — refusé".to_string());
     }
-    let port: u16 = authority
-        .split(':')
-        .nth(1)
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| scheme.default_port());
+    // Un port PRÉSENT mais illisible est REFUSÉ, il ne retombe plus sur le défaut : viser
+    // silencieusement le 443 quand l'opérateur a écrit `:8443x` lui ferait croire à une panne réseau.
+    let port: u16 = match port_str {
+        None => scheme.default_port(),
+        Some(p) => p
+            .parse()
+            .map_err(|_| format!("port d'endpoint invalide « {p} » — refusé"))?,
+    };
     Ok(Target {
         scheme,
         authority: authority.to_string(),

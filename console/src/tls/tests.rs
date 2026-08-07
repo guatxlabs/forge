@@ -374,6 +374,44 @@ fn split_url_parses_both_schemes_and_fails_closed() {
     }
 }
 
+/// LES LITTÉRAUX IPv6 — le découpage coupait au PREMIER « : », donc `[fd00::1]:8080` rendait l'hôte
+/// `[fd00` et un port illisible retombant SILENCIEUSEMENT sur le défaut. Tout littéral IPv6 échouait
+/// donc à la résolution : collecteurs et webhooks IPv6-only étaient INADRESSABLES. Défaut trouvé en
+/// écrivant le test du resserrement « pas de secret en clair », pas par revue.
+///
+/// Les deux formes rendues sont DIFFÉRENTES à dessein : `host` SANS crochets (seule forme que
+/// `to_socket_addrs` accepte), `authority` AVEC (seule forme valide d'un en-tête `Host:`, RFC 7230
+/// §5.4). Confondre les deux redonnerait le bug sous une autre face.
+///
+/// MUTATION : retirer la branche `strip_prefix('[')` -> ce test rougit sur l'hôte ET sur le port.
+#[test]
+fn split_url_handles_bracketed_ipv6_literals() {
+    let t = split_url("https://[fd00::1]:8443/api").expect("IPv6 avec port accepté");
+    assert_eq!(t.host, "fd00::1", "l'hôte doit être rendu SANS crochets (résolution)");
+    assert_eq!(t.authority, "[fd00::1]:8443", "l'autorité GARDE les crochets (en-tête Host:)");
+    assert_eq!(t.port, 8443);
+    assert_eq!(t.path, "/api");
+    // Sans port explicite : le défaut du schéma s'applique, et le « :: » interne ne le perturbe pas.
+    let t = split_url("http://[::1]/x").expect("IPv6 sans port accepté");
+    assert_eq!((t.host.as_str(), t.port), ("::1", 80));
+    let t = split_url("https://[2001:db8::dead:beef]/").expect("IPv6 long accepté");
+    assert_eq!(t.host, "2001:db8::dead:beef");
+    assert_eq!(t.port, 443, "défaut du schéma, malgré 4 « : » dans l'hôte");
+
+    // FAIL-CLOSED sur les autorités AMBIGUËS : un IPv6 sans crochets n'est pas deviné, il est REFUSÉ.
+    // Interpréter une autorité ambiguë, c'est risquer de viser une cible autre que celle qu'on croit
+    // avoir contrôlée — le scope-guard et l'anti-SSRF raisonnent sur ce que ce parseur rend.
+    for bad in [
+        "https://fd00::1/x",          // IPv6 nu : plusieurs « : », aucune lecture sûre
+        "https://[fd00::1/x",         // crochet fermant manquant
+        "https://[fd00::1]x/y",       // parasites après le crochet fermant
+        "https://h.example:8443x/y",  // port présent mais illisible -> REFUS, plus de repli muet
+        "https://[]/x",               // hôte vide entre crochets
+    ] {
+        assert!(split_url(bad).is_err(), "autorité ambiguë/invalide doit être REFUSÉE: {bad:?}");
+    }
+}
+
 // =============================================================================================
 //  2. LA VÉRIFICATION DE CERTIFICAT MORD
 // =============================================================================================

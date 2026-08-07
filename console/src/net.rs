@@ -589,12 +589,16 @@ mod ssrf_tests {
         // `allow_internal = true` : l'escape-hatch d'ACCÈS est ACCORDÉ, et c'est tout l'intérêt du
         // test — on prouve qu'il n'emporte PLUS le droit d'envoyer un secret en clair. Ces adresses
         // sont littérales, donc aucune résolution DNS : le test ne dépend pas du réseau.
-        // PAS d'IPv6 littéral ici, et ce n'est pas un oubli : `tls::split_url` ne gère pas les
-        // crochets RFC 3986 — `http://[fd00::1]/api` devient l'hôte `[fd00` et le port `80`, puis
-        // échoue à la RÉSOLUTION. Découvert par ce test. Le défaut est FAIL-CLOSED (on n'atteint
-        // jamais la cible, donc aucun contournement de garde), mais il rend les littéraux IPv6
-        // inadressables pour les sources de détection et les webhooks. Traité à part.
-        for url in ["http://192.168.1.10/api/alerts", "http://10.0.0.5/api", "http://172.16.0.9/api"] {
+        // L'ULA IPv6 est là parce que ce test l'y a mise : sa première version l'avait fait tomber
+        // sur un DÉFAUT de `tls::split_url` (crochets RFC 3986 non gérés, `[fd00::1]` lu comme
+        // l'hôte `[fd00`), corrigé depuis. Elle reste donc ICI comme non-régression croisée : si le
+        // parseur reperdait l'IPv6, ce test-ci le dirait AUSSI, et pas seulement celui du parseur.
+        for url in [
+            "http://192.168.1.10/api/alerts",
+            "http://10.0.0.5/api",
+            "http://172.16.0.9/api",
+            "http://[fd00::1]/api",
+        ] {
             let e = super::http_get_blocking_with(url, &auth, t, true)
                 .expect_err("secret en clair vers une IP de LAN doit être REFUSÉ");
             assert!(e.contains("ROUTABLE"), "refus « cible routable » attendu pour {url}, obtenu: {e}");
