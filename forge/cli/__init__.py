@@ -49,6 +49,19 @@ from .catalog import (_load_technique_selection, _parse_map,  # noqa: F401
 from .tools import (cmd_tools_list, cmd_tools_install,  # noqa: F401
                     cmd_tools_update, cmd_tools_remove)
 from . import tools as _tools_cli
+from ..interrupt import parse_run_timeout as _parse_run_timeout
+
+
+def _run_timeout_arg(text):
+    """Type argparse de `--run-timeout` : durée en secondes (ou suffixée s/m/h) -> int.
+
+    FAIL-CLOSED, comme `--param` et `--toolspec` : une valeur invalide fait ÉCHOUER la ligne de
+    commande avec un message qui nomme le format attendu. Un budget qu'on croit avoir posé et qui
+    serait silencieusement ignoré laisserait exactement le run illimité qu'on cherche à éviter."""
+    try:
+        return _parse_run_timeout(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
 
 
 def cmd_scope_check(args):
@@ -288,6 +301,18 @@ def build_parser():
                         help="AUTORISE la sortie réseau qui télécharge le modèle d'embeddings "
                              "(--memory-mode embeddings). Sans ce drapeau, le modèle est chargé "
                              "HORS-LIGNE : absent du cache local -> repli jaccard, aucun egress.")
+    # BUDGET DE TEMPS DU RUN — échelon « override explicite » de la précédence de `resource_profile`
+    # (explicite > env `FORGE_RUN_TIMEOUT` > rien). Le levier `run_timeout_secs` EXISTE déjà (profils
+    # 1800/3600/7200, env tabulée, bornes 1..604800 validées côté console) mais n'était appliqué que
+    # de l'EXTÉRIEUR, au SIGKILL, par le reaper Rust — d'où deux campagnes réelles tuées sans rendre
+    # ni rapport ni sidecar de durées. Ce drapeau demande le même arrêt, DE L'INTÉRIEUR et PROPREMENT.
+    # Valeur en SECONDES (comme la variable et le knob) ; suffixes s/m/h acceptés pour dire « 90m ».
+    engage.add_argument("--run-timeout", dest="run_timeout", metavar="DURÉE",
+                        type=_run_timeout_arg,
+                        help="budget de temps du run : à l'échéance il s'arrête PROPREMENT à la "
+                             "prochaine frontière d'action et rend un rapport annoncé PARTIEL "
+                             "(secondes, ou suffixe s/m/h : 5400, 90m, 2h). Sans ce drapeau : "
+                             "env FORGE_RUN_TIMEOUT, sinon AUCUN budget (comportement historique).")
     engage.add_argument("--toolspec", action="append", default=[], metavar="FILE",
                         help="charge un ToolSpec déclaratif (JSON/YAML) et l'enregistre comme module gouverné "
                              "AVANT le plan ; répétable. Fail-CLOSED : spec invalide -> erreur nommant le fichier. "

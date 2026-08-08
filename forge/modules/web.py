@@ -5,18 +5,176 @@ Ce fichier n'enregistre plus QUE `web.nuclei`. La classe qualifiante IDOR/BOLA
 (`access_control.idor`), qui squattait ici, a été extraite dans `access_control.py` (bâtie sur la
 base `Oracle`). nuclei n'apporte AUCUNE preuve d'exploitabilité côté Forge : un hit est signalé sur
 la sévérité auto-déclarée par l'outil (`reported_by_tool`), jamais promu `vulnerable`.
+
+MUTUALISATION PAR HÔTE (le verrou d'usage). nuclei recharge SA BASE DE TEMPLATES ENTIÈRE à chaque
+invocation — coût FIXE, indépendant du nombre de cibles. Le moteur, lui, propose `web.nuclei` par
+CIBLE (host, host:port, scheme://host, …) : sur une campagne réelle, 65 tirs pour **10 hôtes**, donc
+55 rechargements de templates payés pour rien. `-u` de nuclei est un `string[]` : il accepte
+`-u a,b,c` et n'a besoin NI d'un fichier de liste NI d'un montage docker (`-list <fichier>` serait
+invisible dans le conteneur — `runner` lance `docker run --rm --network host` SANS `-v`).
+
+Le module accepte donc un LOT via `action.params["targets"]`, et `coalesce_nuclei()` (ci-dessous)
+fusionne les actions d'une vague en UNE par hôte. Les trois invariants du dépôt tiennent :
+
+  · SCOPE-GUARD PAR CIBLE — chaque cible du lot est re-validée UNE PAR UNE contre le périmètre
+    injecté. Le lot n'est même pas ACCEPTÉ sans périmètre injecté : la tête (seule cible passée par
+    la gate ROE du moteur) est gardée, le reste est REFUSÉ. Grouper ne contourne rien.
+  · ÉPINGLAGE IP — le moteur n'épingle que `action.target`. Un lot n'admet donc QUE des cibles du
+    MÊME nom d'hôte que la tête : l'épinglage anti-rebinding reste valable pour chaque membre.
+  · COUVERTURE DÉMONTRABLE — toute cible du lot ressort avec SON finding : le hit qui la concerne,
+    ou « aucun hit », ou un `skipped` NOMMÉ si elle a été écartée. Jamais une troncature muette.
 """
 import json
+import urllib.parse
 
 from .registry import register, Module
+from ._scopeguard import ScopeGuardMixin
 from .. import resource_profile
 from .. import runner
 from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 
+#: param d'action portant le LOT de cibles (list[str]). Absent/vide -> comportement historique
+#: BYTE-IDENTIQUE (une invocation `-u <action.target>`).
+BATCH_PARAM = "targets"
+
+#: séparateur du `string[]` de nuclei (`-u a,b,c`). Une cible qui le contient est REFUSÉE du lot.
+BATCH_SEP = ","
+
+
+def host_of(target):
+    """Nom d'hôte NORMALISÉ (minuscule, sans port ni scheme) d'une cible, ou None si indérivable.
+
+    C'est la CLÉ DE LOT : `guatx.com`, `https://guatx.com/`, `guatx.com:8443` et `http://guatx.com:80`
+    partagent le même hôte, donc la même résolution DNS — donc le MÊME épinglage IP. Regrouper sur
+    autre chose (un « site », un domaine enregistrable) casserait l'invariant anti-rebinding.
+    Pur, ne lève jamais."""
+    s = str(target or "").strip()
+    if not s:
+        return None
+    if "://" not in s:
+        s = "//" + s                                   # urlsplit ne peuple .hostname qu'avec un netloc
+    try:
+        h = urllib.parse.urlsplit(s).hostname
+    except ValueError:                                 # netloc/port malformé
+        return None
+    return (h or "").lower() or None
+
+
+def unsafe_batch_target(target):
+    """Raison de REFUS d'une cible EN LOT, ou None si elle est passable telle quelle dans `-u a,b,c`.
+
+    Plus strict que la cible unique historique : le lot est une liste CSV, donc une virgule y
+    fabriquerait une cible fantôme (non gardée par le scope !). Miroir de `unsafe_positional_target` :
+    un `-` initial resterait de l'option-smuggling. Pur, ne lève jamais."""
+    s = str(target if target is not None else "")
+    if not s or s != s.strip():
+        return "cible vide ou entourée d'espaces"
+    if s.startswith("-"):
+        return "cible positionnelle ambiguë (commence par '-')"
+    if BATCH_SEP in s:
+        return f"cible contenant '{BATCH_SEP}' — séparateur du lot `-u a,b,c`"
+    if any(c in s for c in "\x00 \t\r\n"):
+        return "cible contenant un espace ou un caractère de contrôle"
+    return None
+
+
+def norm_target(url):
+    """Forme COMPARABLE d'une cible ou d'un `matched-at` : minuscule, scheme retiré, '/' final retiré.
+
+    C'est aussi la clé de COUVERTURE : `app.test` et `https://app.test` normalisent pareil parce
+    qu'ils désignent LA MÊME surface — un hit sur l'un couvre l'autre, et aucun des deux ne doit
+    récolter un « aucun hit » mensonger.
+
+    nuclei ne renvoie PAS la cible d'entrée dans son JSONL : le champ `host` est le NOM D'HÔTE
+    (mesuré sur un run réel : entrée `https://guatx.com:8443` -> `host: "guatx.com"`), donc inutile
+    pour distinguer deux cibles d'un même hôte. C'est `matched-at` qui porte l'entrée, PRÉFIXÉE
+    (entrée `https://guatx.com:8443` -> `matched-at: https://guatx.com:8443/robots.txt`). D'où une
+    attribution par PLUS LONG PRÉFIXE sur cette forme normalisée. Pur, ne lève jamais."""
+    s = str(url or "").strip().lower()
+    for scheme in ("http://", "https://"):
+        if s.startswith(scheme):
+            s = s[len(scheme):]
+            break
+    return s.rstrip("/")
+
+
+def attribute_hit(matched_at, targets):
+    """Cible d'ENTRÉE à laquelle attribuer un hit nuclei (`matched-at`), ou None si aucune ne colle.
+
+    PLUS LONG PRÉFIXE, aux frontières `/`, `?` et `:` uniquement — jamais un préfixe de texte nu
+    (sans quoi `guatx.com` capterait `guatx.community`). Déterministe. Un hit NON attribué n'est
+    JAMAIS perdu : le finding porte de toute façon son `matched-at` comme cible (inchangé), et
+    l'entrée concernée ressortira au pire avec un « aucun hit » de plus — on sous-déclare, on ne
+    sur-déclare pas. Pur, ne lève jamais."""
+    m = norm_target(matched_at)
+    if not m:
+        return None
+    best, best_len = None, -1
+    for t in targets:
+        n = norm_target(t)
+        if not n or len(n) <= best_len:
+            continue
+        if m == n or m.startswith(n + "/") or m.startswith(n + "?") or m.startswith(n + ":"):
+            best, best_len = t, len(n)
+    return best
+
+
+def coalesce_nuclei(actions, max_batch=None):
+    """Fusionne les actions `web.nuclei` d'une VAGUE en UNE action par HÔTE (et par tranche).
+
+    C'est le point d'entrée que le MOTEUR appelle sur une vague, juste avant `run()`. Contrat :
+
+      · les actions d'un AUTRE kind sont rendues TELLES QUELLES, dans leur ordre d'origine ;
+      · les actions `web.nuclei` d'un même hôte sont repliées sur la PREMIÈRE d'entre elles (la TÊTE),
+        qui garde donc sa position dans l'ordre EV du planner et son `action.id` ; les cibles du
+        groupe atterrissent dans `params["targets"]` (tête en premier, ordre d'origine, dédupliqué) ;
+      · une action dont l'hôte est indérivable, ou déjà porteuse d'un `targets`, n'est JAMAIS repliée ;
+      · `max_batch` (défaut `NucleiScan.MAX_BATCH`) borne la taille d'un lot : un hôte à 300 URLs
+        redevient plusieurs actions plutôt qu'une seule invocation qui dépasserait le timeout. Chaque
+        tranche a sa propre tête, donc un `action.id` distinct (jamais deux fois le même au ledger).
+
+    NE MUTE QUE `params[BATCH_PARAM]` des têtes retenues ; ne construit aucune Action. Déterministe.
+    Une liste vide rend une liste vide. Pur (hors la mutation de params), ne lève jamais."""
+    cap = NucleiScan.MAX_BATCH if max_batch is None else int(max_batch)
+    cap = max(1, cap)
+    heads, groups = [], {}                             # hôte -> indices dans `heads` (tranche courante)
+    out = []
+    for a in actions:
+        if getattr(a, "kind", "") != "web.nuclei" or (getattr(a, "params", None) or {}).get(BATCH_PARAM):
+            out.append(a)
+            continue
+        host = host_of(getattr(a, "target", ""))
+        if host is None:                               # cible non parsable -> jamais repliée
+            out.append(a)
+            continue
+        head = groups.get(host)
+        if head is None or len(head[1]) >= cap:
+            head = (a, [a.target])
+            groups[host] = head
+            heads.append(head)
+            out.append(a)
+        elif a.target not in head[1]:
+            head[1].append(a.target)                   # replié sur la tête : l'action disparaît de la vague
+    for action, targets in heads:
+        if len(targets) > 1:
+            action.params[BATCH_PARAM] = list(targets)
+    return out
+
+
+class _Retargeted:
+    """Vue MINIMALE d'une action re-ciblée sur un membre du lot — juste ce que `tool_failed` lit
+    (`.target`). Évite de muter l'action réelle (dont `.target` est la tête gatée par le ROE) pour
+    émettre un finding d'échec au nom d'une AUTRE cible du lot."""
+
+    __slots__ = ("target",)
+
+    def __init__(self, target):
+        self.target = target
+
 
 @register("web.nuclei")
-class NucleiScan(FlagAllowlistMixin, Module):
+class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
     kind = "web.nuclei"
     exploit = False
     _refuse_category = "nuclei"                   # provenance du finding de refus (mixin) — inchangée
@@ -24,7 +182,9 @@ class NucleiScan(FlagAllowlistMixin, Module):
     mitre = techniques.mitre_for("web.nuclei")   # source de vérité : forge/techniques.py
     description = ("Scan de vulnérabilités par templates nuclei (info→critical par défaut, pour faire "
                    "remonter les expositions info/low : swagger/openapi, panels LLM, exposed-files). "
-                   "Params UI : severity (allow-listée), templates (-t), tags (-tags), extra_args (allowlist).")
+                   "Mutualisé PAR HÔTE (`-u a,b,c`) : une invocation, N cibles, chacune scope-guardée "
+                   "et rendue individuellement. Params UI : severity (allow-listée), templates (-t), "
+                   "tags (-tags), extra_args (allowlist).")
     BIN, IMG = "nuclei", "projectdiscovery/nuclei"
     available = property(lambda self: runner.available("nuclei", "projectdiscovery/nuclei", prefer_docker=True))
     _SEV = {"info": "INFO", "low": "LOW", "medium": "MEDIUM", "high": "HIGH", "critical": "CRITICAL"}
@@ -33,6 +193,15 @@ class NucleiScan(FlagAllowlistMixin, Module):
     # exposed-files) qu'un scan manuel voit et que le filtre medium+ masquait. AUCUNE inflation :
     # la sévérité du finding reste = sévérité RÉELLE du template (INFO template -> finding INFO, cf. _SEV).
     _DEFAULT_SEV = "info,low,medium,high,critical"
+    #: taille MAX d'un lot. Borne le dépassement de timeout d'une invocation groupée ET la casse d'un
+    #: tir raté (un lot qui échoue emporte AU PLUS `MAX_BATCH` cibles ; elles ressortent toutes en
+    #: findings d'échec NOMMÉS, jamais en silence). 10 hôtes x <=25 cibles couvre la campagne mesurée.
+    MAX_BATCH = 25
+    #: budget d'un tir. `_TIMEOUT_BASE` seul pour UNE cible == la valeur historique (byte-identique) ;
+    #: chaque cible SUPPLÉMENTAIRE d'un lot ajoute `_TIMEOUT_PER_TARGET`. Sans cet ajout, mutualiser
+    #: échangerait des invocations contre des TIMEOUTS — un gain de temps payé en trous de couverture.
+    _TIMEOUT_BASE = 600
+    _TIMEOUT_PER_TARGET = 120
     # SCHÉMA servi à l'UI (source unique) — rendu dynamiquement par modules-form.js via `forge modules --json`.
     PARAMS_SCHEMA = [
         {"name": "severity", "type": "select", "label": "severity (filtre templates)", "flag": "-severity",
@@ -67,9 +236,57 @@ class NucleiScan(FlagAllowlistMixin, Module):
         levels = [s.strip().lower() for s in str(resolved).split(",") if s.strip().lower() in self._ALLOWED_SEV]
         return ",".join(levels) if levels else self._DEFAULT_SEV
 
-    def _args(self, action):
+    def _batch(self, action):
+        """(cibles RETENUES, [(cible, raison) REFUSÉES]) pour ce tir. FAIL-CLOSED.
+
+        `action.target` est TOUJOURS la tête : c'est la seule cible passée par la gate ROE du moteur
+        (scope + résolution + épinglage). Toute cible SUPPLÉMENTAIRE de `params['targets']` doit
+        franchir QUATRE portes, chacune capable de la refuser SEULE :
+
+          1. **périmètre injecté** — sans `in_scope`/`out_scope` dans les params, le scope-guard local
+             serait PERMISSIF (`ScopeGuardMixin._scope`) : le lot ENTIER est alors refusé et le tir
+             retombe sur la seule tête gatée par le ROE. C'est ce qui empêche qu'un lot devienne un
+             contournement du scope-guard si le moteur oublie d'injecter le périmètre ;
+          2. **scope-guard PAR CIBLE** — `_in_scope` une par une, jamais « la tête est in-scope donc
+             le lot l'est » ;
+          3. **même nom d'hôte que la tête** — le moteur n'épingle QUE `action.target` ; une cible d'un
+             autre hôte se connecterait à une IP NON épinglée (fenêtre de rebinding) ;
+          4. **argv-safe** — pas de virgule (elle fabriquerait une cible fantôme dans `-u a,b,c`),
+             pas de `-` initial, pas d'espace ni de caractère de contrôle.
+
+        Une cible refusée n'est jamais SUPPRIMÉE en silence : `fire()` en émet un finding `skipped`
+        NOMMÉ (seau `unverified` du rapport = trou de couverture, pas du bruit)."""
+        head = action.target
+        raw = (action.params or {}).get(BATCH_PARAM)
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return [head], []                          # chemin historique : une cible, zéro refus
+        enforce, _sc = self._scope(action)
+        head_host = host_of(head)
+        kept, rejected, seen = [head], [], {str(head)}
+        for cand in raw:
+            t = str(cand)
+            if t in seen:
+                continue
+            seen.add(t)
+            if not enforce:
+                rejected.append((t, "lot refusé : aucun périmètre injecté — le scope-guard du module "
+                                    "serait permissif (fail-closed)"))
+            elif (reason := unsafe_batch_target(t)) is not None:
+                rejected.append((t, reason))
+            elif not self._in_scope(action, t):
+                rejected.append((t, "hors périmètre (scope-guard par cible)"))
+            elif host_of(t) != head_host:
+                rejected.append((t, f"hôte '{host_of(t)}' != hôte épinglé '{head_host}' — "
+                                    "l'épinglage IP du moteur ne couvre que la tête du lot"))
+            else:
+                kept.append(t)
+        return kept, rejected
+
+    def _args(self, action, targets=None):
         p = action.params or {}
-        argv = ["-u", action.target, "-severity", self._severity(action)]
+        # `-u` de nuclei est un string[] : `-u a,b,c` charge N cibles pour UNE seule invocation
+        # (donc UN seul chargement de templates). Une seule cible -> argv BYTE-IDENTIQUE à l'historique.
+        argv = ["-u", BATCH_SEP.join(targets or [action.target]), "-severity", self._severity(action)]
         templates = p.get("templates")
         if templates is not None and safe_value(str(templates)):
             argv += ["-t", str(templates)]
@@ -88,19 +305,33 @@ class NucleiScan(FlagAllowlistMixin, Module):
         return argv
 
     def dry(self, action):
-        return runner.cmdline(self.BIN, self.IMG, self._args(action), prefer_docker=True)
+        targets, _ = self._batch(action)
+        return runner.cmdline(self.BIN, self.IMG, self._args(action, targets), prefer_docker=True)
+
+    def _skipped(self, target, reason):
+        """Finding `skipped` NOMMÉ pour une cible ÉCARTÉE du lot — jamais un silence. `skipped` la place
+        dans le seau `unverified` du rapport (« je n'ai PAS pu vérifier »), qui est PROMU, pas replié."""
+        return self.finding(
+            target=target, title=f"nuclei: cible non scannée — {reason}", severity="INFO",
+            category="nuclei", status="skipped", tool="nuclei",
+            evidence=f"{reason}. Cible retirée du lot avant tout lancement (fail-closed).")
 
     def fire(self, action):
-        p = action.params or {}
         if str(action.target).startswith("-"):
             return self._refuse(action, "cible positionnelle ambiguë (commence par '-')")
         if (refused := self.gate_extra_args(action)):     # extra_args gouvernés (mixin, fail-closed)
             return refused
-        rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action),
-                                   timeout=600, prefer_docker=True)
+        targets, rejected = self._batch(action)
+        poc = runner.cmdline(self.BIN, self.IMG, self._args(action, targets), prefer_docker=True)
+        # BUDGET PROPORTIONNEL : une invocation groupée fait le travail de N — lui laisser le budget
+        # d'UNE seule échangerait des invocations contre des timeouts (== des trous de couverture).
+        timeout = self._TIMEOUT_BASE + self._TIMEOUT_PER_TARGET * (len(targets) - 1)
+        rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action, targets),
+                                   timeout=timeout, prefer_docker=True)
         # Parser stdout d'ABORD : nuclei peut sortir rc!=0 sur condition bénigne tout en ayant
         # émis du JSONL valide. On ne renvoie le finding d'échec QUE si aucune ligne ne parse.
         findings = []
+        hit_surfaces = set()                              # SURFACES d'entrée (normalisées) ayant un hit
         for line in (out or "").splitlines():
             line = line.strip()
             if not line:
@@ -111,21 +342,39 @@ class NucleiScan(FlagAllowlistMixin, Module):
                 continue
             info = j.get("info", {})
             sev = self._SEV.get(str(info.get("severity", "info")).lower(), "INFO")
+            matched = j.get("matched-at", action.target)
+            # RÉ-ATTRIBUTION : le hit reste porté par SON `matched-at` (identique au mode non groupé) ;
+            # l'attribution ne sert qu'à la COMPTABILITÉ DE COUVERTURE (quelle cible d'entrée a produit
+            # quelque chose). Un hit non attribuable ne fait donc perdre AUCUN finding.
+            if (owner := attribute_hit(matched, targets)) is not None:
+                hit_surfaces.add(norm_target(owner))
             # Pas de sur-classement : un hit nuclei est signalé PAR L'OUTIL sur sa sévérité
             # auto-déclarée, sans preuve d'exploitabilité côté Forge. On conserve la sévérité
             # (priorisation) mais on émet `reported_by_tool` plutôt que `vulnerable` — la
             # promotion en `vulnerable` est réservée aux oracles à preuve (IDOR, origine vérifiée).
             findings.append(self.finding(
-                target=j.get("matched-at", action.target),
+                target=matched,
                 title=f"nuclei: {info.get('name', j.get('template-id', '?'))}",
                 severity=sev, category=j.get("template-id", "nuclei"),
                 mitre="", status="reported_by_tool" if sev in ("HIGH", "CRITICAL") else "tested",
-                tool="nuclei", evidence=line[:1500], poc=self.dry(action)))
+                tool="nuclei", evidence=line[:1500], poc=poc))
         if not findings:
             failed = self.tool_failed(action, rc, out, err, "nuclei", category="nuclei")
             if failed:
-                return [failed]
-            findings.append(self.finding(
-                target=action.target, title="nuclei: aucun hit", severity="INFO",
-                category="nuclei", status="tested", tool="nuclei", poc=self.dry(action)))
-        return findings
+                # L'ÉCHEC VAUT POUR TOUT LE LOT : chaque cible embarquée ressort avec SON finding
+                # d'échec. Sans ça, mutualiser transformerait N tirs ratés VISIBLES en un seul —
+                # les N-1 autres cibles disparaîtraient du rapport sans avoir été testées.
+                out_f = [failed]
+                for t in targets[1:]:
+                    out_f.append(self.tool_failed(_Retargeted(t), rc, out, err,
+                                                  "nuclei", category="nuclei"))
+                return out_f + [self._skipped(t, r) for t, r in rejected]
+        # COUVERTURE PAR CIBLE, DÉMONTRABLE : chaque cible du lot SANS hit attribué ressort avec son
+        # « aucun hit » — exactement la ligne qu'elle aurait produite seule. Le rapport ne peut donc pas
+        # perdre une cible parce qu'elle a voyagé dans un lot.
+        for t in targets:
+            if norm_target(t) not in hit_surfaces:
+                findings.append(self.finding(
+                    target=t, title="nuclei: aucun hit", severity="INFO",
+                    category="nuclei", status="tested", tool="nuclei", poc=poc))
+        return findings + [self._skipped(t, r) for t, r in rejected]

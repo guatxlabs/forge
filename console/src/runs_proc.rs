@@ -617,7 +617,22 @@ pub(crate) fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_i
         });
 
         // attente du process avec watchdog timeout -> kill group.
-        let timeout = Duration::from_secs(app.run_timeout_secs);
+        //
+        // DÉLAI DE GRÂCE — sans lui, ce watchdog et le budget IN-PROCESS du moteur lisent la MÊME
+        // valeur (`FORGE_RUN_TIMEOUT`, posée au spawn) et arrivent donc à échéance ENSEMBLE : le
+        // `kill_group` peut gagner la course et tuer le run à l'instant précis où il s'arrêtait
+        // proprement. On perdrait alors exactement ce que le budget existe pour sauver — le rapport
+        // et le sidecar de durées, écrits APRÈS la boucle (dommage mesuré deux fois sur des
+        // campagnes réelles : tout le travail fait, le livrable perdu à la dernière seconde).
+        //
+        // La grâce doit couvrir le pire cas d'arrêt propre : le moteur ne COUPE PAS une action en
+        // vol (ce serait fabriquer un échec), il attend qu'elle rende la main — donc au plus
+        // `action_timeout_secs` — puis écrit son rendu. 120 s majore ce cas.
+        //
+        // Le watchdog redevient ainsi ce qu'il doit être : un filet de DERNIER recours pour un
+        // process qui ne s'arrête pas du tout, jamais le mécanisme d'arrêt nominal.
+        const GRACE_SECS: u64 = 120;
+        let timeout = Duration::from_secs(app.run_timeout_secs.saturating_add(GRACE_SECS));
         let (final_status, exit_code): (&str, Option<i64>) = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => {
                 let code = status.code().map(|c| c as i64);
@@ -627,7 +642,14 @@ pub(crate) fn spawn_supervisor(app: App, mut child: tokio::process::Child, run_i
             Err(_) => {
                 // timeout : tuer le GROUPE de CE run (pgid connu au spawn), récupérer. On n'inspecte
                 // pas le slot d'un autre engagement — le pgid ciblé est exclusivement celui de ce run.
-                push_run_log(&app, &run_id, "system", &format!("watchdog: timeout {}s — kill group", app.run_timeout_secs));
+                // Le message dit le délai RÉELLEMENT attendu, budget + grâce, et pas seulement le
+                // budget : annoncer « timeout 3600s » après en avoir attendu 3720 enverrait
+                // l'exploitant chercher une panne à la mauvaise seconde. Si cette branche est
+                // atteinte, c'est que l'arrêt propre n'a PAS eu lieu — le rapport est perdu, et
+                // c'est l'information à retenir de la ligne.
+                push_run_log(&app, &run_id, "system", &format!(
+                    "watchdog: budget {}s + grâce {}s écoulés sans arrêt propre — kill group (rapport NON écrit)",
+                    app.run_timeout_secs, GRACE_SECS));
                 kill_group(pgid);
                 let _ = child.wait().await;
                 ("timeout", None)

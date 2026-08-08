@@ -99,6 +99,35 @@ def response_is_challenge(status, body="", headers=None):
     return looks_like_challenge(None, body or "")        # status=None -> AUCUNE branche par code
 
 
+def reach_is_content(status, body="", headers=None):
+    """True SEULEMENT si la réponse PROUVE que le moteur voit l'APPLICATION : `2xx`, corps NON VIDE,
+    et pas un interstitiel de défi. Tout le reste -> False (« je n'ai pas pu vérifier »).
+
+    POURQUOI SI STRICT — c'est la correction du mode d'échec MESURÉ. Le prédicat précédent était
+    `200 <= status < 400 and not challenge`, et il a fabriqué **8 « franchissements réussis » sur 51**
+    dans le ledger `gxrun2` : les 8 étaient des graphies de `www.guatx.com` répondant **HTTP 301**
+    (la règle d'edge www→apex de Cloudflare, servie AVANT le défi, corps vide). Deux d'entre elles
+    portaient même `{'found': False, 'clicked': False}` — la case n'avait pas été cliquée. Un `tested`
+    y affirmait « Turnstile franchi ET routé » alors que RIEN n'avait été franchi ni routé.
+
+    Une 3xx dit « va voir ailleurs », pas « voici l'application » : elle est servie par l'edge sans
+    que l'origine soit jamais atteinte, et `Oracle._http` (follow_redirects=False) la rend avec un
+    corps vide. Elle ne peut donc RIEN prouver. Idem pour un `204`/`304` : pas d'octets, pas de
+    preuve. Le biais est délibérément du côté de `skipped` — on préfère avouer une cécité que
+    fabriquer un `tested`.
+
+    Pur, ne lève jamais."""
+    try:
+        st = int(status)
+    except (TypeError, ValueError):
+        return False
+    if not 200 <= st < 300:
+        return False
+    if not (body or ""):                                 # 204/304/corps vide : aucun octet, aucune preuve
+        return False
+    return not response_is_challenge(st, body, headers)
+
+
 # --- récolte de la session NAVIGATEUR (parsing pur des charges du service browser) ------------------
 def _domain_covers(domain, host):
     """True si un `domain` de cookie couvre `host` (le point de tête est optionnel, RFC 6265 §5.1.3).
@@ -195,6 +224,67 @@ def material_for_host(cookie_payload, ua_payload, host):
     if not ua:
         return None
     return {"cookies": cookies, "headers": {"User-Agent": ua}}
+
+
+def _status_ok(status):
+    """True si `status` est un 2xx exploitable. `None` (appel direct sans statut) -> True : on ne
+    peut alors rien dire du transport, et c'est le contenu qui tranchera."""
+    if status is None:
+        return True
+    try:
+        return 200 <= int(status) < 300
+    except (TypeError, ValueError):
+        return False
+
+
+# Raisons CANONIQUES d'un échec de récolte. Des constantes, parce que l'imputation EST le diagnostic :
+# pendant tout le run mesuré, l'évidence accusait « ou User-Agent illisible » alors que
+# `/evaluate navigator.userAgent` rendait 200 + l'UA complet. Le vrai coupable — `GET /cookies` en
+# HTTP 500 (`AttributeError: 'Browser' object has no attribute 'cookies'`) — n'était NULLE PART, et
+# 103 franchissements ont été dépensés sur une dépendance cassée de façon déterministe.
+REASON_OK = ""
+REASON_COOKIE_SERVICE = "service"
+REASON_NO_COOKIE = "no_cookie_for_host"
+REASON_UA_SERVICE = "ua_service"
+REASON_NO_UA = "no_user_agent"
+
+
+def harvest(cookie_status, cookie_payload, ua_status, ua_payload, host):
+    """RÉCOLTE DIAGNOSTIQUE : `(material | None, code_de_raison, explication)`.
+
+    Même refus que `material_for_host` (cookies ET UA voyagent ensemble ou pas du tout), mais la
+    raison est IMPUTÉE à la bonne cause au lieu d'être noyée dans un « ou » :
+
+      - `REASON_COOKIE_SERVICE` : le service navigateur a refusé `/cookies` (non-2xx). Rien à voir
+        avec l'UA ni avec la cible — la route est cassée EN AMONT et re-tenter le défi ne peut RIEN
+        y changer (c'est exactement ce qui s'est produit 103 fois) ;
+      - `REASON_NO_COOKIE`      : `/cookies` a répondu, mais aucun cookie n'appartient à `host` ;
+      - `REASON_UA_SERVICE`     : `/evaluate` a refusé ;
+      - `REASON_NO_UA`          : UA illisible -> refus (un `cf_clearance` sous l'UA d'urllib est
+        INOPÉRANT ; produire le matériel donnerait l'ILLUSION d'une route ouverte).
+    SECRET : l'explication ne contient QUE des statuts, des compteurs et un hostname.
+    Pur, ne lève jamais."""
+    if not _status_ok(cookie_status):
+        return None, REASON_COOKIE_SERVICE, (
+            f"le service navigateur a refusé GET /cookies (HTTP {cookie_status}) — la récolte est "
+            f"impossible EN AMONT de la cible ; re-tenter le défi n'y changerait rien "
+            f"(l'UA, lui, n'est pas en cause)")
+    cookies = cookies_for_host(cookie_payload, host)
+    if not cookies:
+        return None, REASON_NO_COOKIE, (
+            f"le navigateur ne porte aucun cookie appartenant à {host} "
+            f"(défi non franchi, ou cookies d'un autre domaine uniquement)")
+    if not _status_ok(ua_status):
+        return None, REASON_UA_SERVICE, (
+            f"le service navigateur a refusé POST /evaluate (HTTP {ua_status}) — User-Agent "
+            f"indisponible ; un cookie de clearance sans l'UA EXACT serait INOPÉRANT")
+    ua = user_agent_from(ua_payload)
+    if not ua:
+        return None, REASON_NO_UA, (
+            "User-Agent du navigateur illisible — un cookie de clearance est lié à l'UA qui l'a "
+            "obtenu : sans l'UA EXACT il serait INOPÉRANT, on refuse donc de le router "
+            "(pas de fausse route)")
+    return {"cookies": cookies, "headers": {"User-Agent": ua}}, REASON_OK, ""
 
 
 def clearance_names(material):

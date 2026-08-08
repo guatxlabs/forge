@@ -67,6 +67,9 @@ TOOL_REPORTED_STATUS = "reported_by_tool"
 #: le nombre d'items : le total exact est TOUJOURS imprimé à côté (« 6 endpoints » + « +2 autres »).
 MAX_OCCURRENCE_EXAMPLES = 8
 MAX_REASON_EXAMPLES = 4
+#: bornes de la table « planifié jamais tenté » (run interrompu). Même règle : borne le TEXTE, jamais
+#: le COMPTE — le nombre total d'actions non tentées est imprimé au-dessus de la table, en entier.
+MAX_NOT_ATTEMPTED_ROWS = 25
 
 _STATUS_GLOSS = {
     "vulnerable": "PROUVÉ exploitable par un oracle Forge",
@@ -432,12 +435,19 @@ def render_item(findings: list[Any], item: Item, num: int, scope_line: str) -> l
 
 
 def render_verdict(findings: list[Any], buckets: dict[str, list[int]],
-                   items: dict[str, list[Item]], view: str) -> list[str]:
+                   items: dict[str, list[Item]], view: str,
+                   interruption: "dict[str, Any] | None" = None) -> list[str]:
     """Section **Verdict** — ce qu'un opérateur lit EN PREMIER, en une ligne.
 
     La ligne de tête est DÉRIVÉE du corpus, jamais gonflée : s'il n'y a aucun finding ≥ MEDIUM ni prouvé,
     elle dit **« rien d'actionnable trouvé »** — franchement, en une ligne, au lieu de se déduire d'un
-    défilement de milliers d'entrées."""
+    défilement de milliers d'entrées.
+
+    `interruption` (fiche `interrupt.interruption_record`, None sur un run complet) CORRIGE cette
+    ligne, et c'est la garde la plus importante du lot : sur un run coupé, « rien d'actionnable
+    trouvé » est une CONCLUSION FAUSSE — le plan n'a pas tourné en entier. La phrase devient alors
+    explicitement bornée à la fraction exécutée, et dit combien d'actions ont tourné sur combien de
+    planifiées. Un rapport tronqué qui ressemble à un rapport complet est PIRE que pas de rapport."""
     n = len(findings)
     n_expl = len(buckets["exploitable"])
     n_qual = len(buckets["qualify"])
@@ -450,6 +460,11 @@ def render_verdict(findings: list[Any], buckets: dict[str, list[int]],
                 f"Le plus grave : **[{str(getattr(top, 'severity', '')).upper()}] "
                 f"{_txt(getattr(top, 'title', ''))}** sur `{_txt(getattr(top, 'target', ''))}` — "
                 f"détail en §« Actionnable — à reporter ».", ""]
+    elif interruption:
+        out += [f"> **Rien d'actionnable DANS LA FRACTION DU PLAN QUI A TOURNÉ** — et le plan n'a "
+                f"**pas** tourné en entier : run **INTERROMPU** ({interruption.get('label') or 'arrêt anticipé'}), "
+                f"{coverage_ratio(interruption)}. **Ne pas en conclure « rien trouvé »** : "
+                f"ce verdict ne porte que sur les actions exécutées.", ""]
     else:
         out += ["> **Rien d'actionnable trouvé.** Aucun finding de sévérité ≥ MEDIUM, aucune "
                 "exploitabilité prouvée. Ce qui suit est du signal à qualifier, des trous de "
@@ -463,22 +478,57 @@ def render_verdict(findings: list[Any], buckets: dict[str, list[int]],
         + (" ⚠️ *ce sont des trous de couverture, pas du bruit*" if n_unver else ""),
         f"- **Bruit de reconnaissance** (INFO) : **{n_recon}** — relégué en annexe, intégralement compté.",
         f"- **Total émis** : **{n}** findings (vue `{view}`).",
-        "",
     ]
+    if interruption:
+        # Rappelé DANS la liste de comptage, pas seulement dans la bannière de tête : c'est ici qu'un
+        # lecteur pressé lit les chiffres, et un dénominateur incomplet doit se dire là où il est lu.
+        out.append(f"- **⚠️ Plan INCOMPLET** : {coverage_ratio(interruption)} — "
+                   f"run interrompu ({interruption.get('label') or 'arrêt anticipé'}).")
+    out.append("")
     return out
 
 
-def render_unverified(findings: list[Any], idxs: list[int]) -> list[str]:
+def coverage_ratio(interruption: "dict[str, Any] | None") -> str:
+    """« X action(s) exécutée(s) sur Y planifiée(s) » — la phrase de couverture d'un run interrompu.
+
+    N'INVENTE JAMAIS de dénominateur : si le nombre d'actions planifiées est inconnu (interruption
+    survenue hors campagne, moteur sans compteur), on dit ce qu'on sait et on dit qu'on ignore le
+    reste. Un ratio fabriqué serait exactement le faux réconfort que ce lot combat."""
+    if not interruption:
+        return ""
+    ran = interruption.get("ran")
+    planned = interruption.get("planned")
+    pending = interruption.get("not_attempted")
+    if ran is None:
+        return "nombre d'actions exécutées inconnu"
+    if not planned:
+        return f"**{ran} action(s) exécutée(s)**, total planifié inconnu (plan non finalisé)"
+    txt = f"**{ran} action(s) exécutée(s) sur {planned} planifiée(s)**"
+    if pending:
+        txt += f", **{pending} jamais tentée(s)**"
+    return txt
+
+
+def render_unverified(findings: list[Any], idxs: list[int],
+                      not_attempted: "list[Any] | None" = None,
+                      interruption: "dict[str, Any] | None" = None) -> list[str]:
     """Section **Couverture non vérifiée** — les `skipped`, PROMUS avant tout le bruit.
 
     Un `skipped` dit « je n'ai PAS pu vérifier » : sur une cible protégée (WAF, outil absent, réseau
     coupé) c'est l'information la PLUS importante du rapport, parce qu'elle borne ce que l'absence de
-    finding permet de conclure. Regroupé PAR MODULE (l'unité du trou), avec les raisons distinctes."""
+    finding permet de conclure. Regroupé PAR MODULE (l'unité du trou), avec les raisons distinctes.
+
+    DEUXIÈME FAMILLE DE TROU, MÊME SECTION (`not_attempted`) : les actions que le planner avait
+    ORDONNÉES et que le run n'a jamais atteintes, parce qu'il a été coupé (budget, signal, erreur).
+    Elles appartiennent ICI et nulle part ailleurs — c'est exactement le même énoncé (« je n'ai PAS
+    vérifié »), à ceci près que le module n'a même pas démarré. On ne crée donc pas un second
+    mécanisme de transparence : on étend celui qui existe. Et on n'en fabrique AUCUN verdict — une
+    action jamais tentée n'est ni `tested`, ni `not_vulnerable`, ni un finding."""
     out = ["## Couverture NON vérifiée (trous de couverture)", ""]
     if not idxs:
         out += ["_Aucun module n'a échoué à s'exécuter : la couverture annoncée par le plan a été "
                 "effectivement tentée._", ""]
-        return out
+        return out + _render_not_attempted(not_attempted, interruption)
     groups: dict[str, dict[str, Any]] = {}
     for i in idxs:
         f = findings[i]
@@ -501,6 +551,41 @@ def render_unverified(findings: list[Any], idxs: list[int]) -> list[str]:
         more = len(g["reasons"]) - len(reasons)
         rtxt = " ; ".join(r[:90] for r in reasons) + (f" · **+{more} autre(s)**" if more > 0 else "")
         out.append(f"| `{kind}` | {g['n']} | {len(g['targets'])} | {rtxt} |")
+    out.append("")
+    return out + _render_not_attempted(not_attempted, interruption)
+
+
+def _render_not_attempted(not_attempted: "list[Any] | None",
+                          interruption: "dict[str, Any] | None") -> list[str]:
+    """Sous-bloc « planifié mais JAMAIS TENTÉ » de la section des trous de couverture.
+
+    Vide (aucune ligne) quand rien n'a été laissé de côté — un run complet rend donc EXACTEMENT le
+    même markdown qu'avant ce lot. Sinon : le compte, la cause, et le détail par module/cible, borné
+    en affichage mais TOUJOURS compté en entier (le nombre affiché n'est jamais le nombre tronqué)."""
+    pending = list(not_attempted or [])
+    if not pending:
+        return []
+    cause = (interruption or {}).get("label") or "run interrompu"
+    groups: dict[str, list[str]] = {}
+    for a in pending:
+        kind = _txt(getattr(a, "kind", "")) or "(kind inconnu)"
+        tgt = _txt(getattr(a, "target", ""))
+        tl = groups.setdefault(kind, [])
+        if tgt and tgt not in tl:
+            tl.append(tgt)
+    out = [f"**{len(pending)} action(s) PLANIFIÉE(S) JAMAIS TENTÉE(S)** — {cause}. "
+           f"Ces {len(groups)} module(s) n'ont **pas démarré** sur ces cibles : aucun verdict n'a été "
+           f"émis pour elles, ni positif ni négatif. Rejouer le run (budget plus large) pour les couvrir.",
+           "", "| Module planifié | Actions non tentées | Cible(s) |", "|---|---|---|"]
+    for kind in sorted(groups, key=lambda k: (-len(groups[k]), k))[:MAX_NOT_ATTEMPTED_ROWS]:
+        tgts = groups[kind]
+        shown = ", ".join(f"`{t}`" for t in tgts[:MAX_REASON_EXAMPLES])
+        more = len(tgts) - min(len(tgts), MAX_REASON_EXAMPLES)
+        out.append(f"| `{kind}` | {len(tgts)} | {shown}"
+                   + (f" · **+{more} autre(s)**" if more > 0 else "") + " |")
+    hidden = len(groups) - min(len(groups), MAX_NOT_ATTEMPTED_ROWS)
+    if hidden > 0:
+        out.append(f"| … | | **+{hidden} module(s) non tenté(s) supplémentaire(s)** |")
     out.append("")
     return out
 

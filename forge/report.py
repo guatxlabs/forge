@@ -40,6 +40,47 @@ from . import llm as _llm
 from . import report_view as _view
 
 
+def _interruption_banner(engine, interruption):
+    """EN-TÊTE D'HONNÊTETÉ D'UN RAPPORT PARTIEL — la toute première chose lue, avant l'engagement.
+
+    RAISON D'ÊTRE. Deux campagnes réelles ont été tuées par un timeout externe sans rien rendre. Le
+    remède (arrêt gracieux + rendu garanti) crée un risque NEUF et pire que le mal : un rapport
+    TRONQUÉ qui ressemble à un rapport COMPLET. Un opérateur y lirait « rien d'actionnable » et
+    conclurait « cible saine », alors que la moitié du plan n'a jamais tourné. Cette bannière est la
+    contre-mesure, et elle est NON NÉGOCIABLE : tant qu'un run est partiel, il le DIT — en tête, avec
+    sa CAUSE (budget / signal externe / exception) et ses COMPTEURS (exécutées sur planifiées, jamais
+    tentées, vagues).
+
+    Rend [] sur un run complet : le rapport d'un run normal est byte-identique à avant ce lot."""
+    if not interruption:
+        return []
+    cause = interruption.get("label") or "arrêt anticipé"
+    detail = str(interruption.get("detail") or "").strip()
+    lines = [
+        f"> ⚠️ **RAPPORT PARTIEL — RUN INTERROMPU ({cause}).**",
+        f"> {_view.coverage_ratio(interruption)}"
+        + (f" · **{interruption['waves']} vague(s)** exécutée(s)."
+           if interruption.get("waves") else "."),
+    ]
+    if detail:
+        lines.append(f"> Cause exacte : {detail}.")
+    if interruption.get("budget_secs"):
+        lines.append(f"> Budget demandé : **{interruption['budget_secs']}s** · écoulé : "
+                     f"**{interruption.get('elapsed_secs', '?')}s**.")
+    lines += [
+        "> **Ce rapport ne couvre QUE ce qui a tourné.** Une absence de finding n'y vaut **pas** une "
+        "absence de vulnérabilité : ce qui n'a pas été tenté est listé en §« Couverture NON vérifiée "
+        "(trous de couverture) », et aucun verdict — surtout pas négatif — n'a été émis pour ces actions.",
+        "",
+    ]
+    err = getattr(engine, "coverage_finalize_error", "")
+    if err:
+        lines.insert(1, f"> ⚠️ **Accounting de couverture INCOMPLET** (`{err}`) — les compteurs "
+                        f"ci-dessous peuvent sous-estimer les trous. Traiter le ledger comme source "
+                        f"de vérité et signaler ce bug.")
+    return lines
+
+
 def _engagement_header(engine):
     """En-tête d'engagement : périmètre autorisé (scope) + empreinte d'intégrité (ledger head +
     clé publique Ed25519 si le ledger est signé en asymétrique). Purement DÉRIVÉ des objets déjà
@@ -221,7 +262,7 @@ def _scope_line(engine):
     return ", ".join(f"`{s}`" for s in items[:6]) + (" …" if len(items) > 6 else "")
 
 
-def _lead_sections(engine, findings, tr, view):
+def _lead_sections(engine, findings, tr, view, interruption=None):
     """L'EN-TÊTE ACTIONNABLE — ce qu'un opérateur (pentester ou chasseur) doit lire EN PREMIER.
 
     Renvoie `(lignes, buckets, keep_idxs)`. IDENTIQUE dans les deux vues : le public change la longueur
@@ -231,7 +272,7 @@ def _lead_sections(engine, findings, tr, view):
     items = {k: _view.group_items(findings, buckets[k]) for k in ("exploitable", "qualify")}
     scope_line = _scope_line(engine)
 
-    out = _view.render_verdict(findings, buckets, items, view)
+    out = _view.render_verdict(findings, buckets, items, view, interruption=interruption)
     lines, nxt = _view.render_actionable(
         findings, items["exploitable"], "## Actionnable — à reporter",
         "_Aucun finding de sévérité ≥ MEDIUM et aucune exploitabilité prouvée. "
@@ -242,16 +283,26 @@ def _lead_sections(engine, findings, tr, view):
         findings, items["qualify"], "## Signal à qualifier (exploitabilité NON démontrée)",
         "_Aucun finding LOW ni hit d'outil tiers._", scope_line, start=nxt)
     out += lines
-    out += _view.render_unverified(findings, buckets["unverified"])
+    out += _view.render_unverified(findings, buckets["unverified"],
+                                   not_attempted=getattr(engine, "not_attempted", None),
+                                   interruption=interruption)
     keep = list(buckets["exploitable"]) + list(buckets["qualify"]) + list(buckets["unverified"])
     return out, buckets, keep
 
 
-def build_report(engine, title="Forge — rapport d'engagement", view=None):
+def build_report(engine, title="Forge — rapport d'engagement", view=None, interruption=None):
     """Rapport markdown d'un run. `view` : `pentest` (défaut, annexe EXHAUSTIVE) ou `bounty` (annexe
     repliée aux représentants, repli COMPTÉ et NOMMÉ). Voir `report_view.resolve_view` pour la
-    précédence (argument > `$FORGE_REPORT_VIEW` > `scope.triage.view` > `scope.triage.auto_hide`)."""
+    précédence (argument > `$FORGE_REPORT_VIEW` > `scope.triage.view` > `scope.triage.auto_hide`).
+
+    `interruption` : fiche d'un run COUPÉ (`interrupt.interruption_record`). Explicite d'abord, sinon
+    REPRISE SUR LE MOTEUR (`engine.interruption`, posée par `Engine._check_stop`) — pour qu'un
+    appelant qui ne connaît pas ce lot (console, script, test) rende malgré tout un rapport HONNÊTE
+    plutôt qu'un rapport tronqué muet. None des deux côtés => run complet => rendu inchangé."""
+    if interruption is None:
+        interruption = getattr(engine, "interruption", None)
     out = [f"# {title}", ""]
+    out += _interruption_banner(engine, interruption)  # PARTIEL ? le dire AVANT tout le reste
     out += _engagement_header(engine)                # en-tête d'engagement (parité console)
     cov = engine.coverage()
 
@@ -266,7 +317,7 @@ def build_report(engine, title="Forge — rapport d'engagement", view=None):
     # --- EN-TÊTE ACTIONNABLE : verdict -> actionnables -> à qualifier -> couverture NON vérifiée.
     #     Le bruit de reconnaissance vient APRÈS (annexe), jamais avant. Les `skipped` REMONTENT :
     #     un « je n'ai pas pu vérifier » borne ce que l'absence de finding permet de conclure.
-    lead, buckets, keep_idxs = _lead_sections(engine, findings, tr, view)
+    lead, buckets, keep_idxs = _lead_sections(engine, findings, tr, view, interruption)
     out += lead
 
     # --- synthèse findings ---
@@ -317,6 +368,13 @@ def build_report(engine, title="Forge — rapport d'engagement", view=None):
     out.append(f"- **Refusées (VETO — hors scope / capacité non autorisée)** : {len(cov['vetoed'])}")
     out.append(f"- **Erreurs / skips** : {len(cov['errors'])}")
     out.append(f"- **Findings dédupliqués (déjà en mémoire)** : {getattr(engine, 'dups', 0)}")
+    pending = getattr(engine, "not_attempted", None) or []
+    if pending:
+        # Ferme l'accounting AU NIVEAU ACTION sur un run coupé : planifiées == appliquées + non tentées.
+        # Sans cette ligne, les actions ordonnées et jamais atteintes ne seraient dans AUCUN compteur.
+        out.append(f"- **Planifiées jamais tentées (run interrompu)** : {len(pending)} "
+                   f"(sur {getattr(engine, 'planned_total', 0)} ordonnée(s) — détail en "
+                   f"§« Couverture NON vérifiée »)")
     not_planned = getattr(engine, "not_planned", None) or {}
     if not_planned:
         # bucket anti-lacune : modules sélectionnés/disponibles que le planner n'a JAMAIS ordonnancés

@@ -39,6 +39,7 @@ import base64
 import contextlib
 import fnmatch
 import json
+import os
 import re
 import threading
 import time
@@ -165,6 +166,17 @@ class SessionStore:
         # n'ont PAS de corps de réponse à inspecter (sonde de TIMING du smuggling) pour qu'ils rendent
         # `skipped` (« je n'ai pas pu vérifier ») au lieu de `tested` (« j'ai vérifié, rien trouvé »).
         self._clearance = {}
+        # MATÉRIEL DE FRANCHISSEMENT ADOPTÉ, tenu À PART du matériel DÉCLARÉ par l'opérateur :
+        # {hôte: (Session, expire_at | None)}. Le tenir à part est ce qui rend l'expiration POSSIBLE —
+        # fusionné dans `_per_host` (l'ancien schéma), il était indéboulonnable, et une clearance
+        # PÉRIMÉE aurait continué d'être envoyée : la cible aurait rendu des pages de DÉFI que les
+        # oracles auraient lues comme du contenu applicatif. C'est le mode d'échec le plus cher du
+        # dépôt (un rapport propre et vide), donc l'expiration doit pouvoir RETIRER le matériel sans
+        # emporter l'authentification de l'opérateur.
+        self._adopted = {}
+        # LEDGER DES TENTATIVES DE FRANCHISSEMENT {hôte: {"n", "last", "cooldown_until"}}. Aucun
+        # secret : des compteurs et des horodatages.
+        self._attempts = {}
         for host, sess in (per_host or {}).items():
             self.add_host_session(host, sess)
 
@@ -216,13 +228,20 @@ class SessionStore:
 
     def session_for(self, url):
         """La `Session` à attacher pour `url`, ou None. SCOPE-GUARD DUR : hors-scope -> None (le
-        matériel secret ne peut physiquement pas partir vers un hôte non autorisé par le ROE)."""
+        matériel secret ne peut physiquement pas partir vers un hôte non autorisé par le ROE).
+
+        FUSION AU POINT DE LECTURE : le matériel DÉCLARÉ par l'opérateur prime, le matériel de
+        franchissement ADOPTÉ (encore VALIDE) ne comble que les trous. Une clearance PÉRIMÉE est
+        retirée ici même et n'est JAMAIS envoyée."""
         if self.scope is None or not self.scope.is_in_scope(url):
             return None
-        s = self._match(Scope._host(url))
-        if s is None or s.is_empty():
+        host = Scope._host(url)
+        base = self._match(host)
+        adopted = self._live_adopted(host)
+        merged = (base.with_fallback(adopted) if base is not None else adopted)
+        if merged is None or merged.is_empty():
             return None
-        return s
+        return merged
 
     def headers_for(self, url):
         """En-têtes de session à injecter pour `url` (scope-guardés), ou {} (jamais None)."""
@@ -243,7 +262,109 @@ class SessionStore:
     CHALLENGED = "challenged"           # défi CONSTATÉ et NON franchi -> aucun module ne peut conclure
     UNKNOWN = "unknown"                 # rien d'observé -> comportement historique (l'oracle conclut)
 
-    def adopt_clearance(self, url, material):
+    # DURÉE DE VIE d'une clearance adoptée. Un `cf_clearance` de challenge managé vit typiquement
+    # ~30 min ; passée cette fenêtre il est REJETÉ et la cible re-sert un défi. On expire donc de
+    # NOTRE côté un peu avant, pour ne jamais tirer avec du matériel mort en croyant voir le site.
+    CLEARANCE_TTL = 1800.0
+    # COOLDOWN après une tentative de franchissement. « 1 SEUL essai sur IP propre — marteler =
+    # Cloudflare flague l'IP » (savoir consigné du workspace). Mesuré sur `gxrun2` : 51 tirs pour
+    # 9 hôtes, jusqu'à 16 tentatives sur le SEUL `guatx.com`, parce que la clé de tir était la
+    # CHAÎNE de cible (`guatx.com`, `https://guatx.com`, `guatx.com:443`…) et non l'HÔTE.
+    CROSSING_COOLDOWN = 900.0
+
+    @classmethod
+    def _tunable(cls, env_name, default):
+        """Valeur ajustable par variable d'environnement, avec repli SILENCIEUX sur le défaut si
+        elle est absente/illisible/négative (une conf hostile ne doit jamais casser un run)."""
+        try:
+            v = float(os.environ.get(env_name, ""))
+            return v if v > 0 else default               # 0/négatif = conf hostile -> défaut
+        except (TypeError, ValueError):
+            return default
+
+    def _live_adopted(self, host, now=None):
+        """`Session` de franchissement ENCORE VALIDE pour `host`, ou None. EXPIRE (et RETIRE) le
+        matériel échu au passage, en repassant l'hôte à `CHALLENGED` : on sait qu'il y a un défi sur
+        cet hôte et on ne détient plus de quoi le passer -> aucun module ne doit conclure dessus."""
+        rec = self._adopted.get(host)
+        if rec is None:
+            return None
+        sess, expire_at = rec
+        if expire_at is not None and (now if now is not None else time.time()) >= expire_at:
+            del self._adopted[host]
+            if self._clearance.get(host) == self.CLEARED:
+                self._clearance[host] = self.CHALLENGED
+            return None
+        return sess
+
+    def expire_clearance(self, url):
+        """RÉVOQUE immédiatement la clearance adoptée pour l'hôte de `url` (TTL écoulé côté cible,
+        cookie invalidé, ou défi RE-CONSTATÉ alors qu'on se croyait passé). Retourne True si du
+        matériel a été retiré.
+
+        C'est le pendant obligatoire de la réutilisation : réutiliser un actif qui a une durée de vie
+        n'est sûr QUE si l'on sait le déclarer mort. L'appelant qui constate un défi sur un hôte
+        `CLEARED` DOIT appeler ceci — sinon le moteur continuerait de tirer avec du matériel mort et
+        prendrait les pages de défi pour l'application."""
+        host = Scope._host(url)
+        existed = self._adopted.pop(host, None) is not None
+        if self._clearance.get(host) == self.CLEARED:
+            self._clearance[host] = self.CHALLENGED
+        return existed
+
+    # --- RÉUTILISER PLUTÔT QUE RETENTER ------------------------------------------------------------
+    def should_attempt_crossing(self, url, now=None):
+        """`(bool, raison)` — faut-il DÉPENSER une tentative de franchissement pour `url` ?
+
+        Une clearance valide est un ACTIF : coût d'acquisition élevé (un clic vision/OS, plusieurs
+        secondes), durée de vie limitée, et re-tenter la dégrade (réputation IP). La réutilisation
+        n'est donc pas une optimisation, c'est la règle. On refuse la tentative si :
+          - l'hôte est HORS PÉRIMÈTRE (scope-guard : on ne franchit rien qu'on n'a pas le droit
+            d'atteindre — et aucun matériel n'existera jamais pour lui) ;
+          - une clearance ENCORE VALIDE est détenue -> les modules la CONSOMMENT ;
+          - un cooldown court après une tentative récente -> anti-martèlement.
+        Aucun secret : la raison ne cite qu'un hostname et des durées."""
+        if self.scope is not None and not self.scope.is_in_scope(url):
+            return False, "hôte hors périmètre — aucun franchissement n'est tenté (scope-guard)"
+        host = Scope._host(url)
+        if not host:
+            return False, "hôte illisible"
+        if self._live_adopted(host, now) is not None:
+            return False, f"clearance déjà valide pour {host} — RÉUTILISÉE (aucune tentative dépensée)"
+        rec = self._attempts.get(host)
+        if rec:
+            t = now if now is not None else time.time()
+            if t < rec.get("cooldown_until", 0.0):
+                return False, (f"franchissement déjà tenté {rec['n']}× sur {host} — cooldown "
+                               f"{int(rec['cooldown_until'] - t)}s (marteler un défi dégrade la "
+                               f"réputation IP et ne le fait pas passer)")
+        return True, ""
+
+    def note_crossing_attempt(self, url, now=None):
+        """ENREGISTRE qu'une tentative de franchissement est DÉPENSÉE sur l'hôte de `url` et arme le
+        cooldown. À appeler AVANT le clic, pour qu'un échec en vol (exception, timeout) laisse quand
+        même la trace qui empêchera de marteler. Retourne le nombre de tentatives pour cet hôte."""
+        host = Scope._host(url)
+        if not host:
+            return 0
+        t = now if now is not None else time.time()
+        rec = self._attempts.setdefault(host, {"n": 0, "last": 0.0, "cooldown_until": 0.0})
+        rec["n"] += 1
+        rec["last"] = t
+        rec["cooldown_until"] = t + self._tunable("FORGE_CROSSING_COOLDOWN", self.CROSSING_COOLDOWN)
+        return rec["n"]
+
+    def crossing_ledger(self):
+        """Recensement SÛR du franchissement {hôte: {état, tentatives, clearance_valide}} — des
+        hostnames, des compteurs et des booléens, JAMAIS de matériel. C'est le chiffre à rapporter :
+        « combien de défis ai-je dépensés, pour combien d'hôtes réellement ouverts ? »."""
+        hosts = set(self._clearance) | set(self._attempts) | set(self._adopted)
+        return {h: {"state": self._clearance.get(h, self.UNKNOWN),
+                    "attempts": (self._attempts.get(h) or {}).get("n", 0),
+                    "clearance_live": self._live_adopted(h) is not None}
+                for h in sorted(hosts)}
+
+    def adopt_clearance(self, url, material, ttl=None):
         """ADOPTE pour l'hôte de `url` du matériel de FRANCHISSEMENT récolté à runtime (cookies de
         clearance + User-Agent exact du navigateur). Retourne True si l'adoption a eu lieu.
 
@@ -265,10 +386,23 @@ class SessionStore:
         harvested = _coerce(material)
         if harvested is None or harvested.is_empty():
             return False
-        existing = self._match(host)                     # inclut le défaut global (ne pas le perdre)
-        self._per_host[host] = (existing.with_fallback(harvested) if existing is not None
-                                else harvested)
+        # Le matériel adopté vit À PART (et DATÉ) : `session_for` le fusionne SOUS celui de
+        # l'opérateur à chaque lecture, et l'expiration peut le retirer sans emporter
+        # l'authentification déclarée. Une nouvelle adoption REMPLACE la précédente pour cet hôte —
+        # sinon les cookies de clearance périmés s'accumuleraient indéfiniment.
+        # Une clearance a TOUJOURS une date de péremption — il n'existe pas de matériel de
+        # franchissement éternel, et un `ttl` nul/négatif signifie « déjà morte » (utile pour
+        # révoquer explicitement). Sans échéance, une clearance périmée continuerait d'être envoyée
+        # et la cible rendrait des pages de défi que les oracles liraient comme du contenu.
+        window = self._tunable("FORGE_CLEARANCE_TTL", self.CLEARANCE_TTL) if ttl is None else float(ttl)
+        self._adopted[host] = (harvested, time.time() + window)
         self._clearance[host] = self.CLEARED
+        # Une acquisition RÉUSSIE lève le cooldown : celui-ci existe pour ne pas marteler un défi
+        # qu'on n'arrive PAS à passer. Passé, c'est le TTL qui gouverne — sans quoi la
+        # RÉ-ACQUISITION après expiration resterait bloquée et le moteur repartirait aveugle.
+        rec = self._attempts.get(host)
+        if rec:
+            rec["cooldown_until"] = 0.0
         return True
 
     def mark_challenged(self, url):
@@ -284,19 +418,29 @@ class SessionStore:
         self._clearance[host] = self.CHALLENGED
         return True
 
-    def clearance_state(self, url):
+    def clearance_state(self, url, now=None):
         """`'cleared'` | `'challenged'` | `'unknown'` pour l'hôte de `url`. `'unknown'` est le défaut
-        et signifie « rien d'observé » : les modules gardent alors leur comportement historique."""
+        et signifie « rien d'observé » : les modules gardent alors leur comportement historique.
+
+        CONSULTE L'ÉCHÉANCE avant de répondre : sans ça, `CLEARED` resterait affiché après expiration
+        tant qu'un autre chemin (`session_for`) n'aurait pas déclenché la purge — l'état dépendrait
+        de l'ORDRE DES LECTURES, et un module pourrait conclure sur un hôte qu'on ne voit plus."""
         host = Scope._host(url)
-        return self._clearance.get(host, self.UNKNOWN) if host else self.UNKNOWN
+        if not host:
+            return self.UNKNOWN
+        self._live_adopted(host, now)                    # purge paresseuse : l'échéance fait foi
+        return self._clearance.get(host, self.UNKNOWN)
 
     def clearance_census(self):
         """Recensement SÛR {hôte: état} du franchissement (hostnames + verdicts, aucun secret)."""
         return dict(self._clearance)
 
     def hosts_with_session(self):
-        """Résumé SÛR (aucun secret) : hôtes portant une session par-hôte + présence d'un défaut global."""
-        return {"per_host": sorted(self._per_host), "has_default": self._default is not None}
+        """Résumé SÛR (aucun secret) : hôtes portant une session par-hôte (déclarée par l'opérateur),
+        hôtes portant une clearance ADOPTÉE encore valide, et présence d'un défaut global."""
+        return {"per_host": sorted(self._per_host),
+                "adopted": sorted(h for h in self._adopted if self._live_adopted(h) is not None),
+                "has_default": self._default is not None}
 
     def __repr__(self):
         return (f"<forge.SessionStore per_host={len(self._per_host)} "

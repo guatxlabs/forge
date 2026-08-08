@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Commandes moteur de la CLI Forge : `plan`, `run`, `campaign` (chargement d'actions/cibles,
 armement, ledger, planner, workflows, ingest console). Extrait de l'ancien `forge/cli.py` (pur
-déplacement, comportement inchangé)."""
+déplacement, comportement inchangé).
+
+LIVRABLE GARANTI (lot BUDGET/INTERRUPTION). Ce fichier est l'endroit exact où deux campagnes réelles
+ont perdu leur rendu : `build_report` et `_save_durations` vivaient APRÈS la boucle, et le handler de
+signal qui aurait permis de les atteindre n'était installé QUE sous `--console`. Un `timeout(1)`
+externe tombait donc sur le handler par défaut de Python et tuait le process à l'instruction courante
+— ledger complet sur le disque, zéro rapport, zéro sidecar de durées.
+
+Trois causes d'arrêt, un seul chemin de sortie : le rendu (rapport + durées + checkpoint de ledger)
+est désormais dans un `finally` et s'exécute pour **l'échéance du budget**, pour un **SIGTERM/SIGINT
+externe** et pour une **exception non rattrapée** (qui continue de remonter APRÈS le rendu, pour que
+le code de sortie reste honnête)."""
 import json
 import os
-import signal
 from pathlib import Path
 
 from ..roe import Scope, Roe, Action
@@ -16,16 +26,17 @@ from ..brain import HeuristicBrain, AutoPentestBrain
 from ..planner import Planner
 from ..memory import make_memory
 from ..durations import DurationStore
+from ..interrupt import (Budget, GracefulStop, Terminate, CAUSE_ERROR,
+                         interruption_record, resolve_run_timeout)
 from .. import purple
 from .. import console_client
 from .. import workflows
 from .. import runner
 
-
-class _Terminate(BaseException):
-    """Arrêt GRACIEUX d'un run sur watchdog SIGTERM (console). Dérive de `BaseException` (PAS de
-    `Exception`) EXPRÈS : le `except Exception` du moteur (M6, robustesse du tir) ne doit PAS l'avaler
-    — il doit dérouler la campagne jusqu'au flush final (finally) pour ne perdre aucun travail."""
+#: Arrêt gracieux — nom HISTORIQUE conservé pour les appelants existants (tests de durabilité,
+#: `_checkpoint` du watchdog console). La classe vit maintenant dans `forge.interrupt` : le moteur
+#: doit pouvoir la lever lui-même (frontière d'action), et il ne peut pas importer la CLI.
+_Terminate = Terminate
 
 
 def _parse_cli_params(param_args):
@@ -131,31 +142,118 @@ def _save_durations(store):
         store.save()
 
 
+def _make_budget(args):
+    """BUDGET DE TEMPS de ce run (`interrupt.Budget`), ou None si l'opérateur n'en a pas posé.
+
+    SURFACE, ET POURQUOI CELLE-LÀ. On ne crée PAS un nouveau levier : `run_timeout_secs` existe déjà
+    dans `resource_profile` (valeurs par profil 1800/3600/7200), avec son override d'env DÉJÀ
+    tabulé (`FORGE_RUN_TIMEOUT`) et DÉJÀ validé côté console (`runs_validate.rs` : clé `run_timeout`,
+    bornes 1..604800) — c'est même la variable que la console pose au spawn du moteur et que son
+    watchdog Rust lit. Le levier n'avait qu'un défaut : il n'était appliqué que DE L'EXTÉRIEUR, à
+    coups de SIGKILL. On lui donne son exécution IN-PROCESS, sur la même variable et les mêmes
+    bornes, plus le drapeau `--run-timeout` qui manquait à l'échelon « override explicite » de la
+    précédence documentée. Aucun réglage nouveau à tenir en cohérence avec l'existant.
+
+    ABSENT PAR DÉFAUT : sans drapeau ni variable, aucun budget (cf. `interrupt.resolve_run_timeout`)."""
+    secs = resolve_run_timeout(getattr(args, "run_timeout", None))
+    if not secs:
+        return None
+    return Budget(secs)
+
+
+def _make_stop(args, emit):
+    """Prédicat d'arrêt gracieux du run : budget + signaux externes (SIGTERM/SIGINT).
+
+    Le handler ne meurt PAS sur place : il pose un drapeau ET coupe les groupes d'outils EN VOL
+    (`runner.terminate_live_tool_groups`) — les outils tournent dans des sessions séparées
+    (start_new_session, E3), donc un SIGTERM whole-run ne les atteint pas et le moteur resterait
+    bloqué dans `communicate()` au lieu d'atteindre sa prochaine frontière d'action."""
+    def _cut_tools():
+        try:
+            runner.terminate_live_tool_groups(force=True)
+        except Exception:  # noqa: BLE001 — un handler de signal ne doit JAMAIS lever
+            pass
+    stop = GracefulStop(budget=_make_budget(args), on_signal=_cut_tools, emit=emit)
+    if stop.budget is not None:
+        emit(f"# Budget de temps : {stop.budget.seconds}s — à l'échéance le run S'ARRÊTE proprement "
+             f"(frontière d'action) et rend un rapport annoncé PARTIEL.")
+    return stop
+
+
+def _render(args, engine, interruption, durations, ledger, sink_flush=None,
+            ledger_note="forge run end"):
+    """RENDU FINAL — l'unique chemin de sortie, appelé depuis un `finally` : fin normale, échéance de
+    budget, signal externe, ou exception non rattrapée. C'est CE bloc que les deux campagnes tuées
+    n'ont jamais atteint.
+
+    ORDRE VOULU : (1) durées observées (le sidecar `.durations`, perdu pour la même raison que le
+    rapport — un run coupé a MESURÉ des durées qui doivent profiter au suivant) ; (2) checkpoint du
+    ledger ; (3) flush console ; (4) rapport. Chaque étape est isolée : l'échec de l'une n'empêche
+    pas les suivantes, et AUCUNE ne peut masquer l'exception qui nous a menés ici."""
+    def _step(label, fn):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 — un rendu best-effort ne masque JAMAIS la cause d'arrêt
+            print(f"[!] rendu : échec {label} ({e!r})", flush=True)
+
+    _step("sidecar de durées", lambda: _save_durations(durations))
+    if ledger is not None:
+        _step("checkpoint ledger", lambda: ledger.checkpoint(note=ledger_note))
+    if sink_flush is not None:
+        _step("flush console", sink_flush)
+    if interruption:
+        print(f"[STOP] run INTERROMPU ({interruption.get('label')}) — "
+              f"{interruption.get('ran')} action(s) exécutée(s)"
+              + (f" sur {interruption['planned']} planifiée(s)" if interruption.get("planned") else "")
+              + " ; le rapport est marqué PARTIEL.", flush=True)
+
+    def _report():
+        rep = build_report(engine, view=_report_view(args), interruption=interruption)
+        if args.report:
+            Path(args.report).write_text(rep, encoding="utf-8")
+            print(f"Rapport{' PARTIEL' if interruption else ''} -> {args.report}", flush=True)
+        else:
+            print("\n" + rep)
+    _step("écriture du rapport", _report)
+
+
 def cmd_run(args):
     _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
     ledger = Ledger(args.ledger) if args.ledger else None
     memory = _make_memory(args)
     durations = _make_durations(args)
-    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, durations=durations)
+    stop = _make_stop(args, lambda line: print(line, flush=True))
+    engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, durations=durations,
+                    stop=stop.reason)
     if args.arm:
         engine.arm(f"forge run --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
         engine.approve(ap)
     actions = _load_actions(args.actions) if args.actions else _demo_actions(scope)
-    engine.run(actions)
-    _save_durations(durations)             # durées observées -> sidecar par-engagement (ordre de soumission)
-    if ledger is not None:                 # scelle la fin de run : checkpoint (ancré si anchor configuré)
-        ledger.checkpoint(note="forge run end")
-    cov = engine.coverage()
-    print(f"Tirées={len(cov['fired'])}  Simulées={len(cov['dry_run'])}  "
-          f"Refusées={len(cov['vetoed'])}  Erreurs={len(cov['errors'])}  Findings={len(engine.findings)}")
-    rep = build_report(engine, view=_report_view(args))
-    if args.report:
-        Path(args.report).write_text(rep, encoding="utf-8")
-        print(f"Rapport -> {args.report}")
-    else:
-        print("\n" + rep)
+    # `run()` n'a PAS de campagne : le dénominateur « planifiées » est la liste d'actions elle-même.
+    actions = list(actions)
+    engine.planned_total = len(actions)
+    interruption = None
+    with stop:
+        try:
+            engine.run(actions)
+        except Terminate as t:
+            interruption = interruption_record(t, budget=stop.budget, engine=engine)
+        except BaseException as exc:       # noqa: BLE001 — on RÉÉMET après avoir rendu (voir finally)
+            interruption = interruption_record(Terminate(CAUSE_ERROR, f"{type(exc).__name__}: {exc}"),
+                                               budget=stop.budget, engine=engine)
+            raise
+        finally:
+            if interruption is not None:   # actions ordonnées jamais atteintes (aucun verdict émis)
+                done = {r["action"] for r in engine.results}
+                engine.not_attempted = [a for a in actions if a.id not in done]
+                interruption["not_attempted"] = len(engine.not_attempted)
+            cov = engine.coverage()
+            print(f"Tirées={len(cov['fired'])}  Simulées={len(cov['dry_run'])}  "
+                  f"Refusées={len(cov['vetoed'])}  Erreurs={len(cov['errors'])}  "
+                  f"Findings={len(engine.findings)}")
+            _render(args, engine, interruption, durations, ledger)
     return 0
 
 
@@ -190,8 +288,12 @@ def cmd_campaign(args):
     # `flush=True` complète PYTHONUNBUFFERED posé par la console au spawn (sortie non bufferisée).
     def _progress(line):
         print(line, flush=True)
+    # ARRÊT GRACIEUX — INSTALLÉ INCONDITIONNELLEMENT (le correctif central de ce lot). Il l'était
+    # UNIQUEMENT sous `--console` : les deux campagnes réelles, lancées en CLI directe, n'avaient donc
+    # AUCUN handler et mouraient sur le SIGTERM par défaut de Python, sans rendre ni rapport ni durées.
+    stop = _make_stop(args, _progress)
     engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, progress=_progress,
-                    durations=durations)
+                    durations=durations, stop=stop.reason)
     if args.arm:
         engine.arm(f"forge campaign --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
@@ -251,8 +353,6 @@ def cmd_campaign(args):
     if args.console:
         sink = console_client.IncrementalIngest(
             args.campaign, args.run_id, url=args.console, token=args.console_token)
-    term = {"sig": False}
-
     def _flush(partial):
         """Flush best-effort du delta vers la console. Erreurs réseau AVALÉES (le run continue) ; les
         offsets du sink n'avancent que sur succès (le delta repart au flush suivant sinon)."""
@@ -272,89 +372,75 @@ def cmd_campaign(args):
     def _checkpoint():
         """Appelé par le moteur (intra-vague + par vague) : flush PARTIEL, puis — si un SIGTERM de
         watchdog est arrivé — DÉCLENCHE l'arrêt gracieux via `_Terminate`. Le raise est posé À UNE
-        FRONTIÈRE d'action (jamais pendant un flush ni un fire) -> pas de réentrance ni de double-envoi."""
-        _flush(partial=True)
-        if term["sig"]:
-            raise _Terminate()
+        FRONTIÈRE d'action (jamais pendant un flush ni un fire) -> pas de réentrance ni de double-envoi.
 
-    def _on_sigterm(_signum, _frame):
-        # Watchdog/cancel console : kill_group envoie SIGTERM PUIS (fix E4) escalade en SIGKILL après une
-        # grâce -> on a le temps de flusher. On ne meurt PAS ici : on POSE un drapeau ; le prochain
-        # checkpoint flushe le travail en cours et lève `_Terminate` pour une sortie propre + flush final.
-        term["sig"] = True
-        # Les outils tournent dans des SESSIONS séparées (start_new_session, E3) -> le SIGTERM whole-run
-        # ne les atteint PAS. On coupe EXPLICITEMENT les groupes d'outils en vol : l'outil courant meurt,
-        # `communicate()` rend la main immédiatement, le moteur atteint son prochain checkpoint et sort
-        # (flush D1) — et il ne reste AUCUN outil orphelin (nuclei &c.) après le cancel (bug T29). Sans
-        # ça, un cancel laissait le moteur relancer des outils jusqu'au checkpoint et des nuclei survivre.
-        try:
-            runner.terminate_live_tool_groups(force=True)
-        except Exception:  # noqa: BLE001 — un handler de signal ne doit JAMAIS lever
-            pass
+        Le déclenchement est aujourd'hui DOUBLÉ (défense en profondeur) : le moteur consulte le même
+        `stop` à CHAQUE action, donc sans attendre le prochain checkpoint (25 actions par défaut).
+        On garde le raise ici parce que la cadence du flush console et celle de l'arrêt restent des
+        décisions distinctes, et parce que ce chemin est celui que couvrent les tests de durabilité."""
+        _flush(partial=True)
+        term = stop.reason()
+        if term is not None:
+            raise term
 
     # intervalle de checkpoint intra-vague (actions). Réglable via FORGE_INGEST_EVERY (défaut 25).
     every = 0
-    old_sigterm = None
     if args.console:
         try:
             every = max(0, int(os.environ.get("FORGE_INGEST_EVERY", "25")))
         except ValueError:
             every = 25
-        try:                                    # SIGTERM indisponible hors thread principal / plateforme
-            old_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
-        except (ValueError, OSError):
-            old_sigterm = None
 
-    terminated = False
-    try:
-        if args.console:
-            engine.campaign(targets, brain, planner,
-                            modules=modules, module_params=module_params,
-                            checkpoint=_checkpoint, checkpoint_every=every)
-        else:
-            # chemin SANS console : appel HISTORIQUE (aucun kwarg de durabilité) -> byte-identique.
-            engine.campaign(targets, brain, planner,
-                            modules=modules, module_params=module_params)
-    except _Terminate:
-        terminated = True
-        print("watchdog: SIGTERM reçu — arrêt gracieux, flush du travail accompli", flush=True)
-    finally:
-        if old_sigterm is not None:
-            try:
-                signal.signal(signal.SIGTERM, old_sigterm)
-            except (ValueError, OSError):
-                pass
-
-    # DURÉES OBSERVÉES : persistées même sur un arrêt watchdog (on est passé par le `except _Terminate`),
-    # pour que le travail de mesure d'un run coupé profite quand même au run suivant.
-    _save_durations(durations)
-    if ledger is not None:                 # scelle la fin de campagne : checkpoint (ancré si anchor configuré)
-        ledger.checkpoint(note="forge campaign end")
-    cov = engine.coverage()
-    print(f"Tirées={len(cov['fired'])}  Simulées={len(cov['dry_run'])}  Refusées={len(cov['vetoed'])}  "
-          f"Erreurs={len(cov['errors'])}  Déférées(budget)={len(engine.skipped_budget)}  "
-          f"Findings={len(engine.findings)}  Dups={engine.dups}  Run-records={len(engine.run_records)}")
-    if engine.coverage_gaps:
-        print("Lacunes de couverture (classes jamais tentées) :")
-        for tgt, miss in engine.coverage_gaps.items():
-            print(f"  {tgt}: {', '.join(miss)}")
-    if engine.not_planned:
-        # bucket anti-lacune : modules sélectionnés/disponibles jamais ordonnancés par le plan.
-        print(f"Modules disponibles non planifiés ({len(engine.not_planned)}) :")
-        for kind, reason in engine.not_planned.items():
-            print(f"  {kind}: {reason}")
-    if args.purple and engine.run_records:
-        n = purple.emit(args.purple, engine.run_records)
-        print(f"Run-records ATT&CK -> {args.purple} ({n})")
-    # FLUSH FINAL : envoie le delta RESTANT (dernière vague partielle) + gaps/skipped/not_planned
-    # complets. `partial=terminated` : sur une fin NORMALE (partial=False) le run_job est marqué 'done' ;
-    # sur un arrêt watchdog (partial=True) le statut reste 'running' pour que le superviseur console le
-    # marque honnêtement 'timeout' (compteurs non nuls déjà persistés par les flushes incrémentaux).
-    _flush(partial=terminated)
-    rep = build_report(engine, view=_report_view(args))
-    if args.report:
-        Path(args.report).write_text(rep, encoding="utf-8")
-        print(f"Rapport -> {args.report}")
-    else:
-        print("\n" + rep)
+    interruption = None
+    # `with stop` : handlers SIGTERM/SIGINT posés pour TOUT le run (plus seulement sous --console) et
+    # restaurés à la sortie, y compris sur exception.
+    with stop:
+        try:
+            if args.console:
+                engine.campaign(targets, brain, planner,
+                                modules=modules, module_params=module_params,
+                                checkpoint=_checkpoint, checkpoint_every=every)
+            else:
+                # chemin SANS console : appel HISTORIQUE (aucun kwarg de durabilité) -> byte-identique.
+                engine.campaign(targets, brain, planner,
+                                modules=modules, module_params=module_params)
+        except Terminate as t:
+            interruption = interruption_record(t, budget=stop.budget, engine=engine)
+        except BaseException as exc:       # noqa: BLE001 — RÉÉMISE après le rendu (voir `finally`)
+            # 3e cause : exception non rattrapée. Le rendu doit AVOIR LIEU (le travail est fait et le
+            # ledger est intact) ; l'exception continue ensuite sa route pour que le code de sortie
+            # reste honnête — un plantage ne doit pas se déguiser en run réussi.
+            interruption = interruption_record(Terminate(CAUSE_ERROR, f"{type(exc).__name__}: {exc}"),
+                                               budget=stop.budget, engine=engine)
+            raise
+        finally:
+            cov = engine.coverage()
+            print(f"Tirées={len(cov['fired'])}  Simulées={len(cov['dry_run'])}  "
+                  f"Refusées={len(cov['vetoed'])}  Erreurs={len(cov['errors'])}  "
+                  f"Déférées(budget)={len(engine.skipped_budget)}  Findings={len(engine.findings)}  "
+                  f"Dups={engine.dups}  Run-records={len(engine.run_records)}")
+            if engine.coverage_gaps:
+                print("Lacunes de couverture (classes jamais tentées) :")
+                for tgt, miss in engine.coverage_gaps.items():
+                    print(f"  {tgt}: {', '.join(miss)}")
+            if engine.not_planned:
+                # bucket anti-lacune : modules sélectionnés/disponibles jamais ordonnancés par le plan.
+                print(f"Modules disponibles non planifiés ({len(engine.not_planned)}) :")
+                for kind, reason in engine.not_planned.items():
+                    print(f"  {kind}: {reason}")
+            if engine.not_attempted:
+                print(f"Actions planifiées JAMAIS TENTÉES ({len(engine.not_attempted)} sur "
+                      f"{engine.planned_total} ordonnée(s)) — aucun verdict émis pour elles.")
+            if args.purple and engine.run_records:
+                try:
+                    n = purple.emit(args.purple, engine.run_records)
+                    print(f"Run-records ATT&CK -> {args.purple} ({n})")
+                except Exception as e:  # noqa: BLE001 — jamais au prix du rapport
+                    print(f"[!] rendu : échec run-records ATT&CK ({e!r})", flush=True)
+            # FLUSH FINAL : delta RESTANT + gaps/skipped/not_planned complets. `partial` : sur une fin
+            # NORMALE (False) le run_job est marqué 'done' ; sur un arrêt anticipé (True) le statut
+            # reste 'running' pour que le superviseur console le marque honnêtement 'timeout'.
+            _render(args, engine, interruption, durations, ledger,
+                    sink_flush=lambda: _flush(partial=bool(interruption)),
+                    ledger_note="forge campaign end")
     return 0

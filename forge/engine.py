@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
+from .interrupt import Terminate
 from . import infra_urls
 from . import modules as mods
 from . import pin
@@ -24,6 +25,7 @@ from . import purple
 from . import resource_profile
 from . import session
 from . import throttle
+from .modules.web import coalesce_nuclei as _coalesce_nuclei
 
 if TYPE_CHECKING:                                         # imports paresseux (type-checking uniquement)
     from collections.abc import Callable, Iterable
@@ -54,6 +56,12 @@ _SCOPE_INJECT_KINDS = frozenset({
     # (ScopeGuardedOracle) pour qu'aucune requête — ni le matériel de session gouverné qu'elle porte —
     # ne parte vers une URL hors périmètre. Sans injection, `_scope` serait permissif (enforce=False).
     "access_control.idor", "access_control.privesc", "auth.takeover", "cors.credentials",
+    # SCAN MUTUALISÉ (`web.nuclei`) : une action peut porter un LOT de cibles du MÊME hôte
+    # (`params['targets']`, cf. `modules/web.coalesce_nuclei`). Le ROE ne gate que `action.target` ;
+    # le périmètre injecté est ce qui permet au module de RE-VALIDER chaque cible du lot, une par une.
+    # SANS cette injection le module REFUSE le lot (fail-closed) et retombe sur la seule tête gatée —
+    # dégradé mais VISIBLE (chaque cible écartée rend un `skipped` nommé), jamais permissif en silence.
+    "web.nuclei",
 })
 
 def _oracle_rate_kinds():
@@ -217,7 +225,8 @@ class Engine:
                  memory: Any = None, graph: EngagementGraph | None = None,
                  campaign: str | None = None, run_id: str | None = None,
                  progress: "Callable[[str], None] | None" = None,
-                 durations: Any = None) -> None:
+                 durations: Any = None,
+                 stop: "Callable[[], Terminate | None] | None" = None) -> None:
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
@@ -259,6 +268,17 @@ class Engine:
         # AUCUN appel, AUCUNE sortie -> comportement byte-à-byte inchangé. Ne touche RIEN de la
         # gouvernance/ROE ni des findings : pure observabilité (ne fait que refléter des res déjà décidés).
         self._progress = progress
+        # ARRÊT GRACIEUX (OPTIONNEL, additif) : prédicat consulté à CHAQUE frontière d'action ; il rend
+        # un `interrupt.Terminate` quand le run doit s'arrêter proprement (budget de temps épuisé,
+        # SIGTERM/SIGINT externe), None sinon. None par défaut (tests, appelants programmatiques) =>
+        # AUCUN appel, comportement byte-identique. Il ne DÉCIDE de rien d'autre : il ne touche ni au
+        # ROE, ni au plan, ni aux findings — il interrompt, et l'interruption est COMPTÉE et DITE
+        # (`self.interruption`, `self.not_attempted`), jamais silencieuse.
+        self._stop = stop
+        # FICHE D'INTERRUPTION du run (None tant qu'il n'a pas été interrompu) — posée par `_check_stop`
+        # au moment de lever, pour que TOUT appelant (CLI, console, test) puisse rendre un rapport qui
+        # s'annonce partiel sans avoir à rattraper l'exception lui-même.
+        self.interruption: dict[str, Any] | None = None
         self.findings: list[Finding] = []
         self.results: list[dict[str, Any]] = []          # [{action, verdict, reasons, output}]
         self.run_records: list[dict[str, Any]] = []      # boucle purple : un record ATT&CK par action tirée
@@ -274,6 +294,17 @@ class Engine:
         self.not_planned: dict[str, str] = {}            # {kind: raison} — disponibles mais jamais planifiés
         self.dups = 0              # findings ignorés car déjà en mémoire
         self.waves = 0             # nb de vagues plan->observe->replan exécutées (campagne itérative)
+        # COMPTE D'INTERRUPTION (anti-lacune, miroir de `not_planned` mais au niveau ACTION) : total des
+        # actions ORDONNÉES par le planner sur l'ensemble des vagues, et celles qui n'ont JAMAIS été
+        # atteintes (run coupé avant elles). Une action non atteinte ne produit AUCUN verdict — surtout
+        # pas un verdict négatif : elle est comptée ICI et listée par le rapport. C'est ce qui permet de
+        # dire « X actions sur Y » au lieu de laisser croire que le plan a été exécuté en entier.
+        self.planned_total = 0
+        self.not_attempted: list[Action] = []
+        # Échec de la finalisation de couverture (cf. `_finalize_coverage`) : chaîne d'erreur, ou "".
+        # FAIL-LOUD — rendu par le rapport plutôt qu'avalé : des compteurs de couverture muets seraient
+        # exactement la lacune silencieuse que ce dépôt interdit.
+        self.coverage_finalize_error = ""
         # PROFIL DE RESSOURCES ACTIF (audit) — rempli au lancement de campaign() (snapshot profil +
         # leviers effectifs). None tant qu'aucune campagne n'a démarré (run() direct des tests).
         self.resource_profile: dict[str, Any] | None = None
@@ -627,6 +658,7 @@ class Engine:
             n += 1
             if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
                 self._run_checkpoint(checkpoint)
+            self._check_stop()                 # frontière d'arrêt gracieux (budget / signal externe)
         return out
 
     def _run_parallel(self, actions: list[Action],
@@ -767,6 +799,7 @@ class Engine:
                 n += 1
                 if checkpoint is not None and checkpoint_every > 0 and n % checkpoint_every == 0:
                     self._run_checkpoint(checkpoint)   # peut lever _Terminate (BaseException) -> arrêt gracieux
+                self._check_stop()             # frontière d'arrêt gracieux (budget / signal externe)
             return out
         finally:
             _shutdown_executor(ex)
@@ -846,6 +879,37 @@ class Engine:
             if est is not None:
                 return est
         return _action_cost(action)
+
+    def _check_stop(self) -> None:
+        """FRONTIÈRE D'ARRÊT GRACIEUX — consulte le prédicat `stop` et lève son `Terminate` le cas
+        échéant. Appelé APRÈS l'application de chaque action (et à chaque frontière de vague), JAMAIS
+        pendant un tir ni pendant une mutation d'état : quand il lève, l'action courante est
+        intégralement appliquée (ledger + finding + décision) et la suivante n'a PAS commencé — donc
+        aucun demi-résultat, aucun verdict fabriqué pour une action non tirée.
+
+        POURQUOI À CHAQUE ACTION ET NON AU CHECKPOINT. Le checkpoint console est cadencé à
+        `FORGE_INGEST_EVERY` (25 actions par défaut) et n'existe QUE sous `--console` : y accrocher
+        l'échéance ferait dépasser le budget de 24 actions dans le meilleur cas, et de l'infini sans
+        console (c'est précisément le trou par lequel les deux campagnes réelles sont mortes). Ce
+        prédicat est PUR et coûte une comparaison de flottants — le payer par action est gratuit
+        devant un tir d'outil.
+
+        DÉPASSEMENT RÉSIDUEL, BORNÉ ET NOMMÉ : on ne coupe PAS l'action en vol (ce serait fabriquer un
+        échec pour un travail qui allait aboutir), donc le budget peut être dépassé de la durée de
+        l'action courante — bornée par `action_timeout_secs` (120 s par défaut). Le rapport dit
+        l'écoulé réel, pas le budget demandé."""
+        if self._stop is None:
+            return
+        term = self._stop()
+        if term is None:
+            return
+        if not isinstance(term, Terminate):                # tolérance : un prédicat qui rend une raison
+            term = Terminate(detail=str(term))
+        from . import interrupt as _interrupt              # import paresseux (aucun cycle au chargement)
+        self.interruption = _interrupt.interruption_record(term, engine=self)
+        self._emit(f"[STOP] arrêt gracieux — {term.detail} ; le travail accompli est conservé "
+                   f"et le rapport dira qu'il est PARTIEL")
+        raise term
 
     def _run_checkpoint(self, checkpoint: "Callable[[], None] | None") -> None:
         """Invoque le callback de checkpoint (flush incrémental console) en BEST-EFFORT : une exception
@@ -1041,61 +1105,124 @@ class Engine:
 
         executed_ids: set[str] = set()               # ids d'actions déjà planifiées (dedup inter-vagues)
         skipped_by_id: dict[str, Action] = {}        # accumule les déférées (par id, pas de doublon)
+        ordered_all: dict[str, Action] = {}          # actions ORDONNÉES (toutes vagues) — dénominateur
         waves = 0
-        while waves < max_waves:
-            # le cerveau lit l'ÉTAT (graphe enrichi par la vague précédente), pas juste les cibles.
-            proposed = brain.propose(self.graph)
-            # DIRECTIVE de sélection EXPLICITE (--modules) : un kind demandé que le cerveau ne propose
-            # PAS sur la surface qu'il travaille (ex. web.security_headers/recon.tech/recon.waf, jamais
-            # dans le plan heuristique de base) est AJOUTÉ sur cette surface AVANT le filtre de _prepare
-            # — sinon il retombait silencieusement dans `not_planned`. NO-OP en mode AUTO (modules vide).
-            proposed = proposed + self._directive_actions(proposed, modules)
-            proposed = self._prepare(proposed, modules, global_params, attrs_by_host)
-            # NOUVELLES actions seulement (idempotence : on ne rejoue pas une action déjà planifiée).
-            fresh = [a for a in proposed if a.id not in executed_ids]
-            if not fresh:                            # critère d'arrêt 1 : point fixe (rien de neuf)
-                break
-            for a in fresh:
-                executed_ids.add(a.id)
+        # LA FINALISATION EST DANS UN `finally` — ET C'EST UN CORRECTIF, PAS UN ORNEMENT.
+        # Tout le bloc d'accounting anti-lacune (skipped_budget, coverage_gaps, selected_modules,
+        # not_planned) vivait APRÈS la boucle : un `Terminate` (watchdog console — le SEUL arrêt
+        # gracieux qui existait) SAUTAIT ce bloc et laissait ces trois structures VIDES. Le rapport
+        # d'un run coupé annonçait donc « aucune lacune, aucune classe non tentée, aucun module non
+        # planifié » — la lacune silencieuse EXACTE que ce dépôt interdit, sur le chemin même qui
+        # était censé sauver le travail. Désormais l'accounting est produit quoi qu'il arrive :
+        # arrêt gracieux, exception, ou fin normale.
+        try:
+            while waves < max_waves:
+                # le cerveau lit l'ÉTAT (graphe enrichi par la vague précédente), pas juste les cibles.
+                proposed = brain.propose(self.graph)
+                # DIRECTIVE de sélection EXPLICITE (--modules) : un kind demandé que le cerveau ne propose
+                # PAS sur la surface qu'il travaille (ex. web.security_headers/recon.tech/recon.waf, jamais
+                # dans le plan heuristique de base) est AJOUTÉ sur cette surface AVANT le filtre de _prepare
+                # — sinon il retombait silencieusement dans `not_planned`. NO-OP en mode AUTO (modules vide).
+                proposed = proposed + self._directive_actions(proposed, modules)
+                proposed = self._prepare(proposed, modules, global_params, attrs_by_host)
+                # NOUVELLES actions seulement (idempotence : on ne rejoue pas une action déjà planifiée).
+                fresh = [a for a in proposed if a.id not in executed_ids]
+                if not fresh:                            # critère d'arrêt 1 : point fixe (rien de neuf)
+                    break
+                for a in fresh:
+                    executed_ids.add(a.id)
 
-            # ENRICHISSEMENT LLM des payloads d'injection (R6) — OPTIONNEL, OFF par défaut, egress-gaté,
-            # borné, fail-open, ADVISORY ONLY. Sur le THREAD PRINCIPAL (le seul écrivain du ledger) : le
-            # LLM propose des payloads SUPPLÉMENTAIRES pour les endpoints/params d'injection, attachés à
-            # `action.params['llm_payloads']`. L'oracle DÉTERMINISTE les teste/confirme au fire-time (edge
-            # G1). Aucune donnée ne sort sans egress autorisé + ledgeré ; no-op quand le LLM est OFF.
-            self._llm_enrich_injections(fresh)
+                # MUTUALISATION `web.nuclei` — UNE invocation par HÔTE au lieu d'une par cible.
+                # La raison n'est pas celle qu'on croyait : nuclei ne fait pas un travail par-URL
+                # qu'on multiplierait. `docker run --rm` JETTE `/root/nuclei-templates` à chaque fois,
+                # donc chaque invocation re-paie toute la base de templates. Coût MESURÉ sur le vrai
+                # binaire : 1 cible 26,0 s, 20 cibles 23,7 s — le coût est FIXE. Sur la campagne
+                # réelle (65 tirs pour 10 hôtes), c'est 55 rechargements inutiles, ~23 min.
+                #
+                # Le point d'insertion porte deux invariants : APRÈS `executed_ids` (toute action
+                # repliée reste marquée, donc jamais rejouée à la vague suivante) et AVANT
+                # `planner.order` (le dénominateur de couverture compte les actions RÉELLEMENT
+                # tirées, pas 55 fantômes qui se liraient comme un trou de couverture).
+                # No-op quand il y a <= 1 nuclei par hôte.
+                fresh = _coalesce_nuclei(fresh)
 
-            ordered, skipped = planner.order(fresh)
-            for a in skipped:                        # defer != delete : accumulé, jamais jeté
-                skipped_by_id[a.id] = a
-            # bannière de vague (live) : borne visuellement les vagues plan->observe->replan et annonce
-            # le nb d'actions ordonnées + différées. No-op si aucun callback (byte-identique).
-            self._emit(f"=== vague {waves + 1} — {len(ordered)} action(s) ordonnée(s)"
-                       + (f", {len(skipped)} différée(s)" if skipped else "") + " ===")
-            # DURABILITÉ INCRÉMENTALE : le checkpoint est passé À CHAQUE run() (persistance intra-vague
-            # tous les `checkpoint_every` actions) PUIS invoqué une fois de plus à la FRONTIÈRE de vague
-            # (le travail d'une vague complète est flushé avant d'entamer la suivante). Sans callback, on
-            # appelle run() avec sa SIGNATURE HISTORIQUE (aucun kwarg) -> byte-identique (les tests qui
-            # espionnent `run(actions)` restent valides).
-            if checkpoint is None:
-                self.run(ordered)
-            else:
-                self.run(ordered, checkpoint=checkpoint, checkpoint_every=checkpoint_every)
-            waves += 1
-            self._run_checkpoint(checkpoint)
+                # ENRICHISSEMENT LLM des payloads d'injection (R6) — OPTIONNEL, OFF par défaut, egress-gaté,
+                # borné, fail-open, ADVISORY ONLY. Sur le THREAD PRINCIPAL (le seul écrivain du ledger) : le
+                # LLM propose des payloads SUPPLÉMENTAIRES pour les endpoints/params d'injection, attachés à
+                # `action.params['llm_payloads']`. L'oracle DÉTERMINISTE les teste/confirme au fire-time (edge
+                # G1). Aucune donnée ne sort sans egress autorisé + ledgeré ; no-op quand le LLM est OFF.
+                self._llm_enrich_injections(fresh)
 
-        self.skipped_budget = list(skipped_by_id.values())
-        # une classe n'est une lacune QUE si elle n'a JAMAIS été tentée sur AUCUNE vague :
-        # recalcul final à partir de tous les kinds réellement exécutés (results), par host.
-        self.coverage_gaps = self._final_gaps(planner, hosts)
-        # ANTI-LACUNE : accounting AU NIVEAU MODULE. L'univers DEMANDÉ pour ce run moins les modules
-        # réellement planifiés (entrés dans results) = les modules disponibles JAMAIS ordonnancés. Chaque
-        # module sélectionné est désormais soit planifié (fired/dry/vetoed/errors) soit listé ici avec sa
-        # raison -> `not_planned ∪ planifiés == selected_modules` (aucune omission silencieuse).
-        self.selected_modules = self._selected_universe(modules)
-        self.not_planned = self.unplanned_modules(self.selected_modules)
-        self.waves = waves
+                ordered, skipped = planner.order(fresh)
+                for a in skipped:                        # defer != delete : accumulé, jamais jeté
+                    skipped_by_id[a.id] = a
+                for a in ordered:                        # dénominateur du « X actions sur Y planifiées »
+                    ordered_all[a.id] = a
+                # bannière de vague (live) : borne visuellement les vagues plan->observe->replan et annonce
+                # le nb d'actions ordonnées + différées. No-op si aucun callback (byte-identique).
+                self._emit(f"=== vague {waves + 1} — {len(ordered)} action(s) ordonnée(s)"
+                           + (f", {len(skipped)} différée(s)" if skipped else "") + " ===")
+                # DURABILITÉ INCRÉMENTALE : le checkpoint est passé À CHAQUE run() (persistance intra-vague
+                # tous les `checkpoint_every` actions) PUIS invoqué une fois de plus à la FRONTIÈRE de vague
+                # (le travail d'une vague complète est flushé avant d'entamer la suivante). Sans callback, on
+                # appelle run() avec sa SIGNATURE HISTORIQUE (aucun kwarg) -> byte-identique (les tests qui
+                # espionnent `run(actions)` restent valides).
+                if checkpoint is None:
+                    self.run(ordered)
+                else:
+                    self.run(ordered, checkpoint=checkpoint, checkpoint_every=checkpoint_every)
+                waves += 1
+                self._run_checkpoint(checkpoint)
+                self._check_stop()               # frontière de vague : budget / signal externe
+        finally:
+            self._finalize_coverage(planner, hosts, modules, skipped_by_id, ordered_all, waves)
         return self.coverage()
+
+    def _finalize_coverage(self, planner: Planner, hosts: list[str],
+                           modules: "Iterable[str] | None",
+                           skipped_by_id: dict[str, Action],
+                           ordered_all: dict[str, Action], waves: int) -> None:
+        """ACCOUNTING ANTI-LACUNE DE FIN DE CAMPAGNE — exécuté sur TOUS les chemins de sortie (fin
+        normale, arrêt gracieux, exception), depuis le `finally` de `campaign()`.
+
+        Produit les buckets que le rapport rend : déférées par budget de planner (defer != delete),
+        classes jamais tentées par cible, modules disponibles jamais ordonnancés, et — nouveau — les
+        actions ORDONNÉES JAMAIS ATTEINTES quand le run a été coupé. Ce dernier bucket est ce qui
+        transforme « le rapport ne parle pas de ces actions » en « le rapport dit qu'elles n'ont pas
+        tourné ».
+
+        FAIL-LOUD, jamais silencieux : une erreur ici est RETENUE dans `coverage_finalize_error` (et
+        rendue par le rapport) au lieu d'être propagée — propager masquerait l'exception d'origine
+        qui a mené au `finally`, et avaler sans le dire produirait des compteurs muets."""
+        try:
+            self.skipped_budget = list(skipped_by_id.values())
+            # une classe n'est une lacune QUE si elle n'a JAMAIS été tentée sur AUCUNE vague :
+            # recalcul final à partir de tous les kinds réellement exécutés (results), par host.
+            self.coverage_gaps = self._final_gaps(planner, hosts)
+            # ANTI-LACUNE : accounting AU NIVEAU MODULE. L'univers DEMANDÉ pour ce run moins les modules
+            # réellement planifiés (entrés dans results) = les modules disponibles JAMAIS ordonnancés. Chaque
+            # module sélectionné est désormais soit planifié (fired/dry/vetoed/errors) soit listé ici avec sa
+            # raison -> `not_planned ∪ planifiés == selected_modules` (aucune omission silencieuse).
+            self.selected_modules = self._selected_universe(modules)
+            self.not_planned = self.unplanned_modules(self.selected_modules)
+            self.waves = waves
+            # ANTI-LACUNE AU NIVEAU ACTION : `planifiées` = tout ce que le planner a ORDONNÉ, toutes
+            # vagues confondues ; `non atteintes` = celles dont aucun résultat n'a été APPLIQUÉ. Sur une
+            # fin normale cette liste est VIDE (invariant) ; sur un run coupé elle porte exactement ce
+            # que le rapport doit annoncer comme non tenté. Une action non atteinte n'a produit ni
+            # verdict, ni finding, ni entrée de ledger : elle n'est nulle part ailleurs.
+            self.planned_total = len(ordered_all)
+            applied = {r["action"] for r in self.results}
+            self.not_attempted = [a for aid, a in ordered_all.items() if aid not in applied]
+            if self.interruption is not None:
+                # La fiche a été posée par `_check_stop` AVANT que ces buckets existent : on la
+                # rafraîchit ici avec les compteurs définitifs (mêmes clés que
+                # `interrupt.interruption_record` — un seul vocabulaire).
+                self.interruption.update({
+                    "ran": len(self.results), "planned": self.planned_total or None,
+                    "not_attempted": len(self.not_attempted), "waves": self.waves})
+        except Exception as e:  # noqa: BLE001 — voir docstring : on RETIENT et on DIT, on ne masque pas
+            self.coverage_finalize_error = f"{type(e).__name__}: {e}"
 
     def _llm_enrich_injections(self, actions: list[Action]) -> None:
         """R6 — enrichit les actions d'INJECTION de la vague avec des payloads SUPPLÉMENTAIRES suggérés
