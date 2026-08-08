@@ -23,6 +23,24 @@ fusionne les actions d'une vague en UNE par hôte. Les trois invariants du dép�
     MÊME nom d'hôte que la tête : l'épinglage anti-rebinding reste valable pour chaque membre.
   · COUVERTURE DÉMONTRABLE — toute cible du lot ressort avec SON finding : le hit qui la concerne,
     ou « aucun hit », ou un `skipped` NOMMÉ si elle a été écartée. Jamais une troncature muette.
+
+CORRECTION MESURÉE (run réel du 2026-08-08 contre un hôte VIVANT) — « le coût est FIXE » n'est vrai
+que sur les cibles MORTES qui ont servi à le calibrer (`tests/bench_nuclei_batch.py` : loopback,
+1 cible 26,0 s / 20 cibles 23,7 s). Contre un hôte qui RÉPOND, le coût marginal par cible est du même
+ORDRE que l'allocation `_TIMEOUT_PER_TARGET` — il ne reste donc PAS de marge :
+
+    lot de  6  ->  mur 1200 s,  durée mesurée 1202,67 s   (mur ATTEINT)
+    lot de 11  ->  mur 1800 s,  durée mesurée 1802,61 s   (mur ATTEINT)
+    lot de 17  ->  mur 2520 s,  durée mesurée 2521,68 s   (mur ATTEINT)
+
+Trois lots sur trois ont été TUÉS par `runner.tool` (rc=124), à quelques secondes de frais près. Le
+« budget proportionnel » n'est donc pas une marge de sécurité, c'est le POINT D'ÉQUILIBRE : la
+moindre variance le franchit. Deux conséquences, toutes deux traitées ici :
+  (a) un lot tué rendait « aucun hit » pour les cibles jamais atteintes — un verdict FABRIQUÉ, que
+      la garantie de couverture ci-dessus prétendait précisément interdire (cf. `fire`, rc=124) ;
+  (b) la borne d'un lot (jusqu'à 3480 s à `MAX_BATCH`) est atteinte pour de vrai, donc le moteur ne
+      peut pas la traiter comme improbable : il refuse désormais de DÉMARRER un lot qui ne tient pas
+      dans le budget restant, et le module RÉDUIT son lot pour tenir (cf. `_fit_to_budget`).
 """
 import json
 import urllib.parse
@@ -32,6 +50,7 @@ from ._scopeguard import ScopeGuardMixin
 from .. import resource_profile
 from .. import runner
 from .. import techniques
+from ..interrupt import ACTION_BUDGET_PARAM
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 
 #: param d'action portant le LOT de cibles (list[str]). Absent/vide -> comportement historique
@@ -40,6 +59,11 @@ BATCH_PARAM = "targets"
 
 #: séparateur du `string[]` de nuclei (`-u a,b,c`). Une cible qui le contient est REFUSÉE du lot.
 BATCH_SEP = ","
+
+#: code de retour que `runner.tool` rend quand il a TUÉ le groupe de process à l'échéance (cf.
+#: `runner._spawn_and_wait`). Un tir à 124 a produit une sortie PARTIELLE : ce qu'il n'a pas atteint
+#: n'a PAS été testé, et ne doit surtout pas ressortir en « aucun hit ».
+TIMEOUT_RC = 124
 
 
 def host_of(target):
@@ -255,7 +279,11 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
              pas de `-` initial, pas d'espace ni de caractère de contrôle.
 
         Une cible refusée n'est jamais SUPPRIMÉE en silence : `fire()` en émet un finding `skipped`
-        NOMMÉ (seau `unverified` du rapport = trou de couverture, pas du bruit)."""
+        NOMMÉ (seau `unverified` du rapport = trou de couverture, pas du bruit).
+
+        CINQUIÈME PORTE, ET ELLE N'EST PAS DE SÉCURITÉ : le BUDGET DE TEMPS restant, quand le moteur
+        l'a posé (`ACTION_BUDGET_PARAM`). Voir `_fit_to_budget` — un lot trop gros pour le temps qui
+        reste est RÉDUIT au plus grand qui tienne, jamais tronqué en vol."""
         head = action.target
         raw = (action.params or {}).get(BATCH_PARAM)
         if not isinstance(raw, (list, tuple)) or not raw:
@@ -280,7 +308,69 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
                                     "l'épinglage IP du moteur ne couvre que la tête du lot"))
             else:
                 kept.append(t)
-        return kept, rejected
+        return self._fit_to_budget(action, kept, rejected)
+
+    def _timeout_for(self, n_targets):
+        """Borne DURE d'un tir pour `n_targets` cibles. UNE SEULE définition, lue par `fire()` (ce
+        qu'on passe à `runner.tool`) ET par `max_runtime()` (ce qu'on ANNONCE au moteur) : les deux ne
+        peuvent pas diverger, et c'est ce qui rend la gate de budget du moteur exacte plutôt
+        qu'approximative."""
+        return self._TIMEOUT_BASE + self._TIMEOUT_PER_TARGET * (max(1, int(n_targets)) - 1)
+
+    def _fits(self, remaining):
+        """Plus grand lot dont la borne `_timeout_for` tient dans `remaining` secondes — 0 si même une
+        cible seule ne tient pas, None si aucun budget n'a été posé (-> aucune réduction)."""
+        if remaining is None:
+            return None
+        try:
+            r = float(remaining)
+        except (TypeError, ValueError):
+            return None
+        if r != r:                                     # NaN -> pas d'information
+            return None
+        if r < self._TIMEOUT_BASE:
+            return 0
+        return 1 + int((r - self._TIMEOUT_BASE) // self._TIMEOUT_PER_TARGET)
+
+    def _fit_to_budget(self, action, kept, rejected):
+        """RÉDUIT le lot au plus grand qui tienne dans le budget de temps RESTANT, et NOMME chaque
+        cible retirée. Le moteur ne DÉMARRE pas une action dont la borne dépasse le temps restant
+        (`Engine._budget_gate`) : sans cette réduction, un lot de 17 URLs (borne 2520 s) serait écarté
+        ENTIER dès qu'il reste moins de 42 min — 0 cible couverte. Avec, il en couvre 3 et DIT les 14
+        autres. Mesuré sur le run du 2026-08-08 : c'est exactement la situation du tir fautif (946 s
+        restants pour une borne de 2520 s).
+
+        POURQUOI RÉDUIRE ET NON RABOTER LE TIMEOUT. Un tir raboté est TUÉ en vol : nuclei rend alors
+        une sortie PARTIELLE, et toute cible qu'il n'a pas atteinte ressortait en `tested`/« aucun
+        hit » — un verdict négatif FABRIQUÉ (15 sur 17 dans la reproduction du tir réel). Réduire le
+        lot AVANT de lancer donne le même temps de calcul sans jamais mentir : ce qui est scanné l'est
+        en entier, ce qui ne l'est pas est un `skipped` nommé.
+
+        NO-OP STRICT sans budget posé (aucun param) : `kept`/`rejected` rendus tels quels."""
+        cap = self._fits((action.params or {}).get(ACTION_BUDGET_PARAM))
+        if cap is None or cap >= len(kept):
+            return kept, rejected                      # pas de budget, ou le lot tient déjà
+        # `cap == 0` (il reste moins que `_TIMEOUT_BASE`) : on garde quand même la TÊTE — le module ne
+        # décide pas de renoncer, il ANNONCE au moteur la borne la plus PETITE qu'il puisse porter
+        # (600 s). C'est le moteur qui écarte l'action entière (`Engine._budget_gate`), et son SKIP
+        # nommé couvre alors toutes les cibles d'un coup : mieux qu'une borne de 2520 s annoncée pour
+        # un lot qu'on n'aurait de toute façon pas lancé.
+        keep = max(1, cap)
+        left = float((action.params or {}).get(ACTION_BUDGET_PARAM))
+        for t in kept[keep:]:
+            rejected.append((t, f"lot réduit au budget de temps restant ({left:.0f}s) — {keep} cible(s) "
+                                f"sur {len(kept)} tiennent dans une invocation "
+                                f"({self._timeout_for(keep)}s) ; celle-ci n'a PAS été scannée"))
+        return kept[:keep], rejected
+
+    def max_runtime(self, action):
+        """Borne DURE que ce module ANNONCE au moteur pour cette action (protocole optionnel lu par
+        `Engine._runtime_bound`). C'est la borne du lot RÉELLEMENT retenu — réduction au budget
+        comprise — donc exactement ce que `fire()` passera à `runner.tool`. Un module qui annonce
+        moins qu'il ne prend rendrait la gate de budget mensongère ; la source unique
+        (`_timeout_for`) et le `_batch()` partagé l'interdisent."""
+        kept, _ = self._batch(action)
+        return self._timeout_for(len(kept))
 
     def _args(self, action, targets=None):
         p = action.params or {}
@@ -325,7 +415,8 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
         poc = runner.cmdline(self.BIN, self.IMG, self._args(action, targets), prefer_docker=True)
         # BUDGET PROPORTIONNEL : une invocation groupée fait le travail de N — lui laisser le budget
         # d'UNE seule échangerait des invocations contre des timeouts (== des trous de couverture).
-        timeout = self._TIMEOUT_BASE + self._TIMEOUT_PER_TARGET * (len(targets) - 1)
+        # MÊME SOURCE que ce que `max_runtime()` annonce au moteur (cf. `_timeout_for`).
+        timeout = self._timeout_for(len(targets))
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action, targets),
                                    timeout=timeout, prefer_docker=True)
         # Parser stdout d'ABORD : nuclei peut sortir rc!=0 sur condition bénigne tout en ayant
@@ -372,8 +463,24 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
         # COUVERTURE PAR CIBLE, DÉMONTRABLE : chaque cible du lot SANS hit attribué ressort avec son
         # « aucun hit » — exactement la ligne qu'elle aurait produite seule. Le rapport ne peut donc pas
         # perdre une cible parce qu'elle a voyagé dans un lot.
+        #
+        # SAUF SI LE TIR A ÉTÉ TUÉ À SON MUR (rc=124, `runner.tool`). C'est un TROU MESURÉ, pas une
+        # hypothèse : sur le run du 2026-08-08, le dernier lot (17 URLs, mur à 2520 s) a été tué à
+        # 2521,68 s. nuclei avait DÉJÀ émis du JSONL, donc `findings` n'était pas vide, donc le
+        # `tool_failed` ci-dessus n'a pas été atteint — et les 4 cibles jamais scannées sont sorties
+        # en `tested` « aucun hit ». Un verdict négatif FABRIQUÉ, produit par la garantie même
+        # (« couverture par URL démontrable ») qui prétendait l'empêcher. Reproduit à l'unité : 15
+        # cibles sur 17 mentaient. Désormais une troncature rend un `skipped` NOMMÉ — « je n'ai pas
+        # vérifié », qui va au seau `unverified` du rapport, jamais au seau « vérifié ».
+        truncated = (rc == TIMEOUT_RC)
         for t in targets:
-            if norm_target(t) not in hit_surfaces:
+            if norm_target(t) in hit_surfaces:
+                continue
+            if truncated:
+                findings.append(self._skipped(
+                    t, f"scan TRONQUÉ — nuclei tué à son échéance de {timeout}s (rc=124) avant "
+                       f"d'avoir rendu un verdict pour cette cible"))
+            else:
                 findings.append(self.finding(
                     target=t, title="nuclei: aucun hit", severity="INFO",
                     category="nuclei", status="tested", tool="nuclei", poc=poc))

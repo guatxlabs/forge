@@ -242,7 +242,8 @@ class TestOracleActuallyTestsDiscoveredParam(unittest.TestCase):
             f = SqliProbe().fire(Action("sqli.probe", self.EP, params={"in_scope": ["app.test"]}))
         finally:
             restore()
-        self.assertEqual(f[0].status, "tested")
+        self.assertEqual(f[0].status, "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("config manquante", f[0].title)
 
 

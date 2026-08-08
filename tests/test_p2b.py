@@ -400,7 +400,8 @@ class TestIdorOracleDifferential(unittest.TestCase):
         finally:
             IdorDifferential._fetch = orig
         self.assertEqual(calls["n"], 0)                  # aucune requête (fail-closed)
-        self.assertEqual(findings[0].status, "tested")
+        self.assertEqual(findings[0].status, "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("capacité destructive non autorisée", findings[0].title)
 
     def test_missing_config_is_info_skip(self):

@@ -75,6 +75,18 @@ ENV_RUN_TIMEOUT = "FORGE_RUN_TIMEOUT"
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smh]?)\s*$", re.IGNORECASE)
 _UNITS = {"": 1, "s": 1, "m": 60, "h": 3600}
 
+#: Nom du param d'action par lequel le MOTEUR passe le budget de temps RESTANT (secondes, float) au
+#: module, juste avant le tir — protocole OPTIONNEL, symétrique de `_pinned_ips`. Vit ICI, dans le
+#: module du budget, parce que c'est un mot de VOCABULAIRE du budget et que `forge.interrupt`
+#: n'importe rien de `forge.*` : le moteur ET les modules peuvent le lire sans cycle d'import.
+#:
+#: DEUX USAGES, un seul sens de lecture (le module ne l'écrit jamais) :
+#:   1. `Engine._budget_gate` le pose, puis demande sa borne au module -> un module qui SAIT réduire
+#:      son travail (`NucleiScan._batch` : un lot de 17 URLs redevient un lot de 3) rend une borne
+#:      DÉJÀ adaptée, et passe la gate au lieu d'être écarté en entier ;
+#:   2. absent (aucun budget posé) => aucun module ne s'adapte, comportement byte-identique.
+ACTION_BUDGET_PARAM = "_budget_remaining"
+
 
 class Terminate(BaseException):
     """Arrêt GRACIEUX d'un run. Dérive de `BaseException` (PAS de `Exception`) EXPRÈS : le

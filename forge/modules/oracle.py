@@ -18,17 +18,23 @@ Ce que la base fournit (chaque oracle concret se réduit à : métadonnées + lo
 Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed restent déclarés par
 chaque module concret et restent gardés par le ROE.
 """
+import functools
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from ._scopeguard import ScopeGuardMixin
 from .registry import Module
+from .. import blindness as _blind
 from .. import pin as _pin
 from .. import session as _session
 from .. import throttle as _throttle
 
 _MAX_REDIRECTS = 5               # borne du suivi de redirection scope-checké opt-in (anti-boucle)
+# Prélèvement BORNÉ du corps d'une réponse d'ERREUR, à des fins de CLASSIFICATION UNIQUEMENT (jamais
+# rendu à l'appelant). 8 Kio suffisent très largement : l'interstitiel Cloudflare porte sa signature
+# (`<title>Just a moment…`, `/cdn-cgi/challenge-platform`) dans ses 500 premiers octets.
+_ERROR_BODY_PEEK = 8192
 _MAX_BACKOFF = 3                 # borne des ré-essais 429/503 (back-off exponentiel, JAMAIS infini)
 _BACKOFF_BASE = 0.5             # délai initial du back-off (s) si pas de Retry-After
 _BACKOFF_CAP = 8.0             # plafond du délai de back-off / d'un Retry-After honoré (s)
@@ -79,6 +85,46 @@ def _host_of(url):
         return ""
 
 
+def _peek_error_body(err):
+    """Prélèvement BORNÉ (`_ERROR_BODY_PEEK`) du corps d'une `HTTPError`, **à des fins de
+    classification uniquement**. Ne lève JAMAIS ('' si le flux est fermé/absent/illisible).
+
+    POURQUOI CE PRÉLÈVEMENT EXISTE — le défaut mesuré. `_http` rend `("", …)` sur `HTTPError` : le
+    corps de la réponse d'erreur est JETÉ. Or l'interstitiel de défi Cloudflare (5 229 octets,
+    « Just a moment… », `/cdn-cgi/challenge-platform`) vit exactement là, et c'est la signature la
+    plus fiable dont on dispose — la seule qui ne dépende pas de la version HTTP négociée. Sur la
+    campagne `gxrun2`, la garde de challenge n'avait plus que la voie en-tête (`cf-mitigated`), qui
+    n'atteint pas le chemin urllib : deux modules qui la portaient ont rendu 49 `tested` chacun sur
+    un mur. On lit donc ce corps ICI, on s'en sert POUR JUGER, et on ne le rend PAS : le contrat
+    public de `_http` (corps vide sur HTTPError) reste BYTE-IDENTIQUE pour les ~19 oracles."""
+    try:
+        return err.read(_ERROR_BODY_PEEK).decode("utf-8", "replace")
+    except Exception:            # noqa: BLE001 (flux déjà consommé/fermé : aucune importance)
+        return ""
+
+
+def _witness(status, body, headers, url, store):
+    """Verse UNE réponse au témoin de cécité de l'action courante et propage l'état au store gouverné.
+
+    Deux effets, tous deux no-op hors contexte gouverné (dev/test/appel direct de `_http`) :
+      - `blindness.note(...)` compte « défi managé constaté » vs « application réellement vue » ;
+      - si la réponse porte une signature EXPLICITE de défi, l'hôte passe à `CHALLENGED` dans le
+        `SessionStore` (scope-guardé, sans secret). C'est la voie de propagation qui existait DÉJÀ
+        mais que SEUL `evasion` alimentait : les modules sans corps à juger (sonde de TIMING du
+        smuggling) la lisent pour s'abstenir. Ne lève jamais."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "") if url else ""
+    except Exception:            # noqa: BLE001
+        host = ""
+    challenged = _blind.note(status, body, headers, host)
+    if challenged and store is not None:
+        try:
+            store.mark_challenged(url)
+        except Exception:        # noqa: BLE001 (le suivi ne doit jamais avorter une requête)
+            pass
+    return challenged
+
+
 def _redirect_target(cur_url, location, store):
     """URL absolue du PROCHAIN saut de redirection SI le suivi est autorisé, sinon None (fail-closed).
 
@@ -110,6 +156,49 @@ class Oracle(Module):
     tool = ""                   # chaîne de provenance estampillée sur les findings
     MAXLEN = 200000             # troncature du corps lu par `_fetch_body` (cas commun ; surchargée par oracle)
 
+    # =============================================================================================
+    #  FRONTIÈRE DE `fire()` — UN mur ne doit pas produire des milliers d'AFFIRMATIONS de non-vuln.
+    #
+    #  MESURÉ (`gxrun2`) : 4 839 findings `tested` — « j'ai vérifié, rien trouvé » — émis sur des
+    #  hôtes dont le moteur n'a JAMAIS vu le contenu. C'est le faux négatif le plus dangereux : il
+    #  RESSEMBLE à de la couverture.
+    #
+    #  POURQUOI ICI, ET PAS QUARANTE RUSTINES. Les ~19 modules-oracles n'ont RIEN en commun côté
+    #  jugement : `security_headers` appelle `self.finding(status='tested')` sans passer par
+    #  `proof()`, `business_logic` n'émet aucune requête, `access_control` construit un différentiel
+    #  multi-comptes. Ce qu'ils partagent, c'est (1) `Oracle._http` en entrée — le chokepoint où la
+    #  réponse ENTRE — et (2) `fire(action)` en sortie. Poser la mesure en (1) et la décision en (2)
+    #  couvre TOUS les oracles, y compris `web.py:access_control.idor` que ce lot ne modifie pas,
+    #  et se prouve en UN endroit. Quarante correctifs indépendants dériveraient et se
+    #  contrediraient ; celui-ci ne peut pas diverger — il n'y en a qu'un.
+    #
+    #  Le déclassement lui-même (`blindness.downgrade`) ne touche QUE `status='tested'` -> `skipped` :
+    #  jamais un `vulnerable` (une preuve reste une preuve), jamais quoi que ce soit si l'action n'a
+    #  pas été jugée AVEUGLE (signature EXPLICITE de défi ET application jamais vue).
+    # =============================================================================================
+    def __init_subclass__(cls, **kw):
+        """Enveloppe le `fire()` de CHAQUE oracle concret : témoin de cécité lié pendant l'appel,
+        déclassement appliqué au retour. Idempotent (un `fire` déjà enveloppé ne l'est pas deux fois)
+        et transparent (`functools.wraps` : nom, docstring et signature conservés pour la console et
+        le catalogue). Un sous-classement qui n'apporte PAS son propre `fire` hérite du parent déjà
+        enveloppé — l'enveloppe n'est donc jamais empilée."""
+        super().__init_subclass__(**kw)
+        fn = cls.__dict__.get("fire")
+        if fn is None or getattr(fn, "_forge_blindness_wrapped", False):
+            return
+
+        @functools.wraps(fn)
+        def _fire_with_blindness_witness(self, action, *a, **k):
+            ctx = _blind.using()
+            with ctx as witness:
+                findings = fn(self, action, *a, **k)
+            # SEUL le propriétaire du témoin juge : un oracle imbriqué (aucun aujourd'hui, mais la
+            # garde est gratuite) ne déclasserait jamais sur une vue PARTIELLE de l'action.
+            return _blind.downgrade(witness if ctx.owned else None, findings)
+
+        _fire_with_blindness_witness._forge_blindness_wrapped = True
+        cls.fire = _fire_with_blindness_witness
+
     # --- construction UNIFORME de Finding (le coeur factorisé) ---
     def proof(self, *, target, proven, title, severity, evidence, poc, fix=None):
         """Finding sur le CHEMIN DE PREUVE. Estampille category=self.cwe, cwe=self.cwe, mitre=self.mitre,
@@ -124,12 +213,29 @@ class Oracle(Module):
             tool=self.tool, evidence=evidence, poc=poc)
 
     def skip(self, *, target, title, evidence, poc, severity="INFO"):
-        """Finding 'non testé / config manquante' : category=self.cwe, status='tested', tool=self.tool,
-        et AUCUN mitre/cwe/fix estampillé (le schema dérivera cwe depuis category + fix depuis le mapping).
-        Sert aussi aux refus fail-closed (ex : write IDOR non autorisé) — INFO, aucun réseau émis."""
+        """Finding « non testé / config manquante » : `status='skipped'`, category=self.cwe,
+        tool=self.tool, et AUCUN mitre/cwe/fix estampillé (le schema dérive cwe depuis category et
+        fix depuis le mapping). Sert aussi aux refus fail-closed (ex : write IDOR non autorisé) —
+        INFO, aucun réseau émis.
+
+        ⚠️ CETTE MÉTHODE ÉMETTAIT `status='tested'`. La méthode LITTÉRALEMENT NOMMÉE `skip`, dont le
+        docstring disait « non testé », affirmait donc « **j'ai vérifié, rien trouvé** » — le contraire
+        exact de ce qu'elle veut dire, et sur la plus grosse population du moteur : **1 750 findings
+        mesurés sur une campagne réelle**, répartis sur 25 kinds. Aucun octet n'avait été émis pour
+        aucun d'eux.
+
+        C'est le même défaut que celui réparé partout ailleurs dans ce dépôt — une affirmation plus
+        large que ce qu'elle recouvre — mais c'était ici le plus coûteux : un rapport listant
+        « access_control.idor : tested » sur une cible pour laquelle aucun compte de test n'était
+        configuré se lit comme une absence de vulnérabilité. C'est précisément le mode d'échec qui a
+        déjà coûté une campagne (rapport propre et vide == « cible saine »).
+
+        `skipped` est le vocabulaire déjà en place pour « je n'ai pas pu vérifier » (cf. `degraded`),
+        et la vue de rapport le remonte en section « Couverture NON vérifiée » au lieu de le noyer
+        dans le bruit de reconnaissance."""
         return self.finding(
             target=target, title=title, severity=severity,
-            category=self.cwe, status="tested", tool=self.tool,
+            category=self.cwe, status="skipped", tool=self.tool,
             evidence=evidence, poc=poc)
 
     def degraded(self, *, target, title, evidence, poc):
@@ -344,7 +450,12 @@ class Oracle(Module):
                     resp = (Oracle._pinned_open(req, pin_ip, timeout=timeout) if pin_ip
                             else Oracle._raw_open(req, timeout=timeout))
                     with resp as r:
-                        return r.status, r.read(maxlen).decode("utf-8", "replace"), r.headers
+                        st_ok = r.status
+                        body_ok = r.read(maxlen).decode("utf-8", "replace")
+                        # CHOKEPOINT : la réponse ENTRE dans l'oracle -> témoin de cécité (no-op hors
+                        # contexte). Un 200 « Just a moment… » est un DÉFI, pas du contenu.
+                        _witness(st_ok, body_ok, r.headers, cur_url, store)
+                        return st_ok, body_ok, r.headers
                 except urllib.error.HTTPError as he:
                     e = he
                     if backoff_left > 0 and _is_throttled(he):
@@ -394,6 +505,11 @@ class Oracle(Module):
             # marqueur « rate-limited » au run (au lieu d'empties silencieux). Puis la réponse telle quelle.
             if _is_throttled(e) and bucket is not None:
                 bucket.mark_blocked()
+            # CHOKEPOINT (réponse d'ERREUR) : on PRÉLÈVE le corps pour JUGER — c'est là que vit
+            # l'interstitiel de défi — puis on rend le corps VIDE comme avant. Le corps prélevé ne
+            # sort JAMAIS d'ici : contrat public de `_http` inchangé, byte pour byte.
+            err_headers = getattr(e, "headers", None)
+            _witness(e.code, _peek_error_body(e), err_headers, cur_url, store)
             # pas de suivi (défaut, hors-scope, sans scope lié, ou budget épuisé) : réponse telle quelle.
             try:
                 return e.code, "", e.headers

@@ -12,6 +12,17 @@ Ce fichier est la PREUVE que le refactor n'a RIEN changé d'observable :
 
 Les snapshots (`tests/_snapshots/*.json`) ont été CAPTURÉS sur le code PRÉ-refactor : ce sont eux
 l'oracle de non-régression, pas la table (comparaison non circulaire).
+
+⚠️ MODIFICATION DÉLIBÉRÉE DU SNAPSHOT (2026-08-08) — et il faut la justifier, puisque tout l'intérêt
+d'un snapshot est de RÉSISTER au changement. Cinq entrées (`auth_skip`, `cors_skip`, `idor_skip`,
+`ssrf_skip`, `idor_write_failclosed`) passent de `status='tested'` à `status='skipped'`. Ce ne sont pas des verdicts
+négatifs : ce sont des `Oracle.skip()` — « config manquante », « capacité non autorisée » — pour
+lesquels AUCUN octet n'a été émis. Elles affirmaient « j'ai vérifié, rien trouvé » sur des tests qui
+n'ont jamais eu lieu (1 750 findings de cette forme sur une campagne réelle).
+
+Le snapshot avait donc figé un DÉFAUT, et un snapshot fidèle à un défaut le perpétue. Les quatre entrées
+`*_negative` restent `tested` : celles-là ont bel et bien tiré et n'ont rien trouvé — c'est la
+distinction que ce fichier doit continuer à garder.
 """
 import email.message
 import io

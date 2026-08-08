@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
-from .interrupt import Terminate
+from .interrupt import Terminate, ACTION_BUDGET_PARAM as _BUDGET_PARAM
 from . import infra_urls
 from . import modules as mods
 from . import pin
@@ -133,6 +133,30 @@ def _action_cost(action: Action) -> float:
     return c
 
 
+def _secs(value: float) -> str:
+    """Formate une durée pour une RAISON lue par un humain.
+
+    Sous 10 s, DEUX décimales — et ce n'est pas de la coquetterie : arrondie à l'entier, la raison
+    d'un run réel affichait « 1s > 1s », c'est-à-dire une gate PARFAITEMENT correcte qui se lit comme
+    un bug (la borne valait 1,0 s, le reste 0,96 s). Une décimale ne suffisait pas non plus. Au-delà
+    de 10 s — l'échelle de tous les budgets réels, en minutes ou en heures — la décimale n'apporte
+    rien et alourdit."""
+    return f"{value:.2f}s" if abs(value) < 10 else f"{value:.0f}s"
+
+
+def _call_bound(module: Any, action: Action) -> Any:
+    """`module.max_runtime(action)` si le module en déclare une, None sinon. Ne lève jamais : un
+    module dont la borne explose (params tordus) est traité comme un module SANS borne — fail-open,
+    comme tout le reste de `Engine._runtime_bound`."""
+    fn = getattr(module, "max_runtime", None)
+    if not callable(fn):
+        return None
+    try:
+        return fn(action)
+    except Exception:  # noqa: BLE001 — une borne indisponible n'est pas une raison d'avorter un tir
+        return None
+
+
 def _shutdown_executor(ex: Any) -> None:
     """Ferme l'exécuteur SANS attendre (`wait=False`) et ANNULE les tâches encore en file d'attente
     (`cancel_futures`) — sur un arrêt gracieux (_Terminate) ou une exception, on ne DÉMARRE plus de
@@ -166,6 +190,7 @@ class Phase(enum.Enum):
     TECHNIQUE_DESELECTED = "technique_deselected"  # technique hors sélection par-scope
     INFRA_NON_TARGET = "infra_non_target"      # cible = namespace d'edge RÉSERVÉ (CDN/WAF) — pas une cible
     UNAVAILABLE = "unavailable"                # outil/service sous-jacent absent
+    BUDGET_TOO_SHORT = "budget_too_short"      # borne d'exécution DÉCLARÉE > budget de temps restant
     DECIDED = "decided"                        # verdict rendu par la gate ROE (VETO/DRY_RUN/FIRE)
     FIRE_ERROR = "fire_error"                  # M6 — exception LEVÉE pendant le tir (module.fire/post-traitement)
 
@@ -218,6 +243,7 @@ class _Pending:
     fire_exc: BaseException | None = None        # exception capturée du fire() (FIRE en erreur)
     bucket_blocked: int = 0                      # 429/WAF persistants relus sur le throttle après le tir
     bucket_rate: float = 0.0
+    budget_skip: str = ""                        # gate de budget : raison NOMMÉE d'un tir NON DÉMARRÉ
 
 
 class Engine:
@@ -226,7 +252,8 @@ class Engine:
                  campaign: str | None = None, run_id: str | None = None,
                  progress: "Callable[[str], None] | None" = None,
                  durations: Any = None,
-                 stop: "Callable[[], Terminate | None] | None" = None) -> None:
+                 stop: "Callable[[], Terminate | None] | None" = None,
+                 remaining: "Callable[[], float] | None" = None) -> None:
         self.scope = scope
         self.ledger = ledger
         self.memory = memory       # memory.Memory | None — dedup + persistance des findings
@@ -275,6 +302,13 @@ class Engine:
         # ROE, ni au plan, ni aux findings — il interrompt, et l'interruption est COMPTÉE et DITE
         # (`self.interruption`, `self.not_attempted`), jamais silencieuse.
         self._stop = stop
+        # BUDGET DE TEMPS RESTANT (OPTIONNEL, additif) — `Budget.remaining` quand l'opérateur a posé un
+        # budget, None sinon. C'est la SECONDE moitié du couple : `stop` dit « l'échéance est PASSÉE »,
+        # `remaining` dit « il reste tant AVANT elle ». Le moteur s'en sert pour ne pas DÉMARRER un tir
+        # dont la borne d'exécution DÉCLARÉE dépasse ce qu'il reste (cf. `_budget_gate`). None (défaut :
+        # aucun budget, appelants programmatiques, tests) => la gate est un NO-OP STRICT (une comparaison
+        # à None) et le comportement est byte-identique. Ne DÉCIDE de rien d'autre : ni ROE, ni plan.
+        self._remaining = remaining
         # FICHE D'INTERRUPTION du run (None tant qu'il n'a pas été interrompu) — posée par `_check_stop`
         # au moment de lever, pour que TOUT appelant (CLI, console, test) puisse rendre un rapport qui
         # s'annonce partiel sans avoir à rattraper l'exception lui-même.
@@ -452,6 +486,12 @@ class Engine:
         pending = _Pending(action, decision=decision, module=module, is_fire=True)
         if decision.pinned_ips:
             action.params["_pinned_ips"] = list(decision.pinned_ips)
+        # GATE DE BUDGET — DERNIÈRE porte avant le tir, et la SEULE qui regarde l'horloge. Elle ne
+        # coupe rien : elle empêche de DÉMARRER ce qui ne peut pas tenir. Cf. `_budget_gate`.
+        if (why := self._budget_gate(module, action)):
+            pending.is_fire = False
+            pending.budget_skip = why
+            return pending
         # INSTRUMENTATION DE DURÉE (horloge MONOTONE — jamais l'heure murale, qu'un NTP peut faire
         # reculer). On chronomètre EXACTEMENT ce qui occupe un worker du pool : le tir bloquant, liaison
         # des contextes thread-local comprise. Enregistré même si le tir LÈVE (le worker a bien été
@@ -474,6 +514,104 @@ class Engine:
         finally:
             self._record_duration(action.kind, time.monotonic() - t0)
         return pending
+
+    # --- GATE DE BUDGET : ON NE COUPE RIEN, ON NE DÉMARRE PAS CE QUI NE TIENT PAS ------------------
+    # LE DÉFAUT MESURÉ (run réel du 2026-08-08, `--run-timeout 100m`) : 7576 s écoulées pour 6000 s
+    # demandées, soit +26,3 %. Le sidecar de durées et le ledger signé disent la même chose, à la
+    # seconde près :
+    #
+    #   · une SEULE action a enjambé l'échéance — un lot `web.nuclei` de 17 URLs, appliqué à t=7570 s
+    #     alors que l'action précédente l'avait été à t=5055 s (2515 s sans QUOI QUE CE SOIT d'appliqué) ;
+    #   · sa durée mesurée est **2521,68 s**, à comparer à sa borne `600 + 120*(17-1)` = **2520 s**.
+    #     Elle n'a donc PAS « duré longtemps » : elle a été **TUÉE À SON MUR** par `runner.tool`
+    #     (rc=124), à 1,68 s de frais de spawn/kill/parse près. Les deux autres tirs nuclei lents du
+    #     même run tombent sur le même constat (1202,67 s pour un mur à 1200 s ; 1802,61 s pour 1800 s) ;
+    #   · dépassement = durée − budget restant AU DÉMARRAGE : 2521,7 − (6000 − 5054,3) = **1575,7 s**.
+    #     C'est exactement le +1576 s observé.
+    #
+    # CE QUE ÇA CHANGE. Le défaut n'est pas « une action est lente », c'est : **le moteur a DÉMARRÉ un
+    # tir dont la borne DURE (2520 s) valait 2,66× le budget qu'il lui restait (946 s)**. Il pouvait le
+    # savoir avant de lancer le process. D'où cette gate, et d'où sa forme :
+    #
+    #   ON NE RABOTE PAS LE TIMEOUT D'UNE ACTION QUI TOURNE. C'était la piste évidente, et la mesure
+    #   la condamne : un lot nuclei tronqué émet un `tested`/« aucun hit » pour CHAQUE cible qu'il n'a
+    #   pas eu le temps d'atteindre (15 sur 17 dans la reproduction du tir final). Raboter le timeout,
+    #   c'est donc FABRIQUER des verdicts négatifs — précisément ce que ce dépôt interdit. (Le trou
+    #   existait déjà sans budget ; il est refermé côté module, cf. `NucleiScan.fire`, rc=124.)
+    #
+    #   ON NE DÉCIDE PAS NON PLUS À LA MUTUALISATION. Réduire `MAX_BATCH` quand le budget est serré
+    #   suppose de connaître le budget RESTANT au moment du regroupement — or `coalesce_nuclei` tourne
+    #   une fois par VAGUE, dans `campaign()`, avant `planner.order` : dans le run réel, ~3200 s et
+    #   4000 actions avant le tir fautif. L'information n'existe pas encore à cet endroit.
+    #
+    # CE QU'ON FAIT : à la DERNIÈRE frontière avant le process, on compare la borne DÉCLARÉE par le
+    # module au temps restant. Trop long -> l'action n'est pas DÉMARRÉE, et elle ressort en SKIP NOMMÉ
+    # (seau `errors` de `coverage()`, listé au rapport). Une action non démarrée n'est ni `tested`, ni
+    # `not_vulnerable`, ni un finding : c'est le vocabulaire « je n'ai pas vérifié » que le dépôt a
+    # déjà. Le module reçoit au passage le temps restant (`ACTION_BUDGET_PARAM`) et peut S'ADAPTER
+    # plutôt que d'être écarté — nuclei réduit son lot au plus grand qui tienne (17 -> 3), les cibles
+    # retirées sortant en `skipped` nommés.
+    #
+    # PORTÉE HONNÊTE, et c'est la limite à connaître : la gate ne couvre que les modules qui DÉCLARENT
+    # une borne (`max_runtime`, ou `spec.timeout` des modules ToolSpec/toolcatalog — 600 s). Les
+    # oracles Python et le recon natif n'en déclarent pas : ils ne sont PAS gatés, et le dépassement
+    # résiduel reste leur durée propre (max mesuré sur le run réel, tous kinds hors nuclei confondus :
+    # **65,7 s**). Fail-open délibéré — gater un oracle à 0,1 ms sur une borne fictive de 120 s
+    # supprimerait de la couverture pour rien. Le lancement l'ANNONCE (cf. `cli/engine._make_stop`).
+    #
+    # SANS BUDGET, RIEN NE CHANGE : `self._remaining is None` -> une comparaison à None, aucun param
+    # posé, aucune borne calculée, aucun chemin nouveau. C'est le cas de tous les appelants
+    # programmatiques et de la CLI sans `--run-timeout`.
+    def _budget_left(self) -> "float | None":
+        """Secondes restant avant l'échéance, ou None (aucun budget posé / hook en défaut).
+
+        Best-effort STRICT : un hook qui lève ou rend n'importe quoi rend None -> la gate se tait et
+        le tir part comme avant. Un budget est là pour BORNER un run, jamais pour en casser un."""
+        fn = self._remaining
+        if fn is None:
+            return None
+        try:
+            left = float(fn())
+        except Exception:  # noqa: BLE001 — un hook en défaut ne doit JAMAIS empêcher un tir
+            return None
+        return None if left != left else left            # NaN -> pas d'information -> pas de gate
+
+    @staticmethod
+    def _runtime_bound(module: Any, action: Action) -> "float | None":
+        """Borne DURE d'exécution que le module DÉCLARE pour CETTE action (secondes), ou None.
+
+        DEUX SOURCES, DUCK-TYPÉES — aucun module n'a à changer pour rester compatible :
+          1. `module.max_runtime(action)` — la borne EXACTE, calculée par le module qui connaît le
+             travail (`NucleiScan` : `600 + 120*(len(lot)-1)`, lot déjà réduit au budget restant) ;
+          2. à défaut, `module.spec.timeout` — les modules ToolSpec (`toolcatalog`, `--toolspec`)
+             portent leur borne dans leur spec (600 s pour nikto/wpscan/testssl/sqlmap/zap).
+        Aucune des deux -> None -> PAS DE GATE (fail-open, cf. l'en-tête de section). Pur, ne lève
+        jamais : une borne illisible vaut une borne absente."""
+        for value in (_call_bound(module, action), getattr(getattr(module, "spec", None), "timeout", None)):
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _budget_gate(self, module: Any, action: Action) -> str:
+        """Raison NOMMÉE de ne pas DÉMARRER ce tir, ou "" (rien à signaler -> on tire).
+
+        Pose au passage le temps restant dans `action.params` pour que le module puisse s'adapter
+        AVANT qu'on lui demande sa borne — l'ordre compte : un lot nuclei réduit rend une borne
+        réduite, et c'est ce qui lui permet de passer la gate au lieu d'être écarté en entier."""
+        left = self._budget_left()
+        if left is None:
+            return ""                                    # aucun budget -> aucune gate (byte-identique)
+        action.params[_BUDGET_PARAM] = left
+        bound = self._runtime_bound(module, action)
+        if bound is None or bound <= left:
+            return ""
+        return (f"non démarrée : borne d'exécution déclarée {_secs(bound)} > budget de temps restant "
+                f"{_secs(max(left, 0.0))} — la démarrer dépasserait l'échéance ; AUCUN verdict n'est "
+                f"émis pour cette action (non testée, pas « rien trouvé »)")
 
     def _note_non_target(self, target: str, family: str) -> None:
         """CONSTAT UNIQUE par cible non-ciblable : « ce n'est pas une cible, c'est le mur ». Dit UNE FOIS
@@ -526,6 +664,17 @@ class Engine:
         # ICI (thread principal, ordre déterministe) et TOUJOURS AVANT les findings/run-record de l'action :
         # l'ordre relatif dans le ledger est donc identique au sériel (roe.decision -> finding(s) -> runrecord).
         self.roe._log("roe.decision", decision.to_dict())
+
+        # GATE DE BUDGET — le tir a été AUTORISÉ (la `roe.decision` FIRE ci-dessus le dit, et c'est
+        # voulu : la gouvernance n'a rien refusé) mais il n'a pas été DÉMARRÉ, faute de temps. SKIP
+        # NOMMÉ : compté dans `coverage()['errors']`, listé au rapport, aucun finding, aucun
+        # run-record. « Je n'ai pas vérifié » — jamais « j'ai vérifié, rien trouvé ».
+        if pending.budget_skip:
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP, reasons=[pending.budget_skip],
+                             output=None, phase=Phase.BUDGET_TOO_SHORT).to_dict()
+            self.results.append(res)
+            return res
 
         if not pending.is_fire:                      # VETO (output None) ou DRY_RUN (output = dry())
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
@@ -894,10 +1043,21 @@ class Engine:
         prédicat est PUR et coûte une comparaison de flottants — le payer par action est gratuit
         devant un tir d'outil.
 
-        DÉPASSEMENT RÉSIDUEL, BORNÉ ET NOMMÉ : on ne coupe PAS l'action en vol (ce serait fabriquer un
-        échec pour un travail qui allait aboutir), donc le budget peut être dépassé de la durée de
-        l'action courante — bornée par `action_timeout_secs` (120 s par défaut). Le rapport dit
-        l'écoulé réel, pas le budget demandé."""
+        DÉPASSEMENT RÉSIDUEL : on ne coupe PAS l'action en vol (ce serait fabriquer un échec pour un
+        travail qui allait aboutir), donc le budget reste dépassable de la durée de l'action courante.
+
+        CETTE DOCSTRING A DÉJÀ MENTI, ET LA MESURE L'A PRISE EN FAUTE. Elle affirmait que le
+        dépassement était « borné par `action_timeout_secs` (120 s par défaut) ». C'était faux dès
+        l'écriture — les modules ToolSpec passent leur PROPRE timeout (600 s), qui PRIME sur le profil
+        (cf. `runner.tool`) — et faux d'un facteur 21 pour `web.nuclei`, dont la borne mutualisée monte
+        à `600 + 120*(MAX_BATCH-1)` = 3480 s. Le run du 2026-08-08 a payé exactement cet écart :
+        +1576 s sur un budget de 6000 s, un seul lot nuclei en cause.
+
+        CE QUI BORNE VRAIMENT LE DÉPASSEMENT, DEPUIS : `_budget_gate` refuse de DÉMARRER une action
+        dont la borne DÉCLARÉE ne tient pas dans le temps restant. Le dépassement se réduit donc à la
+        durée réelle des modules qui ne déclarent PAS de borne (oracles Python, recon natif — 65,7 s
+        au pire sur le run mesuré). Le rapport, lui, continue de dire l'écoulé RÉEL, jamais le budget
+        demandé."""
         if self._stop is None:
             return
         term = self._stop()

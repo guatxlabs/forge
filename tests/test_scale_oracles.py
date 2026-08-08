@@ -310,7 +310,8 @@ class TestXxeProbe(unittest.TestCase):
                                                "in_scope": ["app.test"]}))
         finally:
             restore()
-        self.assertEqual(f[0].status, "tested")
+        self.assertEqual(f[0].status, "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("sensible refusé", f[0].title)
 
     def test_scope_guard_out_of_scope(self):

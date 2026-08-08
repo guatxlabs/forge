@@ -11,6 +11,15 @@ cibles mortes en loopback, `-severity info,low,medium,high,critical`) :
     1 cible  -> 26,0 s        20 cibles -> 23,7 s
     5 cibles -> 27,0 s        => coût FIXE ~25 s, cible marginale DANS LE BRUIT
 
+⚠️ PORTÉE DE CE CALIBRAGE — CIBLES MORTES SEULEMENT (mesuré, 2026-08-08). Les chiffres ci-dessus
+viennent de cibles en loopback qui ne répondent PAS : nuclei n'y fait que charger ses templates,
+d'où le coût fixe. Contre un hôte VIVANT, le coût marginal par cible est du même ORDRE que
+l'allocation `_TIMEOUT_PER_TARGET` (120 s) : sur le run réel, les lots de 6, 11 et 17 ont TOUS été
+tués à leur mur (1202,67 s pour 1200 · 1802,61 s pour 1800 · 2521,68 s pour 2520). Le gain
+d'ORCHESTRATION que ce banc mesure reste vrai — c'est bien le rechargement de templates qu'on
+économise — mais il ne faut PAS en déduire qu'un gros lot tient dans son budget : il ne le tient pas.
+C'est ce qui a coûté +26 % de dépassement au run du 2026-08-08 (cf. `bench_run_budget_overshoot.py`).
+
 Le coût d'une invocation nuclei est donc quasi ENTIÈREMENT fixe (chargement de la base de templates).
 Le banc tourne à deux ratios `marginal/fixe` :
   · `0.00` — le ratio MESURÉ ci-dessus ;

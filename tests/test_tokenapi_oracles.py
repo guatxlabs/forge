@@ -276,7 +276,8 @@ class TestJwtWeaknessOracle(unittest.TestCase):
             f = JwtWeakness().fire(Action("jwt.weakness", self.TGT, params=dict(self.BASE)))
         finally:
             restore()
-        self.assertEqual(f[0].status, "tested")
+        self.assertEqual(f[0].status, "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("aucun JWT", f[0].title)
 
     def test_network_down_degrades_to_skipped(self):

@@ -177,7 +177,27 @@ def _make_stop(args, emit):
     if stop.budget is not None:
         emit(f"# Budget de temps : {stop.budget.seconds}s — à l'échéance le run S'ARRÊTE proprement "
              f"(frontière d'action) et rend un rapport annoncé PARTIEL.")
+        # CE QUE LE BUDGET GARANTIT, ET CE QU'IL NE GARANTIT PAS — dit AU LANCEMENT, pas découvert au
+        # rapport. Un run réel a rendu 7576 s pour 6000 s demandées (+26 %) parce qu'UN lot nuclei de
+        # 17 URLs, démarré avec 946 s de budget restant, portait une borne de 2520 s. La gate de
+        # budget (`Engine._budget_gate`) supprime ce cas ; le résiduel qu'elle NE couvre pas — les
+        # modules qui ne déclarent pas de borne — vaut leur durée propre, et l'opérateur a le droit
+        # de le savoir avant de lancer plutôt que de le déduire d'un écart de 26 %.
+        emit("#   Aucune action dont la borne d'exécution DÉCLARÉE dépasse le budget restant ne sera "
+             "DÉMARRÉE (SKIP nommé, jamais tronquée) ; un lot nuclei se RÉDUIT au lieu d'être écarté.")
+        emit("#   Dépassement résiduel possible : la durée des modules SANS borne déclarée (oracles, "
+             "recon natif) — au pire 66s sur le run de référence. L'écoulé RÉEL est toujours rapporté.")
     return stop
+
+
+def _remaining_hook(stop):
+    """Hook « secondes restant avant l'échéance » passé au moteur, ou None sans budget.
+
+    C'est la SECONDE moitié du couple d'arrêt : `stop.reason` dit « l'échéance est passée, arrête-toi
+    à la prochaine frontière », `remaining` dit « il reste tant AVANT elle, n'entame rien de plus
+    long ». Sans budget -> None -> la gate du moteur est un no-op strict (byte-identique)."""
+    b = getattr(stop, "budget", None)
+    return None if b is None else b.remaining
 
 
 def _render(args, engine, interruption, durations, ledger, sink_flush=None,
@@ -225,7 +245,7 @@ def cmd_run(args):
     durations = _make_durations(args)
     stop = _make_stop(args, lambda line: print(line, flush=True))
     engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, durations=durations,
-                    stop=stop.reason)
+                    stop=stop.reason, remaining=_remaining_hook(stop))
     if args.arm:
         engine.arm(f"forge run --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):
@@ -293,7 +313,7 @@ def cmd_campaign(args):
     # AUCUN handler et mouraient sur le SIGTERM par défaut de Python, sans rendre ni rapport ni durées.
     stop = _make_stop(args, _progress)
     engine = Engine(scope, ledger=ledger, mode=args.mode, memory=memory, progress=_progress,
-                    durations=durations, stop=stop.reason)
+                    durations=durations, stop=stop.reason, remaining=_remaining_hook(stop))
     if args.arm:
         engine.arm(f"forge campaign --arm ({args.reason or 'cli'})")
     for ap in (args.approve or []):

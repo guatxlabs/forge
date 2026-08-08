@@ -218,7 +218,8 @@ class TestInertWhenNoAuthBlock(unittest.TestCase):
                    params={"in_scope": sc.in_scope, "out_scope": sc.out_scope})
         out = IdorDifferential().fire(a)
         f = out[0].to_dict()
-        self.assertEqual(f["status"], "tested")
+        self.assertEqual(f["status"], "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("config manquante", f["title"])
 
     def test_engine_injects_known_creds_when_no_auth(self):

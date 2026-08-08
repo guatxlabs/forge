@@ -247,7 +247,8 @@ class TestInertWithoutAuthContext(unittest.TestCase):
         out = AuthTakeover().fire(a)
         self.assertEqual(len(out), 1)
         f = out[0].to_dict()
-        self.assertEqual(f["status"], "tested")
+        self.assertEqual(f["status"], "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
+        # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.
         self.assertIn("config manquante", f["title"])
 
     def test_no_network_when_config_missing(self):
