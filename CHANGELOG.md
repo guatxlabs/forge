@@ -9,7 +9,71 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — les verdicts disaient plus que ce qu'ils avaient vérifié
+
+Ce lot vient d'une **campagne réelle** contre une infra de production autorisée, entièrement derrière
+un tunnel Cloudflare. Aucun de ces défauts ne cassait quoi que ce soit : ils **rassuraient**.
+
+- **`Oracle.skip()` émettait `status='tested'`.** La méthode LITTÉRALEMENT NOMMÉE `skip`, documentée
+  « non testé / config manquante », affirmait donc « **j'ai vérifié, rien trouvé** » — sur
+  **1 750 findings** mesurés, 25 kinds, **aucun octet émis pour aucun d'eux**. Un rapport listant
+  « access_control.idor : tested » sur une cible pour laquelle aucun compte de test n'est configuré se
+  lit comme une **absence de vulnérabilité** ; c'est le mode d'échec qui a déjà coûté une campagne.
+  Corrigé en `skipped` — le vocabulaire qui existait déjà pour « je n'ai pas pu vérifier », et que la
+  vue de rapport promeut en section « Couverture NON vérifiée ». **Rupture** : 8 tests figeaient le
+  mensonge (dont un nommé `test_no_session_jwt_is_skip` qui assertait `"tested"`), et le snapshot
+  d'équivalence l'avait figé aussi — cinq entrées corrigées, les quatre `*_negative` laissées en
+  `tested` car elles ont bel et bien tiré.
+
+- **Un mur produisait des verdicts.** `Oracle._http` JETTE le corps sur `HTTPError` — or l'interstitiel
+  Cloudflare vit exactement là. La garde d'abstention était déjà câblée dans 6 modules et rendait
+  **zéro** abstention. Le corps d'erreur est désormais prélevé (8 Kio, **pour juger seulement** : le
+  contrat public de `_http` reste byte-identique) et `__init_subclass__` enveloppe le `fire()` de
+  chaque oracle. **117 `tested` convertis sur les 256 réellement atteignables, 0 verdict légitime
+  détruit** (contrôle négatif sur cible saine : identique avant/après). La borne reste étroite et
+  testée — un **403 NU reste un verdict applicatif**, sinon forge deviendrait aveugle aux contrôles
+  d'accès, sa classe la plus payante.
+
+- **Deux verdicts FABRIQUÉS.** (1) Un lot `web.nuclei` tué à son mur rend une sortie **partielle**,
+  donc la branche « outil en échec » n'était jamais atteinte : chaque cible jamais scannée sortait en
+  `tested` « aucun hit » — **15 sur 17** en reproduction. (2) La comptabilité anti-lacune vivait
+  **après** la boucle du moteur : un arrêt gracieux la sautait, et le rapport annonçait « aucune
+  lacune, aucun module non planifié » alors qu'il y en avait **78**.
+
+- **La console perdait 9,4 % des findings en silence** — 499 sur 5 318, `UNIQUE(campaign, target,
+  title) ON CONFLICT IGNORE` (ni `run_id`, ni `tool`, ni `severity`), dont **8 `skipped`**, c'est-à-dire
+  des trous de couverture évaporés. Le symptôme réel est pire qu'un écrasement : c'est le **second**
+  run qui est refusé, et comme le rapport filtre par `run_id`, **son rapport est VIDE** — ce qui se lit
+  « rien trouvé ». Élargir la clef ne récupérait que **8 findings sur 499** et cassait l'idempotence de
+  rejeu que `IncrementalIngest` documente : on **compte et on annonce** (`findings_dropped`,
+  `findings_write_errors`, loi de conservation testée), le stockage ne bouge pas.
+
+- **Fuite de secret dans deux livrables.** L'annexe markdown **et** le livrable client HTML rendaient
+  un `Authorization: Bearer <jwt>` **en clair** — `html_escape` n'est pas une rédaction. Trouvée par
+  le garde-fou de parité **dès sa première exécution**.
+
 ### Added
+
+- **Budget de temps in-process** (`--run-timeout` / `FORGE_RUN_TIMEOUT`, levier `run_timeout_secs`
+  existant qui n'avait qu'une exécution EXTERNE au SIGKILL) + arrêt gracieux hors console. **Le
+  rapport et le sidecar `.durations` sont désormais garantis dans les trois cas d'arrêt** — échéance,
+  SIGTERM, exception — là où deux campagnes réelles avaient perdu leur livrable alors que tout le
+  travail était fait. Un rapport partiel **s'annonce partiel** : cause, X/Y actions, non-tentées
+  listées. Une porte refuse en outre de DÉMARRER un tir dont la borne dépasse le budget restant :
+  dépassement **+26 % → −0,8 %**, avec plus d'actions terminées qu'avant.
+- **`web.nuclei` mutualisé par hôte** (`-u a,b,c` — `-list` est inutilisable, `docker run` est
+  construit sans `-v`) : **60 → 10 invocations**, couverture par URL prouvée identique, scope-guard
+  appliqué par cible via quatre portes indépendantes.
+- **Le rapport de la console mène par un verdict**, comme le CLI : sections « Actionnable »,
+  « Signal à qualifier », « Couverture NON vérifiée » (les `skipped` PROMUS), annexe derrière une
+  comptabilité. Le garde-fou de parité qui le surveille compare des **structures** — l'ancien
+  n'assertait que cinq sous-chaînes et restait vert quand la parité cassait.
+- **`make check-supply-chain`** — les trois gardes (openssl-freedom, licences, octets NUL) tournaient
+  en CI sans qu'aucune cible ne les expose : on ne pouvait les découvrir qu'en les cassant dans une PR.
+- **`docs/UPSTREAM_REPORTS.md`** — reproduction minimale du défaut `cargo-deny`/`krates` (une
+  dépendance OPTIONNELLE dont le nom de paquet diffère du nom de `[lib]` disparaît du graphe, et
+  l'outil répond **`licenses ok`**). Il n'est pas propre à forge : le taire laisserait les autres
+  projets avec le même angle mort.
 - **Une CA privée d'entreprise devient vérifiable — sans lire le magasin système, et sans relâcher un
   seul contrôle** (`FORGE_EXTRA_CA_PEM` / `FORGE_EXTRA_CA_PEM_FILE`). Le seam TLS livré juste avant
   vérifie contre les racines **Mozilla compilées** ; le magasin de CA du **système n'est pas lu**, et
