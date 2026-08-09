@@ -111,6 +111,9 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
 - **[MTTD — ce que la métrique mesure](MTTD.md)** — time-to-ALERT vs time-to-event, interprétation.
 - **[Runbook campagne purple](PURPLE_CAMPAIGN.md)** — campagne recon-large (à lancer sur « go »).
 - **[Template d'engagement de référence](REFERENCE_ENGAGEMENT_TEMPLATE.md)** — squelette du livrable.
+- **[Défauts trouvés en amont](UPSTREAM_REPORTS.md)** — reproductions minimales prêtes à envoyer, pour
+  les défauts d'outils tiers rencontrés ici : ils ne sont pas propres à forge, et les contourner en
+  silence laisserait les autres projets avec le même angle mort.
 
 ---
 

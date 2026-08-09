@@ -59,6 +59,19 @@ test-pg:  ## Tests d'intégration Postgres (Stage 4) : spin docker PG -> cargo t
 check-version:  ## Vérifie que VERSION == pyproject == Cargo.toml (échoue sinon)
 	python3 scripts/check_version.py
 
+# Les trois gardes de chaîne d'approvisionnement tournent en CI, mais RIEN ne les exposait à la main :
+# un contributeur ne pouvait les découvrir qu'en lisant `ci.yml`. Une garde qu'on ne sait pas lancer
+# est une garde qu'on découvre en la cassant, dans une PR, après coup.
+#
+# Elles sont volontairement SÉQUENTIELLES et fail-fast (`&&`) : `openssl-freedom` ne compile rien
+# (quelques secondes de `cargo tree`), autant échouer là plutôt qu'après le reste.
+# NOTE : dans un arbre de dev portant un `[patch]` local gitignoré, les gardes en `--locked` peuvent
+# rendre 2 (fail-closed) — c'est attendu, elles impriment la procédure de repli.
+check-supply-chain:  ## Les 3 gardes de supply-chain : openssl-freedom + licences + octets NUL
+	python3 scripts/check_openssl_freedom.py \
+	  && python3 scripts/check_dep_licenses.py \
+	  && python3 scripts/check_no_stray_nul.py
+
 install:  ## Installe forge en editable (met `forge` sur le PATH)
 	pip install -e .
 

@@ -1293,11 +1293,19 @@ class Engine:
                     executed_ids.add(a.id)
 
                 # MUTUALISATION `web.nuclei` — UNE invocation par HÔTE au lieu d'une par cible.
-                # La raison n'est pas celle qu'on croyait : nuclei ne fait pas un travail par-URL
-                # qu'on multiplierait. `docker run --rm` JETTE `/root/nuclei-templates` à chaque fois,
-                # donc chaque invocation re-paie toute la base de templates. Coût MESURÉ sur le vrai
-                # binaire : 1 cible 26,0 s, 20 cibles 23,7 s — le coût est FIXE. Sur la campagne
-                # réelle (65 tirs pour 10 hôtes), c'est 55 rechargements inutiles, ~23 min.
+                # CE QUE LA MUTUALISATION ÉCONOMISE, et c'est le seul gain certain : `docker run --rm`
+                # JETTE `/root/nuclei-templates` à chaque fois, donc chaque invocation re-paie toute la
+                # base de templates. Sur la campagne réelle (65 tirs pour 10 hôtes), c'est 55
+                # rechargements inutiles, de l'ordre de 25 s pièce — ~23 min rendus.
+                #
+                # ⚠️ CE QU'ELLE N'ÉCONOMISE PAS, et l'affirmation initiale était FAUSSE : « 1 cible
+                # 26,0 s, 20 cibles 23,7 s -> le coût est FIXE » venait d'un banc tapant sur des ports
+                # LOOPBACK MORTS, où nuclei échoue instantanément sur chaque cible — seul le
+                # rechargement des templates était donc mesuré. Contre un hôte qui RÉPOND, le coût
+                # marginal par cible est du même ordre que `_TIMEOUT_PER_TARGET` (120 s). Le
+                # « budget proportionnel » du timeout de lot n'est pas une marge : c'est le point
+                # d'équilibre. C'est ce raisonnement faux qui a produit des lots de 17 dont le mur
+                # valait 2520 s, tués à l'échéance — cf. la porte de budget plus bas.
                 #
                 # Le point d'insertion porte deux invariants : APRÈS `executed_ids` (toute action
                 # repliée reste marquée, donc jamais rejouée à la vague suivante) et AVANT
