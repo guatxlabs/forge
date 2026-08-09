@@ -87,6 +87,28 @@ CE QUE LA MESURE A RÉELLEMENT MONTRÉ (décompte des 2 553, cf. `tests/test_bli
     "missing wordlist flag"`, `theHarvester rc=125 "pull access denied"`. Un argv faux ou une image
     docker absente ressortait en « j'ai vérifié, rien trouvé ». Même maladie, cause différente.
 
+CE QUI EST ARRIVÉ À CES QUATRE-LÀ ENSUITE — ET POURQUOI CE MODULE NE SUFFISAIT PAS
+----------------------------------------------------------------------------------
+Rendre l'échec HONNÊTE (`skipped`) était la moitié du travail ; l'autre était de RÉPARER
+l'invocation, sans quoi quatre outils restaient inertes sur chaque cible. Fait, argv MESURÉ puis
+EXÉCUTÉ (cf. `modules/toolcatalog`) : `gobuster` et `dnsx` sont corrigés et tournent (le diagnostic
+« il manque -w » était incomplet : en gobuster >= 3.x, `-d` EST l'abréviation de `--delay`, d'où le
+`parse error` sur un nom d'hôte) ; `theHarvester` et `masscan` sont RETIRÉS du catalogue.
+
+LE CAS `masscan` CONCERNE DIRECTEMENT LA BORNE DE `tool_did_not_run`, ET IL FAUT LE SAVOIR EN
+LISANT CE FICHIER. Son argv était réparable proprement (consommer l'IP déjà épinglée par le ROE).
+Mais masscan émet des SYN BRUTS et attend la réponse SUR L'ADAPTATEUR : sur un hôte MULTI-HOMED —
+une machine de dev ou de CI ordinaire — la réponse ne revient pas par l'adaptateur auto-détecté et
+il sort **rc=0 avec stdout VIDE**, indiscernable d'une cible sans port ouvert. MESURÉ via le chemin
+d'invocation réel de forge : `127.0.0.1`, `192.168.1.20` (port 22000 pourtant ouvert) et un
+conteneur bridge joignable en `curl` -> zéro résultat, rc=0. Or `tool_did_not_run` borne sur
+`rc != 0` : elle ne peut PAS rattraper ce silence-là. Corriger l'argv aurait donc converti un
+`skipped` CORRECT en un `tested` MENSONGER. On a retiré l'outil plutôt que d'élargir la borne à
+`rc == 0` — élargir aurait déclassé tous les constats légitimes d'une cible saine, l'excès inverse
+exact que ce module refuse. **Le résidu reste donc NOMMÉ : un outil qui sort rc=0 sans rien écrire
+est cru sur parole. C'est assumé, et c'est pourquoi un outil dont le silence peut être un artefact
+d'environnement n'a pas sa place au catalogue.**
+
 OÙ L'INFORMATION SURVIT ENCORE (on ne devine pas — on RÉUTILISE)
 ----------------------------------------------------------------
   1. **L'état `CHALLENGED` du `SessionStore`** — celui que le PREMIER LOT alimente désormais depuis

@@ -204,7 +204,7 @@ class Scope:
         self.rate = int(data.get("rate", 5))
         # DÉBIT EXPLICITE (opt-in per-run) : True si l'opérateur a fixé un `rate` au lancement (vs le
         # défaut). Gate l'injection du débit dans les DRAPEAUX des outils natifs/wrappers (nmap --max-rate,
-        # nuclei -rl, masscan --rate, …) : sans override explicite, aucun drapeau de débit n'est ajouté
+        # nuclei -rl, naabu -rate, …) : sans override explicite, aucun drapeau de débit n'est ajouté
         # (argv BYTE-IDENTIQUE au défaut). Le throttle des oracles (Oracle._http) respecte `rate` en tout
         # temps (débit ROE), c'est l'ajout de drapeaux CLI aux sous-process qui est opt-in.
         self.rate_explicit = bool(data.get("rate_explicit", False))

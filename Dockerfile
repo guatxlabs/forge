@@ -219,16 +219,18 @@ RUN set -eux; \
 # (forge/modules/toolcatalog.py) qui restaient `available:false` faute de binaire deviennent
 # disponibles et que la couverture Forge ÉGALE celle d'un scan manuel. Chaque outil est
 # installé sous le NOM EXACT que le module sonde via `shutil.which(...)` (runner.available) :
-#   apt        : whatweb, masscan, wafw00f, wfuzz, sqlmap, gobuster
+#   apt        : whatweb, wafw00f, wfuzz, sqlmap, gobuster
 #   git+wrap   : testssl.sh (drwetter/testssl.sh, sondé "testssl.sh"), nikto (sullo/nikto, "nikto")
 #   release Go : dnsx, naabu, katana (ProjectDiscovery), amass (OWASP), gau, gospider, dalfox,
 #                feroxbuster, ffuf — DÉJÀ installés PLUS HAUT par la boucle pilotée par le manifeste
 #                (`forge/tools.json`, groupe `extended`) ; ils ne sont plus décrits ici.
 # NON installés (par design) : zap-baseline (web.zap_baseline, prefer_docker → image zaproxy/zap-stable),
 #   Burp (burp.py) et Metasploit (msf.py) restent des SERVICES EXTERNES pilotés via ENV/réseau, jamais
-#   cuits dans l'image ; theHarvester (recon.theharvester) est OMIS ici (son PyPI est un placeholder v0.0.1
-#   et la version amont exige Python>=3.12 alors que la base bookworm fournit 3.11) → reste joignable via
-#   son docker_image `laramies/theharvester` si l'opérateur monte docker.
+#   cuits dans l'image. theHarvester et masscan ont été RETIRÉS du catalogue (2026-08-09) : le premier
+#   n'a aucune image utilisable (`laramies/theharvester` n'existe pas ; l'officielle ghcr.io lance un
+#   SERVEUR REST, pas la CLI), le second se TAIT sans échouer sur une machine multi-homed (rc=0, stdout
+#   vide) — donc son argv corrigé aurait produit un `tested` mensonger là où l'échec produisait un
+#   `skipped` juste. `recon.naabu` couvre les ports ; `subfinder`/`amass`/crt.sh couvrent les sous-domaines.
 # En `mini`, CHAQUE bloc ci-dessous s'auto-court-circuite (exit 0) → les modules dégradent proprement
 # en available:false (déjà géré par l'engine). Le profil `mini` reste donc BYTE-IDENTIQUE à avant.
 # =============================================================================
@@ -245,7 +247,7 @@ RUN set -eux; \
     fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        sqlmap whatweb wafw00f wfuzz masscan gobuster \
+        sqlmap whatweb wafw00f wfuzz gobuster \
         git bsdmainutils procps openssl libpcap0.8 \
         perl libnet-ssleay-perl libjson-perl libxml-writer-perl; \
     rm -rf /var/lib/apt/lists/*

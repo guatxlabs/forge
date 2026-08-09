@@ -58,8 +58,13 @@ class ToolSpec:
       binary          : binaire local (résolu via PATH). `docker_image` = repli conteneurisé optionnel.
       argv_template   : tuple de TOKENS. Un token = littéral OU placeholder `{...}` OU un GROUPE (tuple
                         de tokens = tout-ou-rien : abandonné en bloc si un placeholder requis manque).
-                        Placeholders : {target} {target_host} {target_url} {param:NAME} {param:NAME:DEF}.
+                        Placeholders : {target} {target_host} {target_url} {param:NAME}
+                        {param:NAME:DEF}.
                         RÉSOLUTION en éléments d'argv SÉPARÉS — jamais de concaténation shell.
+      requires_params : noms de params SANS LESQUELS l'outil NE PEUT PAS TOURNER (ex `wordlist` pour
+                        gobuster/dnsx). Manquant -> `status='skipped'` NOMMÉ, ZÉRO processus.
+                        INERTE-MAIS-HONNÊTE plutôt que faussement vert.
+      requires_note   : phrase expliquant COMMENT fournir ces params (jointe à l'évidence du skip).
       cwe / mitre     : mapping technique (le finding porte ces valeurs ; mitre == la table).
       phase           : recon | access | exploit.  capability : passive | active | exploit.
       attck_tactic    : tactique ATT&CK lisible (requise pour une entrée phasée).
@@ -83,7 +88,7 @@ class ToolSpec:
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
         "params_schema", "flag_allowlist", "emit_service_discovery", "emit_endpoint_discovery",
-        "skip_bare_ip", "reap_daemon",
+        "skip_bare_ip", "reap_daemon", "requires_params", "requires_note",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -93,7 +98,7 @@ class ToolSpec:
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
                  hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
                  emit_service_discovery=False, emit_endpoint_discovery=False, skip_bare_ip=False,
-                 reap_daemon=False):
+                 reap_daemon=False, requires_params=(), requires_note=""):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -152,6 +157,24 @@ class ToolSpec:
         # (succès/timeout/annulation), de façon CIBLÉE (jamais un amass tiers). Défaut False (aucun reap →
         # chemin d'exécution BYTE-IDENTIQUE pour tous les autres outils, env hérité comme avant).
         self.reap_daemon = bool(reap_daemon)
+        # PRÉ-REQUIS D'INVOCATION — les params SANS LESQUELS L'OUTIL NE PEUT PAS TOURNER.
+        #
+        # POURQUOI CE CHAMP EXISTE. Deux outils du catalogue exigent une entrée que le spec ne peut
+        # PAS fabriquer : `gobuster dns` et `dnsx -d` REFUSENT de démarrer sans wordlist (« Required
+        # flag "wordlist" not set » / « missing wordlist(w) flag required with domain(d) input »).
+        # Tant que ce pré-requis manquait, l'outil était lancé QUAND MÊME, s'arrêtait sur son propre
+        # message d'erreur, et le module concluait « j'ai vérifié, rien trouvé » : 104 findings du
+        # ledger `gxrun2` (52 par outil, sur CHAQUE cible).
+        #
+        # LE CHOIX EST DÉLIBÉRÉ : un pré-requis absent rend l'outil INERTE **et NOMMÉ**
+        # (`status='skipped'`, la raison dans le titre ET dans l'évidence, ZÉRO processus lancé) au
+        # lieu d'embarquer une wordlist par défaut. Embarquer une liste gonflerait le dépôt et
+        # FIGERAIT un choix de politique (laquelle ? quelle taille ? quel débit ?) au nom de
+        # l'opérateur ; inerte-mais-honnête est strictement préférable à faussement-vert. Le gate est
+        # EN AMONT de `runner.tool` : il ne peut donc produire ni trafic, ni faux constat d'absence.
+        # Défaut `()` => aucun pré-requis => chemin BYTE-IDENTIQUE pour tous les autres outils.
+        self.requires_params = tuple(requires_params)
+        self.requires_note = str(requires_note or "")
 
     @property
     def asset_hits(self):
@@ -329,6 +352,22 @@ def safe_value(val):
     NATIFS (nmap/nuclei) à valider les valeurs de params mappées à un flag (ports/scripts/…) — une valeur
     hostile (`-oN`, métacaractère shell) est REJETÉE. Pur, ne lève jamais."""
     return bool(isinstance(val, str) and val and _SAFE_VALUE_RX.match(val))
+
+
+def missing_required_params(spec, params=None):
+    """Noms des `spec.requires_params` ABSENTS (ou vides) dans `params` — tuple, ordre du spec, vide si
+    tout est là. Garde-fou fail-closed AVANT tout lancement : un outil qui exige une entrée que
+    personne ne lui a donnée NE DOIT PAS être lancé pour aller mourir sur son propre message d'usage
+    (c'est ce qui produisait « j'ai vérifié, rien trouvé »). Une valeur `None`/`""`/`[]` compte comme
+    ABSENTE : `build_argv` abandonne déjà les groupes bâtis dessus, donc l'argv serait tout aussi
+    incomplet. Pur, ne lève jamais."""
+    p = params or {}
+    out = []
+    for name in getattr(spec, "requires_params", ()) or ():
+        val = p.get(name)
+        if val is None or (isinstance(val, (str, list, tuple, dict)) and not val):
+            out.append(name)
+    return tuple(out)
 
 
 def unsafe_extra_args(spec, params=None):
@@ -592,6 +631,19 @@ class ExternalToolModule(ScopeGuardMixin, Module):
                     evidence=(f"Classe EXPLOIT ({self.kind}) : un scope gouverné est lié mais l'opt-in "
                               f"allow_exploit/allow_high_impact n'est PAS armé -> refusé (défense en "
                               f"profondeur), aucun processus lancé."))]
+        # (2b) PRÉ-REQUIS D'INVOCATION — l'outil exige une entrée que personne ne lui a fournie
+        # (wordlist de gobuster/dnsx, IP épinglée de masscan). On NE LE LANCE PAS pour aller mourir
+        # sur son propre message d'usage : c'est exactement ce qui rendait « j'ai vérifié, rien
+        # trouvé » sur 156 findings de `gxrun2`. Skip NOMMÉ, ZÉRO processus — inerte, mais honnête.
+        missing = missing_required_params(s, action.params)
+        if missing:
+            note = (" " + s.requires_note) if s.requires_note else ""
+            return [self._mk(
+                action, status="skipped",
+                title=f"{self.kind} non exécuté — pré-requis manquant ({', '.join(missing)})",
+                evidence=(f"'{s.binary}' EXIGE {', '.join(missing)} pour démarrer : sans cette entrée "
+                          f"il s'arrête sur son propre message d'usage et son silence n'affirmerait "
+                          f"RIEN sur la cible. Aucun processus lancé (fail-closed).{note}"))]
         # (3) DISPONIBILITÉ — binaire (ni local ni docker) absent -> skipped (dégradation gracieuse).
         if not self.available:
             return [self._mk(

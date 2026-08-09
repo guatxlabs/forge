@@ -82,11 +82,11 @@ def _oracle_rate_kinds():
 _RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"}) | _oracle_rate_kinds()
 
 # Kinds d'OUTILS (natifs + wrappers) dont un DRAPEAU CLI de débit est piloté par `rate` (nmap --max-rate,
-# nuclei -rl, httpx -rl, naabu -rate, masscan --rate, feroxbuster --rate-limit, sqlmap/wfuzz/dalfox/
+# nuclei -rl, httpx -rl, naabu -rate, feroxbuster --rate-limit, sqlmap/wfuzz/dalfox/
 # gobuster --delay dérivé). Le débit y est injecté UNIQUEMENT sur override EXPLICITE (`scope.rate_explicit`)
-# -> sans override, aucun drapeau n'est ajouté (argv BYTE-IDENTIQUE au défaut ; masscan garde --rate 1000).
+# -> sans override, aucun drapeau n'est ajouté (argv BYTE-IDENTIQUE au défaut).
 _RATE_FLAG_KINDS = frozenset({
-    "recon.nmap", "web.nuclei", "recon.httpx", "recon.naabu", "recon.masscan", "recon.feroxbuster",
+    "recon.nmap", "web.nuclei", "recon.httpx", "recon.naabu", "recon.feroxbuster",
     "sqli.sqlmap", "fuzz.wfuzz", "xss.dalfox", "recon.gobuster_dns",
 })
 

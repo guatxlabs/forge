@@ -14,21 +14,91 @@ ils ne PROUVENT pas -> `reported_by_tool`/`tested`, jamais `vulnerable`) : cohé
 
 TAXONOMIE — chaque outil mappé à sa `vuln_class` + CWE/ATT&CK :
   Découverte de surface (recon, découvrent des ASSETS re-validés scope) :
-    subfinder/amass (subdomains), dnsx (DNS resolve), naabu (ports), katana/gospider (crawl),
+    subfinder/amass (subdomains), dnsx (enum DNS par wordlist), naabu (ports), katana/gospider (crawl),
     gau (URLs d'archive), feroxbuster (content discovery).
   Fingerprint / détection (recon, rapportent SUR la cible) : whatweb (techno), wafw00f (WAF).
   Scanners (rapportent des faiblesses SUR la cible) : nikto (serveur web), wpscan (WordPress),
     testssl (TLS/SSL), dalfox (XSS, access).
   Exploitation gouvernée (gatée par le plancher opt-in) : sqlmap (SQLi, exploit).
 
-INTÉGRATIONS EXTERNES SUPPLÉMENTAIRES (recon/scan/OSINT, NON-destructif, NON-exploit, proof-oriented) :
-  masscan (balayage de ports rapide, PortScan — COMPLÈTE naabu par un sweep full-range rapporté sur
-    cible), gobuster mode dns (énumération de sous-domaines, SubdomainEnum — COMPLÈTE feroxbuster qui,
-    lui, couvre la découverte de CONTENU), theHarvester (OSINT PASSIF emails/sous-domaines),
-    wfuzz (fuzzing de contenu/paramètres web), ZAP baseline (scan web PASSIF spider+règles passives,
-    AUCUNE attaque active). Aucun outil de brute-force/cred-cracking (hydra/hashcat/john/medusa) ni C2
-    (Cobalt Strike/Sliver/Empire) : ILS COLLISIONNENT avec la philosophie proof-oriented non-brute-force
-    de Forge (les premiers) ou exigent un connecteur dédié + décision de politique (les seconds).
+INTÉGRATIONS EXTERNES SUPPLÉMENTAIRES (recon/scan, NON-destructif, NON-exploit, proof-oriented) :
+  gobuster mode dns (énumération de sous-domaines, SubdomainEnum — COMPLÈTE feroxbuster qui, lui,
+    couvre la découverte de CONTENU), wfuzz (fuzzing de contenu/paramètres web), ZAP baseline (scan
+    web PASSIF spider+règles passives, AUCUNE attaque active). Aucun outil de brute-force/
+    cred-cracking (hydra/hashcat/john/medusa) ni C2 (Cobalt Strike/Sliver/Empire) : ILS COLLISIONNENT
+    avec la philosophie proof-oriented non-brute-force de Forge (les premiers) ou exigent un connecteur
+    dédié + décision de politique (les seconds).
+
+CE QU'UN CATALOGUE DOIT PROUVER — L'INVOCATION, PAS SEULEMENT L'INTENTION
+-------------------------------------------------------------------------
+Quatre entrées de ce fichier n'ont JAMAIS tourné, sur AUCUNE cible, depuis leur intégration : leur
+argv était refusé par l'outil lui-même, ou leur image n'existait pas. Le ledger `gxrun2` en porte la
+trace exacte — 52 findings pour CHACUNE des quatre causes, soit quatre outils mal invoqués sur CHAQUE
+cible, tous rendus en « j'ai vérifié, rien trouvé ». Les argv ci-dessous sont désormais MESURÉS
+(`docker run --rm <image> --help` sur l'image RÉELLEMENT utilisée) puis EXÉCUTÉS contre une cible
+loopback jusqu'à obtenir une sortie PARSÉE — pas déduits. Deux des quatre diagnostics « évidents »
+se sont révélés faux à la mesure (cf. `recon.gobuster_dns` et les deux notes de retrait ci-dessous).
+Un spec qui exige une entrée absente est désormais INERTE ET NOMMÉ (`requires_params`), jamais lancé
+pour aller mourir sur son propre message d'usage.
+
+DEUX CONSERVÉS (gobuster, dnsx), DEUX RETIRÉS (theHarvester, masscan). On n'a pas forcé quatre
+correctifs : deux des quatre entrées ne pouvaient PAS être rendues honnêtes ici, et une entrée de
+catalogue qui ne peut pas fonctionner est PIRE qu'une entrée absente — elle fait croire à une
+couverture.
+
+ENTRÉE RETIRÉE — `recon.masscan` (balayage de ports full-range). LE DIAGNOSTIC D'ORIGINE ÉTAIT JUSTE
+MAIS INCOMPLET : oui, masscan n'accepte qu'une IP (`FAIL: unknown command-line parameter
+"guatx.com"`, rc=1, stdout vide, 52 findings). Et la voie propre pour la lui donner EXISTE et a été
+IMPLÉMENTÉE ET VÉRIFIÉE : ne PAS résoudre le nom soi-même (ce qui creuserait un écart entre ce que le
+scope-guard a autorisé et ce qui est scanné, et rouvrirait la fenêtre TOCTOU que l'épinglage ferme)
+mais CONSOMMER l'épinglage que le ROE pose déjà — `Roe.decide` résout une fois au point de tir, rend
+son verdict CONTRE les IP résolues, et les dépose sur `action.params["_pinned_ips"]` (c'est ce que
+`httpflow` lit déjà via `pin.pick`). L'argv produit était correct et l'IP scannée était, par
+construction, celle que le ROE avait vettée.
+
+  CE QUI A TUÉ L'ENTRÉE EST AILLEURS, ET C'EST LA MESURE QUI L'A SORTI. masscan émet des SYN BRUTS
+  et attend la réponse SUR L'ADAPTATEUR (`-sS -Pn --send-eth`, ses options forcées). Quand la réponse
+  ne revient pas par l'adaptateur auto-détecté, il sort **rc=0 avec stdout VIDE** — indiscernable
+  d'une cible sans aucun port ouvert. MESURÉ sur cette machine, via le chemin d'invocation RÉEL de
+  forge (`docker run --rm --network host`) : `127.0.0.1` -> 0 résultat ; `192.168.1.20` (port 22000
+  DÉMONTRABLEMENT ouvert, `ss -lntp`) -> 0 résultat ; un conteneur sur le bridge docker (`172.17.0.2`,
+  `curl` -> 200) -> 0 résultat ; et `-e docker0` -> `FAIL: failed to detect router`. La même commande
+  lancée depuis l'AUTRE bout d'un lien (conteneur bridge -> `172.17.0.1`) rend bien `Discovered open
+  port 22000/tcp`. Autrement dit : sur toute machine MULTI-HOMED — c'est-à-dire une machine de dev ou
+  de CI ordinaire — masscan se tait sans échouer.
+
+  ET C'EST EXACTEMENT LE CAS QUE `blindness.tool_did_not_run` NE PEUT PAS RATTRAPER : sa borne est
+  `rc != 0`. Corriger l'argv aurait donc TRANSFORMÉ un `skipped` CORRECT (rc=1, nom d'hôte refusé —
+  ce que la garde livrée la veille produisait déjà) en un `tested` MENSONGER, « j'ai vérifié, rien
+  trouvé », sur une cible jamais observée. Le correctif aurait régressé l'honnêteté qu'il prétendait
+  servir. On retire.
+
+  CE QUE LA COUVERTURE PERD, NOMMÉMENT : la VITESSE d'un sweep full-range en SYN. Le RÉSULTAT, lui,
+  reste couvert par `recon.naabu` — connect TCP ordinaire (aucun paquet forgé, aucun adaptateur à
+  deviner), il VOIT localhost et les hôtes multi-homed, il émet déjà la découverte de service
+  chaînable (`emit_service_discovery`), et il accepte `params.ports = "1-65535"` pour la plage
+  complète. Il est plus lent ; il ne ment pas.
+
+ENTRÉE RETIRÉE — `recon.theharvester` (OSINT emails/sous-domaines). MESURÉ, dans cet ordre :
+  1. `laramies/theharvester` (ce que le spec déclarait) N'EXISTE PAS sur Docker Hub — `pull access
+     denied ... repository does not exist` : rc=125, stdout vide, 52 findings du ledger. Une image
+     qui n'existe pas ne peut pas « dégrader gracieusement » : elle échouait à chaque cible.
+  2. L'image OFFICIELLE de l'auteur existe bien, mais ailleurs (`ghcr.io/laramies/theharvester`), et
+     son ENTRYPOINT est `restfulHarvest -H 0.0.0.0 -p 80` — un SERVEUR REST, pas le CLI. L'argv du
+     catalogue y rend `restfulHarvest: error: unrecognized arguments: -d example.com -b all`. La
+     corriger exigerait `docker run --entrypoint theHarvester …`, que `runner.cmdline/tool` ne sait
+     pas construire (il pose `docker run --rm --network host IMAGE args…`, sans entrypoint) : le
+     correctif ne tiendrait donc PAS dans ce catalogue.
+  3. Il RESTE une image tierce fonctionnelle (`secsi/theharvester`, entrypoint `python
+     theHarvester.py`, v4.10.0) : un rebuild NON officiel, non versionné, sur lequel on ferait
+     reposer une entrée de catalogue signée. On ne l'a pas retenu.
+  CE QUE LA COUVERTURE PERD, NOMMÉMENT : la moisson d'EMAILS (le seul apport qui n'était pas déjà
+  couvert). Les SOUS-DOMAINES, eux, restent couverts trois fois — `recon.subfinder`, `recon.amass` et
+  `recon.subdomains` (crt.sh CT + passive DNS, natif) — et ceux-là TOURNENT. Un email n'était de
+  toute façon pas un asset scannable (`hit_is_asset=False`) : il ne pouvait ni être re-validé contre
+  le périmètre, ni chaîné vers un oracle. Enfin `-b all` fan-oute vers des dizaines de fournisseurs
+  OSINT dont la plupart exigent une clé d'API : sans clés, l'outil sortait rc=0 quasi vide — un
+  « aucun hit » que la garde `tool_did_not_run` (rc != 0) n'aurait PAS rattrapé.
 """
 from .toolspec import ToolSpec, register_spec, FlagAllowlistMixin
 
@@ -78,21 +148,50 @@ CATALOG_SPECS = [
         # + marqueur unique, le moteur fuité est terminé de façon ciblée après l'exécution (cf. _daemon_reap).
         reap_daemon=True,
         description="Énumération de sous-domaines (OWASP amass, mode passif) — assets re-validés scope."),
+    # dnsx : ARGV MESURÉ (`docker run --rm projectdiscovery/dnsx -h`). dnsx a DEUX entrées, et une seule
+    #   est atteignable ici : `-l` (liste d'hôtes à RÉSOUDRE) ne lit qu'un FICHIER ou STDIN — or
+    #   `runner.tool` n'alimente pas stdin (mesuré : `-l example.com` traite « example.com » comme un
+    #   chemin de fichier, rc=0 et AUCUNE sortie : un faux « aucun hit » que la garde rc!=0 ne verrait
+    #   même pas). Reste `-d <domaine> -w <mots>`, qui EXIGE la wordlist : sans elle, dnsx s'arrête sur
+    #   `missing wordlist(w) flag required with domain(d) input` (rc=1, stdout vide — 52 findings de
+    #   `gxrun2` rendus en « aucun hit exploitable »). dnsx est donc, ICI, un ÉNUMÉRATEUR ; la
+    #   résolution d'un hôte connu reste couverte par `recon.dig` (types A/AAAA/MX/TXT/NS/…).
+    #   BON À SAVOIR : `-w` accepte une liste INLINE séparée par des virgules (`-w www,mail,dev`) —
+    #   utilisable sans aucun fichier, contrairement à gobuster qui veut un chemin.
     ToolSpec(
         kind="recon.dnsx", vuln_class="Recon", binary="dnsx",
-        argv_template=("-silent", "-a", "-resp", "-d", "{target_host}", ("-rl", "{param:rate}"),
+        # `-nc` (no-color) : MESURÉ — `-silent` ne suffit pas, dnsx colore sa sortie MÊME redirigée vers
+        # un fichier (`example.com [\x1b[35mA\x1b[0m] [\x1b[32m1.2.3.4\x1b[0m]`). Sans `-nc`, chaque
+        # finding embarquait des séquences d'échappement ANSI dans son évidence et dans le ledger.
+        argv_template=("-silent", "-nc", "-a", "-resp", "-d", "{target_host}", ("-w", "{param:wordlist}"),
+                       ("-r", "{param:resolver}"), ("-rl", "{param:rate}"),
                        ("-t", "{param:threads}"), ("-retry", "{param:retries}"), "{args}"),
         mitre="T1590.002", phase="recon", capability="active", attck_tactic="Reconnaissance",
         depends_on=("recon.subdomains",), docker_image="projectdiscovery/dnsx", parser="lines",
         hit_status="tested", severity="INFO",
+        # Même politique que gobuster : pas de wordlist embarquée, pas de lancement sans wordlist.
+        requires_params=("wordlist",),
+        requires_note=("Fournir params.wordlist : chemin de fichier OU liste inline séparée par des "
+                       "virgules (`www,mail,dev`) — dnsx accepte les deux. L'énumération par wordlist "
+                       "est du brute-force PAR VOLUME : le débit reste gouverné par le ROE "
+                       "(`rate_explicit` -> `-rl`) et `-t` borne les threads."),
         params_schema=(
+            {"name": "wordlist", "type": "text", "label": "wordlist (-w, chemin ou liste inline) — REQUIS",
+             "flag": "-w"},
+            {"name": "resolver", "type": "text", "label": "résolveur DNS (-r, ex 1.1.1.1:53)", "flag": "-r"},
             {"name": "rate", "type": "number", "label": "rate-limit (-rl req/s)", "flag": "-rl"},
             {"name": "threads", "type": "number", "label": "threads (-t)", "flag": "-t"},
             {"name": "retries", "type": "number", "label": "retries (-retry)", "flag": "-retry"},
             _EXTRA),
+        # `-d` VOLONTAIREMENT ABSENT de l'allowlist : un 2e domaine en extra_args contournerait le
+        # scope-guard. `-o`/`-j` (sortie fichier) et `-l` (lecture fichier) exclus de même.
         flag_allowlist=("-a", "-aaaa", "-cname", "-mx", "-ns", "-txt", "-ptr", "-soa", "-resp",
-                        "-resp-only", "-rl", "-t", "-retry", "-silent"),
-        description="Résolution/énumération DNS (dnsx) — enregistrements A/hosts, assets re-validés scope."),
+                        "-resp-only", "-rl", "-t", "-retry", "-silent", "-nc", "-w", "-r"),
+        description="Énumération DNS de sous-domaines (dnsx `-d <domaine> -w <mots>`) — enregistrements "
+                    "A + réponse, assets re-validés scope. La wordlist est REQUISE (dnsx refuse "
+                    "`-d` sans `-w`) et accepte une liste INLINE `www,mail,dev` : sans elle l'outil est "
+                    "inerte et le dit (skip nommé, zéro processus). La RÉSOLUTION d'un hôte déjà connu "
+                    "passe par `recon.dig` (dnsx ne la lit que depuis un fichier/stdin)."),
     ToolSpec(
         kind="recon.naabu", vuln_class="PortScan", binary="naabu",
         argv_template=("-silent", "-host", "{target_host}", ("-p", "{param:ports}"),
@@ -336,73 +435,74 @@ CATALOG_SPECS = [
         description="Exploitation SQLi (sqlmap) — GATÉE par le plancher exploit (allow_exploit). Hits reported_by_tool."),
 
     # --- INTÉGRATIONS EXTERNES GOUVERNÉES SUPPLÉMENTAIRES (recon/scan/OSINT, non-destructif/non-exploit) ---
-    # masscan : balayage de ports MASSIF/rapide. COMPLÈTE naabu (asset host:port) par un sweep full-range
-    #   RAPPORTÉ SUR la cible (hit_is_asset=False : la sortie humaine commence par « Discovered », pas par
-    #   un jeton-asset -> on l'attribue à la cible, pas de faux asset). NON destructif (scan SYN).
-    ToolSpec(
-        kind="recon.masscan", vuln_class="PortScan", binary="masscan",
-        # `-p{param:ports:1-65535}` : la valeur EST attachée au flag (UN token) -> défaut `-p1-65535`
-        # BYTE-IDENTIQUE quand `ports` est absent ; `--rate {param:rate:1000}` garde `--rate 1000` par défaut.
-        argv_template=("-p{param:ports:1-65535}", "--rate", "{param:rate:1000}", "{args}", "{target_host}"),
-        mitre="T1046", phase="recon", capability="active", attck_tactic="Discovery",
-        depends_on=(), docker_image="ilyaglow/masscan", parser="regex",
-        parser_regex=r"(?im)^Discovered open port \d+/\w+ on \S+.*$",
-        hit_status="tested", severity="INFO", hit_is_asset=False,
-        params_schema=(
-            {"name": "ports", "type": "text", "label": "ports (-p, défaut 1-65535)", "flag": "-p"},
-            {"name": "rate", "type": "number", "label": "rate (--rate paquets/s, défaut 1000)", "flag": "--rate", "default": 1000},
-            _EXTRA),
-        flag_allowlist=("--rate", "--banners", "--ports", "-p", "--retries", "--open-only",
-                        "--source-port", "--wait", "--ping"),
-        # DÉCOUVERTE DE SERVICE : chaque port ouvert HTTP-confirmé devient une cible CHAÎNABLE (host:port
-        # + marqueur) que le cerveau scanne — COMPLÈTE naabu sur toute la plage (-p1-65535).
-        emit_service_discovery=True,
-        description="Balayage de ports rapide (masscan, -p1-65535 --rate 1000) — ports ouverts RAPPORTÉS "
-                    "SUR la cible (non destructif, SYN scan). Complète naabu par un sweep full-range. "
-                    "Image docker ilyaglow/masscan (Docker Hub, publiée)."),
+    # masscan : RETIRÉ (2026-08). Cf. « ENTRÉE RETIRÉE — recon.masscan » en tête de module.
+    # `recon.naabu` (juste au-dessus) couvre les ports, TOURNE partout, et émet déjà la découverte
+    # de service chaînable. Pour un sweep full-range : `params.ports = "1-65535"` sur naabu.
     # gobuster mode DNS : énumération de SOUS-DOMAINES. On choisit le mode dns (PAS dir) car la découverte
     #   de CONTENU est DÉJÀ couverte par feroxbuster -> gobuster-dns COMPLÈTE (enum sous-domaines). Assets
     #   découverts (phase recon -> hit_is_asset dérivé True) RE-VALIDÉS scope fail-closed. Wordlist FOURNIE
-    #   PAR L'UTILISATEUR (groupe optionnel tout-ou-rien) — aucun chemin machine-spécifique en dur.
+    #   PAR L'UTILISATEUR — aucun chemin machine-spécifique en dur, et SANS elle l'outil ne tourne pas.
+    #
+    #   ARGV MESURÉ (gobuster 3.8.2, image `ghcr.io/oj/gobuster`, `docker run --rm <img> dns --help`) —
+    #   ET LE DIAGNOSTIC « ÉVIDENT » ÉTAIT FAUX. Le ledger montrait `invalid value "guatx.com" for flag
+    #   -d: parse error` (52 findings) et la lecture naturelle était « il manque -w ». La mesure dit
+    #   autre chose : dans gobuster >= 3.x, **`-d` est l'abréviation de `--delay`** (une DURÉE), et le
+    #   domaine s'appelle `--domain`/`--do`. `-d guatx.com` demandait donc à gobuster de lire un nom
+    #   d'hôte comme un délai — d'où « parse error ». `-w` EST bien requis lui aussi (mesuré :
+    #   `Required flag "wordlist" not set`, rc=1), mais il n'aurait JAMAIS été atteint : c'est le
+    #   parsing de `-d` qui échouait en premier. Deux fautes, pas une, et l'ordre importe.
     ToolSpec(
         kind="recon.gobuster_dns", vuln_class="SubdomainEnum", binary="gobuster",
-        argv_template=("dns", "-q", "-d", "{target_host}", ("-w", "{param:wordlist}"),
+        argv_template=("dns", "-q", "--domain", "{target_host}", ("-w", "{param:wordlist}"),
+                       ("--resolver", "{param:resolver}"),
                        ("--delay", "{param:rate_delay_dur}"), ("-t", "{param:threads}"),
                        ("--timeout", "{param:timeout}"), "{args}"),
         mitre="T1590.002", phase="recon", capability="active", attck_tactic="Reconnaissance",
         depends_on=(), docker_image="ghcr.io/oj/gobuster", parser="regex",
-        parser_regex=r"(?im)^Found:\s+(\S+)",
+        # PARSEUR MESURÉ, PAS SUPPOSÉ — et c'était la TROISIÈME faute de cette entrée. L'ancien
+        # `^Found:\s+(\S+)` datait de gobuster <= 3.6 ; en 3.8.2 le mode dns écrit `<hôte> <ip>` sans
+        # préfixe (mesuré sur une énumération RÉELLE : `www.lab.test 127.0.0.42`). Un argv corrigé mais
+        # un parseur périmé aurait rendu EXACTEMENT le même « aucun hit » — d'où la règle : on ne
+        # valide pas un correctif d'invocation sans avoir LU une sortie réelle. Le préfixe `Found: `
+        # reste toléré (optionnel) pour les gobuster plus anciens encore déployés. group(1) = l'hôte,
+        # qui devient l'ASSET re-validé fail-closed contre le périmètre.
+        parser_regex=r"(?im)^(?:Found:\s+)?([a-z0-9_-]+(?:\.[a-z0-9_-]+)+)\b",
         hit_status="tested", severity="INFO",
+        # INERTE-MAIS-HONNÊTE : sans wordlist, gobuster s'arrête sur `Required flag "wordlist" not set`.
+        # On ne le lance pas pour ça — skip NOMMÉ. On n'embarque PAS de liste par défaut : ce serait
+        # figer une politique (taille de l'énumération = volume de requêtes DNS) au nom de l'opérateur.
+        requires_params=("wordlist",),
+        requires_note=("Fournir params.wordlist (chemin lisible par le binaire/conteneur ; convention "
+                       "SecLists/Discovery/DNS/subdomains-top1million-5000.txt). L'énumération par "
+                       "wordlist est du brute-force PAR VOLUME : son débit reste gouverné par le ROE "
+                       "(`rate_explicit` -> `rate_delay_dur` -> `--delay`), et `-t` borne les threads."),
         params_schema=(
-            {"name": "wordlist", "type": "text", "label": "wordlist (-w, chemin)", "flag": "-w"},
+            {"name": "wordlist", "type": "text", "label": "wordlist (-w, chemin) — REQUIS", "flag": "-w"},
+            {"name": "resolver", "type": "text", "label": "résolveur DNS (--resolver, ex 1.1.1.1:53)",
+             "flag": "--resolver"},
             {"name": "threads", "type": "number", "label": "threads (-t)", "flag": "-t"},
             {"name": "timeout", "type": "text", "label": "timeout (--timeout, ex 10s)", "flag": "--timeout"},
             _EXTRA),
-        flag_allowlist=("-w", "-t", "--delay", "--timeout", "-i", "-c", "--wildcard", "-q",
-                        "--no-color", "-r"),
-        description="Énumération DNS de sous-domaines (gobuster mode dns, -q) — COMPLÈTE feroxbuster "
-                    "(découverte de contenu) ; assets re-validés scope. Wordlist FOURNIE PAR "
-                    "L'UTILISATEUR via params.wordlist (convention : SecLists/Discovery/DNS/"
-                    "subdomains-top1million-5000.txt). Image docker ghcr.io/oj/gobuster (à confirmer)."),
-    # theHarvester : OSINT PASSIF (sources publiques -b all) -> emails + sous-domaines. hit_is_asset=False :
-    #   un email n'est PAS un asset scannable (une re-validation scope le supprimerait) -> on RAPPORTE le
-    #   renseignement SUR le domaine cible. capability=passive (pas de trafic vers la cible).
-    ToolSpec(
-        kind="recon.theharvester", vuln_class="OSINT", binary="theHarvester",
-        # `{param:sources:all}` porte le défaut `all` -> `-b all` BYTE-IDENTIQUE quand `sources` est absent.
-        argv_template=("-d", "{target_host}", ("-b", "{param:sources:all}"), ("-l", "{param:limit}"), "{args}"),
-        mitre="T1589", phase="recon", capability="passive", attck_tactic="Reconnaissance",
-        depends_on=(), docker_image="laramies/theharvester", parser="regex",
-        parser_regex=r"(?im)^\s*([\w.+-]+@[\w.-]+\.\w{2,}|(?:[a-z0-9_-]+\.)+[a-z]{2,})(?::[\d.]+)?\s*$",
-        hit_status="tested", severity="INFO", hit_is_asset=False,
-        params_schema=(
-            {"name": "sources", "type": "text", "label": "sources (-b, défaut all)", "flag": "-b", "default": "all"},
-            {"name": "limit", "type": "number", "label": "nb résultats max (-l)", "flag": "-l"},
-            _EXTRA),
-        flag_allowlist=("-b", "-l", "-s", "-g", "-n", "-c", "-r", "-t"),
-        description="OSINT PASSIF emails/sous-domaines (theHarvester, -b all sources publiques) — "
-                    "renseignement RAPPORTÉ sur le domaine cible (hit_is_asset=False). "
-                    "Image docker laramies/theharvester (officielle de l'auteur)."),
+        # ALLOWLIST RECALÉE SUR LES DRAPEAUX QUI EXISTENT VRAIMENT en 3.8.2 (les anciens `-i`/`-r` n'y
+        # sont plus : les garder laissait croire à des options inexistantes). EXCLUS délibérément :
+        # `--domain`/`--do` (un 2e domaine en extra_args ÉCRASERAIT la cible scope-guardée — le dernier
+        # gagne : ce serait un contournement de périmètre), `-o`/`--output` (écriture fichier),
+        # `-p`/`--pattern`/`--discover-pattern` (LECTURE de fichier).
+        flag_allowlist=("-w", "-t", "-d", "--delay", "--timeout", "-c", "--check-cname",
+                        "--wildcard", "--wc", "--no-fqdn", "--nf", "--protocol",
+                        "-q", "--quiet", "--no-color", "--nc", "--no-progress", "--np",
+                        "--no-error", "--ne", "--wordlist-offset", "--wo"),
+        description="Énumération DNS de sous-domaines (gobuster 3.x mode dns, -q --domain) — COMPLÈTE "
+                    "feroxbuster (découverte de contenu) ; assets re-validés scope. Le domaine passe "
+                    "par `--domain` (en 3.x, `-d` est l'abréviation de `--delay`, une durée). Wordlist "
+                    "FOURNIE PAR L'UTILISATEUR via params.wordlist et REQUISE : sans elle l'outil est "
+                    "inerte et le dit (skip nommé, zéro processus). Résolveur optionnel via "
+                    "params.resolver. Image docker ghcr.io/oj/gobuster."),
+    # theHarvester : RETIRÉ (2026-08). Cf. « ENTRÉE RETIRÉE » en tête de module pour le raisonnement
+    #   complet et ce que la couverture perd. En un mot : l'entrée déclarait une image qui N'EXISTE PAS,
+    #   et aucune image utilisable par ce runner n'a été trouvée. Une entrée de catalogue qui ne peut
+    #   pas fonctionner est PIRE qu'une entrée absente — elle fait croire à une couverture.
+    #
     # wfuzz : fuzzing de contenu/paramètres (mot-clé FUZZ dans l'URL, 404 masqués). hit_is_asset=False :
     #   les lignes de résultat (ID:code…) ne sont pas des assets propres -> rapportées SUR la cible.
     #   phase=recon/capability=active — cohérent avec feroxbuster (découverte). Wordlist FOURNIE PAR

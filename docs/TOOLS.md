@@ -178,10 +178,30 @@ rien à faire :
 `wpscan` (web.wpscan) et `zap-baseline.py` (web.zap_baseline, `prefer_docker`) via leur `docker_image` de repli ;
 **Burp** (burp.py) et **Metasploit** (msf.py) sont des **services externes** pilotés via ENV/réseau (jamais cuits
 dans l'image) ; le **service d'automatisation navigateur** des modules `evasion.*` (et de `xss.stored`) est
-lui aussi un **service externe** — voir l'encadré ci-dessous ; `theHarvester` (recon.theharvester) est **omis** (PyPI = placeholder v0.0.1 et l'amont exige
-Python ≥ 3.12 alors que la base bookworm fournit 3.11) → utilisez son `docker_image` `laramies/theharvester`.
+lui aussi un **service externe** — voir l'encadré ci-dessous.
 Sur une arche **non-amd64**, les binaires Go/Rust ci-dessus (dnsx…ffuf) sont omis (pins amd64 seulement) — les
-outils apt/git (sqlmap, nikto, testssl.sh, whatweb, masscan, wafw00f, wfuzz, gobuster) restent disponibles.
+outils apt/git (sqlmap, nikto, testssl.sh, whatweb, wafw00f, wfuzz, gobuster) restent disponibles.
+
+> **Retirés du catalogue (2026-08) — `recon.theharvester` et `recon.masscan`.** Ni l'un ni l'autre
+> n'avait jamais tourné : leur argv était refusé par l'outil, ou leur image n'existait pas (52 findings
+> chacun dans le ledger `gxrun2`, tous rendus en « j'ai vérifié, rien trouvé »).
+> `theHarvester` : l'image déclarée `laramies/theharvester` **n'existe pas** sur Docker Hub ; l'image
+> officielle de l'auteur (`ghcr.io/laramies/theharvester`) a pour entrypoint `restfulHarvest` — un
+> **serveur REST**, et `runner` ne construit pas de `--entrypoint`. Les sous-domaines restent couverts
+> par `recon.subfinder`, `recon.amass` et `recon.subdomains` (crt.sh) ; ce qui est perdu, ce sont les
+> **emails** (qui n'étaient de toute façon pas des assets scannables).
+> `masscan` : son argv était réparable (consommer l'IP épinglée par le ROE), mais un scan SYN brut ne
+> voit pas la réponse sur un hôte multi-homed -> **rc=0, stdout vide** = un « aucun hit » que la garde
+> d'honnêteté (`rc != 0`) ne rattrape pas. **`recon.naabu` couvre les ports** (connect TCP, `params.ports
+> = "1-65535"` pour la plage complète) et, lui, il tourne.
+>
+> **`recon.gobuster_dns` et `recon.dnsx` exigent désormais `params.wordlist`.** Sans elle, le module
+> rend un `skipped` NOMMÉ sans lancer de processus (inerte, mais honnête) : aucune wordlist n'est
+> embarquée — ce serait figer une politique de volume d'énumération au nom de l'opérateur. `dnsx`
+> accepte une liste **inline** séparée par des virgules (`-w www,mail,dev`), donc sans fichier ;
+> `gobuster` exige un **chemin de fichier lisible par le processus** (attention : via le repli
+> `docker_image`, `runner` ne monte aucun volume — une wordlist de l'hôte n'y est pas visible ;
+> installer le binaire local, ou utiliser `dnsx` avec une liste inline).
 
 > ℹ️ **Modules `evasion.*` : indisponibles par conception sans service navigateur.** Les modules
 > `evasion.xhr` / `evasion.turnstile` / `evasion.idor_intercept` / `evasion.discover` (et l'oracle
