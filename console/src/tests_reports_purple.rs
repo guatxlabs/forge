@@ -6,21 +6,414 @@
 use super::*;
 use crate::testutil::*;
 
-    /// [parité lecture] `render_run_report_md` — CINQ SOUS-CHAÎNES vérifiées, pas un miroir.
+    // =============================================================================================
+    //  PARITÉ DU RAPPORT DE RUN — console (Rust) ↔ moteur (Python)
+    //
+    //  HISTOIRE DE CE BLOC, parce qu'elle est le mode d'emploi. Un test nommé
+    //  `run_report_markdown_mirrors_build_report` a longtemps prétendu garder cette parité. Il
+    //  n'assertait que CINQ SOUS-CHAÎNES (titre, une ligne du tableau de sévérité, un en-tête de
+    //  finding, deux lignes ROE) : `forge/report.py` a été refondu DE FOND EN COMBLE — verdict en
+    //  tête, « Actionnable — à reporter », « Signal à qualifier », « Couverture NON vérifiée »,
+    //  annexe derrière une ligne de comptabilité — et le test est resté VERT du début à la fin. Un
+    //  garde-fou qui reste vert quand ce qu'il garde casse est PIRE que pas de garde-fou : il fait
+    //  croire qu'on surveille. Les tests ci-dessous le remplacent, et ils MORDENT :
+    //
+    //   1. `report_view_parity_python_vs_rust_same_corpus` — UN corpus, DEUX moteurs, squelettes
+    //      comparés. Et surtout : toute section émise d'un côté et absente de l'autre doit être
+    //      DÉCLARÉE avec sa raison. Une section AJOUTÉE côté Python (le cas exact qui a produit la
+    //      dérive) rougit ce test tant que personne ne l'a mirroitée OU déclarée.
+    //   2. `run_report_markdown_leads_with_verdict_actionable_and_coverage_holes` — le contrat côté
+    //      console, seul (sans Python) : ordre des sections, comptes de seaux, comptabilité d'annexe.
+    //   3. `run_report_markdown_announces_a_partial_run` — un rapport partiel s'annonce partiel.
+    //   4. `annex_fold_counts_and_names_everything_it_folds` — rien n'est masqué en silence.
+    // =============================================================================================
+
+    /// Corpus PARTAGÉ — la MÊME source alimente les deux rendus. `include_str!` (Rust) et le chemin
+    /// passé au pilote Python désignent le MÊME fichier : il n'existe pas de version « côté Rust ».
+    const PARITY_CORPUS: &str = include_str!("reports/parity_corpus.json");
+    const PARITY_CORPUS_DEFAULT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/reports/parity_corpus.json");
+
+    /// Corpus effectif. `FORGE_PARITY_CORPUS=<chemin>` permet d'éprouver le garde-fou sur un corpus
+    /// RÉEL (une campagne de 5318 findings ne se fige pas dans le dépôt) — il ne DÉSARME rien : toutes
+    /// les assertions restent, elles sont seulement évaluées sur d'autres données. Les deux moteurs
+    /// lisent le MÊME fichier, quel qu'il soit.
+    fn parity_corpus_path() -> String {
+        std::env::var("FORGE_PARITY_CORPUS").unwrap_or_else(|_| PARITY_CORPUS_DEFAULT_PATH.to_string())
+    }
+
+    fn parity_corpus_text() -> String {
+        match std::env::var("FORGE_PARITY_CORPUS") {
+            Ok(p) => std::fs::read_to_string(p).expect("corpus de parité lisible"),
+            Err(_) => PARITY_CORPUS.to_string(),
+        }
+    }
+    /// Racine du dépôt (paquet `forge` Python) — résolue depuis le manifeste, jamais devinée.
+    const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+
+    /// Pilote Python : charge le corpus, reconstruit des `Finding` du schéma moteur, monte un engine
+    /// MINIMAL (aucun réseau, aucun ledger) et rend `forge.report.build_report`. Il ne CHOISIT rien :
+    /// tout ce qui pourrait diverger (cwe/cvss/fix) est explicite dans le corpus.
+    const PARITY_DRIVER_PY: &str = r#"
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from forge.schema import Finding
+from forge import report as R
+
+rows = [r for r in json.load(open(sys.argv[2], encoding='utf-8'))]
+targets = json.loads(sys.argv[3])
+
+class Scope:
+    def __init__(self, t):
+        self.in_scope = t; self.out_scope = []; self.mode = 'propose'
+        self.allow_exploit = False; self.allow_destructive = False
+        self.triage = None; self.llm = None
+
+findings = [Finding(
+    target=r.get('target',''), title=r.get('title',''), severity=r.get('severity','INFO'),
+    category=r.get('category',''), cwe=r.get('cwe',''), mitre=r.get('mitre',''),
+    status=r.get('status','tested'), evidence=r.get('evidence',''), fix=r.get('fix',''),
+    cvss_vector=r.get('cvss_vector',''), cvss_score=r.get('cvss_score',0.0) or 0.0,
+    tool=r.get('tool',''), poc=r.get('poc',''), ts='t') for r in rows]
+
+class Eng: pass
+e = Eng()
+e.findings = findings; e.ledger = None; e.scope = Scope(targets); e.run_records = []
+e.dups = 0; e.not_attempted = []; e.not_planned = {}; e.coverage_gaps = {}
+e.skipped_budget = []; e.interruption = None
+e.campaign_id = 'parity'; e.run_id = 'run-parity'
+e.coverage = lambda: {'fired': [], 'dry_run': [], 'vetoed': [], 'errors': []}
+sys.stdout.write(R.build_report(e))
+"#;
+
+    /// Sections que les DEUX rendus DOIVENT porter, dans CET ordre relatif. C'est le contrat.
+    const MIRRORED_SECTIONS: &[&str] = &[
+        "Verdict",
+        "Actionnable — à reporter",
+        "Signal à qualifier",
+        "Couverture NON vérifiée",
+        "Synthèse",
+        "Findings — annexe complète",
+        "Couverture & transparence",
+    ];
+
+    /// Sections que le moteur émet et que la console NE mirroite PAS — chacune avec sa RAISON.
+    /// Cette liste est le mécanisme anti-lacune du garde-fou lui-même : une section Python qui n'est
+    /// ni mirroitée ni listée ici fait ROUGIR le test. On ne peut donc pas « oublier » une refonte.
+    const PY_ONLY_DECLARED: &[(&str, &str)] = &[
+        ("Engagement",
+         "métadonnées d'engagement : la console les rend dans son en-tête (campagne/mode/statut/fenêtre/opérateur) \
+          et l'empreinte du ledger dans « Annexe — chaîne de custody »"),
+        ("Triage des findings",
+         "le moteur de score-bruit/clusters (forge/triage.py) n'est PAS porté ; la console ne prétend pas \
+          à un triage qu'elle n'a pas exécuté. Les SEAUX (ce sur quoi le rapport MÈNE) le sont, eux"),
+        ("Techniques ATT&CK exercées",
+         "la console rend les techniques tirées DANS « Couverture détection (purple) », où elles sont en plus \
+          jointes aux détections du SOC — c'est un sur-ensemble, pas une lacune"),
+        ("Couverture de détection & chaîne de custody — rapport console",
+         "c'est un POINTEUR vers cette console ; la console porte la chose elle-même"),
+        ("Ledger d'engagement",
+         "équivalent console : « Annexe — chaîne de custody » (chaîne recalculée, head, clé publique, commande de vérif)"),
+        ("Assist LLM",
+         "enrichissement LLM OPT-IN piloté par scope.llm ; la console n'a pas de scope et n'appelle aucun LLM"),
+    ];
+
+    /// Sections propres à la console — chacune avec sa raison. Même règle en sens inverse.
+    const CONSOLE_ONLY_DECLARED: &[(&str, &str)] = &[
+        ("Résumé exécutif", "prose du livrable client (posture, risques prioritaires) — propre à la console"),
+        ("Couverture détection", "jointure des détections Plume (détecté/raté/MTTD) — impossible côté CLI"),
+        ("Annexe — chaîne de custody", "intégrité du ledger côté console + attribution"),
+    ];
+
+    /// Squelette COMPARABLE d'un rapport markdown : sections (titres normalisés, dans l'ordre),
+    /// comptes de seaux lus dans le Verdict, nombre d'items actionnables rendus, et comptabilité de
+    /// l'annexe. On compare des STRUCTURES, pas des sous-chaînes : c'est ce qui rend le contrôle
+    /// capable de rougir sur une refonte, là où cinq `contains()` ne le pouvaient pas.
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReportSkeleton {
+        sections: Vec<String>,
+        counts: Vec<(String, i64)>,
+        actionable_items: usize,
+        accounting: Vec<i64>, // [rendus, repliés, total]
+    }
+
+    /// Normalise un titre de section : on retire un suffixe parenthétique FINAL (il porte des nombres
+    /// ou une glose : « (23 émis, vue `pentest`) », « (trous de couverture) ») pour comparer l'IDENTITÉ
+    /// de la section, pas son décor.
+    fn normalize_heading(h: &str) -> String {
+        let t = h.trim();
+        if t.ends_with(')') {
+            if let Some(i) = t.rfind(" (") {
+                return t[..i].trim().to_string();
+            }
+        }
+        t.to_string()
+    }
+
+    fn skeleton_of(md: &str) -> ReportSkeleton {
+        let mut sections = Vec::new();
+        let mut counts = Vec::new();
+        let mut actionable_items = 0usize;
+        let mut accounting = Vec::new();
+        for line in md.lines() {
+            if let Some(h) = line.strip_prefix("## ") {
+                sections.push(normalize_heading(h));
+            } else if line.starts_with("### A") {
+                actionable_items += 1;
+            } else if let Some(rest) = line.strip_prefix("- **") {
+                // les cinq lignes de comptage du Verdict : « - **<label>** … : **<n>** … »
+                if let Some((label, tail)) = rest.split_once("**") {
+                    for lab in ["Actionnable", "À qualifier", "Couverture NON vérifiée", "Bruit de reconnaissance", "Total émis"] {
+                        if label == lab {
+                            if let Some(n) = first_bold_int(tail) {
+                                counts.push((lab.to_string(), n));
+                            }
+                        }
+                    }
+                }
+            } else if line.starts_with("> **") && line.contains("repliés**") && line.contains("émis au total") {
+                accounting = all_ints(line);
+            }
+        }
+        ReportSkeleton { sections, counts, actionable_items, accounting }
+    }
+
+    /// Premier entier encadré de `**` dans une chaîne (« : **479** ⚠️ … » -> 479).
+    fn first_bold_int(s: &str) -> Option<i64> {
+        let mut it = s.split("**");
+        it.next()?; // avant le premier délimiteur
+        for chunk in it {
+            if let Ok(n) = chunk.trim().parse::<i64>() {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Tous les entiers d'une ligne, dans l'ordre.
+    fn all_ints(s: &str) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                cur.push(c);
+            } else if !cur.is_empty() {
+                out.push(cur.parse().unwrap_or(0));
+                cur.clear();
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur.parse().unwrap_or(0));
+        }
+        out
+    }
+
+    fn declared(list: &[(&str, &str)], h: &str) -> bool {
+        list.iter().any(|(name, _)| *name == h)
+    }
+
+    /// Charge le corpus partagé dans une base console. INSÉRÉ À L'ENVERS À DESSEIN :
+    /// `read_finding_rows` lit `ORDER BY id DESC` (« récents d'abord », choix d'affichage de la
+    /// console) ; insérer à l'envers fait donc voir aux DEUX rendus la MÊME séquence, et la
+    /// comparaison porte sur la VUE, pas sur un choix de tri SQL.
+    fn load_parity_corpus(app: &App, run_id: &str, status: &str) -> Vec<String> {
+        let rows: Vec<Value> = serde_json::from_str(&parity_corpus_text()).expect("corpus JSON valide");
+        let mut targets: Vec<String> = Vec::new();
+        for r in &rows {
+            let t = r.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !t.is_empty() && !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
+        {
+            let db = app.db();
+            migrate(&db);
+            for r in rows.iter().rev() {
+                let g = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                db.execute(
+                    "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    rusqlite::params![
+                        "t", "parity", g("target"), g("title"), g("severity"), g("category"), g("mitre"),
+                        g("status"), g("evidence"), g("tool"), g("poc"), g("fix"), run_id, g("cwe"),
+                        g("cvss_vector"), r.get("cvss_score").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                    ],
+                ).unwrap();
+            }
+            db.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,started_by,targets,started,finished)
+                 VALUES(?,'parity',datetime('now'),?,'propose',0,0,0,0,'operator',?,'2026-06-01T10:00:00Z','2026-06-01T12:00:00Z')",
+                rusqlite::params![run_id, status, serde_json::to_string(&targets).unwrap()],
+            ).unwrap();
+            // GARDE DE STOCKAGE — mesurée AVANT toute comparaison de vue, pour qu'une TRONCATURE au
+            // stockage ne se déguise pas en « divergence de rendu ». `finding` porte
+            // `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` : deux findings de MÊME titre sur la
+            // MÊME cible (modules différents, run différent de la même campagne, sévérités
+            // différentes) sont SILENCIEUSEMENT écrasés — la console en perd 499 sur 5318 (9,4 %) sur
+            // une campagne réelle, et son rapport annonce alors un total qui n'est PAS celui émis.
+            // Cette assertion NOMME la cause au lieu de laisser le lecteur déduire d'un écart de compte.
+            let stored: i64 = db
+                .query_row("SELECT COUNT(*) FROM finding WHERE run_id=?", rusqlite::params![run_id], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                stored as usize,
+                rows.len(),
+                "la console a STOCKÉ {stored} finding(s) sur {} émis par le corpus : \
+                 `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` (console/src/schema.rs) en a écrasé \
+                 {} EN SILENCE. Ce n'est pas une divergence de rendu — c'est une perte au stockage, et \
+                 aucun rapport ne peut la rattraper.",
+                rows.len(),
+                rows.len() - stored as usize
+            );
+        }
+        targets
+    }
+
+    fn render_parity_md(app: &App, run_id: &str) -> String {
+        let store = app.store();
+        let job = store
+            .query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params![run_id], run_job_json)
+            .unwrap();
+        let md = render_run_report_md(&store, run_id, &job, None, None);
+        drop(store);
+        md
+    }
+
+    /// ★ LE GARDE-FOU DE PARITÉ — un corpus, deux moteurs, squelettes comparés.
     ///
-    /// ⚠️ PORTÉE EXACTE, corrigée le 2026-08-07 : ce test s'appelait
-    /// `run_report_markdown_mirrors_build_report` et sa doc annonçait un « miroir markdown de
-    /// build_report ». Il n'en vérifie rien de tel — il assert le titre, UNE ligne du tableau de
-    /// sévérité, UN en-tête de finding et DEUX lignes de transparence ROE. C'est utile comme
-    /// non-régression de rendu, et ça ne prouve AUCUNE parité de structure.
+    /// CE QU'IL PROUVE : la console et `forge.report.build_report` rendent LES MÊMES SECTIONS, dans
+    /// LE MÊME ORDRE, avec LES MÊMES COMPTES DE SEAUX (actionnable / à qualifier / couverture non
+    /// vérifiée / bruit / total) et LA MÊME COMPTABILITÉ D'ANNEXE, sur des findings identiques.
     ///
-    /// Constaté à la mesure : `forge/report.py` a été restructuré en profondeur (verdict en tête,
-    /// sections « Actionnable » / « Signal à qualifier » / « Couverture NON vérifiée », annexe avec
-    /// comptabilité) et ce test est resté VERT. Un test dont le nom promet plus que ce qu'il couvre
-    /// est pire qu'un test absent : il fait croire la parité surveillée. La divergence Rust↔Python
-    /// est donc RÉELLE et non couverte ici — elle est suivie à part, pas masquée par ce nom.
+    /// CE QU'IL NE PROUVE PAS (dit ici plutôt que sous-entendu) : ni l'égalité octet-à-octet des
+    /// proses, ni l'ORDRE de l'annexe — la console n'a pas porté le score-bruit du triage, elle rend
+    /// l'annexe dans son ordre de lecture. Les deux divergences sont DÉCLARÉES, pas subies.
+    ///
+    /// POURQUOI IL MORD : les listes `MIRRORED_SECTIONS` / `PY_ONLY_DECLARED` / `CONSOLE_ONLY_DECLARED`
+    /// forment une PARTITION obligatoire des sections observées des deux côtés. Ajouter une section au
+    /// moteur (ce qui vient d'arriver) la fait apparaître non déclarée -> ROUGE. En retirer une côté
+    /// console -> ROUGE. Décaler un seuil de seau -> les comptes divergent -> ROUGE.
+    ///
+    /// DÉPENDANCE ASSUMÉE : `python3` + le paquet `forge` du dépôt (stdlib pure, aucune installation).
+    /// S'ils manquent, ce test ÉCHOUE au lieu d'être « sauté » : un garde-fou de parité qui se tait
+    /// est exactement le décor qu'on vient de retirer. Le job CI `console` exécute déjà python3
+    /// (`scripts/check_openssl_freedom.py`) avant `cargo test`.
     #[test]
-    fn run_report_markdown_renders_title_severity_finding_and_roe_transparency() {
+    fn report_view_parity_python_vs_rust_same_corpus() {
+        let path = tmp_path("forge-parity-ledger");
+        let app = test_app(&path);
+        let targets = load_parity_corpus(&app, "run-parity", "done");
+        let rust_md = render_parity_md(&app, "run-parity");
+
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(PARITY_DRIVER_PY)
+            .arg(REPO_ROOT)
+            .arg(parity_corpus_path())
+            .arg(serde_json::to_string(&targets).unwrap())
+            .output()
+            .expect(
+                "python3 introuvable — le garde-fou de PARITÉ ne peut pas se taire : \
+                 installez python3 (le moteur Forge en dépend déjà) ou corrigez l'environnement",
+            );
+        assert!(
+            out.status.success(),
+            "le moteur Python n'a pas rendu le rapport de référence — parité INVÉRIFIABLE :\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let py_md = String::from_utf8_lossy(&out.stdout).to_string();
+
+        // Aide au diagnostic (jamais requise) : `FORGE_PARITY_DUMP=<dossier>` écrit les DEUX rendus
+        // côte à côte. Quand ce test rougit, on veut lire les rapports, pas deviner.
+        if let Ok(dir) = std::env::var("FORGE_PARITY_DUMP") {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(format!("{dir}/console.md"), &rust_md);
+            let _ = std::fs::write(format!("{dir}/engine.md"), &py_md);
+        }
+
+        let rs = skeleton_of(&rust_md);
+        let py = skeleton_of(&py_md);
+
+        // (a) AUCUNE SECTION NON DÉCLARÉE, des deux côtés. C'est la garde anti-dérive : une refonte du
+        //     moteur qui ajoute/renomme une section ne peut pas passer inaperçue.
+        for h in &py.sections {
+            assert!(
+                MIRRORED_SECTIONS.contains(&h.as_str()) || declared(PY_ONLY_DECLARED, h),
+                "section Python « {h} » ni mirroitée par la console ni DÉCLARÉE comme non-mirroitée. \
+                 Le moteur a changé : mirroiter la section dans report_render.rs, ou l'ajouter à \
+                 PY_ONLY_DECLARED AVEC SA RAISON. Sections Python vues : {:?}",
+                py.sections
+            );
+        }
+        for h in &rs.sections {
+            assert!(
+                MIRRORED_SECTIONS.contains(&h.as_str()) || declared(CONSOLE_ONLY_DECLARED, h),
+                "section console « {h} » ni mirroitée ni déclarée console-only. Sections vues : {:?}",
+                rs.sections
+            );
+        }
+
+        // (b) TOUTES les sections du contrat sont présentes des DEUX côtés, DANS LE MÊME ORDRE.
+        let keep = |v: &Vec<String>| -> Vec<String> {
+            v.iter().filter(|h| MIRRORED_SECTIONS.contains(&h.as_str())).cloned().collect()
+        };
+        let (rs_mirrored, py_mirrored) = (keep(&rs.sections), keep(&py.sections));
+        assert_eq!(
+            rs_mirrored, py_mirrored,
+            "l'ossature du rapport a divergé.\n  console : {rs_mirrored:?}\n  moteur  : {py_mirrored:?}"
+        );
+        assert_eq!(
+            rs_mirrored,
+            MIRRORED_SECTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "une section du CONTRAT manque (ou a bougé) — les deux rendus sont peut-être d'accord \
+             entre eux, mais ils ne portent plus ce que le contrat exige"
+        );
+
+        // (c) LES SEAUX : mêmes findings -> mêmes comptes. Un seuil de sévérité ou un statut
+        //     « prouvé » qui dérive d'un côté se voit ICI, chiffré.
+        assert_eq!(
+            rs.counts, py.counts,
+            "les comptes de seaux divergent (sévérité/statut interprétés différemment)\n  console : \
+             {:?}\n  moteur  : {:?}",
+            rs.counts, py.counts
+        );
+        assert!(!rs.counts.is_empty(), "aucun compte de seau lu — le format du Verdict a changé");
+
+        // (d) LES ITEMS actionnables : même regroupement par gabarit (1 vuln × N endpoints).
+        assert_eq!(
+            rs.actionable_items, py.actionable_items,
+            "le regroupement par gabarit diverge : {} item(s) côté console, {} côté moteur",
+            rs.actionable_items, py.actionable_items
+        );
+
+        // (e) LA COMPTABILITÉ D'ANNEXE : rendus + repliés = émis, des deux côtés, avec les MÊMES
+        //     nombres. C'est l'invariant « rien n'est masqué en silence », comparé.
+        assert_eq!(
+            rs.accounting, py.accounting,
+            "la comptabilité de l'annexe diverge : {:?} (console) vs {:?} (moteur)",
+            rs.accounting, py.accounting
+        );
+        assert_eq!(rs.accounting.len(), 3, "ligne de comptabilité d'annexe absente ou illisible");
+        assert_eq!(
+            rs.accounting[0] + rs.accounting[1],
+            rs.accounting[2],
+            "rendus + repliés != émis — un finding a disparu du rapport SANS être compté"
+        );
+
+        // (f) AUCUN SECRET dans l'un ou l'autre rendu (le corpus porte un `Authorization: Bearer …`).
+        for (who, md) in [("console", &rust_md), ("moteur", &py_md)] {
+            assert!(
+                !md.contains("SUPERSECRETVALUE"),
+                "le rendu {who} laisse fuir le jeton du PoC — la rédaction a régressé"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Le CONTRAT côté console, vérifié SEUL (sans Python) : ce que l'utilisateur de la console reçoit.
+    /// Avant ce lot, ce rendu était un JOURNAL — « Résumé exécutif → Synthèse → tous les findings à la
+    /// file » — sans verdict, sans tête actionnable, sans section de couverture, sans comptabilité.
+    #[test]
+    fn run_report_markdown_leads_with_verdict_actionable_and_coverage_holes() {
         let path = tmp_path("forge-test-report");
         let app = test_app(&path);
         {
@@ -28,7 +421,13 @@ use crate::testutil::*;
             migrate(&db); // ALTER additifs (run_id sur finding/runrecord) — comme au boot réel
             db.execute(
                 "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,tool,run_id)
-                 VALUES('t','c','api.example.com','IDOR exposé','HIGH','access_control','T1190','confirmé','idor','run-1')",
+                 VALUES('t','c','api.example.com','IDOR exposé','HIGH','access_control','T1190','tested','idor','run-1')",
+                [],
+            ).unwrap();
+            // un `skipped` : c'est un TROU DE COUVERTURE, il doit REMONTER, pas se noyer dans l'annexe.
+            db.execute(
+                "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,tool,run_id)
+                 VALUES('t','c','api.example.com','recon.dns non concluant — résolution indisponible','INFO','recon','','skipped','forge/modules/recon_dns.py:recon.dns','run-1')",
                 [],
             ).unwrap();
             db.execute(
@@ -42,22 +441,130 @@ use crate::testutil::*;
                 [],
             ).unwrap();
         }
-        let store = app.store();
-        let job = store.query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params!["run-1"], run_job_json).unwrap();
-        let md = render_run_report_md(&store, "run-1", &job, None, None);
-        drop(store);
+        let md = render_parity_md(&app, "run-1");
+
+        // --- non-régression du rendu historique (ce que l'ancien test couvrait réellement) ---
         assert!(md.contains("# Forge — rapport d'engagement (`run-1`)"), "titre avec run_id");
         assert!(md.contains("| HIGH | 1 |"), "synthèse sévérité HIGH=1");
-        assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu");
+        assert!(md.contains("### [HIGH] IDOR exposé — `api.example.com`"), "finding détaillé rendu en annexe");
         assert!(md.contains("**Refusées (VETO"), "section transparence ROE présente");
         assert!(md.contains("`VETO` `exploit.rce` → `api.example.com` : capacité non autorisée"), "verdict VETO détaillé avec raison");
         assert!(md.contains("**Simulées (DRY_RUN)** : 2"), "compteur dry_run depuis run_job");
-        // [LOT REPORTING] CWE/CVSS séparés : le finding n'a pas de colonne cwe/cvss -> dérivés
-        // (CWE depuis category vide => '—' ; CVSS depuis sévérité HIGH).
         assert!(md.contains("## Résumé exécutif"), "executive summary présent");
         assert!(md.contains("Posture :"), "phrase posture présente");
         assert!(md.contains("**CWE**") && md.contains("**CVSS**"), "CWE et CVSS rendus séparément");
         assert!(md.contains("7.5"), "CVSS de base dérivé de la sévérité HIGH");
+
+        // --- LA TÊTE ACTIONNABLE (ce qui manquait, et que le nom du test annonce) ---
+        let sk = skeleton_of(&md);
+        assert_eq!(
+            sk.sections.iter().filter(|h| MIRRORED_SECTIONS.contains(&h.as_str())).cloned().collect::<Vec<_>>(),
+            MIRRORED_SECTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "ossature attendue absente ou désordonnée — sections vues : {:?}",
+            sk.sections
+        );
+        // le verdict MÈNE : il est rendu AVANT la synthèse et avant l'annexe.
+        let pos = |h: &str| md.find(&format!("## {h}")).unwrap_or(usize::MAX);
+        assert!(pos("Verdict") < pos("Synthèse"), "le Verdict doit précéder la Synthèse");
+        assert!(pos("Actionnable — à reporter") < pos("Findings — annexe complète"), "l'actionnable précède l'annexe");
+        assert!(pos("Couverture NON vérifiée") < pos("Findings — annexe complète"), "les trous de couverture précèdent l'annexe");
+        assert!(md.contains("**1 finding(s) actionnable(s)**"), "verdict chiffré en tête");
+        assert!(md.contains("### A1 · [HIGH] IDOR exposé"), "l'item actionnable est rendu à la forme triager");
+        // le `skipped` REMONTE dans sa section, groupé par module — jamais présenté comme du bruit.
+        assert!(md.contains("**1 finding(s) `skipped`**"), "les skipped sont comptés comme trous de couverture");
+        assert!(md.contains("| `recon.dns` | 1 |"), "trou de couverture groupé par module");
+        assert!(
+            md.contains("ne vaut donc **pas** une absence de vulnérabilité"),
+            "la portée d'un skipped doit être DITE, pas laissée à l'interprétation"
+        );
+        // comptabilité d'annexe : rendus + repliés = émis, IMPRIMÉE.
+        assert_eq!(sk.accounting, vec![2, 0, 2], "ligne de comptabilité de l'annexe absente/fausse");
+        assert!(md.contains("l'annexe est exhaustive"), "la vue rendue doit être annoncée");
+        // la sévérité vient du FINDING : aucun item n'est relevé pour remplir une section.
+        assert!(
+            md.contains("_Aucun finding LOW ni hit d'outil tiers._"),
+            "une section vide se DIT vide au lieu d'être garnie par sur-classement"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// INVARIANT 4 — un rapport partiel s'ANNONCE partiel. La console ne reçoit pas les compteurs de
+    /// plan du moteur, mais elle SAIT que le run n'est pas allé au bout (`run_job.status`). Elle le
+    /// dit en tête, et elle dit qu'elle IGNORE le dénominateur au lieu d'en fabriquer un.
+    #[test]
+    fn run_report_markdown_announces_a_partial_run() {
+        let path = tmp_path("forge-partial-ledger");
+        let app = test_app(&path);
+        load_parity_corpus(&app, "run-cut", "timeout");
+        let md = render_parity_md(&app, "run-cut");
+        assert!(md.contains("RAPPORT PARTIEL — RUN INTERROMPU (budget dépassé (timeout))"), "bannière de partialité absente");
+        assert!(md.contains("nombre d'actions exécutées inconnu"), "un dénominateur inconnu se DIT inconnu");
+        assert!(
+            md.find("RAPPORT PARTIEL").unwrap() < md.find("## Résumé exécutif").unwrap(),
+            "la bannière doit être lue AVANT tout le reste"
+        );
+
+        // et un run terminé normalement n'en porte AUCUNE trace (rendu inchangé sur ce chemin).
+        let path2 = tmp_path("forge-done-ledger");
+        let app2 = test_app(&path2);
+        load_parity_corpus(&app2, "run-ok", "done");
+        let md_ok = render_parity_md(&app2, "run-ok");
+        assert!(!md_ok.contains("RAPPORT PARTIEL"), "un run complet ne doit pas s'annoncer partiel");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
+    }
+
+    /// INVARIANT 1 — rien n'est masqué en silence. En vue `bounty` l'annexe REPLIE les répétitions de
+    /// gabarit : elle doit alors les COMPTER, les NOMMER, et dire comment les récupérer. Et la
+    /// comptabilité est dérivée DEUX FOIS indépendamment (somme des tailles de groupes vs partition
+    /// d'indices) : muter une seule des deux fait rougir `check()` au lieu de rattraper en silence.
+    #[test]
+    fn annex_fold_counts_and_names_everything_it_folds() {
+        use crate::report_render::view;
+        let path = tmp_path("forge-fold-ledger");
+        let app = test_app(&path);
+        load_parity_corpus(&app, "run-fold", "done");
+        let store = app.store();
+        let rows = crate::report_render::read_finding_rows(&store, "run-fold");
+        drop(store);
+
+        let b = view::bucket_findings(&rows);
+        let keep: Vec<usize> = b.exploitable.iter().chain(b.qualify.iter()).chain(b.unverified.iter()).copied().collect();
+
+        // pentest (défaut) : exhaustif, rien n'est replié.
+        let p = view::annex_plan(&rows, view::VIEW_PENTEST, &keep);
+        assert_eq!(p.rendered.len(), rows.len());
+        assert_eq!(p.folded(), 0);
+        assert!(p.check().0, "partition pentest : {}", p.check().1);
+
+        // bounty : des répétitions de gabarit existent dans le corpus -> il DOIT y avoir du repli,
+        // sinon ce test ne prouverait rien de la comptabilité.
+        let f = view::annex_plan(&rows, view::VIEW_BOUNTY, &keep);
+        assert!(f.folded() > 0, "le corpus doit contenir des répétitions de gabarit à replier");
+        assert!(!f.folded_groups.is_empty(), "tout repli doit être NOMMÉ par son gabarit");
+        for g in &f.folded_groups {
+            assert!(!g.label.is_empty(), "un gabarit replié sans nom serait un masquage silencieux");
+            assert_eq!(g.members.len(), g.members.iter().collect::<std::collections::BTreeSet<_>>().len());
+        }
+        let (ok, why) = f.check();
+        assert!(ok, "partition bounty cassée : {why}");
+        assert_eq!(f.rendered.len() + f.folded(), rows.len(), "rendus + repliés doit couvrir tout le corpus");
+        // et le rendu IMPRIME cette comptabilité (fail-loud, jamais une garantie muette).
+        let mut out: Vec<String> = Vec::new();
+        view::render_annex_accounting(&mut out, &f);
+        let txt = out.join("\n");
+        assert!(txt.contains(&format!("{} repliés", f.folded())), "le repli doit être COMPTÉ dans le rapport");
+        assert!(txt.contains("aucun n'est supprimé"), "le rapport doit dire que rien n'est supprimé");
+        assert!(txt.contains("FORGE_REPORT_VIEW=pentest"), "le rapport doit dire COMMENT récupérer le replié");
+
+        // FAIL-LOUD : une comptabilité cassée n'est PAS rattrapée, elle est imprimée en clair.
+        let mut broken = view::annex_plan(&rows, view::VIEW_PENTEST, &keep);
+        broken.rendered.pop(); // un finding disparaît sans être replié
+        let (ok2, why2) = broken.check();
+        assert!(!ok2, "un finding disparu doit casser l'invariant");
+        let mut out2: Vec<String> = Vec::new();
+        view::render_annex_accounting(&mut out2, &broken);
+        assert!(out2.join("\n").contains("COMPTABILITÉ DE L'ANNEXE CASSÉE"), "la casse doit être RENDUE : {why2}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -148,6 +655,50 @@ use crate::testutil::*;
         assert!(html.contains("forge ledger verify --ledger") && html.contains("--pubkey"), "commande de vérif externe");
         assert!(html.contains("VALIDE"), "intégrité de la chaîne recalculée");
         assert!(html.contains("alice") && html.contains("HAUT-IMPACT"), "attribution actor + opt-in haut-impact");
+        // --- MÊMES INVARIANTS QUE LE MARKDOWN (le livrable client ne peut pas être moins honnête) ---
+        // verdict chiffré en tête, avant la liste complète ; trous de couverture ; comptabilité imprimée.
+        assert!(html.contains("id=\"verdict\""), "section Verdict absente du livrable client");
+        assert!(html.contains("finding(s) actionnable(s)"), "verdict chiffré absent");
+        assert!(html.contains("id=\"gaps\""), "section « Couverture NON vérifiée » absente");
+        assert!(html.contains("émis au total"), "comptabilité de l'annexe non imprimée");
+        assert!(
+            html.find("id=\"verdict\"").unwrap() < html.find("id=\"findings\"").unwrap(),
+            "le verdict doit précéder la liste complète"
+        );
+        // un run 'done' ne s'annonce pas partiel.
+        assert!(!html.contains("RAPPORT PARTIEL"), "un run complet ne doit pas s'annoncer partiel");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Le livrable client HTML ne doit ni MENTIR sur la complétude d'un run coupé, ni laisser fuir un
+    /// secret. `html_escape` neutralise le HTML — il ne masque AUCUN secret : les deux gardes sont
+    /// distinctes et toutes deux nécessaires.
+    #[test]
+    fn run_report_html_announces_partiality_and_redacts_secrets() {
+        let path = tmp_path("forge-html-partial");
+        let app = test_app(&path);
+        load_parity_corpus(&app, "run-cut", "timeout");
+        let custody = build_ledger_custody(&app, "operator");
+        let (job, html) = {
+            let store = app.store();
+            let job = store
+                .query_row(&format!("SELECT {RUN_JOB_COLS} FROM run_job WHERE run_id=?"), &crate::sql_params!["run-cut"], run_job_json)
+                .unwrap();
+            let html = render_run_report_html(&store, "run-cut", &job, None, &custody);
+            (job, html)
+        };
+        assert_eq!(job.get("status").and_then(|v| v.as_str()), Some("timeout"));
+        assert!(html.contains("RAPPORT PARTIEL — RUN INTERROMPU"), "bannière de partialité absente du HTML");
+        // NB : `cover-title` apparaît AUSSI dans le CSS inliné du `<head>` — on ancre donc sur la
+        // balise elle-même, sinon l'assertion comparerait la bannière à une règle de style.
+        assert!(
+            html.find("RAPPORT PARTIEL").unwrap() < html.find("<h1 class=\"cover-title\">").unwrap(),
+            "la bannière doit précéder la page de garde"
+        );
+        assert!(
+            !html.contains("SUPERSECRETVALUE"),
+            "le livrable client HTML laisse fuir le jeton du PoC (html_escape n'est PAS une rédaction)"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

@@ -56,10 +56,45 @@ Détail du modèle : [Modèle de sécurité](SECURITY_MODEL.md).
 | `GET /api/panels/:id/data?from=&to=` | Exécute la requête GXQL du panel (viz table/bar/stat). |
 | `GET /api/runs` | Liste des runs C2-light (récents d'abord). |
 | `GET /api/runs/:id` | Détail d'un run. |
-| `GET /api/runs/:id/report[?format=md\|html\|pdf]` | **Rapport d'engagement**. `md` (défaut), `html` (livrable brandé, CSS print), `pdf` (si moteur PDF présent, sinon `pdf_unavailable`). |
+| `GET /api/runs/:id/report[?format=md\|html\|pdf]` | **Rapport d'engagement**. `md` (défaut), `html` (livrable brandé, CSS print), `pdf` (si moteur PDF présent, sinon `pdf_unavailable`). **Mène par le verdict** — voir ci-dessous. |
 | `GET /api/runs/:id/logs?after=<ID>` | Lignes de log d'un run (fallback polling de SSE). |
 | `GET /api/runs/:id/events` | Flux **SSE** : lignes de log + transitions de statut du run. |
 | `POST /api/scope-check` | Verdict d'appartenance d'une cible au scope serveur (lecture/gouvernance). |
+
+### `GET /api/runs/:id/report` — structure du rapport (parité avec `forge.report.build_report`)
+
+Le rapport **mène par le verdict**, pas par la liste. Ordre des sections (`md` et `html`) :
+
+1. **bannière de partialité** — *seulement* si `run_job.status ∈ {timeout, cancelled, failed, running}*.
+   Un run coupé le DIT en tête : une absence de finding n'y vaut pas une absence de vulnérabilité.
+   La console ne reçoit pas les compteurs de plan du moteur (`forge/console_client.py` ne les
+   transmet pas) — elle dit donc qu'elle **ignore** le ratio « exécutées / planifiées » au lieu d'en
+   fabriquer un ;
+2. **Résumé exécutif** (console uniquement — prose du livrable client) ;
+3. **Verdict** — une ligne (« N actionnable(s) » ou « rien d'actionnable trouvé ») + les comptes des
+   quatre seaux : actionnable (≥ MEDIUM **ou** statut prouvé) · à qualifier (LOW / signalé par un
+   outil) · **couverture NON vérifiée** (`skipped`) · bruit de reconnaissance (INFO) ;
+4. **Actionnable — à reporter** puis **Signal à qualifier** — un bloc par gabarit (1 vuln × N
+   endpoints) à la forme attendue par un triager : sévérité, CWE, CVSS, cible, requête déduite du
+   PoC, reproduction numérotée, **commande rejouable**, observation, correctif ;
+5. **Couverture NON vérifiée (trous de couverture)** — les `skipped`, groupés par module, **avant**
+   toute annexe : c'est ce qui BORNE ce que l'absence de finding permet de conclure ;
+6. **Synthèse** par sévérité ;
+7. **Findings — annexe complète** — précédée d'une ligne de **comptabilité** : `rendus + repliés =
+   émis`. En vue `pentest` (défaut) rien n'est replié ; en vue `bounty` les répétitions de gabarit
+   sont repliées, **comptées, nommées**, avec le moyen de les récupérer ;
+8. **Couverture & transparence (ROE)**, **Couverture détection (purple)**, **Annexe — chaîne de custody**.
+
+**Vue** : `FORGE_REPORT_VIEW=pentest|bounty` (même variable que le moteur, pour que replier soit la
+même décision des deux côtés). Défaut `pentest` = exhaustif.
+
+**Sections du rapport CLI non mirroitées ici, et pourquoi** — le triage à score-bruit
+(`forge/triage.py`) n'est pas porté côté console (elle ne prétend pas à un triage qu'elle n'a pas
+exécuté) ; les techniques ATT&CK exercées sont rendues **dans** « Couverture détection (purple) », où
+elles sont en plus jointes aux détections du SOC ; l'en-tête d'engagement et le ledger du moteur ont
+pour équivalents l'en-tête console et l'annexe chaîne-de-custody. Cette correspondance est **vérifiée
+par un test** (`report_view_parity_python_vs_rust_same_corpus`) qui rougit si le moteur ajoute une
+section que personne n'a ni mirroitée ni déclarée.
 
 > **Les routes qui spawnent le moteur** lancent **un process par requête**. Inventaire complet, par gate :
 >

@@ -463,6 +463,32 @@ async fn build_report_data(app: &App, eid: i64) -> Value {
     let branding = effective_branding(app, eid);
     let summary = summarize(&findings);
 
+    // PARTIALITÉ DE L'ENGAGEMENT — le livrable client agrège des findings STOCKÉS, sans jamais
+    // regarder si les runs qui les ont produits sont allés au bout. Un engagement dont la moitié des
+    // runs a expiré rendait donc un rapport qui RESSEMBLE à un rapport complet : « aucun risque
+    // critique » s'y lit comme un verdict alors que le plan n'a pas tourné. Le rapport de run porte
+    // déjà cette bannière ; l'agrégat la porte maintenant aussi, DÉRIVÉE de `run_job.status` (aucune
+    // invention : on nomme les runs concernés et leur statut).
+    let cut: Vec<Value> = runs
+        .iter()
+        .filter(|r| {
+            crate::report_render::view::partial_cause(r.get("status").and_then(|v| v.as_str()).unwrap_or("")).is_some()
+        })
+        .map(|r| {
+            json!({
+                "run_id": r.get("run_id").cloned().unwrap_or(json!("")),
+                "status": r.get("status").cloned().unwrap_or(json!("")),
+                "why": crate::report_render::view::partial_cause(r.get("status").and_then(|v| v.as_str()).unwrap_or("")).unwrap_or(""),
+            })
+        })
+        .collect();
+    let partial = json!({
+        "is_partial": !cut.is_empty(),
+        "runs_total": runs.len(),
+        "runs_interrupted": cut.len(),
+        "runs": cut,
+    });
+
     json!({
         "generated": generated,
         "branding": branding,
@@ -473,6 +499,10 @@ async fn build_report_data(app: &App, eid: i64) -> Value {
         "summary": summary,
         "findings": findings,
         "runs": runs,
+        // consommé par le HTML/JSON de ce module ET disponible pour le générateur DOCX Python
+        // (`forge/report_engagement.py`) — voir le patch signalé : tant qu'il ne le lit pas, le DOCX
+        // reste le SEUL format qui ne dit pas qu'un engagement est partiel.
+        "partial": partial,
         "attack": attack,
         "custody": custody,
     })
@@ -630,6 +660,35 @@ fn render_html(data: &Value, preview: bool) -> String {
     h.push_str("</dl>");
     h.push_str(&format!("<div class=\"cover-foot\">{}</div>", e(&confidentiality)));
     h.push_str("</section>");
+
+    // ----- BANNIÈRE DE PARTIALITÉ (avant le résumé exécutif : elle en BORNE la portée) -----
+    let partial = data.get("partial").cloned().unwrap_or(json!({}));
+    if partial.get("is_partial").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let n = partial.get("runs_interrupted").and_then(|v| v.as_i64()).unwrap_or(0);
+        let tot = partial.get("runs_total").and_then(|v| v.as_i64()).unwrap_or(0);
+        let detail: Vec<String> = partial
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        format!(
+                            "{} ({})",
+                            getstr(r, "run_id"),
+                            getstr(r, "why"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        h.push_str(&format!(
+            "<p class=\"posture posture-bad\">⚠️ ENGAGEMENT PARTIEL — {n} run(s) sur {tot} ne sont pas \
+             allés au bout : {}. Ce rapport n'agrège que ce qui a effectivement tourné : une absence \
+             de finding n'y vaut PAS une absence de vulnérabilité, et aucun verdict — surtout pas \
+             négatif — n'a été émis pour ce qui n'a jamais été tenté.</p>",
+            e(&detail.join(" · ")),
+        ));
+    }
 
     // ----- RÉSUMÉ EXÉCUTIF -----
     h.push_str("<section class=\"sec\"><h2>Résumé exécutif</h2>");

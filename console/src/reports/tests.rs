@@ -836,6 +836,66 @@ use super::*;
         let _ = std::fs::remove_file(&led);
     }
 
+    /// RUPTURE CORRIGÉE — le livrable client AGRÉGÉ part des findings STOCKÉS et ne regardait JAMAIS
+    /// si les runs qui les ont produits étaient allés au bout. Un engagement dont un run a expiré
+    /// rendait donc un rapport qui RESSEMBLE à un rapport complet : « aucun risque critique » s'y lit
+    /// comme un verdict, alors que le plan n'a pas tourné. La bannière est maintenant DÉRIVÉE de
+    /// `run_job.status`, elle NOMME les runs concernés, et un engagement dont tous les runs sont
+    /// terminés n'en porte aucune trace.
+    ///
+    /// ⚠️ RESTE OUVERT (hors périmètre de ce fichier) : le format **DOCX** est délégué à
+    /// `python -m forge.report_engagement`, qui ne lit pas encore la clef `partial` — c'est le SEUL
+    /// format qui ne dit pas qu'un engagement est partiel. Patch signalé dans le rapport de session.
+    #[tokio::test]
+    async fn engagement_report_announces_an_interrupted_run() {
+        let led = tmp_ledger("engpartial");
+        let app = test_app(&led);
+        seed_engagement(&app, 1, "eng-A");
+        seed_finding(&app, 1, "f1", "a.example.com", "HIGH", "preuve");
+        {
+            let db = app.db();
+            db.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,started_by,engagement_id)
+                 VALUES('run-cut','camp',datetime('now'),'timeout','grey',1,0,0,0,'operator',1)",
+                [],
+            ).unwrap();
+        }
+        let (vtok, _o, _a) = seed_roles(&app);
+        let mut q = HashMap::new();
+        q.insert("format".to_string(), "html".to_string());
+        let r = engagement_report(State(app.clone()), bearer(&vtok), Path(1), Query(q)).await;
+        let html = to_text(r).await;
+        assert!(html.contains("ENGAGEMENT PARTIEL"), "aucune bannière de partialité sur un run coupé");
+        assert!(html.contains("run-cut"), "le run interrompu doit être NOMMÉ, pas juste compté");
+        assert!(html.contains("budget dépassé (timeout)"), "la cause du run coupé doit être dite");
+        assert!(
+            html.find("ENGAGEMENT PARTIEL").unwrap() < html.find("Résumé exécutif").unwrap(),
+            "la bannière BORNE le résumé exécutif : elle doit le précéder"
+        );
+
+        // …et un engagement dont tous les runs sont terminés n'en porte AUCUNE trace.
+        let led2 = tmp_ledger("engdone");
+        let app2 = test_app(&led2);
+        seed_engagement(&app2, 1, "eng-B");
+        seed_finding(&app2, 1, "f1", "a.example.com", "HIGH", "preuve");
+        {
+            let db = app2.db();
+            db.execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,started_by,engagement_id)
+                 VALUES('run-ok','camp',datetime('now'),'done','grey',1,0,0,0,'operator',1)",
+                [],
+            ).unwrap();
+        }
+        let (vtok2, _o2, _a2) = seed_roles(&app2);
+        let mut q2 = HashMap::new();
+        q2.insert("format".to_string(), "html".to_string());
+        let r2 = engagement_report(State(app2.clone()), bearer(&vtok2), Path(1), Query(q2)).await;
+        let html2 = to_text(r2).await;
+        assert!(!html2.contains("ENGAGEMENT PARTIEL"), "un engagement complet ne doit pas s'annoncer partiel");
+        let _ = std::fs::remove_file(&led);
+        let _ = std::fs::remove_file(&led2);
+    }
+
     /// Le sous-routeur se construit sans conflit matchit.
     #[test]
     fn routes_build() {

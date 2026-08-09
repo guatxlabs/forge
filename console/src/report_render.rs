@@ -11,6 +11,12 @@
 //! INCHANGÉS. Le handler /api/runs/:id/report (`run_report`) reste dans main.rs et appelle ces
 //! fonctions re-exportées.
 
+/// Couche de VUE du rapport (verdict / actionnables / trous de couverture / plan d'annexe) — MIROIR
+/// RUST de `forge/report_view.py`. Sous-module de CE fichier : le rendu et sa vue vivent ensemble, et
+/// aucune déclaration de module racine n'a eu à bouger. Voir son en-tête pour la voie retenue (porter
+/// plutôt que déléguer) et le garde-fou de parité qui empêche la re-dérive.
+pub(crate) mod view;
+
 use std::collections::HashMap;
 
 use axum::response::IntoResponse;
@@ -146,24 +152,27 @@ pub(crate) fn which_in_path(bin: &str) -> bool {
 /// Un finding tel que rendu dans le rapport (md ou html). CWE / CVSS sont des champs DÉDIÉS,
 /// séparés de `category` (fourre-tout) et `mitre` (ATT&CK).
 pub(crate) struct FindingRow {
-    title: String,
-    target: String,
-    severity: String,
-    category: String,
-    cwe: String,
-    cvss_vector: String,
-    cvss_score: f64,
-    mitre: String,
-    status: String,
-    tool: String,
-    evidence: String,
-    poc: String,
-    fix: String,
+    // `pub(crate)` depuis le lot PARITÉ-VUE : le sous-module `view` (couche de vue miroir du Python)
+    // dérive les seaux/gabarits DE CES CHAMPS. Ils restent en LECTURE SEULE pour lui — aucune
+    // mutation, aucune sévérité recalculée : la sévérité vient du finding, jamais du rendu.
+    pub(crate) title: String,
+    pub(crate) target: String,
+    pub(crate) severity: String,
+    pub(crate) category: String,
+    pub(crate) cwe: String,
+    pub(crate) cvss_vector: String,
+    pub(crate) cvss_score: f64,
+    pub(crate) mitre: String,
+    pub(crate) status: String,
+    pub(crate) tool: String,
+    pub(crate) evidence: String,
+    pub(crate) poc: String,
+    pub(crate) fix: String,
 }
 
 impl FindingRow {
     /// Affichage CVSS compact « score (vecteur) ». Vide si ni score ni vecteur (ex INFO).
-    fn cvss_display(&self) -> String {
+    pub(crate) fn cvss_display(&self) -> String {
         if self.cvss_score <= 0.0 && self.cvss_vector.is_empty() {
             return String::new();
         }
@@ -370,11 +379,26 @@ pub(crate) fn prose_posture(by_sev: &HashMap<String, i64>) -> String {
     }
 }
 
-/// Rend le markdown du rapport d'un run depuis les données console (miroir de build_report Python) :
-/// synthèse par sévérité, findings détaillés, section transparence ROE (FIRE/DRY_RUN/VETO/erreurs),
-/// section PURPLE (couverture de détection SOC) quand `purple` est fourni, et annexe chaîne-de-custody
-/// (head du ledger, nb entrées, algo, clé publique, attribution actor) quand `custody` est fourni.
-/// Les compteurs proviennent de run_job ; le détail des findings/verdicts des tables finding/roe_decision.
+/// Rend le markdown du rapport d'un run depuis les données console. MIROIR de `forge.report.build_report`
+/// — et il l'est désormais POUR DE BON : le rapport MÈNE par le **Verdict**, puis « Actionnable — à
+/// reporter », « Signal à qualifier », « Couverture NON vérifiée (trous de couverture) », et ne relègue
+/// la liste complète en **annexe** qu'APRÈS une ligne de COMPTABILITÉ (rendus + repliés = émis).
+///
+/// CE QUI A ÉTÉ CORRIGÉ ICI. Le moteur Python a été refondu (une campagne réelle : **5318 findings,
+/// 5306 INFO, 12 LOW, 479 `skipped`**) et cette fonction ne l'avait pas suivi : elle rendait encore
+/// « Résumé exécutif → Synthèse → 5318 findings à la file », c'est-à-dire un JOURNAL — le lecteur ne
+/// pouvait conclure « rien d'exploitable » qu'au terme d'un défilement, et les 479 trous de couverture
+/// (l'information la PLUS précieuse sur une cible protégée) étaient noyés au milieu du bruit INFO.
+/// Le test censé garder cette parité n'assertait que cinq sous-chaînes : il est resté vert pendant
+/// toute la dérive. Il MORD maintenant (cf. `tests_reports_purple`).
+///
+/// INVARIANTS (identiques au moteur, cf. `view`) : rien n'est masqué en silence (tout repli est compté,
+/// nommé, et on dit où le récupérer) · les `skipped` REMONTENT · la sévérité vient du finding, jamais
+/// du rendu · un rapport partiel s'ANNONCE partiel (dérivé de `run_job.status`).
+///
+/// Conservé tel quel : synthèse par sévérité, transparence ROE (FIRE/DRY_RUN/VETO/erreurs), section
+/// PURPLE quand `purple` est fourni, annexe chaîne-de-custody quand `custody` est fourni — ces trois
+/// blocs sont du contenu que le rapport CLI ne PEUT pas produire (jointure Plume, ledger console).
 pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, job: &Value, purple: Option<&Value>, custody: Option<&LedgerCustody>) -> String {
     const SEVERITIES: &[&str] = &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
     let campaign = job.get("campaign").and_then(|v| v.as_str()).unwrap_or("");
@@ -395,6 +419,15 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
         ),
         String::new(),
     ];
+
+    // --- RAPPORT PARTIEL ? le dire AVANT tout le reste. La console ne reçoit pas les compteurs de plan
+    //     du moteur, mais elle SAIT que le run n'est pas allé au bout (`run_job.status`) — et une
+    //     absence de finding sur un plan tronqué ne vaut pas « cible saine ». Aucune ligne sur un run
+    //     terminé normalement (rapport byte-identique au précédent sur ce chemin).
+    let partial = view::partial_cause(job.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+    if let Some(cause) = partial {
+        view::render_partial_banner(&mut out, cause);
+    }
 
     // --- synthèse findings par sévérité (sur les findings de CE run) ---
     let mut by_sev: HashMap<String, i64> = HashMap::new();
@@ -429,6 +462,42 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
     out.push(prose_posture(&by_sev));
     out.push(String::new());
 
+    // ============================================================================================
+    //  EN-TÊTE ACTIONNABLE (miroir de `report._lead_sections`) — verdict, puis ce qu'un opérateur
+    //  doit lire EN PREMIER. Le bruit de reconnaissance vient APRÈS (annexe), jamais avant.
+    //  Les seaux sont DÉRIVÉS du finding (sévérité + statut), jamais d'un score de rendu.
+    // ============================================================================================
+    let render_view = view::resolve_view(None);
+    let buckets = view::bucket_findings(&finding_rows);
+    let items_expl = view::group_items(&finding_rows, &buckets.exploitable);
+    let items_qual = view::group_items(&finding_rows, &buckets.qualify);
+    // Périmètre autorisé : les cibles du run (étape 1 des reproductions). '' si le run n'en porte pas.
+    let scope_line = {
+        let shown: Vec<String> = targets_list.iter().take(6).map(|t| format!("`{t}`")).collect();
+        let mut s = shown.join(", ");
+        if targets_list.len() > 6 {
+            s.push_str(" …");
+        }
+        s
+    };
+    view::render_verdict(&mut out, &finding_rows, &buckets, &items_expl, &items_qual, render_view, partial);
+    let next = view::render_actionable(
+        &mut out, &finding_rows, &items_expl,
+        "## Actionnable — à reporter",
+        "_Aucun finding de sévérité ≥ MEDIUM et aucune exploitabilité prouvée. **Rien d'actionnable à \
+         reporter.** Aucun item n'est relevé en sévérité pour combler la section._",
+        &scope_line, 1,
+    );
+    view::render_actionable(
+        &mut out, &finding_rows, &items_qual,
+        "## Signal à qualifier (exploitabilité NON démontrée)",
+        "_Aucun finding LOW ni hit d'outil tiers._",
+        &scope_line, next,
+    );
+    // Les `skipped` REMONTENT ICI, avant toute annexe : « je n'ai pas pu vérifier » BORNE ce que
+    // l'absence de finding permet de conclure. Ce sont des trous de couverture, pas du bruit.
+    view::render_unverified(&mut out, &finding_rows, &buckets.unverified);
+
     out.push("## Synthèse".into());
     out.push(String::new());
     out.push("| Sévérité | # |".into());
@@ -438,9 +507,21 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
     }
     out.push(String::new());
 
-    // --- findings détaillés ---
-    out.push("## Findings".into());
+    // --- ANNEXE : findings détaillés. DERRIÈRE une ligne de COMPTABILITÉ (`render_annex_accounting`)
+    //     qui dit ce qui est rendu, ce qui est replié, et où récupérer le replié — l'invariant
+    //     « aucune lacune silencieuse » n'est pas une promesse de docstring, il est IMPRIMÉ et
+    //     fail-loud (si la partition tombe, le rapport le dit au lieu de rattraper en douce).
+    //     Vue `pentest` (défaut, exhaustif) sauf `FORGE_REPORT_VIEW=bounty` — MÊME variable que le
+    //     moteur, pour que replier côté CLI et côté console soit la MÊME décision.
+    let keep: Vec<usize> = buckets.exploitable.iter()
+        .chain(buckets.qualify.iter())
+        .chain(buckets.unverified.iter())
+        .copied()
+        .collect();
+    let plan = view::annex_plan(&finding_rows, render_view, &keep);
+    out.push(format!("## Findings — annexe complète ({} émis, vue `{render_view}`)", finding_rows.len()));
     out.push(String::new());
+    view::render_annex_accounting(&mut out, &plan);
     if finding_rows.is_empty() {
         out.push("_Aucun finding._".into());
         out.push(String::new());
@@ -448,22 +529,27 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
     fn dash(s: &str) -> &str {
         if s.is_empty() { "—" } else { s }
     }
-    for f in &finding_rows {
-        out.push(format!("### [{}] {} — `{}`", f.severity, f.title, f.target));
+    for f in plan.rendered.iter().map(|i| &finding_rows[*i]) {
+        // RÉDACTION (défense en profondeur, miroir de `report_view._txt`) : ce rendu lisait les
+        // colonnes BRUTES. Mesuré par le garde-fou de parité sur un corpus portant un
+        // `Authorization: Bearer <jwt>` dans son PoC : le markdown de la console SORTAIT le jeton en
+        // clair (le moteur, lui, rédige depuis toujours). Tout champ texte passe désormais par la
+        // surface UNIQUE `crate::redact` — idempotent, jamais moins masquant.
+        out.push(format!("### [{}] {} — `{}`", f.severity, view::txt(&f.title), view::txt(&f.target)));
         // CWE et CVSS SÉPARÉS (distincts de la catégorie/ATT&CK).
         out.push(format!(
             "- **CWE** : {}  ·  **CVSS** : {}  ·  **ATT&CK** : {}",
             dash(&f.cwe), dash(&f.cvss_display()), dash(&f.mitre),
         ));
-        out.push(format!("- **Catégorie** : {}  ·  **Statut** : {}  ·  **Outil** : {}", dash(&f.category), dash(&f.status), dash(&f.tool)));
+        out.push(format!("- **Catégorie** : {}  ·  **Statut** : {}  ·  **Outil** : {}", dash(&f.category), dash(&f.status), dash(&view::txt(&f.tool))));
         if !f.evidence.is_empty() {
-            out.push(format!("- **Evidence** : {}", f.evidence));
+            out.push(format!("- **Evidence** : {}", view::txt(&f.evidence)));
         }
         if !f.poc.is_empty() {
-            out.push(format!("- **PoC** : {}", f.poc));
+            out.push(format!("- **PoC** : {}", view::txt(&f.poc)));
         }
         if !f.fix.is_empty() {
-            out.push(format!("- **Remediation** : {}", f.fix));
+            out.push(format!("- **Remediation** : {}", view::txt(&f.fix)));
         }
         out.push(String::new());
     }
@@ -620,6 +706,20 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
     h.push_str("<a class=\"btn\" href=\"?format=md\">Markdown</a>");
     h.push_str("</div>");
 
+    // ----- RAPPORT PARTIEL ? avant TOUT le reste, page de garde comprise. Un livrable client qui
+    // ressemble à un rapport complet alors que le plan n'a pas tourné en entier ferait conclure
+    // « cible saine » à un commanditaire. Aucune ligne sur un run terminé normalement.
+    let partial = view::partial_cause(status);
+    if let Some(cause) = partial {
+        h.push_str(&format!(
+            "<p class=\"posture posture-bad\">⚠️ RAPPORT PARTIEL — RUN INTERROMPU ({}). \
+             Ce rapport ne couvre QUE ce qui a tourné : une absence de finding n'y vaut pas une absence \
+             de vulnérabilité, et {}.</p>",
+            e(cause),
+            e("le nombre d'actions exécutées sur planifiées n'est pas connu de la console"),
+        ));
+    }
+
     // ----- PAGE DE GARDE (quetzal + branding) -----
     h.push_str("<section class=\"cover\">");
     h.push_str("<img class=\"qz\" src=\"/quetzal.svg\" alt=\"\">");
@@ -645,6 +745,8 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
     h.push_str("<nav class=\"toc\"><h2>Sommaire</h2><ol>");
     let mut toc = vec![
         ("exec", "Résumé exécutif"),
+        ("verdict", "Verdict"),
+        ("gaps", "Couverture NON vérifiée (trous de couverture)"),
         ("synth", "Synthèse par sévérité"),
         ("findings", "Findings détaillés"),
         ("roe", "Couverture & transparence (ROE)"),
@@ -676,6 +778,71 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
     h.push_str(&format!("<p class=\"posture {}\">{}</p>", posture_cls, e(&posture)));
     h.push_str("</section>");
 
+    // ----- VERDICT + TROUS DE COUVERTURE (miroir HTML de la tête actionnable du markdown) -----
+    // Le livrable client menait par une prose de posture et enchaînait sur la liste complète : un
+    // commanditaire ne pouvait pas lire « ce qui est actionnable » sans traverser tout le bruit, et
+    // les `skipped` — la BORNE de ce que l'absence de finding permet de conclure — n'apparaissaient
+    // nulle part. Les deux sections sont ici, dérivées des MÊMES seaux que le markdown.
+    let buckets = view::bucket_findings(&finding_rows);
+    let items_expl = view::group_items(&finding_rows, &buckets.exploitable);
+    let items_qual = view::group_items(&finding_rows, &buckets.qualify);
+    h.push_str("<section id=\"verdict\" class=\"sec\"><h2>Verdict</h2>");
+    if let Some(top) = items_expl.first() {
+        let f = &finding_rows[top.rep];
+        h.push_str(&format!(
+            "<p class=\"posture posture-bad\">{} finding(s) actionnable(s) (sévérité ≥ MEDIUM ou \
+             exploitabilité prouvée). Le plus grave : [{}] {} sur {}.</p>",
+            buckets.exploitable.len(), e(&f.severity), e(&view::txt(&f.title)), e(&view::txt(&f.target)),
+        ));
+    } else {
+        h.push_str(
+            "<p class=\"posture posture-good\">Rien d'actionnable trouvé. Aucun finding de sévérité \
+             ≥ MEDIUM, aucune exploitabilité prouvée. Ce qui suit est du signal à qualifier, des trous \
+             de couverture et du bruit de reconnaissance — présentés comme tels, sans sur-classement.</p>",
+        );
+    }
+    h.push_str("<ul class=\"plist\">");
+    for (lab, n, extra) in [
+        ("Actionnable (≥ MEDIUM ou prouvé)", buckets.exploitable.len(), format!("{} item(s) distinct(s)", items_expl.len())),
+        ("À qualifier (exploitabilité NON démontrée)", buckets.qualify.len(), format!("{} item(s) distinct(s)", items_qual.len())),
+        ("Couverture NON vérifiée (skipped)", buckets.unverified.len(), "trous de couverture, PAS du bruit".to_string()),
+        ("Bruit de reconnaissance (INFO)", buckets.recon.len(), "relégué en annexe, intégralement compté".to_string()),
+        ("Total retenu", finding_rows.len(), String::new()),
+    ] {
+        h.push_str(&format!(
+            "<li><b>{}</b> : {}{}</li>",
+            e(lab), n,
+            if extra.is_empty() { String::new() } else { format!(" — {}", e(&extra)) },
+        ));
+    }
+    h.push_str("</ul></section>");
+
+    h.push_str("<section id=\"gaps\" class=\"sec\"><h2>Couverture NON vérifiée (trous de couverture)</h2>");
+    if buckets.unverified.is_empty() {
+        h.push_str("<p class=\"muted\">Aucun module n'a échoué à s'exécuter : la couverture annoncée par le plan a été effectivement tentée.</p>");
+    } else {
+        // même regroupement PAR MODULE que le markdown : on réutilise le rendu texte, converti en table.
+        let mut lines: Vec<String> = Vec::new();
+        view::render_unverified(&mut lines, &finding_rows, &buckets.unverified);
+        h.push_str(&format!(
+            "<p><strong>{} finding(s) <code>skipped</code></strong> — une absence de finding sur ces \
+             classes ne vaut donc <strong>pas</strong> une absence de vulnérabilité.</p>",
+            buckets.unverified.len(),
+        ));
+        h.push_str("<table class=\"vtab\"><thead><tr><th>Module</th><th>Occurrences</th><th>Cibles</th><th>Raison(s) rapportée(s)</th></tr></thead><tbody>");
+        for l in lines.iter().filter(|l| l.starts_with("| `")) {
+            let cells: Vec<&str> = l.trim_matches('|').split('|').map(|c| c.trim()).collect();
+            if cells.len() == 4 {
+                h.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    e(cells[0].trim_matches('`')), e(cells[1]), e(cells[2]), e(cells[3]),
+                ));
+            }
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str("</section>");
+
     // ----- SYNTHÈSE par sévérité (cartes chiffrées) -----
     h.push_str("<section id=\"synth\" class=\"sec\"><h2>Synthèse par sévérité</h2><div class=\"sevgrid\">");
     for s in REPORT_SEVERITIES.iter().rev() {
@@ -689,6 +856,20 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
 
     // ----- FINDINGS détaillés -----
     h.push_str("<section id=\"findings\" class=\"sec\"><h2>Findings détaillés</h2>");
+    // COMPTABILITÉ, imprimée : ce livrable rend TOUT (vue exhaustive) — et il le DIT, au lieu de
+    // laisser le lecteur supposer qu'il ne manque rien.
+    {
+        let keep: Vec<usize> = buckets.exploitable.iter()
+            .chain(buckets.qualify.iter())
+            .chain(buckets.unverified.iter())
+            .copied()
+            .collect();
+        let plan = view::annex_plan(&finding_rows, view::resolve_view(None), &keep);
+        let mut acct: Vec<String> = Vec::new();
+        view::render_annex_accounting(&mut acct, &plan);
+        let text = acct.join(" ").trim_start_matches("> ").replace("> ", " ");
+        h.push_str(&format!("<p class=\"muted\">{}</p>", e(text.trim())));
+    }
     if finding_rows.is_empty() {
         h.push_str("<p class=\"muted\">Aucun finding retenu.</p>");
     }
@@ -707,15 +888,18 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
         h.push_str(&format!("<span class=\"chip\"><b>Statut</b> {}</span>", e(dash_or(&f.status))));
         h.push_str(&format!("<span class=\"chip\"><b>Outil</b> {}</span>", e(dash_or(&f.tool))));
         h.push_str("</div>");
+        // RÉDACTION AVANT ÉCHAPPEMENT : `html_escape` neutralise le HTML, il ne masque AUCUN secret.
+        // Ce livrable CLIENT sortait donc les `Authorization: Bearer …` / clefs des PoC en clair, comme
+        // le markdown (même cause, même correctif : la surface unique `crate::redact`).
         if !f.evidence.is_empty() {
-            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">Evidence</div><pre>{}</pre></div>", e(&f.evidence)));
+            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">Evidence</div><pre>{}</pre></div>", e(&view::txt(&f.evidence))));
         }
         if !f.poc.is_empty() {
-            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">PoC</div><pre>{}</pre></div>", e(&f.poc)));
+            h.push_str(&format!("<div class=\"fld\"><div class=\"k\">PoC</div><pre>{}</pre></div>", e(&view::txt(&f.poc))));
         }
         // FIX (maintenant rempli) — mis en avant comme remédiation.
         if !f.fix.is_empty() {
-            h.push_str(&format!("<div class=\"fld fix\"><div class=\"k\">Remédiation</div><div class=\"v\">{}</div></div>", e(&f.fix)));
+            h.push_str(&format!("<div class=\"fld fix\"><div class=\"k\">Remédiation</div><div class=\"v\">{}</div></div>", e(&view::txt(&f.fix))));
         }
         h.push_str("</article>");
     }

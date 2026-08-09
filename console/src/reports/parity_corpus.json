@@ -1,0 +1,159 @@
+[
+  {
+    "_comment": "CORPUS DE PARITÉ — source UNIQUE des deux rendus (Rust console + Python moteur). Voir tests_reports_purple::report_view_parity_python_vs_rust_same_corpus. Ordre = ordre d'émission du moteur. Tous les champs dérivables (cwe/cvss/fix) sont EXPLICITES : c'est ce que l'ingest reçoit réellement du moteur, et ça évite qu'une dérivation Python-only (schema.Finding.__post_init__) fasse diverger la comparaison pour une raison qui n'est pas la vue. `status:vulnerable` est volontairement ABSENT : le moteur le rabat à `tested` hors du chemin de preuve sanctionné, donc un pilote de test ne peut pas le reconstruire fidèlement (la console, elle, le reçoit légitimement de l'ingest).",
+    "target": "", "title": "", "severity": "INFO", "category": "", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "", "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "api.example.com", "title": "IDOR — commande d'un autre utilisateur lisible sur /api/orders/42",
+    "severity": "HIGH", "category": "access_control", "cwe": "CWE-639",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", "cvss_score": 8.1,
+    "mitre": "T1190", "status": "submitted", "tool": "forge/modules/idor.py:web.idor",
+    "evidence": "HTTP 200 — corps contenant l'e-mail et l'adresse du compte 42 depuis la session du compte 7",
+    "poc": "curl -s -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.SUPERSECRETVALUE.sig' https://api.example.com/api/orders/42",
+    "fix": "Contrôler la propriété de l'objet côté serveur (ownership check) avant toute lecture."
+  },
+  {
+    "target": "api.example.com", "title": "IDOR — commande d'un autre utilisateur lisible sur /api/orders/77",
+    "severity": "HIGH", "category": "access_control", "cwe": "CWE-639",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", "cvss_score": 8.1,
+    "mitre": "T1190", "status": "submitted", "tool": "forge/modules/idor.py:web.idor",
+    "evidence": "HTTP 200 — même schéma sur un second identifiant",
+    "poc": "curl -s https://api.example.com/api/orders/77",
+    "fix": "Contrôler la propriété de l'objet côté serveur (ownership check) avant toute lecture."
+  },
+  {
+    "target": "app.example.com", "title": "RCE via désérialisation Java non signée sur /import",
+    "severity": "CRITICAL", "category": "deserialization", "cwe": "CWE-502",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "cvss_score": 9.8,
+    "mitre": "T1059", "status": "accepted", "tool": "forge/modules/deser.py:web.deser",
+    "evidence": "Sortie de `id` dans la réponse : uid=1000(app)",
+    "poc": "curl -X POST --data-binary @payload.ser https://app.example.com/import",
+    "fix": "Refuser la désérialisation d'objets non signés ; allow-list de classes."
+  },
+  {
+    "target": "app.example.com", "title": "SSRF — métadonnées cloud atteignables depuis /fetch",
+    "severity": "MEDIUM", "category": "ssrf", "cwe": "CWE-918",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N", "cvss_score": 5.3,
+    "mitre": "T1190", "status": "tested", "tool": "forge/modules/ssrf.py:web.ssrf",
+    "evidence": "HTTP 200 avec un corps non vide depuis 169.254.169.254 (contenu non exfiltré)",
+    "poc": "curl -sS 'https://app.example.com/fetch?url=http://169.254.169.254/latest/meta-data/'",
+    "fix": "Allow-list de destinations ; refuser les plages privées/link-local côté serveur."
+  },
+  {
+    "target": "www.example.com", "title": "Clickjacking — X-Frame-Options absent (et pas de CSP frame-ancestors)",
+    "severity": "LOW", "category": "headers", "cwe": "CWE-1021",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N", "cvss_score": 3.1,
+    "mitre": "T1595.002", "status": "tested", "tool": "forge/modules/security_headers.py:web.security_headers",
+    "evidence": "X-Frame-Options absent et CSP sans 'frame-ancestors' (HTTP 301)",
+    "poc": "curl -sSI 'https://www.example.com'",
+    "fix": "Poser X-Frame-Options: DENY ou CSP frame-ancestors 'none'."
+  },
+  {
+    "target": "auth.example.com", "title": "Clickjacking — X-Frame-Options absent (et pas de CSP frame-ancestors)",
+    "severity": "LOW", "category": "headers", "cwe": "CWE-1021",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N", "cvss_score": 3.1,
+    "mitre": "T1595.002", "status": "tested", "tool": "forge/modules/security_headers.py:web.security_headers",
+    "evidence": "X-Frame-Options absent et CSP sans 'frame-ancestors' (HTTP 200)",
+    "poc": "curl -sSI 'https://auth.example.com'",
+    "fix": "Poser X-Frame-Options: DENY ou CSP frame-ancestors 'none'."
+  },
+  {
+    "target": "www.example.com", "title": "nuclei : bannière de version exposée (nginx 1.18.0)",
+    "severity": "INFO", "category": "tech", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "reported_by_tool", "tool": "nuclei",
+    "evidence": "Server: nginx/1.18.0", "poc": "nuclei -u https://www.example.com -t exposures/",
+    "fix": "Masquer la bannière de version du serveur."
+  },
+  {
+    "target": "www.example.com", "title": "recon.secrets non exécuté — aucun scanner (trufflehog/gitleaks) (dégradation)",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/recon_secrets.py:recon.secrets",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "api.example.com", "title": "recon.secrets non exécuté — aucun scanner (trufflehog/gitleaks) (dégradation)",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/recon_secrets.py:recon.secrets",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "www.example.com", "title": "recon.content non exécuté — ffuf indisponible (dégradation)",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/recon_content.py:recon.content",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "mail.example.com", "title": "recon.dns non concluant — résolution indisponible (mail.example.com)",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/recon_dns.py:recon.dns",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "imap.example.com", "title": "recon.dns non concluant — résolution indisponible (imap.example.com)",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/recon_dns.py:recon.dns",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "app.example.com", "title": "fuzz.wfuzz non exécuté — outil indisponible (dégradation gracieuse)",
+    "severity": "INFO", "category": "fuzz", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "skipped", "tool": "wfuzz",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "app.example.com", "title": "request-smuggling non testé — challenge/waf managé interposé",
+    "severity": "LOW", "category": "smuggling", "cwe": "CWE-444",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N", "cvss_score": 3.1,
+    "mitre": "", "status": "skipped", "tool": "forge/modules/smuggling.py:request_smuggling.probe",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "https://www.example.com/a?id=3", "title": "Endpoint in-scope : https://www.example.com/a?id=3",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_urls.py:recon.urls",
+    "evidence": "archive gau", "poc": "", "fix": ""
+  },
+  {
+    "target": "https://www.example.com/b?id=9", "title": "Endpoint in-scope : https://www.example.com/b?id=9",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_urls.py:recon.urls",
+    "evidence": "archive gau", "poc": "", "fix": ""
+  },
+  {
+    "target": "https://www.example.com/c?id=17", "title": "Endpoint in-scope : https://www.example.com/c?id=17",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_urls.py:recon.urls",
+    "evidence": "archive gau", "poc": "", "fix": ""
+  },
+  {
+    "target": "10.0.0.5", "title": "Port ouvert 8080 sur 10.0.0.5",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_ports.py:recon.ports",
+    "evidence": "SYN-ACK", "poc": "", "fix": ""
+  },
+  {
+    "target": "10.0.0.7", "title": "Port ouvert 9090 sur 10.0.0.7",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_ports.py:recon.ports",
+    "evidence": "SYN-ACK", "poc": "", "fix": ""
+  },
+  {
+    "target": "cdn.example.com", "title": "Artefact deadbeefcafe1234 servi sans en-tête d'intégrité",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_assets.py:recon.assets",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "cdn.example.com", "title": "Artefact 0123456789abcdef servi sans en-tête d'intégrité",
+    "severity": "INFO", "category": "recon", "cwe": "", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/recon_assets.py:recon.assets",
+    "evidence": "", "poc": "", "fix": ""
+  },
+  {
+    "target": "www.example.com", "title": "En-tête Referrer-Policy absent",
+    "severity": "INFO", "category": "headers", "cwe": "CWE-693", "cvss_vector": "", "cvss_score": 0.0,
+    "mitre": "", "status": "tested", "tool": "forge/modules/security_headers.py:web.security_headers",
+    "evidence": "aucun Referrer-Policy", "poc": "curl -sSI 'https://www.example.com'", "fix": "Poser Referrer-Policy."
+  }
+]
