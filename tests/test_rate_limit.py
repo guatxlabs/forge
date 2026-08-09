@@ -77,7 +77,9 @@ class TestBucket(unittest.TestCase):
 
 class TestHttpThrottleAndBackoff(unittest.TestCase):
     def _patch_raw(self, fn):
-        self._saved_raw = Oracle._raw_open
+        # `__dict__` : le DESCRIPTEUR staticmethod. `Oracle._raw_open` le déréférencerait en fonction
+        # NUE, et la reposer en ferait une méthode d'INSTANCE -> décalage d'arguments du seam réseau.
+        self._saved_raw = Oracle.__dict__["_raw_open"]
         Oracle._raw_open = staticmethod(fn)
 
     def tearDown(self):

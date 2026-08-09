@@ -212,9 +212,19 @@ class TestSstiConsumesLlmPayloads(unittest.TestCase):
     BASE = {"param": "name", "in_scope": ["app.test"]}
 
     def _patch_fetch(self, fn):
-        orig = SstiEval._fetch
+        """`SstiEval` HÉRITE `_fetch` (alias `classmethod` d'`Oracle._fetch_body`) : `SstiEval._fetch`
+        rendrait une méthode DÉJÀ LIÉE, et la reposer laisserait sur la sous-classe un résidu qui
+        masque le descripteur hérité. On lit le descripteur BRUT et on retire l'override."""
+        had = "_fetch" in SstiEval.__dict__
+        orig = SstiEval.__dict__.get("_fetch")
         SstiEval._fetch = staticmethod(fn)
-        return lambda: setattr(SstiEval, "_fetch", orig)
+
+        def restore():
+            if had:
+                SstiEval._fetch = orig
+            else:
+                del SstiEval._fetch
+        return restore
 
     def _substituted(self, tmpl):
         n, m, _ = SstiEval._marker(self.TGT, "name")

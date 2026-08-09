@@ -57,9 +57,22 @@ def _strip(d):
 
 
 def _patch(cls, fn):
-    orig = cls._fetch
+    """Remplace cls._fetch par fn (staticmethod) et restaure PROPREMENT (delattr si hérité).
+
+    `cls.__dict__` : le DESCRIPTEUR staticmethod. `cls._fetch` le déréférencerait en fonction NUE
+    (et le plus souvent HÉRITÉE de la base) : la reposer laisserait sur `cls` une fonction nue —
+    donc une méthode d'INSTANCE, qui reçoit `self` en 1er positionnel et décale tout le seam. On
+    restaure le descripteur, ou on RETIRE l'override quand l'attribut était hérité."""
+    had = "_fetch" in cls.__dict__
+    orig = cls.__dict__.get("_fetch")
     cls._fetch = staticmethod(fn)
-    return lambda: setattr(cls, "_fetch", orig)
+
+    def restore():
+        if had:
+            cls._fetch = orig
+        else:
+            del cls._fetch
+    return restore
 
 
 # Ensemble de kinds attendu — pinné LITTÉRALEMENT. Additif : les 5 modules PASSIFS de cartographie
@@ -357,7 +370,9 @@ class TestSharedHttpWiring(unittest.TestCase):
     def _with_urlopen(self, fn):
         # le câblage HTTP des oracles ouvre le réseau via `Oracle._raw_open` (opener no-follow), PAS
         # via `urllib.request.urlopen` -> on monkeypatch ce seam (une 3xx serait sinon suivie à l'aveugle).
-        orig = Oracle._raw_open
+        # `__dict__` : le DESCRIPTEUR staticmethod (l'accès attribut le déréférencerait en fonction
+        # nue, et la reposer en ferait une méthode d'INSTANCE -> tout le seam décale d'un argument).
+        orig = Oracle.__dict__["_raw_open"]
         Oracle._raw_open = staticmethod(fn)
         self.addCleanup(lambda: setattr(Oracle, "_raw_open", orig))
 

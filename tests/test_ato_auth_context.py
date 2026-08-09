@@ -52,8 +52,11 @@ def _auth_block():
 
 
 def _patch_fetch(fn):
-    """Remplace AuthTakeover._fetch (staticmethod) et renvoie un restaurateur."""
-    orig = AuthTakeover._fetch
+    """Remplace AuthTakeover._fetch (staticmethod) et renvoie un restaurateur.
+
+    `__dict__` : le DESCRIPTEUR. `AuthTakeover._fetch` le déréférencerait en fonction NUE, et la
+    reposer en ferait une méthode d'INSTANCE (self en 1er positionnel -> tout décale)."""
+    orig = AuthTakeover.__dict__["_fetch"]
     AuthTakeover._fetch = staticmethod(fn)
     return lambda: setattr(AuthTakeover, "_fetch", orig)
 

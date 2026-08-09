@@ -101,23 +101,20 @@ class _NetCase(unittest.TestCase):
     #: classes dont ces tests exercent le VRAI `_fetch` (donc le vrai `Oracle._http`).
     ORACLES = (SecurityHeaders, CorsCredentials, IdorDifferential, PrivEsc)
 
-    def setUp(self):
-        """RÉPARE UNE POLLUTION PRÉ-EXISTANTE DE LA SUITE, le temps de ces tests.
-
-        17 sites de tests font `orig = Cls._fetch` — qui rend la FONCTION, pas l'objet `staticmethod` —
-        puis `Cls._fetch = orig` : la restauration reconstruit une méthode d'INSTANCE. `self._fetch(url,
-        headers)` passe alors `self` en 1er argument et tout décale d'un cran ; `Oracle._http` reçoit
-        l'URL dans `headers` et lève `ValueError`. C'était INOFFENSIF tant que chaque test qui touchait
-        ces classes patchait lui-même `_fetch` : ces tests-ci sont les premiers à appeler le VRAI
-        `_fetch` APRÈS eux, et ils ne tombent QUE dans une passe de suite complète (jamais seuls) —
-        exactement le profil d'un défaut d'ordre. On rétablit donc la forme correcte pour la durée du
-        test et on REPOSE EXACTEMENT ce qu'on a trouvé en sortant : le défaut n'est pas masqué, il est
-        rapporté à part (voir le compte rendu du lot)."""
-        for cls in self.ORACLES:
-            found = cls.__dict__.get("_fetch")
-            if found is not None and not isinstance(found, staticmethod):
-                cls._fetch = staticmethod(found)
-                self.addCleanup(lambda c=cls, f=found: setattr(c, "_fetch", f))
+    # CONTOURNEMENT RETIRÉ (2026-08-09) — il n'a plus rien à réparer.
+    #
+    # Un `setUp` vivait ici : la suite laissait des seams DÉGRADÉS (une fonction nue là où le
+    # descripteur `staticmethod`/`classmethod` devait revenir), parce que 20 sites de test
+    # sauvegardaient `Cls._fetch` — qui DÉRÉFÉRENCE le descripteur — au lieu de `Cls.__dict__[...]`.
+    # Ces tests-ci étaient les premiers à appeler le VRAI `_fetch` après eux, donc les premiers à
+    # tomber, et seulement en passe complète : le profil exact d'un défaut d'ORDRE.
+    #
+    # Les 20 sites sont corrigés à la source et un garde-fou AST (`test_seam_restoration.py`) refuse
+    # désormais le motif dans toute la suite. Mesuré en fin de passe complète : **0 seam dégradé**,
+    # contre 12 auparavant. Ce `setUp` est devenu inerte — vérifié : sa condition ne se déclenche
+    # sur aucune des 4 classes ci-dessus. On le retire plutôt que de le laisser : du code de
+    # réparation qui ne répare plus rien fait croire à un problème encore présent, et la prochaine
+    # personne le recopierait ailleurs « par précaution ».
 
     def net(self, route):
         n = _Net(route)

@@ -32,7 +32,9 @@ def _headers(pairs):
 
 
 def _patch(fn):
-    orig = SecurityHeaders._fetch
+    # `__dict__` : le DESCRIPTEUR staticmethod. `SecurityHeaders._fetch` le déréférencerait en fonction
+    # NUE, et la reposer en ferait une méthode d'INSTANCE (self en 1er positionnel -> tout décale).
+    orig = SecurityHeaders.__dict__["_fetch"]
     SecurityHeaders._fetch = staticmethod(fn)
     return lambda: setattr(SecurityHeaders, "_fetch", orig)
 

@@ -59,7 +59,9 @@ def _auth_block(owner="victim", marker=MARKER, url="https://app.test/api/resourc
 
 
 def _patch_fetch(fn):
-    orig = AuthTakeover._fetch
+    # `__dict__` : le DESCRIPTEUR staticmethod (l'accès attribut le déréférencerait en fonction nue,
+    # et la reposer en ferait une méthode d'INSTANCE -> décalage d'arguments du seam).
+    orig = AuthTakeover.__dict__["_fetch"]
     AuthTakeover._fetch = staticmethod(fn)
     return lambda: setattr(AuthTakeover, "_fetch", orig)
 

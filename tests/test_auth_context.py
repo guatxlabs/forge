@@ -52,10 +52,22 @@ def _auth_block():
 
 
 def _patch_fetch(fn):
-    """Remplace IdorDifferential._fetch (staticmethod) et renvoie un restaurateur."""
-    orig = IdorDifferential._fetch
+    """Remplace IdorDifferential._fetch (staticmethod HÉRITÉ) et restaure PROPREMENT.
+
+    `_fetch` est déclaré `@staticmethod` sur `_ContentTypedOracle` : `IdorDifferential._fetch` rendrait
+    la FONCTION résolue, et la reposer laisserait sur la sous-classe une fonction NUE qui masque le
+    descripteur hérité — donc une méthode d'INSTANCE (self en 1er positionnel -> tout décale). On lit
+    le descripteur BRUT et on RETIRE l'override quand l'attribut était hérité."""
+    had = "_fetch" in IdorDifferential.__dict__
+    orig = IdorDifferential.__dict__.get("_fetch")
     IdorDifferential._fetch = staticmethod(fn)
-    return lambda: setattr(IdorDifferential, "_fetch", orig)
+
+    def restore():
+        if had:
+            IdorDifferential._fetch = orig
+        else:
+            del IdorDifferential._fetch
+    return restore
 
 
 def _idor_action(scope, target="app.test"):

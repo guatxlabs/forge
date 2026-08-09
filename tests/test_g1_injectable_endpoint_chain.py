@@ -62,10 +62,22 @@ class _Patch:
 
 
 def _patch_fetch(cls, fn):
-    """Remplace cls._fetch (seam réseau des oracles) par fn ; renvoie un restaurateur."""
-    orig = cls._fetch
+    """Remplace cls._fetch (seam réseau des oracles) par fn ; renvoie un restaurateur.
+
+    `cls.__dict__` : le DESCRIPTEUR staticmethod. `cls._fetch` le déréférencerait en fonction NUE
+    (et le plus souvent HÉRITÉE de la base) : la reposer laisserait sur `cls` une fonction nue —
+    donc une méthode d'INSTANCE, qui reçoit `self` en 1er positionnel et décale tout le seam. On
+    restaure le descripteur, ou on RETIRE l'override quand l'attribut était hérité."""
+    had = "_fetch" in cls.__dict__
+    orig = cls.__dict__.get("_fetch")
     cls._fetch = staticmethod(fn)
-    return lambda: setattr(cls, "_fetch", orig)
+
+    def restore():
+        if had:
+            cls._fetch = orig
+        else:
+            del cls._fetch
+    return restore
 
 
 def _boom(*a, **k):

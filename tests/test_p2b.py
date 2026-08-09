@@ -226,6 +226,26 @@ class TestToolFailedHelper(unittest.TestCase):
         self.assertEqual(f.evidence, "boom")                     # err remonté dans la preuve
 
 
+def _patch_idor_fetch(fn):
+    """Remplace `IdorDifferential._fetch` par `fn` et renvoie un restaurateur FIDÈLE.
+
+    `_fetch` est déclaré `@staticmethod` sur la base `_ContentTypedOracle` : `IdorDifferential._fetch`
+    rendrait la FONCTION résolue, et la reposer laisserait sur la sous-classe une fonction NUE qui
+    masque le descripteur hérité — donc une méthode d'INSTANCE, qui reçoit `self` en 1er positionnel
+    et décale tout le seam (`Oracle._http` reçoit l'URL dans `headers` -> `ValueError`). On lit le
+    DESCRIPTEUR brut et on RETIRE l'override, puisque l'attribut était hérité."""
+    had = "_fetch" in IdorDifferential.__dict__
+    orig = IdorDifferential.__dict__.get("_fetch")
+    IdorDifferential._fetch = staticmethod(fn)
+
+    def restore():
+        if had:
+            IdorDifferential._fetch = orig
+        else:
+            del IdorDifferential._fetch
+    return restore
+
+
 class TestIdorOracleDifferential(unittest.TestCase):
     """Oracle différentiel access_control.idor DURCI : monkeypatch _fetch (zéro réseau).
 
@@ -239,8 +259,7 @@ class TestIdorOracleDifferential(unittest.TestCase):
         def fake_fetch(url, headers, timeout=15, method="GET", body=None):
             role = (headers or {}).get("X-Role", "anon")
             return fetch_map[(url, role)]
-        orig = IdorDifferential._fetch
-        IdorDifferential._fetch = staticmethod(fake_fetch)
+        restore = _patch_idor_fetch(fake_fetch)
         try:
             base = {"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
                     "urls": ["https://app.test/obj/1"]}
@@ -248,7 +267,7 @@ class TestIdorOracleDifferential(unittest.TestCase):
                 base.update(params)
             return mod.fire(Action("access_control.idor", target, params=base))
         finally:
-            IdorDifferential._fetch = orig
+            restore()
 
     def test_vulnerable_when_b_reads_a_and_anon_refused(self):
         u = "https://app.test/obj/1"
@@ -348,15 +367,14 @@ class TestIdorOracleDifferential(unittest.TestCase):
             if method == "PUT" and role == "B":
                 return (200, "", "application/json")             # write accepté
             return (None, "", "")
-        orig = IdorDifferential._fetch
-        IdorDifferential._fetch = staticmethod(fake_fetch)
+        restore = _patch_idor_fetch(fake_fetch)
         try:
             findings = IdorDifferential().fire(Action(
                 "access_control.idor", u, destructive=True,    # write -> autorisé destructif par le ROE
                 params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
                         "urls": [u], "method": "PUT", "body": '{"note":"pwned-by-B"}'}))
         finally:
-            IdorDifferential._fetch = orig
+            restore()
         self.assertEqual(findings[0].severity, "CRITICAL")
         self.assertEqual(findings[0].status, "vulnerable")
         self.assertIn("write CONFIRMÉ", findings[0].title)
@@ -372,15 +390,14 @@ class TestIdorOracleDifferential(unittest.TestCase):
             if method == "DELETE" and role == "B":
                 return (403, "", "")                             # write refusé
             return (None, "", "")
-        orig = IdorDifferential._fetch
-        IdorDifferential._fetch = staticmethod(fake_fetch)
+        restore = _patch_idor_fetch(fake_fetch)
         try:
             findings = IdorDifferential().fire(Action(
                 "access_control.idor", u, destructive=True,    # write -> autorisé destructif par le ROE
                 params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
                         "urls": [u], "method": "DELETE"}))
         finally:
-            IdorDifferential._fetch = orig
+            restore()
         self.assertEqual(findings[0].status, "tested")
 
     def test_write_method_fail_closed_without_destructive(self):
@@ -390,15 +407,14 @@ class TestIdorOracleDifferential(unittest.TestCase):
         def fake_fetch(url, headers, timeout=15, method="GET", body=None):
             calls["n"] += 1                              # ne doit JAMAIS être appelé (guard avant réseau)
             return (200, "x", "application/json")
-        orig = IdorDifferential._fetch
-        IdorDifferential._fetch = staticmethod(fake_fetch)
+        restore = _patch_idor_fetch(fake_fetch)
         try:
             findings = IdorDifferential().fire(Action(
                 "access_control.idor", u,                # destructive=False (défaut)
                 params={"accounts": [{"headers": {"X-Role": "A"}}, {"headers": {"X-Role": "B"}}],
                         "urls": [u], "method": "PUT"}))
         finally:
-            IdorDifferential._fetch = orig
+            restore()
         self.assertEqual(calls["n"], 0)                  # aucune requête (fail-closed)
         self.assertEqual(findings[0].status, "skipped")  # `skip()` = « je n'ai pas pu vérifier » -> `skipped`, plus `tested`
         # (« j'ai vérifié, rien trouvé ») : ce test figeait le mensonge, il fige désormais la vérité.

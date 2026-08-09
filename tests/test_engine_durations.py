@@ -372,7 +372,9 @@ class TestStoreNeverIdentifiesATarget(unittest.TestCase):
 
     def test_MUTATION_dropping_the_kind_guard_lets_a_target_in(self):
         """PREUVE PAR MUTATION : sans la garde, une cible ENTRE — c'est donc bien elle qui protège."""
-        saved = DurationStore._valid_kind
+        # `__dict__` : le DESCRIPTEUR classmethod. `DurationStore._valid_kind` rendrait une méthode
+        # DÉJÀ LIÉE, et la reposer figerait `cls` sur `DurationStore` pour toute sous-classe.
+        saved = DurationStore.__dict__["_valid_kind"]
         try:
             DurationStore._valid_kind = classmethod(lambda _cls, k: isinstance(k, str) and bool(k))
             st = DurationStore()
