@@ -6,6 +6,7 @@ jamais rien installer globalement. Les modules construisent la commande ; le run
 La GATE ROE est en amont : le runner n'est atteint qu'après un verdict FIRE. Zéro dépendance.
 """
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -150,14 +151,118 @@ def terminate_live_tool_groups(force=True):
             pass
 
 
-def cmdline(binary, docker_image=None, args=None, prefer_docker=False):
+# =================================================================================================
+#  VOIE DOCKER — CE QU'ELLE CONSTRUIT, ET CE QU'ELLE REFUSE DE CONSTRUIRE
+# =================================================================================================
+#  La commande est `docker run --rm --network host [--entrypoint E] <image> <args…>`. Deux choses en
+#  découlent, et les deux sont des DÉCISIONS, pas des oublis.
+#
+#  1. AUCUN `-v` / `--mount` — ET C'EST DÉLIBÉRÉ (refus documenté, pas une commodité manquante).
+#     CE QUE ÇA COÛTE, NOMMÉMENT : `gobuster` exige un CHEMIN de wordlist -> inutilisable par la voie
+#     docker (MESURÉ : `docker run --rm --network host ghcr.io/oj/gobuster dns --domain lab.test -w
+#     <chemin hôte>` -> « wordlist file "…" does not exist » — le chemin de l'hôte n'existe pas DANS le
+#     conteneur) ; `web.nuclei` a dû abandonner `-list <fichier>` au profit de `-u a,b,c`.
+#     POURQUOI ON NE L'OUVRE PAS QUAND MÊME :
+#       (a) `--network host` est DÉJÀ sur chaque invocation. Un montage, même `:ro`, borne les
+#           ÉCRITURES — pas les LECTURES ; et une lecture dans un conteneur qui a le réseau de l'hôte
+#           est à un `curl` de l'exfiltration. `:ro` + `--network host` ne protège donc PAS ce qui
+#           compte ici (des secrets lus), il protège ce qui compte le moins (des fichiers écrits).
+#       (b) le chemin à monter viendrait d'un PARAM d'exécution (`params.wordlist`, un champ `text` du
+#           formulaire console), c'est-à-dire du canal de CONFIANCE LA PLUS BASSE du moteur. Toute la
+#           posture du dépôt consiste à empêcher qu'une VALEUR de param devienne une CAPACITÉ
+#           (`check_extra_args`, `safe_value`, `unsafe_positional_target`) ; transformer une valeur de
+#           param en CHEMIN DE L'HÔTE MONTÉ dans une image tierce ferait exactement l'inverse.
+#       (c) le borner correctement (allowlist de racines de montage) impose un défaut VIDE — sinon on
+#           laisse passer `/` ou `~/.ssh`. Donc la capacité serait INERTE par défaut : elle ne servirait
+#           qu'à l'opérateur qui l'arme explicitement, lequel dispose déjà de deux voies MESURÉES et
+#           documentées — installer le binaire LOCAL (gobuster local lit le chemin hôte sans conteneur,
+#           avec les privilèges du moteur et non ceux d'une image tierce), ou `dnsx -w www,mail,dev`
+#           (liste INLINE, aucun fichier). On n'ouvre pas une surface d'accès fichier pour un gain nul
+#           par défaut.
+#     CE QUI RESTE VRAI : un opérateur qui veut vraiment monter un fichier dans un conteneur d'outil le
+#     fait à la main, hors moteur. Le moteur, lui, ne fabrique jamais d'accès au système de fichiers de
+#     l'hôte pour une image tierce.
+#
+#  2. `--entrypoint` EST construit (opt-in, déclaré par le spec) — il n'expose AUCUN fichier.
+#     CE QU'IL DÉBLOQUE, MESURÉ : l'image officielle `ghcr.io/laramies/theharvester` a pour entrypoint
+#     `["restfulHarvest","-H","0.0.0.0","-p","80"]` — un SERVEUR REST, pas la CLI ; sans override, tout
+#     argv de catalogue y rend `unrecognized arguments`. C'était un blocage NOMMÉ dans `toolcatalog` et
+#     `docs/TOOLS.md` ; il est levé.
+#     GOUVERNÉ FAIL-CLOSED : un entrypoint INTERPRÉTEUR/SHELL est REFUSÉ (`entrypoint_refusal`). Sans
+#     ce garde-fou, un ToolSpec DÉCLARATIF (dossier `./toolspecs`, monté `:ro` par défaut, vendu comme
+#     « gouverné, zéro code ») pourrait poser `docker_entrypoint: "sh"` + `argv_template: ["-c", …]` et
+#     RÉINTRODUIRE LE SHELL que tout le reste du moteur interdit. Le refus est posé ICI, au chokepoint
+#     unique où l'entrypoint atteint `docker run` : il couvre TOUTES les voies de déclaration (code,
+#     fichier, plugin), pas seulement celle qu'on aurait pensé à valider.
+
+# Charset BORNÉ d'un entrypoint : un NOM ou un CHEMIN ABSOLU d'exécutable DANS l'image. Ne commence
+# JAMAIS par '-' (anti option-smuggling vers `docker run` lui-même), aucun espace, aucun métacaractère
+# shell, aucun NUL. Le chemin ABSOLU est admis à dessein (`--entrypoint /usr/local/bin/theHarvester`
+# est la forme docker la plus courante) — c'est ce qui rend le contrôle d'interpréteur ci-dessous
+# RÉELLEMENT ATTEIGNABLE : sans lui, `/bin/sh` tomberait sur le charset et la normalisation de basename
+# ne servirait jamais. Le chemin RELATIF (`./x`, `../x`) reste refusé : rien à y gagner, une ambiguïté
+# de résolution à y perdre.
+_ENTRYPOINT_RX = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._+/-]*$")
+
+# Interpréteurs/shells REFUSÉS comme entrypoint. MIROIR VOLONTAIRE de `modules/loader._INTERPRETER_BINARIES`
+# (lui-même miroir de `INTERPRETER_BINARIES` côté Rust, console/src/tools.rs) : la liste n'est pas importée
+# pour garder `runner` sans dépendance sur le paquet `modules` (cycle : modules.toolspec importe runner).
+# `test_runner_docker_entrypoint.TestInterpreterListParity` VERROUILLE l'inclusion — si la liste amont
+# gagne une entrée, le test CASSE au lieu de laisser ce refus silencieusement en retard.
+_ENTRYPOINT_INTERPRETERS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "busybox", "env", "python",
+    "python2", "python3", "perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "awk", "gawk",
+    "mawk", "expect", "tclsh", "wish", "powershell", "pwsh", "cmd", "xargs", "find", "eval", "exec",
+    "source", "sudo", "doas", "ssh", "scp", "sftp", "socat", "nc", "ncat", "netcat", "telnet", "rsync",
+})
+
+
+def entrypoint_refusal(entrypoint):
+    """RAISON de refus d'un `--entrypoint` docker (str), ou None s'il est acceptable.
+
+    Trois barrières, dans cet ordre : (1) charset borné (`_ENTRYPOINT_RX` — pas de '-' initial, pas
+    d'espace, pas de métacaractère) ; (2) le BASENAME normalisé comme le fait le loader
+    (`re.split(r"[\\\\/]")[-1].lower().split(".")[0]`, de sorte que `/bin/sh` et `python3.11` sont vus
+    comme `sh` et `python3`) ; (3) ce basename ne doit PAS être un interpréteur/shell. Absent/vide ->
+    None (aucun entrypoint = comportement historique). Pur, ne lève jamais."""
+    if entrypoint is None or entrypoint == "":
+        return None
+    if not isinstance(entrypoint, str):
+        return f"docker_entrypoint doit être une chaîne (reçu {type(entrypoint).__name__})"
+    if not _ENTRYPOINT_RX.match(entrypoint):
+        return (f"entrypoint docker {entrypoint!r} hors charset borné (alphanumérique + `. _ + / -`, "
+                f"jamais un '-' initial, ni espace, ni métacaractère shell)")
+    base = re.split(r"[\\/]", entrypoint)[-1].lower().split(".")[0]
+    if base in _ENTRYPOINT_INTERPRETERS:
+        return (f"entrypoint docker {entrypoint!r} est un interpréteur/shell ({base!r}) — refusé : "
+                f"`--entrypoint {base} IMAGE -c '…'` réintroduirait le shell que l'argv fixe interdit")
+    return None
+
+
+def _docker_argv(docker_image, args=None, entrypoint=None):
+    """argv `docker run` — SOURCE UNIQUE partagée par `cmdline` (dry-run/PoC) et `tool` (exécution) :
+    ce qu'on MONTRE est exactement ce qu'on LANCE, y compris l'entrypoint. Aucun `-v`/`--mount` n'y est
+    construit (cf. la décision §1 ci-dessus). N'est appelé qu'après `entrypoint_refusal` -> None. Pur."""
+    cmd = ["docker", "run", "--rm", "--network", "host"]
+    if entrypoint:
+        cmd += ["--entrypoint", entrypoint]
+    cmd.append(docker_image)
+    cmd += list(args or [])
+    return cmd
+
+
+def cmdline(binary, docker_image=None, args=None, prefer_docker=False, docker_entrypoint=None):
     """Chaîne de commande (pour dry-run / PoC) — ne lance rien.
 
     Sélection cohérente avec tool() : `prefer_docker` n'est qu'une PRÉFÉRENCE d'ordre, pas une
     exigence. Avec prefer_docker -> docker d'abord, REPLI sur le binaire local s'il est présent et
     docker absent (on ne renvoie « indisponible » que si NI docker NI binaire local). Sans
     prefer_docker -> binaire local d'abord, sinon docker. Dans les deux cas la voie restante est
-    tentée plutôt que d'échouer en silence sur un outil pourtant disponible localement."""
+    tentée plutôt que d'échouer en silence sur un outil pourtant disponible localement.
+
+    `docker_entrypoint` (optionnel) n'a de sens QUE sur la voie docker : la voie locale exécute le
+    binaire lui-même. Un entrypoint REFUSÉ (`entrypoint_refusal`) rend une ligne `# refusé: …` — jamais
+    une commande qu'on ne lancerait de toute façon pas (le PoC affiché reste VRAI)."""
     args = list(args or [])
     docker_ok = docker_image and shutil.which("docker")
     local_ok = bool(shutil.which(binary))
@@ -169,7 +274,10 @@ def cmdline(binary, docker_image=None, args=None, prefer_docker=False):
         if ok and which == "local":
             return " ".join([binary, *args])
         if ok and which == "docker":
-            return " ".join(["docker", "run", "--rm", "--network", "host", docker_image, *args])
+            bad = entrypoint_refusal(docker_entrypoint)
+            if bad is not None:
+                return f"# refusé: {bad}"
+            return " ".join(_docker_argv(docker_image, args, docker_entrypoint))
     return f"# indisponible: ni binaire '{binary}' ni image docker"
 
 
@@ -200,8 +308,10 @@ def _terminate_group(proc, *, force=False):
         pass
 
 
-def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None, env=None):
-    """Exécute. Retourne (returncode, stdout, stderr). 127 si indisponible, 124 si timeout.
+def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None, env=None,
+         docker_entrypoint=None):
+    """Exécute. Retourne (returncode, stdout, stderr). 127 si indisponible, 124 si timeout, 126 si
+    l'entrypoint docker demandé est REFUSÉ (aucun processus lancé).
 
     `timeout` (borne DURE par-action, s) — PRÉCÉDENCE : valeur explicite de l'appelant (override,
     ex. web.nuclei=600) > profil de ressources (`FORGE_RESOURCE_PROFILE`, levier `action_timeout_secs`)
@@ -221,7 +331,13 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None
     `env` (optionnel) : environnement COMPLET du process enfant (dict). None (défaut) -> l'enfant
     HÉRITE de l'environnement courant (comportement historique, byte-identique). Un appelant qui doit
     marquer/isoler l'enfant (cf. `_daemon_reap.reaping_env` : HOME privé + FORGE_RUN_MARKER pour reaper
-    un daemon fuité) passe un dict `os.environ`-dérivé — jamais un env partiel (PATH doit rester)."""
+    un daemon fuité) passe un dict `os.environ`-dérivé — jamais un env partiel (PATH doit rester).
+
+    `docker_entrypoint` (optionnel, voie DOCKER uniquement) : override de l'entrypoint de l'image, pour
+    les images dont l'entrypoint n'est PAS la CLI attendue (mesuré : `ghcr.io/laramies/theharvester`
+    démarre un serveur REST). REFUS FAIL-CLOSED d'un interpréteur/shell (`entrypoint_refusal`) -> rc=126
+    et AUCUN processus lancé : sans ce refus, un spec déclaratif pourrait réintroduire le shell via
+    `--entrypoint sh IMAGE -c '…'`. None/"" -> aucun `--entrypoint` (chemin historique BYTE-IDENTIQUE)."""
     if timeout is None:                                # défaut résolu par le profil de ressources
         timeout = resource_profile.resolve("action_timeout_secs", default=_DEFAULT_ACTION_TIMEOUT)
     args = list(args or [])
@@ -239,7 +355,10 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None
             cmd = [local_path, *args]              # argv = binaire RÉSOLU (pas le nom nu) — portable
             break
         if ok and which == "docker":
-            cmd = ["docker", "run", "--rm", "--network", "host", docker_image, *args]
+            bad = entrypoint_refusal(docker_entrypoint)
+            if bad is not None:                   # fail-closed : ZÉRO processus lancé
+                return (126, "", f"entrypoint docker refusé (fail-closed) : {bad}")
+            cmd = _docker_argv(docker_image, args, docker_entrypoint)
             break
     if cmd is None:
         return (127, "", f"indisponible: ni binaire '{binary}' ni docker pour l'image '{docker_image}'")

@@ -85,20 +85,35 @@ ENTRÉE RETIRÉE — `recon.theharvester` (OSINT emails/sous-domaines). MESURÉ,
      qui n'existe pas ne peut pas « dégrader gracieusement » : elle échouait à chaque cible.
   2. L'image OFFICIELLE de l'auteur existe bien, mais ailleurs (`ghcr.io/laramies/theharvester`), et
      son ENTRYPOINT est `restfulHarvest -H 0.0.0.0 -p 80` — un SERVEUR REST, pas le CLI. L'argv du
-     catalogue y rend `restfulHarvest: error: unrecognized arguments: -d example.com -b all`. La
-     corriger exigerait `docker run --entrypoint theHarvester …`, que `runner.cmdline/tool` ne sait
-     pas construire (il pose `docker run --rm --network host IMAGE args…`, sans entrypoint) : le
-     correctif ne tiendrait donc PAS dans ce catalogue.
+     catalogue y rend `restfulHarvest: error: unrecognized arguments: -d example.com -b all`.
+     ⚠️ CE BLOCAGE-LÀ EST LEVÉ (2026-08) : `runner` construit désormais `--entrypoint` (opt-in via
+     `ToolSpec.docker_entrypoint`, interpréteur/shell REFUSÉ fail-closed), et `docker run --rm
+     --entrypoint theHarvester ghcr.io/laramies/theharvester --help` rend bien la CLI (MESURÉ,
+     rc=0). Cette note est conservée telle quelle pour que personne ne re-tire la conclusion périmée
+     « c'est impossible » : ce n'est plus la raison du retrait.
   3. Il RESTE une image tierce fonctionnelle (`secsi/theharvester`, entrypoint `python
      theHarvester.py`, v4.10.0) : un rebuild NON officiel, non versionné, sur lequel on ferait
-     reposer une entrée de catalogue signée. On ne l'a pas retenu.
+     reposer une entrée de catalogue signée. On ne l'a pas retenu — et depuis (2), il n'y a plus
+     besoin de l'envisager.
+  LA RAISON QUI RESTE, ET QUI SUFFIT À ELLE SEULE : `-b all` fan-oute vers des dizaines de
+  fournisseurs OSINT dont la plupart exigent une clé d'API. SANS CLÉS, l'outil sort **rc=0 quasi
+  vide** — exactement le silence que `blindness.tool_did_not_run` (borne `rc != 0`) NE PEUT PAS
+  rattraper, et exactement ce qui a fait retirer `masscan`. Rendre l'invocation possible aurait donc
+  converti un échec VISIBLE en un « j'ai vérifié, rien trouvé » MENSONGER. L'entrée reste retirée.
   CE QUE LA COUVERTURE PERD, NOMMÉMENT : la moisson d'EMAILS (le seul apport qui n'était pas déjà
   couvert). Les SOUS-DOMAINES, eux, restent couverts trois fois — `recon.subfinder`, `recon.amass` et
   `recon.subdomains` (crt.sh CT + passive DNS, natif) — et ceux-là TOURNENT. Un email n'était de
   toute façon pas un asset scannable (`hit_is_asset=False`) : il ne pouvait ni être re-validé contre
-  le périmètre, ni chaîné vers un oracle. Enfin `-b all` fan-oute vers des dizaines de fournisseurs
-  OSINT dont la plupart exigent une clé d'API : sans clés, l'outil sortait rc=0 quasi vide — un
-  « aucun hit » que la garde `tool_did_not_run` (rc != 0) n'aurait PAS rattrapé.
+  le périmètre, ni chaîné vers un oracle.
+
+CE QUE LE RUNNER NE FERA PAS POUR UNE ENTRÉE DE CE CATALOGUE — LES MONTAGES
+---------------------------------------------------------------------------
+`runner` ne construit AUCUN `-v`/`--mount`, et c'est un REFUS DOCUMENTÉ (le raisonnement complet vit
+en tête de la voie docker de `forge/runner.py`). Conséquence directe et ASSUMÉE ici : `recon.gobuster_dns`
+exige un CHEMIN de wordlist et n'est donc utilisable que par son BINAIRE LOCAL — via `docker_image`, le
+chemin de l'hôte n'existe pas dans le conteneur (MESURÉ : « wordlist file "…" does not exist »). C'est
+pourquoi `requires_params=("wordlist",)` rend l'outil INERTE ET NOMMÉ plutôt que faussement vert, et
+pourquoi `recon.dnsx` — qui accepte une liste INLINE `-w www,mail,dev` — reste la voie sans fichier.
 """
 from .toolspec import ToolSpec, register_spec, FlagAllowlistMixin
 

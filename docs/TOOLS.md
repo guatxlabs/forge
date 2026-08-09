@@ -187,9 +187,13 @@ outils apt/git (sqlmap, nikto, testssl.sh, whatweb, wafw00f, wfuzz, gobuster) re
 > chacun dans le ledger `gxrun2`, tous rendus en « j'ai vérifié, rien trouvé »).
 > `theHarvester` : l'image déclarée `laramies/theharvester` **n'existe pas** sur Docker Hub ; l'image
 > officielle de l'auteur (`ghcr.io/laramies/theharvester`) a pour entrypoint `restfulHarvest` — un
-> **serveur REST**, et `runner` ne construit pas de `--entrypoint`. Les sous-domaines restent couverts
-> par `recon.subfinder`, `recon.amass` et `recon.subdomains` (crt.sh) ; ce qui est perdu, ce sont les
-> **emails** (qui n'étaient de toute façon pas des assets scannables).
+> **serveur REST**, pas la CLI. *(Ce blocage-là est **levé** depuis 2026-08 : `runner` construit
+> désormais `--entrypoint` — voir plus bas. **L'entrée reste retirée** pour une autre raison, qui
+> suffit seule : `-b all` exige des clés d'API et, sans elles, theHarvester sort **rc=0 quasi vide** —
+> le silence exact que la garde d'honnêteté `rc != 0` ne peut pas rattraper, celui qui a fait retirer
+> `masscan`.)* Les sous-domaines restent couverts par `recon.subfinder`, `recon.amass` et
+> `recon.subdomains` (crt.sh) ; ce qui est perdu, ce sont les **emails** (qui n'étaient de toute façon
+> pas des assets scannables).
 > `masscan` : son argv était réparable (consommer l'IP épinglée par le ROE), mais un scan SYN brut ne
 > voit pas la réponse sur un hôte multi-homed -> **rc=0, stdout vide** = un « aucun hit » que la garde
 > d'honnêteté (`rc != 0`) ne rattrape pas. **`recon.naabu` couvre les ports** (connect TCP, `params.ports
@@ -202,6 +206,39 @@ outils apt/git (sqlmap, nikto, testssl.sh, whatweb, wafw00f, wfuzz, gobuster) re
 > `gobuster` exige un **chemin de fichier lisible par le processus** (attention : via le repli
 > `docker_image`, `runner` ne monte aucun volume — une wordlist de l'hôte n'y est pas visible ;
 > installer le binaire local, ou utiliser `dnsx` avec une liste inline).
+
+### La voie `docker run` du runner — ce qu'elle construit, et ce qu'elle refuse
+
+`runner` lance `docker run --rm --network host [--entrypoint E] <image> <args…>`.
+
+**Aucun `-v` / `--mount` — refus délibéré, pas un oubli.** Ce que ça coûte est nommé : `gobuster` exige
+un **chemin** de wordlist et n'est donc utilisable que par son **binaire local** ; `web.nuclei` a dû
+abandonner `-list <fichier>` au profit de `-u a,b,c`. Ce qui n'a pas été retenu, et pourquoi :
+
+| Propriété exigée d'un montage | Verdict |
+|---|---|
+| **lecture seule** (`:ro`) | Insuffisant **ici** : `:ro` borne les écritures, pas les **lectures** — et `--network host` est déjà sur chaque invocation, donc une lecture est à un `curl` de l'exfiltration. |
+| **borné** (allowlist de racines) | Faisable, mais le défaut devrait être **vide** (sinon `/` ou `~/.ssh` passent par inadvertance) → capacité **inerte par défaut**, gain nul. |
+| **explicite** (jamais deviné d'un argv) | Le chemin viendrait de `params.wordlist`, un champ **texte du formulaire console** : le canal de plus basse confiance du moteur. Toute la posture (`check_extra_args`, `safe_value`, `unsafe_positional_target`) consiste à empêcher qu'une **valeur de param** devienne une **capacité** ; en faire un chemin hôte **monté** ferait l'inverse. |
+| **visible** dans la décision | Satisfaisable (le PoC affiché est construit par le même code que la commande lancée) — mais ne rachète pas les trois lignes ci-dessus. |
+
+Les deux voies qui restent sont **mesurées et documentées** : installer le **binaire local** (il lit le
+chemin hôte avec les privilèges du moteur, sans image tierce), ou `dnsx -w www,mail,dev` (liste
+**inline**, aucun fichier). Un opérateur qui veut vraiment monter un fichier dans un conteneur d'outil
+le fait **hors moteur** ; le moteur, lui, ne fabrique jamais d'accès au système de fichiers de l'hôte
+pour une image tierce.
+
+**`--entrypoint` est livré** (opt-in, champ `docker_entrypoint` d'un ToolSpec) : il **n'expose aucun
+fichier** et débloque les images dont l'entrypoint n'est pas la CLI attendue — cas mesuré :
+`ghcr.io/laramies/theharvester` démarre `restfulHarvest`, un serveur REST. **Gouverné fail-closed** :
+un entrypoint **interprète/shell** (`sh`, `bash`, `/bin/busybox`, `python3.11`, `env`…) est **refusé**
+(`rc=126`, aucun processus lancé), et un entrypoint hors charset borné (`-…`, espace, métacaractère,
+chemin relatif) aussi. Sans ce refus, un ToolSpec **déclaratif** du dossier `./toolspecs` — monté `:ro`
+**par défaut** et présenté comme « gouverné, zéro code » — pourrait poser `docker_entrypoint: "sh"` +
+`argv_template: ["-c", …]` et **réintroduire le shell**. Le refus est posé dans `runner`, au chokepoint
+unique où l'entrypoint atteint `docker run` : il couvre **toutes** les voies de déclaration (code,
+fichier, plugin). *(L'endpoint console `/api/tools` n'accepte pas ce champ : sa liste de champs est une
+allowlist explicite — fail-closed par omission.)*
 
 > ℹ️ **Modules `evasion.*` : indisponibles par conception sans service navigateur.** Les modules
 > `evasion.xhr` / `evasion.turnstile` / `evasion.idor_intercept` / `evasion.discover` (et l'oracle

@@ -72,6 +72,8 @@ class ToolSpec:
       exploit / destructive : capacité gouvernée (exploit -> gaté par le plancher opt-in).
       depends_on      : kinds requis en amont (ordonnancement pipeline ; doivent être enregistrés).
       timeout         : borne d'exécution (s).  prefer_docker : préférence d'ordre binaire/docker.
+      docker_entrypoint : override `--entrypoint` de l'image (voie docker seule ; interpréteur/shell
+                        REFUSÉ fail-closed par `runner`). "" (défaut) -> aucun override.
       parser          : lines | regex | json | jsonl | none  (comment extraire les hits de la sortie).
       parser_regex    : regex pour parser="regex" (group(1) si présent, sinon group(0)).
       parser_json_path: tuple de clés pour parser=json/jsonl (chemin vers la valeur du hit).
@@ -88,7 +90,7 @@ class ToolSpec:
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
         "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
         "params_schema", "flag_allowlist", "emit_service_discovery", "emit_endpoint_discovery",
-        "skip_bare_ip", "reap_daemon", "requires_params", "requires_note",
+        "skip_bare_ip", "reap_daemon", "requires_params", "requires_note", "docker_entrypoint",
     )
 
     def __init__(self, kind, vuln_class, binary, argv_template, *, cwe="", mitre="", phase="recon",
@@ -98,7 +100,7 @@ class ToolSpec:
                  parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
                  hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
                  emit_service_discovery=False, emit_endpoint_discovery=False, skip_bare_ip=False,
-                 reap_daemon=False, requires_params=(), requires_note=""):
+                 reap_daemon=False, requires_params=(), requires_note="", docker_entrypoint=""):
         self.kind = kind
         self.vuln_class = vuln_class
         self.binary = binary
@@ -175,6 +177,16 @@ class ToolSpec:
         # Défaut `()` => aucun pré-requis => chemin BYTE-IDENTIQUE pour tous les autres outils.
         self.requires_params = tuple(requires_params)
         self.requires_note = str(requires_note or "")
+        # OVERRIDE D'ENTRYPOINT DOCKER (voie docker UNIQUEMENT) — pour les images dont l'ENTRYPOINT
+        # n'est PAS la CLI attendue. MESURÉ : l'image officielle `ghcr.io/laramies/theharvester` a pour
+        # entrypoint `["restfulHarvest","-H","0.0.0.0","-p","80"]` (un SERVEUR REST) : tout argv de
+        # catalogue y rend `unrecognized arguments`. C'était un blocage NOMMÉ dans `toolcatalog` ; il
+        # est levé. GOUVERNÉ FAIL-CLOSED AU CHOKEPOINT : `runner.entrypoint_refusal` REFUSE tout
+        # interpréteur/shell (rc=126, zéro processus) — sans quoi un spec DÉCLARATIF (`./toolspecs`,
+        # monté `:ro` par défaut, vendu « gouverné, zéro code ») poserait `docker_entrypoint: "sh"` +
+        # `argv_template: ["-c", …]` et RÉINTRODUIRAIT le shell. Défaut "" => aucun `--entrypoint`
+        # construit => chemin d'exécution BYTE-IDENTIQUE pour tous les outils existants.
+        self.docker_entrypoint = str(docker_entrypoint or "")
 
     @property
     def asset_hits(self):
@@ -352,6 +364,60 @@ def safe_value(val):
     NATIFS (nmap/nuclei) à valider les valeurs de params mappées à un flag (ports/scripts/…) — une valeur
     hostile (`-oN`, métacaractère shell) est REJETÉE. Pur, ne lève jamais."""
     return bool(isinstance(val, str) and val and _SAFE_VALUE_RX.match(val))
+
+
+# =================================================================================================
+#  RE-VALIDATION DE PÉRIMÈTRE DES ASSETS DÉCOUVERTS — le FILTRE et son COMPTEUR, un seul prédicat
+# =================================================================================================
+def asset_of(hit):
+    """L'ASSET porté par un hit d'outil de DÉCOUVERTE = son PREMIER JETON. `gobuster dns` écrit
+    `<hôte> <ip>`, `subfinder` un hôte nu, `naabu` un `host:port` — le premier jeton est, dans les
+    trois cas, la chose qu'il faut re-valider contre le périmètre. Pur, ne lève jamais."""
+    parts = str(hit).split()
+    return parts[0] if parts else str(hit)
+
+
+def asset_rejected(enforce, sc, hit):
+    """Ce hit d'ASSET est-il ÉCARTÉ par la re-validation fail-closed du périmètre ?
+
+    SOURCE UNIQUE du prédicat : `_hits_to_findings` FILTRE avec, `out_of_scope_hits` COMPTE avec. Les
+    deux ne peuvent donc pas diverger — un compte rapporté à l'opérateur qui ne correspondrait pas au
+    filtre qui l'a produit serait une seconde phrase fausse, posée pour en corriger une première.
+    Sans périmètre injecté (`enforce` False, dev/test) rien n'est écarté. Pur, ne lève jamais."""
+    if not enforce:
+        return False
+    return not sc.is_in_scope(asset_of(hit))
+
+
+def out_of_scope_hits(spec, enforce, sc, hits):
+    """COMBIEN de résultats l'outil a-t-il RENDUS que la re-validation de périmètre a ÉCARTÉS ?
+
+    POURQUOI CE COMPTE EXISTE. Un outil qui trouve `www.lab.test` et `mail.lab.test` sur un périmètre
+    `in_scope=["lab.test"]` (motif d'HÔTE EXACT : les sous-domaines exigent `*.lab.test`) voit ses deux
+    résultats écartés — c'est le scope-guard qui fait son travail, et il ne bouge pas. Mais le module
+    concluait alors « aucun hit », c'est-à-dire une phrase PLUS LARGE que ce qu'elle recouvre :
+    « j'ai trouvé, mais hors périmètre » n'est pas « rien ». L'information existe ENCORE au moment du
+    filtrage ; il suffisait de la DIRE. Zéro si le spec ne produit pas d'assets ou si aucun périmètre
+    n'est injecté. Pur, ne lève jamais."""
+    if not (enforce and spec.asset_hits):
+        return 0
+    return sum(1 for h in hits if asset_rejected(enforce, sc, h))
+
+
+# Évidence d'un constat d'ABSENCE rendu alors que l'outil AVAIT rendu des résultats, TOUS écartés par
+# la re-validation de périmètre. CE QU'ON N'Y ÉCRIT PAS, ET POURQUOI : le COMPTE, oui ; les VALEURS,
+# jamais. Un finding est rédigé, journalisé au ledger signé, puis exporté au rapport — y déposer les
+# hôtes/URL découverts HORS périmètre publierait de la reconnaissance sur des TIERS que l'engagement
+# ne couvre pas. Le compte suffit à ce dont l'opérateur a besoin ici : savoir que son motif de scope
+# est probablement trop étroit, et que le silence de l'outil n'était pas un silence de la cible.
+SCOPE_FILTERED_EVIDENCE = (
+    "L'outil a RENDU {n} résultat(s) ; la re-validation fail-closed du périmètre les a TOUS écartés "
+    "(aucun n'est in-scope). Ce n'est donc PAS « rien trouvé » mais « rien D'IN-SCOPE » : l'outil a "
+    "bien regardé, et il a bien vu. Le COMPTE est rapporté, JAMAIS les valeurs — ce sont des hôtes/URL "
+    "de tiers hors périmètre et ce finding est journalisé puis exporté : les écrire ferait fuiter de "
+    "la reconnaissance sur eux. Si ces résultats sont légitimement dans le périmètre, élargir le scope "
+    "(un motif d'hôte est EXACT : `exemple.test` ne couvre pas `www.exemple.test`, il faut ajouter "
+    "`*.exemple.test`) puis rejouer. ")
 
 
 def missing_required_params(spec, params=None):
@@ -560,17 +626,23 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         — le reap est dans le `finally`, donc il compose avec le SIGTERM/timeout de D1). Un outil sans
         reap_daemon suit le chemin HISTORIQUE (env hérité, aucun reap) → BYTE-IDENTIQUE."""
         s = self.spec
+        # `docker_entrypoint` n'est passé QUE s'il est déclaré. Ce n'est pas de la cosmétique : le
+        # passer avec `None` changerait la SIGNATURE D'APPEL de `runner.tool` pour les ~20 outils qui
+        # n'en veulent pas, et « byte-identique » cesserait d'être vrai (mesuré : 9 tests cassés — leurs
+        # doublures de `runner.tool` déclarent la signature EXACTE et refusent tout kwarg surnuméraire).
+        ep = {"docker_entrypoint": s.docker_entrypoint} if s.docker_entrypoint else {}
         if not s.reap_daemon:
             return runner.tool(s.binary, s.docker_image or None, argv,
-                               prefer_docker=s.prefer_docker, timeout=s.timeout)
+                               prefer_docker=s.prefer_docker, timeout=s.timeout, **ep)
         with _daemon_reap.reaping_env(prefix="forge-%s-" % s.binary) as env:
             return runner.tool(s.binary, s.docker_image or None, argv,
-                               prefer_docker=s.prefer_docker, timeout=s.timeout, env=env)
+                               prefer_docker=s.prefer_docker, timeout=s.timeout, env=env, **ep)
 
     def dry(self, action):
         s = self.spec
+        ep = {"docker_entrypoint": s.docker_entrypoint} if s.docker_entrypoint else {}
         return runner.cmdline(s.binary, s.docker_image or None, self._argv(action),
-                              prefer_docker=s.prefer_docker)
+                              prefer_docker=s.prefer_docker, **ep)
 
     def _mk(self, action, *, title, status, evidence, severity="INFO", target=None):
         """Construit un Finding estampillé (kind/cwe/mitre/tool/poc). `category=cwe||vuln_class` pour que
@@ -715,23 +787,61 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         #  n'a survécu (`if findings: return findings`, juste au-dessus). Un outil qui a produit ne
         #  serait-ce qu'une ligne est déjà reparti intact — d'où les 1 594 observations du corpus qui
         #  ne sont PAS touchées. Une cible SAINE ne remplit NI (a) NI (b) -> `tested` inchangé.
+        #
+        #  (c) TROISIÈME CAUSE, MESURÉE ENSUITE : l'outil A TROUVÉ, et c'est le PÉRIMÈTRE qui a tout
+        #      écarté. `gobuster` remonte `www.lab.test` + `mail.lab.test` sur `in_scope=["lab.test"]`
+        #      (motif d'hôte EXACT), la re-validation fail-closed les jette — correctement — et il ne
+        #      reste rien à émettre. Le verdict RESTE `tested` : l'outil a bel et bien tourné et
+        #      regardé, en faire un `skipped` serait l'excès inverse. C'est la PHRASE qui était fausse,
+        #      pas le statut ni le filtre. On rapporte donc le COMPTE des écartés — et RIEN de plus :
+        #      surtout pas les valeurs (cf. `SCOPE_FILTERED_EVIDENCE`, qui dit pourquoi).
         # ==========================================================================================
+        # Ce que l'outil a rendu et que le périmètre a écarté. Calculé PAR le filtre lui-même (jamais
+        # par un prédicat recopié) — cf. `_dropped_out_of_scope`. Zéro => phrases historiques intactes.
+        dropped = self._dropped_out_of_scope(action, hits)
+        filtered = SCOPE_FILTERED_EVIDENCE.format(n=dropped) if dropped else ""
         # RATE-LIMIT / WAF : une sortie portant une signature de challenge (429/WAF) est SIGNALÉE dans le
         # titre (au lieu d'un « aucun hit » trompeur) — l'opérateur voit que le scan a été throttlé/bloqué.
         if rc != 0:
             blocked = looks_like_challenge(None, (out or "") + " " + (err or ""))
-            note = " — rate-limited/WAF détecté dans la sortie" if blocked else ", aucun hit exploitable"
+            if blocked:                          # le mur PRIME : c'est le signal le plus actionnable
+                note = " — rate-limited/WAF détecté dans la sortie"
+            elif dropped:
+                note = f" — {dropped} résultat(s) rendus, tous hors périmètre"
+            else:
+                note = ", aucun hit exploitable"
             failed = [self._mk(
                 action, status="tested",
                 title=f"{self.kind} — {s.binary} rc={rc}{note}",
-                evidence=((err or out) or f"rc={rc}").strip()[:500])]
+                evidence=filtered + ((err or out) or f"rc={rc}").strip()[:500])]
             if _blind.tool_did_not_run(rc, out):
                 return _blind.downgrade_did_not_run(failed, rc)
             return _blind.downgrade(self._wall_witness(action), failed)
-        none_found = [self._mk(
-            action, status="tested", title=f"{self.kind} — {s.tool_name}: aucun hit",
-            evidence="Outil exécuté (in-scope), aucun résultat.")]
+        if dropped:
+            none_found = [self._mk(
+                action, status="tested",
+                title=f"{self.kind} — {s.tool_name}: {dropped} résultat(s), tous hors périmètre",
+                evidence=filtered + "Aucun hit in-scope à rapporter (outil exécuté, cible in-scope).")]
+        else:
+            none_found = [self._mk(
+                action, status="tested", title=f"{self.kind} — {s.tool_name}: aucun hit",
+                evidence="Outil exécuté (in-scope), aucun résultat.")]
         return _blind.downgrade(self._wall_witness(action), none_found)
+
+    def _dropped_out_of_scope(self, action, hits):
+        """Nombre de résultats que l'outil A RENDUS et que la re-validation fail-closed du périmètre a
+        ÉCARTÉS. Appelé UNIQUEMENT sur la branche d'ABSENCE (aucun finding n'a survécu) : « tous » y est
+        donc vrai par CONSTRUCTION, pas par un drapeau qu'on pourrait oublier de poser.
+
+        ROUTE VERS LE FILTRE QUI A ÉCARTÉ, jamais vers une copie de sa logique : `out_of_scope_hits`
+        (même prédicat `asset_rejected` que `_hits_to_findings`) pour la voie ASSET,
+        `_discovery.out_of_scope_endpoints` (même partition que `endpoint_discovery_findings`) pour la
+        voie ENDPOINT. Un compte qui divergerait du filtre serait une seconde phrase fausse posée pour
+        en corriger une première. Pur, ne lève jamais."""
+        if self.spec.emit_endpoint_discovery:
+            return _discovery.out_of_scope_endpoints(self, action, hits)
+        enforce, sc = self._scope(action)
+        return out_of_scope_hits(self.spec, enforce, sc, hits)
 
     def _wall_witness(self, action):
         """Témoin de MUR pour cette cible, ou None si l'outil ne parle pas HTTP (auquel cas
@@ -776,10 +886,11 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         out, seen = [], set()
         for h in hits:
             if s.asset_hits:
-                asset = h.split()[0] if h.split() else h      # 1er jeton = l'asset découvert (host/URL)
-                if enforce and not sc.is_in_scope(asset):
+                # 1er jeton = l'asset découvert (host/URL) ; le prédicat de rejet est PARTAGÉ avec le
+                # compteur `out_of_scope_hits` (source unique -> filtre et compte ne divergent pas).
+                if asset_rejected(enforce, sc, h):
                     continue                                  # fail-closed : jamais un asset hors-scope
-                target = asset
+                target = asset_of(h)
             else:
                 target = action.target
             key = (target, h)

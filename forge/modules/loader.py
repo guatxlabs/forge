@@ -318,6 +318,27 @@ def _reject_dangerous(data):
         reason = _dangerous_flag(binary)
         if reason is not None:
             return reason
+    # (1bis) docker_entrypoint : MÊME refus que `binary`, et pour la même raison exactement.
+    #
+    # Ce champ a rouvert une porte que le no-shell avait fermée, et le mécanisme mérite d'être dit :
+    # `_validate_spec_fields` dérive ses champs autorisés de la SIGNATURE de `ToolSpec`, donc ajouter
+    # `docker_entrypoint` l'a rendu déclarable — sans que personne ne le décide — depuis un fichier de
+    # `./toolspecs`, monté `:ro` par défaut et vendu « gouverné, zéro code ». Un spec pouvait alors
+    # demander `docker_entrypoint: "sh"` + `argv_template: ["-c", "…"]`, soit `docker run
+    # --entrypoint sh IMAGE -c '…'` : un shell, par la voie censée n'en jamais donner. MESURÉ : le
+    # loader l'acceptait.
+    #
+    # `runner.entrypoint_refusal` ferme déjà au CHOKEPOINT d'exécution (rc=126, zéro processus), ce
+    # qui couvre TOUTES les voies de déclaration. Ce refus-ci ferme à l'INGESTION : il coûte une
+    # comparaison, il nomme le FICHIER fautif au lieu d'un code de retour découvert au tir, et il vaut
+    # même si un futur appelant contourne le chokepoint. Une seule liste d'interpréteurs pour les
+    # deux (un verrou de parité l'épingle) — deux listes divergeraient.
+    ep = data.get("docker_entrypoint", "")
+    if isinstance(ep, str) and ep:
+        from ..runner import entrypoint_refusal
+        reason = entrypoint_refusal(ep)
+        if reason is not None:
+            return reason
     # (2)+(4) argv_template : placeholders bornés + aucun drapeau d'exfil ; suit l'usage de `{args}`.
     args_used = False
     stack = [(data.get("argv_template", ()) or (), False)]

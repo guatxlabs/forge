@@ -161,6 +161,37 @@ def _has_query_param(u):
         return False
 
 
+def _partition_endpoints(module, action, urls):
+    """(gardées, écartées_hors_périmètre) — SOURCE UNIQUE du nettoyage et de la re-validation de
+    périmètre des URLs crawlées.
+
+    `endpoint_discovery_findings` ÉMET les gardées ; `out_of_scope_endpoints` COMPTE les écartées. Le
+    MÊME code décide dans les deux cas : le compte rapporté à l'opérateur ne peut donc pas contredire
+    le filtre qui l'a produit. Une URL écartée entre dans `seen` — le compte est celui des URLs
+    DISTINCTES écartées, et la liste `gardées` est inchangée (une URL hors périmètre n'aurait de toute
+    façon jamais été gardée). Pur, ne lève jamais."""
+    enforce, sc = module._scope(action)
+    seen, kept, dropped = set(), [], 0
+    for u in urls:
+        s = str(u).strip().rstrip('\\",\')')
+        if not _looks_http_url(s) or s in seen:
+            continue
+        if enforce and not sc.is_in_scope(s):        # fail-closed : jamais un endpoint hors périmètre
+            seen.add(s)
+            dropped += 1
+            continue
+        seen.add(s)
+        kept.append(s)
+    return kept, dropped
+
+
+def out_of_scope_endpoints(module, action, urls):
+    """Nombre d'URLs http(s) DISTINCTES qu'un crawler a rendues et que la re-validation fail-closed du
+    périmètre a écartées. Sert au constat d'ABSENCE de `toolspec` : « N résultats, tous hors périmètre »
+    au lieu de « aucun hit » — le COMPTE, jamais les valeurs (ce sont des URL de tiers). Pur."""
+    return _partition_endpoints(module, action, urls)[1]
+
+
 def endpoint_discovery_findings(module, action, urls, tool):
     """Convertit les URLs CRAWLÉES (katana/gospider/gau) en findings de DÉCOUVERTE D'ENDPOINT
     chaînables : chaque URL http(s) IN-SCOPE devient un NŒUD du graphe (target=URL, marqueur
@@ -174,17 +205,10 @@ def endpoint_discovery_findings(module, action, urls, tool):
       - INJECTABLES D'ABORD : les URLs porteuses d'un paramètre de query (`?k=v`) sont priorisées
         (tri STABLE) avant celles sans query -> le cap ne sacrifie pas la surface injectable ;
       - dédupliqué (ordre préservé), borné à `_MAX_DISCOVERED_ENDPOINTS` (un crawl volumineux ne
-        doit pas exploser le plan). Pur, ne lève jamais."""
-    enforce, sc = module._scope(action)
-    seen, cleaned = set(), []
-    for u in urls:
-        s = str(u).strip().rstrip('\\",\')')
-        if not _looks_http_url(s) or s in seen:
-            continue
-        if enforce and not sc.is_in_scope(s):        # fail-closed : jamais un endpoint hors périmètre
-            continue
-        seen.add(s)
-        cleaned.append(s)
+        doit pas exploser le plan). Pur, ne lève jamais.
+    Le nettoyage + la re-validation vivent dans `_partition_endpoints` (source unique partagée avec le
+    compteur `out_of_scope_endpoints`)."""
+    cleaned, _dropped = _partition_endpoints(module, action, urls)
     cleaned.sort(key=lambda u: 0 if _has_query_param(u) else 1)   # stable : injectables d'abord
     # Cap d'endpoints crawlés RÉSOLU par le MÊME levier que recon_surface.MAX_ENDPOINTS (`crawl_max_endpoints`) :
     # `balanced` == 25 == _MAX_DISCOVERED_ENDPOINTS (byte-identique) ; `low`=10, `full`=50.
