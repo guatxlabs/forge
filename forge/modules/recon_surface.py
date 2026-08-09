@@ -42,6 +42,8 @@ import urllib.request
 
 from ._scopeguard import ScopeGuardMixin, web_url_candidates
 from .registry import register, Module
+from .. import blindness as _blind
+from .. import clearance as _clearance
 from .. import infra_urls
 from .. import pin as _pin
 from .. import resource_profile
@@ -67,6 +69,38 @@ def _root_of(pattern):
 def _under(host, root):
     """True si `host` est la racine `root` ou un sous-domaine de `root` (containment hiérarchique)."""
     return bool(root) and (host == root or host.endswith("." + root))
+
+
+#: Prélèvement BORNÉ du corps d'une réponse d'ERREUR, à des fins de CLASSIFICATION UNIQUEMENT (jamais
+#: rendu à l'appelant) — même borne et même raison que `oracle._ERROR_BODY_PEEK`.
+_ERROR_BODY_PEEK = 8192
+
+
+def _mark_if_challenged(url, err, headers):
+    """Marque l'hôte de `url` `CHALLENGED` dans le store gouverné SI la réponse d'erreur porte une
+    signature EXPLICITE de défi managé (en-tête `cf-mitigated`/DataDome, ou interstitiel dans le corps
+    prélevé). JAMAIS sur un simple code de statut : un 403 NU reste un refus applicatif, et le
+    marquer ferait taire des constats parfaitement valides.
+
+    Effet de bord PUR-ÉTAT : ni le corps prélevé ni les en-têtes ne remontent à l'appelant. Le
+    scope-guard est celui du store (un hôte hors périmètre n'est jamais marqué). Ne lève JAMAIS —
+    aucun suivi ne doit pouvoir faire échouer une requête de recon."""
+    try:
+        body = err.read(_ERROR_BODY_PEEK).decode("utf-8", "replace")
+    except Exception:                                       # noqa: BLE001 (flux déjà consommé/fermé)
+        body = ""
+    try:
+        if not _clearance.response_is_challenge(err.code, body, headers):
+            return False
+    except Exception:                                       # noqa: BLE001
+        return False
+    store = _session.current()
+    if store is None:
+        return False
+    try:
+        return bool(store.mark_challenged(url))
+    except Exception:                                       # noqa: BLE001
+        return False
 
 
 class _PinnedFollowRedirect(urllib.request.HTTPRedirectHandler):
@@ -191,10 +225,21 @@ class PassiveSurface(ScopeGuardMixin, Module):
                 body = r.read(maxlen).decode("utf-8", "replace")
                 return r.status, body, {k: v for k, v in r.headers.items()}
         except urllib.error.HTTPError as e:
+            # LE CORPS D'ERREUR EST PRÉLEVÉ POUR JUGER, PAS POUR ÊTRE RENDU — même cause racine que
+            # celle corrigée dans `Oracle._http` au premier lot, et le même remède. L'interstitiel de
+            # défi (5 229 octets de « Just a moment… » + `/cdn-cgi/challenge-platform`) vit EXACTEMENT
+            # ici, dans le corps de la 403 ; le jeter ne laissait que le code de statut, c'est-à-dire
+            # la voie LARGE (« tout 403 est un défi »), la seule qu'on s'interdit d'utiliser pour
+            # taire un constat. On lit donc le corps ICI, on s'en sert pour marquer l'hôte
+            # `CHALLENGED` (scope-guardé, sans secret), et on rend `""` : le contrat public de
+            # `_http_get` reste BYTE-IDENTIQUE — en particulier `recon.js_endpoints` ne doit
+            # SURTOUT PAS extraire des « endpoints » depuis la page de défi.
             try:
-                return e.code, "", {k: v for k, v in e.headers.items()}
+                hdrs = {k: v for k, v in e.headers.items()}
             except Exception:                               # noqa: BLE001
-                return e.code, "", {}
+                hdrs = {}
+            _mark_if_challenged(url, e, hdrs)
+            return e.code, "", hdrs
         except Exception:                                   # noqa: BLE001  (transport hostile)
             return None, "", {}
 
@@ -575,14 +620,28 @@ class JsEndpoints(PassiveSurface):
             # franchit le challenge et ré-alimente la chaîne discovery->oracle (là où la recon HTTP n'a
             # rien pu voir). C'est LA réponse au trou « WAF -> 0 endpoint -> 0 oracle ».
             if techniques.looks_like_challenge(st, html):
-                return [self._finding(
+                # LE MODULE SAVAIT DÉJÀ, ET DISAIT QUAND MÊME « tested ». Ce marqueur a été émis
+                # **20 fois** dans `gxrun2` avec `status='tested'` : le titre nommait le challenge
+                # pendant que le statut affirmait « j'ai vérifié, rien trouvé ». L'information n'était
+                # pas manquante — elle n'était pas SUIVIE D'EFFET.
+                #
+                # Le déclassement n'est PAS appliqué sur ce marqueur seul : `looks_like_challenge` est
+                # la voie LARGE (tout 403/429/503 en est un), bonne pour BASCULER la recon vers le
+                # navigateur, mauvaise pour taire un constat. On exige la MÊME preuve explicite que
+                # partout ailleurs — l'hôte marqué `CHALLENGED` par le corps d'erreur prélevé
+                # ci-dessus (`_mark_if_challenged`), par `Oracle._http` ou par `recon.httpx`. Un 403
+                # NU laisse donc le marqueur en `tested`, exactement comme avant (résiduel assumé).
+                challenged = [self._finding(
                     page, f"recon.js_endpoints — {techniques.DISCOVERY_CHALLENGE_MARKER}",
                     (f"HTTP {st} et aucun endpoint extrait : signature de challenge/WAF managé observée "
                      f"(découverte plain-HTTP bloquée). Bascule sur la découverte backed-browser "
                      f"(evasion.discover) recommandée pour franchir le challenge et cartographier la surface."),
                     self.dry(action))]
-            return [self._finding(page, "recon.js_endpoints — aucun endpoint extrait",
-                                  "Aucune route/URL d'API détectée dans le JS de la page.", self.dry(action))]
+                return _blind.downgrade(_blind.tool_witness(page), challenged)
+            none_found = [self._finding(page, "recon.js_endpoints — aucun endpoint extrait",
+                                        "Aucune route/URL d'API détectée dans le JS de la page.",
+                                        self.dry(action))]
+            return _blind.downgrade(_blind.tool_witness(page), none_found)
         evidence = (f"routes/paths ({len(paths)}) : {', '.join(sorted_paths[:60]) or '—'} || "
                     f"URLs in-scope ({len(inscope_urls)}) : {', '.join(sorted(inscope_urls)[:20]) or '—'} || "
                     f"URLs externes non appelées ({len(ext_urls)}) : {', '.join(sorted(ext_urls)[:10]) or '—'}")

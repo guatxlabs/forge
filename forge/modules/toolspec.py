@@ -36,6 +36,7 @@ from . import _daemon_reap
 from . import _discovery
 from ._scopeguard import ScopeGuardMixin
 from .registry import register, Module
+from .. import blindness as _blind
 from .. import runner
 from .. import techniques
 from ..challenge import looks_like_challenge
@@ -157,6 +158,31 @@ class ToolSpec:
         """Un hit est-il un ASSET découvert (attribution + re-validation scope) ? Dérivé si non déclaré :
         les outils de PHASE recon découvrent des assets ; les scanners rapportent SUR la cible donnée."""
         return self.phase == "recon" if self.hit_is_asset is None else bool(self.hit_is_asset)
+
+    @property
+    def speaks_http(self):
+        """Cet outil PARLE-T-IL HTTP ? Dérivé de l'argv — **pas d'une liste tenue à la main**.
+
+        POURQUOI CETTE PROPRIÉTÉ EXISTE, ET CE QU'ELLE A EMPÊCHÉ. Un défi managé aveugle ce qui parle
+        HTTP, et RIEN D'AUTRE. Au premier rejeu du corpus `gxrun2`, l'abstention posée sur l'état
+        `CHALLENGED` de l'hôte a fait taire **53 constats parfaitement valides** — `dig: aucun hit`
+        (12), `subfinder: aucun hit` (18), `gobuster` (23) — c'est-à-dire des verdicts DNS et OSINT
+        qu'un interstitiel HTTP n'aveugle absolument pas. C'était l'excès inverse exact que ce
+        chantier doit éviter : « l'outil n'a rien trouvé » transformé en « je n'ai pas pu vérifier »
+        sur une résolution DNS qui, elle, avait parfaitement abouti.
+
+        Le discriminant est DANS LES DONNÉES : un outil qu'on invoque avec une URL (`{target_url}`)
+        émet une requête HTTP ; un outil qu'on invoque avec un hôte nu (`{target_host}`) fait du DNS,
+        du TCP, du TLS ou interroge un tiers (archives, CT logs). Le dériver de l'argv plutôt que de
+        maintenir une liste garantit qu'un `ToolSpec` AJOUTÉ demain est classé correctement sans que
+        personne n'ait à penser à ce fichier. Pur, ne lève jamais."""
+        def _tokens(tpl):
+            for tok in tpl:
+                if isinstance(tok, (tuple, list)):
+                    yield from _tokens(tok)
+                else:
+                    yield str(tok)
+        return any("{target_url}" in t for t in _tokens(self.argv_template))
 
 
 # =================================================================================================
@@ -577,6 +603,16 @@ class ExternalToolModule(ScopeGuardMixin, Module):
         # (4) EXÉCUTION — argv FIXE, NO-SHELL (via le connecteur subprocess partagé runner.tool).
         argv = self._argv(action)
         rc, out, err = self._run(argv)
+        # (4b) PROPAGATION CROISÉE DU MUR — un outil dont la sortie DÉVERSE l'interstitiel (`curl -i`
+        # l'a fait 7 fois dans le ledger `gxrun2`) MARQUE l'hôte CHALLENGED dans le store gouverné.
+        # C'est ici, et pas dans chaque wrapper, parce que c'est le SEUL endroit où la sortie brute
+        # d'un outil quelconque entre dans le moteur — le pendant de `oracle._witness` côté urllib.
+        # Les outils qui passent APRÈS (nuclei, zap-baseline) n'ont plus à redécouvrir le mur.
+        # RÉSERVÉ aux outils qui parlent HTTP : seule une réponse HTTP peut témoigner d'un défi HTTP
+        # sur CET hôte (un enregistrement DNS ou une URL d'archive qui contiendrait la chaîne ne
+        # prouverait rien, et marquerait l'hôte à tort pour tout le reste du run).
+        if s.speaks_http:
+            _blind.note_tool_output(action.target, out, err)
         # (5) DÉGRADATION — indisponible (127) / timeout (124) -> skipped (offline-safe, jamais un faux hit).
         if rc == 127:
             return [self._mk(
@@ -608,19 +644,49 @@ class ExternalToolModule(ScopeGuardMixin, Module):
             findings = self._service_discovery(action, hits) + findings
         if findings:
             return findings
-        # Aucun hit : outil exécuté sans résultat. rc!=0 sans hit -> finding d'échec traçable (tested INFO).
+        # ==========================================================================================
+        #  AUCUN HIT — LE SEUL ENDROIT DE CE FICHIER QUI AFFIRME UNE ABSENCE, donc le seul à garder.
+        #
+        #  Tout ce qui précède CONSIGNE ce que l'outil a vu (un hit = une observation) ; ici, et ici
+        #  seulement, le module DIT « rien ». C'est cette phrase-là qui ment quand l'outil n'a pas pu
+        #  regarder. Deux causes MESURÉES sur `gxrun2`, distinctes, traitées séparément parce qu'elles
+        #  n'appellent pas la même remédiation :
+        #    (a) l'outil N'A PAS TOURNÉ (rc!=0 + stdout vide : argv refusé, image docker absente) —
+        #        251 findings. Corriger l'invocation.
+        #    (b) l'outil a tourné mais DERRIÈRE UN MUR (défi managé constaté sur l'hôte) — corriger
+        #        en routant le franchissement (`evasion`), puis rejouer. RÉSERVÉ aux outils qui
+        #        PARLENT HTTP (`spec.speaks_http`) : un interstitiel n'aveugle ni `dig`, ni `naabu`,
+        #        ni `subfinder`. Sans ce filtre, le rejeu du corpus faisait taire 53 verdicts DNS/
+        #        OSINT parfaitement valides.
+        #  LA CONTRE-PREUVE DU PREMIER LOT (« qui a vu quelque chose garde son constat ») est ici
+        #  STRUCTURELLE, et c'est plus fort qu'un drapeau : ce point n'est atteint QUE si aucun hit
+        #  n'a survécu (`if findings: return findings`, juste au-dessus). Un outil qui a produit ne
+        #  serait-ce qu'une ligne est déjà reparti intact — d'où les 1 594 observations du corpus qui
+        #  ne sont PAS touchées. Une cible SAINE ne remplit NI (a) NI (b) -> `tested` inchangé.
+        # ==========================================================================================
         # RATE-LIMIT / WAF : une sortie portant une signature de challenge (429/WAF) est SIGNALÉE dans le
         # titre (au lieu d'un « aucun hit » trompeur) — l'opérateur voit que le scan a été throttlé/bloqué.
         if rc != 0:
             blocked = looks_like_challenge(None, (out or "") + " " + (err or ""))
             note = " — rate-limited/WAF détecté dans la sortie" if blocked else ", aucun hit exploitable"
-            return [self._mk(
+            failed = [self._mk(
                 action, status="tested",
                 title=f"{self.kind} — {s.binary} rc={rc}{note}",
                 evidence=((err or out) or f"rc={rc}").strip()[:500])]
-        return [self._mk(
+            if _blind.tool_did_not_run(rc, out):
+                return _blind.downgrade_did_not_run(failed, rc)
+            return _blind.downgrade(self._wall_witness(action), failed)
+        none_found = [self._mk(
             action, status="tested", title=f"{self.kind} — {s.tool_name}: aucun hit",
             evidence="Outil exécuté (in-scope), aucun résultat.")]
+        return _blind.downgrade(self._wall_witness(action), none_found)
+
+    def _wall_witness(self, action):
+        """Témoin de MUR pour cette cible, ou None si l'outil ne parle pas HTTP (auquel cas
+        `downgrade` est un no-op strict : un défi HTTP n'aveugle pas une résolution DNS)."""
+        if not self.spec.speaks_http:
+            return None
+        return _blind.tool_witness(action.target)
 
     def _service_discovery(self, action, hits):
         """Convertit les hits d'un SCANNER DE PORTS (naabu/masscan) en findings de DÉCOUVERTE chaînables :

@@ -38,6 +38,7 @@ from .oracle import Oracle
 from .registry import register, Module
 from .recon_surface import PassiveSurface, JsEndpoints, _host_only
 from .. import browser_client as bc
+from .. import blindness as _blind
 from .. import clearance
 from .. import session as _session
 from .. import techniques
@@ -437,11 +438,16 @@ class EvasionDiscover(_EvasionBase, PassiveSurface):
                       f"cookies_de_clearance={harvest.get('clearance_cookies') or 'aucun reconnu'}")
         endpoints = self._extract(action, url, html, captured)
         if not endpoints:
-            return [self._finding(
+            none_found = [self._finding(
                 page, "evasion.discover — aucun endpoint in-scope extrait",
                 "Navigation OK (challenge franchi) mais aucun endpoint in-scope dans le DOM/JS/trafic. "
                 + harvest_ev,
                 self.dry(action))]
+            # SI L'HÔTE EST ENCORE `CHALLENGED` — franchissement NON confirmé par `reach_is_content` —
+            # alors « aucun endpoint » ne veut PAS dire « rien à découvrir » : ça veut dire qu'on a
+            # regardé une page de défi. Le titre parle pourtant de « navigation OK », ce qui rendait le
+            # finding doublement trompeur. 23 findings de ce type sur la campagne réelle.
+            return _blind.downgrade(_blind.tool_witness(page), none_found)
 
         # ÉVIDENCE : UNIQUEMENT des URLs d'endpoints in-scope + des NOMS de cookies (jamais le matériel
         # de session lui-même, jamais le dump réseau brut).

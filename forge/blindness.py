@@ -55,16 +55,78 @@ vide, mesurée sur `www.guatx.com`) reste indétectable ici — un `3xx` nu est 
 oracle. `reach_is_content` refuse déjà d'y voir une réussite ; c'est au franchissement
 (`evasion`/`clearance`) de l'ouvrir, pas à ce témoin de le deviner.
 
+LE SECOND LOT — LES OUTILS EXTERNES, OÙ LA SIGNATURE N'ARRIVE JAMAIS
+--------------------------------------------------------------------
+Le témoin ci-dessus se nourrit de `Oracle._http` : un code, un corps, des en-têtes. **2 553 des
+4 839 `tested` ne passent PAS par là** — ce sont des sorties d'outils externes (`runner.tool`) et de
+modules de surface. Le problème y est de NATURE différente, et c'est ce qui rend le premier remède
+inapplicable tel quel : un outil ne rend qu'un **rc et du texte**. Derrière un mur, nuclei ne dit pas
+« challenge » — il dit **0 résultat**, ce qui est INDISCERNABLE d'une cible saine. La signature
+n'arrive jamais jusqu'à la décision.
+
+CE QUE LA MESURE A RÉELLEMENT MONTRÉ (décompte des 2 553, cf. `tests/test_blindness_tools.py`) —
+« ils concluent tous sur un mur » est FAUX pour 96 % d'entre eux :
+
+  - 1 594 sont des **OBSERVATIONS**, pas des verdicts : une ligne de sortie = un finding
+    (`curl: cf-mitigated: challenge`, `nuclei: WAF Detection`, `WAF/CDN identifié : Cloudflare`).
+    Elles ne prétendent RIEN sur l'absence de vulnérabilité — elles CONSIGNENT ce que le mur a
+    répondu. Les déclasser détruirait la preuve MÊME de l'existence du mur, et noierait le seau
+    `unverified` du rapport sous 1 594 entrées. **Intouchables.**
+  - 669 jugent AUTRE CHOSE que du HTTP : `dig`/`dnsx`/`subfinder` jugent du DNS, `naabu`/`masscan`/
+    `nmap` jugent des PORTS, `crt.sh`/Wayback interrogent des TIERS. Un interstitiel HTTP ne les
+    aveugle pas. **Intouchables.**
+  - 205 n'émettent AUCUN paquet (avis de catalogue `network.smb`/`network.ssh`, module `demo`,
+    intercept sans params). C'est le piège du premier lot (1 750 `skip()` sans réseau) sous un autre
+    nom : compter ces 205 comme « conclusions sur un mur » aurait faussé tout le chiffrage.
+  - **105 seulement** sont de VRAIES affirmations d'absence rendues alors qu'un mur s'était
+    interposé (`nuclei: aucun hit` 23, `evasion.discover — aucun endpoint` 23, zap-baseline 16,
+    curl 17, `recon.js_endpoints` 24, katana 2).
+  - **251 de plus** — DÉCOUVERTES par cette mesure, et plus nombreuses que le mur lui-même — sont
+    des affirmations d'absence rendues alors que **l'outil n'a jamais tourné** : `gobuster rc=1
+    "invalid value for flag -d"`, `masscan rc=1 "unknown command-line parameter"`, `dnsx rc=1
+    "missing wordlist flag"`, `theHarvester rc=125 "pull access denied"`. Un argv faux ou une image
+    docker absente ressortait en « j'ai vérifié, rien trouvé ». Même maladie, cause différente.
+
+OÙ L'INFORMATION SURVIT ENCORE (on ne devine pas — on RÉUTILISE)
+----------------------------------------------------------------
+  1. **L'état `CHALLENGED` du `SessionStore`** — celui que le PREMIER LOT alimente désormais depuis
+     `Oracle._http`, et que `recon.httpx` (qui a vu le `403 / "Just a moment…"` **19 fois** dans ce
+     même ledger, AVANT tout autre outil) sème maintenant lui aussi. C'est la voie principale : elle
+     ne coûte aucune requête et son verdict a DÉJÀ exigé une signature explicite pour être posé.
+  2. **La sortie de l'outil lui-même** — `curl -i` DÉVERSE l'interstitiel et l'en-tête
+     `cf-mitigated`. L'outil qui voit le mur le SIGNALE donc au store (`note_tool_output`), et les
+     outils qui passent APRÈS en bénéficient. C'est la propagation croisée qui manquait.
+
+LA MÊME BORNE, PAS UNE PLUS LARGE. `challenge.looks_like_challenge` traite tout 403/429/503 comme un
+défi : c'est un bon signal pour BASCULER la recon, et un très mauvais pour taire un verdict. On
+n'utilise donc ICI AUSSI que `clearance.response_is_challenge` (en-tête de défi OU interstitiel dans
+le corps) — **un 403 NU reste un verdict applicatif**. Et la contre-preuve du premier lot
+(`contents == 0`, « qui a vu la cible garde son verdict ») est conservée sous une forme PLUS FORTE :
+STRUCTURELLE. Les seuls points d'appel de l'abstention sont les branches d'ABSENCE, atteintes
+uniquement quand AUCUN hit n'a survécu ; un outil qui a produit quoi que ce soit est déjà reparti
+avec ses findings intacts, sans qu'aucun témoin n'ait été construit.
+
+DEUXIÈME BORNE, PROPRE À CE LOT — **`speaks_http`** (cf. `toolspec.ToolSpec`). Un défi managé aveugle
+ce qui parle HTTP, et rien d'autre. Au premier rejeu du corpus, l'abstention posée sur l'état de
+l'hôte a fait taire **53 constats valides** (`dig` 12, `subfinder` 18, `gobuster` 23) : des verdicts
+DNS et OSINT qu'un interstitiel n'aveugle pas. Le discriminant est dérivé de l'argv du spec, pas
+d'une liste tenue à la main.
+
 SECRET : ce module ne retient QUE des compteurs, des codes de statut et des hostnames. Jamais une
 valeur de cookie, jamais un en-tête d'authentification, jamais un fragment de corps.
 """
 import threading
 
 from . import clearance as _clearance
+from . import session as _session
 
 _state = threading.local()
 
 _MAX_HOSTS = 6                   # borne de l'évidence (des noms d'hôtes, pas un inventaire)
+# Prélèvement BORNÉ de la sortie d'un outil pour y CHERCHER une signature de défi. Une sortie d'outil
+# peut peser des mégaoctets (nuclei/zap) ; l'interstitiel, lui, tient dans ses premiers octets. On
+# regarde donc la TÊTE et la QUEUE (une erreur de transport arrive en fin de flux), jamais le milieu.
+_MAX_OUTPUT_PEEK = 8192
 
 
 class Witness:
@@ -185,3 +247,184 @@ class using:
         if self.owned:
             _state.witness = self.prev
         return False
+
+
+# =================================================================================================
+#  BRAS « OUTIL EXTERNE » — un rc et du texte, jamais une réponse HTTP structurée
+#
+#  Aucune de ces fonctions ne fait de réseau, n'alloue de témoin thread-local, ni ne lève. Elles ne
+#  décident RIEN toutes seules : elles ne sont appelées qu'aux points d'émission d'un constat
+#  d'ABSENCE, atteints uniquement quand aucun hit n'a survécu. La contre-preuve du premier lot
+#  (`contents == 0`) est donc portée par la STRUCTURE du site d'appel, pas par un drapeau qu'on
+#  pourrait oublier de passer.
+# =================================================================================================
+def _peek(text):
+    """Tête + queue BORNÉES d'une sortie d'outil (l'interstitiel vit en tête ; une erreur de
+    transport arrive en queue). Rend '' pour toute entrée illisible. Ne lève jamais."""
+    try:
+        s = str(text or "")
+    except Exception:            # noqa: BLE001 (entrée hostile)
+        return ""
+    if len(s) <= 2 * _MAX_OUTPUT_PEEK:
+        return s
+    return s[:_MAX_OUTPUT_PEEK] + s[-_MAX_OUTPUT_PEEK:]
+
+
+# --- Signatures admissibles DANS LA SORTIE D'UN OUTIL (sous-ensemble STRICT de la liste de `challenge`)
+#
+# POURQUOI PLUS ÉTROIT QUE POUR UN CORPS DE RÉPONSE. `challenge.CHALLENGE_BODY_SIGNATURES` juge un
+# CORPS : un corps qui contient « datadome » est un corps servi par DataDome. Une sortie d'OUTIL, elle,
+# est un texte de scanner — et un scanner NOMME les fournisseurs qu'il détecte. Sur une cible
+# parfaitement SAINE, `nuclei` émet des templates comme « WAF Detection » ou « Cloudflare Turnstile
+# detect », et `wafw00f` écrit le nom du WAF : retenir « turnstile » ou « datadome » comme preuve de
+# mur ferait taire les verdicts d'une cible qui répond très bien. C'est EXACTEMENT l'excès inverse que
+# ce chantier doit éviter.
+#
+# Ne restent donc que les chaînes qui n'apparaissent QUE dans une réponse de défi RÉELLEMENT servie :
+# un chemin d'orchestration d'edge, un en-tête de mitigation, le titre/le texte de l'interstitiel.
+# Aucune n'est un nom de produit. `test_blindness_tools` VERROUILLE l'inclusion dans la liste amont
+# (une renommée en amont casse le test au lieu de rendre la détection silencieusement inerte).
+_TOOL_OUTPUT_SIGNATURES = (
+    "/cdn-cgi/challenge-platform",   # URL d'orchestration servie DANS l'interstitiel Cloudflare
+    "cf-mitigated",                  # en-tête de réponse posé par la mitigation (jamais un nom de produit)
+    "__cf_chl",                      # cookie/paramètre du flux de défi
+    "cf_chl_opt",                    # objet JS injecté dans l'interstitiel
+    "just a moment",                 # titre de l'interstitiel Cloudflare
+    "checking your browser",         # variante historique du même interstitiel
+    "captcha-delivery",              # hôte de livraison du défi DataDome (pas le nom « datadome »)
+    "please enable javascript and cookies",          # texte de l'interstitiel
+    "please stand by, while we are checking",        # texte de l'interstitiel
+)
+
+
+def output_is_challenge(stdout="", stderr=""):
+    """La sortie d'un outil porte-t-elle une signature EXPLICITE de défi managé RÉELLEMENT SERVI ?
+
+    Pas de code de statut : la sortie d'un outil n'EST pas une réponse HTTP, et un « 403 » qui traîne
+    dans du texte ne doit RIEN faire taire. Pas de nom de fournisseur non plus (cf.
+    `_TOOL_OUTPUT_SIGNATURES`) : un scanner NOMME les WAF qu'il détecte sur des cibles saines. Ne
+    reste que l'interstitiel lui-même — ce que `curl -i` a déversé 7 fois dans le ledger `gxrun2`.
+    Pur, ne lève jamais."""
+    try:
+        low = (_peek(stdout) + "\n" + _peek(stderr)).lower()
+    except Exception:            # noqa: BLE001 (entrée hostile)
+        return False
+    return any(sig in low for sig in _TOOL_OUTPUT_SIGNATURES)
+
+
+def note_tool_output(target, stdout="", stderr="", store=None):
+    """PROPAGATION CROISÉE : un outil dont la sortie DÉVERSE l'interstitiel (c'est le cas de
+    `curl -i`, qui a consigné `cf-mitigated: challenge` 7 fois dans le ledger `gxrun2`) MARQUE l'hôte
+    `CHALLENGED` dans le store gouverné. Les outils qui passent APRÈS — nuclei, zap-baseline, katana —
+    n'ont alors plus besoin de redécouvrir le mur : ils LISENT l'état.
+
+    C'est la voie de propagation qu'`Oracle._http` alimente déjà côté urllib (`oracle._witness`) ;
+    ici c'est son pendant côté `runner.tool`. Scope-guardé et SANS SECRET par construction : le store
+    refuse tout hôte hors périmètre et ne retient qu'un hostname et un mot.
+
+    Retourne True si l'état a été posé. No-op strict hors moteur (aucun store lié). Ne lève jamais."""
+    if not output_is_challenge(stdout, stderr):
+        return False
+    st = store if store is not None else _session.current()
+    if st is None:
+        return False
+    try:
+        return bool(st.mark_challenged(str(target or "")))
+    except Exception:            # noqa: BLE001 (le suivi ne doit jamais avorter une action)
+        return False
+
+
+class ToolWitness:
+    """Témoin d'UNE exécution d'outil externe — l'analogue de `Witness` quand il n'y a ni code, ni
+    corps, ni en-têtes à compter.
+
+    UN SEUL FAIT, ET C'EST VOULU : `challenged` — « un défi managé est constaté sur cet hôte ». La
+    preuve, elle, a été établie AILLEURS et une seule fois : l'interstitiel qu'un outil déverse est
+    versé à l'état de franchissement par `note_tool_output`, exactement comme `Oracle._http` y verse
+    ce qu'il voit. Le témoin LIT cet état ; il ne re-juge pas la sortie. Une seule route, donc un
+    seul endroit à auditer — et pas de second chemin qui pourrait diverger du premier.
+
+    LA CONTRE-PREUVE DU PREMIER LOT (`contents == 0` : « qui a vu la cible garde son verdict ») n'est
+    PAS un champ ici, elle est STRUCTURELLE et c'est plus fort : les deux seuls points d'appel sont
+    les branches d'ABSENCE, atteintes uniquement quand aucun hit n'a survécu. Un outil qui a produit
+    ne serait-ce qu'un résultat est déjà reparti avec ses findings intacts, sans jamais construire de
+    témoin. `TestObservationsAreNeverDowngraded` verrouille cette propriété."""
+
+    __slots__ = ("host", "challenged")
+
+    def __init__(self, host="", challenged=False):
+        self.host = str(host or "")
+        self.challenged = bool(challenged)
+
+    def blind(self):
+        return self.challenged
+
+    def why(self):
+        """Explication SÛRE (hostname + provenance), sans un octet de la sortie de l'outil."""
+        return (f"l'outil n'a produit AUCUN résultat sur {self.host or '—'} alors que cet hôte est "
+                f"marqué CHALLENGED dans le périmètre gouverné (défi managé constaté et non franchi)")
+
+
+def tool_witness(target, store=None):
+    """Témoin de cécité d'une exécution d'outil externe sur `target`. À appeler UNIQUEMENT au point
+    d'émission d'un constat d'ABSENCE.
+
+    La preuve du mur est EXPLICITE et vient de l'état `CHALLENGED` du store — jamais d'un code de
+    statut. Cet état n'est posé que par des chemins qui ont déjà exigé une signature explicite :
+    `Oracle._http` (premier lot), `recon.httpx`, `recon_surface._http_get`, et `note_tool_output`
+    pour l'outil qui déverse l'interstitiel. Hors moteur (aucun store lié) le témoin n'est JAMAIS
+    aveugle -> comportement historique préservé pour tout appel direct/dev/test. Ne lève jamais."""
+    st = store if store is not None else _session.current()
+    if st is None:
+        return ToolWitness(host=str(target or ""), challenged=False)
+    try:
+        challenged = st.clearance_state(str(target or "")) == st.CHALLENGED
+    except Exception:        # noqa: BLE001
+        challenged = False
+    return ToolWitness(host=str(target or ""), challenged=challenged)
+
+
+# Préfixe d'évidence apposé à un constat d'ABSENCE rendu par un outil qui N'A PAS TOURNÉ (argv refusé
+# par l'outil, image docker absente, échec de lancement). Mesuré : 251 findings du ledger `gxrun2`
+# disaient « j'ai vérifié, rien trouvé » alors que le processus s'était arrêté sur `invalid value for
+# flag -d` / `pull access denied`. Le rc et la sortie d'erreur étaient là, sous la main, inutilisés.
+DID_NOT_RUN_PREFIX = (
+    "NON VÉRIFIÉ — l'outil n'a produit AUCUNE sortie et s'est arrêté en erreur (rc={rc}) : il n'a "
+    "donc rien pu observer, et son silence ne peut RIEN affirmer sur la cible. Le statut passe de "
+    "`tested` (« j'ai vérifié, rien trouvé ») à `skipped` (« je n'ai pas pu vérifier »). Corriger "
+    "l'invocation (argv/binaire/image) puis rejouer. Sortie d'erreur, conservée telle quelle : ")
+
+
+def tool_did_not_run(rc, stdout=""):
+    """L'outil s'est-il arrêté SANS RIEN PRODUIRE ? (`rc != 0` ET stdout VIDE)
+
+    BORNE FACTUELLE, pas une heuristique de mots-clés : un outil qui a écrit ne serait-ce qu'un octet
+    sur stdout a produit une observation, et son constat est GARDÉ INTACT — même à rc non nul (nikto
+    et testssl sortent en erreur tout en ayant rendu leurs résultats, et `parse_output` ne lit QUE
+    stdout : un rc non nul avec du stdout est un cas de parsing, pas de non-exécution). Un outil qui
+    a tourné correctement et n'a simplement rien trouvé sort à **rc == 0** — il n'est jamais concerné.
+    Ne lève jamais."""
+    try:
+        if int(rc) == 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        return not str(stdout or "").strip()
+    except Exception:            # noqa: BLE001
+        return False
+
+
+def downgrade_did_not_run(findings, rc, stderr=""):
+    """Déclasse `tested` -> `skipped` un constat rendu par un outil qui N'A PAS TOURNÉ. Mêmes règles
+    que `downgrade` : jamais un `vulnerable`, jamais un `skipped` déjà posé, jamais une exception."""
+    why = DID_NOT_RUN_PREFIX.format(rc=rc)
+    try:
+        for f in findings or []:
+            if getattr(f, "status", None) != "tested":
+                continue
+            f.status = "skipped"
+            f.evidence = why + (getattr(f, "evidence", "") or "")
+    except Exception:            # noqa: BLE001
+        return findings
+    return findings

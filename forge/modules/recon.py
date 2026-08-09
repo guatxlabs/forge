@@ -9,6 +9,7 @@ import re
 
 from .registry import register, Module
 from .oracle import Oracle
+from .. import blindness as _blind
 from .. import runner
 from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
@@ -160,6 +161,20 @@ class HttpxFingerprint(FlagAllowlistMixin, Module):
         if (refused := self.gate_extra_args(action)):
             return refused
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action), timeout=60, prefer_docker=True)
+        # ============================================================================================
+        #  SEMER L'ÉTAT DU MUR — httpx est le PREMIER à voir la cible, et il l'a DÉJÀ vue.
+        #
+        #  Dans le ledger `gxrun2`, ce module a enregistré **19 fois** `{"status_code":403,
+        #  "title":"Just a moment...","content_length":5506}` — l'interstitiel Cloudflare, en toutes
+        #  lettres, horodaté avant tous les autres outils. Cette connaissance mourait dans un finding
+        #  INFO pendant que nuclei, zap-baseline et katana concluaient « aucun hit » derrière le même
+        #  mur, faute de savoir qu'il existait. On la verse donc à l'état de franchissement gouverné
+        #  (`SessionStore`), la MÊME voie qu'alimentent `Oracle._http` (premier lot) et les wrappers
+        #  d'outils : ceux qui passent après LISENT au lieu de deviner. Aucune requête de plus, aucun
+        #  secret, scope-guardé par le store — et la borne reste celle du premier lot (interstitiel
+        #  explicite, jamais un simple 403 : le JSON d'un 403 NU ne porte aucune de ces chaînes).
+        # ============================================================================================
+        _blind.note_tool_output(action.target, out, err)
         failed = self.tool_failed(action, rc, out, err, "httpx")
         if failed:
             return [failed]

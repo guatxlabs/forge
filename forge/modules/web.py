@@ -47,6 +47,7 @@ import urllib.parse
 
 from .registry import register, Module
 from ._scopeguard import ScopeGuardMixin
+from .. import blindness as _blind
 from .. import resource_profile
 from .. import runner
 from .. import techniques
@@ -419,6 +420,9 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
         timeout = self._timeout_for(len(targets))
         rc, out, err = runner.tool(self.BIN, self.IMG, self._args(action, targets),
                                    timeout=timeout, prefer_docker=True)
+        # PROPAGATION CROISÉE : si la sortie porte l'interstitiel, l'hôte est marqué CHALLENGED pour
+        # les modules qui passeront après (miroir de `ExternalToolModule.fire`). Sans secret, scope-guardé.
+        _blind.note_tool_output(action.target, out, err)
         # Parser stdout d'ABORD : nuclei peut sortir rc!=0 sur condition bénigne tout en ayant
         # émis du JSONL valide. On ne renvoie le finding d'échec QUE si aucune ligne ne parse.
         findings = []
@@ -459,6 +463,12 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
                 for t in targets[1:]:
                     out_f.append(self.tool_failed(_Retargeted(t), rc, out, err,
                                                   "nuclei", category="nuclei"))
+                # `tool_failed` rend un `tested` — « j'ai vérifié, rien trouvé » — même quand nuclei
+                # ne s'est PAS LANCÉ. Mesuré dans `gxrun2` : « [FTL] Could not run nuclei: no
+                # templates provided for scan », rc=1, ZÉRO octet sur stdout, et un finding `tested`
+                # pour chaque cible du lot. Un scanner qui n'a pas démarré n'a rien vérifié.
+                if _blind.tool_did_not_run(rc, out):
+                    out_f = _blind.downgrade_did_not_run(out_f, rc)
                 return out_f + [self._skipped(t, r) for t, r in rejected]
         # COUVERTURE PAR CIBLE, DÉMONTRABLE : chaque cible du lot SANS hit attribué ressort avec son
         # « aucun hit » — exactement la ligne qu'elle aurait produite seule. Le rapport ne peut donc pas
@@ -481,7 +491,15 @@ class NucleiScan(FlagAllowlistMixin, ScopeGuardMixin, Module):
                     t, f"scan TRONQUÉ — nuclei tué à son échéance de {timeout}s (rc=124) avant "
                        f"d'avoir rendu un verdict pour cette cible"))
             else:
-                findings.append(self.finding(
+                # « aucun hit » DERRIÈRE UN MUR ne veut pas dire « rien à trouver » : nuclei ne rend
+                # ni code ni corps, il rend 0 résultat — INDISCERNABLE d'une cible saine. La preuve du
+                # mur, elle, existe ailleurs : l'hôte est marqué CHALLENGED (par `Oracle._http`, par
+                # `recon.httpx`, ou par un outil passé plus tôt) ou l'interstitiel figure dans la
+                # sortie. On la lit ICI plutôt que d'affirmer une absence. 23 findings de `gxrun2`.
+                # Le témoin est construit PAR CIBLE : l'état de franchissement est par-hôte, et une
+                # cible saine n'en porte aucun -> `tested` inchangé.
+                none_found = [self.finding(
                     target=t, title="nuclei: aucun hit", severity="INFO",
-                    category="nuclei", status="tested", tool="nuclei", poc=poc))
+                    category="nuclei", status="tested", tool="nuclei", poc=poc)]
+                findings += _blind.downgrade(_blind.tool_witness(t), none_found)
         return findings + [self._skipped(t, r) for t, r in rejected]
