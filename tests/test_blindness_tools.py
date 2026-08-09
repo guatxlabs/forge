@@ -60,10 +60,18 @@ IN_SCOPE = [HOST]
 # --- Sorties d'outils MESURÉES (ré-exécution des argv du catalogue, `docker run --network none`) ----
 # Le point commun de ces quatre-là : rc non nul, stdout VIDE. L'outil s'est arrêté avant d'observer
 # quoi que ce soit — sa réponse « aucun hit » ne peut rien affirmer.
+# HISTORIQUE : les quatre argv fautifs ont depuis ete CORRIGES ou RETIRES du catalogue (cf.
+# `toolcatalog` : gobuster/dnsx corriges + wordlist REQUISE ; masscan et theHarvester retires).
+# Les chaines restent ici parce que ce fichier documente ce que le LEDGER a montre, et parce que
+# `TestRemovedEntriesCannotComeBackSilently` verrouille le fait que ces causes ne peuvent plus
+# se produire. DNSX_ERR sert encore de sortie d'erreur GENERIQUE (rc=1, stdout vide).
 DNSX_ERR = "[FTL] missing wordlist(w) flag required with domain(d) input"
 MASSCAN_ERR = 'FAIL: unknown command-line parameter "app.test"\n [hint] did you want "--app.test"?'
 THARV_ERR = ("Unable to find image 'laramies/theharvester:latest' locally\n"
              "docker: Error response from daemon: pull access denied for laramies/theharvester")
+# Params MINIMAUX qui satisfont le pre-requis d'invocation d'un outil a wordlist (gobuster/dnsx) —
+# sans eux, `fire()` skippe AVANT tout tir et les tests de degradation ne seraient jamais atteints.
+WORDLIST_OK = {"wordlist": "www,mail"}
 NUCLEI_ERR = "[FTL] Could not run nuclei: no templates provided for scan"
 # gobuster, lui, DÉVERSE son texte d'usage sur stdout (2 080 octets mesurés) : la borne factuelle
 # « stdout vide » ne l'attrape donc pas, et c'est un RÉSIDU ASSUMÉ (cf. le test qui l'épingle).
@@ -97,8 +105,9 @@ class _Case(unittest.TestCase):
         return st
 
     @staticmethod
-    def act(kind, target=URL):
-        return Action(kind, target, params={"in_scope": IN_SCOPE, "out_scope": []})
+    def act(kind, target=URL, extra=None):
+        return Action(kind, target,
+                      params=dict(extra or {}, in_scope=IN_SCOPE, out_scope=[]))
 
     def module(self, kind):
         """Instance du VRAI module, disponibilité forcée (aucun binaire requis, aucun processus).
@@ -110,12 +119,14 @@ class _Case(unittest.TestCase):
         self.addCleanup(lambda: setattr(runner, "available", orig))
         return REGISTRY[kind]()
 
-    def fire_tool(self, kind, rc, out, err, target=URL, store=None):
-        """Tir d'un `ExternalToolModule` — `_run` est stubé SUR L'INSTANCE (jamais sur la classe)."""
+    def fire_tool(self, kind, rc, out, err, target=URL, store=None, params=None):
+        """Tir d'un `ExternalToolModule` — `_run` est stubé SUR L'INSTANCE (jamais sur la classe).
+        `params` sert aux outils dont le spec exige un pre-requis d'invocation (`requires_params`) :
+        sans lui, `fire()` skipperait AVANT le tir et le comportement teste ne serait pas atteint."""
         mod = self.module(kind)
         mod._run = lambda argv: (rc, out, err)
         with session.using(store if store is not None else self.store()):
-            return mod.fire(self.act(kind, target))
+            return mod.fire(self.act(kind, target, params))
 
     def fire_nuclei(self, rc, out, err, target=URL, store=None):
         from forge.modules import web as W
@@ -145,20 +156,13 @@ class _Case(unittest.TestCase):
 # =====================================================================================
 class TestToolDidNotRunProducesAbstention(_Case):
 
-    def test_dnsx_stopped_on_its_own_argv_does_not_claim_a_verdict(self):
-        """MESURÉ : `dnsx` refuse l'argv du catalogue (`-d` sans `-w`), rc=1, stdout VIDE — et les
+    def test_a_tool_stopped_before_observing_anything_does_not_claim_a_verdict(self):
+        """MESURÉ : `dnsx` refusait l'argv du catalogue (`-d` sans `-w`), rc=1, stdout VIDE — et les
         52 findings correspondants du ledger disaient `tested`. Un outil arrêté avant de regarder
-        n'a rien vérifié."""
-        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST)
-        self.assertEqual(self.statuses(f), ["skipped"])
-
-    def test_masscan_rejecting_its_target_does_not_claim_a_verdict(self):
-        f = self.fire_tool("recon.masscan", 1, "", MASSCAN_ERR, target=HOST)
-        self.assertEqual(self.statuses(f), ["skipped"])
-
-    def test_a_missing_docker_image_does_not_claim_a_verdict(self):
-        """`theHarvester` : `pull access denied`, rc=125, stdout vide. 52 findings du ledger."""
-        f = self.fire_tool("recon.theharvester", 125, "", THARV_ERR, target=HOST)
+        n'a rien vérifié. L'argv est corrigé (la wordlist est désormais REQUISE et fournie ici),
+        mais la GARDE doit rester : tout arrêt précoce ultérieur (résolveur injoignable, image
+        cassée) produit la même forme rc!=0 + stdout vide, et doit rester `skipped`."""
+        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST, params=WORDLIST_OK)
         self.assertEqual(self.statuses(f), ["skipped"])
 
     def test_nuclei_that_never_started_does_not_claim_a_verdict(self):
@@ -169,7 +173,7 @@ class TestToolDidNotRunProducesAbstention(_Case):
 
     def test_the_downgraded_evidence_names_the_return_code_and_keeps_the_error(self):
         """Le finding déclassé doit DIRE pourquoi (rc) et conserver la sortie d'erreur d'origine."""
-        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST)[0]
+        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST, params=WORDLIST_OK)[0]
         self.assertIn("NON VÉRIFIÉ", f.evidence)
         self.assertIn("rc=1", f.evidence)
         self.assertIn("missing wordlist", f.evidence)
@@ -266,7 +270,8 @@ class TestNarrowBound(_Case):
         que `nikto` et `testssl` sortent en erreur APRÈS avoir rendu leurs résultats. Élargir à
         « rc != 0 » les rendrait `skipped` sur une cible parfaitement saine.
         Le vrai correctif de gobuster est son argv, pas son statut (cf. rapport de mission)."""
-        f = self.fire_tool("recon.gobuster_dns", 1, GOBUSTER_OUT, GOBUSTER_ERR, target=HOST)
+        f = self.fire_tool("recon.gobuster_dns", 1, GOBUSTER_OUT, GOBUSTER_ERR, target=HOST,
+                           params=dict(WORDLIST_OK))
         self.assertEqual(self.statuses(f), ["tested"])
 
     def test_a_scanner_that_errored_after_producing_results_keeps_them(self):
@@ -374,12 +379,12 @@ class TestNonHttpToolsKeepTheirVerdict(_Case):
         mute = {s.kind for s in _catalog() if not s.speaks_http}
         self.assertLessEqual({"recon.curl", "recon.katana", "web.zap_baseline", "web.nikto"}, speak)
         self.assertLessEqual({"recon.dig", "recon.dnsx", "recon.subfinder", "recon.naabu",
-                              "recon.masscan", "recon.gobuster_dns", "recon.theharvester"}, mute)
+                              "recon.gobuster_dns"}, mute)
 
     def test_a_non_http_tool_that_never_ran_is_still_abstained(self):
         """La borne « parle HTTP » ne concerne QUE le mur. Un outil DNS qui ne s'est pas lancé n'a
         rien vérifié non plus — les deux causes restent bien distinctes."""
-        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST)
+        f = self.fire_tool("recon.dnsx", 1, "", DNSX_ERR, target=HOST, params=WORDLIST_OK)
         self.assertEqual(self.statuses(f), ["skipped"])
 
 

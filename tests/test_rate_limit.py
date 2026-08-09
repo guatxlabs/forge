@@ -4,7 +4,7 @@ par-outil + back-off 429/Retry-After.
 
 Garanties prouvées (zéro I/O réel — horloge/sommeil mockés, `_raw_open` patché) :
   (A) THROTTLE : `Bucket`/`Oracle._http` respectent un min-interval (1/rate) ; rate<=0/absent => no-op.
-  (B) DRAPEAUX : `rate` -> nmap --max-rate, nuclei -rl, httpx -rl, naabu -rate, masscan --rate (≠1000),
+  (B) DRAPEAUX : `rate` -> nmap --max-rate, nuclei -rl, httpx -rl, naabu -rate,
       feroxbuster --rate-limit, sqlmap/wfuzz/dalfox/gobuster --delay (dérivés) ; absent => aucun drapeau.
   (C) BACK-OFF : un 429 avec Retry-After déclenche un sommeil borné puis un ré-essai ; un 429 PERSISTANT
       marque le bucket (`blocked`) -> l'engine surface « rate-limited ».
@@ -164,15 +164,6 @@ class TestNativeRateFlags(unittest.TestCase):
 class TestWrapperRateFlags(unittest.TestCase):
     def _spec(self, kind):
         return mods.get(kind).spec
-
-    def test_masscan_override_replaces_1000(self):
-        argv = build_argv(self._spec("recon.masscan"), "host.test", {"rate": 500})
-        self.assertIn("500", argv)
-        self.assertNotIn("1000", argv)
-
-    def test_masscan_default_keeps_1000(self):
-        argv = build_argv(self._spec("recon.masscan"), "host.test", {})
-        self.assertIn("1000", argv)                   # byte-identique : défaut masscan préservé
 
     def test_naabu_rate(self):
         argv = build_argv(self._spec("recon.naabu"), "host.test", {"rate": 30})

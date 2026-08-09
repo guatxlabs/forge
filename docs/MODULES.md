@@ -25,7 +25,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 > ainsi que les modules natifs à **outil optionnel** (`recon.content` → ffuf, `recon.waf` → wafw00f,
 > `sqli.probe` → sqlmap) sont donc `available:true` **d'office** en `full`. En `mini` ils dégradent en
 > `available:false`. Non embarqués (par design) : `wpscan`/`zap-baseline` (repli `docker_image`), **Burp** &
-> **Metasploit** (services externes ENV), `theHarvester` (amont exige Python ≥ 3.12) — cf.
+> **Metasploit** (services externes ENV) — cf.
 > [TOOLS.md §4(a)](TOOLS.md#a-il-est-déjà-dans-limage-full).
 
 ## Colonnes

@@ -639,7 +639,7 @@ class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
 
 
 class TestE1PortDiscoveryReachesContentScanners(unittest.TestCase):
-    """E1 — les ports découverts par un SCANNER DE PORTS (naabu/masscan) atteignent les SCANNERS DE
+    """E1 — les ports découverts par un SCANNER DE PORTS (naabu) atteignent les SCANNERS DE
     CONTENU HTTP (pas seulement les sondes d'injection). Reproduit le trou T24 : naabu trouvait 18-19
     ports mais AUCUN service n'était scanné par nikto/tech/waf/content/…/security_headers (ils tapaient
     le bare :80 fermé). Preuves HERMÉTIQUES (seams outil/réseau mockés, ZÉRO réseau réel)."""
@@ -779,39 +779,19 @@ class TestE1PortDiscoveryReachesContentScanners(unittest.TestCase):
         for a in evil_scanners:
             self.assertNotEqual(eng.execute(a)["verdict"], FIRE, f"{a.kind} hors-scope a FIRÉ (fail-open!)")
 
-    def test_masscan_discovered_port_becomes_chainable(self):
-        # masscan (format de sortie DIFFÉRENT de naabu) émet lui aussi la découverte de service chaînable.
-        import forge.runner as runner_mod
-
-        def fake_available(binary, docker_image=None, prefer_docker=False):
-            return binary == "masscan"
-
-        def fake_tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=120):
-            return ((0, "Discovered open port 8000/tcp on 127.0.0.1\n", "")
-                    if binary == "masscan" else (127, "", ""))
-
-        def fake_probe(url, timeout=5):
-            return 200 if url == "http://127.0.0.1:8000" else None
-
-        mcls = registry.REGISTRY["recon.masscan"]
-        mhad, mprev = "_fetch" in mcls.__dict__, mcls.__dict__.get("_fetch")
-        sv_av, sv_tool = runner_mod.available, runner_mod.tool
-        runner_mod.available, runner_mod.tool = fake_available, fake_tool
-        mcls._fetch = staticmethod(fake_probe)
-        try:
-            sc = Scope({"mode": "auto", "in_scope": ["127.0.0.1"],
-                        "allow_exploit": False, "allow_private": True})
-            eng = _armed_auto(sc)
-            eng.run([Action("recon.masscan", "127.0.0.1")])
-        finally:
-            runner_mod.available, runner_mod.tool = sv_av, sv_tool
-            if mhad:
-                mcls._fetch = mprev
-            else:
-                del mcls._fetch
-        disc = [f for f in eng.findings
-                if f.target == "127.0.0.1:8000" and "Service web in-scope" in f.title]
-        self.assertTrue(disc, "recon.masscan n'a pas surfacé 127.0.0.1:8000 comme cible chaînable")
+    def test_masscan_style_output_is_still_parsed_into_ports(self):
+        """`recon.masscan` a ete RETIRE du catalogue (cf. toolcatalog : sur une machine multi-homed
+        il sort rc=0 stdout VIDE — un faux « aucun hit » que `tool_did_not_run` ne borne pas). Ce
+        qui reste ici, c'est la TOLERANCE du parseur PARTAGE au format `Discovered open port N/tcp
+        on H` : `ports_from_hits` sert TOUS les scanners de ports (naabu aujourd'hui, un autre
+        demain), et sa capacite a lire ce format ne doit pas se perdre avec l'entree qui l'a
+        motivee."""
+        from forge.modules import _discovery
+        hits = ["Discovered open port 8000/tcp on 127.0.0.1",
+                "Discovered open port 443/tcp on 127.0.0.1"]
+        self.assertEqual(sorted(_discovery.ports_from_hits(hits)), [443, 8000])
+        # et le format naabu (`host:port`) reste lu par le MEME helper.
+        self.assertEqual(_discovery.ports_from_hits(["127.0.0.1:8000"]), [8000])
 
     def test_gau_skips_bare_ip_target_no_junk(self):
         # QUICK-WIN : gau (archives web) sur une IP littérale -> SKIP PROPRE, aucun processus lancé, ZÉRO

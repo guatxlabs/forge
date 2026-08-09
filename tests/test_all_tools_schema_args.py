@@ -7,11 +7,11 @@ aux modules natifs qui shellent un scanner (ffuf `recon.content`, httpx `recon.h
 
 Garanties (échantillon représentatif du jeu d'outils) :
   (A) PARAMS -> ARGV : un jeu de params produit l'argv attendu avec les BONS drapeaux (naabu/feroxbuster/
-      masscan/katana/dalfox/wfuzz/sqlmap-catalog + ffuf-natif/httpx-natif).
+      gobuster/katana/dalfox/wfuzz/sqlmap-catalog + ffuf-natif/httpx-natif).
   (B) FAIL-CLOSED : un drapeau HORS allowlist (`-o /etc/x`, `--config /etc/passwd`, `--proxy http://evil`)
       est REFUSÉ -> `skipped`, ZÉRO processus (runner.tool jamais atteint).
   (C) DÉBIT : `rate` (ou ses dérivées d'unité) se propage au bon drapeau par-outil ; absent => aucun drapeau.
-  (D) BYTE-IDENTIQUE : params non fournis -> argv défaut inchangé (masscan garde `-p1-65535 --rate 1000`).
+  (D) BYTE-IDENTIQUE : params non fournis -> argv défaut inchangé (aucun drapeau optionnel orphelin).
   (E) SCHÉMA SERVI : `forge modules --json` émet un `params_schema` non vide pour ~tous les kinds-outils.
 """
 import io
@@ -114,10 +114,11 @@ class TestWrapperParamArgv(unittest.TestCase):
         self.assertEqual(argv[argv.index("--technique") + 1], "BEU")
         self.assertEqual(argv[argv.index("--dbms") + 1], "MySQL")
 
-    def test_masscan_ports_override(self):
-        argv = build_argv(_spec("recon.masscan"), "host.test", {"ports": "80,443", "rate": 500})
-        self.assertIn("-p80,443", argv)
-        self.assertEqual(argv[argv.index("--rate") + 1], "500")
+    def test_gobuster_wordlist_and_resolver(self):
+        argv = build_argv(_spec("recon.gobuster_dns"), "host.test",
+                          {"wordlist": "/wl.txt", "resolver": "1.1.1.1:53"})
+        self.assertEqual(argv[argv.index("-w") + 1], "/wl.txt")
+        self.assertEqual(argv[argv.index("--resolver") + 1], "1.1.1.1:53")
 
 
 # =================================================================================================
@@ -128,13 +129,10 @@ class TestWrapperDefaultsByteIdentical(unittest.TestCase):
         self.assertEqual(build_argv(_spec("recon.subfinder"), "good.test", {}),
                          ["-silent", "-d", "good.test"])
 
-    def test_masscan_default_keeps_full_range_and_1000(self):
-        argv = build_argv(_spec("recon.masscan"), "host.test", {})
-        self.assertEqual(argv, ["-p1-65535", "--rate", "1000", "host.test"])   # exactement le défaut historique
-
-    def test_theharvester_default_b_all(self):
-        self.assertEqual(build_argv(_spec("recon.theharvester"), "good.test", {}),
-                         ["-d", "good.test", "-b", "all"])
+    def test_gobuster_default_no_optional_flags(self):
+        # sans wordlist l'argv reste minimal — et `fire()` SKIPPE avant tout tir (requires_params).
+        self.assertEqual(build_argv(_spec("recon.gobuster_dns"), "host.test", {}),
+                         ["dns", "-q", "--domain", "host.test"])
 
     def test_wfuzz_default_hc_404(self):
         argv = build_argv(_spec("fuzz.wfuzz"), "http://good.test", {})
@@ -155,7 +153,6 @@ class TestWrapperRateFlags(unittest.TestCase):
 
     CASES = {
         "recon.naabu": ({"rate": 30}, "-rate", "30"),
-        "recon.masscan": ({"rate": 250}, "--rate", "250"),
         "recon.feroxbuster": ({"rate": 12}, "--rate-limit", "12"),
         "recon.katana": ({"rate": 9}, "-rl", "9"),
         "recon.dnsx": ({"rate": 15}, "-rl", "15"),
@@ -172,13 +169,10 @@ class TestWrapperRateFlags(unittest.TestCase):
             self.assertEqual(argv[argv.index(flag) + 1], val, f"{kind}: mauvaise valeur pour {flag}")
 
     def test_no_rate_flag_when_unset(self):
-        # masscan garde son défaut --rate 1000 ; les AUTRES n'émettent aucun drapeau de débit.
+        # aucun outil n'émet de drapeau de débit sans override explicite (argv défaut byte-identique).
         for kind, (_p, flag, _v) in self.CASES.items():
             argv = build_argv(_spec(kind), "http://host.test/?id=1", {})
-            if kind == "recon.masscan":
-                self.assertIn("1000", argv)                                    # défaut préservé
-            else:
-                self.assertNotIn(flag, argv, f"{kind} ne doit pas émettre {flag} sans débit")
+            self.assertNotIn(flag, argv, f"{kind} ne doit pas émettre {flag} sans débit")
 
 
 # =================================================================================================
@@ -186,7 +180,7 @@ class TestWrapperDisallowedFlagFailClosed(unittest.TestCase):
     """(B) un drapeau HORS allowlist -> fire() REFUSE fail-closed, ZÉRO processus (runner.tool=_boom)."""
 
     KINDS = ("recon.naabu", "recon.feroxbuster", "recon.katana", "xss.dalfox",
-             "fuzz.wfuzz", "recon.masscan", "sqli.sqlmap", "recon.subfinder")
+             "fuzz.wfuzz", "recon.gobuster_dns", "sqli.sqlmap", "recon.subfinder")
     BAD = (["-o", "/etc/x"], ["--config", "/etc/passwd"], ["--proxy", "http://evil"])
 
     def test_disallowed_flags_refused_zero_io(self):
@@ -321,8 +315,8 @@ class TestSchemaServedForAllTools(unittest.TestCase):
     TOOL_KINDS = (
         "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu", "recon.katana", "recon.gau",
         "recon.gospider", "recon.feroxbuster", "recon.whatweb", "recon.wafw00f", "web.nikto",
-        "web.wpscan", "web.testssl", "xss.dalfox", "sqli.sqlmap", "recon.masscan",
-        "recon.gobuster_dns", "recon.theharvester", "fuzz.wfuzz", "web.zap_baseline",
+        "web.wpscan", "web.testssl", "xss.dalfox", "sqli.sqlmap",
+        "recon.gobuster_dns", "fuzz.wfuzz", "web.zap_baseline",
         "recon.nmap", "web.nuclei", "recon.httpx", "recon.content", "sqli.probe", "origin.find",
     )
 

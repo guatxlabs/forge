@@ -42,8 +42,8 @@
   (1:1 avec un `kind` Forge) ; le reste est une extension **drop-in plugin** d'un kind existant.
   Zéro bespoke.
 - **Recon / scanners** (`nmap`, `nuclei`, `sqlmap`, `ffuf`, `subfinder`, `nikto`, `dalfox`, `testssl`,
-  `wafw00f`, `masscan`, `gobuster`, `theHarvester`, `wfuzz`, `ZAP`…) : **catalogue ToolSpec (20
-  binaires)** + kinds recon natifs. Tout CLI manquant = **une ligne de ToolSpec / un fichier JSON**
+  `wafw00f`, `gobuster`, `dnsx`, `naabu`, `wfuzz`, `ZAP`…) : **catalogue ToolSpec** + kinds recon
+  natifs. Tout CLI manquant = **une ligne de ToolSpec / un fichier JSON**
   (`FORGE_TOOLSPECS`).
 - **Connecteurs** : Metasploit (`msf.module`) + Burp (`burp.scan`) live.
 - **Long tail** (enum framework-spécifiques : spring-actuator, laravel, nextjs, checks OIDC

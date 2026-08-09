@@ -35,7 +35,7 @@ from forge.modules.toolspec import (ToolSpec, build_argv, parse_output, make_mod
 
 # Intégrations externes SUPPLÉMENTAIRES (recon/scan/OSINT, non-destructif/non-exploit, proof-oriented).
 NEW_KINDS = {
-    "recon.masscan", "recon.gobuster_dns", "recon.theharvester",
+    "recon.gobuster_dns",
     "fuzz.wfuzz", "web.zap_baseline",
     # SONDES RÉSEAU GOUVERNÉES (HTTP/DNS) — non-exploit/non-destructif, scope-guardées, UI-configurables.
     "recon.curl", "recon.dig",
@@ -346,7 +346,7 @@ class TestExploitFloor(unittest.TestCase):
 
 # =================================================================================================
 class TestNewIntegrations(unittest.TestCase):
-    """Intégrations externes AJOUTÉES (masscan, gobuster-dns, theHarvester, wfuzz, ZAP baseline) —
+    """Intégrations externes AJOUTÉES (gobuster-dns, wfuzz, ZAP baseline) —
     enregistrées, gouvernées (scope-guard ZÉRO I/O), no-shell, NON-exploit / NON-destructif, et
     présentes dans les vues dérivées (mitre_for / by_vuln_class / technique_for)."""
 
@@ -362,9 +362,7 @@ class TestNewIntegrations(unittest.TestCase):
             self.assertTrue(techniques.mitre_for(k), f"{k} sans mitre dans la table")
             self.assertEqual(mods.get(k).mitre, techniques.mitre_for(k), f"mitre dérive pour {k}")
         bvc = techniques.by_vuln_class()
-        self.assertIn("recon.masscan", bvc.get("PortScan", []))
         self.assertIn("recon.gobuster_dns", bvc.get("SubdomainEnum", []))
-        self.assertIn("recon.theharvester", bvc.get("OSINT", []))
         self.assertIn("fuzz.wfuzz", bvc.get("Fuzzing", []))
         self.assertIn("web.zap_baseline", bvc.get("WebScan", []))
 
@@ -375,7 +373,6 @@ class TestNewIntegrations(unittest.TestCase):
             self.assertFalse(m.exploit, f"{k} ne doit pas être exploit")
             self.assertFalse(m.destructive, f"{k} ne doit pas être destructif")
             self.assertFalse(techniques.technique_for(k).exploit, f"{k} exploit dans la table")
-        self.assertEqual(techniques.technique_for("recon.theharvester").capability, "passive")
 
     def test_new_kinds_scope_guard_zero_io(self):
         # cible HORS périmètre -> skipped, runner.tool JAMAIS atteint (fail-closed).
@@ -400,9 +397,7 @@ class TestNewIntegrations(unittest.TestCase):
     def test_new_kinds_hits_never_vulnerable(self):
         # les hits sont CLAMPÉS à tested/reported_by_tool — jamais vulnerable.
         samples = {
-            "recon.masscan": "Discovered open port 443/tcp on 1.2.3.4\n",
-            "recon.gobuster_dns": "Found: api.good.test\n",
-            "recon.theharvester": "foo@good.test\nwww.good.test\n",
+            "recon.gobuster_dns": "api.good.test 1.2.3.4\n",   # format REEL de gobuster 3.8
             "fuzz.wfuzz": "000000001:   200        0 L   3 W   45 Ch   \"admin\"\n",
             "web.zap_baseline": "WARN-NEW: Cookie No HttpOnly Flag [10010] x 3\n",
         }
@@ -410,7 +405,8 @@ class TestNewIntegrations(unittest.TestCase):
             m = mods.get(k)
             with _Patch(available=lambda *a, **k: True, tool=lambda *a, **k: (0, out, "")):
                 f = m.fire(Action(k, "http://good.test/",
-                                  params={"in_scope": ["good.test", "*.good.test"]}))
+                                  params={"in_scope": ["good.test", "*.good.test"],
+                                          "wordlist": "www,api"}))
             self.assertTrue(f, f"{k}: aucun finding")
             for x in f:
                 self.assertIn(x.status, ("tested", "reported_by_tool"), f"{k}: statut {x.status}")
