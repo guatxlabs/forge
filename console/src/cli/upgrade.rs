@@ -47,7 +47,10 @@ pub(crate) struct UpgradeOpts {
 const EXPECTED_COLUMNS: &[(&str, &[&str])] = &[
     ("finding", &["run_id", "fix", "cwe", "cvss_vector", "cvss_score", "classification", "assignee", "triage", "engagement_id"]),
     ("runrecord", &["run_id", "engagement_id"]),
-    ("run_job", &["pid", "started_by", "reason", "targets", "modules", "started", "finished", "exit_code", "engagement_id", "owner_instance", "spawn_spec"]),
+    // `findings_dropped`/`findings_write_errors` (SCHEMA_VERSION 2) sont ce qui rend VISIBLE la part
+    // d'un run refusée au stockage. Les omettre ici rendrait `forge upgrade` incapable de vérifier
+    // les colonnes qu'il vient lui-même d'ajouter — un contrôle aveugle à sa propre migration.
+    ("run_job", &["pid", "started_by", "reason", "targets", "modules", "started", "finished", "exit_code", "engagement_id", "owner_instance", "spawn_spec", "findings_dropped", "findings_write_errors"]),
     ("panel", &["descr", "col_span", "updated", "dashboard_id"]),
     ("module", &["enabled", "available_override"]),
     ("engagement", &["tenant_id"]),

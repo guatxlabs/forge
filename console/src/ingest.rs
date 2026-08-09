@@ -37,8 +37,21 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
         store.query_row("SELECT engagement_id FROM run_job WHERE run_id=?", &crate::sql_params![&run_id], |r| r.get_i64(0)).unwrap_or(1)
     };
     let (mut nf, mut nr, mut nd) = (0i64, 0i64, 0i64);
+    // COMPTABILITÉ DE CE QUE LE MOTEUR A ÉMIS, face à ce qui a été STOCKÉ. La table `finding` porte
+    // `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` et l'INSERT ci-dessous renforce avec
+    // `ON CONFLICT DO NOTHING` : un finding refusé par cette clef rendait `Ok(0)` et disparaissait
+    // sans un mot. Le rapport annonçait ensuite un « Total émis » qui était un total STOCKÉ — la
+    // classe de défaut qu'on répare partout : une affirmation plus large que ce qu'elle recouvre.
+    // Mesuré sur une campagne réelle : 499 findings sur 5 318 (9,4 %) refusés, dont 8 `skipped`
+    // (des TROUS DE COUVERTURE, l'information la plus précieuse sur une cible protégée).
+    // On distingue DEUX causes, parce qu'elles n'appellent pas la même action :
+    //   • `n_dropped` — refus de la clef d'unicité (`Ok(0)`) : le finding existe déjà sous ce triplet ;
+    //   • `n_werr`    — échec d'écriture (`Err`) : la base n'a pas pu écrire (verrou, disque, schéma).
+    // Les confondre annoncerait « collision » à un exploitant qui subit une base indisponible.
+    let (mut n_attempted, mut n_werr) = (0i64, 0i64);
     if let Some(arr) = body.get("findings").and_then(|v| v.as_array()) {
         for f in arr {
+            n_attempted += 1;
             // CWE séparé : on prend `cwe` si fourni par le moteur, sinon on le dérive de `category`
             // (rétro-compat avec les anciens modules qui ne posaient que `category="CWE-639"`).
             let cwe = {
@@ -52,17 +65,22 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
                 cvss_vec = v.to_string();
                 cvss_score = s;
             }
-            if let Ok(n) = store.execute(
+            match store.execute(
                 "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,evidence,tool,poc,fix,run_id,cwe,cvss_vector,cvss_score,engagement_id)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
                 &crate::sql_params![gs(f,"ts"), &campaign, gs(f,"target"), gs(f,"title"), gs(f,"severity"),
                     gs(f,"category"), gs(f,"mitre"), gs(f,"status"), gs(f,"evidence"), gs(f,"tool"), gs(f,"poc"),
                     gs(f,"fix"), &run_id, cwe, cvss_vec, cvss_score, engagement_id],
             ) {
-                nf += n as i64;
+                Ok(n) => nf += n as i64,
+                Err(_) => n_werr += 1,
             }
         }
     }
+    // Refusés par la clef d'unicité = émis − stockés − perdus en écriture. Jamais négatif :
+    // `execute` rend soit `Ok(n)` (n ∈ {0,1} sur cet INSERT), soit `Err` — les trois branches sont
+    // exhaustives et disjointes.
+    let n_dropped = (n_attempted - nf - n_werr).max(0);
     if let Some(arr) = body.get("run_records").and_then(|v| v.as_array()) {
         for rr in arr {
             let fired = if rr.get("fired").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
@@ -123,9 +141,34 @@ pub(crate) async fn ingest(State(app): State<App>, headers: HeaderMap, Json(body
                     geti("vetoed"), geti("errors"), skipped, gaps],
             );
         }
+        // COMPTABILITÉ DES NON-STOCKÉS — statement DÉDIÉ, exécuté APRÈS l'upsert de statut et
+        // VOLONTAIREMENT HORS du garde `status='running'` des deux branches ci-dessus : un run
+        // `cancelled`/`timeout` a QUAND MÊME émis ces findings, et son rapport doit pouvoir le dire.
+        // Le garde de statut protège le STATUT (ne pas ré-ouvrir un run terminal) — il n'a aucune
+        // raison de faire disparaître une mesure.
+        // Accumulation (`COALESCE(col,0)+?`) parce que chaque ingest porte un DELTA (checkpoints
+        // incrémentaux puis flush final), là où fired/vetoed/… sont des totaux absolus ré-émis.
+        // Le `COALESCE` fait la transition NULL (« inconnu, run antérieur ») -> entier connu : le
+        // premier ingest d'un run le fait passer à une valeur MESURÉE, fût-elle 0.
+        let _ = store.execute(
+            "UPDATE run_job SET findings_dropped=COALESCE(findings_dropped,0)+?,
+                    findings_write_errors=COALESCE(findings_write_errors,0)+?
+             WHERE run_id=?",
+            &crate::sql_params![n_dropped, n_werr, &run_id],
+        );
         drop(store);
     }
-    (StatusCode::OK, Json(json!({"findings_ingested": nf, "runrecords_ingested": nr, "roe_decisions_ingested": nd})))
+    // La réponse dit la vérité MÊME quand rien n'a pu être persisté (ingest hors run flow : `run_id`
+    // vide -> aucune ligne `run_job` où porter le compteur). C'est le seul endroit qui couvre ce cas ;
+    // le moteur (console_client) le reçoit à chaque flush.
+    (StatusCode::OK, Json(json!({
+        "findings_ingested": nf,
+        "findings_attempted": n_attempted,
+        "findings_dropped": n_dropped,
+        "findings_write_errors": n_werr,
+        "runrecords_ingested": nr,
+        "roe_decisions_ingested": nd,
+    })))
 }
 
 #[cfg(test)]
@@ -226,5 +269,231 @@ mod partial_ingest_tests {
             let status2: String = store.query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params!["run-new"], |r| r.get_str(0)).unwrap();
             assert_eq!(status2, "done", "un run_id inconnu -> INSERT 'done' (comportement inchangé)");
         }
+    }
+}
+
+/// COMPTABILITÉ DES FINDINGS NON STOCKÉS — la perte cesse d'être invisible.
+///
+/// `finding` porte `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` et l'INSERT renforce avec
+/// `ON CONFLICT DO NOTHING`. La clef n'inclut NI `run_id`, NI `tool`, NI `severity`. Mesuré sur la
+/// campagne réelle (`gxrun2/ledger.jsonl`, 5 318 findings émis) : **499 refusés (9,4 %)** — pires cas
+/// ×44 « nuclei: RDAP WHOIS », ×20 « subdomain.takeover non confirmé » — dont **8 `skipped`**, c'est-
+/// à-dire 8 trous de couverture évaporés. Et un SECOND run de la même campagne voit TOUS ses findings
+/// refusés : son rapport (`WHERE run_id=?`) est alors VIDE, ce qui se lit « rien trouvé ».
+///
+/// Le stockage n'est PAS changé (l'idempotence de retry documentée par
+/// `forge/console_client.py::IncrementalIngest` en dépend). Ce qui change : la perte est COMPTÉE,
+/// PERSISTÉE et RENDUE au rapport. Chaque assertion porteuse vit dans SON test.
+#[cfg(test)]
+mod not_stored_accounting_tests {
+    use super::*;
+    use crate::testutil::*;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::Json;
+
+    fn bearer() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", "Bearer t".parse().unwrap());
+        h
+    }
+
+    fn start_run(app: &App, run_id: &str, status: &str) {
+        let store = app.store();
+        store
+            .execute(
+                "INSERT INTO run_job(run_id,campaign,ts,status,mode) VALUES(?,'camp',datetime('now'),?,'auto')",
+                &crate::sql_params![run_id, status],
+            )
+            .unwrap();
+    }
+
+    /// findings de MÊME (target,title) que ceux du corpus réel qui collisionnent.
+    fn dup_body(run_id: &str, n: usize) -> Value {
+        let f: Vec<Value> = (0..n)
+            .map(|i| json!({"target": "guatx.com", "title": "nuclei: DNS WAF Detection",
+                            "severity": "INFO", "status": "tested", "tool": format!("nuclei#{i}")}))
+            .collect();
+        json!({"campaign": "camp", "run_id": run_id, "partial": false, "findings": f, "coverage": {}})
+    }
+
+    fn counters(app: &App, run_id: &str) -> (Option<i64>, Option<i64>, i64) {
+        let store = app.store();
+        let (d, e) = store
+            .query_row(
+                "SELECT findings_dropped, findings_write_errors FROM run_job WHERE run_id=?",
+                &crate::sql_params![run_id],
+                |r| Ok((r.get_opt_i64(0)?, r.get_opt_i64(1)?)),
+            )
+            .unwrap();
+        let stored: i64 = store
+            .query_row("SELECT COUNT(*) FROM finding WHERE run_id=?", &crate::sql_params![run_id], |r| r.get_i64(0))
+            .unwrap();
+        (d, e, stored)
+    }
+
+    // --- la collision de clef est COMPTÉE ------------------------------------------------------
+
+    #[tokio::test]
+    async fn findings_refused_by_the_unique_key_are_counted() {
+        let app = test_app(&tmp_path("ns-ingest-dup"));
+        start_run(&app, "run-dup", "running");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-dup", 5))).await;
+        let (d, _e, stored) = counters(&app, "run-dup");
+        assert_eq!(stored, 1, "un seul des 5 findings passe la clef d'unicité");
+        assert_eq!(d, Some(4), "les 4 refus doivent être COMPTÉS, pas évaporés");
+    }
+
+    #[tokio::test]
+    async fn the_ingest_response_reports_the_loss() {
+        // La réponse HTTP est le SEUL endroit qui couvre l'ingest hors run flow (`run_id` vide) :
+        // il n'y a alors aucune ligne `run_job` où porter le compteur.
+        let app = test_app(&tmp_path("ns-ingest-resp"));
+        let mut body = dup_body("", 3);
+        body["run_id"] = json!("");
+        let v = resp_json(ingest(State(app.clone()), bearer(), Json(body)).await.into_response()).await;
+        assert_eq!(v["findings_attempted"], json!(3), "la réponse doit dire ce que le moteur a ENVOYÉ");
+        assert_eq!(v["findings_ingested"], json!(1));
+        assert_eq!(v["findings_dropped"], json!(2), "la réponse doit dire ce qui a été REFUSÉ");
+    }
+
+    #[tokio::test]
+    async fn a_run_that_dropped_nothing_records_a_measured_zero() {
+        // 0 est une MESURE (« rien n'a été refusé »), distincte de NULL (« run antérieur au comptage »).
+        let app = test_app(&tmp_path("ns-ingest-zero"));
+        start_run(&app, "run-zero", "running");
+        let body = json!({"campaign": "camp", "run_id": "run-zero", "partial": false,
+                          "findings": [{"target": "a.test", "title": "hit a", "severity": "LOW"}],
+                          "coverage": {}});
+        let _ = ingest(State(app.clone()), bearer(), Json(body)).await;
+        let (d, e, stored) = counters(&app, "run-zero");
+        assert_eq!((stored, d, e), (1, Some(0), Some(0)), "un run ingéré doit passer de NULL à une mesure");
+    }
+
+    #[tokio::test]
+    async fn a_run_never_ingested_keeps_an_unknown_share() {
+        let app = test_app(&tmp_path("ns-ingest-null"));
+        start_run(&app, "run-virgin", "running");
+        let (d, e, _s) = counters(&app, "run-virgin");
+        assert_eq!((d, e), (None, None), "sans ingest, la part refusée est INCONNUE — jamais 0");
+    }
+
+    // --- LE cas catastrophique : un SECOND run de la même campagne -----------------------------
+
+    #[tokio::test]
+    async fn a_second_run_of_the_same_campaign_stores_nothing() {
+        // Constat, avant toute réparation : la clef ne porte pas `run_id`, donc le second run est
+        // intégralement refusé et son rapport (`SELECT … WHERE run_id=?`) est VIDE.
+        let app = test_app(&tmp_path("ns-ingest-rerun"));
+        // Séquence RÉELLE : A tourne, finit (l'ingest final le marque 'done'), PUIS B démarre —
+        // l'index unique partiel HA interdit deux runs 'running' sur le même engagement.
+        start_run(&app, "run-A", "running");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-A", 3))).await;
+        start_run(&app, "run-B", "running");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-B", 3))).await;
+        let (_d, _e, stored_b) = counters(&app, "run-B");
+        assert_eq!(stored_b, 0, "le second run n'a stocké AUCUN finding (clef sans run_id)");
+    }
+
+    #[tokio::test]
+    async fn a_second_run_of_the_same_campaign_says_what_it_lost() {
+        // …et c'est CE compteur qui empêche de lire ce rapport vide comme « rien trouvé ».
+        let app = test_app(&tmp_path("ns-ingest-rerun2"));
+        start_run(&app, "run-A", "running");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-A", 3))).await;
+        start_run(&app, "run-B", "running");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-B", 3))).await;
+        let (d, _e, _s) = counters(&app, "run-B");
+        assert_eq!(d, Some(3), "les 3 findings du second run doivent être comptés comme refusés");
+    }
+
+    // --- l'échec d'ÉCRITURE n'est PAS une collision --------------------------------------------
+
+    #[tokio::test]
+    async fn write_failures_are_counted_apart_from_key_collisions() {
+        let app = test_app(&tmp_path("ns-ingest-werr"));
+        start_run(&app, "run-werr", "running");
+        {
+            // la table `finding` disparaît -> chaque INSERT rend Err (et non Ok(0)).
+            let db = app.db();
+            db.execute("ALTER TABLE finding RENAME TO finding_gone", []).unwrap();
+        }
+        let body = json!({"campaign": "camp", "run_id": "run-werr", "partial": false,
+                          "findings": [{"target": "a.test", "title": "x"}, {"target": "b.test", "title": "y"}],
+                          "coverage": {}});
+        let _ = ingest(State(app.clone()), bearer(), Json(body)).await;
+        let store = app.store();
+        let (d, e) = store
+            .query_row(
+                "SELECT findings_dropped, findings_write_errors FROM run_job WHERE run_id=?",
+                &crate::sql_params!["run-werr"],
+                |r| Ok((r.get_opt_i64(0)?, r.get_opt_i64(1)?)),
+            )
+            .unwrap();
+        assert_eq!(e, Some(2), "2 findings perdus sur ÉCHEC D'ÉCRITURE");
+        assert_eq!(d, Some(0), "un échec d'écriture ne doit PAS être compté comme une collision de clef");
+    }
+
+    // --- le compteur SURVIT aux gardes de statut -----------------------------------------------
+
+    #[tokio::test]
+    async fn a_cancelled_run_still_records_what_it_lost() {
+        // Les deux branches de persistance du statut sont gardées par `status='running'` (pour ne pas
+        // ré-ouvrir un run terminal). Ce garde protège le STATUT — il n'a aucune raison de faire
+        // disparaître une MESURE : un run annulé a QUAND MÊME émis ces findings.
+        let app = test_app(&tmp_path("ns-ingest-cancel"));
+        start_run(&app, "run-cx", "cancelled");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-cx", 4))).await;
+        let (d, _e, _s) = counters(&app, "run-cx");
+        assert_eq!(d, Some(3), "la mesure est perdue quand le run n'est plus 'running'");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_keeps_its_terminal_status() {
+        // …sans que la nouvelle écriture ne ré-ouvre le run (le garde historique tient toujours).
+        let app = test_app(&tmp_path("ns-ingest-cancel2"));
+        start_run(&app, "run-cx", "cancelled");
+        let _ = ingest(State(app.clone()), bearer(), Json(dup_body("run-cx", 4))).await;
+        let store = app.store();
+        let st: String = store
+            .query_row("SELECT status FROM run_job WHERE run_id=?", &crate::sql_params!["run-cx"], |r| r.get_str(0))
+            .unwrap();
+        assert_eq!(st, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn checkpoints_accumulate_instead_of_overwriting() {
+        // Chaque ingest porte un DELTA (checkpoints incrémentaux puis flush final) : écraser au lieu
+        // d'accumuler ne rapporterait que la perte du DERNIER flush.
+        let app = test_app(&tmp_path("ns-ingest-accum"));
+        start_run(&app, "run-acc", "running");
+        let mut b1 = dup_body("run-acc", 3);
+        b1["partial"] = json!(true);
+        let _ = ingest(State(app.clone()), bearer(), Json(b1)).await;
+        let mut b2 = dup_body("run-acc", 2);
+        b2["partial"] = json!(true);
+        let _ = ingest(State(app.clone()), bearer(), Json(b2)).await;
+        let (d, _e, stored) = counters(&app, "run-acc");
+        assert_eq!(stored, 1, "un seul finding distinct sur les 5 envoyés");
+        assert_eq!(d, Some(4), "2 + 2 refus cumulés sur les deux checkpoints");
+    }
+
+    // --- l'idempotence de retry, elle, est PRÉSERVÉE -------------------------------------------
+
+    #[tokio::test]
+    async fn a_retried_flush_still_does_not_duplicate_findings() {
+        // `IncrementalIngest` n'avance ses offsets qu'APRÈS un envoi réussi : un flush qui lève après
+        // que le serveur a écrit REJOUE le même delta. L'idempotence repose sur la clef d'unicité —
+        // c'est la raison mesurée pour laquelle on ne l'ÉLARGIT PAS (cf. rapport de session).
+        let app = test_app(&tmp_path("ns-ingest-retry"));
+        start_run(&app, "run-rt", "running");
+        let body = json!({"campaign": "camp", "run_id": "run-rt", "partial": true,
+                          "findings": [{"target": "a.test", "title": "hit a", "severity": "LOW"}],
+                          "coverage": {}});
+        let _ = ingest(State(app.clone()), bearer(), Json(body.clone())).await;
+        let _ = ingest(State(app.clone()), bearer(), Json(body)).await;
+        let (d, _e, stored) = counters(&app, "run-rt");
+        assert_eq!(stored, 1, "un rejeu ne doit pas DOUBLER le finding");
+        assert_eq!(d, Some(1), "…et le rejeu absorbé est COMPTÉ, au lieu d'être invisible");
     }
 }

@@ -275,7 +275,12 @@ CREATE TABLE IF NOT EXISTS run_job(
   exit_code BIGINT DEFAULT NULL, engagement_id BIGINT NOT NULL DEFAULT 1,
   -- HA (#10 Wave B) : owner_instance = instance qui a SPAWNÉ le run (scope-guard du reconcile) ; NULL pour
   -- legacy/pending. spawn_spec = blob JSON RunSpawnSpec d'un run 'pending' (reconstruction par le leader).
-  owner_instance TEXT DEFAULT NULL, spawn_spec TEXT DEFAULT '');
+  owner_instance TEXT DEFAULT NULL, spawn_spec TEXT DEFAULT '',
+  -- Miroir PG des compteurs de findings NON STOCKÉS (cf. SCHEMA/migrate + ingest.rs). NULL = run
+  -- ANTÉRIEUR au comptage (part refusée INCONNUE), 0 = comptée et nulle. Inline ici (comme
+  -- owner_instance/spawn_spec) : un cluster PG FRAIS l'obtient ; un cluster ancien via migrate-store,
+  -- qui copie les colonnes ÉNUMÉRÉES depuis SQLite (PRAGMA table_info) et exige donc leur présence.
+  findings_dropped BIGINT DEFAULT NULL, findings_write_errors BIGINT DEFAULT NULL);
 -- HA (#10 Wave B — fencing correctness) : INDEX UNIQUE PARTIEL « au plus UN run 'running' par engagement ».
 -- C'est la GARDE AUTORITATIVE CROSS-INSTANCE : la transition -> 'running' (claim_run_running) échoue si un
 -- autre run 'running' existe déjà pour le même engagement (double-spawn d'un leader périmé lors d'un flap)
@@ -367,7 +372,9 @@ CREATE TABLE IF NOT EXISTS login_throttle(
 // `PG_SCHEMA`+seed. Elle rend « à quelle version est cette base ? » RÉPONDABLE — base des upgrades sûrs
 // (`forge status` / `upgrade` / `/health`). ADDITIVE : une base ANTÉRIEURE (clé absente) lit
 // `None` et se voit tamponnée au 1er boot suivant la mise à jour (rétro-compat, jamais de valeur inventée).
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+/// v2 — lot « comptabilité des findings NON stockés » : `run_job.findings_dropped` +
+/// `run_job.findings_write_errors` (additifs, DEFAULT NULL = « inconnu sur les runs antérieurs »).
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 /// Clé de la table `settings` portant la version de schéma persistée (cf. [`SCHEMA_VERSION`]).
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 
@@ -444,6 +451,19 @@ pub(crate) fn migrate(db: &Connection) {
         "ALTER TABLE run_job ADD COLUMN started TEXT DEFAULT ''",
         "ALTER TABLE run_job ADD COLUMN finished TEXT DEFAULT ''",
         "ALTER TABLE run_job ADD COLUMN exit_code INTEGER DEFAULT NULL",
+        // COMPTABILITÉ DES FINDINGS NON STOCKÉS (voir ingest.rs) — la table `finding` porte
+        // `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` : la clef n'inclut NI `run_id`, NI `tool`,
+        // NI `severity`. Un finding refusé par cette clef ne laissait AUCUNE trace, et le rapport
+        // annonçait ensuite un « Total émis » qui était en réalité un total STOCKÉ. Mesuré sur une
+        // campagne réelle : 499 findings sur 5 318 (9,4 %) refusés en silence.
+        // `DEFAULT NULL` — et non 0 — À DESSEIN : NULL veut dire « ce run est ANTÉRIEUR au comptage,
+        // la part refusée est INCONNUE », ce qui n'est pas la même affirmation que « rien n'a été
+        // refusé ». Un DEFAULT 0 aurait recréé le mensonge sur les runs existants.
+        "ALTER TABLE run_job ADD COLUMN findings_dropped INTEGER DEFAULT NULL",
+        // …et les findings perdus sur ÉCHEC D'ÉCRITURE (store en erreur : verrou, disque, schéma).
+        // Colonne SÉPARÉE parce que la CAUSE diffère : les confondre ferait annoncer « collision de
+        // clef d'unicité » à un exploitant qui subit en fait une base indisponible.
+        "ALTER TABLE run_job ADD COLUMN findings_write_errors INTEGER DEFAULT NULL",
         // HA (#10 Wave B — run leader). `owner_instance` = the instance_id that ACTUALLY SPAWNED this run
         // (set by claim_and_spawn when the run goes 'running'). NULL for legacy rows and for runs still
         // 'pending' (enqueued by a non-leader, not yet claimed). Under HA it SCOPES reconcile so an

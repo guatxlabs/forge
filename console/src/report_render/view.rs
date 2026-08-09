@@ -759,9 +759,77 @@ pub(crate) fn render_item(out: &mut Vec<String>, rows: &[FindingRow], item: &Ite
     out.push(String::new());
 }
 
+/// Comptabilité des findings **ÉMIS par le moteur mais NON STOCKÉS** par la console, lue sur
+/// `run_job` (cf. `ingest.rs`). Trois états, et ils ne disent PAS la même chose :
+///   - `Unknown` — run ANTÉRIEUR au comptage : la part refusée est **inconnue** ;
+///   - `Counted { 0, 0 }` — mesurée et nulle : le total stocké EST le total émis ;
+///   - `Counted { d, e }` — `d` refusés par la clef d'unicité `campaign+target+title`, `e` perdus
+///     sur échec d'écriture.
+///
+/// POURQUOI CE TYPE EXISTE. `finding` porte `UNIQUE(campaign,target,title) ON CONFLICT IGNORE` : ni
+/// `run_id`, ni `tool`, ni `severity` n'entrent dans la clef. Mesuré sur une campagne réelle,
+/// **499 findings sur 5 318 (9,4 %)** étaient refusés à l'ingestion — et le rapport annonçait ensuite
+/// un « Total émis » qui était en réalité un total **STOCKÉ**. Un opérateur qui lit « Total émis 4819 »
+/// ne pouvait pas savoir qu'il en manquait 499.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotStored {
+    Unknown,
+    Counted { dropped: i64, write_errors: i64 },
+}
+
+/// Lignes de comptabilité à poser JUSTE APRÈS le total du Verdict. Vide quand la mesure existe et
+/// vaut zéro — dans ce cas, et dans ce cas SEULEMENT, « Total émis » est une affirmation vraie.
+/// `stored` = nombre de findings effectivement rendus (le total annoncé).
+pub(crate) fn not_stored_lines(ns: NotStored, stored: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    match ns {
+        NotStored::Counted { dropped: 0, write_errors: 0 } => {}
+        NotStored::Unknown => out.push(
+            "- **⚠️ Part NON stockée : INCONNUE** — ce run est antérieur à la comptabilité des refus \
+             d'ingestion. Le total ci-dessus est un total **STOCKÉ** : la console ne peut pas affirmer \
+             qu'il égale ce que le moteur a émis. Le ledger signé du run (`kind=finding`) fait foi."
+                .into(),
+        ),
+        NotStored::Counted { dropped, write_errors } => {
+            if dropped > 0 {
+                out.push(format!(
+                    "- **⚠️ {dropped} finding(s) émis par le moteur et REFUSÉS au stockage** — collision \
+                     sur la clef d'unicité `campaign+target+title` (ni `run_id`, ni `tool`, ni `severity` \
+                     n'en font partie). Le total ci-dessus est donc un total **STOCKÉ**, pas un total ÉMIS \
+                     : le moteur en a émis **{}**. Le ledger signé du run (`kind=finding`) fait foi.",
+                    stored as i64 + dropped + write_errors,
+                ));
+                if stored == 0 {
+                    out.push(
+                        "- **⚠️ AUCUN finding de ce run n'a été stocké** alors que le moteur en a émis. \
+                         Signature d'une RE-EXÉCUTION de la même campagne sur les mêmes cibles : la clef \
+                         d'unicité ne portant pas `run_id`, les findings du second run sont TOUS refusés \
+                         et ce rapport est VIDE pour une raison qui n'est pas « rien trouvé »."
+                            .into(),
+                    );
+                }
+            }
+            if write_errors > 0 {
+                out.push(format!(
+                    "- **⚠️ {write_errors} finding(s) PERDUS sur échec d'écriture** — la base n'a pas pu \
+                     les écrire (verrou, disque, schéma). Cause DISTINCTE d'une collision de clef : ils \
+                     ne sont nulle part dans cette console, seul le ledger du run les porte."
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Section **Verdict** — ce qu'un opérateur lit EN PREMIER, en une ligne. La ligne de tête est DÉRIVÉE
 /// du corpus, jamais gonflée. `partial` (run coupé) la CORRIGE : sur un plan qui n'a pas tourné en
 /// entier, « rien d'actionnable » est une CONCLUSION FAUSSE.
+///
+/// `not_stored` BORNE de même la ligne « Total émis » : ce total est celui des findings STOCKÉS, et
+/// il n'égale ce que le moteur a émis que si la comptabilité des refus est mesurée ET nulle. La ligne
+/// « Total émis » elle-même est laissée VERBATIM (elle est le miroir de `forge/report_view.py` et le
+/// garde-fou de parité la compare label par label) : on ne la réécrit pas, on la BORNE — la borne
+/// n'apparaît que lorsqu'elle a quelque chose à dire.
 pub(crate) fn render_verdict(
     out: &mut Vec<String>,
     rows: &[FindingRow],
@@ -770,6 +838,7 @@ pub(crate) fn render_verdict(
     items_qual: &[Item],
     view: &str,
     partial: Option<&str>,
+    not_stored: NotStored,
 ) {
     let (n_expl, n_qual, n_unver, n_recon) = (b.exploitable.len(), b.qualify.len(), b.unverified.len(), b.recon.len());
     out.push("## Verdict".into());
@@ -815,6 +884,7 @@ pub(crate) fn render_verdict(
         "- **Bruit de reconnaissance** (INFO) : **{n_recon}** — relégué en annexe, intégralement compté."
     ));
     out.push(format!("- **Total émis** : **{}** findings (vue `{view}`).", rows.len()));
+    out.extend(not_stored_lines(not_stored, rows.len()));
     if let Some(cause) = partial {
         out.push(format!(
             "- **⚠️ Plan INCOMPLET** : {} — run interrompu ({cause}).",
@@ -935,6 +1005,13 @@ pub(crate) fn render_actionable(
 /// Ligne de COMPTABILITÉ de l'annexe — la garde « rien n'est masqué en silence », RENDUE. Dit combien
 /// l'annexe rend, combien elle replie, et **où les retrouver**. Si l'invariant de partition tombe, on
 /// n'essaie PAS de rattraper : on l'imprime en clair, en tête de section (fail-loud).
+///
+/// SECOND SITE du même travers que le Verdict : « = N **émis au total** » compte des findings
+/// **STOCKÉS**. L'équation `rendus + repliés = total` reste exacte (elle porte sur le repliage de
+/// l'annexe, et c'est ce que le garde-fou de parité compare) ; c'est le mot « émis » qui déborde dès
+/// que l'ingestion a refusé quelque chose. On BORNE la ligne au lieu de la réécrire — la réécrire
+/// d'un seul côté ferait diverger la console de `forge/report_view.py`, où « émis » est VRAI (le
+/// moteur rapporte ses propres findings, sans couche de stockage entre les deux).
 pub(crate) fn render_annex_accounting(out: &mut Vec<String>, plan: &AnnexPlan) {
     let (ok, why) = plan.check();
     if !ok {
@@ -980,6 +1057,27 @@ pub(crate) fn render_annex_accounting(out: &mut Vec<String>, plan: &AnnexPlan) {
         ));
         out.push(String::new());
     }
+}
+
+/// BORNE de la ligne ci-dessus — appelée JUSTE APRÈS elle par les deux rendus (md et HTML). Le
+/// « total » de la comptabilité est celui des findings **STOCKÉS** : si l'ingestion en a refusé,
+/// l'annexe est exhaustive DE CE QUI A ÉTÉ STOCKÉ, pas de ce que le moteur a émis. Rien quand la
+/// mesure existe et vaut zéro (l'annexe est alors exhaustive tout court).
+///
+/// Fonction SÉPARÉE, et pas un 3e paramètre de [`render_annex_accounting`], pour deux raisons : la
+/// ligne d'équation est comparée TELLE QUELLE par le garde-fou de parité (`tests_reports_purple`,
+/// qui l'appelle directement), et la borne relève de la couche STOCKAGE — que le rendu du moteur
+/// Python, lui, n'a pas. Le couplage des deux appels est tenu par les tests de
+/// `report_render::tests_not_stored`.
+pub(crate) fn render_annex_not_stored_bound(out: &mut Vec<String>, not_stored: NotStored, total: usize) {
+    let bounds = not_stored_lines(not_stored, total);
+    if bounds.is_empty() {
+        return;
+    }
+    for l in bounds {
+        out.push(format!("> {}", l.trim_start_matches("- ")));
+    }
+    out.push(String::new());
 }
 
 /// EN-TÊTE D'HONNÊTETÉ D'UN RAPPORT PARTIEL — miroir de `report._interruption_banner`, dérivé de la

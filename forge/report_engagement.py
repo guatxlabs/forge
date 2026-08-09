@@ -154,6 +154,55 @@ def normalize(data):
     return out
 
 
+# --- partialité de l'engagement ---------------------------------------------------------------
+# RUPTURE CORRIGÉE — le DOCX était le SEUL format du livrable à ne pas pouvoir dire qu'un engagement
+# est PARTIEL (md/HTML/JSON de la console le disent depuis le lot précédent). Or le DOCX est
+# précisément ce que le commanditaire ouvre : un rapport tronqué qui se présente comme complet fait
+# lire « aucun risque critique » comme un VERDICT, alors qu'une partie du plan n'a jamais tourné.
+#
+# La console POSE bien une clef `partial` dans la Value du rapport (cf. reports/mod.rs) — mais
+# `normalize()` ci-dessus reconstruit `out` à partir d'une LISTE FERMÉE de clefs : `partial` y était
+# JETÉ. Lui transmettre la clef ne suffisait donc pas. On DÉRIVE la partialité de `runs[*].status`,
+# qui, lui, survit à `normalize()` et fait déjà partie du contrat d'entrée documenté en tête de
+# module — aucun champ nouveau n'est exigé de l'appelant (console Rust comme pipeline CLI).
+
+#: Statuts de run qui signent un plan NON MENÉ À TERME. MIROIR EXACT de
+#: `console/src/report_render/view.rs::partial_cause` — les deux tables doivent dire la même chose,
+#: sinon le DOCX et le HTML de la même donnée se contrediraient.
+INTERRUPTED_RUN_STATUS = {
+    "timeout": "budget dépassé (timeout)",
+    "cancelled": "annulé par un opérateur",
+    "canceled": "annulé par un opérateur",
+    "failed": "échec du moteur",
+    "running": "run ENCORE EN COURS — rapport pris à chaud",
+}
+
+
+def interrupted_runs(runs):
+    """Runs de l'engagement qui ne sont PAS allés au bout : `[(run_id, statut, cause)]`.
+    Purement DÉRIVÉ de `runs` (déjà dans le contrat d'entrée). Pur, ne lève jamais."""
+    out = []
+    for r in runs or []:
+        why = INTERRUPTED_RUN_STATUS.get(str((r or {}).get("status") or "").strip().lower())
+        if why:
+            out.append((str((r or {}).get("run_id") or "?"), str((r or {}).get("status") or ""), why))
+    return out
+
+
+def partiality_sentence(runs):
+    """Phrase de partialité d'un engagement, ou '' si tous les runs sont allés au bout.
+    NOMME chaque run coupé (un compte seul ne permet pas de retrouver ce qui manque)."""
+    runs = runs or []
+    cut = interrupted_runs(runs)
+    if not cut:
+        return ""
+    detail = " · ".join(f"{rid} ({why})" for rid, _st, why in cut)
+    return (f"⚠️ ENGAGEMENT PARTIEL — {len(cut)} run(s) sur {len(runs)} ne sont pas allés au bout : "
+            f"{detail}. Ce rapport n'agrège que ce qui a effectivement tourné : une absence de finding "
+            f"n'y vaut PAS une absence de vulnérabilité, et aucun verdict — surtout pas négatif — n'a "
+            f"été émis pour ce qui n'a jamais été tenté.")
+
+
 # --- helpers d'affichage ---------------------------------------------------------------------
 
 def _brand_name(branding):
@@ -345,6 +394,11 @@ def build_html(data):
     h.append(f'<div class="muted">{" · ".join(meta)}</div>')
     h.append(f'<div class="conf">{_e(conf)}</div>')
     h.append("</section>")
+
+    # ---- partialité : la bannière BORNE le résumé exécutif, donc elle le PRÉCÈDE ----
+    _partial = partiality_sentence(norm.get("runs"))
+    if _partial:
+        h.append(f'<p class="conf">{_e(_partial)}</p>')
 
     # ---- résumé exécutif ----
     h.append('<section><h2>Résumé exécutif</h2>')
@@ -540,9 +594,14 @@ def _docx_document_xml(norm):
             _para(f'Rapport d\'engagement : {eng.get("name") or "engagement"}', size=32),
             _para(f'{(b.get("vendor") or "GuatX Forge")} · engagement #{eng.get("id")} · '
                   f'mode {eng.get("mode") or "—"} · généré le {norm.get("generated")}'),
-            _para(b.get("confidentiality") or "Document confidentiel — diffusion restreinte au commanditaire"),
-            _para("Résumé exécutif", heading=True, size=28),
-            _para(_prose_counts(summ))]
+            _para(b.get("confidentiality") or "Document confidentiel — diffusion restreinte au commanditaire")]
+    # PARTIALITÉ — même phrase, même place que le HTML : AVANT le résumé exécutif, qu'elle borne.
+    # C'est le livrable que le commanditaire ouvre ; il ne doit pas pouvoir se lire comme complet.
+    _partial = partiality_sentence(norm.get("runs"))
+    if _partial:
+        body.append(_para(_partial, bold=True))
+    body += [_para("Résumé exécutif", heading=True, size=28),
+             _para(_prose_counts(summ))]
     for s in reversed(SEVERITIES):
         body.append(_para(f"{s} : {summ['by_severity'].get(s, 0)}"))
     body.append(_para("Findings", heading=True, size=28))

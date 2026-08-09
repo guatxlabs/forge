@@ -17,6 +17,12 @@
 /// plutôt que déléguer) et le garde-fou de parité qui empêche la re-dérive.
 pub(crate) mod view;
 
+/// Garde-fou de la COMPTABILITÉ DES FINDINGS NON STOCKÉS — le rapport ne peut plus faire passer un
+/// total STOCKÉ pour un total ÉMIS (cf. l'en-tête du fichier pour la mesure : 499/5318 sur la
+/// campagne réelle).
+#[cfg(test)]
+mod tests_not_stored;
+
 use std::collections::HashMap;
 
 use axum::response::IntoResponse;
@@ -225,6 +231,28 @@ pub(crate) fn read_finding_rows(store: &crate::store::Store, run_id: &str) -> Ve
         },
     )
     .unwrap_or_default()
+}
+
+/// Lit la comptabilité des findings NON STOCKÉS sur la ligne `run_job` du rapport. `null`/absent =>
+/// [`view::NotStored::Unknown`] (run ANTÉRIEUR au comptage — la part refusée est INCONNUE), ce qui
+/// n'est PAS la même affirmation que « rien n'a été refusé ». Aucune valeur inventée : c'est la
+/// distinction NULL/0 portée par le schéma (`DEFAULT NULL`) qui remonte jusqu'au rapport.
+pub(crate) fn read_not_stored(job: &Value) -> view::NotStored {
+    let get = |k: &str| job.get(k).and_then(|v| v.as_i64());
+    match (get("findings_dropped"), get("findings_write_errors")) {
+        // Les deux colonnes sont écrites par le MÊME statement d'ingest : si l'une est connue,
+        // l'autre l'est aussi. Un `None` résiduel (base bricolée à la main) est lu 0 — jamais inventé
+        // au-delà de ce que la colonne connue affirme.
+        (None, None) => view::NotStored::Unknown,
+        (d, e) => view::NotStored::Counted { dropped: d.unwrap_or(0).max(0), write_errors: e.unwrap_or(0).max(0) },
+    }
+}
+
+/// Déshabille une puce markdown de son décor (`- ` de tête, `**`, `` ` ``) pour la réinjecter dans le
+/// HTML. Le TEXTE reste écrit à UN SEUL endroit (la vue markdown) : md et HTML ne peuvent pas dériver.
+/// L'échappement HTML est fait par l'appelant, APRÈS ce nettoyage.
+fn strip_md(line: &str) -> String {
+    line.trim_start_matches("- ").replace("**", "").replace('`', "")
 }
 
 /// Notes d'engagement d'une campagne (table `campaign.notes`) — contexte client (cadre, ROE, objet
@@ -480,7 +508,7 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
         }
         s
     };
-    view::render_verdict(&mut out, &finding_rows, &buckets, &items_expl, &items_qual, render_view, partial);
+    view::render_verdict(&mut out, &finding_rows, &buckets, &items_expl, &items_qual, render_view, partial, read_not_stored(job));
     let next = view::render_actionable(
         &mut out, &finding_rows, &items_expl,
         "## Actionnable — à reporter",
@@ -522,6 +550,7 @@ pub(crate) fn render_run_report_md(store: &crate::store::Store, run_id: &str, jo
     out.push(format!("## Findings — annexe complète ({} émis, vue `{render_view}`)", finding_rows.len()));
     out.push(String::new());
     view::render_annex_accounting(&mut out, &plan);
+    view::render_annex_not_stored_bound(&mut out, read_not_stored(job), plan.total);
     if finding_rows.is_empty() {
         out.push("_Aucun finding._".into());
         out.push(String::new());
@@ -815,6 +844,12 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
             if extra.is_empty() { String::new() } else { format!(" — {}", e(&extra)) },
         ));
     }
+    // Ce que le moteur a émis et que la console n'a PAS stocké — le livrable CLIENT le dit aussi.
+    // Les puces markdown sont réutilisées telles quelles (source unique de la formulation), débarrassées
+    // de leur décor markdown : les deux formats ne peuvent pas dériver l'un de l'autre.
+    for line in view::not_stored_lines(read_not_stored(job), finding_rows.len()) {
+        h.push_str(&format!("<li class=\"posture-bad\">{}</li>", e(&strip_md(&line))));
+    }
     h.push_str("</ul></section>");
 
     h.push_str("<section id=\"gaps\" class=\"sec\"><h2>Couverture NON vérifiée (trous de couverture)</h2>");
@@ -867,6 +902,7 @@ pub(crate) fn render_run_report_html(store: &crate::store::Store, run_id: &str, 
         let plan = view::annex_plan(&finding_rows, view::resolve_view(None), &keep);
         let mut acct: Vec<String> = Vec::new();
         view::render_annex_accounting(&mut acct, &plan);
+        view::render_annex_not_stored_bound(&mut acct, read_not_stored(job), plan.total);
         let text = acct.join(" ").trim_start_matches("> ").replace("> ", " ");
         h.push_str(&format!("<p class=\"muted\">{}</p>", e(text.trim())));
     }

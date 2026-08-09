@@ -687,10 +687,15 @@ pub(crate) fn run_job_json(r: &crate::store::Row) -> crate::store::StoreResult<V
         "started": r.get_opt_str(15)?.unwrap_or_default(),
         "finished": r.get_opt_str(16)?.unwrap_or_default(),
         "exit_code": r.get_opt_i64(17)?,
+        // COMPTABILITÉ DES FINDINGS NON STOCKÉS (cf. ingest.rs). `null` = run ANTÉRIEUR au comptage,
+        // part refusée INCONNUE — ce qui n'est PAS la même chose que 0 (« comptée et nulle »). Le
+        // `get_opt_i64` préserve exactement cette distinction jusqu'au JSON et jusqu'au rapport.
+        "findings_dropped": r.get_opt_i64(18)?,
+        "findings_write_errors": r.get_opt_i64(19)?,
     }))
 }
 
-pub(crate) const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps,started_by,reason,targets,modules,started,finished,exit_code";
+pub(crate) const RUN_JOB_COLS: &str = "run_id,campaign,ts,status,mode,fired,dry_run,vetoed,errors,skipped_budget,coverage_gaps,started_by,reason,targets,modules,started,finished,exit_code,findings_dropped,findings_write_errors";
 
 /// GET /api/runs — liste les runs (récents d'abord). Lecture (viewer) — pas besoin d'opérateur.
 pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {

@@ -51,6 +51,17 @@ La même version est **surfacée sur `/health`** (champ `schema_version`, additi
 > Une base **antérieure** au stamp affiche `schema_version: (non tamponnée)` → le prochain boot (ou
 > `upgrade`) la tamponne. C'est rétro-compatible, jamais une valeur inventée.
 
+### Historique des versions de schéma
+
+| Version | Ce qu'elle ajoute | Effet sur une base existante |
+|---|---|---|
+| 1 | socle (`run_id`/`cwe`/`cvss` sur `finding`, colonnes C2 sur `run_job`, engagements, tenants…) | — |
+| 2 | `run_job.findings_dropped` · `run_job.findings_write_errors` — comptabilité des findings **émis par le moteur et non stockés** (cf. `docs/HTTP_API.md`, section `/api/ingest`) | **Deux `ALTER TABLE … ADD COLUMN` additifs**, idempotents (error-ignored) et **réversibles** en pratique : aucune donnée existante n'est lue, écrite ni convertie ; un binaire ANTÉRIEUR rebranché sur la base migrée continue de fonctionner (il ignore simplement les deux colonnes). Les lignes déjà présentes prennent **`NULL`** — c'est-à-dire « **part refusée inconnue** », délibérément PAS `0` : un `DEFAULT 0` aurait affirmé rétroactivement qu'aucun finding n'avait été perdu, ce qui est précisément le mensonge que ce lot supprime. |
+
+> **Postgres** : les deux colonnes sont dans `PG_SCHEMA` (cluster frais) ; une migration
+> `migrate-store` depuis SQLite les reprend, car elle copie les colonnes **énumérées** sur la source
+> (`PRAGMA table_info`) et exige leur présence sur la cible.
+
 ---
 
 ## 2. `upgrade` — flux sûr en une commande

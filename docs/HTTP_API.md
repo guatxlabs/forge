@@ -74,6 +74,7 @@ Le rapport **mène par le verdict**, pas par la liste. Ordre des sections (`md` 
 3. **Verdict** — une ligne (« N actionnable(s) » ou « rien d'actionnable trouvé ») + les comptes des
    quatre seaux : actionnable (≥ MEDIUM **ou** statut prouvé) · à qualifier (LOW / signalé par un
    outil) · **couverture NON vérifiée** (`skipped`) · bruit de reconnaissance (INFO) ;
+   la ligne **« Total émis »** est **bornée** par la comptabilité des findings non stockés (ci-dessous) ;
 4. **Actionnable — à reporter** puis **Signal à qualifier** — un bloc par gabarit (1 vuln × N
    endpoints) à la forme attendue par un triager : sévérité, CWE, CVSS, cible, requête déduite du
    PoC, reproduction numérotée, **commande rejouable**, observation, correctif ;
@@ -85,6 +86,22 @@ Le rapport **mène par le verdict**, pas par la liste. Ordre des sections (`md` 
    sont repliées, **comptées, nommées**, avec le moyen de les récupérer ;
 8. **Couverture & transparence (ROE)**, **Couverture détection (purple)**, **Annexe — chaîne de custody**.
 
+**« Total émis » est un total STOCKÉ — et le rapport le dit quand ça compte.** Le total du verdict
+est celui des findings **écrits en base**. Il n'égale ce que le moteur a émis que si la comptabilité
+des refus d'ingestion (cf. `/api/ingest`) est **mesurée et nulle** — dans ce cas, et seulement dans
+ce cas, aucune ligne supplémentaire n'apparaît. Sinon le verdict porte, **juste après le total** :
+
+| Situation | Ce que le rapport ajoute |
+|---|---|
+| `findings_dropped > 0` | « **N finding(s) émis par le moteur et REFUSÉS au stockage** » — la clef `campaign+target+title` est nommée, ainsi que ce qui n'en fait PAS partie (`run_id`/`tool`/`severity`), et **le total réellement émis** est donné. Le ledger signé du run (`kind=finding`) fait foi. |
+| `findings_dropped > 0` **et 0 stocké** | en plus : « **AUCUN finding de ce run n'a été stocké** » — signature d'une **ré-exécution de la même campagne** (la clef ne porte pas `run_id`, donc les findings du second run sont tous refusés). Sans cette phrase, un rapport vide se lit « rien trouvé ». |
+| `findings_write_errors > 0` | phrase **séparée** : la base n'a pas pu écrire (verrou, disque, schéma). Cause distincte d'une collision — les confondre enverrait corriger une clef d'unicité alors que la base est indisponible. |
+| colonnes `null` (run antérieur au comptage) | « **Part NON stockée : INCONNUE** » — la console ne peut pas affirmer que son total égale l'émis. Jamais rendu comme un zéro. |
+
+La ligne « Total émis » elle-même est laissée **verbatim** : elle est le miroir de
+`forge/report_view.py` et le garde-fou de parité la compare label par label. On la **borne**, on ne
+la réécrit pas d'un seul côté.
+
 **Vue** : `FORGE_REPORT_VIEW=pentest|bounty` (même variable que le moteur, pour que replier soit la
 même décision des deux côtés). Défaut `pentest` = exhaustif.
 
@@ -95,6 +112,27 @@ elles sont en plus jointes aux détections du SOC ; l'en-tête d'engagement et l
 pour équivalents l'en-tête console et l'annexe chaîne-de-custody. Cette correspondance est **vérifiée
 par un test** (`report_view_parity_python_vs_rust_same_corpus`) qui rougit si le moteur ajoute une
 section que personne n'a ni mirroitée ni déclarée.
+
+### `GET /api/engagements/:id/report` — un engagement PARTIEL le dit dans **tous** ses formats
+
+Le livrable agrégé (`html` · `pdf` · `docx` · `csv` · `json`) part des findings **stockés** et ne
+regardait pas si les runs qui les ont produits étaient allés au bout. Un engagement dont un run a
+expiré rendait donc un rapport qui **ressemble** à un rapport complet : « aucun risque critique » s'y
+lit comme un verdict, alors qu'une partie du plan n'a jamais tourné.
+
+La bannière est **dérivée de `runs[*].status`** (mêmes statuts que la bannière de run :
+`timeout` · `cancelled`/`canceled` · `failed` · `running`), elle **nomme** chaque run coupé avec sa
+cause, et elle **précède le résumé exécutif** qu'elle borne. Un engagement dont tous les runs sont
+terminés n'en porte aucune trace.
+
+> **Le DOCX aussi** — et c'est le format que le commanditaire ouvre. Il est délégué à
+> `python -m forge.report_engagement`, dont `normalize()` reconstruit sa sortie depuis une **liste
+> fermée de clefs** : la clef `partial` que la console pose dans la Value du rapport y était *jetée*.
+> La partialité est donc dérivée de `runs[*].status`, qui survit à `normalize()` et fait déjà partie
+> du contrat d'entrée — **aucun champ nouveau n'est exigé de l'appelant** (console Rust comme
+> pipeline CLI `--stdin`). La table des statuts est le miroir de
+> `console/src/report_render/view.rs::partial_cause`, et un test **lit la source Rust** pour
+> l'affirmer : les deux ne peuvent pas diverger en silence.
 
 > **Les routes qui spawnent le moteur** lancent **un process par requête**. Inventaire complet, par gate :
 >
@@ -191,7 +229,38 @@ section que personne n'a ni mirroitée ni déclarée.
 
 | Méthode & route | Objet |
 |---|---|
-| `POST /api/ingest` | **Point de jonction** moteur→console : reçoit findings + run-records + couverture + décisions ROE d'une campagne. Dedup au store (`UNIQUE(campaign,target,title)`). |
+| `POST /api/ingest` | **Point de jonction** moteur→console : reçoit findings + run-records + couverture + décisions ROE d'une campagne. Dedup au store (`UNIQUE(campaign,target,title)`) — **et la part refusée est COMPTÉE**, voir ci-dessous. |
+
+### Ce que `/api/ingest` renvoie — et pourquoi le compte de refus y figure
+
+La table `finding` porte `UNIQUE(campaign, target, title) ON CONFLICT IGNORE`. La clef **n'inclut ni
+`run_id`, ni `tool`, ni `severity`** : deux findings de même titre sur la même cible — modules
+différents, ou simplement **un autre run de la même campagne** — sont absorbés. Cette absorption est
+CE QUI REND L'INGEST IDEMPOTENT (un flush rejoué après une coupure réseau ne double rien, cf.
+`forge/console_client.py::IncrementalIngest`) ; elle n'est donc pas un défaut à supprimer. Le défaut
+était qu'elle était **muette** : mesuré sur une campagne réelle, **499 findings sur 5 318 (9,4 %)**
+disparaissaient sans trace, et le rapport annonçait ensuite un « Total émis » qui était un total
+**stocké**.
+
+La réponse porte désormais la comptabilité complète du lot :
+
+| Champ | Sens |
+|-------|------|
+| `findings_attempted` | ce que le moteur a **envoyé** dans ce POST |
+| `findings_ingested` | ce qui a été **écrit** |
+| `findings_dropped` | **refusés par la clef d'unicité** (le triplet existe déjà) |
+| `findings_write_errors` | **perdus sur échec d'écriture** (verrou, disque, schéma) — cause distincte |
+| `runrecords_ingested` · `roe_decisions_ingested` | inchangés |
+
+`findings_attempted == findings_ingested + findings_dropped + findings_write_errors` : rien ne peut
+disparaître entre le moteur et la console sans être porté par l'un des trois compteurs.
+
+Quand le POST porte un `run_id` connu, `findings_dropped`/`findings_write_errors` sont **accumulés**
+sur `run_job` (chaque flush porte un delta) et remontent dans `GET /api/runs`, `GET /api/runs/:id`
+et le **rapport de run**. `null` sur ces colonnes = run **antérieur** au comptage : la part refusée
+est *inconnue*, ce qui n'est pas la même affirmation que « rien n'a été refusé ». Un POST **sans**
+`run_id` (ingest hors flux de run, ex. CLI directe) n'a aucune ligne `run_job` où porter le
+compteur : **la réponse HTTP est alors le seul endroit qui dit la perte** — l'appelant doit la lire.
 | `POST /api/dashboards` · `POST /api/dashboards/:id` · `DELETE /api/dashboards/:id` | CRUD des dashboards. |
 | `POST /api/panels` · `POST /api/panels/:id` · `DELETE /api/panels/:id` | CRUD des panels GXQL. |
 
