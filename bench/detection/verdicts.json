@@ -1,0 +1,63 @@
+{
+  "_comment": "SPDX-License-Identifier: AGPL-3.0-or-later — VERIFICATION MANUELLE de chaque finding >= MEDIUM du banc, rejoue a la main contre l'application. Cle stable : <app>/<piste>/<module>@<cible>. Consomme par bench/detection/report.py --verdicts.",
+  "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit&id=1": {
+    "verdict": "TP",
+    "why": "module `sqli` declare par l'app ; rejoue a la main : `?id=1'` -> « You have an error in your SQL syntax … MariaDB »"
+  },
+  "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli_blind/?id=1&Submit=Submit&id=1": {
+    "verdict": "TP",
+    "why": "module `sqli_blind` declare par l'app ; rejoue a la main : `1' AND '1'='1` -> « User ID exists », `…'1'='2` -> absent"
+  },
+  "dvwa/A/path.traversal@http://127.0.0.1:8081/vulnerabilities/fi/?page=include.php&page=..%2F..%2Fforge-canary.txt": {
+    "verdict": "TP",
+    "why": "module `fi` declare par l'app ; preuve INDEPENDANTE du canari : `?page=/etc/passwd` -> `root:x:0:0`"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/docs": {
+    "verdict": "FP",
+    "why": "redirection 301 de repertoire d'Apache : `Location` construit depuis `Host` (comportement par defaut universel). Aucun module « host header » dans la verite terrain de DVWA"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/config": {
+    "verdict": "FP",
+    "why": "redirection 301 de repertoire d'Apache : `Location` construit depuis `Host` (comportement par defaut universel). Aucun module « host header » dans la verite terrain de DVWA"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/external": {
+    "verdict": "FP",
+    "why": "redirection 301 de repertoire d'Apache : `Location` construit depuis `Host` (comportement par defaut universel). Aucun module « host header » dans la verite terrain de DVWA"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/external/phpids/0.6": {
+    "verdict": "FP",
+    "why": "redirection 301 de repertoire d'Apache : `Location` construit depuis `Host` (comportement par defaut universel). Aucun module « host header » dans la verite terrain de DVWA"
+  },
+  "juiceshop/A/access_control.idor@http://127.0.0.1:3000/rest/basket/1": {
+    "verdict": "TP",
+    "why": "CERTIFIE PAR L'APP : le challenge « View Basket » (Broken Access Control) est passe a solved dans GET /api/Challenges"
+  },
+  "juiceshop/A/sqli.probe@http://127.0.0.1:3000/rest/user/login": {
+    "verdict": "TP",
+    "why": "CERTIFIE PAR L'APP : le challenge « Login Admin » (Injection) est passe a solved dans GET /api/Challenges"
+  },
+  "vampi/A/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
+    "verdict": "TP",
+    "why": "BOLA declaree par le README ; rejoue a la main : attacker1 lit `VICTIM_SECRET_MARKER_7Q3` de victim1"
+  },
+  "vampi/B/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
+    "verdict": "TP",
+    "why": "idem, trouve cette fois par la campagne AUTONOME (idor_targets injectees depuis scope.auth)"
+  },
+  "vampi/B/header_injection.probe@http://127.0.0.1:5001/ui": {
+    "verdict": "FP",
+    "why": "redirection 308 de repertoire de Werkzeug : `Location` construit depuis `Host`. Absent de la verite terrain de VAmPI"
+  },
+  "vampi/B/ssrf.xspa@http://127.0.0.1:5001/console?__debugger__=yes&cmd=resource&f=console.png": {
+    "verdict": "FP",
+    "why": "connexion TCP directe : 9 des 10 ports declares « joignables » (22/80/443/3306/5432/6379/8443/9200/27017) sont FERMES ; et l'endpoint n'est pas SSRF-able (corps IDENTIQUE 1563 o pour __debugger__=http://127.0.0.1:1/ et :3306/)"
+  },
+  "vampi/B/ssrf.xspa@http://127.0.0.1:5001/console?__debugger__=yes&cmd=resource&f=style.css": {
+    "verdict": "FP",
+    "why": "connexion TCP directe : 9 des 10 ports declares « joignables » (22/80/443/3306/5432/6379/8443/9200/27017) sont FERMES ; et l'endpoint n'est pas SSRF-able (corps IDENTIQUE 1563 o pour __debugger__=http://127.0.0.1:1/ et :3306/)"
+  },
+  "vampi/B/ssrf.xspa@http://127.0.0.1:5001/console?__debugger__=yes&cmd=resource&f=debugger.js": {
+    "verdict": "FP",
+    "why": "connexion TCP directe : 9 des 10 ports declares « joignables » (22/80/443/3306/5432/6379/8443/9200/27017) sont FERMES ; et l'endpoint n'est pas SSRF-able (corps IDENTIQUE 1563 o pour __debugger__=http://127.0.0.1:1/ et :3306/)"
+  }
+}
