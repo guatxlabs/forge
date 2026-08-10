@@ -93,11 +93,16 @@ class TestWrapperParamArgv(unittest.TestCase):
         self.assertEqual(argv[argv.index("-ct") + 1], "5m")
 
     def test_dalfox_param_worker(self):
+        # `--workers`, PAS `-w` : mesuré sur dalfox 3.1.2 (binaire épinglé de tools.json) ET 3.2.0
+        # (image hahwul/dalfox), `-w` n'existe plus. La cible passe par `--url` (positionnel refusé
+        # en 3.x) — on le verrouille ici pour que le retour au positionnel casse le test.
         argv = build_argv(_spec("xss.dalfox"), "http://host.test/?q=1",
                           {"param": "q", "worker": 50, "rate_delay_ms": "200"})
+        self.assertEqual(argv[argv.index("--url") + 1], "http://host.test/?q=1")
         self.assertEqual(argv[argv.index("-p") + 1], "q")
-        self.assertEqual(argv[argv.index("-w") + 1], "50")
+        self.assertEqual(argv[argv.index("--workers") + 1], "50")
         self.assertEqual(argv[argv.index("--delay") + 1], "200")
+        self.assertNotIn("-w", argv)
 
     def test_wfuzz_wordlist_codes(self):
         argv = build_argv(_spec("fuzz.wfuzz"), "http://host.test",
@@ -314,7 +319,7 @@ class TestSchemaServedForAllTools(unittest.TestCase):
 
     TOOL_KINDS = (
         "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu", "recon.katana", "recon.gau",
-        "recon.gospider", "recon.feroxbuster", "recon.whatweb", "recon.wafw00f", "web.nikto",
+        "recon.feroxbuster", "recon.whatweb", "recon.wafw00f", "web.nikto",
         "web.wpscan", "web.testssl", "xss.dalfox", "sqli.sqlmap",
         "recon.gobuster_dns", "fuzz.wfuzz", "web.zap_baseline",
         "recon.nmap", "web.nuclei", "recon.httpx", "recon.content", "sqli.probe", "origin.find",

@@ -19,7 +19,7 @@ gouvernance sont décrits dans [Architecture §2.3](ARCHITECTURE.md#23-le-regist
 
 > **Outils embarqués dans l'image `full` (défaut).** Depuis l'ajout de la suite de scanners au
 > `Dockerfile`, le profil `full` livre — en plus de `nmap`/`curl`/`dig`/`httpx`/`nuclei`/`subfinder` —
-> les binaires `dnsx`, `naabu`, `katana`, `amass`, `gau`, `gospider`, `feroxbuster`, `ffuf`, `masscan`,
+> les binaires `dnsx`, `naabu`, `katana`, `amass`, `gau`, `feroxbuster`, `ffuf`,
 > `gobuster`, `whatweb`, `wafw00f`, `wfuzz`, `nikto`, `testssl.sh`, `dalfox`, `sqlmap`. Les modules du
 > **catalogue OSS** (`recon.dnsx`, `recon.amass`, `web.nikto`, `web.testssl`, `xss.dalfox`, `sqli.sqlmap`…)
 > ainsi que les modules natifs à **outil optionnel** (`recon.content` → ffuf, `recon.waf` → wafw00f,

@@ -579,7 +579,7 @@ class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
     lents restent TOUS planifiés, juste après (defer != delete)."""
 
     _FAST = ("recon.httpx", "web.security_headers", "web.nuclei", "recon.tech")
-    _SLOW = ("web.nikto", "web.testssl", "recon.content", "recon.katana", "recon.gospider")
+    _SLOW = ("web.nikto", "web.testssl", "recon.content", "recon.katana")
 
     @staticmethod
     def _discovered_service_graph():

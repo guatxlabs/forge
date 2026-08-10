@@ -46,7 +46,7 @@ NEW_KINDS = {
 # pipeline / modules --json / flags cohérents / deps enregistrées) s'appliquent AUSSI aux nouveaux.
 CATALOG_KINDS = {
     "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",
-    "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",
+    "recon.katana", "recon.gau", "recon.feroxbuster",
     "recon.whatweb", "recon.wafw00f",
     "web.nikto", "web.wpscan", "web.testssl", "xss.dalfox", "sqli.sqlmap",
 } | NEW_KINDS

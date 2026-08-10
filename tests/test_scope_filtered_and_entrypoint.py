@@ -205,7 +205,7 @@ class TestCrawlerEndpointsAllFiltered(unittest.TestCase):
                      {"in_scope": ["lab.test"]})
 
     def test_count_reported_and_urls_never_leaked(self):
-        for kind in ("recon.gau", "recon.katana", "recon.gospider"):
+        for kind in ("recon.gau", "recon.katana"):
             with self.subTest(kind=kind):
                 f = self._all_filtered(kind)
                 self.assertEqual(len(f), 1)

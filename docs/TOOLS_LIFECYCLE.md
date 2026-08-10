@@ -1,7 +1,7 @@
 # Cycle de vie des outils — manifeste unique + surcouche runtime
 
 Forge télécharge une douzaine de binaires de sécurité externes (httpx, nuclei, subfinder, dnsx, naabu,
-katana, amass, gau, gospider, dalfox, feroxbuster, ffuf ; `nmap` et la suite `apt` sont installés
+katana, amass, gau, dalfox, feroxbuster, ffuf ; `nmap` et la suite `apt` sont installés
 autrement). Cette page décrit **où vivent leurs versions**, **comment ils sont vérifiés**, et **comment
 en installer ou en mettre à jour un sans reconstruire l'image**.
 

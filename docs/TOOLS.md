@@ -165,8 +165,8 @@ rien à faire :
 
 - **Cœur / recon de base** : `nmap`, `curl`, `dig` (dnsutils), `httpx`, `nuclei`, `subfinder`.
 - **Suite ProjectDiscovery étendue** : `dnsx` (recon.dnsx), `naabu` (recon.naabu), `katana` (recon.katana).
-- **Recon / énumération** : `amass` (recon.amass), `gau` (recon.gau), `gospider` (recon.gospider),
-  `feroxbuster` (recon.feroxbuster), `ffuf` (recon.content), `masscan` (recon.masscan),
+- **Recon / énumération** : `amass` (recon.amass), `gau` (recon.gau),
+  `feroxbuster` (recon.feroxbuster), `ffuf` (recon.content),
   `gobuster` (recon.gobuster_dns), `whatweb` (recon.whatweb), `wafw00f` (recon.wafw00f), `wfuzz` (fuzz.wfuzz).
 - **Scan web / TLS / XSS / SQLi** : `nikto` (web.nikto), `testssl.sh` (web.testssl), `dalfox` (xss.dalfox),
   `sqlmap` (sqli.sqlmap, gaté par le plancher exploit).
@@ -206,6 +206,46 @@ outils apt/git (sqlmap, nikto, testssl.sh, whatweb, wafw00f, wfuzz, gobuster) re
 > `gobuster` exige un **chemin de fichier lisible par le processus** (attention : via le repli
 > `docker_image`, `runner` ne monte aucun volume — une wordlist de l'hôte n'y est pas visible ;
 > installer le binaire local, ou utiliser `dnsx` avec une liste inline).
+
+> **Sept images déclarées, un outil retiré (2026-08-10) — l'outil ABSENT, l'autre moitié du problème.**
+> Une campagne réelle a sauté **375 actions** en « module indisponible (outil sous-jacent absent) »
+> (15 outils × 25 cibles), dont **tous** les outils de découverte : le run n'a atteint que **9 URLs**.
+> Onze de ces entrées ne déclaraient aucune image : hors d'un environnement qui installe le binaire,
+> elles ne pouvaient rien faire d'autre que se déclarer indisponibles. Chaque image ci-dessous a été
+> **tirée, exécutée contre une cible loopback jetable, et sa sortie réellement parsée** — argv ET
+> `parser_regex` vérifiés contre la version de l'image, jamais déduits.
+>
+> | Module | Image déclarée | Provenance |
+> |---|---|---|
+> | `recon.feroxbuster` | `epi052/feroxbuster` (`prefer_docker`) | Docker Hub de l'auteur ; **embarque sa wordlist** |
+> | `recon.gau` | `sxcurity/gau` | l'image que désigne le README amont (`lc/gau`) |
+> | `recon.amass` | `caffix/amass` | label OCI `source = github.com/owasp-amass/amass` |
+> | `web.nikto` | `ghcr.io/sullo/nikto` | label OCI `source = github.com/sullo/nikto` |
+> | `web.testssl` | `drwetter/testssl.sh` | Docker Hub de l'auteur |
+> | `web.wpscan` | `wpscanteam/wpscan` | label OCI `source = github.com/wpscanteam/wpscan` |
+> | `xss.dalfox` | `hahwul/dalfox` + `--entrypoint /app/dalfox` | label OCI `source = github.com/hahwul/dalfox` |
+>
+> **Trois entrées restent BINAIRE-SEUL** — `recon.whatweb`, `recon.wafw00f`, `sqli.sqlmap` : aucune
+> image n'est publiée sous le nom du projet (vérifié), et on ne comble pas le trou avec un rebuild
+> tiers (`secsi/…`, `googlesky/…`) — c'est la règle qui a écarté `secsi/theharvester`. Elles tournent
+> dans l'image Forge `full` (apt) et y dégradent proprement ailleurs.
+>
+> **`recon.gospider` est RETIRÉ.** Son argv et son parseur étaient pourtant JUSTES (mesuré : rc=0,
+> 5 URLs parsées) — c'est la **disponibilité** qui décide : aucune image publiée en amont (le README
+> ne propose qu'un `docker build` à faire soi-même). **`recon.katana` fait le même travail** (crawl →
+> endpoints chaînables → oracles à injection) **avec une image officielle** : la couverture ne perd
+> rien de fonctionnel.
+>
+> **Ce que la mesure a corrigé au passage** — quatre entrées rendaient des phrases fausses :
+> `xss.dalfox` ne pouvait produire aucun hit (image sans entrypoint → rc=127 ; cible positionnelle
+> refusée en 3.x → `--url` ; `--only-poc` devenu à-valeur-obligatoire) ; `recon.feroxbuster` sortait
+> **rc=0 stdout vide** sans wordlist — le silence que la garde `rc != 0` ne rattrape pas, et il était
+> en vigueur **dans l'image livrée** (binaire installé, SecLists non : le `Dockerfile` pose désormais
+> la liste, épinglée SHA256) ; `web.testssl` réduisait ses findings au mot-clé « NOT ok » et comptait
+> « not vulnerable (OK) » comme une vulnérabilité ; `web.wpscan` ne capturait QUE l'avis « No WPScan
+> API Token » pendant que ses vrais constats, indentés, lui échappaient. `web.nikto` rendait son
+> en-tête de rapport comme findings et `recon.whatweb` embarquait des séquences ANSI dans le ledger.
+> Ces sorties réelles sont figées dans `tests/test_toolcatalog_measured_invocation.py`.
 
 ### La voie `docker run` du runner — ce qu'elle construit, et ce qu'elle refuse
 
@@ -286,7 +326,7 @@ outil chargé tant que rien n'est déposé — cf. §4/§5(a) : binaire absent �
 ### (d) Installer/mettre à jour un outil **du catalogue Forge** sans rebuild — `forge tools`
 
 Les trois voies ci-dessus servent à apporter **votre** outil. Pour les binaires que Forge connaît déjà
-(httpx, nuclei, subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf), il
+(httpx, nuclei, subfinder, dnsx, naabu, katana, amass, gau, dalfox, feroxbuster, ffuf), il
 existe une voie dédiée : `forge tools install|update|remove <nom>`. Elle télécharge la version du
 **manifeste** [`forge/tools.json`](../forge/tools.json), **vérifie son SHA256 épinglé**, et pose le
 binaire dans le volume outils persistant `/data/tools/bin` — en tête du `PATH`, devant le
@@ -348,8 +388,8 @@ lancer par son **nom** (pas via un interpréteur, cf. l'argv no-shell §4). Le t
 > est **`python3`** (le profil `full` ajoute aussi `python3-pip`/`python3-venv` pour le moteur PDF weasyprint,
 > toujours du Python) ; la suite de scanners étendue tire en plus **`ruby`** (dépendance de `whatweb`) et
 > **`perl`** (+ modules, pour `nikto`). Les **binaires/scripts** livrés en `full` : `nmap`, `curl`, `dig`
-> (dnsutils), `httpx`, `nuclei`, `subfinder`, `dnsx`, `naabu`, `katana`, `amass`, `gau`, `gospider`,
-> `feroxbuster`, `ffuf`, `masscan`, `gobuster`, `whatweb`, `wafw00f`, `wfuzz`, `nikto`, `testssl.sh`,
+> (dnsutils), `httpx`, `nuclei`, `subfinder`, `dnsx`, `naabu`, `katana`, `amass`, `gau`,
+> `feroxbuster`, `ffuf`, `gobuster`, `whatweb`, `wafw00f`, `wfuzz`, `nikto`, `testssl.sh`,
 > `dalfox`, `sqlmap` (liste §4(a)). **Ni `node` ni `php`** — pour ces langages, fournissez l'interpréteur
 > vous-même (colonne ci-dessus).
 

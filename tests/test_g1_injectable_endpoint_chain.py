@@ -111,7 +111,7 @@ class TestCrawlEmitsInjectableEndpoints(unittest.TestCase):
             self.assertNotEqual(x.status, "vulnerable")
 
     def test_gospider_and_gau_also_emit_endpoint_discovery(self):
-        for kind in ("recon.gospider", "recon.gau"):
+        for kind in ("recon.gau",):
             m = mods.get(kind)
             tgt = "app.test" if kind != "recon.gau" else "app.test"
             out = "http://app.test/search?q=1\n"
@@ -122,7 +122,7 @@ class TestCrawlEmitsInjectableEndpoints(unittest.TestCase):
             self.assertIn(EP_MARK, titles[0])
 
     def test_spec_flag_enabled_on_crawlers(self):
-        for kind in ("recon.katana", "recon.gospider", "recon.gau"):
+        for kind in ("recon.katana", "recon.gau"):
             self.assertTrue(mods.get(kind).spec.emit_endpoint_discovery, kind)
 
 

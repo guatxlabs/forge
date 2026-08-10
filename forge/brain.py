@@ -24,7 +24,7 @@ from . import techniques
 
 # Priorité d'ORDONNANCEMENT des scanners de CONTENU HTTP (EV = value*confidence/cost, cf. planner). Les
 # scanners RAPIDES à FORT SIGNAL (fingerprint HTTP, en-têtes de sécurité, nuclei, techno) doivent passer
-# AVANT les ÉNUMÉRATEURS LENTS (nikto, testssl, feroxbuster/content, katana, gospider) : sinon, à budget de
+# AVANT les ÉNUMÉRATEURS LENTS (nikto, testssl, feroxbuster/content, katana) : sinon, à budget de
 # temps borné, `web.nuclei` — le scanner le plus productif vs un scan manuel — restait ordonné DERRIÈRE
 # ~40 oracles par port (EV du sweep ~0.25) et n'était JAMAIS atteint (T27), et un nikto qui hang gelait
 # tout le pipeline avant que le moindre verdict profond ne sorte. C'est un RÉ-ORDONNANCEMENT (pas un
@@ -40,7 +40,6 @@ _CONTENT_SCANNER_EV = {
     "recon.waf":            (0.6, 0.6, 1.0),   # 0.36 — détection WAF/CDN
     "recon.content":        (0.4, 0.4, 2.0),   # 0.08 — feroxbuster/ffuf (brute de répertoires, LENT)
     "recon.katana":         (0.4, 0.4, 2.0),   # 0.08 — crawl (LENT)
-    "recon.gospider":       (0.4, 0.4, 2.0),   # 0.08 — crawl (LENT)
     "web.nikto":            (0.35, 0.4, 2.0),  # 0.07 — scan de vulns web (LENT, sujet aux hangs)
     "web.testssl":          (0.3, 0.4, 3.0),   # 0.04 — audit TLS (TRÈS LENT)
 }
@@ -116,13 +115,13 @@ class HeuristicBrain(Brain):
 
     # SET COMPLET des scanners de CONTENU HTTP chaînés sur un SERVICE WEB DÉCOUVERT (host:port). Le plan de
     # base ne sème que httpx+nuclei sur un host web ; sur un port DÉCOUVERT (nmap/httpx/naabu/masscan), on
-    # chaîne TOUT le panel de contenu — sinon nikto/tech/waf/content/katana/gospider/testssl/security_headers
+    # chaîne TOUT le panel de contenu — sinon nikto/tech/waf/content/katana/testssl/security_headers
     # ne l'atteignaient JAMAIS en AUTO (ils tapaient le bare :80). Chaque scanner est re-gaté par le ROE
     # (host:port hors-scope -> VETO) et dégrade proprement s'il n'est pas HTTP. httpx/nuclei y figurent aussi
     # (déjà semés par le plan de base -> dédupliqués par l'id d'action stable). Borné : ≤ MAX_CHAIN_TARGETS
     # services découverts × ce set.
     HTTP_CONTENT_SCANNERS = ("recon.httpx", "web.nuclei", "web.nikto", "recon.tech", "recon.waf",
-                             "recon.content", "recon.katana", "recon.gospider", "web.testssl",
+                             "recon.content", "recon.katana", "web.testssl",
                              "web.security_headers")
 
     def propose(self, graph_state):
@@ -326,14 +325,14 @@ class HeuristicBrain(Brain):
         # (g) SERVICE WEB DÉCOUVERT (host:port émis par nmap/httpx/naabu/masscan avec DISCOVERY_SERVICE_MARKER)
         # -> chaîner le SET COMPLET des scanners de CONTENU HTTP sur ce service, pas juste httpx+nuclei du
         # plan de base. C'est le correctif du trou E1 : un port découvert n'était scanné (en AUTO) que par
-        # httpx+nuclei ; nikto/tech/waf/content/katana/gospider/testssl/security_headers ne l'atteignaient
+        # httpx+nuclei ; nikto/tech/waf/content/katana/testssl/security_headers ne l'atteignaient
         # jamais et tapaient le bare :80. `host` EST le host:port (nœud dérivé). Chaque scanner est re-gaté
         # par le ROE à la vague suivante (host:port hors-scope -> VETO), dégrade proprement si non-HTTP (C1),
         # et l'id d'action stable dédoublonne httpx/nuclei déjà semés. Borné (≤ MAX_CHAIN_TARGETS × le set).
         if self._discovery_marker(graph, host) == techniques.DISCOVERY_SERVICE_MARKER:
             for kind in self.HTTP_CONTENT_SCANNERS:
                 # EV PAR TIER (`_CONTENT_SCANNER_EV`) : les rapides à fort signal (httpx/security_headers/
-                # nuclei/tech) passent AVANT les lents (nikto/testssl/ferox/katana/gospider) — l'ORDRE change,
+                # nuclei/tech) passent AVANT les lents (nikto/testssl/ferox/katana) — l'ORDRE change,
                 # aucun scanner n'est retiré (tous restent chaînés/planifiés, juste plus tard pour les lents).
                 out.append(_content_scanner_action(
                     kind, host, f"scanner de contenu HTTP sur service découvert {host} (chaîné)"))

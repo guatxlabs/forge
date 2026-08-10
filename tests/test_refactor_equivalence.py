@@ -125,7 +125,7 @@ EXPECTED_KINDS = {
     "mobile.apk",                                                 # analyse APK/IAP via MobSF/apktool (externe documenté)
     # LOT MIGRATION-SUPERSET — outils OSS PRÉ-WRAPPÉS via ToolSpec (toolcatalog.py), self-registering, dégradent si absent
     "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",    # découverte de surface (subdomains/DNS/ports)
-    "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",  # crawl / URLs d'archive / content discovery
+    "recon.katana", "recon.gau", "recon.feroxbuster",  # crawl / URLs d'archive / content discovery
     "recon.whatweb", "recon.wafw00f",                            # fingerprint techno / détection WAF
     "web.nikto", "web.wpscan", "web.testssl",                    # scanners serveur web / WordPress / TLS (reported_by_tool)
     "xss.dalfox",                                                # scanner XSS (access, reported_by_tool)

@@ -231,6 +231,13 @@ RUN set -eux; \
 #   SERVEUR REST, pas la CLI), le second se TAIT sans échouer sur une machine multi-homed (rc=0, stdout
 #   vide) — donc son argv corrigé aurait produit un `tested` mensonger là où l'échec produisait un
 #   `skipped` juste. `recon.naabu` couvre les ports ; `subfinder`/`amass`/crt.sh couvrent les sous-domaines.
+#   gospider a été RETIRÉ à son tour (2026-08-10) : aucune image publiée en amont, et `katana` — même
+#   fonction, image officielle — le couvre. Le binaire `gospider` n'est donc plus utile ici ; il reste
+#   dans `tools.json` (groupe extended) tant que le manifeste n'est pas re-coupé, sans module qui le sonde.
+# DEPUIS 2026-08-10 : les modules de ce catalogue déclarent des IMAGES DOCKER VÉRIFIÉES (feroxbuster,
+#   gau, amass, nikto, testssl, wpscan, dalfox). Elles ne changent RIEN à cette image (pas de démon
+#   docker dedans → la voie binaire reste la seule ici) : elles servent aux déploiements où Forge tourne
+#   à côté d'un docker (standalone/dev), où ces outils étaient purement indisponibles.
 # En `mini`, CHAQUE bloc ci-dessous s'auto-court-circuite (exit 0) → les modules dégradent proprement
 # en available:false (déjà géré par l'engine). Le profil `mini` reste donc BYTE-IDENTIQUE à avant.
 # =============================================================================
@@ -277,6 +284,37 @@ RUN set -eux; \
     git -C /opt/nikto checkout -q "${NIKTO_SHA}"; \
     ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto; \
     rm -rf /opt/testssl.sh/.git /opt/nikto/.git
+
+# (3) WORDLIST PAR DÉFAUT DE feroxbuster — CE N'EST PAS UN CONFORT, C'EST LA FERMETURE D'UN SILENCE.
+#   MESURÉ dans CETTE image, avant ce bloc : `feroxbuster --silent -u <cible>` sort **rc=0 avec un
+#   stdout VIDE**, le motif n'apparaissant que sur stderr (« Could not open /usr/share/seclists/
+#   Discovery/Web-Content/raft-medium-directories.txt »). Or `blindness.tool_did_not_run` borne son
+#   rattrapage à `rc != 0` : le module concluait donc « recon.feroxbuster — aucun hit », c'est-à-dire
+#   « j'ai vérifié, rien trouvé », sur une cible JAMAIS balayée. C'est le motif exact qui a fait
+#   RETIRER masscan du catalogue — sauf qu'ici il frappait l'outil de découverte de contenu n°1, dans
+#   l'image livrée, à chaque action. La voie docker (image `epi052/feroxbuster`, qui embarque sa liste)
+#   ne sauve pas ce cas : DANS le conteneur Forge il n'y a pas de démon docker, donc le binaire local
+#   est la SEULE voie possible.
+#   POURQUOI LA VRAIE LISTE, ET PAS UN LIEN VERS CELLE DE wfuzz (déjà présente) : le chemin est le
+#   défaut COMPILÉ de feroxbuster ; y poser un fichier qui n'est pas SecLists sous le nom
+#   `raft-medium-directories.txt` mentirait à quiconque inspecte l'image. On télécharge donc le
+#   fichier RÉEL (250 Ko), depuis un TAG immuable, ÉPINGLÉ PAR SHA256 — même discipline d'intégrité
+#   que la boucle du manifeste plus haut. Aucun chemin machine-spécifique n'entre dans le catalogue :
+#   le spec continue de n'avoir AUCUN défaut en dur (`params.wordlist` reste le seul réglage).
+RUN set -eux; \
+    SECLISTS_TAG=2024.3; \
+    WL_SHA=862169ffa761ec93ef43b12ce43c5408f1f3d501b564b50d66bf3666a0cf50a2; \
+    WL_DIR=/usr/share/seclists/Discovery/Web-Content; \
+    if [ "${FORGE_TOOLS_PROFILE}" != "full" ]; then \
+        echo "[forge] mini -> wordlist feroxbuster OMISE ; recon.feroxbuster -> available:false (binaire absent)."; \
+        exit 0; \
+    fi; \
+    mkdir -p "$WL_DIR"; \
+    curl -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors \
+         --connect-timeout 30 --max-time 300 \
+         "https://raw.githubusercontent.com/danielmiessler/SecLists/${SECLISTS_TAG}/Discovery/Web-Content/raft-medium-directories.txt" \
+         -o "$WL_DIR/raft-medium-directories.txt"; \
+    echo "${WL_SHA}  $WL_DIR/raft-medium-directories.txt" | sha256sum -c -
 
 # Moteur PDF (weasyprint) — profil `full` uniquement, pour que `?format=pdf` marche clé-en-main.
 # ── weasyprint est PUR-PYTHON (pip), il n'ajoute NI Go NI Ruby (la claim de composition tient).

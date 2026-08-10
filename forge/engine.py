@@ -50,7 +50,7 @@ _SCOPE_INJECT_KINDS = frozenset({
     # résolus, ports, URLs crawlées/archivées, routes) : le périmètre injecté sert au wrapper à RE-VALIDER
     # fail-closed chaque asset découvert avant d'émettre un finding (jamais un asset hors périmètre).
     "recon.subfinder", "recon.amass", "recon.dnsx", "recon.naabu",
-    "recon.katana", "recon.gau", "recon.gospider", "recon.feroxbuster",
+    "recon.katana", "recon.gau", "recon.feroxbuster",
     # ORACLES à VÉRIFICATION qui sondent des URL DÉRIVÉES de params (urls/whoami/bypass/admin_urls,
     # IDs énumérés, cible d'origine) : le périmètre injecté active leur scope-guard PAR-URL fail-closed
     # (ScopeGuardedOracle) pour qu'aucune requête — ni le matériel de session gouverné qu'elle porte —
