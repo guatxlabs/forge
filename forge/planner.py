@@ -153,7 +153,9 @@ STAGE_VERIFY = 1           # consomme la surface connue (oracles, scanners, expl
 #: et non de la surface nouvelle à découvrir. Aucun consommateur de la vague n'attend son résultat au
 #: sens où un scanner attend les URLs d'un crawler. Le faire attendre coûtait très cher : il pèse
 #: **1 864 s sur le run de référence, soit 24 % de tout le travail mesuré et 51 % d'un budget de
-#: 3 600 s** (dont un tir unique de 1 799 s, module SANS borne déclarée donc non gatable). Le classer
+#: 3 600 s** (dont un tir unique de 1 799 s — le module ne déclarait alors AUCUNE borne, donc la gate
+#: absolue de `Engine._budget_gate` fail-open ; il en déclare une depuis, `origin.MAX_RUNTIME` = 600 s,
+#: ce qui borne le débordement mais ne change RIEN à son classement d'étage). Le classer
 #: producteur bloquait la frontière de replanification derrière lui. Mesuré au banc
 #: `tests/bench_wave_reach.py`, à identique par ailleurs :
 #:      budget 2400 s : 45 actions / 0 URL / 15 kinds  ->  1 234 / 32 / 49
@@ -161,8 +163,16 @@ STAGE_VERIFY = 1           # consomme la surface connue (oracles, scanners, expl
 #:      budget 5918 s : 1 288 / 32 / 55 kinds          ->  1 292 / 32 / 58
 #: Strictement meilleur à TOUS les budgets. Il reste évidemment PLANIFIÉ (consommateur ordinaire,
 #: ordonné par son EV) : rien n'est retiré, seul son rang change.
+#:
+#: `recon.content` Y FIGURE DEPUIS QU'IL ÉMET — et le classement N'A PAS BASCULÉ TOUT SEUL : `stage()`
+#: dérive de `surface_producers()`, qui n'ajoute automatiquement que les modules à `ToolSpec`
+#: (`asset_hits`). Un module NATIF doit être inscrit ICI, et c'est le test d'équivalence ci-dessus qui
+#: l'a EXIGÉ dès que le marqueur est apparu dans son source (vérifié : suite rouge avant l'ajout).
+#: Il rejoint ainsi son jumeau spec-driven `recon.feroxbuster` (même technique, même T1595.003), qui
+#: était déjà producteur.
 NATIVE_SURFACE_PRODUCERS = frozenset({
     "evasion.discover",     # franchit le challenge et émet des endpoints (DISCOVERY_ENDPOINT_MARKER)
+    "recon.content",        # routes ffuf in-scope -> DISCOVERY_ENDPOINT_MARKER (chaînables)
     "recon.httpx",          # ports HTTP confirmés -> DISCOVERY_SERVICE_MARKER (host:port chaînable)
     "recon.js_endpoints",   # endpoints référencés dans le JS -> DISCOVERY_ENDPOINT_MARKER
     "recon.nmap",           # services -> DISCOVERY_SERVICE_MARKER

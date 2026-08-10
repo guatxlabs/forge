@@ -66,9 +66,60 @@ DEFAULT_PATHS = [
     "version", ".well-known/security.txt",
 ]
 
+#: Statuts sur lesquels un oracle peut RÉELLEMENT interroger la route (le serveur a SERVI quelque
+#: chose). Les autres codes de `MATCH_CODES` (401/403/405/500) attestent qu'une route EXISTE mais la
+#: referment : ils restent des constats, et passent en QUEUE de la sélection chaînable pour que le cap
+#: ne sacrifie pas la surface interrogeable. Même intention que « injectables d'abord »
+#: (`_discovery._partition_endpoints`), appliquée à ce que ffuf sait de la route.
+PROBEABLE_STATUS = frozenset({200, 201, 202, 203, 204, 301, 302, 307, 308})
+
 
 @register("recon.content")
 class ContentDiscovery(FlagAllowlistMixin, PassiveSurface):
+    """Découverte ACTIVE de contenu/routes (ffuf) — et PRODUCTEUR DE SURFACE, ce qu'il n'était pas.
+
+    LE DÉFAUT, ET LA PREUVE QUE C'ÉTAIT UN OUBLI (pas un choix)
+    ------------------------------------------------------------
+    Ce module trouvait des routes et n'émettait QUE `DISCOVERY_CHALLENGE_MARKER` — jamais
+    `DISCOVERY_ENDPOINT_MARKER`. Ses trouvailles n'étaient donc chaînées par AUCUN oracle : l'edge (e)
+    du cerveau ne s'allume que sur ce marqueur. Mesuré sur 12 routes rendues par un ffuf stubbé :
+    **12 nœuds ajoutés au graphe, 0 action proposée sur les 12** — des culs-de-sac purs.
+
+    QUATRE FAITS DISENT « OUBLI » :
+      1. le module PAYAIT DÉJÀ le prix de la chaînabilité : chaque route sort avec `target=<URL>`, et
+         `graph.add_finding` en fait un NŒUD (`add_host`). 12 nœuds pour 0 action, c'est du coût pur —
+         un refus DÉLIBÉRÉ de chaîner aurait rattaché les routes à l'hôte, comme le fait son propre
+         finding de synthèse (et comme fait `recon.waf`) ;
+      2. il est CÂBLÉ dans le pont challenge->évasion (edge (f)) : quand ffuf ne voit que des codes de
+         blocage, il DEMANDE `evasion.discover` pour aller chercher des endpoints. Ce pont n'a de sens
+         que si sa sortie NORMALE est, précisément, de la surface pour les oracles ;
+      3. son jumeau spec-driven `recon.feroxbuster` — MÊME technique, MÊME `T1595.003` — est classé
+         PRODUCTEUR (`asset_hits`, via `phase="recon"`). (Il porte d'ailleurs LE MÊME défaut : son
+         spec ne pose pas `emit_endpoint_discovery`, donc ses hits sortent en `feroxbuster: <URL>`
+         avec `target=<URL>` et sont eux aussi des culs-de-sac — mesuré : 6 URLs, 0 action. C'est un
+         second point de correction, dans `toolcatalog.py`, hors du périmètre de ce lot) ;
+      4. le titre était à un mot du marqueur partagé : « Route in-scope » vs « Endpoint in-scope ».
+    Rien, ni dans le source, ni dans les tests, ni dans l'historique du fichier (deux commits : la
+    release initiale et l'ajout SPDX), ne formule la moindre réserve sur la QUALITÉ de ces routes.
+
+    LE RISQUE INVERSE — INONDER LES ORACLES — EST TRAITÉ, SANS ÉCRIRE DE SECONDE CONTRE-MESURE
+    -------------------------------------------------------------------------------------------
+    Un brute-force de chemins peut rendre des routes fantômes (cible catch-all qui répond 200 à tout)
+    ou fermées (401/403/405/500 sont dans `MATCH_CODES`). Trois garde-fous, tous DÉJÀ dans le dépôt :
+      · `Oracle.path_discrimination` couvre le SEUL consommateur capable de tirer un verdict de
+        l'existence d'un chemin (`framework.exposure`, et `race.condition`) : sur une cible qui répond
+        2xx à des chemins de contrôle aléatoires, il rend `skipped`. Les oracles que l'edge (e) chaîne
+        sur une route SANS paramètre (idor / sqli / xss) ne peuvent, eux, RIEN conclure d'un chemin
+        fantôme — ils dégradent en « config manquante » / absence de différentiel ;
+      · la SÉLECTION est celle des autres émetteurs (`_select_endpoints`) : non-cibles d'infra
+        écartées et NOMMÉES, périmètre re-validé fail-closed, cap `crawl_max_endpoints` (25) ;
+      · le fan-out du cerveau (`content_fanout_max`, 32) s'applique enfin à ces nœuds — il ne s'appliquait
+        PAS avant, puisqu'il ne borne que les cibles porteuses d'un marqueur de découverte. Marquer les
+        routes les fait donc ENTRER dans une borne à laquelle elles échappaient.
+    Les routes au-delà du cap ne disparaissent pas : elles gardent leur constat « Route in-scope »
+    (non chaînée, et le finding le DIT).
+    """
+
     kind = "recon.content"
     mitre = techniques.mitre_for("recon.content")            # T1595.003 (source de vérité : techniques.py)
     tool = "forge/modules/recon_active.py:recon.content"
@@ -232,21 +283,50 @@ class ContentDiscovery(FlagAllowlistMixin, PassiveSurface):
             return [self._finding(target, "recon.content — aucune route découverte",
                                   f"ffuf: {n_paths} chemin(s) testé(s), aucune route sur code(s) {self.MATCH_CODES}.",
                                   self.dry(action))]
+        # SÉLECTION CHAÎNABLE (cf. le bloc « ce module PRODUIT de la surface » en tête de classe) :
+        # la MÊME sélection que les autres émetteurs de découverte (`PassiveSurface._select_endpoints` :
+        # dédup, non-cibles d'infra, re-validation fail-closed, cap `crawl_max_endpoints`), appliquée à
+        # des routes ORDONNÉES interrogeables d'abord. L'évidence, elle, reste celle de ce module — il a
+        # un statut HTTP RÉEL, là où le gabarit partagé dirait « jamais appelé ici » (ce serait faux).
+        chain, dropped_infra = self._select_endpoints(action, self._by_probeability(kept, target))
+        chain_set = set(chain)
         findings = [self._finding(
             target, f"Routes découvertes (ffuf) : {len(kept)} in-scope",
             (f"{len(kept)} route(s) sur {n_paths} chemin(s) testé(s) "
-             f"({len(results) - len(kept)} hors périmètre écartée(s)). "
+             f"({len(results) - len(kept)} hors périmètre écartée(s)) ; "
+             f"{len(chain_set)} chaînée(s) vers les oracles. "
              f"Exemples : {', '.join(sorted(str(r.get('url')) for r in kept)[:30]) or '—'}"),
             self.dry(action))]
         for r in kept[:self.MAX_ROUTES]:
             url = r.get("url") or target
             code, length, redir = r.get("status"), r.get("length"), r.get("redirect")
+            chained = url in chain_set
             findings.append(self._finding(
-                url, f"Route in-scope : {url} [{code}]",
+                url,
+                (f"{techniques.DISCOVERY_ENDPOINT_MARKER} : {url} [{code}]" if chained
+                 else f"Route in-scope : {url} [{code}]"),
                 (f"HTTP {code} ; length={length}" + (f" ; -> {redir}" if redir else "")
-                 + " (découverte, jamais exploitée)"),
+                 + " (découverte, jamais exploitée)"
+                 + (" — nouvelle surface chaînable : le cerveau y branche les oracles de vérification."
+                    if chained else
+                    f" — au-delà du cap de fan-out ({len(chain_set)} chaînée(s)) ou non-cible d'infra : "
+                    f"CONSIGNÉE, non chaînée.")),
                 f"curl -sI {url}"))
+        if dropped_infra:
+            findings.append(self._infra_non_target_finding(action, dropped_infra))
         return findings
+
+    @staticmethod
+    def _by_probeability(kept, target):
+        """URLs des routes retenues, INTERROGEABLES D'ABORD (tri STABLE sur `PROBEABLE_STATUS`) : le cap
+        de la sélection ne doit pas sacrifier les routes qu'un oracle peut réellement questionner au
+        profit de 403 qui attestent une existence et referment la porte. Pur, ne lève jamais."""
+        def _rank(r):
+            try:
+                return 0 if int(r.get("status")) in PROBEABLE_STATUS else 1
+            except (TypeError, ValueError):
+                return 1
+        return [str(r.get("url") or target) for r in sorted(kept, key=_rank)]
 
     @staticmethod
     def _parse_ffuf(out):

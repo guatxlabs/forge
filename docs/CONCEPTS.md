@@ -263,7 +263,7 @@ le **balayage auto-pentest**, qui contournait l'intention d'ordre portée par le
 1. **L'étage de tri.** `planner.order()` trie par `(étage, -EV)`. L'étage vaut `STAGE_SURFACE` pour les
    kinds qui **produisent** de la surface — dérivé du `ToolSpec` (`asset_hits`/`emit_*_discovery` :
    katana, gau, subfinder, amass, feroxbuster, naabu, dnsx, gobuster) et d'une liste de kinds natifs
-   *vérifiée contre le source des modules* (httpx, js_endpoints, urls, subdomains, nmap,
+   *vérifiée contre le source des modules* (httpx, js_endpoints, urls, subdomains, nmap, content,
    evasion.discover) — `STAGE_VERIFY` pour tout le reste. Un producteur **sur un endpoint déjà dérivé**
    n'est pas un producteur (il n'élargit rien) ; `origin.find` non plus (il publie une **route
    alternative** vers la surface connue, pas de la surface nouvelle).

@@ -307,12 +307,31 @@ class PassiveSurface(ScopeGuardMixin, Module):
         `extra_dropped` : non-cibles écartées PLUS TÔT par l'appelant (ex. les `<script src>` d'edge que
         `recon.js_endpoints` refuse de récupérer) — fusionnées dans le MÊME constat, pour qu'il en reste
         UN SEUL par action au lieu d'un par point d'écart."""
-        out, dropped = [], list(extra_dropped)
+        kept, dropped = self._select_endpoints(action, urls, extra_dropped=extra_dropped)
+        out = [self._finding(
+            u, f"{marker} : {u}",
+            "Endpoint in-scope référencé (cartographie de surface — jamais appelé ici).",
+            f"# endpoint in-scope à vérifier : {u}") for u in kept]
+        if dropped:
+            out.append(self._infra_non_target_finding(action, dropped))
+        return out
+
+    def _select_endpoints(self, action, urls, extra_dropped=()):
+        """(endpoints RETENUS, non-cibles ÉCARTÉES) — SOURCE UNIQUE de la SÉLECTION d'endpoints
+        chaînables : dédup (ordre préservé), non-cibles d'infra reconnues AVANT le scope-guard,
+        re-validation fail-closed du périmètre, cap `crawl_max_endpoints`.
+
+        Extraite de `_endpoint_findings` (dont elle ne change RIEN au rendu) parce qu'un second
+        émetteur en a besoin SANS son évidence : `recon.content` a, lui, un STATUT HTTP réel à
+        rapporter — « jamais appelé ici » y serait faux. Un module qui recopierait la sélection pour
+        écrire sa propre évidence ferait diverger le cap, le filtre d'infra et le scope-guard : c'est
+        exactement la dérive que ce dépôt ferme partout ailleurs. Pur, ne lève jamais."""
         allow = action.params.get("in_scope", ())            # échappatoire 1 : le périmètre nomme le namespace
         # Cap RÉSOLU par profil de ressources (`crawl_max_endpoints`) : override éventuel > profil >
         # défaut-classe (`self.MAX_ENDPOINTS`, préservant un éventuel override de sous-classe). `balanced`
         # == 25 == défaut -> byte-identique ; `low` réduit (10), `full` élargit (50).
         max_endpoints = resource_profile.resolve("crawl_max_endpoints", default=self.MAX_ENDPOINTS)
+        out, dropped = [], list(extra_dropped)
         for u in list(dict.fromkeys(urls)):                  # dédup en préservant l'ordre
             if len(out) >= max_endpoints:
                 break
@@ -323,13 +342,8 @@ class PassiveSurface(ScopeGuardMixin, Module):
                 continue
             if not self._host_in_scope(action, _host_only(u)):   # défense en profondeur (fail-closed)
                 continue
-            out.append(self._finding(
-                u, f"{marker} : {u}",
-                "Endpoint in-scope référencé (cartographie de surface — jamais appelé ici).",
-                f"# endpoint in-scope à vérifier : {u}"))
-        if dropped:
-            out.append(self._infra_non_target_finding(action, dropped))
-        return out
+            out.append(u)
+        return out, dropped
 
     def _infra_non_target_finding(self, action, dropped):
         """CONSTAT UNIQUE des non-cibles d'infra écartées de la cartographie (`status='skipped'`).

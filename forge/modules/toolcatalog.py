@@ -388,6 +388,10 @@ CATALOG_SPECS = [
         docker_image="epi052/feroxbuster", prefer_docker=True,
         depends_on=("recon.httpx",), parser="regex", parser_regex=r"https?://\S+",
         hit_status="tested", severity="INFO",
+        # SANS ceci, ses hits sortaient en `feroxbuster: <URL>` SANS marqueur : 6 URLs -> 6 nœuds
+        # au graphe -> **0 action**. Il était CLASSÉ producteur (`asset_hits`) tout en ne
+        # produisant que des culs-de-sac — le même trou que `recon.content`, à deux endroits.
+        emit_endpoint_discovery=True,
         params_schema=(
             {"name": "wordlist", "type": "text", "label": "wordlist (-w, chemin)", "flag": "-w"},
             {"name": "rate", "type": "number", "label": "rate-limit (--rate-limit req/s)", "flag": "--rate-limit"},

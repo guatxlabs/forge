@@ -594,11 +594,15 @@ class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
     Et, inchangé : AUCUN kind n'est retiré du plan (coverage-safe)."""
 
     # Producteurs de surface (étage 0) présents sur un service découvert — ils passent tous devant.
-    _PRODUCERS = ("recon.httpx", "recon.katana")
+    # `recon.content` a REJOINT cet étage : ses routes portent désormais le marqueur de découverte et
+    # sont chaînées vers les oracles (cf. `tests/test_recon_content_chainable.py`). Il était classé
+    # « consommateur lent » ici parce qu'il ne produisait RIEN de chaînable — ce n'est plus le cas.
+    # L'assertion, elle, ne bouge pas : producteur avant consommateur, rapide avant lent DANS l'étage.
+    _PRODUCERS = ("recon.httpx", "recon.katana", "recon.content")
     # Consommateurs RAPIDES à fort signal (étage 1, EV de tier haute).
     _FAST = ("web.security_headers", "web.nuclei", "recon.tech")
     # Consommateurs LENTS (étage 1, EV de tier basse).
-    _SLOW = ("web.nikto", "web.testssl", "recon.content")
+    _SLOW = ("web.nikto", "web.testssl")
 
     @staticmethod
     def _discovered_service_graph():
