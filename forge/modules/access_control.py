@@ -190,7 +190,12 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                     poc=self.dry(action)))
                 continue
             r_att = self._fetch(url, attacker)               # (status, body, content_type)
-            r_anon = self._fetch(url, {})
+            # SONDE DE CONTRÔLE : rôle ANONYME DÉCLARÉ (D1/D2). Sans ce marquage, la session
+            # gouvernée (`scope.session`) partait AVEC elle et son 401 attendu devenait un 200 :
+            # `anon_refusé=False` était IMPRIMÉ dans l'evidence de findings par ailleurs corrects
+            # (Juice Shop : `/rest/basket/1` répond 401 à un vrai anonyme, l'evidence disait 200),
+            # et un relecteur y lisait « ressource publique » sur un vrai positif.
+            r_anon = self._fetch_anonymous(url, {})
             # CIBLE INJOIGNABLE => AUCUN VERDICT (att_ok/anon_denied/marker_hit tous faux sur un corps
             # vide -> « IDOR non confirmé » pour une requête jamais partie).
             if r_att[0] is None or r_anon[0] is None:
@@ -213,6 +218,30 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             att_ok = r_att[0] in self._OK
             anon_denied = r_anon[0] in self._DENY
             marker_hit = bool(marker) and att_ok and (marker in (r_att[1] or ""))
+            # =====================================================================================
+            #  D3 — LE MARQUEUR EST-IL LISIBLE SANS AUCUNE SESSION ? (véto de PUBLICITÉ)
+            #
+            #  `proven = marker_hit` seul promouvait un HIGH « l'attaquant lit la ressource de la
+            #  victime » sur une ressource PUBLIQUE. Contre-épreuve du banc : `GET /users/v1` de
+            #  VAmPI répond 200 à un anonyme PAR CONCEPTION et liste tous les utilisateurs ; déclaré
+            #  en `idor_target {owner: victim, marker: "victim1"}`, il rendait « IDOR CONFIRMÉ ».
+            #  Un marqueur trouvé dans une ressource publique ne prouve AUCUNE appartenance : la
+            #  session de l'attaquant n'a rien acheté.
+            #
+            #  LE DISCRIMINANT N'EST PAS « ANON REFUSÉ ». Exiger `anon_denied` pour promouvoir serait
+            #  l'EXCÈS INVERSE : il tuerait les vrais IDOR sur les ressources qui répondent 2xx à
+            #  tout le monde mais dont le CONTENU privé n'apparaît qu'authentifié (l'anonyme obtient
+            #  une vue générique/vide — le marqueur, lui, reste hors de sa portée). Ce qui doit être
+            #  prouvé est plus étroit et plus juste : **la donnée de la victime n'était pas
+            #  atteignable sans session**. On ne regarde donc pas le STATUT de l'anonyme, on regarde
+            #  si LE MARQUEUR est revenu dans SA réponse — quel que soit ce statut (un marqueur servi
+            #  dans un corps de 403 est tout aussi public).
+            #
+            #  La sonde qui porte ce véto est celle de D1 : sans le rôle anonyme déclaré ci-dessus,
+            #  elle emportait la session gouvernée, voyait le marqueur pour cette SEULE raison, et le
+            #  véto se serait retourné en faux négatif. Les deux correctifs sont indissociables.
+            # =====================================================================================
+            marker_public = bool(marker) and (marker in (r_anon[1] or ""))
             # status-delta = corroborateur FAIBLE, JAMAIS promouvant : « attaquant 2xx / anon refusé »
             # prouve seulement que l'endpoint REQUIERT une auth — c'est VRAI pour tout endpoint
             # per-user que l'attaquant possède LÉGITIMEMENT (/api/me, /api/settings). Il ne démontre
@@ -222,13 +251,24 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             # faux HIGH « IDOR CONFIRMÉ » sur un accès à sa propre ressource).
             status_delta = att_ok and anon_denied
             # PREUVE SAINE (seule à promouvoir ici) : le marqueur de la victime (donnée d'AUTRUI)
-            # présent dans la réponse de l'attaquant. Le différentiel de contenu à session
-            # propriétaire vit dans _fire_read (2 comptes) ; ce slice cross-compte ne l'exerce pas.
-            proven = marker_hit
+            # présent dans la réponse de l'attaquant ET **hors de portée d'un anonyme** (véto D3 —
+            # sans lui, une ressource publique portant le marqueur promeut un faux HIGH). Le
+            # différentiel de contenu à session propriétaire vit dans _fire_read (2 comptes) ; ce
+            # slice cross-compte ne l'exerce pas.
+            proven = marker_hit and not marker_public
             if proven:
                 title = "IDOR CONFIRMÉ — l'attaquant lit la ressource de la victime (accès cross-compte)"
                 severity = "HIGH"
-                how = "marqueur de la victime présent dans la réponse de l'attaquant"
+                how = ("marqueur de la victime présent dans la réponse de l'attaquant ET ABSENT de la "
+                       "réponse à la sonde ANONYME (la donnée exigeait bien une session)")
+            elif marker_public:
+                # Le marqueur revient AUSSI sans aucune session : la ressource est publique pour cette
+                # donnée. La session de l'attaquant n'a rien acheté -> AUCUNE appartenance prouvée.
+                title = ("IDOR non confirmé — marqueur LISIBLE ANONYMEMENT (ressource publique) : "
+                         "aucune appartenance prouvée")
+                severity = "INFO"
+                how = ("marqueur présent AUSSI dans la réponse de la sonde ANONYME — la donnée est "
+                       "publique, la session de l'attaquant n'achète aucun accès cross-compte")
             elif status_delta:
                 title = ("IDOR non confirmé — endpoint requiert une auth ; accès cross-compte NON prouvé "
                          "(ni marqueur victime, ni différentiel propriétaire)")
@@ -246,8 +286,11 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
             evidence = redact_secrets(
                 f"attaquant={r_att[0]}/{r_att[2] or '?'} anon={r_anon[0]} owner={owner!r} "
                 f"marqueur={'présent' if marker_hit else ('absent' if marker else 'n/a')} "
+                f"marqueur_lisible_anonymement={marker_public} (véto de PUBLICITÉ : un marqueur "
+                f"servi sans session ne prouve aucune appartenance) "
                 f"status-delta={status_delta} (corroborateur faible, non-promouvant) "
-                f"anon_refusé={anon_denied} ; preuve={how} ; compte attaquant DÉTENU par l'opérateur "
+                f"anon_refusé={anon_denied} ; sonde anonyme tirée SANS matériel de session gouverné ; "
+                f"preuve={how} ; compte attaquant DÉTENU par l'opérateur "
                 "(jamais un tiers) ; matériel d'auth rédigé")
             findings.append(self.proof(
                 target=url, proven=proven,
@@ -360,7 +403,10 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
                 continue
             ra = self._fetch(url, A.get("headers", {}))
             rb = self._fetch(url, B.get("headers", {}))
-            ru = self._fetch(url, {})
+            # SONDE DE CONTRÔLE : rôle ANONYME DÉCLARÉ (D1). C'est ELLE qui porte le véto `anon_denied`
+            # de la promotion `vuln = same and anon_denied` : authentifiée par la session gouvernée,
+            # elle rendait 200 au lieu de 401 et ÉTEIGNAIT l'oracle IDOR — sans aucun signal.
+            ru = self._fetch_anonymous(url, {})
             # CIBLE INJOIGNABLE => AUCUN VERDICT. Le différentiel exige les TROIS réponses ; sans elles
             # `same` et `anon_denied` sont faux par construction et l'oracle rendrait « IDOR non
             # confirmé » pour des requêtes jamais parties. Absence de réponse != absence de vuln.
@@ -568,7 +614,12 @@ class PrivEsc(_ContentTypedOracle, ScopeGuardedOracle):
                 continue
             r_low = self._fetch(url, low.get("headers", {}), method=method)
             r_admin = self._fetch(url, admin.get("headers", {}), method=method)
-            r_anon = self._fetch(url, {}, method=method)
+            # SONDE DE CONTRÔLE : rôle ANONYME DÉCLARÉ. MÊME défaut de classe que D1 sur l'IDOR —
+            # `anon_denied` est un CONJOINT de la promotion privesc (`proven = low_reached and
+            # baseline and anon_denied`), donc une sonde de contrôle authentifiée éteignait aussi
+            # cet oracle-ci. Le banc ne l'a pas mesuré (aucune privesc amorcée) ; le défaut est le
+            # même et se corrige au même endroit.
+            r_anon = self._fetch_anonymous(url, {}, method=method)
             # CIBLE INJOIGNABLE => AUCUN VERDICT. Le titre négatif affirme « fonction non atteinte par le
             # bas-privilège » — une conclusion sur l'autorisation, alors qu'aucune requête n'a abouti.
             if r_low[0] is None or r_admin[0] is None or r_anon[0] is None:

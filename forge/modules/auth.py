@@ -163,7 +163,12 @@ class AuthTakeover(ScopeGuardedOracle):
 
             # --- SONDES (in-scope) : attaquant + contrôle anonyme (toujours) ; propriétaire (si compte) ---
             ws, wbody, _ = self._fetch(url, headers=attacker)
-            anon_s, anon_body, _ = self._fetch(url, headers={})
+            # SONDE DE CONTRÔLE : rôle ANONYME DÉCLARÉ. MÊME défaut de classe que D1 sur l'IDOR — un
+            # dict d'en-têtes vide n'exprime pas « anonyme » mais « rien à ajouter », et la session
+            # gouvernée partait avec la sonde. Ici elle porte DEUX rôles : le différentiel (C) exige
+            # que la vue de l'attaquant DIFFÈRE de la vue anonyme, et `auth_inert` compare l'attaquant
+            # à l'anonyme — une sonde authentifiée rendait ces deux lectures vides de sens.
+            anon_s, anon_body, _ = self._fetch_anonymous(url, headers={})
             # CIBLE INJOIGNABLE => AUCUN VERDICT : marqueur et différentiel sont faux par construction
             # sur un corps vide, donc « ATO non confirmé » certifierait un test jamais émis — sur la
             # classe la plus grave du catalogue.
@@ -187,8 +192,16 @@ class AuthTakeover(ScopeGuardedOracle):
             att_ok = ws in (200, 206)
             anon_denied = anon_s in (401, 403)
 
-            # (A) marqueur d'identité victime dans la réponse authentifiée de l'attaquant.
-            sig_marker = bool(marker) and att_ok and (marker in (wbody or ""))
+            # (A) marqueur d'identité victime dans la réponse authentifiée de l'attaquant, ET HORS DE
+            #     PORTÉE d'un anonyme (véto de PUBLICITÉ — même correctif que D3 sur `access_control`,
+            #     appliqué ici parce que le signal a EXACTEMENT la même forme et promeut un CRITICAL).
+            #     Un marqueur d'identité servi SANS session ne démontre aucune usurpation : la session
+            #     de l'attaquant n'a rien acheté. On ne regarde PAS le statut de l'anonyme (exiger son
+            #     refus serait l'excès inverse : il tuerait les ATO sur les endpoints qui répondent 2xx
+            #     à tous mais ne servent la donnée d'identité qu'authentifiés) — on regarde si LE
+            #     MARQUEUR est revenu dans SA réponse.
+            marker_public = bool(marker) and (marker in (anon_body or ""))
+            sig_marker = bool(marker) and att_ok and (marker in (wbody or "")) and not marker_public
             # (B) status-delta : attaquant 2xx / anon refusé, sur une ressource d'un AUTRE user.
             #     CORROBORATEUR FAIBLE, JAMAIS PROMOUVANT : owner_diff est un compare de LABELS
             #     (owner "victim" ≠ label "attacker") et AUCUNE requête n'est faite avec la session du
@@ -225,6 +238,8 @@ class AuthTakeover(ScopeGuardedOracle):
                 + (f" propriétaire={owner_status}" if owner_status is not None else "")
                 + f" owner={owner!r} owner≠attaquant={owner_diff} ; "
                 f"marqueur={'présent' if sig_marker else 'absent'} "
+                f"marqueur_lisible_anonymement={marker_public} (véto de PUBLICITÉ) ; "
+                f"sonde anonyme tirée SANS matériel de session gouverné ; "
                 f"status-delta={sig_status} (corroborateur faible, non-promouvant) "
                 f"content-differential={sig_content} ; signal(s) promouvant(s)={signals} ; "
                 "comptes (attaquant/victime) DÉTENUS par l'opérateur (jamais un tiers) ; "

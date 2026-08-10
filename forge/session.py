@@ -725,3 +725,49 @@ def using(store):
         yield store
     finally:
         bind(prev)
+
+
+# =================================================================================================
+#  RÔLE DE SONDE « ANONYME » — une sonde qui SE DIT anonyme doit PARTIR anonyme.
+#
+#  LE DÉFAUT MESURÉ (banc de détection, D1). Les oracles de contrôle d'accès tirent une sonde de
+#  CONTRÔLE sans en-tête (`self._fetch(url, {})`) et lisent son refus (401/403) comme la preuve que
+#  la ressource est PROTÉGÉE. Mais `Oracle._http` fusionne le matériel gouverné SOUS les en-têtes de
+#  l'appelant : un dict VIDE n'exprime donc PAS « anonyme », il exprime « rien à ajouter » — et la
+#  sonde part AUTHENTIFIÉE dès qu'un `scope.session` existe. Mesuré sur la BOLA de VAmPI, mêmes
+#  comptes, même cible, seul `scope.session` diffère : `anon=401 -> IDOR CONFIRMÉ (HIGH)` devient
+#  `anon=200 -> IDOR non confirmé (INFO)`. La classe n°1 du bug bounty, éteinte par une
+#  configuration que `scope.example.json` RECOMMANDE, et sans aucun signal.
+#
+#  POURQUOI UN RÔLE, ET PAS UN INTERRUPTEUR GLOBAL. Retirer la session de TOUTES les sondes casserait
+#  les oracles qui en ont BESOIN (la sonde de l'attaquant, celle du propriétaire, la baseline admin
+#  — et les ~19 oracles qui n'évaluent QUE des surfaces authentifiées). La distinction est PAR RÔLE
+#  DE SONDE : dans un même `fire()`, la sonde de contrôle est anonyme, toutes les autres gardent leur
+#  session. D'où une portée EXPLICITE ouverte autour de la seule sonde de contrôle.
+#
+#  POURQUOI ICI, ET PAS UN ARGUMENT DE `_fetch`. `_fetch` est le SEAM monkeypatché par les tests, avec
+#  des signatures différentes par oracle (`(url, headers, …)` vs `(url, headers=None, …)`) ; un
+#  nouveau mot-clé ferait exploser tous les doubles existants. Une portée ambiante traverse le seam
+#  quelle que soit sa forme, exactement comme `using(store)` — même mécanique, même durée de vie.
+#
+#  CE QUE LA PORTÉE NE FAIT PAS : elle ne délie PAS le store. Le scope-guard des redirections, le
+#  suivi de challenge (`mark_challenged`) et le témoin de cécité continuent de voir le store — seule
+#  la FUSION du matériel d'authentification est suspendue. Une sonde anonyme qui tombe sur un défi
+#  reste comptée comme telle.
+# =================================================================================================
+def probe_is_anonymous():
+    """True si la portée courante est déclarée SONDE ANONYME (aucun matériel gouverné ne doit être
+    fusionné dans la requête sortante). False par défaut — le comportement historique."""
+    return int(getattr(_local, "anon_depth", 0)) > 0
+
+
+@contextlib.contextmanager
+def anonymous_probe():
+    """Déclare la portée comme SONDE ANONYME : `Oracle._http` NE fusionne AUCUN matériel gouverné
+    pendant le bloc. Réentrant (compteur de profondeur) et exception-safe : la portée est TOUJOURS
+    refermée, une sonde de contrôle qui lève ne peut pas rendre le reste du `fire()` anonyme."""
+    _local.anon_depth = int(getattr(_local, "anon_depth", 0)) + 1
+    try:
+        yield
+    finally:
+        _local.anon_depth = max(0, int(getattr(_local, "anon_depth", 0)) - 1)

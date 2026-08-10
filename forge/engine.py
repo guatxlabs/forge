@@ -855,10 +855,17 @@ class Engine:
         # APPLIQUE leurs mutations d'état (ledger/ingest/decision/findings/compteurs) STRICTEMENT DANS
         # L'ORDRE d'action sur le thread principal. Le déterminisme du ledger et l'ingest console sont
         # préservés (identiques au sériel). `FORGE_PARALLELISM<=1` (ou pool 1) => chemin sériel historique.
+        # D10 — CONTEXTE D'AUTH PAR-ENGAGEMENT : injecté ICI AUSSI, pas seulement dans `_prepare`
+        # (campagne). `forge run --actions` rendait « IDOR non testé — config manquante » avec un
+        # `scope.auth` COMPLET, parce que l'injection ne vivait que sur le chemin campagne. Même
+        # SOURCE UNIQUE, idempotente (setdefault + garde de ledger) : une action de campagne qui
+        # repasse ici est inchangée. La liste est matérialisée pour pouvoir la parcourir deux fois.
+        actions = list(actions)
+        self._inject_auth_context(actions)
         pool = _parallelism()
         if pool <= 1:
             return self._run_serial(actions, checkpoint, checkpoint_every)
-        return self._run_parallel(list(actions), checkpoint, checkpoint_every, pool)
+        return self._run_parallel(actions, checkpoint, checkpoint_every, pool)
 
     def _run_serial(self, actions: Iterable[Action],
                     checkpoint: "Callable[[], None] | None", checkpoint_every: int) -> list[dict[str, Any]]:
@@ -1150,37 +1157,20 @@ class Engine:
         except Exception:  # noqa: BLE001 — flush best-effort ; l'arrêt gracieux (BaseException) passe volontairement
             pass
 
-    def _prepare(self, actions: list[Action], modules: "Iterable[str] | None",
-                 global_params: dict[str, Any], attrs_by_host: dict[str, Any]) -> list[Action]:
-        """Filtre (sélection modules) + injection de params/scope sur une VAGUE d'actions.
+    def _inject_auth_context(self, actions: "Iterable[Action]") -> None:
+        """Injecte les creds/URLs du scope ET le contexte d'auth PAR-ENGAGEMENT dans les actions de
+        contrôle d'accès. Mutation en place, `setdefault` PUR : n'écrase JAMAIS un param déjà posé
+        (une action IDOR CHAÎNÉE sur un endpoint découvert porte déjà `urls=[endpoint]`, edge C).
 
-        Extrait de la boucle pour être appliqué identiquement à chaque vague (1re proposition ET
-        re-propositions chaînées). N'AJOUTE aucune capacité : restreint + pré-remplit (setdefault).
-        Retourne la liste filtrée+enrichie (les Actions sont mutées en place via leurs params)."""
-        # (1) RESTRICTION par sélection de modules (UI/console) : ne garder que les kinds demandés.
-        wanted = {m for m in (modules or []) if m}
-        if wanted:
-            actions = [a for a in actions if a.kind in wanted]
+        POURQUOI CETTE MÉTHODE EXISTE (défaut D10 du banc). Ce bloc vivait DANS `_prepare`, appelé
+        UNIQUEMENT par `campaign()`. `run()` ne l'appelait pas : avec un `scope.auth` COMPLET,
+        `forge run --actions` rendait « IDOR non testé — config manquante » — le chemin d'exécution
+        le plus direct de la CLI ne pouvait pas armer la classe qualifiante n°1. Extrait en SOURCE
+        UNIQUE et appelé des DEUX côtés : `_prepare` (campagne) et `run()` (actions directes).
 
-        # (1bis) SÉLECTION DE TECHNIQUES PAR-SCOPE — le PLAN est filtré par l'ensemble EFFECTIF activé
-        # (== `pipeline_ordered` filtré par la sélection du scope). Une technique hors-profil/désactivée
-        # n'est jamais PLANIFIÉE (le tir la re-refuserait de toute façon : défense en profondeur). No-op
-        # sur un scope legacy (enabled_kinds is None). Appliqué à CHAQUE vague.
-        if self.enabled_kinds is not None:
-            actions = [a for a in actions if a.kind in self.enabled_kinds]
-
-        # (2) params par-module -> action.params (la console les écrit dans scope ET target.attrs).
-        #     Priorité : params spécifiques à la cible (target.attrs) > params globaux (scope).
-        #     setdefault : on n'écrase jamais un param déjà posé par le cerveau.
-        for a in actions:
-            for src in (global_params, attrs_by_host.get(a.target, {})):
-                for k, v in (src.get(a.kind, {}) or {}).items():
-                    a.params.setdefault(k, v)
-
-        # injecte les creds/URLs du scope dans les actions IDOR (grey/white box). setdefault PUR : une
-        # action IDOR CHAÎNÉE sur un endpoint découvert porte déjà `urls=[endpoint]` (edge C) -> on ne
-        # l'écrase pas, mais on lui injecte quand même les comptes/mitre du scope (sinon l'oracle
-        # skiperait faute de creds). Une action IDOR de base (sans urls) reçoit urls=idor_targets.
+        IDEMPOTENT : `setdefault` sur les params, et `_ledger_auth_use()` porte sa propre garde
+        « une seule fois ». Une action de campagne repasse donc ici par `run()` sans effet — aucun
+        double événement de ledger, aucun param réécrit."""
         for a in actions:
             if a.cls in ("access_control", "idor", "bola"):
                 # CONTEXTE AUTH PAR-ENGAGEMENT (R5) : si l'opérateur a fourni un bloc `auth`, on injecte
@@ -1208,6 +1198,39 @@ class Engine:
                     if self.auth_context.idor_targets:
                         a.params.setdefault("idor_targets", list(self.auth_context.idor_targets))
                     self._ledger_auth_use()               # journalise la MISE EN USAGE (labels, pas de secret)
+
+    def _prepare(self, actions: list[Action], modules: "Iterable[str] | None",
+                 global_params: dict[str, Any], attrs_by_host: dict[str, Any]) -> list[Action]:
+        """Filtre (sélection modules) + injection de params/scope sur une VAGUE d'actions.
+
+        Extrait de la boucle pour être appliqué identiquement à chaque vague (1re proposition ET
+        re-propositions chaînées). N'AJOUTE aucune capacité : restreint + pré-remplit (setdefault).
+        Retourne la liste filtrée+enrichie (les Actions sont mutées en place via leurs params)."""
+        # (1) RESTRICTION par sélection de modules (UI/console) : ne garder que les kinds demandés.
+        wanted = {m for m in (modules or []) if m}
+        if wanted:
+            actions = [a for a in actions if a.kind in wanted]
+
+        # (1bis) SÉLECTION DE TECHNIQUES PAR-SCOPE — le PLAN est filtré par l'ensemble EFFECTIF activé
+        # (== `pipeline_ordered` filtré par la sélection du scope). Une technique hors-profil/désactivée
+        # n'est jamais PLANIFIÉE (le tir la re-refuserait de toute façon : défense en profondeur). No-op
+        # sur un scope legacy (enabled_kinds is None). Appliqué à CHAQUE vague.
+        if self.enabled_kinds is not None:
+            actions = [a for a in actions if a.kind in self.enabled_kinds]
+
+        # (2) params par-module -> action.params (la console les écrit dans scope ET target.attrs).
+        #     Priorité : params spécifiques à la cible (target.attrs) > params globaux (scope).
+        #     setdefault : on n'écrase jamais un param déjà posé par le cerveau.
+        for a in actions:
+            for src in (global_params, attrs_by_host.get(a.target, {})):
+                for k, v in (src.get(a.kind, {}) or {}).items():
+                    a.params.setdefault(k, v)
+
+        # injecte les creds/URLs du scope + le CONTEXTE AUTH PAR-ENGAGEMENT dans les actions de
+        # contrôle d'accès. SOURCE UNIQUE (`_inject_auth_context`) partagée avec `run()` : voir le
+        # docstring de la méthode — l'injection vivait ICI SEULEMENT, et `forge run --actions` la
+        # manquait donc entièrement (défaut D10 du banc).
+        self._inject_auth_context(actions)
 
         # injecte le périmètre dans les actions qui DÉCOUVRENT/RÉSOLVENT des hôtes à runtime : la
         # cible (domaine) est gatée par le ROE, mais ces modules produisent de NOUVEAUX hôtes (IP

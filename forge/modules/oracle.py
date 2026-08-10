@@ -490,15 +490,27 @@ class Oracle(Module):
         d'authentification SECRET applicable à l'URL COURANTE — et UNIQUEMENT si elle est IN-SCOPE
         (scope-guard du store) — est fusionné SOUS les en-têtes de l'appelant dans la requête sortante.
         Il n'est JAMAIS renvoyé ni exposé : l'appelant bâtit ses PoC depuis SES propres en-têtes
-        (`_curl`), pas depuis la requête. Sans store lié (dev/test/offline) -> aucun matériel injecté."""
+        (`_curl`), pas depuis la requête. Sans store lié (dev/test/offline) -> aucun matériel injecté.
+
+        RÔLE DE SONDE ANONYME (`session.anonymous_probe()`) : sous cette portée, la fusion est
+        SUSPENDUE — la requête part avec les SEULS en-têtes de l'appelant. C'est la correction du
+        défaut D1 du banc : un dict d'en-têtes VIDE ne veut pas dire « anonyme », il veut dire « rien
+        à ajouter » ; la sonde de contrôle des oracles de contrôle d'accès partait donc AUTHENTIFIÉE
+        et son 401 attendu devenait un 200, éteignant l'oracle IDOR EN SILENCE. La suspension est
+        PAR-PORTÉE, jamais globale : dans le même `fire()`, les sondes attaquant/propriétaire/admin
+        gardent leur session. Le store reste LIÉ (scope-guard des redirections, `mark_challenged`,
+        témoin de cécité inchangés) : seule la fusion du matériel d'auth est suspendue."""
         caller_headers = dict(headers or {})
         payload = data.encode("utf-8") if isinstance(data, str) else data
         store = _session.current()
+        anon_role = _session.probe_is_anonymous()
         bucket = _throttle.current()             # THROTTLE lié par l'engine autour de fire() ; None => no-op
         cur_url, cur_method, cur_payload = url, method, payload
         for _hop in range(_MAX_REDIRECTS + 1):
             req_headers = dict(caller_headers)
-            if store is not None:                    # scope-guard PAR-URL : {} si url courante hors-scope
+            # `anon_role` : sonde DÉCLARÉE anonyme -> AUCUNE fusion, à AUCUN saut (une redirection ne
+            # doit pas ré-authentifier une sonde de contrôle en cours de route).
+            if store is not None and not anon_role:  # scope-guard PAR-URL : {} si url courante hors-scope
                 for k, v in store.headers_for(cur_url).items():
                     req_headers.setdefault(k, v)     # les en-têtes explicites de l'appelant priment
             # BACK-OFF 429/503 borné : re-tente la MÊME requête après Retry-After / back-off exponentiel,
@@ -603,6 +615,23 @@ class Oracle(Module):
     # Nom historique du seam : les modules concrets appellent `self._fetch(...)` et les tests le
     # monkeypatchent par classe. Résout vers la méthode hoistée ci-dessus (par héritage/alias).
     _fetch = _fetch_body
+
+    def _fetch_anonymous(self, *a, **kw):
+        """SONDE DE CONTRÔLE ANONYME : `self._fetch(...)` tiré sous la portée `anonymous_probe()` —
+        le matériel de session GOUVERNÉ n'est PAS fusionné, la requête part avec les SEULS en-têtes
+        passés par l'appelant (typiquement `{}`).
+
+        POURQUOI CE POINT D'APPEL EXISTE (défaut D1). Un oracle de contrôle d'accès conclut « la
+        ressource est protégée » en lisant le REFUS de sa sonde de contrôle. Si cette sonde emporte
+        la session gouvernée, elle n'est PAS un contrôle : elle mesure le même accès que la sonde
+        authentifiée, le refus attendu n'arrive jamais, et l'oracle rend « non confirmé » sur un vrai
+        IDOR. Le rôle doit donc être DÉCLARÉ au point d'appel, pas déduit d'un dict vide.
+
+        Passe par le seam `_fetch` de l'oracle concret : arité, content-type, monkeypatch des tests,
+        throttle, pin et témoin de cécité s'appliquent EXACTEMENT comme à une sonde normale — seule
+        la fusion du matériel d'auth est suspendue, et seulement pour la durée de cet appel."""
+        with _session.anonymous_probe():
+            return self._fetch(*a, **kw)
 
     # =============================================================================================
     #  SONDE DE CONTRÔLE « CATCH-ALL » (cf. le bloc de doctrine en tête de module)

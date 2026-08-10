@@ -160,7 +160,45 @@ class TestIdorFiresCrossAccount(unittest.TestCase):
         self.assertIn("status-delta", f["evidence"])            # reste corroborateur faible dans l'evidence
 
     def test_no_false_positive_on_public_200(self):
-        # attaquant 200 MAIS anonyme aussi 200 (ressource publique) -> PAS d'IDOR (tested)
+        """Ressource PUBLIQUE portant le MARQUEUR -> jamais promue (D3).
+
+        ⚠️ CE TEST NE POUVAIT PAS ÉCHOUER. Sa version d'origine déclarait une `idor_target` SANS
+        `marker` (`{"url": …, "owner": "victim"}`) et une cible qui répond 200 à tout le monde. Or
+        la promotion s'écrit `marker_hit = bool(marker) and …` : sans marqueur, `marker_hit` est faux
+        AVANT toute considération de publicité, et le test n'exerçait donc que la branche NON
+        promouvante. Il portait le nom d'une garde qu'il ne pouvait pas atteindre — et il est resté
+        vert pendant que le banc mesurait, sur `GET /users/v1` de VAmPI (public par conception,
+        déclaré avec un `marker`), un **HIGH « IDOR CONFIRMÉ »**.
+
+        La version ci-dessous ATTEINT la branche promouvante : marqueur déclaré, marqueur PRÉSENT
+        dans la réponse de l'attaquant (`marker_hit` VRAI, l'ancienne condition suffisante) — et
+        présent AUSSI dans la réponse de la sonde anonyme, ce qui doit désormais le véto.
+        Mutation de contrôle : `proven = marker_hit` (le défaut) -> ce test ROUGIT."""
+        block = _auth_block()
+        block["idor_targets"] = [{"url": "https://app.test/api/orders/3", "owner": "victim",
+                                  "marker": MARKER}]
+        sc = _scope(auth=block)
+
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            # PUBLIQUE PAR CONCEPTION : le même corps — marqueur inclus — pour tout le monde.
+            return 200, f'{{"public": true, "owner": "{MARKER}"}}', "application/json"
+
+        restore = _patch_fetch(fake)
+        try:
+            out = IdorDifferential().fire(_idor_action(sc))
+        finally:
+            restore()
+        f = out[0].to_dict()
+        self.assertEqual(f["status"], "tested")
+        self.assertNotIn("CONFIRMÉ", f["title"])
+        self.assertIn("LISIBLE ANONYMEMENT", f["title"])
+        self.assertIn("marqueur_lisible_anonymement=True", f["evidence"])
+
+    def test_public_200_without_marker_stays_unconfirmed(self):
+        """Cas SANS marqueur, conservé pour ce qu'il est RÉELLEMENT : une cible qui répond 200 à tous
+        et dont l'`idor_target` ne porte aucun marqueur n'a AUCUN signal promouvant (ni marqueur, ni
+        status-delta). Ce test couvre la branche NON promouvante — c'est tout ce que l'ancien
+        `test_no_false_positive_on_public_200` faisait, sous un nom qui promettait davantage."""
         block = _auth_block()
         block["idor_targets"] = [{"url": "https://app.test/api/orders/3", "owner": "victim"}]
         sc = _scope(auth=block)
