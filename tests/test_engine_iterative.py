@@ -573,13 +573,32 @@ class TestReconMislabeledPortConfirmedHttp(unittest.TestCase):
 
 class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
     """E3 (a) — ORDONNANCEMENT : sur un service DÉCOUVERT, les scanners de contenu RAPIDES à FORT SIGNAL
-    (httpx/security_headers/nuclei/tech) sont ordonnés AVANT les ÉNUMÉRATEURS LENTS (nikto/testssl/
-    feroxbuster/katana/gospider) — sinon, à budget de temps borné, web.nuclei (le plus productif) restait
+    (security_headers/nuclei/tech) sont ordonnés AVANT les ÉNUMÉRATEURS LENTS (nikto/testssl/
+    feroxbuster/gospider) — sinon, à budget de temps borné, web.nuclei (le plus productif) restait
     derrière ~40 oracles par port et n'était JAMAIS atteint (T27). RÉ-ORDONNANCEMENT coverage-safe : les
-    lents restent TOUS planifiés, juste après (defer != delete)."""
+    lents restent TOUS planifiés, juste après (defer != delete).
 
-    _FAST = ("recon.httpx", "web.security_headers", "web.nuclei", "recon.tech")
-    _SLOW = ("web.nikto", "web.testssl", "recon.content", "recon.katana")
+    RUPTURE NOMMÉE (lot « la découverte d'abord ») — `recon.httpx` et `recon.katana` ONT CHANGÉ DE
+    CAMP, et c'est le correctif, pas une régression. Le planner trie désormais `(étage, -EV)` : les
+    PRODUCTEURS de surface (`planner.surface_producers()` — httpx, katana, gau, subfinder, nmap,
+    js_endpoints…) passent AVANT tous les consommateurs, quelle que soit leur EV. La mesure qui l'a
+    imposé : sur la campagne réelle du 2026-08-10, les producteurs étaient les décisions 189 à 201 sur
+    202, appliquées à t=2827 s d'un budget de 3600 s — la vague 1 n'a jamais fini et les 263 endpoints
+    découverts n'ont jamais été replanifiés. L'ancienne liste `_SLOW` confondait deux propriétés
+    ORTHOGONALES : « lent » et « producteur ». `recon.katana` est LENT **et** PRODUCTEUR — il doit
+    passer tôt PARCE QUE les scanners qui le suivent travaillent sur ce qu'il trouve.
+
+    Ce que ce test prouve donc maintenant, en deux temps :
+      1. l'ÉTAGE : tout producteur passe avant tout consommateur ;
+      2. l'intention HISTORIQUE, intacte À L'INTÉRIEUR de l'étage consommateur : rapide avant lent.
+    Et, inchangé : AUCUN kind n'est retiré du plan (coverage-safe)."""
+
+    # Producteurs de surface (étage 0) présents sur un service découvert — ils passent tous devant.
+    _PRODUCERS = ("recon.httpx", "recon.katana")
+    # Consommateurs RAPIDES à fort signal (étage 1, EV de tier haute).
+    _FAST = ("web.security_headers", "web.nuclei", "recon.tech")
+    # Consommateurs LENTS (étage 1, EV de tier basse).
+    _SLOW = ("web.nikto", "web.testssl", "recon.content")
 
     @staticmethod
     def _discovered_service_graph():
@@ -593,12 +612,16 @@ class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
         actions = HeuristicBrain().propose(self._discovered_service_graph())
         ordered, _ = Planner().order(actions)                       # budget illimité -> tout ordonné, rien déféré
         seq = [a.kind for a in ordered if a.target == "127.0.0.1:8000"]
-        for fast in self._FAST:
-            self.assertIn(fast, seq, f"{fast} absent du plan sur le service découvert")
-        for slow in self._SLOW:
-            # COVERAGE-SAFE : le lent n'est PAS retiré du plan — il reste ordonné (juste après).
-            self.assertIn(slow, seq, f"{slow} a été DROPPÉ du plan (régression coverage-safe)")
-        # chaque rapide passe AVANT chaque lent (l'ORDRE est le correctif, pas une capacité en moins).
+        for kind in self._PRODUCERS + self._FAST + self._SLOW:
+            # COVERAGE-SAFE : rien n'est retiré du plan — tout reste ordonné (l'ordre seul change).
+            self.assertIn(kind, seq, f"{kind} a été DROPPÉ du plan (régression coverage-safe)")
+        # (1) ÉTAGE : tout PRODUCTEUR de surface passe avant tout consommateur, lent OU rapide.
+        for prod in self._PRODUCERS:
+            for consumer in self._FAST + self._SLOW:
+                self.assertLess(seq.index(prod), seq.index(consumer),
+                                f"{prod} (producteur de surface) ordonné APRÈS {consumer} — "
+                                f"le consommateur travaillerait sur une surface non découverte")
+        # (2) INTENTION HISTORIQUE, intacte DANS l'étage consommateur : rapide avant lent.
         for fast in self._FAST:
             for slow in self._SLOW:
                 self.assertLess(seq.index(fast), seq.index(slow),
@@ -607,17 +630,29 @@ class TestE3ContentScannerSchedulingOrder(unittest.TestCase):
     def test_nuclei_scheduled_ahead_of_the_oracle_sweep(self):
         # AUTO-PENTEST : le sweep ajoute ~40+ oracles par port (EV ~0.25) ; web.nuclei (EV de tier ~0.72)
         # DOIT passer devant eux — c'est exactement ce qui manquait au T27 (nuclei jamais atteint).
+        # Depuis le lot « la découverte d'abord », le peloton de tête est celui de l'étage CONSOMMATEUR :
+        # les producteurs de surface le précèdent tous, par construction (cf. la docstring de classe).
         from forge.brain import AutoPentestBrain
+        from forge.planner import stage, STAGE_VERIFY
         actions = AutoPentestBrain().propose(self._discovered_service_graph())
         ordered, _ = Planner().order(actions)
-        seq = [a.kind for a in ordered if a.target == "127.0.0.1:8000"]
+        here = [a for a in ordered if a.target == "127.0.0.1:8000"]
+        seq = [a.kind for a in here]
+        consumers = [a.kind for a in here if stage(a) == STAGE_VERIFY]
         sweep = [a for a in actions if a.target == "127.0.0.1:8000"
                  and (a.desc or "").startswith("auto-pentest")]
         self.assertGreater(len(sweep), 20, "le sweep auto-pentest devrait proposer de nombreux oracles")
-        # nuclei est dans le peloton de tête, DEVANT le gros du sweep et devant nikto (lent).
-        nuclei_idx = seq.index("web.nuclei")
-        self.assertLess(nuclei_idx, 6, f"web.nuclei ordonné en position {nuclei_idx} (toujours affamé par le sweep)")
-        self.assertLess(nuclei_idx, seq.index("web.nikto"))
+        # nuclei est en tête de l'étage CONSOMMATEUR, DEVANT le gros du sweep et devant nikto (lent).
+        nuclei_idx = consumers.index("web.nuclei")
+        self.assertLess(nuclei_idx, 6,
+                        f"web.nuclei ordonné en position {nuclei_idx} de l'étage consommateur "
+                        f"(toujours affamé par le sweep)")
+        self.assertLess(seq.index("web.nuclei"), seq.index("web.nikto"))
+        # ANTI-STARVATION DU SWEEP : nuclei devance chaque oracle de balayage NON qualifiant du même étage.
+        sweep_consumer_idx = [consumers.index(a.kind) for a in sweep
+                              if stage(a) == STAGE_VERIFY and a.kind in consumers]
+        self.assertTrue(sweep_consumer_idx)
+        self.assertLess(nuclei_idx, max(sweep_consumer_idx))
         # preuve directe sur l'EV : nuclei (tier) > un oracle du sweep (défaut 0.25).
         nuc = next(a for a in actions if a.kind == "web.nuclei" and a.target == "127.0.0.1:8000")
         self.assertGreater(Planner.ev(nuc), Planner.ev(sweep[0]))

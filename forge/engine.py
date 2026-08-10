@@ -17,7 +17,9 @@ from typing import TYPE_CHECKING, Any
 
 from .roe import Roe, VETO, DRY_RUN, FIRE
 from .graph import EngagementGraph
-from .interrupt import Terminate, ACTION_BUDGET_PARAM as _BUDGET_PARAM
+from .interrupt import Terminate, KindShare, ACTION_BUDGET_PARAM as _BUDGET_PARAM
+from .planner import (is_floored as _is_floored, stage as _planner_stage,
+                      STAGE_SURFACE as _STAGE_SURFACE)
 from . import infra_urls
 from . import modules as mods
 from . import pin
@@ -309,6 +311,12 @@ class Engine:
         # aucun budget, appelants programmatiques, tests) => la gate est un NO-OP STRICT (une comparaison
         # à None) et le comportement est byte-identique. Ne DÉCIDE de rien d'autre : ni ROE, ni plan.
         self._remaining = remaining
+        # PART DE BUDGET PAR KIND (`interrupt.KindShare`) — créée PARESSEUSEMENT à la 1re consultation
+        # du budget restant, donc UNIQUEMENT quand un budget existe. None => la seconde clause de
+        # `_budget_gate` est un no-op strict, exactement comme la première (comportement historique).
+        # Exposée en attribut (et non capturée) pour que le rapport/les tests puissent lire
+        # `kind_share.exhausted()` — ce qui a été borné doit être LISIBLE, jamais deviné.
+        self.kind_share: "KindShare | None" = None
         # FICHE D'INTERRUPTION du run (None tant qu'il n'a pas été interrompu) — posée par `_check_stop`
         # au moment de lever, pour que TOUT appelant (CLI, console, test) puisse rendre un rapport qui
         # s'annonce partiel sans avoir à rattraper l'exception lui-même.
@@ -574,7 +582,16 @@ class Engine:
             left = float(fn())
         except Exception:  # noqa: BLE001 — un hook en défaut ne doit JAMAIS empêcher un tir
             return None
-        return None if left != left else left            # NaN -> pas d'information -> pas de gate
+        if left != left:                                 # NaN -> pas d'information -> pas de gate
+            return None
+        # Le budget INITIAL n'est transmis au moteur par AUCUN canal (la CLI ne passe que
+        # `Budget.remaining`) : on le DÉDUIT du plus grand restant jamais observé — c'est-à-dire de
+        # cette première consultation, à la latence de la 1re action près. Aucun réglage nouveau à
+        # tenir en cohérence, et le plafond ne peut que monter (la part ne rétrécit jamais).
+        if self.kind_share is None:
+            self.kind_share = KindShare()
+        self.kind_share.observe(left)
+        return left
 
     @staticmethod
     def _runtime_bound(module: Any, action: Action) -> "float | None":
@@ -607,11 +624,47 @@ class Engine:
             return ""                                    # aucun budget -> aucune gate (byte-identique)
         action.params[_BUDGET_PARAM] = left
         bound = self._runtime_bound(module, action)
-        if bound is None or bound <= left:
+        # CLAUSE ABSOLUE — INCHANGÉE, fail-open comprise (cf. en-tête de section) : sans borne
+        # déclarée, on ne peut pas savoir si le tir tiendra dans l'échéance, et refuser sur une borne
+        # fictive supprimerait de la couverture pour rien.
+        if bound is not None and bound > left:
+            return (f"non démarrée : borne d'exécution déclarée {_secs(bound)} > budget de temps restant "
+                    f"{_secs(max(left, 0.0))} — la démarrer dépasserait l'échéance ; AUCUN verdict n'est "
+                    f"émis pour cette action (non testée, pas « rien trouvé »)")
+        # CLAUSE DE PART — elle, s'applique AUSSI sans borne déclarée (elle prédit par la mesure).
+        return self._kind_share_gate(action, bound)
+
+    def _kind_share_gate(self, action: Action, bound: "float | None") -> str:
+        """SECONDE clause de la MÊME porte : la PART de budget d'un seul kind (cf. `interrupt.KindShare`).
+
+        La clause absolue compare la borne d'UNE action au temps restant ; celle-ci ajoute la dimension
+        CUMULATIVE qui lui manquait — trois `web.testssl` à 600 s « tiennent » chacun dans le budget et
+        pèsent pourtant 41 % du run. Même forme (prospective : on ne DÉMARRE pas ce qui ne tient pas),
+        même sortie (SKIP nommé, aucun verdict).
+
+        UNE DIFFÉRENCE ASSUMÉE AVEC LA CLAUSE ABSOLUE : `bound` peut être None ici. La clause absolue
+        fail-open sans borne déclarée (elle ne peut pas savoir si le tir tiendra dans l'échéance) ; la
+        part, elle, PRÉDIT par la mesure — moyenne du kind sur ce run, puis sidecar `.durations`. C'est
+        ce qui la rend capable de borner un module NATIF sans borne, `origin.find` en tête (1 864 s,
+        24 % du travail du run de référence). Sans borne ET sans mesure : aucune information, aucune gate.
+
+        EXEMPTION QUALIFIANTE — la ligne rouge. Une action dont la classe est QUALIFIANTE (IDOR, auth,
+        RCE, SSRF, biz…) n'est JAMAIS bornée par la part : c'est exactement la règle que
+        `Planner.order` applique déjà au budget de plan (« le budget ne borne QUE le travail
+        NON-QUALIFIANT »), et elle est lue ICI depuis le planner (`is_floored`) plutôt que recopiée."""
+        share = self.kind_share
+        if share is None:
             return ""
-        return (f"non démarrée : borne d'exécution déclarée {_secs(bound)} > budget de temps restant "
-                f"{_secs(max(left, 0.0))} — la démarrer dépasserait l'échéance ; AUCUN verdict n'est "
-                f"émis pour cette action (non testée, pas « rien trouvé »)")
+        if _is_floored(action):                          # voie payable : jamais bornée par la part
+            return ""
+        store = self.durations                           # sidecar `.durations` du run PRÉCÉDENT, si branché
+        estimate = None
+        if store is not None:
+            try:
+                estimate = store.estimate(action.kind)
+            except Exception:  # noqa: BLE001 — un magasin en défaut ne décide de rien
+                estimate = None
+        return share.refuse(action.kind, bound, estimate)
 
     def _note_non_target(self, target: str, family: str) -> None:
         """CONSTAT UNIQUE par cible non-ciblable : « ce n'est pas une cible, c'est le mur ». Dit UNE FOIS
@@ -629,17 +682,30 @@ class Engine:
                                {"target": target, "family": family, "reason": reason})
 
     def _record_duration(self, kind: str, seconds: float) -> None:
-        """Verse UNE durée observée au magasin par-engagement, s'il est branché. No-op strict sinon
-        (une comparaison à None : c'est tout ce que coûte l'instrumentation quand elle est éteinte).
-        Best-effort : un magasin en défaut ne doit JAMAIS avorter un tir. Appelé depuis les workers de
-        tir -> `DurationStore.record` est verrouillé. Ne passe QUE le kind : aucune cible ne sort d'ici."""
+        """Verse UNE durée observée à DEUX comptabilités, toutes deux optionnelles et sans effet quand
+        elles sont absentes (une comparaison à None : c'est tout ce que coûte l'instrumentation éteinte) :
+
+          1. le MAGASIN par-engagement (`durations.DurationStore`) — persistant, sert au préchauffage
+             du run SUIVANT (lecture gelée en cours de run, cf. son en-tête) ;
+          2. la PART par kind de CE run (`interrupt.KindShare`) — volatile, sert à la porte de budget
+             ICI ET MAINTENANT. Les deux sont nécessaires et ne se remplacent pas : le magasin ne sait
+             rien de ce run (gelé), la part ne survit pas au run (et ne doit pas : un compteur de
+             consommation d'hier n'a aucun sens pour borner aujourd'hui).
+
+        Best-effort : ni l'une ni l'autre ne doit JAMAIS avorter un tir. Appelé depuis les workers de
+        tir -> les deux `record` sont verrouillés. Ne passe QUE le kind : aucune cible ne sort d'ici."""
         store = self.durations
-        if store is None:
-            return
-        try:
-            store.record(kind, seconds)
-        except Exception:  # noqa: BLE001 — cache de performance : jamais une cause d'échec de run
-            pass
+        if store is not None:
+            try:
+                store.record(kind, seconds)
+            except Exception:  # noqa: BLE001 — cache de performance : jamais une cause d'échec de run
+                pass
+        share = self.kind_share
+        if share is not None:
+            try:
+                share.record(kind, seconds)
+            except Exception:  # noqa: BLE001 — idem : la comptabilité ne casse pas un run
+                pass
 
     def _apply(self, pending: _Pending) -> dict[str, Any]:
         """PHASE 2 (SÉRIELLE, thread principal, ordre d'action) : applique les MUTATIONS d'état d'un
@@ -1266,6 +1332,7 @@ class Engine:
         executed_ids: set[str] = set()               # ids d'actions déjà planifiées (dedup inter-vagues)
         skipped_by_id: dict[str, Action] = {}        # accumule les déférées (par id, pas de doublon)
         ordered_all: dict[str, Action] = {}          # actions ORDONNÉES (toutes vagues) — dénominateur
+        carry: list[Action] = []                     # consommateurs reportés à la vague suivante (cf. _split_discovery_first)
         waves = 0
         # LA FINALISATION EST DANS UN `finally` — ET C'EST UN CORRECTIF, PAS UN ORNEMENT.
         # Tout le bloc d'accounting anti-lacune (skipped_budget, coverage_gaps, selected_modules,
@@ -1287,7 +1354,7 @@ class Engine:
                 proposed = self._prepare(proposed, modules, global_params, attrs_by_host)
                 # NOUVELLES actions seulement (idempotence : on ne rejoue pas une action déjà planifiée).
                 fresh = [a for a in proposed if a.id not in executed_ids]
-                if not fresh:                            # critère d'arrêt 1 : point fixe (rien de neuf)
+                if not fresh and not carry:              # critère d'arrêt 1 : point fixe (rien de neuf)
                     break
                 for a in fresh:
                     executed_ids.add(a.id)
@@ -1321,15 +1388,20 @@ class Engine:
                 # G1). Aucune donnée ne sort sans egress autorisé + ledgeré ; no-op quand le LLM est OFF.
                 self._llm_enrich_injections(fresh)
 
-                ordered, skipped = planner.order(fresh)
+                ordered, skipped = planner.order(carry + fresh)
                 for a in skipped:                        # defer != delete : accumulé, jamais jeté
                     skipped_by_id[a.id] = a
                 for a in ordered:                        # dénominateur du « X actions sur Y planifiées »
                     ordered_all[a.id] = a
+                # FRONTIÈRE DE REPLANIFICATION APRÈS LA DÉCOUVERTE (cf. `_split_discovery_first`).
+                # `ordered` peut être coupé en deux : les PRODUCTEURS de surface tirent MAINTENANT, les
+                # consommateurs attendent la vague suivante — donc une surface DÉJÀ découverte.
+                ordered, carry = self._split_discovery_first(ordered, waves)
                 # bannière de vague (live) : borne visuellement les vagues plan->observe->replan et annonce
                 # le nb d'actions ordonnées + différées. No-op si aucun callback (byte-identique).
                 self._emit(f"=== vague {waves + 1} — {len(ordered)} action(s) ordonnée(s)"
-                           + (f", {len(skipped)} différée(s)" if skipped else "") + " ===")
+                           + (f", {len(skipped)} différée(s)" if skipped else "")
+                           + (f", {len(carry)} reportée(s) après découverte" if carry else "") + " ===")
                 # DURABILITÉ INCRÉMENTALE : le checkpoint est passé À CHAQUE run() (persistance intra-vague
                 # tous les `checkpoint_every` actions) PUIS invoqué une fois de plus à la FRONTIÈRE de vague
                 # (le travail d'une vague complète est flushé avant d'entamer la suivante). Sans callback, on
@@ -1345,6 +1417,54 @@ class Engine:
         finally:
             self._finalize_coverage(planner, hosts, modules, skipped_by_id, ordered_all, waves)
         return self.coverage()
+
+    @staticmethod
+    def _split_discovery_first(ordered: list[Action],
+                               wave_index: int) -> tuple[list[Action], list[Action]]:
+        """Coupe une vague ORDONNÉE en (tire maintenant, reporte à la vague suivante).
+
+        POURQUOI CETTE FRONTIÈRE EXISTE — ce que l'ORDRE SEUL ne pouvait pas donner. Ordonner les
+        producteurs en tête d'une vague les fait tirer d'abord, mais le cerveau ne REPLANIFIE qu'à la
+        FIN de la vague : les consommateurs de la MÊME vague travaillent donc encore sur la surface
+        d'AVANT. Sur la campagne réelle du 2026-08-10 la vague 1 valait 225 actions pour 7 683 s de
+        travail mesuré, soit tout le budget : elle s'est arrêtée à 223 actions sur 225, et la vague 2 —
+        celle qui aurait consommé les 263 endpoints découverts — n'a jamais commencé. Mesuré au banc
+        `tests/bench_wave_reach.py` : l'étage SEUL fait passer les URLs atteintes de 0 à 1. Avec cette
+        frontière, la découverte est REPLANIFIÉE avant que le premier scanner lent ne démarre.
+
+        LA COUPE : les PRODUCTEURS de surface (`planner.stage`) tirent maintenant ; les consommateurs
+        attendent UNE vague. Comme `ordered` est déjà trié par `(étage, -EV)`, les producteurs en sont
+        le PRÉFIXE — la coupe est une partition, jamais un tri de plus.
+
+        DEFER != DELETE, ET DEFER AU PLUS UNE FOIS. Le report n'est pas une suppression : les actions
+        reportées restent dans `ordered_all` (donc comptées au dénominateur et listées en « planifiées
+        jamais tentées » si le run est coupé), et elles sont re-soumises TELLES QUELLES à la vague
+        suivante. La coupe n'ayant lieu QU'À LA PREMIÈRE VAGUE (cf. plus bas), une action ne peut être
+        reportée qu'UNE FOIS : aucune chaîne de découvertes ne peut repousser indéfiniment les mêmes
+        consommateurs — la famine que le planner coverage-safe interdit reste impossible.
+
+        UNE SEULE FOIS, À LA PREMIÈRE VAGUE — et c'est la mesure qui a imposé la borne. La 1re vague
+        est la SEULE dont le plan est bâti sur la surface de DÉPART : toutes les suivantes sont déjà
+        replanifiées depuis un graphe enrichi. Couper AUSSI aux vagues suivantes reporte les
+        consommateurs NOUVELLEMENT chaînés (les oracles sur les endpoints découverts — les moins chers
+        et les plus nombreux) DERRIÈRE les consommateurs déjà reportés (les scanners lents des cibles
+        de départ) : mesuré au banc, la portée retombe de 2 000+ actions à **32**, exactement le
+        contraire du but. La garantie visée est « le premier engagement de budget côté consommateur se
+        fait sur une surface découverte », pas « la découverte est épuisée avant toute vérification ».
+
+        NO-OP QUAND IL N'Y A RIEN À GAGNER : hors 1re vague, ou pour une vague entièrement PRODUCTRICE
+        ou entièrement CONSOMMATRICE (le cas de tout appelant qui pilote ses actions à la main, et de
+        la quasi-totalité des tests), rend `(ordered, [])` — même liste, même objet-par-objet, un seul
+        `run()` par vague."""
+        if wave_index > 0:                           # cf. supra : la coupe n'a lieu qu'à la 1re vague
+            return list(ordered), []
+        head: list[Action] = []
+        tail: list[Action] = []
+        for a in ordered:
+            (head if _planner_stage(a) == _STAGE_SURFACE else tail).append(a)
+        if not head or not tail:                     # rien à couper -> comportement historique
+            return list(ordered), []
+        return head, tail
 
     def _finalize_coverage(self, planner: Planner, hosts: list[str],
                            modules: "Iterable[str] | None",

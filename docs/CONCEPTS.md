@@ -253,6 +253,31 @@ tire sans `FIRE`. La **session gouvernée** est héritée le long de la chaîne 
 in-scope hérite du matériel d'auth de sa source (no-op scope-guardé si hors-scope), pour que les
 oracles chaînés soient authentifiés — sans que le secret n'entre jamais dans le finding/ledger/graphe.
 
+### 6.1 La découverte d'abord (`stage`)
+
+Le chaînage ne vaut que si la **découverte a eu lieu** : un scanner qui tourne avant `katana`/`gau`/
+`subfinder` travaille sur trois URLs au lieu de cinquante. Deux mécanismes le garantissent, tous deux
+**structurels** (ils s'appliquent à toute action, quelle que soit la voie qui l'a proposée — y compris
+le **balayage auto-pentest**, qui contournait l'intention d'ordre portée par le cerveau) :
+
+1. **L'étage de tri.** `planner.order()` trie par `(étage, -EV)`. L'étage vaut `STAGE_SURFACE` pour les
+   kinds qui **produisent** de la surface — dérivé du `ToolSpec` (`asset_hits`/`emit_*_discovery` :
+   katana, gau, subfinder, amass, feroxbuster, naabu, dnsx, gobuster) et d'une liste de kinds natifs
+   *vérifiée contre le source des modules* (httpx, js_endpoints, urls, subdomains, nmap,
+   evasion.discover) — `STAGE_VERIFY` pour tout le reste. Un producteur **sur un endpoint déjà dérivé**
+   n'est pas un producteur (il n'élargit rien) ; `origin.find` non plus (il publie une **route
+   alternative** vers la surface connue, pas de la surface nouvelle).
+2. **La frontière de replanification.** À la **première vague seulement**, les consommateurs sont
+   reportés d'une vague : la découverte est donc **replanifiée** avant que le premier scanner lent
+   n'engage le budget. Reportés ≠ supprimés — ils restent au dénominateur (`planned_total`) et, s'ils
+   ne tournent pas, sortent en « planifiées jamais tentées ».
+
+Coverage-safe **inchangé** : c'est un ré-ordonnancement, rien n'est retiré, le plancher qualifiant et
+`skipped_budget` sont intacts. Mesuré sur le harnais qui rejoue une campagne réelle
+(`tests/bench_wave_reach.py`, 3 cibles, durées observées injectées, budget égal) : **225 → 1 292
+actions**, **0 → 32 URLs distinctes atteintes**, **0 → 1 vague complétée**, et **aucun kind ne cesse de
+tourner** (58 → 58) — les scanners lents tournent toujours, mais sur une surface découverte.
+
 Les cibles dérivées à runtime sont **re-validées fail-closed** contre le périmètre injecté
 (`in_scope`/`out_scope`) avant toute émission — un module de découverte ne peut pas élargir le scope.
 

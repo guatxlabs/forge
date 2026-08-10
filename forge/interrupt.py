@@ -46,6 +46,7 @@ from __future__ import annotations
 import os
 import re
 import signal
+import threading
 import time
 from typing import Any, Callable
 
@@ -299,6 +300,228 @@ class GracefulStop:
                              f"échéance atteinte : {self.budget.describe()} "
                              f"(--run-timeout / {ENV_RUN_TIMEOUT})")
         return None
+
+
+# --- PART DU BUDGET PAR KIND : aucun module ne mange la moitié du run ------------------------------
+# LE DÉFAUT MESURÉ (campagne réelle du 2026-08-10, `--run-timeout 60m`, 3 cibles). Le sidecar
+# `.durations` du run donne les durées OBSERVÉES, une entrée par tir :
+#
+#     web.testssl        600,96 · 282,47 · 600,24 s   -> 1 483,7 s, soit 41 % du budget
+#     web.nuclei         279,75 · 377,52 · 415,72 s   -> 1 073,0 s, soit 30 %
+#     xss.dalfox         294,07 ·  21,49 · 295,39 s   ->   610,9 s, soit 17 %
+#
+# `web.testssl` seul a donc consommé ~30 des 60 minutes, DEUX de ses trois tirs ayant été TUÉS À LEUR
+# MUR (600 s, la borne `spec.timeout`) : ce n'est pas « un tir qui a duré », c'est le mur payé plein
+# tarif, trois fois. Pendant ce temps la vague 1 n'a pas fini et la découverte n'a jamais été
+# replanifiée.
+#
+# LA GATE ABSOLUE NE POUVAIT PAS L'ATTRAPER, et c'est structurel : elle compare la borne d'UNE action
+# au temps RESTANT (`Engine._budget_gate`). Or 600 s « tient » dans 3600 s, puis dans 3000 s, puis dans
+# 2400 s — chaque tir est individuellement raisonnable, c'est leur SOMME qui ne l'est pas. Il manquait
+# la dimension CUMULATIVE, par kind.
+#
+# CE QU'ON AJOUTE : la MÊME gate, une clause de plus. On ne démarre pas un tir dont la consommation
+# PRÉVUE, AJOUTÉE à ce que son kind a DÉJÀ consommé sur ce run, dépasserait sa PART. Prospectif comme
+# la clause absolue (« on ne démarre pas ce qui ne tient pas »), même vocabulaire de refus, même
+# conséquence : un SKIP NOMMÉ, listé au rapport, AUCUN verdict. Une action non démarrée n'est ni
+# `tested`, ni `not_vulnerable`, ni un finding.
+#
+# CE QU'ON N'AJOUTE PAS, ET POURQUOI :
+#   · pas de second réglage de temps : la part est RELATIVE au budget que l'opérateur a déjà posé
+#     (`--run-timeout` / FORGE_RUN_TIMEOUT). Sans budget, aucune part, aucune gate — no-op strict ;
+#   · pas de troncature d'un tir EN VOL : raboter le timeout d'une action qui tourne FABRIQUE des
+#     verdicts négatifs pour les cibles qu'elle n'a pas atteintes (le dépôt l'interdit, cf. supra) ;
+#   · pas de cap sur les classes QUALIFIANTES : le moteur les exempte via `planner.is_floored` —
+#     la même règle qui, dans `Planner.order`, interdit au budget de plan d'affamer une voie payable.
+#     Une seule définition de « qualifiant », deux consommateurs.
+#
+# LA PART PAR DÉFAUT EST 1/3. Le cahier des charges dit « aucun module ne devrait pouvoir manger la
+# MOITIÉ du budget » : 1/2 serait donc la limite tolérée, pas une cible. 1/3 la respecte strictement
+# tout en laissant les scanners lents TOURNER — sur les durées mesurées ci-dessus et un budget de
+# 3600 s (cap = 1200 s), `web.nuclei` (1073 s) et `xss.dalfox` (611 s) passent ENTIERS, et seul le
+# 3e `web.testssl` est refusé. C'est l'effet voulu : borner, pas supprimer.
+KIND_SHARE_DEFAULT = 1.0 / 3.0
+ENV_KIND_SHARE = "FORGE_KIND_BUDGET_SHARE"
+
+
+def resolve_kind_share(explicit: Any = None) -> float:
+    """Part de budget accordée à UN kind : drapeau/appelant > env `FORGE_KIND_BUDGET_SHARE` > 1/3.
+
+    FAIL-OPEN sur une valeur illisible ou hors bornes (comme `_env_run_timeout` et
+    `resource_profile._coerce`) : un environnement pollué ne doit pas changer un plan en silence, il
+    retombe sur le défaut. `0` (ou négatif) DÉSACTIVE la part — échappatoire explicite pour un
+    opérateur qui veut le comportement d'avant ce lot. Une part `>= 1` est acceptée et vaut « pas de
+    borne utile » (un kind peut prendre tout le budget) : on ne la corrige pas, on l'obéit."""
+    for raw in (explicit, os.environ.get(ENV_KIND_SHARE)):
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value != value or value < 0:               # NaN / négatif -> pas d'information
+            continue
+        return value
+    return KIND_SHARE_DEFAULT
+
+
+class KindShare:
+    """Comptabilité CUMULATIVE du temps consommé PAR KIND, et la porte qui en découle.
+
+    `observe(remaining)` est appelé à chaque consultation du budget restant : le PLAFOND retenu est le
+    PLUS GRAND restant jamais vu, c'est-à-dire le budget INITIAL à la latence de la première action
+    près. C'est délibéré — ça évite d'exiger que l'appelant (CLI, console, test) transmette un
+    deuxième canal pour une valeur que le moteur observe déjà. Monotone : le plafond ne peut que
+    monter, donc la part ne rétrécit jamais en cours de run.
+
+    `record(kind, secs)` est appelé depuis les WORKERS de tir (`Engine._record_duration`) -> verrouillé.
+
+    LIMITE CONNUE, ET BORNÉE : en parallèle, jusqu'à `pool` actions du même kind peuvent franchir la
+    porte avant qu'aucune n'ait été comptabilisée (elles sont évaluées avant de tirer). Le dépassement
+    de part est donc borné par `pool - 1` tirs de ce kind. On ne sérialise pas la porte pour ça : ce
+    serait payer un verrou global sur le chemin de tir pour resserrer une borne déjà petite.
+
+    stdlib seule ; aucun import de `forge.*` (ce module est importé PAR le moteur et la CLI)."""
+
+    def __init__(self, share: Any = None) -> None:
+        self.share = resolve_kind_share(share)
+        self._spent: dict[str, float] = {}
+        self._fires: dict[str, int] = {}              # nb de tirs comptabilisés (pour la MOYENNE)
+        self._ceiling = 0.0
+        self._lock = threading.Lock()
+
+    # --- alimentation ------------------------------------------------------------------------------
+    def observe(self, remaining: float) -> None:
+        """Enregistre un budget RESTANT observé. Le plafond retenu est le maximum (== budget initial)."""
+        try:
+            value = float(remaining)
+        except (TypeError, ValueError):
+            return
+        if value != value:                            # NaN -> aucune information
+            return
+        with self._lock:
+            if value > self._ceiling:
+                self._ceiling = value
+
+    def record(self, kind: str, seconds: float) -> None:
+        """Ajoute une durée OBSERVÉE au compteur de ce kind. Best-effort, ne lève jamais."""
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if value != value or value <= 0:
+            return
+        with self._lock:
+            self._spent[str(kind)] = self._spent.get(str(kind), 0.0) + value
+            self._fires[str(kind)] = self._fires.get(str(kind), 0) + 1
+
+    # --- lecture -----------------------------------------------------------------------------------
+    @property
+    def ceiling(self) -> float:
+        """Budget de référence retenu (le plus grand restant observé)."""
+        with self._lock:
+            return self._ceiling
+
+    @property
+    def cap(self) -> float:
+        """Secondes qu'UN kind peut consommer au total. 0.0 => aucune part active (gate inerte)."""
+        with self._lock:
+            return self._ceiling * self.share
+
+    def spent(self, kind: str) -> float:
+        with self._lock:
+            return self._spent.get(str(kind), 0.0)
+
+    def mean(self, kind: str) -> "float | None":
+        """Durée MOYENNE observée pour ce kind SUR CE RUN, ou None (jamais tiré)."""
+        with self._lock:
+            n = self._fires.get(str(kind), 0)
+            return (self._spent.get(str(kind), 0.0) / n) if n else None
+
+    def exhausted(self) -> "dict[str, float]":
+        """{kind: secondes} des kinds ayant atteint ou dépassé leur part — pour l'observabilité."""
+        cap = self.cap
+        if cap <= 0:
+            return {}
+        with self._lock:
+            return {k: v for k, v in sorted(self._spent.items()) if v >= cap}
+
+    # --- décision ----------------------------------------------------------------------------------
+    @staticmethod
+    def _positive(value: Any) -> "float | None":
+        """Flottant STRICTEMENT positif, ou None (absent / illisible / NaN / <= 0). Pur."""
+        if value is None:
+            return None
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if (out == out and out > 0) else None
+
+    def refuse(self, kind: str, bound: Any = None, estimate: "float | None" = None) -> str:
+        """Raison NOMMÉE de ne pas DÉMARRER ce tir, ou "" (rien à signaler).
+
+        INERTE tant qu'aucune part n'est active (`share <= 0`) ou qu'aucun budget n'a été observé
+        (`ceiling == 0`) : c'est le cas de tout appelant sans `--run-timeout`, donc le comportement
+        historique, à une comparaison de flottants près.
+
+        CE QU'ON PRÉDIT, ET POURQUOI PAS LA BORNE — mesuré, et ça change le verdict. La clause absolue
+        raisonne sur la BORNE déclarée (le mur), parce qu'il s'agit d'y tenir dans tous les cas. La
+        part, elle, raisonne sur la CONSOMMATION, et la borne en est un très mauvais estimateur : sur
+        le run de référence, `web.nuclei` déclare 600 s et a consommé 280/378/416 s. Prédire 600 s pour
+        son 3e tir le refusait à tort (658 + 600 > 1200), alors qu'il tenait (658 + 416). On prédit donc
+        par ordre de préférence :
+          1. la MOYENNE OBSERVÉE du kind SUR CE RUN (`mean`) — la meilleure information disponible, et
+             elle porte sur CETTE surface : nuclei 329 s -> 3e tir ACCEPTÉ, testssl 441 s -> 3e tir
+             REFUSÉ (il a effectivement repris 600 s au mur). C'est ce que la mesure sait, pas ce que
+             la déclaration promet ;
+          2. à défaut, l'estimation du magasin de durées (`durations.DurationStore.estimate`, le
+             sidecar `.durations` du run PRÉCÉDENT de cet engagement) ;
+          3. à défaut, la borne déclarée.
+        La prédiction est TOUJOURS plafonnée par la borne déclarée : le module ne peut pas dépasser son
+        propre mur, prédire au-delà serait refuser sur une valeur impossible."""
+        cap = self.cap
+        if cap <= 0:
+            return ""
+        # UNE BORNE DÉCLARÉE N'EST PAS REQUISE ICI, contrairement à la clause absolue — et c'est
+        # délibéré. La clause absolue fait fail-open sans borne parce que gater un oracle à 0,1 ms sur
+        # une borne fictive supprimerait de la couverture pour rien. La part n'a pas ce problème : un
+        # oracle à 0,1 ms n'atteindra JAMAIS un tiers du budget, alors qu'un module natif SANS borne
+        # peut parfaitement le manger (`origin.find` : 1 864 s, 24 % du travail du run de référence).
+        # Sans borne, on prédit par la mesure (moyenne du run, puis sidecar) ; sans mesure non plus,
+        # aucune information -> aucune gate.
+        need = self._positive(bound)
+        used = self.spent(kind)
+        # LA PREMIÈRE ACTION D'UN KIND N'EST JAMAIS REFUSÉE PAR LA PART, et c'est la clause qui
+        # empêche l'EXCÈS INVERSE. Sans elle, un budget serré ferait taire ENTIÈREMENT les scanners
+        # lents : `web.testssl` (borne 600 s) serait refusé d'office sous 1800 s de budget, `web.nikto`
+        # sous 1800 s aussi — or `nikto` a produit les 16 SEULS signaux qualifiables du run mesuré.
+        # La part borne la RÉPÉTITION d'un kind (« ne mange pas la moitié du run à toi seul »), pas son
+        # EXISTENCE. Tout kind planifié qui passe la clause absolue tire donc AU MOINS UNE FOIS.
+        if used <= 0:
+            return ""
+        predicted = None
+        for source in (self.mean(kind), estimate, need):
+            predicted = self._positive(source)
+            if predicted is not None:
+                break
+        if predicted is None:                         # aucune information -> aucune gate
+            return ""
+        if need is not None:
+            predicted = min(need, predicted)          # jamais au-delà du mur du module
+        if used + predicted <= cap:
+            return ""
+        declared = f"borne déclarée {_secs_short(need)}" if need is not None else "aucune borne déclarée"
+        return (f"non démarrée : part de budget du kind épuisée — `{kind}` a déjà consommé "
+                f"{_secs_short(used)} et ce tir en prendrait ~{_secs_short(predicted)} ({declared}), "
+                f"pour une part de {_secs_short(cap)} ({self.share:.0%} d'un budget de "
+                f"{_secs_short(self.ceiling)}) ; AUCUN verdict n'est émis pour cette action "
+                f"(non testée, pas « rien trouvé »)")
+
+
+def _secs_short(value: float) -> str:
+    """Secondes lisibles (`75s`, `1250s`) — miroir local de `engine._secs`, sans import croisé."""
+    return f"{float(value):.0f}s"
 
 
 def _signal_name(signum: int) -> str:

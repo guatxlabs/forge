@@ -172,14 +172,13 @@ class HeuristicBrain(Brain):
     def _is_endpoint(target):
         """True si `target` désigne un ENDPOINT (chemin/query), pas un hôte nu. Un endpoint est vérifié
         par le chaînage d'oracles CIBLÉS (edge C), jamais par les actions de base (qui sèmeraient
-        recon/nmap/origin sur une URL). Robuste : hôte nu / host:port / IP -> False ; URL à chemin -> True."""
-        s = str(target)
-        if "://" in s:
-            s = s.split("://", 1)[1]
-        if "?" in s or "#" in s:
-            return True
-        _, _, path = s.partition("/")
-        return bool(path.strip("/"))
+        recon/nmap/origin sur une URL).
+
+        DÉLÈGUE à `planner.is_endpoint_target` — SOURCE UNIQUE. Le planner a besoin du MÊME prédicat
+        (un producteur de surface n'en est un que sur un HÔTE, cf. `planner.stage`) : la définition a
+        donc été remontée là-bas et ce nom reste l'alias historique du cerveau."""
+        from .planner import is_endpoint_target       # import paresseux (aucun cycle au chargement)
+        return is_endpoint_target(target)
 
     def _discovery_marker(self, graph, host):
         """Marqueur ('' sinon) attestant que `host` a été DÉCOUVERT par une vague précédente (sous-domaine,
