@@ -182,6 +182,28 @@ class RaceCondition(ScopeGuardedOracle):
         n = self._burst_size(action)
         limit = self._limit(action)
 
+        # SONDE DE CONTRÔLE « CATCH-ALL » — UNIQUEMENT quand le succès est compté SUR LE STATUT SEUL.
+        #
+        # `_is_success` accepte deux contrats (cf. la garde de config ci-dessus) : `success_marker`
+        # (PREUVE DE CORPS) ou `success_codes` (STATUT SEUL). Le second est exactement le défaut qui a
+        # produit 8 faux HIGH dans `framework.exposure` : sur une cible qui répond 2xx à N'IMPORTE
+        # QUELLE requête (SPA catch-all), la rafale entière est comptée « succès », `successes > limit`
+        # est VRAI par construction, et l'oracle promeut un « Race/TOCTOU CONFIRMÉ » HIGH sans qu'aucune
+        # redemption n'ait eu lieu. On demande donc d'abord deux chemins qui ne peuvent pas exister :
+        # 2xx sur les deux -> `skipped`, et AUCUNE rafale n'est tirée (on n'envoie pas N écritures
+        # concurrentes qu'on serait de toute façon incapable de juger).
+        #
+        # Le chemin `success_marker` n'est PAS sondé : sa preuve vient du CORPS, un catch-all ne peut
+        # pas la fabriquer. Zéro requête ajoutée pour les opérateurs qui fournissent un marqueur.
+        if not action.params.get("success_marker"):
+            disc = self.path_discrimination(action, action.target, timeout=timeout)
+            if disc.catchall:
+                return [self.catchall_degraded(
+                    target=action.target,
+                    what=("race.condition (succès compté sur le STATUT seul — params.success_codes "
+                          "sans params.success_marker)"),
+                    disc=disc, poc=self.dry(action))]
+
         results = self._burst(action, action.target, method, data, headers, n, timeout)
         # (5) DÉGRADATION GRACIEUSE : aucune réponse du tout (transport indisponible) -> skipped (offline).
         seen = [(st, body) for st, body in results if st is not None]

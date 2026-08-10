@@ -183,7 +183,17 @@ class TestRaceConditionOracle(unittest.TestCase):
 
     def test_success_codes_without_marker(self):
         # détection par code seul (pas de marqueur) : 3 x HTTP 200 -> 3 succès > quota 1 -> vulnerable.
+        #
+        # ⚠️ CE TEST ENCODAIT LE DÉFAUT. Son `fake` rendait 200 pour TOUTE URL — c'est-à-dire la
+        # définition même d'une cible CATCH-ALL — et il ASSERTAIT `vulnerable`. La sonde de contrôle
+        # (`Oracle.path_discrimination`) rend désormais `skipped` sur une telle cible, à raison : rien
+        # n'y distingue une redemption réussie d'un `index.html`. Le `fake` modélise maintenant une
+        # cible qui DISCRIMINE ses routes (404 sur les chemins de contrôle), ce que fait n'importe quel
+        # vrai endpoint à usage limité — l'intention du test (compter le succès sur le STATUT seul) est
+        # préservée intacte. Le cas catch-all est verrouillé par `test_catchall_no_verdict_on_status_only`.
         def fake(url, headers=None, timeout=15, method="POST", data=None):
+            if "forge-catchall" in url:
+                return (404, "not found")
             return (200, "ok")
         restore = _patch(RaceCondition, fake)
         try:
@@ -209,7 +219,10 @@ class TestRaceConditionOracle(unittest.TestCase):
 
     def test_malformed_success_codes_fire_no_crash(self):
         # L14 — un fire() COMPLET avec success_codes malformé ne lève pas (contrat « ne lève jamais »).
+        # Cible qui DISCRIMINE ses routes (cf. la note de `test_success_codes_without_marker`).
         def fake(url, headers=None, timeout=15, method="POST", data=None):
+            if "forge-catchall" in url:
+                return (404, "not found")
             return (200, "ok")
         restore = _patch(RaceCondition, fake)
         try:
@@ -220,6 +233,54 @@ class TestRaceConditionOracle(unittest.TestCase):
             restore()
         # ["abc", None] : aucun code valide -> repli _SUCCESS_CODES (200 inclus) -> 3 succès > quota 1.
         self.assertEqual(f[0].status, "vulnerable")
+
+    def test_catchall_no_verdict_on_status_only(self):
+        """CIBLE CATCH-ALL + comptage sur le STATUT SEUL -> `skipped`, AUCUNE rafale tirée.
+
+        C'est le défaut de `framework.exposure` transposé ici : un serveur qui rend 200 à n'importe
+        quoi ferait compter la rafale entière comme des succès -> `successes > limit` VRAI par
+        construction -> faux HIGH « Race/TOCTOU CONFIRMÉ » sans qu'aucune redemption n'ait eu lieu."""
+        calls = []
+        lock = threading.Lock()
+
+        def fake(url, headers=None, timeout=15, method="POST", data=None):
+            with lock:
+                calls.append(url)
+            return (200, "ok")                          # catch-all : 200 pour TOUT, y compris les contrôles
+        restore = _patch(RaceCondition, fake)
+        try:
+            f = RaceCondition().fire(Action("race.condition", self.TGT,
+                                            params={"success_codes": [200], "in_scope": ["app.test"],
+                                                    "burst": 4}))
+        finally:
+            restore()
+        self.assertEqual(f[0].status, "skipped", "catch-all + statut seul -> jamais un verdict")
+        self.assertIn("catch-all", f[0].title)
+        self.assertIn("NON VÉRIFIÉ", f[0].evidence)
+        # AUCUNE rafale : seuls les 2 chemins de contrôle ont été tirés (on n'émet pas 4 écritures
+        # concurrentes qu'on serait de toute façon incapable de juger).
+        self.assertEqual(len(calls), 2, f"la rafale ne doit PAS partir : {calls}")
+        self.assertTrue(all("forge-catchall" in u for u in calls), calls)
+
+    def test_success_marker_path_is_immune_to_catchall(self):
+        """Le contrat `success_marker` (PREUVE DE CORPS) n'est PAS sondé et reste INCHANGÉ : un
+        catch-all ne peut pas fabriquer un marqueur, et l'opérateur ne paie aucune requête en plus."""
+        calls = []
+        lock = threading.Lock()
+
+        def fake(url, headers=None, timeout=15, method="POST", data=None):
+            with lock:
+                calls.append(url)
+            return (200, "<html>catch-all</html>")      # 200 partout, mais AUCUN marqueur
+        restore = _patch(RaceCondition, fake)
+        try:
+            f = RaceCondition().fire(Action("race.condition", self.TGT,
+                                            params=dict(self.BASE, burst=4)))
+        finally:
+            restore()
+        self.assertEqual(f[0].status, "tested")         # 0 succès (marqueur absent) -> pas de promotion
+        self.assertFalse(any("forge-catchall" in u for u in calls),
+                         "aucune sonde de contrôle sur le chemin à preuve de CORPS")
 
     # --- rafale BORNÉE (jamais un DoS) ---
     def test_burst_is_bounded(self):

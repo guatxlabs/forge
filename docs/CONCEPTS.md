@@ -101,9 +101,60 @@ concrète d'impact**. La machine d'état des findings (`schema.py`) :
 | `jwt.weakness` | Un **jeton forgé est accepté pour le compte de l'opérateur** (self_marker). |
 | `path.traversal` / `ssti.eval` | Un **marqueur bénin** (canari) revient — jamais de fichier système ni de RCE. |
 | `csrf.state_change` | Action **critique** + anti-CSRF absent **ET** SameSite confirmé absent (détection seule, aucune mutation cross-site). |
+| `framework.exposure` | Signature de **CORPS propre à l'endpoint** (`/beans` → JSON `"beans"`, `/httptrace` → `"traces"`, `/heapdump` → magic `JAVA PROFILE`). Jamais un code 200, **jamais** une réponse HTML. |
+| `race.condition` | Strictement **plus de succès que le quota**, le succès étant attesté par un `success_marker` de **corps** — ou par le statut *sur une cible dont on a vérifié qu'elle discrimine ses routes*. |
 
 Cette discipline reflète le « Gate Impact » : *quelle donnée d'un autre user puis-je voir ? quelle
 action au nom d'un autre user ? quel asset détourner ?* Si les trois sont non → pas de promotion.
+
+### 3.1 Un code 200 n'est pas une preuve — la sonde de contrôle *catch-all*
+
+**MESURÉ (campagne `kong`, 2026-08-10, ledger signé).** Première campagne contre une cible tierce à
+surface anonyme réelle. Résultat : **16 findings, 8 distincts, tous `[HIGH] vulnerable`, tous FAUX** —
+`/actuator/beans`, `/actuator/heapdump`, `/actuator/threaddump`, `/actuator/httptrace`, plus les
+variantes Spring Boot 1.x `/beans`, `/heapdump`, `/threaddump`, `/trace`. La cible est une **SPA qui
+rend son `index.html` — 3 427 octets identiques, HTTP 200 — pour n'importe quel chemin** (`/wp-admin`,
+`/.git/config`, `/zzz-chemin-inexistant-12345`). Il n'y a **aucun** Actuator dessus.
+
+La cause tenait en une disjonction : `if is_sensitive and (leaks or path.endswith((...)))` — pour ces
+cinq chemins `path.endswith(...)` est **vrai inconditionnellement**, donc `leaks` (le seul terme qui
+lisait le corps) n'était **jamais exigé**. Le verdict tombait sur le seul `st == 200`.
+
+**Pourquoi le « 0 faux positif » du dépôt ne l'avait pas vu.** Il était mesuré sur 2 410 puis 5 318
+puis 2 771 findings — mais uniquement contre des cibles **murées** (Cloudflare, UAT qui rend 404
+partout). Aucune ne répondait 200 avec du contenu. **Le défaut se révèle à la première cible
+réellement atteignable.**
+
+**Les deux remèdes, et leurs bornes.**
+
+1. **Preuve positive par CORPS, endpoint par endpoint** (`exposure._actuator_leak`) : chaque surface a
+   une signature propre, et une réponse `text/html` n'est un actuator dans **aucun** cas.
+2. **Sonde de contrôle générique** (`Oracle.path_discrimination`) : *toute* découverte de chemin est
+   non concluante sur une cible qui ne discrimine pas ses routes. On demande **deux chemins qui ne
+   peuvent pas exister** (dérivés de l'origine par SHA-256, donc rejouables) ; s'ils répondent tous
+   deux en 2xx, la cible est **catch-all** et le module rend **`skipped`** — « je n'ai pas pu
+   vérifier » — jamais `tested` ni `vulnerable`. Vocabulaire et témoin réutilisés de
+   [`blindness`](CONCEPTS.md#3-oracles-à-preuve) / `Oracle.degraded()`.
+
+Comme pour `blindness`, deux bornes empêchent l'**excès inverse** :
+
+- la sonde **ne promeut jamais** : son seul pouvoir est de *taire* un verdict. Le 2xx y est lu sur un
+  chemin **fabriqué par l'appelant**, donc c'est une preuve *positive* de non-discrimination — pas une
+  déduction depuis une absence ;
+- **deux** contrôles, pas un : un seul 2xx pourrait être une collision. Preuve partielle (une sonde
+  muette) → **indéterminé**, le module garde son comportement historique.
+
+**Mesuré en lab loopback** (`AVANT` = code de `git HEAD`, `APRÈS` = arbre corrigé, mêmes serveurs) :
+
+| Cible loopback | AVANT | APRÈS |
+|---|---|---|
+| SPA catch-all (corps réel de la campagne) | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `skipped` |
+| Cible qui discrimine, mais HTML sur `/actuator/*` | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `tested` |
+| **Actuator Spring réellement exposé** | 5 `vulnerable` + 1 `tested` | **5 `vulnerable` + 1 `tested`** (intact) |
+
+La dernière ligne est la moitié qui compte autant que la première : **un actuator réellement exposé
+reste détecté**. Verrouillé par `tests/test_catchall_body_proof.py` (les deux sens) et prouvé par
+mutation (11 mutants, 11 tués).
 
 ---
 

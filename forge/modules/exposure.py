@@ -22,7 +22,12 @@ GARDE-FOUS (prouvés par les tests) :
   (1) SCOPE-GUARD fail-closed : hôte hors périmètre -> `skipped`, AUCUNE requête émise ; chaque chemin
       sondé est RE-VALIDÉ in-scope (défense en profondeur) ;
   (2) PREUVE MINIMALE : promotion `vulnerable` UNIQUEMENT sur une surface sensible qui FUIT réellement
-      (config/état) ; une surface simplement présente/non sensible reste `tested` ;
+      (config/état), attestée par une signature de CORPS PROPRE À CET ENDPOINT (`_actuator_leak`) —
+      JAMAIS par le seul code 200, et JAMAIS sur une réponse HTML ; une surface simplement présente/
+      non sensible reste `tested` ;
+  (2b) SONDE DE CONTRÔLE CATCH-ALL : avant de deviner le moindre chemin, on demande deux chemins qui
+      NE PEUVENT PAS exister. S'ils répondent 2xx, la cible ne discrimine pas ses routes -> la
+      découverte de chemin rend `skipped` et AUCUN chemin n'est sondé (cf. `Oracle.path_discrimination`) ;
   (3) NON DESTRUCTIF : GET en lecture seule (exploit=False, destructive=False) — jamais de mutation ;
   (4) DÉGRADATION GRACIEUSE : aucune réponse (réseau indisponible) -> `skipped` (offline-safe).
 
@@ -53,6 +58,92 @@ _ACTUATOR_SENSITIVE = ("/env", "/configprops", "/heapdump", "/threaddump", "/bea
 # marqueurs de corps confirmant un actuator (index) ou une fuite de config (env/configprops).
 _ACTUATOR_INDEX_SIGNS = ('"_links"', '"self"', '"health"', '"actuator"')
 _ACTUATOR_ENV_SIGNS = ('"propertysources"', '"activeprofiles"', '"systemproperties"', '"applicationconfig"')
+
+# =================================================================================================
+#  PREUVE POSITIVE, PAR CHEMIN — la correction du défaut le plus grave du dépôt.
+#
+#  CE QUI ÉTAIT ÉCRIT (et qui a produit 8 findings HIGH FAUX sur une cible tierce réelle) :
+#      if is_sensitive and (leaks or path.endswith(("/heapdump", "/threaddump", "/beans",
+#                                                   "/httptrace", "/trace"))):
+#  Pour ces CINQ chemins, `path.endswith(...)` est VRAI INCONDITIONNELLEMENT — la disjonction rendait
+#  `leaks` (le seul terme qui lisait le CORPS) totalement inopérant. Le verdict `HIGH, proven=True`
+#  tombait donc sur le seul `st == 200`. Sur `cloud.konghq.com` — une SPA qui rend le MÊME
+#  `index.html` de 3 427 octets en HTTP 200 pour n'importe quel chemin — cela a produit
+#  `/actuator/beans`, `/actuator/heapdump`, `/actuator/threaddump`, `/actuator/httptrace`, `/beans`,
+#  `/heapdump`, `/threaddump`, `/trace` en « fuite de configuration ». Aucun actuator n'y existe.
+#
+#  CE QUI EST EXIGÉ MAINTENANT : une signature de CORPS PROPRE À CHAQUE ENDPOINT. Chaque endpoint
+#  actuator a une forme reconnaissable, et c'est elle — jamais le statut — qui promeut :
+#    /env, /configprops -> JSON `propertySources`/`activeProfiles`/`systemProperties` ;
+#    /beans             -> JSON `"beans"` (Boot 2 : `{"contexts":{…{"beans":{…}}}}`, Boot 1 : liste) ;
+#    /threaddump        -> JSON `"threads"`/`threadName`/`threadState`, OU dump jstack texte
+#                          (`java.lang.Thread.State`, `nid=0x`) ;
+#    /httptrace, /trace -> JSON `"traces"` (Boot 2) ou liste `timestamp`+`info`/`headers` (Boot 1) ;
+#    /heapdump          -> BINAIRE HPROF : le corps COMMENCE par le magic `JAVA PROFILE 1.0`.
+#
+#  ET UN INTERDIT ABSOLU, ANTÉRIEUR À TOUTE SIGNATURE : une réponse `text/html` qui commence par
+#  `<!DOCTYPE html>`/`<html` N'EST un actuator dans AUCUN cas. C'est exactement ce que la cible kong
+#  renvoyait, et c'est la porte que la sonde de contrôle catch-all (`Oracle.path_discrimination`)
+#  ferme une seconde fois, en amont.
+# =================================================================================================
+_HTML_PREFIXES = ("<!doctype html", "<html", "<!doctype>", "<?xml")
+_HPROF_MAGIC = "JAVA PROFILE"                    # magic HPROF (ASCII) en tête d'un heapdump binaire
+_THREADDUMP_TEXT_SIGNS = ("java.lang.thread.state", "nid=0x", '"main" ', "at java.")
+_ACTUATOR_LEAK_SIGNS = {
+    "/env": _ACTUATOR_ENV_SIGNS,
+    "/configprops": _ACTUATOR_ENV_SIGNS + ('"contexts"', '"beans"', '"prefix"'),
+    "/beans": ('"beans"',),
+    "/threaddump": ('"threads"', '"threadname"', '"threadstate"', '"lockedmonitors"'),
+    "/httptrace": ('"traces"',),
+    "/trace": ('"traces"', '"timestamp"'),
+}
+
+
+def _looks_structured(body):
+    """Le corps est-il un document STRUCTURÉ (JSON/array) ? Un actuator sert du JSON — pas une page.
+    Pur, ne lève jamais."""
+    return str(body or "").lstrip()[:1] in ("{", "[")
+
+
+def _is_html(body):
+    """Le corps est-il une page HTML/XML livrée au navigateur ? Une page HTML n'est un endpoint
+    actuator dans AUCUN cas — c'est la réponse d'une SPA catch-all. Pur, ne lève jamais."""
+    return str(body or "").lstrip()[:64].lower().startswith(_HTML_PREFIXES)
+
+
+def _actuator_leak(path, body):
+    """(fuite: bool, pourquoi: str) — PREUVE POSITIVE tirée du CORPS pour l'endpoint `path`.
+
+    Contrat : renvoie True UNIQUEMENT si le corps porte la signature PROPRE à cet endpoint. Aucun code
+    de statut n'entre ici — l'appelant a déjà exigé 200, ce qui ne prouve RIEN sur une cible catch-all.
+    Pur, ne lève jamais."""
+    b = str(body or "")
+    p = str(path or "")
+    # /heapdump : dump BINAIRE. Sa seule signature honnête est le magic HPROF en tête. (Le corps est
+    # décodé en utf-8 'replace' par `_fetch` : le magic ASCII survit intact.)
+    if p.endswith("/heapdump"):
+        if b.lstrip().startswith(_HPROF_MAGIC):
+            return True, "magic HPROF « JAVA PROFILE » en tête du corps (dump mémoire binaire servi)"
+        return False, ""
+    # INTERDIT ABSOLU : une page HTML n'est jamais un actuator (c'est la réponse d'une SPA catch-all).
+    if _is_html(b):
+        return False, ""
+    low = b.lower()
+    # /threaddump : JSON (Boot 2) OU dump jstack TEXTE (Boot 1 / `-Dmanagement…`).
+    if p.endswith("/threaddump"):
+        if _looks_structured(b) and any(s in low for s in _ACTUATOR_LEAK_SIGNS["/threaddump"]):
+            return True, "JSON de threaddump (threads/threadName/threadState) — état d'exécution fuité"
+        if any(s in low for s in _THREADDUMP_TEXT_SIGNS):
+            return True, "dump jstack texte (java.lang.Thread.State / nid=0x) — état d'exécution fuité"
+        return False, ""
+    for suffix, signs in _ACTUATOR_LEAK_SIGNS.items():
+        if suffix == "/threaddump" or not p.endswith(suffix):
+            continue
+        hits = [s for s in signs if s in low]
+        if hits and _looks_structured(b):
+            return True, f"JSON d'actuator {suffix} portant {', '.join(hits)} — configuration/état fuité"
+        return False, ""
+    return False, ""
 
 # --- Laravel Telescope / Horizon (panneaux non authentifiés) + Ignition/Whoops (debug) --------------
 _LARAVEL_PATHS = ["/telescope", "/telescope/requests", "/horizon", "/horizon/dashboard"]
@@ -111,9 +202,12 @@ class FrameworkExposure(ScopeGuardedOracle):
 
     def dry(self, action):
         base = self._base(action.target)
-        return (f"# GET {base}/actuator/* (Spring), {base} (__NEXT_DATA__/runtimeConfig Next.js), "
-                f"{base}/telescope|/horizon (Laravel) + fingerprint Ignition ; PREUVE = surface sensible "
-                f"joignable qui fuit config/données (secret RÉDIGÉ) ; lecture seule ; sinon tested")
+        ctl = ", ".join(self.catchall_paths(self._origin_of(base)))
+        return (f"# sonde de CONTRÔLE catch-all d'abord : GET {base}{{{ctl}}} (chemins qui ne peuvent pas "
+                f"exister — 2xx sur les deux => la cible ne discrimine pas ses routes => skipped)\n"
+                f"# GET {base}/actuator/* (Spring), {base} (__NEXT_DATA__/runtimeConfig Next.js), "
+                f"{base}/telescope|/horizon (Laravel) + fingerprint Ignition ; PREUVE = signature de CORPS "
+                f"propre à l'endpoint (jamais le seul HTTP 200, jamais du HTML) ; lecture seule ; sinon tested")
 
     def fire(self, action):
         # (1) SCOPE-GUARD fail-closed — hôte hors périmètre -> skipped, AUCUNE requête émise.
@@ -123,8 +217,18 @@ class FrameworkExposure(ScopeGuardedOracle):
         timeout = action.params.get("timeout", 15)
         exposures, seen_network = [], False
 
+        # (0) SONDE DE CONTRÔLE « CATCH-ALL » — AVANT de deviner le moindre chemin. Une SPA qui rend
+        #     200 sur n'importe quoi rend TOUTE la découverte de chemin non concluante : on ne sonde
+        #     alors PAS les 20 chemins actuator/Laravel (aucun verdict possible, et autant de trafic
+        #     inutile), et on rend `skipped` pour cette surface — jamais `tested` ni `vulnerable`.
+        disc = self.path_discrimination(action, base, timeout=timeout)
+        if disc.probes:
+            seen_network = True
+        path_sweep_ok = not disc.catchall
+
         # --- (A) Spring Boot Actuator ---
-        for path in (action.params.get("actuator_paths") or _ACTUATOR_PATHS)[:self.MAX_PATHS]:
+        for path in ((action.params.get("actuator_paths") or _ACTUATOR_PATHS)[:self.MAX_PATHS]
+                     if path_sweep_ok else []):
             url = base + (path if str(path).startswith("/") else "/" + str(path))
             # RE-VALIDATION périmètre par-URL (défense en profondeur) — hors-scope -> ignoré, aucun I/O.
             if not self._in_scope(action, url):
@@ -137,16 +241,18 @@ class FrameworkExposure(ScopeGuardedOracle):
                 continue
             low = body.lower()
             is_sensitive = any(path.endswith(s) for s in _ACTUATOR_SENSITIVE)
-            leaks = any(s in low for s in _ACTUATOR_ENV_SIGNS)
-            index = any(s in low for s in _ACTUATOR_INDEX_SIGNS)
-            if is_sensitive and (leaks or path.endswith(("/heapdump", "/threaddump", "/beans", "/httptrace", "/trace"))):
+            # PREUVE POSITIVE tirée du CORPS, propre à CE chemin (cf. `_actuator_leak`). Le statut 200
+            # n'entre plus dans la promotion : il est nécessaire, jamais suffisant.
+            leaks, leak_why = _actuator_leak(path, body) if is_sensitive else (False, "")
+            env_leak = any(s in low for s in _ACTUATOR_ENV_SIGNS) and _looks_structured(body)
+            index = (any(s in low for s in _ACTUATOR_INDEX_SIGNS) and _looks_structured(body))
+            if leaks:
                 exposures.append({
                     "surface": f"Spring Boot Actuator {path}", "severity": "HIGH", "proven": True,
                     "target": url,
-                    "evidence": (f"HTTP 200 sur endpoint actuator SENSIBLE {path} — fuite de configuration/"
-                                 f"état ({'propertySources/env' if leaks else 'dump'}). Extrait rédigé : "
-                                 f"{_redact(body)[:400]}")})
-            elif index or leaks:
+                    "evidence": (f"HTTP 200 sur endpoint actuator SENSIBLE {path} — PREUVE DE CORPS : "
+                                 f"{leak_why}. Extrait rédigé : {_redact(body)[:400]}")})
+            elif index or env_leak:
                 exposures.append({
                     "surface": f"Spring Boot Actuator {path}", "severity": "MEDIUM", "proven": False,
                     "target": url,
@@ -154,7 +260,7 @@ class FrameworkExposure(ScopeGuardedOracle):
                                  f"directe de secret. Extrait rédigé : {_redact(body)[:200]}")})
 
         # --- (B) Laravel Telescope / Horizon (non authentifiés) + Ignition (debug) ---
-        for path in (action.params.get("laravel_paths") or _LARAVEL_PATHS):
+        for path in ((action.params.get("laravel_paths") or _LARAVEL_PATHS) if path_sweep_ok else []):
             url = base + path
             if not self._in_scope(action, url):
                 continue
@@ -206,7 +312,16 @@ class FrameworkExposure(ScopeGuardedOracle):
                 evidence="Aucune réponse HTTP (transport indisponible) sur les surfaces sondées ; offline-safe.",
                 poc=self.dry(action))]
 
-        if not exposures:
+        # CATCH-ALL CONSTATÉ : la découverte de chemin (Actuator + Telescope/Horizon) n'a PAS pu être
+        # vérifiée. `skipped` (« je n'ai pas pu vérifier »), jamais `tested` (« j'ai vérifié, rien
+        # trouvé ») ni `vulnerable`. Les constats de RACINE (Ignition/Next.js), qui ne devinent aucun
+        # chemin, restent rendus tels quels à côté.
+        findings = []
+        if disc.catchall:
+            findings.append(self.catchall_degraded(
+                target=base, what="framework.exposure (surfaces devinées : Actuator, Telescope/Horizon)",
+                disc=disc, poc=self.dry(action)))
+        elif not exposures:
             return [self.proof(
                 target=base, proven=False,
                 title="framework.exposure non confirmé — aucune surface de framework sensible exposée",
@@ -215,7 +330,6 @@ class FrameworkExposure(ScopeGuardedOracle):
                           "Ignition ni fuite runtimeConfig Next.js détecté. Surfaces sondées en lecture seule."),
                 poc=self.dry(action))]
 
-        findings = []
         for e in exposures:
             findings.append(self.proof(
                 target=e["target"], proven=e["proven"],

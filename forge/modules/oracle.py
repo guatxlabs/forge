@@ -19,6 +19,7 @@ Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed 
 chaque module concret et restent gardés par le ROE.
 """
 import functools
+import hashlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -143,6 +144,76 @@ def _redirect_target(cur_url, location, store):
     if scope is None or not scope.is_in_scope(nxt):
         return None
     return nxt
+
+
+# =================================================================================================
+#  SONDE DE CONTRÔLE « CATCH-ALL » — un 200 sur un chemin DEVINÉ ne prouve rien si la cible ne
+#  DISCRIMINE PAS ses routes.
+#
+#  MESURÉ (campagne `kong`, ledger signé, `.../tmp/kong/ledger.jsonl`) : `cloud.konghq.com` est une
+#  SPA qui rend son `index.html` — **3 427 octets IDENTIQUES, HTTP 200** — pour `/wp-admin`,
+#  `/.git/config`, `/server-status` et `/zzz-chemin-inexistant-12345`. `framework.exposure` y a émis
+#  **8 findings HIGH `vulnerable` distincts** (`/actuator/beans`, `/heapdump`, `/threaddump`,
+#  `/httptrace`, `/trace`, + variantes Boot 1.x). Aucun actuator n'existe sur cette cible.
+#
+#  LE DÉFAUT EST DE CLASSE, PAS D'INSTANCE. Tout oracle qui DEVINE un chemin puis lit le STATUT de la
+#  réponse comme « ce chemin existe » est faux sur une cible catch-all — et une SPA est le cas
+#  MAJORITAIRE du web moderne. La sonde de contrôle est le seul discriminant qui ne coûte rien : on
+#  demande un chemin qu'AUCUNE application ne peut servir ; s'il répond en 2xx, la cible ne
+#  discrimine pas ses routes et TOUT 2xx sur un chemin deviné est NON CONCLUANT.
+#
+#  DEUX BORNES, SYMÉTRIQUES DE CELLES DE `blindness` (on ne fabrique pas l'excès inverse) :
+#    1. La sonde ne PROMEUT jamais : son seul pouvoir est de faire TAIRE un verdict (`tested`/
+#       `vulnerable` -> `skipped`). Le 2xx y est lu sur un chemin que L'APPELANT a fabriqué et dont
+#       il SAIT qu'il ne peut pas exister : c'est une preuve POSITIVE de non-discrimination, pas une
+#       déduction depuis l'absence.
+#    2. DEUX chemins de contrôle, pas un : un seul 2xx pourrait être une collision (un chemin de
+#       contrôle qui existe pour de vrai). L'ambiguïté résiduelle est NOMMÉE : une cible qui rend un
+#       2xx sur deux jetons aléatoires DISTINCTS et n'a pourtant pas de catch-all n'existe pas en
+#       pratique ; et si elle existait, le coût serait un `skipped` (« pas vérifié »), jamais un faux
+#       négatif silencieux.
+#
+#  La FORME du contrôle doit MIROITER la forme des chemins devinés (extension, profondeur) : une SPA
+#  peut très bien catch-all les chemins sans extension et rendre 404 sur `/x.json`. D'où
+#  `probe_paths` (l'appelant fournit ses propres gabarits quand il devine autre chose que des
+#  segments nus).
+# =================================================================================================
+CATCHALL_PREFIX = (
+    "NON VÉRIFIÉ — la cible NE DISCRIMINE PAS ses routes (catch-all) : {why}. Un code 200 sur un "
+    "chemin DEVINÉ n'y prouve donc RIEN — ni que le chemin existe, ni que la surface est exposée. "
+    "Le statut passe à `skipped` (« je n'ai pas pu vérifier ») plutôt que `tested`/`vulnerable`. "
+    "Rejouer sur une surface qui discrimine, ou exiger une signature de CORPS propre à la surface "
+    "recherchée.")
+
+
+class PathDiscrimination:
+    """Verdict d'une sonde de contrôle « catch-all ». Ne lève jamais.
+
+    `verdict` : True  -> la cible DISCRIMINE (au moins un chemin de contrôle est refusé) ;
+                False -> CATCH-ALL constaté (tous les chemins de contrôle répondent 2xx) ;
+                None  -> INDÉTERMINÉ (aucune réponse, ou sonde non émise) — l'appelant garde son
+                         comportement historique (c'est sa propre dégradation réseau qui parlera).
+
+    Ne retient que des chemins fabriqués par l'appelant, des codes de statut et des tailles : aucun
+    fragment de corps, aucun secret."""
+
+    __slots__ = ("verdict", "probes", "same_body")
+
+    def __init__(self, verdict=None, probes=(), same_body=False):
+        self.verdict = verdict
+        self.probes = list(probes)          # [(path, status, len(body))] — bornée par construction
+        self.same_body = bool(same_body)
+
+    @property
+    def catchall(self):
+        """True UNIQUEMENT sur un catch-all CONSTATÉ (jamais sur l'indéterminé)."""
+        return self.verdict is False
+
+    def why(self):
+        """Explication SÛRE (chemins de contrôle + statuts + tailles), pour l'évidence d'un finding."""
+        bits = ", ".join(f"{p} -> HTTP {s} ({n} o)" for p, s, n in self.probes) or "—"
+        return (f"sonde(s) de contrôle sur des chemins qui NE PEUVENT PAS exister : {bits}"
+                + (" ; corps IDENTIQUES entre les contrôles" if self.same_body else ""))
 
 
 class Oracle(Module):
@@ -532,6 +603,96 @@ class Oracle(Module):
     # Nom historique du seam : les modules concrets appellent `self._fetch(...)` et les tests le
     # monkeypatchent par classe. Résout vers la méthode hoistée ci-dessus (par héritage/alias).
     _fetch = _fetch_body
+
+    # =============================================================================================
+    #  SONDE DE CONTRÔLE « CATCH-ALL » (cf. le bloc de doctrine en tête de module)
+    # =============================================================================================
+    CATCHALL_PROBES = 2          # nombre de chemins de contrôle (deux : anti-collision, cf. borne 2)
+    CATCHALL_MAXLEN = 4096       # on ne lit du contrôle que de quoi comparer deux corps (jamais tout)
+
+    @staticmethod
+    def _origin_of(url):
+        """`scheme://netloc` d'une cible (schéma https supposé si absent), sans chemin ni requête.
+        La sonde de contrôle s'adresse à la RACINE : c'est le routeur de l'application qu'on teste,
+        pas une sous-arborescence. Pur, ne lève jamais."""
+        s = str(url or "").strip()
+        if "://" not in s:
+            s = "https://" + s
+        try:
+            sp = urllib.parse.urlsplit(s)
+            if sp.scheme and sp.netloc:
+                return f"{sp.scheme}://{sp.netloc}"
+        except Exception:            # noqa: BLE001 (URL hostile : jamais d'exception ici)
+            pass
+        return s.rstrip("/")
+
+    @classmethod
+    def catchall_paths(cls, origin, n=None, template="/{token}"):
+        """Chemins de CONTRÔLE DÉTERMINISTES (dérivés de l'origine par SHA-256) qu'aucune application
+        ne peut servir. Déterministes pour être REJOUABLES par l'opérateur et stables en test ; le
+        gabarit est paramétrable car le contrôle doit MIROITER la forme des chemins devinés."""
+        n = cls.CATCHALL_PROBES if n is None else max(1, int(n))
+        seed = hashlib.sha256(str(origin or "").encode("utf-8", "replace")).hexdigest()
+        return [str(template).format(token=f"forge-catchall-{seed[i * 12:(i + 1) * 12]}")
+                for i in range(n)]
+
+    def path_discrimination(self, action, target, timeout=15, probe_paths=None):
+        """La cible DISCRIMINE-t-elle ses routes ? -> `PathDiscrimination` (jamais d'exception).
+
+        Émet `CATCHALL_PROBES` GET en lecture seule sur des chemins FABRIQUÉS qui ne peuvent pas
+        exister. CATCH-ALL constaté (`verdict=False`) ssi TOUS répondent 2xx. Un seul refus (404/4xx/
+        3xx/5xx) suffit à conclure que la cible discrimine (`verdict=True`). Aucune réponse ->
+        `verdict=None` : l'appelant garde son comportement historique.
+
+        SCOPE-GUARD : chaque chemin de contrôle est RE-VALIDÉ in-scope quand l'appelant en porte un
+        (`ScopeGuardMixin`) ; hors périmètre -> aucune requête, verdict INDÉTERMINÉ (fail-closed).
+        Passe par le seam `_fetch` de l'oracle appelant : session gouvernée, throttle, pin, témoin de
+        cécité et monkeypatch des tests s'appliquent EXACTEMENT comme aux sondes normales."""
+        origin = self._origin_of(target)
+        paths = list(probe_paths) if probe_paths else self.catchall_paths(origin)
+        in_scope = getattr(self, "_in_scope", None)
+        probes, all_2xx, bodies = [], True, []
+        for path in paths:
+            url = origin + (path if str(path).startswith("/") else "/" + str(path))
+            if in_scope is not None and not in_scope(action, url):
+                return PathDiscrimination(None, probes, False)      # fail-closed : aucune requête
+            st, body = self._probe(url, timeout=timeout)
+            if st is None:
+                continue                                            # transport muet : ne juge pas
+            probes.append((path, st, len(body or "")))
+            bodies.append((body or "")[:self.CATCHALL_MAXLEN])
+            if not (200 <= int(st) < 300):
+                all_2xx = False
+        same = len(bodies) > 1 and len(set(bodies)) == 1
+        if not all_2xx:
+            return PathDiscrimination(True, probes, same)           # un refus suffit : elle discrimine
+        # CATCH-ALL : exige que les DEUX contrôles aient RÉPONDU (borne anti-collision). Une réponse
+        # unique — l'autre sonde muette — ne suffit pas : on rend INDÉTERMINÉ, jamais un catch-all
+        # déduit d'un seul chemin (ce serait l'excès inverse, un `skipped` sur une cible saine).
+        if len(probes) >= 2:
+            return PathDiscrimination(False, probes, same)
+        return PathDiscrimination(None, probes, same)               # preuve partielle -> indéterminé
+
+    def _probe(self, url, timeout=15):
+        """(status, body) d'une sonde de CONTRÔLE, quel que soit l'arité du `_fetch` de l'oracle
+        concret (2-uplet (st, body) ou 3-uplet (st, body, headers/pairs)). Ne lève jamais : une sonde
+        de contrôle qui casse ne doit JAMAIS faire tomber l'oracle qu'elle protège."""
+        try:
+            res = self._fetch(url, timeout=timeout)
+        except Exception:            # noqa: BLE001 (seam hostile / signature exotique)
+            return None, ""
+        if isinstance(res, tuple) and len(res) >= 2:
+            return res[0], res[1]
+        return None, ""
+
+    def catchall_degraded(self, *, target, what, disc, poc):
+        """Finding de NON-VÉRIFICATION posé quand la cible ne discrimine pas ses routes. Réutilise
+        `degraded()` (status='skipped') : le vocabulaire « je n'ai pas pu vérifier » existe déjà."""
+        return self.degraded(
+            target=target,
+            title=f"{what} non testé — la cible ne DISCRIMINE PAS ses routes (catch-all)",
+            evidence=CATCHALL_PREFIX.format(why=disc.why()),
+            poc=poc)
 
     @staticmethod
     def _content_type(headers):
