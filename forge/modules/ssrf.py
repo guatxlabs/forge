@@ -124,7 +124,37 @@ class SsrfCallback(Oracle):
 #  ou de STATUT vaut preuve. Aucune donnée sensible, aucune requête vers une infra hors périmètre.
 # =================================================================================================
 _XSPA_DEFAULT_PORTS = [22, 80, 443, 3306, 5432, 6379, 8080, 8443, 9200, 27017]
-_XSPA_CLOSED_PORT = 1                    # port quasi-toujours fermé/filtré -> baseline « closed »
+# =================================================================================================
+#  DEUX baselines « fermées », et des ports HAUTS — les deux corrigent le MÊME défaut mesuré.
+#
+#  MESURÉ (banc de détection, `docs/BENCH_DETECTION.md` § D5) : **3 MEDIUM `vulnerable` FAUX** sur
+#  VAmPI, déclarant JOIGNABLES les 10 ports `[22,80,443,3306,5432,6379,8080,8443,9200,27017]` —
+#  9 sur 10 FERMÉS (connexion TCP directe), et l'endpoint pas SSRF-able du tout : corps IDENTIQUE de
+#  1 563 octets pour `__debugger__=…:1/` et `…:3306/`.
+#
+#  CAUSE EXACTE, VÉRIFIÉE (ce n'est PAS le timing — le timing est mesuré mais n'entre dans AUCUN
+#  verdict : seul `sig != closed_sig` promeut). La baseline « fermée » était le port **1**, et la
+#  neutralisation du reflet scrubait le NUMÉRO DE PORT du corps, port par port :
+#
+#      re.sub(r"(?<!\d)1(?!\d)", "<PORT>", body)      # baseline : mange TOUS les « 1 » isolés
+#      re.sub(r"(?<!\d)3306(?!\d)", "<PORT>", body)   # port     : no-op (3306 absent du corps)
+#
+#  Sur un corps HTML quelconque (`HTTP/1.1`, `version 1.0.1`, `console-1`) le corps de la BASELINE est
+#  donc mutilé et celui des ports ne l'est pas : deux corps OCTET POUR OCTET IDENTIQUES produisent
+#  deux signatures DIFFÉRENTES. La neutralisation censée SUPPRIMER le faux signal le FABRIQUAIT — et
+#  de façon inconditionnelle, d'où « 10 ports sur 10 joignables ».
+#
+#  TROIS CORRECTIFS, chacun visant une marche de l'escalier :
+#    (1) SCRUB SYMÉTRIQUE — tous les corps sont normalisés avec le MÊME jeu d'URL et de ports (cf.
+#        `_sig`). Corps identiques -> signatures identiques, par construction.
+#    (2) BASELINES HAUTES — un port à 5 chiffres n'apparaît pas par hasard dans un corps, là où « 1 »
+#        y est partout : le scrub ne peut plus détruire un différentiel RÉEL au passage.
+#    (3) DEUX baselines fermées DISTINCTES — contrôle négatif : deux ports tous deux FERMÉS doivent
+#        rendre la MÊME signature. S'ils diffèrent, le canal est instable (horodatage, nonce, CSRF,
+#        équilibrage) et TOUT différentiel par-port y est ininterprétable -> abstention.
+# =================================================================================================
+_XSPA_CLOSED_PORTS = (47119, 47123)      # 2 ports hauts quasi-toujours fermés -> baseline + contrôle négatif
+_XSPA_CLOSED_PORT = _XSPA_CLOSED_PORTS[0]        # compat : baseline « closed » historique (1re des deux)
 _XSPA_MAX_PORTS = 40                     # borne (politesse / rate) — jamais un scan massif
 
 
@@ -144,8 +174,9 @@ class SsrfXspa(ScopeGuardedOracle):
            "re-valider l'IP (anti-DNS-rebinding) et interdire les schémas/ports arbitraires fournis par "
            "le client — un fetch côté serveur ne doit jamais devenir un scanner de ports interne (CWE-918).")
     description = ("Oracle XSPA (SSRF port-scan) à PREUVE DIFFÉRENTIELLE contre la cible IN-SCOPE "
-                   "uniquement : joignabilité de ports internes via différentiel de réponse/timing vs une "
-                   "baseline fermée (reflet neutralisé). Informatif, non destructif. Sinon tested. CWE-918.")
+                   "uniquement : joignabilité de ports internes via différentiel de réponse vs DEUX "
+                   "baselines fermées (reflet neutralisé symétriquement ; contrôle négatif). Réponse qui "
+                   "ne varie pas selon l'URL injectée -> skipped. Informatif, non destructif. CWE-918.")
 
     def _internal_host(self, action):
         """Hôte à port-scanner : params.internal_host (déclaré par l'opérateur) OU, par défaut, l'HÔTE
@@ -183,24 +214,55 @@ class SsrfXspa(ScopeGuardedOracle):
                            data=urllib.parse.urlencode({param: internal_url}), timeout=timeout)
 
     @staticmethod
-    def _sig(st, body, internal_url, port, internal_host):
-        """Signature de réponse RÉFLEXION-NEUTRALISÉE : (statut, hash du corps normalisé après retrait de
-        l'URL injectée et du port). Neutraliser le reflet évite qu'un simple echo du marqueur (URL/port
-        distincts par port) passe pour un état de port ; seul un CONTENU réel différent (service vs refus)
-        ou un STATUT différent subsiste dans la signature -> preuve robuste."""
+    def _sig(st, body, internal_urls, ports, internal_host):
+        """Signature de réponse RÉFLEXION-NEUTRALISÉE et **SYMÉTRIQUE** : (statut, hash du corps
+        normalisé). Neutraliser le reflet évite qu'un simple echo du marqueur (URL/port distincts par
+        requête) passe pour un état de port ; seul un CONTENU réel différent (service vs refus) ou un
+        STATUT différent subsiste -> preuve robuste.
+
+        SYMÉTRIQUE — le point qui a coûté 3 faux MEDIUM (cf. le bloc de doctrine ci-dessus). `internal_urls`
+        et `ports` portent le jeu COMPLET de la campagne (baselines + tous les ports sondés), pas seulement
+        celui de la requête courante : CHAQUE corps subit donc EXACTEMENT la même normalisation. Deux corps
+        identiques rendent alors des signatures identiques — invariant que l'ancienne version, qui scrubait
+        le seul port de la requête, violait sur n'importe quel corps contenant le chiffre de la baseline.
+
+        Les ports sont scrubés du PLUS LONG au plus court : un `re.sub` sur `80` ne doit pas amputer `8080`
+        déjà remplacé (l'ordre était indifférent tant qu'un seul port était traité ; il ne l'est plus)."""
         b = body or ""
-        b = b.replace(internal_url, "<INJ>").replace(f"{internal_host}:{port}", "<HP>")
-        b = re.sub(r"(?<!\d)" + re.escape(str(port)) + r"(?!\d)", "<PORT>", b)
+        for u in sorted({str(u) for u in (internal_urls or ())}, key=len, reverse=True):
+            b = b.replace(u, "<INJ>")
+        plist = sorted({int(p) for p in (ports or ())}, reverse=True)
+        for p in plist:
+            b = b.replace(f"{internal_host}:{p}", "<HP>")
+        for p in plist:
+            b = re.sub(r"(?<!\d)" + re.escape(str(p)) + r"(?!\d)", "<PORT>", b)
         return (st, _body_hash(b))
+
+    # --- LES DEUX CONTRÔLES NÉGATIFS, nommés séparément (chacun se teste et se mute isolément) ------
+    @staticmethod
+    def _channel_inert(responses):
+        """Le canal porte-t-il de l'information ? FAUX ssi toutes les réponses (baselines + ports) sont
+        identiques OCTET POUR OCTET. C'est le cas mesuré sur VAmPI : l'URL injectée n'a AUCUN effet
+        observable, donc « paramètre non SSRF-able » et « tous les ports fermés » sont indistinguables.
+        Pur, ne lève jamais."""
+        return len(set(responses)) == 1
+
+    @staticmethod
+    def _baselines_agree(base_sigs):
+        """Deux ports tous deux FERMÉS doivent être INDISCERNABLES. S'ils ne le sont pas, la réponse
+        varie pour une raison étrangère à l'état du port (horodatage, nonce, CSRF, équilibrage) et tout
+        différentiel par-port est ininterprétable. Pur, ne lève jamais."""
+        return len(set(base_sigs)) == 1
 
     def dry(self, action):
         param = action.params.get("param", "?")
         host = self._internal_host(action)
         ports = [int(p) for p in (action.params.get("ports") or _XSPA_DEFAULT_PORTS)][:_XSPA_MAX_PORTS]
         return (f"# injecte {param}=http://{host}:<port>/ dans {action.target} pour {len(ports)} port(s) "
-                f"INTERNES de la cible in-scope + une baseline fermée (port {_XSPA_CLOSED_PORT}) ; PREUVE = "
-                f"un différentiel de réponse (reflet NEUTRALISÉ) / timing prouve la joignabilité interne ; "
-                f"informatif, non destructif ; sinon tested")
+                f"INTERNES de la cible in-scope + DEUX baselines fermées {list(_XSPA_CLOSED_PORTS)} "
+                f"(référence + contrôle négatif) ; PREUVE = un différentiel de réponse (reflet NEUTRALISÉ "
+                f"SYMÉTRIQUEMENT) prouve la joignabilité interne ; réponse qui ne varie pas, ou deux "
+                f"baselines fermées discordantes -> skipped (rien à mesurer) ; informatif, non destructif")
 
     def fire(self, action):
         # (1) SCOPE-GUARD fail-closed sur la cible SSRF-able — hors périmètre -> skipped, AUCUN réseau.
@@ -236,22 +298,39 @@ class SsrfXspa(ScopeGuardedOracle):
         except (TypeError, ValueError):
             ports = list(_XSPA_DEFAULT_PORTS)
 
-        # baseline « fermée » (port improbable) — référence du différentiel.
-        closed_url = f"{scheme}://{internal_host}:{_XSPA_CLOSED_PORT}/"
-        t0 = time.monotonic()
-        cst, cbody = self._inject(action, param, closed_url, method, headers, timeout)
-        closed_el = time.monotonic() - t0
-        closed_sig = self._sig(cst, cbody, closed_url, _XSPA_CLOSED_PORT, internal_host)
+        # Jeu COMPLET (baselines + ports sondés) — il alimente la normalisation SYMÉTRIQUE de `_sig`.
+        closed_ports = list(_XSPA_CLOSED_PORTS)
+        all_ports = closed_ports + list(ports)
+        all_urls = [f"{scheme}://{internal_host}:{p}/" for p in all_ports]
 
-        reachable, seen_network, port_notes = [], (cst is not None), []
-        for port in ports:
+        def _probe_port(port):
+            """(sig, statut, corps_brut, secondes) pour un port. Le corps BRUT est conservé : c'est lui
+            qui répond à « la réponse varie-t-elle du tout ? », AVANT toute normalisation."""
             iu = f"{scheme}://{internal_host}:{port}/"
-            t1 = time.monotonic()
+            t = time.monotonic()
             st, body = self._inject(action, param, iu, method, headers, timeout)
-            el = time.monotonic() - t1
+            el = time.monotonic() - t
+            return self._sig(st, body, all_urls, all_ports, internal_host), st, body, el
+
+        # DEUX baselines « fermées » (ports hauts improbables) : référence du différentiel + contrôle négatif.
+        base_sigs, base_raw, base_notes = [], [], []
+        cst, closed_el = None, 0.0
+        for bp in closed_ports:
+            sig, st, body, el = _probe_port(bp)
+            base_sigs.append(sig)
+            base_raw.append((st, body))
+            base_notes.append(f"{bp}(HTTP {st},{round(el, 3)}s)")
+            if cst is None:
+                cst, closed_el = st, el
+        closed_sig = base_sigs[0]
+
+        reachable, seen_network, port_notes = [], any(s is not None for s, _ in base_raw), []
+        port_raw = []
+        for port in ports:
+            sig, st, body, el = _probe_port(port)
             if st is not None:
                 seen_network = True
-            sig = self._sig(st, body, iu, port, internal_host)
+            port_raw.append((st, body))
             differs = (sig != closed_sig)
             if differs:
                 reachable.append(port)
@@ -265,6 +344,49 @@ class SsrfXspa(ScopeGuardedOracle):
                 evidence="Aucune réponse du serveur (transport indisponible) sur la baseline ni les ports ; offline-safe.",
                 poc=self.dry(action))]
 
+        # =========================================================================================
+        #  (5b) LE CANAL PORTE-T-IL SEULEMENT DE L'INFORMATION ? — deux contrôles négatifs, tous deux
+        #  antérieurs au verdict. Un scan de ports par DIFFÉRENTIEL n'a de sens que si la réponse VARIE
+        #  selon le port ; quand elle ne varie pas, il n'y a rien à mesurer — et « rien à mesurer » se
+        #  dit `skipped` (« je n'ai pas pu vérifier »), JAMAIS `tested` (« j'ai vérifié, rien trouvé »)
+        #  ni `vulnerable`. C'est le vocabulaire déjà en place (`Oracle.degraded`), pas un second
+        #  mécanisme concurrent.
+        # =========================================================================================
+        # (i) PARAMÈTRE INERTE — toutes les réponses (baselines comprises) sont identiques OCTET POUR
+        #     OCTET : l'URL injectée n'a AUCUN effet observable. C'est exactement le cas mesuré sur
+        #     VAmPI (1 563 o identiques pour le port 1 et le port 3306). On ne peut pas distinguer
+        #     « paramètre non SSRF-able » de « tous les ports fermés » -> on ne tranche pas.
+        if self._channel_inert(base_raw + port_raw):
+            st0, b0 = base_raw[0]
+            return [self.degraded(
+                target=action.target,
+                title="XSPA non testé — la réponse ne VARIE PAS selon l'URL injectée (rien à mesurer)",
+                evidence=(f"cible={action.target} ; paramètre={param} ; hôte interne={internal_host} ; "
+                          f"les {len(base_raw) + len(port_raw)} réponses (2 baselines fermées + "
+                          f"{len(port_raw)} port(s)) sont IDENTIQUES octet pour octet (HTTP {st0}, "
+                          f"{len(b0 or '')} o). Un scan par différentiel n'a de sens que si la réponse "
+                          f"varie selon le port : un corps identique prouve l'inverse — le paramètre est "
+                          f"INERTE (non SSRF-able) ou tous les ports sont fermés, et ces deux lectures "
+                          f"sont INDISTINGUABLES depuis la réponse. `skipped` (« pas vérifié »), jamais "
+                          f"`tested` ni `vulnerable`."),
+                poc=self.dry(action))]
+        # (ii) CANAL INSTABLE — les DEUX baselines fermées ne rendent pas la même signature. Deux ports
+        #      tous deux fermés DOIVENT être indiscernables ; s'ils ne le sont pas, la réponse porte du
+        #      bruit par-requête (horodatage, nonce, CSRF, équilibrage) et le différentiel par-port ne
+        #      prouve rien. C'est le contrôle qui aurait à lui seul éteint le faux positif du banc.
+        if not self._baselines_agree(base_sigs):
+            return [self.degraded(
+                target=action.target,
+                title="XSPA non testé — deux ports FERMÉS ne rendent pas la même réponse (canal instable)",
+                evidence=(f"cible={action.target} ; paramètre={param} ; hôte interne={internal_host} ; "
+                          f"contrôle négatif sur deux baselines fermées distinctes {closed_ports} : "
+                          f"{' '.join(base_notes)} -> signatures DIFFÉRENTES. Deux ports tous deux fermés "
+                          f"doivent être indiscernables ; ils ne le sont pas, donc la réponse varie pour une "
+                          f"raison ÉTRANGÈRE à l'état du port (horodatage/nonce/CSRF/équilibrage) et tout "
+                          f"différentiel par-port est ININTERPRÉTABLE. `skipped` (« pas vérifié »), jamais "
+                          f"`tested` ni `vulnerable` ; ports candidats non conclus={ports}."),
+                poc=self.dry(action))]
+
         proven = bool(reachable)
         return [self.proof(
             target=action.target, proven=proven,
@@ -275,7 +397,11 @@ class SsrfXspa(ScopeGuardedOracle):
             evidence=(f"cible SSRF-able={action.target} ; hôte interne sondé={internal_host} (in-scope) ; "
                       f"baseline fermée=port {_XSPA_CLOSED_PORT} (HTTP {cst}, {round(closed_el, 3)}s) ; "
                       f"ports JOIGNABLES (différentiel)={reachable or 'aucun'} ; détail={' '.join(port_notes)[:600]} ; "
-                      f"reflet de l'URL injectée NEUTRALISÉ (echo seul != joignabilité) ; sonde CONTRE la "
+                      f"contrôle négatif PASSÉ : deux baselines fermées distinctes {list(_XSPA_CLOSED_PORTS)} "
+                      f"rendent la MÊME signature ({' '.join(base_notes)}) et la réponse VARIE selon l'URL "
+                      f"injectée (le canal porte de l'information) ; reflet de l'URL injectée NEUTRALISÉ de "
+                      f"façon SYMÉTRIQUE sur tous les corps (echo seul != joignabilité ; le verdict ne "
+                      f"dépend PAS du timing) ; sonde CONTRE la "
                       f"cible in-scope uniquement, non destructif, aucune donnée lue"),
             poc=(f"# injecter {param}=http://{internal_host}:<PORT>/ dans {action.target} et comparer la "
                  f"réponse (reflet neutralisé) / timing au port fermé {_XSPA_CLOSED_PORT} ; "

@@ -432,9 +432,29 @@ class TestSsrfXspa(unittest.TestCase):
         self.assertIn("XSPA CONFIRMÉ", f[0].title)
         self.assertIn("80", f[0].evidence)
 
-    def test_tested_no_differential(self):
+    def test_reponse_invariante_sabstient_au_lieu_daffirmer(self):
+        """RUPTURE NOMMÉE (ex-`test_tested_no_differential`) : `tested` -> `skipped`.
+
+        Ce test affirmait qu'une réponse IDENTIQUE pour toutes les URL injectées valait « j'ai vérifié,
+        rien trouvé ». C'est faux, et c'est la moitié du défaut D5 : quand la réponse ne varie pas d'un
+        octet selon le port, le canal ne porte AUCUNE information — « paramètre non SSRF-able » et « tous
+        les ports fermés » sont INDISTINGUABLES depuis la réponse. Le verdict honnête est « je n'ai pas
+        pu vérifier » (`skipped`), le vocabulaire déjà en place pour ça (`Oracle.degraded`)."""
         def fake(url, headers=None, timeout=10, method="GET", data=None):
-            return (502, "connection refused")                # tous identiques -> pas de SSRF joignable
+            return (502, "connection refused")                # INVARIANT -> rien à mesurer
+        f = self._fire(fake)
+        self.assertEqual(f[0].status, "skipped")
+        self.assertIn("ne VARIE PAS", f[0].title)
+        self.assertNotEqual(f[0].status, "vulnerable")
+
+    def test_tested_no_differential_sur_canal_qui_porte_de_linformation(self):
+        """Le VRAI « vérifié, rien trouvé » : la réponse VARIE bien selon l'URL injectée (le canal porte
+        de l'information) mais AUCUN port ne se distingue des deux baselines fermées -> `tested`.
+        Contre-épreuve du test ci-dessus : l'abstention ne doit pas avaler ce cas-là."""
+        def fake(url, headers=None, timeout=10, method="GET", data=None):
+            dec = urllib.parse.unquote_plus(url or "")
+            # le corps recopie l'URL demandée (donc il VARIE), mais dit la même chose pour tout port
+            return (502, f"connection refused for {dec}")
         f = self._fire(fake)
         self.assertEqual(f[0].status, "tested")
         self.assertIn("non confirmé", f[0].title)

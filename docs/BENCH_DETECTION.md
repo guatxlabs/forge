@@ -258,9 +258,24 @@ __debugger__=http://127.0.0.1:1/        -> 200, 1563 o     <- « baseline port f
 __debugger__=http://127.0.0.1:3306/     -> 200, 1563 o     <- corps IDENTIQUE
 ```
 
-Le différentiel qui « prouve » la joignabilité repose sur des écarts de timing de l'ordre de 20 ms
-(`0.036s` vs `0.056s`) entre des réponses au corps identique. Le module se décrit lui-même comme
-« Informatif » — il émet pourtant `status=vulnerable` en MEDIUM.
+⚠️ **CETTE CAUSE ÉTAIT FAUSSE, corrigée le 2026-08-11** — elle est laissée ici parce qu'un rapport
+de banc qui réécrit ses erreurs ne vaut plus rien comme référence. Version initiale : « le
+différentiel repose sur des écarts de timing de l'ordre de 20 ms (`0.036s` vs `0.056s`) ». **Le
+timing est mesuré et imprimé mais n'entre dans AUCUN verdict** — seul `sig != closed_sig` promeut.
+
+**La vraie cause** : la neutralisation du reflet était appliquée de façon **ASYMÉTRIQUE**. La
+baseline était le port **1**, et le corps était scrubé du numéro de port de la requête courante :
+
+    re.sub(r"(?<!\d)1(?!\d)",    "<PORT>", body)   # baseline : mange TOUS les « 1 » isolés
+    re.sub(r"(?<!\d)3306(?!\d)", "<PORT>", body)   # port     : no-op
+
+Sur n'importe quel corps HTML (`HTTP/1.1`, `version 1.0.1`), la baseline est mutilée et les corps de
+ports ne le sont pas. Reproduit : corps IDENTIQUES en entrée -> signatures différentes -> les 10
+ports déclarés « diff », 10 sur 10. **Le mécanisme censé supprimer le faux signal le fabriquait**,
+inconditionnellement — et le module émettait `status=vulnerable` en MEDIUM là-dessus.
+
+La leçon vaut au-delà de D5 : la cause « évidente » (le timing, visible dans l'evidence) n'était pas
+la cause. C'est le neuvième diagnostic de cette série à tomber devant la mesure.
 
 ### D6 — Les oracles d'injection perdent les autres paramètres de la requête
 

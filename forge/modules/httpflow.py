@@ -410,6 +410,52 @@ _CRLF_HEADER_NAME = "Forge-Split"                        # en-tête BÉNIGN tém
 # En-têtes d'hôte injectables pour le host poisoning (le marqueur d'hôte BÉNIGN y est placé).
 _HOST_HEADERS = ["X-Forwarded-Host", "Host", "X-Host", "X-Forwarded-Server", "Forwarded"]
 
+# =================================================================================================
+#  CONTRE-MESURE « CANONICALISATION D'URL » — le reflet d'hôte le plus banal du web n'est PAS une vuln.
+#
+#  MESURÉ (banc de détection multi-applications, `docs/BENCH_DETECTION.md` § D4) : **5 HIGH FAUX** —
+#  4 sur DVWA (Apache 2.4, un par répertoire découvert) + 1 sur VAmPI (Werkzeug 2.2) — tous produits
+#  par le MÊME phénomène : une requête sur un répertoire SANS slash final reçoit une redirection de
+#  canonicalisation dont le `Location` est reconstruit à partir de l'en-tête `Host` de la requête.
+#
+#      curl -H 'Host: evil.example' http://.../docs -> 301  Location: http://evil.example/docs/
+#      curl -H 'Host: evil.example' http://.../ui   -> 308  Location: http://evil.example/ui/
+#
+#  DEUX STACKS INDÉPENDANTES, donc pas un bug d'application : c'est le comportement PAR DÉFAUT d'à
+#  peu près tout serveur web (RFC 3986 § 6 : normalisation de l'URI de référence). Aucune des quatre
+#  applications du banc ne déclarait cette classe dans sa vérité terrain.
+#
+#  POURQUOI LE CONTRÔLE EXISTANT NE POUVAIT PAS RATTRAPER. `control_reflects_host` compare avec le
+#  VRAI `Host` — où le marqueur ne peut par construction jamais apparaître : le contrôle rend
+#  toujours False, et la conjonction `loc and not control_reflects_host` promeut toujours.
+#
+#  POURQUOI PAS `Oracle.path_discrimination()`. Vérifié en loopback contre les deux stacks fautives :
+#  elle rend `verdict=True` (« la cible DISCRIMINE ») sur les deux — ses chemins de contrôle
+#  reçoivent un 404 parfaitement normal. Elle répond à « la cible sert-elle un 200 sur n'importe quel
+#  chemin deviné ? », pas à « ce reflet d'hôte est-il une décision applicative ? ». Famille
+#  différente : elle ne peut ni couvrir ce cas ni entrer en concurrence avec lui. Ce qui EST partagé —
+#  et réutilisé tel quel — c'est le VOCABULAIRE de la retenue (`proof(proven=False)` -> INFO).
+#
+#  CE QUI RESTE DÉTECTÉ (on ne fabrique pas l'excès inverse). Le discriminant est le CHEMIN de la
+#  destination, parce que c'est lui qui distingue une normalisation d'une DÉCISION :
+#    - `Location` dont le chemin est celui de la requête (au slash final près) -> canonicalisation ;
+#    - `Location` vers un AUTRE chemin (`/reset`, `/login`, `/`)            -> décision applicative ;
+#    - marqueur dans le CORPS (lien de reset absolu, lien canonique, `<base href>`) -> le vecteur qui
+#      PAIE (empoisonnement de lien de réinitialisation) — toujours promu ;
+#    - marqueur dans un AUTRE en-tête (`Link`, `Refresh`, `Content-Location`)      -> toujours promu.
+#  Le corps AUTO-GÉNÉRÉ d'une redirection recopie son propre `Location` (« The document has moved
+#  <a href="…">here</a> ») : cet ÉCHO est neutralisé avant la recherche d'un reflet RÉSIDUEL, sinon
+#  la même redirection par défaut repasserait par la porte du corps.
+# =================================================================================================
+
+
+def _same_path(a, b):
+    """Deux chemins d'URL désignent-ils la MÊME ressource, au slash final près ? (`/docs` ≡ `/docs/`,
+    et `''` ≡ `/` — la racine). Pur, ne lève jamais."""
+    na = (str(a or "").rstrip("/")) or "/"
+    nb = (str(b or "").rstrip("/")) or "/"
+    return na == nb
+
 
 @register("header_injection.probe")
 class HeaderInjectionProbe(ClientFlowOracle):
@@ -436,6 +482,55 @@ class HeaderInjectionProbe(ClientFlowOracle):
                 if marker in (v or ""):
                     return name
         return ""
+
+    @classmethod
+    def _is_canonical_redirect(cls, status, req_url, location, marker):
+        """La 3xx observée est-elle la CANONICALISATION D'URL par défaut du serveur (cf. le bloc de
+        doctrine ci-dessus) plutôt qu'une décision de l'application ?
+
+        VRAI ssi les trois tiennent : (1) statut de redirection, (2) le `Location` pointe vers l'hôte
+        MARQUEUR (le serveur a bien recopié notre en-tête), et (3) son chemin est celui de la requête
+        AU SLASH FINAL PRÈS — donc la même ressource, seule l'autorité a changé. Aucune application ne
+        « décide » cela : c'est la normalisation d'URI du serveur.
+
+        FAUX dès que le chemin DIFFÈRE : `/account` -> `/login`, `/x` -> `/`, ou tout `Location`
+        applicatif. Là, l'application a CHOISI une destination en s'appuyant sur un en-tête contrôlé
+        par le client — c'est l'empoisonnement exploitable, et il reste promu. Pur, ne lève jamais."""
+        try:
+            if status is None or not (300 <= int(status) < 400):
+                return False
+        except (TypeError, ValueError):
+            return False
+        loc = str(location or "")
+        if not marker or marker not in loc:
+            return False
+        try:
+            lp = urllib.parse.urlsplit(loc)
+            rp = urllib.parse.urlsplit(str(req_url or ""))
+        except ValueError:            # URL hostile : on NE conclut PAS à la canonicalisation
+            return False
+        # L'hôte de destination doit être EXACTEMENT le marqueur : `http://<marker>.evil/…` n'est pas
+        # une recopie, c'est une construction — on la laisse au chemin de promotion (fail-open vers la
+        # DÉTECTION, jamais vers le silence).
+        if (lp.hostname or "") != marker:
+            return False
+        return _same_path(lp.path, rp.path)
+
+    @classmethod
+    def _host_reflection(cls, status, req_url, pairs, body, marker):
+        """(où, canonicalisation_seule) — où le marqueur d'hôte est réfléchi, et si ce reflet n'est
+        QUE la canonicalisation d'URL par défaut du serveur (auquel cas `où` est vide : rien à promouvoir).
+
+        Sur une canonicalisation constatée, l'ÉCHO est neutralisé des DEUX côtés — l'en-tête `Location`
+        lui-même, et sa recopie dans le corps auto-généré de la page de redirection — puis on cherche un
+        reflet RÉSIDUEL. Un résidu (corps applicatif, `Link`, `Refresh`…) est un VRAI reflet et repart
+        sur le chemin de promotion : la neutralisation retire l'écho, jamais la preuve."""
+        loc = cls._get(pairs, "Location") or ""
+        if not cls._is_canonical_redirect(status, req_url, loc, marker):
+            return cls._reflected_in(pairs, body, marker), False
+        rest = [(k, v) for k, v in (pairs or []) if str(k).lower() != "location"]
+        residual = cls._reflected_in(rest, (body or "").replace(loc, ""), marker)
+        return residual, (not residual)
 
     def dry(self, action):
         param = action.params.get("param")
@@ -480,13 +575,19 @@ class HeaderInjectionProbe(ClientFlowOracle):
             return [blocked]
         control_reflects_host = bool(self._reflected_in(c_pairs, c_body, mhost))
         host_confirmed, host_hdr, host_where = False, "", ""
+        canonical_hdr = ""                # en-tête dont le SEUL reflet était une canonicalisation d'URL
         for hh in _HOST_HEADERS:
             probe_headers = dict(user_headers)
             probe_headers[hh] = mhost
             st, body, pairs = self._fetch(base, headers=probe_headers)
             if st is not None:
                 seen_network = True
-            loc = self._reflected_in(pairs, body, mhost)
+            # CANONICALISATION ÉCARTÉE (cf. doctrine ci-dessus) : une redirection de répertoire dont le
+            # `Location` reflète l'hôte est le comportement PAR DÉFAUT du serveur, pas une vulnérabilité.
+            # On NE `break` PAS dessus : un autre en-tête d'hôte peut, lui, produire un vrai reflet.
+            loc, canonical = self._host_reflection(st, base, pairs, body, mhost)
+            if canonical and not canonical_hdr:
+                canonical_hdr = hh
             if loc and not control_reflects_host:
                 host_confirmed, host_hdr, host_where = True, hh, loc
                 break
@@ -516,6 +617,15 @@ class HeaderInjectionProbe(ClientFlowOracle):
         which = ", ".join(t for t in (
             ("CRLF response-splitting (CWE-113)" if crlf_confirmed else ""),
             ("host header poisoning (CWE-644)" if host_confirmed else "")) if t) or "aucune"
+        # La canonicalisation écartée est NOMMÉE dans l'évidence : l'opérateur doit voir CE QUI a été
+        # observé ET pourquoi ça n'a pas promu (une abstention muette serait le défaut symétrique).
+        canon_note = (f"canonicalisation d'URL ÉCARTÉE (en-tête {canonical_hdr}) : la cible a répondu une "
+                      f"REDIRECTION vers le MÊME chemin sur l'hôte injecté (comportement par défaut de "
+                      f"quasi tout serveur web, mesuré sur Apache 2.4 ET Werkzeug 2.2) — normalisation "
+                      f"d'URI, pas une décision applicative ; aucun reflet RÉSIDUEL hors l'écho du "
+                      f"Location. Un `Location` vers un AUTRE chemin, ou le marqueur dans le corps/un "
+                      f"autre en-tête, aurait promu"
+                      if canonical_hdr and not host_confirmed else "")
         return [self.proof(
             target=action.target, proven=proven,
             title=("Header-Injection CONFIRMÉE — " + which if proven
@@ -523,7 +633,9 @@ class HeaderInjectionProbe(ClientFlowOracle):
             severity=("HIGH" if proven else "INFO"),
             evidence=(f"voie(s)={which} ; CRLF: en-tête témoin '{_CRLF_HEADER_NAME}' matérialisé={crlf_confirmed} ; "
                       f"HOST: en-tête={host_hdr or '—'} reflet={host_where or 'aucun'} "
-                      f"réflexion_contrôle={control_reflects_host} (si vrai -> non concluant) ; marqueur BÉNIGN "
+                      f"réflexion_contrôle={control_reflects_host} (si vrai -> non concluant) ; "
+                      + (canon_note + " ; " if canon_note else "")
+                      + f"marqueur BÉNIGN "
                       f"inerte (aucun Set-Cookie/session tamperé) ; non destructif ; session gouvernée non journalisée"),
             poc=(f"# CRLF: {action.params.get('param', '<param>')}=…%0d%0a{_CRLF_HEADER_NAME}:<token> ; "
                  f"HOST: -H 'X-Forwarded-Host: {mhost}' sur {base}\n"

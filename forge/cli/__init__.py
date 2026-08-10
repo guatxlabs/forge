@@ -167,7 +167,9 @@ _DOCTOR_HINTS = {
                       "rien à installer ; fournir un collecteur (callback_base + callback_check_url) OU un canari bénin (canary_url + canary_marker)"),
     "rfi.probe":     ("aucune — urllib stdlib ; ressource marqueur BÉNIGNE hébergée par l'opérateur",
                       "rien à installer ; fournir params.marker_url (ressource bénigne) + params.marker + params.param"),
-    "ssrf.xspa":     ("aucune — urllib stdlib (différentiel de réponse/timing) ; scan de la cible in-scope",
+    "ssrf.xspa":     ("aucune — urllib stdlib (différentiel de réponse, reflet neutralisé SYMÉTRIQUEMENT ; "
+                      "2 baselines fermées en contrôle négatif — le timing ne participe à AUCUN verdict) ; "
+                      "scan de la cible in-scope",
                       "rien à installer ; fournir params.param (SSRF-able) ; internal_host défaut = hôte cible / loopback"),
     "xss.stored":    ("service browser-automation (défaut http://localhost:8080) — rendu DOM requis",
                       "lancer le service d'automatisation navigateur (port 8080) ; absent -> finding status=skipped (offline-safe)"),
