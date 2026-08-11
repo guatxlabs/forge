@@ -55,6 +55,7 @@ from .registry import register
 from .. import pin as _pin
 from .. import session as _session
 from .. import techniques
+from .. import throttle
 
 
 # =================================================================================================
@@ -128,6 +129,18 @@ class RequestSmugglingProbe(ScopeGuardedOracle):
         # `host` (server_hostname ci-dessous) : la validation du certificat n'est PAS affaiblie. Pin absent =>
         # `connect_host = host` (résolution normale, byte-identique à l'historique).
         connect_host = _pin.pick(action.params.get("_pinned_ips")) or host
+        # DÉBIT — ce module NE PASSE PAS par `Oracle._http` : il ouvre son propre raw socket, donc il
+        # échappait AUX DEUX étages de débit. Mesuré sous un plafond de run actif à 5 req/s :
+        # **10 requêtes en 5 ms** avant que la cadence ne s'installe. Un plafond que l'on peut
+        # contourner en ouvrant sa propre socket n'est pas un plafond.
+        #
+        # L'ATTENTE EST AVANT `t0`, ET C'EST TOUT L'ENJEU : ce qui suit MESURE le délai jusqu'à la
+        # première réponse, et un délai anormal EST le signal de désync. Dormir dans la fenêtre
+        # mesurée ferait passer le frein pour un hang — l'oracle rendrait « désynchronisation
+        # confirmée » sur son propre throttle.
+        _b = throttle.current()
+        if _b is not None:
+            _b.wait()
         t0 = time.monotonic()
         sock = None
         try:
