@@ -42,8 +42,19 @@ cause** ; et **faux positifs** — chaque finding ≥ MEDIUM est rejoué à la m
 - **Modules interrogeant un tiers exclus** (`provision.THIRD_PARTY_MODULES` : crt.sh, Wayback,
   résolveurs DNS publics, dépôts de templates, collecteurs de callback). La liste retenue/exclue est
   écrite dans `modules_loopback_safe.json` à chaque exécution.
-- Ces applications sont **délibérément vulnérables** : ne jamais les exposer. `provision.teardown()`
-  démonte tout.
+- Ces applications sont **délibérément vulnérables** : ne jamais les exposer. Le démontage est
+  **systématique** — il vit dans un `finally`, couvre **tout ce qui porte le préfixe `forge-bench-`**
+  (découvert auprès de docker, pas lu dans une liste), et **vérifie son propre effet** : `teardown()`
+  relit docker + les sockets après avoir retiré, et rend `(ok, restes)`.
+  `--keep-up` laisse le banc debout, mais c'est alors un choix explicite de l'opérateur.
+
+  > Pourquoi ce niveau de soin : le rejeu du **2026-08-11** a trouvé `forge-bench-dvwa` encore à
+  > l'écoute **après** un `teardown()` réputé complet. Le code portait trois chemins de fuite —
+  > démontage opt-in **après** la boucle (aucune interruption n'y survivait) ; liste de démontage
+  > réduite aux applications ayant **répondu**, laissant hors de portée un conteneur créé mais muet ;
+  > et surtout le **refus de périmètre qui sortait sans démonter**, c'est-à-dire le garde qui, en
+  > refusant d'armer parce qu'une application vulnérable écoutait hors de la boucle locale, la
+  > laissait précisément écouter. Couvert par `tests/test_bench_teardown_final.py`.
 
 ## Utilisation
 
@@ -54,8 +65,8 @@ python3 -m bench.detection.run_bench --workdir /tmp/bench --track both --budget 
 # rendre le tableau (par app, par classe, + la liste des >= MEDIUM a verifier a la main)
 python3 -m bench.detection.report --workdir /tmp/bench --verdicts bench/detection/verdicts.json
 
-# demonter
-python3 -c "from bench.detection import provision; provision.teardown()"
+# demonter a la main (le run le fait deja tout seul, y compris s'il est interrompu)
+python3 -c "from bench.detection import provision; print(provision.teardown())"
 ```
 
 **Campagnes jouées, sorties brutes conservées (jamais écrasées)** — `RESULTS_2026-08-10.md` (mesure

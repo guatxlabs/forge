@@ -4,7 +4,10 @@ fournit à forge.
 
 SÛRETÉ. Ces applications sont DÉLIBÉRÉMENT vulnérables : elles ne doivent jamais être exposées.
 Chaque conteneur est publié sur `127.0.0.1` uniquement, et `verify_loopback_only()` REFUSE de
-continuer si un socket d'écoute sort de la boucle locale. Le démontage est dans `teardown()`.
+continuer si un socket d'écoute sort de la boucle locale. Le démontage est dans `teardown()`, qui
+VÉRIFIE son propre effet : il relit docker après avoir retiré et rend ce qui subsiste. Un démontage
+qui rend la main sans rien constater n'est pas une garantie, c'est une intention — et le rejeu du
+2026-08-11 a trouvé un conteneur DVWA encore à l'écoute APRÈS un `teardown()` réputé complet.
 
 HONNÊTETÉ D'AMORÇAGE. `AuthMaterial.declared` porte, en une phrase, EXACTEMENT ce qui a été fourni
 à forge pour cette application. Le rapport le recopie tel quel : « forge trouve X avec 2 comptes
@@ -120,9 +123,41 @@ def bring_up(apps):
     return up
 
 
-def teardown(apps=None):
-    names = [PREFIX + n for n in (apps or list(APPS))]
-    sh("docker", "rm", "-f", *names)
+def list_bench_containers():
+    """Conteneurs du banc RÉELLEMENT présents, DÉRIVÉS de docker et non d'une liste tenue à la main.
+
+    Une liste écrite à la main rate exactement ce qu'il faut voir : un conteneur levé sous un nom
+    absent de `APPS`, ou levé par une invocation antérieure. Le banc lève des applications
+    délibérément vulnérables — sa question n'est pas « ai-je démonté ce que je crois avoir levé »
+    mais « reste-t-il quelque chose ». Seule l'interrogation de docker répond à la seconde."""
+    r = sh("docker", "ps", "-a", "--filter", f"name={PREFIX}", "--format", "{{.Names}}")
+    return sorted({n.strip() for n in r.stdout.splitlines() if n.strip()})
+
+
+def ports_still_listening(ports):
+    """Sockets d'écoute du banc encore ouverts. Ancré aux limites : `:3000` ne doit pas se
+    reconnaître dans `:30000`."""
+    r = sh("ss", "-ltnH")
+    pat = re.compile(r"[:.](%s)\s" % "|".join(re.escape(str(p)) for p in ports))
+    return [ln.strip() for ln in r.stdout.splitlines() if pat.search(ln)]
+
+
+def teardown(apps=None, ports=None):
+    """Démonte le banc et VÉRIFIE SON PROPRE EFFET. Rend `(ok, restes)`.
+
+    Un `teardown()` qui rend la main sans rien constater n'est pas une garantie de sûreté, c'est
+    une intention. Celui-ci relit docker APRÈS avoir retiré, et rend `ok=False` avec la liste de
+    ce qui subsiste — mesuré, pas supposé.
+
+    `apps=None` retire TOUT ce qui porte le préfixe. C'est le défaut, et il est délibéré :
+    l'ancienne signature ne retirait que les applications que l'appelant *croyait* avoir levées."""
+    names = [PREFIX + n for n in apps] if apps else list_bench_containers()
+    if names:
+        sh("docker", "rm", "-f", *names)
+    restes = list_bench_containers()
+    if ports:
+        restes += ports_still_listening(ports)
+    return (not restes), restes
 
 
 def verify_loopback_only(ports):

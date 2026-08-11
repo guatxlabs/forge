@@ -2,7 +2,7 @@
 """Banc de détection multi-applications — point d'entrée.
 
     python3 -m bench.detection.run_bench --workdir /chemin/travail [--apps dvwa,vampi,...]
-                                         [--track a|b|both] [--budget 900] [--teardown]
+                                         [--track a|b|both] [--budget 900] [--keep-up]
 
 DEUX PISTES, mesurées SÉPARÉMENT parce qu'elles ne disent pas la même chose :
   A  oracles AMORCÉS à la main sur la vuln connue  -> mesure le JUGEMENT (détection pure) ;
@@ -11,6 +11,11 @@ DEUX PISTES, mesurées SÉPARÉMENT parce qu'elles ne disent pas la même chose 
 
 SÛRETÉ : loopback strict (vérifié avant d'armer), périmètre borné au port de chaque application,
 et modules interrogeant un tiers exclus (leur liste est écrite dans le rapport).
+
+DÉMONTAGE SYSTÉMATIQUE. Les applications levées sont DÉLIBÉRÉMENT vulnérables : le démontage est
+dans un `finally` et couvre TOUT ce qui porte le préfixe du banc — y compris un conteneur levé mais
+resté muet, que l'ancien code retirait de sa propre liste de démontage. `--keep-up` permet de les
+laisser debout ; c'est un choix explicite de l'opérateur, plus le défaut.
 """
 from __future__ import annotations
 
@@ -40,9 +45,28 @@ def main(argv=None):
     ap.add_argument("--track", default="both", choices=["a", "b", "both"])
     ap.add_argument("--budget", type=int, default=900, help="budget par campagne (s)")
     ap.add_argument("--no-bring-up", action="store_true")
-    ap.add_argument("--teardown", action="store_true")
+    ap.add_argument("--keep-up", action="store_true",
+                    help="NE PAS démonter en sortant (défaut : démontage systématique, y compris "
+                         "sur erreur ou interruption)")
+    ap.add_argument("--teardown", action="store_true",
+                    help=argparse.SUPPRESS)     # conservé : le démontage est désormais le défaut
     args = ap.parse_args(argv)
 
+    try:
+        return _run(args)
+    finally:
+        # Le démontage appartient au `finally`, PAS à la fin du chemin heureux. Il était opt-in
+        # (`--teardown`) et placé après la boucle : toute interruption — délai dépassé, exception,
+        # Ctrl-C, refus de périmètre — laissait quatre applications délibérément vulnérables
+        # levées. Mesuré le 2026-08-11 : un conteneur DVWA écoutait encore après coup.
+        if not args.keep_up:
+            ports = [gt.APPS[a].host_port.split(":")[1] for a in gt.APPS]
+            ok, restes = provision.teardown(ports=ports)
+            if not ok:
+                print(f"[!] DÉMONTAGE INCOMPLET — subsiste : {restes}", file=sys.stderr)
+
+
+def _run(args):
     work = Path(args.workdir)
     work.mkdir(parents=True, exist_ok=True)
     apps = [a.strip() for a in args.apps.split(",") if a.strip()]
@@ -123,8 +147,6 @@ def main(argv=None):
         (work / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
                                             encoding="utf-8")
 
-    if args.teardown:
-        provision.teardown(apps)
     print(f"\n[*] manifeste -> {work / 'manifest.json'}")
     return 0
 
