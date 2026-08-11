@@ -207,6 +207,41 @@ Voir [Administration → Gouvernance des connecteurs](ADMINISTRATION.md#3-gouver
 
 ---
 
+## 2bis. Débit (`rate`) — ce qu'il bride, et ce qu'il ne bride pas
+
+Réglé dans **`scope.json`**, pas en environnement. Le point à connaître, parce qu'il surprend :
+
+| | bridé par `rate` ? |
+|---|---|
+| Les **36 modules NATIFS** de forge (ses propres sondes urllib : oracles d'injection, contrôle d'accès, recon passif, en-têtes…) | **oui, toujours** |
+| Les **outils EXTERNES** (nuclei, naabu, httpx, feroxbuster, sqlmap, wfuzz, dalfox, gobuster) | **non, sauf demande explicite** |
+
+Le défaut est donc « **forge se bride, les outils gardent le leur** » — et ce n'est pas un oubli : ces
+outils ont leur propre gestion de débit, et leur imposer celui du scope coûte cher. Mesuré à `rate: 5` :
+
+    naabu       1,1 min  ->  3,6 h   (65 535 ports à 5 paquets/s)
+    feroxbuster ~qq min  ->  ~100 min
+    nuclei      1,0 min  ->   30 min
+    httpx       0,1 min  ->  3,3 min
+
+**Pour brider AUSSI les outils : `"rate_explicit": true`** dans le scope. Le drapeau natif de chaque
+outil est alors dérivé du `rate` (`-rl` / `-rate` / `--rate-limit`, ou une dérivée en **délai** pour
+sqlmap/wfuzz/dalfox/gobuster dont le drapeau est un délai par requête). Sans lui, l'argv des outils
+est **byte-identique** à leur défaut.
+
+À armer quand l'engagement l'exige : programme qui interdit le trafic soutenu, cible fragile, ou
+clause « *avoid service degradation* ».
+
+> Ce levier **existe et fonctionne depuis toujours** ; il n'était documenté **nulle part** (0
+> occurrence dans la doc et l'exemple de scope au 2026-08-11), ce qui l'a fait passer pour mort lors
+> d'un audit. Un levier qu'on ne peut pas trouver équivaut à un levier absent — d'où cette section.
+
+**Limite connue, non corrigée** : `throttle` borne le débit d'une **action**, pas d'un **run** —
+mesuré, 30 requêtes réparties sur 30 actions ne sont bornées par rien, et le seau est thread-local
+(donc multiplié par le parallélisme). Un plafond global n'existe pas aujourd'hui.
+
+---
+
 ## 3. Qu'est-ce qui est configurable où ?
 
 | Réglage | Au déploiement (env) | Dans l'UI (settings) |
