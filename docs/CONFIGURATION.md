@@ -214,20 +214,44 @@ Réglé dans **`scope.json`**, pas en environnement. Le point à connaître, par
 | | bridé par `rate` ? |
 |---|---|
 | Les **36 modules NATIFS** de forge (ses propres sondes urllib : oracles d'injection, contrôle d'accès, recon passif, en-têtes…) | **oui, toujours** |
-| Les **outils EXTERNES** (nmap, nuclei, naabu, httpx, feroxbuster, katana, dnsx, subfinder, sqlmap, wfuzz, dalfox, gobuster, wpscan) | **non, sauf demande explicite** |
+| Les outils dont le débit se compte en **REQUÊTES HTTP/s** (`nuclei`, `httpx`, `feroxbuster`, `katana`, `dnsx`, `subfinder`) | **oui, par défaut** |
+| Les autres outils externes — **paquets/s** (`naabu`, `nmap`) ou **délai par requête** (`sqlmap`, `wfuzz`, `dalfox`, `gobuster`, `wpscan`) | **non, sauf demande explicite** |
 
-Le défaut est donc « **forge se bride, les outils gardent le leur** » — et ce n'est pas un oubli : ces
-outils ont leur propre gestion de débit, et leur imposer celui du scope coûte cher. Mesuré à `rate: 5` :
+Le coût de brider est réel, et c'est lui qui avait justifié l'opt-in généralisé. Mesuré à `rate: 5` :
 
     naabu       1,1 min  ->  3,6 h   (65 535 ports à 5 paquets/s)
     feroxbuster ~qq min  ->  ~100 min
     nuclei      1,0 min  ->   30 min
     httpx       0,1 min  ->  3,3 min
 
-**Pour brider AUSSI les outils : `"rate_explicit": true`** dans le scope. Le drapeau natif de chaque
-outil est alors dérivé du `rate` (`-rl` / `-rate` / `--rate-limit`, ou une dérivée en **délai** pour
-sqlmap/wfuzz/dalfox/gobuster/wpscan dont le drapeau est un délai par requête). Sans lui, l'argv des
-outils est **byte-identique** à leur défaut.
+**Mais le coût de NE PAS brider n'avait jamais été chiffré, et il est pire.** Mesuré le 2026-08-11
+(machine propre, lignes de base vérifiées, Juice Shop en loopback, campagne autonome de 900 s) :
+
+| `rate` | mémoire de la cible | issue | travail réellement accompli |
+|---|---|---|---|
+| **20** | 167 -> **5 023 Mio** | **MORTE** (`Exited 139`) à t+145 s | 8 actions, **1 660 erreurs** |
+| **5** | 162 -> **484 Mio** | **vivante**, HTTP 200 | **1 360 actions**, 2 730 findings |
+
+**170 fois plus d'actions tirées en bridant.** Une cible morte transforme tout le reste du plan en
+erreurs : ici, brider ne coûte pas de la couverture — brider EST la couverture. Le tueur a été isolé
+SEUL, sans campagne (`feroxbuster --rate-limit 20` -> 5 051 Mio et mort ; `--rate-limit 5` -> 384 Mio
+et vivante), et une désambiguïsation à UNE variable montre que c'est le **débit** et non la
+concurrence : 4 fils à 20 req/s tuent, 50 fils à 5 req/s ne font rien.
+
+D'où le défaut actuel : **un outil qui compte en requêtes HTTP suit `rate` sans qu'on le demande.**
+La facture chiffrée ci-dessus est celle du scanner de PORTS ; elle n'est pas payée par défaut. Et
+l'unité n'est pas devinée — chaque outil la déclare dans son schéma de params (« req/s » vs
+« paquets/s »), et forge la lit là plutôt que dans une liste tenue à la main.
+
+> ⚠️ **Sans `rate` déclaré au scope, rien n'est bridé** — y compris les crawlers. Forge ne fabrique
+> pas un débit que l'engagement n'a pas fixé. Sur une cible réelle, déclarer `rate` n'est donc pas
+> une optimisation : c'est ce qui sépare un engagement d'une dégradation de service.
+
+**Pour brider AUSSI les outils qui restent en opt-in : `"rate_explicit": true`** dans le scope —
+c'est-à-dire le scanner de PORTS (`naabu -rate`, `nmap --max-rate`) et les outils dont le drapeau est
+un **délai par requête** (sqlmap/wfuzz/dalfox/gobuster/wpscan). Il arme en outre le **plafond de
+débit du RUN** (`RunCap`, cf. §2ter). Sans lui, l'argv de ces outils-là reste **byte-identique** à
+leur défaut ; les outils en **req/s**, eux, suivent `rate` sans qu'on le demande (voir ci-dessus).
 
 > **Quatre outils y échappaient en silence** (corrigé) : `recon.katana`, `recon.dnsx`,
 > `recon.subfinder` et `web.wpscan` déclaraient un groupe `{param:rate}` dans leur gabarit d'argv

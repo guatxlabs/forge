@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 import socket
 import threading
 import time
@@ -145,6 +146,56 @@ _RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"})
 #     de rediverger à chaque outil ajouté au catalogue.
 _NATIVE_RATE_FLAG_KINDS = frozenset({"recon.nmap", "web.nuclei", "recon.httpx"})
 _RATE_FLAG_KINDS = _NATIVE_RATE_FLAG_KINDS | _TOOLSPEC_RATE_KINDS
+
+
+# =================================================================================================
+#  DÉFAUT SÛR POUR LES OUTILS QUI COMPTENT EN REQUÊTES HTTP — l'argument de l'opt-in s'est retourné.
+#
+#  L'opt-in (`rate_explicit`) reposait sur un coût CHIFFRÉ : `rate: 5` imposé aux outils fait passer
+#  naabu de 1,1 min à 3,6 h (`docs/CONFIGURATION.md` §2bis). Ce chiffre est exact — et il vient d'un
+#  SCANNER DE PORTS bridé à 5 PAQUETS/s sur 65 535 ports. Ce qui coûte cher, c'est d'appliquer un
+#  débit HTTP à quelque chose qui ne compte pas en requêtes HTTP.
+#
+#  CE QUE LE COÛT DE NE **PAS** BRIDER N'AVAIT JAMAIS CHIFFRÉ (mesuré le 2026-08-11, machine propre,
+#  lignes de base vérifiées, Juice Shop en loopback, campagne autonome de 900 s) :
+#
+#      rate 20 (le défaut que le banc écrivait)   167 -> 5 023 Mio   MORTE à t+145s     8 actions, 1660 err
+#      rate  5 armé                               162 ->   484 Mio   VIVANTE, HTTP 200  1360 actions, 2730 findings
+#
+#  **170 fois plus d'actions tirées en bridant.** Une cible morte transforme tout le reste du plan en
+#  erreurs : brider ne coûte pas de la couverture ici, brider EST la couverture. Le tueur a été isolé
+#  seul, sans campagne — feroxbuster à `--rate-limit 20` tue (5 051 Mio), à `--rate-limit 5` non
+#  (384 Mio) — et la désambiguïsation à une variable dit que c'est le DÉBIT, pas la concurrence :
+#  4 fils à 20 req/s tuent, 50 fils à 5 req/s ne font rien.
+#
+#  D'OÙ CE DÉFAUT : un outil dont le débit se compte en REQUÊTES HTTP suit `scope.rate` SANS attendre
+#  `rate_explicit`. Les autres (paquets/s d'un scanner de ports, délai par requête) gardent l'opt-in,
+#  donc la facture naabu n'est pas payée. L'unité n'est PAS devinée : chaque outil la DÉCLARE dans
+#  son schéma de params, et on la lit là — pas de liste tenue à la main en face d'un catalogue
+#  extensible (c'est exactement la dérive qui avait laissé katana à plein régime).
+# =================================================================================================
+_HTTP_RATE_UNIT_RX = re.compile(r"req\s*/\s*s", re.I)
+# Natifs (drapeau construit en Python, non introspectable) : `-rl` de nuclei et httpx COMPTE en
+# requêtes. `recon.nmap` (`--max-rate`) compte en PAQUETS -> délibérément absent.
+_NATIVE_HTTP_RATE_KINDS = frozenset({"web.nuclei", "recon.httpx"})
+
+
+def _http_request_rate_kinds():
+    """Kinds dont le débit se compte en REQUÊTES HTTP/s — DÉRIVÉ de l'unité que chaque outil déclare
+    lui-même (`params_schema`, champ `rate`, libellé « … req/s »). Ne lève jamais."""
+    out = set(_NATIVE_HTTP_RATE_KINDS)
+    try:
+        for kind in mods.kinds():
+            schema = getattr(getattr(mods.get(kind), "spec", None), "params_schema", None) or ()
+            for p in schema:
+                if p.get("name") == "rate" and _HTTP_RATE_UNIT_RX.search(str(p.get("label", ""))):
+                    out.add(kind)
+    except Exception:                                        # noqa: BLE001
+        pass
+    return frozenset(out) & _RATE_FLAG_KINDS                 # jamais un kind qui ne sait pas le recevoir
+
+
+_HTTP_RATE_FLAG_KINDS = _http_request_rate_kinds()
 
 
 # --- PARALLÉLISME INTRA-VAGUE BORNÉ (G3) ----------------------------------------------------------
@@ -1590,8 +1641,16 @@ class Engine:
                 a.params.setdefault("out_scope", self.scope.out_scope)
             if a.kind in _RATE_LIMITED_KINDS:                # débit ROE -> borne le trafic actif du module
                 a.params.setdefault("rate", self.scope.rate)
+            elif a.kind in _HTTP_RATE_FLAG_KINDS:
+                # OUTIL QUI COMPTE EN REQUÊTES HTTP : suit `rate` SANS attendre `rate_explicit`.
+                # Cf. le bloc « défaut sûr » : non bridé, feroxbuster fait passer la cible de 167 Mio
+                # à 5 Gio et la TUE en 145 s — et une cible morte réduit la campagne de 1360 actions
+                # à 8. Brider n'y coûte pas de couverture, brider EST la couverture.
+                a.params.setdefault("rate", self.scope.rate)
             elif getattr(self.scope, "rate_explicit", False) and a.kind in _RATE_FLAG_KINDS:
-                # OUTIL avec drapeau de débit : injecté SEULEMENT sur override explicite (byte-identique sinon)
+                # LES AUTRES (paquets/s d'un scanner de ports, délai par requête) : override explicite
+                # seulement — c'est là qu'est la facture chiffrée (naabu 1,1 min -> 3,6 h), et elle
+                # n'est pas payée par défaut.
                 a.params.setdefault("rate", self.scope.rate)
 
         # DÉRIVÉES D'UNITÉ du débit (pour les wrappers dont le drapeau est un DÉLAI par requête, pas un

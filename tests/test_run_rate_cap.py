@@ -565,14 +565,29 @@ class TestEveryToolThatDeclaresARateGetsOne(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIn(kind, _RATE_FLAG_KINDS, "les 4 trous mesurés doivent rester couverts")
 
-    def test_I2_the_rate_reaches_the_action_only_under_rate_explicit(self):
-        """Le comportement, pas seulement l'ensemble : sous `rate_explicit` le débit ARRIVE dans
-        `action.params`; sans lui, l'argv reste BYTE-IDENTIQUE au défaut (aucun param posé)."""
-        for explicit, expected in ((False, None), (True, 5)):
-            with self.subTest(rate_explicit=explicit):
+    def test_I2_the_rate_reaches_the_action(self):
+        """Le comportement, pas seulement l'ensemble : le débit ARRIVE-t-il dans `action.params` ?
+
+        RUPTURE NOMMÉE (défaut D20). Ce test visait `recon.katana` pour les DEUX versants, dont
+        « sans `rate_explicit`, aucun param posé ». Katana est un **crawler HTTP**, et cette
+        moitié-là est désormais FAUSSE À DESSEIN : un outil qui compte en requêtes HTTP suit `rate`
+        sans opt-in. Mesuré — non bridé, feroxbuster fait passer la cible de 167 Mio à 5 023 Mio et
+        la TUE en 145 s, ce qui réduit la campagne de 1 360 actions à 8 (1 660 erreurs). Brider n'y
+        coûte pas de couverture : brider EST la couverture.
+
+        L'INTENTION du test est conservée intégralement — « le débit arrive quand il doit arriver,
+        et pas quand il ne doit pas » — mais chaque versant est désormais porté par l'outil dont il
+        décrit VRAIMENT la politique : un scanner de PORTS pour l'opt-in (c'est lui qui porte la
+        facture 1,1 min -> 3,6 h), un crawler HTTP pour le défaut sûr."""
+        for kind, explicit, expected in (
+                ("recon.naabu", False, None),      # paquets/s -> opt-in, argv byte-identique
+                ("recon.naabu", True, 5),          # … et l'opt-in le bride toujours
+                ("recon.katana", False, 5),        # req/s -> bridé par défaut (D20)
+                ("recon.katana", True, 5)):
+            with self.subTest(kind=kind, rate_explicit=explicit):
                 engine = Engine(Scope({"mode": "grey", "in_scope": ["app.test"], "rate": 5,
                                        "rate_explicit": explicit}))
-                action = engine._prepare([Action("recon.katana", "app.test")], None, {}, {})[0]
+                action = engine._prepare([Action(kind, "app.test")], None, {}, {})[0]
                 self.assertEqual(action.params.get("rate"), expected)
 
 

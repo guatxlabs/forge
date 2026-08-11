@@ -357,12 +357,24 @@ def prime(name: str) -> AuthMaterial:
 def write_scope(app: App, auth: AuthMaterial, out: Path, allow_exploit=True):
     """scope.json BORNÉ AU PORT de l'application (`127.0.0.1:PORT`), loopback autorisé
     explicitement (`allow_private`), `allow_exploit` déclaré — les oracles de contrôle d'accès
-    (access_control.*, auth.takeover) en dépendent."""
+    (access_control.*, auth.takeover) en dépendent.
+
+    DÉBIT — `rate: 5`, et ce n'est PAS un réglage de confort. Le banc écrivait `rate: 20`, et c'est
+    ce banc-là qui a produit le verdict « forge tue la cible ». Mesuré le 2026-08-11, machine
+    propre, lignes de base vérifiées, campagne autonome de 900 s sur Juice Shop :
+
+        rate 20   167 -> 5 023 Mio   MORTE (Exited 139) à t+145s     8 actions, 1660 erreurs
+        rate  5   162 ->   484 Mio   VIVANTE, HTTP 200            1360 actions, 2730 findings
+
+    **170 fois plus d'actions tirées en bridant** : une cible morte transforme tout le reste du plan
+    en erreurs. Le banc mesurait donc en partie sa propre configuration létale — et il l'imputait à
+    forge. Le tueur a été isolé seul, sans campagne : feroxbuster à `--rate-limit 20` (5 051 Mio,
+    mort), à `--rate-limit 5` (384 Mio, vivante)."""
     scope = {
         "mode": "grey",
         "in_scope": [app.host_port],
         "out_scope": [],
-        "rate": 20,
+        "rate": 5,
         "allow_exploit": bool(allow_exploit),
         "allow_destructive": False,
         "allow_private": True,
