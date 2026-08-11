@@ -1,5 +1,47 @@
 {
   "_comment": "SPDX-License-Identifier: AGPL-3.0-or-later — VERIFICATION MANUELLE de chaque finding >= MEDIUM du banc, rejoue a la main contre l'application. Cle stable : <app>/<piste>/<module>@<cible>. Consomme par bench/detection/report.py --verdicts.",
+  "_comment_2026_08_11": "DEUX campagnes cohabitent ICI DELIBEREMENT. Les cles du 2026-08-10 sont CONSERVEES telles quelles : un rapport de banc qui efface ses chiffres d'avant ne vaut plus rien comme reference. Les cibles ONT CHANGE de forme entre les deux runs (correctif D6 : en GET la valeur du parametre est desormais REMPLACEE au lieu d'etre AJOUTEE — d'ou `...?id=1&Submit=Submit` au lieu de `...?id=1&Submit=Submit&id=1`), donc les cles ne se recouvrent pas et report.py n'apparie que celles du run courant.",
+
+  "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit": {
+    "verdict": "TP",
+    "why": "2026-08-11 — module `sqli` declare par l'app ; rejoue a la main : `?id=1'&Submit=Submit` -> « You have an error in your SQL syntax ; check the manual that corresponds to your MariaDB server version … near ''1''' at line 1 »"
+  },
+  "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli_blind/?id=1&Submit=Submit": {
+    "verdict": "TP",
+    "why": "2026-08-11 — module `sqli_blind` declare par l'app ; differentiel booleen rejoue a la main : `1' AND '1'='1` -> « User ID exists » (1 occurrence), `1' AND '1'='2` -> 0 occurrence"
+  },
+  "dvwa/A/cmdi.probe@http://127.0.0.1:8081/vulnerabilities/exec/?Submit=Submit": {
+    "verdict": "TP",
+    "why": "2026-08-11 — module `exec` declare par l'app ; rejoue a la main HORS forge : POST `ip=127.0.0.1;id&Submit=Submit` -> « uid=33(www-data) gid=33(www-data) groups=33(www-data) ». NOUVEAU par rapport au 2026-08-10 (correctif D6 : le co-parametre `Submit` est desormais preserve dans le corps POST)"
+  },
+  "dvwa/A/rce.probe@http://127.0.0.1:8081/vulnerabilities/exec/?Submit=Submit": {
+    "verdict": "TP",
+    "why": "2026-08-11 — meme preuve manuelle que cmdi.probe (`uid=33(www-data)`) ; forge a DEUX oracles distincts sur cette classe, comptes separement par la verite terrain. NOUVEAU (D6)"
+  },
+  "dvwa/A/path.traversal@http://127.0.0.1:8081/vulnerabilities/fi/?page=..%2F..%2Fforge-canary.txt": {
+    "verdict": "TP",
+    "why": "2026-08-11 — module `fi` declare par l'app ; canari lu (`FORGE_BENCH_CANARY_9Z4K`) ET preuve INDEPENDANTE du canari : `?page=/etc/passwd` -> `root:x:0:0`"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/config/": {
+    "verdict": "FP",
+    "why": "2026-08-11 — NOUVELLE FORME du meme faux positif (defaut D14). La cible repond 200 SANS AUCUN `Location` : l'unique occurrence de l'hote injecte est la signature serveur d'Apache, `<address>Apache/2.4.25 (Debian) Server at evil.forge-hh.test Port 80</address>` (ServerSignature On, defaut Debian), presente sur toute page auto-generee (index de repertoire ET page 404). Texte INERTE : 0 `href` porte l'hote injecte. Aucun module « host header » dans la verite terrain de DVWA"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/docs/": {
+    "verdict": "FP",
+    "why": "2026-08-11 — idem : 200 sans `Location`, reflet UNIQUEMENT dans `<address>…Server at evil.forge-hh.test Port 80</address>` (signature Apache), 0 `href` porteur. Defaut D14"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/external/": {
+    "verdict": "FP",
+    "why": "2026-08-11 — idem : 200 sans `Location`, reflet UNIQUEMENT dans la signature serveur d'Apache, 0 `href` porteur. Defaut D14"
+  },
+  "dvwa/B/header_injection.probe@http://127.0.0.1:8081/external/phpids/0.6/": {
+    "verdict": "FP",
+    "why": "2026-08-11 — idem : 200 sans `Location`, reflet UNIQUEMENT dans la signature serveur d'Apache, 0 `href` porteur. Defaut D14"
+  },
+  "vampi/A/jwt.weakness@http://127.0.0.1:5001/users/v1/login": {
+    "verdict": "TP",
+    "why": "2026-08-11 — README de l'app : « JWT authentication bypass via weak signing key » ; `/vampi/config.py:13 SECRET_KEY = 'random'` lu DANS le conteneur ; jeton HS256 forge HORS forge avec le secret `random` -> `PUT /users/v1/attacker1/email` accepte (204). NOUVEAU par rapport au 2026-08-10 (correctif D12 : liste HMAC 16 -> 49 entrees)"
+  },
   "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit&id=1": {
     "verdict": "TP",
     "why": "module `sqli` declare par l'app ; rejoue a la main : `?id=1'` -> « You have an error in your SQL syntax … MariaDB »"
@@ -30,19 +72,19 @@
   },
   "juiceshop/A/access_control.idor@http://127.0.0.1:3000/rest/basket/1": {
     "verdict": "TP",
-    "why": "CERTIFIE PAR L'APP : le challenge « View Basket » (Broken Access Control) est passe a solved dans GET /api/Challenges"
+    "why": "2026-08-10 : CERTIFIE PAR L'APP — le challenge « View Basket » (Broken Access Control) est passe a solved dans GET /api/Challenges. || 2026-08-11 : REVERIFIE, meme verdict — `basketAccessChallenge` a de nouveau bascule a `solved`, et le rejeu manuel montre uid attaquant=24 lisant le panier 7 (UserId=25, la victime) -> 200, la meme URL en anonyme -> 401"
   },
   "juiceshop/A/sqli.probe@http://127.0.0.1:3000/rest/user/login": {
     "verdict": "TP",
-    "why": "CERTIFIE PAR L'APP : le challenge « Login Admin » (Injection) est passe a solved dans GET /api/Challenges"
+    "why": "2026-08-10 : CERTIFIE PAR L'APP — le challenge « Login Admin » (Injection) est passe a solved dans GET /api/Challenges. || 2026-08-11 : REVERIFIE, meme verdict — `{\"email\":\"' OR 1=1--\",\"password\":\"x\"}` -> 200 avec l'identite `admin@juice-sh.op` (temoin : email inexistant SANS injection -> 401), et l'app certifie ensuite `loginAdminChallenge` = solved. NUANCE HONNETE : cette annee c'est le rejeu MANUEL qui a fait basculer le challenge — la sonde de forge a prouve la SQLi par differentiel d'AUTORISATION (`' OR '1'='1'-- -`, 401 -> 200) sans viser le compte admin"
   },
   "vampi/A/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
     "verdict": "TP",
-    "why": "BOLA declaree par le README ; rejoue a la main : attacker1 lit `VICTIM_SECRET_MARKER_7Q3` de victim1"
+    "why": "2026-08-10 : BOLA declaree par le README ; rejoue a la main : attacker1 lit `VICTIM_SECRET_MARKER_7Q3` de victim1. || 2026-08-11 : REVERIFIE, meme verdict — le jeton d'attacker1 lit `{\"book_title\":\"victimbook\",\"owner\":\"victim1\",\"secret\":\"VICTIM_SECRET_MARKER_7Q3\"}` ; la meme URL SANS en-tete -> 401 et le marqueur n'y figure pas (0 occurrence). L'evidence rendue par l'oracle est passee de `anon=200 anon_refuse=False` (fausse, defaut D2) a `anon=401 anon_refuse=True`"
   },
   "vampi/B/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
     "verdict": "TP",
-    "why": "idem, trouve cette fois par la campagne AUTONOME (idor_targets injectees depuis scope.auth)"
+    "why": "2026-08-10 : idem, trouve cette fois par la campagne AUTONOME (idor_targets injectees depuis scope.auth). || 2026-08-11 : REVERIFIE, meme verdict, toujours trouve par la campagne autonome — c'est le SEUL vrai positif du mode `--auto-pentest` sur les 4 applications, dans les DEUX campagnes"
   },
   "vampi/B/header_injection.probe@http://127.0.0.1:5001/ui": {
     "verdict": "FP",

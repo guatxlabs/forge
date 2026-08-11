@@ -52,11 +52,21 @@ cause** ; et **faux positifs** — chaque finding ≥ MEDIUM est rejoué à la m
 python3 -m bench.detection.run_bench --workdir /tmp/bench --track both --budget 900
 
 # rendre le tableau (par app, par classe, + la liste des >= MEDIUM a verifier a la main)
-python3 -m bench.detection.report --workdir /tmp/bench --verdicts verdicts.json
+python3 -m bench.detection.report --workdir /tmp/bench --verdicts bench/detection/verdicts.json
 
 # demonter
 python3 -c "from bench.detection import provision; provision.teardown()"
 ```
+
+**Campagnes jouées, sorties brutes conservées (jamais écrasées)** — `RESULTS_2026-08-10.md` (mesure
+initiale, 13 défauts) et `RESULTS_2026-08-11.md` (banc rejoué en entier après remédiation).
+Comparaison AVANT/APRÈS et défauts encore ouverts : `../../docs/BENCH_DETECTION.md`.
+
+**Deux réserves connues sur le banc lui-même** (consignées, non corrigées) :
+`harness.run_forge` marque `partial=True` pour TOUTE campagne pourvue d'un `--run-timeout`, parce que
+la bannière de lancement du moteur contient le mot « PARTIEL » — lire la bannière du rapport du moteur
+plutôt que ce drapeau (défaut **D15**) ; et `THIRD_PARTY_MODULES` exclut par intention déclarée, pas
+par egress observé — `recon.httpx` télécharge un modèle depuis `huggingface.co` (défaut **D17**).
 
 ## Fichiers
 
