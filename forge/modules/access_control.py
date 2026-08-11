@@ -19,6 +19,7 @@ Ce module a été SORTI de `web.py` (qui n'enregistre plus que `web.nuclei`) et 
 historique `forge/modules/web.py:access_control.idor` pour préserver une sortie byte-à-byte stable.
 """
 import hashlib
+import json
 import re
 
 from .. import techniques
@@ -63,6 +64,47 @@ def _normalize_body(body):
 
 def _body_hash(body):
     return hashlib.sha256(_normalize_body(body).encode("utf-8", "replace")).hexdigest()
+
+
+#: Clés d'enveloppe usuelles des API JSON : le PAYLOAD est dessous, pas à la racine.
+_ENVELOPE_KEYS = ("data", "items", "results", "records", "rows", "content", "list", "entries")
+
+
+def _carries_payload(body):
+    """Ce corps PORTE-T-IL quelque chose ? (bool)
+
+    POURQUOI CE PRÉDICAT EXISTE — un défaut LATENT trouvé en rejouant le banc à la main (D22). La
+    preuve « B lit l'objet de A » repose sur l'ÉGALITÉ de deux corps normalisés, et son seul garde
+    refusait un corps **VIDE**. Or `{"status":"success","data":[]}` n'est pas vide : deux comptes qui
+    voient chacun leur PROPRE collection VIDE produisent deux corps identiques, et l'oracle concluait
+    « IDOR CONFIRMÉ » alors que personne n'a rien lu de personne. Le garde existait et gardait à côté.
+
+    Ce prédicat demande donc « y a-t-il un CONTENU », pas « y a-t-il des OCTETS » :
+      · JSON dont l'enveloppe (`data`/`items`/`results`…) est une collection VIDE -> non ;
+      · JSON qui est lui-même `[]` / `{}` -> non ;
+      · tout le reste (objet peuplé, collection non vide, scalaire, corps non-JSON) -> oui.
+
+    CE QU'IL NE FAIT PAS, et c'est délibéré : il ne juge PAS l'APPARTENANCE. Un corps peuplé et
+    identique pour deux comptes peut rester une vue GLOBALE légitime — seule une discrimination
+    contre une troisième identité, ou un marqueur d'appartenance fourni par l'opérateur (voie
+    `idor_targets`), tranche cela. Ce prédicat ferme le mécanisme MESURÉ, pas toute la question.
+
+    Pur, ne lève jamais."""
+    text = (body or "").strip()
+    if not text:
+        return False
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        return True                       # non-JSON non vide : on ne prétend pas savoir le lire
+    if isinstance(doc, (list, tuple)):
+        return bool(doc)
+    if isinstance(doc, dict):
+        envelopes = [k for k in _ENVELOPE_KEYS if k in doc]
+        if envelopes:                     # enveloppe présente -> le contenu est DESSOUS
+            return any(bool(doc[k]) for k in envelopes)
+        return bool(doc)
+    return True                           # scalaire JSON (nombre, chaîne, booléen) -> du contenu
 
 
 class _ContentTypedOracle:
@@ -128,9 +170,14 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
 
     @staticmethod
     def _same_object(resp_a, resp_b):
-        """Preuve « B lit l'objet de A » : status accordé des deux côtés, MÊME content-type, et
-        MÊME hash de corps NORMALISÉ (CSRF/nonce/horodatages retirés). On refuse un corps vide
-        (un 200 sans corps n'est pas une preuve de lecture)."""
+        """Preuve « B lit l'objet de A » : status accordé des deux côtés, MÊME content-type, MÊME
+        hash de corps NORMALISÉ (CSRF/nonce/horodatages retirés), et un corps qui PORTE quelque chose.
+
+        Les deux derniers gardes ne font pas double emploi (défaut D22, trouvé en rejouant le banc à
+        la main) : le premier refuse un corps sans OCTETS, le second un corps sans CONTENU. Deux
+        comptes qui voient chacun leur PROPRE collection vide rendent `{"data":[]}` — des octets, pas
+        un contenu — et l'oracle concluait « IDOR CONFIRMÉ » alors que personne n'a rien lu de
+        personne."""
         sa, ba, ca = resp_a
         sb, bb, cb = resp_b
         if sa not in IdorDifferential._OK or sb not in IdorDifferential._OK:
@@ -138,8 +185,10 @@ class IdorDifferential(_ContentTypedOracle, ScopeGuardedOracle):
         if ca != cb:                     # types divergents -> pas le même objet
             return False
         na = _normalize_body(ba)
-        if not na:                       # pas de contenu à comparer -> pas de preuve
+        if not na:                       # pas d'OCTETS à comparer -> pas de preuve
             return False
+        if not _carries_payload(ba):     # … et pas de CONTENU non plus (cf. `_carries_payload`, D22)
+            return False                 # deux collections VIDES identiques ne prouvent aucune lecture
         return _body_hash(ba) == _body_hash(bb)
 
     @staticmethod
