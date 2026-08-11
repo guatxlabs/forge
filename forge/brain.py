@@ -127,8 +127,15 @@ class HeuristicBrain(Brain):
     def propose(self, graph_state):
         graph = _as_graph(graph_state)
         out, seen = [], set()
+        raw_host = self._raw_target_kinds()
 
         def add(a):
+            # MÊME GARDE, COUVERTURE ÉTENDUE (défaut D16) : un kind dont l'outil reçoit la cible TELLE
+            # QUELLE et la RÉSOUT comme un hôte n'a RIEN à voir sur une cible qui n'est pas un hôte nu
+            # (URL de racine, `host:port`). Cf. `_raw_target_kinds`. Vaut pour le plan de base ET le
+            # chaînage — les deux passent par ici.
+            if a.kind in raw_host and not self._is_bare_host(a.target):
+                return
             if a.id not in seen:
                 seen.add(a.id)
                 out.append(a)
@@ -179,6 +186,63 @@ class HeuristicBrain(Brain):
         donc été remontée là-bas et ce nom reste l'alias historique du cerveau."""
         from .planner import is_endpoint_target       # import paresseux (aucun cycle au chargement)
         return is_endpoint_target(target)
+
+    @staticmethod
+    def _is_bare_host(target):
+        """True si `target` est un HÔTE NU (ni scheme, ni chemin/query, ni `:port`) — la forme qu'un
+        outil qui RÉSOUT un hôte peut consommer telle quelle. DÉLÈGUE à `planner.is_bare_host_target`
+        — SOURCE UNIQUE, comme `_is_endpoint` au-dessus (mêmes deux consommateurs, une définition)."""
+        from .planner import is_bare_host_target      # import paresseux (aucun cycle au chargement)
+        return is_bare_host_target(target)
+
+    @staticmethod
+    def _raw_target_kinds():
+        """Kinds dont l'outil reçoit la cible **TELLE QUELLE** et la RÉSOUT comme un nom d'hôte —
+        donc AVEUGLES sur toute cible qui n'est pas un hôte nu (URL de racine, `host:port`).
+
+        C'EST LA MÊME GARDE QUE `_host_scoped_kinds`, AVEC UNE COUVERTURE ÉTENDUE, PAS UNE SECONDE.
+        `_host_scoped_kinds` (D9) répond à « ce kind a-t-il quelque chose à voir sur un ENDPOINT ? » ;
+        celui-ci répond à « …sur une cible qui n'est PAS un hôte ? ». Le second ensemble est un
+        SOUS-ENSEMBLE STRICT du premier, et il le faut : sur une URL de RACINE, `recon.katana`,
+        `recon.feroxbuster`, `recon.content`, `recon.httpx` ou `recon.js_endpoints` — tous
+        host-scoped — travaillent PARFAITEMENT (ils prennent une URL). Appliquer l'ensemble D9 tel
+        quel aux URL de racine aurait décapité la découverte de contenu : c'est feroxbuster qui a
+        trouvé les 1558 findings de DVWA piste B. Le discriminant n'est donc pas « consomme un hôte »
+        mais « reçoit la cible SANS NORMALISATION ».
+
+        DÉRIVÉ, jamais recopié — deux sources, exactement comme la garde voisine :
+          1. `spec.argv_template` porte un token `{target}` BRUT (ni `{target_host}` — qui retire
+             scheme/chemin/userinfo — ni `{target_url}` — qui parle HTTP). Un `ToolSpec` ajouté demain
+             est classé sans que personne n'ait à penser à ce fichier. MESURE au moment du lot :
+             **0 spec du catalogue** est dans ce cas ; le mécanisme est donc là pour l'avenir, et il
+             ne retire rien aujourd'hui.
+          2. `recon.nmap` — le NATIF que le système de spec ne peut pas introspecter : il fait
+             `argv.append(action.target)` (recon.py, « cible en POSITIONNEL (dernier) »). C'est le
+             seul kind que cette garde retire aujourd'hui, et c'est EXACTEMENT celui que le banc a
+             mesuré aveugle 13 fois sur 13 (`Nmap done: 0 IP addresses (0 hosts up)`).
+             `origin.find`, l'autre natif nommé par la garde voisine, n'y figure PAS : il normalise
+             déjà sa cible en hôte (origin.py, « scheme/port/chemin/userinfo retirés »).
+
+        Lu PARESSEUSEMENT et ne lève jamais : registre indisponible -> le natif seul."""
+        out = {"recon.nmap"}
+        try:
+            from .modules import registry as _registry
+
+            def _toks(tpl):
+                for tok in tpl or ():
+                    if isinstance(tok, (tuple, list)):
+                        yield from _toks(tok)
+                    else:
+                        yield str(tok)
+            for kind, module in dict(_registry.REGISTRY).items():
+                spec = getattr(module, "spec", None)
+                if spec is None:
+                    continue
+                if any("{target}" in t for t in _toks(getattr(spec, "argv_template", ()))):
+                    out.add(kind)
+        except Exception:                            # noqa: BLE001 — registre absent -> natif seul
+            pass
+        return frozenset(out)
 
     def _discovery_marker(self, graph, host):
         """Marqueur ('' sinon) attestant que `host` a été DÉCOUVERT par une vague précédente (sous-domaine,
@@ -557,11 +621,22 @@ class AutoPentestBrain(HeuristicBrain):
                 seen_t.add(a.target)
                 targets.append(a.target)
         host_scoped = self._host_scoped_kinds()
+        raw_host = self._raw_target_kinds()
         extra = []
         for tgt in targets:
-            # MÊME GARDE QUE LE PLAN DE BASE : sur un ENDPOINT, on ne balaie pas les kinds qui
-            # consomment un hôte (cf. `_host_scoped_kinds`). Sur un hôte, rien ne change.
-            blocked = host_scoped if self._is_endpoint(tgt) else frozenset()
+            # MÊME GARDE QUE LE PLAN DE BASE, EN DEUX SEUILS SELON LA FORME DE LA CIBLE :
+            #   - ENDPOINT (chemin/query)  -> tout `_host_scoped_kinds` (D9, inchangé) ;
+            #   - PAS un HÔTE NU (URL de racine, `host:port`) -> `_raw_target_kinds`, le
+            #     SOUS-ENSEMBLE qui reçoit la cible SANS normalisation et la résout comme un nom
+            #     d'hôte (D16 : `nmap … http://h:p` -> « Unable to split netmask », `nmap … h:p`
+            #     -> « Failed to resolve », les deux à rc=0 et « 0 IP addresses (0 hosts up) »).
+            # Sur un hôte NU, rien ne change. Les deux seuils sont dérivés, aucun n'est listé à la main.
+            if self._is_endpoint(tgt):
+                blocked = host_scoped
+            elif not self._is_bare_host(tgt):
+                blocked = raw_host
+            else:
+                blocked = frozenset()
             for kind in order:
                 aid = f"{kind}:{tgt}"
                 if kind in blocked:

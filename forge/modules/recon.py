@@ -21,6 +21,41 @@ from ._discovery import (
 
 _NMAP_OPEN_PORT_RX = re.compile(r"^(\d{1,5})/tcp\s+open\s+(\S+)", re.MULTILINE)
 
+# =================================================================================================
+#  « J'AI SCANNÉ 0 HÔTE » N'EST PAS « J'AI VÉRIFIÉ » — défaut D16 du banc de détection.
+#
+#  Le correctif D9 avait fait tomber le NOMBRE de tirs nmap aveugles (72 -> 13) ; le rejeu a montré
+#  que les 13 restants scannaient TOUS 0 hôte et rendaient TOUS `status=tested` sous le titre
+#  « Services exposés (nmap -sV) ». Un opérateur y lit « vérifié ». MESURÉ contre le vrai binaire :
+#
+#      nmap -sV -Pn --top-ports 20 http://127.0.0.1:8081   Unable to split netmask from target
+#                                                          expression -> Nmap done: 0 IP addresses
+#                                                          (0 hosts up)                       rc=0
+#      nmap … 127.0.0.1:8081                               Failed to resolve "127.0.0.1:8081"
+#                                                          -> Nmap done: 0 IP addresses …      rc=0
+#      nmap … 127.0.0.1                                    Nmap done: 1 IP address (1 host up) rc=0
+#
+#  Les trois sortent **rc=0** : ni `Module.tool_failed` (borne `rc != 0`) ni
+#  `blindness.tool_did_not_run` (`rc != 0` ET stdout vide) ne peuvent voir ce silence — et
+#  `blindness` REFUSE délibérément d'élargir à `rc == 0`, parce qu'un outil qui a bien tourné sur une
+#  cible saine sort lui aussi à rc=0 avec peu de sortie. La distinction n'est donc PAS dans le rc :
+#  elle est DÉCLARÉE PAR NMAP LUI-MÊME, en toutes lettres, dans sa ligne de bilan. Un scan réussi qui
+#  ne trouve rien dit « 1 IP address (1 host up) scanned » — un verdict légitime, qu'on garde intact.
+#  Zéro hôte scanné n'est pas un verdict : c'est une ABSTENTION, et elle se dit `skipped`.
+#  Le cerveau évite désormais de PROPOSER ces cibles (`brain._raw_target_kinds`) ; ceci est la
+#  seconde ligne — ce qui tire quand même ne peut plus affirmer avoir vérifié.
+# =================================================================================================
+_NMAP_NO_HOST_RX = re.compile(r"Nmap done:\s*0 IP addresses\s*\(0 hosts up\)"
+                              r"|No targets were specified, so 0 hosts scanned", re.IGNORECASE)
+
+
+def _nmap_scanned_nothing(out, err):
+    """nmap a-t-il DÉCLARÉ n'avoir scanné AUCUN hôte ? Lecture de SA ligne de bilan, pas une
+    heuristique sur le rc (cf. le bloc ci-dessus). `1 IP address (1 host up) scanned` — le scan
+    légitime qui ne trouve rien — ne matche PAS : le verdict négatif reste un verdict. Pur, ne lève
+    jamais."""
+    return bool(_NMAP_NO_HOST_RX.search(f"{out or ''}\n{err or ''}"))
+
 
 def _httpx_web_ports(out):
     """Ports des services web VIVANTS listés par httpx (JSON par-ligne : chaque ligne = un service
@@ -283,6 +318,23 @@ class NmapServices(FlagAllowlistMixin, Module):
         failed = self.tool_failed(action, rc, out, err, "nmap")
         if failed:
             return [failed]
+        # ABSTENTION NOMMÉE (D16) — nmap déclare n'avoir scanné AUCUN hôte : rien n'a été regardé,
+        # donc rien ne peut être affirmé. `skipped` (« pas vérifié »), jamais `tested` (« vérifié,
+        # rien trouvé »). Aucune découverte/inventaire n'est dérivé d'un scan vide.
+        if _nmap_scanned_nothing(out, err):
+            return [self.finding(
+                target=action.target,
+                title="Services exposés — NON VÉRIFIÉ : nmap n'a scanné AUCUN hôte",
+                severity="INFO", category="recon", mitre="T1046", status="skipped", tool="nmap",
+                evidence=("nmap a rendu « 0 IP addresses (0 hosts up) » : la cible ne lui a pas été "
+                          "présentée sous une forme qu'il sait résoudre (une URL — « Unable to split "
+                          "netmask from target expression » — ou un `host:port`, qu'il lit comme un "
+                          "NOM D'HÔTE : « Failed to resolve »). Il sort rc=0, donc ni `tool_failed` "
+                          "(rc != 0) ni `blindness.tool_did_not_run` ne le voient : sans cette "
+                          "abstention, l'action rendait « Services exposés — vérifié » après avoir "
+                          "regardé zéro hôte. Rejouer sur l'HÔTE NU de la cible.\n\n"
+                          + (out or err).strip()[:900]),
+                poc=self.dry(action))]
         summary = self.finding(
             target=action.target, title="Services exposés (nmap -sV)", severity="INFO",
             category="recon", mitre="T1046", status="tested", tool="nmap",

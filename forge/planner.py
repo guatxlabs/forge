@@ -249,6 +249,42 @@ def is_endpoint_target(target: Any) -> bool:
     return bool(path.strip("/"))
 
 
+def is_bare_host_target(target: Any) -> bool:
+    """True si `target` est un HÔTE NU — un nom ou une IP qu'un outil qui CONSOMME un hôte peut
+    résoudre TEL QUEL. FAUX dès qu'il y a un scheme, un chemin/query/fragment, un userinfo ou un
+    `:port`.
+
+    POURQUOI CE PRÉDICAT EN PLUS de `is_endpoint_target` (défaut D16 du banc). `is_endpoint_target`
+    répond à « y a-t-il un CHEMIN ? » — et une URL de RACINE n'en a pas : `http://127.0.0.1:8081`
+    comme `http://127.0.0.1:8081/` lui rendent `False`, donc « c'est un hôte ». Un `host:port` aussi.
+    MESURÉ, en passant les trois formes au vrai binaire :
+
+        nmap -sV -Pn --top-ports 20 http://127.0.0.1:8081   -> Unable to split netmask from target
+                                                               expression -> 0 IP addresses (0 hosts up)
+        nmap … http://127.0.0.1:8081/                       -> idem
+        nmap … 127.0.0.1:8081                               -> Failed to resolve "127.0.0.1:8081"
+                                                               -> 0 IP addresses (0 hosts up)
+        nmap … 127.0.0.1                                    -> 1 IP address (1 host up) — le SEUL vrai
+
+    Les trois sortent **rc=0** : la borne `rc != 0` de `blindness.tool_did_not_run` ne peut PAS les
+    voir. Il fallait donc un prédicat sur la FORME de la cible, et il vit ici pour la même raison que
+    son voisin : deux consommateurs (le cerveau qui ne sème pas, le module qui s'abstient), une seule
+    définition.
+
+    IPv6 : un littéral non crocheté (`::1`, `fe80::1`) est un HÔTE NU (deux `:` ou plus, jamais de
+    port) ; la forme crochetée `[::1]:8081` porte un port et ne l'est pas. Pur, ne lève jamais."""
+    s = str(target).strip()
+    if not s or "://" in s or "@" in s:
+        return False
+    if any(c in s for c in "/?# "):
+        return False
+    if s.startswith("["):                          # `[::1]` / `[::1]:8081` — forme à port explicite
+        return False
+    if s.count(":") >= 2:                          # littéral IPv6 nu (jamais de port sans crochets)
+        return True
+    return ":" not in s
+
+
 def stage(action: Action) -> int:
     """STAGE_SURFACE si l'action PRODUIT de la surface, STAGE_VERIFY sinon. Pur.
 

@@ -92,10 +92,27 @@ class TestNoBlindHostScopedActionOnAnEndpoint(unittest.TestCase):
         self.assertEqual(blind, [], f"{len(blind)} action(s) hôte-scopées sur un endpoint")
 
     def test_nmap_is_STILL_proposed_on_the_host(self):
-        """Le garde retire des tirs AVEUGLES, pas la technique : sur l'hôte, nmap reste proposé."""
-        on_host = [a for a in self.actions
+        """Le garde retire des tirs AVEUGLES, pas la technique : sur un HÔTE NU, nmap reste proposé.
+
+        RUPTURE NOMMÉE (défaut D16). Ce test visait `HOST` = `127.0.0.1:3000` — un `host:port`. Le
+        rejeu du banc a mesuré que nmap n'y voit RIEN NON PLUS : il lit l'opérande comme un NOM
+        D'HÔTE et rend « Failed to resolve "127.0.0.1:3000" -> Nmap done: 0 IP addresses (0 hosts
+        up) », à rc=0. `is_endpoint_target` répond « pas un endpoint », mais « pas un endpoint » ne
+        veut pas dire « un hôte » : c'est exactement la faille que D16 ferme
+        (`planner.is_bare_host_target`, `brain._raw_target_kinds`). L'INTENTION du test est
+        conservée telle quelle — « nmap doit continuer de tourner LÀ OÙ IL VOIT quelque chose » —
+        et elle est désormais vérifiée sur une cible où il voit effectivement quelque chose
+        (mesuré : `nmap … 127.0.0.1` -> « 1 IP address (1 host up) scanned »)."""
+        g = EngagementGraph()
+        g.add_host("127.0.0.1", kind="host", service="http")
+        on_host = [a for a in AutoPentestBrain().propose(g)
                    if a.kind == "recon.nmap" and not is_endpoint_target(a.target)]
         self.assertTrue(on_host, "nmap doit continuer de tourner LÀ OÙ IL VOIT quelque chose")
+
+    def test_nmap_is_never_proposed_on_a_host_port(self):
+        """Le second versant de la même rupture : sur `host:port`, nmap ne voit rien -> plus proposé."""
+        blind = [a for a in self.actions if a.kind == "recon.nmap"]
+        self.assertEqual(blind, [], "nmap sur `host:port` rend « Failed to resolve » (0 hôte scanné)")
 
 
 class TestEndpointCoverageIsIntact(unittest.TestCase):

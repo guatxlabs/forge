@@ -457,6 +457,85 @@ def _same_path(a, b):
     return na == nb
 
 
+# =================================================================================================
+#  CONTRE-MESURE « ÉCHO DÉCORATIF » — la garde ci-dessus n'a fermé QU'UNE PORTE SUR DEUX.
+#
+#  MESURÉ (rejeu du banc, `docs/BENCH_DETECTION.md` § D14) : **4 HIGH FAUX de plus sur DVWA**, sur
+#  les MÊMES répertoires qu'en D4, à un caractère près — la variante à SLASH FINAL, où Apache ne
+#  redirige plus : il sert l'index, et son pied de page recopie le `Host` reçu.
+#
+#      curl -H 'Host: evil.forge-hh.test' http://127.0.0.1:8081/docs/  ->  200, AUCUN `Location`
+#        <address>Apache/2.4.25 (Debian) Server at evil.forge-hh.test Port 80</address>
+#        occurrences du marqueur dans le corps : 1        `href` PORTEUR : 0
+#
+#  `ServerSignature On` est le défaut Debian : TOUTE page auto-générée (index de répertoire, page
+#  d'erreur) recopie l'en-tête `Host`. Aucune des quatre applications du banc ne déclare cette classe
+#  dans sa vérité terrain. La garde de D4 ne regardait QUE le `Location` ; dès que le marqueur est
+#  dans le CORPS, `_reflected_in` rendait `"corps"` sans autre examen et la seule garde restante
+#  était `control_reflects_host` — celle que D4 a elle-même démontrée structurellement incapable
+#  (elle compare avec le VRAI `Host`, où le marqueur ne peut PAR CONSTRUCTION jamais apparaître).
+#
+#  LE DISCRIMINANT — CE QUE LE CORPS FAIT DU `Host`, PAS LE FAIT QU'IL LE CONTIENNE.
+#  Ce qui rend un host poisoning PAYABLE, c'est qu'une URL soit CONSTRUITE depuis l'en-tête : le
+#  lien de réinitialisation absolu qui part par e-mail, le `<base href>`, le `<script src>`, l'entrée
+#  de cache. Le marqueur y occupe alors l'AUTORITÉ d'une URI (RFC 3986 § 3.2 : l'autorité SUIT
+#  « // » et PRÉCÈDE « / ? # »). Un pied de page, un titre, un message d'erreur le portent comme du
+#  TEXTE : rien n'est construit, rien n'est suivi, rien n'est chargé. Le banc l'avait déjà chiffré
+#  sans le nommer — « href porteur : 0 ».
+#
+#  CE QUI RESTE DÉTECTÉ (on ne fabrique pas l'excès inverse) — le corps promeut dès qu'UNE SEULE
+#  occurrence est PORTEUSE, même noyée dans dix échos inertes :
+#    - `<a href="https://<marqueur>/account/reset?token=…">`   -> lien de reset (le vecteur qui paie)
+#    - `<base href="//<marqueur>/">`, `<script src="http://<marqueur>/x.js">`, `<form action=…>`
+#    - `<meta http-equiv=refresh content="0;url=https://<marqueur>/">`, JSON `{"url":"https://…"}`
+#    - texte nu `<marqueur>/reset?token=…` (lien d'e-mail sans balise) : suivi d'un chemin/une query
+#  Et les VOIES HORS CORPS sont intactes : `Location` applicatif, `Link`, `Refresh`,
+#  `Content-Location`, CRLF response-splitting — la mesure ne portait que sur le corps.
+#
+#  L'abstention est NOMMÉE dans l'évidence (une abstention muette serait le défaut symétrique).
+# =================================================================================================
+
+# Autorité d'URI — le marqueur SUIT « // » (avec userinfo optionnel : `//user:pw@<marqueur>`)…
+_URL_AUTHORITY_BEFORE_RX = re.compile(r'//(?:[^\s"\'<>/?#]*@)?$')
+# …ou PRÉCÈDE un délimiteur de chemin/query/fragment (port optionnel) : `<marqueur>:8443/reset?x`.
+_URL_AUTHORITY_AFTER_RX = re.compile(r'^(?::\d{1,5})?[/?#]')
+# Fenêtre de contexte AMONT bornée : une autorité est collée à son « // » (userinfo compris). Borner
+# évite un balayage du corps entier par occurrence — et tout risque de backtracking pathologique.
+_URL_AUTHORITY_LOOKBEHIND = 128
+
+
+def _host_echo_split(body, marker):
+    """(porteur, inerte) — deux EXTRAITS DE CONTEXTE (ou '') disant COMMENT le marqueur d'hôte
+    apparaît dans le corps :
+
+      - `porteur` : au moins une occurrence occupe l'AUTORITÉ d'une URI -> une URL est CONSTRUITE
+        depuis l'en-tête `Host` (lien de reset, `<base href>`, `src`, entrée de cache) -> vrai
+        empoisonnement, à PROMOUVOIR ;
+      - `inerte`  : le marqueur n'est présent que comme TEXTE (signature serveur `<address>`, titre,
+        message) -> écho décoratif, RIEN n'est construit -> ne promeut pas, mais est NOMMÉ.
+
+    Les deux peuvent être non vides : un corps peut porter un vrai lien ET un pied de page. La
+    décision se prend alors sur `porteur` (fail-open vers la DÉTECTION, jamais vers le silence).
+    Pur, ne lève jamais."""
+    text = body or ""
+    if not marker or marker not in text:
+        return "", ""
+    carrying = inert = ""
+    i = text.find(marker)
+    while i >= 0:
+        before = text[max(0, i - _URL_AUTHORITY_LOOKBEHIND):i]
+        after = text[i + len(marker):i + len(marker) + 16]
+        snip = " ".join(text[max(0, i - 60):i + len(marker) + 40].split())
+        if _URL_AUTHORITY_BEFORE_RX.search(before) or _URL_AUTHORITY_AFTER_RX.match(after):
+            carrying = carrying or snip
+        else:
+            inert = inert or snip
+        if carrying and inert:
+            break
+        i = text.find(marker, i + 1)
+    return carrying, inert
+
+
 @register("header_injection.probe")
 class HeaderInjectionProbe(ClientFlowOracle):
     kind = "header_injection.probe"
@@ -474,8 +553,14 @@ class HeaderInjectionProbe(ClientFlowOracle):
 
     @staticmethod
     def _reflected_in(pairs, body, marker):
-        """'corps' | nom d'en-tête de réponse | '' — où le marqueur d'hôte est réfléchi."""
-        if marker in (body or ""):
+        """'corps' | nom d'en-tête de réponse | '' — où le marqueur d'hôte est réfléchi.
+
+        « Réfléchi DANS LE CORPS » veut dire qu'une URL y est CONSTRUITE depuis l'en-tête `Host`
+        (`_host_echo_split`), pas qu'il s'y trouve recopié en toutes lettres : un pied de page
+        auto-généré (`ServerSignature On`, défaut Debian) recopie le `Host` sur TOUTE page sans que
+        rien ne soit construit — cf. le bloc de doctrine « écho décoratif » ci-dessus. Un écho
+        purement inerte laisse donc la place à l'examen des EN-TÊTES, qui suit."""
+        if _host_echo_split(body, marker)[0]:
             return "corps"
         for name in ("Location", "Content-Location", "Link", "Refresh"):
             for v in ClientFlowOracle._get_all(pairs, name):
@@ -576,6 +661,7 @@ class HeaderInjectionProbe(ClientFlowOracle):
         control_reflects_host = bool(self._reflected_in(c_pairs, c_body, mhost))
         host_confirmed, host_hdr, host_where = False, "", ""
         canonical_hdr = ""                # en-tête dont le SEUL reflet était une canonicalisation d'URL
+        inert_hdr, inert_ctx = "", ""     # en-tête dont le SEUL reflet était un ÉCHO DÉCORATIF (corps)
         for hh in _HOST_HEADERS:
             probe_headers = dict(user_headers)
             probe_headers[hh] = mhost
@@ -588,6 +674,13 @@ class HeaderInjectionProbe(ClientFlowOracle):
             loc, canonical = self._host_reflection(st, base, pairs, body, mhost)
             if canonical and not canonical_hdr:
                 canonical_hdr = hh
+            # ÉCHO DÉCORATIF ÉCARTÉ (cf. doctrine « écho décoratif ») : le corps recopie le `Host` en
+            # TEXTE sans construire d'URL. On ne `break` pas non plus — un autre en-tête peut porter,
+            # lui, un lien réellement construit ; et si l'un d'eux le fait, `loc` gagne (fail-open).
+            if not loc and not inert_hdr:
+                _carrying, _inert = _host_echo_split(body, mhost)
+                if _inert:
+                    inert_hdr, inert_ctx = hh, _inert
             if loc and not control_reflects_host:
                 host_confirmed, host_hdr, host_where = True, hh, loc
                 break
@@ -626,6 +719,15 @@ class HeaderInjectionProbe(ClientFlowOracle):
                       f"Location. Un `Location` vers un AUTRE chemin, ou le marqueur dans le corps/un "
                       f"autre en-tête, aurait promu"
                       if canonical_hdr and not host_confirmed else "")
+        # Idem pour l'écho DÉCORATIF : ce qui a été OBSERVÉ, et pourquoi ça n'a pas promu.
+        inert_note = (f"écho DÉCORATIF ÉCARTÉ (en-tête {inert_hdr}) : le corps recopie le `Host` en "
+                      f"TEXTE INERTE ({inert_ctx[:160]}) — signature/pied de page auto-généré "
+                      f"(`ServerSignature On` est le défaut Debian d'Apache, mesuré sur DVWA) ; AUCUNE "
+                      f"URL n'est CONSTRUITE depuis l'en-tête (0 occurrence en position d'autorité "
+                      f"d'URI : ni href/src/action, ni lien absolu). Un lien de réinitialisation "
+                      f"absolu, un `<base href>`, une ressource chargée depuis l'hôte injecté — ou le "
+                      f"marqueur dans `Location`/`Link`/`Refresh` — auraient promu"
+                      if inert_hdr and not host_confirmed else "")
         return [self.proof(
             target=action.target, proven=proven,
             title=("Header-Injection CONFIRMÉE — " + which if proven
@@ -635,6 +737,7 @@ class HeaderInjectionProbe(ClientFlowOracle):
                       f"HOST: en-tête={host_hdr or '—'} reflet={host_where or 'aucun'} "
                       f"réflexion_contrôle={control_reflects_host} (si vrai -> non concluant) ; "
                       + (canon_note + " ; " if canon_note else "")
+                      + (inert_note + " ; " if inert_note else "")
                       + f"marqueur BÉNIGN "
                       f"inerte (aucun Set-Cookie/session tamperé) ; non destructif ; session gouvernée non journalisée"),
             poc=(f"# CRLF: {action.params.get('param', '<param>')}=…%0d%0a{_CRLF_HEADER_NAME}:<token> ; "
