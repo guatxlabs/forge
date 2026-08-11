@@ -135,11 +135,31 @@ def list_bench_containers():
 
 
 def ports_still_listening(ports):
-    """Sockets d'écoute du banc encore ouverts. Ancré aux limites : `:3000` ne doit pas se
+    """Sockets d'écoute encore ouverts SUR CES PORTS. Ancré aux limites : `:3000` ne doit pas se
     reconnaître dans `:30000`."""
+    if not ports:
+        return []
     r = sh("ss", "-ltnH")
     pat = re.compile(r"[:.](%s)\s" % "|".join(re.escape(str(p)) for p in ports))
     return [ln.strip() for ln in r.stdout.splitlines() if pat.search(ln)]
+
+
+def ports_of_bench_containers(names):
+    """Ports que LE BANC occupe réellement, dérivés des conteneurs PRÉSENTS — jamais d'une liste
+    d'applications connues.
+
+    Un socket n'accuse le banc que s'il a levé le conteneur qui le tient. Interroger « le port 3000
+    est-il occupé ? » sans se demander PAR QUI, c'est confondre « le banc n'a pas démonté » avec
+    « quelqu'un d'autre écoute » — mesuré le 2026-08-11 : `teardown()` a rendu `ok=False` en
+    accusant un conteneur `fjs` étranger au banc, sur un port qu'aucune application du banc
+    n'occupait à ce moment-là. Un garde qui accuse à tort finit ignoré, ce qui le rend inutile
+    exactement le jour où il a raison."""
+    ports = []
+    for n in names:
+        app = APPS.get(n[len(PREFIX):] if n.startswith(PREFIX) else n)
+        if app and ":" in app.host_port:
+            ports.append(app.host_port.rsplit(":", 1)[1])
+    return sorted(set(ports))
 
 
 def teardown(apps=None, ports=None):
@@ -150,8 +170,13 @@ def teardown(apps=None, ports=None):
     ce qui subsiste — mesuré, pas supposé.
 
     `apps=None` retire TOUT ce qui porte le préfixe. C'est le défaut, et il est délibéré :
-    l'ancienne signature ne retirait que les applications que l'appelant *croyait* avoir levées."""
+    l'ancienne signature ne retirait que les applications que l'appelant *croyait* avoir levées.
+
+    `ports=None` (défaut) ne vérifie QUE les ports des conteneurs que ce démontage vient de
+    retirer — voir `ports_of_bench_containers` : le banc ne s'accuse pas des sockets d'autrui."""
     names = [PREFIX + n for n in apps] if apps else list_bench_containers()
+    if ports is None:
+        ports = ports_of_bench_containers(names)
     if names:
         sh("docker", "rm", "-f", *names)
     restes = list_bench_containers()

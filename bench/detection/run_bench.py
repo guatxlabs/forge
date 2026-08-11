@@ -60,8 +60,10 @@ def main(argv=None):
         # Ctrl-C, refus de périmètre — laissait quatre applications délibérément vulnérables
         # levées. Mesuré le 2026-08-11 : un conteneur DVWA écoutait encore après coup.
         if not args.keep_up:
-            ports = [gt.APPS[a].host_port.split(":")[1] for a in gt.APPS]
-            ok, restes = provision.teardown(ports=ports)
+            # Aucune liste de ports passée ici : `teardown()` DÉRIVE les siens des conteneurs
+            # qu'il retire. Lui donner les ports de toutes les applications connues revenait à
+            # s'accuser d'un socket tenu par un conteneur étranger (mesuré le 2026-08-11).
+            ok, restes = provision.teardown()
             if not ok:
                 print(f"[!] DÉMONTAGE INCOMPLET — subsiste : {restes}", file=sys.stderr)
 

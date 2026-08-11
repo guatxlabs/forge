@@ -99,6 +99,30 @@ class TeardownVerifiesItsOwnEffect(unittest.TestCase):
             ok, restes = provision.teardown(ports=["3000"])
         self.assertTrue(ok, f"faux positif d'ancrage : {restes}")
 
+    def test_n_accuse_pas_le_banc_du_socket_d_un_autre(self):
+        """LE GARDE NE DOIT PAS CRIER AU LOUP. Mesuré le 2026-08-11 : `teardown()` a rendu
+        `ok=False` en pointant `127.0.0.1:3000`, tenu par un conteneur `fjs` ÉTRANGER au banc, alors
+        que le banc n'avait levé que DVWA (port 8081). Confondre « le port est occupé » avec « le
+        banc n'a pas démonté », c'est le même geste que tout ce que cette série répare : ne pas
+        demander PAR QUI. Un garde qui accuse à tort finit ignoré — donc inutile le jour où il a
+        raison."""
+        fake = FakeDocker(present={"forge-bench-dvwa"},
+                          listening=["LISTEN 0 4096 127.0.0.1:3000 0.0.0.0:*"])
+        with mock.patch.object(provision, "sh", fake):
+            ok, restes = provision.teardown()          # ports DÉRIVÉS : dvwa -> 8081, pas 3000
+        self.assertTrue(ok, f"socket étranger imputé au banc : {restes}")
+
+    def test_accuse_bien_le_banc_du_socket_qu_il_tient(self):
+        """L'excès inverse — le port de l'application RÉELLEMENT levée, lui, est bien vérifié."""
+        fake = FakeDocker(present={"forge-bench-dvwa"},
+                          listening=["LISTEN 0 4096 127.0.0.1:8081 0.0.0.0:*"])
+        fake_rm = lambda *a, **k: (mock.Mock(returncode=0, stdout="", stderr="")
+                                   if a[:3] == ("docker", "rm", "-f") else fake(*a, **k))
+        with mock.patch.object(provision, "sh", fake_rm):     # retrait sans effet sur le socket
+            ok, restes = provision.teardown()
+        self.assertFalse(ok)
+        self.assertTrue(any("8081" in r for r in restes), restes)
+
     def test_retire_ce_qui_porte_le_prefixe_sans_le_connaitre(self):
         """FUITE n°2, à la racine : le démontage est DÉRIVÉ de docker, pas d'une liste tenue à la
         main. Un conteneur du banc dont le nom n'est plus dans `APPS` doit quand même partir."""
