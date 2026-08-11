@@ -5,6 +5,7 @@ Lance un outil via le binaire local s'il est présent, sinon via `docker run --r
 jamais rien installer globalement. Les modules construisent la commande ; le runner exécute.
 La GATE ROE est en amont : le runner n'est atteint qu'après un verdict FIRE. Zéro dépendance.
 """
+import itertools
 import os
 import re
 import shutil
@@ -149,6 +150,11 @@ def terminate_live_tool_groups(force=True):
             os.killpg(pgid, sig)
         except (ProcessLookupError, OSError):
             pass
+    # ET LA MOITIÉ QUI VIT DANS LE DÉMON DOCKER. Un cancel whole-run qui ne coupe que les groupes de
+    # process LOCAUX laisse debout les conteneurs d'outils : `os.killpg` tue le client `docker run`,
+    # jamais le conteneur (cf. le bloc « conteneur orphelin »). Le filet est ici parce que c'est ICI
+    # qu'on a promis « coupe TOUS les groupes d'outils encore en vol ».
+    terminate_live_containers()
 
 
 # =================================================================================================
@@ -239,11 +245,87 @@ def entrypoint_refusal(entrypoint):
     return None
 
 
-def _docker_argv(docker_image, args=None, entrypoint=None):
+# =================================================================================================
+#  CONTENEUR ORPHELIN — `--rm` NE SUFFIT PAS, ET LE COÛT EST UNE CIBLE MARTELÉE APRÈS LE RUN.
+#
+#  MESURÉ le 2026-08-11, preuve horodatée : DEUX conteneurs feroxbuster encore VIVANTS des HEURES
+#  après la fin de leurs campagnes —
+#      zealous_easley    démarré 12:57:34   `feroxbuster --quiet -u http://127.0.0.1:3000 --rate-limit 5`
+#      agitated_mestorf  démarré 13:50:09   `… --rate-limit 20`
+#  … toujours en train de crawler à 16:11. Ils ont pollué trois mesures successives (une cible « au
+#  repos » à 1,68 Gio, puis une cible MORTE avant même qu'une campagne ne soit tirée) avant qu'on ne
+#  comprenne que la charge ne venait pas du run en cours.
+#
+#  LE PIÈGE : `docker run` est un CLIENT. Le conteneur, lui, vit dans le démon. `_terminate_group`
+#  tue le sous-arbre de process LOCAL — le client meurt, le conteneur SURVIT, et `--rm` (qui ne se
+#  déclenche qu'à la SORTIE du conteneur) n'arrive donc JAMAIS. Le SIGTERM est proxifié par le client
+#  et peut suffire ; le SIGKILL, par construction, ne l'est pas. Un timeout d'action = un orphelin.
+#
+#  POURQUOI C'EST UNE FAILLE DE SÛRETÉ ET PAS UNE FUITE DE RESSOURCE : en engagement réel, c'est un
+#  crawler qui continue de marteler la cible du client APRÈS la fin du run, sans borne, sans budget,
+#  et SANS TRACE — le ledger dit « run terminé ». C'est exactement le « avoid service degradation »
+#  que la quasi-totalité des programmes exigent.
+#
+#  LE CORRECTIF : chaque conteneur reçoit un NOM porteur du préfixe, et il est RETIRÉ DE FORCE en
+#  sortie de tir, quelle que soit la voie (retour normal, timeout, exception). `cmdline()` (dry-run,
+#  PoC) ne reçoit PAS de nom : ce qu'on montre à un humain reste copiable tel quel.
+# =================================================================================================
+CONTAINER_PREFIX = "forge-tool-"
+_container_seq = itertools.count()
+
+
+def _container_name():
+    """Nom unique et RECONNAISSABLE. Le pid distingue deux forges concurrents sur la même machine ;
+    le compteur, deux tirs du même forge. Le préfixe est ce qui rend le balayage de sûreté possible
+    SANS tenir de liste (cf. `terminate_live_containers`)."""
+    return f"{CONTAINER_PREFIX}{os.getpid()}-{next(_container_seq)}"
+
+
+def _docker_rm(name):
+    """Retire le conteneur DE FORCE. Best-effort et SILENCIEUX : sur le chemin normal `--rm` l'a déjà
+    retiré et docker répond « No such container » — ce n'est pas une erreur, c'est la preuve que tout
+    s'est bien passé. Ne lève jamais ; borné dans le temps (un démon docker qui rame ne doit pas
+    retenir un worker)."""
+    if not name:
+        return
+    try:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=20)
+    except Exception:                                       # noqa: BLE001 — best-effort par contrat
+        pass
+
+
+def live_containers():
+    """Conteneurs d'outils de CE forge encore présents — DÉRIVÉS de docker, jamais d'une liste tenue
+    à la main (un conteneur orphelin est précisément celui qu'aucune liste ne connaît plus)."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--filter", f"name={CONTAINER_PREFIX}{os.getpid()}-",
+                            "--format", "{{.Names}}"], capture_output=True, text=True, timeout=20)
+    except Exception:                                       # noqa: BLE001
+        return []
+    return sorted({n.strip() for n in r.stdout.splitlines() if n.strip()})
+
+
+def terminate_live_containers():
+    """Filet de sûreté de fin de run : retire TOUT conteneur d'outil de ce forge encore debout, et
+    REND CE QU'IL A TROUVÉ. Pendant du balayage de groupes de process (`terminate_live_tool_groups`),
+    pour la moitié qui vit dans le démon docker et qu'aucun signal local n'atteint."""
+    names = live_containers()
+    for n in names:
+        _docker_rm(n)
+    return names
+
+
+def _docker_argv(docker_image, args=None, entrypoint=None, name=None):
     """argv `docker run` — SOURCE UNIQUE partagée par `cmdline` (dry-run/PoC) et `tool` (exécution) :
     ce qu'on MONTRE est exactement ce qu'on LANCE, y compris l'entrypoint. Aucun `-v`/`--mount` n'y est
-    construit (cf. la décision §1 ci-dessus). N'est appelé qu'après `entrypoint_refusal` -> None. Pur."""
+    construit (cf. la décision §1 ci-dessus). N'est appelé qu'après `entrypoint_refusal` -> None. Pur.
+
+    `name` n'est posé QUE sur la voie d'exécution (cf. le bloc « conteneur orphelin ») : sans lui, un
+    conteneur survivant au client `docker run` n'est plus identifiable, donc plus arrêtable. Absent
+    (dry-run/PoC) -> argv BYTE-IDENTIQUE à l'historique."""
     cmd = ["docker", "run", "--rm", "--network", "host"]
+    if name:
+        cmd += ["--name", name]
     if entrypoint:
         cmd += ["--entrypoint", entrypoint]
     cmd.append(docker_image)
@@ -348,6 +430,7 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None
     local_path = shutil.which(binary)
     local_ok = bool(local_path)
     cmd = None
+    container = None                                   # nom du conteneur, SI la voie docker est retenue
     order = (("docker", docker_ok), ("local", local_ok)) if prefer_docker \
         else (("local", local_ok), ("docker", docker_ok))
     for which, ok in order:
@@ -358,14 +441,15 @@ def tool(binary, docker_image=None, args=None, prefer_docker=False, timeout=None
             bad = entrypoint_refusal(docker_entrypoint)
             if bad is not None:                   # fail-closed : ZÉRO processus lancé
                 return (126, "", f"entrypoint docker refusé (fail-closed) : {bad}")
-            cmd = _docker_argv(docker_image, args, docker_entrypoint)
+            container = _container_name()         # cf. bloc « conteneur orphelin » : sans nom, inarrêtable
+            cmd = _docker_argv(docker_image, args, docker_entrypoint, name=container)
             break
     if cmd is None:
         return (127, "", f"indisponible: ni binaire '{binary}' ni docker pour l'image '{docker_image}'")
-    return _spawn_and_wait(cmd, timeout, env)
+    return _spawn_and_wait(cmd, timeout, env, container=container)
 
 
-def _spawn_and_wait(cmd, timeout, env):
+def _spawn_and_wait(cmd, timeout, env, container=None):
     """Lance `cmd` (argv FIXE, NO-SHELL) dans son PROPRE groupe de process (`start_new_session=True`) et
     BORNE son runtime à `timeout`s. Retourne (rc, stdout, stderr) ; 124 si timeout ; 1 sur erreur de
     lancement. On N'UTILISE PAS `subprocess.run(timeout=)` : sa gestion de timeout ne tue que l'enfant
@@ -416,3 +500,9 @@ def _spawn_and_wait(cmd, timeout, env):
                 return (1, "", f"erreur d'exécution: {e!r}")
         finally:
             _unregister_tool_pgid(proc.pid)
+            # LA MOITIÉ QUI NE VIT PAS DANS NOTRE ARBRE DE PROCESS. `_terminate_group` a tué le client
+            # `docker run` ; le conteneur, lui, est dans le démon et lui survit — c'est ainsi qu'on a
+            # laissé deux feroxbuster crawler pendant des heures après la fin de leurs runs. On retire
+            # donc explicitement, sur TOUTES les voies de sortie. Sur le chemin normal `--rm` a déjà
+            # fait le travail et docker répond « No such container » : le coût est un aller-retour.
+            _docker_rm(container)

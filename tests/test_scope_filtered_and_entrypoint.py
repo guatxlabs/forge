@@ -263,11 +263,23 @@ class TestDockerEntrypoint(unittest.TestCase):
 
     def test_what_is_shown_is_what_is_launched(self):
         """VISIBILITÉ : `cmdline` (le PoC affiché/journalisé) et `tool` (ce qui tourne) partagent le
-        MÊME constructeur d'argv — l'entrypoint ne peut pas être appliqué en douce sans apparaître."""
+        MÊME constructeur d'argv — l'entrypoint ne peut pas être appliqué en douce sans apparaître.
+
+        RUPTURE NOMMÉE (défaut D21, conteneur orphelin). Les deux argv diffèrent désormais d'UNE
+        paire : `--name forge-tool-<pid>-<n>`, posée sur la seule voie d'exécution. Elle est
+        INDISPENSABLE — mesuré le 2026-08-11, deux conteneurs feroxbuster ont survécu des heures à
+        leurs runs, et sans nom un conteneur qui survit au client `docker run` n'est plus
+        identifiable, donc plus arrêtable. Elle est aussi ABSENTE du PoC à dessein : ce qu'on montre
+        à un humain doit rester copiable tel quel.
+
+        L'invariant que ce test protège reste ENTIER : un nom de conteneur ne change RIEN à ce que
+        l'outil fait. C'est pourquoi la comparaison se fait modulo cette seule paire — et le test
+        VÉRIFIE que la différence se limite à elle."""
         seen = {}
 
-        def _fake_spawn(cmd, timeout, env):
+        def _fake_spawn(cmd, timeout, env, container=None):
             seen["cmd"] = list(cmd)
+            seen["container"] = container
             return (0, "", "")
 
         saved = runner._spawn_and_wait
@@ -279,7 +291,12 @@ class TestDockerEntrypoint(unittest.TestCase):
             runner._spawn_and_wait = saved
         shown = runner.cmdline("nosuchbinary__forge", "img:1", ["-a"], prefer_docker=True,
                                docker_entrypoint="theHarvester")
-        self.assertEqual(shown, " ".join(seen["cmd"]))
+        lance = list(seen["cmd"])
+        self.assertIn("--name", lance, "un conteneur sans nom est un conteneur qu'on ne peut plus arrêter")
+        i = lance.index("--name")
+        self.assertEqual(lance[i + 1], seen["container"])
+        del lance[i:i + 2]                       # … et à part CE nom, tout doit coïncider
+        self.assertEqual(shown, " ".join(lance))
         self.assertIn("--entrypoint theHarvester", shown)
 
     def test_accepted_forms(self):

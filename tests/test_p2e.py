@@ -79,7 +79,11 @@ class TestRunnerTool(unittest.TestCase):
             pid = 4242
 
             def __init__(self, cmd, **k):
-                captured["cmd"] = cmd
+                # PREMIER lancement seulement. `subprocess.run` construit lui aussi un `Popen` : depuis
+                # que le runner retire son conteneur en sortie de tir (défaut D21, conteneur orphelin),
+                # le `docker rm -f` passerait par ce même faux Popen et écraserait la commande qu'on
+                # veut observer — celle de l'OUTIL.
+                captured.setdefault("cmd", cmd)
 
             def communicate(self, timeout=None):
                 return ("ok", "")
