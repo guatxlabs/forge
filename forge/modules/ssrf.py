@@ -21,7 +21,6 @@ Pur urllib (stdlib) ; aucun callback => jamais de verdict aveugle. Bâti sur la 
 import ipaddress
 import re
 import time
-import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -80,15 +79,11 @@ class SsrfCallback(Oracle):
         cb_url, token = self._payload_url(action)
         method = str(action.params.get("method", "GET")).upper()
         headers = action.params.get("headers", {})
-        # 1) injecter l'URL de callback dans le paramètre vulnérable
-        if method == "GET":
-            sep = "&" if "?" in action.target else "?"
-            inj = f"{action.target}{sep}{urllib.parse.urlencode({param: cb_url})}"
-            i_st, _i_body = self._fetch(inj, headers=headers, method="GET")
-        else:
-            inj = action.target
-            i_st, _i_body = self._fetch(inj, headers=headers, method=method,
-                                        data=urllib.parse.urlencode({param: cb_url}))
+        # 1) injecter l'URL de callback dans le paramètre vulnérable. FORME de la requête :
+        #    `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur REMPLACÉE, autres paramètres
+        #    PRÉSERVÉS (un endpoint SSRF-able est presque toujours multi-paramètres).
+        inj, i_data = self.inject_request(action.target, param, cb_url, method)
+        i_st, _i_body = self._fetch(inj, headers=headers, method=method, data=i_data)
         # 2) interroger le collecteur — la PREUVE est ici, pas dans la réponse de la cible
         cs, cbody = self._fetch(check_url, timeout=action.params.get("callback_timeout", 15))
         # AUCUN VERDICT sans les DEUX jambes. Un collecteur MUET ne dit rien sur la réception du
@@ -110,7 +105,7 @@ class SsrfCallback(Oracle):
             severity=("HIGH" if received else "INFO"),
             evidence=(f"injection {param}={cb_url} ; collecteur HTTP {cs} ; token_reçu={received} "
                       f"(token={token})"),
-            poc=(f"# 1) {self._curl(inj, headers, method, None if method == 'GET' else param + '=' + cb_url)}\n"
+            poc=(f"# 1) {self._curl(inj, headers, method, i_data)}\n"
                  f"# 2) curl -sS '{check_url}'  # chercher le token {token}"))]
 
 
@@ -203,15 +198,13 @@ class SsrfXspa(ScopeGuardedOracle):
         return self._is_loopback(host) or self._in_scope(action, host)
 
     def _inject(self, action, param, internal_url, method, headers, timeout):
-        """Injecte l'URL interne dans le paramètre SSRF-able et renvoie (status, body). GET -> query ;
-        autre méthode -> corps urlencodé. NOUS ne requêtons que action.target (in-scope) ; l'URL interne
-        est fetchée PAR LE SERVEUR, jamais par nous."""
-        if method == "GET":
-            sep = "&" if "?" in action.target else "?"
-            url = f"{action.target}{sep}{urllib.parse.urlencode({param: internal_url})}"
-            return self._fetch(url, headers=headers, method="GET", timeout=timeout)
-        return self._fetch(action.target, headers=headers, method=method,
-                           data=urllib.parse.urlencode({param: internal_url}), timeout=timeout)
+        """Injecte l'URL interne dans le paramètre SSRF-able et renvoie (status, body).
+
+        FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur du paramètre
+        ciblé REMPLACÉE, autres paramètres PRÉSERVÉS, en GET comme en POST. NOUS ne requêtons que
+        action.target (in-scope) ; l'URL interne est fetchée PAR LE SERVEUR, jamais par nous."""
+        url, data = self.inject_request(action.target, param, internal_url, method)
+        return self._fetch(url, headers=headers, method=method, data=data, timeout=timeout)
 
     @staticmethod
     def _sig(st, body, internal_urls, ports, internal_host):
@@ -478,14 +471,13 @@ class SsrfCloudMetadata(ScopeGuardedOracle):
         return "forgemeta" + hashlib.sha1(f"{target}|{param}".encode()).hexdigest()[:16]
 
     def _inject(self, action, param, injected_url, method, headers, timeout):
-        """Injecte `injected_url` dans le paramètre SSRF-able et renvoie (status, body). NOUS ne requêtons
-        que action.target (in-scope) ; l'URL métadonnées/collecteur est fetchée PAR LE SERVEUR."""
-        if method == "GET":
-            sep = "&" if "?" in action.target else "?"
-            url = f"{action.target}{sep}{urllib.parse.urlencode({param: injected_url})}"
-            return self._fetch(url, headers=headers, method="GET", timeout=timeout)
-        return self._fetch(action.target, headers=headers, method=method,
-                           data=urllib.parse.urlencode({param: injected_url}), timeout=timeout)
+        """Injecte `injected_url` dans le paramètre SSRF-able et renvoie (status, body).
+
+        FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur du paramètre
+        ciblé REMPLACÉE, autres paramètres PRÉSERVÉS. NOUS ne requêtons que action.target (in-scope) ;
+        l'URL métadonnées/collecteur est fetchée PAR LE SERVEUR."""
+        url, data = self.inject_request(action.target, param, injected_url, method)
+        return self._fetch(url, headers=headers, method=method, data=data, timeout=timeout)
 
     @staticmethod
     def _signature_hit(body, injected_url, markers, min_hits):

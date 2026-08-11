@@ -103,11 +103,37 @@ def _hs256(signing_input, key):
     return _b64url(hmac.new(k, si, hashlib.sha256).digest())
 
 
-# Liste BORNÉE de secrets HMAC courants (secrets de démo/exemples de docs, JAMAIS un dump réel). Un
-# craquage = le secret appartient à cette liste triviale -> preuve BÉNIGNE de secret faible (CWE-347).
+# =================================================================================================
+#  Liste BORNÉE de secrets HMAC courants (secrets de DÉMO / d'EXEMPLES DE DOCS / de fichiers de conf
+#  livrés en l'état, JAMAIS un dump réel). Un craquage = le secret appartient à cette liste triviale
+#  -> preuve BÉNIGNE de secret faible (CWE-347).
+#
+#  ELLE FAISAIT 16 ENTRÉES, ET C'ÉTAIT LE FACTEUR LIMITANT (défaut D12 du banc de détection). Le
+#  secret de VAmPI est `'random'` (`config.py` : `vuln_app.app.config['SECRET_KEY'] = 'random'`,
+#  vérifié DANS le conteneur) et n'y figurait pas -> faux négatif, sur un mécanisme PARFAITEMENT
+#  fonctionnel. Avec `random` présent, le MÊME oracle rend HIGH · vulnerable.
+#
+#  LE COÛT EST DU CPU, PAS DU RÉSEAU — et il faut le dire, parce qu'allonger une liste ressemble à
+#  allonger une attaque. `_crack_hmac` est un craquage HORS-LIGNE : il recalcule un HMAC-SHA256 sur le
+#  `signing_input` DÉJÀ EN MAIN et le compare à la signature du jeton. **ZÉRO requête est émise, quelle
+#  que soit la longueur de la liste** ; le réseau ne dépend que des jetons FORGÉS (alg=none/confusion/
+#  kid), dont le nombre est indépendant de cette liste. Coût mesuré : ~1 µs par candidat, soit ~50 µs
+#  pour la liste entière au plafond. Ce n'est pas un cracker et ça ne peut pas le devenir : le plafond
+#  DUR `_MAX_WORDLIST` borne AUSSI la liste fournie par l'opérateur (`params.hmac_wordlist`), qui
+#  reste le levier prévu pour un dictionnaire propre à l'engagement.
+# =================================================================================================
 _DEFAULT_HMAC_WORDLIST = [
+    # — le noyau historique (inchangé, en tête : le premier hit garde le même index qu'avant) —
     "secret", "password", "changeme", "admin", "jwt", "token", "key", "test", "1234567890",
     "default", "supersecret", "secretkey", "your-256-bit-secret", "private", "qwerty", "s3cr3t",
+    # — secrets de fichiers de conf livrés tels quels (le cas VAmPI, et sa famille) —
+    "random", "dev", "development", "debug", "example", "sample", "demo", "changeit",
+    "mysecret", "mysecretkey", "my-secret", "secret123", "secretpassword", "topsecret",
+    # — gabarits de frameworks / tutoriels JWT les plus recopiés —
+    "jwtsecret", "jwt_secret", "jwt-secret", "jwtkey", "signature", "signingkey", "shhhhh",
+    "secret_key", "secret-key", "app_secret", "supersecretkey", "insecure",
+    # — placeholders qu'on oublie de remplacer —
+    "todo", "replace-me", "changemeplease", "password123", "letmein", "root", "hmac",
 ]
 _MAX_WORDLIST = 50           # plafond DUR : « small bounded wordlist », jamais un brute-force abusif
 

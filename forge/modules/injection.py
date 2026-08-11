@@ -37,7 +37,6 @@ par le ROE comme toute interaction web (web_allowed).
 """
 import hashlib
 import re
-import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -91,18 +90,19 @@ class InjectionOracle(ScopeGuardedOracle):
 
     # --- injection d'un payload dans un paramètre : query si GET, corps urlencodé sinon ---
     def _send(self, action, param, payload, method="GET"):
-        """Émet la requête d'injection et renvoie (où, status, body). GET -> payload dans la query ;
-        autre méthode -> payload dans un corps urlencodé. Les en-têtes explicites (action.params.headers)
-        priment ; la session gouvernée (scope-guardée) est fusionnée SOUS eux par `_http`."""
+        """Émet la requête d'injection et renvoie (où, status, body).
+
+        La FORME de la requête vit en SOURCE UNIQUE dans `Oracle.inject_request` (défaut D6 du banc) :
+        la valeur de `param` est REMPLACÉE en préservant les AUTRES paramètres de la requête — en GET
+        (query réécrite en place, plus d'ajout d'un doublon qu'un parseur premier-gagnant ignore) comme
+        en POST (le corps porte les co-paramètres de la cible, plus seulement le paramètre injecté).
+
+        Les en-têtes explicites (action.params.headers) priment ; la session gouvernée (scope-guardée)
+        est fusionnée SOUS eux par `_http`."""
         headers = dict(action.params.get("headers", {}))
-        if method.upper() == "GET":
-            sep = "&" if "?" in action.target else "?"
-            url = f"{action.target}{sep}{urllib.parse.urlencode({param: payload})}"
-            st, body = self._fetch(url, headers=headers, method="GET")
-            return url, st, body
-        st, body = self._fetch(action.target, headers=headers, method=method.upper(),
-                               data=urllib.parse.urlencode({param: payload}))
-        return action.target, st, body
+        url, data = self.inject_request(action.target, param, payload, method)
+        st, body = self._fetch(url, headers=headers, method=method.upper(), data=data)
+        return url, st, body
 
 
 # =================================================================================================

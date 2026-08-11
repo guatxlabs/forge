@@ -16,6 +16,17 @@ Deux exécutables :
 > non autorisée) n'est **jamais** tiré. Codes de sortie usuels : `0` OK, `1` échec/vuln trouvée,
 > `2` erreur d'usage.
 
+### Codes de sortie de `run` / `campaign` — ce qui les fait basculer
+
+| code | quand |
+|---|---|
+| `1` | **au moins un finding `status=vulnerable`** a été produit par ce run (une PREUVE, pas une sévérité : `Oracle.proof(proven=False)` rend `tested`, et un `vulnerable` sans jeton de preuve est refusé par le schéma). C'est le signal qu'une CI doit gater. Une ligne `[VULN] N finding(s) PROUVÉ(S) vulnerable -> exit 1` est imprimée. |
+| `0` | aucun finding prouvé — **y compris quand le run a été INTERROMPU** (échéance de `--run-timeout`, `SIGTERM`/`SIGINT`). C'est **délibéré** : l'honnêteté d'un run partiel est portée par le rapport (« RAPPORT PARTIEL — RUN INTERROMPU » + section « Couverture NON vérifiée »), pas par un code d'échec qui ferait tomber une CI pour une raison d'ordonnancement. Une vuln trouvée **avant** la coupure sort quand même en `1`. |
+| ≠ 0 (traceback) | exception non rattrapée : le rapport est rendu d'abord, puis l'exception remonte — un plantage ne se déguise pas en run réussi. |
+
+> Avant ce correctif, `run` et `campaign` retournaient `0` **inconditionnellement** : un run produisant
+> des `HIGH`/`vulnerable` sortait en `rc=0` et aucune CI ne pouvait voir une vulnérabilité.
+
 ---
 
 ## 1. `forge` (moteur Python)

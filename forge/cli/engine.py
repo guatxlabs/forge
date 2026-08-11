@@ -237,6 +237,40 @@ def _render(args, engine, interruption, durations, ledger, sink_flush=None,
     _step("écriture du rapport", _report)
 
 
+#: Code de sortie « une vulnérabilité a été PROUVÉE pendant ce run » (cf. `_exit_code`).
+EXIT_VULN = 1
+
+
+def _exit_code(engine, interruption=None):
+    """Code de sortie de `run`/`campaign` : `1` si au moins un finding a été PROUVÉ `vulnerable`,
+    `0` sinon — la promesse que `docs/CLI.md` porte depuis toujours et que le moteur ne tenait pas.
+
+    LE DÉFAUT (D12 du banc de détection, mesuré). `cmd_run` et `cmd_campaign` faisaient `return 0`
+    INCONDITIONNELLEMENT : tous les runs du banc ayant produit des findings `HIGH`/`vulnerable`
+    sortaient en `rc=0`. **Une CI qui gate sur le code de sortie ne pouvait pas voir une
+    vulnérabilité** — et c'est le seul signal qu'une CI lit.
+
+    LE SEUL CRITÈRE EST LA PREUVE, PAS LA SÉVÉRITÉ. `status == 'vulnerable'` est déjà le contrat de
+    preuve du dépôt : `Oracle.proof(proven=False)` rend `tested`, `skip()`/`degraded()` rendent
+    `skipped`, et `Finding.__post_init__` REFUSE un `vulnerable` construit sans jeton de preuve.
+    Gater sur la sévérité rouvrirait ce jugement une seconde fois, ailleurs, avec le droit de diverger.
+
+    L'INTERRUPTION NE CHANGE PAS LE CODE — décision DÉLIBÉRÉE, préservée telle quelle. Un run coupé
+    par le budget ou par un SIGTERM sort en `0` : l'honnêteté d'un run partiel est portée par le
+    RAPPORT (« RAPPORT PARTIEL — RUN INTERROMPU » + la section « Couverture NON vérifiée »), pas par
+    un code d'échec qui ferait échouer une CI pour une raison d'ordonnancement. `interruption` est
+    donc lu, et il ne peut QU'AJOUTER de l'information : une vuln trouvée AVANT la coupure reste
+    visible (`1`), parce que c'est « vuln trouvée » qui doit se voir, pas « run interrompu ».
+    Une exception non rattrapée, elle, continue de remonter et produit son propre code non nul."""
+    proven = [f for f in getattr(engine, "findings", ()) if getattr(f, "status", "") == "vulnerable"]
+    if not proven:
+        return 0
+    print(f"[VULN] {len(proven)} finding(s) PROUVÉ(S) vulnerable"
+          + (" (run INTERROMPU : ce total ne couvre que la partie exécutée)" if interruption else "")
+          + f" -> exit {EXIT_VULN}.", flush=True)
+    return EXIT_VULN
+
+
 def cmd_run(args):
     _register_toolspecs(args)              # --toolspec : outils déclaratifs gouvernés, AVANT le plan
     scope = Scope.load(args.scope)
@@ -274,7 +308,7 @@ def cmd_run(args):
                   f"Refusées={len(cov['vetoed'])}  Erreurs={len(cov['errors'])}  "
                   f"Findings={len(engine.findings)}")
             _render(args, engine, interruption, durations, ledger)
-    return 0
+    return _exit_code(engine, interruption)
 
 
 def _load_targets(path):
@@ -463,4 +497,4 @@ def cmd_campaign(args):
             _render(args, engine, interruption, durations, ledger,
                     sink_flush=lambda: _flush(partial=bool(interruption)),
                     ledger_note="forge campaign end")
-    return 0
+    return _exit_code(engine, interruption)

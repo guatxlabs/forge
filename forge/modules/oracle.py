@@ -736,6 +736,91 @@ class Oracle(Module):
                 ct = ""
         return ct
 
+    # =============================================================================================
+    #  FORME DE LA REQUÊTE D'INJECTION — UN SEUL endroit (défaut D6 du banc de détection)
+    #
+    #  QUATRE implémentations INDÉPENDANTES du MÊME geste vivaient dans `injection.py::_send`,
+    #  `clientflow.py::_send_h`, `rce.py::_send` et `ssrf.py::_inject`, toutes bâties ainsi :
+    #
+    #      sep = "&" if "?" in action.target else "?"
+    #      url  = f"{action.target}{sep}{urlencode({param: payload})}"     # GET  : AJOUTE
+    #      data = urlencode({param: payload})                             # POST : REMPLACE TOUT
+    #
+    #  DEUX faux négatifs MESURÉS, chacun INVISIBLE sur une seule cible (ils dépendent du PARSEUR) :
+    #
+    #    - GET, parseur PREMIER-GAGNANT. `…?id=1&Submit=Submit` + payload donne `…&id=<payload>` ;
+    #      Werkzeug 2.2.3 — la pile réelle de VAmPI — rend
+    #      `MultiDict(parse_qsl("id=1&Submit=Submit&id=INJECTION")).get("id") == "1"` (mesuré DANS
+    #      le conteneur de l'app). La charge n'atteint JAMAIS le sink et l'oracle rend malgré tout
+    #      « non confirmé ». En PHP c'est le DERNIER qui gagne, donc la même sonde marche : le défaut
+    #      est structurellement indétectable sur un échantillon d'une seule pile.
+    #
+    #    - POST, corps REMPLACÉ. Le corps ne portait QUE le paramètre injecté. DVWA exige le
+    #      co-paramètre `Submit` (`isset($_POST['Submit'])`). Mesuré sur l'application :
+    #      `ip=127.0.0.1;echo FORGEMARK123` -> 0 occurrence ; le MÊME payload avec `&Submit=Submit`
+    #      -> 1 occurrence (commande exécutée). Il n'existait AUCUN canal pour porter un
+    #      co-paramètre : la RCE était hors d'atteinte PAR CONSTRUCTION, pas seulement manquée.
+    #
+    #  LE GESTE JUSTE, ÉCRIT UNE FOIS : REMPLACER la valeur du paramètre ciblé en PRÉSERVANT les
+    #  autres paramètres de la requête — le MÊME geste en GET et en POST. « Les autres » sont ceux
+    #  que l'action DÉCRIT, c'est-à-dire la query string de sa cible : c'est déjà ainsi que le
+    #  cerveau décrit un endpoint injectable (`brain._query_params` dérive `param`/`value` de cette
+    #  même query). Aucun vocabulaire nouveau, aucun champ de params supplémentaire.
+    #
+    #  POURQUOI ICI. Ces quatre modules n'ont en commun QUE cette base : `Oracle` porte déjà `_http`
+    #  (l'entrée réseau) et `_curl` (la forme rejouable de la requête). La forme ÉMISE est le pendant
+    #  exact de la forme rejouée — elle appartient au même endroit. Quatre correctifs séparés
+    #  rediverger*aient* ; celui-ci ne peut pas : il n'y en a qu'un.
+    #
+    #  AUCUNE CAPACITÉ ÉLARGIE. La méthode HTTP n'est pas choisie ici (elle vient de `params.method`),
+    #  le scope-guard et le ROE restent en amont, et un POST qui porte désormais ses co-paramètres
+    #  reste EXACTEMENT la requête que l'action décrivait — `allow_destructive` continue de gater les
+    #  méthodes d'écriture, inchangé.
+    # =============================================================================================
+    @staticmethod
+    def _merge_param(pairs, param, payload):
+        """Paires (nom, valeur) où `param` porte `payload` : REMPLACÉ EN PLACE s'il est présent (sa
+        POSITION d'origine est conservée, et ses éventuels DOUBLONS sont collapsés en une seule
+        valeur — un parseur premier-gagnant et un parseur dernier-gagnant doivent lire la MÊME
+        chose), AJOUTÉ en queue sinon. Toutes les autres paires sont préservées, dans l'ordre.
+        Pur, ne lève jamais."""
+        name, val, out, placed = str(param), str(payload), [], False
+        for k, v in pairs:
+            if k != name:
+                out.append((k, v))
+            elif not placed:
+                out.append((k, val))
+                placed = True
+        if not placed:
+            out.append((name, val))
+        return out
+
+    @classmethod
+    def inject_request(cls, target, param, payload, method="GET"):
+        """(url, data) de LA requête d'injection — SOURCE UNIQUE de la forme (cf. bloc ci-dessus).
+
+        - `method` GET -> (URL dont la query porte `param=payload` À LA PLACE de sa valeur d'origine,
+          les AUTRES paramètres intacts et dans l'ordre ; `data=None`) ;
+        - toute autre méthode -> (`target` INCHANGÉ, corps urlencodé portant les paramètres de la
+          query de `target` PLUS `param=payload`). L'URL n'est délibérément PAS réécrite : le routage
+          de la cible reste exactement celui d'aujourd'hui ; c'est le CORPS — qui ne portait que le
+          paramètre injecté — qui gagne les co-paramètres que l'action déclare.
+
+        Sur une cible SANS query — le cas courant — les deux branches sont BYTE-IDENTIQUES à l'ancien
+        code. Ne lève JAMAIS : une URL illisible retombe sur la concaténation historique."""
+        tgt = str(target or "")
+        is_get = str(method or "GET").upper() == "GET"
+        try:
+            sp = urllib.parse.urlsplit(tgt)
+            body = urllib.parse.urlencode(cls._merge_param(
+                urllib.parse.parse_qsl(sp.query, keep_blank_values=True), param, payload))
+        except Exception:            # noqa: BLE001 (URL hostile : jamais d'exception dans un oracle)
+            qs = urllib.parse.urlencode({param: payload})
+            return ((f"{tgt}{'&' if '?' in tgt else '?'}{qs}", None) if is_get else (tgt, qs))
+        if is_get:
+            return urllib.parse.urlunsplit((sp.scheme, sp.netloc, sp.path, body, sp.fragment)), None
+        return tgt, body
+
     # --- PoC curl partagé (IDOR / SSRF / ATO) — un drapeau -H par en-tête (commande rejouable) ---
     @staticmethod
     def _curl(url, headers, method="GET", data=None):

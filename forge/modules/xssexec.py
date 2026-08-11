@@ -293,13 +293,13 @@ class XssExecution(ClientFlowOracle):
         POST par défaut (ou `params.store_method`). Renvoie le status HTTP (None = transport muet)."""
         headers = dict(action.params.get("headers", {}))
         method = str(action.params.get("store_method", "POST")).upper()
+        # Rallié au geste partagé (cf. `Oracle.inject_request`) : 4 implémentations divergentes
+        # avaient déjà rendu la RCE de DVWA inatteignable faute de co-paramètre.
+        url, data = self.inject_request(store_url, param, payload, method)
         if method == "GET":
-            sep = "&" if "?" in store_url else "?"
-            st, _b, _p = self._fetch(store_url + sep + urllib.parse.urlencode({param: payload}),
-                                     headers=headers, method="GET")
+            st, _b, _p = self._fetch(url, headers=headers, method="GET")
             return st
-        st, _b, _p = self._fetch(store_url, headers=headers, method=method,
-                                 data=urllib.parse.urlencode({param: payload}))
+        st, _b, _p = self._fetch(url, headers=headers, method=method, data=data)
         return st
 
     # --- dry / fire ---------------------------------------------------------------------------------

@@ -41,7 +41,6 @@ comme toute interaction web (web_allowed).
 """
 import hashlib
 import re
-import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -129,25 +128,22 @@ class ClientFlowOracle(ScopeGuardedOracle):
             poc=self.dry(action))
 
     def _send_h(self, action, param, payload, method="GET", follow_redirects=True, base=None):
-        """Émet l'injection et renvoie (où, status, body, pairs). GET -> payload dans la query ; autre
-        méthode -> corps urlencodé. Les en-têtes explicites (action.params.headers) priment ; la session
-        gouvernée (scope-guardée) est fusionnée SOUS eux par `_http`.
+        """Émet l'injection et renvoie (où, status, body, pairs).
+
+        FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6 du banc) — la valeur de
+        `param` est REMPLACÉE en PRÉSERVANT les autres paramètres de la requête, en GET comme en POST.
+        Les en-têtes explicites (action.params.headers) priment ; la session gouvernée (scope-guardée)
+        est fusionnée SOUS eux par `_http`.
 
         `base` (défaut None) — base URL déjà NORMALISÉE au scheme (cf. web_url_candidates) à utiliser à la
         place de `action.target` : indispensable pour une cible hôte nu / host:port (sans lui, urllib
         lèverait `unknown url type`). None -> `action.target` (byte-identique pour les cibles URL)."""
         headers = dict(action.params.get("headers", {}))
         tgt = str(base) if base is not None else action.target
-        if method.upper() == "GET":
-            sep = "&" if "?" in tgt else "?"
-            url = f"{tgt}{sep}{urllib.parse.urlencode({param: payload})}"
-            st, body, pairs = self._fetch(url, headers=headers, method="GET",
-                                          follow_redirects=follow_redirects)
-            return url, st, body, pairs
-        st, body, pairs = self._fetch(tgt, headers=headers, method=method.upper(),
-                                      data=urllib.parse.urlencode({param: payload}),
+        url, data = self.inject_request(tgt, param, payload, method)
+        st, body, pairs = self._fetch(url, headers=headers, method=method.upper(), data=data,
                                       follow_redirects=follow_redirects)
-        return tgt, st, body, pairs
+        return url, st, body, pairs
 
 
 # =================================================================================================
@@ -164,6 +160,21 @@ _DOM_SINKS = (
     "location.replace(", "window.location", ".src=", ".setattribute(",
 )
 _SCRIPT_RX = re.compile(r"(?is)<script\b[^>]*>(.*?)</script>")
+
+
+def _browser_ok(status):
+    """Le service navigateur a-t-il ABOUTI ? (2xx strict). `browser_client` rend `status=0` sur erreur
+    RÉSEAU et le CODE HTTP du service sur erreur de service — un 500 n'est PAS une page.
+
+    POURQUOI CE PRÉDICAT EXISTE (défaut D7 du banc). `xss.stored` gardait son verdict par
+    `if rst is None or not dom:` : le SUCCÈS de la navigation n'était jamais vérifié. Un 500 du service
+    renvoie `(500, "Internal Server Error")` — `dom` est NON VIDE, la garde passe, et l'oracle conclut
+    « XSS stored non confirmé — pas de reflet exécutable non échappé dans le DOM rendu ». Une PANNE
+    D'INFRASTRUCTURE devenait un verdict d'ABSENCE de vulnérabilité, sur la classe #5 du workspace.
+    L'oracle frère (`xss.execution`) faisait déjà le bon choix (`if not _ok(gst): return False`) : c'est
+    littéralement le même prédicat, et `xssexec.py:_ok` en est le jumeau — il ne peut pas être importé
+    ici (xssexec importe `ClientFlowOracle` de ce module : le partager créerait un cycle)."""
+    return bool(status) and 200 <= int(status) < 300
 
 
 def _reflected_unescaped(body, marker):
@@ -539,8 +550,15 @@ class XssStored(ClientFlowOracle):
     @staticmethod
     def _browser_render(url, tab=bc.DEFAULT_TAB):
         """Seam (patchable) : navigue vers `url` via le browser gouverné et renvoie (status, DOM rendu).
-        La session authentifiée SECRÈTE vit DANS le service (jamais lue/loggée/reportée ici)."""
-        bc.goto(url, tab=tab)
+        La session authentifiée SECRÈTE vit DANS le service (jamais lue/loggée/reportée ici).
+
+        Le statut de la NAVIGATION est vérifié avant de lire le DOM (défaut D7) : sans cela, un `goto`
+        en échec suivi d'un `content` qui rend la page précédente — ou la page d'erreur du service —
+        produisait un DOM crédible et un verdict fabriqué. Navigation ou lecture non abouties -> `None`,
+        et l'appelant s'abstient au lieu de conclure."""
+        gst, _g = bc.goto(url, tab=tab)
+        if not _browser_ok(gst):
+            return None, ""
         cst, body = bc.content(tab=tab)
         if isinstance(body, dict):
             dom = body.get("content") or body.get("html") or body.get("body") or ""
@@ -557,12 +575,11 @@ class XssStored(ClientFlowOracle):
         scope-guardée fusionnée SOUS eux par `Oracle._http`."""
         headers = dict(action.params.get("headers", {}))
         method = str(action.params.get("store_method", "POST")).upper()
-        if method == "GET":
-            sep = "&" if "?" in store_url else "?"
-            url = f"{store_url}{sep}{urllib.parse.urlencode({param: payload})}"
-            return self._fetch(url, headers=headers, method="GET")
-        return self._fetch(store_url, headers=headers, method=method,
-                           data=urllib.parse.urlencode({param: payload}))
+        # FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — un formulaire de
+        # persistance porte souvent des co-champs obligatoires (jeton, bouton d'envoi) : le corps ne
+        # peut pas se réduire au seul champ injecté sous peine de n'écrire NULLE PART.
+        url, data = self.inject_request(store_url, param, payload, method)
+        return self._fetch(url, headers=headers, method=method, data=data)
 
     def dry(self, action):
         param = action.params.get("param", "?")
@@ -617,10 +634,19 @@ class XssStored(ClientFlowOracle):
             return [blocked]
         # 2) RE-RENDRE une AUTRE vue via le module navigateur et lire le DOM effectif.
         rst, dom = self._browser_render(view_url, tab=action.params.get("tab", bc.DEFAULT_TAB))
-        if rst is None or not dom:
+        # (D7) LE SUCCÈS DE LA SONDE EST UNE CONDITION DU VERDICT, pas seulement la présence d'un DOM.
+        # Un 500 du service navigateur rend `(500, "Internal Server Error")` : `dom` est NON VIDE, donc
+        # l'ancienne garde (`rst is None or not dom`) passait et l'oracle affirmait « pas de reflet
+        # exécutable » — une panne d'infrastructure convertie en absence de vulnérabilité. On exige
+        # désormais un 2xx : sinon on ne CONCLUT PAS (`skipped` = « je n'ai pas pu vérifier »).
+        if not _browser_ok(rst) or not dom:
             return [self.degraded(
                 target=view_url, title="XSS stored non testé — rendu navigateur indisponible (dégradation gracieuse)",
-                evidence="Le module navigateur n'a pas renvoyé de DOM pour la vue de re-rendu ; offline-safe.",
+                evidence=(f"La sonde navigateur n'a pas abouti pour la vue de re-rendu "
+                          f"(statut du service={rst!r}, DOM {'vide' if not dom else 'reçu'}) : aucun "
+                          f"verdict n'est émis. Une réponse d'ERREUR du service porte un corps non vide "
+                          f"(ex « Internal Server Error ») — la lire comme un DOM rendu fabriquerait un "
+                          f"« XSS stored non confirmé » à partir d'une panne. offline-safe."),
                 poc=self.dry(action))]
         reflected = marker in dom
         unescaped = _reflected_unescaped(dom, marker)

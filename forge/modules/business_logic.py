@@ -110,8 +110,8 @@ class BusinessLogicScan(ScopeGuardedOracle):
         if not param or not marker:
             return self._manual(action, name, "sonde incomplète (param/anomaly_marker manquant)")
         headers = dict(action.params.get("headers", {}))
-        sep = "&" if "?" in probe_url else "?"
-        url = f"{probe_url}{sep}{urllib.parse.urlencode({param: tamper})}"
+        # Même geste que les sites ralliés : remplacer en préservant les autres paramètres.
+        url, _d = self.inject_request(probe_url, param, tamper, "GET")
         st, body = self._fetch(url, headers=headers, method="GET")     # DEVIS en LECTURE (non destructif)
         if st is None:
             return self._manual(action, name, "sonde de devis injoignable (réseau indisponible)")

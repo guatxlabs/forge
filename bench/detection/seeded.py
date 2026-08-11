@@ -46,7 +46,10 @@ def dvwa_actions(base, cookie):
     blind = f"{base}/vulnerabilities/sqli_blind/?id=1&Submit=Submit"
     fi = f"{base}/vulnerabilities/fi/?page=include.php"
     xssr = f"{base}/vulnerabilities/xss_r/?name=forge"
-    exec_ = f"{base}/vulnerabilities/exec/"
+    # CO-PARAMÈTRE EXIGÉ : DVWA teste `isset($_POST['Submit'])` — sans lui la RCE est hors
+    # d'atteinte quelle que soit la charge. C'est D6 vu depuis l'AMORÇAGE : l'action ne
+    # déclarait le co-paramètre nulle part, donc rien ne pouvait le porter.
+    exec_ = f"{base}/vulnerabilities/exec/?Submit=Submit"
     xsss = f"{base}/vulnerabilities/xss_s/"
     csrf = f"{base}/vulnerabilities/csrf/?password_new=a&password_conf=a&Change=Change"
     return [

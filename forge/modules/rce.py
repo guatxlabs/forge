@@ -28,7 +28,6 @@ pentest_only=true, bug_bounty_eligible=false (jamais un finding BB payable en pr
 `ScopeGuardedOracle` (scope-guard + dégradation) + `Oracle` (Finding + HTTP + curl partagés).
 """
 import hashlib
-import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -85,17 +84,16 @@ class RceProbe(ScopeGuardedOracle):
         return token, n, m, n * m
 
     def _send(self, action, payload, method):
-        """Injecte `payload` dans params.param (query GET ou corps urlencodé). Renvoie (où, status, body)."""
+        """Injecte `payload` dans params.param et renvoie (où, status, body).
+
+        FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — la valeur du
+        paramètre ciblé est REMPLACÉE, les autres paramètres de la requête sont PRÉSERVÉS, en GET
+        comme en POST. C'est ce qui rend atteignable une injection de commande dont l'application
+        exige un co-paramètre (DVWA : `isset($_POST['Submit'])`)."""
         headers = dict(action.params.get("headers", {}))
-        param = action.params.get("param")
-        if method == "GET":
-            sep = "&" if "?" in action.target else "?"
-            url = f"{action.target}{sep}{urllib.parse.urlencode({param: payload})}"
-            st, body = self._fetch(url, headers=headers, method="GET")
-            return url, st, body
-        st, body = self._fetch(action.target, headers=headers, method=method,
-                               data=urllib.parse.urlencode({param: payload}))
-        return action.target, st, body
+        url, data = self.inject_request(action.target, action.params.get("param"), payload, method)
+        st, body = self._fetch(url, headers=headers, method=method, data=data)
+        return url, st, body
 
     def dry(self, action):
         param = action.params.get("param", "?")
