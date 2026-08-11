@@ -1,26 +1,25 @@
 {
   "_comment": "SPDX-License-Identifier: AGPL-3.0-or-later — VERIFICATION MANUELLE de chaque finding >= MEDIUM du banc, rejoue a la main contre l'application. Cle stable : <app>/<piste>/<module>@<cible>. Consomme par bench/detection/report.py --verdicts.",
   "_comment_2026_08_11": "DEUX campagnes cohabitent ICI DELIBEREMENT. Les cles du 2026-08-10 sont CONSERVEES telles quelles : un rapport de banc qui efface ses chiffres d'avant ne vaut plus rien comme reference. Les cibles ONT CHANGE de forme entre les deux runs (correctif D6 : en GET la valeur du parametre est desormais REMPLACEE au lieu d'etre AJOUTEE — d'ou `...?id=1&Submit=Submit` au lieu de `...?id=1&Submit=Submit&id=1`), donc les cles ne se recouvrent pas et report.py n'apparie que celles du run courant.",
-
   "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit": {
     "verdict": "TP",
-    "why": "2026-08-11 — module `sqli` declare par l'app ; rejoue a la main : `?id=1'&Submit=Submit` -> « You have an error in your SQL syntax ; check the manual that corresponds to your MariaDB server version … near ''1''' at line 1 »"
+    "why": "2026-08-11 (r5) — rejoue main : `?id=1'&Submit=Submit` -> « You have an error in your SQL syntax ; check the manual that corresponds to your MariaDB server version … near ''1''' at line 1 »."
   },
   "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli_blind/?id=1&Submit=Submit": {
     "verdict": "TP",
-    "why": "2026-08-11 — module `sqli_blind` declare par l'app ; differentiel booleen rejoue a la main : `1' AND '1'='1` -> « User ID exists » (1 occurrence), `1' AND '1'='2` -> 0 occurrence"
+    "why": "2026-08-11 (r5) — rejoue main, differentiel booleen : `1' AND '1'='1` -> « User ID exists » (1 occurrence) ; `1' AND '1'='2` -> 0 occurrence."
   },
   "dvwa/A/cmdi.probe@http://127.0.0.1:8081/vulnerabilities/exec/?Submit=Submit": {
     "verdict": "TP",
-    "why": "2026-08-11 — module `exec` declare par l'app ; rejoue a la main HORS forge : POST `ip=127.0.0.1;id&Submit=Submit` -> « uid=33(www-data) gid=33(www-data) groups=33(www-data) ». NOUVEAU par rapport au 2026-08-10 (correctif D6 : le co-parametre `Submit` est desormais preserve dans le corps POST)"
+    "why": "2026-08-11 (r5) — rejoue main HORS forge : POST `ip=127.0.0.1; id&Submit=Submit` -> « uid=33(www-data) gid=33(www-data) groups=33(www-data) ». Execution de commande reelle."
   },
   "dvwa/A/rce.probe@http://127.0.0.1:8081/vulnerabilities/exec/?Submit=Submit": {
     "verdict": "TP",
-    "why": "2026-08-11 — meme preuve manuelle que cmdi.probe (`uid=33(www-data)`) ; forge a DEUX oracles distincts sur cette classe, comptes separement par la verite terrain. NOUVEAU (D6)"
+    "why": "2026-08-11 (r5) — meme preuve que cmdi.probe sur la meme cible (uid=33 www-data). Deux oracles distincts confirment le meme fait : 1 vulnerabilite, 2 findings — a compter comme tel."
   },
   "dvwa/A/path.traversal@http://127.0.0.1:8081/vulnerabilities/fi/?page=..%2F..%2Fforge-canary.txt": {
     "verdict": "TP",
-    "why": "2026-08-11 — module `fi` declare par l'app ; canari lu (`FORGE_BENCH_CANARY_9Z4K`) ET preuve INDEPENDANTE du canari : `?page=/etc/passwd` -> `root:x:0:0`"
+    "why": "2026-08-11 (r5) — rejoue main : `?page=../../forge-canary.txt` rend `FORGE_BENCH_CANARY_9Z4K`. Le canari est BENIN et DECLARE (pose par le banc car l'oracle refuse par conception de cibler /etc/passwd) : la traversee est reelle, l'amorcage est dit."
   },
   "dvwa/B/header_injection.probe@http://127.0.0.1:8081/config/": {
     "verdict": "FP",
@@ -40,7 +39,7 @@
   },
   "vampi/A/jwt.weakness@http://127.0.0.1:5001/users/v1/login": {
     "verdict": "TP",
-    "why": "2026-08-11 — README de l'app : « JWT authentication bypass via weak signing key » ; `/vampi/config.py:13 SECRET_KEY = 'random'` lu DANS le conteneur ; jeton HS256 forge HORS forge avec le secret `random` -> `PUT /users/v1/attacker1/email` accepte (204). NOUVEAU par rapport au 2026-08-10 (correctif D12 : liste HMAC 16 -> 49 entrees)"
+    "why": "2026-08-11 (r5) — rejoue main HORS forge : secret HMAC craque = `random` ; jeton RE-SIGNE a la main accepte en 200 sur /books/v1/victimbook, tandis qu'un jeton mal signe (controle) rend 401. La signature est donc bien contournable."
   },
   "dvwa/A/sqli.probe@http://127.0.0.1:8081/vulnerabilities/sqli/?id=1&Submit=Submit&id=1": {
     "verdict": "TP",
@@ -72,19 +71,19 @@
   },
   "juiceshop/A/access_control.idor@http://127.0.0.1:3000/rest/basket/1": {
     "verdict": "TP",
-    "why": "2026-08-10 : CERTIFIE PAR L'APP — le challenge « View Basket » (Broken Access Control) est passe a solved dans GET /api/Challenges. || 2026-08-11 : REVERIFIE, meme verdict — `basketAccessChallenge` a de nouveau bascule a `solved`, et le rejeu manuel montre uid attaquant=24 lisant le panier 7 (UserId=25, la victime) -> 200, la meme URL en anonyme -> 401"
+    "why": "2026-08-11 (r5) — rejoue main : anonyme -> 401 ; jeton ATTAQUANT (compte cree par self-signup) -> 200 sur le panier id=1 dont le corps porte `UserId: 1` (compte SEEDE de l'app, pas l'attaquant). Lecture cross-compte confirmee."
   },
   "juiceshop/A/sqli.probe@http://127.0.0.1:3000/rest/user/login": {
     "verdict": "TP",
-    "why": "2026-08-10 : CERTIFIE PAR L'APP — le challenge « Login Admin » (Injection) est passe a solved dans GET /api/Challenges. || 2026-08-11 : REVERIFIE, meme verdict — `{\"email\":\"' OR 1=1--\",\"password\":\"x\"}` -> 200 avec l'identite `admin@juice-sh.op` (temoin : email inexistant SANS injection -> 401), et l'app certifie ensuite `loginAdminChallenge` = solved. NUANCE HONNETE : cette annee c'est le rejeu MANUEL qui a fait basculer le challenge — la sonde de forge a prouve la SQLi par differentiel d'AUTORISATION (`' OR '1'='1'-- -`, 401 -> 200) sans viser le compte admin"
+    "why": "2026-08-11 (r5) — rejoue main : mot de passe faux -> 401 ; `{\"email\":\"' OR '1'='1'-- -\"}` -> 200 + jeton dont le payload decode donne email=admin@juice-sh.op, id=1, role=admin. Contournement d'authentification vers un compte ADMIN."
   },
   "vampi/A/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
     "verdict": "TP",
-    "why": "2026-08-10 : BOLA declaree par le README ; rejoue a la main : attacker1 lit `VICTIM_SECRET_MARKER_7Q3` de victim1. || 2026-08-11 : REVERIFIE, meme verdict — le jeton d'attacker1 lit `{\"book_title\":\"victimbook\",\"owner\":\"victim1\",\"secret\":\"VICTIM_SECRET_MARKER_7Q3\"}` ; la meme URL SANS en-tete -> 401 et le marqueur n'y figure pas (0 occurrence). L'evidence rendue par l'oracle est passee de `anon=200 anon_refuse=False` (fausse, defaut D2) a `anon=401 anon_refuse=True`"
+    "why": "2026-08-11 (r5) — rejoue main : anonyme -> 401 ; jeton ATTAQUANT -> 200 avec `{\"owner\": \"victim1\", \"secret\": \"VICTIM_SECRET_MARKER_7Q3\"}`. Le marqueur de la victime est lu par l'attaquant."
   },
   "vampi/B/access_control.idor@http://127.0.0.1:5001/books/v1/victimbook": {
     "verdict": "TP",
-    "why": "2026-08-10 : idem, trouve cette fois par la campagne AUTONOME (idor_targets injectees depuis scope.auth). || 2026-08-11 : REVERIFIE, meme verdict, toujours trouve par la campagne autonome — c'est le SEUL vrai positif du mode `--auto-pentest` sur les 4 applications, dans les DEUX campagnes"
+    "why": "2026-08-11 (r5) — meme preuve que la piste A, atteinte par la campagne autonome."
   },
   "vampi/B/header_injection.probe@http://127.0.0.1:5001/ui": {
     "verdict": "FP",
@@ -101,5 +100,14 @@
   "vampi/B/ssrf.xspa@http://127.0.0.1:5001/console?__debugger__=yes&cmd=resource&f=debugger.js": {
     "verdict": "FP",
     "why": "connexion TCP directe : 9 des 10 ports declares « joignables » (22/80/443/3306/5432/6379/8443/9200/27017) sont FERMES ; et l'endpoint n'est pas SSRF-able (corps IDENTIQUE 1563 o pour __debugger__=http://127.0.0.1:1/ et :3306/)"
+  },
+  "_comment_2026_08_11_r5": "TROISIEME campagne ici — rejeu du 2026-08-11 APRES correction du debit (rate 20 -> 5 ; les outils en req/s suivent `rate` sans opt-in). Les cles des runs precedents sont CONSERVEES : un rapport de banc qui efface ses chiffres d'avant ne vaut plus rien. Les 12 findings >= MEDIUM de ce run ont ete rejoues A LA MAIN, un par un, contre l'application relancee et re-amorcee : 12 VRAIS, 0 FAUX.",
+  "juiceshop/B/access_control.idor@http://127.0.0.1:3000/rest/basket/1": {
+    "verdict": "TP",
+    "why": "2026-08-11 (r5) — meme preuve que la piste A, trouvee cette fois SANS amorcage de l'endpoint : la cible ayant survecu, la piste autonome atteint enfin cet oracle."
+  },
+  "juiceshop/B/access_control.idor@http://127.0.0.1:3000/api/BasketItems": {
+    "verdict": "TP",
+    "why": "2026-08-11 (r5) — rejoue main : anonyme -> 401 ; TOUT compte authentifie recoit la liste COMPLETE (8 items, BasketId distincts 1,2,3,4,5 — cinq paniers d'AUTRES comptes). Lecture cross-compte reelle. RESERVE consignee : la preuve de forge (`meme_objet` = corps normalise identique) serait aussi vraie si les deux comptes voyaient la meme collection VIDE — cf. defaut D22. Ici corroboree par des donnees reelles, donc TP."
   }
 }
