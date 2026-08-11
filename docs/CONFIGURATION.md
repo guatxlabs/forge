@@ -214,7 +214,7 @@ Réglé dans **`scope.json`**, pas en environnement. Le point à connaître, par
 | | bridé par `rate` ? |
 |---|---|
 | Les **36 modules NATIFS** de forge (ses propres sondes urllib : oracles d'injection, contrôle d'accès, recon passif, en-têtes…) | **oui, toujours** |
-| Les **outils EXTERNES** (nuclei, naabu, httpx, feroxbuster, sqlmap, wfuzz, dalfox, gobuster) | **non, sauf demande explicite** |
+| Les **outils EXTERNES** (nmap, nuclei, naabu, httpx, feroxbuster, katana, dnsx, subfinder, sqlmap, wfuzz, dalfox, gobuster, wpscan) | **non, sauf demande explicite** |
 
 Le défaut est donc « **forge se bride, les outils gardent le leur** » — et ce n'est pas un oubli : ces
 outils ont leur propre gestion de débit, et leur imposer celui du scope coûte cher. Mesuré à `rate: 5` :
@@ -226,8 +226,17 @@ outils ont leur propre gestion de débit, et leur imposer celui du scope coûte 
 
 **Pour brider AUSSI les outils : `"rate_explicit": true`** dans le scope. Le drapeau natif de chaque
 outil est alors dérivé du `rate` (`-rl` / `-rate` / `--rate-limit`, ou une dérivée en **délai** pour
-sqlmap/wfuzz/dalfox/gobuster dont le drapeau est un délai par requête). Sans lui, l'argv des outils
-est **byte-identique** à leur défaut.
+sqlmap/wfuzz/dalfox/gobuster/wpscan dont le drapeau est un délai par requête). Sans lui, l'argv des
+outils est **byte-identique** à leur défaut.
+
+> **Quatre outils y échappaient en silence** (corrigé) : `recon.katana`, `recon.dnsx`,
+> `recon.subfinder` et `web.wpscan` déclaraient un groupe `{param:rate}` dans leur gabarit d'argv
+> **sans jamais recevoir de débit** — la liste des kinds concernés était tenue à la main et avait
+> dérivé du catalogue. Un groupe de gabarit dont le param manque est simplement **abandonné**, donc
+> rien ne le signalait : l'UI affichait bien un champ « rate-limit (-rl req/s) » pour katana, et
+> katana — un **crawler HTTP** — tournait à plein régime sous `rate_explicit`. La liste est
+> désormais **dérivée du registre** ; un outil ajouté au catalogue avec un groupe de débit est
+> couvert d'office (garde-fou : `tests/test_run_rate_cap.py::TestEveryToolThatDeclaresARateGetsOne`).
 
 À armer quand l'engagement l'exige : programme qui interdit le trafic soutenu, cible fragile, ou
 clause « *avoid service degradation* ».
@@ -236,9 +245,94 @@ clause « *avoid service degradation* ».
 > occurrence dans la doc et l'exemple de scope au 2026-08-11), ce qui l'a fait passer pour mort lors
 > d'un audit. Un levier qu'on ne peut pas trouver équivaut à un levier absent — d'où cette section.
 
-**Limite connue, non corrigée** : `throttle` borne le débit d'une **action**, pas d'un **run** —
-mesuré, 30 requêtes réparties sur 30 actions ne sont bornées par rien, et le seau est thread-local
-(donc multiplié par le parallélisme). Un plafond global n'existe pas aujourd'hui.
+---
+
+## 2ter. `run_rate` — le plafond de débit du **RUN** (le second étage)
+
+`rate` borne le débit d'une **ACTION**. Il ne bornait rien au niveau d'un **RUN**, et ce n'était pas
+un détail : le seau est reconstruit à **chaque `fire()`** et vit en **thread-local**, donc le premier
+tir de chaque action trouve son créneau libre, et le plafond effectif est **multiplié par le
+parallélisme**. Mesuré (`tests/test_run_rate_cap.py`, horloge injectée, `rate: 5` déclaré) :
+
+| | débit du RUN observé |
+|---|---|
+| sériel, 30 actions × 1 requête | **NON BORNÉ** (0 s d'attente sur tout le run) |
+| sériel, 12 actions × 3 requêtes | 7,29 req/s |
+| sériel, 24 actions × 2 requêtes | 9,79 req/s |
+| **parallèle pool=4**, 24 × 2 | **33,5 req/s** (médiane de 5) |
+| **parallèle pool=8**, 24 × 2 | **59,0 req/s** |
+
+`rate: 5` délivrait donc jusqu'à **11,8× le débit annoncé**. Le coût est établi : une cible (Juice
+Shop) laissée **34 min sans être ciblée** reste stable (102 → 21 Mio) ; campagne lancée à 13:12:42 →
+**3,78 Gio à 13:13:24** → `Exited(139)` à 13:14:47. Mettre une cible à genoux viole
+« *avoid service degradation* », clause de la quasi-totalité des programmes — motif d'exclusion.
+
+**Le plafond de run est un SECOND étage, pas un remplacement.** Les deux sont **chaînés** : une
+requête attend le créneau du RUN, **puis** celui de son ACTION. Le débit résultant est celui du plus
+serré des deux ; aucun n'annule l'autre (un `rate` serré garde ses rafales lissées même sous un
+`run_rate` large, et réciproquement).
+
+| Clé de `scope.json` | Effet |
+|---|---|
+| `"run_rate": N` | Plafond de **N req/s pour tout le run**, partagé par toutes les actions **et tous les workers**. **PRIME** sur la ligne suivante — y compris `0`, qui **désarme**. |
+| `"rate_explicit": true` | À défaut de `run_rate`, arme le plafond à la valeur de `rate`. C'est le seul armement automatique, et il est cohérent : ce levier dit déjà « bride tout, outils compris, cet engagement l'exige ». |
+| *(rien)* | **AUCUN plafond de run** — le défaut, byte-identique à avant. |
+
+**Pourquoi le défaut est « aucun plafond »** : armer un plafond d'office effondrerait la couverture
+de tout run existant qui n'a rien demandé (cf. §2bis — `rate: 5` imposé aux outils fait passer naabu
+de 1,1 min à 3,6 h). Un frein est une **décision d'opérateur** ; sans décision, pas de frein — la
+même règle que `--run-timeout`.
+
+> **RUPTURE NOMMÉE — le chemin CONSOLE.** `console/src/runs_proc.rs` pose
+> `"rate_explicit": spec.rate.is_some()` : renseigner le champ *Rate-limit* de la vue **Launch**
+> arme donc désormais **aussi** le plafond de run. C'est un changement de comportement, et il est
+> voulu — c'est ce que l'UI promettait déjà (« règle le débit (req/s) », cf. `docs/QUICKSTART.md`)
+> et qu'elle ne tenait pas : jusqu'ici un `rate: 5` posé dans Launch délivrait jusqu'à **59 req/s**.
+> Le run est plus lent parce qu'il respecte enfin le débit demandé. Pour l'ancien comportement sans
+> renoncer aux drapeaux d'outils : `"run_rate": 0` dans le scope.
+
+**Un run bridé le DIT.** Avant le premier tir : une ligne de progression `[DÉBIT RUN]` nommant la
+valeur **et le réglage d'origine**, plus une entrée de ledger `engine.run_rate`. À la fin : le débit
+**observé** et les secondes d'attente imposées, également exposés dans `Engine.coverage()['run_rate']`.
+Un frein invisible est pire qu'un frein absent : l'opérateur conclurait que forge est lent.
+
+**Portée honnête** : le plafond borne ce qui passe par le chokepoint HTTP des oracles
+(`Oracle._http`) — les **36 modules natifs**. Un **sous-process** (nuclei, feroxbuster, naabu…) n'y
+passe pas ; son débit se bride par **son propre drapeau**, c'est-à-dire par `rate_explicit` (§2bis).
+Pour brider *réellement tout* : `"rate_explicit": true` — qui arme les deux à la fois.
+
+---
+
+## 2quater. Egress tiers d'un module — `allow_tool_egress`
+
+Forge gate déjà l'assist LLM (`scope.llm.allow_external`) et le backend mémoire à embeddings par un
+egress **explicite**. Il ne gatait pas ses **outils**, et la mesure a rendu l'incohérence intenable :
+`recon.httpx`, retenu comme *loopback-safe*, a téléchargé **92,6 Mio depuis huggingface.co à chacun de
+ses 4 tirs** (~370 Mio) via son drapeau `-tech-detect` — **seul egress prouvé sur 4 906 findings**,
+dans un banc annoncé « loopback strict ». Il n'avait échappé à aucune interdiction : il avait échappé
+au **regard**, parce que l'exclusion portait sur l'**intention déclarée**, jamais sur l'egress
+**observé**.
+
+Le principe : **un module qui sort vers un tiers le DÉCLARE, et l'opérateur peut le REFUSER.**
+
+| Valeur de `allow_tool_egress` | Effet |
+|---|---|
+| *(absente)* / `false` | **Refus** de tout egress déclaré (défaut, fail-closed) |
+| `true` | Autorise les hôtes **déclarés** (jamais les autres : la déclaration reste le contrat) |
+| `["*.huggingface.co", …]` | **Allowlist** par motif (`fnmatch`) ; liste vide ⇒ refus |
+
+Côté module (duck-typé, aucun module existant n'a à changer) : `egress = ("hôte", …)` et, si le
+module ne sait **pas** s'en passer, `egress_required = True`.
+
+* module qui sait **dégrader** (le cas de `recon.httpx`) → il tire quand même, et reçoit
+  `action.params['_egress_allowed'] = False` : à lui de retirer la fonctionnalité qui sort.
+  Coverage-safe : on **borne**, on ne supprime pas ;
+* module qui ne sait **pas** s'en passer → **VETO nommé** par le ROE (couche 3bis), qui cite l'hôte
+  et la clé qui lève le refus. Aucun verdict n'est émis pour l'action.
+
+Le constat est dit **une fois par module** (progression `[EGRESS TIERS]` + ledger
+`engine.tool_egress` + `coverage()['tool_egress']`) — **y compris quand l'egress est autorisé** : un
+egress qu'on autorise sans le voir se reproduira à l'identique.
 
 ---
 

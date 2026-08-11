@@ -156,6 +156,15 @@ class Action:
     confidence: float = 0.5
     cost: float = 1.0
     id: str = ""
+    # EGRESS TIERS DÉCLARÉ par le module qui exécutera cette action (hôtes contactés EN PLUS de la
+    # cible). Rempli par `Engine._decide_blocking` depuis `module.egress` (duck-typé, comme
+    # `module.exploit`/`max_runtime`) juste avant la gate — le cerveau et le planner n'en savent rien.
+    # Vide (le cas de TOUS les modules d'aujourd'hui) => la couche 3bis de `Roe.decide` est inerte.
+    egress: tuple = ()
+    # Le module peut-il travailler SANS cet egress ? False (défaut) => il DÉGRADE (il lit
+    # `params['_egress_allowed']` et retire la fonctionnalité qui sort) ; True => sans autorisation il
+    # ne peut rien faire d'honnête -> VETO nommé plutôt qu'un tir qui sort en douce.
+    egress_required: bool = False
 
     def __post_init__(self) -> None:
         if not self.cls:
@@ -194,6 +203,44 @@ class Decision:
         }
 
 
+def _float_or_none(value: Any) -> "float | None":
+    """Flottant lisible et non-NaN, ou None. Pur, ne lève jamais."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None                    # NaN -> aucune information
+
+
+def _run_rate(data: dict[str, Any]) -> "tuple[float, str]":
+    """`(plafond de débit du RUN en req/s, nom du réglage d'origine)` — 0.0 => AUCUN plafond.
+
+    TROIS ÉCHELONS, et le troisième est le plus important :
+
+      1. `scope.run_rate` — le réglage DÉDIÉ. Il PRIME toujours, y compris pour DÉSARMER (`0`) un run
+         qui serait sinon bridé par l'échelon 2. Illisible => traité comme ABSENT (on retombe sur
+         l'échelon suivant, fail-open comme tous les overrides de ce dépôt) ;
+      2. `rate_explicit: true` — le levier qui existait DÉJÀ et qui dit « bride TOUT, outils compris,
+         cet engagement l'exige » (cf. `docs/CONFIGURATION.md` §2bis). Un opérateur qui l'arme a déjà
+         accepté d'en payer le prix en couverture ; lui rendre en plus un `rate` qui vaut vraiment
+         req/s AU RUN est ce qu'il croyait déjà avoir. C'est le seul armement automatique ;
+      3. RIEN — pas de plafond. C'est le DÉFAUT, et il est délibéré : `rate: 5` imposé aux outils fait
+         passer naabu de 1,1 min à 3,6 h (mesuré). Un plafond de run armé d'office effondrerait la
+         couverture de tout run existant qui n'a rien demandé. Un frein est une décision d'opérateur ;
+         sans décision, pas de frein — exactement la règle de `interrupt.resolve_run_timeout`.
+
+    Pur, ne lève jamais."""
+    if "run_rate" in data:
+        explicit = _float_or_none(data.get("run_rate"))
+        if explicit is not None:
+            return (explicit, "scope.run_rate") if explicit > 0 else (0.0, "")
+    if bool(data.get("rate_explicit", False)):
+        derived = _float_or_none(data.get("rate", 5))
+        if derived is not None and derived > 0:
+            return derived, "scope.rate (rate_explicit)"
+    return 0.0, ""
+
+
 class Scope:
     """Périmètre autorisé. Appartenance fail-closed : in_scope vide => rien n'est en scope."""
 
@@ -208,6 +255,14 @@ class Scope:
         # (argv BYTE-IDENTIQUE au défaut). Le throttle des oracles (Oracle._http) respecte `rate` en tout
         # temps (débit ROE), c'est l'ajout de drapeaux CLI aux sous-process qui est opt-in.
         self.rate_explicit = bool(data.get("rate_explicit", False))
+        # PLAFOND DE DÉBIT AU NIVEAU DU RUN (`forge/throttle.RunCap`) — le second étage de débit. 0.0 =>
+        # AUCUN plafond (défaut : comportement byte-identique). `run_rate_source` NOMME le réglage d'où
+        # il vient, pour qu'un run bridé puisse être remonté à sa cause en une lecture. Cf. `_run_rate`.
+        self.run_rate, self.run_rate_source = _run_rate(data)
+        # EGRESS TIERS DES MODULES — l'opérateur autorise-t-il un module à sortir vers un HÔTE TIERS
+        # (ni la cible, ni un service qu'il a lui-même configuré) ? Absent/False => REFUSÉ (fail-closed,
+        # comme tout le reste de ce fichier). Trois formes acceptées, cf. `egress_allowed`.
+        self.allow_tool_egress = data.get("allow_tool_egress", False)
         self.allow_exploit = bool(data.get("allow_exploit", False))
         self.allow_destructive = bool(data.get("allow_destructive", False))
         # POLITIQUE RÉSEAU (privé/LAN/loopback) — CONTRAT avec la console Rust (`runs.rs::run_create`
@@ -486,6 +541,44 @@ class Scope:
         except _ResolveTimeout:
             return False
 
+    # --- EGRESS TIERS DES MODULES (déclaré par le module, autorisé — ou non — par l'engagement) ---
+    def egress_allowed(self, hosts: Iterable[Any]) -> bool:
+        """L'engagement autorise-t-il ce module à sortir vers ces HÔTES TIERS ? Fail-closed.
+
+        POURQUOI CETTE PORTE EXISTE. Forge gate DÉJÀ l'assist LLM (`scope.llm.allow_external`) et le
+        backend mémoire à embeddings par un egress EXPLICITE. Elle ne gatait pas ses OUTILS — et la
+        mesure a rendu l'incohérence intenable : `recon.httpx`, retenu comme loopback-safe, a
+        téléchargé **92,6 Mio depuis huggingface.co à CHACUN de ses 4 tirs** (~370 Mio) via son drapeau
+        `-tech-detect`, dans un banc annoncé « loopback strict ». C'est le SEUL egress prouvé sur
+        4 906 findings, et il était invisible parce que l'exclusion portait sur l'INTENTION déclarée du
+        module, jamais sur l'egress OBSERVÉ. Un module qui sort vers un tiers doit le DÉCLARER, et
+        l'opérateur doit pouvoir le REFUSER : c'est la doctrine du dépôt, enfin appliquée aux outils.
+
+        TROIS FORMES DE `scope.allow_tool_egress`, une seule clé :
+          · absent / `false` / `null`  -> REFUS de tout egress déclaré (DÉFAUT, fail-closed) ;
+          · `true`                     -> autorise tous les hôtes DÉCLARÉS (jamais les non déclarés :
+                                          la déclaration reste le contrat) ;
+          · liste (ou chaîne unique)   -> ALLOWLIST : chaque hôte déclaré doit matcher une entrée
+                                          (`fnmatch`, insensible à la casse : `*.huggingface.co`).
+                                          Liste VIDE => refus (fail-closed, pas « tout »).
+        Toute autre forme (dict, nombre) => refus. `hosts` vide => True : il n'y a RIEN à autoriser,
+        et c'est le cas de tous les modules d'aujourd'hui — la porte est donc inerte par défaut.
+        Pure, ne lève jamais."""
+        declared = [str(h).strip().lower() for h in (hosts or []) if str(h).strip()]
+        if not declared:
+            return True                                       # rien de déclaré -> rien à autoriser
+        policy = self.allow_tool_egress
+        if policy is True:
+            return True
+        if isinstance(policy, str):
+            policy = [policy]
+        if not isinstance(policy, (list, tuple, set, frozenset)):
+            return False                                      # absent/False/dict/nombre -> fail-closed
+        allowed = [str(p).strip().lower() for p in policy if str(p).strip()]
+        if not allowed:
+            return False                                      # allowlist VIDE => refus, pas « tout »
+        return all(any(fnmatch.fnmatch(h, pattern) for pattern in allowed) for h in declared)
+
     # --- SÉLECTION DE TECHNIQUES PAR-SCOPE (enforcement fail-closed, en plus du scope-guard) ---
     def technique_selection_configured(self) -> bool:
         """True si ce scope porte une SÉLECTION de techniques (profil et/ou toggles). Sinon (scope
@@ -562,6 +655,19 @@ class Roe:
                 return self._finish(VETO, action, reasons, log=log)
             if action.destructive and not self.scope.allow_destructive:
                 reasons.append("action destructive interdite (allow_destructive=false)")
+                return self._finish(VETO, action, reasons, log=log)
+
+            # Couche 3bis — EGRESS TIERS. Même forme que la couche 3 : une CAPACITÉ que le module
+            # DÉCLARE et que l'engagement doit avoir autorisée. Ne mord que sur un module qui déclare
+            # son egress ET qui ne sait pas s'en passer (`egress_required`) ; un module capable de
+            # DÉGRADER n'est jamais vétoé — il reçoit `params['_egress_allowed']=False` et retire la
+            # fonctionnalité qui sort (c'est le chemin coverage-safe : borner, pas supprimer).
+            if action.egress and action.egress_required \
+                    and not self.scope.egress_allowed(action.egress):
+                reasons.append(
+                    "egress tiers non autorisé par l'engagement (allow_tool_egress) — ce module "
+                    f"contacte {', '.join(str(h) for h in action.egress)} EN PLUS de la cible et ne "
+                    "sait pas s'en passer ; aucun verdict n'est émis pour cette action")
                 return self._finish(VETO, action, reasons, log=log)
 
             # in-scope + capacité OK -> au pire DRY_RUN, jamais VETO au-delà

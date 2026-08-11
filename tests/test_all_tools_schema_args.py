@@ -268,9 +268,33 @@ class TestNativeHttpx(unittest.TestCase):
         return mods.get("recon.httpx")._args(Action("recon.httpx", "scan.test", params=params))
 
     def test_default_argv_byte_identical(self):
+        """RUPTURE NOMMÉE (défaut D17, sûreté). Le défaut ne porte PLUS `-tech-detect`.
+
+        Ce drapeau SORT vers un tiers : mesuré au rejeu du banc, **92,6 Mio téléchargés depuis
+        huggingface.co à CHACUN des 4 tirs** du module (~370 Mio), seul egress prouvé sur 4 906
+        findings — dans un banc annoncé « loopback strict ». Un outil qui gate l'assist LLM et le
+        backend mémoire sur l'egress ne peut pas laisser un module de recon sortir par défaut :
+        l'exclusion portait sur l'INTENTION déclarée, pas sur l'egress OBSERVÉ.
+
+        L'intention de ce test est CONSERVÉE — « le défaut ne bouge pas quand on ne demande rien » —
+        et le byte-à-byte historique reste vérifié dès que l'opérateur AUTORISE l'egress
+        (`test_default_argv_byte_identical_when_egress_allowed`)."""
         self.assertEqual(self._argv({}),
+                         ["-u", "scan.test", "-silent", "-status-code", "-title",
+                          "-json", "-no-color"])
+
+    def test_default_argv_byte_identical_when_egress_allowed(self):
+        """L'autre versant : autorisé, l'argv redevient EXACTEMENT l'historique, `-tech-detect`
+        à sa position d'origine (index 5). Borner l'egress ne doit rien coûter à qui l'accepte."""
+        self.assertEqual(self._argv({"_egress_allowed": True}),
                          ["-u", "scan.test", "-silent", "-status-code", "-title", "-tech-detect",
                           "-json", "-no-color"])
+
+    def test_egress_flag_cannot_sneak_back_via_extra_args(self):
+        """L'ALLOWLIST N'EST PAS LA PORTE D'EGRESS. `-tech-detect` y figure légitimement (il est sûr
+        du point de vue option-smuggling) : le laisser passer par `extra_args` rouvrirait par la
+        fenêtre ce qu'on vient de fermer par la porte."""
+        self.assertNotIn("-tech-detect", self._argv({"extra_args": "-tech-detect"}))
 
     def test_threads_status_paths(self):
         argv = self._argv({"threads": 40, "status_codes": "200,301", "paths": "/,/admin"})

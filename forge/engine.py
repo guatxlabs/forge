@@ -68,31 +68,83 @@ _SCOPE_INJECT_KINDS = frozenset({
     "web.nuclei",
 })
 
-def _oracle_rate_kinds():
-    """Kinds à HTTP-oracle (sous-classes `Oracle`) : leur trafic sortant passe par `Oracle._http` et
-    respecte donc le THROTTLE du scope (rate). DÉRIVÉ du registre — aucune liste à maintenir à la main
-    (un nouvel oracle @register est couvert automatiquement). Ne lève jamais (registre indisponible -> ∅)."""
+#: Jetons de gabarit d'argv par lesquels un module ToolSpec DÉCLARE qu'il sait recevoir un débit —
+#: soit en req/s (`rate`), soit en DÉLAI par requête dérivé (sqlmap/wfuzz/dalfox/gobuster/wpscan).
+_RATE_PARAM_TOKENS = ("{param:rate}", "{param:rate_delay_s}", "{param:rate_delay_ms}",
+                      "{param:rate_delay_dur}")
+
+
+def _flatten(value):
+    """Aplatit un gabarit d'argv (tuples imbriqués) en chaînes. Pur, ne lève jamais."""
+    if isinstance(value, str):
+        yield value
+        return
+    try:
+        for item in value:
+            yield from _flatten(item)
+    except TypeError:                                        # ni chaîne ni itérable -> rien à lire
+        return
+
+
+def _rate_kinds():
+    """`(kinds à oracle, kinds d'outil à drapeau de débit)` — les DEUX DÉRIVÉS du registre, en UNE
+    seule passe d'instanciation (le registre est parcouru une fois, pas deux).
+
+      · ORACLES (sous-classes `Oracle`) : leur trafic sortant passe par `Oracle._http` et respecte
+        donc le throttle du scope. Un nouvel oracle `@register` est couvert automatiquement.
+      · OUTILS ToolSpec dont le GABARIT D'ARGV contient un groupe de débit (`{param:rate}` ou une
+        dérivée en délai) : ils SAVENT recevoir un débit, encore faut-il le leur DONNER.
+
+    POURQUOI CETTE SECONDE DÉRIVATION EXISTE — un trou MESURÉ, pas une précaution. La liste des kinds
+    d'outils était tenue À LA MAIN, et elle avait dérivé : **4 outils déclaraient `{param:rate}` dans
+    leur argv sans jamais recevoir de débit** — `recon.katana`, `recon.dnsx`, `recon.subfinder`,
+    `web.wpscan`. Le groupe `{param:rate}` étant simplement ABANDONNÉ quand le param manque, la
+    dérive était SILENCIEUSE : l'opérateur armait `rate_explicit`, l'UI montrait un champ
+    « rate-limit (-rl req/s) » pour katana, et katana crawlait à plein régime. `recon.katana` est un
+    CRAWLER HTTP, et il faisait partie des modules en vol quand une campagne a fait passer une cible
+    de 165 Mio à 4,78 Gio en 100 s. Une liste manuelle en face d'un catalogue d'outils extensible
+    redivergera ; une dérivation, non.
+
+    Ne lève jamais (registre indisponible -> ∅ des deux côtés : on ne fabrique aucun kind)."""
+    oracles, tools = set(), set()
     try:
         from .modules.oracle import Oracle
-        return frozenset(k for k in mods.kinds() if isinstance(mods.get(k), Oracle))
+        for kind in mods.kinds():
+            module = mods.get(kind)
+            if isinstance(module, Oracle):
+                oracles.add(kind)
+            template = getattr(getattr(module, "spec", None), "argv_template", None)
+            if template and any(tok in part
+                                for part in _flatten(template) for tok in _RATE_PARAM_TOKENS):
+                tools.add(kind)
     except Exception:                                        # noqa: BLE001
-        return frozenset()
+        pass
+    return frozenset(oracles), frozenset(tools)
+
+
+_ORACLE_RATE_KINDS, _TOOLSPEC_RATE_KINDS = _rate_kinds()
 
 
 # Kinds ACTIFS rate-limités : l'engine injecte le débit ROE du scope (`rate`) dans action.params pour
 # que le module borne son trafic. Deux familles : (1) les modules de découverte active qui passent `rate`
 # à leur outil (ex: ffuf -rate) ; (2) TOUS les oracles à HTTP (`Oracle._http`) qui respectent le throttle
 # min-interval du moteur. Additif (setdefault) : n'écrase jamais un param posé. rate<=0/absent => no-op.
-_RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"}) | _oracle_rate_kinds()
+_RATE_LIMITED_KINDS = frozenset({"recon.content", "recon.secrets", "recon.waf"}) | _ORACLE_RATE_KINDS
 
-# Kinds d'OUTILS (natifs + wrappers) dont un DRAPEAU CLI de débit est piloté par `rate` (nmap --max-rate,
-# nuclei -rl, httpx -rl, naabu -rate, feroxbuster --rate-limit, sqlmap/wfuzz/dalfox/
-# gobuster --delay dérivé). Le débit y est injecté UNIQUEMENT sur override EXPLICITE (`scope.rate_explicit`)
+# Kinds d'OUTILS dont un DRAPEAU CLI de débit est piloté par `rate` (nmap --max-rate, nuclei -rl,
+# httpx -rl, naabu -rate, feroxbuster --rate-limit, katana -rl, sqlmap/wfuzz/dalfox/gobuster/wpscan
+# --delay dérivé…). Le débit y est injecté UNIQUEMENT sur override EXPLICITE (`scope.rate_explicit`)
 # -> sans override, aucun drapeau n'est ajouté (argv BYTE-IDENTIQUE au défaut).
-_RATE_FLAG_KINDS = frozenset({
-    "recon.nmap", "web.nuclei", "recon.httpx", "recon.naabu", "recon.feroxbuster",
-    "sqli.sqlmap", "fuzz.wfuzz", "xss.dalfox", "recon.gobuster_dns",
-})
+#
+# DEUX SOURCES, et une seule est tenue à la main :
+#   · les TROIS modules NATIFS dont le drapeau est construit en Python (`_args()`) — non
+#     introspectable, donc listé ici ;
+#   · TOUS les modules ToolSpec dont le GABARIT D'ARGV déclare un groupe de débit — DÉRIVÉ du
+#     registre (`_rate_kinds`). C'est ce qui referme le trou mesuré des 4 outils qui déclaraient
+#     `{param:rate}` sans jamais le recevoir (katana/dnsx/subfinder/wpscan) et qui empêche la liste
+#     de rediverger à chaque outil ajouté au catalogue.
+_NATIVE_RATE_FLAG_KINDS = frozenset({"recon.nmap", "web.nuclei", "recon.httpx"})
+_RATE_FLAG_KINDS = _NATIVE_RATE_FLAG_KINDS | _TOOLSPEC_RATE_KINDS
 
 
 # --- PARALLÉLISME INTRA-VAGUE BORNÉ (G3) ----------------------------------------------------------
@@ -146,6 +198,28 @@ def _secs(value: float) -> str:
     de 10 s — l'échelle de tous les budgets réels, en minutes ou en heures — la décimale n'apporte
     rien et alourdit."""
     return f"{value:.2f}s" if abs(value) < 10 else f"{value:.0f}s"
+
+
+def _module_egress(module: Any) -> tuple:
+    """Hôtes TIERS que ce module contacte EN PLUS de la cible, tels qu'il les DÉCLARE — ou `()`.
+
+    DUCK-TYPÉ, exactement comme `module.exploit` / `module.max_runtime` : aucun module n'a à changer
+    pour rester compatible, et un module qui ne déclare rien reste byte-identique. Une déclaration
+    illisible (non itérable, entrées vides) vaut une déclaration ABSENTE plutôt qu'une exception : un
+    moteur ne s'arrête pas sur la métadonnée d'un module. Normalise en minuscules, dédoublonne, garde
+    l'ordre de déclaration (la raison d'un VETO doit être reproductible). Pur, ne lève jamais."""
+    raw = getattr(module, "egress", ()) or ()
+    if isinstance(raw, str):
+        raw = (raw,)
+    out: list[str] = []
+    try:
+        for host in raw:
+            h = str(host).strip().lower()
+            if h and h not in out:
+                out.append(h)
+    except TypeError:                                  # déclaration non itérable -> aucune déclaration
+        return ()
+    return tuple(out)
 
 
 def _call_bound(module: Any, action: Action) -> Any:
@@ -322,6 +396,7 @@ class _Pending:
     budget_skip: str = ""                        # gate de budget : raison NOMMÉE d'un tir NON DÉMARRÉ
     dead_skip: str = ""                          # gate de liveness : cible MORTE -> tir NON DÉMARRÉ
     dead_host: str = ""                          # host:port constaté hors service (CONSTAT unique)
+    egress_note: "tuple[str, tuple, bool] | None" = None   # (kind, hôtes tiers déclarés, autorisé ?)
 
 
 class Engine:
@@ -439,6 +514,23 @@ class Engine:
         # CIBLES CONSTATÉES HORS SERVICE : {host:port -> raison}. Comme `non_targets`, le CONSTAT est dit
         # UNE FOIS (progression + ledger `engine.target_down`) ; chaque action reste un SKIP nommé.
         self.down_targets: dict[str, str] = {}
+        # PLAFOND DE DÉBIT DU RUN (`throttle.RunCap`) — UN SEUL seau, PARTAGÉ par toutes les actions et
+        # tous les workers de tir. C'est ce qui manquait : le seau d'ACTION est reconstruit à chaque
+        # `fire()` ET vit en thread-local, donc il ne borne rien au-delà d'une action (mesuré : 30
+        # requêtes réparties sur 30 actions ne sont bornées par RIEN, et le plafond effectif est
+        # multiplié par le parallélisme). Créé ICI, une fois, et passé à CHAQUE `throttle.using` :
+        # partagé par construction, il survit donc au parallélisme sans verrou supplémentaire (le seau
+        # est déjà thread-safe, cf. `throttle.Bucket.wait`). None quand aucun plafond n'est armé —
+        # le DÉFAUT : `using(rate)` retombe alors exactement sur le chemin historique.
+        rate_cap = float(getattr(scope, "run_rate", 0.0) or 0.0)
+        self._run_cap = (throttle.RunCap(rate_cap, source=getattr(scope, "run_rate_source", ""))
+                         if rate_cap > 0 else None)
+        self._run_cap_said = False                       # le plafond est ANNONCÉ une seule fois
+        # EGRESS TIERS DÉCLARÉ PAR MODULE : {kind: {"hosts": [...], "allowed": bool}}. Comme
+        # `non_targets`/`down_targets`, le CONSTAT est dit UNE FOIS par kind (progression + ledger
+        # `engine.tool_egress`) — autorisé OU refusé, parce qu'un egress AUTORISÉ doit être visible
+        # lui aussi. Vide tant qu'aucun module ne déclare d'egress (le cas de tous, aujourd'hui).
+        self.tool_egress: dict[str, dict[str, Any]] = {}
 
     # --- usage du contexte d'authentification (audit) ---
     def _ledger_auth_use(self) -> None:
@@ -560,22 +652,43 @@ class Engine:
         action.exploit = action.exploit or bool(getattr(module, "exploit", False))
         action.destructive = action.destructive or bool(getattr(module, "destructive", False))
 
+        # EGRESS TIERS DÉCLARÉ PAR LE MODULE — même geste que ci-dessus, une capacité de plus. Le
+        # module DÉCLARE (duck-typé : `egress` = hôtes contactés EN PLUS de la cible ; `egress_required`
+        # = il ne sait pas s'en passer) ; l'engagement AUTORISE ou non (`scope.allow_tool_egress`) ; et
+        # la réponse est POSÉE DANS L'ACTION (`_egress_allowed`, protocole symétrique de `_pinned_ips`
+        # et `_budget_remaining`) pour que le module puisse DÉGRADER au lieu d'être écarté — c'est
+        # exactement ce qu'il faut à `recon.httpx`, dont seul le drapeau `-tech-detect` sort vers
+        # huggingface.co. La gate de REFUS elle-même vit dans le ROE (couche 3bis), avec les autres
+        # capacités. Aucun module ne déclare d'egress aujourd'hui -> `egress` vide -> tout ce bloc est
+        # inerte et le comportement est byte-identique.
+        egress_note = None
+        declared = _module_egress(module)
+        if declared:
+            action.egress = declared
+            action.egress_required = bool(getattr(module, "egress_required", False))
+            allowed = self.scope.egress_allowed(declared)
+            action.params["_egress_allowed"] = allowed
+            egress_note = (action.kind, declared, allowed)
+
         # DÉCISION ROE — log DIFFÉRÉ (`log=False`) : le verdict est calculé ici (résolution DNS bornée +
         # épinglage IP inclus, chemin de tir), mais l'entrée `roe.decision` est journalisée par `_apply`
         # sur le thread principal, dans l'ordre déterministe -> le ledger reste mono-écrivain et ordonné.
         decision = self.roe.decide(action, log=False)
 
         if decision.verdict == VETO:
-            return _Pending(action, decision=decision, module=module, output=None, is_fire=False)
+            return _Pending(action, decision=decision, module=module, output=None, is_fire=False,
+                            egress_note=egress_note)
         if decision.verdict == DRY_RUN:
             output = module.dry(action)              # AUCUN effet de bord (contrat module)
-            return _Pending(action, decision=decision, module=module, output=output, is_fire=False)
+            return _Pending(action, decision=decision, module=module, output=output, is_fire=False,
+                            egress_note=egress_note)
 
         # FIRE — le TIR BLOQUANT. On lie les contextes THREAD-LOCAL (throttle/session/pin) le temps du
         # fire (voir la version historique pour le détail des trois garanties : throttle min-interval,
         # session gouvernée scope-guardée, pin anti-rebinding end-to-end). Tout se fait DANS ce thread :
         # les contextes sont donc visibles par `module.fire` (même thread) et isolés des autres workers.
-        pending = _Pending(action, decision=decision, module=module, is_fire=True)
+        pending = _Pending(action, decision=decision, module=module, is_fire=True,
+                           egress_note=egress_note)
         if decision.pinned_ips:
             action.params["_pinned_ips"] = list(decision.pinned_ips)
         # GATE DE LIVENESS — la cible a-t-elle CESSÉ de répondre pendant ce run ? Placée AVANT la gate
@@ -602,15 +715,24 @@ class Engine:
         # une campagne non armée EMPOISONNERAIT le magasin en apprenant que `web.testssl` prend 3 ms.
         t0 = time.monotonic()
         try:
-            with throttle.using(action.params.get("rate")) as _bucket, session.using(self.sessions), \
+            # DEUX ÉTAGES DE DÉBIT liés ensemble (cf. `forge/throttle`) : le seau d'ACTION (neuf à
+            # chaque fire, thread-local — il lisse la rafale de CETTE action) ET le plafond de RUN
+            # (`self._run_cap`, le MÊME objet pour toutes les actions et tous les workers — il borne
+            # le débit du RUN). `run=None` (le défaut) => `using` retombe byte-à-byte sur l'historique.
+            with throttle.using(action.params.get("rate"), run=self._run_cap) as _bucket, \
+                    session.using(self.sessions), \
                     pin.using(action.target, action.params.get("_pinned_ips")):
                 pending.raw = module.fire(action) or []
             # THROTTLING PERSISTANT : compteur 429/WAF relu après le tir (surface un marqueur « rate-limited »
             # dans les raisons à l'application, au lieu d'empties silencieux). Différé pour ne PAS muter
             # `decision.reasons` avant que `_apply` n'ait journalisé la `roe.decision` d'origine.
+            # Le compteur relu est celui de l'ACTION (jamais le cumul du run) : sinon le marqueur se
+            # rééditerait à chaque action suivant le premier 429 du run. Le DÉBIT affiché, lui, retombe
+            # sur celui du run quand l'action n'en a pas — « débit 0/s » sur un run bridé serait faux.
             if _bucket is not None:
                 pending.bucket_blocked = int(getattr(_bucket, "blocked", 0) or 0)
-                pending.bucket_rate = float(getattr(_bucket, "rate", 0.0) or 0.0)
+                pending.bucket_rate = float(getattr(_bucket, "rate", 0.0) or 0.0) or (
+                    self._run_cap.rate if self._run_cap is not None else 0.0)
         except Exception as e:  # noqa: BLE001 — capturée -> FIRE_ERROR à l'application (miroir M6 sériel)
             pending.fire_exc = e
         finally:
@@ -821,6 +943,59 @@ class Engine:
         if self.ledger:
             self.ledger.append("engine.target_down", {"target": target, "reason": reason})
 
+    def _note_tool_egress(self, kind: str, hosts: tuple, allowed: bool) -> None:
+        """CONSTAT UNIQUE par kind d'un EGRESS TIERS déclaré — autorisé OU refusé. Miroir exact de
+        `_note_non_target` / `_note_target_down` : dit UNE FOIS (progression + ledger
+        `engine.tool_egress`), mais chaque action garde sa trace propre (VETO nommé quand l'egress est
+        refusé à un module qui ne peut pas s'en passer, `_egress_allowed=False` dans les params sinon).
+
+        ON LE DIT AUSSI QUAND C'EST AUTORISÉ, et c'est le point. L'egress de `recon.httpx` vers
+        huggingface.co (92,6 Mio × 4 tirs) n'a pas échappé à une interdiction : il a échappé au REGARD.
+        Un egress qu'on autorise sans le voir se reproduira à l'identique. Appelé depuis `_apply`
+        (thread principal, ordre déterministe -> le ledger reste mono-écrivain)."""
+        if not kind or kind in self.tool_egress:
+            return
+        self.tool_egress[kind] = {"hosts": list(hosts), "allowed": bool(allowed)}
+        verdict = "AUTORISÉ" if allowed else "REFUSÉ (allow_tool_egress)"
+        self._emit(f"[EGRESS TIERS] {kind} contacte {', '.join(hosts)} EN PLUS de la cible — {verdict}")
+        if self.ledger:
+            self.ledger.append("engine.tool_egress",
+                               {"kind": kind, "hosts": list(hosts), "allowed": bool(allowed)})
+
+    # --- PLAFOND DE DÉBIT DU RUN : un run bridé le DIT, il ne ralentit pas mystérieusement ---------
+    def _say_run_cap(self) -> None:
+        """ANNONCE le plafond de débit du run, UNE SEULE FOIS, AVANT le premier tir (progression +
+        ledger `engine.run_rate`). No-op quand aucun plafond n'est armé — donc muet par défaut.
+
+        Un frein invisible est pire qu'un frein absent : l'opérateur qui voit son run traîner sans
+        savoir pourquoi conclut que forge est lent, pas qu'il est bridé — et il désarme la mauvaise
+        chose. L'annonce nomme la valeur ET le réglage d'origine (`scope.run_rate`, ou `scope.rate`
+        via `rate_explicit`), pour que la cause soit remontable en une lecture."""
+        cap = self._run_cap
+        if cap is None or self._run_cap_said:
+            return
+        self._run_cap_said = True
+        origin = cap.source or "scope"
+        self._emit(f"[DÉBIT RUN] plafond {cap.rate:g} req/s pour TOUT le run (source : {origin}) — "
+                   f"partagé par toutes les actions ET tous les workers ; le débit PAR ACTION "
+                   f"(scope.rate) reste appliqué en plus. Ce run est BRIDÉ, il n'est pas lent.")
+        if self.ledger:
+            self.ledger.append("engine.run_rate", {"rate": cap.rate, "source": origin,
+                                                   "scope": "run", "shared_across_threads": True})
+
+    def run_rate_report(self) -> dict[str, Any]:
+        """Ce que le plafond de run a RÉELLEMENT produit — `{}` quand aucun n'est armé.
+
+        Chiffres MESURÉS par le seau lui-même (`RunCap.observed`) et non recalculés ici : requêtes
+        cadencées, fenêtre, DÉBIT OBSERVÉ, secondes dormies. C'est ce qui permet de dire « le plafond
+        a coûté X s » plutôt que « le run a été long ». Exposé par `coverage()` (clé additive)."""
+        cap = self._run_cap
+        if cap is None:
+            return {}
+        out = cap.observed()
+        out.update({"cap": cap.rate, "source": cap.source or "scope"})
+        return out
+
     def _note_non_target(self, target: str, family: str) -> None:
         """CONSTAT UNIQUE par cible non-ciblable : « ce n'est pas une cible, c'est le mur ». Dit UNE FOIS
         (ligne de progression + entrée ledger `engine.non_target`) au lieu d'être redécouvert action après
@@ -885,6 +1060,11 @@ class Engine:
         # ICI (thread principal, ordre déterministe) et TOUJOURS AVANT les findings/run-record de l'action :
         # l'ordre relatif dans le ledger est donc identique au sériel (roe.decision -> finding(s) -> runrecord).
         self.roe._log("roe.decision", decision.to_dict())
+
+        # CONSTAT D'EGRESS TIERS (une fois par kind) — posé ICI, après la décision et avant tout
+        # verdict, pour que l'ordre du ledger reste déterministe (thread principal, ordre d'action).
+        if pending.egress_note:
+            self._note_tool_egress(*pending.egress_note)
 
         # GATE DE BUDGET — le tir a été AUTORISÉ (la `roe.decision` FIRE ci-dessus le dit, et c'est
         # voulu : la gouvernance n'a rien refusé) mais il n'a pas été DÉMARRÉ, faute de temps. SKIP
@@ -1029,6 +1209,7 @@ class Engine:
         # repasse ici est inchangée. La liste est matérialisée pour pouvoir la parcourir deux fois.
         actions = list(actions)
         self._inject_auth_context(actions)
+        self._say_run_cap()          # un run bridé l'ANNONCE avant son premier tir (no-op sans plafond)
         pool = _parallelism()
         if pool <= 1:
             return self._run_serial(actions, checkpoint, checkpoint_every)
@@ -1692,6 +1873,12 @@ class Engine:
             self.planned_total = len(ordered_all)
             applied = {r["action"] for r in self.results}
             self.not_attempted = [a for aid, a in ordered_all.items() if aid not in applied]
+            # CE QUE LE FREIN A COÛTÉ, EN CHIFFRES — dit à la fin comme il a été annoncé au début.
+            # No-op sans plafond armé (`run_rate_report()` rend {}).
+            if (rr := self.run_rate_report()):
+                self._emit(f"[DÉBIT RUN] plafond {rr['cap']:g} req/s — {rr['requests']} requête(s) "
+                           f"cadencée(s), débit OBSERVÉ {rr['rate']} req/s, {rr['waited']}s d'attente "
+                           f"imposée par le plafond")
             if self.interruption is not None:
                 # La fiche a été posée par `_check_stop` AVANT que ces buckets existent : on la
                 # rafraîchit ici avec les compteurs définitifs (mêmes clés que
@@ -1823,8 +2010,14 @@ class Engine:
         # `non_targets` est ADDITIF (les consommateurs — report.py, console_client — lisent des clés
         # FIXES) : agrégat {cible: famille} des non-cibles d'infra RECONNUES. Chaque action visée est
         # DÉJÀ comptée+listée dans `errors` (SKIP nommé) ; cette clé donne le constat en une ligne.
+        # `run_rate` / `tool_egress` sont ADDITIFS au même titre que `non_targets` (les consommateurs —
+        # report.py, console_client — lisent des clés FIXES) : le premier porte le DÉBIT OBSERVÉ au
+        # niveau du RUN quand un plafond est armé (`{}` sinon), le second les egress tiers déclarés
+        # par module, autorisés ou refusés. Ce qui bride et ce qui sort doit être LISIBLE, pas deviné.
         return {"fired": fired, "dry_run": dry, "vetoed": vetoed, "errors": errors,
-                "non_targets": dict(self.non_targets)}
+                "non_targets": dict(self.non_targets),
+                "run_rate": self.run_rate_report(),
+                "tool_egress": {k: dict(v) for k, v in self.tool_egress.items()}}
 
     def roe_decisions(self, start: int = 0) -> list[dict[str, Any]]:
         """Trace ROE sérialisable : un verdict par action évaluée (anti-masquage).

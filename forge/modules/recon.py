@@ -144,11 +144,19 @@ class HttpxFingerprint(FlagAllowlistMixin, Module):
     kind = "recon.httpx"
     exploit = False
     mitre = "T1595"
+    # EGRESS TIERS DÉCLARÉ (cf. docs/CONFIGURATION.md §2quater). MESURÉ, pas supposé : `-tech-detect`
+    # a téléchargé 92,6 Mio depuis huggingface.co à CHACUN des 4 tirs de ce module (~370 Mio) — le
+    # SEUL egress prouvé sur 4 906 findings, dans un banc annoncé « loopback strict ». Le module SAIT
+    # s'en passer (statut, titre, serveur ne sortent pas), donc `egress_required` reste False : sans
+    # autorisation il DÉGRADE (retire le drapeau) au lieu d'être écarté — borner, pas supprimer.
+    egress = ("huggingface.co", "cdn-lfs.huggingface.co")
+    egress_required = False
     _refuse_mitre = "T1595"                       # provenance du finding de refus (mixin) — inchangée
     _refuse_tool = "httpx"
     description = ("Fingerprint HTTP (httpx) : status, titre, techno détectées. Params UI : threads "
                    "(-threads), rate (-rl), status-codes (-mc), paths (-path), extra_args (allowlist). "
-                   "Défaut inchangé quand rien n'est fourni.")
+                   "Défaut inchangé quand rien n'est fourni. `-tech-detect` SORT vers huggingface.co "
+                   "(92,6 Mio par tir) : retiré sauf `scope.allow_tool_egress`.")
     BIN, IMG = "httpx", "projectdiscovery/httpx"
     available = property(lambda self: runner.available("httpx", "projectdiscovery/httpx", prefer_docker=True))
 
@@ -169,7 +177,14 @@ class HttpxFingerprint(FlagAllowlistMixin, Module):
 
     def _args(self, action):
         p = action.params or {}
-        argv = ["-u", action.target, "-silent", "-status-code", "-title", "-tech-detect", "-json", "-no-color"]
+        # `_egress_allowed` est posé par `Engine._decide_blocking` d'après `scope.allow_tool_egress`
+        # (protocole symétrique de `_pinned_ips` / `_budget_remaining`). ABSENT => False, fail-closed :
+        # un appelant qui court-circuite le moteur (test, script) ne doit pas déclencher 92,6 Mio de
+        # téléchargement sans l'avoir demandé.
+        egress_ok = bool(p.get("_egress_allowed"))
+        argv = ["-u", action.target, "-silent", "-status-code", "-title", "-json", "-no-color"]
+        if egress_ok:
+            argv.insert(5, "-tech-detect")        # même position -> argv BYTE-IDENTIQUE si autorisé
         threads = p.get("threads")
         if threads not in (None, "") and safe_value(str(threads)):
             argv += ["-threads", str(threads)]
@@ -185,6 +200,11 @@ class HttpxFingerprint(FlagAllowlistMixin, Module):
         if _path_argval(paths):
             argv += ["-path", str(paths)]
         _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)  # tokens VALIDÉS (fire gate en amont)
+        if not egress_ok:
+            # L'ALLOWLIST N'EST PAS LA PORTE D'EGRESS : `-tech-detect` y figure légitimement (c'est un
+            # drapeau sûr du point de vue option-smuggling). Le laisser passer par `extra_args`
+            # rouvrirait par la fenêtre l'egress qu'on vient de fermer par la porte.
+            extra = [tok for tok in extra if tok != "-tech-detect"]
         argv += extra
         return argv
 
