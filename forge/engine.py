@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import enum
 import os
+import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -159,6 +161,77 @@ def _call_bound(module: Any, action: Action) -> Any:
         return None
 
 
+# --- LA CIBLE EST-ELLE ENCORE LÀ ? (D13) ----------------------------------------------------------
+# CE QUI A ÉTÉ MESURÉ, ET CE QUI NE L'A PAS ÉTÉ. Le banc a conclu « le mode autonome TUE la cible »
+# sur deux campagnes Juice Shop terminées en `Exited (139)` + `Ineffective mark-compacts`. La
+# contre-épreuve dit autre chose. `bkimminich/juice-shop:latest` (image du 2026-06-05), lancée seule,
+# SANS UN SEUL PAQUET envoyé par qui que ce soit, monte de 121 MiB à 4,79 GiB et meurt en **222 s**
+# avec EXACTEMENT la même signature. La campagne n'était donc pas la CAUSE de la mort ; elle l'a
+# accélérée (mort à ~128 s sous `recon.feroxbuster` contre 222 s à vide, n=1 de chaque). On ne pose
+# donc PAS de throttle qu'aucune mesure ne justifie — ce serait l'excès inverse, payé en couverture.
+#
+# CE QUI RESTE VRAI, ET QUI EST LE VRAI DÉFAUT : après la mort, à t=214 s, la campagne a continué à
+# TIRER pendant ~390 s et a émis **193 findings `tested`** — « j'ai vérifié, rien trouvé » — sur un
+# cadavre. Un moteur gouverné doit CONSTATER que la cible n'est plus là et S'ARRÊTER : c'est ce que
+# « avoid service degradation » demande réellement, et c'est aussi ce qui garantit qu'un tir sur cible
+# morte ne produise AUCUN verdict.
+#
+# LA BORNE — pourquoi « morte » exige d'avoir été VIVANTE. On ne gate QUE sur la transition
+# VIVANTE -> INJOIGNABLE observée PENDANT le run. Une cible qu'on n'a JAMAIS jointe (proxy, pare-feu,
+# port non devinable) reste UNKNOWN et n'est JAMAIS gatée : le moteur ne doit pas décider qu'une cible
+# est morte sur la seule foi d'un connect qui échoue — c'est la même discipline que `blindness`, où
+# un 403 nu ne fait taire aucun verdict. Et on ne DEVINE pas de port : sans port explicite ni schéma,
+# aucune sonde, aucune gate.
+_LIVENESS_TTL = 15.0                 # s — au plus UNE sonde par host:port et par fenêtre
+_LIVENESS_CONNECT_TIMEOUT = 2.0      # s — connect TCP borné (jamais un blocage de worker)
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
+
+
+def _target_endpoint(target: Any) -> "tuple[str, int] | None":
+    """(host, port) SONDABLE d'une cible, ou None quand il n'y en a PAS D'EXPLICITE.
+
+    Accepte `h:p`, `scheme://h[:p]/chemin`. REFUSE un hôte nu (`example.com`) : deviner 80/443 pour
+    lui, c'est risquer de déclarer morte une cible qui n'a jamais parlé sur le port deviné. Pur, ne
+    lève jamais."""
+    s = str(target or "").strip()
+    if not s:
+        return None
+    port = None
+    if "://" in s:
+        scheme, _, s = s.partition("://")
+        port = _DEFAULT_SCHEME_PORTS.get(scheme.lower())
+    s = s.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in s:
+        s = s.rsplit("@", 1)[1]
+    if s.startswith("["):                                # IPv6 littéral [::1]:port
+        host, _, rest = s.partition("]")
+        host = host.lstrip("[")
+        if rest.startswith(":"):
+            s = rest[1:]
+        else:
+            s = ""
+    else:
+        host, _, s = s.partition(":")
+    if s:
+        try:
+            port = int(s)
+        except ValueError:
+            pass
+    if not host or not port or not (0 < port < 65536):
+        return None
+    return host, port
+
+
+def _tcp_reachable(host: str, port: int, timeout: float = _LIVENESS_CONNECT_TIMEOUT) -> bool:
+    """UN connect TCP borné -> True/False. SEAM patchable par les tests (aucun réseau en unitaire).
+    Ne lève jamais : toute erreur (DNS, refus, timeout, pare-feu) vaut « injoignable »."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001 — injoignable est une RÉPONSE, pas une panne du moteur
+        return False
+
+
 def _shutdown_executor(ex: Any) -> None:
     """Ferme l'exécuteur SANS attendre (`wait=False`) et ANNULE les tâches encore en file d'attente
     (`cancel_futures`) — sur un arrêt gracieux (_Terminate) ou une exception, on ne DÉMARRE plus de
@@ -193,6 +266,7 @@ class Phase(enum.Enum):
     INFRA_NON_TARGET = "infra_non_target"      # cible = namespace d'edge RÉSERVÉ (CDN/WAF) — pas une cible
     UNAVAILABLE = "unavailable"                # outil/service sous-jacent absent
     BUDGET_TOO_SHORT = "budget_too_short"      # borne d'exécution DÉCLARÉE > budget de temps restant
+    TARGET_DOWN = "target_down"                # cible JOINTE puis devenue INJOIGNABLE pendant le run
     DECIDED = "decided"                        # verdict rendu par la gate ROE (VETO/DRY_RUN/FIRE)
     FIRE_ERROR = "fire_error"                  # M6 — exception LEVÉE pendant le tir (module.fire/post-traitement)
 
@@ -246,6 +320,8 @@ class _Pending:
     bucket_blocked: int = 0                      # 429/WAF persistants relus sur le throttle après le tir
     bucket_rate: float = 0.0
     budget_skip: str = ""                        # gate de budget : raison NOMMÉE d'un tir NON DÉMARRÉ
+    dead_skip: str = ""                          # gate de liveness : cible MORTE -> tir NON DÉMARRÉ
+    dead_host: str = ""                          # host:port constaté hors service (CONSTAT unique)
 
 
 class Engine:
@@ -355,6 +431,14 @@ class Engine:
         # action visée reste un SKIP nommé dans `results` -> comptée dans `coverage()['errors']` et LISTÉE
         # dans le rapport. Reconnu != supprimé : rien n'est écarté en silence.
         self.non_targets: dict[str, str] = {}
+        # LIVENESS PAR host:port (D13) : {(host, port): (state, ts_monotone, jamais_vue_vivante)} où
+        # `state` ∈ {"alive", "down", "unknown"}. Écrit depuis les WORKERS de tir -> verrouillé. Le
+        # dict est BORNÉ par le nombre d'hôtes:ports de l'engagement (pas par le nombre d'actions).
+        self._liveness: dict[tuple[str, int], tuple[str, float, bool]] = {}
+        self._liveness_lock = threading.Lock()
+        # CIBLES CONSTATÉES HORS SERVICE : {host:port -> raison}. Comme `non_targets`, le CONSTAT est dit
+        # UNE FOIS (progression + ledger `engine.target_down`) ; chaque action reste un SKIP nommé.
+        self.down_targets: dict[str, str] = {}
 
     # --- usage du contexte d'authentification (audit) ---
     def _ledger_auth_use(self) -> None:
@@ -494,6 +578,16 @@ class Engine:
         pending = _Pending(action, decision=decision, module=module, is_fire=True)
         if decision.pinned_ips:
             action.params["_pinned_ips"] = list(decision.pinned_ips)
+        # GATE DE LIVENESS — la cible a-t-elle CESSÉ de répondre pendant ce run ? Placée AVANT la gate
+        # de budget : « la cible n'est plus là » explique mieux l'absence de verdict que « il ne reste
+        # pas assez de temps », et elle évite de consommer le budget à tirer dans le vide. Cf.
+        # `_liveness_gate` (et le bloc « LA CIBLE EST-ELLE ENCORE LÀ ? » en tête de module).
+        if (why := self._liveness_gate(action)):
+            pending.is_fire = False
+            pending.dead_skip = why
+            hp = _target_endpoint(action.target)
+            pending.dead_host = f"{hp[0]}:{hp[1]}" if hp else str(action.target)
+            return pending
         # GATE DE BUDGET — DERNIÈRE porte avant le tir, et la SEULE qui regarde l'horloge. Elle ne
         # coupe rien : elle empêche de DÉMARRER ce qui ne peut pas tenir. Cf. `_budget_gate`.
         if (why := self._budget_gate(module, action)):
@@ -666,6 +760,67 @@ class Engine:
                 estimate = None
         return share.refuse(action.kind, bound, estimate)
 
+    # --- GATE DE LIVENESS : ON NE TIRE PAS SUR UN CADAVRE, ET ON N'EN REND AUCUN VERDICT ----------
+    def _liveness_gate(self, action: Action) -> str:
+        """Raison NOMMÉE de ne pas DÉMARRER ce tir parce que la cible est MORTE, ou "".
+
+        TROIS CONDITIONS CUMULATIVES, et chacune est une borne contre l'excès inverse :
+          1. la cible porte un **port EXPLICITE** (`h:p`) ou un **schéma** dont le port se déduit
+             (`http`/`https`). Aucun port devinable -> `_target_endpoint` rend None -> AUCUNE sonde,
+             AUCUNE gate. On ne fabrique pas de port pour avoir le droit de conclure ;
+          2. la cible a été **JOINTE au moins une fois pendant ce run** (`ever_alive`). Une cible
+             jamais jointe reste `unknown` : elle peut vivre derrière un proxy, un pare-feu, un
+             tunnel — le moteur n'a rien à en conclure, et surtout pas qu'elle est morte ;
+          3. la sonde COURANTE échoue. Rejouée au plus une fois par `_LIVENESS_TTL` et par host:port :
+             une cible qui REVIENT (redémarrage) repasse `alive` et la campagne reprend toute seule.
+
+        Coût : UN connect TCP borné par host:port et par fenêtre de 15 s — pas par action. Ne lève
+        jamais : la moindre anomalie rend "" (fail-open), un moteur ne s'arrête pas sur sa propre sonde."""
+        try:
+            hp = _target_endpoint(action.target)
+            if hp is None:
+                return ""
+            now = time.monotonic()
+            with self._liveness_lock:
+                cached = self._liveness.get(hp)
+            if cached is not None and (now - cached[1]) < _LIVENESS_TTL:
+                state, _ts, ever = cached
+            else:
+                # LA SONDE RESPECTE L'ÉPINGLAGE ROE. La gate tourne APRÈS `roe.decide()` : la cible est
+                # donc déjà in-scope ET son IP déjà RÉSOLUE ET ÉPINGLÉE (anti-rebinding). Re-résoudre le
+                # nom ici rouvrirait exactement la fenêtre que le pin ferme — un connect, même sans un
+                # octet de données, partirait vers l'IP qu'un DNS hostile vient de substituer. On sonde
+                # donc l'IP ÉPINGLÉE quand il y en a une, le nom sinon (cible IP littérale / pas de pin).
+                pinned = (action.params.get("_pinned_ips") or [None])[0]
+                ok = _tcp_reachable(pinned or hp[0], hp[1])   # HORS lock (jamais de blocage croisé)
+                with self._liveness_lock:
+                    prev = self._liveness.get(hp)
+                    ever = bool(ok or (prev[2] if prev else False))
+                    state = "alive" if ok else ("down" if ever else "unknown")
+                    self._liveness[hp] = (state, time.monotonic(), ever)
+            if state != "down":
+                return ""
+            return (f"non démarrée : la cible {hp[0]}:{hp[1]} a répondu pendant ce run puis a CESSÉ de "
+                    f"répondre (connexion TCP refusée/expirée) — elle n'est plus en état d'être testée ; "
+                    f"AUCUN verdict n'est émis pour cette action (non testée, pas « rien trouvé »). "
+                    f"Le moteur re-sonde toutes les {_LIVENESS_TTL:g}s : si la cible revient, la "
+                    f"campagne reprend.")
+        except Exception:  # noqa: BLE001 — une sonde en défaut ne doit JAMAIS empêcher un tir
+            return ""
+
+    def _note_target_down(self, target: str, reason: str) -> None:
+        """CONSTAT UNIQUE par cible hors service (ligne de progression + entrée ledger
+        `engine.target_down`). Miroir exact de `_note_non_target` : le constat est dit une fois, mais
+        CHAQUE action visée reste un SKIP nommé dans `results`. Appelé depuis `_apply` (thread
+        principal, ordre déterministe -> ledger mono-écrivain)."""
+        if not target or target in self.down_targets:
+            return
+        self.down_targets[target] = reason
+        self._emit(f"[CIBLE HORS SERVICE] {target} — la cible a cessé de répondre ; les actions "
+                   f"restantes sont SKIP nommées, aucun verdict n'est émis sur une cible morte.")
+        if self.ledger:
+            self.ledger.append("engine.target_down", {"target": target, "reason": reason})
+
     def _note_non_target(self, target: str, family: str) -> None:
         """CONSTAT UNIQUE par cible non-ciblable : « ce n'est pas une cible, c'est le mur ». Dit UNE FOIS
         (ligne de progression + entrée ledger `engine.non_target`) au lieu d'être redécouvert action après
@@ -735,6 +890,18 @@ class Engine:
         # voulu : la gouvernance n'a rien refusé) mais il n'a pas été DÉMARRÉ, faute de temps. SKIP
         # NOMMÉ : compté dans `coverage()['errors']`, listé au rapport, aucun finding, aucun
         # run-record. « Je n'ai pas vérifié » — jamais « j'ai vérifié, rien trouvé ».
+        # GATE DE LIVENESS — la cible a cessé de répondre PENDANT le run. Le module n'a PAS tiré : il
+        # n'y a donc ni finding, ni run-record, ni verdict — c'est le sens même de la gate (un oracle
+        # qui tire sur un cadavre affirmerait « j'ai vérifié, rien trouvé » sur une cible qu'il n'a pas
+        # pu regarder). SKIP NOMMÉ, compté dans `coverage()['errors']` et listé au rapport.
+        if pending.dead_skip:
+            res = ExecResult(action=action.id, target=action.target, kind=action.kind,
+                             verdict=Verdict.SKIP, reasons=[pending.dead_skip],
+                             output=None, phase=Phase.TARGET_DOWN).to_dict()
+            self.results.append(res)
+            self._note_target_down(pending.dead_host, pending.dead_skip)
+            return res
+
         if pending.budget_skip:
             res = ExecResult(action=action.id, target=action.target, kind=action.kind,
                              verdict=Verdict.SKIP, reasons=[pending.budget_skip],

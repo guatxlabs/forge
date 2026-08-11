@@ -490,11 +490,61 @@ class AutoPentestBrain(HeuristicBrain):
 
     `enabled_kinds` = l'ensemble EFFECTIF de kinds activés (typiquement `scope.effective_technique_kinds()`).
     Défaut (None) = tout le pipeline. BORNÉ : les cibles balayées proviennent du plan heuristique (déjà
-    fan-out-borné) ; idempotent (id d'action stable kind:target) -> point fixe garanti sur les vagues."""
+    fan-out-borné) ; idempotent (id d'action stable kind:target) -> point fixe garanti sur les vagues.
+
+    LE BALAYAGE PASSE PAR LE MÊME GARDE HÔTE/ENDPOINT QUE LE PLAN DE BASE (défaut D9 du banc). Le plan
+    de base REFUSE, depuis toujours, de semer « recon/nmap/origin sur une URL » (`_is_endpoint`, et le
+    `continue` de `propose`) : un endpoint est vérifié par les oracles CIBLÉS du chaînage (edge e), pas
+    par des actions qui consomment un HÔTE. Le balayage, lui, proposait CHAQUE kind sur CHAQUE cible
+    touchée, endpoints DÉRIVÉS compris — il contournait le garde. MESURÉ au ledger du banc (DVWA,
+    piste B) : **22 findings `recon.nmap` sur 22** portent `Nmap done: 0 IP addresses (0 hosts up)`,
+    tous rendus `status=tested`. nmap sort `rc=0` (« Unable to split netmask from target expression »),
+    donc la borne `rc != 0` de `blindness.tool_did_not_run` ne peut PAS voir ce silence : une action
+    qui n'a RIEN pu regarder affirmait avoir vérifié. Ici on ne réécrit pas le garde — on l'APPLIQUE
+    (`_host_scoped_kinds`)."""
 
     def __init__(self, enabled_kinds=None):
         self.enabled = (set(enabled_kinds) if enabled_kinds is not None
                         else set(techniques.technique_kinds()))
+
+    @staticmethod
+    def _host_scoped_kinds():
+        """Kinds qui consomment un HÔTE (jamais un chemin) -> RIEN à voir sur un endpoint dérivé.
+
+        DÉRIVÉ, jamais recopié — deux sources déjà en place dans le dépôt, plus le seul nom que le
+        garde existant cite à la main :
+
+          1. `planner.surface_producers()` — l'ensemble des PRODUCTEURS de surface (déclaré par le
+             spec de l'outil : `asset_hits` / `emit_*_discovery`, plus les natifs test-gardés par
+             `TestNativeProducerList`). `planner.stage()` dit DÉJÀ, et à la mesure, qu'« un producteur
+             ne l'est que sur un HÔTE, jamais sur un ENDPOINT déjà dérivé » : il refuse de les CLASSER
+             producteurs là-bas. On ne fait que tirer la conséquence — on ne les y PROPOSE plus.
+          2. `spec.speaks_http` FAUX — le discriminant est DANS L'ARGV : un outil invoqué avec
+             `{target_host}` (testssl, dig, dnsx, amass, subfinder, naabu, gau, gobuster_dns) reçoit
+             un hôte NU ; le chemin de l'endpoint est jeté avant même le lancement. Sur 19 endpoints
+             du même hôte, `web.testssl` ne fait pas 19 vérifications : il refait 19 fois la MÊME,
+             à 600 s de mur chacune.
+          3. `origin.find` — le TROISIÈME nom de la phrase du garde existant (« qui sèmeraient
+             recon/nmap/origin sur une URL », `_is_endpoint`). Le planner l'exclut délibérément de
+             `surface_producers()`, mais pour une raison d'ORDONNANCEMENT (cf. son en-tête), pas
+             parce qu'il saurait lire un chemin : il résout l'IP d'origine d'un DOMAINE.
+
+        Rien n'est RETIRÉ de la couverture d'un endpoint : les oracles (IDOR/SQLi/XSS/le panel à
+        injection et tout le reste du pipeline) continuent d'y être balayés à l'identique — seuls
+        partent les kinds qui, structurellement, n'y regardent rien. Lu PARESSEUSEMENT (aucun import
+        de `forge.modules` au chargement du cerveau) et ne lève jamais : registre indisponible ->
+        producteurs natifs seuls, jamais une exception."""
+        from .planner import surface_producers      # import paresseux (aucun cycle au chargement)
+        out = set(surface_producers()) | {"origin.find"}
+        try:
+            from .modules import registry as _registry
+            for kind, module in dict(_registry.REGISTRY).items():
+                spec = getattr(module, "spec", None)
+                if spec is not None and not getattr(spec, "speaks_http", True):
+                    out.add(kind)
+        except Exception:                            # noqa: BLE001 — registre absent -> dérivé partiel
+            pass
+        return frozenset(out)
 
     def propose(self, graph_state):
         base = super().propose(graph_state)          # recon + oracles heuristiques + chaînage
@@ -506,10 +556,16 @@ class AutoPentestBrain(HeuristicBrain):
             if a.target not in seen_t:
                 seen_t.add(a.target)
                 targets.append(a.target)
+        host_scoped = self._host_scoped_kinds()
         extra = []
         for tgt in targets:
+            # MÊME GARDE QUE LE PLAN DE BASE : sur un ENDPOINT, on ne balaie pas les kinds qui
+            # consomment un hôte (cf. `_host_scoped_kinds`). Sur un hôte, rien ne change.
+            blocked = host_scoped if self._is_endpoint(tgt) else frozenset()
             for kind in order:
                 aid = f"{kind}:{tgt}"
+                if kind in blocked:
+                    continue
                 if aid not in seen_ids:              # ne double jamais une action déjà proposée
                     seen_ids.add(aid)
                     extra.append(_action(kind, tgt, desc=f"auto-pentest : balayage {kind}"))

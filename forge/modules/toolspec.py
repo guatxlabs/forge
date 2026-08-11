@@ -88,7 +88,8 @@ class ToolSpec:
         "kind", "vuln_class", "binary", "argv_template", "cwe", "mitre", "phase", "capability",
         "attck_tactic", "proof_required", "bug_bounty_eligible", "exploit", "destructive", "cls",
         "depends_on", "tools", "docker_image", "prefer_docker", "timeout", "parser", "parser_regex",
-        "parser_json_path", "severity", "hit_status", "hit_is_asset", "tool_name", "description",
+        "parser_reject_line", "parser_json_path", "severity", "hit_status", "hit_is_asset",
+        "tool_name", "description",
         "params_schema", "flag_allowlist", "emit_service_discovery", "emit_endpoint_discovery",
         "skip_bare_ip", "reap_daemon", "requires_params", "requires_note", "docker_entrypoint",
     )
@@ -97,7 +98,8 @@ class ToolSpec:
                  capability="active", attck_tactic="Reconnaissance", proof_required=True,
                  bug_bounty_eligible=False, exploit=False, destructive=False, cls="", depends_on=(),
                  tools=(), docker_image="", prefer_docker=False, timeout=300, parser="lines",
-                 parser_regex="", parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
+                 parser_regex="", parser_reject_line="",
+                 parser_json_path=(), severity="INFO", hit_status="reported_by_tool",
                  hit_is_asset=None, tool_name="", description="", params_schema=(), flag_allowlist=(),
                  emit_service_discovery=False, emit_endpoint_discovery=False, skip_bare_ip=False,
                  reap_daemon=False, requires_params=(), requires_note="", docker_entrypoint=""):
@@ -122,6 +124,11 @@ class ToolSpec:
         self.timeout = timeout
         self.parser = parser
         self.parser_regex = parser_regex
+        # LIGNES REJETÉES AVANT PARSING (regex de LIGNE, "" = aucune — défaut byte-identique). Sert à
+        # écarter les lignes de sortie qui NE SONT PAS un résultat exploitable alors qu'elles portent
+        # une URL : le cas mesuré est le `404` de feroxbuster (cf. `toolcatalog.recon.feroxbuster`).
+        # LIGNE et pas HIT : le discriminant (la colonne de STATUT) vit dans la ligne, pas dans l'URL.
+        self.parser_reject_line = parser_reject_line
         self.parser_json_path = tuple(parser_json_path)
         self.severity = severity
         self.hit_status = hit_status
@@ -550,10 +557,42 @@ def _extract_json(obj, path):
     return out
 
 
+def reject_lines(text, pattern):
+    """Sortie PRIVÉE des lignes qui matchent `pattern` (regex de LIGNE). `pattern` vide/illisible ->
+    `text` rendu TEL QUEL (byte-identique).
+
+    POURQUOI UNE LIGNE ET PAS UN HIT (défaut D8 du banc). `recon.feroxbuster` invoquait `--silent`,
+    qui SUPPRIME la colonne de statut : forge ne voyait que des URLs et ingérait donc les **404**
+    comme de la surface. Mesuré sur DVWA (`--no-recursion`) : **17 des 21 URLs ingérées étaient des
+    404**, soit 81 % — et l'auto-filtre de feroxbuster ne les rattrape pas (leur taille varie avec la
+    longueur du chemin). Le discriminant EXISTE, mais il vit dans la LIGNE (`404 GET 9l 33w 287c
+    http://…`), pas dans l'URL : on ne peut pas le lire depuis un hit déjà extrait. D'où ce filtre, et
+    d'où sa position — AVANT le parseur, jamais après.
+
+    FAIL-OPEN DANS LE BON SENS, et c'est le point délicat. Si l'outil change un jour de mise en forme,
+    ce motif ne matche plus rien : on RÉ-INGÈRE des 404 (bruit, visible, corrigeable) — on ne perd
+    JAMAIS la découverte elle-même, qui reste portée par le `parser_regex` permissif. L'inverse
+    (durcir le `parser_regex` pour exiger la colonne de statut) aurait rendu ZÉRO hit sur un
+    changement de format, c'est-à-dire un « aucun hit » MENSONGER sur une cible jamais regardée —
+    exactement le défaut que ce dépôt corrige partout ailleurs. Pur, ne lève jamais."""
+    if not pattern:
+        return text
+    try:
+        rx = re.compile(pattern)
+    except re.error:                     # motif illisible -> aucun filtre (jamais une perte de hits)
+        return text
+    try:
+        return "\n".join(ln for ln in str(text or "").splitlines() if not rx.search(ln))
+    except Exception:                    # noqa: BLE001 (sortie d'outil hostile)
+        return text
+
+
 def parse_output(spec, rc, stdout, stderr=""):
     """Extrait la liste des HITS (str) de la sortie de l'outil selon `spec.parser`. Dé-dupliqué (ordre
-    préservé) et borné à `_MAX_HITS`. Pur, ne lève jamais (entrée d'outil hostile tolérée)."""
-    text = stdout or ""
+    préservé) et borné à `_MAX_HITS`. Les lignes rejetées par `spec.parser_reject_line` sont écartées
+    AVANT parsing (cf. `reject_lines` ; motif vide -> byte-identique). Pur, ne lève jamais (entrée
+    d'outil hostile tolérée)."""
+    text = reject_lines(stdout or "", getattr(spec, "parser_reject_line", ""))
     hits = []
     try:
         if spec.parser == "none":

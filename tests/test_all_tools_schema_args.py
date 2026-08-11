@@ -148,8 +148,11 @@ class TestWrapperDefaultsByteIdentical(unittest.TestCase):
         self.assertEqual(argv, ["-silent", "-host", "host.test"])              # aucun -p/-rate/-c orphelin
 
     def test_feroxbuster_default_no_wordlist(self):
+        # `--quiet` ET PAS `--silent` (correctif D8) : `--silent` n'imprime QUE des URLs, donc la
+        # colonne de STATUT n'existe pas et forge ingérait les 404 comme de la surface (mesuré sur
+        # DVWA : 17 des 21 URLs ingérées étaient des 404). `--quiet` garde la ligne complète.
         argv = build_argv(_spec("recon.feroxbuster"), "http://good.test", {})
-        self.assertEqual(argv, ["--silent", "-u", "http://good.test"])
+        self.assertEqual(argv, ["--quiet", "-u", "http://good.test"])
 
 
 # =================================================================================================

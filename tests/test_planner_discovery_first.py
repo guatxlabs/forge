@@ -464,11 +464,44 @@ class TestReach(unittest.TestCase):
 
     def test_les_scanners_lents_tournent_TOUJOURS(self):
         """L'excès inverse est aussi grave que le défaut : à budget de référence, AUCUN kind tiré
-        avant le lot ne doit avoir disparu après."""
-        fired = {c: {r["kind"] for r in res["engine"].results if r["verdict"] == "FIRE"}
+        avant le lot ne doit avoir disparu après.
+
+        DEUX PRÉCISIONS, TOUTES DEUX MESURÉES, ET AUCUNE N'AFFAIBLIT L'INVARIANT :
+
+        1. ON NE COMPTE PAS UN TIR AVEUGLE COMME DE LA COUVERTURE (correctif D9). Le balayage
+           auto-pentest proposait `recon/nmap/origin` sur des URLs à chemin, où ces outils ne
+           regardent RIEN. Compter ces tirs-là ferait de ce test le GARDIEN DU DÉFAUT : il exigerait
+           qu'on continue d'invoquer nmap sur une URL.
+        2. « PLANIFIÉ MAIS JAMAIS ATTEINT » N'EST PAS « RETIRÉ » — c'est le contrat coverage-safe du
+           dépôt (defer != delete ; `not_attempted` est COMPTÉ et LISTÉ au rapport). Un kind absent
+           d'`after` mais présent dans son `not_attempted` n'a rien perdu : il attend son tour.
+
+        LE CAS QUI A EXIGÉ CES DEUX PRÉCISIONS, à la mesure. `origin.find`, budget 5 918 s :
+            sans le garde : 1 tir — sur `https://cloud.konghq.com/d/recon-gau/0?q=0`, un ENDPOINT
+                            découvert — d'une durée de 1 799 s ; ses 3 actions sur HÔTE ne sont
+                            jamais atteintes ; le run finit à 7 587 s, soit +28 % du budget.
+            avec le garde : 0 tir ; ses 3 actions sur HÔTE sont dans `not_attempted` (comptées,
+                            listées) ; le run finit à 5 936 s, soit +0,3 % du budget.
+        Le tir « qui prouvait la couverture » était donc À LA FOIS aveugle ET la cause entière du
+        dépassement de budget du run de référence."""
+        host_scoped = AutoPentestBrain._host_scoped_kinds()
+
+        def fired_where_operant(res):
+            out = set()
+            for r in res["engine"].results:
+                if r["verdict"] != "FIRE":
+                    continue
+                if r["kind"] in host_scoped and is_endpoint_target(r["target"]):
+                    continue                      # tir aveugle : ne prouve aucune couverture
+                out.add(r["kind"])
+            return out
+
+        fired = {c: fired_where_operant(res)
                  for c, res in (("before", self.before), ("after", self.after))}
-        self.assertEqual(fired["before"] - fired["after"], set(),
-                         "des kinds ne tirent plus du tout — c'est l'excès inverse")
+        deferred = {a.kind for a in self.after["engine"].not_attempted}
+        self.assertEqual(fired["before"] - fired["after"] - deferred, set(),
+                         "des kinds ne tirent plus du tout ET ne sont même plus planifiés — "
+                         "c'est l'excès inverse")
         for slow in ("web.nikto", "web.testssl", "web.nuclei", "xss.dalfox", "web.zap_baseline"):
             self.assertIn(slow, fired["after"], f"{slow} ne tourne plus")
 

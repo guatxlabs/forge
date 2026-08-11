@@ -364,7 +364,20 @@ CATALOG_SPECS = [
     #   `emit_endpoint_discovery` — a, LUI, une image officielle qui tourne. La couverture ne perd rien.
     ToolSpec(
         kind="recon.feroxbuster", vuln_class="ContentDiscovery", binary="feroxbuster",
-        argv_template=("--silent", "-u", "{target_url}", ("-w", "{param:wordlist}"),
+        # `--quiet` ET PAS `--silent` — C'EST LE CORRECTIF D8, ET IL EST DANS L'INVOCATION.
+        # `--silent` n'imprime QUE les URLs : la colonne de STATUT n'existe pas dans la sortie, donc
+        # forge ne pouvait PAS la voir, et son `https?://\S+` ingérait les **404** comme de la surface
+        # (chaque 404 devenait un NŒUD du graphe, balayé ensuite par tout le panel d'oracles — c'est
+        # l'origine du gros du volume : 1806 findings sur DVWA au banc). `--quiet` retire la bannière
+        # et les barres de progression MAIS GARDE la ligne de résultat complète :
+        #     404      GET        9l       33w      287c http://127.0.0.1:8081/Reports%20List
+        #     301      GET        9l       28w      314c http://127.0.0.1:8081/docs => .../docs/
+        # MESURÉ sur DVWA (`--no-recursion`, image `epi052/feroxbuster`) : `--silent` -> 21 URLs
+        # ingérées, statut INVISIBLE ; `--quiet` -> 22 lignes dont **17 en 404**, et 4 URLs réelles
+        # après rejet (`/`, `/docs`, `/config`, `/external`). 81 % de ce qu'on ingérait n'existait pas.
+        # On ne DEVINE donc rien (l'auto-filtre de feroxbuster, lui, manque ces 404 : leur taille varie
+        # avec la longueur du chemin) — on REGARDE, ce que `--silent` interdisait.
+        argv_template=("--quiet", "-u", "{target_url}", ("-w", "{param:wordlist}"),
                        ("--rate-limit", "{param:rate}"), ("-t", "{param:threads}"),
                        ("-d", "{param:depth}"), ("-x", "{param:extensions}"),
                        ("-s", "{param:status_codes}"), ("--scan-limit", "{param:scan_limit}"), "{args}"),
@@ -387,6 +400,12 @@ CATALOG_SPECS = [
         # conteneur, où il n'y a pas de démon docker — trouve la sienne.
         docker_image="epi052/feroxbuster", prefer_docker=True,
         depends_on=("recon.httpx",), parser="regex", parser_regex=r"https?://\S+",
+        # REJET DE LIGNE (jamais de hit) : une ligne de résultat dont la colonne de STATUT vaut 404
+        # n'est pas de la surface. SEUL le 404 est rejeté — un 403/401/301/500 EST de la surface (une
+        # ressource protégée reste une ressource), et une ligne SANS statut lisible n'est PAS rejetée :
+        # refuser tout endpoint au statut inconnu serait l'excès inverse, et coûterait la couverture
+        # qu'on vient de gagner. Cf. `toolspec.reject_lines` pour le sens de la dégradation.
+        parser_reject_line=r"^\s*404\s",
         hit_status="tested", severity="INFO",
         # SANS ceci, ses hits sortaient en `feroxbuster: <URL>` SANS marqueur : 6 URLs -> 6 nœuds
         # au graphe -> **0 action**. Il était CLASSÉ producteur (`asset_hits`) tout en ne
