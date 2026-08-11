@@ -50,6 +50,7 @@ from .. import resource_profile
 from .. import runner
 from .. import session as _session
 from .. import techniques
+from .. import throttle
 from ..roe import Scope
 
 
@@ -219,6 +220,18 @@ class PassiveSurface(ScopeGuardMixin, Module):
         # suivi — fermant le résidu de re-résolution du suivi auto d'urllib (miroir d'Oracle._http).
         opener = (_pin.build_pinned_opener(extra_handlers=(_PinnedFollowRedirect,))
                   if _pin.ip_for(url) else None)
+        # DÉBIT — cette voie NE PASSE PAS par `Oracle._http`, le chokepoint qui honore les deux étages
+        # de débit : toute la recon de surface (js_endpoints, tech, urls, subdomains…) y échappait.
+        # Même trou que celui mesuré dans `httpflow` (10 requêtes en 5 ms sous un plafond de 5 req/s),
+        # et même remède : on consulte le contexte lié par l'engine autour du `fire()`. Hors contexte
+        # (test unitaire, script hors moteur) `current()` rend None -> no-op total, byte-identique.
+        #
+        # S'APPLIQUE AUSSI AUX TIERS interrogés par cette voie (crt.sh, Wayback) — délibérément : un
+        # plafond déclaré par l'engagement borne ce que FORGE émet, pas seulement ce que la cible
+        # reçoit, et ces services ont leurs propres limites qu'on n'a aucune raison de bousculer.
+        _b = throttle.current()
+        if _b is not None:
+            _b.wait()
         try:
             with (opener.open(req, timeout=timeout) if opener is not None
                   else urllib.request.urlopen(req, timeout=timeout)) as r:
