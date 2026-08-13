@@ -41,6 +41,7 @@ comme toute interaction web (web_allowed).
 """
 import hashlib
 import re
+import urllib.parse
 
 from .oracle import Oracle, ScopeGuardedOracle
 from .registry import register
@@ -486,7 +487,34 @@ class CsrfStateChange(ClientFlowOracle):
                           "params.session_cookie, params.set_cookie, params.csrf_present."),
                 poc=self.dry(action))]
         headers = dict(action.params.get("headers", {}))
-        # probe NON destructif : un simple GET (aucune mutation). On ne rejoue JAMAIS la requête mutante.
+        # ============================================================================================
+        #  « GET donc non destructif » EST UN RAISONNEMENT CIRCULAIRE ICI — et il a été pris en défaut.
+        #
+        #  Cet oracle cherche « une action CRITIQUE atteignable sans jeton ». Or l'une des formes les
+        #  plus courantes de cette faille est précisément **une action mutante exposée en GET**. Se
+        #  prémunir en disant « je ne fais qu'un GET » revient donc à supposer faux ce qu'on teste.
+        #
+        #  MESURÉ le 2026-08-13 sur DVWA, avec l'URL que le banc donnait lui-même à cet oracle :
+        #      GET /vulnerabilities/csrf/?password_new=a&password_conf=a&Change=Change -> « Password Changed »
+        #      admin/password -> 302 vers login.php (REFUSÉ)   |   admin/a -> 302 vers index.php (ACCEPTÉ)
+        #  Le mot de passe administrateur de la cible avait donc été CHANGÉ par la sonde, sous un scope
+        #  déclarant `allow_destructive: False`, et l'évidence affirmait « NON DESTRUCTIF: probe GET ».
+        #
+        #  REMÈDE — quand l'action est déclarée CRITIQUE et qu'aucun `probe_url` n'est fourni, on sonde
+        #  la même URL **sans sa chaîne de requête** : c'est la page/le formulaire, qui porte exactement
+        #  ce que l'oracle vient lire (Set-Cookie + jeton), sans porter les paramètres qui MUTENT.
+        #  Le compromis est nommé : une application qui n'affiche son formulaire qu'avec ses paramètres
+        #  rendra un corps différent — l'oracle abstiendra alors faute de jeton observable, ce qui est
+        #  le bon sens de l'erreur. `probe_url` explicite reste TOUJOURS prioritaire et intouché.
+        # ============================================================================================
+        stripped = ""
+        if not action.params.get("probe_url") and action.params.get("critical") is True:
+            base_probe = urllib.parse.urlsplit(probe)
+            if base_probe.query:
+                stripped = probe
+                probe = urllib.parse.urlunsplit(base_probe._replace(query="", fragment=""))
+                if not self._in_scope(action, probe):
+                    return [self._scope_refused(action)]
         st, body, pairs = self._fetch(probe, headers=headers, method="GET")
         if st is None:
             return [self.degraded(
@@ -508,7 +536,11 @@ class CsrfStateChange(ClientFlowOracle):
             severity=("HIGH" if proven else "INFO"),
             evidence=(f"action_critique={critical} ({crit_why}) ; anti_CSRF_absent={csrf_absent} "
                       f"({csrf_why}) ; SameSite_absent={ss_absent} ({ss_why}) ; NON DESTRUCTIF: probe GET "
-                      f"seul, aucune requête mutante cross-site émise"),
+                      f"seul, aucune requête mutante cross-site émise"
+                      + (f" ; chaîne de requête ÉCARTÉE du probe (action déclarée critique, aucun "
+                         f"`probe_url` fourni) : sondé {probe} au lieu de {stripped} — une action "
+                         f"mutante exposée en GET est précisément ce que cet oracle cherche, la "
+                         f"rejouer « pour voir » la déclencherait" if stripped else "")),
             poc=(f"# probe non destructif: {self._curl(probe, headers, 'GET')}\n"
                  f"# PREUVE = action critique + cookie de session sans SameSite=Lax/Strict + aucun jeton "
                  f"anti-CSRF ; la requête mutante cross-site n'est PAS exécutée (détection seule)"))]

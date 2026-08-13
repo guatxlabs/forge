@@ -70,8 +70,17 @@ def dvwa_actions(base, cookie):
         _a("xss.stored", xsss, {"param": "mtxMessage", "store_url": xsss, "view_url": xsss,
                                 "store_method": "POST", "headers": hdr},
            "XSS stocké : écriture puis relecture de la même page"),
-        _a("csrf.state_change", csrf, {"param": "password_new", "critical": True, "headers": hdr},
-           "changement d'état sans jeton anti-CSRF"),
+        # `probe_url` EXPLICITE — la cible déclarée reste l'URL mutante (c'est bien l'action jugée
+        # critique), mais ce que l'oracle SONDE est la page du formulaire, sans les paramètres qui
+        # changent le mot de passe. Mesuré le 2026-08-13 : un simple GET sur l'URL complète rend
+        # « Password Changed », après quoi `admin/password` est REFUSÉ et `admin/a` accepté. Le banc
+        # mutait donc la cible — sous un scope déclarant `allow_destructive: False` — et ne le disait
+        # nulle part. L'oracle a depuis sa propre garde (il écarte la chaîne de requête quand l'action
+        # est déclarée critique) ; ce `probe_url` la rend explicite plutôt que tacite.
+        _a("csrf.state_change", csrf,
+           {"param": "password_new", "critical": True, "headers": hdr,
+            "probe_url": f"{base}/vulnerabilities/csrf/"},
+           "changement d'état sans jeton anti-CSRF (sondé sur le FORMULAIRE, pas sur l'URL mutante)"),
         _a("xss.execution", f"{base}/vulnerabilities/xss_d/?default=English",
            {"param": "default", "headers": hdr}, "XSS DOM (exige le rendu navigateur)"),
         _a("web.security_headers", base, {"headers": hdr}, "audit d'en-têtes (repère de bruit)"),
