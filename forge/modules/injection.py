@@ -100,7 +100,7 @@ class InjectionOracle(ScopeGuardedOracle):
         Les en-têtes explicites (action.params.headers) priment ; la session gouvernée (scope-guardée)
         est fusionnée SOUS eux par `_http`."""
         headers = dict(action.params.get("headers", {}))
-        url, data = self.inject_request(action.target, param, payload, method)
+        url, data = self.inject_request(action.target, param, payload, method, body_template=action.params.get("body_template"))
         st, body = self._fetch(url, headers=headers, method=method.upper(), data=data)
         return url, st, body
 

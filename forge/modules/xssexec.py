@@ -295,7 +295,7 @@ class XssExecution(ClientFlowOracle):
         method = str(action.params.get("store_method", "POST")).upper()
         # Rallié au geste partagé (cf. `Oracle.inject_request`) : 4 implémentations divergentes
         # avaient déjà rendu la RCE de DVWA inatteignable faute de co-paramètre.
-        url, data = self.inject_request(store_url, param, payload, method)
+        url, data = self.inject_request(store_url, param, payload, method, body_template=action.params.get("body_template"))
         if method == "GET":
             st, _b, _p = self._fetch(url, headers=headers, method="GET")
             return st

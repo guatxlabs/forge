@@ -82,7 +82,7 @@ class SsrfCallback(Oracle):
         # 1) injecter l'URL de callback dans le paramètre vulnérable. FORME de la requête :
         #    `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur REMPLACÉE, autres paramètres
         #    PRÉSERVÉS (un endpoint SSRF-able est presque toujours multi-paramètres).
-        inj, i_data = self.inject_request(action.target, param, cb_url, method)
+        inj, i_data = self.inject_request(action.target, param, cb_url, method, body_template=action.params.get("body_template"))
         i_st, _i_body = self._fetch(inj, headers=headers, method=method, data=i_data)
         # 2) interroger le collecteur — la PREUVE est ici, pas dans la réponse de la cible
         cs, cbody = self._fetch(check_url, timeout=action.params.get("callback_timeout", 15))
@@ -203,7 +203,7 @@ class SsrfXspa(ScopeGuardedOracle):
         FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur du paramètre
         ciblé REMPLACÉE, autres paramètres PRÉSERVÉS, en GET comme en POST. NOUS ne requêtons que
         action.target (in-scope) ; l'URL interne est fetchée PAR LE SERVEUR, jamais par nous."""
-        url, data = self.inject_request(action.target, param, internal_url, method)
+        url, data = self.inject_request(action.target, param, internal_url, method, body_template=action.params.get("body_template"))
         return self._fetch(url, headers=headers, method=method, data=data, timeout=timeout)
 
     @staticmethod
@@ -476,7 +476,7 @@ class SsrfCloudMetadata(ScopeGuardedOracle):
         FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur du paramètre
         ciblé REMPLACÉE, autres paramètres PRÉSERVÉS. NOUS ne requêtons que action.target (in-scope) ;
         l'URL métadonnées/collecteur est fetchée PAR LE SERVEUR."""
-        url, data = self.inject_request(action.target, param, injected_url, method)
+        url, data = self.inject_request(action.target, param, injected_url, method, body_template=action.params.get("body_template"))
         return self._fetch(url, headers=headers, method=method, data=data, timeout=timeout)
 
     @staticmethod

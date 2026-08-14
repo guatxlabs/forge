@@ -223,9 +223,13 @@ class TestSingleBuilder(unittest.TestCase):
         seen = []
         real = Oracle.inject_request.__func__
 
-        def spy(cls, target, param, payload, method="GET"):
-            out = real(cls, target, param, payload, method)
-            seen.append({"target": target, "param": param, "method": method, "out": out})
+        def spy(cls, target, param, payload, method="GET", body_template=None):
+            # `body_template` est RELAYÉ, pas avalé : un espion qui absorberait l'argument
+            # laisserait passer un site qui l'ignore, alors que c'est justement ce que ce
+            # fichier vérifie — que tous les sites parlent au constructeur unique, en ENTIER.
+            out = real(cls, target, param, payload, method, body_template)
+            seen.append({"target": target, "param": param, "method": method,
+                         "body_template": body_template, "out": out})
             return out
         Oracle.inject_request = classmethod(spy)
         return seen, lambda: setattr(Oracle, "inject_request", classmethod(real))

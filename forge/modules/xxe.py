@@ -92,7 +92,7 @@ class XxeProbe(ScopeGuardedOracle):
             # Rallié au geste partagé : remplacer la valeur en PRÉSERVANT les autres paramètres —
             # en POST le corps portait AUTREFOIS le seul paramètre injecté, ce qui rendait
             # inatteignable toute cible exigeant un co-paramètre.
-            url, data = self.inject_request(action.target, param, xml, method)
+            url, data = self.inject_request(action.target, param, xml, method, body_template=action.params.get("body_template"))
             if method == "GET":
                 return self._fetch(url, headers=headers, method="GET")
             return self._fetch(url, headers=headers, method=method, data=data)

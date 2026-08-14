@@ -141,7 +141,7 @@ class ClientFlowOracle(ScopeGuardedOracle):
         lèverait `unknown url type`). None -> `action.target` (byte-identique pour les cibles URL)."""
         headers = dict(action.params.get("headers", {}))
         tgt = str(base) if base is not None else action.target
-        url, data = self.inject_request(tgt, param, payload, method)
+        url, data = self.inject_request(tgt, param, payload, method, body_template=action.params.get("body_template"))
         st, body, pairs = self._fetch(url, headers=headers, method=method.upper(), data=data,
                                       follow_redirects=follow_redirects)
         return url, st, body, pairs
@@ -610,7 +610,7 @@ class XssStored(ClientFlowOracle):
         # FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — un formulaire de
         # persistance porte souvent des co-champs obligatoires (jeton, bouton d'envoi) : le corps ne
         # peut pas se réduire au seul champ injecté sous peine de n'écrire NULLE PART.
-        url, data = self.inject_request(store_url, param, payload, method)
+        url, data = self.inject_request(store_url, param, payload, method, body_template=action.params.get("body_template"))
         return self._fetch(url, headers=headers, method=method, data=data)
 
     def dry(self, action):

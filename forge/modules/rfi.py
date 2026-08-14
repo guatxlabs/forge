@@ -62,7 +62,7 @@ class RfiProbe(ScopeGuardedOracle):
             # Même geste que les 7 sites déjà ralliés : REMPLACER la valeur du paramètre en
             # PRÉSERVANT les autres. Reconstruire à la main ici ferait rediverger le geste —
             # c'est exactement ce qui avait produit 4 implémentations divergentes.
-            url, _d = self.inject_request(action.target, param, payload, "GET")
+            url, _d = self.inject_request(action.target, param, payload, "GET", body_template=action.params.get("body_template"))
             st, body = self._fetch(url, headers=headers, method="GET")
             return url, st, body
         st, body = self._fetch(action.target, headers=headers, method=method,

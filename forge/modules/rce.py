@@ -91,7 +91,8 @@ class RceProbe(ScopeGuardedOracle):
         comme en POST. C'est ce qui rend atteignable une injection de commande dont l'application
         exige un co-paramètre (DVWA : `isset($_POST['Submit'])`)."""
         headers = dict(action.params.get("headers", {}))
-        url, data = self.inject_request(action.target, action.params.get("param"), payload, method)
+        url, data = self.inject_request(action.target, action.params.get("param"), payload, method,
+                                          body_template=action.params.get("body_template"))
         st, body = self._fetch(url, headers=headers, method=method, data=data)
         return url, st, body
 
