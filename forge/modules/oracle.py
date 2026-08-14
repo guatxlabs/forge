@@ -19,6 +19,7 @@ Aucune capacité n'est élargie ici : les flags exploit/destructive/web_allowed 
 chaque module concret et restent gardés par le ROE.
 """
 import functools
+import json
 import hashlib
 import urllib.error
 import urllib.parse
@@ -795,10 +796,69 @@ class Oracle(Module):
             out.append((name, val))
         return out
 
+    #: Marqueur de la position d'injection dans un `body_template`. Choisi pour ne jamais apparaître
+    #: dans un corps légitime et ne rien signifier en JSON, GraphQL, XML ou urlencodé.
+    PAYLOAD_SLOT = "__FORGE_PAYLOAD__"
+
+    @staticmethod
+    def _slot_escape(payload, template):
+        """Échappe `payload` pour le CONTEXTE du gabarit — la seule partie délicate de l'affaire.
+
+        Un gabarit JSON porte la charge DANS une chaîne JSON. Une charge d'injection contient
+        précisément les caractères qui cassent cette chaîne : `"` ferme la chaîne, `\\` échappe le
+        caractère suivant, un saut de ligne est illégal. Substituer brutalement rendrait un corps
+        INVALIDE — l'application répondrait 400 et l'oracle lirait ce 400 comme « pas vulnérable ».
+        Un faux négatif silencieux, causé par l'outil et attribué à la cible.
+
+        DEUX COUCHES, ET C'EST TOUT LE PIÈGE. Dans un corps GraphQL, la charge n'est pas seulement
+        dans une chaîne JSON : elle est dans une chaîne **GraphQL**, elle-même dans la chaîne JSON —
+        `{"query":"{pastes(filter:\\"ICI\\"){id}}"}`. N'échapper que pour JSON rend un corps JSON
+        parfaitement valide dont le GraphQL est CASSÉ dès que la charge contient un guillemet : le
+        serveur répond « syntax error », et l'oracle lit ce refus comme « pas vulnérable ». Or un
+        guillemet est exactement ce que contient une charge SQLi. Le faux négatif viserait donc en
+        priorité la classe qu'on cherche.
+
+        Les deux contextes sont DÉDUITS du gabarit (jamais demandés à l'appelant, qui les oublierait) :
+        un gabarit qui parse en JSON est traité en JSON ; et si le créneau y est immédiatement encadré
+        par un guillemet ÉCHAPPÉ (`\\"`), c'est qu'il vit dans une chaîne GraphQL -> échappement
+        GraphQL d'abord, JSON ensuite. Tout le reste est rendu tel quel. Pur, ne lève jamais."""
+        text = str(payload)
+        try:
+            json.loads(template)
+        except (ValueError, TypeError):
+            return text                                  # gabarit non-JSON -> aucune transformation
+        i = template.find(Oracle.PAYLOAD_SLOT)
+        if i > 0 and template[:i].endswith('\\"'):
+            # COUCHE INTERNE : chaîne GraphQL. L'ordre importe — les antislashs d'abord, sinon on
+            # ré-échapperait ceux qu'on vient d'introduire.
+            text = (text.replace("\\", "\\\\").replace('"', '\\"')
+                        .replace("\n", "\\n").replace("\r", "\\r"))
+        # COUCHE EXTERNE : chaîne JSON. `json.dumps` rend ses guillemets englobants : on les retire,
+        # la charge étant substituée À L'INTÉRIEUR d'une chaîne déjà délimitée par le gabarit.
+        return json.dumps(text, ensure_ascii=False)[1:-1]
+
     @classmethod
-    def inject_request(cls, target, param, payload, method="GET"):
+    def inject_request(cls, target, param, payload, method="GET", body_template=None):
         """(url, data) de LA requête d'injection — SOURCE UNIQUE de la forme (cf. bloc ci-dessus).
 
+        `body_template` (optionnel) — CORPS LITTÉRAL à envoyer, dont le marqueur `PAYLOAD_SLOT` est
+        remplacé par la charge, ÉCHAPPÉE pour le contexte du gabarit (`_slot_escape`). C'est ce qui
+        rend atteignable une surface que la forme urlencodée ne peut pas décrire : un **argument
+        GraphQL**, imbriqué dans la chaîne `query` d'un corps JSON.
+
+        POURQUOI CETTE EXTENSION EXISTE — mesuré, deux campagnes de banc : **DVGA rend 0 sur 6 classes
+        opposables**, et la cause n'est ni le jugement ni la découverte. Les six vivent derrière UN
+        SEUL `POST /graphql`, et le point d'injection est un argument DANS la chaîne `query` —
+        `pastes(filter:"…")`, `systemDiagnostics(cmd:…)`, `uploadPaste(filename:"…")`. La forme
+        historique ne sait produire qu'une query-string ou un corps `x-www-form-urlencoded` : elle ne
+        peut PAS écrire cet endroit-là. Les cinq oracles d'injection étaient donc structurellement
+        aveugles à GraphQL, sans qu'aucun d'eux soit en défaut.
+
+        Un gabarit ABSENT (le cas de tous les appels d'aujourd'hui) laisse les deux branches
+        historiques BYTE-IDENTIQUES. Le `Content-Type` reste à la charge de l'appelant (il vit dans
+        `params.headers`) : cette méthode décrit une FORME de corps, elle ne décide pas d'un en-tête.
+
+        LES DEUX BRANCHES HISTORIQUES, inchangées quand aucun gabarit n'est fourni :
         - `method` GET -> (URL dont la query porte `param=payload` À LA PLACE de sa valeur d'origine,
           les AUTRES paramètres intacts et dans l'ordre ; `data=None`) ;
         - toute autre méthode -> (`target` INCHANGÉ, corps urlencodé portant les paramètres de la
@@ -808,6 +868,10 @@ class Oracle(Module):
 
         Sur une cible SANS query — le cas courant — les deux branches sont BYTE-IDENTIQUES à l'ancien
         code. Ne lève JAMAIS : une URL illisible retombe sur la concaténation historique."""
+        if body_template and cls.PAYLOAD_SLOT in str(body_template):
+            tmpl = str(body_template)
+            return str(target or ""), tmpl.replace(cls.PAYLOAD_SLOT,
+                                                   cls._slot_escape(payload, tmpl))
         tgt = str(target or "")
         is_get = str(method or "GET").upper() == "GET"
         try:

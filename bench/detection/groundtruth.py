@@ -206,9 +206,18 @@ VAMPI = [
 _DVGA_SRC = "DVGA: /opt/dvga/templates/partials/solutions/*.html (challenges déclarés par l'app)"
 
 DVGA = [
-    GroundTruth("dvga", "graphql_introspection", "graphql.access",
+    GroundTruth("dvga", "graphql_introspection", None,
                 "/graphql", _DVGA_SRC, method="POST",
-                proof="POST {\"query\":\"{__schema{types{name}}}\"} -> schéma complet"),
+                proof="POST {\"query\":\"{__schema{types{name}}}\"} -> schéma complet",
+                note=("CLASSE NON OPPOSABLE À FORGE, PAR POLITIQUE ET NON PAR MANQUE. `graphql.access` "
+                      "SONDE bien l'introspection, mais l'émet en `INFO`/`tested` à dessein : « info "
+                      "disclosure seule ne vaut pas preuve d'impact » est une règle du dépôt, et le "
+                      "scorer ne compte un succès qu'en `status=vulnerable` (`score.PROOF_STATUS`). "
+                      "La compter en FAUX NÉGATIF revenait à reprocher à forge d'appliquer sa propre "
+                      "doctrine — et gonflait le « 0/7 » d'une ligne qu'aucun correctif ne pouvait "
+                      "faire basculer. Second empêchement mesuré : l'oracle exige `params.b_marker` + "
+                      "`params.query` (preuve BOLA à deux comptes), or DVGA n'a NI compte NI session — "
+                      "il rend donc `skipped` sur cette application, introspection incluse.")),
     GroundTruth("dvga", "graphql_interface_exposed", None,
                 "/graphiql", _DVGA_SRC,
                 proof="GET /graphiql -> IDE GraphQL exposé",
