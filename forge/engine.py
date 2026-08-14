@@ -1260,6 +1260,12 @@ class Engine:
         # repasse ici est inchangée. La liste est matérialisée pour pouvoir la parcourir deux fois.
         actions = list(actions)
         self._inject_auth_context(actions)
+        # … ET LE DÉBIT, pour exactement la même raison. Il ne vivait lui aussi que dans `_prepare`,
+        # donc `forge run --actions` tirait SANS lissage par-action ni drapeau de débit sur ses
+        # outils (mesuré : `_prepare` -> `params.rate = 5`, ce chemin -> `None`). Un même engagement
+        # ne peut pas brider ou non selon la porte d'entrée. Idempotent : une action de campagne qui
+        # repasse ici est inchangée.
+        self._inject_rate_context(actions)
         self._say_run_cap()          # un run bridé l'ANNONCE avant son premier tir (no-op sans plafond)
         pool = _parallelism()
         if pool <= 1:
@@ -1639,6 +1645,25 @@ class Engine:
             if a.kind in _SCOPE_INJECT_KINDS:
                 a.params.setdefault("in_scope", self.scope.in_scope)
                 a.params.setdefault("out_scope", self.scope.out_scope)
+        self._inject_rate_context(actions)
+        return actions
+
+    def _inject_rate_context(self, actions: "Iterable[Action]") -> None:
+        """Pose le DÉBIT de l'engagement dans `action.params` — SOURCE UNIQUE des deux chemins.
+
+        POURQUOI C'EST UNE MÉTHODE ET NON UN BLOC DANS `_prepare` : elle ne vivait que là, donc sur
+        le chemin CAMPAGNE. Mesuré : `_prepare` -> `params.rate = 5` ; `forge run --actions` ->
+        `None`. C'est la forme EXACTE du défaut D10 (le contexte d'auth ne vivait lui aussi que dans
+        `_prepare`, et `forge run --actions` rendait « IDOR non testé — config manquante » avec un
+        `scope.auth` complet). Un même engagement ne peut pas brider ou non selon la porte d'entrée.
+
+        Le plafond de RUN (`RunCap`) couvrait déjà ce chemin — il est lié depuis l'Engine, pas depuis
+        les params — donc ce qui manquait est le LISSAGE PAR-ACTION (le seau qui empêche une rafale
+        de 30 sondes en 30 ms) et les drapeaux CLI de débit des outils. Les deux étages sont
+        distincts et ne se remplacent pas.
+
+        Idempotente (`setdefault` partout) : une action de campagne qui repasse ici est INCHANGÉE."""
+        for a in actions:
             if a.kind in _RATE_LIMITED_KINDS:                # débit ROE -> borne le trafic actif du module
                 a.params.setdefault("rate", self.scope.rate)
             elif a.kind in _HTTP_RATE_FLAG_KINDS:
@@ -1667,7 +1692,6 @@ class Engine:
                 a.params.setdefault("rate_delay_s", f"{1.0 / rf:.3f}")
                 a.params.setdefault("rate_delay_ms", str(max(1, round(1000.0 / rf))))
                 a.params.setdefault("rate_delay_dur", f"{max(1, round(1000.0 / rf))}ms")
-        return actions
 
     def _directive_actions(self, proposed: list[Action], modules: "Iterable[str] | None") -> list[Action]:
         """DIRECTIVE de sélection EXPLICITE : un module listé dans `--modules` est un ORDRE, pas une
