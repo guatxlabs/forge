@@ -85,6 +85,11 @@ EXPECTED_KINDS = {
     "recon.httpx", "recon.nmap", "ssrf.callback", "web.nuclei",
     "recon.subdomains", "recon.dns", "recon.js_endpoints", "recon.urls", "recon.tech",
     "recon.content", "recon.secrets", "recon.waf",
+    # AJOUT NOMMÉ (défaut « GraphQL 0/6 ») — décrit la surface INJECTABLE d'une API GraphQL. Ce pin
+    # est un verrou volontaire : aucun module n'apparaît sans qu'on l'écrive ici. Une API GraphQL n'a
+    # ni query-string ni formulaire, son point d'injection est un argument DANS la chaîne `query` :
+    # sans ce producteur, toute une famille d'applications reste hors d'atteinte des oracles.
+    "recon.graphql",
     # oracles d'injection server-side à preuve bénigne (injection.py)
     "ssti.eval", "path.traversal", "sqli.probe",
     # oracles client-side / flux de requête à preuve minimale (clientflow.py)

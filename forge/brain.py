@@ -16,8 +16,11 @@ passe des actions. `HeuristicBrain` est le défaut autonome sûr (mapping cible�
 sur findings). La priorité réelle est garantie par le planner coverage-safe, pas par le cerveau
 (anti-starvation) : le cerveau peut sur-/sous-noter sans affamer une voie qualifiante.
 """
+import json as _json
+
 from .roe import Action
 from .graph import EngagementGraph
+from .modules.oracle import Oracle          # PAYLOAD_SLOT : le créneau d'injection, source unique
 from . import resource_profile
 from . import techniques
 
@@ -400,6 +403,14 @@ class HeuristicBrain(Brain):
                 out.append(_content_scanner_action(
                     kind, host, f"scanner de contenu HTTP sur service découvert {host} (chaîné)"))
 
+        # (h) ARGUMENT GRAPHQL DÉCOUVERT (recon.graphql) -> chaîner le panel d'injection AVEC son
+        # gabarit de corps. C'est le dernier maillon du chemin GraphQL : sans lui, la surface est
+        # décrite et personne ne la teste. Mesuré : DVGA rendait 0 sur 6 classes opposables parce
+        # qu'une API GraphQL n'a NI query-string NI formulaire — son point d'injection est un argument
+        # dans la chaîne `query`, que `_chain_from_endpoint` (qui lit des paramètres d'URL) ne peut
+        # pas voir. Le titre du finding est décodé par la MÊME fonction qui l'a écrit.
+        out += self._chain_from_graphql(findings)
+
         # (c) WAF/CDN identifié (finding recon.waf) -> la cible est PROTÉGÉE : proposer les enablers
         # d'évasion (accès derrière CDN/WAF) sur ce host. Chaîné depuis le fingerprint, planner-selectable.
         for f in findings:
@@ -462,6 +473,58 @@ class HeuristicBrain(Brain):
         ("ssrf.xspa",                 0.5, 0.3, 2, "XSPA/scan de ports via param"),
         ("ssrf.cloud_metadata",       0.6, 0.3, 2, "SSRF cloud-metadata via param"),
     )
+
+    #: Fan-out borné du chaînage GraphQL. Un schéma large × un panel d'oracles produit vite des
+    #: milliers d'actions ; la borne est DÉCLARÉE, et ce qu'elle écarte est dit dans le `desc`.
+    MAX_GRAPHQL_ARGS = 12
+
+    def _chain_from_graphql(self, findings):
+        """Actions dérivées des ARGUMENTS GraphQL découverts par `recon.graphql`.
+
+        Le finding porte l'opération / le champ / l'argument dans son TITRE, encodés par
+        `techniques.graphql_arg_title` et relus ici par `parse_graphql_arg_title` — une seule source
+        pour le format, jamais deux copies qui divergent.
+
+        On construit le gabarit MINIMAL : `{op{champ(arg:"<créneau>")}}`. Il ne porte AUCUN
+        co-argument, et c'est assumé — un producteur générique ne peut pas inventer le mot de passe
+        que `systemDiagnostics` exige. Un champ ainsi gaté rendra « non concluant », ce qui est le bon
+        sens de l'erreur : l'oracle s'abstient au lieu d'affirmer. L'opérateur qui connaît les
+        co-arguments fournit son propre `body_template`, qui n'est jamais écrasé (`setdefault`)."""
+        out = []
+        for f in findings[:200]:
+            parsed = techniques.parse_graphql_arg_title(f.get("title", ""))
+            if not parsed:
+                continue
+            op, field, arg, returns_object = parsed
+            endpoint = f.get("target")
+            if not endpoint or len(out) >= self.MAX_GRAPHQL_ARGS * (1 + len(self._PARAM_INJECTION_ORACLES)):
+                continue
+            slot = Oracle.PAYLOAD_SLOT
+            # SÉLECTION DE SOUS-CHAMPS : obligatoire sur un champ qui rend un OBJET, interdite sur un
+            # scalaire. `__typename` est le seul champ disponible sur TOUT type objet — il évite de
+            # deviner un nom de sous-champ, et il est inerte. La mauvaise forme rendrait « must have a
+            # selection of subfields », que l'oracle lirait comme « pas vulnérable » : un faux négatif
+            # total et silencieux, charge pourtant envoyée.
+            selection = "{__typename}" if returns_object else ""
+            tmpl = _json.dumps({"query": '%s{%s(%s:"%s")%s}' % (
+                "" if op == "query" else "mutation ", field, arg, slot, selection)})
+            params = {"param": arg, "method": "POST",
+                      "headers": {"Content-Type": "application/json"},
+                      "body_template": tmpl}
+            base = f"argument GraphQL {op} {field}({arg})"
+            # IDENTIFIANT DISTINCT PAR ARGUMENT — sans lui, les N arguments d'un même endpoint
+            # partagent l'id `kind:target` et s'ÉCRASENT entre eux. Mesuré sur DVGA : 8 actions
+            # `sqli.probe` chaînées -> **2 findings**. La découverte trouvait 26 arguments et un
+            # seul était réellement testé. Même convention que `_chain_from_endpoint` (suffixe `#`),
+            # ici qualifiée par le CHAMP en plus de l'argument : deux champs peuvent porter un
+            # argument de même nom (`paste(title)` et `createPaste(title)`).
+            suffix = f"#{op}.{field}.{arg}"
+            for kind, value, conf, cost, label in (
+                    ("sqli.probe", 0.7, 0.3, 2, "SQLi"),) + self._PARAM_INJECTION_ORACLES:
+                out.append(_action(kind, endpoint, value=value, confidence=conf, cost=cost,
+                                   params=dict(params), id=f"{kind}:{endpoint}{suffix}",
+                                   desc=f"{label} sur {base} (chaîné)"))
+        return out
 
     def _endpoint_oracles(self, endpoint):
         """Oracles de vérification CIBLÉS sur un endpoint in-scope découvert. IDOR + SQLi + XSS reflected

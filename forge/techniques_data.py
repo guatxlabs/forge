@@ -245,6 +245,11 @@ TECHNIQUES = {t.key: t for t in [
     # mitre_by_kind() restent INCHANGÉES (byte-à-byte). recon.secrets -> ExposedSecrets (BB, preuve exigée).
     _k("recon.content",       "Recon", False, depends_on=("recon.httpx",), mitre="T1595.003",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
+    # Décrit la surface INJECTABLE d'une API GraphQL (introspection -> arguments scalaires). Sans lui,
+    # toute une famille d'applications reste hors d'atteinte des oracles d'injection : une API GraphQL
+    # n'a ni query-string ni formulaire, son point d'injection est un argument dans la chaîne `query`.
+    _k("recon.graphql",       "Recon", False, depends_on=("recon.httpx",), mitre="T1595",
+       attck_tactic="Reconnaissance", phase="recon", capability="active"),
     _k("recon.secrets",       "ExposedSecrets", True, depends_on=("recon.js_endpoints",), mitre="T1552.001",
        attck_tactic="Credential Access", phase="recon", capability="passive", proof_required=True),
     _k("recon.waf",           "Recon", False, depends_on=("recon.httpx",), mitre="T1590",
@@ -564,6 +569,39 @@ PURPLE_FALLBACK_KINDS = (
 DISCOVERY_SUBDOMAIN_MARKER = "Sous-domaine in-scope"       # recon.subdomains : nouvel hôte in-scope
 DISCOVERY_ENDPOINT_MARKER = "Endpoint in-scope"            # recon.js_endpoints : endpoint référencé JS
 DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL d'archive in-scope
+# recon.graphql : ARGUMENT injectable d'un champ GraphQL. La surface GraphQL n'a NI query-string NI
+# formulaire — son point d'injection est un argument DANS la chaîne `query` d'un corps JSON. Le titre
+# porte donc, en plus du marqueur, l'opération / le champ / l'argument, encodés et décodés par les DEUX
+# fonctions ci-dessous : émetteur et détecteur partagent le code, jamais un format recopié.
+DISCOVERY_GRAPHQL_ARG_MARKER = "Argument GraphQL injectable"
+
+
+def graphql_arg_title(operation, field, arg, returns_object=False):
+    """Titre CANONIQUE d'un argument GraphQL découvert. `operation` ∈ {query, mutation}.
+
+    `returns_object` n'est PAS un détail cosmétique : GraphQL EXIGE une sélection de sous-champs sur
+    un champ qui rend un objet, et l'INTERDIT sur un champ qui rend un scalaire. Générer la mauvaise
+    forme produit « must have a selection of subfields » — une erreur de SYNTAXE que l'oracle lirait
+    comme « pas vulnérable ». Le faux négatif serait total et silencieux, alors même que la charge a
+    bien été envoyée. L'information est donc portée par le titre, pas devinée par le lecteur."""
+    forme = "objet" if returns_object else "scalaire"
+    return f"{DISCOVERY_GRAPHQL_ARG_MARKER} — {operation} {field}({arg}) [{forme}]"
+
+
+def parse_graphql_arg_title(title):
+    """`(operation, field, arg, returns_object)` depuis un titre canonique, ou None. Ne lève jamais.
+
+    SOURCE UNIQUE avec `graphql_arg_title` : c'est la leçon des listes tenues à la main de ce dépôt
+    (`_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS`) — deux copies d'un même format divergent toujours."""
+    text = str(title or "")
+    if not text.startswith(DISCOVERY_GRAPHQL_ARG_MARKER):
+        return None
+    m = _GRAPHQL_ARG_RX.search(text)
+    return (m.group(1), m.group(2), m.group(3), m.group(4) == "objet") if m else None
+
+
+_GRAPHQL_ARG_RX = __import__("re").compile(
+    r"—\s*(query|mutation)\s+([A-Za-z_][\w]*)\(([A-Za-z_][\w]*)\)\s*\[(objet|scalaire)\]")
 # recon.httpx / recon.nmap : service web DÉCOUVERT sur un port NON standard (ex. host:7100). Émis en
 # PLUS du finding de synthèse, target = `host:port` -> devient un nœud du graphe que le cerveau chaîne
 # (actions web de base + modules web explicites via _directive_actions) sur cette NOUVELLE surface. Sans
