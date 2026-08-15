@@ -301,6 +301,27 @@ _SQL_ERROR_SIGNS = [
     "microsoft ole db provider", "odbc sql server driver", "microsoft sql native client",
     "ora-00933", "ora-01756", "ora-00921", "supplied argument is not a valid mysql",
     "mysql_fetch", "division by zero", "conversion failed when converting",
+    # --- PILOTES PYTHON, tels que les rend une couche ORM (SQLAlchemy en tête) -------------------
+    # MESURÉ le 2026-08-15 sur DVGA : la charge `1'` de cet oracle provoque bel et bien l'erreur,
+    # et AUCUNE des signatures ci-dessus ne la reconnaissait —
+    #     {"errors":[{"message":"(sqlite3.OperationalError) near \"1\": syntax error\n[SQL: SELECT …
+    # `sqlite3::` (deux-points) ne matche pas `sqlite3.` (point), et `syntax error at or near` est la
+    # forme PostgreSQL, pas la forme SQLite (`near \"…\": syntax error`). L'oracle voyait donc l'erreur
+    # passer sans la lire, et rendait « SQLi non confirmé » sur une injection PROUVÉE à la main.
+    #
+    # PORTÉE — ce n'est pas un cas DVGA. SQLAlchemy préfixe TOUTE erreur du pilote sous-jacent par
+    # `(<module>.<Classe>)`, et c'est la couche d'accès dominante de l'écosystème Python : Flask,
+    # FastAPI, Django-avec-SQLAlchemy, la quasi-totalité des API modernes. Forge était aveugle à
+    # cette famille entière — une liste tenue à la main avait dérivé du terrain, comme
+    # `_RATE_FLAG_KINDS` avant elle.
+    "(sqlite3.", "(psycopg2.", "(pymysql.", "(mysqldb.", "(mariadb.", "(cx_oracle.", "(oracledb.",
+    "(pyodbc.", "(asyncpg.", "(aiomysql.", "(sqlalchemy.exc.",
+    # Phrasés SQLite eux-mêmes. `near "` SEUL serait trop large (une application peut écrire
+    # « near "Paris" » en toute légitimité) : on exige le phrasé COMPLET de l'erreur. Le garde
+    # existant — signature ABSENTE de la baseline — protège déjà, mais il ne dispense pas de viser
+    # juste : élargir une signature au-delà de ce qu'on a mesuré, c'est fabriquer le faux positif
+    # de demain.
+    '": syntax error', "no such column",
 ]
 # Extraction de la VERSION du SGBD UNIQUEMENT (convention workspace « SQLi = version du SGBD seule »).
 _DBMS_VERSION_RX = re.compile(
