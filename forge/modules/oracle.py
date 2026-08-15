@@ -799,6 +799,14 @@ class Oracle(Module):
     #: Marqueur de la position d'injection dans un `body_template`. Choisi pour ne jamais apparaître
     #: dans un corps légitime et ne rien signifier en JSON, GraphQL, XML ou urlencodé.
     PAYLOAD_SLOT = "__FORGE_PAYLOAD__"
+    #: Créneau du PORT, pour les surfaces qui déclarent l'hôte et le port SÉPARÉMENT — le cas de
+    #: GraphQL (`importPaste(host: String, port: Int)`). Sans lui, un oracle qui fait varier le port
+    #: doit tout écrire dans l'unique créneau de charge, c'est-à-dire pousser une URL COMPLÈTE dans un
+    #: argument qui attend un hôte nu. MESURÉ sur DVGA : `Could not resolve host: http` — le serveur
+    #: composait `http://http://127.0.0.1:5013:5013/`. La SSRF était atteinte et illisible.
+    #: `inject_request` NE le connaît PAS : c'est l'oracle qui fait varier le port qui le remplit,
+    #: chacun sa compétence.
+    PORT_SLOT = "__FORGE_PORT__"
 
     @staticmethod
     def _slot_escape(payload, template):

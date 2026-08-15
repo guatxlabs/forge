@@ -197,13 +197,29 @@ class SsrfXspa(ScopeGuardedOracle):
         REFUSÉ (jamais de weaponization de la SSRF pour scanner un tiers). Fail-closed."""
         return self._is_loopback(host) or self._in_scope(action, host)
 
-    def _inject(self, action, param, internal_url, method, headers, timeout):
+    def _inject(self, action, param, internal_url, method, headers, timeout, port=None, host=None):
         """Injecte l'URL interne dans le paramètre SSRF-able et renvoie (status, body).
 
         FORME de la requête : `Oracle.inject_request` (source UNIQUE, défaut D6) — valeur du paramètre
         ciblé REMPLACÉE, autres paramètres PRÉSERVÉS, en GET comme en POST. NOUS ne requêtons que
-        action.target (in-scope) ; l'URL interne est fetchée PAR LE SERVEUR, jamais par nous."""
-        url, data = self.inject_request(action.target, param, internal_url, method, body_template=action.params.get("body_template"))
+        action.target (in-scope) ; l'URL interne est fetchée PAR LE SERVEUR, jamais par nous.
+
+        HÔTE ET PORT SÉPARÉS (`Oracle.PORT_SLOT`) — certaines surfaces ne prennent pas une URL mais un
+        hôte NU et un port à part : `importPaste(host: String, port: Int)` en GraphQL. Y pousser une
+        URL complète produit une requête que le serveur ne sait pas composer. MESURÉ sur DVGA : 13
+        `curl` internes tirés (la SSRF est donc bien atteinte) et 12 échecs
+        `Could not resolve host: http`, le serveur ayant composé `http://http://127.0.0.1:5013:5013/`.
+        La vulnérabilité était touchée et le signal illisible.
+
+        Quand le gabarit déclare un créneau de port, on lui donne donc ce qu'il demande : l'HÔTE NU
+        dans le créneau de charge, le PORT dans le sien. Gabarit sans créneau de port -> chemin
+        historique, URL complète, BYTE-IDENTIQUE."""
+        tmpl = action.params.get("body_template")
+        value = internal_url
+        if tmpl and self.PORT_SLOT in str(tmpl) and port is not None:
+            tmpl = str(tmpl).replace(self.PORT_SLOT, str(int(port)))
+            value = host if host is not None else internal_url
+        url, data = self.inject_request(action.target, param, value, method, body_template=tmpl)
         return self._fetch(url, headers=headers, method=method, data=data, timeout=timeout)
 
     @staticmethod
@@ -301,7 +317,8 @@ class SsrfXspa(ScopeGuardedOracle):
             qui répond à « la réponse varie-t-elle du tout ? », AVANT toute normalisation."""
             iu = f"{scheme}://{internal_host}:{port}/"
             t = time.monotonic()
-            st, body = self._inject(action, param, iu, method, headers, timeout)
+            st, body = self._inject(action, param, iu, method, headers, timeout,
+                                    port=port, host=internal_host)
             el = time.monotonic() - t
             return self._sig(st, body, all_urls, all_ports, internal_host), st, body, el
 
