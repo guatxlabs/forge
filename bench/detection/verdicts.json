@@ -109,5 +109,18 @@
   "juiceshop/B/access_control.idor@http://127.0.0.1:3000/api/BasketItems": {
     "verdict": "TP",
     "why": "2026-08-11 (r5) — rejoue main : anonyme -> 401 ; TOUT compte authentifie recoit la liste COMPLETE (8 items, BasketId distincts 1,2,3,4,5 — cinq paniers d'AUTRES comptes). Lecture cross-compte reelle. RESERVE consignee : la preuve de forge (`meme_objet` = corps normalise identique) serait aussi vraie si les deux comptes voyaient la meme collection VIDE — cf. defaut D22. Ici corroboree par des donnees reelles, donc TP."
-  }
+  },
+  "dvga/B/sqli.probe@http://127.0.0.1:5013/graphql": {
+    "verdict": "TP",
+    "why": "2026-08-16 — rejoue MAIN hors forge sur DVGA vivante : POST {\"query\":\"{pastes(filter:\\\"zzz'\\\"){id}}\"} -> \"(sqlite3.OperationalError) near \\\"zzz\\\": syntax error [SQL: SELECT pastes.id ...]\" ; le filter normal rend {\"data\":{\"pastes\":[]}}. Injection SQL reelle dans un ARGUMENT GraphQL."
+  },
+  "dvga/B/cmdi.probe@http://127.0.0.1:5013/graphql": {
+    "verdict": "TP",
+    "why": "2026-08-16 — rejoue MAIN hors forge : {systemDebug(arg:\\\"; id #\\\")} rend la sortie de `ps` SUIVIE de \"uid=1000(dvga) gid=1000(dvga)\". Execution de commande reelle. NOTE : j'avais moi-meme ecarte ce champ apres un test trop rapide (arg:\\\"id\\\" rend \"\" car `ps id` echoue sans bruit) — l'outil a trouve ce que mon exploration manuelle avait classe sans interet."
+  },
+  "dvga/B/rce.probe@http://127.0.0.1:5013/graphql": {
+    "verdict": "TP",
+    "why": "2026-08-16 — meme preuve que cmdi.probe sur le meme champ (systemDebug(arg:)) : 1 vulnerabilite, 2 oracles distincts qui la confirment."
+  },
+  "_comment_2026_08_16": "QUATRIEME campagne — code final (recon.graphql, recon.forms, signatures ORM, PORT_SLOT, traversee en ecriture). Les 3 findings GraphQL de DVGA piste B sont les PREMIERS de cette application : elle rendait 0 sur 6 depuis deux campagnes. Verdicts etablis par rejeu MANUEL hors forge."
 }
