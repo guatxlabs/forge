@@ -176,7 +176,12 @@ class TestBrainChainsInjectionOracles(unittest.TestCase):
         ep = "http://app.test/api/orders"
         g.add_finding(_disc_endpoint(ep))
         onep = {a.kind for a in HeuristicBrain().propose(g) if a.target == ep}
-        self.assertEqual(onep, {"access_control.idor", "sqli.probe", "xss.reflected"})
+        # RUPTURE NOMMÉE — le TRIO devient un QUATUOR : `recon.forms` s'ajoute sur un endpoint
+        # SANS paramètre. C'est précisément le manque que ce test décrivait sans le nommer :
+        # les trois oracles « dégradent proprement » faute de paramètre, et le quatrième va
+        # justement CHERCHER ce paramètre dans les `<input name=…>` de la page. Mesuré :
+        # endpoint nu -> 3 oracles / 0 paramètre ; `?id=1&Submit=Submit` -> 23 actions / 12.
+        self.assertEqual(onep, {"access_control.idor", "recon.forms", "sqli.probe", "xss.reflected"})
 
     def test_multi_param_chains_each_param_bounded(self):
         # MULTI-PARAM : chaque paramètre (borné à MAX_PARAMS_PER_ENDPOINT, dédupliqué par nom) chaîne

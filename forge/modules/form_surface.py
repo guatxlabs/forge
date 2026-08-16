@@ -96,7 +96,11 @@ class FormSurface(ScopeGuardMixin, Module):
     category = "recon"
     mitre = techniques.mitre_for("recon.forms") or "T1595"
     tool = "forge/modules/form_surface.py:recon.forms"
-    emit_endpoint_discovery = True
+    # PAS `emit_endpoint_discovery` — et c'est une correction, pas un oubli. Ce module n'émet
+    # AUCUN endpoint : il émet des PARAMÈTRES (`DISCOVERY_FORM_MARKER`). Le déclarer producteur
+    # d'endpoints le faisait classer « scopé HÔTE » par le garde anti-action-aveugle (D9/D16),
+    # qui refusait alors de le chaîner sur un endpoint — exactement là où il doit tourner,
+    # puisqu'il lit UNE page. Le garde avait raison ; c'est la déclaration qui mentait.
     description = ("Lit les FORMULAIRES d'une page in-scope et émet leurs champs. Un crawler "
                    "découvre des chemins, pas des paramètres : sans cette lecture, les oracles à "
                    "injection restent sans cible sur toute application à formulaires.")

@@ -601,6 +601,16 @@ class HeuristicBrain(Brain):
             _action("access_control.idor", endpoint, value=0.8, confidence=0.3, cost=2,
                     params={"urls": [endpoint]}, desc="IDOR sur endpoint découvert (chaîné)"),
         ]
+        # LIRE LES FORMULAIRES DE **CETTE** PAGE. Le maillon qui manquait, et la mesure l'a dit sans
+        # ambiguïté : `recon.forms` ne tournait que sur la RACINE du site, où DVWA sert une page de
+        # login sans champ vulnérable — « Aucun formulaire sur cette page ». Or les formulaires qui
+        # comptent vivent sur les pages PROFONDES que la découverte vient justement de trouver
+        # (`/vulnerabilities/sqli/`). Un producteur de paramètres qui ne suit pas la découverte ne
+        # sert à rien : c'est le même geste que le chaînage des oracles, appliqué à l'ALIMENTATION.
+        # EV faible (1 GET, aucune soumission) : il passe tôt sans déplacer les oracles.
+        if not params:
+            out.append(_action("recon.forms", endpoint, value=0.5, confidence=0.5, cost=1,
+                               desc="lecture des formulaires de l'endpoint découvert (chaîné)"))
         if not params:
             # SANS param : SQLi/XSS restent chaînés (ils dégradent proprement en `tested`, jamais de faux
             # positif) ; le panel élargi N'est PAS chaîné (il dégraderait TOUT en « config manquante »).

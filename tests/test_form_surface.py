@@ -130,14 +130,33 @@ class TheBrainRebuildsACarryingUrl(unittest.TestCase):
 
     def test_le_fan_out_passe_de_3_a_DOUZE_oracles(self):
         """LE CHIFFRE DU MUR : c'est toute la distance entre DVWA piste B et la piste amorcée."""
-        nu = AutoPentestBrain()._endpoint_oracles(URL)
-        porteuse = self._acts()
-        self.assertLessEqual(len({a.kind for a in nu}), 3)
-        self.assertGreaterEqual(len({a.kind for a in porteuse}), 10)
+        nu = {a.kind for a in AutoPentestBrain()._endpoint_oracles(URL)}
+        porteuse = {a.kind for a in self._acts()}
+        # On compare ce que la mesure compare : le PANEL D'INJECTION. L'endpoint nu n'a que le
+        # minimum qui dégrade proprement (+ `recon.forms`, qui va justement chercher les paramètres) ;
+        # l'URL porteuse ouvre le panel entier. Compter les oracles bruts ferait casser ce test à
+        # chaque enrichissement du chaînage sans rien protéger de plus.
+        panel = {k for k, *_ in AutoPentestBrain._PARAM_INJECTION_ORACLES}
+        self.assertEqual(nu & panel, set(), f"un endpoint SANS paramètre ne peut rien injecter : {nu}")
+        self.assertGreaterEqual(len(porteuse & panel), 8, f"panel non ouvert : {porteuse}")
 
     def test_le_CO_PARAMETRE_voyage_dans_la_cible(self):
         for a in self._acts():
             self.assertIn("Submit=Submit", a.target)
+
+    def test_la_lecture_de_formulaire_SUIT_la_decouverte(self):
+        """LE MAILLON QUE LA MESURE A RÉVÉLÉ MANQUANT. `recon.forms` ne tournait que sur la RACINE
+        du site — où DVWA sert un login sans champ vulnérable (« Aucun formulaire sur cette page »).
+        Les formulaires qui comptent vivent sur les pages PROFONDES que la découverte vient de
+        trouver. Un producteur de paramètres qui ne suit pas la découverte ne sert à rien."""
+        nu = AutoPentestBrain()._endpoint_oracles("http://app.test/vulnerabilities/sqli/")
+        self.assertIn("recon.forms", {a.kind for a in nu},
+                      "un endpoint découvert SANS paramètre doit voir ses formulaires lus")
+
+    def test_un_endpoint_QUI_A_DEJA_ses_parametres_ne_les_relit_pas(self):
+        """Pas de travail inutile : si la query porte déjà des paramètres, il n'y a rien à lire."""
+        av = AutoPentestBrain()._endpoint_oracles("http://app.test/x?id=1")
+        self.assertNotIn("recon.forms", {a.kind for a in av})
 
     def test_un_finding_etranger_est_ignore(self):
         self.assertEqual(AutoPentestBrain()._chain_from_forms(

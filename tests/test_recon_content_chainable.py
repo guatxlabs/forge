@@ -180,9 +180,11 @@ class TestChainedSurface(unittest.TestCase):
             covered = [r["url"] for r in ROUTES if by_target.get(r["url"])]
             self.assertEqual(len(covered), len(ROUTES),
                              f"routes chaînées : {len(covered)}/{len(ROUTES)} (0 = culs-de-sac)")
-            self.assertEqual(len(actions), 47, "11 actions d'hôte + 12 routes x 3 oracles")
+            # RUPTURE NOMMÉE : 3 oracles par route -> 4 (`recon.forms` va chercher les paramètres
+            # que le crawler n'a pas vus). 11 + 12x4 = 59.
+            self.assertEqual(len(actions), 59, "11 actions d'hôte + 12 routes x 4 oracles")
             self.assertEqual(sorted(set(by_target[covered[0]])),
-                             ["access_control.idor", "sqli.probe", "xss.reflected"])
+                             ["access_control.idor", "recon.forms", "sqli.probe", "xss.reflected"])
 
         # MUTATION = l'état d'AVANT : aucune route marquée -> l'edge (e) reste éteint.
         _assert_mutation_kills(self, check, _NO_CHAINABLE,
@@ -303,7 +305,12 @@ class TestFloodGuards(unittest.TestCase):
         chemin fantôme : SQLi/XSS dégradent (« config manquante »), IDOR est différentiel."""
         _actions, by_target = _proposed(_fire())
         chained = sorted(set(by_target[ROUTES[0]["url"]]))
-        self.assertEqual(chained, ["access_control.idor", "sqli.probe", "xss.reflected"])
+        # RUPTURE NOMMÉE — le TRIO devient un QUATUOR : `recon.forms` s'ajoute sur un endpoint
+        # SANS paramètre. C'est précisément le manque que ce test décrivait sans le nommer :
+        # les trois oracles « dégradent proprement » faute de paramètre, et le quatrième va
+        # justement CHERCHER ce paramètre dans les `<input name=…>` de la page. Mesuré :
+        # endpoint nu -> 3 oracles / 0 paramètre ; `?id=1&Submit=Submit` -> 23 actions / 12.
+        self.assertEqual(chained, ["access_control.idor", "recon.forms", "sqli.probe", "xss.reflected"])
         from forge.modules import registry
         for kind in ("sqli.probe", "xss.reflected"):
             out = registry.get(kind).fire(Action(kind, ROUTES[0]["url"],
