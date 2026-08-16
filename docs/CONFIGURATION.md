@@ -360,6 +360,60 @@ egress qu'on autorise sans le voir se reproduira à l'identique.
 
 ---
 
+## 2quinquies. Découverte AUTHENTIFIÉE — ce que forge ne fait PAS, et pourquoi
+
+**À dire d'emblée : la découverte profonde sous authentification n'est PAS automatique.** Les oracles
+natifs de forge portent la session gouvernée (`scope.session`) sur chaque requête ; les **crawlers
+externes**, non. Ils explorent donc la cible **non authentifiés**.
+
+### Le coût, mesuré
+
+Banc du 2026-08-16, DVWA (application dont TOUT le contenu vulnérable est derrière un login) :
+
+| | mesuré |
+|---|---|
+| cibles distinctes atteintes en campagne autonome | 27 |
+| cibles `/vulnerabilities/*` (les pages vulnérables) | **0** |
+| classes opposables trouvées, piste autonome | **0 / 9** |
+| … les mêmes classes, amorcées à la main avec la session | **5 / 9** |
+
+Le jugement de forge n'est pas en cause : les oracles trouvent 5 classes sur 9 dès qu'on leur donne
+les cibles. Ce qui manque est en amont — **le crawler ne voit qu'une page de login**.
+
+### Pourquoi ce n'est pas simplement « câblé »
+
+Donner la session à un outil externe suppose un canal. Il n'y en a que deux, et **aucun n'est sûr
+par la voie docker** :
+
+| canal | ce que les outils supportent | ce que ça coûte |
+|---|---|---|
+| **argv** (`-b/--cookies`, `-H`) | feroxbuster ✅, katana ✅ | le secret devient **world-readable** via `ps`, et se retrouve dans le ledger et les PoC |
+| **fichier** (`-H <file>`, `-config`) | katana ✅, feroxbuster via `ferox-config.toml` | exige un **montage** dans le conteneur — refusé par conception |
+
+Et le refus du montage n'est pas une commodité manquante : il est argumenté dans
+`forge/runner.py` §1, et son argument **couvre exactement ce cas**. Chaque invocation docker porte
+déjà `--network host` ; un montage, même `:ro`, borne les **écritures**, pas les **lectures** — or
+« une lecture dans un conteneur qui a le réseau de l'hôte est à un `curl` de l'exfiltration ».
+
+**Le canal fichier serait donc MOINS sûr que l'argv, pas plus** : l'argv expose le secret à qui lit
+`ps` sur la machine ; le fichier monté l'expose à l'image tierce elle-même, qui a le réseau. C'est
+contre-intuitif, et c'est la raison pour laquelle forge ne fait ni l'un ni l'autre par défaut.
+
+### Ce que l'opérateur peut faire, aujourd'hui
+
+1. **Amorcer les cibles authentifiées** (`forge run --actions`) — la voie mesurée à 5/9 sur DVWA.
+   L'opérateur connaît ses URL ; il n'a pas besoin qu'un crawler les devine.
+2. **Faire tourner le crawler en BINAIRE LOCAL** plutôt qu'en conteneur. Hors docker, le canal
+   fichier redevient viable : un fichier d'en-têtes en `0600` n'est lisible que par son propriétaire
+   et n'apparaît pas dans `ps`. C'est **strictement plus sûr que l'argv** — mais seulement hors
+   conteneur.
+3. **Accepter l'exposition argv en connaissance de cause**, en passant soi-même le cookie via
+   `params.extra_args` de l'outil. Forge ne le fait pas à votre place : *un outil qui redacte ses
+   secrets partout ailleurs ne doit pas en publier un dans une ligne de commande sans que vous
+   l'ayez décidé.*
+
+---
+
 ## 3. Qu'est-ce qui est configurable où ?
 
 | Réglage | Au déploiement (env) | Dans l'UI (settings) |

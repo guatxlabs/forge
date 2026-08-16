@@ -323,7 +323,8 @@ CATALOG_SPECS = [
         # sonde RÉELLE au lieu de « config manquante ») — au lieu d'un simple finding texte jamais vérifié.
         emit_endpoint_discovery=True,
         description="Crawler d'endpoints (katana) — URLs découvertes, re-validées scope fail-closed, émises "
-                    "comme endpoints CHAÎNABLES (-> oracles à injection). js-crawl (-jc)/known-files (-kf) allowlistés."),
+                    "comme endpoints CHAÎNABLES (-> oracles à injection). js-crawl (-jc)/known-files (-kf) allowlistés. "
+                    "NON AUTHENTIFIÉ : ce crawler n'emporte PAS la session gouvernée (`scope.session`) — il ne voit donc que la surface publique. Une application dont le contenu est derrière un login ne rendra qu'une page de login (mesuré sur DVWA : 0 cible `/vulnerabilities/*` sur 27 atteintes). Ce n'est pas un oubli : le secret ne peut passer que par l'argv (visible via `ps`) ou par un fichier monté (pire encore sous `--network host`) — cf. docs/CONFIGURATION.md §2quinquies. "),
     # gau — IMAGE `sxcurity/gau`, celle que le README AMONT (github.com/lc/gau) désigne nommément ;
     #   entrypoint `gau` (la CLI). ARGV + PARSEUR MESURÉS PAR EXÉCUTION, contre un fournisseur Wayback
     #   MOCKÉ EN LOCAL (aucun paquet vers web.archive.org) : `gau --subs --providers wayback lab.test`
@@ -423,6 +424,7 @@ CATALOG_SPECS = [
         flag_allowlist=("-w", "-t", "-d", "-x", "-s", "-C", "-T", "--rate-limit", "--scan-limit",
                         "--silent", "-k", "-n", "-r", "-L"),
         description="Découverte de contenu/routes (feroxbuster) — chemins trouvés, re-validés scope. "
+                    "NON AUTHENTIFIÉ : ce crawler n'emporte PAS la session gouvernée (`scope.session`) — il ne voit donc que la surface publique. Une application dont le contenu est derrière un login ne rendra qu'une page de login (mesuré sur DVWA : 0 cible `/vulnerabilities/*` sur 27 atteintes). Ce n'est pas un oubli : le secret ne peut passer que par l'argv (visible via `ps`) ou par un fichier monté (pire encore sous `--network host`) — cf. docs/CONFIGURATION.md §2quinquies. "
                     "Image docker epi052/feroxbuster (auteur), PRÉFÉRÉE car elle EMBARQUE sa wordlist "
                     "par défaut : sans wordlist, feroxbuster sort rc=0 stdout VIDE (mesuré) — un "
                     "silence que la garde rc!=0 ne rattrape pas. Wordlist surchargeable via "
