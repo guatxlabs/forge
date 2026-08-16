@@ -128,10 +128,17 @@ class GraphqlSurface(ScopeGuardMixin, Module):
         for op, key in (("query", "queryType"), ("mutation", "mutationType")):
             for field in ((schema.get(key) or {}).get("fields") or []):
                 obj = _returns_object(field)
+                tous = [(a.get("name", ""), _arg_type(a)) for a in (field.get("args") or [])]
                 for arg in (field.get("args") or []):
                     t = _arg_type(arg)
                     if t in SCALAR_ARGS:
-                        out.append((op, field.get("name", ""), arg.get("name", ""), t, obj))
+                        nom = arg.get("name", "")
+                        # CO-ARGUMENTS (leçon de D6) : les AUTRES arguments du même champ voyagent
+                        # avec, pour que l'appel dérivé soit COMPLET. Mesuré : sans eux, la chaîne
+                        # automatique n'atteignait qu'une classe sur six — `systemDiagnostics` appelé
+                        # avec le seul `username` n'a même pas de commande à exécuter.
+                        freres = tuple((n, ty) for n, ty in tous if n and n != nom)
+                        out.append((op, field.get("name", ""), nom, t, obj, freres))
         return out
 
     def dry(self, action):
@@ -165,9 +172,10 @@ class GraphqlSurface(ScopeGuardMixin, Module):
                  f"exposés={len(args)}, retenus={min(len(args), MAX_ARGS)} (borne MAX_ARGS={MAX_ARGS}, "
                  f"déclarée — jamais de troncature silencieuse). Ce finding DÉCRIT une surface : "
                  f"aucune charge n'a été envoyée."))]
-            for op, field, arg, atype, obj in args[:MAX_ARGS]:
+            for op, field, arg, atype, obj, freres in args[:MAX_ARGS]:
                 findings.append(self._finding(
-                    action, url, techniques.graphql_arg_title(op, field, arg, returns_object=obj),
+                    action, url, techniques.graphql_arg_title(op, field, arg, returns_object=obj,
+                                                              siblings=freres),
                     (f"argument {arg}:{atype} du champ {op} {field} — point d'injection candidat. "
                      f"Le cerveau en dérive un gabarit de corps ; les oracles jugent. "
                      f"CO-ARGUMENTS NON DEVINÉS : un champ qui exige d'autres arguments (auth, id) "

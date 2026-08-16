@@ -70,6 +70,12 @@ def _action(kind, target, **kw):
     return Action(kind, target, **kw)
 
 
+#: Valeur NEUTRE par type GraphQL, pour compléter un appel sans rien deviner. On ne cherche pas à
+#: satisfaire une logique métier — seulement à produire un appel bien formé, que le résolveur puisse
+#: atteindre. Un type inconnu retombe sur une chaîne : c'est le cas le plus courant et le plus inerte.
+_NEUTRAL_ARG = {"String": '"forge"', "ID": '"1"', "Int": "1", "Float": "1.0", "Boolean": "true"}
+
+
 def _as_graph(graph_state):
     """Accepte un EngagementGraph (nouveau contrat) OU une list[Target] (ancien contrat).
 
@@ -495,7 +501,7 @@ class HeuristicBrain(Brain):
             parsed = techniques.parse_graphql_arg_title(f.get("title", ""))
             if not parsed:
                 continue
-            op, field, arg, returns_object = parsed
+            op, field, arg, returns_object, siblings = parsed
             endpoint = f.get("target")
             if not endpoint or len(out) >= self.MAX_GRAPHQL_ARGS * (1 + len(self._PARAM_INJECTION_ORACLES)):
                 continue
@@ -506,8 +512,17 @@ class HeuristicBrain(Brain):
             # selection of subfields », que l'oracle lirait comme « pas vulnérable » : un faux négatif
             # total et silencieux, charge pourtant envoyée.
             selection = "{__typename}" if returns_object else ""
-            tmpl = _json.dumps({"query": '%s{%s(%s:"%s")%s}' % (
-                "" if op == "query" else "mutation ", field, arg, slot, selection)})
+            # CO-ARGUMENTS — la leçon de D6 (le `Submit` de DVWA) dans une surface nouvelle : une
+            # action doit porter les co-paramètres que l'application EXIGE. Mesuré : la chaîne
+            # automatique n'atteignait qu'UNE classe sur six, et l'unique cause était là —
+            # `{systemDiagnostics(username:"…")}` n'a même pas de commande à exécuter, et
+            # `{systemDiagnostics(cmd:"…")}` est refusé faute d'identifiants.
+            # On donne aux frères une valeur NEUTRE PAR TYPE : on complète un APPEL, on ne devine
+            # aucun secret. Un champ gaté par une authentification restera non concluant — c'est le
+            # bon sens de l'erreur, et l'opérateur qui connaît les valeurs fournit son gabarit.
+            co = "".join(f",{n}:{_NEUTRAL_ARG.get(t, '"forge"')}" for n, t in siblings)
+            tmpl = _json.dumps({"query": '%s{%s(%s:"%s"%s)%s}' % (
+                "" if op == "query" else "mutation ", field, arg, slot, co, selection)})
             params = {"param": arg, "method": "POST",
                       "headers": {"Content-Type": "application/json"},
                       "body_template": tmpl}

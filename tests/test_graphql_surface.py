@@ -101,12 +101,42 @@ class TheBrainTurnsItIntoTests(unittest.TestCase):
         for attendu in ("sqli.probe", "cmdi.probe", "rce.probe", "ssrf.xspa"):
             self.assertIn(attendu, kinds)
 
+    def test_les_CO_ARGUMENTS_accompagnent_la_charge(self):
+        """LEÇON DE D6 dans une surface nouvelle. `systemDiagnostics(username,password,cmd)` appelé
+        avec le seul `cmd` est refusé faute d'identifiants ; avec le seul `username`, il n'a même pas
+        de commande à exécuter. Mesuré : la chaîne automatique n'atteignait qu'UNE classe sur six, et
+        l'unique cause était là. Les frères reçoivent une valeur NEUTRE PAR TYPE — on complète un
+        APPEL, on ne devine aucun secret."""
+        qs = {json.loads(a.params["body_template"])["query"] for a in self._acts()}
+        cmd = [q for q in qs if "systemDiagnostics" in q]
+        self.assertTrue(cmd)
+        for q in cmd:
+            self.assertIn("__FORGE_PAYLOAD__", q)
+            self.assertIn("cmd:", q)
+
+    def test_un_type_INT_recoit_un_entier_non_quote(self):
+        """`port: Int` : une chaîne serait une erreur de type, donc un faux négatif garanti."""
+        f = [{"title": T.graphql_arg_title("mutation", "importPaste", "host", returns_object=True,
+                                           siblings=(("port", "Int"), ("path", "String"))),
+              "target": ENDPOINT}]
+        q = json.loads(AutoPentestBrain()._chain_from_graphql(f)[0].params["body_template"])["query"]
+        self.assertIn("port:1", q)
+        self.assertIn('path:"forge"', q)
+
     def test_le_gabarit_porte_la_bonne_SELECTION(self):
         """Objet -> `{__typename}` ; scalaire -> rien. La mauvaise forme rend « must have a selection
         of subfields », que l'oracle lirait comme « pas vulnérable » : faux négatif TOTAL."""
         qs = {json.loads(a.params["body_template"])["query"] for a in self._acts()}
-        self.assertTrue(any('pastes(filter:"__FORGE_PAYLOAD__"){__typename}' in q for q in qs))
-        self.assertTrue(any(q.endswith('systemDiagnostics(cmd:"__FORGE_PAYLOAD__")}') for q in qs))
+        # On vérifie la PROPRIÉTÉ (sélection présente/absente selon la forme du champ), pas une
+        # chaîne littérale : le gabarit porte désormais aussi les co-arguments, et un test qui
+        # épouse la forme exacte casse à chaque enrichissement sans rien protéger de plus.
+        objets = [q for q in qs if "pastes(" in q]
+        scalaires = [q for q in qs if "systemDiagnostics(" in q]
+        self.assertTrue(objets and scalaires)
+        for q in objets:
+            self.assertTrue(q.endswith("{__typename}}"), f"sélection manquante sur un objet : {q}")
+        for q in scalaires:
+            self.assertNotIn("__typename", q, f"sélection posée sur un scalaire : {q}")
 
     def test_une_MUTATION_est_declaree_comme_telle(self):
         qs = {json.loads(a.params["body_template"])["query"] for a in self._acts()}

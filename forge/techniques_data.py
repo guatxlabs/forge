@@ -576,7 +576,7 @@ DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL 
 DISCOVERY_GRAPHQL_ARG_MARKER = "Argument GraphQL injectable"
 
 
-def graphql_arg_title(operation, field, arg, returns_object=False):
+def graphql_arg_title(operation, field, arg, returns_object=False, siblings=()):
     """Titre CANONIQUE d'un argument GraphQL découvert. `operation` ∈ {query, mutation}.
 
     `returns_object` n'est PAS un détail cosmétique : GraphQL EXIGE une sélection de sous-champs sur
@@ -585,11 +585,20 @@ def graphql_arg_title(operation, field, arg, returns_object=False):
     comme « pas vulnérable ». Le faux négatif serait total et silencieux, alors même que la charge a
     bien été envoyée. L'information est donc portée par le titre, pas devinée par le lecteur."""
     forme = "objet" if returns_object else "scalaire"
-    return f"{DISCOVERY_GRAPHQL_ARG_MARKER} — {operation} {field}({arg}) [{forme}]"
+    # CO-ARGUMENTS — la leçon de D6 (le `Submit` de DVWA) dans une surface nouvelle : une action doit
+    # porter les co-paramètres que l'application EXIGE. `systemDiagnostics(username,password,cmd)`
+    # appelé avec le seul `cmd` échoue AVANT d'atteindre le résolveur ; appelé avec le seul `username`
+    # n'a même pas de commande à exécuter. Mesuré : la chaîne automatique atteignait 1 classe sur 6,
+    # et l'unique cause était là. On transporte donc `nom:Type` pour chaque frère, et le lecteur leur
+    # donne une valeur NEUTRE par type — on complète un appel, on ne devine aucun secret.
+    freres = ",".join(f"{n}:{t}" for n, t in (siblings or ()))
+    return (f"{DISCOVERY_GRAPHQL_ARG_MARKER} — {operation} {field}({arg}) [{forme}]"
+            + (f" {{{freres}}}" if freres else ""))
 
 
 def parse_graphql_arg_title(title):
-    """`(operation, field, arg, returns_object)` depuis un titre canonique, ou None. Ne lève jamais.
+    """`(operation, field, arg, returns_object, siblings)` d'un titre canonique, ou None.
+    `siblings` = tuple de `(nom, Type)`. Ne lève jamais.
 
     SOURCE UNIQUE avec `graphql_arg_title` : c'est la leçon des listes tenues à la main de ce dépôt
     (`_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS`) — deux copies d'un même format divergent toujours."""
@@ -597,11 +606,19 @@ def parse_graphql_arg_title(title):
     if not text.startswith(DISCOVERY_GRAPHQL_ARG_MARKER):
         return None
     m = _GRAPHQL_ARG_RX.search(text)
-    return (m.group(1), m.group(2), m.group(3), m.group(4) == "objet") if m else None
+    if not m:
+        return None
+    freres = []
+    for part in (m.group(5) or "").split(","):
+        nom, _, typ = part.partition(":")
+        if nom.strip() and typ.strip():
+            freres.append((nom.strip(), typ.strip()))
+    return (m.group(1), m.group(2), m.group(3), m.group(4) == "objet", tuple(freres))
 
 
 _GRAPHQL_ARG_RX = __import__("re").compile(
-    r"—\s*(query|mutation)\s+([A-Za-z_][\w]*)\(([A-Za-z_][\w]*)\)\s*\[(objet|scalaire)\]")
+    r"—\s*(query|mutation)\s+([A-Za-z_][\w]*)\(([A-Za-z_][\w]*)\)\s*\[(objet|scalaire)\]"
+    r"(?:\s*\{([^}]*)\})?")
 # recon.httpx / recon.nmap : service web DÉCOUVERT sur un port NON standard (ex. host:7100). Émis en
 # PLUS du finding de synthèse, target = `host:port` -> devient un nœud du graphe que le cerveau chaîne
 # (actions web de base + modules web explicites via _directive_actions) sur cette NOUVELLE surface. Sans
