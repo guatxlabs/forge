@@ -49,6 +49,7 @@ from .techniques_data import (  # noqa: F401  (ré-export : chemins d'import pub
     DISCOVERY_HISTORICAL_URL_MARKER, DISCOVERY_CHALLENGE_MARKER,
     DISCOVERY_SERVICE_MARKER,
     DISCOVERY_GRAPHQL_ARG_MARKER, graphql_arg_title, parse_graphql_arg_title,
+    DISCOVERY_FORM_MARKER, form_title, parse_form_title,
     PROFILES, _PHASE_RANK, PROFILE_NAMES,
 )
 from .challenge import (  # noqa: F401  (ré-export : `techniques.looks_like_challenge` stable)

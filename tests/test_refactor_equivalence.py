@@ -90,6 +90,10 @@ EXPECTED_KINDS = {
     # ni query-string ni formulaire, son point d'injection est un argument DANS la chaîne `query` :
     # sans ce producteur, toute une famille d'applications reste hors d'atteinte des oracles.
     "recon.graphql",
+    # AJOUT NOMMÉ (mur « DVWA piste B 0/9 ») — lit les FORMULAIRES d'une page découverte.
+    # Un crawler découvre des chemins, pas des paramètres : sans lui, les oracles à injection
+    # restent sans cible sur toute application à formulaires.
+    "recon.forms",
     # oracles d'injection server-side à preuve bénigne (injection.py)
     "ssti.eval", "path.traversal", "sqli.probe",
     # oracles client-side / flux de requête à preuve minimale (clientflow.py)

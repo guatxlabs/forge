@@ -250,6 +250,11 @@ TECHNIQUES = {t.key: t for t in [
     # n'a ni query-string ni formulaire, son point d'injection est un argument dans la chaîne `query`.
     _k("recon.graphql",       "Recon", False, depends_on=("recon.httpx",), mitre="T1595",
        attck_tactic="Reconnaissance", phase="recon", capability="active"),
+    # Lit les FORMULAIRES d'une page découverte : un crawler découvre des chemins, pas des
+    # paramètres. Sans lui, les oracles à injection restent sans cible sur toute application à
+    # formulaires (DVWA piste B : 0/9 opposables quand la piste amorcée en trouve 5).
+    _k("recon.forms",         "Recon", False, depends_on=("recon.httpx",), mitre="T1595",
+       attck_tactic="Reconnaissance", phase="recon", capability="active"),
     _k("recon.secrets",       "ExposedSecrets", True, depends_on=("recon.js_endpoints",), mitre="T1552.001",
        attck_tactic="Credential Access", phase="recon", capability="passive", proof_required=True),
     _k("recon.waf",           "Recon", False, depends_on=("recon.httpx",), mitre="T1590",
@@ -574,6 +579,44 @@ DISCOVERY_HISTORICAL_URL_MARKER = "URL historique in-scope"  # recon.urls : URL 
 # porte donc, en plus du marqueur, l'opération / le champ / l'argument, encodés et décodés par les DEUX
 # fonctions ci-dessous : émetteur et détecteur partagent le code, jamais un format recopié.
 DISCOVERY_GRAPHQL_ARG_MARKER = "Argument GraphQL injectable"
+# recon.forms : FORMULAIRE lu sur une page découverte. Un crawler découvre des CHEMINS, pas des
+# paramètres — et les oracles à injection restent alors sans cible (DVWA piste B : 0/9 opposables
+# quand la piste amorcée en trouve 5). Le titre porte la méthode et TOUS les champs, injectables
+# comme CO-PARAMÈTRES : c'est le défaut D6 (le `Submit` de DVWA), sans lequel la branche vulnérable
+# reste hors d'atteinte. Même doctrine que le codec GraphQL : une seule source pour le format.
+DISCOVERY_FORM_MARKER = "Formulaire in-scope"
+
+
+def form_title(method, fields):
+    """Titre CANONIQUE d'un formulaire. `fields` = [(nom, valeur, injectable)].
+    Un champ NON injectable (bouton de soumission nommé) est préfixé `=` — il reste un
+    CO-PARAMÈTRE que l'appel doit porter, mais jamais une cible d'injection."""
+    parts = []
+    for nom, val, inj in fields:
+        parts.append(f"{'' if inj else '='}{nom}={val}")
+    return f"{DISCOVERY_FORM_MARKER} — {str(method or 'GET').upper()} {{{','.join(parts)}}}"
+
+
+def parse_form_title(title):
+    """`(method, [(nom, valeur, injectable), …])` ou None. Pur, ne lève jamais."""
+    text = str(title or "")
+    if not text.startswith(DISCOVERY_FORM_MARKER):
+        return None
+    m = _FORM_TITLE_RX.search(text)
+    if not m:
+        return None
+    champs = []
+    for part in (m.group(2) or "").split(","):
+        if not part:
+            continue
+        inj = not part.startswith("=")
+        nom, _, val = part.lstrip("=").partition("=")
+        if nom.strip():
+            champs.append((nom.strip(), val, inj))
+    return (m.group(1), champs) if champs else None
+
+
+_FORM_TITLE_RX = __import__("re").compile(r"—\s*([A-Z]+)\s*\{([^}]*)\}")
 
 
 def graphql_arg_title(operation, field, arg, returns_object=False, siblings=()):

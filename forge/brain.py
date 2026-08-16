@@ -17,6 +17,7 @@ sur findings). La priorité réelle est garantie par le planner coverage-safe, p
 (anti-starvation) : le cerveau peut sur-/sous-noter sans affamer une voie qualifiante.
 """
 import json as _json
+from urllib.parse import urlencode as _urlencode, urlsplit as _urlsplit, urlunsplit as _urlunsplit
 
 from .roe import Action
 from .graph import EngagementGraph
@@ -416,6 +417,7 @@ class HeuristicBrain(Brain):
         # dans la chaîne `query`, que `_chain_from_endpoint` (qui lit des paramètres d'URL) ne peut
         # pas voir. Le titre du finding est décodé par la MÊME fonction qui l'a écrit.
         out += self._chain_from_graphql(findings)
+        out += self._chain_from_forms(findings)
 
         # (c) WAF/CDN identifié (finding recon.waf) -> la cible est PROTÉGÉE : proposer les enablers
         # d'évasion (accès derrière CDN/WAF) sur ce host. Chaîné depuis le fingerprint, planner-selectable.
@@ -539,6 +541,43 @@ class HeuristicBrain(Brain):
                 out.append(_action(kind, endpoint, value=value, confidence=conf, cost=cost,
                                    params=dict(params), id=f"{kind}:{endpoint}{suffix}",
                                    desc=f"{label} sur {base} (chaîné)"))
+        return out
+
+    #: Borne DÉCLARÉE du fan-out par formulaire (un site en compte souvent plusieurs par page).
+    MAX_FORMS_CHAINED = 6
+
+    def _chain_from_forms(self, findings):
+        """Actions dérivées des FORMULAIRES lus par `recon.forms`.
+
+        LE MUR QUE ÇA LÈVE : un crawler découvre des CHEMINS, pas des paramètres. Mesuré —
+        `/vulnerabilities/sqli/` nu donne **3 oracles et AUCUN paramètre** ; le même endpoint
+        `?id=1&Submit=Submit` en donne **23 actions sur 12 oracles**. C'est toute la distance entre
+        DVWA piste B (0/9 opposables) et la piste amorcée (5/9).
+
+        LE GESTE EST VOLONTAIREMENT MINUSCULE : on reconstruit l'URL PORTEUSE en mettant les champs
+        du formulaire dans sa query, puis on délègue à `_endpoint_oracles` — le chaînage qui existe
+        déjà. Aucun mécanisme d'injection nouveau : `inject_request` PRÉSERVE les co-paramètres
+        depuis le défaut D6 (le `Submit` de DVWA, sans lequel la branche vulnérable est hors
+        d'atteinte). Le travail d'hier porte celui d'aujourd'hui.
+
+        Les champs NON injectables (bouton de soumission nommé) restent dans l'URL comme
+        CO-PARAMÈTRES mais ne deviennent jamais des cibles d'injection : `_endpoint_oracles` les
+        verra comme des paramètres ordinaires, et c'est `MAX_PARAMS_PER_ENDPOINT` qui borne le
+        fan-out — la valeur d'un `Submit` n'a rien d'intéressant à recevoir, mais tout à porter."""
+        out, vus = [], 0
+        for f in findings[:200]:
+            parsed = techniques.parse_form_title(f.get("title", ""))
+            if not parsed or vus >= self.MAX_FORMS_CHAINED:
+                continue
+            _method, champs = parsed
+            endpoint = f.get("target")
+            if not endpoint:
+                continue
+            vus += 1
+            query = _urlencode([(nom, val) for nom, val, _inj in champs])
+            sp = _urlsplit(str(endpoint))
+            porteuse = _urlunsplit((sp.scheme, sp.netloc, sp.path, query, ""))
+            out += self._endpoint_oracles(porteuse)
         return out
 
     def _endpoint_oracles(self, endpoint):
