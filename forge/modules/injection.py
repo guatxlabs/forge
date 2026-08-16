@@ -261,13 +261,37 @@ class PathTraversal(InjectionOracle):
                           "/ params.canary_rel / params.max_depth / params.method."),
                 poc=self.dry(action))]
         method = str(action.params.get("method", "GET")).upper()
+        # ÉCRITURE vs LECTURE — deux primitifs, deux preuves. Cet oracle prouvait une LECTURE (le
+        # canari revient dans la réponse). Or une traversée s'exprime tout aussi souvent en ÉCRITURE :
+        # DVGA offre `uploadPaste(filename:"../../x", content:…)`, qui écrit un fichier arbitraire et
+        # ne rend RIEN à lire. Mesuré : l'oracle rendait « le canari n'est pas revenu » — verdict
+        # EXACT sur une question qui n'était pas celle de la cible. Mauvais primitif, pas mauvais
+        # jugement.
+        #
+        # Prouver une écriture EXIGE un canal de RELECTURE, et seul l'opérateur peut le nommer (rien
+        # dans une réponse d'upload ne dit où le fichier a atterri). `params.read_url` l'apporte :
+        # après chaque tir, on relit cette URL et on cherche le marqueur. Absent -> mode LECTURE,
+        # comportement BYTE-IDENTIQUE à l'historique. On ne DEVINE pas un canal de relecture : sans
+        # lui, la question reste sans réponse, ce qui vaut mieux qu'une réponse inventée.
+        read_url = action.params.get("read_url")
         read, matched, where = False, "", action.target
         seen_network = False
         for payload in self._payloads(action):
             where, st, body = self._send(action, param, payload, method)
             if st is not None:
                 seen_network = True
-            # PREUVE : le marqueur BÉNIGN du canari revient -> le paramètre lit un fichier via traversal.
+            if read_url:
+                # PREUVE D'ÉCRITURE : le marqueur n'est pas dans la réponse au tir — il est dans le
+                # FICHIER, qu'on relit par le canal déclaré. C'est la relecture qui prouve que
+                # l'écriture a atterri hors du répertoire prévu.
+                r_st, r_body = self._fetch(str(read_url), headers=dict(action.params.get("headers", {})))
+                if r_st is not None:
+                    seen_network = True
+                if marker in (r_body or ""):
+                    read, matched = True, payload
+                    break
+                continue
+            # PREUVE DE LECTURE : le marqueur BÉNIGN du canari revient -> le paramètre lit un fichier.
             if marker in (body or ""):
                 read, matched = True, payload
                 break
@@ -277,13 +301,19 @@ class PathTraversal(InjectionOracle):
                 target=where, title="Path traversal non testé — réseau indisponible (dégradation gracieuse)",
                 evidence="Aucune réponse du serveur sur aucune sonde (transport indisponible) ; offline-safe.",
                 poc=self.dry(action))]
+        mode = "écriture (relue)" if read_url else "lecture"
         return [self.proof(
             target=where, proven=read,
-            title=("Path traversal CONFIRMÉ — lecture d'un canari bénin via traversal"
-                   if read else "Path traversal non confirmé — le canari bénin n'est pas revenu"),
+            title=(("Path traversal CONFIRMÉ — ÉCRITURE hors du répertoire prévu, prouvée par relecture"
+                    if read_url else "Path traversal CONFIRMÉ — lecture d'un canari bénin via traversal")
+                   if read else
+                   ("Path traversal non confirmé — le fichier écrit n'est pas relisible à l'URL déclarée"
+                    if read_url else "Path traversal non confirmé — le canari bénin n'est pas revenu")),
             severity=("HIGH" if read else "INFO"),
-            evidence=(f"canari bénin lu={read} (marqueur bénin fourni par l'opérateur ; "
-                      f"aucun fichier système ciblé)" + (f" ; payload={matched}" if read else "")),
+            evidence=(f"primitif={mode} ; canari bénin={read} (marqueur bénin fourni par l'opérateur ; "
+                      f"aucun fichier système ciblé)"
+                      + (f" ; relecture={read_url}" if read_url else "")
+                      + (f" ; payload={matched}" if read else "")),
             poc=(f"# {self._curl(where, dict(action.params.get('headers', {})), method)}\n"
                  f"# PREUVE = le marqueur bénin du canari apparaît dans la réponse"))]
 
