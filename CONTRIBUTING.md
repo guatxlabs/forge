@@ -91,10 +91,14 @@ Everything must be **green** and **offline** — tests must not touch the networ
 3. Include tests. Preserve or improve coverage.
 4. Run `make test` and (for Rust changes) `cargo clippy`. Both must pass.
 5. Sign off your commits (`-s`).
-6. **Write the commit message for a public reader**, not for whoever you last talked to. Say what
-   changes and *why*, so that someone who wasn't in the room can act on it. Length is fine — a
-   measured "why" is worth twenty lines; a narration of your own investigation ("I had dismissed
-   this earlier…") is not. Session chronology belongs in `ROADMAP.md`.
+6. **Write for a public reader** — in commit messages, documentation *and* code comments alike.
+   Every one of them addresses someone who wasn't in the room, doesn't know you, and has to act on
+   what they read. Say what changes and *why*. Length is fine: a measured "why" is worth twenty
+   lines, and a date that makes a claim traceable ("measured 2026-08-16") is traceability, not a
+   diary. What does not belong: first-person narration of your own investigation ("I had dismissed
+   this earlier…"), direct address ("as you asked"), and session chronology used as a storyline —
+   that goes in `ROADMAP.md`. Stating what a status *means* ("a `skipped` says: I could not
+   verify") is the tool's voice, and stays.
 7. **Security issues do not go here** — see [`SECURITY.md`](SECURITY.md).
 
 ## A word on intent
