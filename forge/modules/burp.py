@@ -440,7 +440,7 @@ class BurpScan(Module):
             cwe = _issue_cwe(iss)
             mitre = techniques.mitre_for_cwe(cwe) or self.mitre
             where = iss.get("origin", "") + (iss.get("path") or "")
-            # SECRET : l'issue peut rejouer une requête contenant notre session -> RÉDACTION avant evidence.
+            # SECRET : l'issue peut rejouer une requête contenant la session gouvernée -> RÉDACTION avant evidence.
             raw = _redact(json.dumps(iss), secrets)[:1200]
             findings.append(self.finding(
                 target=(where or action.target),
