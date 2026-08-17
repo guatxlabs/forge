@@ -91,7 +91,11 @@ Everything must be **green** and **offline** — tests must not touch the networ
 3. Include tests. Preserve or improve coverage.
 4. Run `make test` and (for Rust changes) `cargo clippy`. Both must pass.
 5. Sign off your commits (`-s`).
-6. **Security issues do not go here** — see [`SECURITY.md`](SECURITY.md).
+6. **Write the commit message for a public reader**, not for whoever you last talked to. Say what
+   changes and *why*, so that someone who wasn't in the room can act on it. Length is fine — a
+   measured "why" is worth twenty lines; a narration of your own investigation ("I had dismissed
+   this earlier…") is not. Session chronology belongs in `ROADMAP.md`.
+7. **Security issues do not go here** — see [`SECURITY.md`](SECURITY.md).
 
 ## A word on intent
 
