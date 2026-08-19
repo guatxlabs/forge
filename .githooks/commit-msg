@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Barrière LOCALE : refuse un commit dont le message s'adresse à un interlocuteur, ou dont
+# l'identité d'auteur n'est pas l'identité publique unique du dépôt.
+#
+# Un hook n'est PAS transporté par `git clone` et n'est jamais exécuté par l'édition via
+# l'interface web de GitHub : il évite d'avoir à corriger après coup, il ne ferme pas. C'est le
+# job CI (`.github/workflows/ci.yml`) qui ferme. Activation : `git config core.hooksPath .githooks`.
+exec python3 "$(dirname "$0")/../scripts/check_commit_register.py" --message-file "$1"

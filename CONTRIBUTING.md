@@ -90,7 +90,11 @@ Everything must be **green** and **offline** — tests must not touch the networ
 2. One logical change per PR. Keep the diff focused.
 3. Include tests. Preserve or improve coverage.
 4. Run `make test` and (for Rust changes) `cargo clippy`. Both must pass.
-5. Sign off your commits (`-s`).
+5. Sign off your commits (`-s`), and enable the repository hooks once per clone:
+   `git config core.hooksPath .githooks`. The `commit-msg` hook refuses a message that addresses an
+   interlocutor, and an author identity other than `guatxlabs <…@guatx.com>`. It is a convenience,
+   not the barrier: hooks are not carried by `git clone` and never run for GitHub's web editor —
+   the CI job `registre public` checks every pushed commit and is what actually closes the door.
 6. **Write for a public reader** — in commit messages, documentation *and* code comments alike.
    Every one of them addresses someone who wasn't in the room, doesn't know you, and has to act on
    what they read. Say what changes and *why*. Length is fine: a measured "why" is worth twenty

@@ -35,6 +35,38 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Registre public — IDENTITÉ d'auteur et ADRESSAGE des messages de commit.
+  #
+  # C'est la barrière qui FERME. Le hook `commit-msg` (`.githooks/`, activé par
+  # `core.hooksPath`) évite d'avoir à corriger après coup, mais il n'est pas
+  # transporté par `git clone` et n'est JAMAIS exécuté par l'édition via
+  # l'interface web de GitHub — c'est précisément par là qu'étaient entrés des
+  # commits portant un compte personnel. Ce job voit tout ce qui arrive au dépôt.
+  # ---------------------------------------------------------------------------
+  register:
+    name: registre public (identité + adressage)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0          # la plage poussée doit être lisible
+
+      - name: Vérifier les commits poussés
+        run: |
+          set -eu
+          # Plage : les commits AJOUTÉS par ce push / cette PR. Sur une branche neuve
+          # (`before` = 000…0) ou un dispatch manuel, on retombe sur le dernier commit.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before || '' }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            PLAGE="-1 HEAD"
+          else
+            PLAGE="$BASE..HEAD"
+          fi
+          echo "plage vérifiée : $PLAGE"
+          python3 scripts/check_commit_register.py --range "$PLAGE"
+
+  # ---------------------------------------------------------------------------
   # Python — tests du cœur Forge (stdlib only, aucune dépendance à installer).
   # ---------------------------------------------------------------------------
   python:
