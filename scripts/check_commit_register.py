@@ -22,19 +22,16 @@ CE QUI RESTE ADMIS, et qu'un garde trop zélé détruirait
   · un « pourquoi » LONG. La longueur n'a jamais été le défaut ; l'adressage l'était.
   · les trailers d'attribution (`Co-Authored-By:`, `Signed-off-by:`, `Claude-Session:`).
 
-LA VOIX DE L'OUTIL EST ADMISE, MAIS PAS DÉTECTABLE — et il faut le savoir avant de buter dessus.
-Ce garde lit des formes, pas des intentions : il ne distingue pas qui parle. Le pendant `tested` de
-l'exemple ci-dessus — « j'ai vérifié, rien trouvé » — emprunte mot pour mot une tournure bannie, et
-se fait refuser là où sa moitié `skipped` passe (aucun motif ne couvre « je n'ai »). L'asymétrie est
-un ARTEFACT de la liste de motifs, pas une règle.
-Quand la voix de l'outil emprunte une tournure bannie, MARQUER LA LIGNE COMME CITATION (`>`) —
-c'en est une. La règle doit pouvoir citer ce qu'elle interdit sans se refuser elle-même.
+COMMENT ÉCRIRE LA VOIX DE L'OUTIL : LA CITER. Ce garde lit des formes, pas des intentions — il ne
+sait pas qui parle. Une tournure à la première personne qui énonce le sens d'un statut doit donc
+porter une marque de citation : guillemets « … », code entre backticks, ou ligne « > ». C'est ce
+que fait l'exemple `skipped` ci-dessus, et son pendant `tested` passe de la même façon.
 
-SEUL `>` VAUT CITATION ICI, et l'écart avec `tests/test_public_register.py` est DÉLIBÉRÉ : ce
-dernier reconnaît aussi les guillemets et le code inline, parce qu'il relit une prose déjà écrite.
-Ce garde-ci décide d'un refus de commit, et les guillemets servent partout de mise en relief — les
-admettre exempterait la moitié des messages. Ne pas « unifier » les deux sans mesurer ce que la
-seconde règle laisserait passer dans la première.
+CE FICHIER A DIT LE CONTRAIRE, et la mesure l'a corrigé. Il énumérait les verbes bannis après
+« j'ai » et n'admettait que « > », au motif écrit que les guillemets exempteraient trop. Résultat
+mesuré : 20 commits sont passés avec `j'ai inséré`, `j'ai composé`, `mon diagnostic`, `hier`, et
+36 de plus au tour suivant. Reconnaître la citation à sa FORME attrape ces cinquante-six-là et
+laisse passer la voix de l'outil sans avoir à l'énumérer.
 
 USAGE
     check_commit_register.py --message-file <fichier>        # hook commit-msg
@@ -54,18 +51,30 @@ NOM_ATTENDU = "guatxlabs"
 DOMAINE_ATTENDU = "@guatx.com"
 
 #: Tournures qui trahissent une adresse à un interlocuteur plutôt qu'à un lecteur public.
+#: LES ÉLISIONS DE « JE » ET LES POSSESSIFS SONT PRIS EN BLOC, pas mot par mot. La version
+#: précédente énumérait `j'ai (trouvé|corrigé|mesuré|…)` puis `ma (mesure|conclusion|…)` — et a
+#: laissé passer `j'ai inséré`, `j'ai composé`, `mon propre garde`, `de mon côté`, `hier` dans
+#: 56 commits, trouvés seulement par un audit INDÉPENDANT du garde. C'est la quatrième liste tenue
+#: à la main de ce dépôt à survivre à son objet, après `_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS` et
+#: les exemptions du garde de documents. Une énumération ne peut pas être complète : on prend la
+#: FORME, et la citation (guillemets, backticks, « > ») porte les emplois légitimes.
 BANNIES = {
-    r"\bj'ai (?:trouvé|corrigé|mesuré|vérifié|conclu|écarté|commencé|décidé)\b":
-        "récit d'enquête à la première personne",
-    r"\bj'avais\b": "récit d'enquête à la première personne",
+    r"\bj'\w+": "récit d'enquête à la première personne",
+    r"\bje\s+\w+": "récit d'enquête à la première personne",
     r"\bmoi-même\b": "récit d'enquête à la première personne",
-    r"\bma (?:contre-vérification|mesure|conclusion)\b": "récit d'enquête à la première personne",
-    r"\bje (?:consigne|préfère|pense|crois|vais|voulais)\b": "récit à la première personne",
+    r"\b(?:mon|ma|mes)\s+\w+": "possessif de session — une mesure appartient au dépôt, "
+                               "pas à qui l'a faite",
+    r"\bnous\s+(?:avons|allons|devons|avions)\b": "« nous » de conversation",
     r"\bcomme (?:vous|tu) (?:l'|me |m')": "adresse directe à un interlocuteur",
-    r"\bcomme demandé\b": "adresse directe à un interlocuteur",
-    r"\b(?:vous|votre) (?:avez|aviez|aurez|trouverez)\b": "adresse directe à un interlocuteur",
+    r"\bcomme (?:demandé|convenu|discuté|promis)\b": "adresse directe à un interlocuteur",
+    r"\b(?:vous|tu|votre) (?:avez|as|aviez|aurez|trouverez|verrez|noterez)\b":
+        "adresse directe à un interlocuteur",
     r"\bmerci (?:de|pour)\b": "adresse directe à un interlocuteur",
     r"\b(?:notre|cette) session\b(?! gouvernée)": "chronologie de session comme fil narratif",
+    # `hier` en message de commit est TOUJOURS de la chronologie : un lecteur public n'a aucun
+    # repère pour l'interpréter. `aujourd'hui` N'EST PAS banni — il dit « à l'état actuel du
+    # code », dans 8 emplois sur 9 relevés dans cet historique. L'asymétrie est mesurée.
+    r"\b(?:d')?hier\b": "chronologie de session — un lecteur public n'a pas ce repère",
     r"\bdans (?:ma|notre) (?:dernière |précédente )?(?:réponse|conversation)\b":
         "renvoi à une conversation",
 }
@@ -74,16 +83,34 @@ BANNIES = {
 _IGNORE_LIGNE = re.compile(
     r"^\s*(?:>|Co-Authored-By:|Signed-off-by:|Claude-Session:|Reviewed-by:|Cc:)", re.I)
 
+#: Une occurrence CITÉE énonce la forme au lieu de la commettre. Bornée au paragraphe : un
+#: guillemet orphelin exempterait sinon tout le texte jusqu'au suivant.
+_GUILLEMETS = re.compile(r"«(?:[^»\n]|\n(?!\s*\n))*»")
+_CODE = re.compile(r"`[^`\n]+`")
+
+
+def _spans_cites(texte):
+    """Intervalles d'index relevant d'une citation. Pur, ne lève jamais."""
+    return ([m.span() for m in _GUILLEMETS.finditer(texte)] +
+            [m.span() for m in _CODE.finditer(texte)])
+
 
 def fautes_de_message(texte):
-    """[(ligne, motif, raison)] — les tournures interdites d'un message. Pur, ne lève jamais."""
-    out = []
-    for i, ligne in enumerate(str(texte or "").splitlines(), start=1):
-        if _IGNORE_LIGNE.match(ligne):
-            continue
-        for motif, raison in BANNIES.items():
-            for m in re.finditer(motif, ligne, re.I):
-                out.append((i, m.group(0), raison))
+    """[(ligne, motif, raison)] — les tournures interdites d'un message. Pur, ne lève jamais.
+
+    Les spans cités sont calculés sur le texte ENTIER, pas ligne à ligne : une citation se replie
+    d'une ligne sur l'autre, et découper d'abord ferait manquer sa seconde moitié."""
+    texte = str(texte or "")
+    spans = _spans_cites(texte)
+    out, debut = [], 0
+    for i, ligne in enumerate(texte.splitlines(keepends=True), start=1):
+        if not _IGNORE_LIGNE.match(ligne):
+            for motif, raison in BANNIES.items():
+                for m in re.finditer(motif, ligne, re.I):
+                    pos = debut + m.start()
+                    if not any(a <= pos < b for a, b in spans):
+                        out.append((i, m.group(0), raison))
+        debut += len(ligne)
     return out
 
 
