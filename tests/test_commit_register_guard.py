@@ -254,6 +254,67 @@ class TheTwoBarriersExist(unittest.TestCase):
         self.assertNotIn('PLAGE="-1 HEAD"', ci,
                          "le repli passe encore « -1 HEAD » comme UNE seule révision à git")
 
+    def test_les_TROIS_plages_du_job_CI_refusent_vraiment(self):
+        """LA GARDE DOIT PROUVER QU'ELLE MORD, sur les trois formes de plage que le job calcule.
+
+        Ce contrôle avait été vu PASSER, jamais REFUSER — et l'une des trois formes rendait un
+        vert sans rien lire. Les trois sont donc exercées ici contre un commit délibérément
+        fautif, dans un dépôt jetable :
+
+          · `base..HEAD`      — le cas d'une pull request ;
+          · `--rev HEAD`      — le repli d'une branche neuve (`github.event.before` = 000…0) ;
+          · `--rev HEAD`      — le repli d'un `workflow_dispatch` (base vide).
+
+        Un contrôle incapable d'échouer est un décor : si cette assertion devient verte alors
+        qu'elle ne devrait pas, c'est le garde qui a cessé de garder, pas le dépôt qui s'est
+        assaini."""
+        import os
+        import shutil
+        import subprocess as sp
+        import tempfile
+        if shutil.which("git") is None:
+            self.skipTest("git absent : ce test fabrique un dépôt pour exercer le job CI")
+        garde = RACINE / "scripts" / "check_commit_register.py"
+        with tempfile.TemporaryDirectory() as d:
+            def git(*a):
+                sp.run(["git", *a], cwd=d, capture_output=True, check=True)
+            (pathlib.Path(d) / "scripts").mkdir()
+            shutil.copy(garde, pathlib.Path(d) / "scripts" / "check_commit_register.py")
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "guatxlabs")
+            git("config", "user.email", "noreply@guatx.com")
+            pathlib.Path(d, "f.txt").write_text("a", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "feat: un changement décrit pour un lecteur public")
+            base = sp.run(["git", "rev-parse", "HEAD"], cwd=d, capture_output=True,
+                          text=True).stdout.strip()
+            pathlib.Path(d, "f.txt").write_text("b", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m",
+                "fix: j'ai corrigé le champ hier, comme vous l'avez demandé")
+
+            def lancer(*args):
+                return sp.run([sys.executable, "scripts/check_commit_register.py", *args],
+                              cwd=d, capture_output=True, text=True)
+
+            for label, args in (("plage de PR", ("--range", f"{base}..HEAD")),
+                                ("repli branche neuve", ("--rev", "HEAD")),
+                                ("repli dispatch", ("--rev", "HEAD"))):
+                with self.subTest(cas=label):
+                    r = lancer(*args)
+                    self.assertEqual(r.returncode, 1,
+                                     f"{label} : le commit fautif a été ACCEPTÉ "
+                                     f"(sortie {r.returncode})")
+                    self.assertIn("REGISTRE", r.stderr, f"{label} : refus sans motif nommé")
+
+            # ET L'EXCÈS INVERSE : un commit conforme doit passer par les mêmes chemins, sans quoi
+            # « ça refuse » ne prouverait qu'un garde bloqué en position fermée.
+            for label, args in (("plage de PR", ("--range", f"{base}..{base}")),
+                                ("un seul commit", ("--rev", base))):
+                with self.subTest(cas=f"conforme / {label}"):
+                    self.assertEqual(lancer(*args).returncode, 0,
+                                     f"{label} : un commit conforme a été refusé")
+
     def test_le_motif_de_chaque_regle_porte_sa_RAISON(self):
         for motif, raison in BANNIES.items():
             with self.subTest(motif=motif[:30]):
