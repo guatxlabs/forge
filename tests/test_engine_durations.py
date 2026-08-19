@@ -513,10 +513,20 @@ class TestDeterminismAndEngineInvariants(unittest.TestCase):
         """L'INVARIANT DU MOTEUR. Le magasin ne pilote QUE l'ordre de SOUMISSION : la vague est
         réellement réordonnée (contrôle positif), et pourtant ledger / findings / décisions sortent
         EXACTEMENT comme en sériel."""
-        started, eng_p, led_p = self._play(8, self.dir / "parallel.jsonl")
-        _st_s, eng_s, led_s = self._play(1, self.dir / "serial.jsonl")
-        self.assertNotEqual(started, [a.target for a in self._wave()],
-                            "la vague n'a pas été réordonnée : la preuve serait vide")
+        started, eng_p, led_p, preheat_p = self._play(8, self.dir / "parallel.jsonl")
+        _st_s, eng_s, led_s, _ph_s = self._play(1, self.dir / "serial.jsonl")
+        # CONTRÔLE POSITIF sur ce que le moteur DÉCIDE, pas sur ce que l'OS ordonnance.
+        #
+        # Cette assertion portait sur `started` — l'ordre où les threads ENTRENT dans `fire()`. Or
+        # le préchauffage est une priorité de SOUMISSION, ce que dit le docstring de
+        # `_preheat_order` : « ne touche JAMAIS l'ordre d'APPLICATION ». L'ordre de démarrage
+        # observé dépend de l'ordonnanceur de threads, et il diffère entre versions de Python à
+        # décision de moteur IDENTIQUE : mesuré `preheat=[10, 11, 12]` sous 3.11 comme sous 3.14,
+        # `started` réordonné sous 3.14 et strictement en ordre d'indice sous 3.11. Le test
+        # échouait donc là où le moteur avait fait exactement son travail.
+        self.assertTrue(preheat_p, "aucun préchauffage : la vague n'a pas été réordonnée, "
+                                   "la preuve d'invariance serait vide")
+        self.assertEqual(_ph_s, [], "en pool=1 le préchauffage n'a aucun sens et doit rester vide")
         self.assertEqual(_ledger_shape(self.dir / "parallel.jsonl"),
                          _ledger_shape(self.dir / "serial.jsonl"))
         self.assertEqual([_strip_ts(f.to_dict()) for f in eng_p.findings],
@@ -535,15 +545,29 @@ class TestDeterminismAndEngineInvariants(unittest.TestCase):
                     started.append(action.target)
                 return _Stub.fire(self, action)
 
+        # L'ordre de SOUMISSION décidé par le moteur, capté à la source : c'est lui le contrôle
+        # positif, `started` ne mesurant que l'ordonnanceur de threads.
+        preheats = []
+        vrai_preheat = Engine._preheat_order
+
+        def espion(self, actions, capacity):
+            r = vrai_preheat(self, actions, capacity)
+            preheats.extend(r)
+            return r
+
         os.environ["FORGE_PARALLELISM"] = str(pool)
-        with _Swap(self, [_KIND_FAST, _KIND_SLOW], base=Recorder):
-            ledger = Ledger(str(ledger_path))
-            eng = Engine(_scope(), ledger=ledger, mode="auto", memory=Memory(),
-                         campaign="camp", run_id="run-1",
-                         durations=_store_with(**{_KIND_FAST: 0.03, _KIND_SLOW: 1.20}))
-            eng.arm("test invariant")
-            eng.run(self._wave())
-        return started, eng, ledger
+        Engine._preheat_order = espion
+        try:
+            with _Swap(self, [_KIND_FAST, _KIND_SLOW], base=Recorder):
+                ledger = Ledger(str(ledger_path))
+                eng = Engine(_scope(), ledger=ledger, mode="auto", memory=Memory(),
+                             campaign="camp", run_id="run-1",
+                             durations=_store_with(**{_KIND_FAST: 0.03, _KIND_SLOW: 1.20}))
+                eng.arm("test invariant")
+                eng.run(self._wave())
+        finally:
+            Engine._preheat_order = vrai_preheat
+        return started, eng, ledger, preheats
 
 
 # =====================================================================================================

@@ -75,6 +75,10 @@ def _action(kind, target, **kw):
 #: satisfaire une logique métier — seulement à produire un appel bien formé, que le résolveur puisse
 #: atteindre. Un type inconnu retombe sur une chaîne : c'est le cas le plus courant et le plus inerte.
 _NEUTRAL_ARG = {"String": '"forge"', "ID": '"1"', "Int": "1", "Float": "1.0", "Boolean": "true"}
+#: Repli du tableau ci-dessus, nommé plutôt qu'écrit en clair dans la f-string qui l'utilise :
+#: y réutiliser le guillemet du littéral englobant n'est légal qu'à partir de Python 3.12
+#: (PEP 701), alors que ce paquet déclare `requires-python = ">=3.9"`.
+_NEUTRAL_DEFAUT = _NEUTRAL_ARG["String"]
 
 
 def _as_graph(graph_state):
@@ -522,7 +526,7 @@ class HeuristicBrain(Brain):
             # On donne aux frères une valeur NEUTRE PAR TYPE : on complète un APPEL, on ne devine
             # aucun secret. Un champ gaté par une authentification restera non concluant — c'est le
             # bon sens de l'erreur, et l'opérateur qui connaît les valeurs fournit son gabarit.
-            co = "".join(f",{n}:{_NEUTRAL_ARG.get(t, '"forge"')}" for n, t in siblings)
+            co = "".join(f",{n}:{_NEUTRAL_ARG.get(t, _NEUTRAL_DEFAUT)}" for n, t in siblings)
             tmpl = _json.dumps({"query": '%s{%s(%s:"%s"%s)%s}' % (
                 "" if op == "query" else "mutation ", field, arg, slot, co, selection)})
             params = {"param": arg, "method": "POST",

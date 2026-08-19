@@ -78,6 +78,47 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Plancher Python DÉCLARÉ — `pyproject.toml` annonce `requires-python`, et rien ne le
+  # vérifiait : la suite tourne sur 3.11, donc toute syntaxe 3.10-only serait passée. Un cas
+  # RÉEL a coûté 53 erreurs d'import en CI — une f-string réutilisant le guillemet englobant,
+  # légale seulement depuis 3.12 (PEP 701), dans un paquet qui déclare 3.9.
+  #
+  # UN `compileall` SUFFIT et rien de moins ne marche : `ast.parse(feature_version=…)` depuis un
+  # interpréteur récent N'A PAS détecté ce cas (vérifié pour 3.9, 3.11 et 3.12). Seul le vrai
+  # interpréteur du plancher tranche.
+  # ---------------------------------------------------------------------------
+  plancher:
+    name: plancher python déclaré (compileall)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Lire le plancher déclaré dans pyproject.toml
+        id: plancher
+        run: |
+          set -eu
+          V=$(python3 - <<'PY'
+          import re, pathlib
+          m = re.search(r'requires-python\s*=\s*"[^0-9]*([0-9]+\.[0-9]+)',
+                        pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(m.group(1) if m else "")
+          PY
+          )
+          [ -n "$V" ] || { echo "::error::requires-python illisible dans pyproject.toml"; exit 1; }
+          echo "plancher déclaré : $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ steps.plancher.outputs.version }}
+
+      # Le RUNTIME livré seulement : `tests/` peut légitimement utiliser une syntaxe plus récente,
+      # il n'est pas distribué. C'est `forge/` que `pip install` pose chez un tiers.
+      - name: Le paquet livré compile au plancher déclaré
+        run: python -m compileall -q forge/
+
+  # ---------------------------------------------------------------------------
   # Python — tests du cœur Forge (stdlib only, aucune dépendance à installer).
   # ---------------------------------------------------------------------------
   python:
@@ -697,7 +738,7 @@ jobs:
     # de `needs` s'exécute, échoue… et ne bloque RIEN, puisque le seul contrôle exigé
     # par le ruleset est `CI`, qui ne le regarde pas. À vérifier avant d'affirmer
     # qu'un contrôle « est en CI ».
-    needs: [python, console, console-postgres, purple-e2e, security, licence]
+    needs: [register, plancher, python, console, console-postgres, purple-e2e, security, licence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

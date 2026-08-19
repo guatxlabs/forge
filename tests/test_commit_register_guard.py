@@ -17,6 +17,7 @@ Ce fichier vérifie les deux sens : ce qui doit être REFUSÉ l'est, et ce qui d
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -153,6 +154,41 @@ class TheTwoBarriersExist(unittest.TestCase):
                       "aucune barrière CI — le hook seul ne couvre ni un autre poste ni "
                       "l'édition via l'interface web de GitHub")
         self.assertIn("fetch-depth: 0", ci, "sans historique complet, la plage est illisible")
+
+    def test_TOUS_les_jobs_sont_EXIGES_par_l_agregateur(self):
+        """Un job absent de `needs` s'exécute, échoue… et ne bloque RIEN.
+
+        `ci-ok` est le seul contrôle exigé par le ruleset : il ne regarde que ce que `needs`
+        énumère. Le job `register` a tourné VERT à côté de la plaque pendant toute une série de
+        poussées — présent dans l'interface, sans effet sur la fusion. Le commentaire de `ci-ok`
+        avertissait déjà de ce piège ; il fallait une machine pour le tenir."""
+        ci = (RACINE / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # Borné à la section `jobs:` — sinon `push:` du bloc `on:` est pris pour un job.
+        # Lecture par regex plutôt que par `yaml.safe_load` : ce test doit tourner là où la CI
+        # n'installe que `.[test]`, qui ne fournit pas pyyaml.
+        corps = ci.split("\njobs:", 1)
+        self.assertEqual(len(corps), 2, "section `jobs:` introuvable")
+        declares = set(re.findall(r"^  ([a-z][a-z0-9-]*):$", corps[1], re.M)) - {"ci-ok"}
+        apres = ci.split("\n  ci-ok:", 1)
+        self.assertEqual(len(apres), 2, "agrégateur `ci-ok` absent — plus rien n'est exigé")
+        besoins = re.search(r"^    needs: \[([^\]]+)\]", apres[1], re.M)
+        self.assertIsNotNone(besoins, "`ci-ok` sans `needs` — plus rien n'est exigé")
+        exiges = {x.strip() for x in besoins.group(1).split(",")}
+        self.assertEqual(declares - exiges, set(),
+                         "des jobs tournent sans rien bloquer, car absents du `needs` de `ci-ok`")
+
+    def test_le_PLANCHER_python_declare_est_verifie(self):
+        """`requires-python` est une PROMESSE faite à qui installe le paquet.
+
+        Elle n'était vérifiée par rien : la suite tourne sur 3.11, donc une syntaxe 3.10-only
+        serait passée — et une f-string 3.12-only (PEP 701) a réellement coûté 53 erreurs d'import.
+        `ast.parse(feature_version=…)` ne détecte PAS ce cas ; seul l'interpréteur du plancher le
+        fait, d'où un job qui lit la version déclarée et lance `compileall` dessus."""
+        ci = (RACINE / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("compileall", ci, "aucun contrôle du plancher python déclaré")
+        self.assertIn("requires-python", ci,
+                      "le job doit LIRE le plancher dans pyproject, pas le coder en dur — "
+                      "une valeur recopiée dérive de la déclaration qu'elle prétend vérifier")
 
     def test_le_verificateur_s_execute_vraiment(self):
         r = subprocess.run([sys.executable, str(RACINE / "scripts" / "check_commit_register.py"),
