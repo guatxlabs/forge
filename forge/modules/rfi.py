@@ -27,7 +27,7 @@ Bâti sur `ScopeGuardedOracle` (scope-guard + dégradation) + `Oracle` (Finding 
 """
 import urllib.parse
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 

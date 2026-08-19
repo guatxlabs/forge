@@ -44,7 +44,6 @@ Usage :
 from __future__ import annotations
 
 import argparse
-import socket
 import sys
 import unittest.mock as mock
 from pathlib import Path

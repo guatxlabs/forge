@@ -30,8 +30,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import unittest.mock as _mock                                 # noqa: E402
-import forge.roe as _roe_mod                                  # noqa: E402
 from forge.roe import Scope, Action, FIRE                     # noqa: E402
 from forge.engine import Engine                               # noqa: E402
 from forge.brain import Brain                                 # noqa: E402

@@ -12,7 +12,6 @@ Proves:
       (sign → re-verify → reject-on-mismatch), the EC_POINT DER/raw decode, the flag gate, the
       wiring `FORGE_LEDGER_SIGNER=pkcs11` → `Pkcs11Signer`, and the actionable "lib not installed" error.
 """
-import importlib
 import json
 import os
 import shutil

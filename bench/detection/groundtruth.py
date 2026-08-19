@@ -19,7 +19,7 @@ Une entrée `GroundTruth` = UNE vuln connue, décrite par :
 
 Aucune de ces structures n'est importée par `forge/**` : le banc est un OBSERVATEUR.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from forge.roe import Scope, Action, FIRE, DRY_RUN          # noqa: E402
+from forge.roe import Scope, Action          # noqa: E402
 from forge.planner import Planner, QUALIFYING               # noqa: E402
 from forge.brain import HeuristicBrain                      # noqa: E402
 from forge.engine import Engine                             # noqa: E402

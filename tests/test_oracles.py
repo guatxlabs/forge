@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from forge.roe import Scope, Action                          # noqa: E402
+from forge.roe import Action                          # noqa: E402
 from forge import modules as mods                            # noqa: E402
 from forge import purple                                     # noqa: E402
 from forge.modules.ssrf import SsrfCallback                  # noqa: E402

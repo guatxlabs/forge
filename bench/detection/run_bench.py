@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from . import groundtruth as gt
-from . import harness, provision, score, seeded
+from . import harness, provision, seeded
 
 FORGE_ROOT = Path(__file__).resolve().parents[2]
 

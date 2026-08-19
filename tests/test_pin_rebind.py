@@ -26,7 +26,6 @@ import ssl
 import sys
 import threading
 import unittest
-import urllib.parse
 from pathlib import Path
 from unittest import mock
 

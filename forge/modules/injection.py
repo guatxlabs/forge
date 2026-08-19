@@ -38,7 +38,7 @@ par le ROE comme toute interaction web (web_allowed).
 import hashlib
 import re
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .access_control import _body_hash, _normalize_body
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value

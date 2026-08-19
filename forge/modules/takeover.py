@@ -27,7 +27,7 @@ par un seam monkeypatchable (`_resolve_cname` / `_fetch`) : les tests unitaires 
 """
 import shutil
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import runner
 from .. import techniques

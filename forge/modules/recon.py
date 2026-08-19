@@ -11,7 +11,6 @@ from .registry import register, Module
 from .oracle import Oracle
 from .. import blindness as _blind
 from .. import runner
-from .. import techniques
 from .toolspec import FlagAllowlistMixin, check_extra_args, safe_value
 # Découverte de service (host:port chaînable) — SOURCE UNIQUE partagée avec les wrappers spec-driven
 # (naabu/masscan via toolspec.py). recon.nmap/httpx y émettent leurs `host:port` EXACTEMENT comme avant.

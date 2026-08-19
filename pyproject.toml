@@ -47,6 +47,21 @@ forge = ["tools.json"]
 # les fichiers annotés. Les autres modules ne sont pas encore typés -> `follow_imports=silent` les suit
 # pour en tirer les types SANS exiger d'annotations, et `ignore_missing_imports` absorbe les deps tierces
 # optionnelles (cryptography, etc.). Étendre la liste `module` ci-dessous au fur et à mesure du typage.
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# CE QUI EST GATÉ : `F` (pyflakes — import ou variable inutilisés, f-string sans champ, nom
+# non défini) et `E9` (erreurs de syntaxe et d'E/S). Ce sont des DÉFAUTS, pas des goûts : un
+# import mort ne fait rien, une f-string sans champ ne formate rien.
+#
+# CE QUI EST DÉLIBÉRÉMENT HORS PORTE : la famille `E7` de style, et `E702` en particulier
+# (« plusieurs instructions sur une ligne »). Ce dépôt l'emploie à dessein pour apparier des
+# déclarations liées — `engage.add_argument("--ledger"); engage.add_argument("--report")` —
+# et le gater imposerait 149 découpages mécaniques sans corriger quoi que ce soit. Une porte
+# de CI qui fait travailler sans rien prouver finit contournée, et emporte le reste avec elle.
+select = ["F", "E9"]
+
 [tool.mypy]
 # Cible d'analyse mypy (>= 3.10, requis par mypy récent). Le CODE reste compatible 3.9 : toutes les
 # annotations sont différées (`from __future__ import annotations`) donc `X | None` / `list[str]` sont

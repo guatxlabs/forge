@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from forge.roe import Scope, Action                                   # noqa: E402
+from forge.roe import Action                                   # noqa: E402
 from forge.ledger import Ledger                                       # noqa: E402
 from forge.schema import Finding                                      # noqa: E402
 from forge.session import attacker_headers_from_params               # noqa: E402

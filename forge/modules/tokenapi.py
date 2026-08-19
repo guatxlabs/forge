@@ -46,7 +46,7 @@ import hmac
 import json
 import re
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import session as _session
 from .. import techniques

@@ -196,7 +196,7 @@ class TestIterativeCampaign(unittest.TestCase):
             def propose(self, graph_state):
                 self.n += 1
                 # cible distincte à chaque appel -> id d'action toujours neuf (jamais dédupliqué)
-                return [Action("demo.fingerprint", f"app.test", params={"i": self.n}, id=f"demo:{self.n}")]
+                return [Action("demo.fingerprint", "app.test", params={"i": self.n}, id=f"demo:{self.n}")]
         eng = _armed_auto(scope())
         eng.campaign([Target("app.test", "url")], GrowingBrain(), Planner(), max_waves=3)
         self.assertEqual(eng.waves, 3)                        # borné par max_waves (pas de boucle infinie)

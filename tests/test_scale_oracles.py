@@ -359,7 +359,7 @@ class TestRfiProbe(unittest.TestCase):
         def fake(url, headers=None, timeout=15, method="GET", data=None):
             dec = urllib.parse.unquote_plus(url or "")
             if "op-collector.test/marker.txt" in dec:          # l'app a fetché la ressource distante
-                return (200, f"page rendered: RFI_BENIGN_MARK_7q footer")
+                return (200, "page rendered: RFI_BENIGN_MARK_7q footer")
             return (200, "default")
         f = self._fire(fake)
         self.assertEqual(f[0].status, "vulnerable")

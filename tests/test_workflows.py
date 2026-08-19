@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge import techniques                                    # noqa: E402
 from forge import workflows                                     # noqa: E402
-from forge.roe import Scope, Action                             # noqa: E402
+from forge.roe import Scope                             # noqa: E402
 from forge.engine import Engine                                 # noqa: E402
 from forge.brain import AutoPentestBrain                        # noqa: E402
 from forge.planner import Planner                               # noqa: E402

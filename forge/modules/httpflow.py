@@ -751,8 +751,8 @@ class HeaderInjectionProbe(ClientFlowOracle):
                       f"réflexion_contrôle={control_reflects_host} (si vrai -> non concluant) ; "
                       + (canon_note + " ; " if canon_note else "")
                       + (inert_note + " ; " if inert_note else "")
-                      + f"marqueur BÉNIGN "
-                      f"inerte (aucun Set-Cookie/session tamperé) ; non destructif ; session gouvernée non journalisée"),
+                      + "marqueur BÉNIGN "
+                      "inerte (aucun Set-Cookie/session tamperé) ; non destructif ; session gouvernée non journalisée"),
             poc=(f"# CRLF: {action.params.get('param', '<param>')}=…%0d%0a{_CRLF_HEADER_NAME}:<token> ; "
                  f"HOST: -H 'X-Forwarded-Host: {mhost}' sur {base}\n"
                  f"# PREUVE = en-tête bénin '{_CRLF_HEADER_NAME}' matérialisé OU marqueur d'hôte reflété "

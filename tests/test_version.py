@@ -6,7 +6,6 @@ Vérifie aussi que la CLI `forge --version` imprime bien cette même version. `p
 (stdlib, zéro dépendance, zéro réseau).
 """
 import io
-import re
 import sys
 import unittest
 from contextlib import redirect_stdout

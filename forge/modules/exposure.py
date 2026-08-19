@@ -37,11 +37,10 @@ dépendance (stdlib). Le seam `_fetch` est monkeypatché par les tests (aucun r�
 import json
 import re
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 from ..redact import redact_secrets as _redact_secrets
-from ..roe import Scope
 
 
 # --- chemins Spring Boot Actuator (index + endpoints sensibles) ------------------------------------

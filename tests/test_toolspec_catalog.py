@@ -31,7 +31,7 @@ from forge import session as sessionmod                        # noqa: E402
 from forge.session import SessionStore                         # noqa: E402
 from forge.roe import Action, Scope                            # noqa: E402
 from forge.modules.toolspec import (ToolSpec, build_argv, parse_output, make_module,   # noqa: E402
-                                    spec_to_technique, ExternalToolModule)
+                                    ExternalToolModule)
 
 # Intégrations externes SUPPLÉMENTAIRES (recon/scan/OSINT, non-destructif/non-exploit, proof-oriented).
 NEW_KINDS = {

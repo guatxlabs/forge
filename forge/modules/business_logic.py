@@ -28,9 +28,8 @@ GARDE-FOUS :
 
 Bâti sur `ScopeGuardedOracle` (scope-guard + dégradation) + `Oracle` (Finding + HTTP + curl partagés).
 """
-import urllib.parse
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 

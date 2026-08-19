@@ -29,7 +29,7 @@ pentest_only=true, bug_bounty_eligible=false (jamais un finding BB payable en pr
 """
 import hashlib
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import session as _session
 from .. import techniques

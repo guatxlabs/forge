@@ -36,7 +36,7 @@ gardée par le ROE comme toute interaction web (`web_allowed`). Concurrence 100%
 (concurrent.futures) : aucune dépendance externe (seul le réseau peut manquer)."""
 import concurrent.futures as _cf
 
-from .oracle import Oracle, ScopeGuardedOracle
+from .oracle import ScopeGuardedOracle
 from .registry import register
 from .. import techniques
 

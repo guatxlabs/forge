@@ -285,7 +285,8 @@ class TestMixedAlgs(unittest.TestCase):
     @unittest.skipUnless(signing._HAVE_ED, "cryptography/Ed25519 indisponible")
     def test_mixed_algs_forged_ed25519_sig_still_detected(self):
         # NE PAS affaiblir : une signature ed25519 invalide reste détectée dans un ledger mixte
-        led = self._seed_mixed()
+        # L'appel est gardé pour son EFFET (il amorce le ledger mixte) ; sa valeur ne sert pas ici.
+        self._seed_mixed()
         lines = self.path.read_text().splitlines()
         rec = json.loads(lines[0]); rec["sig"] = "00" * 64       # signature ed25519 bidon
         lines[0] = json.dumps(rec, sort_keys=True, separators=(",", ":"))

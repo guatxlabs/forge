@@ -36,7 +36,7 @@ from forge.schema import Target, Finding                   # noqa: E402
 from forge.session import SessionStore                     # noqa: E402
 from forge import techniques                               # noqa: E402
 from forge.modules import registry                         # noqa: E402
-from forge.modules.recon_surface import JsEndpoints, HistoricalUrls  # noqa: E402
+from forge.modules.recon_surface import JsEndpoints  # noqa: E402
 from tests._dns import setUpModule, tearDownModule  # noqa: F401,E402
 
 SUB = techniques.DISCOVERY_SUBDOMAIN_MARKER

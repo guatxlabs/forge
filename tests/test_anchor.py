@@ -2,7 +2,6 @@
 """Ancrage hors-host — témoin co-signataire + reconcile détecte une réécriture re-signée localement."""
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 

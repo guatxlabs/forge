@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge.roe import Scope, Action                       # noqa: E402
 from forge.engine import Engine                           # noqa: E402
 from forge.graph import EngagementGraph                   # noqa: E402
-from forge.schema import Finding, Target                  # noqa: E402
+from forge.schema import Finding                  # noqa: E402
 from forge.modules.origin import OriginFind, _in_cf       # noqa: E402
 from forge import modules as mods                         # noqa: E402
 

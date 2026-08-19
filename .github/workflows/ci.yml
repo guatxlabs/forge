@@ -78,6 +78,36 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Lint — `ruff` sur la famille `F` (pyflakes) et `E9`. Portée et exclusions justifiées dans
+  # `[tool.ruff.lint]` de `pyproject.toml` : on gate des DÉFAUTS (import mort, variable morte,
+  # f-string sans champ), pas un style.
+  #
+  # POURQUOI CE JOB EXISTE : `guatxlabs/ocular` en avait un, ce dépôt non. Un test porté de
+  # l'un à l'autre y a transporté un `import os` inutilisé — invisible ici, signalé là-bas.
+  # Un contrôle absent d'un dépôt ne se remplace pas par l'attention de qui relit.
+  #
+  # VERSION ÉPINGLÉE À L'ÉGAL, comme dans `ocular` : c'est une PORTE, pas un plancher. Une
+  # version plus récente ajoute des règles et ferait rougir un arbre inchangé — mesuré ici,
+  # `ruff 0.15.22` rend 0 constat là où une version postérieure en rend des centaines.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint (ruff, version épinglée)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff (épinglé)
+        run: pip install ruff==0.15.22
+
+      - name: ruff check
+        run: ruff check .
+
+  # ---------------------------------------------------------------------------
   # Plancher Python DÉCLARÉ — `pyproject.toml` annonce `requires-python`, et rien ne le
   # vérifiait : la suite tourne sur 3.11, donc toute syntaxe 3.10-only serait passée. Un cas
   # RÉEL a coûté 53 erreurs d'import en CI — une f-string réutilisant le guillemet englobant,
@@ -766,7 +796,7 @@ jobs:
     # de `needs` s'exécute, échoue… et ne bloque RIEN, puisque le seul contrôle exigé
     # par le ruleset est `CI`, qui ne le regarde pas. À vérifier avant d'affirmer
     # qu'un contrôle « est en CI ».
-    needs: [register, plancher, python, console, console-postgres, purple-e2e, security, licence]
+    needs: [register, lint, plancher, python, console, console-postgres, purple-e2e, security, licence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

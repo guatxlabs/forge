@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge.roe import Scope, Action                               # noqa: E402
-from forge.session import AuthContext, AuthAccount                # noqa: E402
+from forge.session import AuthContext                # noqa: E402
 from forge.engine import Engine                                   # noqa: E402
 from forge.ledger import Ledger                                   # noqa: E402
 from forge.modules.access_control import IdorDifferential         # noqa: E402

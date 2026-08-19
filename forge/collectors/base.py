@@ -25,10 +25,8 @@ SECRET : le secret d'auth (`auth.secret`) n'est JAMAIS imprimé, journalisé, ni
 d'erreur (rédaction défensive via `safe_error`).
 """
 import json
-import os
 import re
 import ssl
-import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone

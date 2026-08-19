@@ -32,7 +32,6 @@ Le service browser est un DOUBLE en mémoire (aucun port 8080 requis). Preuves c
   (7) BOUT-EN-BOUT— campagne `Engine` réelle (ROE armé, gate à 4 couches) : 0 page -> N pages.
 """
 import http.server
-import socket
 import sys
 import threading
 import unittest

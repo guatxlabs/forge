@@ -47,9 +47,7 @@ monkeypatchable + `_send` (query GET ou corps urlencodé). Aucune capacité éla
 """
 import hashlib
 import re
-import urllib.parse
 
-from .oracle import Oracle
 from .injection import InjectionOracle
 from .registry import register
 from .access_control import _body_hash, _normalize_body
