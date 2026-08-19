@@ -53,10 +53,14 @@ class WhatMustBeRefused(unittest.TestCase):
                 self.assertTrue(fautes_de_message(phrase), f"non détecté : {phrase}")
 
     def test_une_identite_personnelle_ou_nominative(self):
+        # Identités SYNTHÉTIQUES à dessein. Une fixture n'a pas besoin d'une vraie adresse pour
+        # prouver la propriété — et ce test-ci, s'il en portait une, publierait exactement ce que
+        # la règle interdit de publier. Les quatre cas couvrent les quatre formes de refus :
+        # pseudonyme hors registre, identité nominative, casse divergente, domaine tiers.
         for nom, email in (("pseudo-perso", "1234567+pseudo-perso@users.noreply.github.com"),
                            ("Prénom Nom", "prenom.nom@example.com"),
                            ("GuatX", "noreply@guatx.com"),
-                           ("guatxlabs", "moi@gmail.com")):
+                           ("guatxlabs", "compte-perso@example.com")):
             with self.subTest(identite=f"{nom} <{email}>"):
                 self.assertIsNotNone(faute_d_identite(nom, email), f"accepté à tort : {nom}")
 
