@@ -135,7 +135,14 @@ def _git(*args):
     Une barrière doit échouer FERMÉE. En rendant seulement `stdout`, un `git log` qui échoue
     donnait une sortie vide, donc « aucune faute », donc un succès — la CI validait alors une
     plage qu'elle n'avait jamais lue. Les appelants qui prononcent un refus lisent le code."""
-    p = subprocess.run(["git", *args], capture_output=True, text=True)
+    try:
+        p = subprocess.run(["git", *args], capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as e:
+        # `git` ABSENT — cas réel : image de test unitaire, conteneur minimal, PATH amputé.
+        # Sans ce cas, `subprocess.run` lève et la barrière PLANTE avec une trace au lieu de
+        # refuser. Un garde qui casse n'échoue pas fermé : il échoue de façon indéterminée, et
+        # l'appelant qui ne rattrape pas conclut ce qu'il veut. On rend un code non nul.
+        return 127, "", f"git introuvable ou inexécutable : {e}"
     return p.returncode, p.stdout, p.stderr
 
 

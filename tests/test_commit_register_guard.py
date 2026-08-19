@@ -202,7 +202,12 @@ class TheTwoBarriersExist(unittest.TestCase):
         l'interface web que des commits à compte personnel sont entrés ici. Le contrôle se fait sur
         un dépôt jetable : rien n'est lu ni écrit dans le dépôt courant."""
         import os
+        import shutil
         import tempfile
+        if shutil.which("git") is None:
+            self.skipTest("git absent : ce test FABRIQUE un dépôt pour observer le committer, "
+                          "il ne peut pas s'en passer (le garde, lui, refuse proprement — cf. "
+                          "`test_une_plage_ILLISIBLE_est_un_REFUS_et_non_un_succes`)")
         with tempfile.TemporaryDirectory() as d:
             def git(*a, **env):
                 subprocess.run(["git", *a], cwd=d, capture_output=True, check=True,
