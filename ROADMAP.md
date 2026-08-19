@@ -77,6 +77,20 @@ via l'interface web ne l'exécute jamais. **C'est la CI qui ferme** ; le hook é
 à corriger après coup. Les deux slots d'identité sont vérifiés, auteur **et** committer, et une
 plage que git n'a pas su lire est un refus : une barrière échoue fermée.
 
+## Ce qu'une contribution doit passer
+
+Chaque porte est **exigée** par l'agrégateur de CI — un job qui n'y figure pas s'exécute, échoue et
+ne bloque rien.
+
+| porte | ce qu'elle refuse |
+|---|---|
+| registre public | identité hors `guatxlabs`, message adressé à un interlocuteur |
+| lint | import ou variable morts, f-string sans champ (`ruff` épinglé à l'égal) |
+| plancher python | une syntaxe plus récente que le `requires-python` déclaré |
+| tests | `unittest` sur le cœur, `cargo test` sur la console, boucle purple de bout en bout |
+| licences | une dépendance ou un fichier redistribué sans licence compatible |
+| sécurité | vulnérabilité connue, licence bannie, secret dans l'arbre ou dans l'historique |
+
 ## Ce qui reste ouvert
 
 Ces points sont connus et nommés parce qu'un lecteur technique a besoin de savoir où sont les bords.
