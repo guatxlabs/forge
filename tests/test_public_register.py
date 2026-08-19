@@ -42,13 +42,41 @@ BANNIES = {
 }
 
 #: Exceptions ADMISES, chacune avec sa raison. Toute autre occurrence fait échouer le test.
-ADMISES = {
-    ("ROADMAP.md", r"\bj'avais\b"): "l'exemple de la règle, qui cite volontairement la mauvaise forme",
-    ("ROADMAP.md", r"\bmoi-même\b"): "l'exemple de la règle, qui cite volontairement la mauvaise forme",
-    ("ROADMAP.md", r"\bcomme (?:vous|tu) (?:l'|me |m')"): "l'exemple de la règle (adresse directe citée)",
-    ("CONTRIBUTING.md", r"\bcomme demandé\b"): "énoncé de la règle elle-même",
-    ("forge/llm.py", r"\bcomme (?:vous|tu) (?:l'|me |m')"): "chaîne de PROMPT adressée au modèle",
-}
+#:
+#: VIDE À DESSEIN. Elle contenait cinq entrées par FICHIER — dont trois exemptaient les 1 200
+#: lignes de `ROADMAP.md` pour un motif donné, ce qui aurait laissé passer une vraie rechute
+#: ailleurs dans le fichier ; et DEUX ÉTAIENT MORTES, leur motif n'existant plus dans le fichier
+#: visé. C'est précisément la liste tenue à la main que le docstring ci-dessus dénonce, juste le
+#: jour de son écriture et fausse ensuite. Les citations sont désormais reconnues par leur FORME
+#: (cf. `_est_citee`), ce qui ne demande aucun entretien. `test_aucune_exception_MORTE` refuse
+#: qu'une entrée y survive à son besoin.
+ADMISES = {}
+
+#: Une occurrence CITÉE énonce la mauvaise forme au lieu de la commettre — et une règle doit
+#: pouvoir citer ce qu'elle interdit sans se refuser elle-même. Trois formes valent citation :
+#: les guillemets « … » (éventuellement sur plusieurs lignes), le code entre backticks, et les
+#: lignes de citation Markdown « > ».
+#: Le guillemet fermant peut être sur la ligne suivante — une citation se replie comme le reste du
+#: texte — mais JAMAIS au-delà d'un saut de paragraphe : un « orphelin exempterait sinon tout le
+#: texte jusqu'au » suivant, et l'exemption avalerait le fichier au lieu de couvrir une citation.
+_GUILLEMETS = re.compile(r"«(?:[^»\n]|\n(?!\s*\n))*»")
+_CODE = re.compile(r"`[^`\n]+`")
+
+
+def _spans_cites(texte):
+    """Intervalles d'index du texte qui relèvent d'une citation. Pur, ne lève jamais."""
+    spans = [m.span() for m in _GUILLEMETS.finditer(texte)]
+    spans += [m.span() for m in _CODE.finditer(texte)]
+    debut = 0
+    for ligne in texte.splitlines(keepends=True):
+        if ligne.lstrip().startswith(">"):
+            spans.append((debut, debut + len(ligne)))
+        debut += len(ligne)
+    return spans
+
+
+def _est_citee(spans, position):
+    return any(a <= position < b for a, b in spans)
 
 
 def _fichiers():
@@ -67,10 +95,13 @@ class TheRepositoryAddressesAPublicReader(unittest.TestCase):
         for f in _fichiers():
             rel = str(f.relative_to(RACINE))
             texte = f.read_text(encoding="utf-8", errors="replace")
+            spans = _spans_cites(texte)
             for motif, raison in BANNIES.items():
                 if (rel, motif) in ADMISES:
                     continue
                 for m in re.finditer(motif, texte, re.I):
+                    if _est_citee(spans, m.start()):
+                        continue
                     ligne = texte[:m.start()].count("\n") + 1
                     fautes.append(f"{rel}:{ligne} — {raison} : « {m.group(0)} »")
         self.assertEqual(fautes, [], "\n".join(
@@ -80,6 +111,54 @@ class TheRepositoryAddressesAPublicReader(unittest.TestCase):
         for (fichier, motif), raison in ADMISES.items():
             with self.subTest(fichier=fichier):
                 self.assertTrue(raison.strip(), f"{fichier} exclu sans justification écrite")
+
+    def test_aucune_exception_MORTE(self):
+        """Une exemption dont le motif a disparu du fichier visé n'exempte plus rien — elle ne fait
+        qu'élargir la brèche pour le jour où la tournure reviendra.
+
+        `ADMISES` en contenait deux, invisibles parce que rien ne les regardait : `CONTRIBUTING.md`
+        n'avait plus « comme demandé », `forge/llm.py` plus d'adresse directe. C'est la troisième
+        occurrence dans ce dépôt d'une liste tenue à la main qui survit à son objet — après
+        `_RATE_FLAG_KINDS` et `_SQL_ERROR_SIGNS`, que le docstring de ce fichier cite déjà."""
+        for (fichier, motif), _ in ADMISES.items():
+            with self.subTest(fichier=fichier, motif=motif[:30]):
+                p = RACINE / fichier
+                self.assertTrue(p.exists(), f"{fichier} exempté mais absent du dépôt")
+                texte = p.read_text(encoding="utf-8", errors="replace")
+                self.assertTrue(re.search(motif, texte, re.I),
+                                f"{fichier} : exemption MORTE, « {motif} » n'y figure plus")
+
+    def test_une_CITATION_ne_compte_PAS_comme_une_faute(self):
+        """Les trois formes de citation, et le contre-exemple qui prouve que le garde mord encore."""
+        for cite in ("la règle bannit « j'avais écarté ce champ » comme récit",
+                     "le motif `moi-même` est refusé par le garde",
+                     "> « J'avais moi-même écarté ce champ » -> adressé à une conversation"):
+            with self.subTest(cite=cite[:34]):
+                spans = _spans_cites(cite)
+                touches = [m for motif in BANNIES for m in re.finditer(motif, cite, re.I)]
+                self.assertTrue(touches, "corpus mal choisi : aucune tournure à citer")
+                self.assertTrue(all(_est_citee(spans, m.start()) for m in touches),
+                                f"citation prise pour une faute : {cite}")
+        nu = "Le champ a été écarté parce que j'avais conclu trop vite."
+        spans = _spans_cites(nu)
+        touches = [m for motif in BANNIES for m in re.finditer(motif, nu, re.I)]
+        self.assertTrue(touches and not any(_est_citee(spans, m.start()) for m in touches),
+                        "une faute en prose nue passe pour une citation — le garde ne mord plus")
+
+    def test_un_guillemet_ORPHELIN_n_exempte_pas_la_suite_du_fichier(self):
+        """Sans borne, un « jamais refermé exempterait tout le texte jusqu'au » suivant.
+
+        C'est le mode de défaillance d'une exemption reconnue par la forme : elle ne coûte rien à
+        écrire, donc elle doit coûter cher à élargir par accident."""
+        texte = ("Un « guillemet ouvert et jamais refermé sur ce paragraphe.\n"
+                 "\n"
+                 "Le champ a été écarté parce que j'avais conclu trop vite.\n"
+                 "\n"
+                 "Et un » qui traîne bien plus loin.\n")
+        spans = _spans_cites(texte)
+        faute = re.search(r"\bj'avais\b", texte)
+        self.assertFalse(_est_citee(spans, faute.start()),
+                         "un guillemet orphelin a exempté un paragraphe entier")
 
     def test_le_garde_a_de_QUOI_mordre(self):
         """Un garde qui ne lit rien ne garde rien : on vérifie qu'il balaie un corpus réel."""

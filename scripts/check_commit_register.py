@@ -30,6 +30,12 @@ un ARTEFACT de la liste de motifs, pas une règle.
 Quand la voix de l'outil emprunte une tournure bannie, MARQUER LA LIGNE COMME CITATION (`>`) —
 c'en est une. La règle doit pouvoir citer ce qu'elle interdit sans se refuser elle-même.
 
+SEUL `>` VAUT CITATION ICI, et l'écart avec `tests/test_public_register.py` est DÉLIBÉRÉ : ce
+dernier reconnaît aussi les guillemets et le code inline, parce qu'il relit une prose déjà écrite.
+Ce garde-ci décide d'un refus de commit, et les guillemets servent partout de mise en relief — les
+admettre exempterait la moitié des messages. Ne pas « unifier » les deux sans mesurer ce que la
+seconde règle laisserait passer dans la première.
+
 USAGE
     check_commit_register.py --message-file <fichier>        # hook commit-msg
     check_commit_register.py --range <base>..<head>          # CI, plage poussée
