@@ -39,6 +39,21 @@ agir sur ce qu'il lit. Dites **ce qui change et pourquoi**.
 
 La chronologie d'une investigation appartient à `ROADMAP.md`, qui existe pour ça.
 
+### Quand la voix de l'outil emprunte une tournure interdite
+
+Le garde lit des **formes**, pas des intentions : il ne sait pas qui parle. L'exemple `skipped`
+ci-dessus passe, mais son pendant `tested` — « j'ai vérifié, rien trouvé » — dit la même chose sur
+l'autre statut et se fait **refuser**, parce qu'il emprunte mot pour mot une forme bannie.
+L'asymétrie est un artefact de la liste de motifs, pas une règle.
+
+Dans ce cas, **préfixez la ligne de `>`** : c'en est une citation, et les lignes citées sont
+ignorées. C'est aussi ce qui permet à la règle de citer ce qu'elle interdit sans se refuser
+elle-même.
+
+```
+> un `tested` dit « j'ai vérifié, rien trouvé » — d'où le contrôle sur l'oracle
+```
+
 ## Comment ces règles sont tenues
 
 | barrière | portée | activation |

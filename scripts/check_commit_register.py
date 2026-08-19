@@ -22,6 +22,14 @@ CE QUI RESTE ADMIS, et qu'un garde trop zélé détruirait
   · un « pourquoi » LONG. La longueur n'a jamais été le défaut ; l'adressage l'était.
   · les trailers d'attribution (`Co-Authored-By:`, `Signed-off-by:`, `Claude-Session:`).
 
+LA VOIX DE L'OUTIL EST ADMISE, MAIS PAS DÉTECTABLE — et il faut le savoir avant de buter dessus.
+Ce garde lit des formes, pas des intentions : il ne distingue pas qui parle. Le pendant `tested` de
+l'exemple ci-dessus — « j'ai vérifié, rien trouvé » — emprunte mot pour mot une tournure bannie, et
+se fait refuser là où sa moitié `skipped` passe (aucun motif ne couvre « je n'ai »). L'asymétrie est
+un ARTEFACT de la liste de motifs, pas une règle.
+Quand la voix de l'outil emprunte une tournure bannie, MARQUER LA LIGNE COMME CITATION (`>`) —
+c'en est une. La règle doit pouvoir citer ce qu'elle interdit sans se refuser elle-même.
+
 USAGE
     check_commit_register.py --message-file <fichier>        # hook commit-msg
     check_commit_register.py --range <base>..<head>          # CI, plage poussée
@@ -74,11 +82,14 @@ def fautes_de_message(texte):
 
 
 def faute_d_identite(nom, email):
-    """Raison du refus d'une identité d'auteur, ou None. Pur, ne lève jamais."""
+    """Raison du refus d'une identité, ou None. Pur, ne lève jamais.
+
+    Le libellé ne nomme PAS le slot : cette fonction ne sait pas si elle juge un auteur ou un
+    committer, et le lui faire dire produisait « IDENTITÉ (committer) : auteur « … » »."""
     nom, email = str(nom or "").strip(), str(email or "").strip().lower()
     if nom != NOM_ATTENDU:
-        return (f"auteur « {nom} » — attendu « {NOM_ATTENDU} ». Un dépôt publié sous un collectif "
-                f"ne doit pas exposer le compte personnel de son auteur.")
+        return (f"nom « {nom} » — attendu « {NOM_ATTENDU} ». Un dépôt publié sous un collectif "
+                f"ne doit pas exposer le compte personnel de qui l'écrit.")
     if not email.endswith(DOMAINE_ATTENDU):
         return (f"adresse « {email} » — attendue sous « {DOMAINE_ATTENDU} ». Aucune adresse "
                 f"personnelle ni nominative.")
@@ -96,7 +107,8 @@ def verifier_revisions(plage, une_seule=False):
     commit visé : sans `-1`, un contrôle « ce commit est-il conforme ? » rendait le verdict de
     l'historique entier. Rend la liste des lignes de refus, vide si tout passe."""
     sep = "\x1e"
-    args = ["log", "--format=%H" + sep + "%an" + sep + "%ae" + sep + "%B" + "\x1d"]
+    champs = ["%H", "%an", "%ae", "%cn", "%ce", "%B"]
+    args = ["log", "--format=" + sep.join(champs) + "\x1d"]
     if une_seule:
         args.append("-1")
     args.append(plage)
@@ -106,12 +118,18 @@ def verifier_revisions(plage, une_seule=False):
         if not bloc.strip():
             continue
         parts = bloc.strip().split(sep)
-        if len(parts) < 4:
+        if len(parts) < len(champs):
             continue
-        sha, nom, email, corps = parts[0][:8], parts[1], parts[2], sep.join(parts[3:])
-        mauvaise = faute_d_identite(nom, email)
-        if mauvaise:
-            refus.append(f"{sha} — IDENTITÉ : {mauvaise}")
+        sha = parts[0][:8]
+        corps = sep.join(parts[len(champs) - 1:])
+        # Les DEUX slots, pas seulement l'auteur : un `cherry-pick`, un `rebase` ou l'édition via
+        # l'interface web laissent l'auteur intact et écrivent une AUTRE identité en committer.
+        # C'est par cette porte que des commits à compte personnel sont entrés dans ce dépôt.
+        for role, nom, email in (("auteur", parts[1], parts[2]),
+                                 ("committer", parts[3], parts[4])):
+            mauvaise = faute_d_identite(nom, email)
+            if mauvaise:
+                refus.append(f"{sha} — IDENTITÉ ({role}) : {mauvaise}")
         for ligne, extrait, raison in fautes_de_message(corps):
             refus.append(f"{sha}:{ligne} — REGISTRE ({raison}) : « {extrait} »")
     return refus
@@ -147,6 +165,9 @@ def main(argv=None):
         print(f"  {r}", file=sys.stderr)
     print("\nCe qui reste ADMIS : la voix de l'outil (« un `skipped` dit je n'ai PAS pu vérifier »), "
           "une date de mesure, et un « pourquoi » long. La longueur n'est pas le défaut.",
+          file=sys.stderr)
+    print("Si c'est bien la voix de l'outil ou une CITATION de la mauvaise forme, préfixez la ligne "
+          "de « > » : ce garde lit des formes, pas des intentions, et ne sait pas qui parle.",
           file=sys.stderr)
     return 1
 
