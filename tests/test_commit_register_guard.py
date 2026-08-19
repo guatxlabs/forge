@@ -268,7 +268,6 @@ class TheTwoBarriersExist(unittest.TestCase):
         Un contrôle incapable d'échouer est un décor : si cette assertion devient verte alors
         qu'elle ne devrait pas, c'est le garde qui a cessé de garder, pas le dépôt qui s'est
         assaini."""
-        import os
         import shutil
         import subprocess as sp
         import tempfile
