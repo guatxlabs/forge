@@ -558,6 +558,10 @@ jobs:
             '''^k8s/40-console\.yaml$''',
             '''^docs/KEY_CUSTODY\.md$''',
             '''^tests/.*\.py$''',
+            # Rapports de banc : la règle matche la CLEF `secret":` d'un extrait JSON dont la
+            # VALEUR est le mot `REDACTED` — c'est-à-dire la preuve que la rédaction a fonctionné.
+            '''^bench/detection/RESULTS_2026-08-11\.md$''',
+            '''^bench/detection/RESULTS_2026-08-11-r5\.md$''',
           ]
 
           # Jetons / JWT de fixture des oracles de détection.
@@ -577,6 +581,30 @@ jobs:
             '''^console/src/notify_channels\.rs$''',
             '''^console/src/notify_sla\.rs$''',
           ]
+
+          # ── Trois règles restées SANS allowlist, et qui ne mordaient sur rien de réel ────────
+          # Elles n'avaient jamais été atteintes : l'étape gitleaks vient APRÈS cargo-deny dans ce
+          # job, et cargo-deny échouait sur un `Cargo.lock` périmé. Un échec en masquait un autre.
+          # Chaque fichier ci-dessous a été OUVERT et sa valeur vérifiée — aucune n'est un secret.
+
+          # La commande de REPRODUCTION affichée dans un rapport. Le jeton est un littéral de
+          # fixture : le payload décode en `SUPERSECRETVALUE`, la signature vaut `sig`. Ces deux
+          # fichiers prouvent que l'en-tête `Authorization` est bien RÉDIGÉ dans un rapport rendu.
+          [[rules]]
+          id = "curl-auth-header"
+          [rules.allowlist]
+          paths = [
+            '''^console/src/reports/parity_corpus\.json$''',
+            '''^tests/test_report_view\.py$''',
+          ]
+
+          # Manifeste d'EXEMPLE (le mot est dans le nom du fichier) : il montre la FORME d'un
+          # Secret Kubernetes à créer soi-même, pas une valeur. Le déploiement réel lit
+          # `k8s/40-console.yaml`, qui ne porte que des `secretKeyRef`.
+          [[rules]]
+          id = "kubernetes-secret-yaml"
+          [rules.allowlist]
+          paths = ['''^k8s/10-secrets\.example\.yaml$''']
 
           # Les faux jetons fournisseur du corpus de rédaction — et de NULLE PART ailleurs.
           [[rules]]
