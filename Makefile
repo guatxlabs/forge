@@ -72,6 +72,13 @@ check-supply-chain:  ## Les 3 gardes de supply-chain : openssl-freedom + licence
 	  && python3 scripts/check_dep_licenses.py \
 	  && python3 scripts/check_no_stray_nul.py
 
+hooks:  ## Active les hooks du dépôt (identité + registre des messages) — une fois par clone
+	@git config core.hooksPath .githooks
+	@echo "hooks actifs : $$(git config core.hooksPath)"
+	@echo "identité : $$(git config user.name) <$$(git config user.email)>"
+	@python3 scripts/check_commit_register.py --rev HEAD >/dev/null 2>&1 \
+	  && echo "dernier commit : conforme" || echo "dernier commit : NON conforme (cf. AGENTS.md)"
+
 install:  ## Installe forge en editable (met `forge` sur le PATH)
 	pip install -e .
 

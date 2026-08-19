@@ -89,11 +89,18 @@ def _git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True).stdout
 
 
-def verifier_revisions(plage):
-    """Vérifie chaque commit d'une plage (`base..head`) ou une révision unique. Rend la liste des
-    lignes de refus, vide si tout passe."""
+def verifier_revisions(plage, une_seule=False):
+    """Vérifie chaque commit d'une plage (`base..head`), ou UN commit si `une_seule`.
+
+    `une_seule` existe parce que `git log HEAD` liste TOUT l'historique atteignable, pas le seul
+    commit visé : sans `-1`, un contrôle « ce commit est-il conforme ? » rendait le verdict de
+    l'historique entier. Rend la liste des lignes de refus, vide si tout passe."""
     sep = "\x1e"
-    brut = _git("log", "--format=%H" + sep + "%an" + sep + "%ae" + sep + "%B" + "\x1d", plage)
+    args = ["log", "--format=%H" + sep + "%an" + sep + "%ae" + sep + "%B" + "\x1d"]
+    if une_seule:
+        args.append("-1")
+    args.append(plage)
+    brut = _git(*args)
     refus = []
     for bloc in brut.split("\x1d"):
         if not bloc.strip():
@@ -129,7 +136,7 @@ def main(argv=None):
         if mauvaise:
             refus.append(f"IDENTITÉ : {mauvaise}")
     else:
-        refus = verifier_revisions(args.plage or args.rev)
+        refus = verifier_revisions(args.plage or args.rev, une_seule=bool(args.rev))
 
     if not refus:
         return 0
