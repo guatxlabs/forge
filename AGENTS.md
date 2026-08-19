@@ -37,7 +37,10 @@ agir sur ce qu'il lit. Dites **ce qui change et pourquoi**.
 * une **date de mesure** — « MESURÉ le 2026-08-16 » est de la traçabilité, pas un journal ;
 * un **« pourquoi » long**. La longueur n'a jamais été le défaut ; l'adressage l'était.
 
-La chronologie d'une investigation appartient à `ROADMAP.md`, qui existe pour ça.
+La chronologie d'une investigation n'appartient pas au dépôt public : `ROADMAP.md` y est un
+**sommaire** — ce qui est livré, ce qui reste ouvert, les limites assumées — et non un journal de
+campagne. Le récit d'une enquête se tient hors du dépôt ; ce qui doit en survivre publiquement,
+c'est la **décision** et son **pourquoi**, dans le message du commit qui la porte.
 
 ### Quand la voix de l'outil emprunte une tournure interdite
 

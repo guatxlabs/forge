@@ -2,7 +2,8 @@
 # Banc de détection multi-applications — méthode et résultats
 
 > [Sommaire](README.md) · Code du banc : [`../bench/detection/`](../bench/README.md) ·
-> Mesure historique mono-cible : `ROADMAP.md` § « Pouvoir de détection — mesuré, pas supposé »
+> Mesure historique mono-cible : conservée hors dépôt public ; ce document lui succède et se
+> suffit à lui-même.
 >
 > **DEUX campagnes, gardées côte à côte.** `2026-08-10` (mesure initiale, 13 défauts consignés) et
 > `2026-08-11` (banc **rejoué en entier** après remédiation, pour mesurer les 13 correctifs ENSEMBLE
@@ -311,7 +312,7 @@ traités.
 ## 6. Les 13 défauts du 2026-08-10 — **texte d'origine conservé**, statut mesuré en campagne complète
 
 > Les descriptions ci-dessous sont celles du jour où le banc les a trouvés, **inchangées**. Les 13 ont
-> été fermés depuis (`ROADMAP.md` § « Remédiation des 13 défauts »), mais ils n'avaient été mesurés
+> été fermés depuis — chacun par un commit qui porte sa mesure —, mais ils n'avaient été mesurés
 > qu'**isolément**. Le tableau qui suit dit ce que la campagne COMPLÈTE du 2026-08-11 a constaté —
 > et pour trois d'entre eux, le constat n'est pas celui qu'on attendait.
 
@@ -559,8 +560,8 @@ sa preuve : une commande, une sortie, ou un extrait de code à la ligne près.
 
 Le correctif D13 (gate de liveness) a été livré avec une conclusion explicite : *« la campagne n'était
 pas la CAUSE de la mort »*, appuyée sur une mesure d'un agent (conteneur seul, zéro paquet, 121 Mio →
-4,79 Gio, mort à 222 s). La ROADMAP note que l'orchestrateur **n'a pas reproduit ce renversement** et
-laisse la question ouverte. **Le rejeu la tranche.**
+4,79 Gio, mort à 222 s). Cette mesure venait d'une source unique, **non reproduite** par une
+contre-vérification indépendante, et la question restait ouverte. **Le rejeu la tranche.**
 
 Le banc lance Juice Shop **en même temps que les trois autres applications** puis la teste **en
 dernier**. Elle est donc restée en vie, sans être ciblée, pendant 34 minutes — un contrôle négatif
