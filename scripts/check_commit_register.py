@@ -97,7 +97,13 @@ def faute_d_identite(nom, email):
 
 
 def _git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True).stdout
+    """(code, stdout, stderr) de git. Le code de retour n'est PAS jetable.
+
+    Une barrière doit échouer FERMÉE. En rendant seulement `stdout`, un `git log` qui échoue
+    donnait une sortie vide, donc « aucune faute », donc un succès — la CI validait alors une
+    plage qu'elle n'avait jamais lue. Les appelants qui prononcent un refus lisent le code."""
+    p = subprocess.run(["git", *args], capture_output=True, text=True)
+    return p.returncode, p.stdout, p.stderr
 
 
 def verifier_revisions(plage, une_seule=False):
@@ -112,7 +118,11 @@ def verifier_revisions(plage, une_seule=False):
     if une_seule:
         args.append("-1")
     args.append(plage)
-    brut = _git(*args)
+    code, brut, err = _git(*args)
+    if code != 0:
+        motif = err.strip().splitlines()[0] if err.strip() else "sans message"
+        return [f"PLAGE ILLISIBLE « {plage} » — git a refusé : {motif}. "
+                f"Rien n'a été vérifié : ce refus est délibéré, une barrière échoue FERMÉE."]
     refus = []
     for bloc in brut.split("\x1d"):
         if not bloc.strip():
@@ -149,8 +159,10 @@ def main(argv=None):
             texte = f.read()
         refus = [f"ligne {ln} — REGISTRE ({raison}) : « {ex} »"
                  for ln, ex, raison in fautes_de_message(texte)]
-        mauvaise = faute_d_identite(_git("config", "user.name").strip(),
-                                    _git("config", "user.email").strip())
+        # Une clé absente rend un code non nul et une sortie vide : `faute_d_identite` refuse
+        # alors le nom vide, ce qui est le comportement voulu — non configuré = non conforme.
+        mauvaise = faute_d_identite(_git("config", "user.name")[1].strip(),
+                                    _git("config", "user.email")[1].strip())
         if mauvaise:
             refus.append(f"IDENTITÉ : {mauvaise}")
     else:

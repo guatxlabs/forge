@@ -53,18 +53,29 @@ jobs:
           fetch-depth: 0          # la plage poussée doit être lisible
 
       - name: Vérifier les commits poussés
+        # Les deux valeurs sont des SHA imposés par GitHub, pas du texte libre — mais elles
+        # passent par `env:` plutôt que par une interpolation dans `run:`, qui est le motif
+        # d'injection à ne pas installer, fût-ce sur une entrée aujourd'hui inoffensive.
+        env:
+          BASE_PR: ${{ github.event.pull_request.base.sha }}
+          BASE_PUSH: ${{ github.event.before }}
         run: |
           set -eu
           # Plage : les commits AJOUTÉS par ce push / cette PR. Sur une branche neuve
           # (`before` = 000…0) ou un dispatch manuel, on retombe sur le dernier commit.
-          BASE="${{ github.event.pull_request.base.sha || github.event.before || '' }}"
+          #
+          # Le repli passe par `--rev HEAD`, PAS par une plage littérale « -1 HEAD » : git
+          # reçoit cet argument comme UNE seule révision, la refuse, et le garde ne voyait
+          # alors aucun commit — donc aucune faute, donc un vert. Ce chemin de repli est le
+          # cas NORMAL d'une branche neuve : il était vert sans rien lire.
+          BASE="${BASE_PR:-${BASE_PUSH:-}}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-            PLAGE="-1 HEAD"
+            echo "plage vérifiée : HEAD seul (pas de base lisible)"
+            python3 scripts/check_commit_register.py --rev HEAD
           else
-            PLAGE="$BASE..HEAD"
+            echo "plage vérifiée : $BASE..HEAD"
+            python3 scripts/check_commit_register.py --range "$BASE..HEAD"
           fi
-          echo "plage vérifiée : $PLAGE"
-          python3 scripts/check_commit_register.py --range "$PLAGE"
 
   # ---------------------------------------------------------------------------
   # Python — tests du cœur Forge (stdlib only, aucune dépendance à installer).

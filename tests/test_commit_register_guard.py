@@ -166,6 +166,25 @@ class TheTwoBarriersExist(unittest.TestCase):
         self.assertFalse(any("(committer) : auteur" in r for r in refus),
                          f"le refus désigne le mauvais slot : {refus}")
 
+    def test_une_plage_ILLISIBLE_est_un_REFUS_et_non_un_succes(self):
+        """Une barrière échoue FERMÉE — sinon elle valide ce qu'elle n'a pas lu.
+
+        Le job CI retombait sur la plage littérale « -1 HEAD » quand `github.event.before` vaut
+        000…0 (branche neuve, dispatch manuel). `git log` refuse cet argument unique, l'ancien
+        `_git` ne rendait que `stdout` — vide — et le garde concluait « aucune faute » : la CI
+        annonçait un contrôle vert sur une plage jamais lue."""
+        for plage in ("-1 HEAD", "cette-reference-n-existe-pas..HEAD"):
+            with self.subTest(plage=plage):
+                refus = verifier_revisions(plage)
+                self.assertTrue(refus, f"plage illisible « {plage} » acceptée en silence")
+                self.assertIn("ILLISIBLE", refus[0])
+
+    def test_le_repli_du_job_CI_est_une_plage_que_git_SAIT_lire(self):
+        """La correction du garde ne sert à rien si le YAML lui donne toujours l'argument cassé."""
+        ci = (RACINE / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn('PLAGE="-1 HEAD"', ci,
+                         "le repli passe encore « -1 HEAD » comme UNE seule révision à git")
+
     def test_le_motif_de_chaque_regle_porte_sa_RAISON(self):
         for motif, raison in BANNIES.items():
             with self.subTest(motif=motif[:30]):
