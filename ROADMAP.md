@@ -64,11 +64,18 @@ qui ne connaît ni la session ni son auteur, et qui doit pouvoir agir sur ce qu'
 directe à un interlocuteur, et la chronologie de session comme fil narratif. Restent admis la voix
 de l'outil, une date de mesure, et un « pourquoi » long — la longueur n'a jamais été le défaut.
 
+La première personne est refusée **en bloc**, pas verbe par verbe : une énumération ne peut pas être
+complète, et celle qui l'a précédée laissait passer `j'ai inséré` là où elle refusait `j'ai mesuré`.
+La voix de l'outil, qui s'écrit à la première personne, passe en portant une **marque de citation**
+— guillemets, code entre backticks, ou ligne `>`. Le détail opérationnel, écrit pour un lecteur sans
+contexte préalable, est dans [`AGENTS.md`](AGENTS.md).
+
 Deux barrières appliquent ces règles depuis une **seule** implémentation
 ([`scripts/check_commit_register.py`](scripts/check_commit_register.py)) : le hook `commit-msg`
 (`make hooks`) et un job de CI. Le hook ne ferme pas — `git clone` ne le transporte pas et l'édition
 via l'interface web ne l'exécute jamais. **C'est la CI qui ferme** ; le hook évite seulement d'avoir
-à corriger après coup.
+à corriger après coup. Les deux slots d'identité sont vérifiés, auteur **et** committer, et une
+plage que git n'a pas su lire est un refus : une barrière échoue fermée.
 
 ## Ce qui reste ouvert
 

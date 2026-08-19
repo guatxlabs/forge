@@ -42,20 +42,33 @@ La chronologie d'une investigation n'appartient pas au dépôt public : `ROADMAP
 campagne. Le récit d'une enquête se tient hors du dépôt ; ce qui doit en survivre publiquement,
 c'est la **décision** et son **pourquoi**, dans le message du commit qui la porte.
 
-### Quand la voix de l'outil emprunte une tournure interdite
+### La première personne : interdite nue, admise CITÉE
 
-Le garde lit des **formes**, pas des intentions : il ne sait pas qui parle. L'exemple `skipped`
-ci-dessus passe, mais son pendant `tested` — « j'ai vérifié, rien trouvé » — dit la même chose sur
-l'autre statut et se fait **refuser**, parce qu'il emprunte mot pour mot une forme bannie.
-L'asymétrie est un artefact de la liste de motifs, pas une règle.
+Le garde lit des **formes**, pas des intentions — il ne sait pas qui parle. Toute élision de « je »
+et tout possessif (`mon`, `ma`, `mes`) sont donc refusés **en bloc**, quel que soit le verbe qui
+suit. Ce n'est pas de la sévérité gratuite : la version qui énumérait les verbes
+(`j'ai trouvé|corrigé|mesuré|…`) a laissé passer **56 occurrences** — `j'ai inséré`, `j'ai composé`,
+`mon propre garde`, `de mon côté`, `ma main` — dans des commits qu'elle déclarait conformes.
 
-Dans ce cas, **préfixez la ligne de `>`** : c'en est une citation, et les lignes citées sont
-ignorées. C'est aussi ce qui permet à la règle de citer ce qu'elle interdit sans se refuser
-elle-même.
+La voix de l'outil s'écrit pourtant à la première personne, et doit passer. Elle passe en portant
+une **marque de citation** — c'en est une :
 
-```
-> un `tested` dit « j'ai vérifié, rien trouvé » — d'où le contrôle sur l'oracle
-```
+| marque | exemple |
+|---|---|
+| guillemets | un `skipped` dit « je n'ai PAS pu vérifier » |
+| code | le motif `mon propre garde` n'était pas couvert |
+| ligne `>` | `> un `tested` dit « j'ai vérifié, rien trouvé »` |
+
+C'est aussi ce qui permet à la règle de citer ce qu'elle interdit sans se refuser elle-même. Une
+citation ne traverse pas un saut de paragraphe, et **un span de code ne doit pas être coupé par un
+retour à la ligne** — sinon l'appariement des backticks se décale et le contenu cité redevient
+visible au garde.
+
+### `hier` est interdit, `aujourd'hui` ne l'est pas
+
+Asymétrie mesurée, pas supposée. « hier » n'a aucun référent pour un lecteur qui arrive six mois
+plus tard. « aujourd'hui » sert à dire *à l'état actuel du code* — « aucun réglage n'expose ce
+levier aujourd'hui » — dans 8 emplois sur 9 relevés dans cet historique.
 
 ## Comment ces règles sont tenues
 
@@ -68,12 +81,39 @@ Le hook **ne suffit pas** : il n'est pas transporté par `git clone` et n'est ja
 l'édition web de GitHub — la voie même par laquelle le problème était entré. **C'est la CI qui
 ferme.** Le hook évite seulement d'avoir à corriger après coup.
 
+Les deux slots d'identité sont vérifiés, **auteur et committer** : un `cherry-pick`, un `rebase` ou
+l'édition web laissent l'auteur intact et écrivent une autre identité en committer — et c'est par
+là que le compte personnel était entré. Une plage que git n'a pas su lire est un **refus**, pas un
+silence : une barrière échoue fermée.
+
 Vérifier un message avant de commiter, ou une plage déjà écrite :
 
 ```sh
 python3 scripts/check_commit_register.py --message-file <fichier>
 python3 scripts/check_commit_register.py --range origin/main..HEAD
 ```
+
+### Ce qu'un garde ne peut pas faire, et ce qu'il faut faire à la place
+
+**Un garde n'attrape que ce qu'il sait décrire.** Les 56 occurrences citées plus haut n'ont pas été
+trouvées par lui — il les déclarait conformes — mais par un **audit indépendant**, écrit avec
+d'autres motifs, exprès plus larges, et confronté ligne à ligne. Ce dépôt a quatre listes tenues à
+la main qui ont survécu à leur objet : `_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS`, les exemptions du
+garde de documents, et cette énumération de verbes.
+
+Avant d'affirmer qu'un dépôt est propre : écrire un contrôle **indépendant du garde**, comparer, et
+trier les faux positifs à la main. Un garde vert ne prouve que l'absence de ce qu'il cherche.
+
+### Si vous réécrivez l'historique
+
+Trois pièges rencontrés, chacun ayant coûté une reprise :
+
+* `git filter-repo` **remet l'arbre de travail à l'état commité**. Toute modification non commitée
+  est perdue — commiter d'abord, réécrire ensuite.
+* sans `--prune-empty=never`, un commit dont le seul changement devient un no-op après réécriture
+  est **supprimé avec son message**. Vérifier le compte de commits avant/après.
+* filter-repo **réécrit les SHA cités dans les messages** : un remplacement littéral qui contient
+  un SHA ne matchera plus au tour suivant.
 
 ## Le reste
 
