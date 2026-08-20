@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 
+from .. import seeds
 from ..roe import Scope, Roe, Action
 from ..ledger import Ledger
 from ..engine import Engine
@@ -312,14 +313,28 @@ def cmd_run(args):
 
 
 def _load_targets(path):
+    """Charge les cibles, en NORMALISANT chaque graine avant qu'elle devienne une cible.
+
+    Une graine qui ne produit pas de cible RÉSEAU — un nom, un pseudonyme, un numéro — est
+    refusée ICI, avec sa raison. Le refus doit tomber à l'entrée : trois couches plus bas,
+    l'absence d'IP à épingler ressemblerait à « rien trouvé » au lieu d'« impossible à
+    gouverner ». Cf. `forge/seeds.py` pour l'ancre de sûreté que cela protège."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out = []
     for i, t in enumerate(data):
         try:
-            out.append(Target(host=t["host"], kind=t.get("kind", "host"), attrs=t.get("attrs", {})))
+            brut = t["host"]
         except KeyError as e:                          # 'host' manquant -> message clair (pas un KeyError brut)
             raise SystemExit(f"targets[{i}] : champ requis manquant {e} dans {path} "
                              f"(chaque cible exige 'host')")
+        graine = seeds.normalize(brut)
+        if not graine.acceptee:
+            raise SystemExit(f"targets[{i}] dans {path} : {graine.motif}")
+        attrs = dict(t.get("attrs", {}))
+        if graine.cible != brut:                       # PIVOT (e-mail -> domaine) : on trace l'origine
+            attrs.setdefault("seed", brut)
+            attrs.setdefault("seed_kind", graine.genre)
+        out.append(Target(host=graine.cible, kind=t.get("kind", "host"), attrs=attrs))
     return out
 
 
