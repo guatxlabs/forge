@@ -20,6 +20,10 @@ message du commit qui le porte.
 - **Cœur de sûreté** — gate ROE fail-closed à 4 couches (armé → in-scope → capacité → approuvé),
   scope-guard, plancher exploit opt-in, ledger d'engagement tamper-evident (chaîne SHA-256 +
   Ed25519 par entrée, vérifiable par un tiers avec la seule clé publique).
+- **Graines d'engagement gouvernées** — une cible peut être un hôte, une URL, un littéral IP ou
+  un **e-mail** (pivot vers son domaine). Un nom, un pseudonyme ou un numéro est refusé au
+  chargement, avec sa raison : la sûreté est ancrée sur une IP épinglable, et une entité qui
+  n'en produit aucune ne peut recevoir aucun verdict réseau.
 - **Périmètre par port** — un motif de scope peut restreindre un hôte à un seul port
   (`example.com:3000`) ; sans port il porte sur l'hôte entier. Face à une cible qui ne révèle aucun
   port, `in_scope` refuse et `out_scope` bloque : chacun va vers la sûreté, il n'existe pas de

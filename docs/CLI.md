@@ -72,6 +72,23 @@ forge run --scope scope.json --actions actions.json \
 Campagne **itérative** (plan → observe → replan) pilotée par le cerveau + le planner coverage-safe.
 `--targets` = JSON `[{host, kind?, attrs?}]`.
 
+**Ce que `host` accepte — une entité est un PIVOT, jamais une cible.** Toute la sûreté est
+ancrée sur une **IP épinglable** : le scope apparie l'hôte, puis le ROE rend son verdict
+(privé / LAN / hors-scope-par-IP) **contre les IP résolues**. Une graine dont aucune IP ne
+peut être tirée n'est pas gouvernable, et elle est refusée **au chargement**, pas plus tard.
+
+| graine | résultat |
+|---|---|
+| `example.com`, `sub.example.com:8443`, `https://example.com/a` | cible telle quelle |
+| `1.2.3.4`, `[::1]:8081` | cible telle quelle (littéral IP) |
+| `alice@example.com` | **pivot** vers `example.com` ; la partie locale est jetée, la graine reste dans `attrs.seed` |
+| `Alice Martin`, `@alice_m`, `+33612345678` | **refusé**, avec la raison et la marche à suivre |
+
+Un pseudonyme ou un numéro n'est pas refusé par manque de capacité technique mais parce que
+les règles d'engagement ne savent pas exprimer « autorisé à investiguer **cette identité** » —
+c'est une autorisation, pas un outil. Si la plateforme visée est dans le périmètre autorisé,
+mettre **son domaine** dans le scope et viser ce domaine.
+
 | Flag | Sens |
 |---|---|
 | `--arm`, `--approve`, `--mode`, `--ledger`, `--report`, `--reason`, `--memory` | comme `run`. |
