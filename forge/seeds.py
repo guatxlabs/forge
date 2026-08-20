@@ -19,10 +19,15 @@ et figé par test pour les URL. Un e-mail a la même forme, il retombait donc su
 par effet de bord. Ici c'est écrit : un e-mail est un PIVOT vers son domaine, la partie locale
 est jetée, et la graine d'origine est conservée dans les attributs pour la traçabilité.
 
-CE QUI N'EST PAS FAIT, ET POURQUOI. Agir sur une PERSONNE — énumérer ses comptes, remonter un
-numéro — n'est pas du test d'infrastructure : le ROE n'a aujourd'hui aucun moyen d'exprimer
-« autorisé à investiguer cette identité ». Tant que cette autorisation n'est pas exprimable,
-ces graines sont refusées. C'est une limite d'AUTORISATION, pas de capacité technique.
+CE QUE FORGE NE FAIT PAS, ET NE FERA PAS. Agir sur une PERSONNE — énumérer ses comptes,
+remonter un numéro, corréler un nom avec des profils — n'est PAS l'objet de cet outil. Forge
+teste une infrastructure qu'un mandat autorise à tester ; la cible y est une machine, et le
+verdict se rend contre une IP.
+
+Ce n'est donc pas une fonctionnalité différée : c'est une FRONTIÈRE. Il n'y a rien à attendre
+ici, et un refus n'est pas l'annonce d'un développement futur. Ce qui suit une graine de
+personne, c'est un message qui explique la limite et indique la voie réseau — jamais une file
+d'attente.
 """
 from __future__ import annotations
 
@@ -70,10 +75,11 @@ class Seed:
 def _refus_personne(genre: str, brut: str) -> str:
     quoi = {"pseudonyme": "un pseudonyme", "telephone": "un numéro de téléphone",
             "nom": "un nom de personne"}[genre]
-    return (f"« {brut} » est {quoi} : aucune IP ne peut en être résolue, donc le ROE ne peut "
-            f"rendre aucun verdict réseau et le scope-guard n'a rien à apparier. Fournir un "
-            f"hôte, une URL ou un e-mail — ou, si la plateforme visée est dans le périmètre "
-            f"autorisé, mettre son domaine dans le scope et viser ce domaine.")
+    return (f"« {brut} » est {quoi} : forge teste une INFRASTRUCTURE, pas une personne. Aucune "
+            f"IP ne peut en être résolue, donc le scope-guard n'a rien à apparier et le ROE "
+            f"aucun verdict réseau à rendre. Fournir un hôte, une URL ou un e-mail — ou, si la "
+            f"plateforme visée est dans le périmètre autorisé, mettre son domaine dans le scope "
+            f"et viser ce domaine.")
 
 
 def normalize(brut: str) -> Seed:

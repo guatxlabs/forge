@@ -84,10 +84,10 @@ peut être tirée n'est pas gouvernable, et elle est refusée **au chargement**,
 | `alice@example.com` | **pivot** vers `example.com` ; la partie locale est jetée, la graine reste dans `attrs.seed` |
 | `Alice Martin`, `@alice_m`, `+33612345678` | **refusé**, avec la raison et la marche à suivre |
 
-Un pseudonyme ou un numéro n'est pas refusé par manque de capacité technique mais parce que
-les règles d'engagement ne savent pas exprimer « autorisé à investiguer **cette identité** » —
-c'est une autorisation, pas un outil. Si la plateforme visée est dans le périmètre autorisé,
-mettre **son domaine** dans le scope et viser ce domaine.
+**Forge teste une infrastructure, pas une personne.** Un pseudonyme ou un numéro n'ouvre
+aucune voie ici, et ce n'est pas une fonctionnalité différée : la cible d'une action est une
+machine, et le verdict se rend contre son IP. Si la plateforme visée est dans le périmètre
+autorisé, mettre **son domaine** dans le scope et viser ce domaine.
 
 | Flag | Sens |
 |---|---|
