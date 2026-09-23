@@ -1,25 +1,37 @@
 {
- "QUALIFYING": [
-  "access_control",
-  "ato",
-  "auth",
-  "auth_bypass",
-  "biz",
-  "bola",
-  "business_logic",
-  "idor",
-  "privesc",
-  "rce",
-  "sqli",
-  "ssrf"
- ],
- "DEFAULT_CHECKLIST": [
-  "access_control",
-  "auth",
-  "ato",
-  "ssrf",
-  "sqli",
-  "rce",
-  "business_logic"
- ]
+  "QUALIFYING": [
+    "access_control",
+    "ato",
+    "auth",
+    "auth_bypass",
+    "biz",
+    "bola",
+    "business_logic",
+    "cspt",
+    "file_upload",
+    "idor",
+    "lfi",
+    "llm",
+    "parser_diff",
+    "privesc",
+    "rce",
+    "sqli",
+    "ssrf",
+    "xss"
+  ],
+  "DEFAULT_CHECKLIST": [
+    "lfi",
+    "xss",
+    "access_control",
+    "business_logic",
+    "file_upload",
+    "sqli",
+    "ssrf",
+    "auth",
+    "cspt",
+    "parser_diff",
+    "ato",
+    "rce"
+  ],
+  "_revision_locale_2026-09-04": "Snapshot mis a jour DELIBEREMENT. QUALIFYING gagne 'lfi' et 'xss' ; DEFAULT_CHECKLIST est reordonnee et etendue. Motif : mesure sur 2 077 rapports de hacktivite reelle — le path traversal est la classe la mieux acceptee du marche (70 %) et le XSS la deuxieme (57-65 %), or les deux etaient non qualifiantes ET absentes de la checklist, si bien que coverage_gaps() ne pouvait jamais signaler qu'on ne les avait pas tentees. Ce n'est pas une derive accidentelle de taxonomie, c'est la correction d'un biais d'allocation constate sur 501 findings reels. | 2e passe : ajout de 'file_upload' (jeton + checklist) avec la LIVRAISON de son module upload.unrestricted. FileUpload est mesuree a 50 % d'acceptation et etait la seule des cinq classes les mieux payees SANS aucun module — donc structurellement invisible pour coverage_gaps()."
 }

@@ -321,11 +321,29 @@ class CmdiProbe(InjectionOracle):
                 if st is not None:
                     seen_network = True
                 b = body or ""
-                if token in b:
-                    executed, matched, how = True, payload, "token echo"
-                    break
+                # PREUVE FORTE — le PRODUIT arithmétique. Il n'est JAMAIS envoyé (seuls `n` et `m` le
+                # sont) : sa présence ne peut pas s'expliquer par une réflexion. On la teste EN PREMIER.
                 if prod_s in b:
                     executed, matched, how = True, payload, "produit arithmétique"
+                    break
+                # PREUVE FAIBLE — le token. ⚠️ IL EST CONTENU DANS LE PAYLOAD (`echo <token>`) : toute
+                # application qui RÉFLÉCHIT la valeur du paramètre le renvoie SANS RIEN EXÉCUTER.
+                # Mesuré en conditions réelles (2026-09-04) sur une FAQ Drupal : le payload complet
+                # `; echo <token>` revenait verbatim dans le JSON `drupalSettings.currentQuery`, et
+                # l'oracle concluait « Command-Injection CONFIRMÉE » en HIGH. Deux gardes ferment
+                # cette porte, le second étant décisif.
+                if token in b:
+                    # (A) GRATUIT — si la COMMANDE ELLE-MÊME revient, c'est une réflexion du paramètre,
+                    #     pas une exécution : un shell qui exécute `echo X` rend `X`, jamais `echo X`.
+                    if cmd in b or payload in b:
+                        continue
+                    # (B) DÉCISIF — sonde de CONTRÔLE : on renvoie le token SEUL, sans aucune syntaxe
+                    #     de commande. S'il revient AUSSI, l'application réfléchit simplement la valeur
+                    #     et le token ne prouve rien. Une seule requête, et seulement en cas de match.
+                    _w, _st, cbody = self._send(action, param, token, method)
+                    if _st is not None and token in (cbody or ""):
+                        continue
+                    executed, matched, how = True, payload, "token echo (contrôle de réflexion passé)"
                     break
             if executed:
                 break

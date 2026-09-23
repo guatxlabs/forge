@@ -177,6 +177,7 @@ def _dom_of(resp):
 # byte-à-byte identiques ; le fix est déclaré explicitement par le module ci-dessous.
 techniques.register_kind(techniques._k(
     "xss.execution", "XSS", True, depends_on=("recon.js_endpoints",),
+    cls="xss",   # AJOUT LOCAL 2026-09-04 : sans cls declare, coverage_gaps() ne relie pas cet oracle a la classe XSS
     cwe="CWE-79", mitre="T1059", exploit=True,
     attck_tactic="Execution", phase="access", capability="active", proof_required=True))
 

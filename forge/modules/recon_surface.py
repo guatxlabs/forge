@@ -291,6 +291,37 @@ class PassiveSurface(ScopeGuardMixin, Module):
     # borne PARTAGÉE du nombre de findings PAR-ENDPOINT émis (fan-out) — le chaînage relira ces cibles.
     MAX_ENDPOINTS = 25
 
+    # Assets STATIQUES : jamais une cible d'injection, quel que soit l'oracle. Mesuré le 2026-09-23
+    # en conditions réelles sur un site à CMS : recon.urls a rendu une majorité de médias (chemins
+    # de type `/-/m/...jpg`) qui saturaient le budget d'endpoints et le fan-out d'oracles sans qu'aucun
+    # ne porte de paramètre injectable. Un `.png` historique n'a rien à recevoir. On les écarte du
+    # CHAÎNAGE, jamais en silence (constat unique compté), et JAMAIS quand l'URL porte une query
+    # (`?`) : un `.css?v=` peut être généré dynamiquement, on reste conservateur.
+    _STATIC_EXT = (
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".avif", ".tif", ".tiff",
+        ".woff", ".woff2", ".ttf", ".eot", ".otf",
+        ".css", ".map",
+        ".mp4", ".webm", ".mp3", ".wav", ".ogg", ".ogv", ".avi", ".mov", ".m4a", ".m4v",
+    )
+
+    @classmethod
+    def _is_static_asset(cls, url):
+        """True si l'URL désigne un asset statique inerte (extension connue, AUCUNE query).
+        Pur, ne lève jamais."""
+        s = str(url)
+        if "?" in s or "#" in s:                     # une query/fragment => potentiellement dynamique
+            return False
+        path = urllib.parse.urlsplit(s).path.lower().rstrip("/")
+        return path.endswith(cls._STATIC_EXT)
+
+    def _drop_static_assets(self, urls):
+        """(cibles chaînables, assets statiques écartés) — pur, sans réseau. Écarte les médias/CSS/
+        fontes/vidéos qui ne sont cible d'AUCUN oracle d'injection. Préserve l'ordre."""
+        kept, dropped = [], []
+        for u in urls:
+            (dropped if self._is_static_asset(u) else kept).append(u)
+        return kept, dropped
+
     def _partition_infra(self, action, urls):
         """(gardées, écartées[(url, famille)]) — point UNIQUE de reconnaissance des non-cibles d'edge
         pour ce module (émission d'endpoints ET récupération de JS référencé). Pur, sans réseau.
@@ -730,14 +761,27 @@ class HistoricalUrls(PassiveSurface):
                                   self.dry(action))]
         in_scope_urls = sorted(u for u in found if self._host_in_scope(action, _host_only(u)))
         filtered = len(found) - len(in_scope_urls)
+        # ÉCART DES ASSETS STATIQUES avant le chaînage : un média historique n'est cible d'aucun
+        # oracle et saturerait le budget d'endpoints (mesuré en conditions réelles, cf. _STATIC_EXT).
+        chainable, static_assets = self._drop_static_assets(in_scope_urls)
         summary = self._finding(
             domain, f"URLs historiques (passif) : {len(in_scope_urls)} in-scope",
             (f"{len(in_scope_urls)} URL(s) in-scope via {', '.join(tried)} "
-             f"({filtered} hors périmètre écartée(s)). Exemples : {', '.join(in_scope_urls[:40]) or '—'}"),
+             f"({filtered} hors périmètre écartée(s) ; {len(static_assets)} asset(s) statique(s) "
+             f"écarté(s) du chaînage). Exemples chaînables : {', '.join(chainable[:40]) or '—'}"),
             self.dry(action))
+        out = [summary]
+        if static_assets:
+            # NON en silence : un constat unique compté, comme pour les non-cibles d'infra.
+            ex = ", ".join(static_assets[:5]) + (" …" if len(static_assets) > 5 else "")
+            out.append(self._skipped(
+                domain, f"recon.urls — {len(static_assets)} asset(s) statique(s) écarté(s) du chaînage",
+                (f"Médias/CSS/fontes/vidéos sans paramètre injectable : cible d'aucun oracle. "
+                 f"Exemples : {ex}. Pour en tester un explicitement, l'ajouter comme cible."),
+                f"# {len(static_assets)} asset(s) statique(s) non chaîné(s) : {ex}"))
         # cibles CHAÎNABLES (edge C) : chaque URL historique in-scope émise comme finding par-endpoint
         # (bornée) que le cerveau vérifie via les oracles.
-        return [summary] + self._endpoint_findings(action, in_scope_urls, techniques.DISCOVERY_HISTORICAL_URL_MARKER)
+        return out + self._endpoint_findings(action, chainable, techniques.DISCOVERY_HISTORICAL_URL_MARKER)
 
     @staticmethod
     def _parse(body):

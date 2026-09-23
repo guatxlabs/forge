@@ -35,6 +35,10 @@ partagés). `exploit=False`, `destructive=False` : sonde de vérification borné
 gardée par le ROE comme toute interaction web (`web_allowed`). Concurrence 100% stdlib
 (concurrent.futures) : aucune dépendance externe (seul le réseau peut manquer)."""
 import concurrent.futures as _cf
+import socket as _socket
+import ssl as _ssl
+import time as _time
+import urllib.parse as _urlparse
 
 from .oracle import ScopeGuardedOracle
 from .registry import register
@@ -127,10 +131,34 @@ class RaceCondition(ScopeGuardedOracle):
         return True
 
     def _burst(self, action, url, method, data, headers, n, timeout):
-        """Tire n requêtes PARALLÈLES (rafale bornée) et renvoie la liste des (status, body). La
-        concurrence est ce qui ouvre la fenêtre TOCTOU (check-then-act non atomique). Chaque worker
-        appelle le seam `_fetch` (session gouvernée fusionnée in-scope par `Oracle._http`). Robuste :
-        une exception d'un worker -> (None, '') (jamais de crash de la rafale)."""
+        """Tire n requêtes PARALLÈLES (rafale bornée) et renvoie la liste des (status, body).
+
+        Deux SYNCHRONISATIONS, choisies par `params.sync` :
+
+          * `"threads"` (DÉFAUT, inchangé) — `ThreadPoolExecutor` sur le seam `_fetch`. Simple et
+            gouverné, mais la gigue entre les requêtes est de l'ordre de la MILLISECONDE : seules
+            les fenêtres TOCTOU larges sont atteignables.
+          * `"last_byte"` — synchronisation à DERNIER OCTET (« single-packet », J. Kettle 2023).
+            On ouvre n connexions, on envoie chaque requête AMPUTÉE de son dernier octet, on laisse
+            le serveur les mettre en attente, puis on envoie les n derniers octets d'affilée. La
+            gigue tombe à quelques dizaines de MICROSECONDES.
+
+        ⚠️ Pourquoi ce n'est pas un détail : sur les piles modernes, la fenêtre d'un check-then-act
+        se compte en microsecondes. Un négatif obtenu en mode `threads` ne dit PAS « pas de race »,
+        il dit « pas de race atteignable à la milliseconde ». C'est la différence entre un test et
+        un verdict — et `fire()` l'écrit dans l'évidence plutôt que de la taire.
+
+        Robuste : une exception d'un worker -> (None, '') ; un échec du transport bas niveau replie
+        sur `threads` (le seam `_fetch` reste donc le chemin par défaut ET le filet).
+        """
+        if str(action.params.get("sync", "threads")).lower() == "last_byte":
+            out = self._burst_last_byte(url, method, data, headers, n, timeout)
+            if out:
+                return out
+            # repli silencieux impossible : `fire()` relit `params.sync` pour l'évidence, et le
+            # mode réellement employé est reporté par `_sync_used`.
+            action.params["_sync_fallback"] = True
+
         results = []
 
         def _one(_i):
@@ -145,6 +173,95 @@ class RaceCondition(ScopeGuardedOracle):
             for fut in _cf.as_completed(futures):
                 results.append(fut.result())
         return results
+
+    @staticmethod
+    def _raw_request(url, method, data, headers):
+        """Sérialise une requête HTTP/1.1 complète en octets. `Connection: close` -> une réponse
+        par connexion, pas de keep-alive à démêler."""
+        u = _urlparse.urlparse(url)
+        path = u.path or "/"
+        if u.query:
+            path += "?" + u.query
+        body = data if isinstance(data, bytes) else (data or "").encode()
+        lignes = [f"{method} {path} HTTP/1.1", f"Host: {u.hostname}", "Connection: close"]
+        vus = {"host", "connection", "content-length"}
+        for k, v in (headers or {}).items():
+            if str(k).lower() not in vus:
+                lignes.append(f"{k}: {v}")
+        if body:
+            lignes.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lignes) + "\r\n\r\n").encode() + body
+
+    @staticmethod
+    def _parse_response(raw):
+        """(status, corps) depuis une réponse HTTP brute. (None, '') si illisible."""
+        if not raw:
+            return (None, "")
+        try:
+            tete, _, corps = raw.partition(b"\r\n\r\n")
+            premiere = tete.split(b"\r\n", 1)[0].decode("latin-1")
+            return (int(premiere.split()[1]), corps.decode("utf-8", "replace"))
+        except Exception:            # noqa: BLE001
+            return (None, "")
+
+    def _burst_last_byte(self, url, method, data, headers, n, timeout):
+        """Synchronisation à DERNIER OCTET. Renvoie [] si le transport n'aboutit pas (-> repli).
+
+        Le dernier octet est retenu sur CHAQUE connexion, puis les n derniers octets partent
+        d'affilée : les requêtes deviennent complètes quasi simultanément côté serveur. `TCP_NODELAY`
+        est indispensable — sans lui, l'algorithme de Nagle regrouperait nos envois et rendrait la
+        synchronisation illusoire.
+
+        AUCUNE requête supplémentaire par rapport au mode `threads` : c'est la MÊME rafale bornée,
+        seulement mieux synchronisée. Le plafond `_MAX_BURST` s'applique en amont, dans `_burst_size`.
+        """
+        u = _urlparse.urlparse(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return []
+        port = u.port or (443 if u.scheme == "https" else 80)
+        raw = self._raw_request(url, method, data, headers)
+        if len(raw) < 2:
+            return []
+
+        conns = []
+        try:
+            ctx = _ssl.create_default_context() if u.scheme == "https" else None
+            for _ in range(n):
+                s = _socket.create_connection((u.hostname, port), timeout=timeout)
+                s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                if ctx is not None:
+                    s = ctx.wrap_socket(s, server_hostname=u.hostname)
+                conns.append(s)
+
+            for s in conns:                    # tout sauf le dernier octet
+                s.sendall(raw[:-1])
+            _time.sleep(0.10)                  # laisse les tampons serveur se remplir
+            for s in conns:                    # les n derniers octets, d'affilée
+                s.sendall(raw[-1:])
+
+            out = []
+            for s in conns:
+                buf = b""
+                try:
+                    while True:
+                        bout = s.recv(65536)
+                        if not bout:
+                            break
+                        buf += bout
+                        if len(buf) > 1_000_000:   # borne de lecture, jamais de mémoire illimitée
+                            break
+                except Exception:            # noqa: BLE001
+                    pass
+                out.append(self._parse_response(buf))
+            return out
+        except Exception:                    # noqa: BLE001  (DNS, TLS, refus… -> repli sur threads)
+            return []
+        finally:
+            for s in conns:
+                try:
+                    s.close()
+                except Exception:            # noqa: BLE001
+                    pass
 
     def dry(self, action):
         n = self._burst_size(action)
@@ -218,6 +335,27 @@ class RaceCondition(ScopeGuardedOracle):
         # PREUVE : STRICTEMENT plus de succès que le quota autorisé -> la limite est contournée par la
         # course (check-then-act non atomique) sur la ressource PROPRE de l'opérateur.
         proven = successes > limit
+
+        # PRÉCISION DE SYNCHRONISATION — dite dans l'évidence, jamais tue.
+        # Un négatif obtenu par `threads` ne signifie PAS « pas de race » : la gigue y est de l'ordre
+        # de la MILLISECONDE, quand une fenêtre check-then-act moderne se compte en microsecondes.
+        # Le taire produirait exactement le faux négatif silencieux que cet oracle existe pour éviter
+        # — et c'est le défaut mesuré le 2026-09-09 : 12 couples (cible, classe payante) sur 13 clos
+        # sous les cinq tentatives, souvent sur un seul geste pris pour un verdict.
+        demande = str(action.params.get("sync", "threads")).lower()
+        replie = bool(action.params.get("_sync_fallback"))
+        employe = "last_byte" if (demande == "last_byte" and not replie) else "threads"
+        if employe == "last_byte":
+            note_sync = ("synchronisation DERNIER OCTET (single-packet) : gigue de quelques dizaines "
+                         "de microsecondes — les fenêtres courtes sont atteintes.")
+        else:
+            note_sync = ("synchronisation par THREADS : gigue de l'ordre de la milliseconde. "
+                         + ("Le mode `last_byte` a été demandé mais le transport bas niveau n'a pas "
+                            "abouti (DNS/TLS/refus) — repli. " if replie else "")
+                         + ("⚠️ CE NÉGATIF NE CLÔT PAS LA CLASSE : une fenêtre de quelques "
+                            "microsecondes reste hors de portée à cette précision. Rejouer avec "
+                            "`params.sync=last_byte` avant de conclure." if not proven else ""))
+
         return [self.proof(
             target=action.target, proven=proven,
             title=(f"Race/TOCTOU CONFIRMÉ — {successes} succès concurrents > quota {limit} (usage limité "
@@ -227,6 +365,7 @@ class RaceCondition(ScopeGuardedOracle):
             severity=("HIGH" if proven else "INFO"),
             evidence=(f"rafale PARALLÈLE bornée={n} (réponses reçues={len(seen)}) ; succès comptés="
                       f"{successes} ; quota autorisé (limit)={limit} ; contournement={'OUI' if proven else 'non'} ; "
+                      f"{note_sync} "
                       f"portée LIMITÉE à la ressource PROPRE de l'opérateur (code/coupon/token/solde à SON "
                       f"compte) — jamais un tiers ; rafale plafonnée à {_MAX_BURST} (non DoS) ; session "
                       f"gouvernée non journalisée ; TOCTOU = check-then-act non atomique (CWE-362/CWE-367)."),

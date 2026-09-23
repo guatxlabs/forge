@@ -9,6 +9,30 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added — couverture du Top 10 des techniques web 2025 : onze oracles à preuve
+
+Onze modules de vérification à preuve bénigne (exploit=False, destructive=False sauf mention),
+et la `DEFAULT_CHECKLIST` recalée sur les taux d'acceptation mesurés (traversal et XSS en tête) —
+l'ordre précédent omettait ces classes et les rendait invisibles à `coverage_gaps()`.
+
+- `upload.unrestricted` (CWE-434) : file upload dangereux, marqueur inerte resservi.
+- `cspt.redirect` + `recon.client_sinks` : Client-Side Path Traversal, différentiel de profondeur
+  de chemin observé au navigateur ; lecture des couples source vers puits du JavaScript de même origine.
+- `parserdiff.unicode` (CWE-176) : différentiel de normalisation Unicode entre WAF et backend.
+- `ormleak.filter` : oracle booléen par filtre ORM, deux sondes par champ, aucun balayage.
+- `ssrf.redirect_loop` : rend visible un SSRF aveugle via une boucle de redirection à codes incrémentaux.
+- `massassign.params` : mass assignment prouvé par un canari inerte, jamais une valeur privilégiée réelle.
+- `business_logic.invariants` : invariants dérivés de l'objet métier (négatif, borne, somme).
+- `llm.prompt_injection` : injection de prompt, canaris inertes, hors `DEFAULT_CHECKLIST` par défaut.
+- `ssti.errors` (CWE-1336) : SSTI aveugle par le canal d'erreur (« Successful Errors »).
+- `sidechannel.shape` (CWE-203) : oracle d'existence par forme de réponse (XS-Leak / length-leak).
+
+Support : garde anti-réflexion sur `cmdi.probe` (un token contenu dans la charge ne prouve pas
+l'exécution), filtre d'assets statiques dans `recon.urls` (constat compté, jamais silencieux),
+synchronisation à dernier octet pour `race`.
+
+Registre : 88 modules, 42 bug_bounty_eligible.
+
 ### Fixed — les verdicts disaient plus que ce qu'ils avaient vérifié
 
 Ce lot vient d'une **campagne réelle** contre une infra de production autorisée, entièrement derrière

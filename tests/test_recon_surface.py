@@ -327,6 +327,33 @@ class TestHistoricalUrls(unittest.TestCase):
         self.assertEqual(f[0].status, "skipped")
         self.assertIn("injoignables", f[0].title)
 
+    # Filtre d'assets statiques (2026-09-23). Mesuré en conditions réelles : recon.urls rendait
+    # une majorité de médias (chemins /-/m/...jpg) qui saturaient le budget d'endpoints sans être
+    # cible d'aucun oracle.
+    WB_MEDIA = json.dumps([
+        ["original"],
+        ["https://app.test/zoek?term=x"],                 # dynamique -> chaînable
+        ["https://app.test/-/m/img/hero.jpg"],            # média -> écarté du chaînage
+        ["https://app.test/bundles/app.css"],             # css -> écarté
+        ["https://app.test/img/logo.png?v=2"],            # query -> CONSERVÉ (potentiellement dynamique)
+    ])
+
+    def test_static_assets_are_dropped_from_chaining_not_silently(self):
+        from forge.techniques import DISCOVERY_HISTORICAL_URL_MARKER
+        f = self._fire(_http({"web.archive.org": (200, self.WB_MEDIA, {})}), {"in_scope": ["app.test"]})
+        # le résumé compte les assets écartés — jamais une troncature silencieuse
+        self.assertIn("asset(s) statique(s) écarté(s)", f[0].evidence)
+        # un constat 'skipped' unique nomme les assets écartés
+        skipped = [x for x in f if x.status == "skipped" and "statique" in x.title]
+        self.assertEqual(len(skipped), 1)
+        # les endpoints CHAÎNABLES émis n'incluent PAS le .jpg ni le .css nus...
+        chained = [x.target for x in f if DISCOVERY_HISTORICAL_URL_MARKER in x.title]
+        self.assertNotIn("https://app.test/-/m/img/hero.jpg", chained)
+        self.assertNotIn("https://app.test/bundles/app.css", chained)
+        # ...mais incluent la page dynamique ET le .png avec query (conservateur)
+        self.assertIn("https://app.test/zoek?term=x", chained)
+        self.assertIn("https://app.test/img/logo.png?v=2", chained)
+
 
 # --- recon.tech -----------------------------------------------------------------------------------
 class TestTech(unittest.TestCase):

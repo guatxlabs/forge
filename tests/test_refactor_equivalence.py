@@ -79,6 +79,49 @@ def _patch(cls, fn):
 # de surface (recon_surface.py) + les 3 modules ACTIFS de reachability (recon_active.py) sont des
 # kinds LIVRÉS au même titre que recon.httpx/recon.nmap.
 EXPECTED_KINDS = {
+    # NOUVEAU MODULE 2026-09-04 — oracle FILE UPLOAD a preuve benigne (CWE-434). Comble la
+    # seule classe a haut rendement (50 % de marche) qui n'avait aucun module dans le moteur.
+    "upload.unrestricted",
+    # 2026-09-09 : module de SURFACE (lecture du JS de meme origine) qui porte la classe
+    # "cspt". Categorie recon, proof_required=False — il LIT, il ne prouve rien ; la
+    # preuve reste l'affaire d'un oracle, encore a construire pour cette classe.
+    "recon.client_sinks",
+    # 2026-09-09 : ORACLE A PREUVE du CSPT. Le module de surface ci-dessus produit des
+    # candidats ; celui-ci PROUVE, par differentiel de profondeur de chemin (meme canari
+    # avec et sans "../", comparaison des chemins REELLEMENT emis par le navigateur).
+    "cspt.redirect",
+    # 2026-09-09 (2e passe) : famille des DIFFERENTIELS D'INTERPRETATION — theme dominant
+    # du Top 10 des techniques web 2025 de PortSwigger (normalisation Unicode 4e, Parser
+    # Differentials 10e). Preuve par CONJONCTION a trois points : temoin reflete, ASCII
+    # filtre, confusable qui passe ET revient normalise. Aucune des trois ne suffit seule.
+    "parserdiff.unicode",
+    # 2026-09-09 (2e passe) : « ORM Leaking More Than You Joined For » (Alex Brown), 2e du
+    # Top 10 PortSwigger 2025, presente comme remplacant la SQLi a mesure que les bases
+    # murissent. Rattache a la classe `access_control` : une fuite par filtre EST une
+    # lecture non autorisee, et une classe neuve la sortirait du plancher anti-famine.
+    "ormleak.filter",
+    # 2026-09-09 (3e passe) : « Novel SSRF Technique Involving HTTP Redirect Loops »
+    # (Shubham Shah), 3e du Top 10 PortSwigger 2025. Premiere fois qu'une lecture de veille
+    # nous fait RECUPERER une classe abandonnee : notre doctrine range le blind SSRF parmi
+    # les non-qualifiantes, et cette technique le rend visible, donc payable.
+    "ssrf.redirect_loop",
+    # 2026-09-09 (5e passe) — deux trous mesures contre 10 articles de veille.
+    # MASS ASSIGNMENT : aucun fichier de tout l'arsenal ne le nommait, alors que la
+    # litterature API le cite comme voie DIRECTE vers la prise de compte. La valeur
+    # injectee est un CANARI inerte : prouver que `role` est assignable n'exige pas
+    # d'ecrire `admin`. Champs de propriete (userId, ownerId) JAMAIS sondes.
+    "massassign.params",
+    # INVARIANTS METIER : `business_logic.scan` ne portait que 3 verifications de commerce
+    # en ligne redigees en TEXTE LIBRE, qui ne testaient rien. Celui-ci DERIVE les
+    # invariants de l'objet observe (negatif, borne entre champs, somme) et les viole
+    # avec des valeurs que le serveur DOIT rejeter — jamais une declaration valide
+    # mais mensongere.
+    "business_logic.invariants",
+    # 2026-09-09 (6e passe) — BASE posee en avance du besoin, et assumee comme telle :
+    # les perimetres exposant un actif IA restent rares aujourd'hui. Oracle d'INJECTION DE PROMPT,
+    # PAS de jailbreak : les canaris sont des chaines inertes, aucun contenu nuisible
+    # n'est demande — un test l'epingle explicitement.
+    "llm.prompt_injection",
     "access_control.idor", "auth.takeover", "burp.scan", "cors.credentials", "demo.fingerprint",
     "evasion.idor_intercept", "evasion.turnstile", "evasion.xhr", "evasion.discover",
     "msf.module", "origin.find",
@@ -96,6 +139,17 @@ EXPECTED_KINDS = {
     "recon.forms",
     # oracles d'injection server-side à preuve bénigne (injection.py)
     "ssti.eval", "path.traversal", "sqli.probe",
+    # 2026-09-23 : CANAL AUXILIAIRE par forme de reponse (famille XS-Leak / length-leak du Top 10 web
+    # 2025). Prouve un ORACLE D'EXISTENCE sur l'etat d'un tiers (statut/ETag/longueur distinguent
+    # present d'absent), read-only. Classe propre `side_channel` HORS DEFAULT_CHECKLIST (comme llm) :
+    # qualifiante mais pas exigee sur toute cible par coverage_gaps().
+    "sidechannel.shape",
+    # 2026-09-23 : « Successful Errors » (Gareth Heyes), 1re du Top 10 des techniques web 2025 de
+    # PortSwigger — le seul rang du Top 10 qui restait sans module. Complement de `ssti.eval` : quand
+    # le produit evalue N'EST PAS reflechi (SSTI aveugle), une division par zero fait fuiter la preuve
+    # d'evaluation par le CANAL D'ERREUR. Preuve par conjonction (erreur arithmetique test-only vs
+    # controle inerte + temoin), meme classe RCE que ssti.eval -> aucune nouvelle entree de checklist.
+    "ssti.errors",
     # oracles client-side / flux de requête à preuve minimale (clientflow.py)
     "xss.reflected", "redirect.open", "csrf.state_change",
     # oracle d'EXÉCUTION XSS confirmée par le navigateur gouverné (xssexec.py) — complément de
@@ -150,11 +204,39 @@ EXPECTED_KINDS = {
     "web.security_headers",                                      # CSP/X-Frame-Options/nosniff/Referrer/HSTS/Permissions-Policy/cookies
 }
 # Ensemble QUALIFYING attendu — pinné LITTÉRALEMENT (ancien planner.QUALIFYING codé en dur).
+# RÉVISION LOCALE 2026-09-04 : ajout délibéré de "lfi" et "xss". Ce n'est PAS une dérive de
+# taxonomie que ce test doit attraper, c'est la correction d'un biais d'allocation MESURÉ.
+# Sur 2 077 rapports de hacktivité réelle, le path traversal est la classe la mieux acceptée du
+# marché (70 %) et le XSS la deuxième (57-65 %) — or les deux étaient NON qualifiantes et ABSENTES
+# de la checklist. Conséquence : `coverage_gaps()` ne pouvait structurellement jamais signaler
+# « jamais tenté » sur elles, et une campagne pouvait déclarer la surface couverte sans les avoir
+# effleurées. C'est exactement le biais constaté sur 501 findings réels (33 % d'Information
+# Disclosure, classe à 25 % de marché ; zéro finding de traversal).
 EXPECTED_QUALIFYING = {
     "idor", "bola", "access_control", "auth", "auth_bypass", "ato",
     "rce", "sqli", "ssrf", "business_logic", "biz", "privesc",
+    "lfi", "xss",
+    # 2e passe 2026-09-04 : "file_upload" arrive AVEC son module (upload.unrestricted). Classe
+    # mesuree a 50 % d'acceptation — la seule des cinq mieux payees qui n'avait aucun oracle.
+    "file_upload",
+    # 3e passe 2026-09-09 : "cspt" (Client-Side Path Traversal) arrive AVEC son module
+    # (recon.client_sinks). Meme defaut structurel que lfi et xss avant le 2026-09-04 :
+    # « client-side path traversal » rendait ZERO fichier dans tout le toolkit et ZERO module
+    # ici, alors que la technique est acceptee en bug bounty (Facebook, GitLab ; whitepaper
+    # CSPT2CSRF de Doyensec sur Mattermost et Rocket.Chat). Sans classe qualifiante declaree,
+    # le plancher anti-famine du planner ne la protege pas et coverage_gaps() reste aveugle.
+    "cspt",
+    # 4e passe 2026-09-09 : classe de la famille des differentiels d'interpretation.
+    "parser_diff",
+    # 6e passe : qualifiante, mais ABSENTE de la checklist (1 cible sur 72 a de l'IA).
+    "llm",
 }
-EXPECTED_CHECKLIST = ["access_control", "auth", "ato", "ssrf", "sqli", "rce", "business_logic"]
+# ORDRE = taux d'acceptation MESURÉ, décroissant (cf. techniques_data.DEFAULT_CHECKLIST).
+# Les entrées à partir de "cspt" n'ont PAS de taux mesuré : elles sont rangées sous les huit
+# classes chiffrées, délibérément. Leur donner un rang plus haut reviendrait à leur inventer un
+# rendement — l'inverse exact de ce que cet ordre est censé encoder.
+EXPECTED_CHECKLIST = ["lfi", "xss", "access_control", "business_logic", "file_upload",
+                      "sqli", "ssrf", "auth", "cspt", "parser_diff", "ato", "rce"]
 
 
 class TestModuleKindSetUnchanged(unittest.TestCase):

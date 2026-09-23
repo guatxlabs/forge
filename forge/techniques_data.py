@@ -171,8 +171,30 @@ TECHNIQUES = {t.key: t for t in [
     _k("ssti.eval",           "RCE", True, depends_on=("recon.js_endpoints",),
        cwe="CWE-1336", mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # sidechannel.shape — CANAL AUXILIAIRE par FORME DE REPONSE (famille XS-Leak / length-leak du
+    # Top 10 web 2025). Prouve un ORACLE D'EXISTENCE sur l'etat d'un tiers (statut/ETag/longueur
+    # distinguent present d'absent), pas une simple info-disclosure. Read-only, benin. Classe propre
+    # `side_channel` HORS DEFAULT_CHECKLIST -> coverage_gaps() n'en exige pas sur toute cible.
+    _k("sidechannel.shape",   "SideChannel", True, depends_on=("recon.js_endpoints",),
+       cls="side_channel", cwe="CWE-203", mitre="T1592",
+       attck_tactic="Reconnaissance", phase="access", capability="active", proof_required=True),
+    # ssti.errors — SSTI AVEUGLE par le CANAL D'ERREUR (« Successful Errors », 1re du Top 10 web 2025).
+    # Complement de ssti.eval : quand le produit evalue n'est PAS reflechi (sortie assainie), une
+    # division par zero fait fuiter la preuve d'evaluation par le message d'erreur. Preuve par
+    # conjonction (erreur arith test-only vs controle inerte + temoin). Meme classe RCE que ssti.eval
+    # -> aucune nouvelle entree de checklist, coverage_gaps() inchange.
+    _k("ssti.errors",         "RCE", True, depends_on=("recon.js_endpoints",),
+       cwe="CWE-1336", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
+    # upload.unrestricted — FILE UPLOAD dangereux (BB) : le filtre d'extension/MIME se contourne et
+    # le fichier est RESSERVI. Preuve BENIGNE : le corps depose est un marqueur texte INERTE, jamais
+    # un webshell. Classe mesuree a 50 % d'acceptation sur 2 077 rapports — c'etait la seule des cinq
+    # classes les mieux payees SANS module, donc invisible pour coverage_gaps().
+    _k("upload.unrestricted", "FileUpload", True, depends_on=("recon.forms",),
+       cls="file_upload", cwe="CWE-434", mitre="T1190",
+       attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
     _k("path.traversal",      "LFI", True, depends_on=("recon.js_endpoints",),
-       cwe="CWE-22",   mitre="T1190",
+       cls="lfi", cwe="CWE-22",   mitre="T1190",
        attck_tactic="Initial Access", phase="access", capability="active", proof_required=True),
     _k("sqli.probe",          "SQLi", True, depends_on=("recon.js_endpoints",),
        cls="sqli", cwe="CWE-89", mitre="T1190",
@@ -186,7 +208,7 @@ TECHNIQUES = {t.key: t for t in [
     # `remediation`/`qualifying` ici -> remediation_map()/qualifying_classes()/mitre_by_kind() restent
     # INCHANGÉES (byte-à-byte) ; le fix est déclaré explicitement par chaque module.
     _k("xss.reflected",       "XSS", True, depends_on=("recon.js_endpoints",),
-       cwe="CWE-79",  mitre="T1059",
+       cls="xss", cwe="CWE-79",  mitre="T1059",
        attck_tactic="Execution", phase="access", capability="active", proof_required=True),
     _k("redirect.open",       "OpenRedirect", True, depends_on=("recon.js_endpoints",),
        cwe="CWE-601", mitre="T1204.001",
@@ -329,7 +351,7 @@ TECHNIQUES = {t.key: t for t in [
     # unique et confirme qu'il se reflète en contexte JS-exécutable sur une AUTRE vue (dégrade en
     # skipped si le module navigateur est absent). exploit=False (marqueur bénin, compte opérateur).
     _k("xss.stored",          "XSS", True, depends_on=("recon.js_endpoints",),
-       cwe="CWE-79", mitre="T1059",
+       cls="xss", cwe="CWE-79", mitre="T1059",
        attck_tactic="Execution", phase="access", capability="active", proof_required=True),
     # rce.probe — VÉRIFICATION d'exécution de code distante GOUVERNÉE (PENTEST-ONLY) : preuve par
     # marqueur de commande BÉNIGN (arithmétique/echo dont la sortie UNIQUE revient), scope-locked, NON
@@ -495,6 +517,35 @@ TECHNIQUES = {t.key: t for t in [
     _t("business_logic", qualifying=True),
     _t("biz",            qualifying=True),
     _t("privesc",        qualifying=True),
+    # AJOUT LOCAL 2026-09-04 — mesure sur 2 077 rapports de hacktivite reelle : le path
+    # traversal est la classe la MIEUX acceptee du marche (70 %) et le XSS la deuxieme
+    # (57-65 %). Toutes deux etaient NON qualifiantes et ABSENTES de DEFAULT_CHECKLIST :
+    # coverage_gaps() ne pouvait donc jamais signaler "jamais tente" sur elles.
+    _t("lfi",            qualifying=True),
+    _t("file_upload",    qualifying=True),   # 50 % de marche — classe ajoutee avec son module
+    # AJOUT LOCAL 2026-09-09 — meme defaut, autre classe. « client-side path traversal »
+    # rendait ZERO fichier dans tout le toolkit et ZERO module ici, alors que la technique
+    # est acceptee en bug bounty (Facebook, GitLab ; whitepaper CSPT2CSRF de Doyensec sur
+    # Mattermost et Rocket.Chat). Sans classe DECLAREE, coverage_gaps() ne peut pas dire
+    # « CSPT jamais tente » — la lacune reste structurellement invisible, exactement comme
+    # xss et lfi l'etaient avant le 2026-09-04. Module : recon.client_sinks.
+    _t("cspt",           qualifying=True),
+    # AJOUT LOCAL 2026-09-09 (2e passe) — famille des DIFFERENTIELS D'INTERPRETATION, theme
+    # dominant du Top 10 des techniques web 2025 de PortSwigger : normalisation Unicode 4e
+    # (Barnett & Barnett, Black Hat USA 2025), Parser Differentials 10e. Notre arsenal n'avait
+    # RIEN de cette famille, qui est precisement ce qui separe « rejouer des charges connues »
+    # de « trouver un ecart que personne n'a encore regarde sur cette cible ».
+    _t("parser_diff",    qualifying=True),
+    # AJOUT LOCAL 2026-09-09 (5e passe) — classe des applications a modele de langage.
+    # ⚠️ QUALIFIANTE mais VOLONTAIREMENT ABSENTE de DEFAULT_CHECKLIST, et c'est un choix mesure :
+    # les perimetres exposant un actif IA restent RARES. L'inscrire ferait crier
+    # coverage_gaps() « llm jamais tente » sur toutes les cibles sans modele — un
+    # bruit permanent qui apprend a ignorer le controle de couverture, donc pire qu'inutile.
+    # La declarer qualifiante suffit : le plancher anti-famine la protege le jour ou un asset IA
+    # entre reellement dans un perimetre, et le module se lance alors explicitement.
+    _t("llm",            qualifying=True),
+
+
 
     # (3) CLÉS CWE / classes de remédiation (repli fix — non qualifiantes).
     _t("cwe-639",       remediation=_R_CWE639),
@@ -509,7 +560,7 @@ TECHNIQUES = {t.key: t for t in [
     _t("origin-exposure", remediation=_R_ORIGIN),
     _t("cwe-89",        remediation=_R_CWE89),
     _t("cwe-79",        remediation=_R_CWE79),
-    _t("xss",           remediation=_R_XSS),
+    _t("xss",           qualifying=True, remediation=_R_XSS),   # AJOUT LOCAL : 57-65 % de marche
     _t("cwe-78",        remediation=_R_CWE78),
     _t("cwe-352",       remediation=_R_CWE352),
     _t("csrf",          remediation=_R_CSRF),
@@ -557,7 +608,35 @@ SURFACE_KEYS = frozenset(SURFACE)
 
 # checklist par défaut = ce qu'on veut couvrir sur une cible web (ordre = priorité hacktivity).
 # Constante ordonnée (non dérivable des flags) — vit ici pour rester la source unique côté planner.
-DEFAULT_CHECKLIST = ["access_control", "auth", "ato", "ssrf", "sqli", "rce", "business_logic"]
+# ORDRE = TAUX D'ACCEPTATION MESURE sur 2 077 rapports de hacktivite (revision locale 2026-09-04).
+# L'ordre precedent ["access_control","auth","ato","ssrf","sqli","rce","business_logic"] se disait
+# "priorite hacktivity" mais n'avait jamais ete mesure : il OMETTAIT les deux classes les mieux
+# payees (lfi 70 %, xss 57-65 %) et reléguait business_logic (51 %) en dernier. coverage_gaps() ne
+# pouvait donc PAS signaler qu'on ne les avait jamais tentees -- exactement le biais constate sur
+# 501 findings reels (33 % d'Information Disclosure a 25 % de marche, 0 finding de traversal).
+DEFAULT_CHECKLIST = [
+    "lfi",              # 70 % — la mieux acceptee du marche
+    "xss",              # 57-65 %
+    "access_control",   # 36-63 % (idor/bola)
+    "business_logic",   # 51 %
+    "file_upload",      # 50 %
+    "sqli",             # 45 %
+    "ssrf",             # 33 %
+    "auth",             # 29 %
+    # -- en dessous : classes SANS taux de marche mesure ---------------------------------
+    # AJOUT LOCAL 2026-09-09. `coverage_gaps()` ne lit QUE cette liste (planner.py:370) :
+    # declarer la classe dans TECHNIQUES ne suffit pas, il faut l'y inscrire pour qu'une
+    # cible jamais sondee sur ce point soit signalee.
+    # RANG DELIBEREMENT BAS, et c'est un choix d'honnetete : nous n'avons AUCUN pourcentage
+    # mesure pour le CSPT, contrairement aux huit classes au-dessus. Le placer plus haut
+    # reviendrait a lui inventer un rendement. Il sert le controle d'acces (CSPT2CSRF permet
+    # d'agir AU NOM d'un autre utilisateur), mais tant que ce n'est pas mesure sur nos
+    # cibles, il reste dans le groupe non chiffre.
+    "cspt",
+    "parser_diff",
+    "ato",
+    "rce",
+]
 
 # Sous-ensemble curé de kinds pour le repli purple (identique à l'ancien purple.DEFAULT_MITRE_BY_KIND).
 # Ce n'est PAS « tous les kinds à point » : evasion/msf/burp n'ont jamais eu de repli purple.

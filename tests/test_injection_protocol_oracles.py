@@ -330,6 +330,55 @@ class TestCmdiProbe(unittest.TestCase):
         self.assertEqual(f[0].status, "vulnerable")
         self.assertIn("produit arithmétique", f[0].evidence)
 
+    def test_reflected_parameter_is_NOT_command_injection(self):
+        """RÉGRESSION — FAUX POSITIF MESURÉ EN CONDITIONS RÉELLES (2026-09-04, FAQ Drupal).
+
+        L'application RÉFLÉCHISSAIT la valeur du paramètre dans un JSON de page
+        (`drupalSettings.currentQuery`). Le payload `; echo <token>` revenait donc VERBATIM, le
+        token était trouvé dans le corps, et l'oracle promouvait « Command-Injection CONFIRMÉE »
+        en HIGH — sur une page qui n'exécute rien. Un rapport bâti là-dessus aurait été invalide.
+
+        Le token est CONTENU dans le payload : sa présence ne prouve donc rien à elle seule. Ici,
+        la réflexion renvoie la commande entière -> garde (A). Un shell qui exécute `echo X` rend
+        `X`, jamais `echo X`."""
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            dec = urllib.parse.unquote_plus(url)
+            val = dec.split("ip=", 1)[1].split("&")[0] if "ip=" in dec else ""
+            return (200, '{"currentQuery":{"ip":"%s"}}' % val)     # réflexion pure
+        f = self._fire(fake)
+        self.assertEqual(f[0].status, "tested", "une réflexion de paramètre n'est PAS une exécution")
+        self.assertIn("non confirmée", f[0].title)
+
+    def test_reflection_control_probe_vetoes_token_only_proof(self):
+        """Garde (B) — la sonde de CONTRÔLE est décisive quand la réflexion ne renvoie QUE le token.
+
+        Si l'app extrait la valeur après `echo ` (ou nettoie la ponctuation) et ne réfléchit que le
+        token, la garde (A) ne suffit pas. On renvoie alors le token SEUL, sans syntaxe de commande :
+        s'il revient aussi, c'est de la réflexion, pas une exécution."""
+        token, _n, _m, _prod = CmdiProbe._marker(self.TGT, "ip")
+
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            # renvoie TOUJOURS le token dès qu'il apparaît dans l'URL — y compris pour le contrôle
+            dec = urllib.parse.unquote_plus(url)
+            return (200, f"PING {token} done") if token in dec else (200, "PING")
+        f = self._fire(fake)
+        self.assertEqual(f[0].status, "tested",
+                         "le token revient AUSSI sans commande : c'est une réflexion, pas une exécution")
+
+    def test_arithmetic_product_survives_full_reflection(self):
+        """La preuve FORTE reste valide même quand l'app réfléchit tout : le produit n'est jamais envoyé."""
+        token, n, m, prod = CmdiProbe._marker(self.TGT, "ip")
+
+        def fake(url, headers=None, timeout=15, method="GET", data=None):
+            dec = urllib.parse.unquote_plus(url)
+            echo = f"{dec}"                                   # réflexion intégrale de l'URL
+            if f"$(( {n}*{m} ))" in dec:
+                return (200, echo + f" -> {prod}")            # ET le produit calculé
+            return (200, echo)
+        f = self._fire(fake)
+        self.assertEqual(f[0].status, "vulnerable")
+        self.assertIn("produit arithmétique", f[0].evidence)
+
     def test_tested_when_no_output(self):
         f = self._fire(lambda *a, **k: (200, "PING pong static"))
         self.assertEqual(f[0].status, "tested")

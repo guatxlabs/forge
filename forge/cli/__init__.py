@@ -93,7 +93,14 @@ def cmd_modules(args):
         params_schema = [dict(d) for d in schema if isinstance(d, dict)]
         # ALLOWLIST de drapeaux pour les extra_args (défense en profondeur server-side) : liste de flags.
         flag_allowlist = [str(f) for f in (getattr(m, "FLAG_ALLOWLIST", None) or ())]
-        rows.append({"kind": k, "cls": k.split(".")[-1],
+        # CORRECTION LOCALE 2026-09-04 — `cls` était RECALCULÉ ici depuis le suffixe du kind, alors
+        # que la table le DÉCLARE (`Technique.cls`). `modules --json` affichait donc `stored` pour
+        # `xss.stored`, `traversal` pour `path.traversal`, `unrestricted` pour `upload.unrestricted` :
+        # un opérateur inspectant le registre ne pouvait PAS relier un module au jeton de checklist
+        # qui le couvre. Le planner, lui, lisait déjà la bonne valeur via `action_class()` — c'était
+        # donc une divergence d'AFFICHAGE, exactement le genre qui rend une lacune invisible.
+        # `action_class` retombe sur le suffixe quand la table ne déclare rien : aucun kind ne régresse.
+        rows.append({"kind": k, "cls": techniques.action_class(k) or k.split(".")[-1],
                      "exploit": bool(m.exploit), "destructive": bool(m.destructive),
                      "web_allowed": web_allowed,
                      "params_schema": params_schema,
