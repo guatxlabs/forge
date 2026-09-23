@@ -41,8 +41,8 @@ Forge n'essaie **pas** de battre Metasploit ou Cobalt Strike sur la capacité of
 **pilote** et **mesure leur impact défensif**. Le différenciateur n'est aucune ligne prise isolément,
 mais leur combinaison : *rouge + bleu, même éditeur, corrélés ATT&CK, autorisation signée*.
 
-Le positionnement commercial complet est dans [`POSITIONING.md`](POSITIONING.md) ; la logique de
-prix dans [`PRICING.md`](PRICING.md).
+Le positionnement complet est dans [`POSITIONING.md`](POSITIONING.md) ; le produit est **gratuit et
+open source**, et la logique de tarification des **prestations** est dans [`PRICING.md`](PRICING.md).
 
 ## La proposition de valeur en trois piliers
 

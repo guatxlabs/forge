@@ -137,7 +137,7 @@ docker run --rm \
 docker start forge   # boot sur la nouvelle image (migrate() re-tamponne, idempotent)
 ```
 
-### 3.2 Postgres (backend enterprise)
+### 3.2 Postgres (backend avancé, flag-gated)
 
 Le **schéma** Postgres (`PG_SCHEMA`, colonnes de `migrate()` déjà fusionnées) est appliqué **au boot** de
 l'image `store-postgres` et **tamponné** (`schema_version`) sous le verrou DDL cluster. Deux cas :

@@ -124,25 +124,25 @@ mod redact;
 mod reports;
 // ENTERPRISE (separable, flag-gated) — row-level multi-tenancy. Community (default) build never engages
 // it (tenancy::enabled() false => single implicit tenant #1, byte-identical). Wired as its OWN module
-// (minimal main.rs delta) so the open core does not depend on it. See COMMUNITY_VS_ENTERPRISE.md.
+// (minimal main.rs delta) so the open core does not depend on it. See ADVANCED_MODULES.md.
 mod tenancy;
 // ENTERPRISE (separable, flag-gated) — OIDC SSO login. Community (default) build never engages it
 // (sso::enabled() false => LOCAL accounts only, byte-identical; every /api/sso/* route 404s). Wired as
 // its OWN module (minimal main.rs delta = this line + one route merge) so the open core does not depend
-// on it. Behind the runtime flag FORGE_ENTERPRISE_SSO / enterprise.sso. See COMMUNITY_VS_ENTERPRISE.md.
+// on it. Behind the runtime flag FORGE_ENTERPRISE_SSO / enterprise.sso. See ADVANCED_MODULES.md.
 mod sso;
 // ENTERPRISE (separable, flag-gated) — SCIM 2.0 provisioning (automated user/group provisioning from an
 // IdP: Okta/Azure AD). Community (default) build never engages it (scim::enabled() false => LOCAL accounts
 // only; every /scim/* + /api/scim/config route 404s). Wired as its OWN module (minimal main.rs delta =
 // this line + one route merge). Authenticated by a SCIM BEARER TOKEN (hashed at rest, constant-time), NOT
-// a session. Behind FORGE_ENTERPRISE_SCIM / enterprise.scim (or the SSO flag). See COMMUNITY_VS_ENTERPRISE.md.
+// a session. Behind FORGE_ENTERPRISE_SCIM / enterprise.scim (or the SSO flag). See ADVANCED_MODULES.md.
 mod scim;
 // ENTERPRISE (separable, flag-gated) — advanced RBAC: the CONFIGURABLE IdP-group -> {role, tenant grant}
 // mapping consulted by BOTH the SSO login (`groups` claim) and SCIM group membership. Community (default)
 // build never engages it (rbac::enabled() = sso||scim, both OFF => role assignment stays admin-only,
 // byte-identical; every /api/rbac/* route 404s, the mapping table is never created). FAIL-CLOSED /
 // least-privilege: an SSO/SCIM identity gets ONLY what its group mapping confers, NEVER super-admin. Wired
-// as its OWN module (minimal main.rs delta = this line + one route merge). See COMMUNITY_VS_ENTERPRISE.md.
+// as its OWN module (minimal main.rs delta = this line + one route merge). See ADVANCED_MODULES.md.
 mod rbac;
 // ENTERPRISE (separable, flag-gated) — E3 COMPLIANCE: WORM / retention / legal-hold on the audit ledger +
 // engagement data. Community (default) build never engages it (compliance::enabled() OFF => every
@@ -150,7 +150,7 @@ mod rbac;
 // (behind FORGE_ENTERPRISE_COMPLIANCE / enterprise.compliance) archives the expired ledger segment ENCRYPTED
 // (reusing the backup discipline) then re-anchors + emits a signed `console.compliance.purge` checkpoint so
 // the chain stays verifiable — NEVER a silent delete. Wired as its OWN module (this line + one route merge +
-// one SPA flag + a flag-gated delete guard). See COMMUNITY_VS_ENTERPRISE.md + forge/compliance_signer.py.
+// one SPA flag + a flag-gated delete guard). See ADVANCED_MODULES.md + forge/compliance_signer.py.
 mod compliance;
 // Sous-modules E3 COMPLIANCE extraits de compliance.rs (PURE MOVE, corps identiques) : math pure
 // policy/WORM/retention + parsing timestamp (compliance_policy) ; export/rendu evidence + helpers de
