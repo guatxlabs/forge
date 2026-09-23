@@ -58,7 +58,7 @@ pip install 'forge[pkcs11]'      # pulls python-pkcs11; the default install does
 
 | Env var | Meaning |
 |---|---|
-| `FORGE_ENTERPRISE_COMPLIANCE=1` | **Required** — engages the enterprise off-host signer seam (gate) |
+| `FORGE_ENTERPRISE_COMPLIANCE=1` | **Required** — engages the off-host signer seam of the compliance module (gate) |
 | `FORGE_LEDGER_SIGNER=pkcs11` | selects this driver |
 | `FORGE_LEDGER_PKCS11_MODULE` | path to the PKCS#11 provider `.so` (e.g. `libsofthsm2.so`) — **required** |
 | `FORGE_LEDGER_PKCS11_TOKEN_LABEL` | token label (or use `…_SLOT`) |
@@ -130,7 +130,7 @@ If your backend signs Ed25519 but has **no PKCS#11 provider** — the canonical 
 the `gcloud` CLI** — use the generic **no-shell exec signer** already in `forge/signing.py`. It runs a
 **fixed, admin-configured argv** (a JSON array — never a shell string, so no metacharacter is ever
 interpreted), pipes the bytes-to-sign on **stdin**, and reads the **hex Ed25519 signature (128 hex chars)**
-back from **stdout**. Same fail-closed guarantee as every enterprise signer: `RemoteSigner.sign`
+back from **stdout**. Same fail-closed guarantee as every off-host signer: `RemoteSigner.sign`
 **re-verifies** the returned signature against `FORGE_LEDGER_SIGNER_PUBKEY` before the entry is written — a
 malformed or non-verifying response is **rejected** and the append aborts (never an unsigned entry).
 

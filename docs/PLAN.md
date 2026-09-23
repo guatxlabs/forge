@@ -60,7 +60,7 @@ autorisée → 1ʳᵉ matrice avec vraies détections SOC + MTTD réel. (Voir
 
 ### Étape 4 — GTM
 
-- Page de positionnement + pricing (tier « Purple » premium vs MSF Pro ~15k$/seat).
+- Page de positionnement + tarification des prestations (valeur de l'accompagnement purple vs MSF Pro ~15k$/siège pour de la capacité brute ; le produit, lui, est gratuit/open).
 - 1 write-up d'engagement de référence.
 
 ## Statut des 6 blockers

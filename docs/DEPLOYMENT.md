@@ -642,11 +642,11 @@ externe), remplacer la règle pod-selector par un `ipBlock` vers son CIDR:port.
 
 ---
 
-## 3ter. SSO entreprise — OIDC natif, SAML via pont OIDC (Stage entreprise, flag-gated)
+## 3ter. SSO — OIDC natif, SAML via pont OIDC (module avancé, flag-gated)
 
-Le SSO entreprise de Forge est **OIDC (OpenID Connect)** — et **rien d'autre** en natif. Comme le
+Le SSO de Forge est **OIDC (OpenID Connect)** — et **rien d'autre** en natif. Comme le
 backend Postgres ([§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)) et la multi-tenance, c'est
-une feature **ENTREPRISE, séparable, runtime-gated** : le build **community (défaut)** se comporte
+un **module avancé, séparable, runtime-gated** (open, comme tout le reste) : le build **par défaut** se comporte
 **exactement** comme aujourd'hui — comptes **LOCAUX** seulement (`users` + argon2id + cookie
 `forge_session` + RBAC admin/opérateur/viewer). Tant que le flag n'est pas **engagé**, toutes les routes
 `/api/sso/*` sont **absentes** (404) et le login local est **inchangé** (byte-identique). Le SSO n'affaiblit

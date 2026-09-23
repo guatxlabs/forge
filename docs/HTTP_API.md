@@ -138,7 +138,7 @@ terminés n'en porte aucune trace.
 >
 > | Gate (plafond) | Routes | Budget de temps |
 > |---|---|---|
-> | `FORGE_ENGINE_MAX_CONCURRENT` (défaut 4) — lecture, ouverte au viewer | `GET /api/techniques`, `GET /api/workflows`, `GET /api/detection/coverage` (collecteur Python), `GET /api/engagements/:id/report?format=docx\|pdf`, `GET /api/runs/:id/report?format=pdf`, `GET /api/compliance/evidence?format=pdf` (enterprise, flag-gated) | `FORGE_ENGINE_TIMEOUT` (120 s) |
+> | `FORGE_ENGINE_MAX_CONCURRENT` (défaut 4) — lecture, ouverte au viewer | `GET /api/techniques`, `GET /api/workflows`, `GET /api/detection/coverage` (collecteur Python), `GET /api/engagements/:id/report?format=docx\|pdf`, `GET /api/runs/:id/report?format=pdf`, `GET /api/compliance/evidence?format=pdf` (module compliance, flag-gated) | `FORGE_ENGINE_TIMEOUT` (120 s) |
 > | `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` (défaut 2) — opérateur | `POST /api/import`, `POST /api/modules/refresh`, `POST`/`DELETE /api/tools`, et la sonde du registre au BOOT | `FORGE_IMPORT_TIMEOUT` (600 s) pour l'import, `FORGE_ENGINE_TIMEOUT` sinon |
 > | `FORGE_PLAN_MAX_CONCURRENT` (défaut 2) — opérateur | `POST /api/plan` | `FORGE_PLAN_TIMEOUT` (300 s) |
 >

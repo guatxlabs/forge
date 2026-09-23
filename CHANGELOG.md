@@ -480,8 +480,9 @@ First public cut of Forge — a governed, proof-oriented red-team engine.
   (deny-by-default NetworkPolicies) for enterprise deployments.
 
 ### Licensing
-- **AGPL-3.0-or-later**, open-core. Enterprise features are documented in
-  [`COMMUNITY_VS_ENTERPRISE.md`](COMMUNITY_VS_ENTERPRISE.md).
+- **AGPL-3.0-or-later** — the whole product is open source, with no paid edition. The advanced
+  separable modules (multi-tenant, SSO/SCIM, compliance) are flag-gated and OFF by default; they are
+  documented in [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md).
 
 [Unreleased]: https://github.com/guatxlabs/forge/commits/main
 [0.0.1]: https://github.com/guatxlabs/forge/commits/main

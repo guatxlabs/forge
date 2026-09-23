@@ -39,7 +39,7 @@ message du commit qui le porte.
   admin/opérateur/viewer, explorateur GXQL read-only, dashboards, gestion des runs, ajout d'outils
   et paramètres par-outil depuis l'UI, runner de sous-commandes gouverné, notifications,
   ownership + workflow de triage, exports HTML/PDF/CSV/JSON par engagement.
-- **Entreprise / passage à l'échelle** — backend Postgres, topologie HA multi-instance, manifestes
+- **Passage à l'échelle (modules avancés, open, flag-gated)** — backend Postgres, topologie HA multi-instance, manifestes
   Kubernetes avec NetworkPolicies deny-by-default, isolation multi-tenant par-ligne, RBAC
   par-engagement, SSO OIDC + SCIM 2.0 (SAML via pont OIDC), rétention/legal-hold/export de preuves.
 - **Cycle de vie** — sauvegardes toujours chiffrées (argon2id + XChaCha20-Poly1305) avec
