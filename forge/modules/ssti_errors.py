@@ -33,7 +33,6 @@ inerte pour la cible (elle lève une exception, gérée par le moteur). exploit=
 tierce. L'escalade (RCE réelle) relève de l'accord du programme et n'est pas tentée ici.
 """
 import hashlib
-import re
 
 from .injection import InjectionOracle
 from .registry import register
@@ -172,7 +171,7 @@ class SstiErrors(InjectionOracle):
         if not seen_network:
             return [self.degraded(
                 target=where, title="SSTI (canal d'erreur) non testé — réseau indisponible (dégradation gracieuse)",
-                evidence=f"Aucune réponse sur les sondes (transport indisponible) ; offline-safe.",
+                evidence="Aucune réponse sur les sondes (transport indisponible) ; offline-safe.",
                 poc=self.dry(action))]
 
         sev = "HIGH" if (proven and strong) else ("MEDIUM" if proven else "INFO")

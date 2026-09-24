@@ -112,7 +112,6 @@ class TestDegradations(unittest.TestCase):
     """« Pas sondable » ne doit jamais etre rendu comme « pas vulnerable »."""
 
     def test_hors_scope(self):
-        ecrits = []
         out, e = _fire(lambda n: (200, {"name": "x"}), target="https://evil.test/api/me")
         self.assertEqual(out[0].status, "skipped")
         self.assertEqual(e, [], "fail-closed : aucune ecriture hors perimetre")
