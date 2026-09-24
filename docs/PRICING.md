@@ -11,7 +11,7 @@
 > avec **toutes** ses capacités — y compris les modules avancés (multi-tenant/MSSP, SSO/SCIM, RBAC avancé,
 > conformité WORM/legal-hold, signeur de ledger hors-host). Il n'y a **ni édition payante, ni fonction
 > bridée derrière un paywall** : ce qui se facture, ce sont des **prestations de service** autour de
-> l'outil, jamais l'outil lui-même. Détail des modules : [`ADVANCED_MODULES.md`](../ADVANCED_MODULES.md).
+> l'outil, jamais l'outil lui-même. Détail des modules : [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md).
 >
 > « Gratuit / libre » vaut au sens des **libertés AGPL-3.0**, pas « sans obligation » : l'AGPL est un
 > **copyleft fort** — source à offrir sur usage réseau (§13), dérivés qui restent sous AGPL, mentions de
@@ -68,7 +68,7 @@ Deux modèles plausibles, non exclusifs :
 - **Note d'archi** : le build par défaut est **stateful single-replica** (SQLite + ledger sur PVC
   RWO, cf. [`DEPLOYMENT.md`](DEPLOYMENT.md)) → profil idéal **mono-opérateur / petit MSSP**. Le
   **multi-tenant scale-out** est un **module open, flag-gated** (`FORGE_ENTERPRISE_STORE=postgres`,
-  ledger hors-host, cf. [`ADVANCED_MODULES.md`](../ADVANCED_MODULES.md)) : disponible dans le code,
+  ledger hors-host, cf. [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md)) : disponible dans le code,
   mais son **exploitation en managé multi-client** relève de la prestation d'hébergement.
 
 > **Recommandation GTM** : démarrer **par-engagement** (faible friction, prouve la valeur sur un
@@ -111,5 +111,5 @@ Deux modèles plausibles, non exclusifs :
 ---
 
 *Voir aussi : [`POSITIONING.md`](POSITIONING.md) (le pitch + teardown concurrentiel) ·
-[`ADVANCED_MODULES.md`](../ADVANCED_MODULES.md) (les modules avancés open, flag-gated) ·
+[`ADVANCED_MODULES.md`](ADVANCED_MODULES.md) (les modules avancés open, flag-gated) ·
 [`DEPLOYMENT.md`](DEPLOYMENT.md) (contrainte single-replica) · [`PLAN.md`](PLAN.md) (roadmap).*

@@ -7,7 +7,7 @@
 
 **·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
 
-**License: [AGPL-3.0-or-later](LICENSE) — 100 % open source**  ·  Modules avancés (flag-gated, OFF par défaut) → [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md)
+**License: [AGPL-3.0-or-later](LICENSE) — 100 % open source**  ·  Modules avancés (flag-gated, OFF par défaut) → [`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)
 
 <br>
 
@@ -296,6 +296,34 @@ plugin sans code) et la politique opérateur — **rien de codé en dur**. Servi
 console seule. **Chiffrement au repos** (image SQLCipher opt-in) et **sauvegardes chiffrées programmées**
 (offsite) : [`docs/MIGRATION.md`](docs/MIGRATION.md) · [`docs/BACKUP.md`](docs/BACKUP.md).
 
+## Désinstallation
+
+Procédure complète (dont la purge d'état et le retrait des outils orchestrés) :
+**[`docs/UNINSTALL.md`](docs/UNINSTALL.md)**. En bref, **par mode de déploiement** :
+
+```sh
+# Docker Compose — depuis la racine du dépôt
+docker compose down                 # arrête, CONSERVE les volumes (DB + ledger)
+docker compose down -v              # arrête + SUPPRIME les volumes (DESTRUCTIF)
+docker image rm forge:0.0.1         # retire l'image
+
+# Docker (conteneur seul)
+docker rm -f forge && docker image rm forge:0.0.1
+
+# Natif / systemd (sans Docker)
+sudo systemctl disable --now forge
+sudo rm -f /etc/systemd/system/forge.service && sudo systemctl daemon-reload
+sudo rm -rf /opt/forge              # binaire + assets (adapter au chemin d'install)
+
+# Moteur Python installé en editable
+pip uninstall forge
+```
+
+> **Purge des données (DESTRUCTIF, irréversible pour l'auditabilité)** — la DB SQLite (+ WAL/SHM), le
+> ledger d'engagement et sa **clé de signature `.ed25519`**, le scope actif et les sauvegardes chiffrées
+> ne sont **jamais** supprimés tant que tu ne les vises pas explicitement. Les chemins exacts et le
+> retrait des outils orchestrés (msf/burp/browser) sont dans [`docs/UNINSTALL.md`](docs/UNINSTALL.md).
+
 ## Documentation
 
 **➡️ Sommaire complet et navigable : [`docs/README.md`](docs/README.md)** — l'ensemble de la
@@ -336,7 +364,7 @@ avec des **obligations** à respecter (voir ci-dessous et [`LICENSE`](LICENSE)).
 
 **Principe** : le **cœur gouvernance + audit cryptographique reste OUVERT et vérifiable** — c'est toute la
 crédibilité du produit. Les capacités d'échelle/équipe/conformité sont des **modules séparables**, open et
-flag-gated. Détail : **[`ADVANCED_MODULES.md`](ADVANCED_MODULES.md)**. L'offre commerciale de GuatX porte
+flag-gated. Détail : **[`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)**. L'offre commerciale de GuatX porte
 sur des **prestations de service** (engagements, accompagnement purple, support/SLA, hébergement managé),
 jamais sur une licence du code — cf. **[`docs/PRICING.md`](docs/PRICING.md)**.
 

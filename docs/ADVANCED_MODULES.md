@@ -1,261 +1,272 @@
-# Forge — Advanced modules (all open, separable, flag-gated)
+# Forge — Modules avancés (tous open, séparables, flag-gated)
 
-Forge is **fully open source** under **[AGPL-3.0-or-later](LICENSE)** — the **whole product**, with **no
-paid edition and no feature held behind a paywall**. The complete governance and cryptographic-audit
-engine is open, and so is every advanced capability below.
+Forge est **entièrement open source** sous **[AGPL-3.0-or-later](../LICENSE)** — le **produit entier**, **sans
+édition payante ni fonctionnalité retenue derrière un paywall**. Le moteur complet de gouvernance et
+d'audit cryptographique est open, et chaque capacité avancée ci-dessous l'est aussi.
 
-**Open source here means the AGPL-3.0 strong copyleft — not the absence of rules.** If you run a
-(modified) Forge as a network service, you must offer its **corresponding source** to that service's
-users (AGPL §13); any **derivative work stays under AGPL-3.0-or-later**; and the **licence text and
-copyright/attribution notices must be preserved**. The freedom to read, run, modify and share comes
-**with** the obligations that keep it that way — see [`LICENSE`](LICENSE) for the binding terms.
+**Ici, open source signifie le copyleft fort d'AGPL-3.0 — pas l'absence de règles.** Si vous exploitez un
+Forge (modifié) comme service réseau, vous devez offrir sa **source correspondante** aux utilisateurs de ce
+service (AGPL §13) ; toute **œuvre dérivée reste sous AGPL-3.0-or-later** ; et le **texte de la licence
+ainsi que les mentions de copyright/attribution doivent être préservés**. La liberté de lire, exécuter,
+modifier et partager vient **avec** les obligations qui la maintiennent — voir [`LICENSE`](../LICENSE) pour
+les termes contraignants.
 
-What this document describes is a **layering inside the open codebase**, not a commercial boundary:
+Ce que ce document décrit est une **stratification à l'intérieur de la base de code open**, pas une frontière commerciale :
 
-> **The governance + cryptographic-audit core is always on.** The **scale / team / compliance**
-> capabilities ship as **separable, flag-gated modules** that are **OFF by default** — a clean extension
-> point on the core, never a fork of it, and never a gate that weakens or hides the open governance/audit
-> surface. Turn them on when you need them; leave them off and the build is byte-identical to the core.
+> **Le cœur gouvernance + audit cryptographique est toujours actif.** Les capacités de **passage à
+> l'échelle / équipe / conformité** sont livrées comme des **modules séparables, flag-gated** qui sont **OFF
+> par défaut** — un point d'extension propre sur le cœur, jamais un fork de celui-ci, et jamais une gate qui
+> affaiblit ou masque la surface open de gouvernance/audit. Activez-les quand vous en avez besoin ;
+> laissez-les désactivées et le build est byte-identique au cœur.
 
-Because everything is AGPL-3.0, anyone can run Forge solo or across many tenants, read every line of the
-safety and audit machinery, and verify that the ledger, the scope-guard, and the oracles do exactly what
-they claim. That transparency is the point: you cannot trust a red-team governance tool you cannot read.
-(GuatX's commercial offering is **services** around the tool — reference engagements, purple
-accompaniment, support/SLA, managed hosting — never a licence to the code; see
-[`docs/PRICING.md`](docs/PRICING.md).)
+Parce que tout est AGPL-3.0, quiconque peut exécuter Forge en solo ou sur de nombreux tenants, lire chaque
+ligne de la machinerie de sécurité et d'audit, et vérifier que le ledger, le scope-guard et les oracles font
+exactement ce qu'ils affirment. Cette transparence est l'enjeu : on ne peut pas faire confiance à un outil de
+gouvernance red-team qu'on ne peut pas lire. (L'offre commerciale de GuatX, ce sont des **services** autour de
+l'outil — engagements de référence, accompagnement purple, support/SLA, hébergement managé — jamais une
+licence sur le code ; voir [`docs/PRICING.md`](PRICING.md).)
 
 ---
 
-## The core — always active, no flag
+## Le cœur — toujours actif, aucun flag
 
-Everything you need to run Forge **solo or as a small team**, on your own infrastructure, at no cost and
-with nothing switched off:
+Tout ce dont vous avez besoin pour exécuter Forge **en solo ou en petite équipe**, sur votre propre
+infrastructure, sans coût et sans rien de désactivé :
 
-- **Governance core**
-  - Fail-closed **ROE scope-guard** (inert by default; in-scope empty = nothing fires; `VETO` on any
-    evaluation error).
-  - **Ed25519 tamper-evident authorization ledger** (append-time, hash-chained, publicly verifiable from
-    the public key alone).
-  - **Proof-oriented oracles** — findings are evidence-backed, not asserted.
+- **Cœur de gouvernance**
+  - **Scope-guard ROE** fail-closed (inerte par défaut ; in-scope vide = rien ne se déclenche ; `VETO` sur
+    toute erreur d'évaluation).
+  - **Ledger d'autorisation Ed25519 tamper-evident** (au moment de l'append, chaîné par hash, vérifiable
+    publiquement à partir de la seule clé publique).
+  - **Oracles orientés preuve** — les findings sont adossés à des preuves, pas affirmés.
 - **Techniques**
-  - The **extensible technique registry** (declare-once → derive-everywhere) and **all technique
-    classes** shipped with the core.
-- **Execution**
-  - The **C2-light governed run flow** (arm → scope → capability → approve, every action gated and
-    ledgered).
-  - The **purple loop** (findings + ATT&CK run-records fed to the detection side and correlated).
-- **Console & access**
-  - The **console UI + first-boot wizard + RBAC** with the three built-in roles: **admin / operator /
+  - Le **registre de techniques extensible** (declare-once → derive-everywhere) et **toutes les classes de
+    techniques** livrées avec le cœur.
+- **Exécution**
+  - Le **flux de run gouverné C2-light** (arm → scope → capability → approve, chaque action gated et
+    ledgerisée).
+  - La **boucle purple** (findings + run-records ATT&CK alimentés côté détection et corrélés).
+- **Console & accès**
+  - L'**UI de la console + wizard de premier boot + RBAC** avec les trois rôles intégrés : **admin / operator /
     viewer**.
-- **Integration & infra**
-  - **Connectors / orchestration**: nuclei, Metasploit (msf), Burp, and the other bundled tool
-    integrations.
-  - **Infra-agnostic detection** (plug any BLUE source — Plume, CrowdSec, FortiGate, pfSense/OPNsense,
-    Elastic, file, exec — with no code).
-  - **Encrypted backup / restore** (argon2id + XChaCha20-Poly1305, ledger-verified).
-- **Scale**
-  - **Single-scope + small-team use** — single-node SQLite store, local operator policy.
+- **Intégration & infra**
+  - **Connecteurs / orchestration** : nuclei, Metasploit (msf), Burp, et les autres intégrations d'outils
+    embarquées.
+  - **Détection infra-agnostique** (brancher n'importe quelle source BLUE — Plume, CrowdSec, FortiGate,
+    pfSense/OPNsense, Elastic, file, exec — sans code).
+  - **Sauvegarde / restauration chiffrée** (argon2id + XChaCha20-Poly1305, vérifiée par le ledger).
+- **Échelle**
+  - **Usage single-scope + petite équipe** — store SQLite mono-nœud, politique opérateur locale.
 
-If Forge fits on one node and one small team, the core is the whole product. Nothing about the safety or
-audit story is held back — and neither is anything below.
-
----
-
-## The advanced modules — separable, flag-gated, OFF by default
-
-These capabilities are for organizations that run Forge at **scale**, across **many teams / tenants**, or
-under **formal compliance**. They are **separable modules** built on top of the core; the core never
-depends on them, and each is engaged only by an explicit flag. **In the default build every flag is OFF ⇒
-the behaviour is byte-identical to the core** (all existing tests green).
-
-- **Multi-tenant / MSSP** — many isolated engagements/customers on one deployment, with **per-tenant
-  cryptographic isolation** (separate keys and ledgers per tenant).
-  - **Row-level multi-tenancy** *(implemented — `console/src/tenancy.rs`, flag-gated)*: a `TENANT ──<
-    ENGAGEMENT ──< findings/runs` hierarchy plus a `tenant_grant(user_id, tenant_id, role)` map. A
-    **fail-closed tenant filter** (deny-by-default, mirroring the ROE) is applied on top of the existing
-    engagement isolation + RBAC: a user of tenant A can **never** list, read, or act on tenant B's
-    engagements / findings / runs / roe / ledger / coverage / reports — no grant ⇒ zero rows / 403. It is
-    engaged only by the flag **`FORGE_ENTERPRISE_TENANCY=1`** (or DB config key `enterprise.tenancy=on`).
-    **DEFAULT build: flag OFF ⇒ a single implicit tenant #1, all users access it, behaviour
-    byte-identical** to pre-tenancy (all existing tests green). The module is separable — the core never
-    depends on it.
-  - **Audited super-admin (platform/MSSP operator)** *(implemented — `console/src/tenancy.rs`)*: a
-    **NON-DISABLABLE**, **provisioning-designated** capability (env `FORGE_SUPERADMIN` and/or the DB
-    provisioning key `enterprise.superadmin` — never a normal UI route) that can **READ across ALL
-    tenants**. It is fail-closed (no designation ⇒ nobody is super-admin; requires a valid individual
-    `admin` session), the account **cannot be disabled / deleted / downgraded** through account CRUD, and
-    **every cross-tenant read is ledgered `console.superadmin.access`** (tenant + what). It grants
-    cross-tenant **READ ONLY** — cross-tenant write/run stays bound to native grants (a normal
-    `tenant_admin` can never cross tenants). Mirrors Plume's non-disablable audited super-admin.
-  - **Tenant CRUD + grant management** *(implemented — `console/src/tenancy.rs`)*: create / rename /
-    archive tenants and list / add / remove a user's `tenant_grant`, gated to a **platform-admin** (a
-    console `admin` session or a super-admin) and ledgered **`console.tenant.*`**. Fail-closed guards:
-    never archive the **last active tenant**, never remove the **last `tenant_admin` grant** of a tenant.
-    In the default build the surface is closed (`403 enterprise_disabled`).
-  - **Per-tenant cryptographic ledger** *(implemented — `console/src/tenancy.rs`)*: each tenant's
-    engagement ledgers are grouped under a tenant-keyed subdirectory
-    (`tenant-<tid>/engagement-<eid>.jsonl`), keeping the **Ed25519 signing per-ledger unchanged** — just
-    scoped per tenant. Default build (flag OFF) keeps the historical flat path (byte-identical).
-  - **Flag-gated tenant UI** *(implemented — SPA + `console/src/tenancy.rs`)*: the console SPA exposes the
-    tenant surface **only when the flag is ON**. A read-only probe `GET /api/tenancy` (served by the
-    separable module) returns `{"enabled": false}` in the default build → the SPA renders **no tenant
-    selector, no `#tenants` admin view, no nav link** (single-tenant shell, byte-identical). When enabled it
-    returns the caller's accessible tenants (super-admin ⇒ all) and drives: a **tenant selector** in the
-    header **above the engagement selector** (tenant → engagement hierarchy, filtering the engagement list
-    to the active tenant), and a **`#tenants` admin view** (create / rename / archive tenants, manage user
-    grants) shown only to a **platform-admin**. The server stays the authority (fail-closed filter + `403`
-    gates); the UI gating is defence-in-depth.
-
-**How to enable.** Set the flag **`FORGE_ENTERPRISE_TENANCY=1`** (env) *or* the per-DB config key
-**`enterprise.tenancy=on`**; designate the platform operator(s) via **`FORGE_SUPERADMIN`** (env) or the
-provisioning key **`enterprise.superadmin`** (comma/space-separated logins — never a normal UI route). With
-the flag OFF (the **default**), Forge is a **single implicit tenant #1** with all users granted full access
-and **byte-identical** pre-tenancy behaviour (all existing tests green). The whole feature is a **separable
-module** — `console/src/tenancy.rs` (+ a minimal `mod tenancy;` wiring in `main.rs`); the core never
-depends on it.
-- **Identity at scale** — **SSO / SCIM** (SAML/OIDC login, automated user provisioning/deprovisioning).
-  - **OIDC SSO login** *(implemented — `console/src/sso.rs`, flag-gated)*: an **Authorization-Code + PKCE**
-    login flow against any OIDC provider. `GET /api/sso/login` redirects to the IdP `authorize` endpoint
-    with a server-side **state + nonce + PKCE `S256` challenge** (persisted per pending-auth); `GET
-    /api/sso/callback` validates the state, exchanges the code (+ `code_verifier`) for tokens, and **fully
-    validates the ID token** — **RS256 signature via the IdP JWKS** (pure-Rust `jsonwebtoken`/`ring`, **no
-    openssl**), **issuer**, **audience == `client_id`**, **exp**, and the **nonce**. On success it maps the
-    OIDC `sub`/`email` to a Forge user (**match existing** or **auto-provision** with a configured default
-    role and an unusable local password) and issues **the same `forge_session` cookie** as local login
-    (HttpOnly / SameSite=Strict). Provider config (`GET/POST /api/sso/config`) is **admin-gated**, supports
-    **OIDC discovery** (`{issuer}/.well-known/openid-configuration`), and the **`client_secret` is
-    write-only** (redacted on GET). **Fail-closed**: any state / nonce / issuer / audience / signature /
-    exp mismatch is rejected (403); the browser is only ever redirected to an **allowlisted** return target
-    (mirrors the `oauth.flow` / `redirect.open` open-redirect discipline); the `client_secret` and the
-    ID/access tokens are **never logged, ledgered, or returned**; each login is ledgered
-    `console.sso.login` (actor + subject only). It is engaged only by **`FORGE_ENTERPRISE_SSO=1`** (or DB
-    config key `enterprise.sso=on`). **DEFAULT build: flag OFF ⇒ `/api/sso/*` is disabled (404) and LOCAL
-    accounts behave byte-identically** to today (all existing tests green). The module is separable —
-    `console/src/sso.rs` (+ a `mod sso;` line and one route merge in `main.rs`); the core never depends on
-    it.
-  - **SCIM 2.0 provisioning** *(implemented — `console/src/scim.rs`, flag-gated)*: automated user/group
-    provisioning + de-provisioning from an IdP (Okta / Azure AD). `GET/POST /scim/v2/Users`,
-    `GET/PUT/PATCH/DELETE /scim/v2/Users/:id`, and `/scim/v2/Groups` implement the SCIM 2.0 core schema
-    (`userName`, `active`, `emails`, `name`, `externalId`). It is authenticated by a **SCIM bearer token**
-    — a long random token an admin generates via `GET/POST /api/scim/config` (admin-gated) — that is a
-    **secret**: stored **hashed** (SHA-256, like a session token — never the raw token), compared
-    **constant-time**, and returned **once** at rotation (redacted thereafter). It is **not** a normal
-    session (an IdP has no `forge_session`); **fail-closed**: no/invalid/unconfigured token ⇒ **401**.
-    Mapping onto Forge: creating / activating a SCIM user **creates / enables** a Forge user (with a
-    **scoped default role** — viewer, **never** admin, **never** super-admin — and an unusable local
-    password); **deactivating** (`active=false`) or **DELETE** **disables the user and purges its sessions**
-    (immediate revocation); group membership maps to a scoped role / tenant-grant (ties to advanced RBAC,
-    bounded to viewer|operator). A **designated super-admin login is protected** — SCIM refuses to create /
-    deactivate / delete it (403). Every mutation is ledgered `console.scim.*` (metadata only — login /
-    externalId / active / booleans, **never the token**). It is engaged only by **`FORGE_ENTERPRISE_SCIM=1`**
-    (or DB config key `enterprise.scim=on`, or the SSO flag). **DEFAULT build: flag OFF ⇒ `/scim/*` and
-    `/api/scim/config` are disabled (404) and LOCAL accounts behave byte-identically** to today (all existing
-    tests green). The module is separable — `console/src/scim.rs` (+ a `mod scim;` line and one route merge
-    in `main.rs`); the core never depends on it.
-  - **Advanced RBAC — IdP-group → {role, tenant grant} mapping** *(implemented — `console/src/rbac.rs`,
-    flag-gated)*: a CONFIGURABLE mapping from an IdP group name to a Forge authorization outcome —
-    `idp_group → { role: viewer|operator|admin, tenant_id?, tenant_role? }`. **Both** the OIDC SSO login
-    path (the ID-token `groups` claim) **and** the SCIM group-membership path consult this ONE table, so
-    an admin configures group → access in a single place (`GET/POST /api/rbac/group-map`,
-    `DELETE /api/rbac/group-map/:group` — **admin-gated**, ledgered `console.rbac.*`). It replaces the
-    earlier best-effort `displayName` heuristic; when no mapping is configured, behaviour is byte-identical
-    to before. **FAIL-CLOSED / least-privilege** (weaken any and a test flips RED): an SSO/SCIM identity
-    gets **ONLY** what its group mapping confers — no matching group ⇒ `role: None` ⇒ the identity keeps
-    its own least-privilege default (`viewer` at most), never more. **NEVER super-admin via SSO/SCIM** —
-    super-admin is a *provisioning-only* designation (see `tenancy.rs`), is not a `users.role` value, and
-    cannot be expressed in the table; a designated super-admin login is additionally never re-roled/re-
-    granted by SSO/SCIM. Roles are validated to `viewer|operator|admin` and tenant roles to
-    `tenant_admin|tenant_operator|tenant_viewer` (anything else — incl. `super_admin` — is rejected at
-    config time). When several mapped groups match, the **highest role wins** (capped at admin); **SCIM
-    additionally clamps admin → operator** (automated bulk provisioning never auto-confers console admin).
-    Tenant grants are landed only when **multi-tenancy** is also engaged. It is engaged whenever
-    **SSO or SCIM** is engaged (`rbac::enabled()` = `sso::enabled() || scim::enabled()`).
-    **DEFAULT build: both flags OFF ⇒ `/api/rbac/*` is disabled (404), the mapping table is never created,
-    and role assignment stays admin-only exactly as today** (all existing tests green). The module is
-    separable — `console/src/rbac.rs` (+ a `mod rbac;` line and one route merge in `main.rs`); the core
-    never depends on it.
-  - **SAML** login is still on the roadmap (a documented FUTURE follow-up — **OIDC covers the common
-    case**; SAML would reuse the same group → role/tenant mapping in `rbac.rs`).
-- **Advanced authorization (further)** — **composable/custom roles** beyond admin/operator/viewer, and
-  **time-boxed per-engagement grants**, build on the `rbac.rs` mapping above (roadmap).
-- **High availability & scale** — **HA / clustering / distributed store** (Postgres instead of
-  single-node SQLite), horizontal scale-out.
-- **Compliance — legal-hold / WORM retention** *(implemented — `console/src/compliance.rs` +
-  `forge/compliance_signer.py`, flag-gated)*: a **retention policy** (a configurable retention duration for
-  the audit trail + findings/runs) settable **per global / per tenant / per engagement** (most-specific
-  wins), and a **legal-hold** flag (per global/tenant/engagement) that **blocks any deletion/purge
-  regardless of retention** — **hold always wins** (fail-closed). **WORM enforcement**: while a ledger
-  record is under retention *or* under legal-hold it **cannot be deleted, altered, or purged**. A
-  **governed purge** (`POST /api/compliance/purge`, admin) is allowed **only** when retention has **expired**
-  **and** there is **no hold**, and it **never silently deletes**: it (a) **archives the expired segment
-  first — encrypted**, reusing the backup discipline (`backup_encrypt`, XChaCha20-Poly1305 + argon2id),
-  then (b) **re-anchors** the ledger and records a **signed checkpoint ledger event
-  `console.compliance.purge`** (counts, segment SHA-256, encrypted-archive SHA-256, purged head, time,
-  actor). The **remaining chain stays verifiable** under the **existing** verifier
-  (`crate::verify_ledger_chain`) *and* the Python `Ledger.verify` — the surviving entries' audited content
-  is byte-preserved (only their `prev`/`hash` are re-linked), so **tamper-evidence and Ed25519 verify are
-  untouched**. **Fail-closed corner**: a purge **refuses** (409 `signed_survivor`) if any *surviving* entry
-  is Ed25519/HMAC-signed (re-hashing it would break its signature) and **refuses** (400) if no archive key
-  is configured (never an unrecoverable delete). The **pluggable checkpoint signer**
-  (`forge/compliance_signer.py`) keeps **verify byte-identical** to `signing.verify_with_pubkey` and exposes
-  a **KMS/HSM seam** (`CallableComplianceSigner`) so a hardware-rooted signer plugs in without changing the
-  verify path. It is engaged only by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or DB config key
-  `enterprise.compliance=on`). **DEFAULT build: flag OFF ⇒ every `/api/compliance/*` route is disabled
-  (404), WORM/retention/hold are inert, and the ledger + engagement data are byte-identical** (all existing
-  tests green). The module is separable — `console/src/compliance.rs` (+ a `mod compliance;` line, one route
-  merge, one SPA flag, and a flag-gated delete/archive WORM guard in `main.rs`); the core never depends on
-  it.
-- **Compliance — pluggable ledger signer (KMS/HSM/remote key)** *(implemented — `forge/signing.py`,
-  flag-gated)*: the audit ledger's **Ed25519 private key can live OFF-HOST** — in a KMS/HSM, a remote signer
-  endpoint, or a **no-shell `exec` helper** — so the private key **never lands on disk**. Selected by config
-  (`FORGE_LEDGER_SIGNER` = `local` | `kms` | `hsm` | `http` | `remote` | `exec`, plus
-  `FORGE_LEDGER_SIGNER_{ENDPOINT,CREDENTIAL,PUBKEY,ARGV,TIMEOUT}`) and gated by
-  **`FORGE_ENTERPRISE_COMPLIANCE=1`**. A `RemoteSigner` produces a **standard Ed25519 signature over the same
-  bytes**, so **verify is UNCHANGED** — `Ledger.verify` / `Ledger.verify_external(pubkey)` /
-  `signing.verify_with_pubkey` accept it with the **public key alone**, byte-identical regardless of who
-  signed. **Fail-closed & no-fallback**: an unreachable/misconfigured/non-verifying remote signer **raises
-  `RemoteSignerError`** and the append aborts — Forge **never** writes an unsigned or insecure entry and
-  **never** silently downgrades to the local key (a remote signer requested without the flag is refused).
-  **Secrets**: the endpoint/credential/argv are **redacted** (`redact_signer_config`) and never
-  logged/ledgered/leaked (not even in error messages or `repr`); the `exec` signer is **no-shell** (fixed,
-  admin-configured argv — a shell string is rejected). **DEFAULT build**: nothing configured ⇒
-  `make_ledger_signer` returns the **`LocalFileSigner`** (the on-disk `<ledger>.ed25519` key) — **byte-identical
-  to before** (all existing ledger tests green). Separable — the whole seam is additive in `forge/signing.py`
-  (`LocalFileSigner`, `RemoteSigner`, `make_ledger_signer`); the core's default path is unchanged.
-- **Compliance — SOC 2 / ISO 27001 evidence export** *(implemented — `console/src/compliance.rs`,
-  flag-gated)*: a **read-only** evidence bundle for a **tenant / engagement / timeframe**, assembled from the
-  **existing** ledger + RBAC + backup state (it **never mutates** any data). It contains the **authorization
-  audit trail** (who authorized what, when, on which scope — mined from the tamper-evident ledger), the
-  **RBAC / grant state** (console accounts, tenant grants, IdP group→role mappings for *this* tenant), the
-  **access / mutation log**, the **backup attestation** (restore-**proven**, from the console ledger), and the
-  **ledger integrity attestation** — **head hash + Ed25519 public key + chain-verify result + an external
-  `forge ledger verify` command** (verification needs the **public key alone**; no secret is included).
-  `GET /api/compliance/evidence?engagement_id=&format=json|html|pdf&from=&to=` (admin) returns **JSON** or a
-  **human-readable HTML** (the HTML **degrades to `?format=html` + print-to-PDF** when no PDF engine is on the
-  host — same `render_pdf_from_html` seam as the branded report). The bundle is **tenant/engagement-isolated**
-  (only that engagement's ledger + counts, only that tenant's grants) and **secret-redacted** end-to-end
-  (passphrases / tokens / credentials / `client_secret` / private keys → `[REDACTED]`; **public keys are
-  preserved**). The **act of exporting is itself ledgered** (`console.compliance.evidence.export` — actor,
-  scope, format, ledger head, chain-ok). Engaged only by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or DB config
-  `enterprise.compliance=on`); **default build (flag OFF) ⇒ the route 404s and nothing changes**.
-- **Compliance (further)** — **KMS/HSM-backed keys** are now available for both the **audit-ledger signer**
-  (`forge/signing.py` `RemoteSigner`, above) and the **compliance checkpoint signer**
-  (`forge/compliance_signer.py` `CallableComplianceSigner`); hardware-rooted **encryption** (backup/archive at
-  rest) is the remaining seam.
+Si Forge tient sur un nœud et une petite équipe, le cœur est le produit entier. Rien de l'histoire de
+sécurité ou d'audit n'est retenu — ni rien de ce qui suit.
 
 ---
 
-## Design principle for contributors
+## Les modules avancés — séparables, flag-gated, OFF par défaut
 
-When adding a capability, ask **which layer it belongs on** — both layers are open AGPL; the question is
-whether it is always-on core or a separable flag-gated module:
+Ces capacités sont destinées aux organisations qui exploitent Forge à **l'échelle**, sur **de nombreuses
+équipes / tenants**, ou sous **conformité formelle**. Ce sont des **modules séparables** construits par-dessus
+le cœur ; le cœur n'en dépend jamais, et chacun n'est engagé que par un flag explicite. **Dans le build par
+défaut, chaque flag est OFF ⇒ le comportement est byte-identique au cœur** (tous les tests existants verts).
 
-- Does it make the **governance or the cryptographic audit trail** stronger, more verifiable, or usable
-  by a solo operator / small team? → **it belongs in the always-on core.**
-- Is it fundamentally about **scale, multi-tenancy, identity-at-scale, HA, or formal compliance**? → it is
-  an **advanced module**, and it must be built **separable** — a clean extension point on the core, OFF by
-  default, never a fork of it, and never a gate that weakens or hides the open governance/audit surface.
+- **Multi-tenant / MSSP** — de nombreux engagements/clients isolés sur un seul déploiement, avec **isolation
+  cryptographique par tenant** (clés et ledgers séparés par tenant).
+  - **Multi-tenance au niveau ligne** *(implémenté — `console/src/tenancy.rs`, flag-gated)* : une hiérarchie
+    `TENANT ──< ENGAGEMENT ──< findings/runs` plus une map `tenant_grant(user_id, tenant_id, role)`. Un
+    **filtre de tenant fail-closed** (deny-by-default, calqué sur le ROE) est appliqué par-dessus l'isolation
+    d'engagement + RBAC existante : un utilisateur du tenant A ne peut **jamais** lister, lire, ou agir sur
+    les engagements / findings / runs / roe / ledger / coverage / reports du tenant B — pas de grant ⇒ zéro
+    ligne / 403. Il n'est engagé que par le flag **`FORGE_ENTERPRISE_TENANCY=1`** (ou la clé de config DB
+    `enterprise.tenancy=on`). **Build par DÉFAUT : flag OFF ⇒ un unique tenant implicite #1, tous les
+    utilisateurs y accèdent, comportement byte-identique** à l'avant-tenance (tous les tests existants
+    verts). Le module est séparable — le cœur n'en dépend jamais.
+  - **Super-admin audité (opérateur plateforme/MSSP)** *(implémenté — `console/src/tenancy.rs`)* : une
+    capacité **NON-DÉSACTIVABLE**, **désignée au provisioning** (env `FORGE_SUPERADMIN` et/ou la clé de
+    provisioning DB `enterprise.superadmin` — jamais une route UI normale) qui peut **LIRE à travers TOUS les
+    tenants**. Elle est fail-closed (aucune désignation ⇒ personne n'est super-admin ; exige une session
+    `admin` individuelle valide), le compte **ne peut être ni désactivé / supprimé / rétrogradé** via le CRUD
+    de compte, et **chaque lecture cross-tenant est ledgerisée `console.superadmin.access`** (tenant + quoi).
+    Elle accorde le cross-tenant **EN LECTURE SEULE** — l'écriture/le run cross-tenant reste lié aux grants
+    natifs (un `tenant_admin` normal ne peut jamais franchir les tenants). Reflète le super-admin audité
+    non-désactivable de Plume.
+  - **CRUD tenant + gestion des grants** *(implémenté — `console/src/tenancy.rs`)* : créer / renommer /
+    archiver des tenants et lister / ajouter / retirer le `tenant_grant` d'un utilisateur, gaté à un
+    **platform-admin** (une session `admin` de console ou un super-admin) et ledgerisé **`console.tenant.*`**.
+    Gardes fail-closed : ne jamais archiver le **dernier tenant actif**, ne jamais retirer le **dernier grant
+    `tenant_admin`** d'un tenant. Dans le build par défaut, la surface est fermée (`403 enterprise_disabled`).
+  - **Ledger cryptographique par tenant** *(implémenté — `console/src/tenancy.rs`)* : les ledgers
+    d'engagement de chaque tenant sont regroupés sous un sous-répertoire clé-par-tenant
+    (`tenant-<tid>/engagement-<eid>.jsonl`), gardant la **signature Ed25519 par-ledger inchangée** — juste
+    scopée par tenant. Le build par défaut (flag OFF) conserve le chemin plat historique (byte-identique).
+  - **UI tenant flag-gated** *(implémenté — SPA + `console/src/tenancy.rs`)* : le SPA de la console expose la
+    surface tenant **uniquement quand le flag est ON**. Une sonde en lecture seule `GET /api/tenancy` (servie
+    par le module séparable) renvoie `{"enabled": false}` dans le build par défaut → le SPA n'affiche **aucun
+    sélecteur de tenant, aucune vue admin `#tenants`, aucun lien de nav** (shell single-tenant,
+    byte-identique). Une fois activée, elle renvoie les tenants accessibles à l'appelant (super-admin ⇒ tous)
+    et pilote : un **sélecteur de tenant** dans l'en-tête **au-dessus du sélecteur d'engagement** (hiérarchie
+    tenant → engagement, filtrant la liste des engagements au tenant actif), et une **vue admin `#tenants`**
+    (créer / renommer / archiver des tenants, gérer les grants utilisateur) montrée uniquement à un
+    **platform-admin**. Le serveur reste l'autorité (filtre fail-closed + gates `403`) ; le gating de l'UI est
+    de la défense en profondeur.
 
-The rule of thumb: **credibility (governance + crypto-audit) is always on; scale/team/compliance is a
-switch you flip.** Nothing is ever paid or hidden — the commercial offering is **services**, not the code
-(see [`docs/PRICING.md`](docs/PRICING.md)).
+**Comment activer.** Poser le flag **`FORGE_ENTERPRISE_TENANCY=1`** (env) *ou* la clé de config par-DB
+**`enterprise.tenancy=on`** ; désigner le(s) opérateur(s) de plateforme via **`FORGE_SUPERADMIN`** (env) ou la
+clé de provisioning **`enterprise.superadmin`** (logins séparés par virgule/espace — jamais une route UI
+normale). Avec le flag OFF (le **défaut**), Forge est un **unique tenant implicite #1** où tous les
+utilisateurs ont un accès complet et un comportement **byte-identique** à l'avant-tenance (tous les tests
+existants verts). La fonctionnalité entière est un **module séparable** — `console/src/tenancy.rs` (+ un
+câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
+- **Identité à l'échelle** — **SSO / SCIM** (login SAML/OIDC, provisioning/déprovisioning automatisé des utilisateurs).
+  - **Login SSO OIDC** *(implémenté — `console/src/sso.rs`, flag-gated)* : un flux de login **Authorization-Code + PKCE**
+    contre n'importe quel provider OIDC. `GET /api/sso/login` redirige vers l'endpoint `authorize` de l'IdP
+    avec un **state + nonce + challenge PKCE `S256`** côté serveur (persisté par pending-auth) ; `GET
+    /api/sso/callback` valide le state, échange le code (+ `code_verifier`) contre des tokens, et **valide
+    entièrement l'ID token** — **signature RS256 via la JWKS de l'IdP** (`jsonwebtoken`/`ring` pur-Rust, **pas
+    d'openssl**), **issuer**, **audience == `client_id`**, **exp**, et le **nonce**. En cas de succès, il mappe
+    le `sub`/`email` OIDC vers un utilisateur Forge (**appariement d'un existant** ou **auto-provisioning**
+    avec un rôle par défaut configuré et un mot de passe local inutilisable) et émet **le même cookie
+    `forge_session`** que le login local (HttpOnly / SameSite=Strict). La config du provider (`GET/POST
+    /api/sso/config`) est **admin-gated**, supporte la **discovery OIDC**
+    (`{issuer}/.well-known/openid-configuration`), et le **`client_secret` est write-only** (rédigé au GET).
+    **Fail-closed** : toute divergence de state / nonce / issuer / audience / signature / exp est rejetée
+    (403) ; le navigateur n'est jamais redirigé que vers une cible de retour **allowlistée** (reflète la
+    discipline anti-open-redirect `oauth.flow` / `redirect.open`) ; le `client_secret` et les tokens ID/access
+    ne sont **jamais loggés, ledgerisés, ni renvoyés** ; chaque login est ledgerisé `console.sso.login`
+    (acteur + sujet seulement). Il n'est engagé que par **`FORGE_ENTERPRISE_SSO=1`** (ou la clé de config DB
+    `enterprise.sso=on`). **Build par DÉFAUT : flag OFF ⇒ `/api/sso/*` est désactivé (404) et les comptes
+    LOCAUX se comportent de façon byte-identique** à aujourd'hui (tous les tests existants verts). Le module
+    est séparable — `console/src/sso.rs` (+ une ligne `mod sso;` et un merge de route dans `main.rs`) ; le
+    cœur n'en dépend jamais.
+  - **Provisioning SCIM 2.0** *(implémenté — `console/src/scim.rs`, flag-gated)* : provisioning +
+    déprovisioning automatisé des utilisateurs/groupes depuis un IdP (Okta / Azure AD). `GET/POST /scim/v2/Users`,
+    `GET/PUT/PATCH/DELETE /scim/v2/Users/:id`, et `/scim/v2/Groups` implémentent le schéma core SCIM 2.0
+    (`userName`, `active`, `emails`, `name`, `externalId`). Il est authentifié par un **bearer token SCIM**
+    — un long token aléatoire qu'un admin génère via `GET/POST /api/scim/config` (admin-gated) — qui est un
+    **secret** : stocké **haché** (SHA-256, comme un token de session — jamais le token brut), comparé en
+    **temps constant**, et renvoyé **une seule fois** à la rotation (rédigé ensuite). Ce n'est **pas** une
+    session normale (un IdP n'a pas de `forge_session`) ; **fail-closed** : token absent/invalide/non-configuré ⇒ **401**.
+    Mapping vers Forge : créer / activer un utilisateur SCIM **crée / active** un utilisateur Forge (avec un
+    **rôle par défaut scopé** — viewer, **jamais** admin, **jamais** super-admin — et un mot de passe local
+    inutilisable) ; **désactiver** (`active=false`) ou **DELETE** **désactive l'utilisateur et purge ses sessions**
+    (révocation immédiate) ; l'appartenance à un groupe mappe vers un rôle scopé / tenant-grant (lié au RBAC
+    avancé, borné à viewer|operator). Un **login super-admin désigné est protégé** — SCIM refuse de le créer /
+    désactiver / supprimer (403). Chaque mutation est ledgerisée `console.scim.*` (métadonnées seulement —
+    login / externalId / active / booléens, **jamais le token**). Il n'est engagé que par **`FORGE_ENTERPRISE_SCIM=1`**
+    (ou la clé de config DB `enterprise.scim=on`, ou le flag SSO). **Build par DÉFAUT : flag OFF ⇒ `/scim/*` et
+    `/api/scim/config` sont désactivés (404) et les comptes LOCAUX se comportent de façon byte-identique** à
+    aujourd'hui (tous les tests existants verts). Le module est séparable — `console/src/scim.rs` (+ une ligne
+    `mod scim;` et un merge de route dans `main.rs`) ; le cœur n'en dépend jamais.
+  - **RBAC avancé — mapping groupe-IdP → {rôle, tenant grant}** *(implémenté — `console/src/rbac.rs`,
+    flag-gated)* : un mapping CONFIGURABLE d'un nom de groupe IdP vers un résultat d'autorisation Forge —
+    `idp_group → { role: viewer|operator|admin, tenant_id?, tenant_role? }`. **À la fois** le chemin de login
+    SSO OIDC (le claim `groups` de l'ID-token) **et** le chemin d'appartenance de groupe SCIM consultent cette
+    UNIQUE table, si bien qu'un admin configure groupe → accès en un seul endroit (`GET/POST /api/rbac/group-map`,
+    `DELETE /api/rbac/group-map/:group` — **admin-gated**, ledgerisé `console.rbac.*`). Il remplace l'ancienne
+    heuristique best-effort sur `displayName` ; quand aucun mapping n'est configuré, le comportement est
+    byte-identique à avant. **FAIL-CLOSED / least-privilege** (en affaiblir un fait passer un test au ROUGE) :
+    une identité SSO/SCIM n'obtient **QUE** ce que son mapping de groupe confère — aucun groupe correspondant ⇒
+    `role: None` ⇒ l'identité conserve son propre défaut least-privilege (`viewer` au plus), jamais davantage.
+    **JAMAIS super-admin via SSO/SCIM** — le super-admin est une désignation *au provisioning uniquement* (voir
+    `tenancy.rs`), n'est pas une valeur `users.role`, et ne peut pas être exprimé dans la table ; un login
+    super-admin désigné n'est en outre jamais re-rôlé/re-granté par SSO/SCIM. Les rôles sont validés à
+    `viewer|operator|admin` et les rôles de tenant à `tenant_admin|tenant_operator|tenant_viewer` (tout le
+    reste — y compris `super_admin` — est rejeté au moment de la config). Quand plusieurs groupes mappés
+    correspondent, le **rôle le plus élevé l'emporte** (plafonné à admin) ; **SCIM clampe en plus admin → operator**
+    (le provisioning de masse automatisé ne confère jamais automatiquement l'admin de console). Les tenant
+    grants ne sont posés que lorsque la **multi-tenance** est également engagée. Il est engagé dès que
+    **SSO ou SCIM** est engagé (`rbac::enabled()` = `sso::enabled() || scim::enabled()`).
+    **Build par DÉFAUT : les deux flags OFF ⇒ `/api/rbac/*` est désactivé (404), la table de mapping n'est
+    jamais créée, et l'assignation de rôle reste admin-only exactement comme aujourd'hui** (tous les tests
+    existants verts). Le module est séparable — `console/src/rbac.rs` (+ une ligne `mod rbac;` et un merge de
+    route dans `main.rs`) ; le cœur n'en dépend jamais.
+  - Le login **SAML** est encore sur la roadmap (un suivi FUTUR documenté — **OIDC couvre le cas commun** ;
+    SAML réutiliserait le même mapping groupe → rôle/tenant dans `rbac.rs`).
+- **Autorisation avancée (pour aller plus loin)** — les **rôles composables/personnalisés** au-delà
+  d'admin/operator/viewer, et les **grants par-engagement à durée limitée**, s'appuient sur le mapping
+  `rbac.rs` ci-dessus (roadmap).
+- **Haute disponibilité & échelle** — **HA / clustering / store distribué** (Postgres au lieu de SQLite
+  mono-nœud), scale-out horizontal.
+- **Conformité — legal-hold / rétention WORM** *(implémenté — `console/src/compliance.rs` +
+  `forge/compliance_signer.py`, flag-gated)* : une **politique de rétention** (une durée de rétention
+  configurable pour l'audit trail + findings/runs) réglable **par global / par tenant / par engagement** (le
+  plus spécifique l'emporte), et un flag **legal-hold** (par global/tenant/engagement) qui **bloque toute
+  suppression/purge indépendamment de la rétention** — **le hold l'emporte toujours** (fail-closed).
+  **Enforcement WORM** : tant qu'un enregistrement de ledger est sous rétention *ou* sous legal-hold, il **ne
+  peut être ni supprimé, ni altéré, ni purgé**. Une **purge gouvernée** (`POST /api/compliance/purge`, admin)
+  n'est autorisée **que** lorsque la rétention a **expiré** **et** qu'il n'y a **aucun hold**, et elle **ne
+  supprime jamais en silence** : elle (a) **archive d'abord le segment expiré — chiffré**, en réutilisant la
+  discipline de backup (`backup_encrypt`, XChaCha20-Poly1305 + argon2id), puis (b) **ré-ancre** le ledger et
+  enregistre un **événement de ledger checkpoint signé `console.compliance.purge`** (comptes, SHA-256 du
+  segment, SHA-256 de l'archive chiffrée, head purgé, heure, acteur). La **chaîne restante demeure vérifiable**
+  sous le vérifieur **existant** (`crate::verify_ledger_chain`) *et* le `Ledger.verify` Python — le contenu
+  audité des entrées survivantes est préservé byte-pour-byte (seuls leurs `prev`/`hash` sont re-liés), de
+  sorte que **le tamper-evidence et la vérification Ed25519 sont intacts**. **Coin fail-closed** : une purge
+  **refuse** (409 `signed_survivor`) si une entrée *survivante* est signée Ed25519/HMAC (la re-hacher
+  casserait sa signature) et **refuse** (400) si aucune clé d'archive n'est configurée (jamais de suppression
+  irrécupérable). Le **signeur de checkpoint pluggable** (`forge/compliance_signer.py`) garde la **vérification
+  byte-identique** à `signing.verify_with_pubkey` et expose un **seam KMS/HSM** (`CallableComplianceSigner`)
+  pour qu'un signeur ancré matériellement se branche sans changer le chemin de vérification. Il n'est engagé
+  que par **`FORGE_ENTERPRISE_COMPLIANCE=1`** (ou la clé de config DB `enterprise.compliance=on`). **Build par
+  DÉFAUT : flag OFF ⇒ chaque route `/api/compliance/*` est désactivée (404), WORM/rétention/hold sont inertes,
+  et le ledger + les données d'engagement sont byte-identiques** (tous les tests existants verts). Le module
+  est séparable — `console/src/compliance.rs` (+ une ligne `mod compliance;`, un merge de route, un flag SPA,
+  et un garde WORM de suppression/archivage flag-gated dans `main.rs`) ; le cœur n'en dépend jamais.
+- **Conformité — signeur de ledger pluggable (KMS/HSM/clé distante)** *(implémenté — `forge/signing.py`,
+  flag-gated)* : la **clé privée Ed25519** du ledger d'audit **peut vivre OFF-HOST** — dans un KMS/HSM, un
+  endpoint de signeur distant, ou un **helper `exec` no-shell** — de sorte que la clé privée **n'atterrit
+  jamais sur disque**. Sélectionné par config (`FORGE_LEDGER_SIGNER` = `local` | `kms` | `hsm` | `http` |
+  `remote` | `exec`, plus `FORGE_LEDGER_SIGNER_{ENDPOINT,CREDENTIAL,PUBKEY,ARGV,TIMEOUT}`) et gaté par
+  **`FORGE_ENTERPRISE_COMPLIANCE=1`**. Un `RemoteSigner` produit une **signature Ed25519 standard sur les
+  mêmes octets**, de sorte que **la vérification est INCHANGÉE** — `Ledger.verify` /
+  `Ledger.verify_external(pubkey)` / `signing.verify_with_pubkey` l'acceptent avec la **seule clé publique**,
+  byte-identique quel que soit le signataire. **Fail-closed & sans repli** : un signeur distant
+  injoignable/mal configuré/qui ne vérifie pas **lève `RemoteSignerError`** et l'append avorte — Forge
+  **n'écrit jamais** d'entrée non signée ou non sûre et **ne se rabat jamais** en silence sur la clé locale
+  (un signeur distant demandé sans le flag est refusé). **Secrets** : l'endpoint/credential/argv sont
+  **rédigés** (`redact_signer_config`) et jamais loggés/ledgerisés/fuités (pas même dans les messages
+  d'erreur ou `repr`) ; le signeur `exec` est **no-shell** (argv fixe, configuré par l'admin — une chaîne
+  shell est rejetée). **Build par DÉFAUT** : rien de configuré ⇒ `make_ledger_signer` renvoie le
+  **`LocalFileSigner`** (la clé sur disque `<ledger>.ed25519`) — **byte-identique à avant** (tous les tests de
+  ledger existants verts). Séparable — le seam entier est additif dans `forge/signing.py` (`LocalFileSigner`,
+  `RemoteSigner`, `make_ledger_signer`) ; le chemin par défaut du cœur est inchangé.
+- **Conformité — export d'évidence SOC 2 / ISO 27001** *(implémenté — `console/src/compliance.rs`,
+  flag-gated)* : un bundle d'évidence en **lecture seule** pour un **tenant / engagement / intervalle de
+  temps**, assemblé à partir de l'état **existant** ledger + RBAC + backup (il **ne mute jamais** aucune
+  donnée). Il contient l'**audit trail d'autorisation** (qui a autorisé quoi, quand, sur quel scope — extrait
+  du ledger tamper-evident), l'**état RBAC / grant** (comptes de console, tenant grants, mappings groupe
+  IdP→rôle pour *ce* tenant), le **log d'accès / de mutation**, l'**attestation de backup** (restauration-**prouvée**,
+  depuis le ledger de la console), et l'**attestation d'intégrité du ledger** — **hash du head + clé publique
+  Ed25519 + résultat de la vérification de chaîne + une commande externe `forge ledger verify`** (la
+  vérification n'a besoin que de la **seule clé publique** ; aucun secret n'est inclus).
+  `GET /api/compliance/evidence?engagement_id=&format=json|html|pdf&from=&to=` (admin) renvoie du **JSON** ou un
+  **HTML lisible par un humain** (le HTML **dégrade vers `?format=html` + impression-vers-PDF** quand aucun
+  moteur PDF n'est présent sur l'hôte — même seam `render_pdf_from_html` que le rapport brandé). Le bundle est
+  **isolé par tenant/engagement** (seulement le ledger + les comptes de cet engagement, seulement les grants de
+  ce tenant) et **secret-rédigé** de bout en bout (passphrases / tokens / credentials / `client_secret` / clés
+  privées → `[REDACTED]` ; **les clés publiques sont préservées**). L'**acte d'exporter est lui-même ledgerisé**
+  (`console.compliance.evidence.export` — acteur, scope, format, head du ledger, chain-ok). Engagé uniquement
+  par **`FORGE_ENTERPRISE_COMPLIANCE=1`** (ou la config DB `enterprise.compliance=on`) ; **build par défaut
+  (flag OFF) ⇒ la route renvoie 404 et rien ne change**.
+- **Conformité (pour aller plus loin)** — les **clés adossées à un KMS/HSM** sont désormais disponibles à la
+  fois pour le **signeur de ledger d'audit** (`forge/signing.py` `RemoteSigner`, ci-dessus) et le **signeur de
+  checkpoint de conformité** (`forge/compliance_signer.py` `CallableComplianceSigner`) ; le **chiffrement**
+  ancré matériellement (backup/archive au repos) est le seam restant.
+
+---
+
+## Principe de conception pour les contributeurs
+
+En ajoutant une capacité, demandez-vous **à quelle couche elle appartient** — les deux couches sont open
+AGPL ; la question est de savoir si c'est du cœur toujours-actif ou un module séparable flag-gated :
+
+- Rend-elle la **gouvernance ou l'audit trail cryptographique** plus fort, plus vérifiable, ou utilisable par
+  un opérateur solo / une petite équipe ? → **elle appartient au cœur toujours-actif.**
+- Est-elle fondamentalement une affaire de **passage à l'échelle, multi-tenance, identité-à-l'échelle, HA, ou
+  conformité formelle** ? → c'est un **module avancé**, et il doit être construit **séparable** — un point
+  d'extension propre sur le cœur, OFF par défaut, jamais un fork de celui-ci, et jamais une gate qui affaiblit
+  ou masque la surface open de gouvernance/audit.
+
+La règle de pouce : **la crédibilité (gouvernance + audit crypto) est toujours active ; l'échelle/équipe/conformité
+est un interrupteur qu'on bascule.** Rien n'est jamais payant ni caché — l'offre commerciale, ce sont des
+**services**, pas le code (voir [`docs/PRICING.md`](PRICING.md)).

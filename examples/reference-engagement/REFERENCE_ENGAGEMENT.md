@@ -1,50 +1,50 @@
-# Forge — Reference Engagement Write-up (ACME Retail lab)
+# Forge — Compte rendu d'engagement de référence (labo ACME Retail)
 
-> **This is a FILLED, REDACTED, LAB-STYLE example** of
+> **Ceci est un exemple REMPLI, CAVIARDÉ, FAÇON LABO** de
 > [`docs/REFERENCE_ENGAGEMENT_TEMPLATE.md`](../../docs/REFERENCE_ENGAGEMENT_TEMPLATE.md).
-> It is the sales/onboarding artifact: "here is what a Forge deliverable looks like." All data is
-> **100% synthetic** (RFC 2606 `.example` hosts, RFC 5737 documentation IPs). No real system was
-> touched. It is the human-readable companion to the machine fixtures in this folder, which
-> `make demo` / `make demo-purple` load into the console.
+> C'est l'artefact commercial/onboarding : « voici à quoi ressemble un livrable Forge ». Toutes les données sont
+> **100 % synthétiques** (hôtes `.example` RFC 2606, IP de documentation RFC 5737). Aucun système réel n'a été
+> touché. C'est le pendant lisible par un humain des fixtures machine de ce dossier, que
+> `make demo` / `make demo-purple` chargent dans la console.
 >
-> The one line that sells it: *"Your SOC saw 4 of the 7 techniques we fired. One more it only sees
-> through a generic parent rule. Here they are, and here is how to close them."*
+> La phrase qui vend le tout : *« Votre SOC a vu 4 des 7 techniques que nous avons tirées. Une de plus, il ne la voit
+> qu'à travers une règle parente générique. Les voici, et voici comment les fermer. »*
 
 ---
 
-## 0. Header
+## 0. En-tête
 
-| Field | Value |
+| Champ | Valeur |
 |---|---|
-| Client / program | ACME Retail — **internal lab** (synthetic) |
-| Engagement type | own-infra lab (authorized, written self-authorization) |
-| Period | 2026-06-26 12:00 → 12:30 UTC |
-| Forge operator(s) | `lab-operator` (demo) |
-| Authorization ref | `LAB-SELF-AUTH-2026-06` (own infrastructure) |
-| Ledger root hash | `<computed at run time — verifiable via forge ledger verify>` |
-| Verification public key | `<Ed25519 pubkey for verify_external — redacted in this sample>` |
+| Client / programme | ACME Retail — **labo interne** (synthétique) |
+| Type d'engagement | labo sur infra maison (autorisé, auto-autorisation écrite) |
+| Période | 2026-06-26 12:00 → 12:30 UTC |
+| Opérateur(s) Forge | `lab-operator` (démo) |
+| Réf. d'autorisation | `LAB-SELF-AUTH-2026-06` (infrastructure maison) |
+| Hash racine du ledger | `<calculé à l'exécution — vérifiable via forge ledger verify>` |
+| Clé publique de vérification | `<clé publique Ed25519 pour verify_external — caviardée dans cet échantillon>` |
 
 ---
 
-## 1. Context & authorized scope
+## 1. Contexte & scope autorisé
 
-- **Business objective**: measure how much of a realistic web red-team chain the lab SOC actually
-  detects, and how fast — before running it for real against production.
-- **`in_scope`** (verbatim from `scope.json`): `shop.lab.example`, `api.lab.example`, `lab.example`.
-- **`out_scope`** (explicit exclusions): `corp.internal.example`, `*.prod.example`.
-- **Armed capabilities**: `allow_exploit = false` · `allow_destructive = false` · `mode = grey` ·
+- **Objectif métier** : mesurer quelle part d'une chaîne web red-team réaliste le SOC du labo détecte
+  réellement, et à quelle vitesse — avant de la lancer pour de vrai contre la production.
+- **`in_scope`** (verbatim depuis `scope.json`) : `shop.lab.example`, `api.lab.example`, `lab.example`.
+- **`out_scope`** (exclusions explicites) : `corp.internal.example`, `*.prod.example`.
+- **Capacités armées** : `allow_exploit = false` · `allow_destructive = false` · `mode = grey` ·
   `rate = 5`.
-- **Window & constraints**: 30-minute window, hosts monitored by the lab Plume SOC, NTP-synced for
-  MTTD. Findings obtained by **read-only verification only** (no exploitation, no data destruction).
+- **Fenêtre & contraintes** : fenêtre de 30 minutes, hôtes monitorés par le SOC Plume du labo, synchronisés NTP pour
+  le MTTD. Findings obtenus par **vérification en lecture seule uniquement** (aucune exploitation, aucune destruction de données).
 
 ---
 
-## 2. Techniques fired (timeline)
+## 2. Techniques tirées (timeline)
 
-One row per action that reached a `FIRE` verdict. Source = run-records + ROE decisions (see
-`runrecords.jsonl` / `roe_decisions.jsonl`). `VETO` / `DRY_RUN` are in §6 (anti-masking).
+Une ligne par action ayant atteint un verdict `FIRE`. Source = run-records + décisions ROE (voir
+`runrecords.jsonl` / `roe_decisions.jsonl`). `VETO` / `DRY_RUN` sont en §6 (anti-masquage).
 
-| # | Timestamp (UTC) | Module (kind) | ATT&CK | Target | ROE verdict |
+| # | Timestamp (UTC) | Module (kind) | ATT&CK | Cible | Verdict ROE |
 |---|---|---|---|---|---|
 | 1 | 12:00:00 | `recon.httpx` | T1595 | shop.lab.example | FIRE |
 | 2 | 12:01:00 | `origin.find` | T1590.005 | lab.example | FIRE |
@@ -57,166 +57,166 @@ One row per action that reached a `FIRE` verdict. Source = run-records + ROE dec
 
 ---
 
-## 3. PURPLE coverage matrix (the core deliverable)
+## 3. Matrice de coverage PURPLE (le livrable central)
 
-Read-only JOIN between Forge run-records (`{mitre}`, `fired=1`) and Plume detections
-(`GET {PLUME_URL}/api/coverage/detections`), on **techniques** (multi-technique tags split on both
-sides). MTTD = `first_ts (Plume alert) − ts_fired (Forge)`, computed against the **most recent** fire
-of each technique, and sampled on **exact** detections only.
+JOIN en lecture seule entre les run-records Forge (`{mitre}`, `fired=1`) et les détections Plume
+(`GET {PLUME_URL}/api/coverage/detections`), sur les **techniques** (tags multi-techniques éclatés des deux
+côtés). MTTD = `first_ts (alerte Plume) − ts_fired (Forge)`, calculé contre le tir **le plus récent**
+de chaque technique, et échantillonné sur les détections **exactes** uniquement.
 
-| ATT&CK technique | Fired | Detected (SOC) | MTTD | Status |
+| Technique ATT&CK | Tirée | Détectée (SOC) | MTTD | Statut |
 |---|:---:|:---:|---|---|
 | T1595 — Active Scanning | ✅ | ✅ exact | 4 min | 🟢 detected-exact |
 | T1046 — Network Service Discovery | ✅ | ✅ exact | 2.5 min | 🟢 detected-exact |
 | T1190 — Exploit Public-Facing App | ✅ | ✅ exact | 3 min | 🟢 detected-exact |
 | T1212 — Exploitation for Credential Access | ✅ | ✅ exact | 6 min | 🟢 detected-exact |
-| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` only (3 alerts) | — | 🟠 **detected-parent-approx** |
+| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` seul (3 alertes) | — | 🟠 **detected-parent-approx** |
 | T1590.005 — Gather Victim Network Info: IP Addresses | ✅ | ❌ | — | 🔴 **missed** |
 | T1539 — Steal Web Session Cookie | ✅ | ❌ | — | 🔴 **missed** |
 
-**Coverage summary** (matches the live `/api/purple/coverage` output for this seed):
-- Techniques fired: **7**
-- Detected **exactly**: **4** → **coverage = 57%**
-- **Parent-approx**: **1** (T1595.002) → *not* counted in the rate, no MTTD invented — a **named
-  blind spot**, see §7
-- Missed: **2** → *(see §7 "how to close")*
-- **MTTD**: avg **232.5 s (3.9 min)**, max **360 s (6 min)** over the **exactly** detected techniques.
+**Résumé de coverage** (correspond à la sortie live de `/api/purple/coverage` pour ce seed) :
+- Techniques tirées : **7**
+- Détectées **exactement** : **4** → **coverage = 57 %**
+- **Parent-approx** : **1** (T1595.002) → *non* compté dans le taux, aucun MTTD inventé — un **angle
+  mort nommé**, voir §7
+- Manquées : **2** → *(voir §7 « comment fermer »)*
+- **MTTD** : moy. **232,5 s (3,9 min)**, max **360 s (6 min)** sur les techniques détectées **exactement**.
 
-> This table is the native output of the purple loop (`/api/purple/coverage`). It is the argument no
-> offensive tool alone produces: the **real, measured** SOC detection rate — not an estimate.
+> Cette table est la sortie native de la boucle purple (`/api/purple/coverage`). C'est l'argument qu'aucun
+> outil offensif seul ne produit : le taux de détection SOC **réel, mesuré** — pas une estimation.
 >
-> **Why T1595.002 is amber and not green.** The SOC does alert on `T1595`, and Forge fired the
-> sub-technique `T1595.002`. Calling that "detected" would be a claim we cannot back: a parent rule
-> says nothing about which **vector** it covers, and the MTTD would date the vuln-scan fire against an
-> unrelated alert. So it stays out of the rate and out of the MTTD. It is not silently dropped either
-> — a flat `missed` would have hidden the useful fact that a nearby rule already exists and only needs
-> narrowing. Three states, because two would have to lie in one direction or the other.
+> **Pourquoi T1595.002 est en orange et pas en vert.** Le SOC alerte bien sur `T1595`, et Forge a tiré la
+> sous-technique `T1595.002`. Appeler cela « détecté » serait une affirmation que nous ne pouvons pas étayer : une règle parente
+> ne dit rien du **vecteur** qu'elle couvre, et le MTTD daterait le tir de vuln-scan contre une
+> alerte sans rapport. Elle reste donc hors du taux et hors du MTTD. Elle n'est pas non plus silencieusement écartée
+> — un simple `missed` aurait masqué le fait utile qu'une règle voisine existe déjà et n'a besoin que d'être
+> resserrée. Trois états, parce que deux devraient mentir dans un sens ou dans l'autre.
 
 ---
 
-## 4. Findings with evidence
+## 4. Findings avec preuve
 
-Source = the red store (`findings.jsonl`). No over-classification: an SSRF that only produced an
-out-of-band callback stays `reported_by_tool` until exploitability is proven.
+Source = le store red (`findings.jsonl`). Pas de sur-classification : un SSRF n'ayant produit qu'un
+callback out-of-band reste `reported_by_tool` tant que l'exploitabilité n'est pas prouvée.
 
-### Finding 1 — IDOR: order invoices readable across tenants
-- **Severity**: HIGH · **ATT&CK**: T1190 · **CWE-639** · **Module**: `access_control.idor`
-- **Target**: `api.lab.example` — `/api/orders/{id}/invoice`
-- **Status**: `vulnerable` (proven cross-tenant read)
-- **Evidence**: test tenant B (uid=1042) fetched tenant A's invoice PDF (order 5581), HTTP 200 — no
-  ownership check on the object id.
-- **Detected by SOC?**: yes, as T1190 (MTTD 3 min — see §3).
-- **Fix**: server-side ownership check on every object reference (deny-by-default).
+### Finding 1 — IDOR : factures de commande lisibles entre tenants
+- **Sévérité** : HIGH · **ATT&CK** : T1190 · **CWE-639** · **Module** : `access_control.idor`
+- **Cible** : `api.lab.example` — `/api/orders/{id}/invoice`
+- **Statut** : `vulnerable` (lecture cross-tenant prouvée)
+- **Preuve** : le tenant de test B (uid=1042) a récupéré le PDF de facture du tenant A (commande 5581), HTTP 200 — aucun
+  contrôle de propriété sur l'id de l'objet.
+- **Détecté par le SOC ?** : oui, en tant que T1190 (MTTD 3 min — voir §3).
+- **Correctif** : contrôle de propriété côté serveur sur chaque référence d'objet (deny-by-default).
 
-### Finding 2 — SSRF: image proxy fetches attacker URL
-- **Severity**: HIGH · **ATT&CK**: T1190 · **CWE-918** · **Module**: `ssrf.callback`
-- **Target**: `api.lab.example` — `/api/proxy?url=`
-- **Status**: `reported_by_tool` (OOB callback only; cloud metadata returned 403 — not escalated)
-- **Evidence**: out-of-band callback from the egress within 1.2 s; `169.254.169.254` blocked (403).
-- **Detected by SOC?**: yes, folded into T1190 detection.
-- **Fix**: strict allowlist of hosts/schemes; block internal IPs and metadata endpoints.
+### Finding 2 — SSRF : le proxy d'image récupère l'URL de l'attaquant
+- **Sévérité** : HIGH · **ATT&CK** : T1190 · **CWE-918** · **Module** : `ssrf.callback`
+- **Cible** : `api.lab.example` — `/api/proxy?url=`
+- **Statut** : `reported_by_tool` (callback OOB seulement ; les métadonnées cloud ont renvoyé 403 — non escaladé)
+- **Preuve** : callback out-of-band depuis l'egress en moins de 1,2 s ; `169.254.169.254` bloqué (403).
+- **Détecté par le SOC ?** : oui, replié dans la détection T1190.
+- **Correctif** : allowlist stricte d'hôtes/schémas ; bloquer les IP internes et les endpoints de métadonnées.
 
-### Finding 3 — Permissive CORS with credentials
-- **Severity**: MEDIUM · **ATT&CK**: T1539 · **CWE-942** · **Module**: `cors.credentials`
-- **Target**: `shop.lab.example` — `/api/account`
-- **Status**: `vulnerable`
-- **Evidence**: `Access-Control-Allow-Origin` reflects an arbitrary Origin **and**
-  `Access-Control-Allow-Credentials: true` — cross-origin credentialed read of the session profile.
-- **Detected by SOC?**: **no** — 🔴 missed (see §7).
-- **Fix**: never reflect arbitrary Origin with credentials; exact allowlist only.
+### Finding 3 — CORS permissif avec identifiants
+- **Sévérité** : MEDIUM · **ATT&CK** : T1539 · **CWE-942** · **Module** : `cors.credentials`
+- **Cible** : `shop.lab.example` — `/api/account`
+- **Statut** : `vulnerable`
+- **Preuve** : `Access-Control-Allow-Origin` reflète une Origin arbitraire **et**
+  `Access-Control-Allow-Credentials: true` — lecture cross-origin avec identifiants du profil de session.
+- **Détecté par le SOC ?** : **non** — 🔴 missed (voir §7).
+- **Correctif** : ne jamais refléter une Origin arbitraire avec identifiants ; allowlist exacte uniquement.
 
-### Finding 4 — Predictable password-reset token
-- **Severity**: CRITICAL · **ATT&CK**: T1212 · **CWE-287** · **Module**: `auth.takeover`
-- **Target**: `shop.lab.example`
-- **Status**: `reported_by_tool` (guessed a test victim's token; no real account harmed)
-- **Evidence**: reset tokens are zero-padded counters; guessed within ~300 tries, no rate limit, no
-  expiry → full account takeover.
-- **Detected by SOC?**: yes, as T1212 (MTTD 6 min — the slowest detection).
-- **Fix**: CSPRNG single-use tokens with short expiry + rate limiting on the reset endpoint.
+### Finding 4 — Token de réinitialisation de mot de passe prévisible
+- **Sévérité** : CRITICAL · **ATT&CK** : T1212 · **CWE-287** · **Module** : `auth.takeover`
+- **Cible** : `shop.lab.example`
+- **Statut** : `reported_by_tool` (token d'une victime de test deviné ; aucun compte réel affecté)
+- **Preuve** : les tokens de reset sont des compteurs zero-paddés ; devinés en ~300 essais, sans rate limit, sans
+  expiration → prise de contrôle complète du compte.
+- **Détecté par le SOC ?** : oui, en tant que T1212 (MTTD 6 min — la détection la plus lente).
+- **Correctif** : tokens à usage unique CSPRNG avec expiration courte + rate limiting sur l'endpoint de reset.
 
-### Finding 5 — Origin IP exposed behind CDN
-- **Severity**: LOW · **ATT&CK**: T1590.005 · **CWE-200** · **Module**: `origin.find`
-- **Target**: `lab.example`
-- **Status**: `tested` (info-disclosure only)
-- **Evidence**: historical A record + shared cert SAN reveal origin `203.0.113.24`, bypassing the
-  CDN WAF.
-- **Detected by SOC?**: **no** — 🔴 missed (passive, so expected — see §7).
-- **Fix**: rotate origin IP, restrict origin to CDN egress ranges, scrub DNS/cert history.
+### Finding 5 — IP d'origine exposée derrière le CDN
+- **Sévérité** : LOW · **ATT&CK** : T1590.005 · **CWE-200** · **Module** : `origin.find`
+- **Cible** : `lab.example`
+- **Statut** : `tested` (divulgation d'information seulement)
+- **Preuve** : un enregistrement A historique + un SAN de certificat partagé révèlent l'origine `203.0.113.24`, contournant le
+  WAF du CDN.
+- **Détecté par le SOC ?** : **non** — 🔴 missed (passif, donc attendu — voir §7).
+- **Correctif** : faire tourner l'IP d'origine, restreindre l'origine aux plages d'egress du CDN, nettoyer l'historique DNS/certificats.
 
-### Finding 6 — Missing security headers + outdated jQuery
-- **Severity**: LOW · **ATT&CK**: T1595.002 · **CWE-693** · **Module**: `web.nuclei`
-- **Target**: `shop.lab.example`
-- **Status**: `tested`
-- **Evidence**: no CSP/HSTS; jQuery 1.12.4 (known DOM-XSS sinks) served.
-- **Detected by SOC?**: **not on this sub-technique** — 🟠 parent-approx: the SOC alerts on the parent
-  `T1595` (Active Scanning, 3 alerts) but has no rule for `T1595.002` (Vulnerability Scanning). Not
-  counted as detected (see §3, §7).
-- **Fix**: add CSP + HSTS, upgrade front-end libraries.
-
----
-
-## 5. Chain of custody — the signed ledger
-
-The credibility of this write-up rests on this: **every action is in a signed, chained ledger,
-verifiable by a third party who does not trust the operator**.
-
-- **Internal integrity**: `forge ledger verify --ledger acme-lab.jsonl` → `<OK / root hash>`.
-- **Third-party verification**: `verify_external(<pubkey>)` — the auditor validates the Ed25519 chain
-  with the **public key only** (cannot forge or alter). Result: `<OK>`.
-- **Ledger coverage**: `<n>` chained entries = **all** ROE decisions (8 FIRE, 1 DRY_RUN, 2 VETO),
-  per-entry MAC (not just at checkpoints).
-- **Custody note (honest)**: local private key for this lab; off-host anchoring (remote co-signing
-  witness, `anchor.py`) = *not enabled* in this sample.
-
-> **The argument**: "You don't have to trust us. Here is the public key. Verify yourself that nothing
-> was fired outside the scope you authorized, and that the log was not rewritten."
+### Finding 6 — En-têtes de sécurité manquants + jQuery obsolète
+- **Sévérité** : LOW · **ATT&CK** : T1595.002 · **CWE-693** · **Module** : `web.nuclei`
+- **Cible** : `shop.lab.example`
+- **Statut** : `tested`
+- **Preuve** : pas de CSP/HSTS ; jQuery 1.12.4 servi (sinks DOM-XSS connus).
+- **Détecté par le SOC ?** : **pas sur cette sous-technique** — 🟠 parent-approx : le SOC alerte sur le parent
+  `T1595` (Active Scanning, 3 alertes) mais n'a aucune règle pour `T1595.002` (Vulnerability Scanning). Non
+  compté comme détecté (voir §3, §7).
+- **Correctif** : ajouter CSP + HSTS, mettre à jour les bibliothèques front-end.
 
 ---
 
-## 6. Anti-masking — what was NOT fired
+## 5. Chaîne de custody — le ledger signé
 
-Honest reporting lists the gaps too — zero silent holes. Source = `roe_decisions.jsonl` + the run_job
-`coverage_gaps` / `skipped_budget`.
+La crédibilité de ce compte rendu repose là-dessus : **chaque action est dans un ledger signé et chaîné,
+vérifiable par un tiers qui ne fait pas confiance à l'opérateur**.
 
-- **`DRY_RUN`** (simulated, never executed): `web.sqli` on `shop.lab.example` — not approved by the
-  operator.
-- **`VETO`** (refused by the gate): `access_control.idor` on `corp.internal.example` (out of scope,
-  scope-guard fail-closed); `msf.module` on `api.lab.example` (`allow_exploit=false` — exploit
-  requires written high-impact opt-in).
-- **Classes never attempted**: SQL injection (`injection.sqli`) on `shop.lab.example` — deferred.
-- **Not tested (time budget)**: stored XSS (`web.xss`) on `shop.lab.example` — deferred, not deleted.
+- **Intégrité interne** : `forge ledger verify --ledger acme-lab.jsonl` → `<OK / hash racine>`.
+- **Vérification par un tiers** : `verify_external(<pubkey>)` — l'auditeur valide la chaîne Ed25519
+  avec la **clé publique seule** (ne peut ni forger ni altérer). Résultat : `<OK>`.
+- **Couverture du ledger** : `<n>` entrées chaînées = **toutes** les décisions ROE (8 FIRE, 1 DRY_RUN, 2 VETO),
+  MAC par entrée (pas seulement aux checkpoints).
+- **Note de custody (honnête)** : clé privée locale pour ce labo ; ancrage off-host (témoin de co-signature
+  distant, `anchor.py`) = *non activé* dans cet échantillon.
 
----
-
-## 7. Value delivered — "here's how to close it"
-
-The conclusion that turns the matrix into a decision.
-
-1. **Detection gaps**: "Your SOC missed **2** techniques outright (**T1590.005, T1539**) and covers a
-   third (**T1595.002**) only by its generic parent rule."
-   - **T1539 (permissive CORS / cookie theft)** — highest priority: it maps to a MEDIUM finding with
-     real cross-origin impact and no detection. Add a rule on anomalous `Origin`-reflected responses
-     / credentialed CORS on `/api/*`.
-   - **T1595.002 (vuln scanning)** — 🟠 *parent-approx*, the cheapest win on the board: your `T1595`
-     rule already fires on this traffic, it just isn't specific to template scanning. Narrow/duplicate
-     it into a `T1595.002` rule (template-scan signatures, 4xx bursts) and the row turns green — no
-     new telemetry needed.
-   - **T1590.005 (passive IP gathering)** — expected blind spot (no traffic to detect); mitigate at
-     the asset level (rotate origin, scrub DNS/cert history) rather than via a SOC rule.
-2. **MTTD to reduce**: T1212 (reset-token brute force) detected but slowest at **6 min** — add a
-   dedicated rate/velocity rule on the reset endpoint to pull it under the target.
-3. **Posture after remediation**: closing T1539 + narrowing the parent rule into a real `T1595.002`
-   rule raises measured coverage from **57%** (4/7) to **≈ 86%** (6/7) — and the parent-approx row
-   disappears, because it becomes a proven detection instead of an assumed one.
-4. **Next campaign**: re-fire the missed techniques after the rules ship → **prove** the gap is
-   closed (continuous-improvement purple loop).
-
-> **Closing pitch**: *"This engagement cost you a signed, verifiable scope and handed you a number
-> you didn't have: your SOC *provably* sees 57% of the techniques we fired, in ~4 minutes — plus one
-> more it only covers by a generic parent rule, which we do not count for you. Here are the 3 rules
-> to add. We re-fire next run to prove it's closed."*
+> **L'argument** : « Vous n'avez pas à nous faire confiance. Voici la clé publique. Vérifiez vous-même que rien
+> n'a été tiré hors du scope que vous avez autorisé, et que le log n'a pas été réécrit. »
 
 ---
 
-*See also: [`docs/POSITIONING.md`](../../docs/POSITIONING.md) · [`docs/PRICING.md`](../../docs/PRICING.md) ·
+## 6. Anti-masquage — ce qui n'a PAS été tiré
+
+Un reporting honnête liste aussi les manques — zéro trou silencieux. Source = `roe_decisions.jsonl` + les
+`coverage_gaps` / `skipped_budget` du run_job.
+
+- **`DRY_RUN`** (simulé, jamais exécuté) : `web.sqli` sur `shop.lab.example` — non approuvé par
+  l'opérateur.
+- **`VETO`** (refusé par la gate) : `access_control.idor` sur `corp.internal.example` (out of scope,
+  scope-guard fail-closed) ; `msf.module` sur `api.lab.example` (`allow_exploit=false` — l'exploit
+  exige un opt-in écrit à fort impact).
+- **Classes jamais tentées** : injection SQL (`injection.sqli`) sur `shop.lab.example` — reportée.
+- **Non testé (budget temps)** : XSS stocké (`web.xss`) sur `shop.lab.example` — reporté, pas supprimé.
+
+---
+
+## 7. Valeur délivrée — « voici comment fermer »
+
+La conclusion qui transforme la matrice en décision.
+
+1. **Gaps de détection** : « Votre SOC a manqué **2** techniques purement et simplement (**T1590.005, T1539**) et en couvre une
+   troisième (**T1595.002**) uniquement par sa règle parente générique. »
+   - **T1539 (CORS permissif / vol de cookie)** — priorité la plus haute : mappe sur un finding MEDIUM avec
+     un vrai impact cross-origin et aucune détection. Ajouter une règle sur les réponses à `Origin` reflétée
+     anormale / CORS avec identifiants sur `/api/*`.
+   - **T1595.002 (vuln scanning)** — 🟠 *parent-approx*, le gain le moins cher du tableau : votre règle `T1595`
+     tire déjà sur ce trafic, elle n'est simplement pas spécifique au template scanning. Resserrez-la/dupliquez-la
+     en une règle `T1595.002` (signatures de template-scan, rafales de 4xx) et la ligne passe au vert — aucune
+     nouvelle télémétrie requise.
+   - **T1590.005 (collecte d'IP passive)** — angle mort attendu (aucun trafic à détecter) ; mitiger au
+     niveau de l'asset (faire tourner l'origine, nettoyer l'historique DNS/certificats) plutôt que via une règle SOC.
+2. **MTTD à réduire** : T1212 (brute force de token de reset) détecté mais le plus lent à **6 min** — ajouter une
+   règle dédiée de rate/vélocité sur l'endpoint de reset pour le ramener sous la cible.
+3. **Posture après remédiation** : fermer T1539 + resserrer la règle parente en une vraie règle `T1595.002`
+   fait passer le coverage mesuré de **57 %** (4/7) à **≈ 86 %** (6/7) — et la ligne parent-approx
+   disparaît, car elle devient une détection prouvée au lieu d'une détection supposée.
+4. **Prochaine campagne** : re-tirer les techniques manquées après le déploiement des règles → **prouver** que le gap est
+   fermé (boucle purple d'amélioration continue).
+
+> **Pitch de clôture** : *« Cet engagement vous a coûté un scope signé et vérifiable, et vous a remis un chiffre
+> que vous n'aviez pas : votre SOC voit *de façon prouvée* 57 % des techniques que nous avons tirées, en ~4 minutes — plus une
+> de plus qu'il ne couvre que par une règle parente générique, que nous ne comptons pas pour vous. Voici les 3 règles
+> à ajouter. On re-tire au run suivant pour prouver que c'est fermé. »*
+
+---
+
+*Voir aussi : [`docs/POSITIONING.md`](../../docs/POSITIONING.md) · [`docs/PRICING.md`](../../docs/PRICING.md) ·
 [`docs/PURPLE_PREREQS.md`](../../docs/PURPLE_PREREQS.md) · [`docs/MTTD.md`](../../docs/MTTD.md).*
