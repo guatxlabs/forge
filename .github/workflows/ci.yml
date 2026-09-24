@@ -574,6 +574,9 @@ jobs:
             '''^console/src/reports\.rs$''',
             '''^tests/test_redact\.py$''',
             '''^tests/test_report_engagement\.py$''',
+            # Fausse réponse de métadonnées cloud (ASIA…/…EXAMPLEKEY, la clé d'exemple de la doc AWS) :
+            # le fichier PROUVE que `ssrf.redirect_loop` MASQUE ces valeurs et n'en met aucune dans un finding.
+            '''^tests/test_ssrf_redirect_loop\.py$''',
           ]
 
           # `generic-api-key` est la règle la plus bruyante : elle matche des NOMS de variables et les
