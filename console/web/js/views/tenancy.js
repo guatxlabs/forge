@@ -98,7 +98,7 @@ export function applyTenancy() {
 // Réutilise adminApi (prefixe /api, lève sur !ok avec le `why` serveur contrôlé -> anti-XSS).
 export async function loadTenants() {
   const host = $('#tenants-list'); if (!host) return;
-  if (!tenancyAdmin()) { host.innerHTML = '<div class="muted">réservé au platform-admin (multi-tenancy enterprise)</div>'; if ($('#tenants-count')) $('#tenants-count').textContent = ''; return; }
+  if (!tenancyAdmin()) { host.innerHTML = '<div class="muted">réservé au platform-admin (module multi-tenant)</div>'; if ($('#tenants-count')) $('#tenants-count').textContent = ''; return; }
   host.innerHTML = '<div class="muted">chargement…</div>';
   let data;
   try { data = await adminApi('/tenants'); }

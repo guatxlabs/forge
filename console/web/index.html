@@ -20,7 +20,7 @@
        d'engagement ci-dessous (hiérarchie tenant → engagement). -->
   <div id="tenant-bar" class="tenant-bar" role="group" aria-label="Tenant actif" hidden>
     <span class="tenant-ic" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg></span>
-    <select id="tenant" class="tenant-select" aria-label="Tenant actif" title="Tenant actif (espace multi-client — ENTERPRISE)"></select>
+    <select id="tenant" class="tenant-select" aria-label="Tenant actif" title="Tenant actif (espace multi-client — module avancé)"></select>
   </div>
   <!-- ENGAGEMENT ACTIF : sélecteur + indicateur PROÉMINENT. L'opérateur sait toujours dans quel
        engagement (espace de travail isolé) il travaille. Change l'engagement -> recharge la vue et
@@ -637,7 +637,7 @@
        retirable. Le serveur reste l'autorité (403 enterprise_disabled / platform_admin_required). -->
   <section id="tenants" class="card span2" aria-labelledby="tn-h">
     <div class="panelhead">
-      <h2 id="tn-h">Tenants <span class="badge" title="ENTERPRISE — multi-tenancy">enterprise</span> <span id="tenants-count" class="badge"></span></h2>
+      <h2 id="tn-h">Tenants <span class="badge" title="Module avancé (open, flag-gated) — multi-tenancy">avancé</span> <span id="tenants-count" class="badge"></span></h2>
       <span class="qbar">
         <button id="tenants-reload" class="k-theme" type="button" title="Rafraîchir la liste des tenants">Rafraîchir</button>
         <button id="tenants-new" class="k-theme" type="button" title="Créer un nouveau tenant (espace multi-client isolé)">+ Tenant</button>
@@ -654,10 +654,10 @@
        community (flag OFF) : aucun lien, aucune vue, login LOCAL inchangé. -->
   <section id="identity" class="card span2" aria-labelledby="id-h">
     <div class="panelhead">
-      <h2 id="id-h">Identité / SSO <span class="badge" title="ENTERPRISE — SSO OIDC + SCIM + RBAC avancé">enterprise</span></h2>
+      <h2 id="id-h">Identité / SSO <span class="badge" title="Module avancé (open, flag-gated) — SSO OIDC + SCIM + RBAC avancé">avancé</span></h2>
       <span class="qbar"><button id="identity-reload" class="k-theme" type="button" title="Rafraîchir la configuration identité">Rafraîchir</button></span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Fédération d'identité <b>ENTERPRISE</b> : connexion <b>OIDC (SSO)</b>, provisioning <b>SCIM 2.0</b>, et <b>RBAC avancé</b> (mapping groupe IdP → rôle Forge + grant tenant). Une identité SSO/SCIM n'obtient <b>que</b> les droits que son mapping de groupe confère (<b>moindre privilège</b>, fail-closed) — <b>jamais super-admin via SSO</b>. Les secrets (<code>client_secret</code>, token SCIM) sont <b>write-only</b> : jamais réaffichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, comptes <b>locaux</b> inchangés.</p>
+    <p class="muted" style="margin:0 0 10px">Fédération d'identité (<b>module avancé</b>, open, flag-gated) : connexion <b>OIDC (SSO)</b>, provisioning <b>SCIM 2.0</b>, et <b>RBAC avancé</b> (mapping groupe IdP → rôle Forge + grant tenant). Une identité SSO/SCIM n'obtient <b>que</b> les droits que son mapping de groupe confère (<b>moindre privilège</b>, fail-closed) — <b>jamais super-admin via SSO</b>. Les secrets (<code>client_secret</code>, token SCIM) sont <b>write-only</b> : jamais réaffichés. Dans le build <b>par défaut</b> (flag OFF) : cette vue n'existe pas, comptes <b>locaux</b> inchangés.</p>
 
     <!-- (1) PROVIDER OIDC -->
     <div id="id-oidc-wrap" class="id-card" hidden>
@@ -720,7 +720,7 @@
        En community (flag OFF) : aucun lien, aucune vue, ledger/données byte-identiques. -->
   <section id="compliance" class="card span2" aria-labelledby="cmp-h">
     <div class="panelhead">
-      <h2 id="cmp-h">Compliance <span class="badge" title="ENTERPRISE — WORM / rétention / legal-hold + preuves SOC 2 / ISO">enterprise</span></h2>
+      <h2 id="cmp-h">Compliance <span class="badge" title="Module avancé (open, flag-gated) — WORM / rétention / legal-hold + preuves SOC 2 / ISO">avancé</span></h2>
       <span class="qbar"><button id="cmp-reload" class="k-theme" type="button" title="Recharger la politique + le signer (secrets rédigés)">Rafraîchir</button></span>
     </div>
     <p class="muted" style="margin:0 0 10px"><b>WORM / rétention / legal-hold</b> sur le ledger tamper-evident + les données d'engagement, et export de <b>preuves d'audit SOC 2 / ISO 27001</b>. La rétention est <b>la plus spécifique</b> (engagement → tenant → global) ; un <b>legal-hold</b> (à n'importe quel niveau) <b>bloque toute purge/suppression</b> — le hold <b>gagne toujours</b> (fail-closed). Chaque mutation est <b>attribuée</b> et <b>ledgerisée</b>. Les secrets (clé d'archive, endpoint/credential du signer) sont <b>rédigés</b> : jamais affichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, ledger/données inchangés.</p>

@@ -61,7 +61,7 @@ export function cmpRenderSigner(s) {
 // Charge la politique effective + les valeurs brutes + le signer rédigé pour le scope courant.
 export async function loadCompliance() {
   const sec = $('#compliance'); if (!sec) return;
-  if (!complianceAdmin()) { const st = $('#cmp-policy-state'); if (st) st.textContent = 'réservé à un admin (compliance enterprise).'; return; }
+  if (!complianceAdmin()) { const st = $('#cmp-policy-state'); if (st) st.textContent = 'réservé à un admin (module compliance).'; return; }
   cmpFillEngagements();
   // engagement_id : celui choisi dans l'export si présent, sinon l'engagement actif, sinon 1.
   const evSel = $('#cmp-ev-engagement');
