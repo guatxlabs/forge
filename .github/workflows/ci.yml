@@ -7,7 +7,7 @@
 #   - purple-e2e : la BOUCLE purple de bout en bout (moteur -> ingest -> détections -> couverture)
 #                  contre le SOC de démonstration loopback `tools/mock_plume.py`.
 #
-# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.1`
+# Le crate `console/` dépend de guatx-core via la git-dep publique `guatxlabs/core@v0.2.2`
 # (console/Cargo.toml + Cargo.lock épinglé sur le rev du tag). Les jobs cargo la résolvent
 # DIRECTEMENT depuis le repo public — aucun checkout voisin, aucun [patch] : c'est exactement
 # ce qu'un clone standalone fait, donc la CI prouve le build public. (Un `console/.cargo/config.toml`
@@ -244,7 +244,7 @@ jobs:
       - name: La garde mord encore (auto-test rouge sur le périmètre exclu)
         run: python3 scripts/check_openssl_freedom.py --self-test-red
 
-      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.1 (réseau) —
+      # cargo résout guatx-core depuis la git-dep publique guatxlabs/core@v0.2.2 (réseau) —
       # cohérent avec Cargo.lock (source git+tag), identique à un clone standalone.
       - name: cargo test (console)
         working-directory: console

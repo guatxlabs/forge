@@ -437,7 +437,7 @@ un tunnel Cloudflare. Aucun de ces défauts ne cassait quoi que ce soit : ils **
 
 ### Notes for open-source builds
 - The Rust console depends on `guatx-core` via a **pinned public git dependency**
-  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.1", features = ["forge"]`; see
+  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2", features = ["forge"]`; see
   `console/Cargo.toml`). A standalone clone of this repo builds the console directly — the core is
   fetched from GitHub at build time, no sibling crate required. In a monorepo dev checkout,
   `console/.cargo/config.toml` (gitignored) carries a `[patch]` that overrides the git dep to a local

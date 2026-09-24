@@ -221,7 +221,7 @@ la commande, pas cette page.
 ## Déploiement en production (self-deploy)
 
 Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est la
-racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.2.1`,
+racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.2.2`,
 aucun crate sibling requis ; `console/Cargo.lock` est committé pour des builds reproductibles) :
 
 ```sh
