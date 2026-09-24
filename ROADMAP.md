@@ -1,11 +1,15 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 # Forge — Roadmap
 
-> **État : pré-1.0**, licence AGPL-3.0-or-later. Le build par défaut (communautaire) est
+> **État : pré-1.0**, **100 % open source** sous licence AGPL-3.0-or-later. Le build par défaut est
 > **openssl-free** (rustls/ring) ; le cœur partagé est consommé via la git-dep publique épinglée
 > [`guatxlabs/core`](https://github.com/guatxlabs/core).
 > Documentation : [`docs/README.md`](docs/README.md) — installation, déploiement, référence CLI/API,
 > modèle de sécurité.
+>
+> **Mesuré** : **88 modules** (`python3 -m forge.cli modules --json` → 88 entrées, 13 `exploit`,
+> 42 `bug_bounty_eligible`) ; suites vertes **hors réseau** — **2834** tests Python
+> (`Ran 2834 tests` / `OK (skipped=3)`) et **571** tests Rust console (`cargo test`, features par défaut).
 
 Cette page décrit **ce qui est livré**, **ce qui reste ouvert** et **comment contribuer**. Les
 changements datés sont dans [`CHANGELOG.md`](CHANGELOG.md) ; le détail d'un correctif est dans le

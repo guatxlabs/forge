@@ -13,7 +13,7 @@
 
 <img src="docs/media/console-demo.gif" alt="Console Forge — vue d'ensemble, catalogue de modules, findings mappés ATT&CK, lancement de campagne gouverné" width="860">
 
-<sub>Console Forge — dashboard · catalogue de modules (les **exploit/destructif** sont gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**). Le registre compte **77 modules** — compte MESURÉ par `python3 -m forge.cli modules --json`, pas lu sur cette capture.</sub>
+<sub>Console Forge — dashboard · catalogue de modules (les **exploit/destructif** sont gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**). Le registre compte **88 modules** — compte MESURÉ par `python3 -m forge.cli modules --json`, pas lu sur cette capture.</sub>
 
 </div>
 
@@ -67,7 +67,7 @@ forge demo                                  # ou: python3 -m forge.cli demo
 
 # suite complète (stdlib, zéro réseau) : Python unittest + cargo test de la console
 make test                                   # = python3 -m unittest discover -s tests -t . + (cd console && cargo test)
-python3 -m unittest discover -s tests -t .  # Python seul (1513 tests — compte MESURÉ : `Ran 1513 tests` / `OK (skipped=1)`)
+python3 -m unittest discover -s tests -t .  # Python seul (2834 tests — compte MESURÉ : `Ran 2834 tests` / `OK (skipped=3)`)
 
 # vérifier l'appartenance d'une cible
 forge scope-check app.exemple.test --scope scope.json
@@ -207,76 +207,16 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
   préréglage — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec se câblent sans
   code) : voir [`docs/DETECTION.md`](docs/DETECTION.md) et [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État (v0.0.1 — 1513 tests Python + 418 tests Rust passent, zéro réseau) — **P1 + P2 complets**
+## État
 
-> **D'où viennent ces deux chiffres.** Python : `python3 -m unittest discover -s tests -t .` →
-> `Ran 1513 tests` / `OK (skipped=1)`. Rust : `cd console && cargo test --offline` →
-> `test result: ok. 418 passed; 0 failed`, **features par défaut**. Le dépôt porte **435** annotations
-> `#[test]`/`#[tokio::test]` : l'écart de 17 est le compte des tests gardés derrière une feature
-> non activée par défaut (`store-postgres`, `encryption`) — 18 gardés, moins 1 en `#[cfg(not(feature
-> = "encryption"))]` qui, lui, tourne. **432 n'est donc PAS un compte de tests exécutés** ; ne le
-> publiez pas comme tel.
+Pré-1.0, **[AGPL-3.0-or-later](LICENSE)**, 100 % open source. **88 modules** (compte MESURÉ :
+`python3 -m forge.cli modules --json` → 88 entrées, 13 `exploit`, 42 `bug_bounty_eligible`) ; suites
+vertes **hors réseau** — **2834** tests Python (`Ran 2834 tests` / `OK (skipped=3)`) et **571** tests
+Rust console (`cargo test`, features par défaut).
 
-| Couche | État |
-|---|---|
-| Gate ROE fail-closed (4 couches) | ✅ construit + testé (10 tests) |
-| Ledger append-time tamper-evident (**Ed25519** asymétrique + verify externe, repli HMAC) | ✅ construit + testé (8 tests) |
-| Engine + report anti-masquage + CLI | ✅ construit, demo bout-en-bout OK |
-| Planner coverage-safe (FLOOR sur classes payantes) | ✅ construit + self-test |
-| Cerveau (interface `Brain` + `HeuristicBrain`) | ✅ — seam pour l'orchestrateur Claude |
-| Runner (binaire local ou docker, sans install) | ✅ construit + testé |
-| Graphe d'engagement (world-model hosts→services→findings) | ✅ construit + testé |
-| Handlers : `recon.httpx`/`recon.nmap`/`web.nuclei`/`access_control.idor`/`origin.find` | ✅ — gatés, auto-neutralisés si l'outil manque |
-| Évasion : `evasion.xhr`/`evasion.turnstile`/`evasion.idor_intercept` (browser-automation) | ✅ — atteindre les cibles CF/WAF, auto-off si service injoignable |
-| Connecteurs : `msf.module` (msfrpcd) / `burp.scan` (REST API Burp) | ✅ — pilotent des outils standards, sondés à fire-time, auto-off si service injoignable |
-| Mémoire : store JSONL + dedup (`forge/memory.py`) | ✅ — backend à embeddings optionnel à brancher |
-| Boucle purple : run-records ATT&CK + `forge campaign` | ✅ construit + testé |
-| **Console Rust** (`console/`, fork de la colonne Plume) | ✅ — compile offline, ingest+coverage+PWA, intégration Python↔Rust prouvée |
-| **GXQL `finding`/`runrecord`** (`GET /api/query`, read-only, anti-injection) + barre de recherche UI | ✅ porté de Plume, testé en live |
-| **Dashboards query-driven** (panels GXQL sauvegardés, viz table/bar/stat, écriture gatée par token) | ✅ testé en live |
-| **Auth/RBAC console** (argon2id Basic=viewer · Bearer=admin · host-guard anti-rebinding) | ✅ porté de Plume, 10/10 en live |
-| **Ledger Ed25519** (signature asymétrique à l'append + `verify_external` par clé publique) | ✅ testé |
-| **Ancrage hors-host** (`anchor.py` : interface `Anchor` + témoin co-signataire + `reconcile`) | ✅ testé (détecte une réécriture re-signée localement) |
-| **Mémoire sémantique** (`JaccardMemory` floue stdlib + bridge FAISS embeddings optionnel) | ✅ Jaccard testé, FAISS dégrade proprement |
-| **Cœur partagé `guatx-core`** (crate Rust **public neutre**, repo séparé `guatxlabs/core` ; console en dépend via git-dep publique épinglée) | ✅ extrait en repo public (épinglé `v0.2.1`), console rebâtie ; suite propre au cœur : **161 tests** (compte MESURÉ dans `guatxlabs/core` : 155 unitaires + 5 parité + 1 doctest) |
-| **Wizard 1er déploiement** (self-deploy : provisionne admin/crypto/source de détection/politique opérateur **depuis le navigateur**, auto-désactivant, zéro défaut codé en dur) | ✅ — `GET /api/setup/state` · `POST /api/setup` |
-| **RBAC admin & gouvernance des connecteurs** (comptes `/api/users`, viewer/opérateur/admin ; msf/burp sondés à fire-time, `exploit` fail-safe, jamais de sur-classement) | ✅ — testé en live |
-| **Source de détection infra-agnostique** (plugin configurable dans l'UI : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec, secret write-only) | ✅ — cf. `docs/DETECTION.md` |
-| **Sauvegarde/restore chiffrées + migration** (archive **toujours chiffrée** argon2id+XChaCha20, scheduler + offsite, `migrate` DB+ledger+clé `.ed25519`) | ✅ — `/api/backup(/policy)` · `/api/restore` · `forge migrate` |
-| **Chiffrement AU REPOS SQLCipher** (image opt-in `--features encryption`, `PRAGMA key` au boot) | ✅ opt-in — `capabilities.sqlcipher` exposé au wizard |
-| Migration Plume vers `guatx-core` + signeur témoin distant (HTTP) | ⏳ à la demande |
-
-**Modules** — le registre compte **77 modules** (compte MESURÉ sur cet arbre :
-`python3 -m forge.cli modules --json` → 77 entrées ; 11 marqués `exploit`, 1 `destructive`, 26 techniques
-ATT&CK distinctes). La table ci-dessous en montre **14** ; [`docs/MODULES.md`](docs/MODULES.md) en décrit
-**32** avec dépendances et statut. **La source de vérité est la commande, pas ces tables** :
-
-| kind | exploit | ATT&CK | description |
-|---|:---:|---|---|
-| `access_control.idor` | ✅ | T1190 | Oracle différentiel IDOR/BOLA à PREUVE sur 2 comptes (CWE-639). |
-| `auth.takeover` | ✅ | T1212 | Oracle ATO/auth-bypass à PREUVE (whoami = identité victime, CWE-287/640). |
-| `burp.scan` | — | T1595.002 | Pilote la REST API de Burp Suite : scan in-scope → issues → Findings. |
-| `cors.credentials` | ✅ | T1539 | Oracle CORS-credentials à PREUVE (ACAO reflète l'origine + ACAC=true, CWE-942). |
-| `demo.fingerprint` | — | — | Démonstration du pipeline (plan→ROE→dry/fire→finding→ledger), zéro I/O. |
-| `evasion.idor_intercept` | ✅ | T1190 | Arme l'interception IDOR en vol (browser intercept-modify, CWE-639). |
-| `evasion.turnstile` | — | T1556 | Franchit le Turnstile interactif (vision-click-os) — enabler d'accès. |
-| `evasion.xhr` | — | T1190 | Observation des requêtes XHR via la session browser (bypass WAF). |
-| `msf.module` | ✅ | T1210 | Pilote msfrpcd : lance le module MSF choisi par l'opérateur. |
-| `origin.find` | — | T1590.005 | IP d'origine derrière CDN/WAF (subfinder→DNS→drop-CF→vérif Host). |
-| `recon.httpx` | — | T1595 | Fingerprint HTTP (status, titre, techno). |
-| `recon.nmap` | — | T1046 | Découverte des services exposés (nmap -sV, top 1000). |
-| `ssrf.callback` | ✅ | T1190 | Oracle SSRF à PREUVE (callback unique reçu côté collecteur, CWE-918). |
-| `web.nuclei` | — | T1595.002 | Scan de vulnérabilités par templates nuclei (medium/high/critical). |
-
-> Aucun module ne tire **rien** sans verdict `FIRE` (in-scope + armé + approuvé + capacité
-> autorisée). Tous les tests sont hermétiques (aucun outil n'est exécuté contre une cible).
-> `forge doctor` indique quels modules sont opérationnels sur la machine courante.
-
-> Ledger : signature **Ed25519 à l'append** par défaut (asymétrique → un tiers vérifie avec la
-> SEULE clé publique via `verify_external(pubkey)`, sans pouvoir forger), repli HMAC si
-> `cryptography` absent. Caveat custody restant : la clé privée est encore **locale** ; l'ancrage
-> hors-host (clé privée sur un signeur distant / co-signataire / transparency log) est la dernière
-> étape — l'architecture asymétrique le permet déjà (seule la clé publique circule). Documenté, pas caché.
+Ce qui est **livré**, **ouvert** et **assumé** vit dans **[`ROADMAP.md`](ROADMAP.md)** ; le catalogue
+détaillé des modules dans **[`docs/MODULES.md`](docs/MODULES.md)**. La source de vérité des comptes est
+la commande, pas cette page.
 
 ## Déploiement en production (self-deploy)
 
