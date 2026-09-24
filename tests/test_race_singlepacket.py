@@ -17,7 +17,6 @@ import contextlib
 import unittest
 
 from forge.roe import Action
-from forge.modules import race as mod
 from forge.modules.race import RaceCondition
 
 TGT = "https://app.test/redeem"

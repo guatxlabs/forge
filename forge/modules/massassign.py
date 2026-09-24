@@ -194,10 +194,10 @@ class MassAssignment(ScopeGuardedOracle):
         if not candidats:
             return [self.skip(
                 target=target, title="Mass assignment non sonde — aucun champ candidat",
-                evidence=(f"Les champs privilegies connus sont soit deja presents dans l'objet "
-                          f"(donc ce sont des fonctionnalites, pas des failles), soit fermes par "
-                          f"defaut. Booleens et montants exigent `destructive` accorde par le ROE ; "
-                          f"les champs de propriete ne sont jamais sondes."),
+                evidence=("Les champs privilegies connus sont soit deja presents dans l'objet "
+                          "(donc ce sont des fonctionnalites, pas des failles), soit fermes par "
+                          "defaut. Booleens et montants exigent `destructive` accorde par le ROE ; "
+                          "les champs de propriete ne sont jamais sondes."),
                 poc=self.dry(action))]
 
         # (2) INJECTION — un seul envoi portant tous les candidats, puis (3) RELECTURE.

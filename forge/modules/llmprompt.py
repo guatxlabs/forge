@@ -182,11 +182,11 @@ class LlmPromptInjection(ScopeGuardedOracle):
                 target=target, proven=True, severity="HIGH",
                 title=(f"SORTIE DE MODELE NON ASSAINIE — le canari revient dans du HTML VIVANT "
                        f"({', '.join(xss)})"),
-                evidence=(f"Le canari inerte revient entoure de balises REELLES et non de leurs "
-                          f"entites : la reponse du modele est rendue sans echappement. C'est un "
-                          f"XSS dont la charge transite par le modele — la famille la plus "
-                          f"directement rapportable, parce qu'elle se rejoue et qu'un triage la "
-                          f"comprend sans detour. Sondes : " + " | ".join(observations) +
+                evidence=("Le canari inerte revient entoure de balises REELLES et non de leurs "
+                          "entites : la reponse du modele est rendue sans echappement. C'est un "
+                          "XSS dont la charge transite par le modele — la famille la plus "
+                          "directement rapportable, parce qu'elle se rejoue et qu'un triage la "
+                          "comprend sans detour. Sondes : " + " | ".join(observations) +
                           ". ⚠️ Aucun contenu nuisible n'a ete demande ni produit : le canari est "
                           "une chaine sans signification. IMPACT A INSTRUIRE : la reponse est-elle "
                           "montree a un AUTRE utilisateur (historique partage, resume, "
@@ -199,8 +199,8 @@ class LlmPromptInjection(ScopeGuardedOracle):
                 target=target, proven=True, severity="MEDIUM",
                 title=(f"INJECTION DE PROMPT CONFIRMEE — {len(confirmes)} famille(s) : "
                        f"{', '.join(confirmes)}"),
-                evidence=(f"Le canari inerte a ete emis par le modele : la frontiere entre les "
-                          f"instructions systeme et l'entree utilisateur n'est pas tenue. Sondes : "
+                evidence=("Le canari inerte a ete emis par le modele : la frontiere entre les "
+                          "instructions systeme et l'entree utilisateur n'est pas tenue. Sondes : "
                           + " | ".join(observations) +
                           ". ⚠️ PORTEE, et elle decide de la recevabilite du rapport : une deviation "
                           "d'instruction SANS consequence sur un tiers ni sur un actif reste un "

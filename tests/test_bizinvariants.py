@@ -10,7 +10,6 @@ envoyees doivent etre INVALIDES par construction, et l'etat initial restaure.
 """
 from __future__ import annotations
 
-import json
 import unittest
 
 from forge.roe import Action

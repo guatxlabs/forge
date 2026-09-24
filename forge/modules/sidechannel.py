@@ -29,7 +29,6 @@ mutation d'état, aucun impact sur le trafic d'un tiers. exploit=False, destruct
 présent d'absent. Sévérité MEDIUM (oracle d'énumération) ; l'ampleur réelle (combien d'états
 énumérables, quelle sensibilité) et l'escalade relèvent de l'analyse humaine et de l'accord du programme.
 """
-import hashlib
 
 from .injection import InjectionOracle
 from .registry import register
