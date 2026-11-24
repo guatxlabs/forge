@@ -1082,3 +1082,95 @@ byHb5g3JqJSE6WJSuyEQrUob
         assert_ne!(origin_of("http://idp.example/x"), origin_of("https://idp.example/x"), "different scheme");
         assert!(origin_of("ftp://idp.example").is_none(), "non-http(s) => None");
     }
+
+    // ------------------------------------------------------------------------------------------------
+    // ID-TOKEN CLAIMS — direct calls to `validate_id_token`, for the cases the HTTP flow tests do not
+    // reach: REQUIRED claims absent (OIDC Core 3.1.3.7 makes `iss`, `aud` and `exp` mandatory), expired,
+    // wrong issuer, unexpected `alg`.
+    // ------------------------------------------------------------------------------------------------
+
+    /// Config and JWKS for the direct `validate_id_token` tests (the JWKS holds the GOOD key under KID).
+    fn id_token_fixture() -> (SsoConfig, Value) {
+        let cfg = SsoConfig {
+            issuer: "https://idp.example".into(),
+            client_id: "forge-client".into(),
+            client_secret: "s".into(),
+            redirect_uri: "http://localhost/cb".into(),
+            allowed_redirect_uris: vec!["http://localhost/app".into()],
+            provisioning: "match".into(),
+            default_role: "viewer".into(),
+            user_claim: "email".into(),
+            require_email_verified: true,
+        };
+        let jwks = json!({"keys": [{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID, "n": GOOD_N, "e": GOOD_E}]});
+        (cfg, jwks)
+    }
+
+    /// Nominal claims for `id_token_fixture`: every test removes or alters ONE claim from this set.
+    fn nominal_claims() -> Value {
+        json!({"iss": "https://idp.example", "aud": "forge-client", "sub": "sub-x", "nonce": "n",
+               "exp": crate::now_epoch() + 3600})
+    }
+
+    /// Sign `claims` in RS256 with the GOOD key (the one the fixture JWKS publishes under KID).
+    fn sign_rs256(claims: &Value) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(KID.to_string());
+        let key = EncodingKey::from_rsa_pem(GOOD_PEM.as_bytes()).expect("encoding key");
+        encode(&header, claims, &key).expect("sign")
+    }
+
+    /// A correctly signed token WITHOUT `iss` must be refused: an absent issuer is not a matching one.
+    /// Without `iss` in the required claims, jsonwebtoken only compares `iss` WHEN PRESENT.
+    #[test]
+    fn id_token_without_iss_is_rejected() {
+        let (cfg, jwks) = id_token_fixture();
+        // Witness: the nominal token passes, otherwise the refusal below proves nothing.
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&nominal_claims()), &jwks).is_ok(), "nominal");
+        let mut claims = nominal_claims();
+        claims.as_object_mut().expect("object").remove("iss");
+        let err = validate_id_token(&cfg, "n", &sign_rs256(&claims), &jwks).expect_err("iss absent -> refused");
+        assert!(err.contains("iss"), "the refusal names the missing claim: {err}");
+    }
+
+    /// A correctly signed token WITHOUT `aud` must be refused: a token for no audience is not a token for
+    /// this client. Without `aud` in the required claims, jsonwebtoken only compares `aud` WHEN PRESENT.
+    #[test]
+    fn id_token_without_aud_is_rejected() {
+        let (cfg, jwks) = id_token_fixture();
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&nominal_claims()), &jwks).is_ok(), "nominal");
+        let mut claims = nominal_claims();
+        claims.as_object_mut().expect("object").remove("aud");
+        let err = validate_id_token(&cfg, "n", &sign_rs256(&claims), &jwks).expect_err("aud absent -> refused");
+        assert!(err.contains("aud"), "the refusal names the missing claim: {err}");
+    }
+
+    /// Expired, wrong issuer, `alg` other than RS256, `exp` absent: each is refused on its own.
+    #[test]
+    fn id_token_rejects_expired_wrong_issuer_foreign_alg_and_missing_exp() {
+        use base64::Engine as _;
+        let (cfg, jwks) = id_token_fixture();
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&nominal_claims()), &jwks).is_ok(), "nominal");
+
+        let mut expired = nominal_claims();
+        expired["exp"] = json!(crate::now_epoch() - 3600); // well beyond the 60 s default leeway
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&expired), &jwks).is_err(), "expired");
+
+        let mut wrong_iss = nominal_claims();
+        wrong_iss["iss"] = json!("https://other-idp.example");
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&wrong_iss), &jwks).is_err(), "wrong issuer");
+
+        let mut no_exp = nominal_claims();
+        no_exp.as_object_mut().expect("object").remove("exp");
+        assert!(validate_id_token(&cfg, "n", &sign_rs256(&no_exp), &jwks).is_err(), "exp absent");
+
+        // `alg: HS256` header on an otherwise valid token (the classic confusion with the RSA public key).
+        // The header is rewritten by hand rather than signed with an HMAC key, so that the test does not
+        // depend on the `EncodingKey::from_secret` signature; the refusal must come from the alg guard.
+        let good = sign_rs256(&nominal_claims());
+        let (_, rest) = good.split_once('.').expect("JWS has a header");
+        let hs_header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"alg": "HS256", "typ": "JWT", "kid": KID}).to_string());
+        let err = validate_id_token(&cfg, "n", &format!("{hs_header}.{rest}"), &jwks).expect_err("alg HS256");
+        assert!(err.contains("RS256"), "refused by the alg guard: {err}");
+    }

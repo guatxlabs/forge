@@ -663,7 +663,8 @@ fn redacted_config(app: &App) -> Value {
 /// Validate the ID token against the IdP JWKS and the flow's expectations. Returns `(sub, email, groups)`
 /// on success (`groups` = the OIDC `groups` claim, empty if absent — feeds advanced RBAC, fail-closed to
 /// least privilege). FAIL-CLOSED on ANY mismatch: unsupported alg, unknown kid, bad signature, wrong
-/// issuer, wrong audience, expired, or a nonce that does not match the pending-auth nonce.
+/// issuer, wrong audience, expired, a missing `iss`/`aud`/`exp`, or a nonce that does not match the
+/// pending-auth nonce.
 fn validate_id_token(
     cfg: &SsoConfig,
     expected_nonce: &str,
@@ -684,6 +685,10 @@ fn validate_id_token(
     val.set_issuer(&[cfg.issuer.as_str()]); // token `iss` must EXACTLY equal the configured issuer
     val.set_audience(&[cfg.client_id.as_str()]); // token `aud` must contain client_id
     val.validate_exp = true; // reject expired tokens (jsonwebtoken enforces exp with default leeway)
+    // REQUIRED PRESENT, not only checked when present: OIDC Core 3.1.3.7 makes `iss`, `aud` and `exp`
+    // mandatory in an ID token. jsonwebtoken's default only requires `exp`; `set_issuer`/`set_audience`
+    // alone compare `iss`/`aud` WHEN THE TOKEN CARRIES THEM, so a signed token without either passed.
+    val.set_required_spec_claims(&["exp", "iss", "aud"]);
 
     let data = decode::<Value>(token, &key, &val).map_err(|e| format!("token rejected: {e}"))?;
     let claims = data.claims;
