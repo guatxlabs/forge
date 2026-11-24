@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Oracle A PREUVE de la FUITE PAR FILTRE ORM — `ormleak.filter`.
 
 D'OU VIENT CETTE TECHNIQUE

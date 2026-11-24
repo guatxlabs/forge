@@ -1,20 +1,22 @@
-# Cycle de vie des outils — manifeste unique + surcouche runtime
+# Tool lifecycle — single manifest + runtime overlay
 
-Forge télécharge une douzaine de binaires de sécurité externes (httpx, nuclei, subfinder, dnsx, naabu,
-katana, amass, gau, dalfox, feroxbuster, ffuf ; `nmap` et la suite `apt` sont installés
-autrement). Cette page décrit **où vivent leurs versions**, **comment ils sont vérifiés**, et **comment
-en installer ou en mettre à jour un sans reconstruire l'image**.
+[English](TOOLS_LIFECYCLE.md) | [Français](TOOLS_LIFECYCLE.fr.md)
 
-> Prérequis de lecture : [Installation](INSTALLATION.md) (profils `mini`/`full`) et
-> [Ajouter votre propre outil](TOOLS.md) (ToolSpec — déclarer un outil CLI *gouverné*, sans code).
-> La présente page traite du **binaire** ; `TOOLS.md` traite de sa **déclaration** comme module.
+Forge downloads a dozen external security binaries (httpx, nuclei, subfinder, dnsx, naabu,
+katana, amass, gau, dalfox, feroxbuster, ffuf; `nmap` and the `apt` suite are installed
+differently). This page describes **where their versions live**, **how they are verified**, and **how
+to install or update one without rebuilding the image**.
+
+> Reading prerequisites: [Installation](INSTALLATION.md) (`mini`/`full` profiles) and
+> [Adding your own tool](TOOLS.md) (ToolSpec — declaring a *governed* CLI tool, without code).
+> This page deals with the **binary**; `TOOLS.md` deals with its **declaration** as a module.
 
 ---
 
-## 1. Le manifeste — `forge/tools.json`
+## 1. The manifest — `forge/tools.json`
 
-Une seule source de vérité. Elle porte, **par outil** : la version, un gabarit d'URL, le format
-d'archive, le chemin du binaire *dans* l'archive, le nom posé sur le `PATH`, et un **SHA256 par
+A single source of truth. It carries, **per tool**: the version, a URL template, the archive
+format, the path of the binary *inside* the archive, the name placed on the `PATH`, and a **SHA256 per
 architecture**.
 
 ```json
@@ -32,128 +34,128 @@ architecture**.
 }
 ```
 
-Gabarits disponibles : `{version}`, `{arch}` (nomenclature Docker : `amd64`/`arm64`) et `{arch_uname}`
-(`x86_64`/`aarch64` — certains éditeurs nomment leurs assets ainsi). Principe **bring-your-own-tool** :
-ajouter un outil = ajouter une entrée JSON, **aucun code**.
+Available templates: `{version}`, `{arch}` (Docker naming: `amd64`/`arm64`) and `{arch_uname}`
+(`x86_64`/`aarch64` — some vendors name their assets that way). **Bring-your-own-tool** principle:
+adding a tool = adding a JSON entry, **no code**.
 
-**Pourquoi ce fichier existe.** Les versions et les digests étaient des `ARG` codés en dur, **dupliqués**
-entre `Dockerfile` et `docker-compose.yml`. Deux copies d'un pin, c'est une divergence silencieuse qui
-attend son heure. Elles n'existent plus qu'ici — et une garde statique
-(`tests/test_tools_manifest.py`) échoue si une version, un digest ou une URL d'outil réapparaît dans le
-`Dockerfile` ou le compose.
+**Why this file exists.** The versions and digests were hard-coded `ARG`s, **duplicated**
+between `Dockerfile` and `docker-compose.yml`. Two copies of a pin are a silent divergence waiting
+for its moment. They now exist only here — and a static guard
+(`tests/test_tools_manifest.py`) fails if a tool version, digest or URL reappears in the
+`Dockerfile` or the compose file.
 
-**Bumper une version** : éditer `version` + les digests (relevés dans le `*_checksums.txt` de la release
-amont), puis soit reconstruire l'image, soit — sans rebuild — `forge tools update <nom>` (§3).
+**Bumping a version**: edit `version` + the digests (read from the `*_checksums.txt` of the upstream
+release), then either rebuild the image, or — without a rebuild — `forge tools update <nom>` (§3).
 
-### Qui lit le manifeste
+### Who reads the manifest
 
-| Consommateur | Quand | Effet |
+| Consumer | When | Effect |
 |---|---|---|
-| `Dockerfile` (`python3 forge/toolsmanifest.py --arch … --profile full`) | au **build** | baseline bakée dans `/usr/local/bin`, selon `FORGE_TOOLS_PROFILE` |
-| `forge tools list\|install\|update\|remove` | au **runtime** | surcouche persistante dans `/data/tools/bin` |
-| console — `GET/POST /api/tools/runtime` + panneau **Administration → cycle de vie des outils** | au **runtime** | pilote la CLI ci-dessus, admin-only + ledgerisé (§3.1) |
+| `Dockerfile` (`python3 forge/toolsmanifest.py --arch … --profile full`) | at **build** | baseline baked into `/usr/local/bin`, according to `FORGE_TOOLS_PROFILE` |
+| `forge tools list\|install\|update\|remove` | at **runtime** | persistent overlay in `/data/tools/bin` |
+| console — `GET/POST /api/tools/runtime` + **Administration → tool lifecycle** panel | at **runtime** | drives the CLI above, admin-only + ledgered (§3.1) |
 
 ---
 
-## 2. Baseline au build — inchangée
+## 2. Build-time baseline — unchanged
 
-`FORGE_TOOLS_PROFILE=full` (défaut) installe les outils du manifeste ; `mini` les omet et les modules
-dégradent proprement (`available: false`). La vérification est celle qu'elle a toujours été : chaque
-archive est validée par `sha256sum -c` contre le pin de son architecture, **toute non-correspondance
-fait échouer le build**.
+`FORGE_TOOLS_PROFILE=full` (default) installs the manifest's tools; `mini` omits them and the modules
+degrade cleanly (`available: false`). Verification is what it has always been: each
+archive is validated by `sha256sum -c` against the pin for its architecture, **any mismatch
+makes the build fail**.
 
-Deux garde-fous s'ajoutent, tous deux fail-closed :
+Two guards are added, both fail-closed:
 
-- un outil **sans pin** pour l'architecture cible est **écarté du plan** — jamais téléchargé non
-  vérifié — et listé sur `stderr` (c'est le cas de la suite étendue hors `amd64`, comme avant) ;
-- le groupe socle `core` (httpx/nuclei/subfinder) passe par `--require-complete core` : un pin manquant
-  **fait échouer le build** plutôt que produire une image silencieusement amputée.
+- a tool **without a pin** for the target architecture is **dropped from the plan** — never downloaded
+  unverified — and listed on `stderr` (this is the case of the extended suite outside `amd64`, as before);
+- the `core` base group (httpx/nuclei/subfinder) goes through `--require-complete core`: a missing pin
+  **makes the build fail** rather than producing a silently truncated image.
 
 ---
 
-## 3. Surcouche runtime — installer / mettre à jour sans rebuild
+## 3. Runtime overlay — installing / updating without a rebuild
 
 ```bash
-forge tools list                              # état : version cible, résolution PATH, provenance
-forge tools install nuclei  --actor alice     # installe la version du manifeste
-forge tools update  nuclei  --actor alice     # repose la version du manifeste (après un bump)
-forge tools remove  nuclei  --actor alice     # retire de la couche runtime ; la baseline reste
+forge tools list                              # state: target version, PATH resolution, provenance
+forge tools install nuclei  --actor alice     # installs the manifest's version
+forge tools update  nuclei  --actor alice     # re-places the manifest's version (after a bump)
+forge tools remove  nuclei  --actor alice     # removes from the runtime layer; the baseline stays
 ```
 
-Le binaire atterrit dans **`/data/tools/bin`** — volume persistant, propriété de l'utilisateur `forge`
-(uid 10001), **en tête du `PATH`** devant le `/usr/local/bin` baké. Il survit donc à un *recreate* du
-conteneur, et une mise à jour ne demande plus de reconstruire l'image.
+The binary lands in **`/data/tools/bin`** — a persistent volume, owned by the `forge` user
+(uid 10001), **at the head of the `PATH`** ahead of the baked `/usr/local/bin`. It therefore survives a container
+*recreate*, and an update no longer requires rebuilding the image.
 
-Ordre de résolution du `PATH` : `/opt/tools` (bind-mount opérateur, priorité inchangée) →
-`/data/tools/bin` (couche runtime) → `/usr/local/bin` (baseline bakée) → reste du système.
+`PATH` resolution order: `/opt/tools` (operator bind mount, priority unchanged) →
+`/data/tools/bin` (runtime layer) → `/usr/local/bin` (baked baseline) → rest of the system.
 
-Hors conteneur, le répertoire par défaut est `<data_dir>/tools` ; `FORGE_TOOLS_DIR` le surcharge.
+Outside a container, the default directory is `<data_dir>/tools`; `FORGE_TOOLS_DIR` overrides it.
 
-> **Sur Kubernetes, la surcouche est indisponible telle quelle — et elle le dit.** Le Deployment
-> `k8s/40-console.yaml` pose `readOnlyRootFilesystem: true` et ne monte que `/data/db`, `/data/ledger`
-> et `/data/scope`. `/data/tools` y est donc en lecture seule : `forge tools install` **refuse
-> proprement** (« répertoire outils non inscriptible »), il ne dégrade rien silencieusement. Pour
-> l'activer, montez un volume sur `/data/tools` — un PVC si vous voulez que les installs survivent au
-> redémarrage du pod, un `emptyDir` si des installs éphémères par pod vous suffisent. Rien d'autre à
-> changer : `FORGE_TOOLS_DIR` et le `PATH` viennent déjà de l'image.
+> **On Kubernetes, the overlay is unavailable as is — and it says so.** The Deployment
+> `k8s/40-console.yaml` sets `readOnlyRootFilesystem: true` and mounts only `/data/db`, `/data/ledger`
+> and `/data/scope`. `/data/tools` is therefore read-only there: `forge tools install` **refuses
+> cleanly** ("répertoire outils non inscriptible" — tools directory not writable), it degrades nothing silently. To
+> enable it, mount a volume on `/data/tools` — a PVC if you want installs to survive a
+> pod restart, an `emptyDir` if ephemeral per-pod installs are enough for you. Nothing else to
+> change: `FORGE_TOOLS_DIR` and the `PATH` already come from the image.
 
-### 3.1 Depuis la console (API + panneau)
+### 3.1 From the console (API + panel)
 
-La même chose, sans shell dans le conteneur. `Administration → cycle de vie des outils` liste le
-manifeste (version cible, version installée lue **dans le reçu**, provenance runtime/baseline/absent,
-chemin résolu, présence du pin pour l'architecture) et attache trois actions à chaque ligne.
+The same thing, without a shell in the container. `Administration → cycle de vie des outils` (the tool lifecycle panel) lists the
+manifest (target version, installed version read **from the receipt**, runtime/baseline/absent provenance,
+resolved path, presence of the pin for the architecture) and attaches three actions to each row.
 
 ```
-GET  /api/tools/runtime                              # état (n'exécute aucun outil)
+GET  /api/tools/runtime                              # state (executes no tool)
 POST /api/tools/runtime  {"action":"install","name":"nuclei"}
 ```
 
-**Le corps n'accepte QUE `{action, name}`.** Tout autre champ — `url`, `sha256`, `digest`, `version` —
-fait **échouer** la requête en 400, avant le moindre sous-processus. Ce n'est pas un filtrage
-silencieux : c'est la même propriété qu'en CLI, exprimée à l'étage HTTP. Le `name` doit en outre
-figurer dans le manifeste **tel que le moteur le rapporte** (`forge tools list --json`) ; si cette
-sonde n'aboutit pas, la mutation est **refusée** plutôt que tentée à l'aveugle. L'`argv` est fixe et
-construit côté serveur. Un outil sans pin pour l'architecture courante n'a **aucun bouton** dans le
-panneau : il n'existe pas de chemin, même cosmétique, vers un téléchargement non vérifié.
+**The body accepts ONLY `{action, name}`.** Any other field — `url`, `sha256`, `digest`, `version` —
+makes the request **fail** with 400, before any subprocess. This is not silent
+filtering: it is the same property as in the CLI, expressed at the HTTP level. The `name` must moreover
+appear in the manifest **as the engine reports it** (`forge tools list --json`); if that
+probe does not succeed, the mutation is **refused** rather than attempted blindly. The `argv` is fixed and
+built server-side. A tool without a pin for the current architecture has **no button** in the
+panel: there is no path, not even a cosmetic one, to an unverified download.
 
-Gouvernance : **admin-only** (`check_admin`, 403 sinon — installer un binaire est au moins aussi
-privilégié que déclarer un outil via `/api/tools`, et exige une attribution individuelle), spawn
-**borné** (budget de temps, plafond de concurrence, cap d'octets, kill de groupe), et **double
-journalisation** — `console.tools.install|update|remove` (qui a demandé quoi, et l'issue) en plus de
-l'entrée `tools.install` que l'installeur écrit lui-même avec **le digest vérifié**.
+Governance: **admin-only** (`check_admin`, 403 otherwise — installing a binary is at least as
+privileged as declaring a tool through `/api/tools`, and requires individual attribution), **bounded**
+spawn (time budget, concurrency ceiling, byte cap, group kill), and **double
+logging** — `console.tools.install|update|remove` (who asked for what, and the outcome) in addition to
+the `tools.install` entry that the installer writes itself with **the verified digest**.
 
-### Ce que ça ne fait pas
+### What it does not do
 
-- **Pas d'installation depuis une URL arbitraire.** Il n'existe ni `--url` ni `--sha256`. La source est
-  calculée depuis le manifeste : c'est l'allowlist.
-- **Pas d'« update vers la dernière version amont ».** Ce serait un téléchargement non épinglé.
-  Mettre à jour = bumper le manifeste (changement revu et pinné) puis `forge tools update`.
-- **Pas d'auto-update, pas de tâche de fond.** Action opérateur explicite, uniquement.
-- **Aucune élévation.** L'outil installé reste soumis exactement aux mêmes portes que celui de la
-  baseline : scope-guard ROE fail-closed, plancher exploit, argv fixe no-shell, sonde de disponibilité.
+- **No installation from an arbitrary URL.** There is neither `--url` nor `--sha256`. The source is
+  computed from the manifest: that is the allowlist.
+- **No "update to the latest upstream version".** That would be an unpinned download.
+  Updating = bumping the manifest (reviewed and pinned change) then `forge tools update`.
+- **No auto-update, no background task.** Explicit operator action, only.
+- **No elevation.** The installed tool stays subject to exactly the same gates as the one from the
+  baseline: fail-closed ROE scope-guard, exploit floor, fixed no-shell argv, availability probe.
 
 ---
 
-## 4. Le modèle de gouvernance, point par point
+## 4. The governance model, point by point
 
-Installer un binaire au runtime dans un outil offensif est précisément la capacité qui annule une
-gouvernance si elle est mal posée. Chaque garantie ci-dessous est couverte par un test
+Installing a binary at runtime in an offensive tool is precisely the capability that cancels out
+governance if it is badly set up. Each guarantee below is covered by a test
 (`tests/test_tools_runtime_install.py`, `tests/test_tools_manifest.py`).
 
-| Garantie | Mise en œuvre | Ce qui se passe en cas d'écart |
+| Guarantee | Implementation | What happens on deviation |
 |---|---|---|
-| **Intégrité obligatoire** | SHA256 calculé **sur le flux** pendant l'écriture, comparé au pin du manifeste | refus, temporaire détruit, **rien** sur le `PATH`, refus **journalisé** |
-| **Pin requis** | pas de digest pour l'architecture → refus **avant tout octet réseau** | aucune requête n'est émise |
-| **Source allowlistée** | URL dérivée du manifeste ; aucun paramètre d'URL n'existe | nom hors manifeste → refus, rien n'est téléchargé |
-| **HTTPS strict** | gabarit `https://` exigé au chargement ; redirection quittant HTTPS refusée | `URLError`, téléchargement abandonné |
-| **Pas de shell** | `urllib` + `zipfile`/`tarfile` — ni `curl`, ni `unzip`, ni `tar`, aucun sous-processus | (test : toute création de processus fait échouer la suite) |
-| **Pas d'évasion de chemin** | un seul membre extrait ; la destination est **calculée par nous**, jamais lue dans l'archive | un membre nommé `../../evil` atterrit sous le nom `bin` prévu, dans le répertoire outils |
-| **Journalisation** | `tools.install` / `tools.update` / `tools.remove` / `tools.refused` chaînés + signés | ledger injoignable → **action refusée** (aucune install non tracée) |
-| **Pose atomique** | staging + `os.replace`, mode `0755` | jamais de binaire à moitié écrit sur le `PATH` |
-| **No-op par défaut** | rien n'est créé ni sondé à l'import ; aucun module du moteur n'importe l'installeur | sans action opérateur, comportement identique à la baseline |
+| **Mandatory integrity** | SHA256 computed **on the stream** during the write, compared to the manifest's pin | refusal, temporary file destroyed, **nothing** on the `PATH`, refusal **logged** |
+| **Pin required** | no digest for the architecture → refusal **before any network byte** | no request is issued |
+| **Allowlisted source** | URL derived from the manifest; no URL parameter exists | name outside the manifest → refusal, nothing is downloaded |
+| **Strict HTTPS** | `https://` template required at load time; redirection leaving HTTPS refused | `URLError`, download abandoned |
+| **No shell** | `urllib` + `zipfile`/`tarfile` — neither `curl`, nor `unzip`, nor `tar`, no subprocess | (test: any process creation makes the suite fail) |
+| **No path escape** | a single member extracted; the destination is **computed by us**, never read from the archive | a member named `../../evil` lands under the intended `bin` name, in the tools directory |
+| **Logging** | `tools.install` / `tools.update` / `tools.remove` / `tools.refused` chained + signed | ledger unreachable → **action refused** (no untraced install) |
+| **Atomic placement** | staging + `os.replace`, mode `0755` | never a half-written binary on the `PATH` |
+| **No-op by default** | nothing is created or probed at import; no engine module imports the installer | without an operator action, behaviour identical to the baseline |
 
-Une entrée de ledger porte le nom, la version, l'architecture, **le digest vérifié**, l'URL, le chemin
-et l'acteur :
+A ledger entry carries the name, the version, the architecture, **the verified digest**, the URL, the path
+and the actor:
 
 ```json
 {"kind": "tools.install", "detail": {
@@ -162,18 +164,18 @@ et l'acteur :
   "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.6.9/httpx_1.6.9_linux_amd64.zip"}}
 ```
 
-`forge ledger verify --ledger …` continue de valider la chaîne de bout en bout.
+`forge ledger verify --ledger …` keeps validating the chain end to end.
 
 ---
 
-## 5. Ce qui n'est pas construit (et pourquoi)
+## 5. What is not built (and why)
 
-- **Versions hors manifeste.** Installer une version absente du manifeste supposerait d'accepter un
-  digest saisi par l'opérateur (ou récupéré puis confirmé). C'est une UX d'intégrité à part entière,
-  laissée à une itération dédiée plutôt que bâclée : tant qu'elle n'existe pas, il n'y a **aucun**
-  chemin vers un téléchargement non épinglé.
-- ~~**API et panneau console.**~~ **Livré** (§3.1) : `GET/POST /api/tools/runtime` + le panneau
-  `Administration → cycle de vie des outils`. La contrainte qui rendait ce chantier délicat est tenue —
-  la route n'accepte qu'un **nom du manifeste**, jamais une URL ni une empreinte.
-- **Sonde de version par exécution.** `forge tools list` ne lance **rien** : la version installée est
-  lue dans le reçu déposé à l'installation. Lister ne doit pas être une exécution.
+- **Versions outside the manifest.** Installing a version absent from the manifest would mean accepting a
+  digest entered by the operator (or fetched then confirmed). That is an integrity UX in its own right,
+  left to a dedicated iteration rather than rushed: as long as it does not exist, there is **no**
+  path to an unpinned download.
+- ~~**API and console panel.**~~ **Shipped** (§3.1): `GET/POST /api/tools/runtime` + the
+  `Administration → cycle de vie des outils` panel. The constraint that made this work delicate is upheld —
+  the route accepts only a **manifest name**, never a URL nor a fingerprint.
+- **Version probe by execution.** `forge tools list` launches **nothing**: the installed version is
+  read from the receipt dropped at install time. Listing must not be an execution.

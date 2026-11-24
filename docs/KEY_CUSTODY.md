@@ -1,82 +1,84 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-# Garde de clés — signature de ledger off-host (PKCS#11 / KMS / HSM)
+# Key custody — off-host ledger signing (PKCS#11 / KMS / HSM)
 
-Le ledger d'engagement de Forge est signé en **Ed25519** (asymétrique → non-répudiation : un tiers
-vérifie avec la **clé publique seule**). Par défaut, la clé privée réside sur l'hôte dans
-`<ledger>.ed25519` (0600) — le `LocalFileSigner` communautaire. C'est byte-identique, sans dépendance,
-et stdlib-only, mais cela a une **limite connue** : la clé de signature se trouve sur le même hôte que
-l'écrivain, donc **root sur cet hôte** atteint la clé.
+[English](KEY_CUSTODY.md) | [Français](KEY_CUSTODY.fr.md)
 
-Ce document explique comment déplacer la clé privée **off-host** pour que host-root ne puisse plus
-signer, et comment un witness anchor off-host la complète.
+Forge's engagement ledger is signed with **Ed25519** (asymmetric → non-repudiation: a third party
+verifies with the **public key alone**). By default, the private key lives on the host in
+`<ledger>.ed25519` (0600) — the default `LocalFileSigner`. It is byte-identical, dependency-free,
+and stdlib-only, but it has a **known limit**: the signing key sits on the same host as the
+writer, so **root on that host** reaches the key.
+
+This document explains how to move the private key **off-host** so that host-root can no longer
+sign, and how an off-host witness anchor complements it.
 
 ---
 
-## Pourquoi PKCS#11 (et pas AWS-KMS directement)
+## Why PKCS#11 (and not AWS-KMS directly)
 
-Le ledger est en **Ed25519**. Cela contraint le backend :
+The ledger uses **Ed25519**. This constrains the backend:
 
-| Backend | Ed25519 ? | Comment Forge l'atteint |
+| Backend | Ed25519? | How Forge reaches it |
 |---|---|---|
-| **AWS KMS** | ❌ RSA / ECDSA seulement — *ne peut pas* signer en Ed25519 | inutilisable directement pour ce ledger |
-| **PKCS#11 (`CKM_EDDSA`)** | ✅ | `FORGE_LEDGER_SIGNER=pkcs11` (ce driver) |
-| **GCP KMS** (clés `ED25519`) | ✅ | **exec signer** générique (`gcloud kms asymmetric-sign`) |
-| **N'importe quel HSM / AWS CloudHSM** | ✅ (expose un provider PKCS#11) | `FORGE_LEDGER_SIGNER=pkcs11` |
+| **AWS KMS** | ❌ RSA / ECDSA only — *cannot* sign Ed25519 | not usable directly for this ledger |
+| **PKCS#11 (`CKM_EDDSA`)** | ✅ | `FORGE_LEDGER_SIGNER=pkcs11` (this driver) |
+| **GCP KMS** (`ED25519` keys) | ✅ | generic **exec signer** (`gcloud kms asymmetric-sign`) |
+| **Any HSM / AWS CloudHSM** | ✅ (exposes a PKCS#11 provider) | `FORGE_LEDGER_SIGNER=pkcs11` |
 | **SoftHSM2** (dev/CI) | ✅ | `FORGE_LEDGER_SIGNER=pkcs11` |
 
-Donc **AWS-KMS ne peut pas piloter ce ledger** sans changer l'algorithme du ledger pour RSA/ECDSA (ce
-que nous ne faisons délibérément pas — Ed25519 nous donne des signatures petites, déterministes, rapides
-et une non-répudiation propre). **PKCS#11** est la voie vendor-neutral : SoftHSM2 en dev/CI, n'importe
-quel HSM (y compris AWS CloudHSM, qui expose une bibliothèque PKCS#11) ou un pont cloud-KMS→PKCS#11 en
-prod. C'est un mince FFI, donc Forge reste **openssl-free** et le moteur par défaut conserve **zéro
-dépendance runtime** — rien de nouveau n'est importé tant que vous n'activez pas explicitement le signer
-PKCS#11.
+So **AWS-KMS cannot drive this ledger** without changing the ledger algorithm to RSA/ECDSA (which
+we deliberately do not do — Ed25519 gives us small, deterministic, fast signatures
+and clean non-repudiation). **PKCS#11** is the vendor-neutral path: SoftHSM2 in dev/CI, any
+HSM (including AWS CloudHSM, which exposes a PKCS#11 library) or a cloud-KMS→PKCS#11 bridge in
+production. It is a thin FFI, so Forge stays **openssl-free** and the default engine keeps **zero
+runtime dependencies** — nothing new is imported until you explicitly enable the PKCS#11
+signer.
 
 ---
 
-## Le signer PKCS#11 — comment il se branche
+## The PKCS#11 signer — how it plugs in
 
-`forge/signing_pkcs11.py` ajoute `Pkcs11Signer`, une sous-classe du `RemoteSigner` existant. Il réutilise
-le **même contrat fail-closed** :
+`forge/signing_pkcs11.py` adds `Pkcs11Signer`, a subclass of the existing `RemoteSigner`. It reuses
+the **same fail-closed contract**:
 
-- signe via le token avec `CKM_EDDSA` ;
-- **re-vérifie** la signature retournée contre la clé publique avant de l'accepter — une réponse bidon ou
-  incohérente est **rejetée**, jamais écrite ;
-- **ne se rabat jamais** sur une clé locale ;
-- n'expose que la **clé publique** à ce processus, donc `verify` / `verify_external(pubkey)` sont
-  inchangés pour les auditeurs tiers ;
-- une signature d'**auto-test au build** prouve que la paire de clés du token vérifie réellement avant que
-  le signer soit retourné (fail fast sur un mauvais appariement token/clé).
+- signs via the token with `CKM_EDDSA`;
+- **re-verifies** the returned signature against the public key before accepting it — a bogus or
+  inconsistent response is **rejected**, never written;
+- **never falls back** to a local key;
+- exposes only the **public key** to this process, so `verify` / `verify_external(pubkey)` are
+  unchanged for third-party auditors;
+- a **build-time self-test** signature proves that the token's key pair actually verifies before
+  the signer is returned (fail fast on a token/key mismatch).
 
-Il est **optionnel et opt-in**. `python-pkcs11` est un **import paresseux à l'intérieur du driver** — le
-build communautaire par défaut n'importe rien de nouveau et reste stdlib-only. N'installez l'extra que
-lorsque vous l'utilisez :
+It is **optional and opt-in**. `python-pkcs11` is a **lazy import inside the driver** — the
+default build imports nothing new and stays stdlib-only. Only install the extra
+when you use it:
 
 ```bash
 pip install 'forge[pkcs11]'      # pulls python-pkcs11; the default install does NOT
 ```
 
-### Configuration — ENV seulement (le PIN jamais sur argv)
+### Configuration — ENV only (the PIN never on argv)
 
-| Variable d'env | Sens |
+| Env variable | Meaning |
 |---|---|
-| `FORGE_ENTERPRISE_COMPLIANCE=1` | **Requis** — engage le seam de signer off-host du module compliance (gate) |
-| `FORGE_LEDGER_SIGNER=pkcs11` | sélectionne ce driver |
-| `FORGE_LEDGER_PKCS11_MODULE` | chemin du `.so` du provider PKCS#11 (p. ex. `libsofthsm2.so`) — **requis** |
-| `FORGE_LEDGER_PKCS11_TOKEN_LABEL` | label du token (ou utiliser `…_SLOT`) |
-| `FORGE_LEDGER_PKCS11_SLOT` | index de slot (alternative au label de token) |
-| `FORGE_LEDGER_PKCS11_KEY_LABEL` | label de clé (`CKA_LABEL`) — label et/ou id requis |
-| `FORGE_LEDGER_PKCS11_KEY_ID` | id de clé, hex ou texte (`CKA_ID`) |
-| `FORGE_LEDGER_PKCS11_PIN` | **PIN utilisateur — secret, env seulement**, jamais argv/logs |
+| `FORGE_ENTERPRISE_COMPLIANCE=1` | **Required** — engages the off-host signer seam of the compliance module (gate) |
+| `FORGE_LEDGER_SIGNER=pkcs11` | selects this driver |
+| `FORGE_LEDGER_PKCS11_MODULE` | path to the PKCS#11 provider `.so` (e.g. `libsofthsm2.so`) — **required** |
+| `FORGE_LEDGER_PKCS11_TOKEN_LABEL` | token label (or use `…_SLOT`) |
+| `FORGE_LEDGER_PKCS11_SLOT` | slot index (alternative to the token label) |
+| `FORGE_LEDGER_PKCS11_KEY_LABEL` | key label (`CKA_LABEL`) — label and/or id required |
+| `FORGE_LEDGER_PKCS11_KEY_ID` | key id, hex or text (`CKA_ID`) |
+| `FORGE_LEDGER_PKCS11_PIN` | **user PIN — secret, env only**, never argv/logs |
 
-Le PIN et les détails de provider/token sont traités comme des secrets : ils n'apparaissent jamais dans
-`repr`, les logs, les entrées de ledger, ni les erreurs levées (`redact_signer_config` rédige `pin`).
+The PIN and the provider/token details are treated as secrets: they never appear in
+`repr`, logs, ledger entries, or raised errors (`redact_signer_config` redacts `pin`).
 
 ---
 
-## Mise en place dev / CI avec SoftHSM2
+## Dev / CI setup with SoftHSM2
 
-SoftHSM2 est un token PKCS#11 logiciel — parfait pour le développement et la CI (sans matériel). Exemple :
+SoftHSM2 is a software PKCS#11 token — perfect for development and CI (no hardware). Example:
 
 ```bash
 # 1. install SoftHSM2 + the Python binding
@@ -104,45 +106,45 @@ export FORGE_LEDGER_PKCS11_KEY_LABEL=forge-ledger
 export FORGE_LEDGER_PKCS11_PIN=1234
 ```
 
-Forge signe désormais chaque entrée de ledger sur le token ; la clé privée n'entre jamais dans le
-processus. `tests/test_pkcs11_signer.py::TestLiveSoftHSMRoundTrip` effectue exactement ce round-trip
-lorsque SoftHSM2 + `python-pkcs11` sont présents (il est auto-skippé sinon).
+Forge now signs every ledger entry on the token; the private key never enters the
+process. `tests/test_pkcs11_signer.py::TestLiveSoftHSMRoundTrip` performs exactly this round-trip
+when SoftHSM2 + `python-pkcs11` are present (it is auto-skipped otherwise).
 
 ---
 
 ## Production — HSM / AWS CloudHSM / cloud-KMS via PKCS#11
 
-Chacun d'eux expose une **bibliothèque de provider PKCS#11** ; pointez `FORGE_LEDGER_PKCS11_MODULE` dessus
-et renseignez le token/slot, le label/id de clé, et le PIN :
+Each of them exposes a **PKCS#11 provider library**; point `FORGE_LEDGER_PKCS11_MODULE` at it
+and fill in the token/slot, the key label/id, and the PIN:
 
-- **HSM on-prem / réseau** (Thales Luna, Entrust nShield, Utimaco, YubiHSM2…) : utilisez le `.so` PKCS#11
-  du vendeur, une clé Ed25519 générée non-exportable sur l'appareil.
-- **AWS CloudHSM** : installez le CloudHSM Client SDK, utilisez `libcloudhsm_pkcs11.so`, PIN = `CU_user:password`.
-  (**AWS KMS** nu **n'est pas utilisable** ici — il n'offre pas Ed25519 ; voir la table ci-dessus.)
-- **cloud-KMS via un pont PKCS#11** : p. ex. le `libkmsp11.so` de Google Cloud, ou un proxy SoftHSM/`p11-kit`
-  devant un KMS qui parle Ed25519.
+- **On-prem / network HSM** (Thales Luna, Entrust nShield, Utimaco, YubiHSM2…): use the vendor's PKCS#11
+  `.so`, with a non-exportable Ed25519 key generated on the device.
+- **AWS CloudHSM**: install the CloudHSM Client SDK, use `libcloudhsm_pkcs11.so`, PIN = `CU_user:password`.
+  (Bare **AWS KMS** **is not usable** here — it does not offer Ed25519; see the table above.)
+- **cloud-KMS via a PKCS#11 bridge**: e.g. Google Cloud's `libkmsp11.so`, or a SoftHSM/`p11-kit` proxy
+  in front of a KMS that speaks Ed25519.
 
-Stockez le PIN via votre gestionnaire de secrets et injectez-le comme `FORGE_LEDGER_PKCS11_PIN` au runtime
-(env, pas argv). Faites tourner la clé du ledger en générant une nouvelle clé de token et en ré-ancrant ;
-la clé publique change, donc publiez la nouvelle clé publique à vos auditeurs/witness.
+Store the PIN in your secrets manager and inject it as `FORGE_LEDGER_PKCS11_PIN` at runtime
+(env, not argv). Rotate the ledger key by generating a new token key and re-anchoring;
+the public key changes, so publish the new public key to your auditors/witness.
 
-### Échappatoire — GCP-KMS-Ed25519 via l'exec signer générique (voie cloud-KMS recommandée)
+### Escape hatch — GCP-KMS-Ed25519 via the generic exec signer (recommended cloud-KMS path)
 
-Si votre backend signe en Ed25519 mais n'a **aucun provider PKCS#11** — le cas canonique est **GCP KMS
-piloté par la CLI `gcloud`** — utilisez l'**exec signer no-shell** générique déjà présent dans
-`forge/signing.py`. Il exécute un **argv fixe, configuré par l'admin** (un tableau JSON — jamais une
-chaîne shell, donc aucun métacaractère n'est jamais interprété), envoie les octets-à-signer sur **stdin**,
-et relit la **signature Ed25519 en hex (128 caractères hex)** depuis **stdout**. Même garantie fail-closed
-que tout signer off-host : `RemoteSigner.sign` **re-vérifie** la signature retournée contre
-`FORGE_LEDGER_SIGNER_PUBKEY` avant que l'entrée soit écrite — une réponse malformée ou qui ne vérifie pas
-est **rejetée** et l'append avorte (jamais une entrée non signée).
+If your backend signs Ed25519 but has **no PKCS#11 provider** — the canonical case is **GCP KMS
+driven by the `gcloud` CLI** — use the generic **no-shell exec signer** already present in
+`forge/signing.py`. It runs a **fixed, admin-configured argv** (a JSON array — never a
+shell string, so no metacharacter is ever interpreted), sends the bytes-to-sign on **stdin**,
+and reads back the **Ed25519 signature in hex (128 hex characters)** from **stdout**. Same fail-closed guarantee
+as any off-host signer: `RemoteSigner.sign` **re-verifies** the returned signature against
+`FORGE_LEDGER_SIGNER_PUBKEY` before the entry is written — a malformed or non-verifying response
+is **rejected** and the append aborts (never an unsigned entry).
 
-> **Aucun driver GCP sur mesure — par conception.** Forge ne livre **aucun** code spécifique à GCP-KMS :
-> l'exec signer générique couvre déjà GCP-KMS de bout en bout (ci-dessous). **AWS-KMS reste non supporté
-> pour ce ledger** — il n'offre aucun type de clé Ed25519 (RSA/ECDSA seulement ; voir la table ci-dessus).
-> Pour AWS, placez plutôt un HSM/CloudHSM **PKCS#11** devant le ledger, ou utilisez GCP KMS.
+> **No bespoke GCP driver — by design.** Forge ships **no** GCP-KMS-specific code:
+> the generic exec signer already covers GCP-KMS end to end (below). **AWS-KMS remains unsupported
+> for this ledger** — it offers no Ed25519 key type (RSA/ECDSA only; see the table above).
+> For AWS, put a **PKCS#11** HSM/CloudHSM in front of the ledger instead, or use GCP KMS.
 
-**1 — créer une clé de signature Ed25519 dans GCP KMS** (algorithme `EC_SIGN_ED25519`) :
+**1 — create an Ed25519 signing key in GCP KMS** (algorithm `EC_SIGN_ED25519`):
 
 ```bash
 gcloud kms keyrings create forge --location=global
@@ -152,7 +154,7 @@ gcloud kms keys create ledger \
   --default-algorithm=ec-sign-ed25519      # EC_SIGN_ED25519 — Ed25519, matches the ledger algorithm
 ```
 
-**2 — exporter la clé PUBLIQUE en 64-hex** (exactement ce que `verify_external` / `ledger verify --pubkey` attend) :
+**2 — export the PUBLIC key as 64-hex** (exactly what `verify_external` / `ledger verify --pubkey` expects):
 
 ```bash
 gcloud kms keys versions get-public-key 1 \
@@ -163,9 +165,9 @@ python3 -c 'from cryptography.hazmat.primitives.serialization import load_pem_pu
 # → 64 hex chars. This is FORGE_LEDGER_SIGNER_PUBKEY — publish it to your auditors/witness.
 ```
 
-**3 — le helper de signature** `/opt/forge/gcp-kms-ed25519-sign.sh` — lit les octets sur stdin, appelle
-`gcloud kms asymmetric-sign` (qui, pour Ed25519, signe l'**entrée brute**, sans pré-digest), et encode en
-hex la signature **brute de 64 octets** que GCP retourne sur stdout :
+**3 — the signing helper** `/opt/forge/gcp-kms-ed25519-sign.sh` — reads the bytes on stdin, calls
+`gcloud kms asymmetric-sign` (which, for Ed25519, signs the **raw input**, without pre-digest), and hex-encodes
+the **raw 64-byte** signature that GCP returns on stdout:
 
 ```bash
 #!/usr/bin/env bash
@@ -177,7 +179,7 @@ gcloud kms asymmetric-sign \
   | python3 -c 'import sys; sys.stdout.write(sys.stdin.buffer.read().hex())'
 ```
 
-**4 — brancher l'exec signer** (l'argv est un tableau JSON — le chemin du helper plus ses arguments fixes) :
+**4 — wire the exec signer** (the argv is a JSON array — the helper path plus its fixed arguments):
 
 ```bash
 export FORGE_ENTERPRISE_COMPLIANCE=1
@@ -186,33 +188,33 @@ export FORGE_LEDGER_SIGNER_PUBKEY=<64-hex from step 2>
 export FORGE_LEDGER_SIGNER_ARGV='["/opt/forge/gcp-kms-ed25519-sign.sh","global","forge","ledger","1"]'
 ```
 
-La clé privée **ne quitte jamais GCP KMS** (seul `gcloud … asymmetric-sign` est invoqué ; aucun matériel
-de clé sur un volume de pod). Faites la rotation en créant une nouvelle version de clé et en ré-exportant
-la clé publique (étape 2) — puis publiez la nouvelle clé publique à vos auditeurs/witness.
+The private key **never leaves GCP KMS** (only `gcloud … asymmetric-sign` is invoked; no key material
+on a pod volume). Rotate by creating a new key version and re-exporting
+the public key (step 2) — then publish the new public key to your auditors/witness.
 
 ---
 
-## Garde de clés en HA (Kubernetes) — garder la clé privée HORS du volume de ledger partagé
+## Key custody in HA (Kubernetes) — keep the private key OFF the shared ledger volume
 
-> **Pourquoi cela compte en HA.** En HA, le ledger tamper-evident est un **fichier** sur un **PVC
-> ReadWriteMany partagé** (`forge-ledger`, monté sur `/data/ledger` par chaque réplique — voir
-> `k8s/40-console.yaml`). Le `LocalFileSigner` communautaire écrit sa clé **privée** à côté du ledger
-> sous `<ledger>.ed25519` (0600). Sur ce volume RWX, un bit de perms `0600` n'est **pas** une frontière
-> d'isolation : **n'importe quel pod ou sidecar** qui monte le même PVC, et **n'importe quel
-> snapshot/backup de PVC**, livre la clé de signature Ed25519 brute — avec laquelle un attaquant peut
-> forger des entrées de ledger forge arbitraires. La clé locale perms-seulement convient pour un hôte
-> single-tenant ; elle ne convient **pas** sur un volume partagé multi-writer. Déplacez la clé **hors** de
-> ce volume. Deux patterns supportés, le plus sûr d'abord :
+> **Why this matters in HA.** In HA, the tamper-evident ledger is a **file** on a **shared
+> ReadWriteMany PVC** (`forge-ledger`, mounted at `/data/ledger` by every replica — see
+> `k8s/40-console.yaml`). The default `LocalFileSigner` writes its **private** key next to the ledger
+> as `<ledger>.ed25519` (0600). On this RWX volume, a `0600` permission bit is **not** an isolation
+> boundary: **any pod or sidecar** that mounts the same PVC, and **any PVC
+> snapshot/backup**, hands over the raw Ed25519 signing key — with which an attacker can
+> forge arbitrary forge ledger entries. The permissions-only local key is fine for a
+> single-tenant host; it is **not** fine on a shared multi-writer volume. Move the key **off**
+> that volume. Two supported patterns, safest first:
 
-### Pattern 1 (PRÉFÉRÉ pour HA / multi-tenant) — signer off-host, clé sur aucun volume de pod
+### Pattern 1 (PREFERRED for HA / multi-tenant) — off-host signer, key on no pod volume
 
-Utilisez le **signer PKCS#11** (`FORGE_LEDGER_SIGNER=pkcs11`, documenté ci-dessus) ou l'**exec signer**
-générique vers un KMS off-host. La clé privée réside sur un HSM/token et **ne touche jamais aucun volume
-de pod** — donc ni le PVC RWX, ni un snapshot, ni un sidecar co-monté ne la voit jamais. C'est la posture
-HA recommandée et aussi le contrôle qui supprime la limite host-root décrite ci-dessous.
+Use the **PKCS#11 signer** (`FORGE_LEDGER_SIGNER=pkcs11`, documented above) or the generic **exec signer**
+towards an off-host KMS. The private key lives on an HSM/token and **never touches any pod
+volume** — so neither the RWX PVC, nor a snapshot, nor a co-mounted sidecar ever sees it. This is the recommended HA
+posture and also the control that removes the host-root limit described below.
 
-Câblage k8s (bloc opt-in dans `k8s/40-console.yaml` ; PIN/module via le Secret `forge-ledger-pkcs11` —
-placeholder dans `k8s/10-secrets.example.yaml`, EVAL-ONLY, appliqué explicitement) :
+k8s wiring (opt-in block in `k8s/40-console.yaml`; PIN/module via the `forge-ledger-pkcs11` Secret —
+placeholder in `k8s/10-secrets.example.yaml`, EVAL-ONLY, applied explicitly):
 
 ```yaml
 env:
@@ -230,17 +232,17 @@ env:
     valueFrom: { secretKeyRef: { name: forge-ledger-pkcs11, key: FORGE_LEDGER_PKCS11_PIN } }
 ```
 
-Nécessite une image `store-postgres` construite avec l'extra `pkcs11` et un `.so` de provider PKCS#11
-présent dans le conteneur (baké dedans ou via un sidecar). Aucun Secret de clé n'est créé ; le PVC RWX ne
-porte alors **que** la projection JSONL du ledger.
+Requires a `store-postgres` image built with the `pkcs11` extra and a PKCS#11 provider `.so`
+present in the container (baked in or via a sidecar). No key Secret is created; the RWX PVC then
+carries **only** the JSONL projection of the ledger.
 
-### Pattern 2 (REPLI) — signer local, clé en Secret read-only PAS sur le PVC RWX
+### Pattern 2 (FALLBACK) — local signer, key in a read-only Secret NOT on the RWX PVC
 
-Si vous devez conserver le signer **local** en HA (p. ex. aucun HSM disponible), découplez le **chemin** de
-la clé du chemin du ledger avec **`FORGE_LEDGER_KEY`** et fournissez la clé comme un **Secret read-only
-dédié** plutôt que de la laisser s'écrire sur `/data/ledger` :
+If you must keep the **local** signer in HA (e.g. no HSM available), decouple the key **path** from
+the ledger path with **`FORGE_LEDGER_KEY`** and provide the key as a **dedicated read-only
+Secret** rather than letting it be written to `/data/ledger`:
 
-1. **Pré-générez** la clé Ed25519 hors bande (ne laissez pas le pod la créer automatiquement sur le volume partagé) :
+1. **Pre-generate** the Ed25519 key out of band (do not let the pod create it automatically on the shared volume):
 
    ```bash
    python3 -c 'from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as K; \
@@ -248,9 +250,9 @@ dédié** plutôt que de la laisser s'écrire sur `/data/ledger` :
    # → base64 of the raw 32-byte private key; put it in Secret forge-ledger-key, data.forge.ed25519
    ```
 
-2. Fournissez-la comme Secret **`forge-ledger-key`** (placeholder dans `k8s/10-secrets.example.yaml`),
-   monté **read-only** à un chemin, et pointez **`FORGE_LEDGER_KEY`** sur ce montage (bloc opt-in dans
-   `k8s/40-console.yaml`) :
+2. Provide it as the **`forge-ledger-key`** Secret (placeholder in `k8s/10-secrets.example.yaml`),
+   mounted **read-only** at a path, and point **`FORGE_LEDGER_KEY`** at that mount (opt-in block in
+   `k8s/40-console.yaml`):
 
    ```yaml
    env:
@@ -268,69 +270,69 @@ dédié** plutôt que de la laisser s'écrire sur `/data/ledger` :
          items: [ { key: forge.ed25519, path: forge.ed25519 } ]
    ```
 
-`FORGE_LEDGER_KEY` fait lire au signer la clé **depuis le montage read-only** au lieu d'écrire/lire
-`<ledger>.ed25519` sur le PVC RWX. Comme le montage est read-only et que la clé pré-existe, elle est
-**lue, pas réécrite** — la clé privée n'est **jamais** placée sur le volume `forge-ledger` partagé, qui ne
-porte alors que `engagement.jsonl` + le high-water-mark. Faites la rotation en remplaçant le Secret et en
-ré-ancrant (publiez la nouvelle clé publique à vos auditeurs/witness).
+`FORGE_LEDGER_KEY` makes the signer read the key **from the read-only mount** instead of writing/reading
+`<ledger>.ed25519` on the RWX PVC. Since the mount is read-only and the key pre-exists, it is
+**read, not rewritten** — the private key is **never** placed on the shared `forge-ledger` volume, which then
+carries only `engagement.jsonl` + the high-water-mark. Rotate by replacing the Secret and
+re-anchoring (publish the new public key to your auditors/witness).
 
-**Résiduel pour le Pattern 2.** La clé atterrit tout de même dans un **Secret** k8s (etcd) et est présente
-dans le montage tmpfs du pod — donc un accès cluster-admin / etcd l'atteint encore. Le Pattern 2 supprime
-l'exposition *volume-partagé / snapshot*, pas la confiance dans le magasin de secrets k8s ; pour la
-propriété plus forte (clé sur aucun volume de pod du tout, host-root ne peut pas exfiltrer) utilisez le
-**Pattern 1**. Les deux conservent `runAsNonRoot`, `readOnlyRootFilesystem`, et les NetworkPolicies
-deny-by-default intactes ; le Secret de clé et le Secret PKCS#11 sont **opt-in** (hors du chemin
-`kubectl apply -k k8s/` par défaut).
+**Residual for Pattern 2.** The key still lands in a k8s **Secret** (etcd) and is present
+in the pod's tmpfs mount — so cluster-admin / etcd access still reaches it. Pattern 2 removes
+the *shared-volume / snapshot* exposure, not the trust in the k8s secret store; for the
+stronger property (key on no pod volume at all, host-root cannot exfiltrate) use
+**Pattern 1**. Both keep `runAsNonRoot`, `readOnlyRootFilesystem`, and the deny-by-default
+NetworkPolicies intact; the key Secret and the PKCS#11 Secret are **opt-in** (outside the default
+`kubectl apply -k k8s/` path).
 
-Voir `docs/DEPLOYMENT.md` §3bis.6 (HA sur Kubernetes) pour la topologie environnante.
+See `docs/DEPLOYMENT.md` §3bis.6 (HA on Kubernetes) for the surrounding topology.
 
-## Contre quoi les deux modes protègent
+## What the two modes protect against
 
-Avec la clé on-host et le `NullAnchor` par défaut, l'intégrité du ledger dépend de l'hôte lui-même :
-quiconque y a root atteint la clé de signature. Deux contrôles opt-in suppriment ensemble cette
-dépendance :
+With the on-host key and the default `NullAnchor`, ledger integrity depends on the host itself:
+anyone with root on it reaches the signing key. Two opt-in controls together remove this
+dependency:
 
-1. **Garde de clés off-host (ce driver).** Avec `FORGE_LEDGER_SIGNER=pkcs11` (ou l'exec signer vers un
-   KMS off-host), la clé privée réside sur le token/HSM. Host-root peut *demander* des signatures sur du
-   nouveau contenu mais **ne peut pas extraire la clé**, donc il ne peut pas re-signer silencieusement un
-   passé réécrit à lui seul.
-2. **Witness anchor off-host** (`forge/anchor.py` — `WitnessAnchor` + `reconcile`). Un hôte séparé détient
-   une clé distincte et contre-signe des checkpoints `(seq|head|ts)` dans son propre log append-only.
-   `reconcile` recalcule les heads du ledger depuis genesis et les compare à ce que le witness a
-   contre-signé — détectant un passé réécrit (même re-signé).
+1. **Off-host key custody (this driver).** With `FORGE_LEDGER_SIGNER=pkcs11` (or the exec signer towards an
+   off-host KMS), the private key lives on the token/HSM. Host-root can *request* signatures on
+   new content but **cannot extract the key**, so it cannot silently re-sign a
+   rewritten past on its own.
+2. **Off-host witness anchor** (`forge/anchor.py` — `WitnessAnchor` + `reconcile`). A separate host holds
+   a distinct key and countersigns `(seq|head|ts)` checkpoints in its own append-only log.
+   `reconcile` recomputes the ledger heads from genesis and compares them with what the witness
+   countersigned — detecting a rewritten past (even re-signed).
 
-**Pourquoi les deux sont nécessaires.** La signature off-host seule arrête l'*exfiltration* de clé, mais
-un host-root qui peut encore *appeler* le signer pourrait re-signer un ledger tronqué/réécrit pour la
-suite. Le witness anchor épingle les heads historiques quelque part que l'hôte ne peut pas altérer, donc
-`reconcile` attrape la réécriture. Inversement, le witness seul ne protège pas la clé. Activez les **deux**
-et forger la piste d'audit exige de compromettre **l'hôte de Forge *et* le witness *et* le HSM**.
+**Why both are needed.** Off-host signing alone stops key *exfiltration*, but
+a host-root that can still *call* the signer could re-sign a truncated/rewritten ledger going
+forward. The witness anchor pins the historical heads somewhere the host cannot alter, so
+`reconcile` catches the rewrite. Conversely, the witness alone does not protect the key. Enable **both**
+and forging the audit trail requires compromising **the Forge host *and* the witness *and* the HSM**.
 
-Les deux contrôles sont **opt-in** : le défaut communautaire reste local + `NullAnchor` (byte-identique et
-sans dépendance). Voir `forge/anchor.py` pour le modèle de menace derrière le witness anchor.
+Both controls are **opt-in**: the default remains local + `NullAnchor` (byte-identical and
+dependency-free). See `forge/anchor.py` for the threat model behind the witness anchor.
 
 ---
 
-## Secrets de données au repos — ce que vous devez garder, et ce qui casse sinon
+## Data-at-rest secrets — what you must keep, and what breaks otherwise
 
-La discussion sur la garde ci-dessus porte sur la **clé de signature du ledger** (intégrité). Deux
-*autres* secrets gouvernent la **confidentialité au repos**. Ils sont indépendants l'un de l'autre et de
-la clé de signature, et une restauration n'est pleinement réussie que lorsque vous détenez encore ceux que
-vous avez utilisés :
+The custody discussion above is about the **ledger signing key** (integrity). Two
+*other* secrets govern **confidentiality at rest**. They are independent of each other and of
+the signing key, and a restore is only fully successful when you still hold the ones
+you used:
 
-| Secret | Protège | Si vous le perdez |
+| Secret | Protects | If you lose it |
 |---|---|---|
-| `FORGE_FIELD_KEY` (+ `_FILE`) | Le **matériel d'authentification** des engagements — bearers, cookies et valeurs d'en-tête des comptes de test de l'opérateur (`scope_json.auth`). Chiffrement de champ, **build par défaut**, AEAD pur Rust. | La base reste pleinement intacte et lisible ; seul ce matériel reste **scellé**. Les runs sur ces engagements **refusent de démarrer** (jamais un contexte d'auth vide en silence). Récupération = **ré-entrer** le matériel dans l'éditeur d'engagement. |
-| `FORGE_DB_KEY` | Le **fichier SQLite entier** (SQLCipher, image `encryption` seulement). | La base est **illisible**. Aucune récupération partielle. |
-| Passphrase de backup | L'**archive** (`forge backup`), qui porte le snapshot de la DB + le ledger + la clé de signature. | L'archive est **irrécupérable** — il n'y a aucune voie de sortie en clair. |
+| `FORGE_FIELD_KEY` (+ `_FILE`) | The engagements' **authentication material** — bearers, cookies and header values of the operator's test accounts (`scope_json.auth`). Field encryption, **default build**, pure-Rust AEAD. | The database stays fully intact and readable; only this material stays **sealed**. Runs on these engagements **refuse to start** (never a silently empty auth context). Recovery = **re-enter** the material in the engagement editor. |
+| `FORGE_DB_KEY` | The **entire SQLite file** (SQLCipher, `encryption` image only). | The database is **unreadable**. No partial recovery. |
+| Backup passphrase | The **archive** (`forge backup`), which carries the DB snapshot + the ledger + the signing key. | The archive is **unrecoverable** — there is no plaintext way out. |
 
-**Ils se composent, et ils sont vérifiés indépendamment.** Restaurer une archive avec la bonne passphrase
-sur un hôte qui n'a pas `FORGE_FIELD_KEY` donne une installation complète et fonctionnelle dont le
-matériel d'auth reste scellé — ce qui est le comportement fail-closed voulu, pas de la corruption. Stockez
-la field key là où vous stockez la passphrase de backup : elles sont nécessaires ensemble pour ramener un
-engagement **armé**.
+**They compose, and they are checked independently.** Restoring an archive with the right passphrase
+on a host that does not have `FORGE_FIELD_KEY` yields a complete, working installation whose
+auth material stays sealed — which is the intended fail-closed behaviour, not corruption. Store
+the field key where you store the backup passphrase: they are needed together to bring back an
+**armed** engagement.
 
-> **Rotation.** Le scellement est par-écriture et idempotent : le matériel déjà scellé sous une ancienne
-> clé est laissé tel quel. Pour faire passer un engagement à une nouvelle clé, posez le nouveau
-> `FORGE_FIELD_KEY` et **ré-entrez** son matériel dans l'éditeur — la console le scelle alors sous la
-> nouvelle clé. Il n'y a pas de re-key en masse in-place, délibérément : cela exigerait de détenir les deux
-> clés à la fois dans le processus.
+> **Rotation.** Sealing is per-write and idempotent: material already sealed under an old
+> key is left as is. To move an engagement to a new key, set the new
+> `FORGE_FIELD_KEY` and **re-enter** its material in the editor — the console then seals it under the
+> new key. There is no in-place bulk re-key, deliberately: it would require holding both
+> keys at once in the process.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Module de SURFACE client — lit le JavaScript de la cible et en extrait les couples
 source -> puits (XSS DOM) ainsi que les chemins d'API construits (Client-Side Path Traversal).
 

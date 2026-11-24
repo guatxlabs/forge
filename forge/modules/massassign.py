@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Oracle A PREUVE du MASS ASSIGNMENT — `massassign.params`.
 
 D'OU VIENT CETTE CLASSE

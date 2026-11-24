@@ -1,0 +1,1263 @@
+# Forge — Déploiement self-service (runbook) & empreinte
+
+[English](DEPLOYMENT.md) | [Français](DEPLOYMENT.fr.md)
+
+> 🧭 [Documentation Forge](README.fr.md) · Voir aussi : [Installation](INSTALLATION.fr.md) ·
+> [Premier déploiement (wizard)](FIRST_DEPLOYMENT.fr.md) · [Configuration](CONFIGURATION.fr.md) ·
+> [**Upgrade / migration / backup (runbook)**](UPGRADE.fr.md)
+
+> **Usage AUTORISÉ uniquement.** Forge reste **INERTE par défaut** (`in_scope` vide = tout refusé).
+> Rien de ce runbook n'arme quoi que ce soit : l'opérateur arme chaque couche consciemment (cf. la
+> gate ROE à 4 couches dans le [README](../README.fr.md)).
+
+Ce document est le **runbook self-deploy bout-en-bout** pour un client frais : choisir une image,
+la lancer, provisionner l'install **depuis le navigateur** (wizard — **rien de codé en dur**),
+migrer d'éventuelles données existantes, et mettre en place des **sauvegardes chiffrées
+programmées**. La deuxième moitié conserve l'**empreinte mesurée** et la matrice de déploiement.
+
+**Table des matières**
+
+1. [Options de build & run](#1-options-de-build--run) — mini/full, Docker, docker-compose, natif/systemd, image `encryption` (§1.5), chiffrement de **champ** du matériel d'auth (§1.6, build par défaut)
+2. [Premier boot — le wizard web](#2-premier-boot--le-wizard-web) — admin, crypto, source de détection, politique opérateur
+3. [Données — migration & sauvegardes chiffrées](#3-données--migration--sauvegardes-chiffrées)
+4. [Contexte de build & dépendance `guatx-core`](#4-contexte-de-build--dépendance-guatx-core)
+5. [Liveness `/health` & en-tête `Host`](#5-liveness-health--en-tête-host)
+6. [Empreinte mesurée & matrice de déploiement](#6-empreinte-mesurée--matrice-de-déploiement) *(référence)*
+
+---
+
+## 1. Options de build & run
+
+> ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, cf.
+> `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
+> les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
+> clone standalone y suffit). Détail en [§4](#4-contexte-de-build--dépendance-guatx-core).
+
+### 1.0 Pré-étape OBLIGATOIRE — le fichier scope (fail-loud)
+
+Le scope/ROE actif est **monté en volume**, jamais cuit dans l'image. Créer le **fichier** avant tout `up` :
+
+```sh
+# depuis la racine du dépôt
+cp scope.example.json scope.json          # in_scope vide = INERTE ; éditer AVEC AUTORISATION écrite
+```
+
+Si `scope.json` est absent, Docker crée un **répertoire** vide à sa place : l'entrypoint compose
+**échoue bruyamment** (message explicite) plutôt que de démarrer sur un scope illisible. Absent/vide
+sans répertoire ⇒ repli sur `scope.example.json` embarqué (INERTE). `scope.json` reste gitignoré.
+
+### 1.1 Profils d'image : `mini` vs `full`
+
+Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dégradent proprement**
+(`available:false`) quand un outil manque — aucune erreur, c'est géré par l'engine.
+
+| Profil | Contenu | Poids | `?format=pdf` | Modules PD (httpx/nuclei/subfinder) |
+|---|---|---|---|---|
+| `mini` | console + `python3` + `nmap` | **~150-250 MB** | `pdf_unavailable` (impression navigateur) | `available:false` |
+| `full` *(défaut)* | + binaires ProjectDiscovery (vérifiés SHA256) + moteur PDF weasyprint | **~350-500 MB** | actif clé-en-main | disponibles |
+
+### 1.2 Docker (image seule)
+
+```sh
+# depuis la racine du dépôt
+# full (défaut)
+docker build -t forge:0.0.1 .
+# mini
+docker build --build-arg FORGE_TOOLS_PROFILE=mini -t forge:0.0.1-mini .
+
+docker run -d --name forge \
+  -p 127.0.0.1:7100:7100 \
+  -v forge-db:/data/db -v forge-ledger:/data/ledger \
+  -v "$PWD/scope.json:/data/scope/scope.json:ro" \
+  --env-file .env \
+  forge:0.0.1
+```
+
+> Bind **loopback uniquement** (`127.0.0.1:7100`). N'exposer publiquement qu'à travers un
+> reverse-proxy + auth + `FORGE_CONSOLE_HOST` (host-allowlist anti-DNS-rebinding) — cf. [§5](#5-liveness-health--en-tête-host).
+
+### 1.3 docker-compose *(recommandé)*
+
+Le compose fixe déjà le bon contexte, le fail-loud du scope, les volumes, le healthcheck `/health`
+et le bind loopback. **Services optionnels derrière des profils** ⇒ un `up` nu démarre la **console seule**.
+
+```sh
+# depuis la racine du dépôt
+docker compose up -d --build          # console SEULE (profil full par défaut)
+FORGE_TOOLS_PROFILE=mini docker compose up -d --build   # console SEULE, image mini
+
+# couches optionnelles, à la demande (aucune n'est requise au boot) :
+docker compose --profile browser up -d        # + accès/évasion (Camoufox :8080)
+docker compose --profile msf --profile burp up -d   # + connecteurs (BYO images)
+
+docker compose config      # valider la configuration résolue
+```
+
+Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `.env`
+(gitignoré, `required:false`). Gabarit commenté : [`.env.example`](../.env.example). Les connecteurs
+`browser`/`msf`/`burp` restent **inertes** tant que leur service n'est pas joignable (sonde à fire-time).
+
+> **Secrets sans `.env` en clair.** Chaque secret d'env accepte un jumeau `<VAR>_FILE` : l'env porte un
+> **chemin**, le secret vit dans un **fichier monté root-owned** (Docker secret / Secret k8s), pas dans
+> un `.env` posé à côté de l'app. Détails, tableau des secrets couverts, et ce qui est déjà write-only
+> via l'UI (détection, SSO `client_secret`) : [`docs/SECRETS.md`](SECRETS.fr.md).
+
+### 1.4 Natif / systemd (sans Docker)
+
+Unité durcie fournie : [`deploy/forge.service`](../deploy/forge.service)
+(`NoNewPrivileges`, `ProtectSystem=strict`, `CapabilityBoundingSet=`, seccomp `@system-service`…).
+Le durcissement systemd **n'affaiblit aucun garde-fou applicatif**, il renforce l'isolation du process.
+
+```sh
+cd console && cargo build --release            # depuis la racine du dépôt ; binaire offline (cache cargo)
+sudo install -m0755 target/release/forge /usr/local/bin/
+sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
+sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
+sudo mkdir -p /var/lib/forge/{db,ledger,scope}                      # remplir scope/scope.json AVEC AUTORISATION
+sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge.env   # y mettre les hashes argon2id
+sudo cp deploy/forge.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now forge
+```
+
+Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans aucune dépendance pip**.
+
+### 1.5 Image `encryption` (chiffrement AU REPOS — SQLCipher, opt-in)
+
+> ℹ️ Le **matériel d'authentification** (bearers/cookies/en-têtes des comptes de test d'un engagement)
+> est chiffré **par champ**, dans le build **par défaut**, sans SQLCipher — cf.
+> [§1.6](#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut). SQLCipher ci-dessous
+> chiffre **tout le reste** en plus, au prix d'un backend crypto système à la compilation.
+
+Le build **par défaut** stocke la base SQLite **en clair** (`capabilities.sqlcipher:false`). Pour un
+chiffrement au repos, compiler la console avec la feature `encryption` puis fournir la clé au boot :
+
+```sh
+# 1) image chiffrée (feature Cargo -> backend crypto SQLCipher)
+cd console && cargo build --release --features encryption   # depuis la racine du dépôt
+#    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
+
+# 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)
+#    extrait docker-compose.override.yml :
+#      services:
+#        forge:
+#          image: forge:0.0.1-encryption
+#          environment:
+#            FORGE_DB_KEY: ${FORGE_DB_KEY}     # [SECRET] depuis .env/docker secret, JAMAIS commité
+```
+
+Sans `FORGE_DB_KEY` correcte, la base chiffrée est **illisible** (fail-closed). Convertir un install
+existant en clair → chiffré = **Runbook B** de [`docs/MIGRATION.md`](MIGRATION.fr.md). Le wizard expose
+`capabilities.sqlcipher` (true seulement sur ce build) pour que l'UI le reflète honnêtement.
+
+> **À part** la crypto AU REPOS (opt-in), le **ledger d'engagement** est signé **Ed25519** (asymétrique,
+> vérifiable par un tiers avec la seule clé publique) **par défaut** — aucune action requise.
+
+### 1.6 Chiffrement de CHAMP du matériel d'authentification (build par défaut)
+
+Le `scope_json` d'un engagement peut porter un **contexte d'authentification** (`auth.accounts[]`) :
+les **bearers, cookies et valeurs d'en-tête des comptes de test** de l'opérateur — c'est-à-dire des
+**sessions authentifiées sur l'estate d'un client**. C'est la seule donnée de la base qui soit un
+*credential vivant*. Elle est **chiffrée au repos dans le build par défaut**, sans SQLCipher et **sans
+aucune dépendance supplémentaire** : la pile AEAD **pur Rust** déjà embarquée (XChaCha20-Poly1305 +
+argon2id — celle qui chiffre les sauvegardes) est réutilisée. L'`openssl-freedom` du build **par défaut**
+reste intacte ([§3quater.1](#perimetre-de-l-openssl-freedom) — 0 occurrence mesurée).
+
+```sh
+# La clé suit le motif maison <VAR>_FILE (cf. « Secrets sans .env en clair ») :
+FORGE_FIELD_KEY=<passphrase forte>          # ... OU, mieux :
+FORGE_FIELD_KEY_FILE=/run/secrets/forge_field_key   # secret Docker/k8s monté root, l'env ne porte qu'un CHEMIN
+```
+
+**Ce qui est chiffré, et ce qui ne l'est pas** (périmètre délibéré) :
+
+| Donnée | Au repos | Pourquoi |
+|---|---|---|
+| `auth.accounts[].bearer` / `.cookies` / valeurs de `.headers` | **chiffré** | credential rejouable |
+| `auth.accounts[].label`, **noms** d'en-têtes/cookies | clair | non secrets ; l'éditeur les ré-affiche **sans la clé** |
+| `auth.idor_targets[]` (`url`/`owner`/`marker`) | clair | config déjà re-servie en clair par l'API |
+| `users.pass_hash` (argon2id), `session.token_sha` (SHA-256) | clair | empreintes à **sens unique**, pas du matériel rejouable |
+
+**Fail-closed — trois règles, aucune dégradation silencieuse :**
+
+1. **Aucun contexte auth ⇒ aucune clé requise.** Une install qui n'arme pas de contexte n'est
+   **jamais** affectée : comportement et payloads inchangés.
+2. **Écrire du matériel sans clé ⇒ `503 field_key_missing`.** On ne persiste **jamais** un credential
+   en clair « en attendant ». Le message nomme la variable à poser. *(Re-cadrer un périmètre sans
+   ressaisir de matériel reste possible sans la clé : rien de nouveau n'est à chiffrer.)*
+3. **Lancer un run dont le matériel ne s'ouvre pas ⇒ le run est REFUSÉ** (`auth_context_sealed`).
+   Partir avec un contexte auth **vide** désarmerait les oracles de contrôle d'accès en silence : le
+   moteur aurait l'air de tourner sans plus rien tester en cross-compte. Il n'existe aucun repli.
+
+**Migration d'un install existant : automatique, au boot.** Les lignes antérieures portent le matériel
+en clair ; la console les **scelle en place** au démarrage (idempotent, rejouable). Sans clé, rien
+n'est converti et le boot le **crie** — laisser croire au chiffrement serait pire que le clair assumé :
+
+```
+[forge] ⚠️ MATÉRIEL D'AUTHENTIFICATION EN CLAIR AU REPOS — 2 engagement(s) … FORGE_FIELD_KEY n'est pas posée …
+[forge] CHIFFREMENT DE CHAMP ARMÉ — 2 engagement(s) avec matériel d'authentification, chiffré AU REPOS …
+```
+
+L'état est aussi **visible dans le produit** : `GET /api/engagements` rend `auth.at_rest` ∈
+`sealed | plaintext | mixed | none` (aucun secret — juste l'état).
+
+> ⚠️ **CUSTODY — `FORGE_FIELD_KEY` est un secret à conserver, au même titre que la passphrase de
+> sauvegarde.** Une sauvegarde restaurée sur une machine sans cette clé rend une base **intacte** dont
+> le matériel d'auth reste **scellé** : les runs de ces engagements refuseront de démarrer jusqu'à ce
+> que la clé soit fournie. Les deux secrets sont **indépendants** et **tous deux requis** (cf.
+> [`docs/KEY_CUSTODY.md`](KEY_CUSTODY.fr.md)). Perdre la clé n'entraîne aucune perte d'autre donnée : il
+> suffit de **ressaisir** le matériel d'authentification dans l'éditeur d'engagement.
+
+Les deux couches **se composent** : `--features encryption` (SQLCipher) par-dessus des champs scellés
+reste valide — le champ est alors chiffré deux fois, ce qui est sans effet de bord.
+
+---
+
+## 2. Premier boot — le wizard web
+
+**Rien n'est codé en dur.** Une install fraîche n'a **aucun admin, aucun scope réel, aucune source de
+détection** : tout se provisionne **depuis le navigateur** au premier accès.
+
+1. Ouvrir **`http://127.0.0.1:7100`** (ou l'URL du reverse-proxy). Le SPA appelle `GET /api/setup/state` :
+   - `needs_setup:true` ⇒ le **wizard** s'affiche ;
+   - `capabilities.sqlcipher` ⇒ l'UI sait si le chiffrement au repos est disponible (image `encryption`).
+2. **Le wizard `POST /api/setup`** (route **PUBLIQUE mais auto-désactivante** : `409` dès qu'un admin
+   existe). Champs — seul l'admin est requis, **le reste n'est persisté que s'il est fourni** :
+   - **Créer l'admin** (`admin_login` + `admin_password`) → hash **argon2id**, rôle `admin`. Le mot de
+     passe/hash n'est **jamais** journalisé ni ledgerisé. Le navigateur **atterrit connecté** (cookie
+     `forge_session`, HttpOnly/SameSite=Strict).
+   - **Crypto** — le ledger est déjà signé **Ed25519** automatiquement ; le chiffrement **au repos**
+     dépend de l'image (`encryption`, cf. [§1.5](#15-image-encryption-chiffrement-au-repos--sqlcipher-opt-in)),
+     surfacé via `capabilities.sqlcipher`.
+   - **Source de détection = LEUR infra** (`detection_source`, optionnel) — plugin **configurable, sans
+     code** : FortiGate/pfSense/OPNsense/CrowdSec/Elastic/OpenSearch/fichier/exec… Modèle, préréglages
+     et mapping MITRE : **[`docs/DETECTION.md`](DETECTION.fr.md)**. Réglable aussi plus tard dans
+     *Administration → Source de détection*. Le secret d'auth est **write-only** (jamais renvoyé/loggé).
+   - **Politique opérateur** (`operator_policy`, optionnel) — gouverne le rôle **opérateur/C2** (RBAC) ;
+     vide = C2 **fermé** (fail-closed). `session_ttl` optionnel.
+3. La gate d'auth **s'engage** dès qu'un admin activé existe (l'état DB fait autorité). `/api/setup`
+   se ferme définitivement.
+
+> ⚠️ **Sécurité — NE PAS exposer le port AVANT le premier provisioning.** Le wizard zéro-config est
+> **public par conception** jusqu'à ce qu'un admin existe (`POST /api/setup` s'auto-désactive en `409`
+> seulement une fois l'admin créé). Tant que l'install est vierge, **quiconque atteint l'hôte avant vous
+> peut réclamer l'admin** — exposition standard des wizards self-hosted. Le code gère la course
+> (création d'admin atomique, `/api/setup` fail-closed dès le premier admin), **mais le port doit rester
+> sur loopback / derrière une auth tant que l'install n'est pas provisionnée.** Le bind par défaut est
+> déjà **`127.0.0.1:7100`** (loopback) — **ne PAS passer à `0.0.0.0` avant d'avoir claim l'admin.**
+> Provisionner d'abord (localement ou via un tunnel/reverse-proxy authentifié), publier ensuite. En
+> headless, provisionner par variables d'env (ci-dessous) **avant** le premier démarrage exposé.
+
+**Provisioning headless** (sans navigateur) : poser `FORGE_CONSOLE_PASS_HASH` /
+`FORGE_CONSOLE_OPERATOR_HASH` (hashes argon2id via `forge hashpw` / `hashpw-operator`) et
+`FORGE_CONSOLE_TOKEN` dans `.env`/l'EnvironmentFile — l'`state` bascule alors `provisioned:true` sans wizard.
+
+**RBAC/administration après boot** : gestion des comptes via `/api/users` (admin) ; **Basic** = viewer
+(lecture), **Bearer token** = agent/admin (écriture d'ingestion), rôle **opérateur** pour le C2 gouverné.
+Toutes les routes (sauf `/health`) sont derrière **host-guard** (anti-rebinding) + **auth-guard**.
+
+---
+
+## 3. Données — migration & sauvegardes chiffrées
+
+### 3.1 Migrer un install existant
+
+Reprendre un install **systemd/bare-metal** vers Docker (ou toute cible) **sans perdre l'audit**. Trois
+artefacts **couplés** voyagent ensemble : la base SQLite, le ledger `engagement.jsonl`, **et sa clé de
+signature `.ed25519`** (sinon la chaîne signée devient invérifiable). Runbook complet + garde-fous :
+**[`docs/MIGRATION.md`](MIGRATION.fr.md)**.
+
+```sh
+# UX primaire : conteneur one-shot au 1er déploiement (source ouverte READ-ONLY, jamais mutée)
+docker run --rm \
+  -v /ancien/forge:/import:ro -v forge-db:/data/db -v forge-ledger:/data/ledger \
+  forge:0.0.1 \
+  forge migrate --from /import --to /data/db/forge.db \
+    --ledger /data/ledger/engagement.jsonl --verify
+# chiffrer au passage (image `encryption`) : ... --encrypt --key-env FORGE_DB_KEY   (clé via ENV, jamais argv)
+```
+
+Le wizard propose aussi un **import pré-provision** (`POST /api/setup/migrate`), **opt-in** et réservé
+au pré-déploiement (désactivé par défaut : `FORGE_ALLOW_API_MIGRATE` + `FORGE_CONSOLE_IMPORT_DIR`) ; la
+voie CLI ci-dessus reste l'UX documentée.
+
+**Mettre à jour une console DÉJÀ déployée** (bump de schéma après un `docker pull` d'une image plus
+récente) → **une seule commande fail-closed** `forge upgrade` : snapshot pré-upgrade **chiffré** →
+`migrate` additif → vérif schéma/ledger/santé → **rollback automatique** au moindre échec. Voir le runbook
+dédié **[`docs/UPGRADE.md`](UPGRADE.fr.md)** (SQLite solo, Postgres, HA rolling-upgrade, drill de restore).
+La version de schéma est visible via `forge status` et le champ `schema_version` de `/health`.
+
+### 3.2 Sauvegardes chiffrées + programmation + offsite
+
+L'archive de sauvegarde est **TOUJOURS chiffrée** (argon2id + **XChaCha20-Poly1305**, pur Rust) — il
+n'existe **aucun chemin en clair**, car elle embarque **la clé de signature ET la base**. Format,
+restauration, garde-fous et expédition offsite : **[`docs/BACKUP.md`](BACKUP.fr.md)**.
+
+- **Politique** (activation / intervalle / rétention / offsite `rclone`|`exec`) : réglée dans
+  *Administration → Sauvegarde* ou `POST /api/backup/policy` — **rien de codé en dur**. Le nom d'ENV
+  portant la passphrase est référencé par `policy.passphrase_env` (jamais la passphrase en clair en DB).
+- **Scheduler en-console** (fail-open : un échec est loggé + ledgerisé, ne crashe jamais la console),
+  piloté par 2 knobs d'environnement :
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `FORGE_BACKUP_TICK_SECS` | période de réveil du scheduler | `60` s |
+| `FORGE_BACKUP_PASSPHRASE` | **[SECRET]** passphrase (nom d'ENV référencé par `policy.passphrase_env`) | — |
+
+Restauration : `POST /api/restore` (ou CLI), passphrase obligatoire (fail-closed), manifeste `sha256`
+re-vérifié, clé `.ed25519` replacée en `0600`.
+
+### 3.3 Object-store S3/MinIO pour artefacts (offsite `s3`) — feature Cargo `object-store` (OPT-IN)
+
+Le stockage d'artefacts (archive de backup offsite, exports/évidence) passe par un **seam BlobStore**
+backend-agnostique (`console/src/blob.rs`). Le build **PAR DÉFAUT** ne compile que
+`LocalFsBlobStore` (**système de fichiers**, aucune dépendance nouvelle) : le chemin par défaut (aucun
+artefact S3 configuré) est **inchangé**. L'implémentation **S3/MinIO** (`S3BlobStore`) et sa dépendance
+`rust-s3` vivent **derrière la feature Cargo `object-store`** (OFF par défaut). Le build par défaut
+(feature OFF) ne pull **aucune** dép S3 et reste byte-identique.
+
+⚠️ **Cette feature est le SEUL périmètre où l'openssl-freedom du dépôt ne tient pas** — et c'était
+affirmé ici à tort. `rust-s3` est bien câblé en `sync-rustls-tls` (donc **ni** `native-tls`, **ni**
+`openssl`), mais la chaîne `attohttpc → rustls/DEFAULT` tire **`aws-lc-rs`/`aws-lc-sys`** : **12**
+occurrences interdites mesurées, contre **0** au build par défaut. La chaîne est **transitive** — pas
+réparable sans forker `rust-s3`/`attohttpc`. Conséquence pratique : construire avec `object-store`
+exige une toolchain **C + cmake** au build (rien de plus au runtime). Détail, mesures et garde
+automatique : [§3quater.1](#perimetre-de-l-openssl-freedom).
+
+**Sélection runtime** : `S3BlobStore` est choisi **uniquement** si la feature est compilée **ET** l'ENV
+S3 est configuré ; sinon `LocalFsBlobStore` (racine `FORGE_BLOB_DIR`, défaut `blobs/` sibling de la base).
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `FORGE_BLOB_DIR` | racine du store local (feature OFF **ou** S3 non configuré) | `blobs/` sibling de la base |
+| `FORGE_BLOB_S3_ENDPOINT` | endpoint S3/MinIO (ex. `http://minio:9000`) — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_BUCKET` | bucket cible — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_ACCESS_KEY` | **[SECRET]** access key — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_SECRET_KEY` | **[SECRET]** secret key — **requis** pour S3 | — |
+| `FORGE_BLOB_S3_REGION` | région SigV4 (MinIO l'ignore mais SigV4 l'exige) | `us-east-1` |
+
+Adressage **path-style** forcé (compatible MinIO). Les credentials vivent **uniquement dans l'ENV** —
+jamais en base, jamais dans la politique de backup, jamais journalisés/ledgerisés (les traces ne portent
+que `backend`/`bucket`/`key`/`url`).
+
+**Backup offsite `s3`** : sous la feature, la politique de backup accepte `offsite.kind = "s3"` (préfixe
+de clé optionnel `key_prefix`). Le scheduler PUT l'archive **chiffrée** vers le bucket S3, référencée par
+clé/URL — trace `console.backup.offsite` (kind + statut, aucun secret). Exemple de politique :
+
+```jsonc
+POST /api/backup/policy
+{ "enabled": true, "interval_secs": 86400, "retention": 7,
+  "passphrase_env": "FORGE_BACKUP_PASSPHRASE",
+  "offsite": { "kind": "s3", "key_prefix": "offsite/backups" } }
+```
+
+**Build & validation (round-trip MinIO)** :
+
+```bash
+cd console && cargo build --release --features object-store   # (Docker : --build-arg FORGE_CARGO_FEATURES=object-store)
+
+# MinIO de test + bucket
+docker run -d --rm -e MINIO_ROOT_USER=forge -e MINIO_ROOT_PASSWORD=forgepw123 \
+    -p 9000:9000 --name forge-minio minio/minio server /data
+docker run --rm --network host --entrypoint sh minio/mc -c \
+    'mc alias set l http://localhost:9000 forge forgepw123 && mc mb l/forge-artifacts'
+
+export FORGE_BLOB_S3_ENDPOINT=http://localhost:9000 FORGE_BLOB_S3_BUCKET=forge-artifacts \
+       FORGE_BLOB_S3_ACCESS_KEY=forge FORGE_BLOB_S3_SECRET_KEY=forgepw123
+# round-trip PUT→GET→EXISTS→DELETE sur le store actif (S3 ici, sinon local)
+forge blob-selftest --key evidence/proof.bin
+# expédie un artefact RÉEL (archive de backup chiffrée) via le producteur offsite câblé, puis GET-vérifie
+forge blob-selftest --file ./mon-archive.forge --key-prefix offsite/backups
+```
+
+Feature OFF (défaut), la sous-commande `blob-selftest` n'existe pas et seul le store local est disponible.
+
+---
+
+## 3bis. Backend Postgres (Stage 4 — HA / multi-instance)
+
+Le backend PAR DÉFAUT est **SQLite** (fichier local, zéro dépendance) — **inchangé**. Un backend
+**Postgres** OPT-IN existe derrière la feature Cargo `store-postgres` : plusieurs instances **console
+stateless** peuvent partager **UNE** base Postgres. Le backend PG est **openssl-free** — TLS `rustls` +
+provider `ring`, jamais native-tls/openssl, **0** occurrence interdite mesurée sous
+`--features store-postgres` ([§3quater.1](#perimetre-de-l-openssl-freedom)) ; le build par défaut (feature
+OFF) ne compile **aucune** dép Postgres et reste byte-identique.
+
+### 3bis.1 Build & run avec Postgres
+
+Deux réglages runtime pilotent la sélection (gate **FAIL-CLOSED**) :
+
+| Variable | Rôle |
+|---|---|
+| `FORGE_ENTERPRISE_STORE=postgres` | sélectionne le backend Postgres (sinon SQLite) |
+| `FORGE_DB_URL` | DSN `postgres://user:pass@host:5432/db` — **requis** si `…=postgres` (sinon refus de démarrer) |
+
+La feature doit être **compilée** dans le binaire (`FORGE_ENTERPRISE_STORE=postgres` sur un binaire
+par défaut échoue au boot avec un message clair « rebuild with `--features store-postgres` »).
+
+```sh
+# Natif : build feature (openssl-free) puis run
+cd console && cargo build --release --features store-postgres
+FORGE_ENTERPRISE_STORE=postgres \
+FORGE_DB_URL='postgres://forge:forge@db.internal:5432/forge' \
+  ./target/release/forge
+```
+
+**docker-compose** — un override ADDITIF (`docker-compose.postgres.yml`) recompile l'image avec la
+feature (`--build-arg FORGE_CARGO_FEATURES=store-postgres`, qui installe aussi `pg_dump`/`pg_restore`
+dans l'image) et démarre un service `postgres:16` (profil `postgres`). Le déploiement SQLite par défaut
+(`docker-compose.yml` seul) reste **inchangé** :
+
+```sh
+# depuis la racine du dépôt — profil postgres + override
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+               --profile postgres up -d --build
+```
+
+Credentials par défaut d'ÉVAL (`forge/forge`) — **surcharger** en prod via `.env`
+(`FORGE_PG_USER`/`FORGE_PG_PASSWORD`/`FORGE_PG_DB`, repris à la fois par le service `postgres` et par
+`FORGE_DB_URL`). Ne **jamais** publier le port Postgres publiquement (le service reste `expose:`-only sur
+le réseau compose).
+
+### 3bis.2 Migrer les données SQLite → Postgres (Stage 3, gouverné)
+
+Si tu as déjà des données SQLite à conserver, migre-les **AVANT** le 1er run Postgres avec le migrateur
+gouverné (copie table par table en ordre FK, recalage des séquences IDENTITY, **vérification des comptes
+ligne à ligne** avec ROLLBACK sur écart, **checkpoint ledger signé**) :
+
+```sh
+# dry-run d'abord (n'écrit RIEN) — inspecte ce qui SERAIT copié
+forge migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl --dry-run
+# puis la vraie migration (--force pour écraser une cible non vide)
+forge migrate-store --to 'postgres://forge:forge@postgres:5432/forge' \
+  --from /data/db/forge.db --ledger /data/ledger/engagement.jsonl
+```
+
+Codes de sortie : `0` OK · `1` refus de gouvernance (cible non vide sans `--force`) ou écart de comptes
+(rollback) · `2` usage/connexion/schéma · **`3` migration committée mais checkpoint ledger non écrit**
+(gouvernance : une migration sans son checkpoint tamper-evident ne rapporte **jamais** un succès — à
+traiter comme un échec, ré-émettre le checkpoint). En Docker, lancer via un conteneur one-shot
+`run --rm --entrypoint forge … migrate-store …` (cf. `docker-compose.postgres.yml`).
+
+### 3bis.3 Sauvegarde & restauration Postgres (`pg_dump`)
+
+Sous un backend Postgres actif, `forge backup` (CLI / `POST /api/backup` / scheduler) sauvegarde
+**Postgres** — plus le fichier SQLite (qui serait **vide**). L'artefact `db` de l'archive chiffrée est un
+dump **`pg_dump -Fc`** (format custom, compressé, **restaurable via `pg_restore`**), sous l'entrée
+`db.pgdump` (le manifeste porte `db_format: "pgdump"`). `pg_dump` est invoqué en **argv fixe (no-shell)**
+et les credentials du DSN sont **rédigés** dans les logs/le ledger. **Si `pg_dump` est absent** du PATH,
+la sauvegarde **échoue avec un message clair** (jamais de repli silencieux sur un SQLite vide) — d'où
+`postgresql-client` dans l'image PG.
+
+Le reste de la chaîne est **inchangé** : archive **toujours chiffrée** (argon2id + XChaCha20-Poly1305),
+ledger + clé `.ed25519` inclus, chaîne du ledger vérifiée avant/après.
+
+**Restauration Postgres** (manuelle, hors console) — extraire `db.pgdump` de l'archive déchiffrée puis :
+
+```sh
+# 1) déchiffrer l'archive (POST /api/restore apply=false, ou l'outil de restore) et extraire db.pgdump
+# 2) restaurer dans une base cible avec pg_restore (custom format)
+createdb -h HOST -U forge forge_restored
+pg_restore -h HOST -U forge -d forge_restored --no-owner db.pgdump
+# vérifier : pg_restore --list db.pgdump  (liste les TABLE DATA — dump non trivial + restorable)
+```
+
+> Le **swap-en-place** de `POST /api/restore apply=true` reste SQLite-only (il remplace le fichier
+> local). Sous Postgres, la restauration se fait via `pg_restore` ci-dessus (le dump est un artefact PG
+> standard). Le `restore` CLI SQLite n'est **pas** le chemin PG.
+
+### 3bis.4 Liveness `/health` sous PG
+
+`/health` (§5) **ping le store ACTIF** : sous PG il fait un `SELECT 1` **à travers le backend** (donc via
+le **reconnect+retry** HA — voir 3bis.5). Champ **additif `db`** : `"ok"` si le ping passe, `"degraded"`
+si la base est injoignable. La sonde reste **rapide et non-fatale** : `/health` répond **toujours 200**
+(liveness du routeur HTTP) même en `degraded`, donc le `HEALTHCHECK` (qui ne teste que le code 200)
+n'oscille pas sur une coupure DB transitoire — mais un superviseur peut lire `db` pour alerter.
+
+### 3bis.5 HA / multi-instance — ce qui est turnkey et ce qui NE l'est PAS
+
+**Turnkey** : `N` instances console **stateless** contre **UNE** base Postgres partagée. Chaque instance
+détient un **client session-pinné** ; sur une coupure (restart/failover Postgres) une opération du store
+qui échoue avec une **erreur de connexion** **se RECONNECTE une fois puis REJOUE** l'opération
+(reconnect au grain d'une opération — jamais au milieu d'une transaction ; une paire
+`INSERT`+`last_insert_id` ne peut pas chevaucher un reconnect). Le seam PG partage la même **granularité
+de verrou** que SQLite.
+
+**PAS turnkey — contraintes réelles à connaître (soyons honnêtes) :**
+
+- **Le ledger tamper-evident est un FICHIER (`engagement.jsonl`), pas dans Postgres.** Le multi-instance
+  exige donc soit un **stockage partagé** pour ce fichier (volume RWX / NFS — attention aux appends
+  concurrents : la console sérialise ses propres appends sous un verrou **par instance**, ce qui ne
+  couvre **pas** deux instances écrivant le **même** fichier en parallèle), soit **un ledger par
+  instance** (chaînes séparées, à agréger à la lecture). Il n'y a **pas** de ledger partagé
+  transactionnel « clé en main ». Pour un vrai multi-writer, préférer **un ledger par instance** (chaque
+  chaîne reste vérifiable indépendamment) plutôt qu'un fichier partagé exposé aux appends concourants.
+- **Caches en mémoire par instance / éventuellement cohérents.** Plusieurs caches sont **locaux** à
+  chaque process et **recalculés au boot / après une mutation faite PAR CETTE instance** :
+  `detection_config` (source de détection), `auth_required` (gate d'auth engagée), le **head du ledger**
+  (`prev`/`seq`). Une mutation faite via l'**instance A** (ex. changer la source de détection, créer un
+  compte) n'invalide **pas** le cache de l'**instance B** tant que B ne re-boote pas / ne refait pas
+  l'action → fenêtre d'**éventuelle cohérence**. La **donnée** (table `settings`/`users`…) est cohérente
+  dans Postgres immédiatement ; c'est le **cache** qui traîne. Sûr pour la lecture (fail-open lisible),
+  mais ne comptez pas sur une propagation inter-instances instantanée des réglages d'admin.
+- **Sticky sessions recommandées** : les caches par instance + le head ledger par instance rendent un
+  routage **collant** (une session admin → toujours la même instance) plus prévisible qu'un round-robin
+  pur.
+
+En résumé : **scale-out en lecture/exécution contre un Postgres partagé = OK** ; l'audit-ledger partagé
+et la propagation instantanée des réglages d'admin **ne sont pas** automatiques — dimensionner en
+conséquence (ledger par instance, ou stockage partagé assumé ; réglages d'admin propagés au reboot).
+
+### 3bis.6 HA sur Kubernetes — manifests `k8s/`
+
+Les manifests HA vivent dans **`k8s/`** (à la racine du repo) et matérialisent la topologie Wave A/B/C
+ci-dessus sur Kubernetes : **console à N réplicas** contre **un Postgres partagé**, MinIO/S3 pour les
+artefacts, Ingress collant pour les flux SSE, et — le cœur du #13 — des **NetworkPolicies deny-by-default
+est-ouest**. C'est le pendant k8s du harnais `docker-compose.ha.yml` + `Caddyfile`. Cette section
+**REMPLACE** l'ancienne note « k3s / k8s single-replica » (voir [§6 « Contrainte d'archi »](#contrainte-darchi)) pour le cas HA.
+
+**Appliquer.**
+
+```sh
+# 1) Construire l'image AVEC le backend Postgres (+ object-store si artefacts S3) — l'image
+#    SQLite par défaut FAIL-CLOSE sous FORGE_HA=1.
+docker build -f Dockerfile \
+  --build-arg FORGE_CARGO_FEATURES="store-postgres object-store" \
+  -t <registry>/forge:0.0.1 .         # contexte = racine du dépôt (git-dep guatx-core, pas de sibling)
+docker push <registry>/forge:0.0.1
+
+# 2) Régler l'image dans k8s/40-console.yaml (et le host réel dans k8s/50-ingress.yaml +
+#    FORGE_CONSOLE_HOST dans k8s/11-config.yaml).
+
+# 3) PROD : NE PAS appliquer k8s/10-secrets.example.yaml (placeholders d'ÉVAL). Provisionner les 3
+#    Secrets (forge-db, forge-auth, forge-objectstore) hors-bande (SealedSecrets/ExternalSecrets/
+#    SOPS), retirer la ligne du kustomization.yaml, puis :
+kubectl apply -k k8s/                          # namespace + config + PG + MinIO + console + ingress + netpol
+# (lab : appliquer tel quel — les Secrets d'éval bootent le cluster de test.)
+```
+
+Validé par **`kubeconform -strict`** (20 ressources, 0 invalide) et `kubectl kustomize k8s/`.
+
+**Contrat env de la console (= Wave A/B/C).** `k8s/40-console.yaml` reproduit exactement le contrat des
+overrides compose :
+
+| Variable | Source k8s | Rôle |
+|---|---|---|
+| `FORGE_HA=1` | ConfigMap | engage HA — boot FAIL-CLOSED si le store actif ≠ Postgres |
+| `FORGE_ENTERPRISE_STORE=postgres` | ConfigMap | sélectionne le backend PG (exige `FORGE_DB_URL`) |
+| `FORGE_DB_URL` | **Secret** `forge-db` | DSN Postgres partagé |
+| `FORGE_INSTANCE_ID` | **`fieldRef: metadata.name`** | identité d'instance = **nom du pod** (unique par réplica → clé du bail leader). Une valeur statique collisionnerait — d'où le `fieldRef`, équivalent k8s du fallback HOSTNAME de compose |
+| `FORGE_CONSOLE_ADDR=0.0.0.0:7100` | ConfigMap | bind interne au pod (jamais public — Service + Ingress + NetworkPolicy devant) |
+| `FORGE_CONSOLE_HOST` | ConfigMap | allowlist Host anti-DNS-rebinding — DOIT inclure le host public de l'Ingress + les noms de Service |
+| `FORGE_CONSOLE_TOKEN` / `_PASS_HASH` / `_OPERATOR_HASH` | **Secret** `forge-auth` | bearer d'ingestion + hashes argon2id (stables entre réplicas) |
+| `FORGE_BLOB_S3_*` | ConfigMap (endpoint/bucket) + **Secret** `forge-objectstore` (clés) | object-store artefacts, actif seulement si l'image est buildée `--features object-store` |
+| `FORGE_CONSOLE_DB` | ConfigMap → `emptyDir` | fallback SQLite **local au pod** (inutilisé sous PG) — jamais sur le volume partagé |
+
+**Élection du leader — pas de worker séparé.** Les réplicas sont identiques. Ils **auto-élisent un unique
+run-leader** via le bail single-row `leader_lease` (`scope='run-worker'`, TTL 45 s) dans le Postgres
+partagé : le leader exécute les engagements (one-run-per-engagement, fencé en DB), les autres servent
+UI/API et **reprennent le bail** à son expiration. `leader`/`instance_id` sont publiés sur `GET /health`.
+**Aucun Deployment worker distinct n'est nécessaire** — scaler `replicas` suffit.
+
+**Sondes.** `readinessProbe`/`livenessProbe` = `GET /health` sur 7100, avec **`Host: localhost`** en
+en-tête (dans l'allowlist par défaut) — sinon kubelet enverrait `Host: <podIP>` → 421 → faux unhealthy.
+`/health` répond **toujours 200** quand le routeur HTTP est vivant (`db:"degraded"` sur coupure DB
+transitoire, sans faire flapper la sonde).
+
+**Ledger partagé RWX — le choix à faire (RWX vs object-store vs ledger-par-instance).** Le ledger
+tamper-evident est un **fichier** (`engagement.jsonl`), pas une table Postgres. `k8s/40-console.yaml` le
+place sur un **PVC `ReadWriteMany`** monté par tous les réplicas — ce qui **exige une StorageClass RWX**
+(NFS / CephFS / EFS / Azure Files / Filestore). Les volumes bloc classiques (**RWO** : EBS, GCE-PD, la
+plupart des CSI par défaut) **ne satisfont pas** RWX et le 2ᵉ réplica ne schedulera pas. Trois options,
+par ordre de robustesse d'audit :
+
+1. **Ledger par instance** (recommandé pour un vrai multi-writer) — chaque réplica écrit **sa propre**
+   chaîne (StatefulSet + PVC RWO par pod) ; chaque chaîne reste vérifiable indépendamment, agrégée à la
+   lecture. Pas d'appends concourants sur un même fichier. *(Le manifeste fourni utilise un Deployment +
+   PVC RWX partagé pour rester turnkey ; migrer vers un StatefulSet par-instance si l'audit strict
+   l'impose.)*
+2. **PVC RWX partagé** (fourni) — un seul `engagement.jsonl` pour tous. La console **sérialise ses propres
+   appends par instance** ; ce verrou **ne couvre pas** deux instances écrivant le même fichier en
+   parallèle → accepter la mise en garde « appends concourants » ou router de façon collante.
+3. **Object-store pour les artefacts** — les **évidences/exports/backups** (pas le ledger lui-même) vont
+   sur MinIO/S3 via le seam `object-store` (`FORGE_BLOB_S3_*`), déchargeant le volume partagé du gros
+   binaire. Orthogonal au choix ledger : combinable avec (1) ou (2).
+
+**Clé de signature du ledger — HORS du volume partagé.** ⚠️ Le PVC RWX `forge-ledger` ne doit
+porter que la **projection JSONL** du ledger (`engagement.jsonl` + high-water-mark), **jamais la clé de
+signature**. Par défaut le signeur **local** écrit sa **clé privée** Ed25519 en `<ledger>.ed25519` (0600)
+**à côté** du ledger — donc **sur ce volume partagé**, où le `0600` n'est **pas** une frontière
+d'isolation : tout pod/sidecar montant le même PVC, ou un **snapshot** du PVC, lit la clé privée brute (→
+forge d'entrées de ledger). Acceptable en mono-tenant lab ; **pas** en HA/multi-tenant. Deux patterns
+supportés, opt-in (les deux préservent `runAsNonRoot`/`readOnlyRootFilesystem` + les NetworkPolicies
+deny-by-default ; leurs Secrets ne sont **pas** dans le `kubectl apply -k k8s/` par défaut) :
+
+1. **(préféré) Signeur off-host PKCS#11** (`FORGE_LEDGER_SIGNER=pkcs11`) — la clé vit sur un HSM/token et
+   ne touche **aucun** volume de pod. Bloc env opt-in dans `k8s/40-console.yaml` ; module + PIN via le
+   Secret `forge-ledger-pkcs11`.
+2. **(repli) Clé en Secret monté read-only** — pré-générer la clé Ed25519 hors-bande, la fournir via le
+   Secret dédié `forge-ledger-key` **monté en lecture seule**, et pointer **`FORGE_LEDGER_KEY`** dessus
+   (bloc opt-in `k8s/40-console.yaml`). La clé est **lue, pas réécrite** → elle n'atterrit **jamais** sur
+   le PVC `forge-ledger` partagé.
+
+Détail complet, wiring k8s et rotation : **[`docs/KEY_CUSTODY.md` §Garde de clés en HA](KEY_CUSTODY.fr.md#garde-de-clés-en-ha-kubernetes--garder-la-clé-privée-hors-du-volume-de-ledger-partagé)**.
+
+**Postgres — managé recommandé en prod.** `k8s/20-postgres.yaml` fournit un **StatefulSet single-replica +
+Service headless + PVC RWO** pour le **test/dev**. En **prod, préférer un Postgres managé/opéré** (RDS,
+Cloud SQL, CloudNativePG/Crunchy) : un Postgres mono-pod ne rend pas la stack HA (backups, failover, PITR
+viennent du managé). Pour pointer la console dessus : ne pas appliquer `20-postgres.yaml`, mettre le DSN
+managé dans le Secret `forge-db`, et remplacer la règle d'egress `console→postgres` par un `ipBlock` vers
+l'endpoint managé (cf. notes de `60-networkpolicies.yaml`). Idem MinIO → **S3 externe** en prod.
+
+**Sticky sessions pour SSE.** Les flux SSE (logs de run, présence live) doivent rester **épinglés à un
+seul backend** pour la durée du stream, et les caches par-instance + le head de ledger par-instance
+rendent le routage collant correct de toute façon. Deux niveaux, cumulés :
+
+- **Ingress nginx** (`k8s/50-ingress.yaml`) : `affinity: cookie` (cookie `forge_lb`) — équivalent k8s du
+  `lb_policy cookie` de Caddy ; plus `proxy-buffering: off` + `proxy-read-timeout: 3600` pour ne pas
+  bufferiser/couper les streams.
+- **Service** (`k8s/40-console.yaml`) : `sessionAffinity: ClientIP` (ceinture + bretelles). L'alternative
+  sans ingress-controller est un `Service type: LoadBalancer` + `ClientIP` + `externalTrafficPolicy:
+  Local` (fourni commenté).
+
+**Modèle NetworkPolicy — deny-by-default est-ouest (cœur du #13).** `k8s/60-networkpolicies.yaml` pose
+d'abord un **`default-deny-all`** (podSelector vide, `policyTypes: [Ingress, Egress]`, aucune règle → tout
+refusé dans les deux sens pour **tous** les pods du namespace), puis **uniquement** les chemins
+least-privilege, additifs :
+
+| Flux autorisé | Egress (source) | Ingress (destination) |
+|---|---|---|
+| Ingress-controller → **console:7100** | — (hors namespace) | policy `forge` (from ns `ingress-nginx`) |
+| **console → Postgres:5432** | policy `forge` | policy `forge-postgres` (from pods console) |
+| **console → MinIO:9000** | policy `forge` | policy `forge-minio` (from pods console) |
+| **\<tous pods\> → kube-dns:53** (UDP+TCP) | policy `allow-dns-egress` | (kube-system) |
+
+**Tout le reste est refusé** : pas d'egress internet, pas de mouvement latéral, **pas de trafic
+console↔console** (le bail leader, la présence et l'invalidation de cache inter-instances passent **par
+Postgres**, pas pod-à-pod ; le ledger partagé est un volume fichier, pas un chemin réseau). Une connexion
+ne passe que si elle est autorisée **des deux côtés** (egress source **et** ingress destination) — les deux
+sont fournis. Deux mises en garde documentées dans le fichier : (a) les **sondes kubelet** viennent du
+nœud, pas d'un pod — la plupart des CNI (Calico/Cilium) les exemptent ; sinon décommenter le stub
+`ipBlock` vers le **CIDR du nœud** dans la policy console ; (b) pour un **backend externe** (PG managé / S3
+externe), remplacer la règle pod-selector par un `ipBlock` vers son CIDR:port.
+
+---
+
+## 3ter. SSO — OIDC natif, SAML via pont OIDC (module avancé, flag-gated)
+
+Le SSO de Forge est **OIDC (OpenID Connect)** — et **rien d'autre** en natif. Comme le
+backend Postgres ([§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)) et la multi-tenance, c'est
+un **module avancé, séparable, runtime-gated** (open, comme tout le reste) : le build **par défaut** se comporte
+**exactement** comme aujourd'hui — comptes **LOCAUX** seulement (`users` + argon2id + cookie
+`forge_session` + RBAC admin/opérateur/viewer). Tant que le flag n'est pas **engagé**, toutes les routes
+`/api/sso/*` sont **absentes** (404) et le login local est **inchangé** (byte-identique). Le SSO n'affaiblit
+jamais la surface de gouvernance/audit : il **AJOUTE** seulement un chemin de login Authorization-Code qui,
+en cas de succès, émet **LE MÊME** cookie `forge_session` que `/api/login`.
+
+### 3ter.1 Ce que Forge parle nativement : OIDC (et uniquement OIDC)
+
+| Variable | Rôle |
+|---|---|
+| `FORGE_ENTERPRISE_SSO` (truthy) **ou** clé de config par-DB `enterprise.sso` | engage le SSO OIDC (sinon build par défaut, login local seul) |
+| `FORGE_SSO_HTTP_TIMEOUT` | timeout des fetch discovery/JWKS/token (défaut `10` s) |
+
+Le provider OIDC se configure **côté admin** (route admin-gated `POST /api/sso/config`, `client_secret`
+**write-only** / rédigé, jamais renvoyé/loggé/ledgerisé) — **rien de codé en dur**, même substrat que la
+source de détection. Champs : **`issuer`**, **`client_id`** / **`client_secret`**, **`redirect_uri`** (le
+`/api/sso/callback` de cette console), **`allowed_redirect_uris`** (allowlist des cibles de retour
+post-login — le navigateur n'est **jamais** redirigé ailleurs, même discipline que `redirect.open` /
+`oauth.flow`, donc **pas d'open-redirect**), et le mapping identité (`provisioning` = `match`/`auto`,
+`user_claim` = `email`/`sub`, `default_role`).
+
+Flux **Authorization-Code + PKCE (S256)**, **fail-closed à chaque étape** : `GET /api/sso/login` construit
+l'URL authorize (state + nonce + challenge persistés server-side) et 302 vers l'IdP ; `GET
+/api/sso/callback` valide le state (one-time), échange le code contre les tokens, puis **VALIDE
+cryptographiquement l'ID token** — signature **RS256 via la JWKS de l'IdP** (kid exact ; `none`/HS\*
+rejetés → pas de downgrade d'algo), `iss`, `aud == client_id`, `exp`, et binding du `nonce`.
+
+> #### ✅ Transport SSO — `https://` natif, vérifié (le proxy TLS d'egress n'est PLUS requis)
+>
+> **La console parle TLS elle-même.** Discovery, JWKS **et** l'échange de token passent par le **seam TLS
+> unique** (`console/src/tls.rs`) : un `issuer` en **`https://`** est joint **directement**, avec
+> **vérification complète du certificat** — chaîne jusqu'aux racines Mozilla (`webpki-roots`) **et** nom
+> d'hôte — **le handshake aboutissant AVANT le premier octet applicatif**. Pointez `issuer` sur l'endpoint
+> `https://` de votre IdP.
+>
+> **Ce que cela corrige.** Au callback, la console POST vers le **token endpoint** de l'IdP le
+> **`client_secret`** (`Authorization: Basic`, client_secret_basic) **et** le **`code`** d'autorisation.
+> Auparavant ce POST partait en **HTTP clair** et ce hop devait être protégé par un proxy TLS d'egress ou
+> un segment interne de confiance. **Ce contournement est caduc** : en `https://`, un MITM obtient une
+> connexion en échec, jamais le secret. La suite de tests contient le contrôle correspondant (une chaîne
+> non ancrée dans une racine de confiance fait échouer la connexion).
+>
+> **Ce qui n'a PAS changé (défense en profondeur, indépendante du transport) :**
+> - le **`client_secret` est write-only** — jamais renvoyé, **jamais loggé, jamais ledgerisé** (rédigé) ;
+> - la **deny-list SSRF** console (`net::resolve_guarded_with`) bloque loopback / link-local
+>   (169.254.169.254) / RFC1918 / ULA / unspecified sur l'**IP résolue** de connexion (anti-DNS-rebinding),
+>   pour discovery, JWKS **et** le POST token — sauf escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS`.
+>   **Le TLS ne la remplace pas** : chiffrer un fetch vers `169.254.169.254` n'en fait pas une cible
+>   légitime, et le refus tombe **avant** toute connexion, donc avant tout handshake ;
+> - les endpoints discovery (`token`/`jwks`/`authorization`) sont **pinnés à l'origine de l'issuer**
+>   (anti-SSRF, un document de discovery hostile ne peut pas rediriger ailleurs) ;
+> - l'**ID token reste validé RS256/JWKS** quel que soit le transport de fetch (intégrité du token) ; le
+>   TLS y ajoute désormais la **confidentialité** du `client_secret`/`code` sur le fil.
+>
+> **`http://` reste accepté, mais gouverné.** Un IdP **on-prem** en clair reste joignable : il doit être
+> une **cible interne** ET l'escape-hatch `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` doit être posé
+> explicitement. Un IdP **public** en `http://` est donc, en pratique, refusé par la deny-list. Les
+> patterns proxy TLS d'egress / service-mesh mTLS / oauth2-proxy **restent utilisables** si votre
+> topologie les impose déjà — ils ne sont simplement plus **nécessaires**.
+>
+> **Aucune échappatoire de vérification.** Il n'existe ni option, ni variable d'environnement, ni drapeau
+> de build pour accepter un certificat non fiable (auto-signé, chaîne inconnue, mauvais nom d'hôte) : un
+> TLS qui ne vérifie rien est du clair déguisé, et c'est précisément par là que les échappatoires entrent.
+>
+> **AC privée d'entreprise — `FORGE_EXTRA_CA_PEM` (livré).** Les racines de confiance sont les racines
+> **Mozilla compilées** (`webpki-roots`) ; le **magasin système n'est PAS lu**, et il ne le sera pas :
+> c'est ce qui garde la posture sans dépendance OS (pas de `schannel`, pas de `security-framework`, pas
+> d'`openssl`). Un IdP — ou un collecteur — signé par l'**AC privée de l'organisation** n'était donc pas
+> vérifiable, et les seules issues qui restaient étaient mauvaises, dont le **retour au clair**.
+>
+> L'opérateur peut désormais **fournir explicitement** ses propres ancres :
+>
+> ```bash
+> FORGE_EXTRA_CA_PEM_FILE=/etc/forge/entreprise-ca.pem   # un CHEMIN (montage Docker/k8s, ConfigMap)
+> # ou, à plat :
+> FORGE_EXTRA_CA_PEM="-----BEGIN CERTIFICATE-----\n…"    # le PEM VERBATIM (motif <VAR> / <VAR>_FILE maison)
+> ```
+>
+> Le PEM peut porter **plusieurs** blocs `CERTIFICATE` (chaîne d'AC intermédiaires incluse). Les ancres
+> sont **AJOUTÉES** aux racines Mozilla, jamais substituées.
+>
+> **Ce que ce knob N'EST PAS.** Ce n'est **pas** une échappatoire de vérification, et c'est une distinction
+> de fond, pas de vocabulaire : la vérification reste **PLEINE**. Chaîne validée jusqu'à une ancre, **nom
+> d'hôte vérifié**, **expiration honorée**. On élargit l'ensemble des émetteurs de confiance ; on ne
+> relâche **aucun** contrôle. Il n'existe toujours ni option, ni variable, ni drapeau de build pour
+> accepter un certificat auto-signé, une chaîne inconnue, un mauvais nom d'hôte ou un certificat périmé —
+> et la garde de **source** qui interdit au crate d'ouvrir l'API `dangerous` de rustls reste en place.
+> Quatre tests le figent : l'AC fournie fait **aboutir** son propre handshake ; une **autre** AC le laisse
+> **échouer** ; le **nom d'hôte** est toujours vérifié, ancre en place ; un certificat **expiré** est
+> toujours refusé, ancre en place.
+>
+> **FAIL-CLOSED au boot.** Un PEM configuré mais **illisible, vide ou invalide** fait **échouer le
+> démarrage** (`[forge] FATAL …`, code 2). Il ne dégrade **jamais** en silence vers « pas d'ancre » : sinon
+> l'opérateur croirait sa CA installée et découvrirait le contraire des heures plus tard, sous la forme
+> d'un « émetteur inconnu » qui ne désigne pas la cause. Rien de configuré ⇒ **aucune** ligne au boot,
+> comportement inchangé.
+>
+> Les autres issues restent valables si votre topologie les impose déjà : AC publiquement reconnue, cible
+> **interne** en `http://` sous `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1` (clair **gouverné**), ou **proxy
+> TLS-terminant** d'egress.
+>
+> **mTLS — `FORGE_CLIENT_CERT_PEM` / `FORGE_CLIENT_KEY_PEM` (livré).** Symétrique du knob ci-dessus, et
+> il ne faut pas les confondre : l'ancre d'entreprise sert à **vérifier le pair**, l'identité cliente
+> sert à **nous authentifier auprès de lui**. Le seam n'installait aucun certificat client, et un
+> endpoint qui en **exige** un — IdP OIDC d'entreprise, collecteur derrière un service-mesh — restait
+> délégué au collecteur Python. C'est fini : rustls présente nativement la chaîne fournie
+> (`with_client_auth_cert`), **sans dépendance nouvelle et sans bibliothèque système**.
+>
+> ```bash
+> FORGE_CLIENT_CERT_PEM_FILE=/etc/forge/client.pem   # chaîne cliente : feuille D'ABORD, puis intermédiaires
+> FORGE_CLIENT_KEY_PEM_FILE=/etc/forge/client.key    # clé privée — fichier 0600, root-only
+> ```
+>
+> **La forme `_FILE` est la bonne pour la clé**, et ce n'est pas un détail de style : l'environnement
+> d'un processus se lit dans `/proc/<pid>/environ`, se recopie dans les dumps de configuration, les
+> inspections de conteneur et les rapports d'incident. La forme verbatim (`FORGE_CLIENT_KEY_PEM=…`)
+> existe pour le 12-factor, elle n'est pas recommandée.
+>
+> **La clé privée n'apparaît nulle part.** C'est le secret le plus sensible que le binaire manipule — il
+> ne s'expire pas de lui-même et il signe notre identité auprès de tout pair mTLS. Elle n'est écrite ni
+> au boot, ni dans un log, ni dans une erreur, ni dans le ledger, ni dans une réponse d'API : un refus
+> dit **que** la clé est invalide (et **quelle variable** est en cause), jamais **ce qu'elle contient** —
+> pas même un fragment. La ligne de boot annonce la longueur de la chaîne et les noms des variables, rien
+> d'autre. Deux tests **balaient** les sorties (succès et échec) à la recherche du moindre fragment du
+> corps de la clé.
+>
+> **Ce que ce knob N'EST PAS.** Présenter une identité ne relâche **rien** de la vérification du
+> certificat **serveur** : chaîne, nom d'hôte et expiration restent vérifiés à l'identique. Et le
+> certificat n'est envoyé **que si le pair le DEMANDE** — le poser ne change **rien** pour les endpoints
+> ordinaires (un test le fige).
+>
+> **FAIL-CLOSED au boot.** Les deux variables vont **ensemble ou pas du tout**. Une **moitié** seule, un
+> PEM **illisible**, ou une **clé qui ne correspond pas au certificat** (comparaison des
+> `SubjectPublicKeyInfo` — la faute qu'on commet en renouvelant l'un sans l'autre) font **échouer le
+> démarrage** (`[forge] FATAL …`, code 2) en **nommant la variable**. Jamais un mTLS silencieusement
+> absent, qui se découvrirait au premier handshake sous la forme d'une « connexion refusée » ne
+> désignant pas la cause. Rien de configuré ⇒ **aucune** ligne au boot, comportement inchangé.
+>
+> Un **couple** de tests fige le mécanisme contre un serveur de test qui **exige** un certificat client
+> (`WebPkiClientVerifier`) : avec l'identité, le pair nous authentifie et la session porte des octets
+> applicatifs ; **sans** elle, la connexion ne porte rien. Sans la moitié négative, on ne saurait pas si
+> ce serveur exige réellement quoi que ce soit.
+
+**Mapping groupes → rôles Forge.** Le claim OIDC `groups` de l'ID token est résolu vers un rôle/grants
+Forge **via le seam RBAC « groups-from-claims »** (`rbac::groups_from_claims` → `rbac::resolve` →
+`rbac::apply_to_user`) : les groupes de l'IdP pilotent le rôle (et les grants tenant) de l'identité, dès la
+**première** connexion (y compris pour un compte auto-provisionné). **Fail-closed / moindre privilège** :
+aucun groupe correspondant ⇒ le `default_role` configuré (jamais super-admin, non représentable dans le
+mapping). L'IdP reste ainsi **la** source de vérité des rôles, sans double-administration des comptes.
+
+### 3ter.2 IdP SAML-only : supportés via un **pont OIDC externe** (par conception)
+
+Forge n'implémente **PAS** de SAML natif en-process — **choix délibéré**, pas une lacune :
+
+- **Posture openssl-free.** La pile SAML Rust (**`samael`**) tire **openssl + libxmlsec1**, donc deux
+  **bibliothèques système** à installer, versionner et patcher sur chaque hôte — c'est exactement ce que la
+  posture openssl-free du **build par défaut** refuse (`rustls`/`ring`, jamais native-tls/openssl — même
+  discipline que le backend PG en [§3bis](#3bis-backend-postgres-stage-4--ha--multi-instance)).
+  **Précision d'honnêteté :** « openssl-free » ne veut **pas** dire « 100 % Rust ». `ring` — le provider
+  crypto de `rustls`, et donc du seam TLS sortant — embarque de l'**assembleur et du C** compilés par `cc`.
+  La différence n'est pas « zéro C », elle est **« zéro bibliothèque système »** : ce C-là est **vendu avec
+  le crate et compilé par cargo** (et `cc` + une chaîne C sont de toute façon déjà exigés par
+  `rusqlite/bundled`), là où openssl/libxmlsec1 sont des `.so` de l'hôte. Le refus de `samael` tient sur ce
+  critère-là, pas sur un absolu « pure-Rust ».
+  **Et la posture est PÉRIMÉTRÉE** : elle vaut pour le build par défaut et `store-postgres`, **pas** pour
+  `object-store` — cf. [§3quater.1](#perimetre-de-l-openssl-freedom). Ce qu'accepter `samael` ajouterait
+  reste néanmoins d'une autre nature : deux `.so` **de l'hôte**, là où le débordement `object-store` est du
+  C **vendu et compilé par cargo**.
+- **Surface d'attaque.** Vérifier soi-même les signatures **XML-DSig** + le **C14N exclusif** est
+  précisément la classe de foot-gun **XML-Signature-Wrapping (XSW)** — un contournement d'auth livré à
+  répétition **même par des piles SAML matures**. Forge garde son **unique** surface d'auth, minimale et
+  sans bibliothèque système, plutôt que d'ajouter cette dette.
+
+**Pattern supporté : mettre un pont OIDC DEVANT Forge.** Le pont termine le SAML contre l'IdP du client et
+présente de l'**OIDC** à Forge. Forge ne parle **jamais** que l'OIDC qu'il valide déjà (RS256/JWKS,
+groups→rôles) → openssl-freedom du build par défaut préservée, **zéro nouvelle dépendance, zéro nouvelle
+surface d'attaque**. Ponts
+éprouvés : **Dex** (connecteur SAML), **Keycloak identity brokering** (broker l'IdP SAML du client, expose
+de l'OIDC à Forge), ou **oauth2-proxy**.
+
+```
+   IdP SAML du client                Pont OIDC (hors Forge)              Forge console
+ ┌──────────────────┐   SAML 2.0   ┌──────────────────────────┐  OIDC  ┌────────────────────┐
+ │ ADFS / Azure AD  │ ───────────▶ │ Dex (connecteur SAML)    │ ─────▶ │ /api/sso/login     │
+ │ Shibboleth / …   │ ◀─────────── │  — ou —                  │ ◀───── │ /api/sso/callback  │
+ └──────────────────┘  assertion   │ Keycloak identity broker │ authz  │ RS256/JWKS + groups│
+                                    │  — ou — oauth2-proxy     │  code  │      → rôles RBAC   │
+                                    └──────────────────────────┘        └────────────────────┘
+     libxmlsec1/XML-DSig CONFINÉ dans le pont ↑              Forge = OIDC pur, openssl-free ↑
+```
+
+Le pont porte **toute** la complexité XML/openssl ; Forge reçoit un ID token OIDC standard et applique son
+mapping `groups → rôles` inchangé. C'est la voie recommandée pour tout IdP SAML-only.
+
+### 3ter.3 Échappatoire — feature Cargo `saml` OPTIONNELLE (non construite par défaut)
+
+Si un **contrat** exige un SAML **en-process** (pas de pont possible), une future feature Cargo **`saml`**
+(backend `samael`) pourra être ajoutée — produisant une **variante de build openssl + libxmlsec1** distincte,
+le **build par défaut restant openssl-free** (même discipline opt-in que `store-postgres` /
+`encryption` / `object-store` : le contrat porte sur le **build par défaut**, chaque feature répond du
+sien — et `object-store` déborde déjà, cf. [§3quater.1](#perimetre-de-l-openssl-freedom)).
+**Non implémentée aujourd'hui** : documentée comme **disponible sur demande**, pas livrée. Le
+défaut, et la recommandation, restent le **pont OIDC** ci-dessus.
+
+---
+
+## 3quater. Seam TLS sortant — la console parle `https://`, et le vérifie
+
+**Décision : pas de clair.** La console avait exactement **trois** sorties TCP, toutes en socket brut :
+l'échange de jeton OIDC, le webhook de notification, et le fetcher de source de détection. Elles passent
+désormais toutes par **un seul seam** — `console/src/tls.rs` — qui parle `http://` (clair **gouverné**) ou
+`https://` (**TLS vérifié**). Une seule implémentation, donc **une seule politique de confiance** à
+vérifier.
+
+| Sortie | Fichier | Avant | Maintenant |
+|---|---|---|---|
+| Échange de jeton OIDC (`client_secret` + `code`) | `sso/mod.rs` | clair, proxy TLS d'egress **prescrit** | `https://` natif, certificat vérifié — proxy **plus requis** ([§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc)) |
+| Webhook de notification | `notify_channels.rs` | collecteur on-prem **seulement** | Slack / Teams / PagerDuty joignables en `https://` |
+| Fetcher de source de détection | `net.rs` | `https://` **refusé** (ou délégué au Python) | servi **en Rust**, sans spawn sur une route de lecture |
+
+**Ce qui est garanti — et ce qui ne l'est pas.**
+
+- **Vérification complète, sans échappatoire.** Chaîne jusqu'aux racines Mozilla compilées
+  (`webpki-roots`) **et** nom d'hôte. Le **handshake aboutit avant le premier octet applicatif** : face à
+  un pair non prouvé, l'appelant n'obtient **aucun flux**, donc n'écrit **aucun secret**. Il n'existe ni
+  option, ni ENV, ni feature pour accepter un certificat non fiable — un test de **garde de source**
+  interdit au crate d'ouvrir l'API dangereuse de rustls.
+- **La deny-list SSRF reste en amont** (`net::resolve_guarded_with`) et s'applique à l'**IP résolue** que
+  l'on va connecter, en `http://` **comme** en `https://`. Chiffrer un fetch vers `169.254.169.254` n'en
+  fait pas une cible légitime.
+- **Le clair reste possible là où il est gouverné** : cible **interne** + `FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`.
+  Un **secret** vers une cible **publique** en `http://` reste **refusé** ; en `https://` il est autorisé.
+- **Pas de SMTP** — refusé indépendamment du TLS (STARTTLS est une élévation *négociée* ; cf.
+  [`ADMINISTRATION.md` §5bis](ADMINISTRATION.fr.md)).
+- **mTLS : livré.** Le seam installe désormais un **certificat client** quand l'opérateur en fournit un
+  (`FORGE_CLIENT_CERT_PEM` / `FORGE_CLIENT_KEY_PEM`, natif rustls `with_client_auth_cert` — aucune
+  dépendance nouvelle) ; voir [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
+  Ce qui reste délégué au collecteur Python, c'est une identité **propre à une source** : celle du seam
+  est celle du **processus**.
+- **AC d'entreprise : fournie explicitement.** Les racines sont celles **compilées** ; le **magasin
+  système n'est pas lu** (c'est ce qui évite `schannel` / `security-framework` / `openssl`). Un
+  certificat émis par une AC privée se rend vérifiable en posant `FORGE_EXTRA_CA_PEM` — cf.
+  [§3ter.1](#3ter1-ce-que-forge-parle-nativement--oidc-et-uniquement-oidc).
+
+**Coût mesuré.** L'ajout pèse **6 crates nets** — `ring`, `rustls`, `rustls-pki-types`,
+`rustls-webpki`, `untrusted`, `webpki-roots` — et **≈ +20 s CPU** de compilation à froid. **Aucun nouveau
+prérequis machine** : `ring` compile de l'asm/C via `cc`, déjà exigé par `rusqlite/bundled`. La feature
+`store-postgres` **partage** exactement cette pile (une seule version de `rustls`, aucun conflit).
+
+⚠️ `rustls` est épinglé `default-features = false, features = ["ring", …]` : sa feature **par défaut** est
+le provider `aws-lc-rs`, qui tire une toolchain C/cmake. Ce qui suit dit exactement où cet épinglage
+**tient** et où il est **débordé**.
+
+<a id="perimetre-de-l-openssl-freedom"></a>
+
+### 3quater.1 Périmètre de l'openssl-freedom — vrai par défaut, FAUX sous `object-store`
+
+**L'invariant.** *La fermeture de dépendances du crate console ne contient aucune bibliothèque système de
+crypto/TLS : ni `openssl`, ni `native-tls`, ni `aws-lc`, ni `schannel`, ni `security-framework`.*
+
+**Il est PÉRIMÉTRÉ, et le périmètre fait partie de l'énoncé.** Mesuré le 2026-08-07 :
+
+| Périmètre de build | Occurrences interdites | L'invariant |
+|---|---|---|
+| **build par défaut** | **0** | **tient** |
+| `--features store-postgres` | **0** | **tient** |
+| `--features encryption` | **0** | tient *(SQLCipher exige un backend crypto au BUILD, pas une lib système en plus dans la fermeture)* |
+| `--features object-store` | **12** | **FAUX** |
+| `--all-features` | **20** | **FAUX** |
+
+**Pourquoi ce n'est pas réparable ici** — c'est l'information utile, pas l'aveu. La chaîne est
+**transitive** et aucun maillon ne nous appartient :
+
+```
+object-store → rust-s3 (`sync-rustls-tls`) → attohttpc (`tls-rustls`) → `__rustls`
+             → rustls/DEFAULT → aws-lc-rs → aws-lc-sys
+```
+
+`attohttpc` déclare pourtant `rustls` en `default-features = false` — mais sa feature interne `__rustls`,
+**seule porte d'entrée** de `tls-rustls`, réactive explicitement `rustls/default`, dont le provider par
+défaut est `aws-lc-rs`. `attohttpc` expose bien une variante `-ring` (`tls-rustls-webpki-roots-ring`), mais
+`rust-s3/sync-rustls-tls` câble **en dur** `attohttpc/tls-rustls` : elle est **inatteignable** depuis notre
+manifeste, et l'ajouter en plus ne retirerait rien — **les features cargo sont ADDITIVES**. Il faudrait
+forker ou patcher `rust-s3`/`attohttpc`. Le choix assumé est donc de **corriger l'affirmation**, pas de
+pourchasser la dépendance : un invariant énoncé trop largement est un défaut de véracité plus grave que la
+dépendance elle-même.
+
+**Ce que `object-store` déborde exactement.** Pas seulement son propre sous-arbre : l'**unification de
+features** de cargo propage `aws-lc-rs` à **toutes** les instances de `rustls` du graphe — y compris la
+nôtre, épinglée `["ring"]`. Le code appelle toujours `rustls::crypto::ring::default_provider()`
+**explicitement** (cf. `console/src/tls.rs`), donc le provider **utilisé au runtime reste `ring`** ; mais
+`aws-lc-sys` est bel et bien **compilé et lié** dans ce binaire-là. C'est ce que dit le compte de 20 sous
+`--all-features` contre 12 sous `object-store` seul.
+
+**Ce que ça change pour un exploitant.** Le binaire livré (build par défaut) et la variante
+**Postgres** ne demandent **aucune** bibliothèque de crypto/TLS à l'hôte — c'est la promesse, elle tient.
+Un binaire construit **avec `object-store`** compile en plus `aws-lc-sys` : prévoir la toolchain
+**C + cmake** au build. Rien à installer au **runtime** dans les deux cas (aws-lc est *vendu* par le crate,
+pas emprunté au système), donc c'est un coût de **build**, pas de déploiement.
+
+**La garde, pas la phrase.** Cette page se périme toute seule à la prochaine dépendance ajoutée. Le
+contrôle est donc **exécuté**, à la main comme en CI (job `console` de `.github/workflows/ci.yml`) :
+
+```sh
+# depuis la racine du dépôt — exige 0 sur les périmètres contractuels, AFFICHE les exclus
+python3 scripts/check_openssl_freedom.py
+
+# prouve que la garde MORD encore (exige 0 sur le périmètre connu sale : elle doit rougir)
+python3 scripts/check_openssl_freedom.py --self-test-red
+
+# la mesure brute, périmètre par périmètre, si l'on veut la refaire à la main
+cd console
+cargo tree -e normal,build --no-dedupe | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+cargo tree -e normal,build --no-dedupe --features store-postgres | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+cargo tree -e normal,build --no-dedupe --all-features | grep -icE "openssl|native-tls|aws-lc|schannel|security-framework"
+# attendu : 0, 0, 20
+```
+
+En cas de rouge, le script **nomme** le périmètre cassé **et** la chaîne d'introduction (`cargo tree -i`) —
+il ne dit pas seulement « échec ». Élargir ses exclusions sans corriger cette section, c'est refaire
+exactement le trou qu'il vient de boucher.
+
+<a id="perimetre-de-l-audit-de-licences"></a>
+
+### 3quater.2 Périmètre de l'audit de LICENCES — `cargo-deny` ne descend pas dans `object-store`
+
+C'est **le même sous-arbre** qu'au §3quater.1, et ce n'est pas une coïncidence : `object-store` est la
+seule feature dont la fermeture n'est pas entièrement lue par l'outillage. Là il s'agissait de crypto ;
+ici il s'agit du **droit de redistribuer** — le dépôt est publié sous `AGPL-3.0-or-later` et le binaire
+embarque tout son graphe.
+
+**L'angle mort, en chiffres.** Mesuré le 2026-08-07 avec `cargo-deny 0.18.2`, le binaire épinglé de la CI :
+
+| Ce qui est lu | Crates examinés |
+|---|---|
+| `cargo-deny --all-features` (job `security`) | **239** |
+| `cargo metadata --all-features` / `Cargo.lock` | **290** |
+| **écart** | **51 crates, jamais lus par l'audit officiel** |
+
+**La cause, établie par mutation — pas déduite.** `cargo-deny` (via `krates`) perd une dépendance
+**optionnelle** dont le nom de **paquet** diffère du nom de sa cible `[lib]`. `rust-s3` est exactement ce
+cas : paquet `rust-s3`, `[lib] name = "s3"`. La feature déclare le paquet
+(`object-store = ["dep:rust-s3"]`) alors que l'arête résolue de `cargo metadata` porte le nom de la lib
+(`"name": "s3"`) : l'appariement par nom échoue, la feature est tenue pour **désactivée**, et tout ce qui
+pend dessous disparaît. Un seul facteur changé à chaque mesure :
+
+| Manifeste | Invocation | Crates vus | Sous-arbre |
+|---|---|---|---|
+| réel (`optional`, `dep:rust-s3`) | `--all-features` | 239 | **absent** |
+| syntaxe implicite (`object-store = ["rust-s3"]`) | `--all-features` | 239 | **absent** |
+| dépendance rendue **non** optionnelle | *(sans drapeau)* | 250 | **présent** |
+| dépendance renommée `s3 = { package = "rust-s3" }` | `--all-features` | 287 | **présent** |
+
+Ce n'est donc **ni** `--all-features` (le drapeau porte : 201 → 239), **ni** la syntaxe `dep:`, **ni** un
+`targets` restreint dans `deny.toml` (il n'y en a pas), **ni** une exclusion explicite.
+
+**Ce que ça cachait — le vert n'était pas « conforme », il était « pas regardé ».** Deux des 51 crates ne
+satisfont pas la liste `allow` telle qu'elle était écrite : `attohttpc 0.30.1` (**MPL-2.0**) et
+`tiny-keccak 2.0.2` (**CC0-1.0**). Vérifié en rendant le sous-arbre visible puis en relançant le
+cargo-deny de la CI avec la `deny.toml` du dépôt : `licenses FAILED`, code 4, ces deux crates nommés. Pire,
+`deny.toml` **justifiait le retrait de `MPL-2.0`** de sa liste par « cargo-deny la signale non
+rencontrée » — une décision prise **à travers** l'angle mort.
+
+**Compatibilité AGPL du sous-arbre : vérifiée, et elle tient.** 51 crates, aucune licence propriétaire,
+aucun copyleft inconciliable :
+
+- **MIT / Apache-2.0 / ISC / BSD-2 / BSD-3 / MIT-0 / Unicode-3.0** (48 crates) — permissives, entrantes
+  vers l'AGPLv3 sans réserve (Apache-2.0 est compatible GPLv3/AGPLv3, pas GPLv2 — sans objet ici).
+- **MPL-2.0** — `attohttpc` seul. Copyleft **par fichier**, GPL/AGPL-compatible **par construction** : la
+  §3.3 autorise le « Larger Work » sous une *Secondary License* (GPL/LGPL/AGPL) **sauf** notice
+  « Incompatible With Secondary Licenses » (Exhibit B). **Vérifié : aucun fichier source d'`attohttpc` ne
+  porte cette notice.** Obligation qui subsiste : les fichiers MPL restent sous MPL, source disponible —
+  ce que l'AGPL impose déjà.
+- **CC0-1.0** — `tiny-keccak` seul. Renonciation au domaine public, aucune réciprocité.
+- **`aws-lc-sys 0.43.0`** mérite son propre regard : ~69 Mo de **C vendu** (BoringSSL, lui-même fork
+  d'OpenSSL) sous une expression à sept conjonctions,
+  `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`.
+  Les deux pièges attendus sont **absents**, vérifiés dans l'arbre vendu et non sur la foi du champ SPDX :
+  · le code dérivé d'OpenSSL/SSLeay est **relicencié Apache-2.0** par AWS — **zéro** occurrence de la
+  clause publicitaire « All advertising materials… » (celle qui rend l'ancienne licence OpenSSL
+  incompatible GPL) dans les 69 Mo ; · `third_party/jitterentropy` est double BSD-3-Clause **ou** GPLv2,
+  et le `LICENSE` **élit expressément la BSD-3-Clause et NON la GPLv2** — c'est la seule mention de GPL de
+  tout le crate (9 fichiers, tous des en-têtes de cette bibliothèque).
+
+**Verdict : aucune incompatibilité avec `AGPL-3.0-or-later`.** `MPL-2.0` et `CC0-1.0` sont désormais
+autorisées **nommément** dans `deny.toml`, avec leur justification.
+
+**La compensation, parce que l'exclusion subsiste.** `cargo-deny` reste aveugle tant que le manifeste
+n'est pas réparé : ses contrôles `bans` et `sources` ne couvrent **pas** ces 51 crates. Ce qui est
+couvert, et par quoi :
+
+| Axe | Sur les 239 | Sur les 51 de `object-store` |
+|---|---|---|
+| **Avis de sécurité** | `cargo audit` (lit `Cargo.lock`) | ✅ **oui** — les 290 crates |
+| **Licences** | `cargo deny check licenses` | ✅ **oui** — `scripts/check_dep_licenses.py` |
+| **Bans / versions multiples** | `cargo deny check bans` | ❌ **non** — exclusion assumée |
+| **Provenance (registre/git)** | `cargo deny check sources` | ❌ **non** — exclusion assumée |
+
+```sh
+# depuis la racine — refait le contrôle de licence sur les 290 crates, avec la liste `allow`
+# LUE dans deny.toml (une seule vérité de politique, deux moteurs pour l'appliquer)
+python3 scripts/check_dep_licenses.py
+
+# prouve que la garde MORD encore : elle doit rougir en nommant attohttpc et tiny-keccak
+python3 scripts/check_dep_licenses.py --self-test-red
+
+# le différentiel EXACT, si le binaire cargo-deny est là (la CI le lui passe)
+python3 scripts/check_dep_licenses.py --cargo-deny /tmp/cargo-deny
+```
+
+**La réparation à la source, connue et mesurée, volontairement non appliquée ici.** Une ligne de
+`console/Cargo.toml` suffit — déclarer la dépendance sous le nom de sa lib :
+
+```toml
+s3 = { package = "rust-s3", version = "0.37", optional = true, default-features = false, features = ["sync-rustls-tls"] }
+# et : object-store = ["dep:s3"]
+```
+
+Mesuré : `cargo-deny` passe de 239 à **287** crates et voit `rust-s3`, `attohttpc` et `aws-lc-sys`. Elle
+touche le manifeste et le `Cargo.lock` — donc un rebuild et une revue à part entière. Le jour où elle sera
+faite : retirer ce paragraphe **et** l'exclusion de `deny.toml` ; `check_dep_licenses.py --self-test-red`
+rougira de lui-même pour le rappeler.
+
+---
+
+## 4. Contexte de build & dépendance `guatx-core`
+
+Le contexte de build est la **RACINE de ce dépôt**. Le crate `console` résout `guatx-core` via une
+**git-dep publique ÉPINGLÉE** — `guatx-core = { git = "https://github.com/guatxlabs/core", tag =
+"v0.2.2", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
+build**, aucun crate sibling n'est requis dans le contexte. Un clone **standalone** de ce dépôt construit
+directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe `context: .`).
+
+- **Reproductibilité** : `console/Cargo.lock` est **committé** (retiré de `console/.gitignore`) — un
+  binaire/produit verrouille ses deps pour des builds identiques client/CI. Le Dockerfile build
+  d'ailleurs `cargo build --release --locked`, qui **exige** un `Cargo.lock` présent et à jour.
+- **Override dev (monorepo)** : `console/.cargo/config.toml` (**GITIGNORÉ**, absent des clones publics)
+  porte un `[patch]` qui redirige la git-dep vers le core local (`path = "../../core"`) — il garde la
+  vitesse du path en développement sans dépendre du core publié. Le build par défaut (sans ce fichier)
+  résout la git-dep épinglée.
+- **Ignore du contexte** : `Dockerfile.dockerignore` (ignore-file **spécifique au Dockerfile** —
+  BuildKit le préfère à un `.dockerignore` racine quand il jouxte le Dockerfile désigné par `-f`).
+  Motifs relatifs à la **racine du dépôt**. Exclut le cache Cargo `console/target/` (plusieurs GB, cf. §6), les
+  `*.db`/WAL, le ledger `*.jsonl`, `__pycache__`, `**/.git` et les secrets (`*.env`/`*.key`/…).
+
+**Migration `path` → git-dep : FAITE.** La console consommait autrefois `core` en dép `path` (layout
+sibling monorepo), ce qui imposait un contexte de build parent. Le repo public `guatxlabs/core` (tag
+`v0.2.2`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
+builder qui copiait le sibling `core/` a **disparu**, et un checkout **standalone** (sans sibling) builde tel quel.
+
+---
+
+## 5. Liveness `/health` & en-tête `Host`
+
+Le `HEALTHCHECK` (Dockerfile **et** compose) fait un vrai **`GET /health` attendant HTTP 200** — pas un
+simple TCP port-open (qui passerait même si le routeur HTTP est mort).
+
+- `/health` est **PUBLIC** (hors `auth_guard`) mais **sous `host_guard`** (anti-DNS-rebinding) : la sonde
+  **doit** envoyer un `Host` autorisé. En visant `http://127.0.0.1:7100/health`, urllib pose
+  `Host: 127.0.0.1:7100` → `host_guard` retire le port → `127.0.0.1`, présent dans l'allowlist **par
+  défaut** (`localhost` / `127.0.0.1` / `::1`). Vérifié en exécutant le binaire : Host `127.0.0.1` → 200
+  (healthy) ; Host étranger → **421** (unhealthy).
+- Derrière un reverse-proxy avec `FORGE_CONSOLE_HOST` restreint, la sonde continue de viser `127.0.0.1`
+  (toujours dans l'allowlist par défaut, indépendamment de `FORGE_CONSOLE_HOST`) — le healthcheck reste
+  vert sans ouvrir le host-guard.
+- **Corps `/health`** : `{"status":"ok","version":"X.Y.Z","db":"ok|degraded"}`. Le champ **`db`** est
+  **additif** (Stage 4) : il **ping le store ACTIF** (SQLite : `SELECT 1` trivial ; Postgres : `SELECT 1`
+  via le backend, donc à travers le reconnect+retry HA). `"degraded"` = base injoignable. La sonde est
+  **non-fatale** : `/health` répond **toujours 200** même en `degraded` (le `HEALTHCHECK` ne teste que le
+  code 200 → il n'oscille pas sur une coupure DB transitoire), mais un superviseur externe peut lire `db`
+  pour alerter/évincer une instance dont la DB est down.
+
+```sh
+docker inspect --format '{{.State.Health.Status}}' forge      # -> healthy
+curl -s http://127.0.0.1:7100/health   # -> {"db":"ok","status":"ok","version":"0.0.1"}
+```
+
+---
+
+## 6. Empreinte mesurée & matrice de déploiement
+
+*(chiffres mesurés)*
+
+### Composition
+
+Forge lui-même :
+
+Compte MESURÉ sur cet arbre, `wc -l`, `__pycache__/` et `target/` exclus (la commande est donnée
+pour que vous puissiez le refaire) :
+
+| Langage | Périmètre | LOC | Commande |
+|---|---|---|---|
+| Python | moteur, stdlib pur, `deps=[]` | **23 876** | `find forge -name '*.py' -not -path '*__pycache__*' \| xargs wc -l` |
+| Rust | console (tests inclus) | **51 749** | `find console/src -name '*.rs' \| xargs wc -l` |
+| Rust | guatx-core | **9 280** | `find src -name '*.rs' \| xargs wc -l` (dans le dépôt `core`) |
+| JS / HTML / CSS | UI | **10 471** | `find console/web -type f \( -name '*.js' -o -name '*.html' -o -name '*.css' \) \| xargs wc -l` |
+
+> Les chiffres précédemment publiés ici (~5 256 / ~4 006 / ~1 032 / ~3 513) dataient d'un arbre bien
+> antérieur et sous-estimaient le code d'un facteur 2,5 à 12. Ils sont remplacés par la mesure ci-dessus.
+
+**ZÉRO** Java / C / C++ / Go / bash dans le code Forge — *le code de Forge*. La **fermeture de
+dépendances**, elle, contient du C/asm compilé par cargo : l'amalgame **SQLite** (`rusqlite/bundled`) et
+l'asm de **`ring`** (provider crypto du seam TLS). « openssl-free » ne signifie donc pas « zéro C » mais
+**« zéro bibliothèque système à installer »** — ce C-là est vendu avec les crates et bâti par cargo.
+Et l'affirmation est **périmétrée** : elle vaut pour le build par défaut et `--features store-postgres`
+(**0** occurrence mesurée), **pas** pour `--features object-store` (**12**, via `aws-lc-sys`, qui ajoute
+**cmake** aux prérequis de build). Mesures, chaîne et garde automatique :
+[§3quater.1](#perimetre-de-l-openssl-freedom).
+
+Les outils **ORCHESTRÉS** (jamais embarqués, tous **OPTIONNELS**, auto-neutralisés si absents) :
+
+| Outil | Langage |
+|---|---|
+| nmap | C |
+| httpx / nuclei / subfinder | Go |
+| MSF | Ruby |
+| Burp | Java |
+| browser / camoufox | Python + Firefox |
+
+### Poids
+
+Mesuré sur cet arbre (`find … -printf '%s\n' | awk`) :
+
+- **Python** (`forge/`, `__pycache__` exclu) : **1 371 KB**
+- **web** (`console/web/`, tous fichiers) : **877 KB**
+- **binaire Rust console** : **non mesuré** — aucun `console/target/release/forge` n'est présent sur cet
+  arbre, et nous ne publions pas une taille de binaire que nous n'avons pas pesée. Mesurez la vôtre après
+  `cargo build --release` : `ls -l console/target/release/forge`. *(Le chiffre « 4.2 MB » publié
+  précédemment n'a pas de mesure reproductible attachée ; il est retiré plutôt que reconduit.)*
+- Le cache de build `console/target/` pèse **2,8 GB** sur cet arbre — il n'est **jamais expédié**
+  (`.dockerignore`). *(La note précédente parlait de « 1.6 GB dans `forge/` » : le cache n'est pas dans
+  `forge/`, et il a grossi depuis.)*
+- **Image Docker** :
+  - **minimale ~150-250 MB** (console + python + nmap)
+  - **complète ~350-500 MB** (+ binaires Go PD)
+- `browser-automation` = image **4 GB** séparée (sidecar optionnel derrière `profiles: ["browser"]`).
+
+### Matrice de déploiement
+
+#### Docker ✅
+
+- `docker compose config` valide ; un `up` nu démarre la **console seule** (optionnels sous profils).
+- Multi-stage (builder rust jeté → runtime debian-slim).
+- Non-root uid 10001, tini PID1, volumes DB / ledger / scope.
+- Contexte de build & dépendance `core/`, ignore du contexte, profils d'image, supply-chain SHA256,
+  liveness : cf. [§1](#1-options-de-build--run), [§4](#4-contexte-de-build--dépendance-guatx-core),
+  [§5](#5-liveness-health--en-tête-host).
+
+**Supply-chain — pins SHA256, source unique.** Les archives d'outils ne sont jamais récupérées « par
+tag » non vérifiées : chaque archive est **épinglée par digest, par architecture**, et validée par
+`sha256sum -c` — toute non-correspondance **fait échouer le build**. Versions, digests, gabarits d'URL
+et membres d'archive vivent dans un **manifeste unique**, [`forge/tools.json`](../forge/tools.json), lu
+par le `Dockerfile` **au build** *et* par l'installeur **runtime** (`forge tools install|update|remove`).
+Il n'y a donc plus de pin recopié entre `Dockerfile` et `docker-compose.yml` : **bumper une version =
+éditer ce seul fichier** (version + digests issus du `*_checksums.txt` amont). Un outil sans pin pour
+l'architecture cible est **écarté du plan** (jamais téléchargé non vérifié) ; le groupe socle `core`
+(httpx/nuclei/subfinder) est en plus gardé par `--require-complete core`, qui fait échouer le build
+plutôt que produire une image amputée. Garde anti-régression : `tests/test_tools_manifest.py`.
+
+**Outils au runtime, sans rebuild.** `forge tools list|install|update|remove` installe un outil du
+manifeste dans le **volume outils persistant** `/data/tools/bin` (forge-owned uid 10001, en tête du
+PATH devant le `/usr/local/bin` baké), après vérification du SHA256 pin, et **journalise** l'acte au
+ledger d'engagement. Vide par défaut → comportement identique à la baseline `FORGE_TOOLS_PROFILE`.
+Détail : [`docs/TOOLS_LIFECYCLE.md`](TOOLS_LIFECYCLE.fr.md).
+
+#### k3s / k8s ✅
+
+- **Deux modes** : (a) **single-replica** SQLite (build par défaut, ci-dessous) ; (b) **HA multi-réplicas**
+  contre Postgres partagé → **manifests `k8s/` + NetworkPolicies deny-by-default**, cf.
+  [§3bis.6](#3bis6-ha-sur-kubernetes--manifests-k8s).
+- Mode (a) : Deployment **single-replica**.
+- ⚠️① la console **SPAWN** `python3 -m forge.cli` (setsid) → python + package forge **DANS LE MÊME
+  conteneur** (pas séparable).
+- ⚠️② en mode (a) SQLite + ledger = **PVC ReadWriteOnce** → pas de scale horizontal. Le mode (b) lève ça
+  via Postgres partagé + ledger sur PVC **RWX** (ou ledger-par-instance) — cf. §3bis.6.
+- Outils externes (browser:8080, msfrpcd:55553, burp:1337) = Services / sidecars optionnels.
+
+#### Host natif ✅
+
+- `pip install -e .` + `cargo build --release` + outils sur PATH.
+- Unité systemd durcie fournie (`deploy/forge.service`) — cf. [§1.4](#14-natif--systemd-sans-docker).
+
+#### venv ✅
+
+- `deps=[]` → la partie Python tient en venv **sans aucune dépendance pip**.
+
+### Rapports & export PDF
+
+Le rapport d'engagement est servi par la console : `GET /api/report/:id?format=md` (**défaut**,
+rétro-compat) et `?format=html` (livrable client brandé, avec CSS `@media print` + couleurs forcées
+`print-color-adjust`).
+
+- **Voie PDF par défaut (aucune dépendance)** : ouvrir `?format=html` puis **« Imprimer » →
+  « Enregistrer au format PDF »** dans le navigateur. La feuille de style d'impression est fournie, donc
+  badges/posture restent lisibles. C'est le chemin recommandé — **zéro binaire externe**.
+- **`?format=pdf` (OPTIONNEL)** : rendu PDF côté serveur, activé **seulement si** un moteur PDF est
+  présent sur le PATH (`weasyprint` recommandé, pip pur-Python ; `wkhtmltopdf` supporté s'il est déjà là).
+  Absent → JSON `pdf_unavailable` qui renvoie vers l'impression navigateur. Le profil `full` embarque
+  `weasyprint` (venv isolé `/opt/pdfenv`, symlinké dans `/usr/local/bin`) → `?format=pdf` clé-en-main ;
+  `mini` l'omet.
+
+> Le moteur PDF est un outil **orchestré optionnel** (comme nmap/nuclei/Burp) : non embarqué,
+> auto-neutralisé si absent. La claim « ZÉRO Go/Ruby/… dans le code Forge » n'est pas affectée
+> (weasyprint est pur-Python ; ses libs C pango/cairo sont de la même catégorie que nmap).
+
+### Contrainte d'archi
+
+- **STATEFUL single-replica + PVC RWO** (pas scale-out).
+- HA / multi-tenant futur = ledger hors-host + store partagé (à repenser).
+- **Profil idéal actuel** : mono-opérateur / petit MSSP.
+- **Atout** : noyau gouverné minuscule + moteurs lourds branchables en sidecars optionnels
+  (livrable « mini » ~200 MB ou « full » selon le client).

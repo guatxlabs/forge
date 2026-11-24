@@ -2,7 +2,7 @@
 # Sûreté d'abord : aucune cible ici ne tire quoi que ce soit contre une cible réelle.
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-py test-rust test-pg test-purple check-version install console doctor clean demo demo-purple demo-seed
+.PHONY: help test test-py test-rust test-pg test-purple check-version check-document-languages install console doctor clean demo demo-purple demo-seed
 
 # --- Postgres (Stage 4) : conteneur éphémère pour les tests d'intégration du backend store-postgres ---
 PG_IMAGE      ?= postgres:16
@@ -58,6 +58,13 @@ test-pg:  ## Tests d'intégration Postgres (Stage 4) : spin docker PG -> cargo t
 
 check-version:  ## Vérifie que VERSION == pyproject == Cargo.toml (échoue sinon)
 	python3 scripts/check_version.py
+
+# Les documents existent en anglais (X.md) et en français (X.fr.md). La garde exige la paire de
+# chaque document suivi (sauf l'ensemble nommé `UNE_SEULE_LANGUE` de scripts/parite_des_langues.py,
+# chaque entrée avec sa raison) et compare les faits que la langue ne change pas : titres, blocs de
+# code, tableaux, liens et leur direction, ancres, nombres, identifiants.
+check-document-languages:  ## Chaque document existe en anglais et en français, en parité
+	python3 scripts/check_every_document_is_paired_and_in_parity.py
 
 # Les trois gardes de chaîne d'approvisionnement tournent en CI, mais RIEN ne les exposait à la main :
 # un contributeur ne pouvait les découvrir qu'en lisant `ci.yml`. Une garde qu'on ne sait pas lancer

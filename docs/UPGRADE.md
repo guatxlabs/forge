@@ -1,70 +1,72 @@
 # Forge — Upgrade / Migration / Backup (runbook)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Déploiement](DEPLOYMENT.md) ·
-> [Migration de données](MIGRATION.md) · [Sauvegardes chiffrées](BACKUP.md) ·
-> [Custody des clés](KEY_CUSTODY.md)
+[English](UPGRADE.md) | [Français](UPGRADE.fr.md)
 
-> **Usage AUTORISÉ uniquement.** Rien de ce runbook n'arme quoi que ce soit. L'upgrade est une
-> opération de **maintenance de données** (schéma + sauvegarde), pas une action offensive.
+> 🧭 [Forge documentation](README.md) · See also: [Deployment](DEPLOYMENT.md) ·
+> [Data migration](MIGRATION.md) · [Encrypted backups](BACKUP.md) ·
+> [Key custody](KEY_CUSTODY.md)
 
-Ce document décrit le cycle de vie **UPGRADE → VÉRIF → ROLLBACK** d'une console Forge déjà déployée, en
-**une seule commande fail-closed**. Le principe directeur : **on ne migre JAMAIS sans un instantané
-chiffré vérifié**, et **tout échec revient à l'état EXACT d'avant**.
+> **AUTHORIZED use only.** Nothing in this runbook arms anything. The upgrade is a
+> **data maintenance** operation (schema + backup), not an offensive action.
+
+This document describes the **UPGRADE → VERIFY → ROLLBACK** lifecycle of an already deployed Forge console, in
+**a single fail-closed command**. The guiding principle: **we NEVER migrate without a verified encrypted
+snapshot**, and **any failure returns to the EXACT prior state**.
 
 ---
 
 ## TL;DR
 
 ```sh
-# À quelle version de schéma est cette base ? (lecture seule, ne démarre pas le serveur)
+# Which schema version is this database at? (read-only, does not start the server)
 forge status
 
-# Aperçu SANS rien muter (montre le snapshot + la migration prévue)
+# Preview WITHOUT mutating anything (shows the snapshot + the planned migration)
 forge upgrade --dry-run
 
-# Upgrade réel : snapshot chiffré -> migrate additif -> vérif -> rollback si échec
+# Real upgrade: encrypted snapshot -> additive migrate -> verify -> rollback on failure
 FORGE_UPGRADE_PASS='…' \
 forge upgrade --passphrase-env FORGE_UPGRADE_PASS
 ```
 
-Idempotent : re-lancer alors que la base est déjà à jour = **no-op succès** (vérifié, aucun changement).
+Idempotent: re-running when the database is already up to date = **successful no-op** (verified, no change).
 
 ---
 
-## 1. `status` — « à quelle version est cette base »
+## 1. `status` — "which version is this database at"
 
-`forge status [--db <path>] [--ledger <path>] [--json]` imprime un instantané **lecture seule**
-(aucune mutation, ne démarre **pas** le serveur, exit rapide) :
+`forge status [--db <path>] [--ledger <path>] [--json]` prints a **read-only** snapshot
+(no mutation, does **not** start the server, fast exit):
 
-| Champ | Sens |
+| Field | Meaning |
 |-------|------|
-| `version` | version produit (fichier `VERSION`, source unique) |
-| `schema_version` | version **LOGIQUE** du schéma persistée (`settings.schema_version`, tamponnée par `migrate()`) |
-| `schema_version_expected` | version attendue par **ce binaire** (compilée) |
-| `backend` | `sqlite` (défaut/community) ou `postgres` |
-| `db` | chemin SQLite, ou URL Postgres **RÉDIGÉE** (jamais de credentials) |
-| `ledger` / `ledger_ok` / `ledger_head` | tête de la chaîne d'audit, **hash-chain re-vérifiée** |
-| `ha_configured` | HA armé via `FORGE_HA` (le *leader* live, lui, est sur `/health`) |
+| `version` | product version (`VERSION` file, single source) |
+| `schema_version` | persisted **LOGICAL** schema version (`settings.schema_version`, stamped by `migrate()`) |
+| `schema_version_expected` | version expected by **this binary** (compiled in) |
+| `backend` | `sqlite` (default build) or `postgres` |
+| `db` | SQLite path, or **REDACTED** Postgres URL (never credentials) |
+| `ledger` / `ledger_ok` / `ledger_head` | head of the audit chain, **hash-chain re-verified** |
+| `ha_configured` | HA armed via `FORGE_HA` (the live *leader*, for its part, is on `/health`) |
 
-La même version est **surfacée sur `/health`** (champ `schema_version`, additif) d'une instance vivante.
+The same version is **surfaced on `/health`** (field `schema_version`, additive) of a live instance.
 
-> Une base **antérieure** au stamp affiche `schema_version: (non tamponnée)` → le prochain boot (ou
-> `upgrade`) la tamponne. C'est rétro-compatible, jamais une valeur inventée.
+> A database **older** than the stamp shows `schema_version: (non tamponnée)` (not stamped) → the next boot (or
+> `upgrade`) stamps it. This is backward-compatible, never an invented value.
 
-### Historique des versions de schéma
+### Schema version history
 
-| Version | Ce qu'elle ajoute | Effet sur une base existante |
+| Version | What it adds | Effect on an existing database |
 |---|---|---|
-| 1 | socle (`run_id`/`cwe`/`cvss` sur `finding`, colonnes C2 sur `run_job`, engagements, tenants…) | — |
-| 2 | `run_job.findings_dropped` · `run_job.findings_write_errors` — comptabilité des findings **émis par le moteur et non stockés** (cf. `docs/HTTP_API.md`, section `/api/ingest`) | **Deux `ALTER TABLE … ADD COLUMN` additifs**, idempotents (error-ignored) et **réversibles** en pratique : aucune donnée existante n'est lue, écrite ni convertie ; un binaire ANTÉRIEUR rebranché sur la base migrée continue de fonctionner (il ignore simplement les deux colonnes). Les lignes déjà présentes prennent **`NULL`** — c'est-à-dire « **part refusée inconnue** », délibérément PAS `0` : un `DEFAULT 0` aurait affirmé rétroactivement qu'aucun finding n'avait été perdu, ce qui est précisément le mensonge que ce lot supprime. |
+| 1 | base (`run_id`/`cwe`/`cvss` on `finding`, C2 columns on `run_job`, engagements, tenants…) | — |
+| 2 | `run_job.findings_dropped` · `run_job.findings_write_errors` — accounting of findings **emitted by the engine and not stored** (see `docs/HTTP_API.md`, section `/api/ingest`) | **Two additive `ALTER TABLE … ADD COLUMN`**, idempotent (error-ignored) and **reversible** in practice: no existing data is read, written or converted; an OLDER binary plugged back onto the migrated database keeps working (it simply ignores the two columns). Rows already present take **`NULL`** — that is, "**refused share unknown**", deliberately NOT `0`: a `DEFAULT 0` would have retroactively asserted that no finding had been lost, which is precisely the lie this batch removes. |
 
-> **Postgres** : les deux colonnes sont dans `PG_SCHEMA` (cluster frais) ; une migration
-> `migrate-store` depuis SQLite les reprend, car elle copie les colonnes **énumérées** sur la source
-> (`PRAGMA table_info`) et exige leur présence sur la cible.
+> **Postgres**: the two columns are in `PG_SCHEMA` (fresh cluster); a `migrate-store`
+> migration from SQLite carries them over, because it copies the columns **enumerated** on the source
+> (`PRAGMA table_info`) and requires their presence on the target.
 
 ---
 
-## 2. `upgrade` — flux sûr en une commande
+## 2. `upgrade` — safe flow in one command
 
 ```
 forge upgrade --passphrase-env <ENVVAR>
@@ -72,58 +74,58 @@ forge upgrade --passphrase-env <ENVVAR>
     [--to <postgres-url>] [--force] [--dry-run]
 ```
 
-Séquence **FAIL-CLOSED** (chaque étape peut seulement AVANCER si la précédente a réussi) :
+**FAIL-CLOSED** sequence (each step can only MOVE ON if the previous one succeeded):
 
-1. **Snapshot pré-upgrade CHIFFRÉ.** Réutilise le moteur de backup audité (**argon2id** + **XChaCha20-Poly1305**,
-   sel/nonce par archive), chaîne ledger vérifiée **avant** écriture, archive **fsync'd**, taggée
-   `pre-upgrade-<schema_version>-<epoch>.forge` dans `--backup-dir` (défaut : dossier de la base). Le
-   snapshot est **re-vérifié** (déchiffrement + sha256 du manifest + hash-chain) : **s'il est invérifiable,
-   on N'A PAS de filet → ABORT avant toute mutation.** *On ne migre jamais sans un bon instantané.*
-2. **Migrate additif** (`SCHEMA` idempotent + `migrate()` : `ADD COLUMN`/`CREATE TABLE IF NOT EXISTS`,
-   error-ignored). Tamponne `schema_version`. Si `--to <postgres-url>` est fourni : **migration de store
-   gouvernée** SQLite → Postgres (`migrate-store` : ordre FK, préservation des ids, vérif des comptes
-   ligne à ligne, checkpoint ledger signé) — **feature `store-postgres`** requise dans l'image.
-3. **Vérif** : self-check de schéma (colonnes additives présentes + `schema_version == cible`) +
-   `ledger verify` (hash-chain) + (store) la vérif des comptes de `migrate-store`.
-4. **Self-check santé** : la base répond (`SELECT 1`) + tête de ledger cohérente (les mêmes contrôles que
+1. **ENCRYPTED pre-upgrade snapshot.** Reuses the audited backup engine (**argon2id** + **XChaCha20-Poly1305**,
+   per-archive salt/nonce), ledger chain verified **before** writing, archive **fsync'd**, tagged
+   `pre-upgrade-<schema_version>-<epoch>.forge` in `--backup-dir` (default: the database folder). The
+   snapshot is **re-verified** (decryption + manifest sha256 + hash-chain): **if it cannot be verified,
+   we have NO safety net → ABORT before any mutation.** *We never migrate without a good snapshot.*
+2. **Additive migrate** (idempotent `SCHEMA` + `migrate()`: `ADD COLUMN`/`CREATE TABLE IF NOT EXISTS`,
+   error-ignored). Stamps `schema_version`. If `--to <postgres-url>` is provided: **governed store
+   migration** SQLite → Postgres (`migrate-store`: FK order, id preservation, row-by-row count
+   verification, signed ledger checkpoint) — **`store-postgres` feature** required in the image.
+3. **Verify**: schema self-check (additive columns present + `schema_version == cible`) +
+   `ledger verify` (hash-chain) + (store) the `migrate-store` count verification.
+4. **Health self-check**: the database answers (`SELECT 1`) + consistent ledger head (the same checks as
    `/health`).
-5. **Sur TOUT échec en 2–4 : RESTORE** depuis le snapshot pré-upgrade → retour à l'état **EXACT** d'avant,
-   **exit non-zéro**, message clair. **Jamais de base à moitié migrée.** Sur succès : `schema_version`
-   tamponnée + entrée ledger **`console.upgrade {from, to, backup_id}`** (métadonnées seules).
+5. **On ANY failure in 2–4: RESTORE** from the pre-upgrade snapshot → back to the **EXACT** prior state,
+   **non-zero exit**, clear message. **Never a half-migrated database.** On success: `schema_version`
+   stamped + ledger entry **`console.upgrade {from, to, backup_id}`** (metadata only).
 
-**Idempotent** : si la base est déjà à la version cible, l'étape *migrate* est **sautée** (elle est de
-toute façon additive-idempotente) mais la **vérif tourne quand même** → no-op succès.
+**Idempotent**: if the database is already at the target version, the *migrate* step is **skipped** (it is
+additive-idempotent anyway) but **verification still runs** → successful no-op.
 
-**`--dry-run`** : imprime le plan (où serait écrit le snapshot, `would_migrate`, cible de store rédigée)
-et **ne mute RIEN** (aucun snapshot, aucun `migrate`).
+**`--dry-run`**: prints the plan (where the snapshot would be written, `would_migrate`, redacted store target)
+and **mutates NOTHING** (no snapshot, no `migrate`).
 
 ### Secrets
-- **Passphrase** du snapshot : lue **UNIQUEMENT** depuis l'ENV nommée par `--passphrase-env` (jamais en
-  argv → jamais dans `ps`/l'historique shell).
-- **URL Postgres** (`--to`) : **rédigée** (sans `user:pass` ni query-string) dans le rapport ET le ledger.
+- Snapshot **passphrase**: read **ONLY** from the ENV named by `--passphrase-env` (never in
+  argv → never in `ps`/the shell history).
+- **Postgres URL** (`--to`): **redacted** (no `user:pass` nor query-string) in the report AND the ledger.
 
 ---
 
-## 3. Scénarios
+## 3. Scenarios
 
-### 3.1 SQLite solo (community, défaut)
+### 3.1 Solo SQLite (default build)
 
 ```sh
-# 1) constater l'état
+# 1) check the state
 forge status --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl
 
-# 2) aperçu
+# 2) preview
 forge upgrade --db /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --backup-dir /data/backups --dry-run
 
-# 3) upgrade réel
+# 3) real upgrade
 FORGE_UPGRADE_PASS='…' forge upgrade \
     --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
     --backup-dir /data/backups --passphrase-env FORGE_UPGRADE_PASS
 ```
 
-En Docker : arrêter le conteneur console, lancer `upgrade` en **one-shot** sur les mêmes volumes, puis
-redémarrer sur la nouvelle image.
+In Docker: stop the console container, run `upgrade` as a **one-shot** on the same volumes, then
+restart on the new image.
 
 ```sh
 docker stop forge
@@ -134,56 +136,56 @@ docker run --rm \
   forge upgrade --db /data/db/forge.db \
     --ledger /data/ledger/engagement.jsonl --backup-dir /data/backups \
     --passphrase-env FORGE_UPGRADE_PASS
-docker start forge   # boot sur la nouvelle image (migrate() re-tamponne, idempotent)
+docker start forge   # boot on the new image (migrate() re-stamps, idempotent)
 ```
 
-### 3.2 Postgres (backend avancé, flag-gated)
+### 3.2 Postgres (advanced backend, flag-gated)
 
-Le **schéma** Postgres (`PG_SCHEMA`, colonnes de `migrate()` déjà fusionnées) est appliqué **au boot** de
-l'image `store-postgres` et **tamponné** (`schema_version`) sous le verrou DDL cluster. Deux cas :
+The Postgres **schema** (`PG_SCHEMA`, `migrate()` columns already merged in) is applied **at boot** of
+the `store-postgres` image and **stamped** (`schema_version`) under the cluster DDL lock. Two cases:
 
-- **Migrer les DONNÉES SQLite → Postgres** (bascule de backend) : image `store-postgres`, puis
+- **Migrating SQLite DATA → Postgres** (backend switch): `store-postgres` image, then
   ```sh
   FORGE_UPGRADE_PASS='…' forge upgrade \
       --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
       --backup-dir /data/backups --passphrase-env FORGE_UPGRADE_PASS \
-      --to 'postgres://…@pg:5432/forge?sslmode=require'   # [--force] pour écraser une cible non vide
+      --to 'postgres://…@pg:5432/forge?sslmode=require'   # [--force] to overwrite a non-empty target
   ```
-  Le snapshot pré-upgrade protège la **source SQLite** ; la migration de store est **gouvernée**
-  (vérif des comptes, refus d'écraser sans `--force`, checkpoint signé `console.store.migrate`). Détails
-  bas niveau : [`docs/MIGRATION.md`](MIGRATION.md) §Postgres et [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) §3bis.
-- **Bump de schéma d'une base Postgres déjà en service** : le schéma additif est appliqué **au boot**
-  (idempotent). Le snapshot logique Postgres se fait par `pg_dump` (cf. `/api/backup` sous PG et
-  [`docs/BACKUP.md`](BACKUP.md)) — **avant** un `docker pull` majeur, prenez ce dump.
+  The pre-upgrade snapshot protects the **SQLite source**; the store migration is **governed**
+  (count verification, refusal to overwrite without `--force`, signed checkpoint `console.store.migrate`). Low-level
+  details: [`docs/MIGRATION.md`](MIGRATION.md) §Postgres and [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) §3bis.
+- **Schema bump of a Postgres database already in service**: the additive schema is applied **at boot**
+  (idempotent). The Postgres logical snapshot is done by `pg_dump` (see `/api/backup` under PG and
+  [`docs/BACKUP.md`](BACKUP.md)) — **before** a major `docker pull`, take that dump.
 
-### 3.3 HA / multi-instance — upgrade rolling (drain-leader)
+### 3.3 HA / multi-instance — rolling upgrade (drain-leader)
 
-⚠️ **NE JAMAIS lancer la migration depuis N instances en parallèle.** Sous HA (Postgres partagé),
-plusieurs réplicas écrivant le schéma / migrant les données **en même temps** provoquent des courses
-(duplicate-key, `tuple concurrently updated`). Procédure sûre :
+⚠️ **NEVER run the migration from N instances in parallel.** Under HA (shared Postgres),
+several replicas writing the schema / migrating the data **at the same time** cause races
+(duplicate-key, `tuple concurrently updated`). Safe procedure:
 
-1. **Boot ordonné** : le boot applique `PG_SCHEMA` sous un `pg_advisory_xact_lock` cluster-global → un
-   **seul** réplica pose le schéma additif à la fois, les autres voient tout déjà présent (idempotent).
-   Un upgrade **purement schéma-additif** peut donc se faire par **rolling restart** des réplicas sur la
-   nouvelle image, sans commande manuelle.
-2. **Si une migration de DONNÉES est nécessaire** (`upgrade --to …` / `migrate-store`) : **draine le
-   leader** — mets à jour **UNE** instance hors rotation (ou une instance de maintenance dédiée), lance
-   `upgrade`/`migrate-store` **là uniquement**, vérifie (`status`, `ledger verify`), **puis** fais le
-   rolling restart des autres réplicas sur la nouvelle image. Jamais deux migrations concurrentes.
-3. Le *leader* live est visible sur `/health` (`leader: true/false`, `instance_id`) — utilise-le pour
-   choisir/confirmer l'instance de maintenance.
+1. **Ordered boot**: the boot applies `PG_SCHEMA` under a cluster-global `pg_advisory_xact_lock` → a
+   **single** replica lays down the additive schema at a time, the others see everything already present (idempotent).
+   A **purely schema-additive** upgrade can therefore be done by **rolling restart** of the replicas onto the
+   new image, with no manual command.
+2. **If a DATA migration is needed** (`upgrade --to …` / `migrate-store`): **drain the
+   leader** — update **ONE** instance out of rotation (or a dedicated maintenance instance), run
+   `upgrade`/`migrate-store` **there only**, verify (`status`, `ledger verify`), **then** do the
+   rolling restart of the other replicas onto the new image. Never two concurrent migrations.
+3. The live *leader* is visible on `/health` (`leader: true/false`, `instance_id`) — use it to
+   choose/confirm the maintenance instance.
 
 ---
 
 ## 4. Rollback
 
-Le rollback est **automatique** : au moindre échec des étapes *migrate*/*vérif*/*santé*, `upgrade`
-restaure db + ledger depuis le snapshot pré-upgrade (`restore --force` interne, re-vérifié sha256 +
-hash-chain) et **sort non-zéro**. La base **n'est jamais laissée à moitié migrée**. La restauration
-elle-même est **tracée** au ledger (`console.restore`) — le rollback est auditable.
+Rollback is **automatic**: at the slightest failure of the *migrate*/*verify*/*health* steps, `upgrade`
+restores db + ledger from the pre-upgrade snapshot (internal `restore --force`, re-verified sha256 +
+hash-chain) and **exits non-zero**. The database **is never left half-migrated**. The restore
+itself is **recorded** in the ledger (`console.restore`) — the rollback is auditable.
 
-Si le rollback automatique **échoue lui-même** (I/O, permissions), le message indique le chemin du
-snapshot chiffré et la commande manuelle exacte :
+If the automatic rollback **itself fails** (I/O, permissions), the message gives the path of the
+encrypted snapshot and the exact manual command:
 
 ```sh
 forge restore --in <pre-upgrade-…​.forge> --passphrase-env <ENV> \
@@ -192,58 +194,58 @@ forge restore --in <pre-upgrade-…​.forge> --passphrase-env <ENV> \
 
 ---
 
-## 5. Backup / Restore (rappel — UX une commande)
+## 5. Backup / Restore (reminder — one-command UX)
 
-`upgrade` **réutilise** ces primitives ; on peut aussi les appeler seules.
+`upgrade` **reuses** these primitives; they can also be called on their own.
 
 ```sh
-# Sauvegarde CHIFFRÉE (db + ledger + clé .ed25519 + manifest) — passphrase via ENV, jamais argv
+# ENCRYPTED backup (db + ledger + .ed25519 key + manifest) — passphrase via ENV, never argv
 FORGE_BACKUP_PASS='…' forge backup --out /data/backups/manual.forge \
     --db /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
     --passphrase-env FORGE_BACKUP_PASS
 
-# Restauration (déchiffre, vérifie sha256 + hash-chain, refuse d'écraser un install non vide sans --force)
+# Restore (decrypts, verifies sha256 + hash-chain, refuses to overwrite a non-empty install without --force)
 FORGE_BACKUP_PASS='…' forge restore --in /data/backups/manual.forge \
     --to /data/db/forge.db --ledger /data/ledger/engagement.jsonl \
-    --passphrase-env FORGE_BACKUP_PASS   # [--force] pour un swap en place
+    --passphrase-env FORGE_BACKUP_PASS   # [--force] for an in-place swap
 ```
 
-**Propriétés de sécurité** (identiques à `upgrade`) : archive **toujours chiffrée** (aucun chemin en
-clair — elle embarque la clé de signature ET la base), **AEAD-authentifiée** (une mauvaise passphrase ou
-une altération ⇒ échec propre, **rien écrit**), chaîne ledger vérifiée **avant** backup et **à la**
-restauration, garde **anti-écrasement** (`--force` explicite), passphrase **transitoire** (jamais
-stockée/loggée/ledgerisée). Programmation + rétention + offsite S3/MinIO : [`docs/BACKUP.md`](BACKUP.md).
+**Security properties** (identical to `upgrade`): archive **always encrypted** (no plaintext
+path — it bundles the signing key AND the database), **AEAD-authenticated** (a wrong passphrase or
+tampering ⇒ clean failure, **nothing written**), ledger chain verified **before** backup and **at**
+restore, **anti-overwrite** guard (explicit `--force`), **transient** passphrase (never
+stored/logged/written to the ledger). Scheduling + retention + S3/MinIO offsite: [`docs/BACKUP.md`](BACKUP.md).
 
-### Drill de restore offsite (recommandé)
+### Offsite restore drill (recommended)
 
 ```sh
-# 1) récupérer une archive offsite (S3/MinIO ou copie local_dir), la valider SANS écrire :
+# 1) fetch an offsite archive (S3/MinIO or local_dir copy), validate it WITHOUT writing:
 FORGE_BACKUP_PASS='…' forge restore --in /tmp/offsite-copy.forge \
     --to /tmp/restore-drill.db --ledger /tmp/restore-drill.jsonl --passphrase-env FORGE_BACKUP_PASS
-# 2) vérifier la base + la chaîne restaurées :
+# 2) check the restored database + chain:
 forge status --db /tmp/restore-drill.db --ledger /tmp/restore-drill.jsonl
 forge ledger verify --ledger /tmp/restore-drill.jsonl
-# 3) nettoyer : rm /tmp/restore-drill.*
+# 3) clean up: rm /tmp/restore-drill.*
 ```
 
-Les snapshots `pre-upgrade-*` écrits par `upgrade` sont des archives de backup **standard** : ils sont
-**balayés par la rétention existante** (cf. politique de backup) et restaurables par la commande ci-dessus.
+The `pre-upgrade-*` snapshots written by `upgrade` are **standard** backup archives: they are
+**swept by the existing retention** (see the backup policy) and restorable with the command above.
 
 ---
 
-## 6. Propriétés de sécurité (résumé)
+## 6. Security properties (summary)
 
-| Garantie | Mécanisme |
+| Guarantee | Mechanism |
 |----------|-----------|
-| Jamais de migration sans filet | Snapshot pré-upgrade **chiffré + chain-vérifié** obligatoire, sinon ABORT |
-| Jamais de base à moitié migrée | Tout échec 2–4 → **RESTORE** à l'état exact d'avant, exit non-zéro |
-| Rejeu sûr | Idempotent (migrate additif ; même-version → skip + vérif) |
-| Community byte-identique | Nouvelles sous-commandes **additives** ; flux existants inchangés ; **openssl-free** (build community — cf. `DEPLOYMENT.md` §3quater.1) |
-| Crypto auditée | Réutilise argon2id + XChaCha20-Poly1305 du backup (aucun nouveau chemin crypto) |
-| Secrets protégés | Passphrase via **ENV** (jamais argv) ; URL Postgres **rédigée** dans log/ledger |
-| Auditable | `console.backup` / `console.upgrade` / `console.restore` chaînés au ledger tamper-evident |
-| HA correct | **Drain-leader** documenté ; jamais N migrations concurrentes |
+| Never a migration without a safety net | **Encrypted + chain-verified** pre-upgrade snapshot mandatory, otherwise ABORT |
+| Never a half-migrated database | Any failure in 2–4 → **RESTORE** to the exact prior state, non-zero exit |
+| Safe replay | Idempotent (additive migrate; same version → skip + verify) |
+| Default build byte-identical | **Additive** new subcommands; existing flows unchanged; **openssl-free** (default build — see `DEPLOYMENT.md` §3quater.1) |
+| Audited crypto | Reuses the backup's argon2id + XChaCha20-Poly1305 (no new crypto path) |
+| Protected secrets | Passphrase via **ENV** (never argv); Postgres URL **redacted** in log/ledger |
+| Auditable | `console.backup` / `console.upgrade` / `console.restore` chained into the tamper-evident ledger |
+| Correct HA | **Drain-leader** documented; never N concurrent migrations |
 
-> Vérif de **signature** du ledger (Ed25519/HMAC) et anti-**troncature** (high-water-mark) restent du
-> ressort du moteur `forge ledger verify --pubkey` (Python) + de l'ancrage hors-host ; `upgrade`
-> re-vérifie le **hash-chaining** (même algo que `/api/ledger/verify`). Voir [`KEY_CUSTODY.md`](KEY_CUSTODY.md).
+> Ledger **signature** verification (Ed25519/HMAC) and anti-**truncation** (high-water-mark) remain the
+> responsibility of the `forge ledger verify --pubkey` engine (Python) + off-host anchoring; `upgrade`
+> re-verifies the **hash-chaining** (same algorithm as `/api/ledger/verify`). See [`KEY_CUSTODY.md`](KEY_CUSTODY.md).

@@ -568,6 +568,11 @@ use crate::testutil::*;
         // community : flag OFF => 403 enterprise_disabled (aucune surface tenant).
         let resp = tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Acme"}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag OFF => 403 enterprise_disabled");
+        let refus = resp_json(resp).await;
+        assert_eq!(refus["error"], "enterprise_disabled", "le code d'erreur reste stable");
+        let why = refus["why"].as_str().unwrap_or_default();
+        assert!(why.contains("module avancé multi-tenancy non activé"), "texte servi : {why}");
+        assert!(!why.contains("enterprise non"), "vocabulaire d'édition dans le texte servi : {why}");
         enable_enterprise_tenancy(&app);
         // operator => 403 ; admin => 200.
         let resp = tenancy::tenants_create(State(app.clone()), opr.clone(), Json(json!({"name":"Acme"}))).await;

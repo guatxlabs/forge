@@ -9,7 +9,7 @@
 #         --from-literal=FORGE_CONSOLE_PASS_HASH="$(forge hashpw <pw>)" \
 #         --from-literal=FORGE_CONSOLE_OPERATOR_HASH=''
 # …or the equivalent via SealedSecrets / ExternalSecrets / SOPS. See 10-secrets.example.yaml for the
-# exact key names each workload expects, and docs/DEPLOYMENT.md §k8s.
+# exact key names each workload expects, and docs/DEPLOYMENT.md §3bis.6 (HA on Kubernetes).
 # The workloads reference those Secret names, so without them the console/postgres/minio pods stay
 # Pending on the missing Secret — which is the intended fail-safe (no silent default creds).
 apiVersion: kustomize.config.k8s.io/v1beta1

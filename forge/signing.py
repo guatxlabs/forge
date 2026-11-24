@@ -597,8 +597,8 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
     # --- enterprise remote signer (flag-gated) ---
     if not enterprise_signer_enabled(env):
         raise RemoteSignerError(
-            "signeur distant (KMS/HSM/exec/pkcs11) demandé mais l'entreprise COMPLIANCE n'est pas activée "
-            f"({ENTERPRISE_COMPLIANCE_FLAG}=1) — repli LOCAL refusé (fail-closed, open-core)"
+            "signeur distant (KMS/HSM/exec/pkcs11) demandé mais le module avancé COMPLIANCE n'est pas activé "
+            f"({ENTERPRISE_COMPLIANCE_FLAG}=1) — repli LOCAL refusé (fail-closed)"
         )
     if mode == "pkcs11":
         from . import signing_pkcs11   # LAZY: python-pkcs11 only imported when the operator selects pkcs11

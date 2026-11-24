@@ -9,7 +9,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
 #                  --profile postgres up -d --build
 #
-# ÉTAPES OBLIGATOIRES (cf. docs/DEPLOYMENT.md § Postgres) :
+# ÉTAPES OBLIGATOIRES (cf. docs/DEPLOYMENT.md §3bis « Postgres backend ») :
 #   1) Pré-étape scope.json (comme le déploiement SQLite) : `cp scope.example.json scope.json` dans forge/.
 #   2) `--profile postgres` DÉMARRE le service `postgres` (sinon la console démarre sans sa DB -> échec au
 #      boot : FORGE_ENTERPRISE_STORE=postgres exige FORGE_DB_URL joignable).

@@ -26,8 +26,8 @@ data:
   # SQLite fallback path — LOCAL to each pod (emptyDir), UNUSED while Postgres is the active store.
   # Kept off the shared ledger volume so N replicas never contend on one SQLite file at boot.
   FORGE_CONSOLE_DB: "/data/db/forge.db"
-  # Tamper-evident engagement ledger — on the shared RWX PVC (see console Deployment + DEPLOYMENT.md
-  # §k8s for the RWX-vs-object-store / per-instance-ledger tradeoff).
+  # Tamper-evident engagement ledger — on the shared RWX PVC (see console Deployment + docs/DEPLOYMENT.md
+  # §3bis.6 for the RWX-vs-object-store / per-instance-ledger tradeoff).
   FORGE_CONSOLE_LEDGER: "/data/ledger/engagement.jsonl"
   FORGE_CONSOLE_SCOPE: "/data/scope/scope.json"
   # Host allowlist (anti-DNS-rebinding). Must include EVERY Host clients present through the Ingress,

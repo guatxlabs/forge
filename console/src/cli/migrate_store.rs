@@ -247,7 +247,7 @@ fn migrate_store_core(
     let missing: Vec<String> = tables.iter().filter(|t| !dest_tables.contains(*t)).cloned().collect();
     if !missing.is_empty() {
         return Err(StoreError::Backend(format!(
-            "cible dépourvue de {} table(s) source (aucun schéma connu — base ou enterprise — ne les crée ; \
+            "cible dépourvue de {} table(s) source (aucun schéma connu — build par défaut ou module avancé — ne les crée ; \
              migration REFUSÉE plutôt qu'un skip silencieux ou un DDL deviné) : {}",
             missing.len(),
             missing.join(", ")

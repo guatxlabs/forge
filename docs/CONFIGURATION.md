@@ -1,433 +1,436 @@
-# Référence de configuration
+# Configuration reference
 
-> [Sommaire](README.md) · Voir aussi : [Installation](INSTALLATION.md) ·
-> [Premier déploiement](FIRST_DEPLOYMENT.md) · [Administration](ADMINISTRATION.md) ·
-> [Modèle de sécurité](SECURITY_MODEL.md)
+[English](CONFIGURATION.md) | [Français](CONFIGURATION.fr.md)
 
-Forge se configure à **deux niveaux complémentaires** :
+> [Contents](README.md) · See also: [Installation](INSTALLATION.md) ·
+> [First deployment](FIRST_DEPLOYMENT.md) · [Administration](ADMINISTRATION.md) ·
+> [Security model](SECURITY_MODEL.md)
 
-1. **Variables d'environnement** — fixées **au déploiement** (image / `.env` / EnvironmentFile
-   systemd). Elles pilotent le bind, les chemins d'état, les secrets d'amorçage, les services
-   pilotés. Gabarit commenté : [`../.env.example`](../.env.example).
-2. **Table `settings`** (SQLite) — configurée **dans l'UI** (wizard de 1er boot ou
-   *Administration*), réservée admin, **ledgerisée**. Elle porte la source de détection, la politique
-   opérateur, la politique de sauvegarde, etc. **Rien n'y est codé en dur.**
+Forge is configured at **two complementary levels**:
 
-> Sûreté : les défauts laissent Forge **INERTE** et en **loopback**. Rien n'est armé. Les secrets
-> ([SECRET]) ne doivent JAMAIS être committés ; garder `.env` en `0600`.
+1. **Environment variables** — set **at deployment** (image / `.env` / systemd EnvironmentFile).
+   They drive the bind, the state paths, the bootstrap secrets, the driven services. Commented
+   template: [`../.env.example`](../.env.example).
+2. **`settings` table** (SQLite) — configured **in the UI** (first-boot wizard or
+   *Administration*), admin-only, **ledgered**. It holds the detection source, the operator policy,
+   the backup policy, etc. **Nothing in it is hard-coded.**
+
+> Safety: the defaults leave Forge **INERT** and on **loopback**. Nothing is armed. Secrets
+> ([SECRET]) must NEVER be committed; keep `.env` at `0600`.
 
 ---
 
-## 1. Variables d'environnement
+## 1. Environment variables
 
-### 1.1 Console — bind, chemins d'état, session
+### 1.1 Console — bind, state paths, session
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_CONSOLE_ADDR` | Adresse de bind API/UI. **Jamais** `0.0.0.0` sans reverse-proxy + auth + host-allowlist. | `127.0.0.1:7100` (binaire) · `0.0.0.0:7100` (image, réseau isolé) | `127.0.0.1:7100` |
-| `FORGE_CONSOLE_DB` | Chemin du store SQLite. | `forge.db` | `/data/db/forge.db` |
-| `FORGE_CONSOLE_LEDGER` | Chemin du ledger d'engagement (JSONL). | `engagement.jsonl` | `/data/ledger/engagement.jsonl` |
-| `FORGE_CONSOLE_SCOPE` | Chemin du scope/ROE **actif** (in_scope vide = INERTE). Pré-filtre fail-closed des cibles lançables depuis le web. | `<pkg_dir>/scope.json` | `/data/scope/scope.json` |
-| `FORGE_CONSOLE_WEB` | Racine des assets UI servis en fallback. | résolu auto (`console/web`) | `/opt/forge/console/web` |
-| `FORGE_CONSOLE_USER` | Identifiant du rôle **viewer** (Basic auth). | `forge` | `forge` |
-| `FORGE_CONSOLE_SESSION_TTL` | Durée de vie d'une session (s). **C'est la valeur effective** de la TTL de session. | `3600` | `1800` |
-| `FORGE_CONSOLE_HOST` | Allowlist `Host` anti-DNS-rebinding (CSV) si exposé via proxy. `localhost`/`127.0.0.1`/`::1` sont toujours acceptés. | *(vide)* | `console.exemple.test` |
-| `FORGE_CONSOLE_LEDGER_PUBKEY` | Clé publique Ed25519 (hex 64) pour la vérif côté console. **Publique, non secrète.** | *(vide)* | `a1b2…` |
+| `FORGE_CONSOLE_ADDR` | API/UI bind address. **Never** `0.0.0.0` without reverse proxy + auth + host allowlist. | `127.0.0.1:7100` (binary) · `0.0.0.0:7100` (image, isolated network) | `127.0.0.1:7100` |
+| `FORGE_CONSOLE_DB` | Path of the SQLite store. | `forge.db` | `/data/db/forge.db` |
+| `FORGE_CONSOLE_LEDGER` | Path of the engagement ledger (JSONL). | `engagement.jsonl` | `/data/ledger/engagement.jsonl` |
+| `FORGE_CONSOLE_SCOPE` | Path of the **active** scope/ROE (empty in_scope = INERT). Fail-closed pre-filter of the targets launchable from the web. | `<pkg_dir>/scope.json` | `/data/scope/scope.json` |
+| `FORGE_CONSOLE_WEB` | Root of the UI assets served as fallback. | auto-resolved (`console/web`) | `/opt/forge/console/web` |
+| `FORGE_CONSOLE_USER` | Identifier of the **viewer** role (Basic auth). | `forge` | `forge` |
+| `FORGE_CONSOLE_SESSION_TTL` | Lifetime of a session (s). **This is the effective value** of the session TTL. | `3600` | `1800` |
+| `FORGE_CONSOLE_HOST` | Anti-DNS-rebinding `Host` allowlist (CSV) when exposed through a proxy. `localhost`/`127.0.0.1`/`::1` are always accepted. | *(empty)* | `console.exemple.test` |
+| `FORGE_CONSOLE_LEDGER_PUBKEY` | Ed25519 public key (hex 64) for console-side verification. **Public, not secret.** | *(empty)* | `a1b2…` |
 
-### 1.2 Console — secrets d'authentification / RBAC
+### 1.2 Console — authentication / RBAC secrets
 
-Vides ⇒ **mode dev localhost-ouvert** pour le viewer, token d'ingestion **généré au boot**, rôle
-opérateur **non provisionné** (C2 fermé). Renseigner pour un déploiement durci (ou tout provisionner
-via le [wizard](FIRST_DEPLOYMENT.md)).
+Empty ⇒ **open-localhost dev mode** for the viewer, ingestion token **generated at boot**, operator
+role **not provisioned** (C2 closed). Fill them in for a hardened deployment (or provision everything
+through the [wizard](FIRST_DEPLOYMENT.md)).
 
-| Variable | Sens | Défaut | Comment l'obtenir |
+| Variable | Meaning | Default | How to obtain it |
 |---|---|---|---|
-| `FORGE_CONSOLE_TOKEN` | **[SECRET]** Bearer d'**ingestion** (canal moteur→console). Sinon généré au boot (éphémère). | *(auto)* | `openssl rand -hex 16` |
-| `FORGE_CONSOLE_PASS_HASH` | **[SECRET]** Hash argon2id du rôle **viewer** (Basic). Sa présence engage la gate d'auth. | *(vide)* | `forge hashpw '<pw>'` |
-| `FORGE_CONSOLE_OPERATOR_HASH` | **[SECRET]** Hash argon2id du rôle **opérateur** C2 (en-tête `X-Forge-Operator`). Vide = **C2 fermé** (fail-closed). | *(vide)* | `forge hashpw-operator '<pw>'` |
+| `FORGE_CONSOLE_TOKEN` | **[SECRET]** **Ingestion** bearer (engine→console channel). Otherwise generated at boot (ephemeral). | *(auto)* | `openssl rand -hex 16` |
+| `FORGE_CONSOLE_PASS_HASH` | **[SECRET]** argon2id hash of the **viewer** role (Basic). Its presence engages the auth gate. | *(empty)* | `forge hashpw '<pw>'` |
+| `FORGE_CONSOLE_OPERATOR_HASH` | **[SECRET]** argon2id hash of the C2 **operator** role (`X-Forge-Operator` header). Empty = **C2 closed** (fail-closed). | *(empty)* | `forge hashpw-operator '<pw>'` |
 
-> **Attribution individuelle** : l'administration (`check_admin`) **n'accepte PAS** de repli
-> env-hash — elle exige une **session admin** nommée (créée via le wizard ou `forge useradd
-> <login> admin`). Les hashes env sont un mécanisme d'**amorçage headless** (viewer/opérateur).
+> **Individual attribution**: administration (`check_admin`) does **NOT accept** an env-hash
+> fallback — it requires a named **admin session** (created through the wizard or `forge useradd
+> <login> admin`). The env hashes are a **headless bootstrap** mechanism (viewer/operator).
 
-### 1.3 Moteur Python — spawn & timeouts
+### 1.3 Python engine — spawn & timeouts
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_PKG_DIR` | Racine du package python `forge` spawné par la console (cwd du spawn). | `..` | `/opt/forge` |
-| `FORGE_PYTHON` | Interpréteur pour `python3 -m forge.cli`. | `python3` | `python3` |
-| `FORGE_DURATIONS` | Kill-switch du **magasin de durées observées** (`<ledger>.durations`, sidecar du ledger de l'engagement — donc **par engagement**, supprimé avec lui). Il agrège la durée des tirs **PAR KIND DE MODULE UNIQUEMENT** (jamais par cible/hôte/URL : ce serait un journal de reconnaissance survivant à l'engagement), en taille **bornée** (≤ 256 kinds, agrégat fixe par kind, ~quelques Kio). Il sert **uniquement** à l'ordre de SOUMISSION du préchauffage intra-vague (`engine._preheat_key`) — **aucune** décision de tir, de scope ou de ROE n'en dépend. `0`/`off`/`false`/`no` ⇒ aucun fichier, aucune mesure, préchauffage sur `action.cost` (comportement d'avant la version). Sans `--ledger`, il n'y a de toute façon aucun fichier. | *(actif)* | `0` |
-| `FORGE_RUN_TIMEOUT` | Budget max (s) d'un run C2-light (watchdog). | `1800` (binaire) · `900` (image) | `900` |
-| `FORGE_KIND_BUDGET_SHARE` | **Part du budget de temps qu'UN SEUL kind de module peut consommer** sur un run, en fraction. Sert la seconde clause de la porte de budget (`engine._budget_gate` → `interrupt.KindShare`) : on ne DÉMARRE pas un tir dont la consommation **prévue** (moyenne observée du kind sur ce run, à défaut le sidecar `.durations`, à défaut la borne déclarée — jamais au-delà de cette borne), ajoutée à ce que le kind a **déjà** consommé, dépasserait cette part. Motivé par la mesure : sur une campagne réelle, `web.testssl` a pris **1 484 s (41 %)** d'un budget de 3 600 s — trois tirs individuellement raisonnables dont deux tués à leur mur de 600 s — pendant que la vague 1 ne finissait pas. **Ce n'est pas une troncature** : l'action refusée sort en **SKIP nommé**, listé au rapport, **sans aucun verdict** (ni `tested`, ni `not_vulnerable`, ni finding). Trois garde-fous : le **1er tir d'un kind n'est jamais refusé** (un scanner lent tourne toujours au moins une fois) ; les **classes qualifiantes** (IDOR/auth/RCE/SSRF/biz — `planner.is_floored`) sont **exemptées** ; et **sans budget de temps posé, la clause est totalement inerte**. `0` la désactive. Valeur illisible → défaut. | `0.3333` (1/3) | `0.25` |
-| `FORGE_PLAN_TIMEOUT` | Budget max (s) d'un **dry-plan** (`POST /api/plan`, inerte). Au dépassement : le **groupe** moteur est tué et l'appelant reçoit `504 plan_timeout` (jamais d'aperçu partiel). Valeur invalide ou `0` → défaut. | `300` | `60` |
-| `FORGE_PLAN_MAX_CONCURRENT` | Nombre de **dry-plans en vol** simultanés (chacun spawne un process moteur). Au-delà : `429 plan_busy` — erreur explicite, **pas** de file d'attente muette. **Relue à chaque dry-plan** (comme `FORGE_PLAN_TIMEOUT`) : une modification prend effet sans redémarrer. Valeur invalide ou `0` → défaut. | `2` | `4` |
-| `FORGE_ENGINE_TIMEOUT` | Budget (s) du **travail moteur** des autres spawns : catalogue `GET /api/techniques`, `GET /api/workflows`, collecteur de détections, rendu **DOCX/PDF** du livrable, et sonde du registre (`POST /api/modules/refresh`, boot). Au dépassement : le **groupe** est tué et la route rend sa cause NOMMÉE (`techniques_unavailable`/`builtins_unavailable` en fail-soft, `504 docx_engine_timeout` pour le livrable). Relue à chaque appel. Valeur invalide ou `0` → défaut. **Le mur-à-mur d'une requête coupée vaut ce budget PLUS le temps de mort effective du spawn** (SIGTERM, puis SIGKILL après 5 s si un membre l'ignore) : mesuré à **5,02–5,06 s** (9 mesures) pour un budget de 5 s sur un moteur qui sort au SIGTERM. | `120` | `30` |
-| `FORGE_ENGINE_MAX_CONCURRENT` | Nombre de spawns moteur de **LECTURE** vivants (compteur distinct de celui du dry-plan et de celui de l'opérateur : une rafale de lectures n'affame pas l'opérateur, et réciproquement — le total machine est la **somme** des trois). Un slot est tenu par la **vie du process ET de ses descendants**, pas par celle de la requête HTTP : abandonner la requête ne le rend pas. Un descendant qui QUITTE le groupe (`setsid`/double-fork) est retrouvé par le marqueur d'environnement du spawn et par la chaîne de parenté (subreaper) — mesuré : 40 requêtes abandonnées laissaient **40** descendants vivants avec un plafond de 4, elles en laissent **0** et la borne refuse (rafale de 20 : 16 × `429`). Limites écrites dans `docs/HTTP_API.md`, et elles sont MOINS CHÈRES POUR L'ÉVADÉ QUE LEUR NOM NE LE SUGGÈRE : il suffit de retirer UNE variable d'environnement (`env -u FORGE_ENGINE_SPAWN` → **7 survivants**, exactement comme `env -i`) quand le leader est déjà sorti ; et un travail délégué à un NON-descendant (`systemd-run --user`) sort simplement du domaine (**5 survivants** pour 4 requêtes abandonnées, slot rendu aussitôt). Hors Linux, pas de `/proc` : repli sur le kill de groupe. COÛT SUR LE CHEMIN NOMINAL, mesuré, ET IL DÉPEND DE LA FORME DU DESCENDANT (une seule forme avait été mesurée et son chiffre généralisé à tort) : aucun descendant **0,030–0,040 s** ; descendant qui REDIRIGE ses fd et meurt au SIGTERM **0,133–0,146 s** ; qui REDIRIGE ses fd et IGNORE SIGTERM **5,17–5,24 s** (slot tenu jusqu'au SIGKILL de la fenêtre de grâce, et il est bien tué) ; qui HÉRITE du pipe stdout — le défaut d'un `fork`/`Popen` sans redirection — **0,380–0,396 s**, contre le BUDGET MOTEUR ENTIER avant correctif (**5,13 s** à `FORGE_ENGINE_TIMEOUT=5`, **9,13 s** à 9, **120,061 s** au défaut livré, et la sortie valide était JETÉE). Le levier de ce cas-là n'était pas `CANCEL_GRACE_SECS` mais `FORGE_ENGINE_TIMEOUT` ; il est traité à la cause (on n'attend plus la fermeture d'un pipe hérité pour répondre, cf. `docs/HTTP_API.md`). Au-delà : refus **explicite** (le message nomme la variable), **pas** de file d'attente muette. Relue à chaque appel. Valeur invalide ou `0` → défaut. | `4` | `8` |
-| `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` | Nombre de spawns moteur **OPÉRATEUR** vivants : `POST /api/import`, `POST /api/modules/refresh`, `POST`/`DELETE /api/tools`, sonde du registre au boot. Gate séparée de la lecture pour deux raisons mesurées : une rafale de lectures viewer ne doit pas faire échouer un import opérateur, et 40 refresh concurrents ne doivent pas rendre une lecture viewer 50× plus lente (mesuré **0,21 s → 11,4 s** avant borne, **0,34 s → 3,7 s** après). Au-delà : refus explicite (`429 import_busy`, `429` + `probe_error` pour le refresh). Relue à chaque appel. | `2` | `4` |
-| `FORGE_IMPORT_TIMEOUT` | Budget (s) du parse d'un **import de scan** (`POST /api/import`) — distinct de `FORGE_ENGINE_TIMEOUT` parce qu'un export de scanner (jusqu'à 64 Mio, le plafond d'entrée de la route) est légitimement plus long qu'un catalogue. Au dépassement : spawn tué, `504 import_timeout`, **aucun** finding partiel inséré. Relue à chaque appel. Valeur invalide ou `0` → défaut. **Pourquoi 600 s par défaut** : le budget est dimensionné sur le PLAFOND D'ENTRÉE de la route (64 Mio), pas sur un import typique. Mesuré sur cette machine (moteur `python3` réel, cibles in-scope) : 1,3 Mio / 9 000 entrées → **4,7 s** ; 11,1 Mio / 72 000 entrées → **49,2 s** (croissance supra-linéaire). À 64 Mio, l'ordre de grandeur dépasse donc les 285 s : un défaut plus court couperait un import légitime au pire moment. Ce que coûte un import lent : **un** des 2 slots de la gate OPÉRATEUR (jamais la gate de lecture), sur une route authentifiée opérateur, sans fuite de process (mesuré : 0 survivant après déconnexion du client). Un exploitant qui veut un mur-à-mur court le baisse — c'est le sens de la variable. | `600` | `120` |
-| `FORGE_CONSOLE_URL` | Cible d'ingestion `POST /api/ingest` pour le **client Python** (`campaign`, `demo_ingest`, `doctor`). Doit matcher `FORGE_CONSOLE_ADDR`. | `http://127.0.0.1:7100` | `http://127.0.0.1:7100` |
-| `FORGE_LEDGER_KEY` | **[SECRET]** Matériel de clé de signature du ledger côté moteur. Vide = clé locale auto-générée (`<base>.ed25519`, `0600`). | *(vide)* | *(matériel de clé)* |
-| `FORGE_TOOLS_DIR` | Racine du **volume outils runtime** (`forge tools install\|update\|remove`) : les binaires vont dans `<dir>/bin`, les reçus dans `<dir>/state`. `<dir>/bin` doit être sur le `PATH` pour être résolu (l'image l'y met, devant le `/usr/local/bin` baké). **Rien n'est créé tant qu'aucune action opérateur n'a eu lieu** → vide = comportement identique à la baseline. Cf. `docs/TOOLS_LIFECYCLE.md`. | `<data_dir>/tools` | `/data/tools` |
-| `FORGE_TOOLS_MANIFEST` | Chemin du **manifeste** des outils (versions + pins SHA256 par architecture + gabarits d'URL). Vide = `tools.json` livré dans le package. Un manifeste opérateur reste soumis aux **mêmes** validations fail-closed (URL `https://` obligatoire, digest 64 hexa, `bin` sans séparateur de chemin) : il déplace l'allowlist, il ne la supprime pas. | *(livré)* | `/etc/forge/tools.json` |
-| `PYTHONPATH` / `PYTHONUNBUFFERED` | Résolution du package `forge` / logs non bufferisés (fixés par l'image/systemd). | image | `/opt/forge` / `1` |
+| `FORGE_PKG_DIR` | Root of the `forge` python package spawned by the console (cwd of the spawn). | `..` | `/opt/forge` |
+| `FORGE_PYTHON` | Interpreter for `python3 -m forge.cli`. | `python3` | `python3` |
+| `FORGE_DURATIONS` | Kill switch of the **observed-durations store** (`<ledger>.durations`, sidecar of the engagement ledger — hence **per engagement**, deleted with it). It aggregates the duration of shots **PER MODULE KIND ONLY** (never per target/host/URL: that would be a reconnaissance log outliving the engagement), at a **bounded** size (≤ 256 kinds, fixed aggregate per kind, ~a few KiB). It serves **only** the SUBMISSION order of the intra-wave preheat (`engine._preheat_key`) — **no** firing, scope or ROE decision depends on it. `0`/`off`/`false`/`no` ⇒ no file, no measurement, preheat on `action.cost` (behaviour before this version). Without `--ledger`, there is no file anyway. | *(active)* | `0` |
+| `FORGE_RUN_TIMEOUT` | Max budget (s) of a C2-light run (watchdog). | `1800` (binary) · `900` (image) | `900` |
+| `FORGE_KIND_BUDGET_SHARE` | **Share of the time budget that ONE SINGLE module kind may consume** in a run, as a fraction. Serves the second clause of the budget gate (`engine._budget_gate` → `interrupt.KindShare`): a shot is not STARTED if its **expected** consumption (observed mean of the kind on this run, failing that the `.durations` sidecar, failing that the declared bound — never beyond that bound), added to what the kind has **already** consumed, would exceed this share. Motivated by measurement: on a real campaign, `web.testssl` took **1 484 s (41 %)** of a 3 600 s budget — three individually reasonable shots, two of them killed at their 600 s wall — while wave 1 did not finish. **This is not a truncation**: the refused action comes out as a **named SKIP**, listed in the report, **with no verdict at all** (neither `tested`, nor `not_vulnerable`, nor finding). Three guards: the **1st shot of a kind is never refused** (a slow scanner always runs at least once); the **qualifying classes** (IDOR/auth/RCE/SSRF/biz — `planner.is_floored`) are **exempt**; and **with no time budget set, the clause is completely inert**. `0` disables it. Unreadable value → default. | `0.3333` (1/3) | `0.25` |
+| `FORGE_PLAN_TIMEOUT` | Max budget (s) of a **dry-plan** (`POST /api/plan`, inert). When exceeded: the engine **group** is killed and the caller receives `504 plan_timeout` (never a partial preview). Invalid value or `0` → default. | `300` | `60` |
+| `FORGE_PLAN_MAX_CONCURRENT` | Number of simultaneous **in-flight dry-plans** (each one spawns an engine process). Beyond that: `429 plan_busy` — an explicit error, **not** a silent queue. **Re-read on every dry-plan** (like `FORGE_PLAN_TIMEOUT`): a change takes effect without a restart. Invalid value or `0` → default. | `2` | `4` |
+| `FORGE_ENGINE_TIMEOUT` | Budget (s) of the **engine work** of the other spawns: catalog `GET /api/techniques`, `GET /api/workflows`, detection collector, **DOCX/PDF** rendering of the deliverable, and registry probe (`POST /api/modules/refresh`, boot). When exceeded: the **group** is killed and the route returns its NAMED cause (`techniques_unavailable`/`builtins_unavailable` in fail-soft, `504 docx_engine_timeout` for the deliverable). Re-read on every call. Invalid value or `0` → default. **The wall-clock time of a cut request equals this budget PLUS the time for the spawn to actually die** (SIGTERM, then SIGKILL after 5 s if a member ignores it): measured at **5.02–5.06 s** (9 measurements) for a 5 s budget on an engine that exits on SIGTERM. | `120` | `30` |
+| `FORGE_ENGINE_MAX_CONCURRENT` | Number of live **READ** engine spawns (a counter distinct from the dry-plan one and the operator one: a burst of reads does not starve the operator, and vice versa — the machine total is the **sum** of the three). A slot is held for the **life of the process AND of its descendants**, not for that of the HTTP request: abandoning the request does not release it. A descendant that LEAVES the group (`setsid`/double-fork) is found again through the spawn's environment marker and through the parent chain (subreaper) — measured: 40 abandoned requests left **40** live descendants with a ceiling of 4; they now leave **0** and the bound refuses (burst of 20: 16 × `429`). Limits written in `docs/HTTP_API.md`, and they are CHEAPER FOR THE ESCAPEE THAN THEIR NAME SUGGESTS: removing ONE environment variable is enough (`env -u FORGE_ENGINE_SPAWN` → **7 survivors**, exactly like `env -i`) when the leader has already exited; and work delegated to a NON-descendant (`systemd-run --user`) simply leaves the domain (**5 survivors** for 4 abandoned requests, slot released immediately). Outside Linux, no `/proc`: fallback to the group kill. COST ON THE NOMINAL PATH, measured, AND IT DEPENDS ON THE SHAPE OF THE DESCENDANT (only one shape had been measured and its figure wrongly generalised): no descendant **0.030–0.040 s**; descendant that REDIRECTS its fds and dies on SIGTERM **0.133–0.146 s**; that REDIRECTS its fds and IGNORES SIGTERM **5.17–5.24 s** (slot held until the SIGKILL of the grace window, and it is indeed killed); that INHERITS the stdout pipe — the default of a `fork`/`Popen` without redirection — **0.380–0.396 s**, versus the WHOLE ENGINE BUDGET before the fix (**5.13 s** at `FORGE_ENGINE_TIMEOUT=5`, **9.13 s** at 9, **120.061 s** at the shipped default, and the valid output was DISCARDED). The lever for that case was not `CANCEL_GRACE_SECS` but `FORGE_ENGINE_TIMEOUT`; it is fixed at the cause (the response no longer waits for an inherited pipe to close, cf. `docs/HTTP_API.md`). Beyond that: **explicit** refusal (the message names the variable), **not** a silent queue. Re-read on every call. Invalid value or `0` → default. | `4` | `8` |
+| `FORGE_ENGINE_OPERATOR_MAX_CONCURRENT` | Number of live **OPERATOR** engine spawns: `POST /api/import`, `POST /api/modules/refresh`, `POST`/`DELETE /api/tools`, registry probe at boot. A gate separate from reads for two measured reasons: a burst of viewer reads must not make an operator import fail, and 40 concurrent refreshes must not make a viewer read 50× slower (measured **0.21 s → 11.4 s** before the bound, **0.34 s → 3.7 s** after). Beyond that: explicit refusal (`429 import_busy`, `429` + `probe_error` for the refresh). Re-read on every call. | `2` | `4` |
+| `FORGE_IMPORT_TIMEOUT` | Budget (s) of the parse of a **scan import** (`POST /api/import`) — distinct from `FORGE_ENGINE_TIMEOUT` because a scanner export (up to 64 MiB, the route's input ceiling) is legitimately longer than a catalog. When exceeded: spawn killed, `504 import_timeout`, **no** partial finding inserted. Re-read on every call. Invalid value or `0` → default. **Why 600 s by default**: the budget is sized on the route's INPUT CEILING (64 MiB), not on a typical import. Measured on this machine (real `python3` engine, in-scope targets): 1.3 MiB / 9 000 entries → **4.7 s**; 11.1 MiB / 72 000 entries → **49.2 s** (super-linear growth). At 64 MiB, the order of magnitude therefore exceeds 285 s: a shorter default would cut a legitimate import at the worst moment. What a slow import costs: **one** of the 2 slots of the OPERATOR gate (never the read gate), on an operator-authenticated route, with no process leak (measured: 0 survivors after the client disconnects). An operator who wants a short wall-clock lowers it — that is the point of the variable. | `600` | `120` |
+| `FORGE_CONSOLE_URL` | `POST /api/ingest` ingestion target for the **Python client** (`campaign`, `demo_ingest`, `doctor`). Must match `FORGE_CONSOLE_ADDR`. | `http://127.0.0.1:7100` | `http://127.0.0.1:7100` |
+| `FORGE_LEDGER_KEY` | **[SECRET]** Ledger signing key material on the engine side. Empty = auto-generated local key (`<base>.ed25519`, `0600`). | *(empty)* | *(key material)* |
+| `FORGE_TOOLS_DIR` | Root of the **runtime tools volume** (`forge tools install\|update\|remove`): binaries go into `<dir>/bin`, receipts into `<dir>/state`. `<dir>/bin` must be on the `PATH` to be resolved (the image puts it there, ahead of the baked `/usr/local/bin`). **Nothing is created until an operator action has taken place** → empty = behaviour identical to the baseline. Cf. `docs/TOOLS_LIFECYCLE.md`. | `<data_dir>/tools` | `/data/tools` |
+| `FORGE_TOOLS_MANIFEST` | Path of the tools **manifest** (versions + SHA256 pins per architecture + URL templates). Empty = `tools.json` shipped in the package. An operator manifest remains subject to the **same** fail-closed validations (`https://` URL mandatory, 64-hex digest, `bin` without path separator): it moves the allowlist, it does not remove it. | *(shipped)* | `/etc/forge/tools.json` |
+| `PYTHONPATH` / `PYTHONUNBUFFERED` | Resolution of the `forge` package / unbuffered logs (set by the image/systemd). | image | `/opt/forge` / `1` |
 
-> **Plafond d'octets (non configurable).** La sortie d'un spawn moteur est collectée en RAM : elle est
-> plafonnée à **8 Mio** (sorties texte : dry-plan, catalogues) et **64 Mio** (sorties binaires : DOCX/PDF).
-> Au-delà, le groupe est tué et l'appelant reçoit une erreur explicite (`502 plan_output_too_large` pour le
-> dry-plan, dégradation `501` pour le livrable) — **aucune sortie partielle n'est rendue comme complète**.
-> Ce n'est pas un réglage d'exploitation mais une digue anti-OOM : ces valeurs sont des constantes du binaire.
+> **Byte ceiling (not configurable).** The output of an engine spawn is collected in RAM: it is
+> capped at **8 MiB** (text outputs: dry-plan, catalogs) and **64 MiB** (binary outputs: DOCX/PDF).
+> Beyond that, the group is killed and the caller receives an explicit error (`502 plan_output_too_large` for the
+> dry-plan, `501` degradation for the deliverable) — **no partial output is returned as complete**.
+> This is not an operating setting but an anti-OOM dam: these values are constants of the binary.
 
-### 1.4 Chiffrement au repos
+### 1.4 Encryption at rest
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_FIELD_KEY` | **[SECRET]** Passphrase de **chiffrement de champ**. Couvre (a) le **matériel d'authentification** d'engagement (bearers/cookies/en-têtes des comptes de test) et (b) les **trois secrets d'intégration** : jeton de source de détection, jeton de canal de notification, `client_secret` SSO. **Build PAR DÉFAUT** — AEAD pur Rust, aucune dépendance ajoutée. Requise **uniquement** si l'un de ces secrets est posé : sans elle, toute écriture est refusée (**503** `field_key_missing`), un run dont le matériel est scellé **refuse de démarrer**, et une intégration dont le secret est scellé **refuse de partir** (jamais un contexte ni une authentification vides en silence). Accepte `FORGE_FIELD_KEY_FILE`. | *(vide)* | *(passphrase forte)* |
-| `FORGE_DB_KEY` | **[SECRET]** Clé SQLCipher (chiffrement **intégral**). La console émet `PRAGMA key` **avant toute requête**. Sans elle (sur build chiffré), la base est **illisible** (fail-closed). **Ignorée** sur le build par défaut (base en clair). | *(vide)* | *(passphrase forte)* |
+| `FORGE_FIELD_KEY` | **[SECRET]** **Field encryption** passphrase. Covers (a) the engagement **authentication material** (bearers/cookies/headers of the test accounts) and (b) the **three integration secrets**: detection source token, notification channel token, SSO `client_secret`. **DEFAULT build** — pure-Rust AEAD, no added dependency. Required **only** if one of these secrets is set: without it, every write is refused (**503** `field_key_missing`), a run whose material is sealed **refuses to start**, and an integration whose secret is sealed **refuses to go out** (never an empty context or authentication in silence). Accepts `FORGE_FIELD_KEY_FILE`. | *(empty)* | *(strong passphrase)* |
+| `FORGE_DB_KEY` | **[SECRET]** SQLCipher key (**full** encryption). The console issues `PRAGMA key` **before any query**. Without it (on an encrypted build), the database is **unreadable** (fail-closed). **Ignored** on the default build (database in plaintext). | *(empty)* | *(strong passphrase)* |
 
-Les deux couches sont **indépendantes et composables** : `FORGE_FIELD_KEY` protège les credentials
-**dans le build par défaut** (openssl-freedom intacte) ; `FORGE_DB_KEY` chiffre **tout le reste**, au
-prix d'un backend crypto système à la compilation (image `encryption`).
+The two layers are **independent and composable**: `FORGE_FIELD_KEY` protects the credentials
+**in the default build** (openssl-freedom intact); `FORGE_DB_KEY` encrypts **everything else**, at
+the cost of a system crypto backend at compile time (`encryption` image).
 
-Voir [`DEPLOYMENT.md` §1.6](DEPLOYMENT.md#16-chiffrement-de-champ-du-matériel-dauthentification-build-par-défaut)
-(champ), [`MIGRATION.md`](MIGRATION.md) Runbook B et [Installation §6](INSTALLATION.md#6-image-encryption-chiffrement-au-repos--sqlcipher-opt-in) (SQLCipher).
+See [`DEPLOYMENT.md` §1.6](DEPLOYMENT.md#16-field-encryption-of-authentication-material-default-build)
+(field), [`MIGRATION.md`](MIGRATION.md) Runbook B and [Installation §6](INSTALLATION.md#6-encryption-image-encryption-at-rest--sqlcipher-opt-in) (SQLCipher).
 
-### 1.4bis Egress sortant — confiance TLS et identité cliente
+### 1.4bis Outbound egress — TLS trust and client identity
 
-Les **trois** sorties TCP de la console (échange de jeton OIDC, webhook de notification, fetcher de
-source de détection) passent par un **seam TLS unique** (`console/src/tls.rs`) dont la vérification est
-**pleine et sans échappatoire** : chaîne, nom d'hôte, validité. Le magasin de CA du **système n'est pas
-lu** (posture sans dépendance OS : pas de `schannel`/`security-framework`/`openssl`), donc une **AC
-privée d'entreprise** doit être **fournie explicitement**.
+The **three** TCP outputs of the console (OIDC token exchange, notification webhook, detection source
+fetcher) go through a **single TLS seam** (`console/src/tls.rs`) whose verification is
+**full and without escape hatch**: chain, host name, validity. The **system** CA store **is not
+read** (no-OS-dependency posture: no `schannel`/`security-framework`/`openssl`), so a **private
+enterprise CA** must be **supplied explicitly**.
 
-Deux directions à ne pas confondre : `FORGE_EXTRA_CA_PEM` sert à **vérifier le pair** ; `FORGE_CLIENT_*`
-sert à **nous authentifier auprès de lui** (mTLS). Poser la seconde ne relâche rien de la première.
+Two directions not to be confused: `FORGE_EXTRA_CA_PEM` is used to **verify the peer**; `FORGE_CLIENT_*`
+is used to **authenticate us to it** (mTLS). Setting the second relaxes nothing of the first.
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_EXTRA_CA_PEM` | Ancres de confiance **SUPPLÉMENTAIRES** au format **PEM verbatim** (un ou plusieurs blocs `CERTIFICATE`), **ajoutées** aux racines Mozilla — jamais substituées. Pour un IdP OIDC ou un collecteur signé par l'AC privée de l'organisation. **La vérification reste PLEINE** : ce n'est **pas** un interrupteur, il n'existe toujours aucun moyen d'accepter une chaîne inconnue, un mauvais nom d'hôte ou un certificat périmé. **FAIL-CLOSED** : un PEM illisible/vide/invalide **tue le boot** (`FATAL`, code 2) plutôt que de dégrader en silence vers « pas d'ancre ». Accepte `FORGE_EXTRA_CA_PEM_FILE` (un **chemin**). | *(vide = racines Mozilla seules)* | `-----BEGIN CERTIFICATE-----…` |
-| `FORGE_CLIENT_CERT_PEM` | **Chaîne de certificats CLIENTE** (PEM, **feuille d'abord**, intermédiaires ensuite) que la console **présente au pair qui l'exige** (mTLS). Elle n'est envoyée **que si le pair la demande** : la poser ne change **rien** pour les endpoints ordinaires. Publique — le pair la reçoit sur le fil. Accepte `FORGE_CLIENT_CERT_PEM_FILE` (un **chemin**). | *(vide = aucun certificat présenté)* | `-----BEGIN CERTIFICATE-----…` |
-| `FORGE_CLIENT_KEY_PEM` | **[SECRET — le plus sensible du binaire]** Clé privée de la chaîne ci-dessus (PKCS#8, PKCS#1 ou SEC1). Elle n'apparaît **nulle part** : ni au boot, ni dans un log, ni dans une erreur, ni dans le ledger, ni dans une réponse d'API. Un refus dit **que** la clé est invalide, jamais **ce qu'elle contient**. **Préférer franchement `FORGE_CLIENT_KEY_PEM_FILE`** (un **chemin** vers un fichier `0600`) : l'environnement d'un processus se lit dans `/proc/<pid>/environ` et se recopie dans tout dump de configuration. | *(vide = aucun certificat présenté)* | `/etc/forge/client.key` via `…_FILE` |
-| `FORGE_ALLOW_INTERNAL_INTEGRATIONS` | Autorise les fetches d'**intégration** à joindre une cible **interne/privée** (SIEM/IdP on-prem). Absent/faux ⇒ deny-list SSRF (loopback, RFC1918, link-local, métadonnées cloud, ULA). **Ne couvre pas** l'envoi d'un secret en clair vers une cible **publique** : ce refus-là n'a **aucune** échappatoire. | *(vide = refusé)* | `1` |
+| `FORGE_EXTRA_CA_PEM` | **ADDITIONAL** trust anchors in **verbatim PEM** format (one or more `CERTIFICATE` blocks), **added** to the Mozilla roots — never substituted. For an OIDC IdP or a collector signed by the organisation's private CA. **Verification stays FULL**: this is **not** a switch, there is still no way to accept an unknown chain, a wrong host name or an expired certificate. **FAIL-CLOSED**: an unreadable/empty/invalid PEM **kills the boot** (`FATAL`, code 2) rather than silently degrading to "no anchor". Accepts `FORGE_EXTRA_CA_PEM_FILE` (a **path**). | *(empty = Mozilla roots only)* | `-----BEGIN CERTIFICATE-----…` |
+| `FORGE_CLIENT_CERT_PEM` | **CLIENT certificate chain** (PEM, **leaf first**, intermediates next) that the console **presents to the peer that requires it** (mTLS). It is sent **only if the peer asks for it**: setting it changes **nothing** for ordinary endpoints. Public — the peer receives it on the wire. Accepts `FORGE_CLIENT_CERT_PEM_FILE` (a **path**). | *(empty = no certificate presented)* | `-----BEGIN CERTIFICATE-----…` |
+| `FORGE_CLIENT_KEY_PEM` | **[SECRET — the most sensitive of the binary]** Private key of the chain above (PKCS#8, PKCS#1 or SEC1). It appears **nowhere**: not at boot, not in a log, not in an error, not in the ledger, not in an API response. A refusal says **that** the key is invalid, never **what it contains**. **Strongly prefer `FORGE_CLIENT_KEY_PEM_FILE`** (a **path** to a `0600` file): a process's environment can be read in `/proc/<pid>/environ` and is copied into any configuration dump. | *(empty = no certificate presented)* | `/etc/forge/client.key` via `…_FILE` |
+| `FORGE_ALLOW_INTERNAL_INTEGRATIONS` | Allows **integration** fetches to reach an **internal/private** target (on-prem SIEM/IdP). Absent/false ⇒ SSRF deny-list (loopback, RFC1918, link-local, cloud metadata, ULA). **Does not cover** sending a secret in plaintext to a **public** target: that refusal has **no** escape hatch. | *(empty = refused)* | `1` |
 
-**Les deux `FORGE_CLIENT_*` vont ensemble, ou aucune.** Un certificat sans clé ne peut rien signer,
-une clé sans certificat ne prouve aucune identité : dans les deux cas rustls n'enverrait tout
-simplement rien, et le pair mTLS refuserait la connexion avec un message qui ne désigne pas la
-variable manquante. Le boot **meurt** donc (`FATAL`, code 2) sur une identité à moitié posée, sur un
-PEM illisible, et sur une **clé qui ne correspond pas au certificat** (comparaison des
-`SubjectPublicKeyInfo`) — la faute qu'on commet en renouvelant l'un sans l'autre.
+**The two `FORGE_CLIENT_*` go together, or neither.** A certificate without a key cannot sign anything,
+a key without a certificate proves no identity: in both cases rustls would simply send nothing,
+and the mTLS peer would refuse the connection with a message that does not point to the
+missing variable. The boot therefore **dies** (`FATAL`, code 2) on a half-set identity, on an
+unreadable PEM, and on a **key that does not match the certificate** (comparison of the
+`SubjectPublicKeyInfo`) — the mistake one makes when renewing one without the other.
 
-### 1.5 Migration via API (opt-in, pré-provision)
+### 1.5 Migration through the API (opt-in, pre-provisioning)
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_ALLOW_API_MIGRATE` | Ouvre `POST /api/setup/migrate` (sinon **403** — la CLL `forge migrate` reste l'UX primaire). | *(off)* | `1` |
-| `FORGE_CONSOLE_IMPORT_DIR` | Racine allowlistée des chemins d'import de la migration API (anti path-traversal). | *(racine de données)* | `/import` |
+| `FORGE_ALLOW_API_MIGRATE` | Opens `POST /api/setup/migrate` (otherwise **403** — the `forge migrate` CLI remains the primary UX). | *(off)* | `1` |
+| `FORGE_CONSOLE_IMPORT_DIR` | Allowlisted root of the import paths of the API migration (anti path traversal). | *(data root)* | `/import` |
 
-### 1.6 Sauvegardes programmées
+### 1.6 Scheduled backups
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_BACKUP_TICK_SECS` | Période de réveil du scheduler de sauvegarde. | `60` | `60` |
-| `FORGE_BACKUP_PASSPHRASE` | **[SECRET]** Passphrase du backup **programmé**. **Le NOM de cette variable** est référencé par `backup_policy.passphrase_env` (jamais la passphrase en DB). | *(vide)* | *(passphrase)* |
+| `FORGE_BACKUP_TICK_SECS` | Wake-up period of the backup scheduler. | `60` | `60` |
+| `FORGE_BACKUP_PASSPHRASE` | **[SECRET]** Passphrase of the **scheduled** backup. **The NAME of this variable** is referenced by `backup_policy.passphrase_env` (never the passphrase in the DB). | *(empty)* | *(passphrase)* |
 
-Détails : [`BACKUP.md`](BACKUP.md).
+Details: [`BACKUP.md`](BACKUP.md).
 
-### 1.7 Boucle purple — source de détection (legacy / collecteur)
+### 1.7 Purple loop — detection source (legacy / collector)
 
-La source se configure **de préférence dans l'UI** (`settings.detection_source`, §2). Les variables
-ci-dessous sont des **replis** :
+The source is configured **preferably in the UI** (`settings.detection_source`, §2). The variables
+below are **fallbacks**:
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `PLUME_URL` | **[PURPLE]** Préréglage rétro-compat `kind=plume` (utilisé seulement si `settings.detection_source` est absent). `http://` interne uniquement. | *(vide = purple OFF)* | `http://plume-internal:8000` |
-| `PLUME_TOKEN` | **[SECRET][PURPLE]** Basic auth = `base64("user:pass")`. | *(vide)* | `dXNlcjpwYXNz` |
-| `FORGE_DETECTION_SOURCE` | **[SECRET]** Spécification JSON complète d'une source (kinds « riches » : crowdsec/elastic/syslog/mTLS/exec). La console la passe **par ENV** au collecteur Python (jamais en argv). | *(vide)* | `{"kind":"crowdsec",…}` |
+| `PLUME_URL` | **[PURPLE]** Backward-compatible `kind=plume` preset (used only if `settings.detection_source` is absent). Internal `http://` only. | *(empty = purple OFF)* | `http://plume-internal:8000` |
+| `PLUME_TOKEN` | **[SECRET][PURPLE]** Basic auth = `base64("user:pass")`. | *(empty)* | `dXNlcjpwYXNz` |
+| `FORGE_DETECTION_SOURCE` | **[SECRET]** Full JSON specification of a source ("rich" kinds: crowdsec/elastic/syslog/mTLS/exec). The console passes it **through ENV** to the Python collector (never in argv). | *(empty)* | `{"kind":"crowdsec",…}` |
 
-Modèle complet et préréglages : [`DETECTION.md`](DETECTION.md). Prérequis Plume :
+Full model and presets: [`DETECTION.md`](DETECTION.md). Plume prerequisites:
 [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).
 
-### 1.8 Couche accès/évasion (browser-automation, optionnelle)
+### 1.8 Access/evasion layer (browser-automation, optional)
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_BROWSER_URL` | Service Camoufox + Xvfb pour les modules `evasion.*`. Injoignable = connecteur inerte. | `http://localhost:8080` (image : `http://browser-automation:8080`) | `http://browser-automation:8080` |
+| `FORGE_BROWSER_URL` | Camoufox + Xvfb service for the `evasion.*` modules. Unreachable = inert connector. | `http://localhost:8080` (image: `http://browser-automation:8080`) | `http://browser-automation:8080` |
 
-### 1.9 Connecteurs opérateur (optionnels)
+### 1.9 Operator connectors (optional)
 
-Vides/injoignables ⇒ connecteur inerte à fire-time (aucune capacité offensive embarquée).
+Empty/unreachable ⇒ connector inert at fire-time (no embedded offensive capability).
 
-| Variable | Sens | Défaut |
+| Variable | Meaning | Default |
 |---|---|---|
-| `MSF_RPC_HOST` | Hôte msfrpcd. | `127.0.0.1` |
-| `MSF_RPC_PORT` | Port RPC msfrpcd. | `55553` |
-| `MSF_RPC_USER` | Utilisateur RPC. | `msf` |
-| `MSF_RPC_SSL` | TLS vers msfrpcd. | `true` |
-| `MSF_RPC_PASS` | **[SECRET]** Mot de passe RPC (`msfrpcd -P`). | *(vide)* |
-| `MSF_RPC_TOKEN` | **[SECRET]** Token RPC permanent (alternative au user/pass). | *(vide)* |
-| `BURP_API_URL` | Base REST API Burp. | `http://127.0.0.1:1337` |
-| `BURP_API_KEY` | **[SECRET]** Clé API Burp (souvent intégrée à l'URL). | *(vide)* |
+| `MSF_RPC_HOST` | msfrpcd host. | `127.0.0.1` |
+| `MSF_RPC_PORT` | msfrpcd RPC port. | `55553` |
+| `MSF_RPC_USER` | RPC user. | `msf` |
+| `MSF_RPC_SSL` | TLS to msfrpcd. | `true` |
+| `MSF_RPC_PASS` | **[SECRET]** RPC password (`msfrpcd -P`). | *(empty)* |
+| `MSF_RPC_TOKEN` | **[SECRET]** Permanent RPC token (alternative to user/pass). | *(empty)* |
+| `BURP_API_URL` | Burp REST API base. | `http://127.0.0.1:1337` |
+| `BURP_API_KEY` | **[SECRET]** Burp API key (often embedded in the URL). | *(empty)* |
 
 ### 1.10 Build-time (image)
 
-| Variable | Sens | Défaut | Exemple |
+| Variable | Meaning | Default | Example |
 |---|---|---|---|
-| `FORGE_TOOLS_PROFILE` | `--build-arg` : `full` (httpx/nuclei/subfinder vérifiés SHA256 + moteur PDF weasyprint) ou `mini` (les omet). | `full` | `mini` |
+| `FORGE_TOOLS_PROFILE` | `--build-arg`: `full` (SHA256-verified httpx/nuclei/subfinder + weasyprint PDF engine) or `mini` (omits them). | `full` | `mini` |
 
-Voir [Installation §1](INSTALLATION.md#1-profils-dimage--mini-vs-full).
+See [Installation §1](INSTALLATION.md#1-image-profiles-mini-vs-full).
 
 ---
 
-## 2. Table `settings` (configurée dans l'UI, ledgerisée)
+## 2. `settings` table (configured in the UI, ledgered)
 
-Clés de la table SQLite `settings`, mutées via l'API (admin) ou le wizard. **Aucune valeur codée en
-dur** : une clé absente = comportement par défaut, jamais une valeur inventée.
+Keys of the SQLite `settings` table, mutated through the API (admin) or the wizard. **No hard-coded
+value**: an absent key = default behaviour, never an invented value.
 
-| Clé | Sens | Défaut | Écrite par |
+| Key | Meaning | Default | Written by |
 |---|---|---|---|
-| `detection_source` | Objet `DetectionSource` (source de la boucle purple). Secret d'auth **write-only** (jamais renvoyé). | *(absente = purple OFF, fail-open lisible)* | wizard · `POST /api/detection/source` · `POST /api/setup` |
-| `operator_policy` | Politique du rôle opérateur (C2). Champ clé : `source_cidrs` (allowlist d'IP client). Absent/vide = **aucune restriction** source. | *(absente)* | wizard · `POST /api/setup` |
-| `backup_policy` | Politique de sauvegarde programmée/offsite (`enabled`, `interval_secs`, `retention`, `passphrase_env`, `staging_dir`, `offsite`). Secrets rédigés au GET. | *(absente = aucune sauvegarde programmée)* | `POST /api/backup/policy` |
-| `backup_last_run` | Horodatage interne du dernier tick de sauvegarde dû (état du scheduler). | *(absente)* | scheduler (interne) |
-| `session_ttl` | TTL de session **persistée** par le wizard/setup (substrat de config). La durée **effective** est pilotée par `FORGE_CONSOLE_SESSION_TTL` (§1.1). | *(absente)* | `POST /api/setup` |
-| `trusted_proxy` | CIDR(s) du/des proxy(ies) amont de confiance. Un `X-Forwarded-For` n'est honoré **que** si le pair TCP tombe dans l'un d'eux ; sinon repli **fail-closed** sur le pair TCP. Une valeur non-CIDR ⇒ XFF ignoré. | *(absente = XFF non honoré)* | admin (settings) |
+| `detection_source` | `DetectionSource` object (source of the purple loop). Auth secret **write-only** (never returned). | *(absent = purple OFF, readable fail-open)* | wizard · `POST /api/detection/source` · `POST /api/setup` |
+| `operator_policy` | Policy of the operator role (C2). Key field: `source_cidrs` (client IP allowlist). Absent/empty = **no** source restriction. | *(absent)* | wizard · `POST /api/setup` |
+| `backup_policy` | Scheduled/offsite backup policy (`enabled`, `interval_secs`, `retention`, `passphrase_env`, `staging_dir`, `offsite`). Secrets redacted on GET. | *(absent = no scheduled backup)* | `POST /api/backup/policy` |
+| `backup_last_run` | Internal timestamp of the last due backup tick (scheduler state). | *(absent)* | scheduler (internal) |
+| `session_ttl` | Session TTL **persisted** by the wizard/setup (config substrate). The **effective** duration is driven by `FORGE_CONSOLE_SESSION_TTL` (§1.1). | *(absent)* | `POST /api/setup` |
+| `trusted_proxy` | CIDR(s) of the trusted upstream proxy(ies). An `X-Forwarded-For` is honoured **only** if the TCP peer falls within one of them; otherwise **fail-closed** fallback to the TCP peer. A non-CIDR value ⇒ XFF ignored. | *(absent = XFF not honoured)* | admin (settings) |
 
-### Gouvernance des modules (table `module`)
+### Module governance (`module` table)
 
-Distincte de `settings` : la table `module` porte le **catalogue** (peuplé au boot depuis `forge
-modules`) **et** la gouvernance par connecteur, mutée par `POST /api/modules/:kind` (admin,
-ledgerisé) :
+Distinct from `settings`: the `module` table holds the **catalog** (populated at boot from `forge
+modules`) **and** the per-connector governance, mutated by `POST /api/modules/:kind` (admin,
+ledgered):
 
-| Champ | Sens | Effet |
+| Field | Meaning | Effect |
 |---|---|---|
-| `enabled` (bool) | Connecteur activé/désactivé. | `enabled=false` ⇒ SKIP au tir (comme un outil absent), **même si le binaire est présent**. |
-| `web_allowed` (bool) | Le connecteur peut être lancé depuis le web (C2-light). | Contrôle le plancher `web_allowed` des modules sélectionnables via `/api/run`. |
-| `available_override` (bool\|null) | Force/efface l'état de disponibilité affiché (3 états : inchangé / effacé / forcé). | Reflète la disponibilité dans l'UI. |
+| `enabled` (bool) | Connector enabled/disabled. | `enabled=false` ⇒ SKIP at firing (like a missing tool), **even if the binary is present**. |
+| `web_allowed` (bool) | The connector may be launched from the web (C2-light). | Controls the `web_allowed` floor of the modules selectable through `/api/run`. |
+| `available_override` (bool\|null) | Forces/clears the displayed availability state (3 states: unchanged / cleared / forced). | Reflects availability in the UI. |
 
-Voir [Administration → Gouvernance des connecteurs](ADMINISTRATION.md#3-gouvernance-des-connecteurs-installerdésinstaller).
+See [Administration → Connector governance](ADMINISTRATION.md#3-connector-governance-installuninstall).
 
 ---
 
-## 2bis. Débit (`rate`) — ce qu'il bride, et ce qu'il ne bride pas
+## 2bis. Rate (`rate`) — what it throttles, and what it does not
 
-Réglé dans **`scope.json`**, pas en environnement. Le point à connaître, parce qu'il surprend :
+Set in **`scope.json`**, not in the environment. The point to know, because it surprises:
 
-| | bridé par `rate` ? |
+| | throttled by `rate`? |
 |---|---|
-| Les **36 modules NATIFS** de forge (ses propres sondes urllib : oracles d'injection, contrôle d'accès, recon passif, en-têtes…) | **oui, toujours** |
-| Les outils dont le débit se compte en **REQUÊTES HTTP/s** (`nuclei`, `httpx`, `feroxbuster`, `katana`, `dnsx`, `subfinder`) | **oui, par défaut** |
-| Les autres outils externes — **paquets/s** (`naabu`, `nmap`) ou **délai par requête** (`sqlmap`, `wfuzz`, `dalfox`, `gobuster`, `wpscan`) | **non, sauf demande explicite** |
+| Forge's **43 NATIVE modules** derived from `Oracle`, cf. §2ter (its own urllib probes: injection oracles, access control, passive recon, headers…) | **yes, always** |
+| The tools whose rate is counted in **HTTP REQUESTS/s** (`nuclei`, `httpx`, `feroxbuster`, `katana`, `dnsx`, `subfinder`) | **yes, by default** |
+| The other external tools — **packets/s** (`naabu`, `nmap`) or **delay per request** (`sqlmap`, `wfuzz`, `dalfox`, `gobuster`, `wpscan`) | **no, unless explicitly requested** |
 
-Le coût de brider est réel, et c'est lui qui avait justifié l'opt-in généralisé. Mesuré à `rate: 5` :
+The cost of throttling is real, and it is what had justified the generalised opt-in. Measured at `rate: 5`:
 
-    naabu       1,1 min  ->  3,6 h   (65 535 ports à 5 paquets/s)
-    feroxbuster ~qq min  ->  ~100 min
+    naabu       1,1 min  ->  3,6 h     # 65 535 ports at 5 packets/s
+    feroxbuster       …  ->  ~100 min  # before: a few minutes
     nuclei      1,0 min  ->   30 min
     httpx       0,1 min  ->  3,3 min
 
-**Mais le coût de NE PAS brider n'avait jamais été chiffré, et il est pire.** Mesuré le 2026-08-11
-(machine propre, lignes de base vérifiées, Juice Shop en loopback, campagne autonome de 900 s) :
+**But the cost of NOT throttling had never been quantified, and it is worse.** Measured on 2026-08-11
+(clean machine, baselines verified, Juice Shop on loopback, 900 s autonomous campaign):
 
-| `rate` | mémoire de la cible | issue | travail réellement accompli |
+| `rate` | target memory | outcome | work actually done |
 |---|---|---|---|
-| **20** | 167 -> **5 023 Mio** | **MORTE** (`Exited 139`) à t+145 s | 8 actions, **1 660 erreurs** |
-| **5** | 162 -> **484 Mio** | **vivante**, HTTP 200 | **1 360 actions**, 2 730 findings |
+| **20** | 167 -> **5 023 MiB** | **DEAD** (`Exited 139`) at t+145 s | 8 actions, **1 660 errors** |
+| **5** | 162 -> **484 MiB** | **alive**, HTTP 200 | **1 360 actions**, 2 730 findings |
 
-**170 fois plus d'actions tirées en bridant.** Une cible morte transforme tout le reste du plan en
-erreurs : ici, brider ne coûte pas de la couverture — brider EST la couverture. Le tueur a été isolé
-SEUL, sans campagne (`feroxbuster --rate-limit 20` -> 5 051 Mio et mort ; `--rate-limit 5` -> 384 Mio
-et vivante), et une désambiguïsation à UNE variable montre que c'est le **débit** et non la
-concurrence : 4 fils à 20 req/s tuent, 50 fils à 5 req/s ne font rien.
+**170 times more actions fired when throttling.** A dead target turns the whole rest of the plan into
+errors: here, throttling does not cost coverage — throttling IS coverage. The killer was isolated
+ALONE, without a campaign (`feroxbuster --rate-limit 20` -> 5 051 MiB and dead; `--rate-limit 5` -> 384 MiB
+and alive), and a ONE-variable disambiguation shows that it is the **rate** and not the
+concurrency: 4 threads at 20 req/s kill, 50 threads at 5 req/s do nothing.
 
-D'où le défaut actuel : **un outil qui compte en requêtes HTTP suit `rate` sans qu'on le demande.**
-La facture chiffrée ci-dessus est celle du scanner de PORTS ; elle n'est pas payée par défaut. Et
-l'unité n'est pas devinée — chaque outil la déclare dans son schéma de params (« req/s » vs
-« paquets/s »), et forge la lit là plutôt que dans une liste tenue à la main.
+Hence the current default: **a tool that counts in HTTP requests follows `rate` without being asked.**
+The quantified bill above is that of the PORT scanner; it is not paid by default. And
+the unit is not guessed — each tool declares it in its params schema ("req/s" vs
+"packets/s"), and forge reads it there rather than from a hand-maintained list.
 
-> ⚠️ **Sans `rate` déclaré au scope, rien n'est bridé** — y compris les crawlers. Forge ne fabrique
-> pas un débit que l'engagement n'a pas fixé. Sur une cible réelle, déclarer `rate` n'est donc pas
-> une optimisation : c'est ce qui sépare un engagement d'une dégradation de service.
+> ⚠️ **Without `rate` declared in the scope, nothing is throttled** — crawlers included. Forge does not
+> make up a rate that the engagement has not set. On a real target, declaring `rate` is therefore not
+> an optimisation: it is what separates an engagement from a service degradation.
 
-**Pour brider AUSSI les outils qui restent en opt-in : `"rate_explicit": true`** dans le scope —
-c'est-à-dire le scanner de PORTS (`naabu -rate`, `nmap --max-rate`) et les outils dont le drapeau est
-un **délai par requête** (sqlmap/wfuzz/dalfox/gobuster/wpscan). Il arme en outre le **plafond de
-débit du RUN** (`RunCap`, cf. §2ter). Sans lui, l'argv de ces outils-là reste **byte-identique** à
-leur défaut ; les outils en **req/s**, eux, suivent `rate` sans qu'on le demande (voir ci-dessus).
+**To ALSO throttle the tools that remain opt-in: `"rate_explicit": true`** in the scope —
+that is, the PORT scanner (`naabu -rate`, `nmap --max-rate`) and the tools whose flag is
+a **delay per request** (sqlmap/wfuzz/dalfox/gobuster/wpscan). It additionally arms the **RUN
+rate ceiling** (`RunCap`, cf. §2ter). Without it, the argv of those tools remains **byte-identical** to
+their default; the **req/s** tools, for their part, follow `rate` without being asked (see above).
 
-> **Quatre outils y échappaient en silence** (corrigé) : `recon.katana`, `recon.dnsx`,
-> `recon.subfinder` et `web.wpscan` déclaraient un groupe `{param:rate}` dans leur gabarit d'argv
-> **sans jamais recevoir de débit** — la liste des kinds concernés était tenue à la main et avait
-> dérivé du catalogue. Un groupe de gabarit dont le param manque est simplement **abandonné**, donc
-> rien ne le signalait : l'UI affichait bien un champ « rate-limit (-rl req/s) » pour katana, et
-> katana — un **crawler HTTP** — tournait à plein régime sous `rate_explicit`. La liste est
-> désormais **dérivée du registre** ; un outil ajouté au catalogue avec un groupe de débit est
-> couvert d'office (garde-fou : `tests/test_run_rate_cap.py::TestEveryToolThatDeclaresARateGetsOne`).
+> **Four tools silently escaped it** (fixed): `recon.katana`, `recon.dnsx`,
+> `recon.subfinder` and `web.wpscan` declared a `{param:rate}` group in their argv template
+> **without ever receiving a rate** — the list of affected kinds was hand-maintained and had
+> drifted from the catalog. A template group whose param is missing is simply **dropped**, so
+> nothing flagged it: the UI did display a "rate-limit (-rl req/s)" field for katana, and
+> katana — an **HTTP crawler** — ran at full speed under `rate_explicit`. The list is
+> now **derived from the registry**; a tool added to the catalog with a rate group is
+> covered automatically (guard: `tests/test_run_rate_cap.py::TestEveryToolThatDeclaresARateGetsOne`).
 
-À armer quand l'engagement l'exige : programme qui interdit le trafic soutenu, cible fragile, ou
-clause « *avoid service degradation* ».
+Arm it when the engagement requires it: a programme that forbids sustained traffic, a fragile target, or
+an "*avoid service degradation*" clause.
 
-> Ce levier **existe et fonctionne depuis toujours** ; il n'était documenté **nulle part** (0
-> occurrence dans la doc et l'exemple de scope au 2026-08-11), ce qui l'a fait passer pour mort lors
-> d'un audit. Un levier qu'on ne peut pas trouver équivaut à un levier absent — d'où cette section.
-
----
-
-## 2ter. `run_rate` — le plafond de débit du **RUN** (le second étage)
-
-`rate` borne le débit d'une **ACTION**. Il ne bornait rien au niveau d'un **RUN**, et ce n'était pas
-un détail : le seau est reconstruit à **chaque `fire()`** et vit en **thread-local**, donc le premier
-tir de chaque action trouve son créneau libre, et le plafond effectif est **multiplié par le
-parallélisme**. Mesuré (`tests/test_run_rate_cap.py`, horloge injectée, `rate: 5` déclaré) :
-
-| | débit du RUN observé |
-|---|---|
-| sériel, 30 actions × 1 requête | **NON BORNÉ** (0 s d'attente sur tout le run) |
-| sériel, 12 actions × 3 requêtes | 7,29 req/s |
-| sériel, 24 actions × 2 requêtes | 9,79 req/s |
-| **parallèle pool=4**, 24 × 2 | **33,5 req/s** (médiane de 5) |
-| **parallèle pool=8**, 24 × 2 | **59,0 req/s** |
-
-`rate: 5` délivrait donc jusqu'à **11,8× le débit annoncé**. Le coût est établi : une cible (Juice
-Shop) laissée **34 min sans être ciblée** reste stable (102 → 21 Mio) ; campagne lancée à 13:12:42 →
-**3,78 Gio à 13:13:24** → `Exited(139)` à 13:14:47. Mettre une cible à genoux viole
-« *avoid service degradation* », clause de la quasi-totalité des programmes — motif d'exclusion.
-
-**Le plafond de run est un SECOND étage, pas un remplacement.** Les deux sont **chaînés** : une
-requête attend le créneau du RUN, **puis** celui de son ACTION. Le débit résultant est celui du plus
-serré des deux ; aucun n'annule l'autre (un `rate` serré garde ses rafales lissées même sous un
-`run_rate` large, et réciproquement).
-
-| Clé de `scope.json` | Effet |
-|---|---|
-| `"run_rate": N` | Plafond de **N req/s pour tout le run**, partagé par toutes les actions **et tous les workers**. **PRIME** sur la ligne suivante — y compris `0`, qui **désarme**. |
-| `"rate_explicit": true` | À défaut de `run_rate`, arme le plafond à la valeur de `rate`. C'est le seul armement automatique, et il est cohérent : ce levier dit déjà « bride tout, outils compris, cet engagement l'exige ». |
-| *(rien)* | **AUCUN plafond de run** — le défaut, byte-identique à avant. |
-
-**Pourquoi le défaut est « aucun plafond »** : armer un plafond d'office effondrerait la couverture
-de tout run existant qui n'a rien demandé (cf. §2bis — `rate: 5` imposé aux outils fait passer naabu
-de 1,1 min à 3,6 h). Un frein est une **décision d'opérateur** ; sans décision, pas de frein — la
-même règle que `--run-timeout`.
-
-> **RUPTURE NOMMÉE — le chemin CONSOLE.** `console/src/runs_proc.rs` pose
-> `"rate_explicit": spec.rate.is_some()` : renseigner le champ *Rate-limit* de la vue **Launch**
-> arme donc désormais **aussi** le plafond de run. C'est un changement de comportement, et il est
-> voulu — c'est ce que l'UI promettait déjà (« règle le débit (req/s) », cf. `docs/QUICKSTART.md`)
-> et qu'elle ne tenait pas : jusqu'ici un `rate: 5` posé dans Launch délivrait jusqu'à **59 req/s**.
-> Le run est plus lent parce qu'il respecte enfin le débit demandé. Pour l'ancien comportement sans
-> renoncer aux drapeaux d'outils : `"run_rate": 0` dans le scope.
-
-**Un run bridé le DIT.** Avant le premier tir : une ligne de progression `[DÉBIT RUN]` nommant la
-valeur **et le réglage d'origine**, plus une entrée de ledger `engine.run_rate`. À la fin : le débit
-**observé** et les secondes d'attente imposées, également exposés dans `Engine.coverage()['run_rate']`.
-Un frein invisible est pire qu'un frein absent : l'opérateur conclurait que forge est lent.
-
-**Portée honnête** : le plafond borne ce qui passe par le chokepoint HTTP des oracles
-(`Oracle._http`) — les **36 modules natifs**. Un **sous-process** (nuclei, feroxbuster, naabu…) n'y
-passe pas ; son débit se bride par **son propre drapeau**, c'est-à-dire par `rate_explicit` (§2bis).
-Pour brider *réellement tout* : `"rate_explicit": true` — qui arme les deux à la fois.
+> This lever **has always existed and worked**; it was documented **nowhere** (0
+> occurrences in the docs and the scope example as of 2026-08-11), which made it look dead during
+> an audit. A lever that cannot be found is as good as an absent lever — hence this section.
 
 ---
 
-## 2quater. Egress tiers d'un module — `allow_tool_egress`
+## 2ter. `run_rate` — the **RUN** rate ceiling (the second stage)
 
-Forge gate déjà l'assist LLM (`scope.llm.allow_external`) et le backend mémoire à embeddings par un
-egress **explicite**. Il ne gatait pas ses **outils**, et la mesure a rendu l'incohérence intenable :
-`recon.httpx`, retenu comme *loopback-safe*, a téléchargé **92,6 Mio depuis huggingface.co à chacun de
-ses 4 tirs** (~370 Mio) via son drapeau `-tech-detect` — **seul egress prouvé sur 4 906 findings**,
-dans un banc annoncé « loopback strict ». Il n'avait échappé à aucune interdiction : il avait échappé
-au **regard**, parce que l'exclusion portait sur l'**intention déclarée**, jamais sur l'egress
-**observé**.
+`rate` bounds the rate of an **ACTION**. It bounded nothing at the level of a **RUN**, and that was not
+a detail: the bucket is rebuilt on **every `fire()`** and lives in **thread-local** storage, so the first
+shot of each action finds its slot free, and the effective ceiling is **multiplied by the
+parallelism**. Measured (`tests/test_run_rate_cap.py`, injected clock, `rate: 5` declared):
 
-Le principe : **un module qui sort vers un tiers le DÉCLARE, et l'opérateur peut le REFUSER.**
-
-| Valeur de `allow_tool_egress` | Effet |
+| | observed RUN rate |
 |---|---|
-| *(absente)* / `false` | **Refus** de tout egress déclaré (défaut, fail-closed) |
-| `true` | Autorise les hôtes **déclarés** (jamais les autres : la déclaration reste le contrat) |
-| `["*.huggingface.co", …]` | **Allowlist** par motif (`fnmatch`) ; liste vide ⇒ refus |
+| serial, 30 actions × 1 request | **UNBOUNDED** (0 s of waiting over the whole run) |
+| serial, 12 actions × 3 requests | 7.29 req/s |
+| serial, 24 actions × 2 requests | 9.79 req/s |
+| **parallel pool=4**, 24 × 2 | **33.5 req/s** (median of 5) |
+| **parallel pool=8**, 24 × 2 | **59.0 req/s** |
 
-Côté module (duck-typé, aucun module existant n'a à changer) : `egress = ("hôte", …)` et, si le
-module ne sait **pas** s'en passer, `egress_required = True`.
+`rate: 5` therefore delivered up to **11.8× the announced rate**. The cost is established: a target (Juice
+Shop) left **34 min without being targeted** stays stable (102 → 21 MiB); campaign launched at 13:12:42 →
+**3.78 GiB at 13:13:24** → `Exited(139)` at 13:14:47. Bringing a target to its knees violates
+"*avoid service degradation*", a clause of nearly all programmes — grounds for exclusion.
 
-* module qui sait **dégrader** (le cas de `recon.httpx`) → il tire quand même, et reçoit
-  `action.params['_egress_allowed'] = False` : à lui de retirer la fonctionnalité qui sort.
-  Coverage-safe : on **borne**, on ne supprime pas ;
-* module qui ne sait **pas** s'en passer → **VETO nommé** par le ROE (couche 3bis), qui cite l'hôte
-  et la clé qui lève le refus. Aucun verdict n'est émis pour l'action.
+**The run ceiling is a SECOND stage, not a replacement.** The two are **chained**: a
+request waits for the RUN slot, **then** for that of its ACTION. The resulting rate is that of the
+tighter of the two; neither cancels the other (a tight `rate` keeps its bursts smoothed even under a
+wide `run_rate`, and vice versa).
 
-Le constat est dit **une fois par module** (progression `[EGRESS TIERS]` + ledger
-`engine.tool_egress` + `coverage()['tool_egress']`) — **y compris quand l'egress est autorisé** : un
-egress qu'on autorise sans le voir se reproduira à l'identique.
+| `scope.json` key | Effect |
+|---|---|
+| `"run_rate": N` | Ceiling of **N req/s for the whole run**, shared by all actions **and all workers**. **TAKES PRECEDENCE** over the next row — including `0`, which **disarms**. |
+| `"rate_explicit": true` | Failing `run_rate`, arms the ceiling at the value of `rate`. This is the only automatic arming, and it is consistent: this lever already says "throttle everything, tools included, this engagement requires it". |
+| *(nothing)* | **NO run ceiling** — the default, byte-identical to before. |
+
+**Why the default is "no ceiling"**: arming a ceiling automatically would collapse the coverage
+of every existing run that asked for nothing (cf. §2bis — `rate: 5` imposed on the tools takes naabu
+from 1.1 min to 3.6 h). A brake is an **operator decision**; no decision, no brake — the
+same rule as `--run-timeout`.
+
+> **NAMED BREAKING CHANGE — the CONSOLE path.** `console/src/runs_proc.rs` sets
+> `"rate_explicit": spec.rate.is_some()`: filling in the *Rate-limit* field of the **Launch** view
+> therefore now **also** arms the run ceiling. It is a change of behaviour, and it is
+> intended — it is what the UI already promised ("sets the rate (req/s)", cf. `docs/QUICKSTART.md`)
+> and did not deliver: until now a `rate: 5` set in Launch delivered up to **59 req/s**.
+> The run is slower because it finally respects the requested rate. For the old behaviour without
+> giving up the tool flags: `"run_rate": 0` in the scope.
+
+**A throttled run SAYS SO.** Before the first shot: a `[DÉBIT RUN]` progress line naming the
+value **and the setting it came from**, plus an `engine.run_rate` ledger entry. At the end: the
+**observed** rate and the imposed seconds of waiting, also exposed in `Engine.coverage()['run_rate']`.
+An invisible brake is worse than an absent brake: the operator would conclude that forge is slow.
+
+**Honest scope**: the ceiling bounds what goes through the oracles' HTTP chokepoint
+(`Oracle._http`) — the **43 native modules** derived from `Oracle` (MEASURED on 2026-11-24, out of 69
+native kinds: `python3 -c "import forge.modules; from forge.modules.registry import REGISTRY; from forge.modules.oracle import Oracle; print(sum(issubclass(c, Oracle) for c in REGISTRY.values()))"`). A **subprocess** (nuclei, feroxbuster, naabu…) does not
+go through it; its rate is throttled by **its own flag**, that is, by `rate_explicit` (§2bis).
+To *really throttle everything*: `"rate_explicit": true` — which arms both at once.
 
 ---
 
-## 2quinquies. Découverte AUTHENTIFIÉE — ce que forge ne fait PAS, et pourquoi
+## 2quater. Third-party egress of a module — `allow_tool_egress`
 
-**À dire d'emblée : la découverte profonde sous authentification n'est PAS automatique.** Les oracles
-natifs de forge portent la session gouvernée (`scope.session`) sur chaque requête ; les **crawlers
-externes**, non. Ils explorent donc la cible **non authentifiés**.
+Forge already gates the LLM assist (`scope.llm.allow_external`) and the embeddings memory backend behind an
+**explicit** egress. It did not gate its **tools**, and measurement made the inconsistency untenable:
+`recon.httpx`, considered *loopback-safe*, downloaded **92.6 MiB from huggingface.co on each of
+its 4 shots** (~370 MiB) through its `-tech-detect` flag — **the only proven egress over 4 906 findings**,
+in a bench announced as "strict loopback". It had not escaped any prohibition: it had escaped
+**scrutiny**, because the exclusion was based on the **declared intent**, never on the **observed**
+egress.
 
-### Le coût, mesuré
+The principle: **a module that goes out to a third party DECLARES it, and the operator can REFUSE it.**
 
-Banc du 2026-08-16, DVWA (application dont TOUT le contenu vulnérable est derrière un login) :
-
-| | mesuré |
+| Value of `allow_tool_egress` | Effect |
 |---|---|
-| cibles distinctes atteintes en campagne autonome | 27 |
-| cibles `/vulnerabilities/*` (les pages vulnérables) | **0** |
-| classes opposables trouvées, piste autonome | **0 / 9** |
-| … les mêmes classes, amorcées à la main avec la session | **5 / 9** |
+| *(absent)* / `false` | **Refusal** of any declared egress (default, fail-closed) |
+| `true` | Allows the **declared** hosts (never the others: the declaration remains the contract) |
+| `["*.huggingface.co", …]` | **Allowlist** by pattern (`fnmatch`); empty list ⇒ refusal |
 
-Le jugement de forge n'est pas en cause : les oracles trouvent 5 classes sur 9 dès qu'on leur donne
-les cibles. Ce qui manque est en amont — **le crawler ne voit qu'une page de login**.
+On the module side (duck-typed, no existing module has to change): `egress = ("hôte", …)` and, if the
+module **cannot** do without it, `egress_required = True`.
 
-### Pourquoi ce n'est pas simplement « câblé »
+* module that can **degrade** (the case of `recon.httpx`) → it still fires, and receives
+  `action.params['_egress_allowed'] = False`: it is up to it to remove the feature that goes out.
+  Coverage-safe: we **bound**, we do not delete;
+* module that **cannot** do without it → **named VETO** by the ROE (layer 3bis), which cites the host
+  and the key that lifts the refusal. No verdict is issued for the action.
 
-Donner la session à un outil externe suppose un canal. Il n'y en a que deux, et **aucun n'est sûr
-par la voie docker** :
+The finding is stated **once per module** (`[EGRESS TIERS]` progress line + `engine.tool_egress`
+ledger entry + `coverage()['tool_egress']`) — **including when the egress is allowed**: an
+egress allowed without being seen will happen again identically.
 
-| canal | ce que les outils supportent | ce que ça coûte |
+---
+
+## 2quinquies. AUTHENTICATED discovery — what forge does NOT do, and why
+
+**To say right away: deep discovery under authentication is NOT automatic.** Forge's native
+oracles carry the governed session (`scope.session`) on every request; the **external
+crawlers** do not. They therefore explore the target **unauthenticated**.
+
+### The cost, measured
+
+Bench of 2026-08-16, DVWA (an application whose ENTIRE vulnerable content is behind a login):
+
+| | measured |
+|---|---|
+| distinct targets reached in an autonomous campaign | 27 |
+| `/vulnerabilities/*` targets (the vulnerable pages) | **0** |
+| reportable classes found, autonomous track | **0 / 9** |
+| … the same classes, seeded by hand with the session | **5 / 9** |
+
+Forge's judgement is not at fault: the oracles find 5 classes out of 9 as soon as they are given
+the targets. What is missing is upstream — **the crawler only sees a login page**.
+
+### Why it is not simply "wired"
+
+Giving the session to an external tool requires a channel. There are only two, and **neither is safe
+via docker**:
+
+| channel | what the tools support | what it costs |
 |---|---|---|
-| **argv** (`-b/--cookies`, `-H`) | feroxbuster ✅, katana ✅ | le secret devient **world-readable** via `ps`, et se retrouve dans le ledger et les PoC |
-| **fichier** (`-H <file>`, `-config`) | katana ✅, feroxbuster via `ferox-config.toml` | exige un **montage** dans le conteneur — refusé par conception |
+| **argv** (`-b/--cookies`, `-H`) | feroxbuster ✅, katana ✅ | the secret becomes **world-readable** via `ps`, and ends up in the ledger and the PoCs |
+| **file** (`-H <file>`, `-config`) | katana ✅, feroxbuster via `ferox-config.toml` | requires a **mount** into the container — refused by design |
 
-Et le refus du montage n'est pas une commodité manquante : il est argumenté dans
-`forge/runner.py` §1, et son argument **couvre exactement ce cas**. Chaque invocation docker porte
-déjà `--network host` ; un montage, même `:ro`, borne les **écritures**, pas les **lectures** — or
-« une lecture dans un conteneur qui a le réseau de l'hôte est à un `curl` de l'exfiltration ».
+And the refusal of the mount is not a missing convenience: it is argued in
+`forge/runner.py` §1, and its argument **covers exactly this case**. Every docker invocation already carries
+`--network host`; a mount, even `:ro`, bounds **writes**, not **reads** — and
+"a read in a container that has the host's network is one `curl` away from exfiltration".
 
-**Le canal fichier serait donc MOINS sûr que l'argv, pas plus** : l'argv expose le secret à qui lit
-`ps` sur la machine ; le fichier monté l'expose à l'image tierce elle-même, qui a le réseau. C'est
-contre-intuitif, et c'est la raison pour laquelle forge ne fait ni l'un ni l'autre par défaut.
+**The file channel would therefore be LESS safe than argv, not more**: argv exposes the secret to whoever reads
+`ps` on the machine; the mounted file exposes it to the third-party image itself, which has the network. It is
+counter-intuitive, and it is the reason why forge does neither by default.
 
-### Ce que l'opérateur peut faire, aujourd'hui
+### What the operator can do, today
 
-1. **Amorcer les cibles authentifiées** (`forge run --actions`) — la voie mesurée à 5/9 sur DVWA.
-   L'opérateur connaît ses URL ; il n'a pas besoin qu'un crawler les devine.
-2. **Faire tourner le crawler en BINAIRE LOCAL** plutôt qu'en conteneur. Hors docker, le canal
-   fichier redevient viable : un fichier d'en-têtes en `0600` n'est lisible que par son propriétaire
-   et n'apparaît pas dans `ps`. C'est **strictement plus sûr que l'argv** — mais seulement hors
-   conteneur.
-3. **Accepter l'exposition argv en connaissance de cause**, en passant soi-même le cookie via
-   `params.extra_args` de l'outil. Forge ne le fait pas à votre place : *un outil qui redacte ses
-   secrets partout ailleurs ne doit pas en publier un dans une ligne de commande sans que vous
-   l'ayez décidé.*
+1. **Seed the authenticated targets** (`forge run --actions`) — the path measured at 5/9 on DVWA.
+   The operator knows their URLs; they do not need a crawler to guess them.
+2. **Run the crawler as a LOCAL BINARY** rather than in a container. Outside docker, the file
+   channel becomes viable again: a headers file at `0600` is readable only by its owner
+   and does not appear in `ps`. It is **strictly safer than argv** — but only outside a
+   container.
+3. **Accept the argv exposure knowingly**, by passing the cookie yourself through
+   the tool's `params.extra_args`. Forge does not do it for you: *a tool that redacts its
+   secrets everywhere else must not publish one in a command line without you having
+   decided so.*
 
 ---
 
-## 3. Qu'est-ce qui est configurable où ?
+## 3. What is configurable where?
 
-| Réglage | Au déploiement (env) | Dans l'UI (settings) |
+| Setting | At deployment (env) | In the UI (settings) |
 |---|:---:|:---:|
-| Bind, chemins d'état, TTL session | ✅ | — |
-| Secrets d'amorçage (token, hash viewer/opérateur) | ✅ | (comptes créés via UI/CLI ensuite) |
-| Admin & comptes individuels | (amorçage) | ✅ (wizard + *Administration → Comptes*) |
-| Source de détection (purple) | ✅ (legacy `PLUME_*`/`FORGE_DETECTION_SOURCE`) | ✅ **recommandé** (`detection_source`) |
-| Politique opérateur (source-CIDR) | — | ✅ (`operator_policy`) |
-| Politique de sauvegarde (schedule/offsite) | (2 knobs : tick, passphrase env) | ✅ (`backup_policy`) |
-| Gouvernance des connecteurs | — | ✅ (`module`) |
-| Chiffrement au repos | ✅ (image `encryption` + `FORGE_DB_KEY`) | (reflété : `capabilities.sqlcipher`) |
-| Proxy de confiance (XFF) | — | ✅ (`trusted_proxy`) |
+| Bind, state paths, session TTL | ✅ | — |
+| Bootstrap secrets (token, viewer/operator hash) | ✅ | (accounts created through UI/CLI afterwards) |
+| Admin & individual accounts | (bootstrap) | ✅ (wizard + Administration → « Comptes » (*Accounts*)) |
+| Detection source (purple) | ✅ (legacy `PLUME_*`/`FORGE_DETECTION_SOURCE`) | ✅ **recommended** (`detection_source`) |
+| Operator policy (source CIDR) | — | ✅ (`operator_policy`) |
+| Backup policy (schedule/offsite) | (2 knobs: tick, passphrase env) | ✅ (`backup_policy`) |
+| Connector governance | — | ✅ (`module`) |
+| Encryption at rest | ✅ (`encryption` image + `FORGE_DB_KEY`) | (reflected: `capabilities.sqlcipher`) |
+| Trusted proxy (XFF) | — | ✅ (`trusted_proxy`) |
 
-Le **provisioning headless** (sans navigateur) est possible : poser `FORGE_CONSOLE_PASS_HASH` /
-`FORGE_CONSOLE_OPERATOR_HASH` / `FORGE_CONSOLE_TOKEN` — l'état de setup bascule alors `provisioned:true`
-sans wizard. Voir [Premier déploiement](FIRST_DEPLOYMENT.md).
+**Headless provisioning** (without a browser) is possible: set `FORGE_CONSOLE_PASS_HASH` /
+`FORGE_CONSOLE_OPERATOR_HASH` / `FORGE_CONSOLE_TOKEN` — the setup state then switches to `provisioned:true`
+without the wizard. See [First deployment](FIRST_DEPLOYMENT.md).

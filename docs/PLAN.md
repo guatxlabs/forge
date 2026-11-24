@@ -1,90 +1,92 @@
 # Forge — Plan & Roadmap
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.md) · [Positionnement](POSITIONING.md)
+[English](PLAN.md) | [Français](PLAN.fr.md)
 
-> ✅ MISE À JOUR — l'**Étape 2** (P1 vendable : reporting + comptes), l'**Étape 3** (crédibilité
-> offensive) et les comptes utilisateurs / l'attribution individuelle sont **livrés**. Reste ouvert
-> ⏳ un retour de terrain sur un engagement réel. Le reste de ce plan est conservé pour le contexte.
+> 🧭 [Forge documentation](README.md) · See also: [Overview](OVERVIEW.md) · [Positioning](POSITIONING.md)
 
-## Positionnement
+> ✅ UPDATE — **Step 2** (sellable P1: reporting + accounts), **Step 3** (offensive
+> credibility) and user accounts / individual attribution are **delivered**. Still open:
+> ⏳ field feedback from a real engagement. The rest of this plan is kept for context.
 
-Forge = couche d'orchestration red-team **GOUVERNÉE** + mesure **PURPLE**, companion de
+## Positioning
+
+Forge = **GOVERNED** red-team orchestration layer + **PURPLE** measurement, companion to
 Plume (blue).
 
-- **Segment** : red-team **auditable sous conformité + purple intégré**.
-- **Acheteur** : RSSI / lead purple / juridique — **PAS** le pentester chasseur d'exploits.
+- **Segment**: red-team **auditable under compliance + integrated purple**.
+- **Buyer**: CISO / purple lead / legal — **NOT** the exploit-hunting pentester.
 
-> **Slogan** : « Forge n'est pas un remplaçant de Metasploit — c'est la couche gouvernance
-> + preuve + mesure purple par-dessus les outils que vous avez déjà (il pilote MSF/Burp/nuclei). »
+> **Tagline**: "Forge is not a Metasploit replacement — it is the governance
+> + evidence + purple measurement layer on top of the tools you already have (it drives MSF/Burp/nuclei)."
 
 ## Red / Blue / Purple
 
-- **Plume = BLEU** (détection / SOC).
-- **Forge = ROUGE** (offensif).
-- **« Purple » n'est PAS un 3ᵉ produit** : c'est la boucle de collaboration rouge × bleu
-  (rouge + bleu = violet). La matrice de couverture (tiré vs détecté → detected / missed / MTTD)
-  **EST** cette boucle.
+- **Plume = BLUE** (detection / SOC).
+- **Forge = RED** (offensive).
+- **"Purple" is NOT a 3rd product**: it is the red × blue collaboration loop
+  (red + blue = purple). The coverage matrix (fired vs detected → detected / missed / MTTD)
+  **IS** that loop.
 
-**Le MOAT** = rouge + bleu **MÊME VENDEUR**, corrélés par ATT&CK + preuve d'autorisation signée
-(ROE fail-closed + ledger Ed25519) — ce qu'aucun incumbent (MSF / Cobalt Strike / Maltego / Splunk)
-n'a.
+**The MOAT** = red + blue from the **SAME VENDOR**, correlated through ATT&CK + signed evidence of authorization
+(fail-closed ROE + Ed25519 ledger) — something no incumbent (MSF / Cobalt Strike / Maltego / Splunk)
+has.
 
-## ✅ Déjà fait
+## ✅ Already done
 
-- **Audit** : revue de sécurité interne menée, les findings identifiés ont été corrigés.
-- **Parité CLI ↔ UI** (+ opt-in exploit gouverné).
-- **Connecteurs** MSF / Burp.
-- **Fondation P0** : git v0.0.1, packaging / Makefile / pyproject, Docker / compose / systemd / CI,
+- **Audit**: internal security review carried out, the identified findings were fixed.
+- **CLI ↔ UI parity** (+ governed exploit opt-in).
+- MSF / Burp **connectors**.
+- **P0 foundation**: git v0.0.1, packaging / Makefile / pyproject, Docker / compose / systemd / CI,
   `forge doctor`, LICENSE.
-- **Boucle purple** (code + tests, vérifiée en mocké).
+- **Purple loop** (code + tests, verified with mocks).
 
-## Roadmap séquencée
+## Sequenced roadmap
 
-### Étape 1 — GO LIVE PURPLE (en attente de Plume déployée)
+### Step 1 — PURPLE GO LIVE (waiting for Plume to be deployed)
 
-Câbler `PLUME_URL` → Plume prod (JOIN lecture seule) + 1ʳᵉ campagne purple réelle sur cible lab
-autorisée → 1ʳᵉ matrice avec vraies détections SOC + MTTD réel. (Voir
+Wire `PLUME_URL` → Plume prod (read-only JOIN) + 1st real purple campaign on an authorized lab target
+→ 1st matrix with real SOC detections + real MTTD. (See
 [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).)
 
-### Étape 2 — P1 vendable
+### Step 2 — sellable P1
 
-- Export PDF / HTML client (#4).
-- Comptes utilisateurs / attribution individuelle (#6).
+- Client PDF / HTML export (#4).
+- User accounts / individual attribution (#6).
 
-### Étape 3 — crédibilité offensive
+### Step 3 — offensive credibility
 
-- Durcir l'oracle IDOR (fragile : faux positifs / faux négatifs).
-- 2-3 oracles à-preuve (SSRF callback-vérifié, auth / ATO).
-- Engine **ITÉRATIF** (chaînage recon → origin → nuclei → idor).
-- Connecteur MSF session-poll (preuve réelle, pas faux positif).
+- Harden the IDOR oracle (fragile: false positives / false negatives).
+- 2-3 evidence oracles (callback-verified SSRF, auth / ATO).
+- **ITERATIVE** engine (chaining recon → origin → nuclei → idor).
+- MSF session-poll connector (real evidence, not a false positive).
 
-### Étape 4 — GTM
+### Step 4 — GTM
 
-- Page de positionnement + tarification des prestations (valeur de l'accompagnement purple vs MSF Pro ~15k$/siège pour de la capacité brute ; le produit, lui, est gratuit/open).
-- 1 write-up d'engagement de référence.
+- Positioning page + pricing of services (value of purple coaching vs MSF Pro ~15k$/seat for raw capability; the product itself is free/open).
+- 1 reference engagement write-up.
 
-## Statut des 6 blockers
+## Status of the 6 blockers
 
-| # | Blocker | Statut |
+| # | Blocker | Status |
 |---|---|---|
 | 1 | secrets / .gitignore | ✅ |
-| 2 | versionnement / packaging | ✅ |
-| 3 | boucle purple | ✅ (code + tests ; reste démo live) |
-| 4 | livrable PDF | 🟡 (rapport console complet ✓, reste export PDF / HTML brandé) |
-| 5 | vrai finding terrain | ⏳ |
-| 6 | comptes utilisateurs | ⏳ |
+| 2 | versioning / packaging | ✅ |
+| 3 | purple loop | ✅ (code + tests; live demo remaining) |
+| 4 | PDF deliverable | 🟡 (full console report ✓, branded PDF / HTML export remaining) |
+| 5 | real field finding | ⏳ |
+| 6 | user accounts | ⏳ |
 
-## Avis offensif honnête
+## Honest offensive assessment
 
-- Profondeur offensive native **FAIBLE** (1 oracle à-preuve fragile + wraps + connecteurs).
-- Ne **PAS** courir après la parité MSF / CS (perdu d'avance, hors-charte).
-- Miser sur **gouvernance + purple + oracles à-preuve crédibles**.
-- L'ancrage **BLEU** du projet est son différenciateur (la mesure purple, où rouge rencontre
-  bleu).
-- **NE PAS** : beacon / C2 maison, Cellebrite / forensics, course au nombre d'exploits.
+- Native offensive depth **LOW** (1 fragile evidence oracle + wraps + connectors).
+- Do **NOT** chase MSF / CS parity (lost in advance, outside the charter).
+- Bet on **governance + purple + credible evidence oracles**.
+- The project's **BLUE** anchoring is its differentiator (purple measurement, where red meets
+  blue).
+- **DO NOT**: home-made beacon / C2, Cellebrite / forensics, race for the number of exploits.
 
 ## Time-to-sellable
 
-Horizon de plusieurs mois jusqu'à un premier client convaincu par la démo purple.
+A horizon of several months until a first client convinced by the purple demo.
 
-**Risque principal = FOCUS** : la boucle purple doit rester **#1**, sinon dispersion.
+**Main risk = FOCUS**: the purple loop must stay **#1**, otherwise scattering.

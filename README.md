@@ -2,191 +2,193 @@
 
 # 🔨 Forge
 
-**The heavyweight red-team engine.** — l'antithèse offensive de [Plume](https://github.com/guatxlabs/plume), le SOC blue-team.
-*Python · stdlib-only core · sûreté d'abord (ROE fail-closed + ledger tamper-evident).*
+[English](README.md) | [Français](README.fr.md)
 
-**·  by [GuatX](https://guatx.com)  ·  usage autorisé uniquement  ·**
+**The heavyweight red-team engine.** — the offensive counterpart of [Plume](https://github.com/guatxlabs/plume), the blue-team SOC.
+*Python · stdlib-only core · safety first (fail-closed ROE + tamper-evident ledger).*
 
-**License: [AGPL-3.0-or-later](LICENSE) — 100 % open source**  ·  Modules avancés (flag-gated, OFF par défaut) → [`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)
+**·  by [GuatX](https://guatx.com)  ·  authorized use only  ·**
+
+**License: [AGPL-3.0-or-later](LICENSE) — 100 % open source**  ·  Advanced modules (flag-gated, OFF by default) → [`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)
 
 <br>
 
-<img src="docs/media/console-demo.gif" alt="Console Forge — vue d'ensemble, catalogue de modules, findings mappés ATT&CK, lancement de campagne gouverné" width="860">
+<img src="docs/media/console-demo.gif" alt="Forge console — overview, module catalog, ATT&CK-mapped findings, governed campaign launch" width="860">
 
-<sub>Console Forge — dashboard · catalogue de modules (les **exploit/destructif** sont gatés par les ROE) · findings mappés **ATT&CK** · **lancement gouverné** (hors-scope = VETO dur, chaque tir au **ledger**). Le registre compte **88 modules** — compte MESURÉ par `python3 -m forge.cli modules --json`, pas lu sur cette capture.</sub>
+<sub>Forge console — dashboard · module catalog (the **exploit/destructive** ones are gated by the ROE) · **ATT&CK**-mapped findings · **governed launch** (out-of-scope = hard VETO, every shot in the **ledger**). The registry holds **88 modules** — a count MEASURED by `python3 -m forge.cli modules --json`, not read off this screenshot.</sub>
 
 </div>
 
-Plume **observe** (la plume qui consigne, bleu). Forge **frappe** — et **trempe** les défenses de
-Plume (la boucle purple-team). Forge orchestre des modules d'attaque (recon → enum → exploit) où
-**chaque action passe par une gate ROE fail-closed** et est tracée dans un **ledger d'engagement
-append-time, tamper-evident**. Par défaut, Forge est **INERTE** : rien ne peut tirer tant que
-l'opérateur n'a pas armé chaque couche consciemment.
+Plume **observes** (the quill that records, blue). Forge **strikes** — and **tempers** Plume's
+defenses (the purple-team loop). Forge orchestrates attack modules (recon → enum → exploit) where
+**every action goes through a fail-closed ROE gate** and is recorded in an **append-time,
+tamper-evident engagement ledger**. By default, Forge is **INERT**: nothing can fire until the
+operator has consciously armed every layer.
 
-> ⚠️ **Cadre autorisé uniquement** (bug bounty in-scope, pentest sous contrat, CTF, infra propre).
-> La gate ROE + le scope-guard + le ledger sont là pour **imposer ET prouver** l'autorisation.
-> Passer un WAF/Cloudflare ≠ une faille : c'est un enabler d'accès, pas un bug.
+> ⚠️ **Authorized settings only** (in-scope bug bounty, contracted pentest, CTF, your own infra).
+> The ROE gate + the scope-guard + the ledger are there to **enforce AND prove** authorization.
+> Getting past a WAF/Cloudflare ≠ a vulnerability: it is an access enabler, not a bug.
 
-> 📚 **Documentation produit complète → [`docs/`](docs/README.md)** — vue d'ensemble, architecture,
-> installation, wizard de 1er déploiement, référence de configuration (env + settings), administration,
-> concepts, référence CLI & API HTTP, standalone, modèle de sécurité, désinstallation, dépannage.
+> 📚 **Full product documentation → [`docs/`](docs/README.md)** — overview, architecture,
+> installation, first-deployment wizard, configuration reference (env + settings), administration,
+> concepts, CLI & HTTP API reference, standalone, security model, uninstall, troubleshooting.
 
-## Sûreté d'abord — la gate à 4 couches (`forge/roe.py`)
+## Safety first — the 4-layer gate (`forge/roe.py`)
 
-Toutes doivent être franchies pour qu'une action LIVE parte. Sinon : `DRY_RUN` (simulation) ou
-`VETO` (refus dur).
+All of them must be passed for a LIVE action to go out. Otherwise: `DRY_RUN` (simulation) or
+`VETO` (hard refusal).
 
-| Couche | Question | Échec → |
+| Layer | Question | Failure → |
 |---|---|---|
-| 1 — armé ? | engagement explicitement armé (`--arm`) ? | `DRY_RUN` |
-| 2 — scope ? | cible ∈ `in_scope` et ∉ `out_scope` ? (**fail-closed** : `in_scope` vide = rien) | `VETO` |
-| 3 — capacité ? | exploit/destructif ⇒ `allow_exploit`/`allow_destructive` explicites ? | `VETO` |
-| 4 — approuvé ? | action approuvée (`--approve`), ou mode `auto` ? | `DRY_RUN` |
+| 1 — armed? | engagement explicitly armed (`--arm`)? | `DRY_RUN` |
+| 2 — scope? | target ∈ `in_scope` and ∉ `out_scope`? (**fail-closed**: empty `in_scope` = nothing) | `VETO` |
+| 3 — capability? | exploit/destructive ⇒ explicit `allow_exploit`/`allow_destructive`? | `VETO` |
+| 4 — approved? | action approved (`--approve`), or `auto` mode? | `DRY_RUN` |
 
-`VETO` (couche 2/3) n'est **jamais** simulé ni tiré. Toute erreur d'évaluation ⇒ `VETO` (fail-closed).
+`VETO` (layer 2/3) is **never** simulated or fired. Any evaluation error ⇒ `VETO` (fail-closed).
 
 ## Install
 
 ```sh
-pip install -e .          # met l'exécutable `forge` sur le PATH (forge = forge.cli:main)
-forge doctor              # diagnostic : modules opérationnels + outil/service attendu par module
+pip install -e .          # puts the `forge` executable on the PATH (forge = forge.cli:main)
+forge doctor              # diagnostics: operational modules + tool/service expected per module
 ```
 
-Sans installation, tout est aussi accessible via `python3 -m forge.cli <commande>`.
+Without installing, everything is also reachable via `python3 -m forge.cli <commande>`.
 
 ## Quickstart
 
-> 🚀 **Nouveau ?** Le parcours opérateur bout-en-bout **100 % hors-ligne** (seed + mock-Plume, aucun
-> service externe) est dans [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — install → scope →
-> campagne/`make demo` → console → matrice purple → rapport → vérif intégrité, avec un point de
-> contrôle « ce que tu dois voir » à chaque étape.
+> 🚀 **New?** The end-to-end operator walkthrough, **100 % offline** (seed + mock-Plume, no
+> external service), is in [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — install → scope →
+> campaign/`make demo` → console → purple matrix → report → integrity check, with a
+> "what you should see" checkpoint at each step.
 
 ```sh
-# démonstration bout-en-bout — AUCUNE cible réelle, AUCUN I/O réseau
-forge demo                                  # ou: python3 -m forge.cli demo
+# end-to-end demonstration — NO real target, NO network I/O
+forge demo                                  # or: python3 -m forge.cli demo
 
-# suite complète (stdlib, zéro réseau) : Python unittest + cargo test de la console
+# full suite (stdlib, zero network): Python unittest + cargo test of the console
 make test                                   # = python3 -m unittest discover -s tests -t . + (cd console && cargo test)
-python3 -m unittest discover -s tests -t .  # Python seul (2834 tests — compte MESURÉ : `Ran 2834 tests` / `OK (skipped=3)`)
+python3 -m unittest discover -s tests -t .  # Python only (2949 tests — MEASURED on 2026-11-24: `Ran 2949 tests` / `OK (skipped=5)`)
 
-# vérifier l'appartenance d'une cible
+# check whether a target is in scope
 forge scope-check app.exemple.test --scope scope.json
 
-# planifier (montre le verdict ROE de chaque action, ne tire rien)
+# plan (shows the ROE verdict of each action, fires nothing)
 forge plan --scope scope.json --actions actions.json
 
-# exécuter — INERTE par défaut ; il faut armer ET approuver pour tirer
+# run — INERT by default; you must arm AND approve to fire
 forge run --scope scope.json --actions actions.json \
-    --ledger engagements/e1.jsonl --report rapport.md            # tout en DRY_RUN
+    --ledger engagements/e1.jsonl --report rapport.md            # everything in DRY_RUN
 forge run --scope scope.json --actions actions.json \
     --arm --approve demo.fingerprint:app.test --ledger engagements/e1.jsonl
 
-# intégrité de l'engagement
+# engagement integrity
 forge ledger verify --ledger engagements/e1.jsonl
 ```
 
-Copier `scope.example.json` → `scope.json` et renseigner `in_scope` **avec autorisation écrite**.
-`scope.json`, `*.key`, `*.jsonl` sont gitignorés (secrets / état d'engagement).
+Copy `scope.example.json` → `scope.json` and fill in `in_scope` **with written authorization**.
+`scope.json`, `*.key`, `*.jsonl` are gitignored (secrets / engagement state).
 
-### Démo instantanée — console peuplée en 1 commande (hors-ligne)
+### Instant demo — console populated in 1 command (offline)
 
-Un **engagement de référence synthétique** est fourni dans
-[`examples/reference-engagement/`](examples/reference-engagement/) (hôtes `.example` réservés, IP de
-doc — **aucune cible réelle, aucun SOC réel**). Il peuple immédiatement les onglets
-Findings / Coverage / Purple / Runs :
+A **synthetic reference engagement** is provided in
+[`examples/reference-engagement/`](examples/reference-engagement/) (reserved `.example` hosts,
+documentation IPs — **no real target, no real SOC**). It immediately populates the
+Findings / Coverage / Purple / Runs tabs:
 
 ```sh
-make demo          # amorce la base démo + lance la console peuplée  -> http://127.0.0.1:7100
-make demo-purple   # idem + stub mock-Plume (DEMO FIXTURE) -> matrice détecté/raté/MTTD (7 tirés, 4 détectés, 3 ratés)
+make demo          # seeds the demo database + launches the populated console  -> http://127.0.0.1:7100
+make demo-purple   # same + mock-Plume stub (DEMO FIXTURE) -> detected/missed/MTTD matrix (7 fired, 4 detected, 3 missed)
 ```
 
-`make demo` lance `forge seed-demo --dir examples/reference-engagement`, qui **ingère les
-fixtures directement dans SQLite** (idempotent, sans réseau, ne touche que la campagne démo
-`acme-lab`). Le write-up commercial correspondant :
+`make demo` runs `forge seed-demo --dir examples/reference-engagement`, which **ingests the
+fixtures directly into SQLite** (idempotent, no network, touches only the `acme-lab` demo
+campaign). The matching commercial write-up:
 [`examples/reference-engagement/REFERENCE_ENGAGEMENT.md`](examples/reference-engagement/REFERENCE_ENGAGEMENT.md).
 
-## Console Rust (`console/` — le store + la boucle purple)
+## Rust console (`console/` — the store + the purple loop)
 
-Fork minimal de la colonne Plume (axum + rusqlite, binaire unique) : store du modèle ROUGE
-(`finding`/`runrecord`), API, et le **point de jonction purple** (`POST /api/ingest` reçoit les
-findings + run-records ATT&CK du moteur Python ; Plume corrèle ensuite par champ `mitre`).
+Minimal fork of the Plume backbone (axum + rusqlite, single binary): store for the RED model
+(`finding`/`runrecord`), API, and the **purple junction point** (`POST /api/ingest` receives the
+ATT&CK findings + run-records from the Python engine; Plume then correlates on the `mitre` field).
 
 ```sh
-cd console && cargo build --release            # compile offline depuis le cache cargo
-# (optionnel) activer l'auth opérateur : hash argon2id du mot de passe, jamais en clair
+cd console && cargo build --release            # builds offline from the cargo cache
+# (optional) enable operator auth: argon2id hash of the password, never in plaintext
 HASH=$(./target/release/forge hashpw 'mon-mot-de-passe')
 FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) \
 FORGE_CONSOLE_USER=forge FORGE_CONSOLE_PASS_HASH="$HASH" \
-    ./target/release/forge            # http://127.0.0.1:7100  (sans PASS_HASH = dev localhost ouvert)
-# côté moteur : expédier une campagne vers la console
+    ./target/release/forge            # http://127.0.0.1:7100  (without PASS_HASH = open localhost dev)
+# engine side: ship a campaign to the console
 python3 -m forge.cli campaign --scope scope.json --targets t.json --campaign op1 \
     --console http://127.0.0.1:7100 --console-token "$FORGE_CONSOLE_TOKEN"
 ```
 
-**Auth/RBAC** (modèle `auth_guard`/`host_guard` de Plume) : `/health` ouvert ; toutes les autres
-routes derrière (a) **host-guard** anti-DNS-rebinding (`Host` en allowlist → sinon `421`) et (b)
-**auth-guard** si `FORGE_CONSOLE_PASS_HASH` est défini — **Basic** (opérateur=viewer, lecture) ou
-**Bearer token** (agent/admin=écriture). Sans hash → mode dev localhost ouvert (les écritures
-restent gatées par le token). Mot de passe **argon2id** via `forge hashpw '...'`.
-Endpoints : `GET /health` · `POST /api/ingest` (token) · `GET /api/findings` · `GET /api/runrecords` ·
-`GET /api/coverage` (rollup ATT&CK) · **`GET /api/query?q=...`** (GXQL) · **`/api/panels`** (GET liste ·
-POST créer [token] · DELETE [token] · `GET /api/panels/:id/data`) · `GET /` (console opérateur dark,
-vanilla-JS : barre de recherche GXQL + **dashboard de panels** table/bar/stat).
-Dedup au niveau store (`UNIQUE(campaign,target,title)`). Bind 127.0.0.1 ; auth/RBAC complète = durcissement.
+**Auth/RBAC** (Plume's `auth_guard`/`host_guard` model): `/health` open; all other
+routes behind (a) the anti-DNS-rebinding **host-guard** (`Host` in allowlist → otherwise `421`) and (b) the
+**auth-guard** if `FORGE_CONSOLE_PASS_HASH` is set — **Basic** (operator=viewer, read) or
+**Bearer token** (agent/admin=write). Without a hash → open localhost dev mode (writes
+remain gated by the token). **argon2id** password via `forge hashpw '...'`.
+Endpoints: `GET /health` · `POST /api/ingest` (token) · `GET /api/findings` · `GET /api/runrecords` ·
+`GET /api/coverage` (ATT&CK rollup) · **`GET /api/query?q=...`** (GXQL) · **`/api/panels`** (GET list ·
+POST create [token] · DELETE [token] · `GET /api/panels/:id/data`) · `GET /` (dark operator console,
+vanilla-JS: GXQL search bar + table/bar/stat **panel dashboard**).
+Store-level dedup (`UNIQUE(campaign,target,title)`). Bind 127.0.0.1; full auth/RBAC = hardening.
 
-**GXQL (langage de requête type-SPL, porté de Plume)** — *GuatX Query Language*, **anciennement
-« SOQL »** : même langage, même syntaxe, seul le nom change ; le drapeau CLI `--soql`, la clé JSON
-`soql` et le module `guatx_core::soql` restent inchangés. Interroge `finding`/`runrecord`,
-compilé en **SQL read-only** (champs en allowlist, valeurs en params liés, un seul SELECT, LIMIT
-plafonné, connexion `SQLITE_OPEN_READ_ONLY`). Exemples :
+**GXQL (SPL-like query language, ported from Plume)** — *GuatX Query Language*, **formerly
+"SOQL"**: same language, same syntax, only the name changes; the CLI flag `--soql`, the JSON key
+`soql` and the `guatx_core::soql` module remain unchanged. Queries `finding`/`runrecord`,
+compiled to **read-only SQL** (allowlisted fields, values as bound params, a single SELECT, LIMIT
+capped, `SQLITE_OPEN_READ_ONLY` connection). Examples:
 ```
 search severity=HIGH | fields target,title,mitre
 search | stats count by severity | sort -count
 search title~Origine
 runs | stats count by mitre
 ```
-Un champ hors allowlist → `400` (anti-injection). Le SQL compilé est renvoyé (transparence).
+A field outside the allowlist → `400` (anti-injection). The compiled SQL is returned (transparency).
 
-### Quickstart console (≈5 min)
+### Console quickstart (≈5 min)
 
 ```sh
-# 1) build du binaire (offline, depuis le cache cargo)
+# 1) build the binary (offline, from the cargo cache)
 cd console && cargo build --release && cd ..
 
-# 2) lancer la console (dev : localhost ouvert, écritures gatées par token)
+# 2) launch the console (dev: open localhost, writes gated by token)
 FORGE_CONSOLE_TOKEN=$(openssl rand -hex 16) ./console/target/release/forge &
-#    -> http://127.0.0.1:7100   (UI opérateur dark + API)
+#    -> http://127.0.0.1:7100   (dark operator UI + API)
 
-# 3) peupler le catalogue de modules côté UI
-forge modules --json                       # liste les 77 modules du registre (kind, mitre, dispo)
+# 3) populate the module catalog on the UI side
+forge modules --json                       # lists the modules of the registry (kind, mitre, availability)
 
-# 4) ingérer une campagne de démonstration (zéro réseau, finding synthétique)
+# 4) ingest a demonstration campaign (zero network, synthetic finding)
 FORGE_CONSOLE_URL=http://127.0.0.1:7100 FORGE_CONSOLE_TOKEN=$FORGE_CONSOLE_TOKEN \
     python3 demo_ingest.py                 # FIRE demo.fingerprint -> POST /api/ingest
 ```
 
-> En conteneur : la console bind `127.0.0.1:7100` par défaut (`FORGE_CONSOLE_ADDR`). Pour
-> l'exposer, fixer `FORGE_CONSOLE_ADDR=0.0.0.0:7100`, ajouter le nom d'hôte public au host-guard
-> anti-rebinding via `FORGE_CONSOLE_HOST`, **et** définir `FORGE_CONSOLE_PASS_HASH` (auth argon2id)
-> — ne jamais exposer le mode dev localhost-ouvert hors de la machine.
+> In a container: the console binds `127.0.0.1:7100` by default (`FORGE_CONSOLE_ADDR`). To
+> expose it, set `FORGE_CONSOLE_ADDR=0.0.0.0:7100`, add the public hostname to the anti-rebinding
+> host-guard via `FORGE_CONSOLE_HOST`, **and** set `FORGE_CONSOLE_PASS_HASH` (argon2id auth)
+> — never expose the open-localhost dev mode outside the machine.
 
-## Connecteurs (outils de pentest standards, pilotés par Forge)
+## Connectors (standard pentest tools, driven by Forge)
 
-Forge n'ajoute pas de capacité offensive propre : deux connecteurs **pilotent** des outils de
-pentest standards que l'opérateur exécute déjà lui-même, et **mappent** leurs résultats en
-Findings derrière la même gate ROE. Tous deux sondent leur service **à fire-time** (jamais au
-catalogue) et s'auto-neutralisent si le service est injoignable.
+Forge adds no offensive capability of its own: two connectors **drive** standard pentest
+tools that the operator already runs themselves, and **map** their results into
+Findings behind the same ROE gate. Both probe their service **at fire-time** (never at
+catalog time) and neutralize themselves if the service is unreachable.
 
-| Module | Outil piloté | Variables d'env (défauts) |
+| Module | Driven tool | Env variables (defaults) |
 |---|---|---|
-| `msf.module` | **msfrpcd** (RPC msgpack) — lance le module MSF choisi par l'opérateur ; aucun payload généré par Forge | `MSF_RPC_HOST` (127.0.0.1) · `MSF_RPC_PORT` (55553) · `MSF_RPC_USER` (msf) · `MSF_RPC_PASS` · `MSF_RPC_SSL` (true) · `MSF_RPC_TOKEN` (token permanent, optionnel) |
-| `burp.scan` | **REST API Burp Suite** Pro/Enterprise — lance un scan in-scope, rapatrie les issues | `BURP_API_URL` (http://127.0.0.1:1337) · `BURP_API_KEY` |
+| `msf.module` | **msfrpcd** (msgpack RPC) — launches the MSF module chosen by the operator; no payload generated by Forge | `MSF_RPC_HOST` (127.0.0.1) · `MSF_RPC_PORT` (55553) · `MSF_RPC_USER` (msf) · `MSF_RPC_PASS` · `MSF_RPC_SSL` (true) · `MSF_RPC_TOKEN` (permanent token, optional) |
+| `burp.scan` | **Burp Suite REST API** Pro/Enterprise — launches an in-scope scan, brings back the issues | `BURP_API_URL` (http://127.0.0.1:1337) · `BURP_API_KEY` |
 
-Gouvernance : `msf.module` déclare `exploit=True` (fail-safe → l'engine exige `allow_exploit`) ;
-`burp.scan` reste `exploit=False` mais émet `reported_by_tool` (jamais `vulnerable` — comme nuclei,
-pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique lesquels sont joignables.
+Governance: `msf.module` declares `exploit=True` (fail-safe → the engine requires `allow_exploit`);
+`burp.scan` stays `exploit=False` but emits `reported_by_tool` (never `vulnerable` — like nuclei,
+no over-classification without evidence of exploitability). `forge doctor` shows which ones are reachable.
 
-## Architecture (en bref)
+## Architecture (in short)
 
 ```
   cerveau (planner heuristique, seam orchestrateur LLM)
@@ -200,115 +202,116 @@ pas de sur-classement sans preuve d'exploitabilité). `forge doctor` indique les
         modules = OUTILS AUTONOMES orchestrés (recon, oracles à preuve, évasion navigateur, connecteurs)
 ```
 
-- **Cœur** = `roe.py` (gate) + `ledger.py` (preuve) + `engine.py` + `schema.py`. Pur-stdlib.
-- **Modules** restent indépendants (le `Module` ne fait que `dry()`→PoC et `fire()`→findings).
-- **Boucle purple** : chaque finding porte un champ `mitre` (ATT&CK) = clé de jointure pour valider la
-  détection côté défense (BAS). La **source de détection est un plugin configurable** (Plume n'est qu'un
-  préréglage — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec se câblent sans
-  code) : voir [`docs/DETECTION.md`](docs/DETECTION.md) et [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **Core** = `roe.py` (gate) + `ledger.py` (evidence) + `engine.py` + `schema.py`. Pure stdlib.
+- **Modules** stay independent (the `Module` only does `dry()`→PoC and `fire()`→findings).
+- **Purple loop**: every finding carries a `mitre` field (ATT&CK) = join key to validate
+  detection on the defense side (BAS). The **detection source is a configurable plugin** (Plume is only a
+  preset — CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, file, exec are wired without
+  code): see [`docs/DETECTION.md`](docs/DETECTION.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## État
+## Status
 
-Pré-1.0, **[AGPL-3.0-or-later](LICENSE)**, 100 % open source. **88 modules** (compte MESURÉ :
-`python3 -m forge.cli modules --json` → 88 entrées, 13 `exploit`, 42 `bug_bounty_eligible`) ; suites
-vertes **hors réseau** — **2834** tests Python (`Ran 2834 tests` / `OK (skipped=3)`) et **571** tests
-Rust console (`cargo test`, features par défaut).
+Pre-1.0, **[AGPL-3.0-or-later](LICENSE)**, 100 % open source. **88 modules** (MEASURED count:
+`python3 -m forge.cli modules --json` → 88 entries, 13 `exploit`, 42 `bug_bounty_eligible`); suites
+green **offline** — **2949** Python tests (`Ran 2949 tests` / `OK (skipped=5)`, each skip naming the optional tool or corpus
+it lacks) and **571** Rust
+console tests (`cargo test`, default features), MEASURED on 2026-11-24.
 
-Ce qui est **livré**, **ouvert** et **assumé** vit dans **[`ROADMAP.md`](ROADMAP.md)** ; le catalogue
-détaillé des modules dans **[`docs/MODULES.md`](docs/MODULES.md)**. La source de vérité des comptes est
-la commande, pas cette page.
+What is **delivered**, **open** and **accepted** lives in **[`ROADMAP.md`](ROADMAP.md)**; the detailed
+module catalog in **[`docs/MODULES.md`](docs/MODULES.md)**. The source of truth for the counts is
+the command, not this page.
 
-## Déploiement en production (self-deploy)
+## Production deployment (self-deploy)
 
-Runbook complet : **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. En bref — le contexte de build est la
-racine de ce dépôt (la console résout `guatx-core` via une git-dep publique épinglée au tag `v0.2.2`,
-aucun crate sibling requis ; `console/Cargo.lock` est committé pour des builds reproductibles) :
+Full runbook: **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. In short — the build context is the
+root of this repository (the console resolves `guatx-core` through a public git-dep pinned to tag `v0.2.2`,
+no sibling crate required; `console/Cargo.lock` is committed for reproducible builds):
 
 ```sh
-cp scope.example.json scope.json          # INERTE tant que in_scope vide ; éditer AVEC AUTORISATION
-docker compose up -d --build              # console SEULE (loopback :7100, healthcheck GET /health)
+cp scope.example.json scope.json          # INERT while in_scope is empty; edit WITH AUTHORIZATION
+docker compose up -d --build              # console ONLY (loopback :7100, healthcheck GET /health)
 ```
 
-Ouvrir `http://127.0.0.1:7100` → le **wizard 1er boot** provisionne l'admin (RBAC argon2id), la crypto,
-la **source de détection de TON infra** (FortiGate/pfSense/CrowdSec/Elastic/… — [`docs/DETECTION.md`](docs/DETECTION.md),
-plugin sans code) et la politique opérateur — **rien de codé en dur**. Services optionnels
-(browser/msf/burp) derrière des **profils** (`--profile browser`), aucun `depends_on` dur → un `up` nu =
-console seule. **Chiffrement au repos** (image SQLCipher opt-in) et **sauvegardes chiffrées programmées**
-(offsite) : [`docs/MIGRATION.md`](docs/MIGRATION.md) · [`docs/BACKUP.md`](docs/BACKUP.md).
+Open `http://127.0.0.1:7100` → the **first-boot wizard** provisions the admin (argon2id RBAC), the crypto,
+the **detection source of YOUR infra** (FortiGate/pfSense/CrowdSec/Elastic/… — [`docs/DETECTION.md`](docs/DETECTION.md),
+no-code plugin) and the operator policy — **nothing hard-coded**. Optional services
+(browser/msf/burp) behind **profiles** (`--profile browser`), no hard `depends_on` → a bare `up` =
+console only. **Encryption at rest** (opt-in SQLCipher image) and **scheduled encrypted backups**
+(offsite): [`docs/MIGRATION.md`](docs/MIGRATION.md) · [`docs/BACKUP.md`](docs/BACKUP.md).
 
-## Désinstallation
+## Uninstall
 
-Procédure complète (dont la purge d'état et le retrait des outils orchestrés) :
-**[`docs/UNINSTALL.md`](docs/UNINSTALL.md)**. En bref, **par mode de déploiement** :
+Full procedure (including state purge and removal of the orchestrated tools):
+**[`docs/UNINSTALL.md`](docs/UNINSTALL.md)**. In short, **per deployment mode**:
 
 ```sh
-# Docker Compose — depuis la racine du dépôt
-docker compose down                 # arrête, CONSERVE les volumes (DB + ledger)
-docker compose down -v              # arrête + SUPPRIME les volumes (DESTRUCTIF)
-docker image rm forge:0.0.1         # retire l'image
+# Docker Compose — from the repository root
+docker compose down                 # stops, KEEPS the volumes (DB + ledger)
+docker compose down -v              # stops + DELETES the volumes (DESTRUCTIVE)
+docker image rm forge:0.0.1         # removes the image
 
-# Docker (conteneur seul)
+# Docker (standalone container)
 docker rm -f forge && docker image rm forge:0.0.1
 
-# Natif / systemd (sans Docker)
+# Native / systemd (without Docker)
 sudo systemctl disable --now forge
 sudo rm -f /etc/systemd/system/forge.service && sudo systemctl daemon-reload
-sudo rm -rf /opt/forge              # binaire + assets (adapter au chemin d'install)
+sudo rm -rf /opt/forge              # binary + assets (adapt to the install path)
 
-# Moteur Python installé en editable
+# Python engine installed as editable
 pip uninstall forge
 ```
 
-> **Purge des données (DESTRUCTIF, irréversible pour l'auditabilité)** — la DB SQLite (+ WAL/SHM), le
-> ledger d'engagement et sa **clé de signature `.ed25519`**, le scope actif et les sauvegardes chiffrées
-> ne sont **jamais** supprimés tant que tu ne les vises pas explicitement. Les chemins exacts et le
-> retrait des outils orchestrés (msf/burp/browser) sont dans [`docs/UNINSTALL.md`](docs/UNINSTALL.md).
+> **Data purge (DESTRUCTIVE, irreversible for auditability)** — the SQLite DB (+ WAL/SHM), the
+> engagement ledger and its **`.ed25519` signing key**, the active scope and the encrypted backups
+> are **never** deleted unless you explicitly target them. The exact paths and the
+> removal of the orchestrated tools (msf/burp/browser) are in [`docs/UNINSTALL.md`](docs/UNINSTALL.md).
 
 ## Documentation
 
-**➡️ Sommaire complet et navigable : [`docs/README.md`](docs/README.md)** — l'ensemble de la
-documentation produit (vue d'ensemble, architecture, installation, configuration, administration,
-concepts, CLI, API HTTP, sécurité, dépannage). Les pages phares :
+**➡️ Full, navigable table of contents: [`docs/README.md`](docs/README.md)** — the whole of the
+product documentation (overview, architecture, installation, configuration, administration,
+concepts, CLI, HTTP API, security, troubleshooting). The key pages:
 
-- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — **ce qu'est Forge**, la valeur, le fonctionnement standalone.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — **comment c'est construit** (moteur Python + console Rust + SPA + gouvernance).
-- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — **référence complète** des variables d'env et des clés `settings`.
-- [`docs/CLI.md`](docs/CLI.md) · [`docs/HTTP_API.md`](docs/HTTP_API.md) — références CLI & API HTTP.
-- [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **démarrage bout-en-bout hors-ligne** (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
-- [`docs/PLAN.md`](docs/PLAN.md) — positionnement, red/blue/purple, roadmap séquencée et statut des blockers.
-- [`docs/DETECTION.md`](docs/DETECTION.md) — **source de détection = plugin configurable** (brancher n'importe quelle infra BLUE sans code : Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) + modèle `DetectionSource` et mapping MITRE.
-- [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prérequis du préréglage **Plume** pour câbler la boucle purple (le moat) — un cas particulier de `DETECTION.md`.
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — **runbook self-deploy bout-en-bout** : build/run (mini·full · Docker · compose · natif/systemd · image `encryption` SQLCipher), **wizard 1er boot** (admin · crypto · source de détection · politique opérateur — rien de codé en dur), migration & **sauvegardes chiffrées** (schedule/offsite), contexte de build `guatx-core`, liveness `/health`. Inclut l'empreinte mesurée + matrice (Docker / k8s / host / venv).
-- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — **matrice de support OS** (Linux primaire · macOS pleinement supporté · Windows best-effort) : ce qui marche partout vs la seule capacité Unix-only (kill de sous-arbre `setsid`/`killpg` du run C2), et la résolution des répertoires config/data/temp par OS.
-- [`docs/MIGRATION.md`](docs/MIGRATION.md) — reprendre un install existant (DB + ledger + clé `.ed25519`) vers Docker/autre cible ; option chiffrement au repos SQLCipher.
-- [`docs/BACKUP.md`](docs/BACKUP.md) — sauvegarde/restauration **toujours chiffrées** (argon2id + XChaCha20-Poly1305), programmation + expédition **offsite**.
+- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — **what Forge is**, the value, standalone operation.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — **how it is built** (Python engine + Rust console + SPA + governance).
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — **complete reference** of the env variables and `settings` keys.
+- [`docs/CLI.md`](docs/CLI.md) · [`docs/HTTP_API.md`](docs/HTTP_API.md) — CLI & HTTP API references.
+- [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — **end-to-end offline start** (seed + mock-Plume): install → scope → console → purple → report → integrity.
+- [`docs/PLAN.md`](docs/PLAN.md) — positioning, red/blue/purple, sequenced roadmap and blocker status.
+- [`docs/DETECTION.md`](docs/DETECTION.md) — **detection source = configurable plugin** (plug in any BLUE infra without code: Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/file/exec) + `DetectionSource` model and MITRE mapping.
+- [`docs/PURPLE_PREREQS.md`](docs/PURPLE_PREREQS.md) — prerequisites of the **Plume** preset to wire the purple loop (the moat) — a special case of `DETECTION.md`.
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — **end-to-end self-deploy runbook**: build/run (mini·full · Docker · compose · native/systemd · SQLCipher `encryption` image), **first-boot wizard** (admin · crypto · detection source · operator policy — nothing hard-coded), migration & **encrypted backups** (schedule/offsite), `guatx-core` build context, `/health` liveness. Includes the measured footprint + matrix (Docker / k8s / host / venv).
+- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — **OS support matrix** (Linux primary · macOS fully supported · Windows best-effort): what works everywhere vs the only Unix-only capability (`setsid`/`killpg` subtree kill of the C2 run), and how config/data/temp directories are resolved per OS.
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) — take over an existing install (DB + ledger + `.ed25519` key) to Docker/another target; SQLCipher encryption-at-rest option.
+- [`docs/BACKUP.md`](docs/BACKUP.md) — backup/restore, **always encrypted** (argon2id + XChaCha20-Poly1305), scheduling + **offsite** shipping.
 
-## Licence & modèle
+## License & model
 
-Forge est **100 % open source** sous **[AGPL-3.0-or-later](LICENSE)** — **tout le produit**, sans édition
-payante ni fonction bridée. « Open » ne veut pas dire « sans règles » : l'AGPL est un **copyleft fort**,
-avec des **obligations** à respecter (voir ci-dessous et [`LICENSE`](LICENSE)).
+Forge is **100 % open source** under **[AGPL-3.0-or-later](LICENSE)** — **the whole product**, with no paid
+offering and no crippled feature. "Open" does not mean "without rules": the AGPL is a **strong copyleft**,
+with **obligations** to respect (see below and [`LICENSE`](LICENSE)).
 
-- **Le cœur** — gratuit, auto-hébergeable, toujours actif : scope-guard ROE fail-closed, ledger
-  d'autorisation Ed25519 tamper-evident, oracles orientés-preuve, registre extensible de techniques +
-  toutes les classes de techniques, run C2-light gouverné, console (UI + wizard + RBAC admin/operator/
-  viewer), connecteurs/orchestration (nuclei/msf/burp/…), détection infra-agnostique, backup/restore
-  chiffré et boucle purple — **tout ce qu'il faut pour faire tourner Forge en solo ou en petite équipe**.
-  Comme c'est de l'AGPL, tout déploiement en réseau doit offrir la source correspondante à ses
-  utilisateurs (§13), tout dérivé reste sous AGPL-3.0, et les mentions de licence sont préservées.
-- **Les modules avancés** — **open eux aussi**, séparables et **flag-gated, OFF par défaut** : la couche
-  **échelle / équipe / conformité** — multi-tenant/MSSP (isolation crypto par tenant), SSO/SCIM, RBAC
-  composable avancé & grants par engagement, HA/clustering/store distribué (Postgres), conformité (preuves
-  SOC2/ISO, rétention legal-hold/WORM, clés KMS/HSM). On les active quand on en a besoin ; laissés OFF, le
-  build est **byte-identique** au cœur.
+- **The core** — free, self-hostable, always on: fail-closed ROE scope-guard, tamper-evident Ed25519
+  authorization ledger, evidence-oriented oracles, extensible technique registry +
+  all technique classes, governed C2-light run, console (UI + wizard + admin/operator/
+  viewer RBAC), connectors/orchestration (nuclei/msf/burp/…), infra-agnostic detection, encrypted
+  backup/restore and purple loop — **everything needed to run Forge solo or in a small team**.
+  Since it is AGPL, any network deployment must offer the corresponding source to its
+  users (§13), any derivative stays under AGPL-3.0, and license notices are preserved.
+- **The advanced modules** — **open as well**, separable and **flag-gated, OFF by default**: the
+  **scale / team / compliance** layer — multi-tenant/MSSP (per-tenant crypto isolation), SSO/SCIM, advanced
+  composable RBAC & per-engagement grants, HA/clustering/distributed store (Postgres), compliance (SOC2/ISO
+  evidence, legal-hold/WORM retention, KMS/HSM keys). You enable them when you need them; left OFF, the
+  build is **byte-identical** to the core.
 
-**Principe** : le **cœur gouvernance + audit cryptographique reste OUVERT et vérifiable** — c'est toute la
-crédibilité du produit. Les capacités d'échelle/équipe/conformité sont des **modules séparables**, open et
-flag-gated. Détail : **[`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)**. L'offre commerciale de GuatX porte
-sur des **prestations de service** (engagements, accompagnement purple, support/SLA, hébergement managé),
-jamais sur une licence du code — cf. **[`docs/PRICING.md`](docs/PRICING.md)**.
+**Principle**: the **governance core + cryptographic audit stays OPEN and verifiable** — that is the whole
+credibility of the product. The scale/team/compliance capabilities are **separable modules**, open and
+flag-gated. Details: **[`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.md)**. GuatX's commercial offering is about
+**professional services** (engagements, purple coaching, support/SLA, managed hosting),
+never a license of the code — see **[`docs/PRICING.md`](docs/PRICING.md)**.
 
-> **Usage autorisé / éthique uniquement.** La licence AGPL couvre le *code* ; elle n'autorise **aucune**
-> action offensive hors d'un périmètre explicitement autorisé (bug bounty in-scope, pentest sous contrat,
-> CTF, infra propre). La gate ROE + le scope-guard + le ledger sont là pour imposer ET prouver cette
-> autorisation.
+> **Authorized / ethical use only.** The AGPL license covers the *code*; it authorizes **no**
+> offensive action outside an explicitly authorized scope (in-scope bug bounty, contracted pentest,
+> CTF, your own infra). The ROE gate + the scope-guard + the ledger are there to enforce AND prove that
+> authorization.

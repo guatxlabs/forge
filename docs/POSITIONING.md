@@ -1,58 +1,60 @@
-# Forge — Positionnement (GTM)
+# Forge — Positioning (GTM)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.md) · [Pricing](PRICING.md) · [Plan](PLAN.md)
+[English](POSITIONING.md) | [Français](POSITIONING.fr.md)
 
-> **Slogan**
-> *« Forge n'est pas un remplaçant de Metasploit — c'est la couche **gouvernance + preuve + mesure
-> purple** par-dessus les outils que vous avez déjà (il pilote MSF / Burp / nuclei). »*
+> 🧭 [Forge documentation](README.md) · See also: [Overview](OVERVIEW.md) · [Pricing](PRICING.md) · [Plan](PLAN.md)
 
-Forge ne se vend PAS sur le nombre d'exploits. Il se vend sur trois choses qu'aucun arsenal offensif
-n'a jamais offertes ensemble : **prouver l'autorisation**, **mesurer ce que le SOC a vu**, et **ne
-rien casser par défaut**. C'est une couche de **gouvernance offensive**, pas un nouvel arsenal.
+> **Tagline**
+> *"Forge is not a Metasploit replacement — it is the **governance + evidence + purple
+> measurement** layer on top of the tools you already have (it drives MSF / Burp / nuclei)."*
+
+Forge is NOT sold on the number of exploits. It is sold on three things that no offensive arsenal
+has ever offered together: **proving authorization**, **measuring what the SOC saw**, and **breaking
+nothing by default**. It is an **offensive governance** layer, not a new arsenal.
 
 ---
 
-## 1. Le segment cible (et qui on N'adresse PAS)
+## 1. The target segment (and whom we do NOT address)
 
-| | Acheteur visé | Pourquoi |
+| | Target buyer | Why |
 |---|---|---|
-| ✅ | **RSSI / Direction sécurité** | Veut une preuve auditable que le red-team est resté in-scope, et un chiffre de couverture défensive à présenter au COMEX / au régulateur. |
-| ✅ | **Lead purple-team / responsable détection** | Veut savoir, technique ATT&CK par technique, ce que le SOC **a détecté / raté** et en combien de temps (MTTD). |
-| ✅ | **Juridique / conformité / DPO** | Veut une chaîne de custody signée et vérifiable par un tiers : qui a autorisé quoi, quand, sur quel périmètre. |
-| ❌ | **Le pentester chasseur d'exploits** | Cherche la capacité brute (0-days, post-exploit, evasion EDR). Forge ne joue PAS sur ce terrain — il **pilote** ses outils, il ne les remplace pas. |
+| ✅ | **CISO / Security leadership** | Wants auditable evidence that the red team stayed in-scope, and a defensive coverage figure to present to the executive committee / the regulator. |
+| ✅ | **Purple-team lead / detection owner** | Wants to know, ATT&CK technique by technique, what the SOC **detected / missed** and how fast (MTTD). |
+| ✅ | **Legal / compliance / DPO** | Wants a signed chain of custody verifiable by a third party: who authorized what, when, on which scope. |
+| ❌ | **The exploit-hunting pentester** | Looks for raw capability (0-days, post-exploit, EDR evasion). Forge does NOT play on that field — it **drives** their tools, it does not replace them. |
 
-**La phrase qui qualifie un prospect** : *« Après une campagne offensive, pouvez-vous prouver
-à un auditeur que vous êtes resté in-scope, ET chiffrer ce que votre SOC a réellement détecté ? »*
-Si la réponse est « non / pas facilement », c'est un prospect Forge.
+**The sentence that qualifies a prospect**: *"After an offensive campaign, can you prove
+to an auditor that you stayed in-scope, AND put a figure on what your SOC actually detected?"*
+If the answer is "no / not easily", it is a Forge prospect.
 
 ---
 
-## 2. Les trois piliers
+## 2. The three pillars
 
-### Pilier (a) — Preuve d'autorisation signée
+### Pillar (a) — Signed evidence of authorization
 
-Le différenciateur que **personne** dans l'offensif n'industrialise : l'autorisation n'est pas une
-intention, c'est un artefact cryptographique.
+The differentiator that **nobody** in offensive security industrializes: authorization is not an
+intention, it is a cryptographic artifact.
 
-- **Gate ROE fail-closed à 4 couches** (`forge/roe.py`) : une action LIVE ne part QUE si elle a
-  franchi *armé → in-scope (allowlist, jamais deny-list) → capacité autorisée → approuvée*. Toute
-  ambiguïté ou erreur d'évaluation ⇒ `VETO` (refus dur). Hors scope ⇒ jamais simulé, jamais tiré.
-- **Ledger d'engagement append-time, tamper-evident** (`forge/ledger.py` + `signing.py`) :
-  chaîne de hash SHA-256 + signature **Ed25519** par-entrée. Un tiers (auditeur, client, juridique)
-  vérifie l'intégrité avec la **seule clé publique** (`verify_external(pubkey)`) — sans jamais
-  pouvoir forger une entrée.
-- **Custody — honnêteté** : la clé privée est encore locale ; l'**ancrage hors-host** (témoin
-  co-signataire distant, `forge/anchor.py`) est l'étape finale, et l'architecture asymétrique le
-  permet déjà (seule la clé publique circule). Documenté, pas caché.
+- **Fail-closed 4-layer ROE gate** (`forge/roe.py`): a LIVE action goes out ONLY if it has
+  passed *armed → in-scope (allowlist, never deny-list) → authorized capability → approved*. Any
+  ambiguity or evaluation error ⇒ `VETO` (hard refusal). Out of scope ⇒ never simulated, never fired.
+- **Append-time, tamper-evident engagement ledger** (`forge/ledger.py` + `signing.py`):
+  SHA-256 hash chain + per-entry **Ed25519** signature. A third party (auditor, client, legal)
+  verifies integrity with the **public key alone** (`verify_external(pubkey)`) — without ever
+  being able to forge an entry.
+- **Custody — honesty**: the private key is still local; **off-host anchoring** (remote co-signing
+  witness, `forge/anchor.py`) is the final step, and the asymmetric architecture already
+  allows it (only the public key circulates). Documented, not hidden.
 
-**Valeur vendue** : « Vous signez chaque action de l'engagement. Votre auditeur la vérifie sans vous
-faire confiance. »
+**Value sold**: "You sign every action of the engagement. Your auditor verifies it without
+trusting you."
 
-### Pilier (b) — Boucle PURPLE même-vendeur
+### Pillar (b) — Same-vendor PURPLE loop
 
-Forge (rouge) et **Plume** (bleu, le SOC [`guatxlabs/plume`](https://github.com/guatxlabs/plume))
-sont du **même éditeur** et se corrèlent par
-champ **MITRE ATT&CK**. « Purple » n'est pas un 3ᵉ produit : c'est la boucle.
+Forge (red) and **Plume** (blue, the SOC [`guatxlabs/plume`](https://github.com/guatxlabs/plume))
+come from the **same vendor** and correlate on the
+**MITRE ATT&CK** field. "Purple" is not a 3rd product: it is the loop.
 
 ```
 Forge tire la technique T ─► run-record {mitre: T} ─► Plume ingère
@@ -62,105 +64,105 @@ Forge tire la technique T ─► run-record {mitre: T} ─► Plume ingère
    (Forge mesure le VRAI MTTD + le VRAI % de couverture du SOC)
 ```
 
-Sortie : par technique → **detected / missed / MTTD réel**. Pas un score marketing — un join
-lecture-seule entre ce que le rouge a tiré et ce que le bleu a vu.
+Output: per technique → **detected / missed / real MTTD**. Not a marketing score — a
+read-only join between what red fired and what blue saw.
 
-**Valeur vendue** : « Voici, technique par technique, ce que votre SOC a raté, et en combien de
-temps il a vu le reste. Voici comment combler. »
+**Value sold**: "Here, technique by technique, is what your SOC missed, and how fast
+it saw the rest. Here is how to close the gaps."
 
-### Pilier (c) — Safe-by-default
+### Pillar (c) — Safe-by-default
 
-- **Non-exploit forcé** : par défaut Forge est **INERTE**. `allow_exploit` / `allow_destructive`
-  sont des opt-in explicites par engagement. Un module marqué `exploit=True` (ex. `msf.module`) est
-  vétoé tant que la capacité n'est pas armée.
-- **Gouverne opt-in** : armement par couche (`--arm`), approbation par action (`--approve`), ou mode
-  `auto` documenté. Rien ne « part tout seul ».
-- **Scope-guard dur** : `in_scope` vide ⇒ rien ne tire (fail-closed). Le connecteur `burp.scan`
-  émet `reported_by_tool`, jamais `vulnerable`, tant qu'il n'y a pas de preuve d'exploitabilité —
-  pas de sur-classement.
+- **Forced non-exploit**: by default Forge is **INERT**. `allow_exploit` / `allow_destructive`
+  are explicit per-engagement opt-ins. A module flagged `exploit=True` (e.g. `msf.module`) is
+  vetoed as long as the capability is not armed.
+- **Opt-in governance**: per-layer arming (`--arm`), per-action approval (`--approve`), or documented
+  `auto` mode. Nothing "goes off on its own".
+- **Hard scope-guard**: empty `in_scope` ⇒ nothing fires (fail-closed). The `burp.scan` connector
+  emits `reported_by_tool`, never `vulnerable`, as long as there is no evidence of exploitability —
+  no over-classification.
 
-**Valeur vendue** : « L'outil le plus difficile à utiliser pour faire une bêtise. Par construction. »
+**Value sold**: "The hardest tool to make a mistake with. By construction."
 
 ---
 
-## 3. Teardown concurrentiel (honnête)
+## 3. Competitive teardown (honest)
 
-Où Forge **GAGNE** et où il **PERD**. Vendre la vérité construit la confiance d'un acheteur RSSI.
+Where Forge **WINS** and where it **LOSES**. Selling the truth builds a CISO buyer's trust.
 
 | Dimension | Forge | Metasploit (Pro) | Cobalt Strike | Maltego | Splunk (ES) |
 |---|---|---|---|---|---|
-| **Gouvernance / preuve d'autorisation** | 🟢 **Gate ROE + ledger Ed25519 tiers-vérifiable** | 🔴 quasi nul | 🔴 nul | ⚪ N/A | ⚪ N/A |
-| **Audit / chaîne de custody** | 🟢 **append-time, signé** | 🟡 logs locaux | 🟡 logs C2 | 🔴 | 🟡 logs |
-| **Boucle purple intégrée (même vendeur)** | 🟢 **Forge×Plume, corrélation ATT&CK, MTTD** | 🔴 | 🟡 via intégrations tierces | 🔴 | 🟡 côté bleu seul |
-| **UI opérateur / dashboards** | 🟢 console + GXQL + panels | 🟡 | 🟡 | 🟢 | 🟢 |
-| **Safe-by-default** | 🟢 **inerte, opt-in, fail-closed** | 🔴 conçu pour tirer | 🔴 | ⚪ | ⚪ |
-| **Empreinte / déployabilité** | 🟢 un binaire + du Python stdlib (taille du livrable **non re-mesurée**) | 🟡 | 🟡 | 🟡 | 🔴 lourd |
+| **Governance / evidence of authorization** | 🟢 **ROE gate + third-party-verifiable Ed25519 ledger** | 🔴 near zero | 🔴 none | ⚪ N/A | ⚪ N/A |
+| **Audit / chain of custody** | 🟢 **append-time, signed** | 🟡 local logs | 🟡 C2 logs | 🔴 | 🟡 logs |
+| **Integrated purple loop (same vendor)** | 🟢 **Forge×Plume, ATT&CK correlation, MTTD** | 🔴 | 🟡 via third-party integrations | 🔴 | 🟡 blue side only |
+| **Operator UI / dashboards** | 🟢 console + GXQL + panels | 🟡 | 🟡 | 🟢 | 🟢 |
+| **Safe-by-default** | 🟢 **inert, opt-in, fail-closed** | 🔴 designed to fire | 🔴 | ⚪ | ⚪ |
+| **Footprint / deployability** | 🟢 one binary + stdlib Python (deliverable size **not re-measured**) | 🟡 | 🟡 | 🟡 | 🔴 heavy |
 | | | | | | |
-| **Capacité offensive brute** | 🔴 **faible — pilote, ne fournit pas** | 🟢 énorme | 🟢 élite (C2/post-ex) | 🟡 OSINT | ⚪ |
-| **Maturité / track record** | 🔴 **v0.0.1** | 🟢 20+ ans | 🟢 standard red-team | 🟢 | 🟢 |
-| **Écosystème / modules / communauté** | 🟡 **77 modules** | 🟢 2000+ | 🟢 | 🟢 | 🟢 |
-| **Post-exploitation / C2 / pivot** | 🔴 **aucun (hors-charte)** | 🟢 | 🟢 | ⚪ | ⚪ |
+| **Raw offensive capability** | 🔴 **low — drives, does not provide** | 🟢 huge | 🟢 elite (C2/post-ex) | 🟡 OSINT | ⚪ |
+| **Maturity / track record** | 🔴 **v0.0.1** | 🟢 20+ years | 🟢 red-team standard | 🟢 | 🟢 |
+| **Ecosystem / modules / community** | 🟡 **88 modules** (2026-11-24) | 🟢 2000+ | 🟢 | 🟢 | 🟢 |
+| **Post-exploitation / C2 / pivot** | 🔴 **none (outside the charter)** | 🟢 | 🟢 | ⚪ | ⚪ |
 
-**Lecture** : Forge est **complémentaire**, pas substituable. Il ne cherche PAS à battre MSF sur la
-capacité (perdu d'avance, hors-charte). Il s'achète **par-dessus** MSF/Burp/nuclei pour les gouverner
-et mesurer leur impact défensif. Le moat = *rouge + bleu, même vendeur, corrélés ATT&CK, autorisation
-signée* — ce qu'aucune ligne de cette table n'a en colonne unique.
+**Reading**: Forge is **complementary**, not substitutable. It does NOT try to beat MSF on
+capability (lost in advance, outside the charter). It is bought **on top of** MSF/Burp/nuclei to govern them
+and measure their defensive impact. The moat = *red + blue, same vendor, ATT&CK-correlated, signed
+authorization* — something no row of this table has in a single column.
 
 ---
 
-## 3bis. Face à l'OSS / AGPL (honnête)
+## 3bis. Against OSS / AGPL (honest)
 
-La vérité qui désarme l'objection « c'est juste reNgine avec une autre UI » : comme **orchestrateur
-d'outils piloté depuis une interface**, Forge n'est **PAS unique** — l'OSS mature couvre déjà bien cet
-axe. Le différenciateur de Forge n'est pas l'orchestration : c'est la couche
-**gouvernance + preuve + non-répudiation**, que nous n'avons vue industrialisée dans **aucun des projets
-OSS listés ci-dessous** — formulation volontairement bornée à cette liste, parce que « aucun projet OSS »
-tout court n'est pas une affirmation que nous pouvons vérifier.
+The truth that defuses the objection "it is just reNgine with another UI": as a **tool
+orchestrator driven from an interface**, Forge is **NOT unique** — mature OSS already covers this
+axis well. Forge's differentiator is not orchestration: it is the
+**governance + evidence + non-repudiation** layer, which we have not seen industrialized in **any of the OSS
+projects listed below** — a wording deliberately bounded to this list, because "no OSS project"
+on its own is not a claim we can verify.
 
-| Outil | Licence | Ce qu'il fait aussi bien (ou mieux) | Ce qui manque vs Forge |
+| Tool | License | What it does as well (or better) | What is missing vs Forge |
 |---|---|---|---|
-| **reNgine** | GPL-3.0 | Orchestration recon/scan via UI web, scan-engines paramétrables, findings. Le plus proche sur « piloter des outils depuis une UI ». | Pas de scope-guard fail-closed, pas de ledger, pas de discipline de preuve, pas de purple. Orienté recon web. |
-| **Faraday** (Community) | GPL-3.0 | Plateforme collaborative multi-pentest : workspaces (≈ engagements), 80+ outils intégrés, findings, reporting, RBAC. | Il agrège, il ne tire pas sous contrainte ; pas de ledger signé, pas de planner coverage-safe, pas de purple. |
-| **Osmedeus** | MIT | Framework d'automatisation recon/scan par workflows, rapide, CLI-first. | CLI, pas de gouvernance UI, pas de preuve/ledger/purple. |
-| **DefectDojo** (OWASP) | BSD-2 | Vuln management / ASPM : import de scans, dédup, triage, métriques, rapport. | DevSecOps, pas d'orchestration active, pas de scope-guard offensif, pas de ledger d'autorisation. |
-| **Nuclei / ProjectDiscovery** | MIT | Le moteur de scan que Forge pilote. | Une brique, pas un orchestrateur gouverné. |
-| **Metasploit / Sliver / Havoc / Mythic** | BSD/Apache/GPL | Vrais frameworks d'exploitation & C2 (post-ex). | Niche opposée : ils exploitent ; Forge exclut l'exploit et se veut prouvable/auditable — il les pilote. |
-| **MITRE Caldera** | Apache-2.0 (projet à l'Apache Incubator depuis le 20/05/2026) | Émulation d'adversaire autonome, planificateur, abilities mappées ATT&CK, agents multi-OS. **Le plus proche sur « rejouer un adversaire mappé ATT&CK ».** | Pas de gate d'autorisation fail-closed ni de ledger signé tiers-vérifiable ; la boucle de validation côté SIEM n'est pas livrée avec. |
-| **Splunk Attack Range** | Apache-2.0 (Splunk Threat Research Team) | **Attaque → SIEM → validation automatisée de détection, jusqu'en CI/CD.** C'est l'antériorité la plus directe sur la boucle purple. | Il provisionne un **lab** (cloud/local) autour de Splunk ; ce n'est pas un produit souverain auto-hébergé à faible empreinte, et l'autorisation n'y est pas un objet prouvable. |
+| **reNgine** | GPL-3.0 | Recon/scan orchestration via a web UI, configurable scan engines, findings. The closest on "driving tools from a UI". | No fail-closed scope-guard, no ledger, no evidence discipline, no purple. Web-recon oriented. |
+| **Faraday** (Community) | GPL-3.0 | Collaborative multi-pentest platform: workspaces (≈ engagements), 80+ integrated tools, findings, reporting, RBAC. | It aggregates, it does not fire under constraint; no signed ledger, no coverage-safe planner, no purple. |
+| **Osmedeus** | MIT | Workflow-based recon/scan automation framework, fast, CLI-first. | CLI, no UI governance, no evidence/ledger/purple. |
+| **DefectDojo** (OWASP) | BSD-2 | Vuln management / ASPM: scan import, dedup, triage, metrics, reporting. | DevSecOps, no active orchestration, no offensive scope-guard, no authorization ledger. |
+| **Nuclei / ProjectDiscovery** | MIT | The scan engine that Forge drives. | A building block, not a governed orchestrator. |
+| **Metasploit / Sliver / Havoc / Mythic** | BSD/Apache/GPL | Real exploitation & C2 frameworks (post-ex). | Opposite niche: they exploit; Forge excludes exploitation and aims to be provable/auditable — it drives them. |
+| **MITRE Caldera** | Apache-2.0 (project in the Apache Incubator since 20/05/2026) | Autonomous adversary emulation, planner, ATT&CK-mapped abilities, multi-OS agents. **The closest on "replaying an ATT&CK-mapped adversary".** | No fail-closed authorization gate nor third-party-verifiable signed ledger; the SIEM-side validation loop does not ship with it. |
+| **Splunk Attack Range** | Apache-2.0 (Splunk Threat Research Team) | **Attack → SIEM → automated detection validation, all the way into CI/CD.** It is the most direct prior art on the purple loop. | It provisions a **lab** (cloud/local) around Splunk; it is not a sovereign, self-hosted, low-footprint product, and authorization is not a provable object in it. |
 
-**Lecture** : comme orchestrateur-UI, Forge n'est **pas unique** (reNgine / Faraday sont matures), et la
-**boucle attaque → détection n'est pas neuve non plus** (Caldera, Attack Range, et tout le marché
-BAS/AEV — Cymulate, SafeBreach, Picus — la vendent). Ce que nous n'avons trouvé chez aucun d'eux, c'est
-la combinaison : **prouver l'autorisation** (scope-guard fail-closed), **prouver l'impact**
-(oracle → preuve), le rendre **non-répudiable** (ledger Ed25519 chaîné), et livrer la boucle purple
-**dans un ensemble souverain auto-hébergé** (Forge + Plume, même dépôt, corrélés par technique ATT&CK).
-C'est là, pas sur « une UI par-dessus des outils » ni sur « faire du BAS », que se joue le moat.
-
----
-
-## 4. Ce que Forge N'EST PAS (anti-confusion)
-
-- **PAS un beacon / un C2** : aucun implant, aucun callback persistant, aucune post-exploitation.
-  Forge orchestre des outils à fire-time puis trace ; il ne maintient pas d'accès.
-- **PAS de l'OSINT / Maltego** : il ne cartographie pas des personnes, des graphes sociaux, des
-  fuites. Son `origin.find` retrouve une IP d'origine derrière un CDN — c'est de la recon technique
-  scopée, pas du renseignement.
-- **PAS du forensics / Cellebrite** : aucune acquisition disque/mobile, aucune analyse post-mortem.
-  Le ledger est une preuve **d'autorisation d'engagement**, pas une preuve forensique de terminal.
-- **PAS un scanner de vulnérabilités** : nuclei/Burp font le scan ; Forge les **gouverne et corrèle**.
-- **PAS un remplaçant de Metasploit** : il le **pilote** (`msf.module` → msfrpcd).
+**Reading**: as a UI orchestrator, Forge is **not unique** (reNgine / Faraday are mature), and the
+**attack → detection loop is not new either** (Caldera, Attack Range, and the whole
+BAS/AEV market — Cymulate, SafeBreach, Picus — sell it). What we have found in none of them is
+the combination: **proving authorization** (fail-closed scope-guard), **proving impact**
+(oracle → evidence), making it **non-repudiable** (chained Ed25519 ledger), and delivering the purple loop
+**in a sovereign self-hosted bundle** (Forge + Plume, same repository, correlated per ATT&CK technique).
+That is where the moat is played, not on "a UI on top of tools" nor on "doing BAS".
 
 ---
 
-## 5. Le pitch en une page (pour un RSSI)
+## 4. What Forge is NOT (anti-confusion)
 
-> Vos pentesters ont déjà Metasploit, Burp, nuclei. Ce qui vous manque, c'est : (1) **prouver** à
-> votre auditeur que la campagne est restée dans le périmètre autorisé — signé, vérifiable sans vous
-> faire confiance ; (2) **chiffrer** ce que votre SOC a réellement détecté, technique ATT&CK par
-> technique, avec le vrai temps de détection ; (3) un outil **incapable de déraper** par défaut.
-> Forge est cette couche. Il ne remplace pas vos outils — il les rend gouvernables et mesurables.
+- **NOT a beacon / a C2**: no implant, no persistent callback, no post-exploitation.
+  Forge orchestrates tools at fire-time and then records; it does not maintain access.
+- **NOT OSINT / Maltego**: it does not map people, social graphs,
+  leaks. Its `origin.find` recovers an origin IP behind a CDN — that is scoped technical
+  recon, not intelligence.
+- **NOT forensics / Cellebrite**: no disk/mobile acquisition, no post-mortem analysis.
+  The ledger is evidence of **engagement authorization**, not endpoint forensic evidence.
+- **NOT a vulnerability scanner**: nuclei/Burp do the scanning; Forge **governs and correlates** them.
+- **NOT a Metasploit replacement**: it **drives** it (`msf.module` → msfrpcd).
 
 ---
 
-*Voir aussi : [`PRICING.md`](PRICING.md) · [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md) ·
-[`PLAN.md`](PLAN.md) (roadmap) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (câblage Plume).*
+## 5. The one-page pitch (for a CISO)
+
+> Your pentesters already have Metasploit, Burp, nuclei. What you are missing is: (1) **proving** to
+> your auditor that the campaign stayed within the authorized scope — signed, verifiable without
+> trusting you; (2) **putting a figure** on what your SOC actually detected, ATT&CK technique by
+> technique, with the real detection time; (3) a tool **unable to go off the rails** by default.
+> Forge is that layer. It does not replace your tools — it makes them governable and measurable.
+
+---
+
+*See also: [`PRICING.md`](PRICING.md) · [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md) ·
+[`PLAN.md`](PLAN.md) (roadmap) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (Plume wiring).*

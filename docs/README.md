@@ -1,123 +1,125 @@
-# Documentation Forge
+# Forge documentation
 
-**Forge** — plateforme d'évaluation red-team **gouvernée** : chaque action offensive passe par une
-gate ROE *fail-closed* et est scellée dans un **ledger d'engagement** tamper-evident, tandis que la
-boucle **purple** mesure ce que la défense a réellement détecté. Forge tourne **en standalone**
-(l'intégration au SOC Plume est optionnelle).
+[English](README.md) | [Français](README.fr.md)
 
-> ⚠️ **Cadre autorisé uniquement** — bug bounty in-scope, pentest sous contrat, CTF, infra propre.
-> La gate ROE + le scope-guard + le ledger sont là pour **imposer ET prouver** l'autorisation.
-> Forge est **INERTE par défaut** : rien ne tire tant que l'opérateur n'a pas armé chaque couche.
+**Forge** — a **governed** red-team assessment platform: every offensive action goes through a
+*fail-closed* ROE gate and is sealed in a tamper-evident **engagement ledger**, while the
+**purple** loop measures what the defense actually detected. Forge runs **standalone**
+(integration with the Plume SOC is optional).
 
-Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe vers une page dédiée.
+> ⚠️ **Authorized settings only** — in-scope bug bounty, contracted pentest, CTF, your own infra.
+> The ROE gate + the scope-guard + the ledger are there to **enforce AND prove** authorization.
+> Forge is **INERT by default**: nothing fires until the operator has armed every layer.
+
+Documented version: **0.0.1**. This page is the table of contents. Each link points to a dedicated page.
 
 ---
 
-## Par où commencer
+## Where to start
 
-| Vous êtes… | Commencez par |
+| You are… | Start with |
 |---|---|
-| **Nouvel opérateur** qui découvre le produit | [Vue d'ensemble](OVERVIEW.md) → [Démarrage hors-ligne](GETTING_STARTED.md) |
-| **Admin/DevOps** qui déploie une console | [Installation](INSTALLATION.md) → [Premier déploiement (wizard)](FIRST_DEPLOYMENT.md) |
-| **Architecte / RSSI** qui évalue | [Vue d'ensemble](OVERVIEW.md) → [Architecture](ARCHITECTURE.md) → [Modèle de sécurité](SECURITY_MODEL.md) |
-| **Intégrateur** qui câble une source de détection | [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) → [Sources de détection](DETECTION.md) |
-| **Développeur / scripteur** | [Référence CLI](CLI.md) → [Référence API HTTP](HTTP_API.md) → [Configuration](CONFIGURATION.md) |
+| **A new operator** discovering the product | [Overview](OVERVIEW.md) → [Offline start](GETTING_STARTED.md) |
+| **An admin/DevOps** deploying a console | [Installation](INSTALLATION.md) → [First deployment (wizard)](FIRST_DEPLOYMENT.md) |
+| **An architect / CISO** evaluating | [Overview](OVERVIEW.md) → [Architecture](ARCHITECTURE.md) → [Security model](SECURITY_MODEL.md) |
+| **An integrator** wiring a detection source | [Concepts: purple loop](CONCEPTS.md#5-the-purple-loop) → [Detection sources](DETECTION.md) |
+| **A developer / scripter** | [CLI reference](CLI.md) → [HTTP API reference](HTTP_API.md) → [Configuration](CONFIGURATION.md) |
 
 ---
 
-## Sommaire complet
+## Full table of contents
 
-### 1. Comprendre Forge
+### 1. Understanding Forge
 
-- **[Vue d'ensemble](OVERVIEW.md)** — ce qu'est Forge, la proposition de valeur, le fonctionnement
-  standalone (Plume/purple est optionnel), ce que Forge n'est pas.
-- **[Architecture](ARCHITECTURE.md)** — comment c'est construit : le moteur Python (scope-guard ROE,
-  planner coverage-safe, cerveau, oracles à preuve, catalogue de techniques, chaînage,
-  découverte par évasion, ledger Ed25519, collecteurs), la console Rust/axum (RBAC, C2-light, DB,
-  settings), le SPA, le registre de modules, le modèle de gouvernance. *(Le document de rationale
-  historique reste [`../ARCHITECTURE.md`](../ARCHITECTURE.md).)*
-- **[Concepts](CONCEPTS.md)** — ROE/scope-guard, ledger tamper-evident, oracles à preuve
-  (*tested-unless-proven*), catalogue de modules + techniques (mapping ATT&CK), boucle purple,
-  chaînage, découverte backée par évasion.
-- **[Catalogue de modules](MODULES.md)** — les 77 modules du registre (32 y sont décrits) : `kind`, capacité (exploit/destructif),
-  technique ATT&CK, description, dépendance.
-- **[Ajouter votre propre outil (depuis l'UI)](TOOLS.md)** — déclarer un outil CLI gouverné (ToolSpec
-  déclaratif : binaire + argv no-shell + allowlist + params) sans éditer de fichier ni recompiler.
-- **[Cycle de vie des outils](TOOLS_LIFECYCLE.md)** — le **binaire** (là où `TOOLS.md` traite de sa
-  déclaration) : manifeste unique `forge/tools.json` (versions + pins SHA256 par architecture), lu par
-  le build *et* par `forge tools install|update|remove` — installer ou mettre à jour un outil sans
-  rebuild, digest vérifié avant toute pose sur le `PATH`, acte journalisé au ledger.
+- **[Overview](OVERVIEW.md)** — what Forge is, the value proposition, standalone
+  operation (Plume/purple is optional), what Forge is not.
+- **[Architecture](ARCHITECTURE.md)** — how it is built: the Python engine (ROE scope-guard,
+  coverage-safe planner, brain, evidence oracles, technique catalog, chaining,
+  evasion-backed discovery, Ed25519 ledger, collectors), the Rust/axum console (RBAC, C2-light, DB,
+  settings), the SPA, the module registry, the governance model. *(The historical rationale
+  document remains [`../ARCHITECTURE.md`](../ARCHITECTURE.md).)*
+- **[Concepts](CONCEPTS.md)** — ROE/scope-guard, tamper-evident ledger, evidence oracles
+  (*tested-unless-proven*), module + technique catalog (ATT&CK mapping), purple loop,
+  chaining, evasion-backed discovery.
+- **[Module catalog](MODULES.md)** — 43 of the 88 modules of the registry are described there (MEASURED on 2026-11-24: `python3 -m forge.cli modules --json`): `kind`, capability (exploit/destructive),
+  ATT&CK technique, description, dependency.
+- **[Adding your own tool (from the UI)](TOOLS.md)** — declare a governed CLI tool (declarative
+  ToolSpec: binary + no-shell argv + allowlist + params) without editing a file or recompiling.
+- **[Tool lifecycle](TOOLS_LIFECYCLE.md)** — the **binary** (where `TOOLS.md` covers its
+  declaration): single manifest `forge/tools.json` (versions + SHA256 pins per architecture), read by
+  the build *and* by `forge tools install|update|remove` — install or update a tool without a
+  rebuild, digest verified before anything is placed on the `PATH`, operation logged in the ledger.
 
-### 2. Déployer & exploiter
+### 2. Deploying & operating
 
-- **[Installation](INSTALLATION.md)** — Docker (profils `mini`/`full`), docker-compose (profils
-  optionnels), natif/systemd, venv/dev, image `encryption` (SQLCipher au repos). Commandes exactes.
-- **[Premier déploiement](FIRST_DEPLOYMENT.md)** — le wizard web de 1er boot (admin, crypto, source
-  de détection, politique opérateur — rien de codé en dur).
-- **[Démarrage bout-en-bout hors-ligne](GETTING_STARTED.md)** — parcours opérateur 100 % offline
-  (seed + mock-Plume) : install → scope → console → purple → rapport → intégrité.
-- **[Runbook de déploiement self-service](DEPLOYMENT.md)** — le runbook détaillé (empreinte mesurée,
-  matrice Docker/k8s/host/venv, contexte de build = racine du dépôt + git-dep `guatx-core`, liveness
-  `/health`, export PDF).
-- **[Utiliser Forge en standalone (sans Plume)](STANDALONE.md)** — page dédiée : tout fonctionne
-  sans SOC.
+- **[Installation](INSTALLATION.md)** — Docker (`mini`/`full` profiles), docker-compose (optional
+  profiles), native/systemd, venv/dev, `encryption` image (SQLCipher at rest). Exact commands.
+- **[First deployment](FIRST_DEPLOYMENT.md)** — the first-boot web wizard (admin, crypto, detection
+  source, operator policy — nothing hard-coded).
+- **[End-to-end offline start](GETTING_STARTED.md)** — 100 % offline operator walkthrough
+  (seed + mock-Plume): install → scope → console → purple → report → integrity.
+- **[Self-service deployment runbook](DEPLOYMENT.md)** — the detailed runbook (measured footprint,
+  Docker/k8s/host/venv matrix, build context = repository root + `guatx-core` git-dep, `/health`
+  liveness, PDF export).
+- **[Using Forge standalone (without Plume)](STANDALONE.md)** — dedicated page: everything works
+  without a SOC.
 
-### 3. Administrer
+### 3. Administering
 
-- **[Administration](ADMINISTRATION.md)** — comptes & rôles (admin/opérateur/viewer), gouvernance
-  des connecteurs (activer/désactiver = « installer/désinstaller »), configuration de la source de
-  détection, politique opérateur + source-CIDR, sauvegarde/restauration + programmation/offsite,
+- **[Administration](ADMINISTRATION.md)** — accounts & roles (admin/operator/viewer), connector
+  governance (enable/disable = "install/uninstall"), detection source
+  configuration, operator policy + source-CIDR, backup/restore + scheduling/offsite,
   migration.
-- **[Sources de détection](DETECTION.md)** — brancher n'importe quelle infra BLUE **sans code**
-  (Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/OpenSearch/fichier/exec) : modèle
-  `DetectionSource`, préréglages, mapping MITRE.
-- **[Prérequis Plume](PURPLE_PREREQS.md)** — le préréglage `kind=plume` de la boucle purple.
-- **[Migration de données](MIGRATION.md)** — reprendre un install existant (DB + ledger + clé
-  `.ed25519`), option chiffrement au repos SQLCipher.
-- **[Sauvegarde & restauration](BACKUP.md)** — archives **toujours chiffrées** (argon2id +
-  XChaCha20-Poly1305), programmation + offsite.
-- **[Console in-UI](CONSOLE.md)** — runner **gouverné** de sous-commandes `forge` depuis l'UI (allowlist
-  stricte, **sans shell**, admin-only, ledgerisé, streamé) : supprime le `docker compose exec forge forge …`
-  pour les ops courantes (`status`, `ledger verify`, `read`, `backup`, `upgrade`).
+- **[Detection sources](DETECTION.md)** — plug in any BLUE infra **without code**
+  (Plume/CrowdSec/FortiGate/pfSense/OPNsense/Elastic/OpenSearch/file/exec): `DetectionSource`
+  model, presets, MITRE mapping.
+- **[Plume prerequisites](PURPLE_PREREQS.md)** — the `kind=plume` preset of the purple loop.
+- **[Data migration](MIGRATION.md)** — take over an existing install (DB + ledger + `.ed25519`
+  key), SQLCipher encryption-at-rest option.
+- **[Backup & restore](BACKUP.md)** — **always encrypted** archives (argon2id +
+  XChaCha20-Poly1305), scheduling + offsite.
+- **[In-UI console](CONSOLE.md)** — **governed** runner of `forge` subcommands from the UI (strict
+  allowlist, **no shell**, admin-only, ledgered, streamed): removes the `docker compose exec forge forge …`
+  for routine ops (`status`, `ledger verify`, `read`, `backup`, `upgrade`).
 
-### 4. Références
+### 4. References
 
-- **[Configuration](CONFIGURATION.md)** — table COMPLÈTE de **toutes** les variables d'environnement
+- **[Configuration](CONFIGURATION.md)** — COMPLETE table of **all** environment variables
   (`FORGE_CONSOLE_*`, `PLUME_URL`/`PLUME_TOKEN`, `FORGE_DB_KEY`, `FORGE_ALLOW_API_MIGRATE`,
-  `FORGE_TOOLS_PROFILE`, knobs opérateur/détection/backup) **et** de toutes les clés de la table
-  `settings` (nom, sens, défaut, exemple, configurable au déploiement vs dans l'UI).
-- **[Référence CLI](CLI.md)** — toutes les sous-commandes `forge` (`python -m forge.cli`) et
-  `forge`, avec leurs flags.
-- **[Référence API HTTP](HTTP_API.md)** — toutes les routes de la console (méthode, auth requise,
-  objet).
+  `FORGE_TOOLS_PROFILE`, operator/detection/backup knobs) **and** of all the keys of the
+  `settings` table (name, meaning, default, example, configurable at deployment vs in the UI).
+- **[CLI reference](CLI.md)** — all `forge` subcommands (`python -m forge.cli`) and
+  `forge`, with their flags.
+- **[HTTP API reference](HTTP_API.md)** — all console routes (method, required auth,
+  purpose).
 
-### 5. Sécurité, dépannage, désinstallation
+### 5. Security, troubleshooting, uninstall
 
-- **[Modèle de sécurité](SECURITY_MODEL.md)** — authz, gates fail-closed, intégrité du ledger,
-  chiffrement au repos, gestion des secrets, host-guard, plancher exploit.
-- **[Plateformes supportées](PLATFORMS.md)** — matrice OS (Linux primaire, macOS pleinement
-  supporté, Windows best-effort) : composants qui marchent partout vs la seule capacité Unix-only
-  (kill de sous-arbre `setsid`/`killpg` du run C2 gouverné), résolution config/données/temp par OS,
-  et le filet anti-régression `tests/test_portability_guard.py`.
-- **[Dépannage & FAQ](TROUBLESHOOTING.md)** — symptômes courants, diagnostics, questions fréquentes.
-- **[Désinstallation & suppression des données](UNINSTALL.md)** — arrêter, supprimer
-  image/conteneur/volumes, purger DB/ledger/clés, désinstaller les outils.
+- **[Security model](SECURITY_MODEL.md)** — authz, fail-closed gates, ledger integrity,
+  encryption at rest, secret management, host-guard, exploit floor.
+- **[Supported platforms](PLATFORMS.md)** — OS matrix (Linux primary, macOS fully
+  supported, Windows best-effort): components that work everywhere vs the only Unix-only capability
+  (`setsid`/`killpg` subtree kill of the governed C2 run), config/data/temp resolution per OS,
+  and the `tests/test_portability_guard.py` anti-regression net.
+- **[Troubleshooting & FAQ](TROUBLESHOOTING.md)** — common symptoms, diagnostics, frequently asked questions.
+- **[Uninstall & data removal](UNINSTALL.md)** — stop, remove
+  image/container/volumes, purge DB/ledger/keys, uninstall the tools.
 
-### 6. Go-to-market & référence purple *(contexte produit)*
+### 6. Go-to-market & purple reference *(product context)*
 
-- **[Positionnement](POSITIONING.md)** — segment cible, les trois piliers, teardown concurrentiel.
-- **[Prestations & tarification](PRICING.md)** *(proposition)* — le produit est gratuit/open ; on tarife des prestations de service (engagement, accompagnement purple, support, hébergement).
-- **[Plan & roadmap](PLAN.md)** — statut des blockers, roadmap séquencée.
-- **[MTTD — ce que la métrique mesure](MTTD.md)** — time-to-ALERT vs time-to-event, interprétation.
-- **[Runbook campagne purple](PURPLE_CAMPAIGN.md)** — campagne recon-large (à lancer sur « go »).
-- **[Template d'engagement de référence](REFERENCE_ENGAGEMENT_TEMPLATE.md)** — squelette du livrable.
-- **[Défauts trouvés en amont](UPSTREAM_REPORTS.md)** — reproductions minimales prêtes à envoyer, pour
-  les défauts d'outils tiers rencontrés ici : ils ne sont pas propres à forge, et les contourner en
-  silence laisserait les autres projets avec le même angle mort.
+- **[Positioning](POSITIONING.md)** — target segment, the three pillars, competitive teardown.
+- **[Services & pricing](PRICING.md)** *(proposal)* — the product is free/open; what is priced is professional services (engagement, purple coaching, support, hosting).
+- **[Plan & roadmap](PLAN.md)** — blocker status, sequenced roadmap.
+- **[MTTD — what the metric measures](MTTD.md)** — time-to-ALERT vs time-to-event, interpretation.
+- **[Purple campaign runbook](PURPLE_CAMPAIGN.md)** — broad-recon campaign (to be launched on "go").
+- **[Reference engagement template](REFERENCE_ENGAGEMENT_TEMPLATE.md)** — skeleton of the deliverable.
+- **[Defects found upstream](UPSTREAM_REPORTS.md)** — minimal reproductions ready to send, for
+  the third-party tool defects encountered here: they are not specific to forge, and working around them
+  silently would leave other projects with the same blind spot.
 
 ---
 
-## Carte des concepts (en 30 secondes)
+## Concept map (in 30 seconds)
 
 ```
   cerveau (HeuristicBrain / orchestrateur Claude)
@@ -131,15 +133,15 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
         modules = OUTILS AUTONOMES orchestrés (recon, oracles à preuve, évasion, connecteurs MSF/Burp)
 ```
 
-- **Gate ROE à 4 couches** (`forge/roe.py`) : *armé → in-scope → capacité autorisée → approuvé*.
-  Hors scope ⇒ `VETO` (jamais simulé, jamais tiré). Voir [Concepts](CONCEPTS.md#1-roe--scope-guard).
-- **Ledger tamper-evident** (`forge/ledger.py`) : chaîne SHA-256 + signature Ed25519 par-entrée,
-  vérifiable par un tiers avec la seule clé publique. Voir [Concepts](CONCEPTS.md#2-le-ledger-dengagement).
-- **Boucle purple** : chaque finding porte un `mitre` (ATT&CK) — clé de jointure avec les détections
-  du SOC. Source de détection = **plugin configurable**. Voir [Concepts](CONCEPTS.md#5-la-boucle-purple).
+- **4-layer ROE gate** (`forge/roe.py`): *armed → in-scope → authorized capability → approved*.
+  Out of scope ⇒ `VETO` (never simulated, never fired). See [Concepts](CONCEPTS.md#1-roe--scope-guard).
+- **Tamper-evident ledger** (`forge/ledger.py`): SHA-256 chain + per-entry Ed25519 signature,
+  verifiable by a third party with the public key alone. See [Concepts](CONCEPTS.md#2-the-engagement-ledger).
+- **Purple loop**: every finding carries a `mitre` (ATT&CK) — join key with the SOC's
+  detections. Detection source = **configurable plugin**. See [Concepts](CONCEPTS.md#5-the-purple-loop).
 
 ---
 
-*Forge est un produit **[GuatX](https://guatx.com)** — l'antithèse offensive gouvernée du SOC
-blue-team [Plume](https://github.com/guatxlabs/plume). Usage autorisé / éthique uniquement
-(voir [`../LICENSE`](../LICENSE)).*
+*Forge is a **[GuatX](https://guatx.com)** product — the governed offensive counterpart of the
+blue-team SOC [Plume](https://github.com/guatxlabs/plume). Authorized / ethical use only
+(see [`../LICENSE`](../LICENSE)).*

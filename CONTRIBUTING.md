@@ -1,119 +1,121 @@
-# Contribuer à Forge
+# Contributing to Forge
 
-Merci de votre intérêt pour Forge — le moteur red-team gouverné. Les contributions sont bienvenues,
-sous quelques règles qui existent parce que Forge est un outil **safety-critical, qui applique
-l'autorisation**.
+[English](CONTRIBUTING.md) | [Français](CONTRIBUTING.fr.md)
 
-En contribuant, vous acceptez que votre contribution soit licenciée sous **AGPL-3.0-or-later** (la
-licence du projet), et vous certifiez le [Developer Certificate of Origin](https://developercertificate.org/)
-en signant vos commits (`git commit -s` → ajoute `Signed-off-by:`).
+Thank you for your interest in Forge — the governed red-team engine. Contributions are welcome,
+under a few rules that exist because Forge is a **safety-critical, authorization-enforcing**
+tool.
 
-## Non négociable : les invariants de gouvernance
+By contributing, you agree that your contribution is licensed under **AGPL-3.0-or-later** (the
+project's license), and you certify the [Developer Certificate of Origin](https://developercertificate.org/)
+by signing off your commits (`git commit -s` → adds `Signed-off-by:`).
 
-Une pull request qui affaiblit l'un d'eux sera **rejetée**, aussi utile la fonctionnalité soit-elle :
+## Non-negotiable: the governance invariants
 
-- **Le scope-guard est fail-closed.** Toute requête sortante passe par le contrôle in-scope /
-  `allow_private` *avant* toute I/O. Un scope vide signifie que rien ne se déclenche.
-- **La gate ROE à 4 couches** (`forge/roe.py`) reste intacte : armed → in-scope → capability
-  (`allow_exploit`/`allow_destructive`) → approved. Toute erreur d'évaluation est un `VETO`.
-- **Le plancher exploit tient.** Aucune action `exploit`/`destructive` ne se déclenche sans
-  autorisation explicite. Les flags de capacité sont dérivés des attributs de classe des modules et
-  ne sont jamais qu'*élevés*, jamais accordés par la config, un `module_param`, un plugin ou un
-  profil de ressources.
-- **Le ledger est append-only et tamper-evident.** N'ajoutez pas de chemin de code qui mute,
-  réordonne ou rétrograde une entrée signée, ou qui laisse `verify()` passer sur une chaîne altérée.
-- **Les secrets sont rédigés à la frontière.** Les credentials de session, les clés d'API et les
-  clés de signature ne doivent jamais atteindre un finding, le ledger, un rapport, un log ou une
-  réponse d'API.
-- **Le planner est coverage-safe** — les classes de vulnérabilités qualifiantes ne sont jamais
-  affamées en silence ; les reports sont signalés, jamais abandonnés.
-- **Les findings sont orientés preuve.** Un oracle ne promeut vers `vulnerable` que sur une preuve
-  authentique, jamais sur un signal bénin.
+A pull request that weakens one of them will be **rejected**, however useful the feature:
 
-En cas de doute, ajoutez un test qui prouve que l'invariant tient toujours.
+- **The scope-guard is fail-closed.** Every outbound request goes through the in-scope /
+  `allow_private` check *before* any I/O. An empty scope means nothing fires.
+- **The 4-layer ROE gate** (`forge/roe.py`) stays intact: armed → in-scope → capability
+  (`allow_exploit`/`allow_destructive`) → approved. Any evaluation error is a `VETO`.
+- **The exploit floor holds.** No `exploit`/`destructive` action fires without
+  explicit authorization. Capability flags are derived from the modules' class attributes and
+  are only ever *raised*, never granted by config, a `module_param`, a plugin or a
+  resource profile.
+- **The ledger is append-only and tamper-evident.** Do not add a code path that mutates,
+  reorders or downgrades a signed entry, or that lets `verify()` pass on an altered chain.
+- **Secrets are redacted at the boundary.** Session credentials, API keys and
+  signing keys must never reach a finding, the ledger, a report, a log or an
+  API response.
+- **The planner is coverage-safe** — qualifying vulnerability classes are never
+  silently starved; deferrals are reported, never dropped.
+- **Findings are evidence-oriented.** An oracle only promotes to `vulnerable` on genuine
+  evidence, never on a benign signal.
+
+When in doubt, add a test that proves the invariant still holds.
 
 ## Build & tests
 
-> **Note (build open-source) :** la console Rust dépend de `guatx-core` via une **git-dep publique
-> épinglée** (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"` ; cf. `console/Cargo.toml`).
-> Un clone standalone de *ce* dépôt build la console directement — le core est récupéré depuis GitHub
-> au build. Pour un checkout de dev en monorepo, `console/.cargo/config.toml` (gitignoré) `[patch]`e
-> la git-dep vers un `../../core` local.
+> **Note (open-source build):** the Rust console depends on `guatx-core` via a **pinned public
+> git-dep** (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`; see `console/Cargo.toml`).
+> A standalone clone of *this* repository builds the console directly — the core is fetched from GitHub
+> at build time. For a monorepo dev checkout, `console/.cargo/config.toml` (gitignored) `[patch]`es
+> the git-dep to a local `../../core`.
 
 ```sh
-make test           # suite complète : Python (unittest/pytest) + Rust (cargo test)
-make test-py        # moteur Python seul (stdlib, zéro réseau)
-make test-rust      # console Rust seule (offline)
-make test-purple    # boucle purple bout-en-bout (nécessite un binaire console buildé — voir plus bas)
-make doctor         # diagnostique les modules + outils/services attendus
+make test           # full suite: Python (unittest/pytest) + Rust (cargo test)
+make test-py        # Python engine only (stdlib, zero network)
+make test-rust      # Rust console only (offline)
+make test-purple    # end-to-end purple loop (requires a built console binary — see below)
+make doctor         # diagnoses the modules + expected tools/services
 ```
 
-Tout doit être **vert** et **offline** — les tests ne doivent toucher ni au réseau ni à une cible
-réelle.
+Everything must be **green** and **offline** — tests must touch neither the network nor a real
+target.
 
-> **La boucle purple est testée de bout en bout, pas seulement côté par côté.** `make test-purple`
-> (`scripts/purple_loop_e2e.py`, lancé par le job CI `purple-e2e`) pilote toute la chaîne sur une seule machine :
-> le moteur déclenche le module synthétique `demo.fingerprint` → les run-records sont POSTés vers un vrai
-> binaire console (`/api/ingest`) → la console interroge le stub SOC de démo `tools/mock_plume.py`
-> (`GET /api/coverage/detections?since=…`) → `GET /api/purple/coverage` est confronté aux attentes
-> *dérivées des tirs réels* (ensembles detected/missed, `detection_rate`, MTTD par technique). Cela reste
-> dans la règle « aucune I/O réseau offensive » : le stub ne fait jamais que **répondre** sur 127.0.0.1, les cibles sont
-> des littéraux d'IP loopback (donc la ROE les épingle sans aucune résolution DNS), et `demo.fingerprint` émet un
-> finding synthétique sans toucher au réseau. Il faut un binaire console — passez
-> `CONSOLE_BIN=console/target/debug/forge` si vous n'avez pas buildé en `--release`.
+> **The purple loop is tested end to end, not only side by side.** `make test-purple`
+> (`scripts/purple_loop_e2e.py`, run by the `purple-e2e` CI job) drives the whole chain on a single machine:
+> the engine fires the synthetic `demo.fingerprint` module → the run-records are POSTed to a real
+> console binary (`/api/ingest`) → the console queries the demo SOC stub `tools/mock_plume.py`
+> (`GET /api/coverage/detections?since=…`) → `GET /api/purple/coverage` is checked against expectations
+> *derived from the actual shots* (detected/missed sets, `detection_rate`, per-technique MTTD). This stays
+> within the "no offensive network I/O" rule: the stub only ever **answers** on 127.0.0.1, the targets are
+> loopback IP literals (so the ROE pins them without any DNS resolution), and `demo.fingerprint` emits a
+> synthetic finding without touching the network. A console binary is required — pass
+> `CONSOLE_BIN=console/target/debug/forge` if you have not built with `--release`.
 
-> **Un outil optionnel : un runtime JavaScript (`node`).** Le garde de gouvernance du SPA
-> (`tests/test_console_spa_governance.py`) prouve *par exécution* que l'unique porte réseau de la console
-> attache la preuve opérateur : il importe le vrai module API sous `node` avec chaque primitive réseau
-> instrumentée. Des contrôles textuels ont été tentés et trompés de façon mesurable (un helper vidé, un nom
-> sosie, même une chaîne morte gardaient la suite verte alors que chaque écriture partait sans preuve). Il pilote aussi la porte selon un
-> plan de VARIATION — chaque route déclarée par le serveur, plus des formes d'URL générées, croisées avec l'ensemble fermé des
-> méthodes HTTP et quelques méthodes d'extension inventées — de sorte qu'une décision de preuve qui dépend de l'URL ressort
-> comme une incohérence plutôt que d'avoir à être devinée. Sans `node`, ces **six tests sont skippés avec un message
-> explicite** — le reste du garde est en pur stdlib et tourne quand même.
-> La CI pose `FORGE_REQUIRE_JS_RUNTIME=1`, qui transforme l'absence en **échec**, pour que le garde ne puisse jamais
-> y être silencieusement off. `FORGE_JS_RUNTIME=<path>` pointe vers un runtime absent du `PATH`.
+> **One optional tool: a JavaScript runtime (`node`).** The SPA governance guard
+> (`tests/test_console_spa_governance.py`) proves *by execution* that the console's single network gate
+> attaches the operator evidence: it imports the real API module under `node` with every network primitive
+> instrumented. Textual checks were tried and measurably fooled (an emptied helper, a look-alike
+> name, even a dead string kept the suite green while every write went out without evidence). It also drives the gate according to a
+> VARIATION plan — every route declared by the server, plus generated URL shapes, crossed with the closed set of
+> HTTP methods and a few invented extension methods — so that an evidence decision that depends on the URL shows up
+> as an inconsistency rather than having to be guessed. Without `node`, these **six tests are skipped with an explicit
+> message** — the rest of the guard is pure stdlib and runs anyway.
+> The CI sets `FORGE_REQUIRE_JS_RUNTIME=1`, which turns the absence into a **failure**, so that the guard can never
+> be silently off there. `FORGE_JS_RUNTIME=<path>` points to a runtime that is not on the `PATH`.
 
-## Style de code
+## Code style
 
-- **Moteur Python** — stdlib seule (aucune dép runtime au-delà de ce qui est déjà vendoré). Oracles
-  à base de classes sur la base `Oracle` ; scope-guard via `ScopeGuardMixin` ; `argparse` avec
-  exemples d'usage ; `log(msg, level)` avec les préfixes `[*] [+] [!] [-] [VULN]` ; **pas de shell**
-  (argv fixe, jamais `sh -c`). Les nouveaux types d'outils s'enregistrent déclarativement
+- **Python engine** — stdlib only (no runtime dep beyond what is already vendored). Class-based
+  oracles on the `Oracle` base; scope-guard via `ScopeGuardMixin`; `argparse` with
+  usage examples; `log(msg, level)` with the `[*] [+] [!] [-] [VULN]` prefixes; **no shell**
+  (fixed argv, never `sh -c`). New tool types register declaratively
   (`@register` + `forge/techniques.py`).
-- **Console Rust** — `openssl`-free (rustls/ring) **dans les builds par défaut et `store-postgres`,
-  PAS sous `--features object-store`** (`aws-lc` transitif, cf. `docs/DEPLOYMENT.md` §3quater.1) ;
-  garde : `python3 scripts/check_openssl_freedom.py`. Erreurs via `ApiError` ; le seam `Store` pour
-  l'accès DB (aucun type de driver brut sur les sites d'appel) ; chaque valeur SQL bindée comme un
+- **Rust console** — `openssl`-free (rustls/ring) **in the default and `store-postgres` builds,
+  NOT under `--features object-store`** (transitive `aws-lc`, see `docs/DEPLOYMENT.md` §3quater.1);
+  guard: `python3 scripts/check_openssl_freedom.py`. Errors via `ApiError`; the `Store` seam for
+  DB access (no raw driver type at call sites); every SQL value bound as a
   `Param`.
-- **SPA web** — pas d'`innerHTML` avec des données non fiables ; rendu via `textContent` / le tagged
-  template `safeHtml` / `esc()`. Les écritures passent par le helper authentifié `write()`.
+- **Web SPA** — no `innerHTML` with untrusted data; rendering via `textContent` / the `safeHtml` tagged
+  template / `esc()`. Writes go through the authenticated `write()` helper.
 
 ## Pull requests
 
-1. Ouvrez d'abord une issue pour tout ce qui n'est pas trivial, afin qu'on s'accorde sur l'approche.
-2. Un seul changement logique par PR. Gardez le diff focalisé.
-3. Incluez des tests. Préservez ou améliorez la couverture.
-4. Lancez `make test` et (pour les changements Rust) `cargo clippy`. Les deux doivent passer.
-5. Signez vos commits (`-s`), et activez les hooks du dépôt une fois par clone :
-   `git config core.hooksPath .githooks`. Le hook `commit-msg` refuse un message qui s'adresse à un
-   interlocuteur, et une identité d'auteur autre que `guatxlabs <…@guatx.com>`. C'est une commodité,
-   pas la barrière : les hooks ne sont pas transportés par `git clone` et ne s'exécutent jamais pour
-   l'éditeur web de GitHub — le job CI `registre public` vérifie chaque commit poussé et c'est lui
-   qui ferme réellement la porte.
-6. **Écrivez pour un lecteur public** — dans les messages de commit, la documentation *et* les
-   commentaires de code pareillement. Chacun d'eux s'adresse à quelqu'un qui n'était pas dans la
-   pièce, ne vous connaît pas, et doit agir sur ce qu'il lit. Dites ce qui change et *pourquoi*. La
-   longueur n'est pas un problème : un « pourquoi » mesuré vaut vingt lignes, et une date qui rend une
-   affirmation traçable (« mesuré 2026-08-16 ») est de la traçabilité, pas un journal. Ce qui n'a pas
-   sa place : le récit à la première personne de votre propre enquête (« j'avais écarté ceci plus
-   tôt… »), l'adresse directe (« comme vous l'avez demandé »), et la chronologie de session utilisée
-   comme fil narratif — cela va dans `ROADMAP.md`. Énoncer ce qu'un statut *signifie* (« un `skipped`
-   dit : je n'ai pas pu vérifier ») est la voix de l'outil, et reste.
-7. **Les problèmes de sécurité ne vont pas ici** — voir [`SECURITY.md`](SECURITY.md).
+1. Open an issue first for anything non-trivial, so we agree on the approach.
+2. One logical change per PR. Keep the diff focused.
+3. Include tests. Preserve or improve coverage.
+4. Run `make test` and (for Rust changes) `cargo clippy`. Both must pass.
+5. Sign off your commits (`-s`), and enable the repository hooks once per clone:
+   `git config core.hooksPath .githooks`. The `commit-msg` hook refuses a message that addresses an
+   interlocutor, and an author identity other than `guatxlabs <…@guatx.com>`. It is a convenience,
+   not the barrier: hooks are not carried by `git clone` and never run for
+   GitHub's web editor — the `registre public` (*public register*) CI job checks every pushed commit and it is the one
+   that actually closes the door.
+6. **Write for a public reader** — in commit messages, documentation *and*
+   code comments alike. Each of them addresses someone who was not in the
+   room, does not know you, and must act on what they read. Say what changes and *why*.
+   Length is not a problem: a measured "why" is worth twenty lines, and a date that makes a
+   claim traceable ("measured 2026-08-16") is traceability, not a diary. What does not
+   belong: the first-person narrative of your own investigation ("I had ruled this out
+   earlier…"), direct address ("as you asked"), and the session chronology used
+   as a narrative thread — that goes into `ROADMAP.md`. Stating what a status *means* ("a `skipped`
+   says: I could not verify") is the voice of the tool, and stays.
+7. **Security issues do not go here** — see [`SECURITY.md`](SECURITY.md).
 
-## Un mot sur l'intention
+## A word on intent
 
-Forge est réservé à un usage **autorisé** uniquement (bug bounty in-scope, pentest sous contrat,
-CTF, votre propre infrastructure). Les contributions qui facilitent l'*évasion d'autorisation* ou
-l'attaque de cibles qui ne vous appartiennent pas sont hors périmètre pour ce projet.
+Forge is reserved for **authorized** use only (in-scope bug bounty, contracted pentest,
+CTF, your own infrastructure). Contributions that facilitate *authorization evasion* or
+attacking targets that do not belong to you are out of scope for this project.

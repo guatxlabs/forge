@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE — SCIM 2.0 provisioning (SEPARABLE, FLAG-GATED module).
+//! ADVANCED MODULE — SCIM 2.0 provisioning (SEPARABLE, FLAG-GATED, OFF by default).
 //!
-//! Open-core discipline (mirrors `sso.rs` / `tenancy.rs`): this is an ENTERPRISE feature. The COMMUNITY
-//! (default) build behaves EXACTLY as today — LOCAL accounts only, managed by the admin console. Every
-//! `/scim/*` route (and the admin `/api/scim/config`) is a NO-OP (404 `not_found`) unless the enterprise
-//! flag is ENGAGED (`enabled()` false => community, byte-identical). It never weakens the open
+//! Same separation as `sso.rs` / `tenancy.rs`: this module is OFF by default. The default build
+//! behaves EXACTLY as today — LOCAL accounts only, managed by the admin console. Every
+//! `/scim/*` route (and the admin `/api/scim/config`) is a NO-OP (404 `not_found`) unless its
+//! flag is ENGAGED (`enabled()` false => default behaviour, byte-identical). It never weakens the
 //! governance/audit surface; it only ADDS an automated user/group provisioning path for an IdP
 //! (Okta / Azure AD / etc.) that maps SCIM identities onto the SAME `users` table local login already uses.
 //!

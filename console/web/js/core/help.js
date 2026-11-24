@@ -14,7 +14,7 @@ import { modal } from './ui.js';
 // =====================================================================================
 // Rubriques ordonnées. blocks = [type, payload] : 'p' paragraphe, 'h' sous-titre, 'ul' liste, 'steps' étapes.
 export const HELP_TOPICS = [
-  { key: 'governance', title: 'Comment Forge fonctionne — sûreté & gouvernance', icon: 'shield', doc: 'docs/SECURITY_MODEL.md', pinned: true, blocks: [
+  { key: 'governance', title: 'Comment Forge fonctionne — sûreté & gouvernance', icon: 'shield', doc: 'docs/SECURITY_MODEL.fr.md', pinned: true, blocks: [
     ['p', "Forge est un produit d'évaluation red-team autorisé et gouverné : chaque action passe par des garde-fous conçus pour échouer du côté sûr (fail-closed). Voici le modèle de sûreté qu'un opérateur doit comprendre AVANT de lancer quoi que ce soit."],
     ['h', 'Scope-guard fail-closed'],
     ['p', "Le périmètre autorisé (scope serveur) fait autorité. Toute cible hors-scope est vétoée côté serveur (VETO dur) et ne peut JAMAIS être élargie depuis le web. En cas de doute, on refuse plutôt que d'autoriser."],
@@ -25,11 +25,11 @@ export const HELP_TOPICS = [
     ['h', 'Ledger tamper-evident'],
     ['p', "Chaque décision et chaque lancement sont journalisés dans un ledger append-only chaîné par SHA-256 et signé. Toute altération casse la chaîne et devient visible. La console recalcule l'intégrité hash ; la signature cryptographique se vérifie en CLI."],
   ] },
-  { key: 'overview', title: "Vue d'ensemble", icon: 'home', doc: 'docs/OVERVIEW.md', view: 'overview', blocks: [
+  { key: 'overview', title: "Vue d'ensemble", icon: 'home', doc: 'docs/OVERVIEW.fr.md', view: 'overview', blocks: [
     ['p', "Tableau de bord d'entrée : l'état de la boucle purple, la répartition des findings par sévérité et les capacités disponibles. C'est le point de départ pour situer l'engagement en cours."],
     ['p', "Le sélecteur de campagne (en-tête) filtre toutes les vues sur une campagne précise. Le badge « posture » résume l'état de la boucle."],
   ] },
-  { key: 'launch', title: 'Campagne', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'launch', blocks: [
+  { key: 'launch', title: 'Campagne', icon: 'play', doc: 'docs/PURPLE_CAMPAIGN.fr.md', view: 'launch', blocks: [
     ['p', "Compose et lance une campagne gouvernée. Non-exploit / non-destructif par défaut ; tout est borné au scope serveur et journalisé au ledger (console.run.start)."],
     ['steps', [
       "Vérifiez une cible (lecture pure) : la décision in-scope / hors-scope s'affiche sans rien lancer.",
@@ -40,38 +40,38 @@ export const HELP_TOPICS = [
     ]],
     ['p', "Le run en cours diffuse ses logs en direct ; la liste des runs conserve l'historique et permet d'annuler un run actif."],
   ] },
-  { key: 'modules', title: 'Capacités & Modules', icon: 'flask', doc: 'docs/MODULES.md', view: 'modules', blocks: [
+  { key: 'modules', title: 'Capacités & Modules', icon: 'flask', doc: 'docs/MODULES.fr.md', view: 'modules', blocks: [
     ['p', "Catalogue des capacités du moteur. Le badge « web » marque un module lançable en cadre web ; « exploit » / « destructif » portent un risque accru et sont gatés par les ROE au lancement."],
     ['p', "La disponibilité EFFECTIVE d'un module dépend de la sonde host ET de la gouvernance des connecteurs (Administration). Un connecteur désactivé est SKIP au tir, même si son binaire est présent."],
   ] },
-  { key: 'techniques', title: 'Techniques & Sélection', icon: 'flask', doc: 'docs/MODULES.md', view: 'techniques', blocks: [
+  { key: 'techniques', title: 'Techniques & Sélection', icon: 'flask', doc: 'docs/MODULES.fr.md', view: 'techniques', blocks: [
     ['p', "Catalogue des techniques du moteur GROUPÉ PAR CATÉGORIE (SQLi, IDOR, SSRF, XSS…), DÉRIVÉ du registre : un nouveau module apparaît automatiquement sous sa catégorie. Chaque technique porte les outils qui la couvrent et son éligibilité (BB = bug bounty, pentest = pentest-only)."],
     ['p', "Sélection PAR-SCOPE : le profil (bug_bounty | pentest | custom) donne l'ensemble de base, puis les toggles par catégorie / par technique AJOUTENT ou RETIRENT (la désactivation prime — fail-closed). « Au scope, retirer un test automatique » : une technique décochée n'est NI planifiée NI tirée par le moteur, en plus du scope-guard."],
     ['p', "Enregistrer la sélection est réservé aux comptes operator/admin et journalisé au ledger. La sélection s'applique aux prochains runs (scope.json profile/techniques_enabled/categories_enabled)."],
   ] },
-  { key: 'workflows', title: 'Workflows', icon: 'layout', doc: 'docs/MODULES.md', view: 'workflows', blocks: [
+  { key: 'workflows', title: 'Workflows', icon: 'layout', doc: 'docs/MODULES.fr.md', view: 'workflows', blocks: [
     ['p', "Pipelines COMPOSÉS sans code : une sélection ORDONNÉE de techniques/outils (+ params par étape), sauvegardée et éditable. Absorbe les scan-engines de reNgine, les workflows d'Osmedeus et les pipelines visuels de Trickest — le builder réutilise le catalogue par catégorie et l'état activé par le scope."],
     ['p', "GOUVERNANCE fail-closed : un workflow est une PROPOSITION. Le scope-guard ROE et la sélection par-scope restent seuls juges — une étape hors-scope / désactivée pour le scope est LARGUÉE au tir. Les étapes exploit restent derrière l'opt-in fort-impact. Les workflows intégrés (dérivés du registre) ne sont pas supprimables."],
     ['p', "Création/édition/suppression réservées operator/admin et journalisées au ledger (POST /api/workflows[/:name]). « Lancer ce workflow » passe par le lancement gouverné (POST /api/run modules=étapes, auto_pentest) : mêmes garde-fous que le lancement standard."],
   ] },
-  { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'findings', blocks: [
+  { key: 'findings', title: 'Findings', icon: 'shield', doc: 'docs/CONCEPTS.fr.md', view: 'findings', blocks: [
     ['p', "Résultats d'évaluation normalisés : sévérité, cible, technique MITRE, statut. Filtrez par sévérité, statut ou cible ; cliquez un finding pour son détail complet (preuve, contexte, référence ledger)."],
     ['p', "Les findings alimentent la couverture ATT&CK et la boucle purple : une technique tirée devient « détectée exacte », « parente seule » (angle mort) ou « ratée » côté défense."],
   ] },
-  { key: 'reports', title: "Rapport d'engagement (livrable)", icon: 'shield', doc: 'docs/CONCEPTS.md', view: 'reports', blocks: [
+  { key: 'reports', title: "Rapport d'engagement (livrable)", icon: 'shield', doc: 'docs/CONCEPTS.fr.md', view: 'reports', blocks: [
     ['p', "Le LIVRABLE CLIENT agrégé de l'engagement ACTIF : page de garde brandée, résumé exécutif, findings détaillés (secrets rédigés), couverture ATT&CK et annexe chaîne-de-custody. Formats HTML / PDF / DOCX / CSV / JSON — l'aperçu HTML s'affiche dans la vue."],
     ['p', "ISOLATION : le rapport ne reflète QUE l'engagement actif (jamais les données d'un autre). Chaque génération et chaque configuration de branding sont journalisées au ledger. Le branding (nom du commanditaire, logo, prestataire) est réservé au rôle admin ; PDF/DOCX dégradent proprement si le moteur d'impression ou python est absent sur l'hôte."],
     ['p', "Depuis Findings, « Export CSV / JSON » télécharge les findings de l'engagement actif et « Rapport complet » ouvre cette vue."],
   ] },
-  { key: 'explore', title: 'Recherche & Explore (GXQL)', icon: 'search', doc: 'docs/CONCEPTS.md', view: 'explore', blocks: [
+  { key: 'explore', title: 'Recherche & Explore (GXQL)', icon: 'search', doc: 'docs/CONCEPTS.fr.md', view: 'explore', blocks: [
     ['p', "Requêteur GXQL (langage de recherche en pipeline) sur les données de l'engagement, ex : search severity=HIGH | stats count by mitre | sort -count | head 20."],
     ['p', "Choisissez une visualisation (table / barres / courbe / stat). Cliquez une valeur pour un drilldown ; « Panneau » enregistre la requête comme panneau réutilisable dans un dashboard."],
   ] },
-  { key: 'coverage', title: 'Couverture ATT&CK', icon: 'activity', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'coverage', blocks: [
+  { key: 'coverage', title: 'Couverture ATT&CK', icon: 'activity', doc: 'docs/PURPLE_CAMPAIGN.fr.md', view: 'coverage', blocks: [
     ['p', "Couverture ATT&CK côté offensif : par technique MITRE, combien de runs l'ont tentée et combien ont « tiré » (déclenché un résultat)."],
     ['p', "Une technique tentée mais à 0 tiré est couverte sans résultat côté cible. Pour l'axe défensif (détecté vs raté), voir « Détection purple »."],
   ] },
-  { key: 'purple-coverage', title: 'Détection purple', icon: 'layout', doc: 'docs/DETECTION.md', view: 'purple-coverage', blocks: [
+  { key: 'purple-coverage', title: 'Détection purple', icon: 'layout', doc: 'docs/DETECTION.fr.md', view: 'purple-coverage', blocks: [
     ['p', "Mesure DÉFENSIVE et OPTIONNELLE : pour chaque technique tirée en red-team, a-t-elle été détectée par votre source BLUE (SOC/IDS/pare-feu) ? TROIS états, pas deux : vert = détecté sur EXACTEMENT cette technique, ambre = seule la technique PARENTE est couverte (vous avez tiré T1110.001, vous n'avez que des règles T1110 génériques — ce n'est PAS une preuve de détection, ce n'est donc pas compté dans le taux), rouge = trou de détection. Le MTTD mesure le délai tir → alerte, sur les détections exactes uniquement."],
     ['p', "Aucune source n'est requise : sans source, Forge tourne en AUTONOME (standalone) et l'état est neutre — ce n'est pas une panne. Si une source est configurée mais injoignable, la mesure est déclarée impossible ; aucun « détecté » n'est inventé."],
     ['h', 'Connecter une source de détection'],
@@ -81,21 +81,21 @@ export const HELP_TOPICS = [
       "Testez la joignabilité, puis enregistrez. La boucle purple s'active dès que la source répond.",
     ]],
   ] },
-  { key: 'campaigns', title: 'Campagnes', icon: 'server', doc: 'docs/PURPLE_CAMPAIGN.md', view: 'campaigns', blocks: [
+  { key: 'campaigns', title: 'Campagnes', icon: 'server', doc: 'docs/PURPLE_CAMPAIGN.fr.md', view: 'campaigns', blocks: [
     ['p', "Regroupe l'activité par campagne (une opération d'évaluation nommée). Sélectionnez-en une pour filtrer transversalement findings, couverture, ROE et ledger."],
   ] },
-  { key: 'roe', title: 'ROE / Garde-fou', icon: 'shield', doc: 'docs/SECURITY_MODEL.md', view: 'roe', blocks: [
+  { key: 'roe', title: 'ROE / Garde-fou', icon: 'shield', doc: 'docs/SECURITY_MODEL.fr.md', view: 'roe', blocks: [
     ['p', "Journal des décisions du garde-fou (Rules of Engagement). Chaque action proposée par le moteur reçoit un verdict : FIRE (exécutée), DRY_RUN (simulée) ou VETO (bloquée), avec sa raison."],
     ['p', "C'est la transparence anti-masquage : on voit pourquoi une action a été autorisée, simulée ou refusée — jamais de refus silencieux."],
   ] },
-  { key: 'ledger', title: "Ledger d'engagement", icon: 'lock', doc: 'docs/SECURITY_MODEL.md', view: 'ledger', blocks: [
+  { key: 'ledger', title: "Ledger d'engagement", icon: 'lock', doc: 'docs/SECURITY_MODEL.fr.md', view: 'ledger', blocks: [
     ['p', "Journal d'engagement append-only chaîné par SHA-256 : preuve d'intégrité de toutes les actions et décisions. La console recalcule la chaîne de hash (intégrité hash-only)."],
     ['p', "La signature cryptographique se vérifie hors-console : forge ledger verify --pubkey <clé>."],
   ] },
-  { key: 'dashboards', title: 'Dashboards / Vues', icon: 'layout', doc: 'docs/CONCEPTS.md', view: 'dashboards', blocks: [
+  { key: 'dashboards', title: 'Dashboards / Vues', icon: 'layout', doc: 'docs/CONCEPTS.fr.md', view: 'dashboards', blocks: [
     ['p', "Compose des dashboards de panneaux GXQL (glisser pour réordonner, coin pour redimensionner). Une « vue » est une collection de dashboards — un simple filtre d'affichage local."],
   ] },
-  { key: 'admin', title: 'Administration', icon: 'user', doc: 'docs/ADMINISTRATION.md', view: 'admin', blocks: [
+  { key: 'admin', title: 'Administration', icon: 'user', doc: 'docs/ADMINISTRATION.fr.md', view: 'admin', blocks: [
     ['p', "Réservé au rôle admin. Toutes les mutations sont attribuées à votre compte et ledgerisées."],
     ['h', 'Comptes'],
     ['p', "viewer (lecture seule) · operator (arme les campagnes) · admin (administre). Désactivation, rétrogradation et réinitialisation de mot de passe révoquent immédiatement les sessions du compte. Le dernier admin activé est protégé (anti-verrouillage)."],

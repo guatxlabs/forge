@@ -1,0 +1,176 @@
+# Secrets — indirection `*_FILE` (Docker & k8s secrets)
+
+[English](SECRETS.md) | [Français](SECRETS.fr.md)
+
+> **Principe** : *« la clé ne doit pas être posée à côté de la porte ».* Aucun secret ne vit en clair
+> dans un `.env` posé à côté de l'app. L'environnement porte un **CHEMIN** ; le secret vit dans un
+> **fichier monté, root-owned**, hors du répertoire de travail. C'est le pattern secret standard
+> 12-factor (Docker secrets / Kubernetes Secret-as-file).
+
+## TL;DR
+
+Chaque variable d'environnement qui porte un secret accepte un **jumeau `<VAR>_FILE`** :
+
+1. si `<VAR>` est posée **et non vide** → sa valeur est utilisée (voie directe, **défaut
+   inchangé** — byte-identique à avant) ;
+2. sinon, si `<VAR>_FILE` est posée → le fichier pointé est **lu**, son **newline/espace de fin est
+   retiré**, et son contenu est utilisé ;
+3. sinon → le secret est considéré **absent** (le repli propre de l'app s'applique : génération
+   éphémère pour le token d'ingest, refus *fail-closed* pour une passphrase de backup, etc.).
+
+**Fail-soft** : un `<VAR>_FILE` illisible (mauvais chemin, permissions) ne fait **jamais** planter le
+process et ne produit **jamais** un secret vide silencieux qui affaiblirait l'auth — il journalise un
+avertissement (nommant la **variable**, jamais la valeur) et retombe sur le repli de l'app.
+
+La valeur d'un secret n'est **jamais** journalisée ni passée sur `argv`.
+
+## Secrets couverts
+
+| Variable | Rôle | Consommé par |
+|----------|------|--------------|
+| `FORGE_CONSOLE_TOKEN` | Bearer d'ingestion `/api/ingest` | console (Rust) + client `console_client` (Python) |
+| `FORGE_FIELD_KEY` | Chiffrement de **champ** du matériel d'authentification d'engagement (bearers/cookies/en-têtes des comptes de test) **et des trois secrets d'intégration** (source de détection, canal de notification, `client_secret` SSO) — **build par défaut** | console (Rust) |
+| `FORGE_DB_KEY` | Clé SQLCipher au repos (image `--features encryption`) | console (Rust) |
+| `FORGE_BACKUP_PASSPHRASE` | Passphrase des sauvegardes chiffrées (nommée par `policy.passphrase_env`) | console (Rust) — backup/restore/scheduler/upgrade |
+| `FORGE_COMPLIANCE_ARCHIVE_KEY` | Passphrase d'archive de purge gouvernée | console (Rust) |
+| `FORGE_LEDGER_SIGNER_CREDENTIAL` | Jeton Bearer du signeur distant KMS/HSM/HTTP | moteur (Python, `signing.py`) |
+| `FORGE_LEDGER_SIGNER_ARGV` | Argv du signeur exec (peut porter des creds) | moteur (Python, `signing.py`) |
+| `FORGE_LEDGER_PKCS11_PIN` | PIN utilisateur du token PKCS#11 | moteur (Python, `signing_pkcs11.py`) |
+| `PLUME_TOKEN` | Basic auth du préréglage détection legacy | console (Rust) + moteur (Python) |
+| `FORGE_DETECTION_SOURCE` | Config source de détection (JSON porteur du secret d'auth) | moteur (Python, `collectors`) |
+| `MSF_RPC_PASS`, `MSF_RPC_TOKEN` | Creds msfrpcd (connecteur `msf.module`) | moteur (Python) |
+| `BURP_API_KEY` | Clé REST API Burp (connecteur `burp.scan`) | moteur (Python) |
+
+Chacune accepte `<VAR>_FILE`. Exemple : la console lit `FORGE_CONSOLE_TOKEN`, sinon
+`FORGE_CONSOLE_TOKEN_FILE`.
+
+### Déjà write-only via l'UI — n'ont **jamais** besoin d'un `.env`
+
+> ⚠️ **« Write-only » décrit la SURFACE D'API, pas le repos** — les deux sont désormais couverts, mais
+> ce sont bien **deux** propriétés. Ces secrets ne sont jamais re-servis par une lecture, jamais
+> journalisés, jamais ledgerisés (surface d'API) **et** ils sont chiffrés dans la table `settings` par le
+> chiffrement de **champ** (`FORGE_FIELD_KEY`, build par défaut) — voir « Ce qui est chiffré au repos »
+> ci-dessous. `--features encryption` + `FORGE_DB_KEY` (base entière) reste composable par-dessus.
+
+- **Secret de la source de détection** (`settings.detection_source`) : saisi au wizard du 1er
+  déploiement ou dans *Administration → Source de détection*, stocké **write-only** en base (jamais
+  relu en clair, jamais journalisé). Les variables `PLUME_*` / `FORGE_DETECTION_SOURCE` ne sont qu'un
+  **repli rétro-compat** pour un pilotage hors-UI.
+- **SSO `client_secret`** : réglé dans les settings via l'UI, **write-only**, jamais réémis. Aucune
+  variable d'env, donc aucun `.env`, n'est nécessaire pour lui.
+- **Jeton du canal de notification** (`settings.notify_channel` → `auth.secret`) : même motif
+  write-only (`GET` rend `secret_set: bool`), même réserve sur le repos.
+
+### Ce qui est chiffré au repos — état MESURÉ
+
+| Donnée | Emplacement | Au repos (build par défaut) |
+|---|---|---|
+| Matériel d'auth d'engagement (bearer/cookies/en-têtes) | `engagement.scope_json` → `auth.accounts[]` | **chiffré** (`FORGE_FIELD_KEY`) |
+| Idem, en transit interne vers le moteur | `run_job.spawn_spec` (chemin HA *pending*) | **chiffré** (hérité) — et purgé au claim |
+| Mots de passe de comptes | `users.pass_hash` | **hash argon2id** — sans objet (sens unique) |
+| Jetons de session | `session.token_sha` | **SHA-256** — sans objet (sens unique) |
+| Secret de la source de détection | `settings.detection_source` → `auth.secret` | **chiffré** (`FORGE_FIELD_KEY`) |
+| Jeton du canal de notification | `settings.notify_channel` → `auth.secret` | **chiffré** (`FORGE_FIELD_KEY`) |
+| SSO `client_secret` | `settings.sso.config` → `client_secret` | **chiffré** (`FORGE_FIELD_KEY`) |
+
+**Les trois dernières lignes viennent de basculer** — elles étaient « en clair », consignées comme un
+écart **connu et assumé**. La raison de l'écart était technique et réelle : les sceller **exige** de
+rendre faillibles leurs points d'usage (`ds_secret`, `ch_secret`, `sso::load_config`), or le dernier
+renvoyait un `Option` — un déchiffrement raté y serait devenu « **SSO non configuré** », c'est-à-dire
+la **dégradation silencieuse** que le fail-closed du chiffrement de champ existe pour interdire.
+
+L'ordre imposé a donc été respecté : **d'abord la faillibilité, ensuite le scellement.**
+
+- `sso::load_config` rend désormais `Result<Option<SsoConfig>, String>` — **trois** issues distinctes :
+  `Ok(None)` = non configuré (403 `sso_unconfigured`), `Ok(Some)` = utilisable, `Err` = **configuré mais
+  illisible** (503 `sso_secret_unreadable`). Un secret qui n'ouvre pas ne peut plus se faire passer pour
+  une console jamais configurée.
+- Le secret de source et le jeton de canal sont ouverts à leur **point d'usage unique**
+  (`collect_detections_with`, `deliver_blocking`) : sans clé, l'intégration **refuse** de partir avec une
+  raison nommée, plutôt que de se présenter **sans authentification** — un 401 que l'admin
+  diagnostiquerait comme une panne de SIEM.
+- Une base existante est **convertie au boot**, en place et idempotemment
+  (`migrate_seal_settings_secrets`). Sans clé, rien n'est converti mais le clair restant est **compté et
+  annoncé** — jamais tu.
+
+Le périmètre reste **mesuré** : seule la **valeur** du secret est scellée. `kind`, `endpoint`,
+`auth.type`, `issuer`, `client_id` restent lisibles au repos — l'admin doit pouvoir ré-éditer sa config
+sans la clé, et ce ne sont pas des credentials. `--features encryption` + `FORGE_DB_KEY` (chiffrement
+**intégral**) reste **composable** par-dessus.
+
+## Docker Compose
+
+`docker-compose.yml` fournit un bloc `secrets:` (commenté, opt-in) et l'exemple de câblage
+`FORGE_BACKUP_PASSPHRASE_FILE: /run/secrets/backup_passphrase`. Marche à suivre :
+
+1. Écrire chaque secret dans un fichier hôte **jamais suivi par git** : soit un chemin absolu hors
+   du dépôt (recommandé, p.ex. `/etc/forge/secrets/backup_passphrase`), soit `./secrets/<nom>` **à
+   condition** que `secrets/` soit ignoré par git (vérifier : `git check-ignore -v secrets/<nom>`).
+2. Décommenter le bloc `secrets:` (haut-niveau) et déclarer les fichiers (`file: ./secrets/...`) —
+   ou, en mode Swarm, `external: true` + `docker secret create`.
+3. Dans le service `forge`, ajouter la clause `secrets:` listant les secrets à monter (Docker les
+   expose sous `/run/secrets/<nom>`, mode `0400` root).
+4. Décommenter la ligne `environment:` correspondante `<VAR>_FILE: /run/secrets/<nom>`.
+
+```yaml
+# docker-compose.yml (extrait)
+services:
+  forge:
+    environment:
+      FORGE_BACKUP_PASSPHRASE_FILE: /run/secrets/backup_passphrase
+    secrets:
+      - backup_passphrase
+secrets:
+  backup_passphrase:
+    file: /etc/forge/secrets/backup_passphrase   # fichier hôte hors du dépôt (jamais suivi par git)
+```
+
+La valeur directe (`FORGE_BACKUP_PASSPHRASE: ...` via `.env`) reste supportée (rétro-compat).
+
+## Kubernetes
+
+Le pattern **Secret-monté-en-fichier** existe déjà pour la clé de signature du ledger
+(`forge-ledger-key`, OPTION B dans `k8s/40-console.yaml`). On le **reflète** pour le token, la
+passphrase et les creds connecteurs via le Secret `forge-secret-files` (dans
+`k8s/10-secrets.example.yaml`, opt-in) :
+
+1. Provisionner le Secret `forge-secret-files` **hors-bande** (SealedSecrets / ExternalSecrets / SOPS
+   / `kubectl create secret`). Le fichier d'exemple `k8s/10-secrets.example.yaml` ne contient que des
+   **placeholders** : il documente la forme attendue, il n'est pas destiné à être appliqué tel quel.
+2. Dans la `Deployment` de la console : décommenter le **volume** `secret-files` (projette le Secret
+   en fichiers, `defaultMode: 0440`), le **volumeMount** (`/etc/forge/secrets`, `readOnly: true`), et
+   les env `FORGE_*_FILE` pointant sur les chemins montés.
+
+```yaml
+# k8s/40-console.yaml (extrait — env)
+- name: FORGE_CONSOLE_TOKEN_FILE
+  value: /etc/forge/secrets/console_token
+# ... volume ...
+- name: secret-files
+  secret:
+    secretName: forge-secret-files
+    defaultMode: 0440   # lecture propriétaire+groupe ; fsGroup donne le GROUPE au process, pas la propriété
+    items:
+      - { key: console_token, path: console_token }
+```
+
+Préférer un Secret **monté en fichier** à un `secretKeyRef` env : avec `secretKeyRef`, la valeur en
+clair atterrit dans l'**environnement du pod** (visible dans `kubectl describe pod`, les dumps de
+crash, l'environ des process enfants) ; montée en fichier, elle reste dans un tmpfs root-owned lu à la
+demande.
+
+> ⚠️ **Les Secrets restent hors du `kubectl apply -k k8s/` par défaut.** `10-secrets.example.yaml` est
+> **délibérément absent** de la liste `resources:` de `kustomization.yaml` — ses valeurs de
+> placeholder ne partent jamais par défaut. `kubectl kustomize k8s/` rend un manifeste **identique**
+> avec ou sans ce changement (les ajouts sont des commentaires + un Secret dans le fichier exclu).
+
+## Implémentation (référence)
+
+- **Rust** : `console/src/secret_env.rs` — `secret_from_env(name) -> Option<String>` (env direct →
+  `<VAR>_FILE` lu + `trim_end` → `None` fail-soft). Points d'appel : `main.rs` (token), `dbmigrate.rs`
+  (`FORGE_DB_KEY`), `backup.rs::read_passphrase_env` (partagé par backup/restore/scheduler/`upgrade`),
+  `compliance.rs` (archive key), `detection.rs` (`PLUME_TOKEN` legacy).
+- **Python** : `forge/portability.py` — `env_secret(name, env=None)` (même précédence + `rstrip`).
+  Points d'appel : `console_client.py` (token), `modules/msf.py`, `modules/burp.py`, `cli/purple.py`,
+  `collectors/base.py::load_source` (`env:NAME`), `signing.py` (credential/argv),
+  `signing_pkcs11.py` (PIN).

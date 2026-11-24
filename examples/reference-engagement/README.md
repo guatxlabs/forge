@@ -1,85 +1,87 @@
-# Forge — Engagement de référence embarqué (FIXTURE DE DÉMO)
+# Forge — Bundled reference engagement (DEMO FIXTURE)
 
-> ⚠️ **100 % synthétique. Pas une vraie cible, pas un vrai SOC.** Chaque hôte utilise le TLD
-> réservé `.example` (RFC 2606) et chaque IP utilise une plage de documentation (RFC 5737). Ce dossier
-> est livré avec Forge pour qu'une installation neuve soit **démontrable de bout en bout, hors-ligne, avec
-> zéro I/O réseau**. Rien ici n'a été testé contre un système réel.
+[English](README.md) | [Français](README.fr.md)
 
-Voici un petit **engagement en labo maison** réaliste — « ACME Retail (labo) » — utilisé pour peupler une
-console Forge neuve (Findings / Coverage / Purple / Runs) en une seule commande, et comme
-démonstration commerciale/onboarding de ce à quoi ressemble un livrable Forge.
+> ⚠️ **100 % synthetic. Not a real target, not a real SOC.** Every host uses the reserved
+> `.example` TLD (RFC 2606) and every IP uses a documentation range (RFC 5737). This folder
+> ships with Forge so that a fresh install is **demonstrable end to end, offline, with
+> zero network I/O**. Nothing here was tested against a real system.
 
-## Ce qu'il y a ici
+This is a small, realistic **home-lab engagement** — "ACME Retail (lab)" — used to populate a
+fresh Forge console (Findings / Coverage / Purple / Runs) in a single command, and as a
+sales/onboarding demonstration of what a Forge deliverable looks like.
 
-| Fichier | Rôle |
+## What is here
+
+| File | Role |
 |---|---|
-| `scope.json` | Scope/ROE autorisé (grey-box, `allow_exploit=false`, `allow_destructive=false`). In-scope : `shop.lab.example`, `api.lab.example`, `lab.example`. Out-of-scope : `corp.internal.example`, `*.prod.example`. |
-| `targets.json` | Les trois cibles synthétiques. |
-| `findings.jsonl` | 6 findings répartis sur 5 techniques ATT&CK, avec CWE / sévérité / statut (IDOR, SSRF, CORS permissif, token de reset prévisible, exposition d'origine, en-têtes manquants). |
-| `runrecords.jsonl` | 8 run-records ATT&CK tirés (la timeline red-team). Alimente l'onglet **Coverage** et le côté red de la jointure **Purple**. |
-| `roe_decisions.jsonl` | 11 décisions de gouvernance : 8 `FIRE` + 2 `VETO` (out-of-scope, exploit non armé) + 1 `DRY_RUN`. Alimente `/api/roe` (transparence anti-masquage). |
-| `detections.jsonl` | Le côté **blue** : 4 « détections SOC » taggées MITRE, servies par le stub mock-Plume. Délibérément un *sous-ensemble* de ce qui a été tiré, pour que la matrice montre les **trois** états — détecté, parent-approx et manqué. |
-| `REFERENCE_ENGAGEMENT.md` | Une copie **remplie** de [`docs/REFERENCE_ENGAGEMENT_TEMPLATE.md`](../../docs/REFERENCE_ENGAGEMENT_TEMPLATE.md) — le compte rendu / livrable rédigé façon labo (caviardé). |
+| `scope.json` | Authorized scope/ROE (grey-box, `allow_exploit=false`, `allow_destructive=false`). In-scope: `shop.lab.example`, `api.lab.example`, `lab.example`. Out-of-scope: `corp.internal.example`, `*.prod.example`. |
+| `targets.json` | The three synthetic targets. |
+| `findings.jsonl` | 6 findings spread over 5 ATT&CK techniques, with CWE / severity / status (IDOR, SSRF, permissive CORS, predictable reset token, origin exposure, missing headers). |
+| `runrecords.jsonl` | 8 fired ATT&CK run-records (the red-team timeline). Feeds the **Coverage** tab and the red side of the **Purple** join. |
+| `roe_decisions.jsonl` | 11 governance decisions: 8 `FIRE` + 2 `VETO` (out-of-scope, unarmed exploit) + 1 `DRY_RUN`. Feeds `/api/roe` (anti-masking transparency). |
+| `detections.jsonl` | The **blue** side: 4 MITRE-tagged "SOC detections", served by the mock-Plume stub. Deliberately a *subset* of what was fired, so that the matrix shows all **three** states — detected, parent-approx and missed. |
+| `REFERENCE_ENGAGEMENT.md` | A **filled-in** copy of [`docs/REFERENCE_ENGAGEMENT_TEMPLATE.md`](../../docs/REFERENCE_ENGAGEMENT_TEMPLATE.md) — the write-up / deliverable written lab-style (redacted). |
 
-## La matrice purple que cela produit
+## The purple matrix this produces
 
-Techniques tirées (red, depuis `runrecords.jsonl`) jointes aux détections (blue, depuis `detections.jsonl`) :
+Fired techniques (red, from `runrecords.jsonl`) joined to the detections (blue, from `detections.jsonl`):
 
-| ATT&CK | Tirée | Détectée | MTTD | Statut |
+| ATT&CK | Fired | Detected | MTTD | Status |
 |---|:---:|:---:|---|---|
 | T1595 — Active Scanning | ✅ | ✅ exact | 4 min | 🟢 detected-exact |
 | T1046 — Network Service Discovery | ✅ | ✅ exact | 2.5 min | 🟢 detected-exact |
 | T1190 — Exploit Public-Facing App (IDOR + SSRF) | ✅ | ✅ exact | 3 min | 🟢 detected-exact |
 | T1212 — Exploitation for Credential Access | ✅ | ✅ exact | 6 min | 🟢 detected-exact |
-| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` seul (3 alertes) | — | 🟠 **detected-parent-approx** |
+| T1595.002 — Vulnerability Scanning | ✅ | ⚠️ parent `T1595` only (3 alerts) | — | 🟠 **detected-parent-approx** |
 | T1590.005 — Gather Victim Network Info: IPs | ✅ | ❌ | — | 🔴 **missed** |
 | T1539 — Steal Web Session Cookie (CORS) | ✅ | ❌ | — | 🔴 **missed** |
 
-**7 techniques tirées · 4 detected-exact · 1 parent-approx · 2 missed → taux de détection 57 % ·
-MTTD moy. 232,5 s (≈ 3,9 min), max 360 s (6 min).**
+**7 techniques fired · 4 detected-exact · 1 parent-approx · 2 missed → detection rate 57 % ·
+avg MTTD 232.5 s (≈ 3.9 min), max 360 s (6 min).**
 
-> Mesuré, pas affirmé : `forge seed-demo --dir examples/reference-engagement` + `tools/mock_plume.py`
-> + `GET /api/purple/coverage` renvoie `techniques_fired=7, techniques_detected=4,
+> Measured, not asserted: `forge seed-demo --dir examples/reference-engagement` + `tools/mock_plume.py`
+> + `GET /api/purple/coverage` returns `techniques_fired=7, techniques_detected=4,
 > techniques_parent_approx=1, techniques_missed=2, detection_rate=0.5714285714285714,
 > mttd_avg_secs=232.5, mttd_max_secs=360`.
 >
-> **Lisez attentivement la ligne T1595.002** — c'est tout l'intérêt de la jointure à trois états. Le SOC alerte bien sur
-> `T1595` (Active Scanning), et Forge a tiré la **sous-technique** `T1595.002` (Vulnerability Scanning).
-> Une règle parente n'est **pas la preuve** que le vecteur de la sous-technique est couvert, donc elle n'est **pas** comptée comme
-> détectée : le taux reste **4/7**, et aucun MTTD n'est inventé pour elle. Elle n'est pas jetée pour autant — c'est
-> un **angle mort nommé** : *« vous avez tiré T1595.002 ; tout ce que vous avez, c'est une règle générique T1595. »* Cette ligne est le
-> livrable. Une matrice à deux états l'aurait montrée comme un simple `missed`, masquant le fait qu'une règle
-> voisine existe et n'a besoin que d'être resserrée.
+> **Read the T1595.002 row carefully** — it is the whole point of the three-state join. The SOC does alert on
+> `T1595` (Active Scanning), and Forge fired the **sub-technique** `T1595.002` (Vulnerability Scanning).
+> A parent rule is **not evidence** that the sub-technique's vector is covered, so it is **not** counted as
+> detected: the rate stays **4/7**, and no MTTD is invented for it. It is not thrown away either — it is
+> a **named blind spot**: *"you fired T1595.002; all you have is a generic T1595 rule."* This row is the
+> deliverable. A two-state matrix would have shown it as a plain `missed`, hiding the fact that a neighboring
+> rule exists and only needs tightening.
 
-## Comment le lancer
+## How to run it
 
-Depuis la racine du dépôt :
+From the repository root:
 
 ```bash
-# Console peuplée (Findings / Coverage / Runs) — hors-ligne, aucun SOC requis :
+# Populated console (Findings / Coverage / Runs) — offline, no SOC required:
 make demo            # -> http://127.0.0.1:7100
 
-# Boucle purple complète (ajoute la matrice detected / parent-approx / missed / MTTD) avec le stub mock-Plume :
-make demo-purple     # démarre tools/mock_plume.py + console avec PLUME_URL défini
+# Full purple loop (adds the detected / parent-approx / missed / MTTD matrix) with the mock-Plume stub:
+make demo-purple     # starts tools/mock_plume.py + console with PLUME_URL set
 ```
 
-Sous le capot, `make demo` lance `forge seed-demo --dir examples/reference-engagement`,
-qui ingère ces fixtures **directement dans la base SQLite** (`FORGE_CONSOLE_DB`, défaut
-`forge-demo.db`) — sans aller-retour serveur, sans réseau. C'est **idempotent** : une réexécution ne
-touche que la campagne de démo `acme-lab` et jamais aucune donnée d'engagement réel dans la même base.
+Under the hood, `make demo` runs `forge seed-demo --dir examples/reference-engagement`,
+which ingests these fixtures **directly into the SQLite database** (`FORGE_CONSOLE_DB`, default
+`forge-demo.db`) — no server round-trip, no network. It is **idempotent**: a re-run only
+touches the `acme-lab` demo campaign and never any real engagement data in the same database.
 
-Vous pouvez aussi seeder manuellement et pointer vers n'importe quelle base :
+You can also seed manually and point at any database:
 
 ```bash
 FORGE_CONSOLE_DB=my.db console/target/release/forge seed-demo --dir examples/reference-engagement
 ```
 
-## Sécurité
+## Safety
 
-- `allow_exploit=false` / `allow_destructive=false` dans `scope.json` — les findings ont été obtenus par
-  **vérification en lecture seule** (*read* IDOR cross-tenant, callback SSRF out-of-band, sonde d'en-tête
-  CORS avec identifiants). Les deux lignes `VETO` de `roe_decisions.jsonl` montrent le scope-guard refusant une
-  cible out-of-scope et un module d'exploit non armé ; la ligne `DRY_RUN` montre une action non approuvée
-  simulée, jamais exécutée.
-- `tools/mock_plume.py` est un **stub stdlib**, clairement étiqueté `DEMO FIXTURE` dans chaque réponse
-  (`_demo:true`, `_warning`, en-tête `X-Demo-Fixture`). **Ne jamais** pointer un engagement réel dessus.
+- `allow_exploit=false` / `allow_destructive=false` in `scope.json` — the findings were obtained by
+  **read-only verification** (cross-tenant IDOR *read*, out-of-band SSRF callback, CORS header
+  probe with credentials). The two `VETO` rows of `roe_decisions.jsonl` show the scope-guard refusing an
+  out-of-scope target and an unarmed exploit module; the `DRY_RUN` row shows an unapproved action
+  simulated, never executed.
+- `tools/mock_plume.py` is a **stdlib stub**, clearly labeled `DEMO FIXTURE` in every response
+  (`_demo:true`, `_warning`, `X-Demo-Fixture` header). **Never** point a real engagement at it.

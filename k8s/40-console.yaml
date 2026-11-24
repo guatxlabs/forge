@@ -15,7 +15,7 @@
 # Shared, tamper-evident engagement ledger. RWX so every replica mounts the SAME engagement.jsonl.
 # ⚠️ RWX REQUIREMENT: ReadWriteMany needs an RWX-capable StorageClass (NFS / CephFS / EFS /
 # Azure Files / Filestore). Plain block volumes (RWO: EBS, GCE-PD, most CSI defaults) CANNOT satisfy
-# this and the second replica will fail to schedule. See DEPLOYMENT.md §k8s for the RWX-vs-per-
+# this and the second replica will fail to schedule. See docs/DEPLOYMENT.md §3bis.6 for the RWX-vs-per-
 # instance-ledger-vs-object-store decision — the console serializes its OWN appends per-instance, so
 # a shared file across replicas relies on RWX + accepting the concurrent-append caveat; for a strict
 # multi-writer audit chain prefer a per-instance ledger (StatefulSet + RWO-per-pod) instead.
@@ -24,7 +24,7 @@
 # its private key to `<ledger>.ed25519` next to the ledger — i.e. ONTO this RWX volume, where any pod/
 # sidecar mounting it (or a PVC snapshot) can read the raw signing key. In HA/multi-tenant move the key
 # OFF this volume: (preferred) the off-host PKCS#11 signer, or (fallback) a read-only Secret-mounted key
-# via FORGE_LEDGER_KEY. See the opt-in blocks on the Deployment below + docs/KEY_CUSTODY.md §HA.
+# via FORGE_LEDGER_KEY. See the opt-in blocks on the Deployment below + docs/KEY_CUSTODY.md §"Key custody in HA (Kubernetes)".
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

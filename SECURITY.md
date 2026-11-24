@@ -1,85 +1,87 @@
-# Politique de sécurité
+# Security policy
 
-Forge est un moteur de sécurité offensive **gouverné** : toute sa proposition de valeur tient à ce
-que les attaques ne puissent pas se déclencher hors d'un scope autorisé et à ce que chaque action
-soit prouvable. Un défaut dans cette gouvernance est un bug sérieux, et nous voulons en être
-informés.
+[English](SECURITY.md) | [Français](SECURITY.fr.md)
 
-## Signaler une vulnérabilité
+Forge is a **governed** offensive security engine: its whole value proposition rests on
+attacks being unable to fire outside an authorized scope and on every action
+being provable. A defect in that governance is a serious bug, and we want to
+hear about it.
 
-**N'ouvrez pas d'issue publique pour une vulnérabilité de sécurité.**
+## Reporting a vulnerability
 
-Signalez en privé, par l'un ou l'autre canal :
+**Do not open a public issue for a security vulnerability.**
 
-1. **GitHub Security Advisories** *(à privilégier)* — le bouton « Report a vulnerability » de
-   l'onglet **Security** de ce dépôt. Il garde le signalement, la discussion et le correctif
-   coordonnés et privés de bout en bout, et nous permet de vous créditer à la divulgation.
-2. **E-mail** — `security@guatx.com`, si vous préférez ne pas utiliser de compte GitHub, ou si le
-   problème concerne le dépôt lui-même.
+Report privately, through either channel:
 
-Merci d'utiliser l'un de ces canaux plutôt qu'une issue publique, une pull request ou un message
-direct.
+1. **GitHub Security Advisories** *(preferred)* — the "Report a vulnerability" button in
+   this repository's **Security** tab. It keeps the report, the discussion and the fix
+   coordinated and private end to end, and lets us credit you at disclosure.
+2. **E-mail** — `security@guatx.com`, if you prefer not to use a GitHub account, or if the
+   problem concerns the repository itself.
 
-Merci d'inclure : la version/le commit affecté, une description, les étapes de reproduction ou un
-PoC, et l'impact. Les GitHub Security Advisories sont privés de bout en bout, aucun chiffrement
-supplémentaire n'est donc nécessaire.
+Please use one of these channels rather than a public issue, a pull request or a direct
+message.
 
-Nous visons un **accusé de réception sous 3 jours ouvrés** et un accord avec vous sur un calendrier
-de remédiation. Nous pratiquons la **divulgation coordonnée** et vous créditerons (sauf si vous
-préférez rester anonyme) une fois un correctif publié.
+Please include: the affected version/commit, a description, the reproduction steps or a
+PoC, and the impact. GitHub Security Advisories are private end to end, so no additional
+encryption is needed.
 
-## Ce qui est dans le périmètre
+We aim for an **acknowledgement within 3 business days** and an agreement with you on a remediation
+timeline. We practice **coordinated disclosure** and will credit you (unless you
+prefer to remain anonymous) once a fix is published.
 
-Un bug de sécurité dans Forge, c'est tout ce qui laisse une action échapper au modèle de sûreté, ou
-qui fuite des données/secrets. En particulier :
+## What is in scope
 
-- **Contournement du scope-guard / de la ROE** — une action qui se déclenche contre une cible hors
-  `in_scope`, ou une action `exploit`/`destructive` qui se déclenche sans l'autorisation `allow_*`
-  correspondante.
-- **Intégrité du ledger** — forger, réordonner, tronquer ou rétrograder une entrée de ledger
-  d'engagement signée de sorte que `verify()` passe quand même.
-- **Isolation tenant / engagement** — lire les findings/données d'un autre engagement ou tenant
-  (p. ex. via la surface GXQL) sous le module multi-tenant (flag-gated).
-- **Fuite de secret** — des credentials de session opérateur, des clés d'API ou des clés de
-  signature qui s'échappent dans un finding, le ledger, un rapport, un log ou une réponse d'API.
-- **AuthN/AuthZ** — contournement d'authentification de la console, élévation de privilèges, IDOR
-  cross-tenant.
-- **Injection / RCE** dans le moteur ou la console (commande, SQL, path traversal, désérialisation).
-- **Élargissement de capacité via la config** — un champ de scope, un `module_param`, un plugin ou
-  un profil de ressources qui accorde une capacité que l'opérateur n'a pas autorisée.
+A security bug in Forge is anything that lets an action escape the safety model, or
+that leaks data/secrets. In particular:
 
-## Ce qui N'EST PAS une vulnérabilité
+- **Scope-guard / ROE bypass** — an action that fires against a target outside
+  `in_scope`, or an `exploit`/`destructive` action that fires without the corresponding `allow_*`
+  authorization.
+- **Ledger integrity** — forging, reordering, truncating or downgrading a signed engagement
+  ledger entry such that `verify()` still passes.
+- **Tenant / engagement isolation** — reading the findings/data of another engagement or tenant
+  (e.g. via the GXQL surface) under the multi-tenant module (flag-gated).
+- **Secret leak** — operator session credentials, API keys or signing
+  keys escaping into a finding, the ledger, a report, a log or an API response.
+- **AuthN/AuthZ** — console authentication bypass, privilege escalation, cross-tenant
+  IDOR.
+- **Injection / RCE** in the engine or the console (command, SQL, path traversal, deserialization).
+- **Capability widening through config** — a scope field, a `module_param`, a plugin or
+  a resource profile that grants a capability the operator did not authorize.
 
-- **Utiliser Forge contre une cible que vous n'êtes pas autorisé à tester.** Forge applique *et
-  prouve* l'autorisation ; il ne l'accorde pas, et ne le peut pas. Le mésusage relève de la
-  responsabilité de l'opérateur.
-- **Franchir un WAF/Cloudflare/anti-bot.** C'est un facilitateur d'accès, pas une vulnérabilité —
-  voir le README.
-- **Les limites documentées et assumées** du déploiement par défaut (p. ex. l'accès host-root à une
-  clé de signature de ledger co-localisée — voir [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md) — ou
-  des collecteurs de détection qui échouent *ouvert* sur une erreur de mesure). Ce sont des
-  compromis de durcissement de déploiement, documentés avec leurs mitigations opt-in. Ne les
-  signalez que si vous pouvez défaire la mitigation ou démontrer un impact *nouveau*.
+## What is NOT a vulnerability
 
-## Versions supportées
+- **Using Forge against a target you are not authorized to test.** Forge enforces *and
+  proves* authorization; it does not grant it, and cannot. Misuse is the
+  operator's responsibility.
+- **Getting past a WAF/Cloudflare/anti-bot.** It is an access enabler, not a vulnerability —
+  see the README.
+- **The documented and accepted limits** of the default deployment (e.g. host-root access to a
+  co-located ledger signing key — see [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md) — or
+  detection collectors that fail *open* on a measurement error). These are
+  deployment-hardening trade-offs, documented with their opt-in mitigations. Only
+  report them if you can defeat the mitigation or demonstrate a *new* impact.
 
-Forge est en pré-1.0 et n'a **encore aucune release taguée**. Les correctifs de sécurité
-atterrissent sur `main`, la seule chose maintenue, merci donc de citer un commit `main` dans votre
-signalement.
+## Supported versions
 
-| Version | Supportée |
+Forge is pre-1.0 and has **no tagged release yet**. Security fixes
+land on `main`, the only thing maintained, so please cite a `main` commit in your
+report.
+
+| Version | Supported |
 |---------|-----------|
 | `main` | ✅ |
-| releases taguées | aucune n'existe encore |
+| tagged releases | none exist yet |
 
-Cette section nommera les versions supportées une fois que des tags existeront — pas avant. Annoncer
-un support par version alors qu'aucune version n'existe serait une fausse promesse, et enverrait
-celui qui signale chercher un numéro de release introuvable.
+This section will name the supported versions once tags exist — not before. Announcing
+per-version support while no version exists would be a false promise, and would send
+the reporter looking for a release number that cannot be found.
 
-## Durcissement & audits
+## Hardening & audits
 
-Forge livre un modèle de sécurité documenté ([`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md),
-[`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md)) et un pipeline CI qui lance `cargo audit` et du secret
-scanning. Les contrôles de sûreté cœur (scope-guard, gate ROE à 4 couches, ledger tamper-evident,
-planner coverage-safe) sont couverts par des tests. Une revue adverse interne de la base de code a
-été menée et les problèmes qu'elle a identifiés ont été corrigés avant la publication.
+Forge ships a documented security model ([`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md),
+[`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md)) and a CI pipeline that runs `cargo audit` and secret
+scanning. The core safety controls (scope-guard, 4-layer ROE gate, tamper-evident ledger,
+coverage-safe planner) are covered by tests. An internal adversarial review of the codebase was
+carried out and the problems it identified were fixed before publication.

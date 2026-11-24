@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE — OIDC SSO login (SEPARABLE, FLAG-GATED module).
+//! ADVANCED MODULE — OIDC SSO login (SEPARABLE, FLAG-GATED, OFF by default).
 //!
-//! Open-core discipline (mirrors `tenancy.rs`): this is an ENTERPRISE feature. The COMMUNITY (default)
+//! Same separation as `tenancy.rs`: this module is OFF by default. The default
 //! build behaves EXACTLY as today — LOCAL accounts only (`users` table + argon2id + `forge_session`
-//! cookie + admin/operator/viewer RBAC). Every route here is a NO-OP (404 `not_found`) unless the
-//! enterprise flag is ENGAGED (`enabled()` false => community, byte-identical). It never weakens the
-//! open governance/audit surface; it only ADDS an OIDC Authorization-Code login path that, on success,
+//! cookie + admin/operator/viewer RBAC). Every route here is a NO-OP (404 `not_found`) unless its
+//! flag is ENGAGED (`enabled()` false => default behaviour, byte-identical). It never weakens the
+//! governance/audit surface; it only ADDS an OIDC Authorization-Code login path that, on success,
 //! issues THE SAME `forge_session` cookie the local `/api/login` issues.
 //!
 //! FLOW (Authorization-Code + PKCE, fail-closed at every step):

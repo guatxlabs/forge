@@ -1,123 +1,128 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-# Règles du dépôt — à lire AVANT de commiter
+# Repository rules — read BEFORE committing
 
-Ce fichier existe pour être lu **sans aucun contexte préalable** : par un contributeur nouveau, ou
-par un agent qui ouvre ce dépôt sans mémoire de ce qui a précédé. Les deux règles ci-dessous ne se
-négocient pas, et elles sont **vérifiées par la machine** — un commit qui les enfreint est refusé.
+[English](AGENTS.md) | [Français](AGENTS.fr.md)
 
-## 1. Une seule identité publique : `guatxlabs <noreply@guatx.com>`
+This file exists to be read **without any prior context**: by a new contributor, or
+by an agent that opens this repository with no memory of what came before. The two rules below are not
+negotiable, and they are **checked by the machine** — a commit that breaks them is refused.
+
+## 1. A single public identity: `guatxlabs <noreply@guatx.com>`
 
 ```sh
 git config user.name  guatxlabs
 git config user.email noreply@guatx.com
 ```
 
-**Aucune adresse personnelle ni nominative**, jamais — ni en auteur, ni en committer. Un dépôt
-publié sous un collectif ne doit pas exposer le compte personnel de qui l'écrit.
+**No personal or named address**, ever — neither as author nor as committer. A repository
+published under a collective must not expose the personal account of whoever writes it.
 
-Cette règle a une histoire utile : l'historique a porté pendant des mois deux identités pour une
-même personne, dont un compte GitHub personnel entré par l'**édition via l'interface web**. Un
-`.mailmap` ne l'a pas corrigé — la page *Contributors* de GitHub apparie les commits aux comptes
-par l'adresse stockée dans les octets du commit. Il a fallu réécrire l'historique.
+This rule has a useful history: for months the history carried two identities for the
+same person, one of them a personal GitHub account that came in through **editing via the web interface**. A
+`.mailmap` did not fix it — GitHub's *Contributors* page matches commits to accounts
+by the address stored in the commit bytes. The history had to be rewritten.
 
-## 2. Un message de commit s'adresse à un LECTEUR PUBLIC
+## 2. A commit message addresses a PUBLIC READER
 
-Écrivez pour quelqu'un qui n'était pas dans la pièce, qui ne vous connaît pas, et qui doit pouvoir
-agir sur ce qu'il lit. Dites **ce qui change et pourquoi**.
+Write for someone who was not in the room, who does not know you, and who must be able to
+act on what they read. Say **what changes and why**.
 
-**Interdit** — le commit n'est pas un compte rendu de conversation :
+The guard reads commit messages in **French**: the refused and admitted phrasings below are quoted
+in French, as the guard reads them, each followed by an English gloss in parentheses.
 
-* le récit d'enquête à la première personne (« j'avais écarté ce champ », « ma vérification ») ;
-* l'adresse directe à un interlocuteur (« comme vous l'avez demandé », « merci de vérifier ») ;
-* la chronologie de session comme fil narratif (« cette session a produit… »).
+**Forbidden** — the commit is not a conversation transcript:
 
-**Admis, et à ne pas confondre avec ce qui précède** :
+* first-person investigation narrative (« j'avais écarté ce champ » (*I had ruled out this field*), « ma vérification » (*my check*));
+* direct address to an interlocutor (« comme vous l'avez demandé » (*as you asked*), « merci de vérifier » (*please check*));
+* the session chronology as narrative thread (« cette session a produit… » (*this session produced…*)).
 
-* la **voix de l'outil** — « un `skipped` dit *je n'ai PAS pu vérifier* » énonce le sens d'un statut ;
-* une **date de mesure** — « MESURÉ le 2026-08-16 » est de la traçabilité, pas un journal ;
-* un **« pourquoi » long**. La longueur n'a jamais été le défaut ; l'adressage l'était.
+**Admitted, and not to be confused with the above**:
 
-La chronologie d'une investigation n'appartient pas au dépôt public : `ROADMAP.md` y est un
-**sommaire** — ce qui est livré, ce qui reste ouvert, les limites assumées — et non un journal de
-campagne. Le récit d'une enquête se tient hors du dépôt ; ce qui doit en survivre publiquement,
-c'est la **décision** et son **pourquoi**, dans le message du commit qui la porte.
+* the **voice of the tool** — « un `skipped` dit *je n'ai PAS pu vérifier* » (*a `skipped` says "I could NOT verify"*) states the meaning of a status;
+* a **measurement date** — « MESURÉ le 2026-08-16 » (*MEASURED on 2026-08-16*) is traceability, not a diary;
+* a **long "why"**. Length was never the defect; addressing was.
 
-### La première personne : interdite nue, admise CITÉE
+The chronology of an investigation does not belong in the public repository: `ROADMAP.md` is a
+**summary** there — what is delivered, what remains open, the accepted limits — and not a campaign
+log. The narrative of an investigation is kept outside the repository; what must survive of it publicly
+is the **decision** and its **why**, in the message of the commit that carries it.
 
-Le garde lit des **formes**, pas des intentions — il ne sait pas qui parle. Toute élision de « je »
-et tout possessif (`mon`, `ma`, `mes`) sont donc refusés **en bloc**, quel que soit le verbe qui
-suit. Ce n'est pas de la sévérité gratuite : la version qui énumérait les verbes
-(`j'ai trouvé|corrigé|mesuré|…`) a laissé passer **56 occurrences** — `j'ai inséré`, `j'ai composé`,
-`mon propre garde`, `de mon côté`, `ma main` — dans des commits qu'elle déclarait conformes.
+### The first person: forbidden bare, admitted QUOTED
 
-La voix de l'outil s'écrit pourtant à la première personne, et doit passer. Elle passe en portant
-une **marque de citation** — c'en est une :
+The guard reads **forms**, not intentions — it does not know who is speaking. Every elision of « je » (*I*)
+and every possessive (`mon`, `ma`, `mes` — *my*) are therefore refused **as a block**, whatever the verb that
+follows. This is not gratuitous strictness: the version that enumerated the verbs
+(`j'ai trouvé|corrigé|mesuré|…` — *I found|fixed|measured|…*) let **56 occurrences** through — `j'ai inséré`, `j'ai composé`,
+`mon propre garde`, `de mon côté`, `ma main` (*I inserted*, *I composed*, *my own guard*, *on my side*, *my hand*) — in commits it declared compliant.
 
-| marque | exemple |
+The voice of the tool is nevertheless written in the first person, and must pass. It passes by carrying
+a **quotation mark** — this is one:
+
+| mark | example |
 |---|---|
-| guillemets | un `skipped` dit « je n'ai PAS pu vérifier » |
-| code | le motif `mon propre garde` n'était pas couvert |
-| ligne `>` | `> un `tested` dit « j'ai vérifié, rien trouvé »` |
+| quotation marks | un `skipped` dit « je n'ai PAS pu vérifier » (*a `skipped` says "I could NOT verify"*) |
+| code | le motif `mon propre garde` n'était pas couvert (*the pattern `mon propre garde` was not covered*) |
+| `>` line | `> un `tested` dit « j'ai vérifié, rien trouvé »` (*a tested status says "I checked, found nothing"*) |
 
-C'est aussi ce qui permet à la règle de citer ce qu'elle interdit sans se refuser elle-même. Une
-citation ne traverse pas un saut de paragraphe, et **un span de code ne doit pas être coupé par un
-retour à la ligne** — sinon l'appariement des backticks se décale et le contenu cité redevient
-visible au garde.
+This is also what lets the rule quote what it forbids without refusing itself. A
+quotation does not cross a paragraph break, and **a code span must not be split by a
+line break** — otherwise the backtick pairing shifts and the quoted content becomes
+visible to the guard again.
 
-### `hier` est interdit, `aujourd'hui` ne l'est pas
+### `hier` is forbidden, `aujourd'hui` is not
 
-Asymétrie mesurée, pas supposée. « hier » n'a aucun référent pour un lecteur qui arrive six mois
-plus tard. « aujourd'hui » sert à dire *à l'état actuel du code* — « aucun réglage n'expose ce
-levier aujourd'hui » — dans 8 emplois sur 9 relevés dans cet historique.
+(`hier` = *yesterday*, `aujourd'hui` = *today*.) Asymmetry measured, not assumed. « hier » has no referent for a reader who arrives six months
+later. « aujourd'hui » serves to say *in the current state of the code* — « aucun réglage n'expose ce
+levier aujourd'hui » (*no setting exposes this lever today*) — in 8 uses out of 9 found in this history.
 
-## Comment ces règles sont tenues
+## How these rules are held
 
-| barrière | portée | activation |
+| barrier | reach | activation |
 |---|---|---|
-| hook `commit-msg` | poste local, avant que le commit existe | `make hooks` (une fois par clone) |
-| job CI `registre public` | tout ce qui arrive au dépôt | automatique |
+| `commit-msg` hook | local workstation, before the commit exists | `make hooks` (once per clone) |
+| `registre public` CI job (*public register*) | everything that reaches the repository | automatic |
 
-Le hook **ne suffit pas** : il n'est pas transporté par `git clone` et n'est jamais exécuté par
-l'édition web de GitHub — la voie même par laquelle le problème était entré. **C'est la CI qui
-ferme.** Le hook évite seulement d'avoir à corriger après coup.
+The hook **is not enough**: it is not carried by `git clone` and is never run by
+GitHub's web editing — the very path through which the problem had come in. **The CI is what
+closes.** The hook only saves having to fix things afterwards.
 
-Les deux slots d'identité sont vérifiés, **auteur et committer** : un `cherry-pick`, un `rebase` ou
-l'édition web laissent l'auteur intact et écrivent une autre identité en committer — et c'est par
-là que le compte personnel était entré. Une plage que git n'a pas su lire est un **refus**, pas un
-silence : une barrière échoue fermée.
+Both identity slots are checked, **author and committer**: a `cherry-pick`, a `rebase` or
+web editing leave the author intact and write another identity as committer — and that is
+how the personal account had come in. A range that git could not read is a **refusal**, not
+silence: a barrier fails closed.
 
-Vérifier un message avant de commiter, ou une plage déjà écrite :
+Check a message before committing, or a range already written:
 
 ```sh
 python3 scripts/check_commit_register.py --message-file <fichier>
 python3 scripts/check_commit_register.py --range origin/main..HEAD
 ```
 
-### Ce qu'un garde ne peut pas faire, et ce qu'il faut faire à la place
+### What a guard cannot do, and what to do instead
 
-**Un garde n'attrape que ce qu'il sait décrire.** Les 56 occurrences citées plus haut n'ont pas été
-trouvées par lui — il les déclarait conformes — mais par un **audit indépendant**, écrit avec
-d'autres motifs, exprès plus larges, et confronté ligne à ligne. Ce dépôt a quatre listes tenues à
-la main qui ont survécu à leur objet : `_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS`, les exemptions du
-garde de documents, et cette énumération de verbes.
+**A guard only catches what it knows how to describe.** The 56 occurrences cited above were not
+found by it — it declared them compliant — but by an **independent audit**, written with
+other patterns, deliberately broader, and compared line by line. This repository has four hand-kept lists
+that outlived their purpose: `_RATE_FLAG_KINDS`, `_SQL_ERROR_SIGNS`, the exemptions of the
+document guard, and this enumeration of verbs.
 
-Avant d'affirmer qu'un dépôt est propre : écrire un contrôle **indépendant du garde**, comparer, et
-trier les faux positifs à la main. Un garde vert ne prouve que l'absence de ce qu'il cherche.
+Before asserting that a repository is clean: write a check **independent of the guard**, compare, and
+sort the false positives by hand. A green guard only proves the absence of what it looks for.
 
-### Si vous réécrivez l'historique
+### If you rewrite history
 
-Trois pièges rencontrés, chacun ayant coûté une reprise :
+Three traps encountered, each of which cost a redo:
 
-* `git filter-repo` **remet l'arbre de travail à l'état commité**. Toute modification non commitée
-  est perdue — commiter d'abord, réécrire ensuite.
-* sans `--prune-empty=never`, un commit dont le seul changement devient un no-op après réécriture
-  est **supprimé avec son message**. Vérifier le compte de commits avant/après.
-* filter-repo **réécrit les SHA cités dans les messages** : un remplacement littéral qui contient
-  un SHA ne matchera plus au tour suivant.
+* `git filter-repo` **resets the working tree to the committed state**. Any uncommitted change
+  is lost — commit first, rewrite afterwards.
+* without `--prune-empty=never`, a commit whose only change becomes a no-op after rewriting
+  is **deleted along with its message**. Check the commit count before/after.
+* filter-repo **rewrites the SHAs cited in messages**: a literal replacement that contains
+  a SHA will no longer match on the next pass.
 
-## Le reste
+## The rest
 
-Les invariants techniques (scope-guard fail-closed, gate ROE à 4 couches, plancher exploit, ledger
-append-only, rédaction des secrets, planner coverage-safe, findings à preuve) sont dans
-[`CONTRIBUTING.md`](CONTRIBUTING.md). Une PR qui en affaiblit un est refusée, quelle que soit son
-utilité par ailleurs.
+The technical invariants (fail-closed scope-guard, 4-layer ROE gate, exploit floor, append-only
+ledger, secret redaction, coverage-safe planner, evidence-backed findings) are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). A PR that weakens one of them is refused, whatever its
+usefulness otherwise.

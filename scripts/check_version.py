@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Garde-fou de dérive de version (source de vérité unique = fichier `VERSION` à la racine).
 
 Échoue (exit 1) si `VERSION`, `pyproject.toml` (`[project].version`) et

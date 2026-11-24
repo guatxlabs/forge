@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests hermetiques de `massassign.params` — aucun reseau.
 
 TROIS CONTRATS SONT EPINGLES, et les deux derniers portent sur la sûrete plus que sur la mesure.

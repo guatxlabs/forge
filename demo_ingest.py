@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Driver de démo — FIRE le module synthétique demo.fingerprint puis ingère vers la console.
 
 NE MODIFIE PAS le code source Forge : réutilise Scope/Engine/Action + console_client tels quels.

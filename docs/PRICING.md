@@ -1,115 +1,117 @@
-# Forge — Prestations & tarification (PROPOSITION)
+# Forge — Services & pricing (PROPOSAL)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Positionnement](POSITIONING.md) · [Vue d'ensemble](OVERVIEW.md)
+[English](PRICING.md) | [Français](PRICING.fr.md)
 
-> ⚠️ **Statut : PROPOSITION de travail, pas un engagement commercial.** Les montants ci-dessous sont
-> des ordres de grandeur pour cadrer la discussion GTM (cf. [`POSITIONING.md`](POSITIONING.md)). Aucun
-> tarif n'est ferme tant qu'un premier engagement de référence n'a pas validé la valeur de couverture
-> (cf. [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md)).
+> 🧭 [Forge documentation](README.md) · See also: [Positioning](POSITIONING.md) · [Overview](OVERVIEW.md)
 
-> 💡 **Le produit est gratuit et open source.** Forge est publié sous **[AGPL-3.0-or-later](../LICENSE)**,
-> avec **toutes** ses capacités — y compris les modules avancés (multi-tenant/MSSP, SSO/SCIM, RBAC avancé,
-> conformité WORM/legal-hold, signeur de ledger hors-host). Il n'y a **ni édition payante, ni fonction
-> bridée derrière un paywall** : ce qui se facture, ce sont des **prestations de service** autour de
-> l'outil, jamais l'outil lui-même. Détail des modules : [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md).
+> ⚠️ **Status: working PROPOSAL, not a commercial commitment.** The amounts below are
+> orders of magnitude to frame the GTM discussion (see [`POSITIONING.md`](POSITIONING.md)). No
+> price is firm until a first reference engagement has validated the coverage value
+> (see [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md)).
+
+> 💡 **The product is free and open source.** Forge is published under **[AGPL-3.0-or-later](../LICENSE)**,
+> with **all** its capabilities — including the advanced modules (multi-tenant/MSSP, SSO/SCIM, advanced RBAC,
+> WORM/legal-hold compliance, off-host ledger signer). There is **no paid offering and no feature
+> locked behind a paywall**: what is billed is **professional services** around
+> the tool, never the tool itself. Module details: [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md).
 >
-> « Gratuit / libre » vaut au sens des **libertés AGPL-3.0**, pas « sans obligation » : l'AGPL est un
-> **copyleft fort** — source à offrir sur usage réseau (§13), dérivés qui restent sous AGPL, mentions de
-> licence préservées (cf. [`LICENSE`](../LICENSE)).
+> "Free" holds in the sense of the **AGPL-3.0 freedoms**, not "without obligation": the AGPL is a
+> **strong copyleft** — source to be offered on network use (§13), derivatives that stay under the AGPL, license
+> notices preserved (see [`LICENSE`](../LICENSE)).
 
 ---
 
-## 1. La logique de prix
+## 1. The pricing logic
 
-On ne tarife **PAS** le logiciel (il est libre) ni le nombre d'exploits (Forge n'en fournit pas — il
-pilote MSF/Burp/nuclei). La facturation porte sur la **prestation** — la valeur de gouvernance et de
-couverture mesurée qu'un accompagnement apporte :
+We do **NOT** price the software (it is free) nor the number of exploits (Forge provides none — it
+drives MSF/Burp/nuclei). Billing covers the **service** — the governance and
+measured-coverage value that an engagement brings:
 
-- ce que coûte aujourd'hui au client de **prouver manuellement** qu'un red-team est resté in-scope
-  (heures juridiques + risque d'audit) ;
-- ce que vaut de **chiffrer la couverture défensive** (le SOC voit-il 40 % ou 80 % des techniques ?
-  combien coûte un trou non détecté ?) ;
-- l'effet **même-vendeur** rouge × bleu : un seul interlocuteur pour la boucle purple, une seule
-  corrélation ATT&CK.
+- what it costs the client today to **manually prove** that a red team stayed in-scope
+  (legal hours + audit risk);
+- what it is worth to **put a figure on defensive coverage** (does the SOC see 40 % or 80 % of the techniques?
+  how much does an undetected gap cost?);
+- the **same-vendor** red × blue effect: a single point of contact for the purple loop, a single
+  ATT&CK correlation.
 
-**Ancrage marché** : Metasploit Pro se vend ~**15 000 $/siège/an** pour de la *capacité* offensive.
-Forge n'achète pas la capacité (le client l'a déjà) et ne vend **aucune licence produit** — il vend la
-**preuve + la mesure**, livrées par une prestation. La valeur se justifie par la couverture mesurée, pas
-par la capacité brute ni par un droit d'usage du code.
+**Market anchor**: Metasploit Pro sells for ~**$15,000/seat/year** for offensive *capability*.
+Forge does not sell capability (the client already has it) and sells **no product license** — it sells
+**evidence + measurement**, delivered through a service. The value is justified by measured coverage, not
+by raw capability nor by a right to use the code.
 
 ---
 
-## 2. Les prestations (proposition)
+## 2. The services (proposal)
 
-| Prestation | Contenu | Pour qui | Ordre de grandeur |
+| Service | Content | For whom | Order of magnitude |
 |---|---|---|---|
-| **Engagement de référence** ⭐ | Une campagne autorisée de bout en bout : périmètre + gate ROE, **ledger Ed25519 tiers-vérifiable**, **matrice de couverture ATT&CK** (detected / missed / MTTD réel) et rapport livré. C'est le livrable qui prouve la valeur. | Premier client / audit ponctuel qui veut chiffrer sa couverture. | Forfait par engagement. |
-| **Accompagnement purple** | Câblage **Forge × Plume** (SOC bleu), mise en place de la boucle de couverture, comblement itératif des trous, montée en compétence de l'équipe interne. | RSSI / lead purple qui veut installer la boucle dans la durée. | Forfait ou régie. |
-| **Support & SLA** | Support ouvré, mises à jour, aide au déploiement — **y compris les modules avancés** (multi-tenant/MSSP, SSO/SCIM, conformité WORM, ancrage ledger hors-host) —, revue de scope, réponse priorisée. | Équipe interne stable / MSSP avec roster d'opérateurs. | Abonnement annuel. |
-| **Hébergement / managé** | Forge opéré par GuatX : ancrage du ledger hors-host, sauvegardes chiffrées, mises à jour, supervision. | Client régulé / sans équipe ops dédiée. | Sur devis. |
+| **Reference engagement** ⭐ | An authorized campaign end to end: scope + ROE gate, **third-party-verifiable Ed25519 ledger**, **ATT&CK coverage matrix** (detected / missed / real MTTD) and delivered report. It is the deliverable that proves the value. | First client / one-off audit that wants to put a figure on its coverage. | Fixed price per engagement. |
+| **Purple coaching** | Wiring **Forge × Plume** (blue SOC), setting up the coverage loop, iterative closing of gaps, upskilling of the internal team. | CISO / purple lead who wants to install the loop for the long term. | Fixed price or time and materials. |
+| **Support & SLA** | Business-hours support, updates, deployment help — **including the advanced modules** (multi-tenant/MSSP, SSO/SCIM, WORM compliance, off-host ledger anchoring) —, scope review, prioritized response. | Stable internal team / MSSP with a roster of operators. | Annual subscription. |
+| **Hosting / managed** | Forge operated by GuatX: off-host ledger anchoring, encrypted backups, updates, monitoring. | Regulated client / without a dedicated ops team. | On quote. |
 
-> Le produit reste **entièrement auto-hébergeable et gratuit** dans chacun de ces cas. La prestation ne
-> déverrouille aucune fonction : elle apporte du **temps expert, de la garantie et de la preuve livrée**.
+> The product remains **fully self-hostable and free** in each of these cases. The service
+> unlocks no feature: it brings **expert time, assurance and delivered evidence**.
 
 ---
 
-## 3. Axes de facturation (esquisse, à arbitrer)
+## 3. Billing axes (sketch, to be decided)
 
-Deux modèles plausibles, non exclusifs :
+Two plausible models, not mutually exclusive:
 
-### (a) Par-engagement
-- **Unité** : une campagne autorisée (un scope, un ledger, une matrice de couverture livrée).
-- **Adapté à** : cabinets de conseil / audits ponctuels, premiers clients (faible engagement initial).
-- **Livrable facturé** : le rapport d'engagement signé + la matrice purple (cf. template).
+### (a) Per engagement
+- **Unit**: one authorized campaign (one scope, one ledger, one delivered coverage matrix).
+- **Suited to**: consulting firms / one-off audits, first clients (low initial commitment).
+- **Billed deliverable**: the signed engagement report + the purple matrix (see template).
 
-### (b) Support / abonnement annuel
-- **Unité** : contrat de support par opérateur actif (siège) ou par périmètre.
-- **Adapté à** : équipe interne stable, MSSP avec roster d'opérateurs.
-- **Note d'archi** : le build par défaut est **stateful single-replica** (SQLite + ledger sur PVC
-  RWO, cf. [`DEPLOYMENT.md`](DEPLOYMENT.md)) → profil idéal **mono-opérateur / petit MSSP**. Le
-  **multi-tenant scale-out** est un **module open, flag-gated** (`FORGE_ENTERPRISE_STORE=postgres`,
-  ledger hors-host, cf. [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md)) : disponible dans le code,
-  mais son **exploitation en managé multi-client** relève de la prestation d'hébergement.
+### (b) Support / annual subscription
+- **Unit**: support contract per active operator (seat) or per scope.
+- **Suited to**: stable internal team, MSSP with a roster of operators.
+- **Architecture note**: the default build is **stateful single-replica** (SQLite + ledger on an RWO
+  PVC, see [`DEPLOYMENT.md`](DEPLOYMENT.md)) → ideal profile **single operator / small MSSP**. The
+  **multi-tenant scale-out** is an **open, flag-gated module** (`FORGE_ENTERPRISE_STORE=postgres`,
+  off-host ledger, see [`ADVANCED_MODULES.md`](ADVANCED_MODULES.md)): available in the code,
+  but **running it as a managed multi-client service** falls under the hosting service.
 
-> **Recommandation GTM** : démarrer **par-engagement** (faible friction, prouve la valeur sur un
-> premier client de référence), puis basculer les clients récurrents en **support/abonnement**.
+> **GTM recommendation**: start **per engagement** (low friction, proves the value on a
+> first reference client), then move recurring clients to **support/subscription**.
 
-### Niveaux de support
-| Niveau | Contenu | |
+### Support levels
+| Level | Content | |
 |---|---|---|
-| **Communautaire** | Docs, best-effort, pas de SLA. | gratuit, avec l'open source |
-| **Standard** | Support ouvré, mises à jour, aide au câblage Plume. | prestation |
-| **Priorisé** | Réponse priorisée, onboarding accompagné, aide à l'ancrage ledger hors-host, revue de scope, déploiement des modules avancés. | prestation, sur devis |
+| **Community** | Docs, best-effort, no SLA. | free, with the open source |
+| **Standard** | Business-hours support, updates, help wiring Plume. | service |
+| **Prioritized** | Prioritized response, assisted onboarding, help with off-host ledger anchoring, scope review, deployment of the advanced modules. | service, on quote |
 
 ---
 
-## 4. Ce qui justifie la valeur de l'accompagnement purple (argumentaire)
+## 4. What justifies the value of purple coaching (argument)
 
-1. **Valeur de couverture mesurée** : passer d'un SOC « on pense être couverts » à « on détecte
-   N techniques ATT&CK sur M, MTTD médian = X min » est un livrable directement présentable au COMEX
-   et à l'auditeur. C'est la sortie native de la boucle purple.
-2. **Un seul interlocuteur pour rouge + bleu** : pas d'intégration tierce fragile entre l'outil offensif
-   et le SIEM — la corrélation ATT&CK est native (champ `mitre` joint en lecture seule).
-3. **Preuve d'autorisation incluse** : le ledger Ed25519 vérifiable par un tiers réduit le coût
-   juridique/audit de chaque campagne (moins d'heures d'avocat pour « prouver qu'on est resté
-   in-scope »).
-4. **Safe-by-default** : moindre risque opérationnel (inerte par défaut, fail-closed) = argument
-   d'assurance / conformité.
-
----
-
-## 5. Limites honnêtes à dire au prospect
-
-- **Capacité offensive brute faible** : si le besoin est « plus d'exploits / du post-ex / du C2 »,
-  Forge n'est PAS la réponse — garder MSF/CS, ajouter Forge par-dessus.
-- **Maturité v0.0.1** : les premiers clients sont des **design partners** (prestation à tarif réduit
-  contre retour terrain et droit de référence).
-- **Single-replica par défaut** : le multi-tenant scale-out **existe** comme module open flag-gated,
-  mais l'**offre managée multi-client** (SLA, ancrage hors-host opéré par GuatX) est une roadmap de
-  prestation, pas un acquis.
+1. **Measured coverage value**: going from a SOC that "thinks it is covered" to "we detect
+   N ATT&CK techniques out of M, median MTTD = X min" is a deliverable that can be presented directly to the executive committee
+   and to the auditor. It is the native output of the purple loop.
+2. **A single point of contact for red + blue**: no fragile third-party integration between the offensive tool
+   and the SIEM — the ATT&CK correlation is native (`mitre` field joined read-only).
+3. **Evidence of authorization included**: the third-party-verifiable Ed25519 ledger reduces the
+   legal/audit cost of each campaign (fewer lawyer hours to "prove we stayed
+   in-scope").
+4. **Safe-by-default**: lower operational risk (inert by default, fail-closed) = an insurance /
+   compliance argument.
 
 ---
 
-*Voir aussi : [`POSITIONING.md`](POSITIONING.md) (le pitch + teardown concurrentiel) ·
-[`ADVANCED_MODULES.md`](ADVANCED_MODULES.md) (les modules avancés open, flag-gated) ·
-[`DEPLOYMENT.md`](DEPLOYMENT.md) (contrainte single-replica) · [`PLAN.md`](PLAN.md) (roadmap).*
+## 5. Honest limits to tell the prospect
+
+- **Low raw offensive capability**: if the need is "more exploits / post-ex / C2",
+  Forge is NOT the answer — keep MSF/CS, add Forge on top.
+- **v0.0.1 maturity**: the first clients are **design partners** (service at a reduced rate
+  in exchange for field feedback and the right to use them as a reference).
+- **Single-replica by default**: the multi-tenant scale-out **exists** as an open flag-gated module,
+  but the **managed multi-client offering** (SLA, off-host anchoring operated by GuatX) is a service
+  roadmap item, not a given.
+
+---
+
+*See also: [`POSITIONING.md`](POSITIONING.md) (the pitch + competitive teardown) ·
+[`ADVANCED_MODULES.md`](ADVANCED_MODULES.md) (the open, flag-gated advanced modules) ·
+[`DEPLOYMENT.md`](DEPLOYMENT.md) (single-replica constraint) · [`PLAN.md`](PLAN.md) (roadmap).*

@@ -130,7 +130,7 @@ fn gate(app: &App, headers: &HeaderMap) -> Option<Response> {
         return Some(err(
             StatusCode::FORBIDDEN,
             "enterprise_disabled",
-            "multi-tenancy enterprise non activée (FORGE_ENTERPRISE_TENANCY / enterprise.tenancy)",
+            "module avancé multi-tenancy non activé (FORGE_ENTERPRISE_TENANCY / enterprise.tenancy)",
         ));
     }
     if !platform_admin_ok(app, headers) {

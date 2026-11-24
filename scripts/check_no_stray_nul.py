@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Interdit l'octet NUL non déclaré dans un fichier suivi par git.
 
 POURQUOI (mesuré, pas supposé). `console/src/common.rs` contenait UN octet NUL, dans un

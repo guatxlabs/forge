@@ -1,61 +1,63 @@
-# Prérequis Plume pour la boucle purple Forge (le moat)
+# Plume prerequisites for the Forge purple loop (the moat)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Sources de détection](DETECTION.md) ·
-> [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) · [MTTD](MTTD.md)
+[English](PURPLE_PREREQS.md) | [Français](PURPLE_PREREQS.fr.md)
 
-> **Plume est UN préréglage (`kind=plume`), pas la seule option.** La source de détection est un **plugin
-> configurable** : CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, un fichier JSONL ou une
-> commande maison se câblent **sans code** (wizard / *Administration → Source de détection*). Le modèle
-> `DetectionSource` complet et les préréglages par infra sont dans **[`DETECTION.md`](DETECTION.md)**. Ce
-> document ne couvre que le préréglage **Plume** ; `PLUME_URL`/`PLUME_TOKEN` restent supportés en
-> rétro-compat (interprétés comme `kind=plume`).
+> 🧭 [Forge documentation](README.md) · See also: [Detection sources](DETECTION.md) ·
+> [Concepts: purple loop](CONCEPTS.md#5-the-purple-loop) · [MTTD](MTTD.md)
 
-## Rappel du flux
+> **Plume is ONE preset (`kind=plume`), not the only option.** The detection source is a **configurable
+> plugin**: CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, a JSONL file or a custom
+> command are wired **without code** (wizard / *Administration → Detection source*). The full
+> `DetectionSource` model and the per-infrastructure presets are in **[`DETECTION.md`](DETECTION.md)**. This
+> document only covers the **Plume** preset; `PLUME_URL`/`PLUME_TOKEN` remain supported for
+> backward compatibility (interpreted as `kind=plume`).
 
-La console Forge `/api/detection/coverage` (alias rétro-compat `/api/purple/coverage`) lit les run-records
-tirés (par **technique**, tags multi-techniques éclatés), interroge la **source de détection
-configurée**, et **JOIN** à trois états → detected (exact) / parent_approx / missed /
-MTTD. Pour le préréglage Plume, la source est `GET {PLUME_URL}/api/coverage/detections`.
+## The flow, in brief
 
-## Checklist Plume (à faire avant le « go »)
+The Forge console `/api/detection/coverage` (backward-compatible alias `/api/purple/coverage`) reads the
+fired run-records (per **technique**, multi-technique tags split), queries the **configured detection
+source**, and **JOINs** into three states → detected (exact) / parent_approx / missed /
+MTTD. For the Plume preset, the source is `GET {PLUME_URL}/api/coverage/detections`.
 
-1. **Champ `mitre` exposé par la source de détection** : chaque **alerte** et chaque **règle** doit
-   porter une technique ATT&CK, et le champ doit être **indexé** côté source (l'agrégat de l'étape 2
-   est une requête par `mitre`). Une version de Plume qui n'expose pas encore ce champ doit être mise
-   à jour avant de câbler la boucle purple.
+## Plume checklist (to do before the "go")
 
-2. **Endpoint exposé** : `GET /api/coverage/detections?since=<epoch>` →
-   `{"detections":[{mitre,count,first_ts},…]}` (agrégat `alert WHERE mitre<>'' GROUP BY mitre`,
-   tri `count DESC`).
+1. **`mitre` field exposed by the detection source**: every **alert** and every **rule** must
+   carry an ATT&CK technique, and the field must be **indexed** on the source side (the aggregate in step 2
+   is a query by `mitre`). A Plume version that does not expose this field yet must be updated
+   before wiring the purple loop.
 
-3. ⭐ **Règles taguées MITRE** (travail manuel) : `rule.mitre` rempli sur les règles utiles
-   (ex. brute-force → T1110, port-scan → T1046, web-scan → T1595.002, accès → T1190). Sinon Plume
-   détecte sans `mitre` → matrice = tout « raté » (faux trous).
+2. **Exposed endpoint**: `GET /api/coverage/detections?since=<epoch>` →
+   `{"detections":[{mitre,count,first_ts},…]}` (aggregate `alert WHERE mitre<>'' GROUP BY mitre`,
+   sorted `count DESC`).
 
-4. **Règles actives + sources de logs qui coulent** : Plume ingère les events (journald / syslog)
-   de l'hôte testé → un tir déclenche la règle → `alert` avec `mitre` hérité.
+3. ⭐ **MITRE-tagged rules** (manual work): `rule.mitre` filled in on the useful rules
+   (e.g. brute-force → T1110, port-scan → T1046, web-scan → T1595.002, access → T1190). Otherwise Plume
+   detects without `mitre` → matrix = everything "missed" (false gaps).
 
-5. **Joignabilité + auth depuis la console** : endpoint sous `/api/` → **Basic
-   (viewer / editor / admin)** OU header SSO de confiance ; les **tokens Bearer d'agent NE sont
-   PAS acceptés**. Fournir un identifiant Plume lecture + chemin réseau ouvert. (À vérifier au
-   câblage : la console doit envoyer du Basic / SSO, **pas** du Bearer.)
+4. **Active rules + log sources flowing**: Plume ingests the events (journald / syslog)
+   of the tested host → a shot triggers the rule → `alert` with an inherited `mitre`.
 
-6. **Horloges synchronisées (NTP)** : `ts_fired` (Forge) et `alert.ts` (Plume) cohérents pour un
-   MTTD juste (MTTD = `first_ts − ts_fired`).
+5. **Reachability + auth from the console**: endpoint under `/api/` → **Basic
+   (viewer / editor / admin)** OR a trusted SSO header; agent **Bearer tokens are NOT
+   accepted**. Provide a read-only Plume credential + an open network path. (To check during
+   wiring: the console must send Basic / SSO, **not** Bearer.)
 
-7. **Cible lab autorisée surveillée par Plume** : pour la moitié « tir », un hôte dans le périmètre
-   de monitoring Plume, autorisé à être attaqué. ROE / scope reste dur.
+6. **Synchronised clocks (NTP)**: `ts_fired` (Forge) and `alert.ts` (Plume) consistent for an
+   accurate MTTD (MTTD = `first_ts − ts_fired`).
 
-## Côté Forge au « go »
+7. **Authorised lab target monitored by Plume**: for the "fire" half, a host inside Plume's
+   monitoring scope, authorised to be attacked. ROE / scope stays hard.
 
-Configurer la **source de détection** (préréglage Plume) — soit dans l'UI (*Administration → Source de
-détection*, ou l'étape 3 du wizard), soit via `PLUME_URL` + `PLUME_TOKEN` (rétro-compat) — confirmer le
-type d'auth, lancer la 1ʳᵉ campagne lab gatée ROE, sortir la matrice live + le rapport. Pour toute autre
-infra (CrowdSec, FortiGate, Elastic…), voir **[`DETECTION.md`](DETECTION.md)**.
+## Forge side at the "go"
 
-## ⚠️ Sûreté
+Configure the **detection source** (Plume preset) — either in the UI (*Administration → Detection
+source*, or step 3 of the wizard), or via `PLUME_URL` + `PLUME_TOKEN` (backward compatibility) — confirm the
+auth type, launch the 1st ROE-gated lab campaign, produce the live matrix + the report. For any other
+infrastructure (CrowdSec, FortiGate, Elastic…), see **[`DETECTION.md`](DETECTION.md)**.
 
-- Le JOIN est **lecture seule** (sûr).
-- Tirer des techniques = **uniquement** cible autorisée / scopée. ROE / scope reste dur.
-- **JAMAIS** de tir sur prod non autorisée ni source de détection (`PLUME_URL`/`settings.detection_source`) détournée.
-- Source absente/injoignable ⇒ `source_reachable:false` : la mesure est déclarée **impossible**, jamais inventée.
+## ⚠️ Safety
+
+- The JOIN is **read-only** (safe).
+- Firing techniques = **only** an authorised / scoped target. ROE / scope stays hard.
+- **NEVER** fire at unauthorised production, nor at a hijacked detection source (`PLUME_URL`/`settings.detection_source`).
+- Source absent/unreachable ⇒ `source_reachable:false`: the measurement is declared **impossible**, never invented.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests hermetiques de la synchronisation A DERNIER OCTET de `race.condition` — aucun reseau.
 
 CE QUI EST EN JEU. `race.condition` synchronisait par threads : gigue de l'ordre de la

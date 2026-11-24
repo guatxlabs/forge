@@ -1,34 +1,36 @@
-# Sauvegarde & restauration chiffrées
+# Encrypted backup & restore
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Administration](ADMINISTRATION.md#5-sauvegarde--restauration) ·
-> [Migration de données](MIGRATION.md) · [Configuration](CONFIGURATION.md#16-sauvegardes-programmées)
+[English](BACKUP.md) | [Français](BACKUP.fr.md)
 
-Ce runbook décrit la **sauvegarde** et la **restauration** de la Forge Console : le format
-d'archive, le chiffrement, pourquoi **la clé de signature voyage à l'intérieur de l'archive
-chiffrée**, les garde-fous de restauration, et la programmation + expédition **offsite**.
+> 🧭 [Forge documentation](README.md) · See also: [Administration](ADMINISTRATION.md#5-backup--restore) ·
+> [Data migration](MIGRATION.md) · [Configuration](CONFIGURATION.md#16-scheduled-backups)
 
-Une sauvegarde regroupe les **trois artefacts couplés** de l'engagement — exactement les mêmes
-que la migration :
+This runbook describes **backup** and **restore** of the Forge Console: the archive
+format, the encryption, why **the signing key travels inside the encrypted
+archive**, the restore guardrails, and scheduling + **offsite** shipping.
 
-| Artefact | Entrée d'archive | Rôle |
+A backup bundles the engagement's **three coupled artefacts** — exactly the same ones
+as the migration:
+
+| Artefact | Archive entry | Role |
 |----------|------------------|------|
-| Base SQLite | `db.sqlite` | findings / runs / ROE / comptes / settings (snapshot **cohérent** via `VACUUM INTO`) |
-| Ledger d'engagement | `engagement.jsonl` | chaîne SHA-256 **tamper-evident** des mutations |
-| **Clé de signature** | `signing.ed25519` | secret Ed25519 (0600) qui **signe** les entrées du ledger |
-| Manifeste | `manifest.json` | schéma + `sha256` par fichier (ré-vérifié à la restauration) |
+| SQLite database | `db.sqlite` | findings / runs / ROE / accounts / settings (**consistent** snapshot via `VACUUM INTO`) |
+| Engagement ledger | `engagement.jsonl` | **tamper-evident** SHA-256 chain of mutations |
+| **Signing key** | `signing.ed25519` | Ed25519 secret (0600) that **signs** the ledger entries |
+| Manifest | `manifest.json` | schema + per-file `sha256` (re-verified on restore) |
 
 ---
 
-## 1. L'archive est TOUJOURS chiffrée — il n'existe aucun chemin en clair
+## 1. The archive is ALWAYS encrypted — there is no plaintext path
 
-Parce que l'archive embarque **la clé privée de signature `.ed25519` ET la base**, elle est
-**toujours** scellée. Il **n'existe aucune variante non chiffrée** et **une passphrase est
-obligatoire** (fail-closed : passphrase absente ⇒ refus, rien n'est écrit).
+Because the archive bundles **the `.ed25519` private signing key AND the database**, it is
+**always** sealed. There is **no unencrypted variant** and **a passphrase is
+mandatory** (fail-closed: missing passphrase ⇒ refusal, nothing is written).
 
-> ⚠️ **La clé `.ed25519` DOIT rester avec le ledger.** Sans elle, la chaîne signée devient
-> invérifiable. La sauvegarde l'embarque, la restauration la replace **en 0600**.
+> ⚠️ **The `.ed25519` key MUST stay with the ledger.** Without it, the signed chain becomes
+> unverifiable. The backup bundles it, the restore puts it back **as 0600**.
 
-### Format (auto-descriptif)
+### Format (self-describing)
 
 ```
 [ en-tête EN CLAIR ]                       [ ciphertext AEAD (tar chiffré) ]
@@ -40,76 +42,76 @@ obligatoire** (fail-closed : passphrase absente ⇒ refus, rien n'est écrit).
                                             │        signing.ed25519
 ```
 
-L'en-tête (magic | version | paramètres argon2 | sel | nonce) est écrit **en clair** devant le
-ciphertext **ET lié comme donnée associée (AAD)** de l'AEAD.
+The header (magic | version | argon2 parameters | salt | nonce) is written **in plaintext** in front of the
+ciphertext **AND bound as associated data (AAD)** of the AEAD.
 
-### Chiffrement : argon2id + XChaCha20-Poly1305 (pur Rust, aucune dépendance C)
+### Encryption: argon2id + XChaCha20-Poly1305 (pure Rust, no C dependency)
 
 ```
 passphrase ──argon2id(sel 16o aléatoire, params par défaut)──▶ clé 32o
 tar(archive) ──XChaCha20-Poly1305(clé, nonce 24o aléatoire, AAD = en-tête)──▶ ciphertext‖tag
 ```
 
-- **KDF** : argon2id (Algorithme id, v0x13). Le sel (16o) et le nonce (24o) sont tirés par le
-  **CSPRNG de l'OS** à chaque sauvegarde ⇒ deux sauvegardes du même état diffèrent, et rejouer un
-  nonce est improbable. Les paramètres argon2 voyagent **dans l'en-tête** (auto-descriptif) pour
-  être re-dérivables à la restauration ; ils sont **validés dans des bornes sûres** avant dérivation
-  (un en-tête corrompu ⇒ erreur propre, jamais de panic/DoS).
-- **AEAD** : XChaCha20-Poly1305. Le tag Poly1305 authentifie **le corps ET l'en-tête** (AAD) :
-  altérer un seul octet (corps, sel, nonce ou paramètres) **fait échouer le déchiffrement**.
-- **La passphrase / la clé dérivée ne sont JAMAIS stockées, loggées ni ledgerisées.** La clé
-  dérivée est effacée du stack dès qu'elle n'est plus nécessaire.
+- **KDF**: argon2id (Algorithm id, v0x13). The salt (16 bytes) and the nonce (24 bytes) are drawn from the
+  **OS CSPRNG** on every backup ⇒ two backups of the same state differ, and replaying a
+  nonce is improbable. The argon2 parameters travel **in the header** (self-describing) so they
+  can be re-derived on restore; they are **validated within safe bounds** before derivation
+  (a corrupted header ⇒ clean error, never a panic/DoS).
+- **AEAD**: XChaCha20-Poly1305. The Poly1305 tag authenticates **the body AND the header** (AAD):
+  altering a single byte (body, salt, nonce or parameters) **makes decryption fail**.
+- **The passphrase / derived key are NEVER stored, logged nor written to the ledger.** The derived
+  key is wiped from the stack as soon as it is no longer needed.
 
-**Mauvaise passphrase** ou **archive altérée** ⇒ échec **propre** (tag AEAD invalide) : la
-restauration n'écrit **rien**.
-
----
-
-## 2. Intégrité : le ledger est vérifié avant et après
-
-- **Avant la sauvegarde** : la chaîne SHA-256 du ledger est vérifiée. Une chaîne **rompue avorte**
-  la sauvegarde (aucune archive écrite).
-- **À la restauration** : (1) l'AEAD authentifie l'archive ; (2) le `sha256` de **chaque** fichier
-  du `manifest.json` est re-vérifié ; (3) la chaîne du ledger extrait est re-vérifiée **avant** tout
-  placement ; (4) après placement, la chaîne est **re-vérifiée** puis l'action est tracée.
+**Wrong passphrase** or **tampered archive** ⇒ **clean** failure (invalid AEAD tag): the
+restore writes **nothing**.
 
 ---
 
-## 3. Restauration : garde anti-écrasement + « restart requis »
+## 2. Integrity: the ledger is verified before and after
 
-La restauration **refuse d'écraser** un install existant **non vide** (base ou ledger) sans un
-**`--force`** (CLI) ou une **confirmation explicite** (API). Par défaut, elle **valide et rapporte**
-sans rien écrire.
-
-> ℹ️ **La console vivante tient déjà la base ouverte.** Un swap **en place** remplace
-> `db.sqlite`/ledger/clé sous une connexion SQLite active : il **exige un redémarrage** de la
-> console (`docker restart` / `systemctl restart forge`) pour charger l'état restauré. Tant
-> que ce n'est pas fait, l'API répond `restart_required: true` avec une note de maintenance.
+- **Before the backup**: the ledger's SHA-256 chain is verified. A **broken** chain **aborts**
+  the backup (no archive written).
+- **On restore**: (1) the AEAD authenticates the archive; (2) the `sha256` of **each** file
+  in `manifest.json` is re-verified; (3) the chain of the extracted ledger is re-verified **before** any
+  placement; (4) after placement, the chain is **re-verified** then the action is recorded.
 
 ---
 
-## 4. CLI (voie de confiance, locale)
+## 3. Restore: anti-overwrite guard + "restart required"
 
-La passphrase est lue **uniquement depuis une variable d'ENV** (jamais en `argv` — pas de fuite via
-`ps`/`cmdline`), jamais depuis `--flag`.
+Restore **refuses to overwrite** an existing **non-empty** install (database or ledger) without a
+**`--force`** (CLI) or an **explicit confirmation** (API). By default, it **validates and reports**
+without writing anything.
+
+> ℹ️ **The live console already holds the database open.** An **in-place** swap replaces
+> `db.sqlite`/ledger/key under an active SQLite connection: it **requires a restart** of the
+> console (`docker restart` / `systemctl restart forge`) to load the restored state. Until
+> that is done, the API answers `restart_required: true` with a maintenance note.
+
+---
+
+## 4. CLI (trusted, local path)
+
+The passphrase is read **only from an ENV variable** (never in `argv` — no leak via
+`ps`/`cmdline`), never from `--flag`.
 
 ```bash
-# Sauvegarde CHIFFRÉE (argon2id + XChaCha20-Poly1305)
+# ENCRYPTED backup (argon2id + XChaCha20-Poly1305)
 export FORGE_BK_PASS='une-passphrase-forte-et-unique'
 forge backup --out /backups/forge-$(date +%s).forge --passphrase-env FORGE_BK_PASS \
     [--db forge.db] [--ledger engagement.jsonl]
 
-# Restauration : déchiffre, vérifie sha256 + chaîne ledger, refuse d'écraser sans --force
+# Restore: decrypts, verifies sha256 + ledger chain, refuses to overwrite without --force
 forge restore --in /backups/forge-XXXX.forge --passphrase-env FORGE_BK_PASS \
     [--to forge.db] [--ledger engagement.jsonl] [--force]
 ```
 
-Codes de sortie : `0` OK, `1` échec, `2` usage.
+Exit codes: `0` OK, `1` failure, `2` usage.
 
-### One-shot Docker (sauvegarde manuelle)
+### Docker one-shot (manual backup)
 
-Monte les volumes de données + un dossier de sortie, passe la passphrase par l'ENV du conteneur, et
-lance la sous-commande `backup` en one-shot :
+Mount the data volumes + an output folder, pass the passphrase through the container's ENV, and
+run the `backup` subcommand as a one-shot:
 
 ```bash
 docker run --rm \
@@ -124,40 +126,40 @@ docker run --rm \
     --ledger /data/engagement.jsonl
 ```
 
-L'archive de sortie (`/backups/*.forge`) est chiffrée et embarque base + ledger + clé.
+The output archive (`/backups/*.forge`) is encrypted and bundles database + ledger + key.
 
 ---
 
-## 5. API (admin-gated, ledgerisé)
+## 5. API (admin-gated, written to the ledger)
 
-Toutes les routes exigent une **session admin** (`check_admin`, sinon `403`). Chaque action est
-**ledgerisée** (métadonnées **seules** — jamais la passphrase).
+All routes require an **admin session** (`check_admin`, otherwise `403`). Each action is
+**written to the ledger** (metadata **only** — never the passphrase).
 
-| Route | Rôle |
+| Route | Role |
 |-------|------|
-| `POST /api/backup` | Corps `{passphrase}` ⇒ crée l'archive chiffrée et la **renvoie en téléchargement** (`Content-Disposition`). Ledger `console.backup` : acteur + horodatage + **taille + sha256** de l'archive. |
-| `POST /api/restore` | Corps `{archive_b64, passphrase, apply?, confirm?}`. **Par défaut** : valide + vérifie + rapporte (aucune écriture). `apply:true` **exige** `confirm:true` ⇒ swap en place (**redémarrage requis**). Ledger `console.restore.validate` / `console.restore`. |
-| `GET /api/backup/policy` | Politique programmée/offsite, **secrets rédigés** (`***REDACTED***`) ; `passphrase_env` (un NOM d'ENV) conservé. |
-| `POST /api/backup/policy` | Enregistre la politique (validée) ; tout `passphrase` en clair est **retiré** avant persistance. Ledger `console.backup.policy.set`. |
+| `POST /api/backup` | Body `{passphrase}` ⇒ creates the encrypted archive and **returns it as a download** (`Content-Disposition`). Ledger `console.backup`: actor + timestamp + archive **size + sha256**. |
+| `POST /api/restore` | Body `{archive_b64, passphrase, apply?, confirm?}`. **By default**: validates + verifies + reports (no write). `apply:true` **requires** `confirm:true` ⇒ in-place swap (**restart required**). Ledger `console.restore.validate` / `console.restore`. |
+| `GET /api/backup/policy` | Scheduled/offsite policy, **secrets redacted** (`***REDACTED***`); `passphrase_env` (an ENV NAME) kept. |
+| `POST /api/backup/policy` | Saves the (validated) policy; any plaintext `passphrase` is **removed** before persistence. Ledger `console.backup.policy.set`. |
 
-La **passphrase** transite dans le corps de la requête, est utilisée une fois (dérivation) puis
-**abandonnée** — jamais persistée côté serveur ni côté navigateur (les champs sont vidés après envoi).
+The **passphrase** travels in the request body, is used once (derivation) then
+**discarded** — never persisted on the server side nor on the browser side (the fields are cleared after sending).
 
-### UI (`#admin` → « Sauvegarde & restauration »)
+### UI (`#admin` → « Sauvegarde & restauration », Backup & restore)
 
-- **Créer une sauvegarde** : invite la passphrase (double saisie) ⇒ télécharge l'archive chiffrée.
-- **Restaurer** : sélection de fichier + passphrase + cases *appliquer* / *confirmer* (le swap exige
-  les deux). Par défaut : validation non destructive avec rapport.
-- **Éditeur de politique** : intervalle, rétention, `passphrase_env`, staging, destination offsite.
+- **Create a backup**: prompts for the passphrase (entered twice) ⇒ downloads the encrypted archive.
+- **Restore**: file selection + passphrase + *apply* / *confirm* boxes (the swap requires
+  both). By default: non-destructive validation with a report.
+- **Policy editor**: interval, retention, `passphrase_env`, staging, offsite destination.
 
 ---
 
-## 6. Sauvegarde programmée + offsite
+## 6. Scheduled backup + offsite
 
-Configurée via `settings.backup_policy` (aucune valeur codée en dur ; **sans politique, aucune
-sauvegarde programmée**). Un **runner périodique en console** vérifie à chaque tick si une sauvegarde
-est **due** ; il est **fail-open** : un échec de sauvegarde/expédition est **loggé + ledgerisé**
-(`console.backup.error`) mais ne fait **jamais crasher** la console.
+Configured via `settings.backup_policy` (no hard-coded value; **without a policy, no
+scheduled backup**). A **periodic runner in the console** checks on each tick whether a backup
+is **due**; it is **fail-open**: a backup/shipping failure is **logged + written to the ledger**
+(`console.backup.error`) but **never crashes** the console.
 
 ```json
 {
@@ -171,25 +173,25 @@ est **due** ; il est **fail-open** : un échec de sauvegarde/expédition est **l
 }
 ```
 
-- **`passphrase_env`** : la passphrase du backup **programmé** provient de cette **variable d'ENV**
-  du process console — **jamais** stockée en clair dans `settings`. Si l'ENV est absente ⇒ le backup
-  programmé **échoue en fail-closed** (loggé/ledgerisé), sans rien exposer.
-- **`retention`** : conserve les *N* archives locales les plus récentes dans `staging_dir`
-  (`0` = illimité).
-- **`offsite.kind` ∈ {none, local_dir, exec}** (liste **fermée**) :
-  - `none` : rien n'est expédié (défaut).
-  - `local_dir` : copie l'archive dans `dir`.
-  - `exec` : lance un **argv FIXE** (aucun shell, `program` = **chemin absolu**) avec un **timeout**.
-    Le token littéral `{archive}` dans `program`/`args` est remplacé par le chemin de l'archive.
-    Idéal pour `rclone`/`scp`/`aws s3`. **Aucun secret inline** : fournissez les identifiants via
-    l'ENV du process (ex. `RCLONE_CONFIG_*`) ou un fichier de config monté, jamais dans la politique.
+- **`passphrase_env`**: the passphrase of the **scheduled** backup comes from this **ENV variable**
+  of the console process — **never** stored in plaintext in `settings`. If the ENV is missing ⇒ the scheduled
+  backup **fails closed** (logged/written to the ledger), without exposing anything.
+- **`retention`**: keeps the *N* most recent local archives in `staging_dir`
+  (`0` = unlimited).
+- **`offsite.kind` ∈ {none, local_dir, exec}** (**closed** list):
+  - `none`: nothing is shipped (default).
+  - `local_dir`: copies the archive into `dir`.
+  - `exec`: runs a **FIXED argv** (no shell, `program` = **absolute path**) with a **timeout**.
+    The literal token `{archive}` in `program`/`args` is replaced by the archive path.
+    Ideal for `rclone`/`scp`/`aws s3`. **No inline secret**: provide the credentials via
+    the process ENV (e.g. `RCLONE_CONFIG_*`) or a mounted config file, never in the policy.
 
-Le tick du runner est réglable via `FORGE_BACKUP_TICK_SECS` (défaut 60 s).
+The runner tick is adjustable via `FORGE_BACKUP_TICK_SECS` (default 60 s).
 
-### Alternative : cron / systemd-timer
+### Alternative: cron / systemd-timer
 
-Si vous préférez piloter la sauvegarde **hors** console, désactivez la politique (`enabled:false`)
-et planifiez la sous-commande CLI. Exemple systemd-timer :
+If you prefer to drive the backup **outside** the console, disable the policy (`enabled:false`)
+and schedule the CLI subcommand. systemd-timer example:
 
 ```ini
 # /etc/systemd/system/forge-backup.service
@@ -208,16 +210,16 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-(La passphrase doit provenir d'une source protégée — `systemd` credential, fichier `0600`, ou
-gestionnaire de secrets — jamais un littéral committé.)
+(The passphrase must come from a protected source — `systemd` credential, `0600` file, or
+secrets manager — never a committed literal.)
 
 ---
 
-## 7. Ce qui n'est JAMAIS écrit dans le ledger / les logs
+## 7. What is NEVER written to the ledger / the logs
 
-- La **passphrase** ni la **clé dérivée** (aucune entrée, aucun log).
-- Le contenu des **secrets offsite** (`GET /api/backup/policy` rédige tout champ *secretish*).
+- Neither the **passphrase** nor the **derived key** (no entry, no log).
+- The content of **offsite secrets** (`GET /api/backup/policy` redacts any *secretish* field).
 
-Les entrées ledger (`console.backup`, `console.restore`, `console.backup.scheduled`,
-`console.backup.offsite`, `console.backup.policy.set`) ne portent que des **métadonnées** : acteur,
-horodatage, taille/sha256 de l'archive, `kind` d'offsite, statut.
+Ledger entries (`console.backup`, `console.restore`, `console.backup.scheduled`,
+`console.backup.offsite`, `console.backup.policy.set`) carry only **metadata**: actor,
+timestamp, archive size/sha256, offsite `kind`, status.

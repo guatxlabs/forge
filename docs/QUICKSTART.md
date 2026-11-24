@@ -1,76 +1,78 @@
-# Forge — Quickstart : déployer + tester en local sur un programme bug bounty
+# Forge — Quickstart: deploy + test locally on a bug bounty program
 
-> Cible : lancer Forge en **Docker** et tester un **nouveau programme bug bounty**, **entièrement via l'UI web**.
-> Aucun fichier à créer, aucune commande avant d'accéder à l'interface.
-> Rappel de sûreté : Forge est **fail-closed** — périmètre vide = tout refusé. Le scope EST ton autorisation (ROE).
+[English](QUICKSTART.md) | [Français](QUICKSTART.fr.md)
 
-## 0. Prérequis
-- Docker + Docker Compose. Un clone standalone de ce dépôt (la console récupère `guatx-core` via une git-dep publique au build — aucun contexte parent requis).
-- Rien d'autre. Pas de scope.json, pas de compte à pré-créer.
+> Goal: run Forge in **Docker** and test a **new bug bounty program**, **entirely through the web UI**.
+> No file to create, no command before reaching the interface.
+> Safety reminder: Forge is **fail-closed** — empty scope = everything refused. The scope IS your authorization (ROE).
 
-## 1. Déployer — une seule commande
+## 0. Prerequisites
+- Docker + Docker Compose. A standalone clone of this repository (the console fetches `guatx-core` through a public git-dep at build time — no parent context required).
+- Nothing else. No scope.json, no account to pre-create.
+
+## 1. Deploy — a single command
 ```bash
-# depuis la racine du dépôt
+# from the repository root
 docker compose up -d --build
 ```
-- Service **`forge`** ; console web sur **http://127.0.0.1:7100** (loopback uniquement).
-- Données dans les volumes nommés `forge-db` / `forge-ledger` (re-`up` idempotent, aucune accumulation).
-- Image `full` par défaut (httpx/nuclei/subfinder vérifiés SHA256 + PDF). `mini` : `FORGE_TOOLS_PROFILE=mini docker compose build`.
+- Service **`forge`**; web console at **http://127.0.0.1:7100** (loopback only).
+- Data in the named volumes `forge-db` / `forge-ledger` (re-`up` is idempotent, nothing accumulates).
+- `full` image by default (httpx/nuclei/subfinder SHA256-verified + PDF). `mini`: `FORGE_TOOLS_PROFILE=mini docker compose build`.
 
-## 2. Ouvrir l'UI → le wizard fait tout
-Ouvre **http://127.0.0.1:7100**. Au 1er lancement, l'**assistant de déploiement** (5 étapes) crée TOUT, dans le navigateur :
-1. **Admin** — ton compte administrateur (argon2id). Pas de CLI `useradd`.
-2. **Chiffrement** — crypto au repos (SQLCipher optionnel selon l'image).
-3. **Détection** — source blue (SIEM/IDS) pour la boucle purple, optionnelle.
-4. **Opérateur** — politique C2 (source-CIDR, fail-closed).
-5. **Périmètre (ROE)** — **le scope de ton programme, saisi ici** : `mode` (grey/white/black), hôtes **in-scope** (globs/CIDR), **out-scope**. C'est ton autorisation.
+## 2. Open the UI → the wizard does everything
+Open **http://127.0.0.1:7100**. On first launch, the **deployment wizard** (5 steps) creates EVERYTHING, in the browser:
+1. **Admin** — your administrator account (argon2id). No `useradd` CLI.
+2. **Encryption** — crypto at rest (SQLCipher optional depending on the image).
+3. **Detection** — blue source (SIEM/IDS) for the purple loop, optional.
+4. **Operator** — C2 policy (source-CIDR, fail-closed).
+5. **Scope (ROE)** — **your program's scope, entered here**: `mode` (grey/white/black), **in-scope** hosts (globs/CIDR), **out-scope**. This is your authorization.
 
-L'assistant s'auto-désactive une fois provisionné. Tu es connecté, prêt à tester. **Zéro fichier, zéro commande.**
+The wizard disables itself once provisioned. You are logged in, ready to test. **Zero files, zero commands.**
 
-> ⚠️ **Provisionne AVANT d'exposer le port.** Le wizard est public jusqu'à ce que l'admin existe — quiconque atteint l'hôte en premier peut le réclamer. Garde le bind sur **loopback `127.0.0.1`** (le défaut) et **ne passe PAS à `0.0.0.0`** tant que tu n'as pas claim l'admin (cf. `docs/DEPLOYMENT.md §2`).
+> ⚠️ **Provision BEFORE exposing the port.** The wizard is public until the admin exists — whoever reaches the host first can claim it. Keep the bind on **loopback `127.0.0.1`** (the default) and **do NOT switch to `0.0.0.0`** until you have claimed the admin (see `docs/DEPLOYMENT.md §2`).
 
-> Le périmètre saisi devient l'**Engagement #1**. `allow_exploit`/`allow_destructive` restent `false` en bug bounty (techniques destructrices/DoS/brute-force bannies et refusées par le scope-guard de toute façon). Le test authentifié (IDOR/ATO : creds/session/idor_targets) se règle dans l'éditeur d'engagement (secret, jamais journalisé).
+> The scope you enter becomes **Engagement #1**. `allow_exploit`/`allow_destructive` stay `false` in bug bounty (destructive/DoS/brute-force techniques are banned and refused by the scope-guard anyway). Authenticated testing (IDOR/ATO: creds/session/idor_targets) is set in the engagement editor (secret, never logged).
 
-## 3. Un 2e programme = un nouvel Engagement (dans l'UI)
-Administration → **Engagements** → créer un engagement avec son propre scope/ROE/ledger. Chaque programme reste **isolé** (findings/runs/ledger/RBAC/rapport par-engagement). Bascule d'un engagement à l'autre dans l'UI. Rien à éditer sur disque.
+## 3. A 2nd program = a new Engagement (in the UI)
+Administration → **Engagements** → create an engagement with its own scope/ROE/ledger. Each program stays **isolated** (findings/runs/ledger/RBAC/report per engagement). Switch from one engagement to another in the UI. Nothing to edit on disk.
 
-## 4. Tester (lancer une campagne) — vue **Launch**
-1. Choisis les **modules** (ou laisse le **planner** ordonner par valeur avec planchers de couverture).
-2. Saisis/valide les **cibles in-scope** et lance. Le **scope-guard** garantit : rien hors-scope, jamais tiré ni simulé.
-3. **Logs live (SSE)** ; les **findings** apparaissent avec **discipline de preuve** (`tested` tant qu'un oracle ne prouve pas `vulnerable`).
-4. **Triage** (`new → triaging → confirmed / false_positive / duplicate → resolved`) + **assigne** (ownership), transitions gouvernées + événement live.
-5. **Exporte** le rapport **par engagement** (HTML/PDF/CSV/JSON) + bulk-export.
+## 4. Test (launch a campaign) — **Launch** view
+1. Pick the **modules** (or let the **planner** order them by value with coverage floors).
+2. Enter/confirm the **in-scope targets** and launch. The **scope-guard** guarantees: nothing out of scope, never fired nor simulated.
+3. **Live logs (SSE)**; **findings** appear with **evidence discipline** (`tested` as long as an oracle does not prove `vulnerable`).
+4. **Triage** (`new → triaging → confirmed / false_positive / duplicate → resolved`) + **assign** (ownership), governed transitions + live event.
+5. **Export** the report **per engagement** (HTML/PDF/CSV/JSON) + bulk-export.
 
-Techniques natives : IDOR, SSRF, XSS, SQLi, JWT/auth, CORS, XXE, race, CSRF, open-redirect, SSTI, cmdi,
-proto-pollution, GraphQL, NoSQL, cache-poison, smuggling, takeover, secrets… (cf. `docs/TECHNIQUE_COVERAGE.md`).
+Native techniques: IDOR, SSRF, XSS, SQLi, JWT/auth, CORS, XXE, race, CSRF, open-redirect, SSTI, cmdi,
+proto-pollution, GraphQL, NoSQL, cache-poison, smuggling, takeover, secrets… (see `docs/TECHNIQUE_COVERAGE.md`).
 
-## 5. Outils (piloter nmap/nuclei/httpx/sqlmap/ffuf…) — TOUT depuis l'UI
-Forge **pilote** des outils, il n'embarque pas d'arsenal offensif. Les scanners standards sont dans l'image `full`.
-Pour Metasploit/Burp : pointe les env `MSF_RPC_*` / `BURP_API_*` vers tes services (profils `--profile msf|burp`).
-- **Paramétrer un outil** : chaque outil (26 kinds — nmap, nuclei, ffuf, sqlmap, subfinder, naabu, feroxbuster, dalfox…) expose ses **arguments dans l'UI** (ports/scripts/timing/wordlist/threads/rate…), plus un champ `extra_args` allowlisté. Ex. nmap entièrement custom `-sV -p- --script http-* -T2`.
-- **Rate-limit** : règle le débit (req/s) dans la vue Launch → propagé à chaque outil (`--max-rate`/`-rl`/`--rate`/`--delay`) + throttle moteur + back-off automatique sur 429/WAF.
-- **Ajouter TON outil** : Administration → **Ajouter un outil** → déclare un ToolSpec gouverné (binaire/docker, argv, params, allowlist) → il apparaît dans Launch, configurable, scope-guardé. Aucun fichier, aucun rebuild (cf. `docs/TOOLS.md`). *(Le binaire doit être présent dans l'image ou fourni par un script — sinon l'outil est `skipped`.)*
-- **Ajout LIVE, sans redémarrage** : dépose un exécutable dans **`forge/tools/`** (utilisable au run suivant, rien à cliquer) **ou** ajoute un ToolSpec via l'UI / **`forge/toolspecs/`** → clique **« Rafraîchir modules »**. Les deux montages sont **ON par défaut** — jamais de `docker build`/`down`/`up` en plein pentest.
-- **Rendre le binaire dispo — 3 voies** (détail `docs/TOOLS.md §5`) : (a) **déjà dans l'image `full`** (nmap/curl/dig/httpx/nuclei/subfinder) ; (b) **image custom mince** `FROM forge:0.0.1` + `apt install`/`COPY` (jeu figé, prod) ; (c) **monter SANS rebuild** — dossiers hôte `:ro` : `./tools`→`/opt/tools` (binaires/scripts exécutables, **déjà sur le PATH**) et `./toolspecs` (`FORGE_TOOLSPECS`, ToolSpecs déclaratifs gouvernés) sont **ON par défaut** ; `./plugins` (`FORGE_PLUGINS`, modules Python `@register` — code, haute confiance) reste **OPT-IN** (décommenter le bind + l'env → un `up` de recréation one-shot). Ex. : `cp myfuzzer forge/tools/ && chmod +x` → utilisable au run suivant. ⚠️ `./tools`/`./plugins` = **opérateur-de-confiance** (arbitraire) ; la gouvernance ToolSpec borne l'invocation, pas l'interne du binaire.
+## 5. Tools (driving nmap/nuclei/httpx/sqlmap/ffuf…) — EVERYTHING from the UI
+Forge **drives** tools; it does not ship an offensive arsenal. The standard scanners are in the `full` image.
+For Metasploit/Burp: point the `MSF_RPC_*` / `BURP_API_*` env vars at your services (profiles `--profile msf|burp`).
+- **Configure a tool**: each tool (26 kinds — nmap, nuclei, ffuf, sqlmap, subfinder, naabu, feroxbuster, dalfox…) exposes its **arguments in the UI** (ports/scripts/timing/wordlist/threads/rate…), plus an allowlisted `extra_args` field. E.g. a fully custom nmap `-sV -p- --script http-* -T2`.
+- **Rate-limit**: set the throughput (req/s) in the Launch view → propagated to each tool (`--max-rate`/`-rl`/`--rate`/`--delay`) + engine throttle + automatic back-off on 429/WAF.
+- **Add YOUR tool**: Administration → **« ajouter un outil »** (*Add a tool*) → declare a governed ToolSpec (binary/docker, argv, params, allowlist) → it appears in Launch, configurable, scope-guarded. No file, no rebuild (see `docs/TOOLS.md`). *(The binary must be present in the image or provided by a script — otherwise the tool is `skipped`.)*
+- **LIVE addition, no restart**: drop an executable into **`forge/tools/`** (usable on the next run, nothing to click) **or** add a ToolSpec through the UI / **`forge/toolspecs/`** → click **« Rafraîchir modules »** (*Refresh modules*). Both mounts are **ON by default** — never a `docker build`/`down`/`up` in the middle of a pentest.
+- **Making the binary available — 3 ways** (details `docs/TOOLS.md §5`): (a) **already in the `full` image** (nmap/curl/dig/httpx/nuclei/subfinder); (b) **thin custom image** `FROM forge:0.0.1` + `apt install`/`COPY` (frozen set, prod); (c) **mount WITHOUT rebuilding** — host folders `:ro`: `./tools`→`/opt/tools` (executable binaries/scripts, **already on the PATH**) and `./toolspecs` (`FORGE_TOOLSPECS`, governed declarative ToolSpecs) are **ON by default**; `./plugins` (`FORGE_PLUGINS`, `@register` Python modules — code, high trust) stays **OPT-IN** (uncomment the bind + the env → a one-shot recreate `up`). E.g.: `cp myfuzzer forge/tools/ && chmod +x` → usable on the next run. ⚠️ `./tools`/`./plugins` = **trusted operator** (arbitrary); ToolSpec governance bounds the invocation, not the binary's internals.
 
-## 6. Cycle de vie (sûr) — depuis l'UI
-Administration → **Console Forge** : un panneau qui lance les commandes gouvernées (`status`, `ledger verify`,
-`backup`, `upgrade`…) **sans quitter le navigateur** (allowlist, pas de shell, `upgrade` demande confirmation,
-sortie streamée). En CLI (optionnel, pour les habitués) :
+## 6. Lifecycle (safe) — from the UI
+Administration → **« Console Forge »** (*Forge console*): a panel that runs the governed commands (`status`, `ledger verify`,
+`backup`, `upgrade`…) **without leaving the browser** (allowlist, no shell, `upgrade` asks for confirmation,
+streamed output). In the CLI (optional, for regulars):
 ```bash
 docker compose exec forge forge status
-# upgrade sûr : snapshot chiffré -> migrate -> verify -> rollback auto si échec (no-op = 0 écriture)
+# safe upgrade: encrypted snapshot -> migrate -> verify -> automatic rollback on failure (no-op = 0 writes)
 docker compose exec forge forge upgrade --passphrase-env FORGE_BACKUP_PASSPHRASE
 ```
-Arrêt : `docker compose down` (volumes persistent ; `down -v` pour tout effacer).
+Stop: `docker compose down` (volumes persist; `down -v` to wipe everything).
 
 ## Alternatives
-- **Host natif** : `cd console && cargo build --release && ./target/release/forge` (puis wizard dans le navigateur).
-- **Postgres (équipe)** : `--profile postgres` + `FORGE_ENTERPRISE_STORE=postgres` (voir `docs/DEPLOYMENT.md §3bis`).
-- **HA / k3s** : `kubectl apply -k k8s/` (voir `docs/DEPLOYMENT.md §3bis.6`, `docs/UPGRADE.md`, `docs/KEY_CUSTODY.md`).
+- **Native host**: `cd console && cargo build --release && ./target/release/forge` (then the wizard in the browser).
+- **Postgres (team)**: `--profile postgres` + `FORGE_ENTERPRISE_STORE=postgres` (see `docs/DEPLOYMENT.md §3bis`).
+- **HA / k3s**: `kubectl apply -k k8s/` (see `docs/DEPLOYMENT.md §3bis.6`, `docs/UPGRADE.md`, `docs/KEY_CUSTODY.md`).
 
-## Règle d'or
-Le **scope est l'autorisation**. N'y mets que ce que le programme t'autorise ; `allow_exploit`/`allow_destructive`
-restent `false` sauf ROE écrit. Les secrets ne traînent pas en clair : détection/SSO se règlent write-only dans
-l'UI ; les secrets d'env (token, passphrase, creds connecteurs) passent par Docker/k8s secrets (`*_FILE`), pas un
-`.env` en clair à côté de l'app (cf. [`docs/SECRETS.md`](SECRETS.md)). Forge refuse tout hors-scope, c'est sa raison d'être.
+## Golden rule
+The **scope is the authorization**. Put in it only what the program authorizes you to test; `allow_exploit`/`allow_destructive`
+stay `false` unless there is a written ROE. Secrets do not lie around in plaintext: detection/SSO are set write-only in
+the UI; env secrets (token, passphrase, connector creds) go through Docker/k8s secrets (`*_FILE`), not a
+plaintext `.env` next to the app (see [`docs/SECRETS.md`](SECRETS.md)). Forge refuses everything out of scope; that is its reason for being.

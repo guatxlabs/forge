@@ -1,115 +1,117 @@
-# Plan de refactor d'architecture — incrémental, jamais un big-bang
+# Architecture refactor plan — incremental, never a big-bang
 
-> **Statut : §1 (main.rs) FAIT ✅ ; §2 (boilerplate Python) PLAN uniquement.** Ce document ne
-> modifie aucun code. Il applique le principe « refactors d'architecture incrémentaux, JAMAIS un
-> big-bang » à la dette de structure identifiée dans la console.
+[English](ARCHITECTURE_REFACTOR_PLAN.md) | [Français](ARCHITECTURE_REFACTOR_PLAN.fr.md)
+
+> **Status: §1 (main.rs) DONE ✅; §2 (Python boilerplate) PLAN only.** This document
+> modifies no code. It applies the principle "incremental architecture refactors, NEVER a
+> big-bang" to the structural debt identified in the console.
 >
-> **MISE À JOUR (post-split).** La décomposition du god-file `console/src/main.rs` visée par le
-> §1 est **RÉALISÉE** : `main.rs` est passé de 6065 → **~460 lignes**, avec `router.rs` (build_router),
-> `boot.rs` (serve/dispatch_cli/store-gate) et les **11 fichiers `tests_*.rs`** extraits comme prévu
-> (Étapes 1→4 toutes appliquées). Le §1 ci-dessous est **conservé comme trace historique** et marqué
-> ✅ FAIT. La **plus grosse dette d'architecture résiduelle** est désormais côté **fichiers volumineux
-> restants** — `console/src/store.rs` (~2306 l), `console/src/sso.rs` (~2110 l),
-> `console/src/scim.rs` (~1995 l) — à décomposer par la **même** discipline PURE MOVE/EXTRACT
-> quand on touchera ces zones. Le §2 (boilerplate `extra_args`/allowlist dans `forge/modules/*.py`)
-> reste un PLAN valide, non entamé.
+> **UPDATE (post-split).** The decomposition of the `console/src/main.rs` god-file targeted by
+> §1 is **DONE**: `main.rs` went from 6065 → **~460 lines**, with `router.rs` (build_router),
+> `boot.rs` (serve/dispatch_cli/store-gate) and the **11 `tests_*.rs` files** extracted as planned
+> (Steps 1→4 all applied). §1 below is **kept as a historical record** and marked
+> ✅ DONE. The **largest remaining architecture debt** is now on the side of the **remaining large
+> files** — `console/src/store.rs` (~2306 l), `console/src/sso.rs` (~2110 l),
+> `console/src/scim.rs` (~1995 l) — to be decomposed with the **same** PURE MOVE/EXTRACT discipline
+> when those areas are touched. §2 (`extra_args`/allowlist boilerplate in `forge/modules/*.py`)
+> remains a valid PLAN, not started.
 >
-> **Principe directeur (non négociable) :** chaque étape est une **PURE MOVE / PURE EXTRACTION**
-> à comportement strictement préservé, autonome (compile + tests verts seule), et ordonnée du
-> **plus petit risque au plus grand**. On ne vise JAMAIS un fichier « propre » d'un coup ; on
-> extrait par couplage, opportunistiquement. Le build communautaire reste **byte-identique**.
+> **Guiding principle (non-negotiable):** each step is a **PURE MOVE / PURE EXTRACTION**
+> with strictly preserved behaviour, self-contained (compiles + tests green on its own), and ordered from
+> **smallest risk to largest**. We NEVER aim for a "clean" file in one go; we
+> extract by coupling, opportunistically. The default build stays **byte-identical**.
 
 ---
 
-## 0. Garde-fous (à respecter à CHAQUE étape)
+## 0. Guardrails (to respect at EVERY step)
 
-Ces invariants s'appliquent à toutes les étapes des deux chantiers. Une étape qui en viole un
-seul est à annuler, pas à « corriger ensuite ».
+These invariants apply to every step of both workstreams. A step that violates a
+single one must be reverted, not "fixed later".
 
-1. **Vert avant / vert après.** Avant de committer une étape :
-   - Rust : `cd console && cargo test` (le paquet s'appelle `forge`, pas `forge-console`)
-     → **418 tests Rust** (compte MESURÉ : `test result: ok. 418 passed`) doivent rester verts,
-     **même nombre, mêmes noms**.
-   - Python : `python3 -m unittest discover -s tests -t .` → **1513 tests Python** (compte MESURÉ :
-     `Ran 1513 tests` / `OK (skipped=1)`) doivent rester verts, même nombre.
-   - `cargo build --release` (build communautaire, features par défaut) doit produire un binaire
-     **byte-identique** au HEAD précédent : une PURE MOVE ne change ni le code généré ni les
-     `include_str!`/assets. (Vérif : `cargo build --release` puis `sha256sum` du binaire
-     avant/après ; ou `cargo build && git stash` A/B si l'environnement est déterministe.)
-2. **Zéro changement de comportement.** Aucune signature publique, aucun ordre de `.route()`,
-   aucun code de sortie CLI, aucun message d'erreur, aucun champ de Finding ne change. Les
-   extractions n'introduisent que du déplacement + des `pub(crate) use` / des bases partagées.
-3. **Une seule couture par commit.** Un commit = une extraction cohésive. Jamais deux seams
-   dans le même diff (facilite la revue et le `git revert` chirurgical).
-4. **Le pattern d'extraction est déjà établi dans le repo — on l'ÉTEND, on n'invente rien.**
-   `main.rs` a déjà été scindé ainsi (findings.rs, runs.rs → runs_proc/runs_ha/runs_validate,
-   engagements.rs, auth.rs, net.rs…), chaque fois via `mod x; pub(crate) use crate::x::*;` avec
-   un commentaire « (PURE MOVE) ». Toute nouvelle extraction copie ce modèle **verbatim**.
-5. **Déclencheur opportuniste.** Ces refactors se font quand on touche déjà la zone OU comme
-   respiration de dette explicitement budgétée — jamais en « réécriture spéculative » qui
-   bloquerait une livraison fonctionnelle.
+1. **Green before / green after.** Before committing a step:
+   - Rust: `cd console && cargo test` (the package is called `forge`, not `forge-console`)
+     → **418 Rust tests** (MEASURED count: `test result: ok. 418 passed`) must stay green,
+     **same number, same names**.
+   - Python: `python3 -m unittest discover -s tests -t .` → **1513 Python tests** (MEASURED count:
+     `Ran 1513 tests` / `OK (skipped=1)`) must stay green, same number.
+   - `cargo build --release` (default build, default features) must produce a binary
+     **byte-identical** to the previous HEAD: a PURE MOVE changes neither the generated code nor the
+     `include_str!`/assets. (Check: `cargo build --release` then `sha256sum` of the binary
+     before/after; or `cargo build && git stash` A/B if the environment is deterministic.)
+2. **Zero behaviour change.** No public signature, no `.route()` order,
+   no CLI exit code, no error message, no Finding field changes. The
+   extractions introduce only moves + `pub(crate) use` / shared bases.
+3. **A single seam per commit.** One commit = one cohesive extraction. Never two seams
+   in the same diff (eases review and surgical `git revert`).
+4. **The extraction pattern is already established in the repo — we EXTEND it, we invent nothing.**
+   `main.rs` has already been split this way (findings.rs, runs.rs → runs_proc/runs_ha/runs_validate,
+   engagements.rs, auth.rs, net.rs…), each time via `mod x; pub(crate) use crate::x::*;` with
+   a "(PURE MOVE)" comment. Any new extraction copies this model **verbatim**.
+5. **Opportunistic trigger.** These refactors happen when the area is already being touched OR as
+   an explicitly budgeted debt breather — never as a "speculative rewrite" that
+   would block a functional delivery.
 
 ---
 
-## 1. `console/src/main.rs` (6065 lignes) — décomposition du god-file — ✅ FAIT
+## 1. `console/src/main.rs` (6065 lines) — god-file decomposition — ✅ DONE
 
-> **✅ RÉALISÉ.** Ce chantier est terminé : `main.rs` fait aujourd'hui **~460 lignes**, `router.rs`
-> et `boot.rs` sont extraits, et les **11 fichiers `tests_*.rs`** listés au §1.2 existent. La
-> section ci-dessous est laissée **à titre historique** (l'état « 6065 lignes » décrit le point de
-> départ avant la découpe, pas l'état actuel). Prochaine cible : store.rs / sso.rs / scim.rs.
+> **✅ DONE.** This workstream is finished: `main.rs` is now **~460 lines**, `router.rs`
+> and `boot.rs` are extracted, and the **11 `tests_*.rs` files** listed in §1.2 exist. The
+> section below is left **for the record** (the "6065 lines" state describes the starting
+> point before the split, not the current state). Next target: store.rs / sso.rs / scim.rs.
 
-### 1.1 État réel vérifié (lu, pas supposé)
+### 1.1 Actual state, verified (read, not assumed)
 
-Structure de `main.rs` **avant** la découpe (offsets relevés sur le fichier, pas supposés) :
+Structure of `main.rs` **before** the split (offsets read from the file, not assumed):
 
-| Lignes | Contenu | Nature |
+| Lines | Content | Nature |
 |--------|---------|--------|
 | 1–72 | `use` (axum, rusqlite, serde, std, tokio) | imports |
-| 73–329 | ~30 × `mod x;` + `pub(crate) use crate::x::*;` + commentaires « PURE MOVE » | déclarations de modules déjà extraits |
+| 73–329 | ~30 × `mod x;` + `pub(crate) use crate::x::*;` + "PURE MOVE" comments | declarations of already extracted modules |
 | 330–359 | `async fn health(State<App>) -> Json<Value>` | handler |
-| 360–375 | `fn health_db_ping(&App) -> bool` | helper de `health` |
-| 376–387 | `fn catch_panic_response(err) -> Response` | responder du `CatchPanic` layer |
+| 360–375 | `fn health_db_ping(&App) -> bool` | `health` helper |
+| 376–387 | `fn catch_panic_response(err) -> Response` | responder of the `CatchPanic` layer |
 | 388–607 | `fn build_router(app: App, web_dir: &str) -> Router` | **60 `.route()` + 8 `.merge(x::routes())`** |
 | 608–621 | `#[tokio::main] async fn main()` | glue (dispatch_cli → serve) |
-| 623–732 | `fn dispatch_cli(args: &[String]) -> Option<i32>` | sous-commandes CLI (hashpw, ledger verify…) |
-| 733–1122 | `async fn serve()` | boot serveur (~390 l : ouverture DB, PRAGMA, SCHEMA, migrate, store-gate, App, HA, bind) |
-| 1123–1139 | `enum StoreSelection` | type de la store-gate |
-| 1140–1164 | `fn enterprise_store_gate(...) -> Result<StoreSelection, String>` | décision SQLite/Postgres |
-| 1166–1167 | `#[cfg(test)] pub(crate) mod testutil;` | **déjà un fichier externe** (`testutil.rs`, 83 l) |
-| **1169–6065** | **`#[cfg(test)] mod tests { … }`** | **4897 lignes, 133 fns `#[test]`/`#[tokio::test]`** |
+| 623–732 | `fn dispatch_cli(args: &[String]) -> Option<i32>` | CLI subcommands (hashpw, ledger verify…) |
+| 733–1122 | `async fn serve()` | server boot (~390 l: DB open, PRAGMA, SCHEMA, migrate, store-gate, App, HA, bind) |
+| 1123–1139 | `enum StoreSelection` | store-gate type |
+| 1140–1164 | `fn enterprise_store_gate(...) -> Result<StoreSelection, String>` | SQLite/Postgres decision |
+| 1166–1167 | `#[cfg(test)] pub(crate) mod testutil;` | **already an external file** (`testutil.rs`, 83 l) |
+| **1169–6065** | **`#[cfg(test)] mod tests { … }`** | **4897 lines, 133 `#[test]`/`#[tokio::test]` fns** |
 
-**Constat clé : ~80 % du fichier (4897/6065) est le module de tests inline.** Le code non-test
-ne fait que **~1168 lignes**, dont la seule vraie « fonction-dieu » interne est `build_router`
-(220 l, wiring pur de handlers déjà importés depuis les sous-modules). Le plan attaque donc
-**d'abord le test module** (gain de taille massif, risque quasi nul), puis les seams de code.
+**Key finding: ~80 % of the file (4897/6065) is the inline test module.** The non-test code
+is only **~1168 lines**, whose only real internal "god-function" is `build_router`
+(220 l, pure wiring of handlers already imported from the submodules). The plan therefore attacks
+**the test module first** (massive size gain, near-zero risk), then the code seams.
 
-> Les handlers routés par `build_router` (`whoami`, `ingest`, `findings`, `coverage`,
-> `attack_matrix`, `run_create`…) sont **déjà** définis dans les sous-modules et re-exportés
-> `pub(crate)` à la racine (§73–329). `build_router` ne fait que les câbler — l'extraire est donc
-> mécanique. Les tests inline accèdent aux privés de la racine via `use super::*` +
-> `use crate::testutil::*` ; un module de test **enfant** (fichier frère `mod tests;`) conserve
-> cet accès (un module enfant voit les items privés de ses ancêtres). C'est ce qui rend toutes
-> les étapes ci-dessous sûres.
+> The handlers routed by `build_router` (`whoami`, `ingest`, `findings`, `coverage`,
+> `attack_matrix`, `run_create`…) are **already** defined in the submodules and re-exported
+> `pub(crate)` at the root (§73–329). `build_router` only wires them — extracting it is therefore
+> mechanical. The inline tests access the root's private items via `use super::*` +
+> `use crate::testutil::*`; a **child** test module (sibling file `mod tests;`) keeps
+> this access (a child module sees the private items of its ancestors). This is what makes all
+> the steps below safe.
 
-### 1.2 Séquence ordonnée (petit risque → grand risque)
+### 1.2 Ordered sequence (small risk → large risk)
 
-#### Étape 1 — Sortir le module de tests dans un fichier frère (`console/src/tests.rs`)
-- **Move :** lignes **1169–6065** (`mod tests { use super::*; use crate::testutil::*; … }`)
-  → nouveau fichier `console/src/tests.rs` (corps du module, sans les accolades `mod tests {}`).
-  Dans `main.rs`, remplacer le bloc par `#[cfg(test)]\nmod tests;`.
-- **Pourquoi sûr :** `super::*` depuis `tests.rs` (module enfant de la racine) résout exactement
-  les mêmes items privés de `main.rs` qu'en inline ; `crate::testutil::*` est déjà un chemin
-  absolu inchangé. Aucun `pub` à ajouter, aucun corps de test touché.
-- **Résultat :** `main.rs` passe de 6065 → **~1168 lignes**. Gain de 80 %.
-- **Risque : TRÈS FAIBLE.** Pur déplacement de texte compilé seulement en `cfg(test)`.
-- **Vérif verte :** `cd console && cargo test` → **418 tests, mêmes noms** (compte MESURÉ) ; `cargo build
-  --release` byte-identique (le code non-test est inchangé, tests exclus du build release).
+#### Step 1 — Move the test module out into a sibling file (`console/src/tests.rs`)
+- **Move:** lines **1169–6065** (`mod tests { use super::*; use crate::testutil::*; … }`)
+  → new file `console/src/tests.rs` (module body, without the `mod tests {}` braces).
+  In `main.rs`, replace the block with `#[cfg(test)]\nmod tests;`.
+- **Why it is safe:** `super::*` from `tests.rs` (child module of the root) resolves exactly
+  the same private items of `main.rs` as inline; `crate::testutil::*` is already an unchanged absolute
+  path. No `pub` to add, no test body touched.
+- **Result:** `main.rs` goes from 6065 → **~1168 lines**. 80 % gain.
+- **Risk: VERY LOW.** Pure move of text compiled only under `cfg(test)`.
+- **Green check:** `cd console && cargo test` → **418 tests, same names** (MEASURED count); `cargo build
+  --release` byte-identical (the non-test code is unchanged, tests excluded from the release build).
 
-#### Étape 2 — Scinder `tests.rs` par sous-système (miroir des modules source)
-Une fois `tests.rs` isolé (4897 l, 133 tests), le scinder en fichiers de test frères, **par
-grappes cohésives déjà contiguës** dans le fichier (offsets relevés dans le module courant) :
+#### Step 2 — Split `tests.rs` by subsystem (mirroring the source modules)
+Once `tests.rs` is isolated (4897 l, 133 tests), split it into sibling test files, **by
+cohesive clusters already contiguous** in the file (offsets read in the current module):
 
-| Fichier de test proposé | Tests (thème) | Plage actuelle (dans main.rs) |
+| Proposed test file | Tests (theme) | Current range (in main.rs) |
 |-------------------------|---------------|-------------------------------|
 | `tests_http_boot.rs` | panic-responder, security-headers, store-gate contract, health, standalone-boot | 1177–1335, 5955–6065 |
 | `tests_auth_session.rs` | create_session, login-lockout, tokens, sessions, cookie/bearer, attribution, auth-gate, https-detect | 1461–1846 |
@@ -123,50 +125,50 @@ grappes cohésives déjà contiguës** dans le fichier (offsets relevés dans le
 | `tests_reports_purple.rs` | run-report md/html, cvss, html-escape, purple coverage, detection source | 4189–4912 |
 | `tests_modules_tools.rs` | high-impact gate, validate_modules, extra_args allowlist, toolspec, tools CRUD, module routes | 4912–5429 |
 
-- **Move mécanique :** pour chaque grappe, couper les fns concernées de `tests.rs` → fichier
-  frère ; ajouter `#[cfg(test)] mod tests_<x>;` dans `main.rs` (ou dans un `mod tests;` parent
-  qui `pub(crate) mod`-déclare les sous-fichiers). Chaque fichier débute par
-  `use super::*; use crate::testutil::*;` — même préambule que le module d'origine.
-- **Risque : FAIBLE.** Purement du texte ; le seul piège est un helper de test **partagé** défini
-  dans le module (ex. `test_app`, `test_app_scoped`, `http_raw`, `get_req`, `post_req`,
-  `parse_status`, `cookie_token`, `operator_headers`, `seed_two_tenants`…). **Prérequis :**
-  déplacer d'abord ces helpers partagés dans `console/src/testutil.rs` (fichier déjà existant,
-  `pub(crate)`), en une **sous-étape 2a** dédiée, avant tout découpage — sinon un fichier de test
-  perd l'accès à son helper. Les helpers mono-usage restent avec leur test.
-- **Faisabilité incrémentale :** chaque fichier peut être extrait **un à un** ; entre deux, le
-  build est vert. On n'est PAS obligé de faire les 11 d'un coup — on en fait un quand on touche
-  la zone.
-- **Vérif verte :** après chaque fichier, `cargo test` → total inchangé.
+- **Mechanical move:** for each cluster, cut the relevant fns from `tests.rs` → sibling
+  file; add `#[cfg(test)] mod tests_<x>;` in `main.rs` (or in a parent `mod tests;`
+  that `pub(crate) mod`-declares the sub-files). Each file starts with
+  `use super::*; use crate::testutil::*;` — the same preamble as the original module.
+- **Risk: LOW.** Purely text; the only trap is a **shared** test helper defined
+  in the module (e.g. `test_app`, `test_app_scoped`, `http_raw`, `get_req`, `post_req`,
+  `parse_status`, `cookie_token`, `operator_headers`, `seed_two_tenants`…). **Prerequisite:**
+  first move these shared helpers into `console/src/testutil.rs` (an already existing file,
+  `pub(crate)`), in a dedicated **sub-step 2a**, before any splitting — otherwise a test file
+  loses access to its helper. Single-use helpers stay with their test.
+- **Incremental feasibility:** each file can be extracted **one by one**; in between, the
+  build is green. There is NO obligation to do all 11 at once — one is done when the area
+  is touched.
+- **Green check:** after each file, `cargo test` → total unchanged.
 
-#### Étape 3 — Extraire `build_router` dans `console/src/router.rs`
-- **Move :** lignes **388–607** (`fn build_router`) → `console/src/router.rs` exposant
-  `pub(crate) fn build_router(app: App, web_dir: &str) -> Router`. Emporter avec elle
-  `catch_panic_response` (376–387) et `health`/`health_db_ping` (330–375) **si** elles ne sont
-  utilisées que par le router/tests — sinon les laisser à la racine et les garder `pub(crate)`.
-- **Pourquoi sûr :** `build_router` ne fait que câbler des handlers **déjà** re-exportés
-  `pub(crate)` à la racine (§73–329) ; depuis `router.rs`, ces symboles restent accessibles via
-  `use crate::*;` (ou imports ciblés). Aucun handler n'est déplacé, aucun ordre de route ne
-  bouge, aucune string ne change → binaire identique.
-- **Risque : FAIBLE.** Le seul point d'attention est la liste d'`use` à recopier ; le compilateur
-  la garantit exhaustive.
-- **Vérif verte :** `cargo test` (les tests `*_routes_do_not_conflict`, `security_headers_*`,
-  `standalone_boot_serves_health_*` exercent déjà le router monté) + build release byte-identique.
+#### Step 3 — Extract `build_router` into `console/src/router.rs`
+- **Move:** lines **388–607** (`fn build_router`) → `console/src/router.rs` exposing
+  `pub(crate) fn build_router(app: App, web_dir: &str) -> Router`. Take along
+  `catch_panic_response` (376–387) and `health`/`health_db_ping` (330–375) **if** they are
+  used only by the router/tests — otherwise leave them at the root and keep them `pub(crate)`.
+- **Why it is safe:** `build_router` only wires handlers **already** re-exported
+  `pub(crate)` at the root (§73–329); from `router.rs`, these symbols remain accessible via
+  `use crate::*;` (or targeted imports). No handler is moved, no route order
+  moves, no string changes → identical binary.
+- **Risk: LOW.** The only point of attention is the list of `use` to copy; the compiler
+  guarantees it is exhaustive.
+- **Green check:** `cargo test` (the `*_routes_do_not_conflict`, `security_headers_*`,
+  `standalone_boot_serves_health_*` tests already exercise the mounted router) + byte-identical release build.
 
-#### Étape 4 (optionnelle, seulement si `main.rs` reste gros) — Extraire le boot dans `console/src/boot.rs`
-- **Move :** `serve` (733–1122), `dispatch_cli` (623–732), `enterprise_store_gate` (1140–1164),
-  `enum StoreSelection` (1123–1139) → `console/src/boot.rs` (`pub(crate)`). `main.rs` se réduit à
-  `main()` + les `mod`/`use` de racine + le `mod tests`.
-- **Pourquoi sûr :** ce sont des fonctions à couplage faible avec le reste (elles consomment
-  `App`, `enterprise_store_gate`, `build_router`) ; l'extraction est un déplacement + `use`.
-- **Risque : FAIBLE-MOYEN.** `serve` est la plus grosse (~390 l) et touche des `#[cfg(feature =
-  "encryption")]` et le câblage HA — recopier les `use`/attributs `cfg` **à l'identique**. C'est
-  la seule étape avec un peu de surface ; elle est **optionnelle** et ne se fait que si le gain de
-  lisibilité le justifie après l'étape 1.
-- **Vérif verte :** `cargo test` (les tests `enterprise_store_gate_contract`,
-  `standalone_boot_*`, `health_surfaces_stamped_schema_version` couvrent la zone) + build
-  release byte-identique.
+#### Step 4 (optional, only if `main.rs` stays large) — Extract the boot into `console/src/boot.rs`
+- **Move:** `serve` (733–1122), `dispatch_cli` (623–732), `enterprise_store_gate` (1140–1164),
+  `enum StoreSelection` (1123–1139) → `console/src/boot.rs` (`pub(crate)`). `main.rs` shrinks to
+  `main()` + the root `mod`/`use` + the `mod tests`.
+- **Why it is safe:** these are functions loosely coupled with the rest (they consume
+  `App`, `enterprise_store_gate`, `build_router`); the extraction is a move + `use`.
+- **Risk: LOW-MEDIUM.** `serve` is the largest (~390 l) and touches `#[cfg(feature =
+  "encryption")]` and the HA wiring — copy the `use`/`cfg` attributes **identically**. It is
+  the only step with a little surface; it is **optional** and is only done if the
+  readability gain justifies it after step 1.
+- **Green check:** `cargo test` (the `enterprise_store_gate_contract`,
+  `standalone_boot_*`, `health_surfaces_stamped_schema_version` tests cover the area) + byte-identical
+  release build.
 
-### 1.3 Cible finale (indicative, PAS un objectif à atteindre d'un coup)
+### 1.3 Final target (indicative, NOT a goal to reach in one go)
 ```
 console/src/main.rs        ~60 l   (main() + mod/use racine + mod tests;)
 console/src/router.rs      ~230 l  (build_router + health + catch_panic_response)
@@ -174,28 +176,28 @@ console/src/boot.rs        ~430 l  (serve + dispatch_cli + store-gate)   [étape
 console/src/testutil.rs    ~250 l  (helpers de test partagés, étendu en 2a)
 console/src/tests_*.rs      11 fichiers, ~4900 l au total (répartis)
 ```
-Ordre d'exécution recommandé : **1 → (2a → 2 au fil de l'eau) → 3 → 4 (si besoin)**. Après
-l'étape 1 seule, la dette « god-file » est déjà résolue à 80 % pour un risque quasi nul.
+Recommended execution order: **1 → (2a → 2 as you go) → 3 → 4 (if needed)**. After
+step 1 alone, the "god-file" debt is already 80 % resolved for near-zero risk.
 
 ---
 
-## 2. `forge/modules/*.py` — factorisation du boilerplate `extra_args`/allowlist
+## 2. `forge/modules/*.py` — factoring out the `extra_args`/allowlist boilerplate
 
-### 2.1 État réel vérifié
+### 2.1 Actual state, verified
 
-La base a **déjà** deux socles de factorisation en place :
-- `forge/modules/oracle.py::Oracle` (+ `ScopeGuardedOracle`) — factorise les 4 oracles à preuve
-  (`proof`/`skip`/`_http`/`_curl`). **Bien fait, rien à refaire ici.**
-- `forge/modules/toolspec.py::ExternalToolModule` (382–…) — base des wrappers **générés depuis un
-  `ToolSpec`** : elle centralise DÉJÀ, dans un seul `fire()`, tout le contrat gouverné —
-  scope-guard fail-closed, **anti-injection d'argument positionnel** (`unsafe_positional_target`),
-  **allowlist `extra_args` fail-closed** (`unsafe_extra_args`, 436–445), plancher exploit,
-  dégradation binaire absent, exécution no-shell.
+The codebase **already** has two factoring foundations in place:
+- `forge/modules/oracle.py::Oracle` (+ `ScopeGuardedOracle`) — factors the 4 evidence-backed oracles
+  (`proof`/`skip`/`_http`/`_curl`). **Well done, nothing to redo here.**
+- `forge/modules/toolspec.py::ExternalToolModule` (382–…) — base of the wrappers **generated from a
+  `ToolSpec`**: it ALREADY centralises, in a single `fire()`, the whole governed contract —
+  fail-closed scope-guard, **positional-argument anti-injection** (`unsafe_positional_target`),
+  **fail-closed `extra_args` allowlist** (`unsafe_extra_args`, 436–445), exploit floor,
+  degradation when the binary is absent, no-shell execution.
 
-**La dette est ailleurs :** les modules **écrits à la main** (pas générés depuis un `ToolSpec`)
-**ré-implémentent chacun** ce que `ExternalToolModule` centralise déjà. Duplication vérifiée :
+**The debt is elsewhere:** the **hand-written** modules (not generated from a `ToolSpec`)
+**each re-implement** what `ExternalToolModule` already centralises. Verified duplication:
 
-| Module | Classe(s) | `FLAG_ALLOWLIST` | `_refuse()` local | param-spec `extra_args` répété | gate dans `fire()` |
+| Module | Class(es) | `FLAG_ALLOWLIST` | local `_refuse()` | repeated `extra_args` param-spec | gate in `fire()` |
 |--------|-----------|:---:|:---:|:---:|:---:|
 | `recon.py` | `HttpxFingerprint`, `NmapServices` | 2× (l.53, 125) | 2× (l.81, 170) | 2× | 2× (`check_extra_args`) |
 | `web.py` | `NucleiScan` | 1× (l.37) | 1× (l.77) | 1× | 1× |
@@ -203,23 +205,23 @@ La base a **déjà** deux socles de factorisation en place :
 | `recon_active.py` | `ContentDiscovery` (`PassiveSurface`) | 1× (l.96) | — | 1× | 6× refs |
 | `injection.py` | `SqliProbe` (`InjectionOracle`) | 1× (l.286) | — | 1× | 1× (l.403) |
 
-Le pattern dupliqué, **quasi-verbatim** d'un module à l'autre :
+The duplicated pattern, **near-verbatim** from one module to the next:
 ```python
-FLAG_ALLOWLIST = ("-x", "-y", ...)                       # (1) constante par module
-{"name": "extra_args", "type": "list", "label": "...", "flag": ""}   # (2) entrée de params répétée
-# dans preview :
+FLAG_ALLOWLIST = ("-x", "-y", ...)                       # (1) per-module constant
+{"name": "extra_args", "type": "list", "label": "...", "flag": ""}   # (2) repeated params entry
+# in preview:
 _, extra = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
-# dans fire() :
+# in fire():
 bad_extra, _ = check_extra_args(p.get("extra_args"), self.FLAG_ALLOWLIST)
 if bad_extra is not None:
-    return self._refuse(action, f"argument libre refusé ({bad_extra})")   # (3) refus fail-closed dupliqué
+    return self._refuse(action, f"argument libre refusé ({bad_extra})")   # (3) duplicated fail-closed refusal
 ```
-`_refuse` est copié **à l'identique** dans `recon.py` (×2), `web.py`, `origin.py`.
+`_refuse` is copied **identically** in `recon.py` (×2), `web.py`, `origin.py`.
 
-### 2.2 Cible de factorisation
+### 2.2 Factoring target
 
-Introduire, **dans `toolspec.py`** (à côté de `check_extra_args`/`safe_value` déjà partagés), un
-**mixin léger** pour les modules hand-written qui ne descendent pas de `ExternalToolModule` :
+Introduce, **in `toolspec.py`** (next to the already shared `check_extra_args`/`safe_value`), a
+**lightweight mixin** for the hand-written modules that do not descend from `ExternalToolModule`:
 
 ```python
 class FlagAllowlistMixin:
@@ -227,14 +229,14 @@ class FlagAllowlistMixin:
     Factorise : la constante d'entrée de params, la porte fail-closed, et le finding de refus.
     Aucune capacité élargie — même allowlist, même comportement, une seule source."""
 
-    FLAG_ALLOWLIST: tuple = ()          # déclarée par chaque module concret (inchangé)
+    FLAG_ALLOWLIST: tuple = ()          # declared by each concrete module (unchanged)
 
-    # (2) l'entrée de params répétée -> une classmethod qui la produit
+    # (2) the repeated params entry -> a classmethod that produces it
     @classmethod
     def extra_args_param(cls, label="extra args (allowlist de drapeaux)"):
         return {"name": "extra_args", "type": "list", "label": label, "flag": ""}
 
-    # (3) le refus fail-closed unifié (remplace les _refuse copiés)
+    # (3) the unified fail-closed refusal (replaces the copied _refuse)
     def _refuse(self, action, reason):
         return [self.finding(
             target=action.target, title=f"{self.kind} non exécuté — {reason}",
@@ -242,60 +244,60 @@ class FlagAllowlistMixin:
             tool=self._toolname(), evidence=f"{reason}. Aucun processus lancé (fail-closed).",
             poc=self.dry(action))]
 
-    # (1+gate) la porte : None si OK, sinon le finding de refus déjà construit
+    # (1+gate) the gate: None if OK, otherwise the already built refusal finding
     def gate_extra_args(self, action):
         bad_extra, _ = check_extra_args((action.params or {}).get("extra_args"), self.FLAG_ALLOWLIST)
         return self._refuse(action, f"argument libre refusé ({bad_extra})") if bad_extra is not None else None
 ```
-> **Note d'exactitude comportementale :** le libellé/`category`/`status` du finding de refus doit
-> être aligné **verbatim** sur ce que chaque module produit aujourd'hui (ex. `status="skipped"`
-> vs le message exact). Si les modules divergent sur le wording, **conserver le wording par
-> module** en le passant en argument, OU migrer d'abord les wordings vers une forme commune dans
-> une étape isolée AVANT d'introduire le mixin — sinon un test de régression du finding casse.
-> C'est le seul point de vigilance : la factorisation ne doit PAS uniformiser un message que les
-> tests figent.
+> **Behavioural accuracy note:** the wording/`category`/`status` of the refusal finding must
+> be aligned **verbatim** with what each module produces today (e.g. `status="skipped"`
+> vs the exact message). If the modules diverge on wording, **keep the per-module
+> wording** by passing it as an argument, OR first migrate the wordings to a common form in
+> an isolated step BEFORE introducing the mixin — otherwise a finding regression test breaks.
+> This is the only point of vigilance: the factoring must NOT standardise a message that the
+> tests pin down.
 
-### 2.3 Séquence ordonnée (plus petit risque → plus grand)
+### 2.3 Ordered sequence (smallest risk → largest)
 
-| # | Module migré | Pourquoi cet ordre | Risque | Vérif verte |
+| # | Migrated module | Why this order | Risk | Green check |
 |---|--------------|--------------------|:------:|-------------|
-| 0 | **Ajouter `FlagAllowlistMixin` dans `toolspec.py`** (sans le brancher) + tests unitaires du mixin | Introduit le socle sans toucher aucun module → build vert par construction | Très faible | `python3 -m unittest` : +N tests neufs, les 1513 existants inchangés |
-| 1 | **`web.py::NucleiScan`** (1 classe, `_refuse` local le plus simple) | Cas le plus isolé → valide le mixin sur un vrai module | Faible | `pytest -k nuclei` + suite complète ; finding de refus byte-identique |
-| 2 | **`recon.py::HttpxFingerprint` puis `NmapServices`** (2 classes, `_refuse` dupliqué ×2) | Élimine la duplication la plus flagrante ; deux classes ⇒ deux commits | Faible | tests `recon`/`module_routes_do_not_conflict` |
-| 3 | **`origin.py::SubfinderEnum`** (gate en 2 points : preview + fire) | Vérifie que le mixin couvre le double appel `check_extra_args` | Faible | tests `origin`/exposure |
-| 4 | **`recon_active.py::ContentDiscovery`** (`PassiveSurface`, 6 refs) | Plus de points de contact ⇒ après rodage du mixin | Faible-moyen | tests `recon_active`/secret-scan |
-| 5 | **`injection.py::SqliProbe`** (`InjectionOracle` → `ScopeGuardedOracle`) | Héritage multiple (mixin + chaîne Oracle) ⇒ **en dernier**, MRO à valider | Moyen | test `validate_extra_args_enforces_allowlist` (Rust) + `pytest -k sqli` |
+| 0 | **Add `FlagAllowlistMixin` in `toolspec.py`** (without wiring it) + mixin unit tests | Introduces the foundation without touching any module → green build by construction | Very low | `python3 -m unittest`: +N new tests, the 1513 existing ones unchanged |
+| 1 | **`web.py::NucleiScan`** (1 class, simplest local `_refuse`) | Most isolated case → validates the mixin on a real module | Low | `pytest -k nuclei` + full suite; byte-identical refusal finding |
+| 2 | **`recon.py::HttpxFingerprint` then `NmapServices`** (2 classes, `_refuse` duplicated ×2) | Removes the most glaring duplication; two classes ⇒ two commits | Low | `recon`/`module_routes_do_not_conflict` tests |
+| 3 | **`origin.py::SubfinderEnum`** (gate at 2 points: preview + fire) | Checks that the mixin covers the double `check_extra_args` call | Low | `origin`/exposure tests |
+| 4 | **`recon_active.py::ContentDiscovery`** (`PassiveSurface`, 6 refs) | More contact points ⇒ after the mixin is broken in | Low-medium | `recon_active`/secret-scan tests |
+| 5 | **`injection.py::SqliProbe`** (`InjectionOracle` → `ScopeGuardedOracle`) | Multiple inheritance (mixin + Oracle chain) ⇒ **last**, MRO to validate | Medium | `validate_extra_args_enforces_allowlist` test (Rust) + `pytest -k sqli` |
 
-- **Chaque migration = 1 commit** : remplacer, dans le module, le `_refuse` local + le
-  `{"name":"extra_args",...}` littéral + l'appel `check_extra_args`+garde par le mixin
+- **Each migration = 1 commit**: replace, in the module, the local `_refuse` + the
+  literal `{"name":"extra_args",...}` + the `check_extra_args` call + guard with the mixin
   (`class X(FlagAllowlistMixin, ...)`, `params=[..., self.extra_args_param()]`,
-  `if (r := self.gate_extra_args(action)): return r`). **La constante `FLAG_ALLOWLIST` reste
-  déclarée par le module** (elle est intrinsèque à l'outil enveloppé — ne PAS la centraliser).
-- **Piège MRO (étape 5) :** `InjectionOracle` descend déjà de `ScopeGuardedOracle`
-  (`ScopeGuardMixin, Oracle`). Ajouter `FlagAllowlistMixin` en **tête** de bases
-  (`class SqliProbe(FlagAllowlistMixin, InjectionOracle)`) pour que ses méthodes priment sans
-  masquer `finding`/`_in_scope` de la chaîne Oracle. Valider par `SqliProbe.__mro__` + le test.
-- **Non-objectif :** on ne fusionne PAS ces modules dans `ExternalToolModule` (ils ont une logique
-  de parsing/jugement propre non générable depuis un `ToolSpec`). Le mixin factorise uniquement la
-  plomberie `extra_args`, pas le corps métier.
+  `if (r := self.gate_extra_args(action)): return r`). **The `FLAG_ALLOWLIST` constant stays
+  declared by the module** (it is intrinsic to the wrapped tool — do NOT centralise it).
+- **MRO trap (step 5):** `InjectionOracle` already descends from `ScopeGuardedOracle`
+  (`ScopeGuardMixin, Oracle`). Add `FlagAllowlistMixin` at the **head** of the bases
+  (`class SqliProbe(FlagAllowlistMixin, InjectionOracle)`) so that its methods take precedence without
+  masking `finding`/`_in_scope` from the Oracle chain. Validate with `SqliProbe.__mro__` + the test.
+- **Non-goal:** these modules are NOT merged into `ExternalToolModule` (they have their own
+  parsing/judgement logic that cannot be generated from a `ToolSpec`). The mixin factors only the
+  `extra_args` plumbing, not the business body.
 
 ### 2.4 Gain
-- Supprime ~4 copies de `_refuse`, ~6 littéraux `{"name":"extra_args",...}`, et unifie la porte
-  `extra_args` en une source unique — **sans** changer une allowlist ni un argv généré (les tests
-  `validate_extra_args_enforces_allowlist` et `plan_threads_and_validates_module_params_extra_args`
-  restent le filet).
-- Aligne les modules hand-written sur le contrat déjà porté par `ExternalToolModule`, réduisant la
-  divergence future (le prochain module wrapper hérite du bon comportement par défaut).
+- Removes ~4 copies of `_refuse`, ~6 `{"name":"extra_args",...}` literals, and unifies the
+  `extra_args` gate into a single source — **without** changing an allowlist or a generated argv (the
+  `validate_extra_args_enforces_allowlist` and `plan_threads_and_validates_module_params_extra_args` tests
+  remain the safety net).
+- Aligns the hand-written modules with the contract already carried by `ExternalToolModule`, reducing
+  future divergence (the next wrapper module inherits the right behaviour by default).
 
 ---
 
-## 3. Ce que ce plan n'est PAS
+## 3. What this plan is NOT
 
-- **Pas un big-bang.** Aucune étape ne dépend de la suivante pour être verte ; on peut s'arrêter
-  après l'Étape 1 de chaque chantier et avoir déjà encaissé l'essentiel du gain.
-- **Pas une réécriture.** Zéro logique nouvelle : déplacements de texte + une base partagée dont
-  le corps est copié des implémentations existantes.
-- **Pas de changement de surface communautaire.** Binaire release byte-identique ; findings,
-  routes, codes de sortie, allowlists — tous inchangés.
-- **Opportuniste.** Déclencheur : « je touche déjà cette zone » ou une fenêtre de dette budgétée.
-  Jamais « refactorons pour refactorer ».
+- **Not a big-bang.** No step depends on the next one to be green; you can stop
+  after Step 1 of each workstream and have already banked most of the gain.
+- **Not a rewrite.** Zero new logic: text moves + a shared base whose
+  body is copied from the existing implementations.
+- **No change to the default-build surface.** Byte-identical release binary; findings,
+  routes, exit codes, allowlists — all unchanged.
+- **Opportunistic.** Trigger: "I am already touching this area" or a budgeted debt window.
+  Never "let's refactor for the sake of refactoring".

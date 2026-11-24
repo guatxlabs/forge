@@ -1,118 +1,120 @@
-# Vue d'ensemble
+# Overview
 
-> [Sommaire](README.md) · Suivant : [Architecture](ARCHITECTURE.md) · [Concepts](CONCEPTS.md) ·
-> [Démarrage hors-ligne](GETTING_STARTED.md)
+[English](OVERVIEW.md) | [Français](OVERVIEW.fr.md)
 
-## Qu'est-ce que Forge ?
+> [Table of contents](README.md) · Next: [Architecture](ARCHITECTURE.md) · [Concepts](CONCEPTS.md) ·
+> [Offline start](GETTING_STARTED.md)
 
-**Forge est une plateforme d'évaluation red-team gouvernée.** Elle orchestre des modules d'attaque
-(recon → énumération → oracles à preuve → connecteurs d'exploitation), mais son cœur n'est pas
-l'arsenal : c'est la **couche de gouvernance, de preuve et de mesure** posée par-dessus.
+## What is Forge?
 
-Trois invariants la définissent :
+**Forge is a governed red-team assessment platform.** It orchestrates attack modules
+(recon → enumeration → evidence oracles → exploitation connectors), but its core is not
+the arsenal: it is the **governance, evidence and measurement layer** placed on top of it.
 
-1. **Gouvernance fail-closed** — chaque action passe par une **gate ROE (Rules of Engagement) à
-   quatre couches**. Par défaut, Forge est **INERTE** : rien ne peut tirer tant que l'opérateur n'a
-   pas armé chaque couche consciemment. Hors périmètre autorisé ⇒ refus dur (`VETO`), jamais simulé.
-2. **Preuve d'autorisation** — chaque décision (armement, approbation, tir, finding) est scellée
-   dans un **ledger d'engagement append-time, tamper-evident**, signé **Ed25519**. Un tiers
-   (auditeur, client, juridique) vérifie l'intégrité et l'appartenance au périmètre avec la **seule
-   clé publique**, sans jamais pouvoir forger une entrée.
-3. **Mesure purple** — chaque technique tirée porte un identifiant **MITRE ATT&CK**. En joignant les
-   techniques *tirées* (red) aux techniques *détectées* par la défense (blue), Forge calcule la
-   **couverture de détection réelle** et le **MTTD** — technique par technique.
+Three invariants define it:
 
-Forge est écrit en **Python pur-stdlib** (le moteur) + **Rust/axum** (la console) + **vanilla-JS**
-(le SPA). Le livrable est **un binaire + des sources Python** (Python **1 371 KB** + web **877 KB** mesurés ;
-taille du binaire **non mesurée** — cf. [`DEPLOYMENT.md`](DEPLOYMENT.md) §6) ; les moteurs offensifs lourds (nmap, nuclei, Metasploit, Burp,
-browser-automation) sont **orchestrés en option**, jamais embarqués, et **s'auto-neutralisent** s'ils
-sont absents.
+1. **Fail-closed governance** — every action goes through a **four-layer ROE (Rules of Engagement)
+   gate**. By default, Forge is **INERT**: nothing can fire until the operator has
+   consciously armed every layer. Outside the authorized scope ⇒ hard refusal (`VETO`), never simulated.
+2. **Evidence of authorization** — every decision (arming, approval, shot, finding) is sealed
+   in an **append-time, tamper-evident engagement ledger**, signed with **Ed25519**. A third party
+   (auditor, client, legal) verifies integrity and scope membership with the **public
+   key alone**, without ever being able to forge an entry.
+3. **Purple measurement** — every fired technique carries a **MITRE ATT&CK** identifier. By joining the
+   *fired* techniques (red) to the techniques *detected* by the defense (blue), Forge computes the
+   **real detection coverage** and the **MTTD** — technique by technique.
 
-## Le problème que Forge résout
+Forge is written in **pure-stdlib Python** (the engine) + **Rust/axum** (the console) + **vanilla-JS**
+(the SPA). The deliverable is **one binary + Python sources** (Python **1,371 KB** + web **877 KB** measured;
+binary size **not measured** — see [`DEPLOYMENT.md`](DEPLOYMENT.md) §6); the heavy offensive engines (nmap, nuclei, Metasploit, Burp,
+browser-automation) are **orchestrated as options**, never bundled, and **neutralize themselves** if they
+are absent.
 
-Après une campagne offensive, deux questions restent souvent sans réponse démontrable :
+## The problem Forge solves
 
-- **« Pouvez-vous prouver à un auditeur que le red-team est resté dans le périmètre autorisé ? »**
-  → Forge répond avec un ledger signé, vérifiable sans confiance dans l'opérateur.
-- **« Combien de ces techniques votre SOC a-t-il réellement détecté, et en combien de temps ? »**
-  → Forge répond avec une matrice de couverture ATT&CK et un MTTD mesuré (pas estimé).
+After an offensive campaign, two questions often remain without a demonstrable answer:
 
-Forge n'essaie **pas** de battre Metasploit ou Cobalt Strike sur la capacité offensive brute. Il les
-**pilote** et **mesure leur impact défensif**. Le différenciateur n'est aucune ligne prise isolément,
-mais leur combinaison : *rouge + bleu, même éditeur, corrélés ATT&CK, autorisation signée*.
+- **"Can you prove to an auditor that the red team stayed within the authorized scope?"**
+  → Forge answers with a signed ledger, verifiable without trusting the operator.
+- **"How many of these techniques did your SOC actually detect, and how fast?"**
+  → Forge answers with an ATT&CK coverage matrix and a measured (not estimated) MTTD.
 
-Le positionnement complet est dans [`POSITIONING.md`](POSITIONING.md) ; le produit est **gratuit et
-open source**, et la logique de tarification des **prestations** est dans [`PRICING.md`](PRICING.md).
+Forge does **not** try to beat Metasploit or Cobalt Strike on raw offensive capability. It
+**drives** them and **measures their defensive impact**. The differentiator is no single line taken in isolation,
+but their combination: *red + blue, same vendor, ATT&CK-correlated, signed authorization*.
 
-## La proposition de valeur en trois piliers
+The full positioning is in [`POSITIONING.md`](POSITIONING.md); the product is **free and
+open source**, and the pricing logic for **professional services** is in [`PRICING.md`](PRICING.md).
 
-### Pilier A — Preuve d'autorisation signée
-- **Gate ROE fail-closed à 4 couches** (`forge/roe.py`) : une action LIVE ne part QUE si elle a
-  franchi *armé → in-scope (allowlist, jamais deny-list) → capacité autorisée → approuvée*. Toute
-  ambiguïté ou erreur d'évaluation ⇒ `VETO`.
-- **Ledger d'engagement** (`forge/ledger.py` + `signing.py`) : chaîne SHA-256 + signature Ed25519
-  **par-entrée**, vérification externe par clé publique seule (`verify_external`).
+## The value proposition in three pillars
 
-### Pilier B — Boucle purple même-éditeur
-- Forge (rouge) et Plume (bleu, le SOC) se corrèlent par champ **MITRE**. « Purple » n'est pas un 3ᵉ
-  produit : c'est la boucle. Sortie : par technique → **detected (exact) / parent_approx / missed /
-  MTTD**. Le taux et le MTTD ne comptent que l'exact : une règle parente générique ne prouve pas la
-  détection de la sous-technique tirée.
-- La **source de détection est un plugin configurable** : Plume n'est qu'un préréglage
-  (`kind=plume`). CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, un fichier ou une
-  commande se câblent **sans code** — voir [`DETECTION.md`](DETECTION.md).
+### Pillar A — Signed evidence of authorization
+- **Fail-closed 4-layer ROE gate** (`forge/roe.py`): a LIVE action goes out ONLY if it has
+  passed *armed → in-scope (allowlist, never deny-list) → authorized capability → approved*. Any
+  ambiguity or evaluation error ⇒ `VETO`.
+- **Engagement ledger** (`forge/ledger.py` + `signing.py`): SHA-256 chain + **per-entry** Ed25519
+  signature, external verification with the public key alone (`verify_external`).
 
-### Pilier C — Safe-by-default
-- **Non-exploit forcé** : `allow_exploit` / `allow_destructive` sont des opt-in explicites par
-  engagement. Un module `exploit=True` (ex. `msf.module`) est vétoé tant que la capacité n'est pas
-  armée.
-- **Scope-guard dur** : `in_scope` vide ⇒ rien ne tire (fail-closed).
-- **Pas de sur-classement** : un connecteur tiers (nuclei, Burp) émet `reported_by_tool`, jamais
-  `vulnerable`, tant qu'il n'y a pas de preuve d'exploitabilité.
+### Pillar B — Same-vendor purple loop
+- Forge (red) and Plume (blue, the SOC) correlate on the **MITRE** field. "Purple" is not a 3rd
+  product: it is the loop. Output: per technique → **detected (exact) / parent_approx / missed /
+  MTTD**. The rate and the MTTD only count exact matches: a generic parent rule does not prove the
+  detection of the fired sub-technique.
+- The **detection source is a configurable plugin**: Plume is only a preset
+  (`kind=plume`). CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, a file or a
+  command are wired **without code** — see [`DETECTION.md`](DETECTION.md).
 
-## Forge fonctionne en STANDALONE
+### Pillar C — Safe-by-default
+- **Forced non-exploit**: `allow_exploit` / `allow_destructive` are explicit per-engagement
+  opt-ins. An `exploit=True` module (e.g. `msf.module`) is vetoed as long as the capability is not
+  armed.
+- **Hard scope-guard**: empty `in_scope` ⇒ nothing fires (fail-closed).
+- **No over-classification**: a third-party connector (nuclei, Burp) emits `reported_by_tool`, never
+  `vulnerable`, as long as there is no evidence of exploitability.
 
-**Plume (le SOC) et la boucle purple sont OPTIONNELS.** Forge est un produit complet sans eux :
+## Forge works STANDALONE
 
-| Sans aucune source de détection | Forge fait quand même… |
+**Plume (the SOC) and the purple loop are OPTIONAL.** Forge is a complete product without them:
+
+| Without any detection source | Forge still does… |
 |---|---|
-| Scope-guard ROE + armement par couche | ✅ tout le cycle de gouvernance |
-| Ledger d'engagement signé + vérif externe | ✅ preuve d'autorisation |
-| Recon, oracles à preuve, connecteurs MSF/Burp | ✅ tout le red-team gouverné |
-| Console (findings / coverage ATT&CK / runs), GXQL, dashboards, rapports | ✅ tout le store + livrables |
-| Boucle purple (detected/missed/MTTD) | ⏸️ inerte — **fail-open lisible** : `source_reachable:false`, aucune métrique inventée |
+| ROE scope-guard + per-layer arming | ✅ the whole governance cycle |
+| Signed engagement ledger + external verification | ✅ evidence of authorization |
+| Recon, evidence oracles, MSF/Burp connectors | ✅ the whole governed red-team |
+| Console (findings / ATT&CK coverage / runs), GXQL, dashboards, reports | ✅ the whole store + deliverables |
+| Purple loop (detected/missed/MTTD) | ⏸️ inert — **readable fail-open**: `source_reachable:false`, no invented metric |
 
-Quand aucune source de détection n'est configurée, l'endpoint de couverture purple répond
-honnêtement « mesure impossible » plutôt que d'inventer un chiffre. Brancher une source **plus tard**
-active la boucle sans rien changer d'autre. Voir la page dédiée
-**[Utiliser Forge en standalone](STANDALONE.md)**.
+When no detection source is configured, the purple coverage endpoint answers
+honestly "measurement impossible" rather than inventing a figure. Plugging in a source **later**
+activates the loop without changing anything else. See the dedicated page
+**[Using Forge standalone](STANDALONE.md)**.
 
-## Ce que Forge N'EST PAS
+## What Forge is NOT
 
-- **PAS un C2 / un beacon** : aucun implant, aucun callback persistant, aucune post-exploitation.
-  Forge orchestre des outils à *fire-time* puis trace ; il ne maintient pas d'accès. Le run-flow
-  « C2-light » de la console est un **lanceur de campagne gouverné et audité**, pas un canal de
-  commande persistant.
-- **PAS un scanner de vulnérabilités** : nuclei/Burp font le scan ; Forge les **gouverne et corrèle**.
-- **PAS un remplaçant de Metasploit** : il le **pilote** (`msf.module` → msfrpcd).
-- **PAS de l'OSINT / du forensics** : `origin.find` retrouve une IP d'origine derrière un CDN (recon
-  technique scopée) ; le ledger prouve une **autorisation d'engagement**, pas une preuve forensique
-  de terminal.
+- **NOT a C2 / a beacon**: no implant, no persistent callback, no post-exploitation.
+  Forge orchestrates tools at *fire-time* and then records; it does not maintain access. The console's
+  "C2-light" run-flow is a **governed and audited campaign launcher**, not a persistent
+  command channel.
+- **NOT a vulnerability scanner**: nuclei/Burp do the scanning; Forge **governs and correlates** them.
+- **NOT a Metasploit replacement**: it **drives** it (`msf.module` → msfrpcd).
+- **NOT OSINT / forensics**: `origin.find` recovers an origin IP behind a CDN (scoped technical
+  recon); the ledger proves an **engagement authorization**, not endpoint forensic
+  evidence.
 
-Détail anti-confusion : [`POSITIONING.md`](POSITIONING.md) §4.
+Anti-confusion details: [`POSITIONING.md`](POSITIONING.md) §4.
 
-## Maturité & contraintes (honnêteté)
+## Maturity & constraints (honesty)
 
-- **Version 0.0.1** — les premiers clients sont des design partners.
-- **Stateful single-replica** : SQLite + ledger sur un volume `ReadWriteOnce` → profil idéal
-  **mono-opérateur / petit MSSP**. Le multi-tenant scale-out est une évolution (ledger hors-host +
-  store partagé), pas un acquis. Voir [`DEPLOYMENT.md`](DEPLOYMENT.md) § Contrainte d'archi.
-- **Custody** : la clé privée de signature est aujourd'hui **locale** ; l'ancrage hors-host (témoin
-  co-signataire distant, `forge/anchor.py`) est la dernière étape, et l'architecture asymétrique le
-  permet déjà (seule la clé publique circule). Documenté, pas caché.
+- **Version 0.0.1** — the first clients are design partners.
+- **Stateful single-replica**: SQLite + ledger on a `ReadWriteOnce` volume → ideal profile
+  **single operator / small MSSP**. Multi-tenant scale-out is an evolution (off-host ledger +
+  shared store), not a given. See [`DEPLOYMENT.md`](DEPLOYMENT.md) § Architecture constraint.
+- **Custody**: the private signing key is currently **local**; off-host anchoring (remote co-signing
+  witness, `forge/anchor.py`) is the last step, and the asymmetric architecture already
+  allows it (only the public key circulates). Documented, not hidden.
 
-## Prochaines étapes
+## Next steps
 
-- Voir Forge tourner en 10 minutes, 100 % hors-ligne → **[Démarrage](GETTING_STARTED.md)**.
-- Comprendre comment c'est construit → **[Architecture](ARCHITECTURE.md)** et **[Concepts](CONCEPTS.md)**.
-- Déployer une console → **[Installation](INSTALLATION.md)** puis **[Premier déploiement](FIRST_DEPLOYMENT.md)**.
+- See Forge running in 10 minutes, 100 % offline → **[Getting started](GETTING_STARTED.md)**.
+- Understand how it is built → **[Architecture](ARCHITECTURE.md)** and **[Concepts](CONCEPTS.md)**.
+- Deploy a console → **[Installation](INSTALLATION.md)** then **[First deployment](FIRST_DEPLOYMENT.md)**.

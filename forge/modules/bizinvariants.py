@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Oracle A PREUVE des INVARIANTS METIER — `business_logic.invariants`.
 
 POURQUOI IL S'AJOUTE A `business_logic.scan` AU LIEU DE LE REMPLACER

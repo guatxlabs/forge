@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Oracle À PREUVE du Client-Side Path Traversal (CSPT) — `cspt.redirect`.
 
 CE QU'IL PROUVE, ET COMMENT

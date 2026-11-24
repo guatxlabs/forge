@@ -1,81 +1,83 @@
-# MTTD — ce que la métrique mesure (et ne mesure PAS)
+# MTTD — what the metric measures (and does NOT measure)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) · [Prérequis Plume](PURPLE_PREREQS.md)
+[English](MTTD.md) | [Français](MTTD.fr.md)
+
+> 🧭 [Forge documentation](README.md) · See also: [Concepts: purple loop](CONCEPTS.md#5-the-purple-loop) · [Plume prerequisites](PURPLE_PREREQS.md)
 
 ## TL;DR
 
-Le MTTD reporté par Forge est un **time-to-ALERT**, pas un **time-to-event**. Il inclut la latence
-d'**évaluation des règles Plume** (`interval_s`, défaut ~300 s) + la latence d'**ingest des logs**
-(journald → Plume). Les MTTD observés (ex. **352 s**, **623 s**) reflètent donc en grande partie
-l'intervalle d'évaluation des règles testées, et **ne doivent pas être surinterprétés** comme le
-temps de réaction « brut » du SOC.
+The MTTD reported by Forge is a **time-to-ALERT**, not a **time-to-event**. It includes the
+**Plume rule evaluation** latency (`interval_s`, default ~300 s) + the **log ingest** latency
+(journald → Plume). The observed MTTDs (e.g. **352 s**, **623 s**) therefore largely reflect
+the evaluation interval of the tested rules, and **must not be over-interpreted** as the
+"raw" reaction time of the SOC.
 
-## Comment le MTTD est calculé
+## How the MTTD is computed
 
-La console fait le JOIN purple (`console/src/main.rs`, fonction de couverture) :
+The console performs the purple JOIN (`console/src/main.rs`, coverage function):
 
 ```
 MTTD(technique T) = first_detection_ts(T) − last_fire_ts(T)     (en secondes, tronqué à 0 si négatif)
 ```
 
-- `last_fire_ts(T)` = horodatage du **tir red** le plus récent pour la technique T (côté Forge,
-  champ `ts` des run-records).
-- `first_detection_ts(T)` = `first_ts` renvoyé par Plume (`GET {PLUME_URL}/api/coverage/detections`),
-  soit le **premier `alert.ts`** agrégé pour ce `mitre`.
+- `last_fire_ts(T)` = timestamp of the most recent **red shot** for technique T (Forge side,
+  `ts` field of the run-records).
+- `first_detection_ts(T)` = `first_ts` returned by Plume (`GET {PLUME_URL}/api/coverage/detections`),
+  i.e. the **first `alert.ts`** aggregated for this `mitre`.
 
-Le point clé : `first_detection_ts` est le timestamp d'une **ALERTE**, pas de l'**événement** sous-jacent.
+The key point: `first_detection_ts` is the timestamp of an **ALERT**, not of the underlying **event**.
 
-## Pourquoi c'est un time-to-ALERT, pas un time-to-event
+## Why it is a time-to-ALERT, not a time-to-event
 
-Une alerte Plume n'existe qu'**après** que :
+A Plume alert only exists **after**:
 
-1. **Ingest** — l'événement (journald / syslog de l'hôte testé) est ingéré par Plume. Latence de
-   collecte/transport non nulle.
-2. **Évaluation de règle** — la règle Plume associée s'exécute. Les règles tournent **par
-   intervalle** (`interval_s`, défaut ~300 s), pas en continu : un événement arrivé juste après un
-   cycle d'évaluation attend ~jusqu'au cycle suivant avant de produire une alerte.
+1. **Ingest** — the event (journald / syslog of the tested host) is ingested by Plume. Non-zero
+   collection/transport latency.
+2. **Rule evaluation** — the associated Plume rule runs. Rules run **on an
+   interval** (`interval_s`, default ~300 s), not continuously: an event that arrives just after an
+   evaluation cycle waits ~until the next cycle before producing an alert.
 
-Donc, pour une technique détectée par une règle d'intervalle :
+So, for a technique detected by an interval rule:
 
 ```
 MTTD ≈ latence_ingest + (temps jusqu'au prochain cycle d'évaluation) + temps_de_règle
      ≈ latence_ingest + [0 … interval_s]   (en moyenne ~interval_s/2, au pire ~interval_s)
 ```
 
-Avec `interval_s ≈ 300 s`, un MTTD observé de **352 s** ou **623 s** est cohérent avec
-**1× à 2× l'intervalle** + l'ingest — c'est-à-dire dominé par la cadence d'évaluation des règles,
-pas par une lenteur de détection « réelle ». La détection elle-même (le matching) est quasi-instantanée ;
-ce qu'on mesure, c'est surtout **quand la règle a regardé**.
+With `interval_s ≈ 300 s`, an observed MTTD of **352 s** or **623 s** is consistent with
+**1× to 2× the interval** + ingest — that is, dominated by the rule evaluation cadence,
+not by a "real" detection slowness. Detection itself (the matching) is near-instantaneous;
+what is measured is mostly **when the rule looked**.
 
-## Conséquence : ne pas surinterpréter
+## Consequence: do not over-interpret
 
-- Un MTTD de quelques centaines de secondes **n'indique pas** un SOC lent : il indique surtout
-  l'`interval_s` des règles concernées. Comparer des MTTD entre techniques n'a de sens que si l'on
-  connaît l'`interval_s` de chaque règle (deux règles à intervalles différents ne sont pas
-  comparables directement).
-- Le MTTD est **borné par le bas** par l'intervalle de la règle : on ne peut pas mesurer un
-  time-to-alert plus fin que la cadence d'évaluation, même si la détection logique est immédiate.
-- Le JOIN reste **lecture seule** et la console **ne fabrique jamais** de MTTD (si Plume est
-  injoignable/illisible → `plume_reachable:false`, MTTD `null`, jamais inventé). La métrique est
-  fidèle ; c'est son **interprétation** qui demande le contexte `interval_s`.
+- An MTTD of a few hundred seconds **does not indicate** a slow SOC: it mostly indicates
+  the `interval_s` of the rules concerned. Comparing MTTDs across techniques only makes sense if
+  the `interval_s` of each rule is known (two rules with different intervals are not
+  directly comparable).
+- The MTTD is **bounded from below** by the rule interval: a time-to-alert finer than the
+  evaluation cadence cannot be measured, even if the logical detection is immediate.
+- The JOIN stays **read-only** and the console **never fabricates** an MTTD (if Plume is
+  unreachable/unreadable → `plume_reachable:false`, MTTD `null`, never invented). The metric is
+  faithful; it is its **interpretation** that needs the `interval_s` context.
 
-## Recommandations
+## Recommendations
 
-1. **Documenter l'`interval_s` des règles testées** à côté de chaque MTTD dans le rapport purple
-   (sans cette donnée, un MTTD seul est ambigu : détection lente vs simple cadence d'intervalle).
-2. **Pour un MTTD plus fin**, baisser l'`interval_s` des règles concernées (le plancher du MTTD
-   descend alors vers la vraie latence d'ingest + matching). ⚠️ **Hors périmètre Forge** : c'est une
-   configuration de la source de détection, pas un réglage de ce dépôt.
-3. **Horloges synchronisées (NTP)** entre l'hôte Forge (`ts` du tir) et Plume (`alert.ts`) — sans
-   ça, `first_detection_ts − last_fire_ts` est biaisé par le décalage d'horloge (cf.
-   `PURPLE_PREREQS.md` §6). La troncature à 0 masque un décalage négatif mais pas un décalage positif.
-4. **Présenter le MTTD comme un time-to-ALERT** dans tout livrable client : nommer explicitement
-   qu'il englobe ingest + cadence d'évaluation des règles, pour éviter la lecture « temps de réaction
-   du SOC ».
+1. **Document the `interval_s` of the tested rules** next to each MTTD in the purple report
+   (without this data, an MTTD alone is ambiguous: slow detection vs mere interval cadence).
+2. **For a finer MTTD**, lower the `interval_s` of the rules concerned (the MTTD floor
+   then goes down towards the true ingest + matching latency). ⚠️ **Outside Forge's scope**: this is a
+   configuration of the detection source, not a setting of this repository.
+3. **Synchronised clocks (NTP)** between the Forge host (`ts` of the shot) and Plume (`alert.ts`) — without
+   it, `first_detection_ts − last_fire_ts` is biased by the clock offset (cf.
+   `PURPLE_PREREQS.md` §6). Truncation to 0 hides a negative offset but not a positive one.
+4. **Present the MTTD as a time-to-ALERT** in any client deliverable: state explicitly
+   that it covers ingest + rule evaluation cadence, to avoid the "SOC reaction
+   time" reading.
 
-## Voir aussi
+## See also
 
-- [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) — prérequis Plume (règles taguées `mitre`, endpoint
-  `/api/coverage/detections`, NTP) pour que le JOIN MTTD fonctionne.
-- [`PURPLE_CAMPAIGN.md`](PURPLE_CAMPAIGN.md) — gabarit de campagne recon-large qui amorce la
-  matrice MTTD.
+- [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) — Plume prerequisites (`mitre`-tagged rules, endpoint
+  `/api/coverage/detections`, NTP) for the MTTD JOIN to work.
+- [`PURPLE_CAMPAIGN.md`](PURPLE_CAMPAIGN.md) — broad-recon campaign template that seeds the
+  MTTD matrix.

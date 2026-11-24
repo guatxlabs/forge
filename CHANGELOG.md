@@ -1,5 +1,7 @@
 # Changelog
 
+[English](CHANGELOG.md) | [Français](CHANGELOG.fr.md)
+
 All notable changes to Forge are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Forge aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) from its first tagged release.
@@ -9,356 +11,356 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
-### Added — couverture du Top 10 des techniques web 2025 : onze oracles à preuve
+### Added — coverage of the 2025 Top 10 web techniques: eleven evidence oracles
 
-Onze modules de vérification à preuve bénigne (exploit=False, destructive=False sauf mention),
-et la `DEFAULT_CHECKLIST` recalée sur les taux d'acceptation mesurés (traversal et XSS en tête) —
-l'ordre précédent omettait ces classes et les rendait invisibles à `coverage_gaps()`.
+Eleven verification modules with benign evidence (exploit=False, destructive=False unless stated),
+and the `DEFAULT_CHECKLIST` realigned on the measured acceptance rates (traversal and XSS first) —
+the previous order left out these classes and made them invisible to `coverage_gaps()`.
 
-- `upload.unrestricted` (CWE-434) : file upload dangereux, marqueur inerte resservi.
-- `cspt.redirect` + `recon.client_sinks` : Client-Side Path Traversal, différentiel de profondeur
-  de chemin observé au navigateur ; lecture des couples source vers puits du JavaScript de même origine.
-- `parserdiff.unicode` (CWE-176) : différentiel de normalisation Unicode entre WAF et backend.
-- `ormleak.filter` : oracle booléen par filtre ORM, deux sondes par champ, aucun balayage.
-- `ssrf.redirect_loop` : rend visible un SSRF aveugle via une boucle de redirection à codes incrémentaux.
-- `massassign.params` : mass assignment prouvé par un canari inerte, jamais une valeur privilégiée réelle.
-- `business_logic.invariants` : invariants dérivés de l'objet métier (négatif, borne, somme).
-- `llm.prompt_injection` : injection de prompt, canaris inertes, hors `DEFAULT_CHECKLIST` par défaut.
-- `ssti.errors` (CWE-1336) : SSTI aveugle par le canal d'erreur (« Successful Errors »).
-- `sidechannel.shape` (CWE-203) : oracle d'existence par forme de réponse (XS-Leak / length-leak).
+- `upload.unrestricted` (CWE-434): dangerous file upload, inert marker served back.
+- `cspt.redirect` + `recon.client_sinks`: Client-Side Path Traversal, path-depth differential
+  observed in the browser; reading of source-to-sink pairs in same-origin JavaScript.
+- `parserdiff.unicode` (CWE-176): Unicode normalization differential between WAF and backend.
+- `ormleak.filter`: boolean oracle through an ORM filter, two probes per field, no sweeping.
+- `ssrf.redirect_loop`: makes a blind SSRF visible through a redirect loop with incrementing codes.
+- `massassign.params`: mass assignment proven by an inert canary, never a real privileged value.
+- `business_logic.invariants`: invariants derived from the business object (negative, bound, sum).
+- `llm.prompt_injection`: prompt injection, inert canaries, outside `DEFAULT_CHECKLIST` by default.
+- `ssti.errors` (CWE-1336): blind SSTI through the error channel ("Successful Errors").
+- `sidechannel.shape` (CWE-203): existence oracle through response shape (XS-Leak / length-leak).
 
-Support : garde anti-réflexion sur `cmdi.probe` (un token contenu dans la charge ne prouve pas
-l'exécution), filtre d'assets statiques dans `recon.urls` (constat compté, jamais silencieux),
-synchronisation à dernier octet pour `race`.
+Support: anti-reflection guard on `cmdi.probe` (a token contained in the payload does not prove
+execution), static-asset filter in `recon.urls` (finding counted, never silent),
+last-byte synchronization for `race`.
 
-Registre : 88 modules, 42 bug_bounty_eligible.
+Registry: 88 modules, 42 bug_bounty_eligible.
 
-### Fixed — les verdicts disaient plus que ce qu'ils avaient vérifié
+### Fixed — the verdicts said more than what they had verified
 
-Ce lot vient d'une **campagne réelle** contre une infra de production autorisée, entièrement derrière
-un tunnel Cloudflare. Aucun de ces défauts ne cassait quoi que ce soit : ils **rassuraient**.
+This batch comes from a **real campaign** against an authorized production infra, entirely behind
+a Cloudflare tunnel. None of these defects broke anything: they **reassured**.
 
-- **`Oracle.skip()` émettait `status='tested'`.** La méthode LITTÉRALEMENT NOMMÉE `skip`, documentée
-  « non testé / config manquante », affirmait donc « **j'ai vérifié, rien trouvé** » — sur
-  **1 750 findings** mesurés, 25 kinds, **aucun octet émis pour aucun d'eux**. Un rapport listant
-  « access_control.idor : tested » sur une cible pour laquelle aucun compte de test n'est configuré se
-  lit comme une **absence de vulnérabilité** ; c'est le mode d'échec qui a déjà coûté une campagne.
-  Corrigé en `skipped` — le vocabulaire qui existait déjà pour « je n'ai pas pu vérifier », et que la
-  vue de rapport promeut en section « Couverture NON vérifiée ». **Rupture** : 8 tests figeaient le
-  mensonge (dont un nommé `test_no_session_jwt_is_skip` qui assertait `"tested"`), et le snapshot
-  d'équivalence l'avait figé aussi — cinq entrées corrigées, les quatre `*_negative` laissées en
-  `tested` car elles ont bel et bien tiré.
+- **`Oracle.skip()` emitted `status='tested'`.** The method LITERALLY NAMED `skip`, documented
+  "not tested / missing config", therefore asserted "**I checked, found nothing**" — over
+  **1,750 findings** measured, 25 kinds, **not a single byte sent for any of them**. A report listing
+  "access_control.idor : tested" on a target for which no test account is configured
+  reads as an **absence of vulnerability**; that is the failure mode that has already cost a campaign.
+  Fixed to `skipped` — the vocabulary that already existed for "I could not verify", and that the
+  report view promotes to a "Coverage NOT verified" section. **Breaking**: 8 tests froze the
+  lie (including one named `test_no_session_jwt_is_skip` that asserted `"tested"`), and the equivalence
+  snapshot had frozen it too — five entries fixed, the four `*_negative` ones left as
+  `tested` because they really did fire.
 
-- **Un mur produisait des verdicts.** `Oracle._http` JETTE le corps sur `HTTPError` — or l'interstitiel
-  Cloudflare vit exactement là. La garde d'abstention était déjà câblée dans 6 modules et rendait
-  **zéro** abstention. Le corps d'erreur est désormais prélevé (8 Kio, **pour juger seulement** : le
-  contrat public de `_http` reste byte-identique) et `__init_subclass__` enveloppe le `fire()` de
-  chaque oracle. **117 `tested` convertis sur les 256 réellement atteignables, 0 verdict légitime
-  détruit** (contrôle négatif sur cible saine : identique avant/après). La borne reste étroite et
-  testée — un **403 NU reste un verdict applicatif**, sinon forge deviendrait aveugle aux contrôles
-  d'accès, sa classe la plus payante.
+- **A wall produced verdicts.** `Oracle._http` DISCARDS the body on `HTTPError` — yet the Cloudflare
+  interstitial lives exactly there. The abstention guard was already wired into 6 modules and produced
+  **zero** abstentions. The error body is now sampled (8 KiB, **for judging only**: the
+  public contract of `_http` stays byte-identical) and `__init_subclass__` wraps the `fire()` of
+  every oracle. **117 `tested` converted out of the 256 actually reachable, 0 legitimate verdict
+  destroyed** (negative control on a healthy target: identical before/after). The boundary stays narrow and
+  tested — a **BARE 403 remains an application verdict**, otherwise forge would become blind to access
+  controls, its best-paying class.
 
-- **Deux verdicts FABRIQUÉS.** (1) Un lot `web.nuclei` tué à son mur rend une sortie **partielle**,
-  donc la branche « outil en échec » n'était jamais atteinte : chaque cible jamais scannée sortait en
-  `tested` « aucun hit » — **15 sur 17** en reproduction. (2) La comptabilité anti-lacune vivait
-  **après** la boucle du moteur : un arrêt gracieux la sautait, et le rapport annonçait « aucune
-  lacune, aucun module non planifié » alors qu'il y en avait **78**.
+- **Two FABRICATED verdicts.** (1) A `web.nuclei` batch killed at its wall returns a **partial** output,
+  so the "tool failed" branch was never reached: every target never scanned came out as
+  `tested` "no hit" — **15 out of 17** in reproduction. (2) The anti-gap accounting lived
+  **after** the engine loop: a graceful stop skipped it, and the report announced "no
+  gap, no unplanned module" when there were **78**.
 
-- **La console perdait 9,4 % des findings en silence** — 499 sur 5 318, `UNIQUE(campaign, target,
-  title) ON CONFLICT IGNORE` (ni `run_id`, ni `tool`, ni `severity`), dont **8 `skipped`**, c'est-à-dire
-  des trous de couverture évaporés. Le symptôme réel est pire qu'un écrasement : c'est le **second**
-  run qui est refusé, et comme le rapport filtre par `run_id`, **son rapport est VIDE** — ce qui se lit
-  « rien trouvé ». Élargir la clef ne récupérait que **8 findings sur 499** et cassait l'idempotence de
-  rejeu que `IncrementalIngest` documente : on **compte et on annonce** (`findings_dropped`,
-  `findings_write_errors`, loi de conservation testée), le stockage ne bouge pas.
+- **The console silently lost 9.4 % of findings** — 499 out of 5,318, `UNIQUE(campaign, target,
+  title) ON CONFLICT IGNORE` (neither `run_id`, nor `tool`, nor `severity`), including **8 `skipped`**, that is
+  coverage holes that evaporated. The real symptom is worse than an overwrite: it is the **second**
+  run that is refused, and since the report filters by `run_id`, **its report is EMPTY** — which reads
+  "nothing found". Widening the key recovered only **8 findings out of 499** and broke the replay
+  idempotence that `IncrementalIngest` documents: we **count and announce** (`findings_dropped`,
+  `findings_write_errors`, tested conservation law), the storage does not change.
 
-- **Fuite de secret dans deux livrables.** L'annexe markdown **et** le livrable client HTML rendaient
-  un `Authorization: Bearer <jwt>` **en clair** — `html_escape` n'est pas une rédaction. Trouvée par
-  le garde-fou de parité **dès sa première exécution**.
+- **Secret leak in two deliverables.** The markdown appendix **and** the HTML client deliverable rendered
+  an `Authorization: Bearer <jwt>` **in plaintext** — `html_escape` is not redaction. Found by
+  the parity guard **on its very first run**.
 
 ### Added
 
-- **Budget de temps in-process** (`--run-timeout` / `FORGE_RUN_TIMEOUT`, levier `run_timeout_secs`
-  existant qui n'avait qu'une exécution EXTERNE au SIGKILL) + arrêt gracieux hors console. **Le
-  rapport et le sidecar `.durations` sont désormais garantis dans les trois cas d'arrêt** — échéance,
-  SIGTERM, exception — là où deux campagnes réelles avaient perdu leur livrable alors que tout le
-  travail était fait. Un rapport partiel **s'annonce partiel** : cause, X/Y actions, non-tentées
-  listées. Une porte refuse en outre de DÉMARRER un tir dont la borne dépasse le budget restant :
-  dépassement **+26 % → −0,8 %**, avec plus d'actions terminées qu'avant.
-- **`web.nuclei` mutualisé par hôte** (`-u a,b,c` — `-list` est inutilisable, `docker run` est
-  construit sans `-v`) : **60 → 10 invocations**, couverture par URL prouvée identique, scope-guard
-  appliqué par cible via quatre portes indépendantes.
-- **Le rapport de la console mène par un verdict**, comme le CLI : sections « Actionnable »,
-  « Signal à qualifier », « Couverture NON vérifiée » (les `skipped` PROMUS), annexe derrière une
-  comptabilité. Le garde-fou de parité qui le surveille compare des **structures** — l'ancien
-  n'assertait que cinq sous-chaînes et restait vert quand la parité cassait.
-- **`make check-supply-chain`** — les trois gardes (openssl-freedom, licences, octets NUL) tournaient
-  en CI sans qu'aucune cible ne les expose : on ne pouvait les découvrir qu'en les cassant dans une PR.
-- **`docs/UPSTREAM_REPORTS.md`** — reproduction minimale du défaut `cargo-deny`/`krates` (une
-  dépendance OPTIONNELLE dont le nom de paquet diffère du nom de `[lib]` disparaît du graphe, et
-  l'outil répond **`licenses ok`**). Il n'est pas propre à forge : le taire laisserait les autres
-  projets avec le même angle mort.
-- **Une CA privée d'entreprise devient vérifiable — sans lire le magasin système, et sans relâcher un
-  seul contrôle** (`FORGE_EXTRA_CA_PEM` / `FORGE_EXTRA_CA_PEM_FILE`). Le seam TLS livré juste avant
-  vérifie contre les racines **Mozilla compilées** ; le magasin de CA du **système n'est pas lu**, et
-  c'est exactement ce qui évite `schannel`, `security-framework` et `openssl`. Cette posture avait un
-  prix documenté : un déploiement dont l'IdP OIDC ou le collecteur est signé par **sa propre AC**
-  n'avait que de **mauvaises** issues — dont le **retour au clair**, précisément ce que « pas de clair »
-  refuse.
+- **In-process time budget** (`--run-timeout` / `FORGE_RUN_TIMEOUT`, existing `run_timeout_secs`
+  lever that only had an EXTERNAL enforcement by SIGKILL) + graceful stop outside the console. **The
+  report and the `.durations` sidecar are now guaranteed in all three stop cases** — deadline,
+  SIGTERM, exception — where two real campaigns had lost their deliverable although all the
+  work was done. A partial report **announces itself as partial**: cause, X/Y actions, untried ones
+  listed. A gate also refuses to START a shot whose bound exceeds the remaining budget:
+  overrun **+26 % → −0.8 %**, with more actions completed than before.
+- **`web.nuclei` pooled per host** (`-u a,b,c` — `-list` is unusable, `docker run` is
+  built without `-v`): **60 → 10 invocations**, per-URL coverage proven identical, scope-guard
+  applied per target through four independent gates.
+- **The console report leads with a verdict**, like the CLI: "Actionable",
+  "Signal to qualify", "Coverage NOT verified" sections (the `skipped` PROMOTED), appendix behind an
+  accounting. The parity guard that watches it compares **structures** — the old one
+  only asserted five substrings and stayed green when parity broke.
+- **`make check-supply-chain`** — the three guards (openssl-freedom, licenses, NUL bytes) ran
+  in CI without any target exposing them: you could only discover them by breaking them in a PR.
+- **`docs/UPSTREAM_REPORTS.md`** — minimal reproduction of the `cargo-deny`/`krates` defect (an
+  OPTIONAL dependency whose package name differs from its `[lib]` name disappears from the graph, and
+  the tool answers **`licenses ok`**). It is not specific to forge: keeping quiet about it would leave other
+  projects with the same blind spot.
+- **A private enterprise CA becomes verifiable — without reading the system store, and without relaxing a
+  single check** (`FORGE_EXTRA_CA_PEM` / `FORGE_EXTRA_CA_PEM_FILE`). The TLS seam shipped just before
+  verifies against the **compiled-in Mozilla** roots; the **system** CA store **is not read**, and
+  that is exactly what avoids `schannel`, `security-framework` and `openssl`. This posture had a
+  documented price: a deployment whose OIDC IdP or collector is signed by **its own CA**
+  only had **bad** options — including **going back to plaintext**, precisely what "no plaintext"
+  refuses.
 
-  **La distinction est tout le sujet.** Ce knob **AJOUTE une ancre** que l'opérateur **fournit
-  explicitement** ; il ne **retire aucun contrôle**. La chaîne est toujours validée jusqu'à une ancre, le
-  **nom d'hôte** toujours vérifié, l'**expiration** toujours honorée. `with_root_certificates` accepte des
-  ancres supplémentaires **sans jamais toucher** à l'API `dangerous` de rustls — la garde de **source**
-  qui interdit au crate de l'ouvrir reste **verte**, inchangée.
+  **The distinction is the whole point.** This knob **ADDS an anchor** that the operator **provides
+  explicitly**; it **removes no check**. The chain is still validated up to an anchor, the
+  **hostname** still verified, **expiry** still honored. `with_root_certificates` accepts
+  additional anchors **without ever touching** the rustls `dangerous` API — the **source** guard
+  that forbids the crate from opening it stays **green**, unchanged.
 
-  **Prouvé par un COUPLE, pas par une affirmation.** Le test de rejet existant (fixture AC non fiable +
-  feuille signée) reste rouge-quand-muté, et **quatre** tests l'encadrent : la **même** AC fournie en PEM
-  fait **ABOUTIR** le handshake (le knob opère) ; une **AUTRE** AC le laisse **ÉCHOUER** (il vérifie, il
-  ne gobe pas) ; le **nom d'hôte** hors SAN est refusé **ancre en place** ; une feuille **EXPIRÉE** signée
-  par l'ancre fournie est refusée **ancre en place**, avec pour contre-exemple la **même** ancre + le
-  **même** sujet + le **même** SAN sur une feuille **non expirée**, qui aboutit — la seule variable entre
-  les deux moitiés étant la fenêtre de validité.
+  **Proven by a PAIR, not by an assertion.** The existing rejection test (untrusted CA fixture +
+  signed leaf) stays red-when-mutated, and **four** tests frame it: the **same** CA provided as PEM
+  makes the handshake **SUCCEED** (the knob works); **ANOTHER** CA leaves it **FAILING** (it verifies, it
+  does not swallow); a **hostname** outside the SAN is refused **with the anchor in place**; an **EXPIRED** leaf signed
+  by the provided anchor is refused **with the anchor in place**, with as counter-example the **same** anchor + the
+  **same** subject + the **same** SAN on a **non-expired** leaf, which succeeds — the only variable between
+  the two halves being the validity window.
 
-  **Fail-closed au boot** : un PEM configuré mais illisible, vide ou invalide **tue le démarrage**
-  (`[forge] FATAL`, code 2), il ne dégrade **jamais** vers « pas d'ancre » — sinon l'opérateur croirait sa
-  CA installée et découvrirait le contraire au premier handshake, sous un « émetteur inconnu » qui ne
-  désigne pas la cause. C'est la **seule** différence assumée avec le motif maison `secret_env`, qui est
-  fail-**soft** par contrat. Rien de configuré ⇒ **aucune** ligne au boot. **Zéro nouvelle dépendance**
-  (le parseur PEM est déjà dans `rustls-pki-types`) ; openssl-freedom du build PAR DÉFAUT vérifiée par commande (**0** hit).
+  **Fail-closed at boot**: a PEM that is configured but unreadable, empty or invalid **kills startup**
+  (`[forge] FATAL`, code 2), it **never** degrades to "no anchor" — otherwise the operator would believe their
+  CA installed and discover the opposite at the first handshake, under an "unknown issuer" that does not
+  point to the cause. It is the **only** accepted difference from the in-house `secret_env` pattern, which is
+  fail-**soft** by contract. Nothing configured ⇒ **no** line at boot. **Zero new dependencies**
+  (the PEM parser is already in `rustls-pki-types`); openssl-freedom of the DEFAULT build verified by command (**0** hits).
 
-- **Les trois derniers secrets en clair au repos sont scellés — mais la faillibilité d'abord.** Le jeton
-  de **source de détection**, le jeton de **canal de notification** et le **`client_secret` SSO** vivaient
-  en clair dans `settings`. Ils avaient été écartés du premier lot de chiffrement de champ pour une raison
-  technique **réelle**, consignée : les sceller **exige** de rendre faillibles `ds_secret`, `ch_secret` et
-  `sso::load_config` — or ce dernier rendait un **`Option`**, où un déchiffrement raté serait devenu
-  « **SSO non configuré** », soit la **dégradation silencieuse** que tout ce travail interdit.
+- **The last three plaintext secrets at rest are sealed — but fallibility first.** The **detection
+  source** token, the **notification channel** token and the **SSO `client_secret`** lived
+  in plaintext in `settings`. They had been left out of the first field-encryption batch for a **real**
+  technical reason, recorded: sealing them **requires** making `ds_secret`, `ch_secret` and
+  `sso::load_config` fallible — and the latter returned an **`Option`**, where a failed decryption would have become
+  "**SSO not configured**", i.e. the **silent degradation** that all this work forbids.
 
-  L'ordre imposé a été suivi. **(1) Faillibilité, avec un échec LISIBLE** : `sso::load_config` rend
-  désormais `Result<Option<SsoConfig>, String>` — **trois** issues distinctes : `Ok(None)` = non configuré
-  (**403** `sso_unconfigured`), `Ok(Some)` = utilisable, `Err` = **configuré mais illisible** (**503**
-  `sso_secret_unreadable`). Les deux autres secrets sont ouverts à leur **point d'usage unique**
-  (`collect_detections_with`, `deliver_blocking`) : sans clé, l'intégration **refuse de partir** avec une
-  raison nommée, au lieu de se présenter **sans authentification** — un 401 que l'admin diagnostiquerait
-  comme une panne de SIEM. **(2) Scellement** : `field_crypto` réutilisé tel quel — **même** clé
-  (`FORGE_FIELD_KEY`), **même** enveloppe `forge:fenc1:`, **aucune** ré-implémentation d'AEAD.
+  The imposed order was followed. **(1) Fallibility, with a READABLE failure**: `sso::load_config` now returns
+  `Result<Option<SsoConfig>, String>` — **three** distinct outcomes: `Ok(None)` = not configured
+  (**403** `sso_unconfigured`), `Ok(Some)` = usable, `Err` = **configured but unreadable** (**503**
+  `sso_secret_unreadable`). The two other secrets are opened at their **single point of use**
+  (`collect_detections_with`, `deliver_blocking`): without a key, the integration **refuses to go out** with a
+  named reason, instead of presenting itself **without authentication** — a 401 the admin would diagnose
+  as a SIEM outage. **(2) Sealing**: `field_crypto` reused as is — **same** key
+  (`FORGE_FIELD_KEY`), **same** `forge:fenc1:` envelope, **no** re-implementation of AEAD.
 
-  **Illisibilité prouvée SUR LES OCTETS DU DISQUE** (fichier `.db` + `-wal` + `-shm`), avec son
-  contre-exemple : la **même** sonde, sur la **même** base, **trouve** les canaris quand les mêmes valeurs
-  sont écrites sans scellement — sans quoi « absent » pourrait l'être pour la mauvaise raison. Une base
-  existante est **convertie au boot**, en place et idempotemment ; sans clé, rien n'est converti mais le
-  clair restant est **compté et annoncé** — jamais tu. Périmètre **mesuré** : seule la **valeur** du
-  secret est scellée ; `kind`, `endpoint`, `auth.type`, `issuer`, `client_id` restent lisibles (l'admin
-  doit pouvoir ré-éditer sa config sans la clé, et ce ne sont pas des credentials).
-- **Le préchauffage intra-vague sait enfin ce qu'est une action LENTE — il la MESURE.** L'ordonnancement
-  des soumissions (`engine._preheat_order`) estimait la lenteur avec `action.cost`, parce que c'était le
-  seul porteur EXISTANT. Or `cost` est une donnée de **gouvernance** (le prix qu'on accepte de payer),
-  pas une mesure de **durée** : les deux corrèlent souvent, rien ne le garantit — et le cerveau ne
-  renseigne un coût explicite que pour les kinds de sa table, **tout le reste part au défaut 1.0**, y
-  compris des modules réellement lents. Le résidu était consigné avec son bloqueur : « ni le ledger ni
-  les run-records n'horodatent à mieux que la seconde ». C'est ce bloqueur qui est levé.
+  **Unreadability proven ON THE DISK BYTES** (`.db` file + `-wal` + `-shm`), with its
+  counter-example: the **same** probe, on the **same** database, **finds** the canaries when the same values
+  are written without sealing — otherwise "absent" could be absent for the wrong reason. An existing
+  database is **converted at boot**, in place and idempotently; without a key, nothing is converted but the
+  remaining plaintext is **counted and announced** — never hidden. **Measured** scope: only the **value** of the
+  secret is sealed; `kind`, `endpoint`, `auth.type`, `issuer`, `client_id` stay readable (the admin
+  must be able to re-edit their config without the key, and these are not credentials).
+- **Intra-wave preheating finally knows what a SLOW action is — it MEASURES it.** The scheduling
+  of submissions (`engine._preheat_order`) estimated slowness with `action.cost`, because it was the
+  only EXISTING carrier. Yet `cost` is a **governance** datum (the price one accepts to pay),
+  not a **duration** measurement: the two often correlate, nothing guarantees it — and the brain only
+  fills in an explicit cost for the kinds in its table, **everything else falls back to the 1.0 default**,
+  including genuinely slow modules. The residue was recorded with its blocker: "neither the ledger nor
+  the run-records timestamp better than to the second". That blocker is what is lifted.
 
-  **Instrumentation** : `engine._decide_blocking` chronomètre le **tir** à l'horloge **monotone**
-  (`time.monotonic`, jamais l'heure murale). Le **dry-run n'est PAS chronométré**, délibérément :
-  `dry()` est sans effet de bord par contrat, donc quasi instantané — mesurer une campagne non armée
-  apprendrait que `web.testssl` prend 3 ms et **empoisonnerait** le magasin. **Prix mesuré, pas
-  affirmé** : `1,23 µs` par observation en boucle serrée, et un écart **sous le bruit** (`-0,1 ms` sur
-  24 tirs) en mur-à-mur — à comparer à des **secondes** pour un vrai outil.
+  **Instrumentation**: `engine._decide_blocking` times the **shot** with the **monotonic** clock
+  (`time.monotonic`, never wall-clock time). The **dry-run is NOT timed**, deliberately:
+  `dry()` is side-effect free by contract, hence near-instant — measuring an unarmed campaign
+  would teach that `web.testssl` takes 3 ms and **poison** the store. **Price measured, not
+  asserted**: `1,23 µs` per observation in a tight loop, and a difference **below the noise** (`-0,1 ms` over
+  24 shots) wall-to-wall — to be compared with **seconds** for a real tool.
 
-  **Stockage — l'agrégat est PAR KIND, JAMAIS PAR CIBLE** (`forge/durations.py`). Ce n'est pas une
-  contrainte subie : un magasin de durées par-cible serait un **journal de reconnaissance persistant
-  après l'engagement** (« combien de temps l'hôte X a mis à répondre »), et le préchauffage n'a de toute
-  façon besoin que du kind. La garde est **structurelle** — `record()` refuse toute clé qui n'est pas un
-  identifiant de module, à l'écriture comme à la relecture d'un fichier trafiqué — et **prouvée sur les
-  octets écrits**, pas sur l'API. Taille **bornée** : ≤ 256 kinds (éviction déterministe), agrégat de
-  **taille fixe** par kind (compteur + anneau de 8 durées) — 10 000 tirs n'écrivent pas un octet de plus
-  que 10.
+  **Storage — the aggregate is PER KIND, NEVER PER TARGET** (`forge/durations.py`). This is not a
+  constraint endured: a per-target duration store would be a **reconnaissance log persisting
+  after the engagement** ("how long host X took to answer"), and preheating only
+  needs the kind anyway. The guard is **structural** — `record()` refuses any key that is not a
+  module identifier, on write as well as when re-reading a tampered file — and **proven on the
+  written bytes**, not on the API. **Bounded** size: ≤ 256 kinds (deterministic eviction), aggregate of
+  **fixed size** per kind (counter + ring of 8 durations) — 10,000 shots do not write one byte more
+  than 10.
 
-  **Confiance sans modèle** : sous 3 observations, le kind n'a **pas** d'estimation (n=1 est du bruit) ;
-  au-delà, c'est la **médiane** de l'anneau (un tir qui échoue en 3 ms ne fait pas passer un kind lent
-  pour rapide), **quantifiée** à un chiffre significatif pour que deux kinds de lenteur comparable
-  restent dans le **même palier** — sans quoi la règle « palier complet ou rien » scinderait le groupe
-  d'actions lentes qu'elle existe pour protéger. Pas d'apprentissage, pas de seuil réglable.
+  **Confidence without a model**: under 3 observations, the kind has **no** estimate (n=1 is noise);
+  beyond that, it is the **median** of the ring (a shot that fails in 3 ms does not make a slow kind look
+  fast), **quantized** to one significant digit so that two kinds of comparable slowness
+  stay in the **same level** — otherwise the "full level or nothing" rule would split the group
+  of slow actions it exists to protect. No learning, no tunable threshold.
 
-  **Repli EXACT** : sans magasin, ou avec un magasin sans aucune observation, `_preheat_key` rend
-  `action.cost` pour toute action — **mêmes paliers, même ordre, comportement d'avant à l'identique**.
-  C'est la première propriété testée, et sa mutation (casser le repli) rougit.
+  **EXACT fallback**: without a store, or with a store holding no observation at all, `_preheat_key` returns
+  `action.cost` for every action — **same levels, same order, previous behavior identical**.
+  It is the first property tested, and its mutation (breaking the fallback) turns red.
 
-  **Gain mesuré, et dit honnêtement** (`tests/bench_engine_parallel_order.py`, pool=4, 5 répétitions,
-  deux invocations indépendantes, dispersion intra-série ≤ 1,3 %) : sur les formes où `cost` **dit
-  vrai**, la durée observée ne rapporte **RIEN** — `straggler` 1,84 s → 1,83/1,84 s (dans le bruit),
-  `queue-large` et `uniform` inchangés. Elle ne rapporte **que** là où
-  `cost` **ment** — nouvelle forme `cost-lies` (un module lent resté au coût par défaut, un module
-  rapide sur-annoté) : `index` 1,88 s, `cost` **1,92 s** (le préchauffage par coût est alors **pire que
-  ne rien faire**), **observed 1,60 s** — soit **-16,8 %** contre le coût et **1,05x** le plancher
-  travail/pool au lieu de 1,26x. Le gain réel de ce chantier n'est donc pas « c'est plus rapide », c'est
-  « l'ordonnancement ne dépend plus d'une donnée qui n'a jamais promis d'être une durée ».
+  **Gain measured, and stated honestly** (`tests/bench_engine_parallel_order.py`, pool=4, 5 repetitions,
+  two independent invocations, intra-series spread ≤ 1.3 %): on the shapes where `cost` **tells the
+  truth**, the observed duration brings **NOTHING** — `straggler` 1.84 s → 1.83/1.84 s (within the noise),
+  `queue-large` and `uniform` unchanged. It **only** pays off where
+  `cost` **lies** — new `cost-lies` shape (a slow module left at the default cost, a fast module
+  over-annotated): `index` 1.88 s, `cost` **1.92 s** (cost-based preheating is then **worse than
+  doing nothing**), **observed 1.60 s** — i.e. **-16.8 %** versus cost and **1.05x** the
+  work/pool floor instead of 1.26x. The real gain of this work is therefore not "it is faster", it is
+  "scheduling no longer depends on a datum that never promised to be a duration".
 
-  **Invariants intacts** : l'ordre d'**APPLICATION** ne bouge pas (ledger/findings/décisions identiques
-  au sériel, chaîne vérifiée des deux côtés), seul l'ordre de **SOUMISSION** change ; scope, ROE et
-  ledger restent fail-closed ; **zéro nouvelle dépendance**. Le magasin est **gelé** pour la durée d'un
-  run : deux runs sur le même magasin préchauffent à l'identique (le prix assumé : c'est le run
-  **suivant** qui profite des mesures, pas les vagues suivantes du même run).
-- **Chiffrement au repos du matériel d'authentification — dans le build PAR DÉFAUT, sans OpenSSL.** Le
-  volet réseau venait d'être fermé (seam TLS) ; restait le repos. `docs/DEPLOYMENT.md` §1.5 le concédait :
-  le build par défaut stocke la base **en clair**, et cette base porte désormais le **contexte auth
-  par-engagement** — bearers, cookies et valeurs d'en-tête des **comptes de test** de l'opérateur,
-  c'est-à-dire des **sessions authentifiées sur l'estate d'un client**. Le chiffrement intégral existait
-  (feature `encryption`) mais exige un **backend crypto système/openssl à la compilation** : l'activer par
-  défaut aurait cassé l'openssl-freedom.
+  **Invariants intact**: the **APPLICATION** order does not move (ledger/findings/decisions identical
+  to serial, chain verified on both sides), only the **SUBMISSION** order changes; scope, ROE and
+  ledger stay fail-closed; **zero new dependencies**. The store is **frozen** for the duration of a
+  run: two runs on the same store preheat identically (the accepted price: it is the **next**
+  run that benefits from the measurements, not the following waves of the same run).
+- **Encryption at rest of authentication material — in the DEFAULT build, without OpenSSL.** The
+  network side had just been closed (TLS seam); rest remained. `docs/DEPLOYMENT.md` §1.5 conceded it:
+  the default build stores the database **in plaintext**, and that database now carries the **per-engagement
+  auth context** — bearers, cookies and header values of the operator's **test accounts**,
+  that is **authenticated sessions on a client's estate**. Full encryption existed
+  (`encryption` feature) but requires a **system/openssl crypto backend at compile time**: enabling it by
+  default would have broken openssl-freedom.
 
-  **Chiffrement de CHAMP** (`console/src/field_crypto.rs`) avec la pile AEAD **pur Rust déjà embarquée**
-  (`chacha20poly1305` + `argon2`, deps non optionnelles — celles des sauvegardes) : **ZÉRO nouvelle
-  dépendance**, openssl-freedom du build PAR DÉFAUT **vérifiée à 0 occurrence** après coup. La KDF argon2id et le cœur AEAD
-  ont été **EXTRAITS** de `backup_crypto.rs` (`aead_seal`/`aead_open`) plutôt que réécrits — il n'existe
-  qu'**une** implémentation de crypto symétrique dans la console, et elle a maintenant un test de contrat
-  sur le **lien AAD** (la preuve par mutation a montré qu'aucun test n'en dépendait).
+  **FIELD encryption** (`console/src/field_crypto.rs`) with the **pure-Rust AEAD stack already shipped**
+  (`chacha20poly1305` + `argon2`, non-optional deps — those of the backups): **ZERO new
+  dependencies**, openssl-freedom of the DEFAULT build **verified at 0 occurrences** afterwards. The argon2id KDF and the AEAD core
+  were **EXTRACTED** from `backup_crypto.rs` (`aead_seal`/`aead_open`) rather than rewritten — there is
+  only **one** symmetric crypto implementation in the console, and it now has a contract test
+  on the **AAD binding** (the mutation proof showed that no test depended on it).
 
-  **Un seul goulot d'écriture** : `validate_engagement_scope` produit la chaîne `scope_json` persistée,
-  donc sceller là rend structurellement impossible d'écrire un credential en clair par un chemin oublié.
-  **Un seul point d'ouverture** : le `scope.json` **0600** du run. Entre les deux, le matériel reste
-  chiffré — y compris dans le blob `run_job.spawn_spec` du chemin HA *pending*, qui devient donc chiffré
-  au repos lui aussi, en plus d'être purgé au claim.
+  **A single write choke point**: `validate_engagement_scope` produces the persisted `scope_json` string,
+  so sealing there makes it structurally impossible to write a credential in plaintext through a forgotten path.
+  **A single opening point**: the run's **0600** `scope.json`. In between, the material stays
+  encrypted — including in the `run_job.spawn_spec` blob of the HA *pending* path, which therefore becomes encrypted
+  at rest too, in addition to being purged at claim time.
 
-  **Périmètre MESURÉ** : scellés `bearer` / `cookies` / **valeurs** d'en-tête. Laissés en clair, à dessein,
-  les `label`, les **noms** d'en-têtes et les `idor_targets` — l'API les re-sert **déjà** en clair à
-  l'éditeur, donc les sceller rendrait l'éditeur illisible sans la clé **sans protéger un seul credential**.
-  `users.pass_hash` (argon2id) et `session.token_sha` (SHA-256) ne sont **pas** chiffrés : ce sont des
-  empreintes à sens unique, pas du matériel rejouable.
+  **MEASURED scope**: sealed: `bearer` / `cookies` / header **values**. Left in plaintext, on purpose:
+  the `label`, the header **names** and the `idor_targets` — the API **already** serves them back in plaintext to
+  the editor, so sealing them would make the editor unreadable without the key **without protecting a single credential**.
+  `users.pass_hash` (argon2id) and `session.token_sha` (SHA-256) are **not** encrypted: they are
+  one-way digests, not replayable material.
 
-  **FAIL-CLOSED, sans dégradation silencieuse** — on venait de corriger un bug où le contexte auth
-  s'effaçait en silence, et ça a coûté une campagne : (1) **aucun contexte auth ⇒ aucune clé requise**
-  (no-op strict, payloads inchangés) ; (2) **écrire du matériel sans clé ⇒ `503 field_key_missing`**
-  nommant la variable — jamais de credential persisté en clair « en attendant » ; (3) **matériel scellé
-  illisible ⇒ le run REFUSE de démarrer** (`auth_context_sealed`) plutôt que de partir avec un `auth`
-  vide qui désarmerait les oracles de contrôle d'accès sans le dire.
+  **FAIL-CLOSED, without silent degradation** — we had just fixed a bug where the auth context
+  was silently erased, and it cost a campaign: (1) **no auth context ⇒ no key required**
+  (strict no-op, payloads unchanged); (2) **writing material without a key ⇒ `503 field_key_missing`**
+  naming the variable — never a credential persisted in plaintext "in the meantime"; (3) **unreadable sealed
+  material ⇒ the run REFUSES to start** (`auth_context_sealed`) rather than going out with an empty `auth`
+  that would disarm the access-control oracles without saying so.
 
-  **Migration traitée, pas ignorée** : les bases existantes sont **scellées en place au boot**
-  (idempotent, rejouable, compté). Sans clé, rien n'est converti et le boot le **crie** — donner
-  l'illusion du chiffrement serait pire que le clair assumé. L'état est aussi lisible **dans le produit**
+  **Migration handled, not ignored**: existing databases are **sealed in place at boot**
+  (idempotent, replayable, counted). Without a key, nothing is converted and the boot **shouts** it — giving
+  the illusion of encryption would be worse than acknowledged plaintext. The state is also readable **in the product**
   (`auth.at_rest` ∈ `sealed|plaintext|mixed|none`).
 
-  **Clé** : `FORGE_FIELD_KEY`, via le motif maison `<VAR>_FILE` déjà supporté. **Custody** : c'est un
-  secret à conserver **avec** la passphrase de sauvegarde — une base restaurée sans lui est intacte mais
-  son matériel reste scellé (round-trip sauvegarde vérifié). Perdre la clé ne perd **aucune autre donnée** :
-  il suffit de ressaisir le matériel. Les deux couches **composent** (`--features encryption` par-dessus
-  reste valide). Docs : `DEPLOYMENT.md` §1.6, `CONFIGURATION.md` §1.4, `KEY_CUSTODY.md`.
-- **Seam TLS sortant — la console parle `https://`, et le vérifie.** La console avait exactement trois
-  sorties TCP, toutes en socket brut, donc **en clair** : l'échange de jeton OIDC (`sso/mod.rs`), le
-  webhook de notification (`notify_channels.rs`) et le fetcher de source de détection (`net.rs`). La plus
-  grave était la première : le POST au token endpoint porte le **`client_secret`**
-  (`Authorization: Basic`) **et** le **`code`** d'autorisation — `docs/DEPLOYMENT.md` le concédait et
-  prescrivait un **proxy TLS d'egress** en contournement.
+  **Key**: `FORGE_FIELD_KEY`, via the in-house `<VAR>_FILE` pattern already supported. **Custody**: it is a
+  secret to keep **together with** the backup passphrase — a database restored without it is intact but
+  its material stays sealed (backup round-trip verified). Losing the key loses **no other data**:
+  re-entering the material is enough. The two layers **compose** (`--features encryption` on top
+  remains valid). Docs: `DEPLOYMENT.md` §1.6, `CONFIGURATION.md` §1.4, `KEY_CUSTODY.md`.
+- **Outbound TLS seam — the console speaks `https://`, and verifies it.** The console had exactly three
+  outbound TCP paths, all over a raw socket, hence **in plaintext**: the OIDC token exchange (`sso/mod.rs`), the
+  notification webhook (`notify_channels.rs`) and the detection-source fetcher (`net.rs`). The most
+  serious was the first: the POST to the token endpoint carries the **`client_secret`**
+  (`Authorization: Basic`) **and** the authorization **`code`** — `docs/DEPLOYMENT.md` conceded it and
+  prescribed an **egress TLS proxy** as a workaround.
 
-  **Un seul point de sortie** (`console/src/tls.rs`), partagé par les trois : clair (**gouverné**) ou TLS
-  avec **vérification complète du certificat** — chaîne jusqu'aux racines Mozilla (`webpki-roots`) **et**
-  nom d'hôte —, le **handshake aboutissant avant le premier octet applicatif**. Face à un pair non prouvé,
-  l'appelant n'obtient aucun flux, donc n'écrit aucun secret. **Aucune échappatoire de vérification** n'est
-  livrée : ni option, ni ENV, ni feature ; une garde de source interdit au crate d'ouvrir l'API dangereuse
-  de rustls. Le contournement par proxy TLS est **caduc** ; Slack / Teams / PagerDuty deviennent joignables
-  ; une source de détection `https` est servie **en Rust**, sans spawn Python sur une route de lecture.
+  **A single exit point** (`console/src/tls.rs`), shared by all three: plaintext (**governed**) or TLS
+  with **full certificate verification** — chain up to the Mozilla roots (`webpki-roots`) **and**
+  hostname —, the **handshake completing before the first application byte**. Facing an unproven peer,
+  the caller gets no stream, hence writes no secret. **No verification escape hatch** is
+  shipped: no option, no ENV, no feature; a source guard forbids the crate from opening the dangerous API
+  of rustls. The TLS-proxy workaround is **obsolete**; Slack / Teams / PagerDuty become reachable
+  ; an `https` detection source is served **in Rust**, without a Python spawn on a read route.
 
-  **Les gardes existantes restent.** La deny-list SSRF s'applique à l'IP **résolue**, en `http://` comme en
-  `https://` (chiffrer un fetch vers `169.254.169.254` n'en fait pas une cible légitime). Le refus
-  « secret + cible publique en clair » s'**assouplit exactement** : autorisé en `https://`, toujours refusé
-  en `http://`. Le clair vers un collecteur **interne** explicitement autorisé est inchangé.
+  **The existing guards remain.** The SSRF deny-list applies to the **resolved** IP, over `http://` as well as
+  `https://` (encrypting a fetch to `169.254.169.254` does not make it a legitimate target). The
+  "secret + public plaintext target" refusal is **relaxed exactly**: allowed over `https://`, still refused
+  over `http://`. Plaintext to an explicitly authorized **internal** collector is unchanged.
 
-  **Pas de SMTP** — refusé indépendamment du TLS : STARTTLS est une élévation **négociée** (classe
-  d'injection de commandes en clair, CVE-2011-0411 et sa descendance) et le SMTP réel se pratique en TLS
-  opportuniste contre des relais auto-signés. **Pas de lecture du magasin d'AC système** — une AC
-  d'entreprise n'est donc pas reprise AUTOMATIQUEMENT ; elle se fournit explicitement (cf. plus bas,
-  `FORGE_EXTRA_CA_PEM`). Le **mTLS**, annoncé absent dans une version antérieure de cette entrée, est
-  livré plus bas dans cette même release non publiée.
+  **No SMTP** — refused independently of TLS: STARTTLS is a **negotiated** upgrade (class of
+  plaintext command injection, CVE-2011-0411 and its descendants) and real-world SMTP is practiced with
+  opportunistic TLS against self-signed relays. **No reading of the system CA store** — an enterprise
+  CA is therefore not picked up AUTOMATICALLY; it is provided explicitly (see below,
+  `FORGE_EXTRA_CA_PEM`). **mTLS**, announced as absent in an earlier version of this entry, is
+  shipped further down in this same unpublished release.
 
-  **Coût : 6 crates nets** (`ring`, `rustls`, `rustls-pki-types`, `rustls-webpki`, `untrusted`,
-  `webpki-roots`), ≈ +20 s CPU à froid, **aucun nouveau prérequis machine** (`ring` compile de l'asm/C via
-  `cc`, déjà exigé par `rusqlite/bundled`). **openssl-freedom préservée et vérifiée par commande** : aucun
-  `openssl-sys` / `native-tls` / `aws-lc-rs` / `schannel` / `security-framework` dans la fermeture, build
-  par défaut comme sous `store-postgres` (qui partage la même pile, une seule version de `rustls`).
-- **Cycle de vie des outils — un manifeste unique, et une surcouche runtime qui n'ouvre aucune porte.**
-  Les versions et les empreintes SHA256 des douze binaires de sécurité téléchargés (httpx, nuclei,
-  subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf) étaient des `ARG`
-  codés en dur **dupliqués** entre `Dockerfile` et `docker-compose.yml`. Deux copies d'un pin, c'est
-  une divergence silencieuse qui attend son heure — et il n'existait aucun moyen d'installer un outil
-  omis, ni d'en mettre un à jour, sans reconstruire l'image.
+  **Cost: 6 net crates** (`ring`, `rustls`, `rustls-pki-types`, `rustls-webpki`, `untrusted`,
+  `webpki-roots`), ≈ +20 s CPU cold, **no new machine prerequisite** (`ring` compiles asm/C via
+  `cc`, already required by `rusqlite/bundled`). **openssl-freedom preserved and verified by command**: no
+  `openssl-sys` / `native-tls` / `aws-lc-rs` / `schannel` / `security-framework` in the closure, default
+  build as well as under `store-postgres` (which shares the same stack, a single version of `rustls`).
+- **Tool lifecycle — a single manifest, and a runtime overlay that opens no door.**
+  The versions and SHA256 digests of the twelve downloaded security binaries (httpx, nuclei,
+  subfinder, dnsx, naabu, katana, amass, gau, gospider, dalfox, feroxbuster, ffuf) were hard-coded
+  `ARG`s **duplicated** between `Dockerfile` and `docker-compose.yml`. Two copies of a pin are
+  a silent divergence waiting for its moment — and there was no way to install an omitted
+  tool, or to update one, without rebuilding the image.
 
-  **Source unique : `forge/tools.json`.** Version, gabarit d'URL, format d'archive, membre à extraire,
-  nom posé sur le `PATH`, et un digest **par architecture**. Le `Dockerfile` le lit au build (via
-  `forge/toolsmanifest.py`, script autonome stdlib) et l'installeur runtime lit le même fichier.
-  Le compose ne propage plus aucun pin. Bumper une version = éditer ce seul fichier. Une garde statique
-  échoue si une version, un digest ou une URL d'outil réapparaît dans le `Dockerfile` ou le compose.
+  **Single source: `forge/tools.json`.** Version, URL template, archive format, member to extract,
+  name placed on the `PATH`, and a digest **per architecture**. The `Dockerfile` reads it at build time (via
+  `forge/toolsmanifest.py`, a standalone stdlib script) and the runtime installer reads the same file.
+  The compose file no longer propagates any pin. Bumping a version = editing this single file. A static guard
+  fails if a tool version, digest or URL reappears in the `Dockerfile` or the compose file.
 
-  **La baseline du build ne change pas** : mêmes binaires, mêmes versions, mêmes digests, même
-  `sha256sum -c` qui fait échouer le build en cas d'écart. Deux garde-fous s'ajoutent : un outil sans
-  pin pour l'architecture cible est **écarté du plan** (jamais téléchargé non vérifié) et signalé, et
-  le groupe socle passe par `--require-complete core` — un pin manquant sur httpx/nuclei/subfinder fait
-  échouer le build plutôt que produire une image amputée. Comme un `docker build` n'est pas jouable en
-  CI, la boucle d'installation du `Dockerfile` est **extraite et réellement exécutée** par la suite de
-  tests, avec `curl`/`sha256sum`/`unzip`/`tar` doublés : on vérifie l'URL téléchargée, le digest
-  présenté, le membre extrait, la profondeur de `--strip-components` et le nom du binaire posé — et
-  qu'un digest non concordant fait tout échouer sans rien installer.
+  **The build baseline does not change**: same binaries, same versions, same digests, same
+  `sha256sum -c` that fails the build on any mismatch. Two guards are added: a tool without
+  a pin for the target architecture is **dropped from the plan** (never downloaded unverified) and reported, and
+  the base group goes through `--require-complete core` — a missing pin on httpx/nuclei/subfinder fails
+  the build rather than producing a crippled image. Since a `docker build` cannot be run in
+  CI, the install loop of the `Dockerfile` is **extracted and actually executed** by the test
+  suite, with `curl`/`sha256sum`/`unzip`/`tar` stubbed: we check the downloaded URL, the digest
+  presented, the extracted member, the `--strip-components` depth and the name of the placed binary — and
+  that a mismatching digest makes everything fail without installing anything.
 
-  **Surcouche runtime : `forge tools list|install|update|remove`.** Le binaire atterrit dans
-  `/data/tools/bin` — volume persistant, propriété de l'utilisateur `forge`, en tête du `PATH` devant le
-  `/usr/local/bin` baké : mettre à jour un outil ne demande plus de rebuild, et l'install survit à un
-  *recreate* du conteneur. Installer un binaire au runtime dans un outil offensif est précisément la
-  capacité qui annule une gouvernance si elle est mal posée, donc : SHA256 épinglé **calculé sur le
-  flux** et comparé avant que quoi que ce soit n'atteigne le `PATH` (écart ⇒ refus, temporaire détruit,
-  refus **journalisé**) ; source **allowlistée** par le manifeste — il n'existe ni `--url` ni
-  `--sha256`, et un nom hors manifeste ne déclenche aucune requête ; HTTPS strict, redirection quittant
-  HTTPS refusée ; **aucun shell ni sous-processus** (`urllib` + `zipfile`/`tarfile`, un seul membre
-  extrait vers une destination que nous calculons — un membre nommé `../../evil` ne sort pas du
-  répertoire outils) ; **ledger obligatoire** (`tools.install`/`.update`/`.remove`/`.refused`, chaînés
-  et signés) — sans ledger résoluble, l'action est refusée : pas de changement de capacité sans trace.
+  **Runtime overlay: `forge tools list|install|update|remove`.** The binary lands in
+  `/data/tools/bin` — persistent volume, owned by the `forge` user, at the head of the `PATH` in front of the
+  baked `/usr/local/bin`: updating a tool no longer requires a rebuild, and the install survives a
+  container *recreate*. Installing a binary at runtime in an offensive tool is precisely the
+  capability that voids a governance if it is badly designed, so: pinned SHA256 **computed over the
+  stream** and compared before anything reaches the `PATH` (mismatch ⇒ refusal, temporary file destroyed,
+  refusal **logged**); source **allowlisted** by the manifest — there is neither `--url` nor
+  `--sha256`, and a name outside the manifest triggers no request; strict HTTPS, a redirect leaving
+  HTTPS refused; **no shell or subprocess** (`urllib` + `zipfile`/`tarfile`, a single member
+  extracted to a destination that we compute — a member named `../../evil` does not escape the
+  tools directory); **mandatory ledger** (`tools.install`/`.update`/`.remove`/`.refused`, chained
+  and signed) — without a resolvable ledger, the action is refused: no capability change without a trace.
 
-  Aucune élévation : l'outil installé reste soumis au scope-guard ROE fail-closed, au plancher exploit
-  et au même contrat `Module`. Et **le défaut est un no-op** : rien n'est créé ni sondé à l'import,
-  aucun module du moteur n'importe l'installeur, le volume est vide tant qu'aucune action opérateur
-  n'a eu lieu — la résolution `PATH` est alors identique à la baseline.
+  No elevation: the installed tool remains subject to the fail-closed ROE scope-guard, to the exploit floor
+  and to the same `Module` contract. And **the default is a no-op**: nothing is created or probed at import,
+  no engine module imports the installer, the volume is empty as long as no operator action
+  has taken place — `PATH` resolution is then identical to the baseline.
 
-  Volontairement **non construit** : l'installation d'une version *hors* manifeste (elle supposerait
-  d'accepter un digest saisi à la main — tant qu'elle n'existe pas, il n'y a aucun chemin vers un
-  téléchargement non épinglé), l'API admin et le panneau UI de la console, et la sonde de version par
-  exécution du binaire. Documentation : `docs/TOOLS_LIFECYCLE.md`.
+  Deliberately **not built**: installing a version *outside* the manifest (it would imply
+  accepting a hand-typed digest — as long as it does not exist, there is no path to an
+  unpinned download), the console admin API and UI panel, and the version probe by
+  executing the binary. Documentation: `docs/TOOLS_LIFECYCLE.md`.
 
 ### Changed
-- **Un secret de source de détection ne part plus en clair vers une cible PUBLIQUE** (installs existantes
-  — rupture **NOMMÉE**). Le fetcher de source n'avait **aucune** garde de ce genre : une source
-  `plume`/`generic_http` en **`http://`** vers une adresse **publique**, portant un `auth.secret`, mettait
-  son en-tête `Authorization:` **sur le fil**. Le canal de notification, lui, refusait déjà ce cas — la
-  règle existait donc, en **copie inline** dans un seul des deux egress. Elle est désormais **partagée**
-  (`net::reject_cleartext_secret`, une implémentation, vérifiée une fois) et **appliquée aux deux**. Le
-  refus tombe **avant la connexion** et **aucune** variable d'environnement ne l'ouvre. Correctifs :
-  passer la source en **`https://`** (une AC privée se fournit via `FORGE_EXTRA_CA_PEM`), ou retirer le
+- **A detection-source secret no longer goes out in plaintext to a PUBLIC target** (existing installs
+  — **NAMED** breaking change). The source fetcher had **no** guard of this kind: a
+  `plume`/`generic_http` source over **`http://`** to a **public** address, carrying an `auth.secret`, put
+  its `Authorization:` header **on the wire**. The notification channel, for its part, already refused this case — the
+  rule therefore existed, as an **inline copy** in only one of the two egress paths. It is now **shared**
+  (`net::reject_cleartext_secret`, one implementation, verified once) and **applied to both**. The
+  refusal falls **before the connection** and **no** environment variable opens it. Fixes:
+  move the source to **`https://`** (a private CA is provided via `FORGE_EXTRA_CA_PEM`), or remove the
   secret.
 
-  **Ce qui N'A PAS été resserré, et pourquoi — mesuré, pas supposé.** L'option envisagée était d'exiger
-  `https` **dès qu'un secret est configuré**, l'échappatoire ne couvrant plus que le cas *sans* secret.
-  Mesure faite : cela casse le déploiement **on-prem de référence** — un collecteur interne authentifié
-  qui n'expose **aucun écouteur TLS** (`PLUME_URL`/`PLUME_TOKEN` sur un segment privé, encodé par deux
-  tests existants). La CA d'entreprise n'aide pas ici : elle fournit une **ancre**, pas un **écouteur**.
-  Le resserrement aurait donc **tué** l'usage au lieu de le déplacer. `http://` + secret vers une cible
-  **interne** explicitement autorisée (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) reste donc **servi** — c'est
-  le clair **gouverné**, et il est nommé comme tel.
+  **What was NOT tightened, and why — measured, not assumed.** The option considered was to require
+  `https` **as soon as a secret is configured**, the escape hatch then only covering the case *without* a secret.
+  Measurement done: it breaks the **reference on-prem** deployment — an authenticated internal collector
+  that exposes **no TLS listener** (`PLUME_URL`/`PLUME_TOKEN` on a private segment, encoded by two
+  existing tests). The enterprise CA does not help here: it provides an **anchor**, not a **listener**.
+  The tightening would therefore have **killed** the use case instead of moving it. `http://` + secret to an
+  explicitly authorized **internal** target (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) therefore remains **served** — it is
+  **governed** plaintext, and it is named as such.
 
-- **Les secrets d'intégration ne sont plus persistés verbatim** (installs existantes — rupture
-  **NOMMÉE**). `settings.detection_source → auth.secret`, `settings.notify_channel → auth.secret` et
-  `settings.sso.config → client_secret` étaient stockés **en clair** ; ils sont désormais **scellés**
-  (`FORGE_FIELD_KEY`). Conséquences pratiques : (a) sans clé de champ, **poser** l'un de ces secrets par
-  l'API renvoie **503** `field_key_missing` au lieu de l'écrire en clair ; (b) un outil externe qui lisait
-  ces valeurs directement dans la base n'y trouvera plus qu'une enveloppe ; (c) `FORGE_FIELD_KEY` devient
-  un secret à **conserver** pour ces intégrations aussi — la perdre les rend illisibles, et l'intégration
-  **refuse de partir** plutôt que de se présenter sans authentification. Le chemin `keep_secret` (éditer
-  l'endpoint sans retaper le jeton) fonctionne **sans clé** : il recopie l'enveloppe telle quelle.
-- **Un nouveau fichier apparaît à côté du ledger d'un engagement : `<ledger>.durations`** (installs
-  existantes — rupture NOMMÉE). Sidecar au même titre que `<ledger>.hwm` et `<ledger>.ed25519`, créé au
-  premier `forge run`/`forge campaign` qui reçoit `--ledger` **et** tire au moins une action. Il porte
-  **uniquement** des durées agrégées **par kind de module** (aucune cible, aucun hôte, aucune URL), pèse
-  quelques Kio au plus, n'est **pas** un secret, et n'est **pas** dans la chaîne d'auditabilité (le
-  perdre ne casse rien : le préchauffage retombe sur `action.cost`). Conséquences pratiques : les
-  scripts de purge doivent l'inclure (`docs/UNINSTALL.md` mis à jour), et une exploitation qui n'en veut
-  pas pose `FORGE_DURATIONS=0` (aucun fichier créé, comportement d'avant à l'identique). Sans
-  `--ledger`, rien ne change : aucun fichier n'a jamais été écrit.
+- **Integration secrets are no longer persisted verbatim** (existing installs — **NAMED**
+  breaking change). `settings.detection_source → auth.secret`, `settings.notify_channel → auth.secret` and
+  `settings.sso.config → client_secret` were stored **in plaintext**; they are now **sealed**
+  (`FORGE_FIELD_KEY`). Practical consequences: (a) without a field key, **setting** one of these secrets through
+  the API returns **503** `field_key_missing` instead of writing it in plaintext; (b) an external tool that read
+  these values directly from the database will find only an envelope there; (c) `FORGE_FIELD_KEY` becomes
+  a secret to **keep** for these integrations too — losing it makes them unreadable, and the integration
+  **refuses to go out** rather than presenting itself without authentication. The `keep_secret` path (editing
+  the endpoint without retyping the token) works **without a key**: it copies the envelope as is.
+- **A new file appears next to an engagement's ledger: `<ledger>.durations`** (existing
+  installs — NAMED breaking change). A sidecar like `<ledger>.hwm` and `<ledger>.ed25519`, created at the
+  first `forge run`/`forge campaign` that receives `--ledger` **and** fires at least one action. It carries
+  **only** durations aggregated **per module kind** (no target, no host, no URL), weighs
+  a few KiB at most, is **not** a secret, and is **not** in the auditability chain (losing
+  it breaks nothing: preheating falls back on `action.cost`). Practical consequences: the
+  purge scripts must include it (`docs/UNINSTALL.md` updated), and an operation that does not want it
+  sets `FORGE_DURATIONS=0` (no file created, previous behavior identical). Without
+  `--ledger`, nothing changes: no file has ever been written.
 - **The purple join now has THREE states, not two — and the headline rate got stricter.** The join
   between fired techniques (red) and SOC detections (blue) was a plain **string equality** on the
   `mitre` tag, which produced two measured defects.

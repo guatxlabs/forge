@@ -723,7 +723,7 @@
       <h2 id="cmp-h">Compliance <span class="badge" title="Module avancé (open, flag-gated) — WORM / rétention / legal-hold + preuves SOC 2 / ISO">avancé</span></h2>
       <span class="qbar"><button id="cmp-reload" class="k-theme" type="button" title="Recharger la politique + le signer (secrets rédigés)">Rafraîchir</button></span>
     </div>
-    <p class="muted" style="margin:0 0 10px"><b>WORM / rétention / legal-hold</b> sur le ledger tamper-evident + les données d'engagement, et export de <b>preuves d'audit SOC 2 / ISO 27001</b>. La rétention est <b>la plus spécifique</b> (engagement → tenant → global) ; un <b>legal-hold</b> (à n'importe quel niveau) <b>bloque toute purge/suppression</b> — le hold <b>gagne toujours</b> (fail-closed). Chaque mutation est <b>attribuée</b> et <b>ledgerisée</b>. Les secrets (clé d'archive, endpoint/credential du signer) sont <b>rédigés</b> : jamais affichés. En build <b>community</b> (flag OFF) : cette vue n'existe pas, ledger/données inchangés.</p>
+    <p class="muted" style="margin:0 0 10px"><b>WORM / rétention / legal-hold</b> sur le ledger tamper-evident + les données d'engagement, et export de <b>preuves d'audit SOC 2 / ISO 27001</b>. La rétention est <b>la plus spécifique</b> (engagement → tenant → global) ; un <b>legal-hold</b> (à n'importe quel niveau) <b>bloque toute purge/suppression</b> — le hold <b>gagne toujours</b> (fail-closed). Chaque mutation est <b>attribuée</b> et <b>ledgerisée</b>. Les secrets (clé d'archive, endpoint/credential du signer) sont <b>rédigés</b> : jamais affichés. En build par défaut (module avancé éteint, flag OFF) : cette vue n'existe pas, ledger/données inchangés.</p>
 
     <!-- (1) POLITIQUE DE RÉTENTION + (2) LEGAL-HOLD (par scope) -->
     <div class="id-card">
@@ -812,7 +812,7 @@
         <button id="admin-toolsrt-reload" class="k-theme" type="button" title="Recharger l'état des outils (lecture seule : n'exécute aucun outil)">Rafraîchir</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Installer / mettre à jour / retirer les <b>binaires de sécurité externes</b> (httpx, nuclei, subfinder…) <b>sans reconstruire l'image</b>. La version et le <b>SHA256 par architecture</b> viennent du <b>manifeste unique</b> <code>forge/tools.json</code> : <b>il n'existe aucun paramètre d'URL, de version ou d'empreinte</b>, ici comme dans <code>forge tools</code> — un téléchargement non épinglé n'est pas « refusé », il est <b>inexprimable</b>. Le digest est calculé <b>sur le flux</b> et comparé au pin <b>avant</b> toute pose sur le <code>PATH</code> ; un écart ⇒ refus, temporaire détruit, refus <b>journalisé</b>. Un outil <b>non épinglé</b> pour l'architecture courante n'a pas de bouton. <b>Admin-only</b>, chaque action est <b>attribuée</b> et <b>ledgerisée</b>. Détails : <code>docs/TOOLS_LIFECYCLE.md</code>.</p>
+    <p class="muted" style="margin:0 0 10px">Installer / mettre à jour / retirer les <b>binaires de sécurité externes</b> (httpx, nuclei, subfinder…) <b>sans reconstruire l'image</b>. La version et le <b>SHA256 par architecture</b> viennent du <b>manifeste unique</b> <code>forge/tools.json</code> : <b>il n'existe aucun paramètre d'URL, de version ou d'empreinte</b>, ici comme dans <code>forge tools</code> — un téléchargement non épinglé n'est pas « refusé », il est <b>inexprimable</b>. Le digest est calculé <b>sur le flux</b> et comparé au pin <b>avant</b> toute pose sur le <code>PATH</code> ; un écart ⇒ refus, temporaire détruit, refus <b>journalisé</b>. Un outil <b>non épinglé</b> pour l'architecture courante n'a pas de bouton. <b>Admin-only</b>, chaque action est <b>attribuée</b> et <b>ledgerisée</b>. Détails : <code>docs/TOOLS_LIFECYCLE.fr.md</code>.</p>
     <div id="admin-toolsrt-body"><div class="muted">chargement…</div></div>
   </section>
 
@@ -827,7 +827,7 @@
         <button id="admin-notify-reload" class="k-theme" type="button" title="Recharger la configuration du canal (jeton rédigé)">Recharger</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Miroir <b>hors-processus</b> des notifications in-app (assignation / triage) vers un <b>webhook</b>. C'est de l'<b>egress depuis un outil offensif</b>, donc gouverné comme celui du LLM : <b>off par défaut</b>, opt-in explicite et ledgerisé. Ce qui part est <b>minimal et rédigé</b> — le texte passe par le <b>rédacteur des rapports</b> puis par la <b>neutralisation des URL</b> (une URL de cible porte en général l'identifiant de la victime). Les cibles <b>internes</b> (loopback, RFC1918, métadonnées cloud) sont <b>refusées</b> sauf <code>FORGE_ALLOW_INTERNAL_INTEGRATIONS=1</code>, et un <b>jeton</b> n'est jamais envoyé <b>en clair vers une cible publique</b>. Chaque envoi est <b>journalisé</b> (canal, destinataire <b>rédigé</b>, issue) — <b>jamais le contenu</b>. SMTP : <b>non construit</b>, et pourquoi — cf. <code>docs/ADMINISTRATION.md</code>.</p>
+    <p class="muted" style="margin:0 0 10px">Miroir <b>hors-processus</b> des notifications in-app (assignation / triage) vers un <b>webhook</b>. C'est de l'<b>egress depuis un outil offensif</b>, donc gouverné comme celui du LLM : <b>off par défaut</b>, opt-in explicite et ledgerisé. Ce qui part est <b>minimal et rédigé</b> — le texte passe par le <b>rédacteur des rapports</b> puis par la <b>neutralisation des URL</b> (une URL de cible porte en général l'identifiant de la victime). Les cibles <b>internes</b> (loopback, RFC1918, métadonnées cloud) sont <b>refusées</b> sauf <code>FORGE_ALLOW_INTERNAL_INTEGRATIONS=1</code>, et un <b>jeton</b> n'est jamais envoyé <b>en clair vers une cible publique</b>. Chaque envoi est <b>journalisé</b> (canal, destinataire <b>rédigé</b>, issue) — <b>jamais le contenu</b>. SMTP : <b>non construit</b>, et pourquoi — cf. <code>docs/ADMINISTRATION.fr.md</code>.</p>
     <div id="admin-notify-body"><div class="muted">chargement…</div></div>
   </section>
 
@@ -856,7 +856,7 @@
         <button id="admin-det-reload" class="k-theme" type="button" title="Recharger la configuration de la source (secret rédigé)">Recharger</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Source <b>BLUE</b> (SIEM/IDS/pare-feu) corrélée à la boucle purple par identité MITRE. <b>N'importe quelle infra</b> se câble ici sans code (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, commande). Le <b>secret</b> est <b>write-only</b> (affiché <code>•••</code> une fois posé, jamais renvoyé) et manié comme un secret de session. Une source absente/injoignable ⇒ mesure déclarée <b>impossible</b> (<code>source_reachable:false</code>), jamais de détection inventée. Chaque enregistrement est <b>ledgerisé</b>. Détails : <code>docs/DETECTION.md</code>.</p>
+    <p class="muted" style="margin:0 0 10px">Source <b>BLUE</b> (SIEM/IDS/pare-feu) corrélée à la boucle purple par identité MITRE. <b>N'importe quelle infra</b> se câble ici sans code (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, commande). Le <b>secret</b> est <b>write-only</b> (affiché <code>•••</code> une fois posé, jamais renvoyé) et manié comme un secret de session. Une source absente/injoignable ⇒ mesure déclarée <b>impossible</b> (<code>source_reachable:false</code>), jamais de détection inventée. Chaque enregistrement est <b>ledgerisé</b>. Détails : <code>docs/DETECTION.fr.md</code>.</p>
     <div id="admin-det-form"><div class="muted">chargement…</div></div>
   </section>
 
@@ -872,7 +872,7 @@
         <button id="admin-bk-reload" class="k-theme" type="button" title="Recharger la politique de sauvegarde (secrets rédigés)">Recharger</button>
       </span>
     </div>
-    <p class="muted" style="margin:0 0 10px">Archive <b>toujours chiffrée</b> (argon2id + XChaCha20-Poly1305) : elle embarque la <b>base</b>, le <b>ledger</b> tamper-evident et la <b>clé de signature</b> <code>.ed25519</code> — il n'existe <b>aucun chemin en clair</b>. La <b>passphrase est obligatoire</b> (fail-closed) et n'est <b>jamais</b> stockée/loggée/ledgerisée (elle n'est pas conservée côté navigateur au-delà de la requête). La <b>restauration</b> valide + vérifie par défaut (aucune écriture) ; un <b>swap en place</b> exige une confirmation explicite et un <b>redémarrage</b>. Chaque action est <b>ledgerisée</b> (métadonnées seules). Détails : <code>docs/BACKUP.md</code>.</p>
+    <p class="muted" style="margin:0 0 10px">Archive <b>toujours chiffrée</b> (argon2id + XChaCha20-Poly1305) : elle embarque la <b>base</b>, le <b>ledger</b> tamper-evident et la <b>clé de signature</b> <code>.ed25519</code> — il n'existe <b>aucun chemin en clair</b>. La <b>passphrase est obligatoire</b> (fail-closed) et n'est <b>jamais</b> stockée/loggée/ledgerisée (elle n'est pas conservée côté navigateur au-delà de la requête). La <b>restauration</b> valide + vérifie par défaut (aucune écriture) ; un <b>swap en place</b> exige une confirmation explicite et un <b>redémarrage</b>. Chaque action est <b>ledgerisée</b> (métadonnées seules). Détails : <code>docs/BACKUP.fr.md</code>.</p>
     <div class="det-actions" style="margin-bottom:12px">
       <button id="bk-create" class="login-btn" type="button" title="Créer une sauvegarde chiffrée et la télécharger">Créer une sauvegarde…</button>
       <button id="bk-restore" class="k-theme" type="button" title="Valider / restaurer une archive chiffrée">Restaurer une archive…</button>
@@ -953,7 +953,7 @@
     <!-- STEP 3 — source de détection (tout optionnel, stocké verbatim pour la boucle purple). MÊME composant
          que le panneau admin (parité stricte du jeu de champs) : monté dynamiquement dans #su-det-form. -->
     <div class="setup-panel" data-panel="3">
-      <div class="setup-note muted">Source BLUE (SIEM/IDS/pare-feu) corrélée par identité MITRE. Optionnelle — modifiable plus tard dans Administration. Le secret est write-only. Voir <code>docs/DETECTION.md</code>.</div>
+      <div class="setup-note muted">Source BLUE (SIEM/IDS/pare-feu) corrélée par identité MITRE. Optionnelle — modifiable plus tard dans Administration. Le secret est write-only. Voir <code>docs/DETECTION.fr.md</code>.</div>
       <div id="su-det-form"></div>
     </div>
 

@@ -249,12 +249,16 @@ class TestInterruptedRunStaysZero(_Harness):
 
 
 class TestDocumentedContract(unittest.TestCase):
-    """Le contrat est écrit dans `docs/CLI.md` : il doit décrire ce que le code fait maintenant."""
+    """Le contrat est écrit dans `docs/CLI.md` et sa version française `docs/CLI.fr.md` : chacun doit
+    décrire ce que le code fait maintenant. La sortie du rapport (« RUN INTERROMPU ») est citée telle
+    quelle dans les deux langues."""
 
     def test_cli_doc_states_both_branches(self):
-        doc = (Path(__file__).resolve().parents[1] / "docs" / "CLI.md").read_text(encoding="utf-8")
-        self.assertIn("status=vulnerable", doc)
-        self.assertIn("INTERROMPU", doc)
+        for nom in ("CLI.md", "CLI.fr.md"):
+            with self.subTest(document=nom):
+                doc = (Path(__file__).resolve().parents[1] / "docs" / nom).read_text(encoding="utf-8")
+                self.assertIn("status=vulnerable", doc)
+                self.assertIn("INTERROMPU", doc)
 
 
 if __name__ == "__main__":

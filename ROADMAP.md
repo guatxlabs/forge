@@ -1,166 +1,169 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 # Forge — Roadmap
 
-> **État : pré-1.0**, **100 % open source** sous licence AGPL-3.0-or-later. Le build par défaut est
-> **openssl-free** (rustls/ring) ; le cœur partagé est consommé via la git-dep publique épinglée
+[English](ROADMAP.md) | [Français](ROADMAP.fr.md)
+
+> **Status: pre-1.0**, **100 % open source** under the AGPL-3.0-or-later license. The default build is
+> **openssl-free** (rustls/ring); the shared core is consumed via the pinned public git-dep
 > [`guatxlabs/core`](https://github.com/guatxlabs/core).
-> Documentation : [`docs/README.md`](docs/README.md) — installation, déploiement, référence CLI/API,
-> modèle de sécurité.
+> Documentation: [`docs/README.md`](docs/README.md) — installation, deployment, CLI/API reference,
+> security model.
 >
-> **Mesuré** : **88 modules** (`python3 -m forge.cli modules --json` → 88 entrées, 13 `exploit`,
-> 42 `bug_bounty_eligible`) ; suites vertes **hors réseau** — **2834** tests Python
-> (`Ran 2834 tests` / `OK (skipped=3)`) et **571** tests Rust console (`cargo test`, features par défaut).
+> **Measured**: **88 modules** (`python3 -m forge.cli modules --json` → 88 entries, 13 `exploit`,
+> 42 `bug_bounty_eligible`); suites green **offline** — **2949** Python tests
+> (`Ran 2949 tests` / `OK (skipped=5)`, each skip naming the optional tool or corpus it lacks) and **571** Rust console tests (`cargo test`, default features),
+> MEASURED on 2026-11-24.
 
-Cette page décrit **ce qui est livré**, **ce qui reste ouvert** et **comment contribuer**. Les
-changements datés sont dans [`CHANGELOG.md`](CHANGELOG.md) ; le détail d'un correctif est dans le
-message du commit qui le porte.
+This page describes **what is delivered**, **what remains open** and **how to contribute**. The
+dated changes are in [`CHANGELOG.md`](CHANGELOG.md); the details of a fix are in the
+message of the commit that carries it.
 
-## Livré
+## Delivered
 
-- **Intégrité des verdicts** — un oracle ne rend pas de verdict négatif sur une cible qu'il n'a pas
-  atteinte. Une sonde sans réponse produit `skipped` (« je n'ai pas pu vérifier »), jamais `tested`
-  (« vérifié, rien trouvé »). La distinction porte sur les classes usuelles : IDOR, ATO, SSRF, SQLi,
-  élévation de privilèges, traversée de chemin.
-- **Cœur de sûreté** — gate ROE fail-closed à 4 couches (armé → in-scope → capacité → approuvé),
-  scope-guard, plancher exploit opt-in, ledger d'engagement tamper-evident (chaîne SHA-256 +
-  Ed25519 par entrée, vérifiable par un tiers avec la seule clé publique).
-- **Graines d'engagement gouvernées** — une cible peut être un hôte, une URL, un littéral IP ou
-  un **e-mail** (pivot vers son domaine). Un nom, un pseudonyme ou un numéro est refusé au
-  chargement, avec sa raison : la sûreté est ancrée sur une IP épinglable, et une entité qui
-  n'en produit aucune ne peut recevoir aucun verdict réseau.
-- **Périmètre par port** — un motif de scope peut restreindre un hôte à un seul port
-  (`example.com:3000`) ; sans port il porte sur l'hôte entier. Face à une cible qui ne révèle aucun
-  port, `in_scope` refuse et `out_scope` bloque : chacun va vers la sûreté, il n'existe pas de
-  réponse neutre.
-- **Moteur** — planner coverage-safe (aucune classe qualifiante affamée en silence), oracles à
-  preuve sur les classes web usuelles, chaînage recon → découverte de services → scan de contenu,
-  arsenal d'outils CLI gouvernés (ToolSpec déclaratif, no-shell) + plugins drop-in, importateurs de
-  scans, triage natif zéro-egress, assist LLM optionnel (off par défaut, egress-gaté, advisory).
-- **Boucle purple** — run-records taggés ATT&CK, source de détection **plugin configurable**
-  (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, fichier, exec), matrice de
-  couverture exercé × détecté × MTTD.
-- **Console** — wizard de premier déploiement (aucun défaut codé en dur), RBAC
-  admin/opérateur/viewer, explorateur GXQL read-only, dashboards, gestion des runs, ajout d'outils
-  et paramètres par-outil depuis l'UI, runner de sous-commandes gouverné, notifications,
-  ownership + workflow de triage, exports HTML/PDF/CSV/JSON par engagement.
-- **Passage à l'échelle (modules avancés, open, flag-gated)** — backend Postgres, topologie HA multi-instance, manifestes
-  Kubernetes avec NetworkPolicies deny-by-default, isolation multi-tenant par-ligne, RBAC
-  par-engagement, SSO OIDC + SCIM 2.0 (SAML via pont OIDC), rétention/legal-hold/export de preuves.
-- **Cycle de vie** — sauvegardes toujours chiffrées (argon2id + XChaCha20-Poly1305) avec
-  programmation et offsite, upgrade une-commande avec rollback automatique, migration de données,
-  chiffrement au repos SQLCipher (image opt-in), custody de clé off-host PKCS#11 / KMS.
-- **Ressources réglables au lancement** — profil unifié `low|balanced|full` **plus** des leviers
-  individuels dans l'UI, générés depuis la table du moteur plutôt qu'une copie qui dériverait.
-  L'allowlist est compilée côté serveur — le parseur itère les leviers connus et va chercher leur
-  clé dans la requête, donc une clé inconnue est inatteignable par construction. Forge doit pouvoir
-  tourner sur une machine contrainte sans la saturer, et aucune valeur de ressource n'est figée
-  dans le code.
+- **Verdict integrity** — an oracle does not return a negative verdict on a target it did not
+  reach. A probe without a response produces `skipped` ("I could not verify"), never `tested`
+  ("verified, nothing found"). The distinction covers the usual classes: IDOR, ATO, SSRF, SQLi,
+  privilege escalation, path traversal.
+- **Safety core** — fail-closed 4-layer ROE gate (armed → in-scope → capability → approved),
+  scope-guard, opt-in exploit floor, tamper-evident engagement ledger (SHA-256 chain +
+  per-entry Ed25519, verifiable by a third party with the public key alone).
+- **Governed engagement seeds** — a target can be a host, a URL, an IP literal or
+  an **e-mail** (pivot to its domain). A name, a pseudonym or a number is refused at
+  load time, with its reason: safety is anchored on a pinnable IP, and an entity that
+  produces none cannot receive any network verdict.
+- **Per-port scope** — a scope pattern can restrict a host to a single port
+  (`example.com:3000`); without a port it covers the whole host. Facing a target that reveals no
+  port, `in_scope` refuses and `out_scope` blocks: each goes toward safety, there is no
+  neutral answer.
+- **Engine** — coverage-safe planner (no qualifying class silently starved), evidence
+  oracles on the usual web classes, chaining recon → service discovery → content scan,
+  arsenal of governed CLI tools (declarative ToolSpec, no-shell) + drop-in plugins, scan
+  importers, zero-egress native triage, optional LLM assist (off by default, egress-gated, advisory).
+- **Purple loop** — ATT&CK-tagged run-records, **configurable plugin** detection source
+  (Plume, CrowdSec, FortiGate, pfSense/OPNsense, Elastic/OpenSearch, file, exec), exercised × detected × MTTD
+  coverage matrix.
+- **Console** — first-deployment wizard (no hard-coded default), admin/operator/viewer
+  RBAC, read-only GXQL explorer, dashboards, run management, adding tools
+  and per-tool parameters from the UI, governed subcommand runner, notifications,
+  ownership + triage workflow, HTML/PDF/CSV/JSON exports per engagement.
+- **Scaling (advanced modules, open, flag-gated)** — Postgres backend, multi-instance HA topology, Kubernetes
+  manifests with deny-by-default NetworkPolicies, per-row multi-tenant isolation, per-engagement
+  RBAC, OIDC SSO + SCIM 2.0 (SAML via OIDC bridge), retention/legal-hold/evidence export.
+- **Lifecycle** — always-encrypted backups (argon2id + XChaCha20-Poly1305) with
+  scheduling and offsite, one-command upgrade with automatic rollback, data migration,
+  SQLCipher encryption at rest (opt-in image), off-host PKCS#11 / KMS key custody.
+- **Resources tunable at launch** — unified `low|balanced|full` profile **plus** individual
+  levers in the UI, generated from the engine's table rather than a copy that would drift.
+  The allowlist is compiled server-side — the parser iterates over the known levers and fetches their
+  key from the request, so an unknown key is unreachable by construction. Forge must be able to
+  run on a constrained machine without saturating it, and no resource value is frozen
+  in the code.
 
-## Gouvernance du dépôt
+## Repository governance
 
-Deux règles s'appliquent à toute contribution, humaine ou automatisée. Elles sont **vérifiées par
-la machine** : un commit qui les enfreint est refusé. Le détail opérationnel, écrit pour un lecteur
-sans contexte préalable, est dans [`AGENTS.md`](AGENTS.md).
+Two rules apply to every contribution, human or automated. They are **checked by
+the machine**: a commit that breaks them is refused. The operational details, written for a reader
+without prior context, are in [`AGENTS.md`](AGENTS.md).
 
-**1. Une seule identité publique** — `guatxlabs <noreply@guatx.com>`, en auteur **et** en committer.
-Aucune adresse personnelle ni nominative. Un dépôt publié sous un collectif ne doit pas exposer le
-compte personnel de qui l'écrit.
+**1. A single public identity** — `guatxlabs <noreply@guatx.com>`, as author **and** as committer.
+No personal or named address. A repository published under a collective must not expose the
+personal account of whoever writes it.
 
-**2. Un message de commit s'adresse à un lecteur public** — quelqu'un qui n'était pas dans la pièce,
-qui ne connaît ni la session ni son auteur, et qui doit pouvoir agir sur ce qu'il lit. Un commit dit
-**ce qui change et pourquoi**. Sont exclus le récit d'enquête à la première personne, l'adresse
-directe à un interlocuteur, et la chronologie de session comme fil narratif. Restent admis la voix
-de l'outil, une date de mesure, et un « pourquoi » long — la longueur n'a jamais été le défaut.
+**2. A commit message addresses a public reader** — someone who was not in the room,
+who knows neither the session nor its author, and who must be able to act on what they read. A commit says
+**what changes and why**. Excluded are first-person investigation narrative, direct
+address to an interlocutor, and the session chronology as narrative thread. Still admitted: the voice
+of the tool, a measurement date, and a long "why" — length was never the defect.
 
-La première personne est refusée **en bloc**, pas verbe par verbe : une énumération ne peut pas être
-complète, et celle qui l'a précédée laissait passer `j'ai inséré` là où elle refusait `j'ai mesuré`.
-La voix de l'outil, qui s'écrit à la première personne, passe en portant une **marque de citation**
-— guillemets, code entre backticks, ou ligne `>`. Le détail opérationnel, écrit pour un lecteur sans
-contexte préalable, est dans [`AGENTS.md`](AGENTS.md).
+The first person is refused **as a block**, not verb by verb: an enumeration cannot be
+complete, and the one that preceded it let `j'ai inséré` (*I inserted*) through where it refused `j'ai mesuré` (*I measured*).
+The voice of the tool, which is written in the first person, passes by carrying a **quotation mark**
+— quotation marks, code between backticks, or a `>` line. The operational details, written for a reader without
+prior context, are in [`AGENTS.md`](AGENTS.md).
 
-Deux barrières appliquent ces règles depuis une **seule** implémentation
-([`scripts/check_commit_register.py`](scripts/check_commit_register.py)) : le hook `commit-msg`
-(`make hooks`) et un job de CI. Le hook ne ferme pas — `git clone` ne le transporte pas et l'édition
-via l'interface web ne l'exécute jamais. **C'est la CI qui ferme** ; le hook évite seulement d'avoir
-à corriger après coup. Les deux slots d'identité sont vérifiés, auteur **et** committer, et une
-plage que git n'a pas su lire est un refus : une barrière échoue fermée.
+Two barriers enforce these rules from a **single** implementation
+([`scripts/check_commit_register.py`](scripts/check_commit_register.py)): the `commit-msg` hook
+(`make hooks`) and a CI job. The hook does not close — `git clone` does not carry it and editing
+via the web interface never runs it. **The CI is what closes**; the hook only saves having
+to fix things afterwards. Both identity slots are checked, author **and** committer, and a
+range that git could not read is a refusal: a barrier fails closed.
 
-## Ce qu'une contribution doit passer
+## What a contribution must pass
 
-Chaque porte est **exigée** par l'agrégateur de CI — un job qui n'y figure pas s'exécute, échoue et
-ne bloque rien.
+Every gate is **required** by the CI aggregator — a job that is not listed there runs, fails and
+blocks nothing.
 
-| porte | ce qu'elle refuse |
+| gate | what it refuses |
 |---|---|
-| registre public | identité hors `guatxlabs`, message adressé à un interlocuteur |
-| lint | import ou variable morts, f-string sans champ (`ruff` épinglé à l'égal) |
-| plancher python | une syntaxe plus récente que le `requires-python` déclaré |
-| tests | `unittest` sur le cœur, `cargo test` sur la console, boucle purple de bout en bout |
-| licences | une dépendance ou un fichier redistribué sans licence compatible |
-| sécurité | vulnérabilité connue, licence bannie, secret dans l'arbre ou dans l'historique |
+| registre public (*public register*) | identity other than `guatxlabs`, message addressed to an interlocutor |
+| lint | dead import or variable, f-string without a field (`ruff` pinned to an exact version) |
+| python floor | a syntax newer than the declared `requires-python` |
+| tests | `unittest` on the core, `cargo test` on the console, end-to-end purple loop |
+| licenses | a dependency or redistributed file without a compatible license |
+| security | known vulnerability, banned license, secret in the tree or in the history |
 
-## Ce qui reste ouvert
+## What remains open
 
-Ces points sont connus et nommés parce qu'un lecteur technique a besoin de savoir où sont les bords.
-Aucun ne se corrige par un simple correctif.
+These points are known and named because a technical reader needs to know where the edges are.
+None of them is fixed by a simple patch.
 
-- **Couverture des API GraphQL** — les classes d'injection y vivent derrière un point d'entrée
-  unique, et le point d'injection est un argument à l'intérieur de la requête. Le moteur sait
-  désormais l'atteindre — gabarit de corps avec échappement des deux contextes imbriqués (chaîne
-  GraphQL dans chaîne JSON), chaînage automatique depuis l'introspection du schéma. La couverture
-  reste inférieure à celle des surfaces REST classiques.
-- **Le débit ne borne que ce que Forge émet lui-même.** Le plafond porte sur le point de passage
-  HTTP du moteur. Un outil tiers piloté par Forge qui frappe la cible par son propre client — le
-  scanner d'un proxy d'interception, par exemple — émet un trafic que ce plafond ne voit pas. À
-  l'inverse, le trafic de plan de contrôle vers les services **de l'opérateur** n'est
-  délibérément pas compté contre le budget de requêtes de la cible.
-- **Surfaces authentifiées** — atteindre les pages internes d'une application suppose de porter une
-  session jusqu'aux outils de découverte. Les outils qui ne déclarent pas de paramètre d'en-tête ou
-  de cookie explorent en anonyme et ne voient donc que la surface publique.
-- **Crawl et rendu JavaScript** — la découverte de surface repose sur des outils externes dont les
-  capacités varient. Une application dont la navigation n'existe qu'à l'exécution est moins bien
-  couverte qu'une application servie côté serveur.
+- **GraphQL API coverage** — the injection classes live there behind a single
+  entry point, and the injection point is an argument inside the query. The engine can
+  now reach it — body template with escaping of both nested contexts (GraphQL string
+  inside a JSON string), automatic chaining from schema introspection. Coverage
+  remains lower than on classic REST surfaces.
+- **The rate only bounds what Forge emits itself.** The ceiling applies to the engine's HTTP
+  choke point. A third-party tool driven by Forge that hits the target through its own client — the
+  scanner of an intercepting proxy, for example — emits traffic that this ceiling does not see.
+  Conversely, control-plane traffic to the **operator's** services is
+  deliberately not counted against the target's request budget.
+- **Authenticated surfaces** — reaching an application's internal pages requires carrying a
+  session through to the discovery tools. Tools that do not declare a header or
+  cookie parameter explore anonymously and therefore only see the public surface.
+- **Crawling and JavaScript rendering** — surface discovery relies on external tools whose
+  capabilities vary. An application whose navigation only exists at runtime is less well
+  covered than a server-side rendered application.
 
-## Limites assumées et documentées
+## Accepted and documented limits
 
-- **Intégrité d'audit vs compromission host-root** — par défaut la clé de signature est locale et
-  l'ancre est nulle. Deux contrôles opt-in ferment ce cas : signeur off-host (PKCS#11 / KMS) et
-  ancre témoin. Voir [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md).
-- **Collecteurs de détection fail-open par conception** — ils alimentent le reporting et la mesure
-  de couverture, **jamais** une décision de tir : scope, ROE et ledger restent fail-closed.
-- **Un secret PEUT partir en clair vers une cible INTERNE explicitement autorisée.** C'est la seule
-  exception survivante à « pas de clair », et elle est étroite : il faut à la fois une adresse
-  **privée**, une autorisation **explicite** (`FORGE_ALLOW_INTERNAL_INTEGRATIONS`), et rien de tout
-  cela n'est le défaut. Vers une cible **publique**, un secret en clair est refusé avant connexion,
-  sans variable pour l'ouvrir.
-  *Pourquoi elle reste ouverte* : exiger `https` dès qu'un secret existe casse le déploiement
-  on-prem de référence — un collecteur interne authentifié sans écouteur TLS. Une AC d'entreprise
-  n'y change rien : elle fournit une **ancre**, pas un **écouteur**. Fermer cette porte est un
-  arbitrage de produit, pas une dette technique ; techniquement, c'est une condition unique dans
-  `net::reject_cleartext_secret`, au prix d'une rupture nette pour ces installations.
-- **Matériel d'authentification dans les sauvegardes** — une archive contient la base entière, donc
-  tout matériel d'auth stocké. C'est **inhérent** : une sauvegarde doit restaurer fidèlement, et
-  rédiger l'archive ferait perdre le contexte à la restauration. La garantie n'est donc pas « pas de
-  secret dans l'archive » mais **« aucune archive en clair ne peut exister »** — le chiffrement est
-  obligatoire et fail-closed sur les trois chemins (API, CLI hors-ligne, planificateur), la
-  passphrase vient de l'environnement et jamais d'argv, et deux couches indépendantes le refusent.
+- **Audit integrity vs host-root compromise** — by default the signing key is local and
+  the anchor is null. Two opt-in controls close this case: off-host signer (PKCS#11 / KMS) and
+  witness anchor. See [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md).
+- **Detection collectors fail-open by design** — they feed reporting and coverage
+  measurement, **never** a firing decision: scope, ROE and ledger stay fail-closed.
+- **A secret MAY go out in plaintext to an explicitly authorized INTERNAL target.** It is the only
+  surviving exception to "no plaintext", and it is narrow: it requires at once a
+  **private** address, an **explicit** authorization (`FORGE_ALLOW_INTERNAL_INTEGRATIONS`), and none of
+  this is the default. To a **public** target, a plaintext secret is refused before connection,
+  with no variable to open it.
+  *Why it stays open*: requiring `https` as soon as a secret exists breaks the reference
+  on-prem deployment — an authenticated internal collector without a TLS listener. An enterprise CA
+  changes nothing there: it provides an **anchor**, not a **listener**. Closing this door is a
+  product trade-off, not technical debt; technically, it is a single condition in
+  `net::reject_cleartext_secret`, at the price of a clean break for these installations.
+- **Authentication material in backups** — an archive contains the whole database, hence
+  all stored auth material. This is **inherent**: a backup must restore faithfully, and
+  redacting the archive would lose the context on restore. The guarantee is therefore not "no
+  secret in the archive" but **"no plaintext archive can exist"** — encryption is
+  mandatory and fail-closed on all three paths (API, offline CLI, scheduler), the
+  passphrase comes from the environment and never from argv, and two independent layers refuse it.
 
-## Décisions produit actées
+## Product decisions made
 
-- **Pas de SAML in-process.** Le pont OIDC (Dex / Keycloak / oauth2-proxy) est la voie supportée :
-  un SAML natif tirerait openssl + libxmlsec1 — ce qui casse le build openssl-free — et un XML-DSig
-  maison est un piège. Une feature Cargo `saml` optionnelle reste différée.
-- **Pas de driver KMS cloud dédié.** Le signeur PKCS#11 couvre HSM et CloudHSM, et le signeur `exec`
-  générique couvre un KMS Ed25519 (recette dans [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md)).
-  AWS-KMS ne signe pas Ed25519 et n'est donc pas utilisable pour ce ledger.
-- **Le débit (`rate`) est une donnée de gouvernance** portée par le scope et les règles
-  d'engagement, pas un levier de profil de ressources.
+- **No in-process SAML.** The OIDC bridge (Dex / Keycloak / oauth2-proxy) is the supported path:
+  native SAML would pull in openssl + libxmlsec1 — which breaks the openssl-free build — and a home-made
+  XML-DSig is a trap. An optional `saml` Cargo feature remains deferred.
+- **No dedicated cloud KMS driver.** The PKCS#11 signer covers HSM and CloudHSM, and the generic `exec`
+  signer covers an Ed25519 KMS (recipe in [`docs/KEY_CUSTODY.md`](docs/KEY_CUSTODY.md)).
+  AWS-KMS does not sign Ed25519 and is therefore not usable for this ledger.
+- **The rate (`rate`) is a governance datum** carried by the scope and the rules of
+  engagement, not a resource-profile lever.
 
-## Contribuer
+## Contributing
 
-Les correctifs, modules et ToolSpecs sont bienvenus. Lire d'abord
-[`CONTRIBUTING.md`](CONTRIBUTING.md) (invariants de sûreté à ne pas casser, build et tests),
-[`AGENTS.md`](AGENTS.md) (règles de commit, vérifiées par la machine) et
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Pour une vulnérabilité, suivre
-[`SECURITY.md`](SECURITY.md) — pas d'issue publique. Les points ouverts ci-dessus le sont
-réellement : ouvrir une issue pour en discuter avant un gros chantier.
+Fixes, modules and ToolSpecs are welcome. Read first
+[`CONTRIBUTING.md`](CONTRIBUTING.md) (safety invariants not to break, build and tests),
+[`AGENTS.md`](AGENTS.md) (commit rules, checked by the machine) and
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). For a vulnerability, follow
+[`SECURITY.md`](SECURITY.md) — no public issue. The open points above really
+are open: open an issue to discuss them before a large piece of work.

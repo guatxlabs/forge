@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests hermetiques de `ssrf.redirect_loop` — aucun reseau.
 
 DEUX CONTRATS SONT EPINGLES, et le second pese autant que le premier.

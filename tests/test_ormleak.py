@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests hermetiques de `ormleak.filter` — aucun reseau.
 
 DEUX CONTRATS SONT EPINGLES ICI, et le second est le plus important.

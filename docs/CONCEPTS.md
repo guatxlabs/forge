@@ -1,197 +1,199 @@
 # Concepts
 
-> [Sommaire](README.md) · Voir aussi : [Architecture](ARCHITECTURE.md) ·
-> [Modèle de sécurité](SECURITY_MODEL.md) · [Catalogue de modules](MODULES.md)
+[English](CONCEPTS.md) | [Français](CONCEPTS.fr.md)
 
-Cette page explique les idées centrales de Forge. Chaque section renvoie au code et aux références.
+> [Contents](README.md) · See also: [Architecture](ARCHITECTURE.md) ·
+> [Security model](SECURITY_MODEL.md) · [Module catalogue](MODULES.md)
+
+This page explains Forge's core ideas. Each section points to the code and the references.
 
 - [1. ROE & scope-guard](#1-roe--scope-guard)
-- [2. Le ledger d'engagement](#2-le-ledger-dengagement)
-- [3. Oracles à preuve (*tested-unless-proven*)](#3-oracles-à-preuve)
-- [4. Catalogue de modules & techniques (ATT&CK)](#4-catalogue-de-modules--techniques)
-- [5. La boucle purple](#5-la-boucle-purple)
-- [6. Chaînage (engine itératif)](#6-chaînage)
-- [7. Découverte backée par évasion](#7-découverte-backée-par-évasion)
+- [2. The engagement ledger](#2-the-engagement-ledger)
+- [3. Evidence-backed oracles (*tested-unless-proven*)](#3-evidence-backed-oracles)
+- [4. Module & technique catalogue (ATT&CK)](#4-module--technique-catalogue)
+- [5. The purple loop](#5-the-purple-loop)
+- [6. Chaining (iterative engine)](#6-chaining)
+- [7. Evasion-backed discovery](#7-evasion-backed-discovery)
 
 ---
 
 ## 1. ROE & scope-guard
 
-Le **ROE (Rules of Engagement)** est le cœur de sûreté (`forge/roe.py`). Il combine le scope-guard
-*fail-closed* du prototype interne d'origine et le modèle d'armement par couche de Plume.
-**Quatre couches** doivent
-TOUTES être franchies pour qu'une action LIVE parte :
+The **ROE (Rules of Engagement)** is the safety core (`forge/roe.py`). It combines the *fail-closed*
+scope-guard of the original internal prototype and Plume's per-layer arming model.
+**Four layers** must
+ALL be passed for a LIVE action to go out:
 
-| Couche | Question | Portée | Échec → |
+| Layer | Question | Reach | Failure → |
 |---|---|---|---|
-| 1 — armé ? | l'engagement est-il explicitement armé (`--arm`) ? | global | `DRY_RUN` |
-| 2 — scope ? | cible ∈ `in_scope` **et** ∉ `out_scope` ? (fail-closed : `in_scope` vide = rien) | par cible | `VETO` |
-| 3 — capacité ? | exploit/destructif ⇒ `allow_exploit`/`allow_destructive` explicites ? | par action | `VETO` |
-| 4 — approuvé ? | action approuvée (`--approve`), ou mode `auto` ? | par action | `DRY_RUN` |
+| 1 — armed? | is the engagement explicitly armed (`--arm`)? | global | `DRY_RUN` |
+| 2 — scope? | target ∈ `in_scope` **and** ∉ `out_scope`? (fail-closed: empty `in_scope` = nothing) | per target | `VETO` |
+| 3 — capability? | exploit/destructive ⇒ explicit `allow_exploit`/`allow_destructive`? | per action | `VETO` |
+| 4 — approved? | action approved (`--approve`), or `auto` mode? | per action | `DRY_RUN` |
 
-**Verdicts** :
-- **`FIRE`** — 1+2+3+4 OK → action live autorisée (seul cas où `module.fire()` est appelé).
-- **`DRY_RUN`** — in-scope + capacité OK mais non armé/non approuvé → simulation sûre (`module.dry()`
-  génère le PoC, aucun effet de bord).
-- **`VETO`** — couche 2 ou 3 échoue → refus DUR, **jamais** simulé, **jamais** tiré.
+**Verdicts**:
+- **`FIRE`** — 1+2+3+4 OK → live action authorised (the only case where `module.fire()` is called).
+- **`DRY_RUN`** — in-scope + capability OK but not armed/not approved → safe simulation (`module.dry()`
+  generates the PoC, no side effect).
+- **`VETO`** — layer 2 or 3 fails → HARD refusal, **never** simulated, **never** fired.
 
-**Fail-closed intégral** : toute exception, champ inconnu ou ambiguïté d'évaluation ⇒ `VETO`.
-L'appartenance au scope canonise l'hôte (retire scheme/port/path, casefold) et gère les globs **et**
-les CIDR/IP — une IP `out_scope` ne peut pas être contournée via une URL ou un `host:port`.
+**Fully fail-closed**: any exception, unknown field or evaluation ambiguity ⇒ `VETO`.
+Scope membership canonicalises the host (strips scheme/port/path, casefold) and handles globs **and**
+CIDR/IPs — an `out_scope` IP cannot be bypassed through a URL or a `host:port`.
 
-Le `Scope` (`scope.json`) porte : `mode` (white/grey/black), `in_scope`/`out_scope`, `rate`,
+The `Scope` (`scope.json`) carries: `mode` (white/grey/black), `in_scope`/`out_scope`, `rate`,
 `allow_exploit`, `allow_destructive`, `known_creds`, `idor_targets`, `module_params`,
-`disabled_modules`, et le matériel de `session`/`sessions` (SECRET). Modèle de fichier :
+`disabled_modules`, and the `session`/`sessions` material (SECRET). File template:
 [`../scope.example.json`](../scope.example.json).
 
-> **Note trust-boundary** : franchir un WAF/Cloudflare n'est **pas** une faille — c'est un enabler
-> d'accès. La gate ROE + le ledger existent pour **imposer ET prouver** l'autorisation, pas pour la
-> contourner.
+> **Trust-boundary note**: getting past a WAF/Cloudflare is **not** a vulnerability — it is an access
+> enabler. The ROE gate + the ledger exist to **enforce AND prove** authorisation, not to
+> bypass it.
 
 ---
 
-## 2. Le ledger d'engagement
+## 2. The engagement ledger
 
-Chaque acte (décision ROE, armement, approbation, finding, run-record, action console) est **chaîné
-et signé à l'append** (`forge/ledger.py` + `signing.py`) :
+Every act (ROE decision, arming, approval, finding, run-record, console action) is **chained
+and signed on append** (`forge/ledger.py` + `signing.py`):
 
 ```
 hash_n = SHA256( hash_{n-1} || seq || ts || kind || canonical_json(detail) )
-sig_n  = sign(hash_n)                     # Ed25519 par défaut ; HMAC en repli si cryptography absent
+sig_n  = sign(hash_n)                     # Ed25519 by default; HMAC as a fallback if cryptography is missing
 ```
 
-Propriétés :
-- **Couverture totale** : TOUTES les entrées sont chaînées (corrige la faiblesse « ~8 types admin
-  seulement » du ledger d'origine).
-- **Signature par-entrée** (pas seulement au checkpoint) : altérer un octet casse `verify()`.
-- **Non-répudiation** (Ed25519) : `verify_external(pubkey_hex)` laisse un **tiers** vérifier
-  l'intégrité **et** l'appartenance au périmètre avec la **seule clé publique**, sans pouvoir forger.
-- **Alg-aware / anti-downgrade** : un même ledger mélange les entrées moteur (`ed25519`/`hmac`) et
-  les entrées console (`sha256-console`, chaîne non signée). Une garde structurelle lie l'algo au
-  `kind` : `sha256-console` n'est légitime que sur un `kind` `console.*`, et inversement — ce qui
-  ferme le downgrade (réécrire une entrée moteur en non-signée) **et** le relabel.
+Properties:
+- **Full coverage**: ALL entries are chained (fixes the "only ~8 admin types" weakness
+  of the original ledger).
+- **Per-entry signature** (not only at the checkpoint): altering one byte breaks `verify()`.
+- **Non-repudiation** (Ed25519): `verify_external(pubkey_hex)` lets a **third party** verify
+  integrity **and** scope membership with the **public key alone**, without being able to forge.
+- **Alg-aware / anti-downgrade**: a single ledger mixes engine entries (`ed25519`/`hmac`) and
+  console entries (`sha256-console`, unsigned chain). A structural guard binds the algorithm to the
+  `kind`: `sha256-console` is only legitimate on a `console.*` `kind`, and vice versa — which
+  closes the downgrade (rewriting an engine entry as unsigned) **and** the relabel.
 
-**Custody (honnêteté)** : la clé privée `.ed25519` (0600) est aujourd'hui **locale**. L'ancrage
-hors-host (`forge/anchor.py` : témoin co-signataire distant + `reconcile` qui détecte une réécriture
-re-signée localement) est la dernière étape ; l'architecture asymétrique le permet déjà.
+**Custody (honesty)**: the `.ed25519` private key (0600) is **local** today. Off-host
+anchoring (`forge/anchor.py`: remote co-signing witness + `reconcile`, which detects a locally
+re-signed rewrite) is the last step; the asymmetric architecture already allows it.
 
-Commandes : `forge ledger verify|pubkey|keygen` ([CLI](CLI.md)) · `forge ledger verify`
-(chaîne seule, rapide) · `GET /api/ledger/verify` (côté console, sans clé privée).
+Commands: `forge ledger verify|pubkey|keygen` ([CLI](CLI.md)) · `forge ledger verify`
+(chain only, fast) · `GET /api/ledger/verify` (console side, without the private key).
 
 ---
 
-## 3. Oracles à preuve
+## 3. Evidence-backed oracles
 
-Principe ***tested-unless-proven*** : un finding **ne monte PAS** en `vulnerable` sans **preuve
-concrète d'impact**. La machine d'état des findings (`schema.py`) :
+The ***tested-unless-proven*** principle: a finding does **NOT** rise to `vulnerable` without **concrete
+evidence of impact**. The finding state machine (`schema.py`):
 
 `tested → reported_by_tool → vulnerable` (+ `not_vulnerable`, `informative`, `skipped`, …).
 
-- **`reported_by_tool`** — un outil tiers (nuclei, Burp) a signalé un hit **sur sa propre
-  sévérité auto-déclarée**. Ce n'est PAS une vuln confirmée par Forge : pas de sur-classement.
-- **`vulnerable`** — réservé aux **oracles à preuve** qui apportent une preuve différentielle ou
-  d'exploitabilité, **liée au compte de l'opérateur** (jamais un tiers). Exemples :
+- **`reported_by_tool`** — a third-party tool (nuclei, Burp) reported a hit **at its own
+  self-declared severity**. This is NOT a vulnerability confirmed by Forge: no over-classification.
+- **`vulnerable`** — reserved for **evidence-backed oracles** that bring differential or
+  exploitability evidence, **tied to the operator's account** (never a third party). Examples:
 
-| Oracle | Preuve exigée pour `vulnerable` |
+| Oracle | Evidence required for `vulnerable` |
 |---|---|
-| `access_control.idor` | Le compte B obtient le **même corps normalisé** que l'objet du compte A (anon refusé). |
-| `ssrf.callback` | Un **callback unique** est reçu côté collecteur. |
-| `auth.takeover` | Après le flux de bypass, le `whoami` renvoie l'**identité de la victime**. |
-| `cors.credentials` | ACAO reflète l'origine attaquante (pas `*`) **ET** ACAC=true sur un endpoint authentifié. |
-| `jwt.weakness` | Un **jeton forgé est accepté pour le compte de l'opérateur** (self_marker). |
-| `path.traversal` / `ssti.eval` | Un **marqueur bénin** (canari) revient — jamais de fichier système ni de RCE. |
-| `csrf.state_change` | Action **critique** + anti-CSRF absent **ET** SameSite confirmé absent (détection seule, aucune mutation cross-site). |
-| `framework.exposure` | Signature de **CORPS propre à l'endpoint** (`/beans` → JSON `"beans"`, `/httptrace` → `"traces"`, `/heapdump` → magic `JAVA PROFILE`). Jamais un code 200, **jamais** une réponse HTML. |
-| `race.condition` | Strictement **plus de succès que le quota**, le succès étant attesté par un `success_marker` de **corps** — ou par le statut *sur une cible dont on a vérifié qu'elle discrimine ses routes*. |
+| `access_control.idor` | Account B gets the **same normalised body** as account A's object (anon refused). |
+| `ssrf.callback` | A **unique callback** is received on the collector side. |
+| `auth.takeover` | After the bypass flow, `whoami` returns the **victim's identity**. |
+| `cors.credentials` | ACAO reflects the attacker origin (not `*`) **AND** ACAC=true on an authenticated endpoint. |
+| `jwt.weakness` | A **forged token is accepted for the operator's account** (self_marker). |
+| `path.traversal` / `ssti.eval` | A **benign marker** (canary) comes back — never a system file nor RCE. |
+| `csrf.state_change` | **Critical** action + anti-CSRF absent **AND** SameSite confirmed absent (detection only, no cross-site mutation). |
+| `framework.exposure` | **BODY signature specific to the endpoint** (`/beans` → JSON `"beans"`, `/httptrace` → `"traces"`, `/heapdump` → magic `JAVA PROFILE`). Never a 200 code, **never** an HTML response. |
+| `race.condition` | Strictly **more successes than the quota**, success being attested by a **body** `success_marker` — or by the status *on a target verified to discriminate its routes*. |
 
-Cette discipline reflète le « Gate Impact » : *quelle donnée d'un autre user puis-je voir ? quelle
-action au nom d'un autre user ? quel asset détourner ?* Si les trois sont non → pas de promotion.
+This discipline reflects the "Impact Gate": *which data of another user can I see? which
+action on behalf of another user? which asset can I hijack?* If all three are no → no promotion.
 
-### 3.1 Un code 200 n'est pas une preuve — la sonde de contrôle *catch-all*
+### 3.1 A 200 code is not evidence — the *catch-all* control probe
 
-**MESURÉ (campagne `kong`, 2026-08-10, ledger signé).** Première campagne contre une cible tierce à
-surface anonyme réelle. Résultat : **16 findings, 8 distincts, tous `[HIGH] vulnerable`, tous FAUX** —
-`/actuator/beans`, `/actuator/heapdump`, `/actuator/threaddump`, `/actuator/httptrace`, plus les
-variantes Spring Boot 1.x `/beans`, `/heapdump`, `/threaddump`, `/trace`. La cible est une **SPA qui
-rend son `index.html` — 3 427 octets identiques, HTTP 200 — pour n'importe quel chemin** (`/wp-admin`,
-`/.git/config`, `/zzz-chemin-inexistant-12345`). Il n'y a **aucun** Actuator dessus.
+**MEASURED (`kong` campaign, 2026-08-10, signed ledger).** First campaign against a third-party target with
+a real anonymous surface. Result: **16 findings, 8 distinct, all `[HIGH] vulnerable`, all FALSE** —
+`/actuator/beans`, `/actuator/heapdump`, `/actuator/threaddump`, `/actuator/httptrace`, plus the
+Spring Boot 1.x variants `/beans`, `/heapdump`, `/threaddump`, `/trace`. The target is an **SPA that
+renders its `index.html` — 3,427 identical bytes, HTTP 200 — for any path** (`/wp-admin`,
+`/.git/config`, `/zzz-chemin-inexistant-12345`). There is **no** Actuator on it.
 
-La cause tenait en une disjonction : `if is_sensitive and (leaks or path.endswith((...)))` — pour ces
-cinq chemins `path.endswith(...)` est **vrai inconditionnellement**, donc `leaks` (le seul terme qui
-lisait le corps) n'était **jamais exigé**. Le verdict tombait sur le seul `st == 200`.
+The cause came down to one disjunction: `if is_sensitive and (leaks or path.endswith((...)))` — for these
+five paths `path.endswith(...)` is **unconditionally true**, so `leaks` (the only term that
+read the body) was **never required**. The verdict rested on `st == 200` alone.
 
-**Pourquoi le « 0 faux positif » du dépôt ne l'avait pas vu.** Il était mesuré sur 2 410 puis 5 318
-puis 2 771 findings — mais uniquement contre des cibles **murées** (Cloudflare, UAT qui rend 404
-partout). Aucune ne répondait 200 avec du contenu. **Le défaut se révèle à la première cible
-réellement atteignable.**
+**Why the repository's "0 false positives" had not seen it.** It was measured on 2,410 then 5,318
+then 2,771 findings — but only against **walled** targets (Cloudflare, a UAT that returns 404
+everywhere). None answered 200 with content. **The defect shows up at the first target
+that is actually reachable.**
 
-**Les deux remèdes, et leurs bornes.**
+**The two remedies, and their limits.**
 
-1. **Preuve positive par CORPS, endpoint par endpoint** (`exposure._actuator_leak`) : chaque surface a
-   une signature propre, et une réponse `text/html` n'est un actuator dans **aucun** cas.
-2. **Sonde de contrôle générique** (`Oracle.path_discrimination`) : *toute* découverte de chemin est
-   non concluante sur une cible qui ne discrimine pas ses routes. On demande **deux chemins qui ne
-   peuvent pas exister** (dérivés de l'origine par SHA-256, donc rejouables) ; s'ils répondent tous
-   deux en 2xx, la cible est **catch-all** et le module rend **`skipped`** — « je n'ai pas pu
-   vérifier » — jamais `tested` ni `vulnerable`. Vocabulaire et témoin réutilisés de
-   [`blindness`](CONCEPTS.md#3-oracles-à-preuve) / `Oracle.degraded()`.
+1. **Positive evidence by BODY, endpoint by endpoint** (`exposure._actuator_leak`): each surface has
+   its own signature, and a `text/html` response is an actuator in **no** case.
+2. **Generic control probe** (`Oracle.path_discrimination`): *any* path discovery is
+   inconclusive on a target that does not discriminate its routes. We request **two paths that cannot
+   exist** (derived from the origin by SHA-256, hence replayable); if both answer
+   2xx, the target is **catch-all** and the module returns **`skipped`** — "I could not
+   verify" — never `tested` nor `vulnerable`. Vocabulary and witness reused from
+   [`blindness`](#3-evidence-backed-oracles) / `Oracle.degraded()`.
 
-Comme pour `blindness`, deux bornes empêchent l'**excès inverse** :
+As with `blindness`, two limits prevent the **opposite excess**:
 
-- la sonde **ne promeut jamais** : son seul pouvoir est de *taire* un verdict. Le 2xx y est lu sur un
-  chemin **fabriqué par l'appelant**, donc c'est une preuve *positive* de non-discrimination — pas une
-  déduction depuis une absence ;
-- **deux** contrôles, pas un : un seul 2xx pourrait être une collision. Preuve partielle (une sonde
-  muette) → **indéterminé**, le module garde son comportement historique.
+- the probe **never promotes**: its only power is to *silence* a verdict. The 2xx is read on a
+  path **fabricated by the caller**, so it is *positive* evidence of non-discrimination — not an
+  inference from an absence;
+- **two** controls, not one: a single 2xx could be a collision. Partial evidence (one silent
+  probe) → **undetermined**, the module keeps its historical behaviour.
 
-**Mesuré en lab loopback** (`AVANT` = code de `git HEAD`, `APRÈS` = arbre corrigé, mêmes serveurs) :
+**Measured in a loopback lab** (`AVANT` = code from `git HEAD`, `APRÈS` = fixed tree, same servers):
 
-| Cible loopback | AVANT | APRÈS |
+| Loopback target | AVANT (before) | APRÈS (after) |
 |---|---|---|
-| SPA catch-all (corps réel de la campagne) | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `skipped` |
-| Cible qui discrimine, mais HTML sur `/actuator/*` | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `tested` |
-| **Actuator Spring réellement exposé** | 5 `vulnerable` + 1 `tested` | **5 `vulnerable` + 1 `tested`** (intact) |
+| Catch-all SPA (real body from the campaign) | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `skipped` |
+| Target that discriminates, but HTML on `/actuator/*` | **8 `vulnerable` HIGH** | 0 `vulnerable`, 1 `tested` |
+| **Spring Actuator genuinely exposed** | 5 `vulnerable` + 1 `tested` | **5 `vulnerable` + 1 `tested`** (intact) |
 
-La dernière ligne est la moitié qui compte autant que la première : **un actuator réellement exposé
-reste détecté**. Verrouillé par `tests/test_catchall_body_proof.py` (les deux sens) et prouvé par
-mutation (11 mutants, 11 tués).
+The last row is the half that matters as much as the first: **a genuinely exposed actuator
+stays detected**. Locked by `tests/test_catchall_body_proof.py` (both directions) and proven by
+mutation (11 mutants, 11 killed).
 
 ---
 
-## 4. Catalogue de modules & techniques
+## 4. Module & technique catalogue
 
-`forge/techniques.py` est la **source de vérité unique** de la taxonomie : une table
-`kind`/classe/CWE → `Technique` (ATT&CK id, CWE, qualifiant, remédiation, tactique/phase/capability).
-Les autres fichiers **dérivent** leurs vues (le planner son ensemble `QUALIFYING`, le brain les
-`cls`/`exploit` par kind, le schema le mapping de remédiation, purple le repli ATT&CK par kind) —
-plus aucune recopie qui dériverait.
+`forge/techniques.py` is the **single source of truth** for the taxonomy: a table
+`kind`/class/CWE → `Technique` (ATT&CK id, CWE, qualifier, remediation, tactic/phase/capability).
+The other files **derive** their views (the planner its `QUALIFYING` set, the brain the
+`cls`/`exploit` per kind, the schema the remediation mapping, purple the ATT&CK fallback per kind) —
+no more copies that could drift.
 
-Chaque module porte un **identifiant MITRE ATT&CK** (le badge dans la console et la clé de jointure
-purple). Le catalogue livré compte **77 modules** (compte MESURÉ : `forge modules --json`) couvrant :
+Each module carries a **MITRE ATT&CK identifier** (the badge in the console and the purple
+join key). The shipped catalogue counts **88 modules** (MEASURED on 2026-11-24: `python3 -m forge.cli modules --json`) covering:
 
-- **Recon passif** : `recon.subdomains` (crt.sh), `recon.dns`, `recon.urls` (Wayback), `recon.tech`,
+- **Passive recon**: `recon.subdomains` (crt.sh), `recon.dns`, `recon.urls` (Wayback), `recon.tech`,
   `recon.waf`, `recon.js_endpoints`.
-- **Recon actif gouverné** : `recon.httpx`, `recon.nmap`, `web.nuclei`, `recon.content` (ffuf,
-  rate-limité), `recon.secrets` (trufflehog/gitleaks), `origin.find` (IP d'origine derrière CDN).
-- **Oracles à preuve** : `access_control.idor`, `ssrf.callback`, `auth.takeover`, `cors.credentials`,
+- **Governed active recon**: `recon.httpx`, `recon.nmap`, `web.nuclei`, `recon.content` (ffuf,
+  rate-limited), `recon.secrets` (trufflehog/gitleaks), `origin.find` (origin IP behind a CDN).
+- **Evidence-backed oracles**: `access_control.idor`, `ssrf.callback`, `auth.takeover`, `cors.credentials`,
   `ssti.eval`, `path.traversal`, `sqli.probe`, `xss.reflected`, `redirect.open`, `csrf.state_change`,
   `jwt.weakness`, `graphql.access`.
-- **Évasion** (browser-automation) : `evasion.xhr`, `evasion.turnstile`, `evasion.idor_intercept`,
+- **Evasion** (browser-automation): `evasion.xhr`, `evasion.turnstile`, `evasion.idor_intercept`,
   `evasion.discover`.
-- **Connecteurs** : `msf.module` (msfrpcd), `burp.scan` (REST API Burp).
-- **Démo** : `demo.fingerprint` (no-op, zéro I/O).
+- **Connectors**: `msf.module` (msfrpcd), `burp.scan` (Burp REST API).
+- **Demo**: `demo.fingerprint` (no-op, zero I/O).
 
-La **table complète générée** (`kind`, exploit, destructif, ATT&CK, description, dépendance,
-disponibilité) est dans **[MODULES.md](MODULES.md)**. La disponibilité réelle sur une machine se
-sonde avec `forge doctor` (un module dont l'outil manque est **auto-neutralisé**, jamais tiré).
+The **complete generated table** (`kind`, exploit, destructive, ATT&CK, description, dependency,
+availability) is in **[MODULES.md](MODULES.md)**. Actual availability on a machine is
+probed with `forge doctor` (a module whose tool is missing is **auto-neutralised**, never fired).
 
 ---
 
-## 5. La boucle purple
+## 5. The purple loop
 
-La boucle **purple** corrèle les techniques **tirées** en red (run-records taggés `mitre`) aux
-techniques **détectées** par la défense — par **égalité d'identifiant de TECHNIQUE** — et en déduit
-**trois états** + le **MTTD**.
+The **purple** loop correlates the techniques **fired** in red (run-records tagged `mitre`) with the
+techniques **detected** by the defence — by **equality of TECHNIQUE identifier** — and derives
+**three states** + the **MTTD** from it.
 
 ```
 Forge tire la technique T ─► run-record {mitre: T} ─► console (store rouge)
@@ -204,102 +206,102 @@ Source de détection (Plume/SIEM/IDS) détecte T ? ─────────�
        MTTD(T) = first_detection − last_fire, sur les detected-exact UNIQUEMENT
 ```
 
-**Pourquoi trois états et pas deux.** Un tag multi-techniques (`"T1595.002 T1046"` — la norme chez
-SigmaHQ : plusieurs `attack.` par règle) est **éclaté des deux côtés** de la jointure, sinon le corpus
-Sigma fabrique de faux `missed`. Et une règle taguée de la technique **parente** n'est **pas** une
-preuve de détection de la sous-technique tirée : elle est comptée à part (`parent_approx`), **hors du
-taux vitrine et hors du MTTD**. La jointure voit un **identifiant**, pas une requête de détection :
-elle ne peut donc pas *prouver* que le vecteur tiré est couvert. Exemple mesuré : Forge tire
-`T1110.001` (devinette de mot de passe SSH) ; trois des règles `T1110` livrées avec Plume sont bornées
-au mail, bornées au web, ou exigent une dispersion d'IP — aucune de ces trois n'attrape un brute-force
-SSH mono-source ; d'autres règles `T1110` seedées le pourraient, **selon la télémétrie branchée et les
-règles activées**. C'est précisément pour ça qu'on ne tranche pas : le doute est **nommé** plutôt
-qu'arbitré en faveur du vendeur. Le parent-approx n'est pas du déchet pour autant : c'est un **angle
-mort nommé** (« vous avez tiré `T1110.001`, vous n'avez que des règles `T1110` génériques »), rendu
-dans sa propre liste. Pour passer au vert : taguer une règle **de cette sous-technique**.
+**Why three states and not two.** A multi-technique tag (`"T1595.002 T1046"` — the norm at
+SigmaHQ: several `attack.` per rule) is **split on both sides** of the join, otherwise the Sigma
+corpus fabricates false `missed`. And a rule tagged with the **parent** technique is **not**
+evidence of detection of the fired sub-technique: it is counted separately (`parent_approx`), **outside the
+headline rate and outside the MTTD**. The join sees an **identifier**, not a detection query:
+so it cannot *prove* that the fired vector is covered. Measured example: Forge fires
+`T1110.001` (SSH password guessing); three of the `T1110` rules shipped with Plume are limited
+to mail, limited to web, or require IP dispersion — none of these three catches a single-source SSH
+brute-force; other seeded `T1110` rules could, **depending on the telemetry plugged in and the
+rules enabled**. That is precisely why we do not decide: the doubt is **named** rather than
+arbitrated in the vendor's favour. Parent-approx is not waste for all that: it is a **named blind
+spot** ("you fired `T1110.001`, you only have generic `T1110` rules"), rendered
+in its own list. To turn green: tag a rule **for that sub-technique**.
 
-Deux invariants :
-- **La corrélation ne change jamais** ; seule la **SOURCE** de détection est spécifique au client.
-  C'est un **plugin configurable** : Plume n'est qu'un préréglage (`kind=plume`). Modèle
-  `DetectionSource`, préréglages (CrowdSec/FortiGate/pfSense/OPNsense/Elastic/fichier/exec) et mapping
-  MITRE : [`DETECTION.md`](DETECTION.md). Prérequis du préréglage Plume : [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).
-- **Fail-open lisible** : source absente/injoignable ⇒ `source_reachable:false`, la mesure est
-  déclarée **impossible** — jamais de `detected`/`parent_approx`/`missed`/`MTTD` inventé. Source
-  joignable mais vide (SOC frais) = état **valide**.
+Two invariants:
+- **The correlation never changes**; only the detection **SOURCE** is client-specific.
+  It is a **configurable plugin**: Plume is only a preset (`kind=plume`). `DetectionSource`
+  model, presets (CrowdSec/FortiGate/pfSense/OPNsense/Elastic/file/exec) and MITRE
+  mapping: [`DETECTION.md`](DETECTION.md). Plume preset prerequisites: [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md).
+- **Readable fail-open**: source absent/unreachable ⇒ `source_reachable:false`, the measurement is
+  declared **impossible** — never an invented `detected`/`parent_approx`/`missed`/`MTTD`. A source that is
+  reachable but empty (fresh SOC) = a **valid** state.
 
-Le **MTTD** est un **time-to-ALERT** (il englobe l'ingest + la cadence d'évaluation des règles), pas
-un time-to-event — à ne pas surinterpréter. Explication détaillée : [`MTTD.md`](MTTD.md).
+The **MTTD** is a **time-to-ALERT** (it covers ingest + rule evaluation cadence), not
+a time-to-event — not to be over-interpreted. Detailed explanation: [`MTTD.md`](MTTD.md).
 
-Endpoint : `GET /api/detection/coverage` (alias rétro-compat `/api/purple/coverage`). Préflight
-lecture seule : `forge doctor --purple`.
-
----
-
-## 6. Chaînage
-
-`engine.campaign()` est **itératif** : `plan → observe → replan`, jusqu'à un critère d'arrêt.
-
-À chaque **vague**, le cerveau (`brain.propose(graph)`) lit le **world-model enrichi** par la vague
-précédente (pas seulement les cibles), le planner ordonne (coverage-safe), l'engine tire (gaté), et
-les findings **enrichissent le graphe** — ce qui permet au cerveau de **chaîner** :
-
-- une **origine hors-CDN** découverte (`origin.find`) → `nuclei`/oracles sur l'IP ;
-- un **fingerprint** → les oracles à preuve adaptés à la techno ;
-- un **endpoint découvert** (JS, WAF-bypass) → un oracle IDOR/injection sur cet endpoint.
-
-Critères d'arrêt : point fixe (plus de nouvelle action), `max_waves` (garde anti-boucle), ou budget
-épuisé pour le travail non-qualifiant. Le **ROE/gouvernance est réappliqué à chaque vague** — rien ne
-tire sans `FIRE`. La **session gouvernée** est héritée le long de la chaîne : une cible dérivée
-in-scope hérite du matériel d'auth de sa source (no-op scope-guardé si hors-scope), pour que les
-oracles chaînés soient authentifiés — sans que le secret n'entre jamais dans le finding/ledger/graphe.
-
-### 6.1 La découverte d'abord (`stage`)
-
-Le chaînage ne vaut que si la **découverte a eu lieu** : un scanner qui tourne avant `katana`/`gau`/
-`subfinder` travaille sur trois URLs au lieu de cinquante. Deux mécanismes le garantissent, tous deux
-**structurels** (ils s'appliquent à toute action, quelle que soit la voie qui l'a proposée — y compris
-le **balayage auto-pentest**, qui contournait l'intention d'ordre portée par le cerveau) :
-
-1. **L'étage de tri.** `planner.order()` trie par `(étage, -EV)`. L'étage vaut `STAGE_SURFACE` pour les
-   kinds qui **produisent** de la surface — dérivé du `ToolSpec` (`asset_hits`/`emit_*_discovery` :
-   katana, gau, subfinder, amass, feroxbuster, naabu, dnsx, gobuster) et d'une liste de kinds natifs
-   *vérifiée contre le source des modules* (httpx, js_endpoints, urls, subdomains, nmap, content,
-   evasion.discover) — `STAGE_VERIFY` pour tout le reste. Un producteur **sur un endpoint déjà dérivé**
-   n'est pas un producteur (il n'élargit rien) ; `origin.find` non plus (il publie une **route
-   alternative** vers la surface connue, pas de la surface nouvelle).
-2. **La frontière de replanification.** À la **première vague seulement**, les consommateurs sont
-   reportés d'une vague : la découverte est donc **replanifiée** avant que le premier scanner lent
-   n'engage le budget. Reportés ≠ supprimés — ils restent au dénominateur (`planned_total`) et, s'ils
-   ne tournent pas, sortent en « planifiées jamais tentées ».
-
-Coverage-safe **inchangé** : c'est un ré-ordonnancement, rien n'est retiré, le plancher qualifiant et
-`skipped_budget` sont intacts. Mesuré sur le harnais qui rejoue une campagne réelle
-(`tests/bench_wave_reach.py`, 3 cibles, durées observées injectées, budget égal) : **225 → 1 292
-actions**, **0 → 32 URLs distinctes atteintes**, **0 → 1 vague complétée**, et **aucun kind ne cesse de
-tourner** (58 → 58) — les scanners lents tournent toujours, mais sur une surface découverte.
-
-Les cibles dérivées à runtime sont **re-validées fail-closed** contre le périmètre injecté
-(`in_scope`/`out_scope`) avant toute émission — un module de découverte ne peut pas élargir le scope.
+Endpoint: `GET /api/detection/coverage` (backward-compatible alias `/api/purple/coverage`). Read-only
+preflight: `forge doctor --purple`.
 
 ---
 
-## 7. Découverte backée par évasion
+## 6. Chaining
 
-`evasion.discover` (T1594) navigue **derrière un challenge WAF managé** via le service
-browser-automation (Camoufox + vision-click-os pour un Turnstile interactif), puis **extrait des
-endpoints** (DOM/JS/XHR) **in-scope** et les émet avec le marqueur de découverte — qui alimente
-ensuite la chaîne d'oracles (§6). Les modules d'évasion :
+`engine.campaign()` is **iterative**: `plan → observe → replan`, until a stop criterion.
 
-| Module | Rôle | ATT&CK |
+At each **wave**, the brain (`brain.propose(graph)`) reads the **world-model enriched** by the
+previous wave (not only the targets), the planner orders (coverage-safe), the engine fires (gated), and
+the findings **enrich the graph** — which lets the brain **chain**:
+
+- a discovered **off-CDN origin** (`origin.find`) → `nuclei`/oracles on the IP;
+- a **fingerprint** → the evidence-backed oracles suited to the technology;
+- a **discovered endpoint** (JS, WAF bypass) → an IDOR/injection oracle on that endpoint.
+
+Stop criteria: fixed point (no new action), `max_waves` (anti-loop guard), or budget
+exhausted for non-qualifying work. **ROE/governance is reapplied at each wave** — nothing
+fires without `FIRE`. The **governed session** is inherited along the chain: an in-scope derived
+target inherits the auth material of its source (scope-guarded no-op if out of scope), so that the
+chained oracles are authenticated — without the secret ever entering the finding/ledger/graph.
+
+### 6.1 Discovery first (`stage`)
+
+Chaining is only worth something if **discovery has happened**: a scanner that runs before `katana`/`gau`/
+`subfinder` works on three URLs instead of fifty. Two mechanisms guarantee it, both
+**structural** (they apply to any action, whatever path proposed it — including
+the **auto-pentest sweep**, which bypassed the ordering intent carried by the brain):
+
+1. **The sort stage.** `planner.order()` sorts by `(étage, -EV)` (stage, -EV). The stage is `STAGE_SURFACE` for the
+   kinds that **produce** surface — derived from the `ToolSpec` (`asset_hits`/`emit_*_discovery`:
+   katana, gau, subfinder, amass, feroxbuster, naabu, dnsx, gobuster) and from a list of native kinds
+   *checked against the modules' source* (httpx, js_endpoints, urls, subdomains, nmap, content,
+   evasion.discover) — `STAGE_VERIFY` for everything else. A producer **on an already derived endpoint**
+   is not a producer (it widens nothing); nor is `origin.find` (it publishes an **alternative
+   route** to the known surface, not new surface).
+2. **The replanning boundary.** At the **first wave only**, consumers are
+   deferred by one wave: discovery is therefore **replanned** before the first slow scanner
+   commits the budget. Deferred ≠ removed — they stay in the denominator (`planned_total`) and, if they
+   do not run, come out as "planned, never attempted".
+
+Coverage-safe **unchanged**: this is a re-ordering, nothing is removed, the qualifying floor and
+`skipped_budget` are intact. Measured on the harness that replays a real campaign
+(`tests/bench_wave_reach.py`, 3 targets, observed durations injected, equal budget): **225 → 1,292
+actions**, **0 → 32 distinct URLs reached**, **0 → 1 wave completed**, and **no kind stops
+running** (58 → 58) — the slow scanners still run, but on a discovered surface.
+
+Targets derived at runtime are **re-validated fail-closed** against the injected scope
+(`in_scope`/`out_scope`) before any emission — a discovery module cannot widen the scope.
+
+---
+
+## 7. Evasion-backed discovery
+
+`evasion.discover` (T1594) browses **behind a managed WAF challenge** via the
+browser-automation service (Camoufox + vision-click-os for an interactive Turnstile), then **extracts
+in-scope endpoints** (DOM/JS/XHR) and emits them with the discovery marker — which then feeds
+the oracle chain (§6). The evasion modules:
+
+| Module | Role | ATT&CK |
 |---|---|---|
-| `evasion.turnstile` | Franchit le Cloudflare Turnstile interactif (détection template + clic OS X11) — **enabler d'accès** | T1556 |
-| `evasion.xhr` | Observe les requêtes XHR via la session browser (contournement WAF/DataDome) | T1190 |
-| `evasion.idor_intercept` | Arme l'interception IDOR en vol (browser intercept-modify) — preuve via `/intercept-dump` | T1190 |
-| `evasion.discover` | Découverte d'endpoints derrière WAF, scope-locké, non destructif, borné, session redigée | T1594 |
+| `evasion.turnstile` | Gets past the interactive Cloudflare Turnstile (template detection + X11 OS click) — **access enabler** | T1556 |
+| `evasion.xhr` | Observes XHR requests via the browser session (WAF/DataDome bypass) | T1190 |
+| `evasion.idor_intercept` | Arms in-flight IDOR interception (browser intercept-modify) — evidence via `/intercept-dump` | T1190 |
+| `evasion.discover` | Endpoint discovery behind a WAF, scope-locked, non-destructive, bounded, session redacted | T1594 |
 
-Garanties : **scope-locked** (chaque endpoint découvert re-validé), **non-destructif**, **borné**,
-**session redigée** (le matériel d'auth ne fuit pas). Le service browser-automation est **optionnel**
-(`FORGE_BROWSER_URL`) : injoignable ⇒ le module s'auto-neutralise (`available:false`), jamais tiré.
+Guarantees: **scope-locked** (each discovered endpoint re-validated), **non-destructive**, **bounded**,
+**session redacted** (auth material does not leak). The browser-automation service is **optional**
+(`FORGE_BROWSER_URL`): unreachable ⇒ the module auto-neutralises (`available:false`), never fired.
 
-> Rappel : franchir un WAF **≠ une faille**. C'est un enabler d'accès à combiner avec un oracle à
-> preuve. Le ledger et le scope-guard restent durs.
+> Reminder: getting past a WAF **≠ a vulnerability**. It is an access enabler to combine with an evidence-backed
+> oracle. The ledger and the scope-guard stay hard.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests hermetiques de `recon.client_sinks` — aucun reseau, aucun fichier hors du depot.
 
 Chaque test epingle un garde-fou qui a REELLEMENT saute pendant la construction du module

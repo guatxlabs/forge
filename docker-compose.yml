@@ -310,7 +310,7 @@ services:
   # ---------------------------------------------------------------------------
   # EXCLU d'un `docker compose up` NU (profil "postgres") => le déploiement PAR DÉFAUT reste SQLite,
   # INCHANGÉ. Pour l'activer, il faut À LA FOIS ce profil ET l'override qui recompile la console avec la
-  # feature `store-postgres` et pointe FORGE_DB_URL sur ce service (cf. docs/DEPLOYMENT.md § Postgres) :
+  # feature `store-postgres` et pointe FORGE_DB_URL sur ce service (cf. docs/DEPLOYMENT.md §3bis « Postgres backend ») :
   #     docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
   #                    --profile postgres up -d --build
   # Sans l'override, la console (build SQLite) IGNORE ce Postgres. Credentials : défauts d'ÉVAL

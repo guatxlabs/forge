@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE — Row-level multi-tenancy (SEPARABLE, FLAG-GATED module).
+//! ADVANCED MODULE — Row-level multi-tenancy (SEPARABLE, FLAG-GATED, OFF by default).
 //!
-//! Open-core discipline: this module is an ENTERPRISE feature. The COMMUNITY (default) build behaves as
-//! a SINGLE IMPLICIT TENANT (#1) with BYTE-IDENTICAL behavior — every function here is a NO-OP unless the
-//! enterprise flag is engaged (`enabled()` false => community). It never weakens the open governance/audit
+//! This module is OFF by default. The default build behaves as
+//! a SINGLE IMPLICIT TENANT (#1) with BYTE-IDENTICAL behavior — every function here is a NO-OP unless
+//! its flag is engaged (`enabled()` false => default behaviour). It never weakens the governance/audit
 //! surface; it only ADDS a fail-closed tenant filter ON TOP of the existing engagement isolation + RBAC.
 //!
 //! MODEL (see main.rs SCHEMA):

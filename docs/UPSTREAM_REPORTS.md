@@ -1,57 +1,59 @@
-# Défauts trouvés en amont — reproductions prêtes à envoyer
+# Defects found upstream — reproductions ready to send
 
-Ce fichier existe parce qu'un défaut d'outil trouvé ici n'est **pas** propre à ce dépôt : n'importe
-quel projet dans la même configuration l'a aussi, sans le savoir. Le signaler en amont vaut mieux que
-de le contourner en silence — et une reproduction minimale coûte moins cher au mainteneur amont qu'un
-rapport en prose.
+[English](UPSTREAM_REPORTS.md) | [Français](UPSTREAM_REPORTS.fr.md)
 
-Chaque entrée porte : le défaut, **comment il a été isolé** (facteur unique), la reproduction, et ce
-que le projet a fait en attendant.
+This file exists because a tool defect found here is **not** specific to this repository: any
+project in the same configuration has it too, without knowing it. Reporting it upstream is better than
+working around it silently — and a minimal reproduction costs the upstream maintainer less than a
+prose report.
+
+Each entry carries: the defect, **how it was isolated** (single factor), the reproduction, and what
+the project did in the meantime.
 
 ---
 
-## 1. cargo-deny / krates — une dépendance OPTIONNELLE dont le nom de paquet ≠ nom de `[lib]` disparaît
+## 1. cargo-deny / krates — an OPTIONAL dependency whose package name ≠ `[lib]` name disappears
 
-**État : à signaler.** Trouvé le 2026-08-07, cargo-deny **0.18.2**.
+**Status: to be reported.** Found on 2026-08-07, cargo-deny **0.18.2**.
 
-### Le défaut
+### The defect
 
-`cargo-deny` (via `krates`) **perd silencieusement tout un sous-arbre de dépendances** quand une
-dépendance **optionnelle** a un nom de paquet différent du nom de sa cible `[lib]`.
+`cargo-deny` (via `krates`) **silently loses an entire dependency subtree** when an
+**optional** dependency has a package name different from the name of its `[lib]` target.
 
-La feature déclare le **paquet** (`object-store = ["dep:rust-s3"]`), mais l'arête résolue que rend
-`cargo metadata` porte le nom de la **lib** (`"name": "s3"`). L'appariement échoue, la feature est
-tenue pour désactivée, et l'ensemble du sous-arbre sort du graphe audité.
+The feature declares the **package** (`object-store = ["dep:rust-s3"]`), but the resolved edge returned by
+`cargo metadata` carries the **lib** name (`"name": "s3"`). The matching fails, the feature is
+considered disabled, and the whole subtree leaves the audited graph.
 
-### Pourquoi c'est grave — ce n'est pas un faux négatif, c'est un faux VERT
+### Why it is serious — it is not a false negative, it is a false GREEN
 
-L'outil ne dit pas « je n'ai pas regardé ». Il rend **`licenses ok`**. Mesuré sur deux copies du même
-dépôt ne différant **que** par le nommage de cette dépendance :
+The tool does not say "I did not look". It returns **`licenses ok`**. Measured on two copies of the same
+repository differing **only** in the naming of this dependency:
 
-| arbre | verdict |
+| tree | verdict |
 |---|---|
-| `rust-s3 = { optional = true }` (nom de lib `s3`) | `licenses ok` — 239 crates vus |
-| `s3 = { package = "rust-s3", optional = true }` | **`licenses FAILED`** — 287 crates vus |
+| `rust-s3 = { optional = true }` (lib name `s3`) | `licenses ok` — 239 crates seen |
+| `s3 = { package = "rust-s3", optional = true }` | **`licenses FAILED`** — 287 crates seen |
 
-Les deux crates qui faisaient échouer l'audit — `attohttpc` (MPL-2.0) et `tiny-keccak` (CC0-1.0) —
-étaient invisibles. Pire : la politique de ce dépôt avait **retiré `MPL-2.0`** de sa liste d'autorisées
-au motif que « cargo-deny la signale non rencontrée ». Une décision de licence prise **à travers**
-l'angle mort.
+The two crates that made the audit fail — `attohttpc` (MPL-2.0) and `tiny-keccak` (CC0-1.0) —
+were invisible. Worse: this repository's policy had **removed `MPL-2.0`** from its allowed list
+on the grounds that "cargo-deny reports it as not encountered". A licence decision taken **through**
+the blind spot.
 
-### Isolement — un seul facteur changé à la fois
+### Isolation — one factor changed at a time
 
-| manifeste | invocation | crates vus | sous-arbre |
+| manifest | invocation | crates seen | subtree |
 |---|---|---|---|
-| `optional`, syntaxe `dep:rust-s3` | `--all-features` | 239 | absent |
-| `optional`, syntaxe implicite `["rust-s3"]` | `--all-features` | 239 | absent |
-| dépendance rendue **non** optionnelle | *(sans drapeau)* | 250 | **présent** |
-| **renommée** `s3 = { package = "rust-s3" }` | `--all-features` | 287 | **présent** |
+| `optional`, `dep:rust-s3` syntax | `--all-features` | 239 | absent |
+| `optional`, implicit `["rust-s3"]` syntax | `--all-features` | 239 | absent |
+| dependency made **non**-optional | *(no flag)* | 250 | **present** |
+| **renamed** `s3 = { package = "rust-s3" }` | `--all-features` | 287 | **present** |
 
-Éliminés par la mesure : ce n'est **pas** `--all-features` (il porte bien : 201 → 239, les optionnelles
-des autres features entrent), **pas** la syntaxe `dep:`, **pas** un `targets` restreint (il n'y en a
-pas), **pas** une exclusion. `cargo metadata --all-features` voit, lui, les 290 crates.
+Ruled out by measurement: it is **not** `--all-features` (it does take effect: 201 → 239, the optional
+dependencies of the other features come in), **not** the `dep:` syntax, **not** a restricted `targets` (there is
+none), **not** an exclusion. `cargo metadata --all-features`, for its part, sees all 290 crates.
 
-### Reproduction minimale
+### Minimal reproduction
 
 ```toml
 # Cargo.toml
@@ -64,35 +66,35 @@ rust-s3 = { version = "0.37", optional = true, default-features = false, feature
 
 ```bash
 cargo-deny --all-features check licenses --config <chemin ABSOLU>/deny.toml
-# -> le sous-arbre rust-s3 / attohttpc / aws-lc-sys est ABSENT du graphe
+# -> the rust-s3 / attohttpc / aws-lc-sys subtree is ABSENT from the graph
 
-# puis, seule modification :
+# then, the only change:
 #   s3 = { package = "rust-s3", version = "0.37", optional = true, ... }
 #   object-store = ["dep:s3"]
-# -> le sous-arbre apparaît, +48 crates
+# -> the subtree appears, +48 crates
 ```
 
-`rust-s3` est un bon cas de test public : paquet `rust-s3`, `[lib] name = "s3"`.
+`rust-s3` is a good public test case: package `rust-s3`, `[lib] name = "s3"`.
 
-### Comportement souhaité
+### Desired behaviour
 
-Peu importe la correction retenue en amont — l'important est que l'outil **ne rende pas `ok`** sur un
-graphe qu'il sait incomplet. Un avertissement nommant la dépendance perdue suffirait à transformer un
-faux vert en question posée à l'humain.
+Whatever fix is chosen upstream — what matters is that the tool **does not return `ok`** on a
+graph it knows to be incomplete. A warning naming the lost dependency would be enough to turn a
+false green into a question put to the human.
 
-### Ce que ce projet a fait en attendant
+### What this project did in the meantime
 
-1. **Renommé la dépendance** (`s3 = { package = "rust-s3" }`) — une ligne, aucun changement de code
-   (l'extern s'appelait déjà `s3`), `Cargo.lock` inchangé.
-2. Ajouté `scripts/check_dep_licenses.py`, qui refait le contrôle sur `cargo metadata --all-features`
-   en lisant la liste `allow` de `deny.toml` — **une seule vérité de politique, deux moteurs**.
-   Câblé en CI avec un auto-test rouge, parce qu'une garde incapable d'échouer est un décor.
-3. Documenté le périmètre réel de l'audit dans `docs/DEPLOYMENT.md` §3quater.2, y compris **ce qui
-   n'est toujours pas couvert** (`bans` / `sources` sur ces crates).
+1. **Renamed the dependency** (`s3 = { package = "rust-s3" }`) — one line, no code change
+   (the extern was already called `s3`), `Cargo.lock` unchanged.
+2. Added `scripts/check_dep_licenses.py`, which redoes the check on `cargo metadata --all-features`
+   by reading the `allow` list of `deny.toml` — **a single policy truth, two engines**.
+   Wired into CI with a red self-test, because a guard unable to fail is decoration.
+3. Documented the actual scope of the audit in `docs/DEPLOYMENT.md` §3quater.2, including **what
+   is still not covered** (`bans` / `sources` on these crates).
 
-### Note annexe, même famille
+### Side note, same family
 
-Un `--config` **relatif** est résolu depuis le dossier du manifeste et **retombe en silence** sur la
-configuration par défaut si le chemin ne résout pas. Même classe de défaut : l'outil continue avec une
-politique qui n'est pas celle qu'on lui a demandée, sans le dire. D'où le chemin **absolu** partout
-dans ce dépôt.
+A **relative** `--config` is resolved from the manifest's folder and **silently falls back** to the
+default configuration if the path does not resolve. Same class of defect: the tool carries on with a
+policy that is not the one it was asked for, without saying so. Hence the **absolute** path everywhere
+in this repository.

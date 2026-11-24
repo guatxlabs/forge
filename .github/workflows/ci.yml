@@ -177,6 +177,15 @@ jobs:
       - name: Version drift check (VERSION == pyproject == Cargo.toml)
         run: make check-version
 
+      # CHAQUE DOCUMENT EXISTE DANS SES DEUX LANGUES, ET SA TRADUCTION GARDE LES FAITS DE L'ORIGINAL.
+      # Anglais d'abord (`X.md`), français en `X.fr.md`. La garde joue d'abord ses témoins sur des
+      # dépôts fabriqués, puis l'inventaire en strict (tout document suivi a sa paire, sauf l'ensemble
+      # nommé `UNE_SEULE_LANGUE`, chaque entrée avec sa raison et jamais périmée) et la parité de
+      # chaque paire : titres, commandes, tableaux, cibles et direction des liens, sélecteur, ancres,
+      # nombres, identifiants. Pur stdlib + git, quelques secondes.
+      - name: Chaque document existe dans ses deux langues, en parite
+        run: make check-document-languages
+
       # La garde de gouvernance du SPA (tests/test_console_spa_governance.py) prouve par EXÉCUTION que
       # la porte réseau unique attache la preuve opérateur : elle importe le module d'API réel sous un
       # runtime JavaScript. Sans runtime, ces tests-là se SAUTENT (le reste de la garde est pur-stdlib).
@@ -699,7 +708,7 @@ jobs:
       - name: Les ancres de licence du dépôt sont présentes et non vides
         run: |
           set -eu
-          for f in LICENSE THIRD-PARTY-NOTICES.md; do
+          for f in LICENSE THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.fr.md; do
             [ -s "$f" ] || { echo "::error file=$f::fichier de licence manquant ou vide"; exit 1; }
           done
 
@@ -708,7 +717,8 @@ jobs:
         # une famille, une licence couvre la famille pas le sous-ensemble :
         #   1. un texte de licence NON VIDE, dans le dossier de la police, dont
         #      l'AVIS DE COPYRIGHT nomme la famille ;
-        #   2. une section `## <Famille>` dans THIRD-PARTY-NOTICES.md.
+        #   2. une section `## <Famille>` dans THIRD-PARTY-NOTICES.md ET dans sa version
+        #      française THIRD-PARTY-NOTICES.fr.md (un avis est publié dans les deux langues).
         #
         # Pourquoi ces deux formes précises, et pas plus simple :
         #   * « un OFL quelconque dans le dossier » suffirait à un dossier qui en
@@ -756,7 +766,7 @@ jobs:
           # souligné et emporte chiffres, majuscules et ponctuation.
           norm() { tr '[:upper:]' '[:lower:]' | sed 's/[ _-]//g'; }
 
-          headings=$(grep -E '^#{2,} ' THIRD-PARTY-NOTICES.md | sed -E 's/^#+ +//' | norm)
+          notices="THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.fr.md"
 
           while IFS= read -r f; do
             [ -n "$f" ] || continue
@@ -765,8 +775,10 @@ jobs:
             slug=$(printf '%s' "${base%.*}" | sed -E 's/-latin(-ext)?$//' | norm)
             [ -n "$slug" ] || { echo "::error file=$f::aucune famille dérivable de ce nom de fichier"; status=1; continue; }
 
-            printf '%s\n' "$headings" | grep -qxF "$slug" \
-              || { echo "::error file=$f::famille « $slug » redistribuée sans section « ## <famille> » dans THIRD-PARTY-NOTICES.md"; status=1; }
+            for n in $notices; do
+              grep -E '^#{2,} ' "$n" | sed -E 's/^#+ +//' | norm | grep -qxF "$slug" \
+                || { echo "::error file=$f::famille « $slug » redistribuée sans section « ## <famille> » dans $n"; status=1; }
+            done
 
             found=""
             for lic in "$dir"/OFL* "$dir"/LICEN[CS]E* "$dir"/COPYING*; do

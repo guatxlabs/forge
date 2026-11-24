@@ -123,7 +123,7 @@ TEMOINS_SATISFAITS = (
     "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
     "AGPL-3.0-or-later",                                 # `-or-later` couvert par la forme nue
     "Apache-2.0 AND ISC",
-    # aws-lc-sys : sept conjonctions, dont quatre disjonctions imbriquées — le cas le plus dur du
+    # aws-lc-sys : sept conjonctions, dont trois disjonctions imbriquées — le cas le plus dur du
     # graphe, et celui qui compte le plus (c'est le crate au code C vendu).
     "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND "
     "(Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",

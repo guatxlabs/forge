@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE (E3 COMPLIANCE) — WORM / retention / legal-hold on the audit ledger + engagement data
-//! (SEPARABLE, FLAG-GATED module).
+//! ADVANCED MODULE (E3 COMPLIANCE) — WORM / retention / legal-hold on the audit ledger + engagement data
+//! (SEPARABLE, FLAG-GATED, OFF by default).
 //!
-//! Open-core discipline (mirrors `tenancy.rs` / `sso.rs` / `scim.rs` / `rbac.rs`): this is an ENTERPRISE
-//! feature. The COMMUNITY (default) build behaves EXACTLY as today — every route here is a NO-OP (404
-//! `not_found`) unless the enterprise flag is ENGAGED (`enabled()` false => community, byte-identical).
-//! It never weakens the open governance/audit surface; it only ADDS retention/hold policy + a GOVERNED
+//! Same separation as `tenancy.rs` / `sso.rs` / `scim.rs` / `rbac.rs`: this module is OFF by default.
+//! The default build behaves EXACTLY as today — every route here is a NO-OP (404 `not_found`) unless
+//! its flag is ENGAGED (`enabled()` false => default behaviour, byte-identical).
+//! It never weakens the governance/audit surface; it only ADDS retention/hold policy + a GOVERNED
 //! purge that PRESERVES the tamper-evident ledger.
 //!
 //! WHAT IT ADDS (all admin-gated + ledgered, all fail-closed):

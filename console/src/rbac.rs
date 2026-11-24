@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE — Advanced RBAC: IdP-group -> {Forge role, tenant grant} mapping (SEPARABLE, FLAG-GATED).
+//! ADVANCED MODULE — Advanced RBAC: IdP-group -> {Forge role, tenant grant} mapping (SEPARABLE, FLAG-GATED).
 //!
-//! Open-core discipline (mirrors `tenancy.rs` / `sso.rs` / `scim.rs`): this is the ENTERPRISE
-//! "advanced authorization" slice. The COMMUNITY (default) build behaves EXACTLY as today — LOCAL
-//! accounts, roles assigned only by a console admin. This module is INERT unless enterprise SSO **or**
-//! SCIM is engaged (`enabled()` = `sso::enabled() || scim::enabled()`); with both flags OFF every
-//! `/api/rbac/*` route 404s and the mapping table is never created (community DB byte-identical).
+//! Same separation as `tenancy.rs` / `sso.rs` / `scim.rs`: this is the
+//! "advanced authorization" slice, OFF by default. The default build behaves EXACTLY as today — LOCAL
+//! accounts, roles assigned only by a console admin. This module is INERT unless the SSO **or**
+//! SCIM module is engaged (`enabled()` = `sso::enabled() || scim::enabled()`); with both flags OFF every
+//! `/api/rbac/*` route 404s and the mapping table is never created (default DB byte-identical).
 //!
 //! WHAT IT ADDS: a CONFIGURABLE mapping from an IdP group name to a Forge authorization outcome —
 //!   `idp_group -> { role: viewer|operator|admin, tenant_id?, tenant_role? }`.

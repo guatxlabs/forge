@@ -114,7 +114,7 @@ PERIMETRES: dict[str, dict] = {
         "libelle": "(build par défaut)",
         "flags": [],
         "exige_propre": True,
-        "note": "le binaire community livré",
+        "note": "le binaire livré par défaut",
     },
     "store-postgres": {
         "libelle": "--features store-postgres",
@@ -396,7 +396,7 @@ def main() -> int:
         print(
             "    Les périmètres EXCLUS sont mesurés et affichés À DESSEIN — l'exclusion doit rester\n"
             "    visible. Ils ne font PAS échouer ce contrôle. Leur justification :\n"
-            "    docs/DEPLOYMENT.md § « Périmètre de l'openssl-freedom ».\n"
+            "    docs/DEPLOYMENT.md §3quater.1 (ancre `#perimetre-de-l-openssl-freedom`).\n"
         )
 
     if not casses:

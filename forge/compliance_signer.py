@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ENTERPRISE (E3 COMPLIANCE) — pluggable checkpoint signer + WORM/retention decision (SEPARABLE, INERT).
+"""ADVANCED MODULE (E3 COMPLIANCE) — pluggable checkpoint signer + WORM/retention decision (SEPARABLE, INERT).
 
-Open-core discipline: this is an ENTERPRISE seam. It is INERT unless a compliance flow calls it — merely
-importing it changes NOTHING in the community engine (no side effects, no global state, no ledger hook).
+This is a separable seam of an advanced module, OFF by default. It is INERT unless a compliance flow
+calls it — merely importing it changes NOTHING in the default engine (no side effects, no global state,
+no ledger hook).
 It sits ON TOP of `forge.signing` (Ed25519, asymmetric → non-repudiation) and adds NOTHING to the ledger
 VERIFY path: checkpoint verification delegates verbatim to `signing.verify_with_pubkey`, so verification
 stays BYTE-IDENTICAL whether the signature was produced by the local key or a KMS/HSM.

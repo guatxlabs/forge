@@ -1,130 +1,132 @@
-# Source de détection — brancher N'IMPORTE QUELLE infra BLUE (sans code)
+# Detection source — plug in ANY BLUE infrastructure (no code)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Concepts : boucle purple](CONCEPTS.md#5-la-boucle-purple) ·
-> [Administration](ADMINISTRATION.md#2-source-de-détection) · [Prérequis Plume](PURPLE_PREREQS.md)
+[English](DETECTION.md) | [Français](DETECTION.fr.md)
 
-La boucle **purple** de Forge corrèle les techniques ATT&CK **tirées** en red-team (run-records) aux
-techniques **détectées** par le SOC/IDS/pare-feu, par **égalité d'identifiant MITRE** — puis en déduit
-`detected` (exact) / `parent_approx` (sous-technique tirée, seule la parente couverte) / `missed` /
-**MTTD**. La *corrélation* est infra-neutre et **ne change jamais**. Seule la
-**SOURCE** de détection est spécifique à chaque client : c'est un **plugin configurable**, décrit par un
-objet JSON, éditable **dans l'UI** (wizard de 1er déploiement ou panneau *Administration → Source de
-détection*) — **aucun code à écrire**.
+> 🧭 [Forge documentation](README.md) · See also: [Concepts: purple loop](CONCEPTS.md#5-the-purple-loop) ·
+> [Administration](ADMINISTRATION.md#2-detection-source) · [Plume prerequisites](PURPLE_PREREQS.md)
 
-> Plume n'est **qu'un préréglage parmi d'autres** (`kind=plume`). CrowdSec, FortiGate, pfSense/OPNsense,
-> Elastic/OpenSearch, un fichier JSONL ou une commande maison se câblent de la même façon.
+Forge's **purple** loop correlates the ATT&CK techniques **fired** by the red team (run-records) with the
+techniques **detected** by the SOC/IDS/firewall, by **equality of MITRE identifier** — then derives
+`detected` (exact) / `parent_approx` (sub-technique fired, only the parent covered) / `missed` /
+**MTTD** from it. The *correlation* is infrastructure-neutral and **never changes**. Only the detection
+**SOURCE** is specific to each client: it is a **configurable plugin**, described by a
+JSON object, editable **in the UI** (first-deployment wizard or the Administration → « Source de
+détection » (*Detection source*) panel) — **no code to write**.
 
-## Contrat fail-open lisible (invariant de sûreté)
+> Plume is **only one preset among others** (`kind=plume`). CrowdSec, FortiGate, pfSense/OPNsense,
+> Elastic/OpenSearch, a JSONL file or a custom command are wired the same way.
 
-- Une source **absente** ou **injoignable / mal configurée** ⇒ `source_reachable:false` : Forge déclare la
-  mesure **impossible** et **n'invente JAMAIS** `detected` / `parent_approx` / `missed` / `MTTD`.
-- Une source **joignable mais vide** (SOC frais, rien détecté) est un état **valide** (`reachable:true`,
+## Readable fail-open contract (safety invariant)
+
+- An **absent** or **unreachable / misconfigured** source ⇒ `source_reachable:false`: Forge declares the
+  measurement **impossible** and **NEVER invents** `detected` / `parent_approx` / `missed` / `MTTD`.
+- A **reachable but empty** source (fresh SOC, nothing detected) is a **valid** state (`reachable:true`,
   `detections:[]`).
-- Le **secret** d'authentification (clé API / token SIEM) est **write-only** : jamais renvoyé par un GET,
-  jamais journalisé, jamais ledgerisé (traité comme un secret de session, rédigé en profondeur).
-- **Il est aussi chiffré AU REPOS** (`FORGE_FIELD_KEY`, build par défaut) : `settings.detection_source`
-  ne porte plus le jeton en clair. Sans clé de champ, l'écriture est refusée (**503** `field_key_missing`)
-  et la collecte **refuse de partir** avec une raison nommée — plutôt que d'interroger la source **sans
-  authentification** et de faire diagnostiquer un 401 comme une panne de SIEM. Une base existante est
-  convertie **au boot**, en place ; le clair qui subsiste faute de clé est **compté et annoncé**.
-- **Un jeton ne part jamais en clair vers une source PUBLIQUE.** Règle **partagée** avec le canal de
-  notification (`net::reject_cleartext_secret`) — voir la note de rupture ci-dessous.
+- The authentication **secret** (API key / SIEM token) is **write-only**: never returned by a GET,
+  never logged, never written to the ledger (treated as a session secret, redacted in depth).
+- **It is also encrypted AT REST** (`FORGE_FIELD_KEY`, default build): `settings.detection_source`
+  no longer carries the token in plaintext. Without a field key, the write is refused (**503** `field_key_missing`)
+  and collection **refuses to start** with a named reason — rather than querying the source **without
+  authentication** and getting a 401 diagnosed as a SIEM outage. An existing database is
+  converted **at boot**, in place; any plaintext left for lack of a key is **counted and announced**.
+- **A token never goes out in plaintext to a PUBLIC source.** Rule **shared** with the notification
+  channel (`net::reject_cleartext_secret`) — see the breaking-change note below.
 
-## Le modèle `DetectionSource`
+## The `DetectionSource` model
 
-Rangé dans `settings.detection_source` (écrit par le wizard ou `POST /api/detection/source`, admin +
-ledgerisé). Objet JSON :
+Stored in `settings.detection_source` (written by the wizard or `POST /api/detection/source`, admin +
+written to the ledger). JSON object:
 
 ```jsonc
 {
-  "kind": "generic_http",          // plugin de transport/parseur (liste fermée, cf. ci-dessous)
-  "endpoint": "http://siem:9200/idx/_search",  // URL (kinds http) OU chemin de fichier (file/syslog)
-  "auth": { "type": "bearer", "secret": "…", "header": "X-Api-Key" },  // secret WRITE-ONLY
-  "query": "since={since}",        // chaîne ({since}=epoch substitué) OU corps JSON (elastic/opensearch)
-  "mapping": { … },                // NORMALISATION native -> {mitre, ts} (cf. « Mapping MITRE »)
-  "timeout": 8, "insecure_tls": false, "max_lines": 200000            // options facultatives
+  "kind": "generic_http",          // transport/parser plugin (closed list, see below)
+  "endpoint": "http://siem:9200/idx/_search",  // URL (http kinds) OR file path (file/syslog)
+  "auth": { "type": "bearer", "secret": "…", "header": "X-Api-Key" },  // WRITE-ONLY secret
+  "query": "since={since}",        // string ({since}=epoch substituted) OR JSON body (elastic/opensearch)
+  "mapping": { … },                // native NORMALISATION -> {mitre, ts} (see "MITRE mapping")
+  "timeout": 8, "insecure_tls": false, "max_lines": 200000            // optional settings
 }
 ```
 
-| Champ | Rôle |
+| Field | Role |
 |-------|------|
 | `kind` | `none · plume · generic_http · crowdsec · elastic · opensearch · fortigate_syslog · pfsense · opnsense · file_jsonl · exec` |
-| `endpoint` | URL http(s) (kinds http) **ou** chemin de fichier (`file_jsonl`, syslog en mode fichier). `path` accepté comme alias. |
-| `auth.type` | `none · basic · bearer · api_key_header · mtls` (`mtls` = transport, via un kind délégué au collecteur Python). |
-| `auth.secret` | **[SECRET, write-only]** Basic = `base64("user:pass")` · Bearer = token · api_key_header = valeur d'en-tête. |
-| `auth.header` | nom d'en-tête pour `api_key_header` (défaut `X-API-Key`). |
-| `query` | HTTP : query-string (`{since}` substitué) ; Elastic/OpenSearch : **corps JSON** (dict). |
-| `mapping` | règles de normalisation vers MITRE (voir plus bas). |
+| `endpoint` | http(s) URL (http kinds) **or** file path (`file_jsonl`, syslog in file mode). `path` accepted as an alias. |
+| `auth.type` | `none · basic · bearer · api_key_header · mtls` (`mtls` = transport, via a kind delegated to the Python collector). |
+| `auth.secret` | **[SECRET, write-only]** Basic = `base64("user:pass")` · Bearer = token · api_key_header = header value. |
+| `auth.header` | header name for `api_key_header` (default `X-API-Key`). |
+| `query` | HTTP: query string (`{since}` substituted); Elastic/OpenSearch: **JSON body** (dict). |
+| `mapping` | normalisation rules towards MITRE (see below). |
 
-### Où c'est exécuté
+### Where it runs
 
-- Les kinds `plume` / `generic_http` sont interrogés **nativement par la console Rust** (fetcher intégré,
-  jointure MITRE inchangée), en **`http://` comme en `https://`** : le transport vient du **seam TLS**
-  (`console/src/tls.rs`), certificat **vérifié** (chaîne + nom d'hôte + validité ; une **AC privée
-  d'entreprise** se fournit via `FORGE_EXTRA_CA_PEM`). Une source `https` ne déclenche donc plus de spawn
-  Python sur une route de **lecture**.
+- The `plume` / `generic_http` kinds are queried **natively by the Rust console** (built-in fetcher,
+  unchanged MITRE join), over **`http://` as well as `https://`**: the transport comes from the **TLS seam**
+  (`console/src/tls.rs`), with a **verified** certificate (chain + host name + validity; a **private
+  enterprise CA** is supplied via `FORGE_EXTRA_CA_PEM`). An `https` source therefore no longer triggers a Python
+  spawn on a **read** route.
 
-> ⚠️ **RUPTURE NOMMÉE — un secret de source ne part plus en clair vers une cible PUBLIQUE.** Le fetcher
-> n'avait **aucune** garde de ce genre : une source `generic_http`/`plume` en **`http://`** vers une
-> adresse **publique**, avec un `auth.secret`, mettait son en-tête `Authorization:` **sur le fil**. C'est
-> désormais **refusé avant la connexion**, par la même règle que le canal de notification, et **aucune**
-> variable d'environnement ne l'ouvre. Correctifs : passer la source en **`https://`** (une AC privée se
-> fournit via `FORGE_EXTRA_CA_PEM`), ou retirer le secret.
+> ⚠️ **NAMED BREAKING CHANGE — a source secret no longer goes out in plaintext to a PUBLIC target.** The fetcher
+> had **no** guard of this kind: a `generic_http`/`plume` source over **`http://`** towards a
+> **public** address, with an `auth.secret`, put its `Authorization:` header **on the wire**. This is
+> now **refused before connecting**, by the same rule as the notification channel, and **no**
+> environment variable opens it. Fixes: switch the source to **`https://`** (a private CA is
+> supplied via `FORGE_EXTRA_CA_PEM`), or remove the secret.
 >
-> **Ce qui N'A PAS changé, délibérément** : `http://` **+ secret** vers un collecteur **interne**
-> autorisé (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) reste **servi**. C'est le déploiement on-prem de
-> référence (`PLUME_URL`/`PLUME_TOKEN` sur un segment privé). Exiger `https://` dès qu'un secret est posé
-> aurait tué cet usage sans le déplacer : une CA d'entreprise fournit une **ancre**, pas un **écouteur
-> TLS** — un collecteur qui n'en expose aucun n'aurait plus eu aucune voie.
-- Tout le reste — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, fichier, exec, ou `auth.type=mtls`**
-  (le seam sait désormais présenter un certificat client, mais cette identité est celle du **PROCESSUS**,
-  pas de la source : deux sources exigeant deux certificats distincts ne sont pas représentables) — est
-  **délégué au collecteur Python** `forge.collectors`
-  (protocoles/parsing riches),
-  invoqué par la console (`python3 -m forge.cli detections --since N --source env:FORGE_DETECTION_SOURCE`).
-  La console reste un **joignteur** infra-neutre : la sortie de tout kind est normalisée en
-  `[{mitre,count,first_ts}]` puis passée à la **même** corrélation.
+> **What has NOT changed, deliberately**: `http://` **+ secret** towards an authorised **internal**
+> collector (`FORGE_ALLOW_INTERNAL_INTEGRATIONS=1`) is still **served**. This is the reference on-prem
+> deployment (`PLUME_URL`/`PLUME_TOKEN` on a private segment). Requiring `https://` as soon as a secret is set
+> would have killed this use without relocating it: an enterprise CA provides an **anchor**, not a **TLS
+> listener** — a collector that exposes none would have had no path left.
+- Everything else — **CrowdSec, Elastic/OpenSearch, syslog/filterlog, file, exec, or `auth.type=mtls`**
+  (the seam can now present a client certificate, but that identity is the **PROCESS**'s,
+  not the source's: two sources requiring two distinct certificates cannot be represented) — is
+  **delegated to the Python collector** `forge.collectors`
+  (rich protocols/parsing),
+  invoked by the console (`python3 -m forge.cli detections --since N --source env:FORGE_DETECTION_SOURCE`).
+  The console remains an infrastructure-neutral **joiner**: the output of any kind is normalised into
+  `[{mitre,count,first_ts}]` then passed to the **same** correlation.
 
-## Mapping MITRE — la seule chose à cartographier
+## MITRE mapping — the only thing to map
 
-La plupart des infras BLUE **ne parlent PAS MITRE nativement** : elles émettent des *scénarios*, des *noms
-de règle*, des *lignes de log*. Le `mapping` transforme ces signaux natifs en techniques. On **ne devine
-jamais** une technique : une signature non cartographiée est **ignorée** (pas de faux détecté/raté).
+Most BLUE infrastructures **do NOT speak MITRE natively**: they emit *scenarios*, *rule
+names*, *log lines*. The `mapping` turns these native signals into techniques. A technique is **never
+guessed**: an unmapped signature is **ignored** (no false detected/missed).
 
-Trois modes (l'éditeur de l'UI propose les lignes « signature → technique » ; le JSON avancé donne le
-contrôle complet) :
+Three modes (the UI editor offers "signature → technique" rows; the advanced JSON gives full
+control):
 
-1. **Table** (infra native non taggée) — `mapping.table` = `{signature_native → "Txxxx"}`, la signature
-   étant lue au champ `mapping.field`. Ex CrowdSec : `field:"scenario"`, `table:{"crowdsecurity/ssh-bf":"T1110"}`.
-2. **Direct** (SIEM déjà taggé) — `mapping.mitre` = chemin pointé d'un champ qui porte déjà le `Txxxx`
-   (ex Elastic : `"_source.signal.rule.threat.technique.id"`). Aucune table nécessaire.
-3. **Règles regex** (syslog/filterlog) — `mapping.rules` = `[{match:"<regex>", mitre:"Txxxx"}]`. Un groupe
-   nommé `(?P<ts>…)` fournit le `first_ts` (epoch) si présent.
+1. **Table** (untagged native infrastructure) — `mapping.table` = `{signature_native → "Txxxx"}`, the signature
+   being read from the `mapping.field` field. CrowdSec example: `field:"scenario"`, `table:{"crowdsecurity/ssh-bf":"T1110"}`.
+2. **Direct** (already tagged SIEM) — `mapping.mitre` = dotted path to a field that already carries the `Txxxx`
+   (Elastic example: `"_source.signal.rule.threat.technique.id"`). No table needed.
+3. **Regex rules** (syslog/filterlog) — `mapping.rules` = `[{match:"<regex>", mitre:"Txxxx"}]`. A named
+   group `(?P<ts>…)` provides the `first_ts` (epoch) if present.
 
-Options communes : `mapping.records` (chemin pointé du tableau d'événements — défaut : racine, sinon
-`detections`/`results`, sinon `hits.hits` pour ES) · `mapping.ts` (champ horodatage, défaut `first_ts`)
-· `mapping.count` (facultatif ; absent ⇒ 1 par enregistrement).
+Common options: `mapping.records` (dotted path to the event array — default: root, otherwise
+`detections`/`results`, otherwise `hits.hits` for ES) · `mapping.ts` (timestamp field, default `first_ts`)
+· `mapping.count` (optional; absent ⇒ 1 per record).
 
-## Préréglages par infra
+## Per-infrastructure presets
 
-### `plume` — le préréglage historique (rétro-compat)
+### `plume` — the historical preset (backward compatibility)
 
-Contrat Plume : `GET {endpoint}/api/coverage/detections?since=N` → `{"detections":[{mitre,count,first_ts}]}`,
-**Basic auth**, **mapping identité** (aucun mapping requis). Interrogé nativement par la console.
+Plume contract: `GET {endpoint}/api/coverage/detections?since=N` → `{"detections":[{mitre,count,first_ts}]}`,
+**Basic auth**, **identity mapping** (no mapping required). Queried natively by the console.
 
 ```json
 { "kind": "plume", "endpoint": "http://plume-internal:PORT",
   "auth": { "type": "basic", "secret": "BASE64_user_colon_pass" } }
 ```
 
-**Rétro-compat env** : `PLUME_URL` + `PLUME_TOKEN` restent supportés — en l'absence de
-`settings.detection_source`, ils sont interprétés comme ce préréglage exact
-(`{kind:plume, endpoint:PLUME_URL, auth:{type:basic, secret:PLUME_TOKEN}}`). Voir `docs/PURPLE_PREREQS.md`.
+**Env backward compatibility**: `PLUME_URL` + `PLUME_TOKEN` remain supported — when there is no
+`settings.detection_source`, they are interpreted as this exact preset
+(`{kind:plume, endpoint:PLUME_URL, auth:{type:basic, secret:PLUME_TOKEN}}`). See `docs/PURPLE_PREREQS.md`.
 
 ### `crowdsec` — LAPI
 
-`GET {endpoint}/v1/decisions` (ou `/v1/alerts`), en-tête `X-Api-Key`. CrowdSec émet des **scénarios** :
-`mapping.table` scénario → technique **REQUIS**.
+`GET {endpoint}/v1/decisions` (or `/v1/alerts`), `X-Api-Key` header. CrowdSec emits **scenarios**:
+scenario → technique `mapping.table` **REQUIRED**.
 
 ```json
 { "kind": "crowdsec", "endpoint": "http://127.0.0.1:8080", "path": "/v1/decisions",
@@ -133,9 +135,9 @@ Contrat Plume : `GET {endpoint}/api/coverage/detections?since=N` → `{"detectio
                "table": { "crowdsecurity/ssh-bf": "T1110", "crowdsecurity/http-probing": "T1595.002" } } }
 ```
 
-### `fortigate_syslog` — syslog texte
+### `fortigate_syslog` — text syslog
 
-Chemin d'un fichier syslog matérialisé (`endpoint`/`path`). Règles regex → technique **REQUISES**.
+Path to a materialised syslog file (`endpoint`/`path`). Regex → technique rules **REQUIRED**.
 
 ```json
 { "kind": "fortigate_syslog", "endpoint": "/var/log/fortigate.log",
@@ -144,10 +146,10 @@ Chemin d'un fichier syslog matérialisé (`endpoint`/`path`). Règles regex → 
     { "match": "logdesc=\"?Port scan", "mitre": "T1046" } ] } }
 ```
 
-### `pfsense` / `opnsense` — filterlog (ou REST)
+### `pfsense` / `opnsense` — filterlog (or REST)
 
-Mode **fichier** (filterlog) : comme FortiGate (`endpoint` = chemin, `mapping.rules`). Mode **REST** :
-`endpoint` http(s) exposant un JSON (piloté par `mapping.records/mitre/table`).
+**File** mode (filterlog): like FortiGate (`endpoint` = path, `mapping.rules`). **REST** mode:
+http(s) `endpoint` exposing JSON (driven by `mapping.records/mitre/table`).
 
 ```json
 { "kind": "opnsense", "endpoint": "/var/log/filter/latest.log",
@@ -156,8 +158,8 @@ Mode **fichier** (filterlog) : comme FortiGate (`endpoint` = chemin, `mapping.ru
 
 ### `elastic` / `opensearch` — `_search`
 
-`POST {endpoint}` (URL `_search` d'un index de détections), corps `query` (dict) — sinon un range
-par défaut sur `@timestamp >= since`. Hits lus dans `hits.hits` ; chemins `mapping` visant `_source.*`.
+`POST {endpoint}` (`_search` URL of a detections index), `query` body (dict) — otherwise a default
+range on `@timestamp >= since`. Hits read from `hits.hits`; `mapping` paths targeting `_source.*`.
 
 ```json
 { "kind": "elastic", "endpoint": "https://es:9200/detections-*/_search",
@@ -167,10 +169,10 @@ par défaut sur `@timestamp >= since`. Hits lus dans `hits.hits` ; chemins `mapp
                "ts": "_source.@timestamp" } }
 ```
 
-### `file_jsonl` — export/tap fichier
+### `file_jsonl` — file export/tap
 
-Une ligne = un objet JSON natif ; normalisé par `mapping` (table/champ ou `mitre` direct). Utile pour un
-export SIEM, un tap maison, une fixture.
+One line = one native JSON object; normalised by `mapping` (table/field or direct `mitre`). Useful for a
+SIEM export, a custom tap, a fixture.
 
 ```json
 { "kind": "file_jsonl", "endpoint": "/var/spool/forge/detections.jsonl",
@@ -178,36 +180,36 @@ export SIEM, un tap maison, une fixture.
                "table": { "SSH brute force": "T1110" } } }
 ```
 
-### `exec` — commande de confiance (admin uniquement)
+### `exec` — trusted command (admin only)
 
-Exécute un **argv fixe** (aucun shell, timeout dur, env minimal sur liste blanche — le secret n'est
-**jamais** propagé au process enfant) qui imprime des événements JSON sur stdout, puis normalise via
-`mapping`. Pour les infras sans transport standard.
+Runs a **fixed argv** (no shell, hard timeout, minimal allowlisted env — the secret is
+**never** propagated to the child process) that prints JSON events on stdout, then normalises via
+`mapping`. For infrastructures without a standard transport.
 
 ```json
 { "kind": "exec", "cmd": ["/opt/soc/pull.sh", "--json", "--since", "{since}"],
   "mapping": { "field": "signature", "table": { "port-scan": "T1046" } } }
 ```
 
-## Tester & enregistrer
+## Test & save
 
-- **Tester** : `POST /api/detection/test` (admin) exécute une collecte **unique** contre la config
-  fournie et renvoie `{reachable, count, sample_mitres, error?}` — **jamais** le secret. Le bouton
-  *Tester la connexion* du panneau admin (et le champ write-only) l'utilisent ; `keep_secret:true`
-  permet de tester une config éditée **sans re-saisir** le secret déjà posé.
-- **Enregistrer** : `POST /api/detection/source` (admin, **ledgerisé** `console.detection.source.set`)
-  persiste `settings.detection_source` et recharge la source à chaud. `GET /api/detection/source`
-  renvoie la config **secret rédigé** + `secret_set`.
-- **Diagnostic hors-ligne** : `python3 -m forge.cli doctor` inclut une ligne de santé de la source, et
-  `python3 -m forge.cli detections --source <spec> --since N` imprime `{"detections":[…]}` (voir la CLI).
+- **Test**: `POST /api/detection/test` (admin) runs a **single** collection against the supplied
+  config and returns `{reachable, count, sample_mitres, error?}` — **never** the secret. The
+  *Test connection* button of the admin panel (and the write-only field) use it; `keep_secret:true`
+  lets you test an edited config **without re-entering** the secret already set.
+- **Save**: `POST /api/detection/source` (admin, **written to the ledger** as `console.detection.source.set`)
+  persists `settings.detection_source` and hot-reloads the source. `GET /api/detection/source`
+  returns the config with the **secret redacted** + `secret_set`.
+- **Offline diagnosis**: `python3 -m forge.cli doctor` includes a health line for the source, and
+  `python3 -m forge.cli detections --source <spec> --since N` prints `{"detections":[…]}` (see the CLI).
 
 ## CLI / env
 
-Le collecteur Python lit sa config via `--source` : `env:NOM` (**voie privilégiée** — la console y met le
-JSON *avec* secret pour ne pas le fuiter via `argv`/`ps`), `@fichier`, ou du JSON littéral.
+The Python collector reads its config via `--source`: `env:NOM` (**preferred path** — the console puts the
+JSON *with* the secret there so as not to leak it via `argv`/`ps`), `@fichier`, or literal JSON.
 
 ```bash
-# diagnostic d'une source (n'imprime jamais le secret)
+# diagnose a source (never prints the secret)
 FORGE_DETECTION_SOURCE='{"kind":"crowdsec","endpoint":"http://127.0.0.1:8080", …}' \
   python3 -m forge.cli detections --source env:FORGE_DETECTION_SOURCE --since 0
 ```

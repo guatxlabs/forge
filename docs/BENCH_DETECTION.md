@@ -1,124 +1,126 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-# Banc de détection multi-applications — méthode et résultats
+# Multi-application detection bench — method and results
 
-> [Sommaire](README.md) · Code du banc : [`../bench/detection/`](../bench/README.md) ·
-> Mesure historique mono-cible : conservée hors dépôt public ; ce document lui succède et se
-> suffit à lui-même.
+[English](BENCH_DETECTION.md) | [Français](BENCH_DETECTION.fr.md)
+
+> [Contents](README.md) · Bench code: [`../bench/detection/`](../bench/README.md) ·
+> Historical single-target measurement: kept outside the public repository; this document succeeds it and
+> stands on its own.
 >
-> **DEUX campagnes, gardées côte à côte.** `2026-08-10` (mesure initiale, 13 défauts consignés) et
-> `2026-08-11` (banc **rejoué en entier** après remédiation, pour mesurer les 13 correctifs ENSEMBLE
-> et non plus isolément). Les chiffres d'avant sont **conservés visibles** partout où ils ont bougé :
-> un rapport de banc qui réécrit ses erreurs ne vaut plus rien comme référence. Le rejeu a fermé
-> 10 défauts sur 13, en a laissé 3 partiellement ouverts, et en a mis **6 nouveaux** au jour (§6bis).
+> **TWO campaigns, kept side by side.** `2026-08-10` (initial measurement, 13 defects recorded) and
+> `2026-08-11` (bench **replayed in full** after remediation, to measure the 13 fixes TOGETHER
+> and no longer in isolation). The earlier figures are **kept visible** wherever they moved:
+> a bench report that rewrites its errors is worthless as a reference. The replay closed
+> 10 defects out of 13, left 3 partially open, and brought **6 new ones** to light (§6bis).
 
-## 1. Pourquoi ce banc existe
+## 1. Why this bench exists
 
-La seule mesure de pouvoir de détection du dépôt portait sur **une** application (OWASP Juice Shop) :
-2 vulnérabilités confirmées, vérité terrain fournie par l'app elle-même. C'est une mesure honnête,
-mais un **échantillon de 1** : il ne dit pas si le moteur GÉNÉRALISE ou s'il a été ajusté à cette
-cible. Tout le reste des confrontations avait buté sur l'**accès** (mur Cloudflare, UAT en 404),
-jamais sur la détection — sauf une cible réelle où le moteur a produit **8 HIGH faux**.
+The repository's only measurement of detection power covered **one** application (OWASP Juice Shop):
+2 confirmed vulnerabilities, ground truth supplied by the app itself. It is an honest measurement,
+but a **sample of 1**: it does not say whether the engine GENERALISES or whether it was tuned to that
+target. All the other confrontations had stalled on **access** (Cloudflare wall, UAT returning 404),
+never on detection — except one real target where the engine produced **8 false HIGH**.
 
-Ce banc répond à une question et une seule : **au-delà de Juice Shop, forge trouve-t-il quelque
-chose, et affirme-t-il des choses fausses ?**
+This bench answers one question and one only: **beyond Juice Shop, does forge find anything,
+and does it assert false things?**
 
-## 2. Ce qui est mesuré, et comment
+## 2. What is measured, and how
 
-Quatre applications volontairement vulnérables, **stacks délibérément différentes**, chacune
-fournissant sa PROPRE vérité terrain — jamais forge :
+Four intentionally vulnerable applications, **deliberately different stacks**, each
+supplying its OWN ground truth — never forge:
 
-| app | stack | vérité terrain |
+| app | stack | ground truth |
 |---|---|---|
-| Juice Shop (contrôle) | Node/Express/Angular/SQLite | `GET /api/Challenges` : son registre de challenges |
-| DVWA | PHP 7/Apache/MariaDB | `/var/www/html/vulnerabilities/` : sa liste de modules |
-| VAmPI | Python/Flask/connexion/OpenAPI3 | `README.md` § *List of Vulnerabilities* + branches `if vuln:` |
-| DVGA | Python/Flask/Graphene | `templates/partials/solutions/*.html` : ses pages de solutions |
+| Juice Shop (control) | Node/Express/Angular/SQLite | `GET /api/Challenges`: its challenge registry |
+| DVWA | PHP 7/Apache/MariaDB | `/var/www/html/vulnerabilities/`: its list of modules |
+| VAmPI | Python/Flask/connexion/OpenAPI3 | `README.md` § *List of Vulnerabilities* + `if vuln:` branches |
+| DVGA | Python/Flask/Graphene | `templates/partials/solutions/*.html`: its solution pages |
 
-Juice Shop est **rejouée** pour vérifier que le banc REPRODUIT la mesure connue du dépôt : sans ce
-contrôle, un écart sur les trois autres serait indiscernable d'un défaut du banc.
+Juice Shop is **replayed** to check that the bench REPRODUCES the repository's known measurement: without this
+control, a deviation on the other three would be indistinguishable from a bench defect.
 
-### Deux pistes, jamais confondues
+### Two tracks, never conflated
 
-Une campagne autonome mesure **deux** capacités à la fois — DÉCOUVRIR la surface, et JUGER une fois
-dessus. Quand elle ne trouve rien, on ignore laquelle a échoué. Le banc les sépare :
+An autonomous campaign measures **two** capabilities at once — DISCOVERING the surface, and JUDGING once
+on it. When it finds nothing, we do not know which one failed. The bench separates them:
 
-- **piste A — jugement.** Chaque oracle est amorcé à la main sur l'URL et le paramètre EXACTS de la
-  vuln connue. La découverte est neutralisée ; il ne reste que le verdict.
-- **piste B — chaîne complète.** Campagne `--auto-pentest` sur la racine de l'app. C'est là que se
-  comptent les **faux positifs**, parce que c'est là qu'il y a du volume.
+- **track A — judgement.** Each oracle is seeded by hand on the EXACT URL and parameter of the known
+  vuln. Discovery is neutralised; only the verdict remains.
+- **track B — full chain.** `--auto-pentest` campaign on the app root. This is where the
+  **false positives** are counted, because this is where the volume is.
 
-### Trois métriques, la troisième d'abord
+### Three metrics, the third one first
 
-Vrais positifs **par classe** · faux négatifs **avec leur cause** (oracle absent ? amorçage ?
-navigateur ? budget ?) · et **faux positifs** : chaque finding ≥ MEDIUM est rejoué à la main contre
-l'application. Un banc qui ne compterait que les trouvailles ne prouverait rien.
+True positives **per class** · false negatives **with their cause** (missing oracle? seeding?
+browser? budget?) · and **false positives**: every finding ≥ MEDIUM is replayed by hand against
+the application. A bench that only counted findings would prove nothing.
 
-Une classe qu'**aucun** oracle du dépôt ne revendique n'est PAS comptée en faux négatif : c'est une
-lacune de couverture, comptée à part. Les classes bannies du périmètre (DoS, brute force, absence de
-rate-limit) sont exclues du dénominateur.
+A class that **no** oracle in the repository claims is NOT counted as a false negative: it is a
+coverage gap, counted separately. Classes banned from the scope (DoS, brute force, missing
+rate-limit) are excluded from the denominator.
 
-## 3. Ce qui a été amorcé — déclaré par application
+## 3. What was seeded — declared per application
 
-« forge trouve X avec 2 comptes fournis » et « forge trouve X sans rien » sont deux affirmations
-différentes. Le banc rend les deux lisibles ; l'amorçage exact vit dans `manifest.json`
-(`apps.<app>.primed`) et est recopié tel quel dans le rapport.
+"forge finds X with 2 supplied accounts" and "forge finds X with nothing" are two different
+claims. The bench makes both readable; the exact seeding lives in `manifest.json`
+(`apps.<app>.primed`) and is copied as is into the report.
 
-| app | amorcé |
+| app | seeded |
 |---|---|
-| Juice Shop | 2 comptes à nous (self-signup) + le panier de la victime comme cible IDOR marquée |
-| DVWA | 1 session authentifiée (compte natif `admin`), niveau natif `low`, 1 **canari bénin** dans la racine web |
-| VAmPI | 2 comptes à nous + 1 ressource possédée par la victime, décrite par son marqueur |
-| DVGA | **rien** — l'application est entièrement anonyme |
+| Juice Shop | 2 accounts of our own (self-signup) + the victim's basket as a marked IDOR target |
+| DVWA | 1 authenticated session (native `admin` account), native `low` level, 1 **benign canary** in the web root |
+| VAmPI | 2 accounts of our own + 1 resource owned by the victim, described by its marker |
+| DVGA | **nothing** — the application is entirely anonymous |
 
-Le canari de DVWA n'est pas une facilité : `path.traversal` REFUSE par conception de cibler
-`/etc/passwd` et exige un marqueur bénin fourni par l'opérateur. Sans lui il ne peut structurellement
-rien confirmer.
+DVWA's canary is not a shortcut: `path.traversal` REFUSES by design to target
+`/etc/passwd` and requires a benign marker supplied by the operator. Without it, it can structurally
+confirm nothing.
 
-## 4. Sûreté du banc
+## 4. Bench safety
 
-- **Loopback strict.** Chaque conteneur est publié sur `127.0.0.1` uniquement.
-  `provision.verify_loopback_only()` lit `ss -ltn` et **refuse d'armer** si un socket du banc écoute
-  ailleurs. Ces applications sont délibérément vulnérables : elles ne doivent jamais être exposées.
-- **Périmètre borné au port** : `in_scope: ["127.0.0.1:<port>"]`, plus `allow_private: true` (le ROE
-  refuse les adresses privées par défaut). Vérifié par `forge scope-check` avant chaque armement,
-  avec **contre-épreuve** sur une cible hors périmètre (attendu : exit 1).
-- **`allow_exploit: true`** — assumé et déclaré : les oracles de contrôle d'accès en dépendent. Ces
-  applications nous appartiennent. `allow_destructive` reste `false`.
-- **Modules interrogeant un tiers exclus** (`provision.THIRD_PARTY_MODULES`) : crt.sh, Wayback,
-  résolveurs DNS publics, dépôts de templates amont, collecteurs de callback hors hôte. La liste
-  retenue/exclue est écrite à chaque exécution dans `modules_loopback_safe.json`.
-  ⚠️ **CETTE GARANTIE EST INCOMPLÈTE, mesuré le 2026-08-11** : l'exclusion porte sur l'INTENTION
-  déclarée d'un module, pas sur son egress observé. `recon.httpx` — retenu comme sûr — a téléchargé
-  92,6 Mio depuis `huggingface.co` à chacun de ses 4 tirs. Détail et preuve en **D17** (§6bis).
-  Le reste du run est resté en boucle locale ; aucune requête n'est sortie vers une cible tierce.
-- **Limite assumée** : le service navigateur gouverné tourne dans son propre espace réseau ; il ne
-  peut pas atteindre un `127.0.0.1:<port>` de l'hôte. Les oracles adossés au navigateur
-  (`xss.execution`, le rendu DOM de `xss.stored`) sont donc **non mesurables** sur ce banc — ils sont
-  comptés `skipped`, jamais `manqués`. Les rendre mesurables exigerait de lier les applications à
-  l'adresse du pont docker, ce que la règle « loopback uniquement » interdit.
+- **Strict loopback.** Each container is published on `127.0.0.1` only.
+  `provision.verify_loopback_only()` reads `ss -ltn` and **refuses to arm** if a bench socket listens
+  elsewhere. These applications are deliberately vulnerable: they must never be exposed.
+- **Scope bounded to the port**: `in_scope: ["127.0.0.1:<port>"]`, plus `allow_private: true` (the ROE
+  refuses private addresses by default). Checked by `forge scope-check` before each arming,
+  with a **counter-test** on an out-of-scope target (expected: exit 1).
+- **`allow_exploit: true`** — assumed and declared: the access-control oracles depend on it. These
+  applications belong to us. `allow_destructive` stays `false`.
+- **Modules querying a third party excluded** (`provision.THIRD_PARTY_MODULES`): crt.sh, Wayback,
+  public DNS resolvers, upstream template repositories, off-host callback collectors. The
+  kept/excluded list is written at each run to `modules_loopback_safe.json`.
+  ⚠️ **THIS GUARANTEE IS INCOMPLETE, measured on 2026-08-11**: the exclusion covers a module's declared
+  INTENT, not its observed egress. `recon.httpx` — kept as safe — downloaded
+  92.6 MiB from `huggingface.co` on each of its 4 shots. Detail and evidence in **D17** (§6bis).
+  The rest of the run stayed on local loopback; no request went out to a third-party target.
+- **Accepted limit**: the governed browser service runs in its own network namespace; it
+  cannot reach a host `127.0.0.1:<port>`. Browser-backed oracles
+  (`xss.execution`, the DOM rendering of `xss.stored`) are therefore **not measurable** on this bench — they are
+  counted `skipped`, never `manqués` (missed). Making them measurable would require binding the applications to
+  the docker bridge address, which the "loopback only" rule forbids.
 
-## 5. Résultats — AVANT (2026-08-10) / APRÈS (2026-08-11)
+## 5. Results — BEFORE (2026-08-10) / AFTER (2026-08-11)
 
-> **Les deux campagnes sont conservées côte à côte, colonne par colonne.** Les 13 défauts consignés
-> en §6 ont été fermés entre les deux, mais **ils n'avaient été mesurés qu'ISOLÉMENT** ; le banc a été
-> rejoué EN ENTIER pour les mesurer ENSEMBLE. Sorties brutes : [`RESULTS_2026-08-10.md`](../bench/detection/RESULTS_2026-08-10.md)
-> et [`RESULTS_2026-08-11.md`](../bench/detection/RESULTS_2026-08-11.md).
+> **The two campaigns are kept side by side, column by column.** The 13 defects recorded
+> in §6 were closed between the two, but **they had only been measured in ISOLATION**; the bench was
+> replayed IN FULL to measure them TOGETHER. Raw outputs: [`RESULTS_2026-08-10.md`](../bench/detection/RESULTS_2026-08-10.md)
+> and [`RESULTS_2026-08-11.md`](../bench/detection/RESULTS_2026-08-11.md).
 >
-> **Méthode IDENTIQUE** — même vérité terrain (fournie par les applications), même amorçage déclaré,
-> même budget `--budget 900`, mêmes modules retenus, mêmes deux pistes.
-> **UN SEUL paramètre a changé, et il est déclaré** : l'action `cmdi.probe`/`rce.probe` de la piste A
-> de DVWA vise désormais `/vulnerabilities/exec/?Submit=Submit` au lieu de `/vulnerabilities/exec/`
-> (`bench/detection/seeded.py`). Raison : DVWA teste `isset($_POST['Submit'])` — sans ce co-paramètre
-> la RCE est **hors d'atteinte par construction**, quelle que soit la charge. C'est le défaut D6 vu
-> depuis l'amorçage : l'action ne déclarait le co-paramètre nulle part, donc rien ne pouvait le
-> porter. Le correctif D6 (préservation des autres paramètres) et cette correction d'amorçage sont
-> **indissociables** : ni l'un ni l'autre seul ne rend la RCE atteignable.
+> **IDENTICAL method** — same ground truth (supplied by the applications), same declared seeding,
+> same budget `--budget 900`, same kept modules, same two tracks.
+> **ONE SINGLE parameter changed, and it is declared**: DVWA's track-A `cmdi.probe`/`rce.probe` action
+> now targets `/vulnerabilities/exec/?Submit=Submit` instead of `/vulnerabilities/exec/`
+> (`bench/detection/seeded.py`). Reason: DVWA tests `isset($_POST['Submit'])` — without this co-parameter
+> the RCE is **out of reach by construction**, whatever the payload. This is defect D6 seen
+> from the seeding side: the action declared the co-parameter nowhere, so nothing could
+> carry it. The D6 fix (preserving the other parameters) and this seeding correction are
+> **inseparable**: neither one alone makes the RCE reachable.
 
-### 5.1 Synthèse
+### 5.1 Summary
 
-| app | piste | opposables | **vrais positifs** | **faux négatifs** | **faux positifs** | findings émis | ≥ MEDIUM revendiqués |
+| app | track | opposable | **true positives** | **false negatives** | **false positives** | findings emitted | ≥ MEDIUM claimed |
 |---|---|---|---|---|---|---|---|
-| | | | AVANT → **APRÈS** | AVANT → **APRÈS** | AVANT → **APRÈS** | AVANT → **APRÈS** | AVANT → **APRÈS** |
+| | | | BEFORE → **AFTER** | BEFORE → **AFTER** | BEFORE → **AFTER** | BEFORE → **AFTER** | BEFORE → **AFTER** |
 | Juice Shop | A | 3 | 2 → **2** | 1 → **1** | 0 → **0** | 6 → **6** | 2 → **2** |
 | Juice Shop | B | 3 | 0 → **0** | 3 → **3** | 0 → **0** | 873 → **45** | 0 → **0** |
 | DVWA | A | 9 | 3 → **5** | 6 → **4** | 0 → **0** | 15 → **15** | 3 → **5** |
@@ -129,59 +131,61 @@ rien confirmer.
 | DVGA | B | 7 | 0 → **0** | 7 → **7** | 0 → **0** | 1849 → **2940** | 0 → **0** |
 | **TOTAL** | | | **6 → 9** ¹ | | **8 → 4** | **5747 → 4906** ² | **15 → 14** |
 
-¹ vrais positifs comptés en paires (app, classe) distinctes, sans double compte entre les pistes.
-² A+B confondues. Sur la seule piste autonome : **5703 → 4862**.
+¹ true positives counted as distinct (app, class) pairs, without double counting across tracks.
+² A+B combined. On the autonomous track alone: **5703 → 4862**.
 
-- **Ce qui a bougé en bien** : DVWA gagne `cmdi.probe` **HIGH** et `rce.probe` **CRITICAL** (la RCE,
-  vérifiée à la main : `uid=33(www-data)`) ; VAmPI gagne `jwt.weakness` **HIGH** ; les 4 faux positifs
-  de VAmPI ont disparu ; le volume de la piste B tombe de 1806 à 1558 sur DVWA et de 1175 à 319 sur
+- **What moved for the better**: DVWA gains `cmdi.probe` **HIGH** and `rce.probe` **CRITICAL** (the RCE,
+  verified by hand: `uid=33(www-data)`); VAmPI gains `jwt.weakness` **HIGH**; VAmPI's 4 false positives
+  are gone; track-B volume drops from 1806 to 1558 on DVWA and from 1175 to 319 on
   VAmPI.
-- **Ce qui n'a PAS bougé** : les **4 `header_injection.probe` HIGH de DVWA sont toujours là** (§5.2) ;
-  la piste B reste à **1 seul vrai positif** sur les 4 applications ; DVGA reste à **0 sur 7** dans les
-  deux pistes, et son volume **AUGMENTE** (1849 → 2940).
-- **Colonne « run partiel » retirée du tableau** : elle était fausse pour 3 lignes sur 4. Voir §6bis,
-  défaut **D15**.
+- **What did NOT move**: DVWA's **4 `header_injection.probe` HIGH are still there** (§5.2);
+  track B stays at **1 single true positive** across the 4 applications; DVGA stays at **0 out of 7** on both
+  tracks, and its volume **INCREASES** (1849 → 2940).
+- **"Partial run" column removed from the table**: it was wrong for 3 rows out of 4. See §6bis,
+  defect **D15**.
 
-### 5.2 Faux positifs — chaque ≥ MEDIUM rejoué à la main, dans les DEUX campagnes
+### 5.2 False positives — every ≥ MEDIUM replayed by hand, in BOTH campaigns
 
-**AVANT — 15 revendications ≥ MEDIUM : 7 vrais positifs, 8 FAUX POSITIFS, 0 non vérifié.**
-**APRÈS — 14 revendications ≥ MEDIUM : 10 vrais positifs, 4 FAUX POSITIFS, 0 non vérifié.**
+**BEFORE — 15 claims ≥ MEDIUM: 7 true positives, 8 FALSE POSITIVES, 0 unverified.**
+**AFTER — 14 claims ≥ MEDIUM: 10 true positives, 4 FALSE POSITIVES, 0 unverified.**
 
-| verdict | AVANT | APRÈS | qui | pourquoi (vérifié à la main contre l'application) |
+| verdict | BEFORE | AFTER | who | why (verified by hand against the application) |
 |---|---|---|---|---|
-| **TP** | 3 | **3** | `access_control.idor` (Juice Shop, VAmPI A+B) | marqueur de la victime lu depuis la session de l'attaquant, absent en anonyme (401) ; Juice Shop **certifié par l'app** (« View Basket » `solved`) |
-| **TP** | 3 | **3** | `sqli.probe` (DVWA ×2, Juice Shop) | erreur MariaDB / différentiel booléen / bypass d'auth `' OR 1=1--` → `admin@juice-sh.op` (témoin sans injection : 401) |
-| **TP** | 1 | **1** | `path.traversal` (DVWA) | canari lu ; LFI prouvée **indépendamment** du canari (`?page=/etc/passwd` → `root:x:0:0`) |
-| **TP** | 0 | **2** | `cmdi.probe` + `rce.probe` (DVWA) | **NOUVEAU (D6)** — POST `ip=127.0.0.1;id&Submit=Submit` → `uid=33(www-data)`, rejoué hors forge |
-| **TP** | 0 | **1** | `jwt.weakness` (VAmPI) | **NOUVEAU (D12)** — jeton HS256 forgé hors forge avec le secret `random` (`/vampi/config.py:13`) → `PUT /users/v1/attacker1/email` accepté (**204**) |
-| **FP** | 5 | **4** | `header_injection.probe` | ~~redirection de répertoire : `Location` construit depuis `Host`~~ **cette forme-là est éteinte** ; les 4 qui restent passent par une **AUTRE porte** — voir §5.2bis |
-| **FP** | 3 | **0** | `ssrf.xspa` (VAmPI) | éteints — mais **pas par la voie qu'on croit** : voir §5.2ter |
+| **TP** | 3 | **3** | `access_control.idor` (Juice Shop, VAmPI A+B) | victim's marker read from the attacker's session, absent when anonymous (401); Juice Shop **certified by the app** ("View Basket" `solved`) |
+| **TP** | 3 | **3** | `sqli.probe` (DVWA ×2, Juice Shop) | MariaDB error / boolean differential / auth bypass `' OR 1=1--` → `admin@juice-sh.op` (witness without injection: 401) |
+| **TP** | 1 | **1** | `path.traversal` (DVWA) | canary read; LFI proven **independently** of the canary (`?page=/etc/passwd` → `root:x:0:0`) |
+| **TP** | 0 | **2** | `cmdi.probe` + `rce.probe` (DVWA) | **NEW (D6)** — POST `ip=127.0.0.1;id&Submit=Submit` → `uid=33(www-data)`, replayed outside forge |
+| **TP** | 0 | **1** | `jwt.weakness` (VAmPI) | **NEW (D12)** — HS256 token forged outside forge with the secret `random` (`/vampi/config.py:13`) → `PUT /users/v1/attacker1/email` accepted (**204**) |
+| **FP** | 5 | **4** | `header_injection.probe` | ~~directory redirect: `Location` built from `Host`~~ **that form is extinguished**; the 4 that remain go through **ANOTHER door** — see §5.2bis |
+| **FP** | 3 | **0** | `ssrf.xspa` (VAmPI) | extinguished — but **not the way one would think**: see §5.2ter |
 
-Taux de faux positifs sur les revendications actionnables : ~~**8/15 ≈ 53 %**~~ → **4/14 ≈ 29 %**.
-Inchangé en revanche : **la totalité des faux positifs vient du mode autonome** (piste B). La piste A,
-amorcée à la main, n'a produit **aucun** faux positif sur les 4 applications, dans les deux campagnes.
+False-positive rate on actionable claims: ~~**8/15 ≈ 53 %**~~ → **4/14 ≈ 29 %**.
+Unchanged, on the other hand: **all the false positives come from autonomous mode** (track B). Track A,
+seeded by hand, produced **no** false positive on the 4 applications, in either campaign.
 
-### 5.2bis Les 4 `header_injection.probe` HIGH de DVWA — le correctif a déplacé la porte, pas fermé la pièce
+### 5.2bis DVWA's 4 `header_injection.probe` HIGH — the fix moved the door, it did not close the room
 
-C'était le point d'attention explicite du mandat. Verdict : **ils n'ont PAS disparu, et le correctif
-D4 ne couvre pas cette forme.** Le compte est resté rigoureusement identique — seules les cibles ont
-glissé d'un caractère :
+This was the explicit point of attention of the brief. Verdict: **they have NOT disappeared, and the D4
+fix does not cover this form.** The count stayed strictly identical — only the targets
+shifted by one character:
 
-| | AVANT (2026-08-10) | APRÈS (2026-08-11) |
+| | BEFORE (2026-08-10) | AFTER (2026-08-11) |
 |---|---|---|
-| cibles | `/docs` · `/config` · `/external` · `/external/phpids/0.6` | `/docs/` · `/config/` · `/external/` · `/external/phpids/0.6/` |
-| réponse | **301** avec `Location: http://<marqueur>/docs/` | **200**, **aucun `Location`** |
-| voie du reflet | en-tête `Location` | **corps** |
-| verdict forge | HIGH `vulnerable` ×4 | HIGH `vulnerable` ×4 |
+| targets | `/docs` · `/config` · `/external` · `/external/phpids/0.6` | `/docs/` · `/config/` · `/external/` · `/external/phpids/0.6/` |
+| response | **301** with `Location: http://<marqueur>/docs/` | **200**, **no `Location`** |
+| reflection path | `Location` header | **body** |
+| forge verdict | HIGH `vulnerable` ×4 | HIGH `vulnerable` ×4 |
 
-Sur les cibles SANS slash final, le correctif D4 fonctionne et le dit — evidence rendue :
+On the targets WITHOUT a trailing slash, the D4 fix works and says so — evidence returned:
 
 > « canonicalisation d'URL ÉCARTÉE (en-tête Host) : la cible a répondu une REDIRECTION vers le MÊME
 > chemin sur l'hôte injecté […] aucun reflet RÉSIDUEL hors l'écho du Location. »
+> (URL canonicalisation RULED OUT (Host header): the target answered with a REDIRECT to the SAME path on
+> the injected host […] no RESIDUAL reflection apart from the Location echo.)
 
-Mais la découverte propose AUSSI les variantes AVEC slash final, où Apache ne redirige plus : il sert
-l'index de répertoire, et son pied de page recopie l'en-tête `Host`. Reproduit à la main sur les
-quatre :
+But discovery ALSO proposes the variants WITH a trailing slash, where Apache no longer redirects: it serves
+the directory index, and its footer copies the `Host` header. Reproduced by hand on all
+four:
 
 ```
 curl -H 'Host: evil.forge-hh.test' http://127.0.0.1:8081/docs/
@@ -191,30 +195,30 @@ curl -H 'Host: evil.forge-hh.test' http://127.0.0.1:8081/docs/
      href portant l'hôte injecté                 : 0
 ```
 
-C'est `ServerSignature On`, le **réglage par défaut de Debian**, et il apparaît sur **toute** page
-auto-générée par Apache — index de répertoire **et page 404**. Le reflet est du **texte inerte** :
-aucun lien ne le porte, aucun cache ne le sert, aucune réinitialisation de mot de passe ne l'utilise.
-La vérité terrain de DVWA (`/var/www/html/vulnerabilities/`) ne déclare aucune classe « host header ».
-**Quatre faux HIGH, à nouveau.**
+This is `ServerSignature On`, **Debian's default setting**, and it appears on **every** page
+auto-generated by Apache — directory index **and 404 page**. The reflection is **inert text**:
+no link carries it, no cache serves it, no password reset uses it.
+DVWA's ground truth (`/var/www/html/vulnerabilities/`) declares no "host header" class.
+**Four false HIGH, again.**
 
-Cause exacte, lue dans le code : `_host_reflection` (`forge/modules/httpflow.py:520`) ne discrimine
-que la voie `Location`, par le chemin de destination. Dès que le marqueur est dans le CORPS,
-`_reflected_in` rend `"corps"` sans autre examen, et la seule garde restante est
-`control_reflects_host` — la garde que D4 a elle-même qualifiée de structurellement incapable :
-la requête de contrôle part **sans** l'en-tête injecté, donc le marqueur ne peut par construction
-jamais y apparaître, et elle rend **toujours** `False`. Le correctif a fermé la porte du `Location` et
-laissé la porte du corps **exactement dans l'état que le banc dénonçait**. Consigné en **D14** (§6bis).
+Exact cause, read in the code: `_host_reflection` (`forge/modules/httpflow.py:520`) only discriminates
+the `Location` path, by the destination path. As soon as the marker is in the BODY,
+`_reflected_in` returns `"corps"` (body) without further examination, and the only remaining guard is
+`control_reflects_host` — the guard that D4 itself described as structurally incapable:
+the control request goes out **without** the injected header, so the marker can by construction
+never appear in it, and it **always** returns `False`. The fix closed the `Location` door and
+left the body door **exactly in the state the bench denounced**. Recorded as **D14** (§6bis).
 
-### 5.2ter Les 3 `ssrf.xspa` de VAmPI — éteints, mais la campagne ne le prouve pas
+### 5.2ter VAmPI's 3 `ssrf.xspa` — extinguished, but the campaign does not prove it
 
-Sur la piste B, `ssrf.xspa` rend désormais `skipped — Requiert params.param` sur les 9 cibles de
-VAmPI : l'URL paramétrée `/console?__debugger__=yes&cmd=resource&f=console.png` **n'est plus
-découverte du tout**. Les 3 faux positifs ont donc disparu **de la campagne** sans que l'oracle ait
-eu à juger — c'est le correctif de découverte (D8) qui les a fait disparaître, pas le correctif de
-jugement (D5).
+On track B, `ssrf.xspa` now returns `skipped — Requiert params.param` (requires params.param) on VAmPI's 9
+targets: the parameterised URL `/console?__debugger__=yes&cmd=resource&f=console.png` **is no longer
+discovered at all**. The 3 false positives have therefore disappeared **from the campaign** without the oracle
+having to judge — it is the discovery fix (D8) that made them disappear, not the judgement
+fix (D5).
 
-Le correctif D5 a donc été vérifié **séparément**, en rejouant l'oracle sur la cible EXACTE des 3 faux
-positifs du 2026-08-10 :
+The D5 fix was therefore verified **separately**, by replaying the oracle on the EXACT target of the 3 false
+positives of 2026-08-10:
 
 ```
 forge run --actions  {kind: ssrf.xspa,
@@ -228,190 +232,190 @@ APRÈS  -> INFO   · skipped    · « XSPA non testé — la réponse ne VARIE P
             (HTTP 200, 1563 o) »
 ```
 
-Les 1 563 octets sont exactement ceux que le banc avait mesurés à la main en §D5. Le correctif tient
-sur sa propre mesure ; **c'est la disparition en campagne qui ne prouve rien**, et le distinguer était
-nécessaire.
+The 1,563 bytes are exactly those the bench had measured by hand in §D5. The fix holds
+on its own measurement; **it is the disappearance in the campaign that proves nothing**, and distinguishing the two was
+necessary.
 
-### 5.3 Faux négatifs — expliqués, un par un (AVANT → APRÈS)
+### 5.3 False negatives — explained, one by one (BEFORE → AFTER)
 
-| classe manquée | app | cause établie AVANT | APRÈS (2026-08-11) |
+| missed class | app | cause established BEFORE | AFTER (2026-08-11) |
 |---|---|---|---|
-| injection de commande / RCE | DVWA | **D6** — la sonde POST ne porte QUE le paramètre injecté ; DVWA exige le co-paramètre `Submit` | ✅ **TROUVÉE** — `cmdi.probe` HIGH + `rce.probe` CRITICAL, vérifiées à la main (`uid=33(www-data)`) |
-| XSS réfléchi | DVWA | conception : `xss.reflected` exige un contexte JS-exécutable ; DVWA réfléchit en contenu HTML — l'oracle VOIT `réfléchi=True, non_échappé=True` et refuse de promouvoir | inchangé — toujours `tested`, abstention de conception |
-| XSS stocké | DVWA, DVGA | **D7** — verdict fabriqué à partir d'une erreur du service navigateur | ✅ **abstention honnête** — `skipped · « rendu navigateur indisponible (dégradation gracieuse) »`. Toujours un faux négatif, mais il ne se déguise plus en verdict |
-| XSS DOM | DVWA, Juice Shop | non mesurable ici (navigateur hors espace réseau) — `skipped`, correctement | inchangé |
-| CSRF | DVWA | le détecteur d'anti-CSRF cherche `"csrf"` dans **tout le corps** ; la page DVWA « CSRF » contient le mot dans ses liens et titres | inchangé — toujours `tested`, non promu |
-| SQLi | VAmPI | point d'injection = **segment de chemin** (`/users/v1/{username}`) ; les oracles n'écrivent que dans un paramètre de query ou un corps de formulaire | **inchangé** — le correctif D6 préserve les autres paramètres, il n'apprend pas à écrire dans un segment de chemin |
-| BFLA (mot de passe d'autrui) | VAmPI | abstention **correcte** (`PUT` mute l'objet d'un tiers, refusé tant que `allow_destructive` est faux) | ✅ abstention désormais **nommée** : « Privesc write PUT non tiré — capacité destructive non autorisée » (au lieu de « config manquante ») |
-| JWT à clé faible | VAmPI | **D12** — la liste HMAC par défaut (16 entrées) ne contient pas `random` | ✅ **TROUVÉE** — HIGH `vulnerable`, secret craqué hors ligne (candidat #16 de la liste étendue) |
-| introspection GraphQL | DVGA | détectée mais rendue **INFO** par conception ; le chemin exige `b_marker` + `query` | inchangé |
-| cmdi / SQLi / traversal / XSS / SSRF GraphQL | DVGA | points d'injection = **arguments dans un corps JSON GraphQL** ; aucun oracle ne sait écrire dedans | **inchangé — 0 sur 7** |
-| toutes (piste B, DVWA/DVGA) | — | la découverte n'a produit **aucune URL portant un paramètre de query** | **inchangé** : 22 cibles sur DVWA, 25 sur DVGA, **aucune avec un paramètre de query** |
-| toutes (piste B, Juice Shop) | — | **D13** — l'application est morte pendant la campagne | **l'application est morte À NOUVEAU** — mais cette fois la cause est mesurée (§6bis, D13-bis) et les oracles ne tirent plus sur le cadavre |
+| command injection / RCE | DVWA | **D6** — the POST probe carries ONLY the injected parameter; DVWA requires the `Submit` co-parameter | ✅ **FOUND** — `cmdi.probe` HIGH + `rce.probe` CRITICAL, verified by hand (`uid=33(www-data)`) |
+| reflected XSS | DVWA | design: `xss.reflected` requires a JS-executable context; DVWA reflects into HTML content — the oracle SEES `réfléchi=True, non_échappé=True` and refuses to promote | unchanged — still `tested`, design abstention |
+| stored XSS | DVWA, DVGA | **D7** — verdict fabricated from a browser service error | ✅ **honest abstention** — `skipped · « rendu navigateur indisponible (dégradation gracieuse) »` (browser rendering unavailable, graceful degradation). Still a false negative, but it no longer disguises itself as a verdict |
+| DOM XSS | DVWA, Juice Shop | not measurable here (browser outside the network namespace) — `skipped`, correctly | unchanged |
+| CSRF | DVWA | the anti-CSRF detector looks for `"csrf"` in **the whole body**; DVWA's "CSRF" page contains the word in its links and titles | unchanged — still `tested`, not promoted |
+| SQLi | VAmPI | injection point = **path segment** (`/users/v1/{username}`); the oracles only write into a query parameter or a form body | **unchanged** — the D6 fix preserves the other parameters, it does not learn to write into a path segment |
+| BFLA (someone else's password) | VAmPI | **correct** abstention (`PUT` mutates a third party's object, refused as long as `allow_destructive` is false) | ✅ abstention now **named**: « Privesc write PUT non tiré — capacité destructive non autorisée » (write PUT privesc not fired — destructive capability not authorised) (instead of « config manquante », missing config) |
+| weak-key JWT | VAmPI | **D12** — the default HMAC list (16 entries) does not contain `random` | ✅ **FOUND** — HIGH `vulnerable`, secret cracked offline (candidate #16 of the extended list) |
+| GraphQL introspection | DVGA | detected but rendered **INFO** by design; the path requires `b_marker` + `query` | unchanged |
+| GraphQL cmdi / SQLi / traversal / XSS / SSRF | DVGA | injection points = **arguments in a GraphQL JSON body**; no oracle knows how to write into it | **unchanged — 0 out of 7** |
+| all (track B, DVWA/DVGA) | — | discovery produced **no URL carrying a query parameter** | **unchanged**: 22 targets on DVWA, 25 on DVGA, **none with a query parameter** |
+| all (track B, Juice Shop) | — | **D13** — the application died during the campaign | **the application died AGAIN** — but this time the cause is measured (§6bis, D13-bis) and the oracles no longer fire at the corpse |
 
-### 5.4 Le contrôle a bien reproduit la mesure de référence — deux fois
+### 5.4 The control did reproduce the reference measurement — twice
 
-Juice Shop, piste A, dans les DEUX campagnes : `access_control.idor` → **IDOR CONFIRMÉ**,
-`sqli.probe` → **SQLi CONFIRMÉ**, 6 findings, 2 revendications ≥ MEDIUM, **aucun écart**. L'app
-l'atteste elle-même (`GET /api/Challenges` : `basketAccessChallenge` et `loginAdminChallenge` passés
-à `solved`). Le banc n'introduit donc pas de biais, et le rejeu n'a pas dérivé : les écarts observés
-sur DVWA/VAmPI/DVGA sont bien ceux du moteur.
+Juice Shop, track A, in BOTH campaigns: `access_control.idor` → **IDOR CONFIRMÉ** (IDOR confirmed),
+`sqli.probe` → **SQLi CONFIRMÉ** (SQLi confirmed), 6 findings, 2 claims ≥ MEDIUM, **no deviation**. The app
+attests it itself (`GET /api/Challenges`: `basketAccessChallenge` and `loginAdminChallenge` moved
+to `solved`). The bench therefore introduces no bias, and the replay has not drifted: the deviations observed
+on DVWA/VAmPI/DVGA are indeed the engine's.
 
-*Nuance consignée* : en 2026-08-11 c'est le **rejeu manuel** (`' OR 1=1--` → `admin@juice-sh.op`) qui a
-fait basculer `loginAdminChallenge`, alors qu'en 2026-08-10 la sonde de forge l'avait fait elle-même.
-Forge a prouvé la SQLi par différentiel d'AUTORISATION (`' OR '1'='1'-- -`, 401 → 200) sans viser le
-compte administrateur. La revendication reste un vrai positif — la vuln est à l'endroit annoncé — mais
-la certification par l'app vient d'ailleurs.
+*Recorded nuance*: on 2026-08-11 it was the **manual replay** (`' OR 1=1--` → `admin@juice-sh.op`) that
+flipped `loginAdminChallenge`, whereas on 2026-08-10 forge's probe had done it itself.
+Forge proved the SQLi by AUTHORISATION differential (`' OR '1'='1'-- -`, 401 → 200) without targeting the
+administrator account. The claim remains a true positive — the vuln is where it was announced — but
+the certification by the app comes from elsewhere.
 
-### 5.5 Verdict honnête sur la généralisation — le chiffre a bougé, la frontière non
+### 5.5 Honest verdict on generalisation — the figure moved, the boundary did not
 
-**Forge généralise un peu plus largement, toujours étroitement, et toujours seulement quand on
-l'amorce.**
+**Forge generalises a little more widely, still narrowly, and still only when it is
+seeded.**
 
-- **Ce qui tient sur plusieurs stacks** : ~~`sqli.probe`, `access_control.idor` et `path.traversal` —
-  **3 classes d'oracle sur 25 opposables**~~ → désormais **6 classes d'oracle sur les 13 opposables**
-  du banc : `sqli.probe`, `access_control.idor`, `path.traversal`, **`cmdi.probe`**, **`rce.probe`**,
-  **`jwt.weakness`**. En paires (app, classe) : **6 → 9 sur 23**.
-- **La frontière, elle, s'est déplacée d'un cran seulement.** L'ancien constat disait « rien hors
-  paramètre de query sur une URL connue ». Ce n'est plus exact : le correctif D6 fait entrer le
-  **formulaire POST multi-champs** (DVWA `exec`, qui exige le co-paramètre `Submit`) — et c'est la
-  RCE, la trouvaille la plus lourde du banc. Mais les deux autres formes n'ont **pas** bougé :
-  **segment de chemin** (VAmPI SQLi) et **corps JSON GraphQL** (DVGA) restent à **0 détection**.
-- **GraphQL : le chiffre n'a PAS bougé — 0 sur 7**, dans les deux pistes, dans les deux campagnes.
-  Une stack entière reste hors de portée, et son volume de bruit a même **augmenté** (1849 → 2940).
-- **Le mode autonome ne trouve toujours presque rien, et se trompe encore plus souvent qu'il ne
-  trouve.** ~~5703 findings, 1 vrai positif, 8 faux positifs~~ → **4862 findings sur les 4 campagnes,
-  toujours 1 SEUL vrai positif** (la BOLA de VAmPI, et uniquement parce que l'opérateur avait déclaré
-  la cible IDOR dans le scope), contre **4 faux positifs**. Le rapport faux/vrai s'améliore de 8:1 à
-  **4:1** — il reste **défavorable**.
-- **Répondre à la question posée** : *forge a-t-il été ajusté à Juice Shop ?* Non, et c'est encore
-  plus net qu'avant — les classes qui marchent sur Juice Shop marchent ailleurs, et DVWA en trouve
-  désormais **plus** que la cible de référence. *Mais* l'échantillon de 1 masquait toujours la même
-  chose : hors des formes de requête que les oracles savent écrire, la couverture tombe à zéro, et le
-  mode autonome produit encore plus de faux HIGH que de vrais.
+- **What holds across several stacks**: ~~`sqli.probe`, `access_control.idor` and `path.traversal` —
+  **3 oracle classes out of 25 opposable**~~ → now **6 oracle classes out of the bench's 13 opposable**
+  ones: `sqli.probe`, `access_control.idor`, `path.traversal`, **`cmdi.probe`**, **`rce.probe`**,
+  **`jwt.weakness`**. In (app, class) pairs: **6 → 9 out of 23**.
+- **The boundary, for its part, has moved by one notch only.** The old finding said "nothing outside a
+  query parameter on a known URL". That is no longer accurate: the D6 fix brings in the
+  **multi-field POST form** (DVWA `exec`, which requires the `Submit` co-parameter) — and that is the
+  RCE, the heaviest finding of the bench. But the two other forms have **not** moved:
+  **path segment** (VAmPI SQLi) and **GraphQL JSON body** (DVGA) remain at **0 detections**.
+- **GraphQL: the figure has NOT moved — 0 out of 7**, on both tracks, in both campaigns.
+  An entire stack remains out of reach, and its noise volume has even **increased** (1849 → 2940).
+- **Autonomous mode still finds almost nothing, and is wrong even more often than it
+  finds.** ~~5703 findings, 1 true positive, 8 false positives~~ → **4862 findings over the 4 campaigns,
+  still 1 SINGLE true positive** (VAmPI's BOLA, and only because the operator had declared
+  the IDOR target in the scope), against **4 false positives**. The false/true ratio improves from 8:1 to
+  **4:1** — it remains **unfavourable**.
+- **Answering the question asked**: *was forge tuned to Juice Shop?* No, and it is even
+  clearer than before — the classes that work on Juice Shop work elsewhere, and DVWA now finds
+  **more** than the reference target. *But* the sample of 1 still hid the same
+  thing: outside the request forms the oracles know how to write, coverage drops to zero, and
+  autonomous mode still produces more false HIGH than true ones.
 
-**Recommandation de publication — NON RENVERSÉE.** Publier le mode `--auto-pentest` comme un scanner
-resterait **indéfendable** :
+**Publication recommendation — NOT REVERSED.** Publishing `--auto-pentest` mode as a scanner
+would remain **indefensible**:
 
-1. **Plus de faux que de vrais** : 4 HIGH faux contre 1 vrai positif. Un opérateur qui suivrait ce
-   rapport enverrait 4 rapports « host header poisoning » sur une signature Apache par défaut.
-2. **La cible meurt toujours**, et cette fois la cause est établie (§6bis, D13-bis) : idle 34 minutes
-   → mémoire stable ; campagne lancée → 4,9 Gio et `Exited(139)` en **90 secondes**.
-3. **13 nmap sur 13 rapportent « j'ai vérifié » après avoir scanné 0 hôte** (§6bis, D16). Le compte a
-   chuté (72 → 13), la cécité est restée à **100 %**.
-4. La découverte ne produit **toujours aucune URL portant un paramètre de query** : les oracles qui
-   paient n'ont rien à mordre en mode autonome.
+1. **More false than true**: 4 false HIGH against 1 true positive. An operator who followed this
+   report would send 4 "host header poisoning" reports on a default Apache signature.
+2. **The target still dies**, and this time the cause is established (§6bis, D13-bis): idle 34 minutes
+   → stable memory; campaign launched → 4.9 GiB and `Exited(139)` in **90 seconds**.
+3. **13 nmap out of 13 report "I checked" after scanning 0 hosts** (§6bis, D16). The count
+   dropped (72 → 13), the blindness stayed at **100 %**.
+4. Discovery **still produces no URL carrying a query parameter**: the oracles that
+   pay have nothing to bite on in autonomous mode.
 
-En revanche les **oracles amorcés** (piste A) sont défendables, et le sont **davantage** qu'avant :
-**0 faux positif** sur les 4 applications dans les deux campagnes, **9 vrais positifs au lieu de 6**,
-dont une **RCE CRITICAL prouvée**, et des abstentions nommées au lieu de verdicts fabriqués.
-Le chemin de publication reste « forge = un vérificateur d'hypothèses amorcé par l'opérateur », pas
-« forge = un scanner autonome » — désormais jusqu'à ce que **D14, D16 et la cause de D13** soient
-traités.
+On the other hand, the **seeded oracles** (track A) are defensible, and **more so** than before:
+**0 false positives** on the 4 applications in both campaigns, **9 true positives instead of 6**,
+including a **proven CRITICAL RCE**, and named abstentions instead of fabricated verdicts.
+The publication path remains "forge = an operator-seeded hypothesis verifier", not
+"forge = an autonomous scanner" — now until **D14, D16 and the cause of D13** are
+addressed.
 
-## 6. Les 13 défauts du 2026-08-10 — **texte d'origine conservé**, statut mesuré en campagne complète
+## 6. The 13 defects of 2026-08-10 — **original text kept**, status measured in a full campaign
 
-> Les descriptions ci-dessous sont celles du jour où le banc les a trouvés, **inchangées**. Les 13 ont
-> été fermés depuis — chacun par un commit qui porte sa mesure —, mais ils n'avaient été mesurés
-> qu'**isolément**. Le tableau qui suit dit ce que la campagne COMPLÈTE du 2026-08-11 a constaté —
-> et pour trois d'entre eux, le constat n'est pas celui qu'on attendait.
+> The descriptions below are those of the day the bench found them, **unchanged**. All 13 have
+> been closed since — each by a commit that carries its measurement —, but they had only been measured
+> **in isolation**. The table that follows says what the FULL campaign of 2026-08-11 observed —
+> and for three of them, the observation is not the one expected.
 
-| # | ce que le correctif promettait | **constaté en campagne complète** |
+| # | what the fix promised | **observed in a full campaign** |
 |---|---|---|
-| D1 | l'IDOR à 2 comptes n'est plus éteint par `scope.session` | ✅ evidence VAmPI : `anon=401 · anon_refusé=True · « sonde anonyme tirée SANS matériel de session gouverné »` |
-| D2 | l'evidence du chemin à marqueur ne ment plus | ✅ idem — l'ancien `anon=200 / anon_refusé=False` a disparu |
-| D3 | plus de HIGH sur une ressource publique | ✅ véto de publicité visible dans l'evidence (`marqueur_lisible_anonymement=False`) ; aucun HIGH sur ressource publique dans les 4 campagnes |
-| D4 | les 5 `header_injection` faux sont éteints | ⚠️ **PARTIEL — 1 sur 5 éteint pour de bon.** VAmPI `/ui` : oui, avec l'abstention nommée. DVWA : les 4 HIGH **reviennent** par une autre porte → **D14** |
-| D5 | `ssrf.xspa` n'invente plus de ports joignables | ✅ vérifié **séparément** sur la cible exacte (§5.2ter) — en campagne, la cible avait déjà disparu de la découverte |
-| D6 | la RCE de DVWA devient atteignable | ✅ **HIGH + CRITICAL**, `uid=33(www-data)` vérifié à la main. La plus grosse trouvaille du rejeu |
-| D7 | `xss.stored` ne fabrique plus de verdict négatif | ✅ `skipped — rendu navigateur indisponible (dégradation gracieuse)` sur DVWA **et** DVGA |
-| D8 | plus de 404 ingérés en endpoints | ✅ 22 cibles sur DVWA (toutes réelles), 9 sur VAmPI ; **aucune URL fantôme** du type `/modern%20mom` |
-| D9 | plus de nmap sur un endpoint | ⚠️ **PARTIEL** — 72 → 13, mais **13 sur 13 scannent 0 hôte et rendent `tested`** → **D16** |
-| D10 | `forge run --actions` injecte le contexte d'auth | ✅ (le banc passe toujours les valeurs dans l'action ; l'injection est désormais idempotente) |
-| D11 | `rc=1` sur vuln prouvée | ✅ **5 runs sur 8 rendent `rc=1`**, exactement ceux qui portent un `vulnerable` (DVWA A/B, VAmPI A/B, Juice Shop A) |
-| D12 | `jwt.weakness` craque le secret de VAmPI | ✅ **HIGH `vulnerable`**, confirmé hors forge (jeton forgé avec `random` → 204) |
-| D13 | plus de tir sur cadavre | ✅ pour le **symptôme** (8 tirs, **0 verdict d'oracle qualifiant** post-mortem) · ❌ pour la **cause**, qui est maintenant établie → **D13-bis** |
+| D1 | the 2-account IDOR is no longer extinguished by `scope.session` | ✅ VAmPI evidence: `anon=401 · anon_refusé=True · « sonde anonyme tirée SANS matériel de session gouverné »` |
+| D2 | the evidence of the marker path no longer lies | ✅ same — the old `anon=200 / anon_refusé=False` has disappeared |
+| D3 | no more HIGH on a public resource | ✅ publicity veto visible in the evidence (`marqueur_lisible_anonymement=False`); no HIGH on a public resource in the 4 campaigns |
+| D4 | the 5 false `header_injection` are extinguished | ⚠️ **PARTIAL — 1 out of 5 extinguished for good.** VAmPI `/ui`: yes, with the named abstention. DVWA: the 4 HIGH **come back** through another door → **D14** |
+| D5 | `ssrf.xspa` no longer invents reachable ports | ✅ verified **separately** on the exact target (§5.2ter) — in the campaign, the target had already disappeared from discovery |
+| D6 | DVWA's RCE becomes reachable | ✅ **HIGH + CRITICAL**, `uid=33(www-data)` verified by hand. The biggest finding of the replay |
+| D7 | `xss.stored` no longer fabricates a negative verdict | ✅ `skipped — rendu navigateur indisponible (dégradation gracieuse)` on DVWA **and** DVGA |
+| D8 | no more 404s ingested as endpoints | ✅ 22 targets on DVWA (all real), 9 on VAmPI; **no phantom URL** of the `/modern%20mom` kind |
+| D9 | no more nmap on an endpoint | ⚠️ **PARTIAL** — 72 → 13, but **13 out of 13 scan 0 hosts and return `tested`** → **D16** |
+| D10 | `forge run --actions` injects the auth context | ✅ (the bench still passes the values in the action; the injection is now idempotent) |
+| D11 | `rc=1` on a proven vuln | ✅ **5 runs out of 8 return `rc=1`**, exactly those carrying a `vulnerable` (DVWA A/B, VAmPI A/B, Juice Shop A) |
+| D12 | `jwt.weakness` cracks VAmPI's secret | ✅ **HIGH `vulnerable`**, confirmed outside forge (token forged with `random` → 204) |
+| D13 | no more firing at a corpse | ✅ for the **symptom** (8 shots, **0 qualifying oracle verdicts** post-mortem) · ❌ for the **cause**, which is now established → **D13-bis** |
 
-Le texte d'origine des 13 entrées suit. Chaque entrée porte sa preuve : une commande, une sortie, ou
-un extrait de code à la ligne près. L'ordre est celui de la gravité pour un opérateur **au moment où
-elles ont été écrites**.
+The original text of the 13 entries follows. Each entry carries its evidence: a command, an output, or
+a code excerpt to the exact line. The order is that of severity for an operator **at the time
+they were written**.
 
-### D1 — Une session gouvernée DÉSACTIVE l'oracle IDOR à 2 comptes (faux négatif silencieux)
+### D1 — A governed session DISABLES the 2-account IDOR oracle (silent false negative)
 
-`access_control.idor` juge par `vuln = same and anon_denied` (`access_control.py:390`), où
-`anon_denied` vient de `ru = self._fetch(url, {})` (`access_control.py:363`). Mais `Oracle._http`
-**fusionne la session gouvernée** (`scope.session`) sur toute URL in-scope : la sonde dite « anonyme »
-part donc AUTHENTIFIÉE dès qu'un `scope.session` est configuré — ce que `scope.example.json`
-recommande explicitement pour attacher du matériel d'auth.
+`access_control.idor` judges by `vuln = same and anon_denied` (`access_control.py:390`), where
+`anon_denied` comes from `ru = self._fetch(url, {})` (`access_control.py:363`). But `Oracle._http`
+**merges the governed session** (`scope.session`) on any in-scope URL: the so-called "anonymous" probe
+therefore goes out AUTHENTICATED as soon as a `scope.session` is configured — which `scope.example.json`
+explicitly recommends for attaching auth material.
 
-Mesuré sur la BOLA réelle de VAmPI (`GET /books/v1/victimbook`, vérité terrain : README de l'app),
-mêmes comptes, même cible, seul `scope.session` diffère :
+Measured on VAmPI's real BOLA (`GET /books/v1/victimbook`, ground truth: the app's README),
+same accounts, same target, only `scope.session` differs:
 
-| scope | evidence rendue par l'oracle | verdict |
+| scope | evidence returned by the oracle | verdict |
 |---|---|---|
-| **avec** `session` | `A=200 B=200 anon=200 même_objet=True anon_refusé=False` | `IDOR non confirmé` — **INFO** |
-| **sans** `session` | `A=200 B=200 anon=401 même_objet=True anon_refusé=True` | `IDOR CONFIRMÉ` — **HIGH** |
+| **with** `session` | `A=200 B=200 anon=200 même_objet=True anon_refusé=False` | `IDOR non confirmé` — **INFO** |
+| **without** `session` | `A=200 B=200 anon=401 même_objet=True anon_refusé=True` | `IDOR CONFIRMÉ` — **HIGH** |
 
-Vérification indépendante : `curl http://127.0.0.1:5001/books/v1/victimbook` (sans en-tête) → **401**.
-Et directement sur le chokepoint :
+Independent check: `curl http://127.0.0.1:5001/books/v1/victimbook` (no header) → **401**.
+And directly on the chokepoint:
 
 ```
 Oracle._http(url, headers={})                       -> 401     (vraiment anonyme)
 with session.using(store): Oracle._http(url, {})    -> 200 + corps du panier
 ```
 
-**Conséquence** : la classe #1 du bug bounty est éteinte par une configuration légitime — et sans
-aucun signal, puisque le finding rendu est un « non confirmé » d'apparence normale.
+**Consequence**: the #1 bug bounty class is extinguished by a legitimate configuration — and without
+any signal, since the finding returned is a normal-looking "not confirmed".
 
-### D2 — La même sonde fausse l'evidence du chemin à marqueur
+### D2 — The same probe falsifies the evidence of the marker path
 
-Sur le chemin `_fire_auth_targets`, `anon_denied` ne promeut pas, mais il est **imprimé** :
-sur Juice Shop, `GET /rest/basket/1` répond **401** à un anonyme réel, et l'evidence du finding dit
-`anon=200 ; anon_refusé=False`. Un relecteur y lit « ressource publique » et écarte un vrai positif.
+On the `_fire_auth_targets` path, `anon_denied` does not promote, but it is **printed**:
+on Juice Shop, `GET /rest/basket/1` answers **401** to a real anonymous user, and the finding's evidence says
+`anon=200 ; anon_refusé=False`. A reviewer reads "public resource" there and discards a true positive.
 
-### D3 — `access_control.idor` promeut un HIGH sur une ressource PUBLIQUE
+### D3 — `access_control.idor` promotes a HIGH on a PUBLIC resource
 
-`proven = marker_hit` seul (`access_control.py:227`). Un marqueur présent dans une ressource
-publique ne prouve aucune appartenance, et la sonde anonyme — cassée par D1 — ne peut pas véto.
+`proven = marker_hit` alone (`access_control.py:227`). A marker present in a public
+resource proves no ownership, and the anonymous probe — broken by D1 — cannot veto.
 
-Contre-épreuve exécutée : `GET /users/v1` de VAmPI est **public par conception** (anon → 200, liste
-tous les utilisateurs), déclaré `idor_target {owner: victim, marker: "victim1"}`. Verdict rendu :
+Counter-test run: VAmPI's `GET /users/v1` is **public by design** (anon → 200, lists
+all users), declared `idor_target {owner: victim, marker: "victim1"}`. Verdict returned:
 
 > **HIGH · vulnerable · « IDOR CONFIRMÉ — l'attaquant lit la ressource de la victime (accès
-> cross-compte) »**, evidence `anon=200 … anon_refusé=False`.
+> cross-compte) »** (IDOR CONFIRMED — the attacker reads the victim's resource, cross-account access), evidence `anon=200 … anon_refusé=False`.
 
-Un test porte pourtant ce nom — `tests/test_auth_context.py::test_no_false_positive_on_public_200`.
-Il passe, et il ne peut pas échouer : son `idor_target` n'a **pas de `marker`**
-(`{"url": …, "owner": "victim"}`), or `marker_hit = bool(marker) and …`. Le test couvre donc la
-branche NON promouvante et laisse intacte celle qui promeut — celle que `scope.example.json` décrit
-comme « le chemin PRÉFÉRÉ ».
+Yet a test bears that name — `tests/test_auth_context.py::test_no_false_positive_on_public_200`.
+It passes, and it cannot fail: its `idor_target` has **no `marker`**
+(`{"url": …, "owner": "victim"}`), and `marker_hit = bool(marker) and …`. The test therefore covers the
+NON-promoting branch and leaves intact the one that promotes — the one `scope.example.json` describes
+as "the PREFERRED path".
 
-### D4 — `header_injection.probe` : un HIGH par répertoire, sur du comportement de serveur par défaut
+### D4 — `header_injection.probe`: one HIGH per directory, on default server behaviour
 
-Un `Host:` reflété dans `Location:` promeut `HIGH / vulnerable / CWE-644 (host header poisoning)`
-(`httpflow.py:515`). Or **toute** redirection de répertoire construit son `Location` à partir du
-`Host` de la requête. Reproduit sur DEUX stacks :
+A `Host:` reflected in `Location:` promotes `HIGH / vulnerable / CWE-644 (host header poisoning)`
+(`httpflow.py:515`). But **every** directory redirect builds its `Location` from the
+request's `Host`. Reproduced on TWO stacks:
 
 ```
 curl -H 'Host: evil.example' http://127.0.0.1:8081/docs   -> 301  Location: http://evil.example/docs/   (Apache 2.4)
 curl -H 'Host: evil.example' http://127.0.0.1:5001/ui     -> 308  Location: http://evil.example/ui/     (Werkzeug 2.2)
 ```
 
-Ni DVWA ni VAmPI ne déclarent cette classe dans leur vérité terrain. Récolte : **4 HIGH sur DVWA**
-(un par répertoire découvert) + **1 HIGH sur VAmPI**. Le contrôle interne ne peut pas rattraper : il
-compare avec le **vrai** `Host`, où le marqueur ne peut par construction pas apparaître.
+Neither DVWA nor VAmPI declares this class in their ground truth. Harvest: **4 HIGH on DVWA**
+(one per discovered directory) + **1 HIGH on VAmPI**. The internal control cannot catch it: it
+compares with the **real** `Host`, where the marker cannot by construction appear.
 
-### D5 — `ssrf.xspa` déclare JOIGNABLES des ports qui n'écoutent nulle part
+### D5 — `ssrf.xspa` declares REACHABLE ports that listen nowhere
 
-Sur VAmPI (Flask `debug=True`, donc console Werkzeug exposée), la campagne autonome a promu **3
-findings MEDIUM `vulnerable`** :
+On VAmPI (Flask `debug=True`, hence the Werkzeug console exposed), the autonomous campaign promoted **3
+MEDIUM `vulnerable` findings**:
 
-> « XSPA CONFIRMÉ — joignabilité de ports internes via SSRF » ·
+> « XSPA CONFIRMÉ — joignabilité de ports internes via SSRF » (XSPA CONFIRMED — internal port reachability via SSRF) ·
 > `ports JOIGNABLES (différentiel)=[22, 80, 443, 3306, 5432, 6379, 8080, 8443, 9200, 27017]`
 
-Vérification par connexion TCP directe sur le même hôte : **9 de ces 10 ports sont FERMÉS**
-(seul `8080` écoute). Et la cible — `/console?__debugger__=yes&cmd=resource&f=console.png`, le
-servant de ressources statiques du débogueur — n'est pas SSRF-able du tout :
+Check by direct TCP connection on the same host: **9 of these 10 ports are CLOSED**
+(only `8080` listens). And the target — `/console?__debugger__=yes&cmd=resource&f=console.png`, the
+debugger's static resource server — is not SSRF-able at all:
 
 ```
 __debugger__=yes                        -> 200,  507 o
@@ -419,53 +423,53 @@ __debugger__=http://127.0.0.1:1/        -> 200, 1563 o     <- « baseline port f
 __debugger__=http://127.0.0.1:3306/     -> 200, 1563 o     <- corps IDENTIQUE
 ```
 
-⚠️ **CETTE CAUSE ÉTAIT FAUSSE, corrigée le 2026-08-11** — elle est laissée ici parce qu'un rapport
-de banc qui réécrit ses erreurs ne vaut plus rien comme référence. Version initiale : « le
-différentiel repose sur des écarts de timing de l'ordre de 20 ms (`0.036s` vs `0.056s`) ». **Le
-timing est mesuré et imprimé mais n'entre dans AUCUN verdict** — seul `sig != closed_sig` promeut.
+⚠️ **THIS CAUSE WAS WRONG, corrected on 2026-08-11** — it is left here because a bench report
+that rewrites its errors is worthless as a reference. Initial version: "the
+differential relies on timing gaps of the order of 20 ms (`0.036s` vs `0.056s`)". **The
+timing is measured and printed but enters NO verdict** — only `sig != closed_sig` promotes.
 
-**La vraie cause** : la neutralisation du reflet était appliquée de façon **ASYMÉTRIQUE**. La
-baseline était le port **1**, et le corps était scrubé du numéro de port de la requête courante :
+**The real cause**: the reflection neutralisation was applied **ASYMMETRICALLY**. The
+baseline was port **1**, and the body was scrubbed of the port number of the current request:
 
-    re.sub(r"(?<!\d)1(?!\d)",    "<PORT>", body)   # baseline : mange TOUS les « 1 » isolés
-    re.sub(r"(?<!\d)3306(?!\d)", "<PORT>", body)   # port     : no-op
+    re.sub(r"(?<!\d)1(?!\d)",    "<PORT>", body)   # baseline: eats ALL isolated "1"s
+    re.sub(r"(?<!\d)3306(?!\d)", "<PORT>", body)   # port: no-op
 
-Sur n'importe quel corps HTML (`HTTP/1.1`, `version 1.0.1`), la baseline est mutilée et les corps de
-ports ne le sont pas. Reproduit : corps IDENTIQUES en entrée -> signatures différentes -> les 10
-ports déclarés « diff », 10 sur 10. **Le mécanisme censé supprimer le faux signal le fabriquait**,
-inconditionnellement — et le module émettait `status=vulnerable` en MEDIUM là-dessus.
+On any HTML body (`HTTP/1.1`, `version 1.0.1`), the baseline is mutilated and the port
+bodies are not. Reproduced: IDENTICAL bodies in input -> different signatures -> all 10
+ports declared "diff", 10 out of 10. **The mechanism meant to suppress the false signal was manufacturing it**,
+unconditionally — and the module emitted `status=vulnerable` as MEDIUM on that basis.
 
-La leçon vaut au-delà de D5 : la cause « évidente » (le timing, visible dans l'evidence) n'était pas
-la cause. C'est le neuvième diagnostic de cette série à tomber devant la mesure.
+The lesson goes beyond D5: the "obvious" cause (the timing, visible in the evidence) was not
+the cause. It is the ninth diagnosis of this series to fall before measurement.
 
-### D6 — Les oracles d'injection perdent les autres paramètres de la requête
+### D6 — The injection oracles lose the request's other parameters
 
-Quatre implémentations indépendantes (`injection.py::_send`, `clientflow.py::_send_h`, `rce.py`,
-`ssrf.py`) construisent la requête ainsi :
+Four independent implementations (`injection.py::_send`, `clientflow.py::_send_h`, `rce.py`,
+`ssrf.py`) build the request like this:
 
 ```python
 sep = "&" if "?" in action.target else "?"
-url = f"{action.target}{sep}{urllib.parse.urlencode({param: payload})}"   # GET : AJOUTE
+url = f"{action.target}{sep}{urllib.parse.urlencode({param: payload})}"   # GET: APPENDS
 ...
-data=urllib.parse.urlencode({param: payload})                             # POST : REMPLACE tout le corps
+data=urllib.parse.urlencode({param: payload})                             # POST: REPLACES the whole body
 ```
 
-- **POST** — le corps ne contient QUE le paramètre injecté. L'injection de commande de DVWA exige le
-  co-paramètre `Submit` : `ip=127.0.0.1;echo FORGEMARK123` seul → **0 occurrence** ; le même payload
-  avec `&Submit=Submit` → **1 occurrence** (commande exécutée). D'où `cmdi.probe` et `rce.probe` en
-  « non confirmée » sur une RCE bien vivante (`uid=33(www-data)` vérifié à la main).
-- **GET** — le paramètre est AJOUTÉ, pas substitué : `?id=1&Submit=Submit&id=<payload>`. En PHP le
-  dernier gagne (mesuré : `ID: 2`) donc ça marche ; en **Flask/Werkzeug le premier gagne**
-  (`MultiDict(parse_qsl("id=1&Submit=Submit&id=INJECTION")).get("id")` → **`1`**). Sur tout parseur
-  premier-gagnant, la charge n'atteint jamais le sink et l'oracle rend malgré tout « non confirmé ».
+- **POST** — the body contains ONLY the injected parameter. DVWA's command injection requires the
+  `Submit` co-parameter: `ip=127.0.0.1;echo FORGEMARK123` alone → **0 occurrences**; the same payload
+  with `&Submit=Submit` → **1 occurrence** (command executed). Hence `cmdi.probe` and `rce.probe` as
+  "not confirmed" on a very much alive RCE (`uid=33(www-data)` verified by hand).
+- **GET** — the parameter is APPENDED, not substituted: `?id=1&Submit=Submit&id=<payload>`. In PHP the
+  last one wins (measured: `ID: 2`) so it works; in **Flask/Werkzeug the first one wins**
+  (`MultiDict(parse_qsl("id=1&Submit=Submit&id=INJECTION")).get("id")` → **`1`**). On any
+  first-wins parser, the payload never reaches the sink and the oracle still returns "not confirmed".
 
-Ce défaut est **invisible sur une seule cible** : il dépend du parseur de la stack.
+This defect is **invisible on a single target**: it depends on the stack's parser.
 
-### D7 — `xss.stored` rend un verdict NÉGATIF à partir d'une page d'erreur du navigateur
+### D7 — `xss.stored` returns a NEGATIVE verdict from a browser error page
 
-Garde de `clientflow.py:620` : `if rst is None or not dom:` — le **succès** de la navigation n'est jamais
-vérifié. Un 500 du service navigateur renvoie `(500, "Internal Server Error")` : `dom` est non vide,
-la garde passe, et l'oracle conclut. Reproduction déterministe (seams stubés) :
+Guard at `clientflow.py:620`: `if rst is None or not dom:` — navigation **success** is never
+checked. A 500 from the browser service returns `(500, "Internal Server Error")`: `dom` is non-empty,
+the guard passes, and the oracle concludes. Deterministic reproduction (stubbed seams):
 
 ```
 xss.stored     -> tested  · « XSS stored non confirmé — pas de reflet exécutable non échappé
@@ -474,12 +478,12 @@ xss.stored     -> tested  · « XSS stored non confirmé — pas de reflet exéc
 xss.execution  -> skipped · « sonde navigateur non aboutie (dégradation gracieuse) »   <- correct
 ```
 
-L'oracle frère fait le bon choix (`if not _ok(gst): return False`). C'est un verdict fabriqué.
+The sibling oracle makes the right choice (`if not _ok(gst): return False`). It is a fabricated verdict.
 
-### D8 — La découverte ingère des 404 comme endpoints, sans sonde de confirmation
+### D8 — Discovery ingests 404s as endpoints, without a confirmation probe
 
-Le spec `recon.feroxbuster` (`toolcatalog.py:366`) invoque `--silent` et parse `https?://\S+`.
-`--silent` **supprime la colonne de statut** : forge ne peut pas la voir. Mesuré :
+The `recon.feroxbuster` spec (`toolcatalog.py:366`) invokes `--silent` and parses `https?://\S+`.
+`--silent` **suppresses the status column**: forge cannot see it. Measured:
 
 ```
 docker run --rm --network host epi052/feroxbuster -u http://127.0.0.1:8081 --no-recursion
@@ -487,16 +491,16 @@ docker run --rm --network host epi052/feroxbuster -u http://127.0.0.1:8081 --no-
   404  ... 287c http://127.0.0.1:8081/Reports%20List
 ```
 
-(l'auto-filtre de feroxbuster manque ces 404 : leur taille varie avec la longueur du chemin.)
-Ces URLs deviennent des **nœuds du graphe** et reçoivent tout le balayage d'oracles. `_discovery.py`
-applique pourtant exactement cette discipline aux PORTS (« un vrai GET obtient un STATUS HTTP ») —
-elle n'est pas appliquée aux URLs. C'est l'origine du gros du volume : 1806 findings sur DVWA.
+(feroxbuster's auto-filter misses these 404s: their size varies with the path length.)
+These URLs become **graph nodes** and receive the full oracle sweep. Yet `_discovery.py`
+applies exactly this discipline to PORTS ("a real GET obtains an HTTP STATUS") —
+it is not applied to URLs. This is the origin of most of the volume: 1806 findings on DVWA.
 
-### D9 — `--auto-pentest` contourne la discrimination hôte/endpoint
+### D9 — `--auto-pentest` bypasses the host/endpoint discrimination
 
-`brain.py:175` dit explicitement qu'un endpoint ne doit pas recevoir « recon/nmap/origin sur une
-URL », et `_base_actions` l'applique. Mais `AutoPentestBrain.propose` balaie **chaque technique sur
-chaque cible touchée**, endpoints compris, sans ce garde. Résultat mesuré dans le ledger :
+`brain.py:175` says explicitly that an endpoint must not receive "recon/nmap/origin on a
+URL", and `_base_actions` applies it. But `AutoPentestBrain.propose` sweeps **every technique over
+every touched target**, endpoints included, without this guard. Result measured in the ledger:
 
 ```
 poc      : docker run --rm --network host instrumentisto/nmap -sV -Pn --top-ports 1000 \
@@ -505,35 +509,35 @@ evidence : Nmap done: 0 IP addresses (0 hosts up) scanned in 0.35 seconds
 status   : tested        title : « Services exposés (nmap -sV) »
 ```
 
-**22 findings `recon.nmap` sur 22** sont dans ce cas. nmap sort `rc=0` (« Unable to split netmask
-from target expression »), donc la borne `rc != 0` de `blindness.tool_did_not_run` ne peut pas le
-voir : un outil qui n'a rien scanné est rendu en « j'ai vérifié ».
+**22 `recon.nmap` findings out of 22** are in this situation. nmap exits with `rc=0` ("Unable to split netmask
+from target expression"), so the `rc != 0` bound of `blindness.tool_did_not_run` cannot
+see it: a tool that scanned nothing is rendered as "I checked".
 
-### D10 — `forge run --actions` n'injecte pas le contexte d'auth par-engagement
+### D10 — `forge run --actions` does not inject the per-engagement auth context
 
-L'injection des `accounts`/`idor_targets` depuis `scope.auth` vit dans `Engine._prepare`
-(`engine.py:1184-1209`), appelé UNIQUEMENT par `campaign()`. `Engine.run()` (`engine.py:839`) ne
-l'appelle pas. Conséquence : avec un `scope.auth` complet, `forge run --actions` rend « IDOR non
-testé — config manquante ». Le banc contourne en passant les valeurs dans l'action ; la CLI, elle,
-ne le documente nulle part.
+The injection of `accounts`/`idor_targets` from `scope.auth` lives in `Engine._prepare`
+(`engine.py:1184-1209`), called ONLY by `campaign()`. `Engine.run()` (`engine.py:839`) does not
+call it. Consequence: with a complete `scope.auth`, `forge run --actions` returns "IDOR not
+tested — missing config". The bench works around it by passing the values in the action; the CLI, for its part,
+documents this nowhere.
 
-### D11 — Le code de sortie documenté « 1 = vuln trouvée » n'est jamais produit
+### D11 — The documented exit code "1 = vuln found" is never produced
 
-`docs/CLI.md:16` annonce « `0` OK, `1` échec/vuln trouvée ». `cmd_run` (`cli/engine.py:277`) et
-`cmd_campaign` (`cli/engine.py:466`) font `return 0` inconditionnellement. Mesuré : tous les runs du
-banc qui ont produit des findings `HIGH/vulnerable` sortent en **`rc=0`**. Une CI qui gate sur le
-code de sortie ne verrait jamais une vulnérabilité.
+`docs/CLI.md:16` announces "`0` OK, `1` failure/vuln found". `cmd_run` (`cli/engine.py:277`) and
+`cmd_campaign` (`cli/engine.py:466`) do `return 0` unconditionally. Measured: all the bench runs
+that produced `HIGH/vulnerable` findings exit with **`rc=0`**. A CI that gates on the
+exit code would never see a vulnerability.
 
-### D12 — La liste HMAC par défaut de `jwt.weakness` est très courte
+### D12 — `jwt.weakness`'s default HMAC list is very short
 
-16 secrets (`tokenapi.py:108`). Le secret de VAmPI est `'random'` (`config.py`) et n'y figure pas →
-faux négatif. Avec `hmac_wordlist=["secret","password","random","changeme"]`, le même oracle rend
-**HIGH · vulnerable · « secret HMAC faible craqué hors-ligne »**. Le mécanisme est bon, la liste est
-le facteur limitant.
+16 secrets (`tokenapi.py:108`). VAmPI's secret is `'random'` (`config.py`) and is not in it →
+false negative. With `hmac_wordlist=["secret","password","random","changeme"]`, the same oracle returns
+**HIGH · vulnerable · « secret HMAC faible craqué hors-ligne »** (weak HMAC secret cracked offline). The mechanism is sound, the list is
+the limiting factor.
 
-### D13 — Le mode autonome TUE la cible, et les oracles qualifiants tirent sur un cadavre
+### D13 — Autonomous mode KILLS the target, and the qualifying oracles fire at a corpse
 
-Deux campagnes `--auto-pentest` sur OWASP Juice Shop, deux **crashs de l'application** :
+Two `--auto-pentest` campaigns on OWASP Juice Shop, two **application crashes**:
 
 ```
 docker ps -a  ->  forge-bench-juice     Exited (139)
@@ -542,30 +546,30 @@ docker logs   ->  FATAL ERROR: Ineffective mark-compacts near heap limit
                   Allocation failed - JavaScript heap out of memory
 ```
 
-Conséquence mesurable : `access_control.idor` — la classe #1 — a rendu, aux DEUX runs,
-« IDOR non testé — cible injoignable (aucune réponse) … attaquant=None, anonyme=None ». L'oracle
-s'abstient correctement (c'est la bonne discipline), mais le résultat net est **zéro mesure** : la
-tempête de découverte de contenu passe AVANT les oracles qualifiants et emporte la cible. Le
-plancher anti-famine du planner protège leur *sélection*, pas leur *ordre d'exécution*.
+Measurable consequence: `access_control.idor` — the #1 class — returned, on BOTH runs,
+« IDOR non testé — cible injoignable (aucune réponse) … attaquant=None, anonyme=None » (IDOR not tested — target unreachable, no response). The oracle
+abstains correctly (that is the right discipline), but the net result is **zero measurement**: the
+content-discovery storm runs BEFORE the qualifying oracles and takes the target down. The
+planner's anti-starvation floor protects their *selection*, not their *execution order*.
 
-C'est aussi un problème de politique : le workspace bannit les techniques DoS, et le mode autonome
-en produit une par accident.
+It is also a policy problem: the workspace bans DoS techniques, and autonomous mode
+produces one by accident.
 
-## 6bis. Défauts mis au jour par le REJEU (2026-08-11) — CONSIGNÉS, NON CORRIGÉS
+## 6bis. Defects brought to light by the REPLAY (2026-08-11) — RECORDED, NOT FIXED
 
-Aucun fichier de `forge/**` n'a été modifié par ce rejeu. Comme au premier tour, chaque entrée porte
-sa preuve : une commande, une sortie, ou un extrait de code à la ligne près.
+No file under `forge/**` was modified by this replay. As in the first round, each entry carries
+its evidence: a command, an output, or a code excerpt to the exact line.
 
-### D13-bis — La cause de la mort de Juice Shop est établie, et ce n'est PAS celle qui a été retenue
+### D13-bis — The cause of Juice Shop's death is established, and it is NOT the one that was retained
 
-Le correctif D13 (gate de liveness) a été livré avec une conclusion explicite : *« la campagne n'était
-pas la CAUSE de la mort »*, appuyée sur une mesure d'un agent (conteneur seul, zéro paquet, 121 Mio →
-4,79 Gio, mort à 222 s). Cette mesure venait d'une source unique, **non reproduite** par une
-contre-vérification indépendante, et la question restait ouverte. **Le rejeu la tranche.**
+The D13 fix (liveness gate) was delivered with an explicit conclusion: *"the campaign was
+not the CAUSE of the death"*, backed by a measurement from an agent (container alone, zero packets, 121 MiB →
+4.79 GiB, death at 222 s). That measurement came from a single source, **not reproduced** by an
+independent cross-check, and the question remained open. **The replay settles it.**
 
-Le banc lance Juice Shop **en même temps que les trois autres applications** puis la teste **en
-dernier**. Elle est donc restée en vie, sans être ciblée, pendant 34 minutes — un contrôle négatif
-gratuit. Échantillonnage `docker stats --no-stream`, une mesure par minute :
+The bench starts Juice Shop **at the same time as the three other applications** then tests it
+**last**. It therefore stayed alive, untargeted, for 34 minutes — a free negative
+control. `docker stats --no-stream` sampling, one measurement per minute:
 
 ```
 12:38:47  102.6 MiB      <- conteneur levé à 12:34:39, AUCUNE campagne ne le vise
@@ -581,21 +585,21 @@ gratuit. Échantillonnage `docker stats --no-stream`, une mesure par minute :
 13:14:47                 <- Exited (139) · FATAL ERROR: Ineffective mark-compacts near heap limit
 ```
 
-`docker inspect` : `StartedAt 10:34:39Z → FinishedAt 11:14:47Z`, `ExitCode 139`, `OOMKilled false`
-(c'est le heap V8 qui sature, pas le cgroup). **34 minutes au repos : rien. 90 secondes sous
-campagne : 0,02 → 4,9 Gio, puis mort.** La prémisse « elle s'autodétruit toute seule » est donc
-**contredite par la mesure**, et le constat d'origine du banc — *le mode autonome tue la cible* — est
-**rétabli**. La décision produit « aucun throttle n'est justifié » repose sur une prémisse fausse.
+`docker inspect`: `StartedAt 10:34:39Z → FinishedAt 11:14:47Z`, `ExitCode 139`, `OOMKilled false`
+(it is the V8 heap that saturates, not the cgroup). **34 minutes at rest: nothing. 90 seconds under
+campaign: 0.02 → 4.9 GiB, then death.** The premise "it self-destructs on its own" is therefore
+**contradicted by the measurement**, and the bench's original finding — *autonomous mode kills the target* — is
+**restored**. The product decision "no throttle is justified" rests on a false premise.
 
-Ce qui tient, en revanche, c'est le correctif lui-même : `Tirées=8` sur le cadavre (contre 1107
-avant), chaque abstention nommée (« la cible a répondu pendant ce run puis a CESSÉ de répondre »), et
-**aucun oracle qualifiant n'a émis de verdict post-mortem** — les 22 findings postérieurs à la mort
-sont tous des enregistrements `feroxbuster` de l'outil qui était en vol au moment du crash.
+What does hold, on the other hand, is the fix itself: `Tirées=8` (fired) on the corpse (against 1107
+before), each abstention named (« la cible a répondu pendant ce run puis a CESSÉ de répondre », the target answered during this run then STOPPED answering), and
+**no qualifying oracle emitted a post-mortem verdict** — the 22 findings after the death
+are all `feroxbuster` records from the tool that was in flight at the time of the crash.
 
-### D14 — `header_injection.probe` : la garde D4 ne couvre QUE la voie `Location` ; la voie du CORPS est intacte
+### D14 — `header_injection.probe`: the D4 guard covers ONLY the `Location` path; the BODY path is intact
 
-Décrit en détail en §5.2bis. En résumé : **4 HIGH faux sur DVWA, exactement autant qu'avant**, sur les
-mêmes répertoires, à un caractère près.
+Described in detail in §5.2bis. In short: **4 false HIGH on DVWA, exactly as many as before**, on the
+same directories, to within one character.
 
 ```
 curl -H 'Host: evil.forge-hh.test' http://127.0.0.1:8081/docs/      -> 200, AUCUN Location
@@ -604,30 +608,31 @@ curl -H 'Host: evil.forge-hh.test' http://127.0.0.1:8081/docs/      -> 200, AUCU
   (identique sur /config/, /external/, /external/phpids/0.6/ — et sur toute page 404)
 ```
 
-`ServerSignature On` est le défaut Debian d'Apache : **toute** page auto-générée recopie l'en-tête
-`Host`. Le reflet est du texte inerte dans un `<address>` — aucun lien, aucun cache, aucun lien de
-réinitialisation. Aucune des quatre applications ne déclare cette classe dans sa vérité terrain.
+`ServerSignature On` is Apache's Debian default: **every** auto-generated page copies the
+`Host` header. The reflection is inert text inside an `<address>` — no link, no cache, no
+reset link. None of the four applications declares this class in its ground truth.
 
-Mécanique, à la ligne : `_host_reflection` (`httpflow.py:520`) n'appelle `_is_canonical_redirect` que
-pour discriminer le `Location`. Dès que le marqueur est dans le corps, `_reflected_in`
-(`httpflow.py:286`) rend `"corps"` sans autre examen, et la seule garde restante est
-`control_reflects_host` — **la garde que D4 a elle-même démontrée incapable** : la requête de contrôle
-part sans l'en-tête injecté, donc le marqueur ne peut par construction jamais y apparaître, et elle
-rend toujours `False`. Le correctif D4 a donc traité **le symptôme observé** (la redirection de
-répertoire), pas **le mécanisme** (une garde de contrôle qui ne peut rien garder).
+Mechanics, to the line: `_host_reflection` (`httpflow.py:520`) only calls `_is_canonical_redirect`
+to discriminate the `Location`. As soon as the marker is in the body, `_reflected_in`
+(`httpflow.py:286`) returns `"corps"` (body) without further examination, and the only remaining guard is
+`control_reflects_host` — **the guard that D4 itself showed to be incapable**: the control request
+goes out without the injected header, so the marker can by construction never appear in it, and it
+always returns `False`. The D4 fix therefore addressed **the observed symptom** (the directory
+redirect), not **the mechanism** (a control guard that can guard nothing).
 
-### D15 — Le drapeau `partial` du BANC est vrai pour toute campagne, interrompue ou non
+### D15 — The BENCH's `partial` flag is true for every campaign, interrupted or not
 
-Défaut **du banc**, pas du moteur, et il touche une colonne publiée : `harness.py:108` décide
-`partial = hard_kill or ("PARTIEL" in text.upper()) or ("interrompu" in text.lower())`, où `text` est
-la sortie standard de forge **plus** le rapport. Or `forge/cli/engine.py:177` émet, **au lancement**
-de toute campagne pourvue d'un `--run-timeout` :
+A defect **of the bench**, not of the engine, and it affects a published column: `harness.py:108` decides
+`partial = hard_kill or ("PARTIEL" in text.upper()) or ("interrompu" in text.lower())`, where `text` is
+forge's standard output **plus** the report. But `forge/cli/engine.py:177` emits, **at the launch**
+of any campaign given a `--run-timeout`:
 
 > `# Budget de temps : 900s — à l'échéance le run S'ARRÊTE proprement (frontière d'action) et rend un
 > rapport annoncé PARTIEL.`
+> (Time budget: 900s — at the deadline the run STOPS cleanly, at an action boundary, and returns a report announced as PARTIAL.)
 
-Contre-épreuve exécutée — une campagne d'**une seule action**, terminée en quelques secondes,
-`Déférées(budget)=0`, `rc=0`, rapport **sans** bannière d'interruption :
+Counter-test run — a campaign of **a single action**, finished in a few seconds,
+`Déférées(budget)=0` (deferred), `rc=0`, report **without** an interruption banner:
 
 ```
 banniere de LANCEMENT contient « PARTIEL »  -> OUI (ligne 1)
@@ -635,21 +640,21 @@ rapport annonce « RAPPORT PARTIEL »          -> NON (0 occurrence)
 ce que le harnais en déduit                  -> partial = True
 ```
 
-Conséquence : les quatre lignes `OUI (budget)` de la colonne « run partiel » du tableau §5.1 **du
-2026-08-10 ne portaient aucune information**. Le vrai décompte, lu dans le rapport du moteur (qui, lui,
-dit vrai) : **une seule** campagne sur quatre a réellement été interrompue par le budget — VAmPI B
-(909,3 s pour 900 s demandées, bannière « RAPPORT PARTIEL » présente). DVWA B (617 s) et DVGA B
-(718 s) sont allées au bout, avec des actions **non démarrées** par la gate de budget et nommées comme
-telles (`web.testssl`, `web.zap_baseline`, `xss.dalfox` : « borne d'exécution déclarée 600s > budget
-de temps restant 299s »). Juice Shop B s'est arrêtée sur la mort de la cible, pas sur le budget.
-La colonne a été retirée du tableau et remplacée par ce paragraphe.
+Consequence: the four `OUI (budget)` (YES) rows of the "partial run" column of the §5.1 table **of
+2026-08-10 carried no information**. The true count, read in the engine's report (which, for its part,
+tells the truth): **only one** campaign out of four was actually interrupted by the budget — VAmPI B
+(909.3 s for 900 s requested, « RAPPORT PARTIEL » banner present). DVWA B (617 s) and DVGA B
+(718 s) ran to completion, with actions **not started** by the budget gate and named as
+such (`web.testssl`, `web.zap_baseline`, `xss.dalfox`: « borne d'exécution déclarée 600s > budget
+de temps restant 299s », declared execution bound 600s > remaining time budget 299s). Juice Shop B stopped on the target's death, not on the budget.
+The column was removed from the table and replaced by this paragraph.
 
-### D16 — 13 nmap sur 13 rendent « j'ai vérifié » après avoir scanné **0 hôte**
+### D16 — 13 nmap out of 13 return "I checked" after scanning **0 hosts**
 
-Le correctif D9 a bien fait chuter le **nombre** de tirs nmap (72 → 13) en appliquant au balayage
-autonome la règle que `brain.py:175` énonçait déjà. Mais le défaut que D9 nommait — *« un outil qui
-n'a rien scanné est rendu en “j'ai vérifié” »* — est **intact**, et sa fréquence est passée de 22/72
-à **13/13**.
+The D9 fix did bring down the **number** of nmap shots (72 → 13) by applying to the autonomous
+sweep the rule that `brain.py:175` already stated. But the defect D9 named — *"a tool that
+scanned nothing is rendered as 'I checked'"* — is **intact**, and its frequency went from 22/72
+to **13/13**.
 
 ```
 poc      : docker run --rm --network host instrumentisto/nmap -sV -Pn --top-ports 1000 127.0.0.1:8081
@@ -657,25 +662,25 @@ evidence : Nmap done: 0 IP addresses (0 hosts up) scanned in 1.10 seconds
 statut   : tested      titre : « Services exposés (nmap -sV) »
 ```
 
-Les 13 tirs (DVWA ×5, DVGA ×4, VAmPI ×3, Juice Shop ×1) scannent tous **0 hôte** et rendent tous
-`tested`. Deux causes distinctes, aucune couverte :
+The 13 shots (DVWA ×5, DVGA ×4, VAmPI ×3, Juice Shop ×1) all scan **0 hosts** and all return
+`tested`. Two distinct causes, neither covered:
 
-- **forme URL** — `http://127.0.0.1:8081`, `http://127.0.0.1:8081/`, `https://127.0.0.1:8081` sont
-  encore proposées à nmap. Le garde de D9 discrimine « endpoint » et « hôte » ; une URL de RACINE
-  passe pour un hôte ;
-- **forme `host:port`** — `127.0.0.1:8081` est traité par nmap comme un **nom d'hôte** à résoudre, qui
-  n'existe pas → `0 IP addresses`. Même la forme « correcte » est donc inscannable telle quelle.
+- **URL form** — `http://127.0.0.1:8081`, `http://127.0.0.1:8081/`, `https://127.0.0.1:8081` are
+  still proposed to nmap. The D9 guard discriminates "endpoint" and "host"; a ROOT URL
+  passes for a host;
+- **`host:port` form** — `127.0.0.1:8081` is treated by nmap as a **host name** to resolve, which
+  does not exist → `0 IP addresses`. Even the "correct" form is therefore unscannable as is.
 
-nmap sort `rc=0` dans les deux cas, donc la borne `rc != 0` de `blindness.tool_did_not_run` ne peut
-toujours pas le voir. Un opérateur lit « Services exposés — vérifié » là où rien n'a été regardé.
+nmap exits with `rc=0` in both cases, so the `rc != 0` bound of `blindness.tool_did_not_run` still cannot
+see it. An operator reads "Exposed services — checked" where nothing was looked at.
 
-### D17 — Le banc a émis du trafic vers un TIERS, et sa liste d'exclusion ne pouvait pas le voir
+### D17 — The bench emitted traffic towards a THIRD PARTY, and its exclusion list could not see it
 
-Défaut **du banc**, et il touche sa garantie de sûreté la plus forte (§4 : « aucun trafic vers un
-tiers »). `provision.THIRD_PARTY_MODULES` exclut les modules dont **l'intention déclarée** est
-d'interroger un tiers (crt.sh, Wayback, résolveurs DNS publics, dépôts de templates, collecteurs de
-callback). `recon.httpx` n'en fait pas partie — il ne parle qu'à la cible… sauf au premier
-démarrage :
+A defect **of the bench**, and it affects its strongest safety guarantee (§4: "no traffic towards a
+third party"). `provision.THIRD_PARTY_MODULES` excludes the modules whose **declared intent** is
+to query a third party (crt.sh, Wayback, public DNS resolvers, template repositories, callback
+collectors). `recon.httpx` is not one of them — it only talks to the target… except on first
+start:
 
 ```
 finding « Fingerprint HTTP (httpx) », evidence :
@@ -685,63 +690,63 @@ finding « Fingerprint HTTP (httpx) », evidence :
   2026/08/11 10:43:42 INFO Model downloaded size=92.6MB
 ```
 
-Constaté **4 fois** (DVWA ×2, DVGA, Juice Shop ; le conteneur tourne en `--rm`, donc rien n'est mis en
-cache d'un tir à l'autre) : soit ≈ **370 Mio téléchargés depuis huggingface.co** pendant un run dont
-la propriété annoncée est le loopback strict. Aucune requête n'est sortie **vers les cibles**, et le
-`verify_loopback_only()` a bien fait son travail — mais il vérifie les sockets d'**écoute**, pas
-l'**egress**. Balayage des 4 906 findings : c'est le **seul** egress prouvé ; toutes les autres
-occurrences d'hôtes tiers sont du contenu de page cité en evidence (`github.com` dans le HTML de
-DVGA), des bannières d'outil (`nmap.org`), ou des marqueurs synthétiques jamais résolus
+Observed **4 times** (DVWA ×2, DVGA, Juice Shop; the container runs with `--rm`, so nothing is
+cached from one shot to the next): that is ≈ **370 MiB downloaded from huggingface.co** during a run whose
+announced property is strict loopback. No request went out **towards the targets**, and
+`verify_loopback_only()` did its job — but it checks **listening** sockets, not
+**egress**. Sweep of the 4,906 findings: this is the **only** proven egress; all the other
+occurrences of third-party hosts are page content quoted as evidence (`github.com` in DVGA's
+HTML), tool banners (`nmap.org`), or synthetic markers never resolved
 (`attacker.example`, `forge-redirect.example`).
 
-**La leçon est la même que celle de D5** : une garde formulée sur l'INTENTION d'un module ne peut pas
-attraper un comportement de son outil sous-jacent. Il faudrait mesurer l'egress (réseau du conteneur
-d'outil coupé, ou observation) plutôt que de le déclarer.
+**The lesson is the same as D5's**: a guard formulated on a module's INTENT cannot
+catch a behaviour of its underlying tool. Egress would have to be measured (tool container
+network cut off, or observation) rather than declared.
 
-### D18 — L'amorçage du banc mute la cible, et le banc ne le dit pas
+### D18 — The bench's seeding mutates the target, and the bench does not say so
 
-Mineur, mais il fausse toute reprise manuelle. L'action `csrf.state_change` de la piste A vise
-`/vulnerabilities/csrf/?password_new=a&password_conf=a&Change=Change` : elle **change réellement le
-mot de passe** du compte `admin` de DVWA en `a`. Constaté après coup — la reconnexion manuelle avec
-`admin/password` échoue, `admin/a` réussit. Un nouveau run du banc n'en souffre pas
-(`provision.prime_dvwa` réinitialise la base via `setup.php` avant de se connecter), mais toute
-vérification manuelle faite APRÈS un run doit le savoir. L'`AuthMaterial.declared` de DVWA ne
-mentionne pas cet effet de bord.
+Minor, but it skews any manual follow-up. The track-A `csrf.state_change` action targets
+`/vulnerabilities/csrf/?password_new=a&password_conf=a&Change=Change`: it **actually changes the
+password** of DVWA's `admin` account to `a`. Observed afterwards — manual reconnection with
+`admin/password` fails, `admin/a` succeeds. A new bench run does not suffer from it
+(`provision.prime_dvwa` resets the database via `setup.php` before connecting), but any
+manual check made AFTER a run must know it. DVWA's `AuthMaterial.declared` does not
+mention this side effect.
 
-## 7. Ce qui a bien tenu (à ne pas perdre)
+## 7. What held up well (not to be lost)
 
-- **L'anti-masquage est réel.** ~~Le run DVWA a été coupé par le budget et le rapport l'annonce en
-  tête : « RAPPORT PARTIEL — RUN INTERROMPU », « 1751 action(s) exécutée(s) sur 2700 planifiée(s),
-  949 jamais tentée(s) »~~ — **exemple corrigé le 2026-08-11, il n'était pas le bon** : le drapeau qui
-  l'avait désigné venait du banc, pas du moteur (défaut **D15**). Le mécanisme, lui, tient et se
-  vérifie sur la campagne qui a VRAIMENT été interrompue, **VAmPI B** (909,3 s pour 900 s demandées) :
-  son rapport porte bien la bannière « RAPPORT PARTIEL — RUN INTERROMPU » en tête, et forge le répète
-  jusque dans le résumé de sortie — « 1 finding(s) PROUVÉ(S) vulnerable (run INTERROMPU : ce total ne
-  couvre que la partie exécutée) ». Sur les campagnes NON interrompues, la même discipline s'applique
-  aux actions non démarrées par la gate de budget, nommées une par une : « borne d'exécution déclarée
+- **Anti-masking is real.** ~~The DVWA run was cut off by the budget and the report announces it at the
+  top: « RAPPORT PARTIEL — RUN INTERROMPU », « 1751 action(s) exécutée(s) sur 2700 planifiée(s),
+  949 jamais tentée(s) »~~ — **example corrected on 2026-08-11, it was not the right one**: the flag that
+  had designated it came from the bench, not from the engine (defect **D15**). The mechanism itself holds and can be
+  verified on the campaign that was REALLY interrupted, **VAmPI B** (909.3 s for 900 s requested):
+  its report does carry the « RAPPORT PARTIEL — RUN INTERROMPU » (PARTIAL REPORT — RUN INTERRUPTED) banner at the top, and forge repeats it
+  even in the output summary — « 1 finding(s) PROUVÉ(S) vulnerable (run INTERROMPU : ce total ne
+  couvre que la partie exécutée) » (1 PROVEN vulnerable finding; run INTERRUPTED: this total only covers the executed part). On the NON-interrupted campaigns, the same discipline applies
+  to the actions not started by the budget gate, named one by one: « borne d'exécution déclarée
   600s > budget de temps restant 299s — la démarrer dépasserait l'échéance ; AUCUN verdict n'est émis
-  pour cette action (non testée, pas “rien trouvé”) ».
-- **La discipline de preuve tient sur les négatifs**, et elle a tenu deux fois : ~~1770 des 1806
-  findings DVWA~~ → **1476 des 1558** sont des `INFO` `tested`/`skipped` explicites (le reste : 78 LOW
-  et les 4 HIGH faux) ; aucun verdict aveugle, chaque abstention est nommée. Mieux qu'avant : les abstentions qui étaient auparavant des
-  verdicts fabriqués (`xss.stored`) ou muettes (`privesc`) sont désormais motivées en clair.
-- **La gate de liveness tient sur sa propre mesure.** Juice Shop est morte pendant la campagne, comme
-  la première fois — mais **`Tirées=8`** sur le cadavre, chaque `SKIP` nommé (« la cible a répondu
-  pendant ce run puis a CESSÉ de répondre »), et **aucun oracle qualifiant n'a émis de verdict
-  post-mortem** (contre 221 « j'ai vérifié, rien trouvé » avant).
-- **Une revendication d'outil tiers reste cantonnée.** `dalfox` a signalé un XSS réfléchi sur
-  `/docs?any=…` ; vérification manuelle : la charge revient **URL-encodée** dans le `href`, donc
-  inerte. Forge l'a classé `reported_by_tool` / LOW, sous « Signal à qualifier (exploitabilité NON
-  démontrée) » — jamais promu. C'est le bon comportement, et il n'a pas régressé : les 70
-  `reported_by_tool` du rejeu sont tous en LOW, aucun promu.
-- **Le scope-guard fait ce qu'il dit.** `scope-check` in-scope → `rc=0`, hors périmètre
-  (`http://example.com`) → `rc=1`, sur les **quatre** engagements des **deux** campagnes ; aucune
-  requête n'est sortie de la boucle locale **vers une cible**. Réserve nommée : un outil, lui, est
-  sorti — voir **D17**.
-- **Le contrat de code de sortie est désormais honoré** (D11) : 5 des 8 runs rendent `rc=1`, et ce
-  sont exactement les 5 qui portent un finding `vulnerable`.
+  pour cette action (non testée, pas “rien trouvé”) » (starting it would exceed the deadline; NO verdict is emitted for this action — not tested, not "nothing found").
+- **Evidence discipline holds on negatives**, and it held twice: ~~1770 of the 1806
+  DVWA findings~~ → **1476 of the 1558** are explicit `INFO` `tested`/`skipped` (the rest: 78 LOW
+  and the 4 false HIGH); no blind verdict, each abstention is named. Better than before: the abstentions that were previously
+  fabricated verdicts (`xss.stored`) or silent (`privesc`) are now explained in plain words.
+- **The liveness gate holds on its own measurement.** Juice Shop died during the campaign, as
+  the first time — but **`Tirées=8`** on the corpse, each `SKIP` named (« la cible a répondu
+  pendant ce run puis a CESSÉ de répondre »), and **no qualifying oracle emitted a post-mortem
+  verdict** (against 221 "I checked, nothing found" before).
+- **A third-party tool claim stays contained.** `dalfox` reported a reflected XSS on
+  `/docs?any=…`; manual check: the payload comes back **URL-encoded** in the `href`, hence
+  inert. Forge classified it `reported_by_tool` / LOW, under « Signal à qualifier (exploitabilité NON
+  démontrée) » (signal to qualify, exploitability NOT demonstrated) — never promoted. This is the right behaviour, and it has not regressed: the 70
+  `reported_by_tool` of the replay are all LOW, none promoted.
+- **The scope-guard does what it says.** `scope-check` in scope → `rc=0`, out of scope
+  (`http://example.com`) → `rc=1`, on the **four** engagements of **both** campaigns; no
+  request left local loopback **towards a target**. Named reservation: a tool, for its part, did
+  go out — see **D17**.
+- **The exit-code contract is now honoured** (D11): 5 of the 8 runs return `rc=1`, and they
+  are exactly the 5 that carry a `vulnerable` finding.
 
-## 8. Reproduire
+## 8. Reproduce
 
 ```bash
 python3 -m bench.detection.run_bench --workdir /tmp/bench --track both --budget 900
@@ -749,15 +754,15 @@ python3 -m bench.detection.report   --workdir /tmp/bench --verdicts bench/detect
 python3 -c "from bench.detection import provision; provision.teardown()"
 ```
 
-`run_bench` écrit `manifest.json` (amorçage, scope rédigé, durées, drapeau `partial` par piste —
-**attention : ce drapeau est faux, cf. D15 ; lire la bannière du rapport du moteur**), un store
-`--memory` JSONL par piste et par application (les findings bruts), le rapport markdown du moteur et
-son ledger signé.
+`run_bench` writes `manifest.json` (seeding, redacted scope, durations, `partial` flag per track —
+**caution: this flag is wrong, cf. D15; read the banner of the engine's report**), a JSONL
+`--memory` store per track and per application (the raw findings), the engine's markdown report and
+its signed ledger.
 
-Sorties brutes conservées, une par campagne — **jamais écrasées** :
+Raw outputs kept, one per campaign — **never overwritten**:
 [`RESULTS_2026-08-10.md`](../bench/detection/RESULTS_2026-08-10.md) ·
 [`RESULTS_2026-08-11.md`](../bench/detection/RESULTS_2026-08-11.md).
-Les verdicts manuels des deux campagnes cohabitent dans
-[`verdicts.json`](../bench/detection/verdicts.json) : les cibles ont changé de forme entre les deux
-runs (correctif D6), donc les clés ne se recouvrent pas, et `report.py` n'apparie que celles du run
-qu'on lui donne.
+The manual verdicts of both campaigns coexist in
+[`verdicts.json`](../bench/detection/verdicts.json): the targets changed shape between the two
+runs (D6 fix), so the keys do not overlap, and `report.py` only matches those of the run
+it is given.

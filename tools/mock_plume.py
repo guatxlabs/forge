@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """mock_plume.py — DEMO FIXTURE stub of the Plume SOC detection API (stdlib only).
 
 ⚠️  THIS IS NOT A REAL SOC. It serves a fixed, synthetic seed of MITRE-tagged "detections"

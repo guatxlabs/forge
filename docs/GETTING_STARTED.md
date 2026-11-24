@@ -1,90 +1,92 @@
-# Forge — Démarrage (parcours opérateur bout-en-bout, 100 % hors-ligne)
+# Forge — Getting started (end-to-end operator path, 100 % offline)
 
-> 🧭 [Documentation Forge](README.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.md) ·
-> [Installation](INSTALLATION.md) · [Référence CLI](CLI.md)
+[English](GETTING_STARTED.md) | [Français](GETTING_STARTED.fr.md)
 
-> Ce guide se fait **entièrement hors-ligne**, avec l'**engagement de référence synthétique** fourni
-> ([`examples/reference-engagement/`](../examples/reference-engagement/)) et le **stub mock-Plume**
-> stdlib ([`tools/mock_plume.py`](../tools/mock_plume.py)). **Aucun service externe, aucune cible
-> réelle, aucun SOC réel** n'est requis. Chaque étape a un point de contrôle **« Ce que tu dois
-> voir »** : si ça ne correspond pas, arrête-toi là avant de continuer.
+> 🧭 [Forge documentation](README.md) · See also: [Overview](OVERVIEW.md) ·
+> [Installation](INSTALLATION.md) · [CLI reference](CLI.md)
+
+> This guide runs **entirely offline**, with the provided **synthetic reference engagement**
+> ([`examples/reference-engagement/`](../examples/reference-engagement/)) and the stdlib **mock-Plume
+> stub** ([`tools/mock_plume.py`](../tools/mock_plume.py)). **No external service, no real
+> target, no real SOC** is required. Each step has a **"What you should
+> see"** checkpoint: if it does not match, stop there before going on.
 >
-> ⚠️ Cadre **autorisé uniquement** (bug bounty in-scope, pentest sous contrat, CTF, infra propre).
-> Passer un WAF/Cloudflare ≠ une faille : la gate ROE + le scope-guard + le ledger sont là pour
-> **imposer ET prouver** l'autorisation. Voir [`../README.md`](../README.md).
+> ⚠️ **Authorized settings only** (in-scope bug bounty, contracted pentest, CTF, your own infra).
+> Getting past a WAF/Cloudflare ≠ a vulnerability: the ROE gate + the scope-guard + the ledger are there to
+> **enforce AND prove** the authorization. See [`../README.md`](../README.md).
 
-Toutes les commandes se lancent depuis la racine du dépôt.
+All commands are run from the repository root.
 
 ---
 
-## (a) Installer / construire
+## (a) Install / build
 
-Le cœur Python est **pur-stdlib** (`deps=[]`) ; la console est un binaire Rust unique.
+The Python core is **pure-stdlib** (`deps=[]`); the console is a single Rust binary.
 
 ```bash
-# 1) moteur Python (met l'exécutable `forge` sur le PATH)
-pip install -e .            # sans install : préfixer les commandes par `python3 -m forge.cli`
+# 1) Python engine (puts the `forge` executable on the PATH)
+pip install -e .            # without install: prefix commands with `python3 -m forge.cli`
 
-# 2) console Rust (compile offline depuis le cache cargo)
+# 2) Rust console (compiles offline from the cargo cache)
 cd console && cargo build --release && cd ..
 
-# 3) suite de tests complète (stdlib côté Python + cargo côté console, zéro réseau)
+# 3) full test suite (stdlib on the Python side + cargo on the console side, zero network)
 make test                  # = python3 -m unittest discover -s tests -t .  +  (cd console && cargo test)
-python3 -m unittest discover -s tests -t .   # Python seul (1513 tests)
+python3 -m unittest discover -s tests -t .   # Python only (2949 tests, MEASURED on 2026-11-24)
 ```
 
-> **Ce que tu dois voir** : `pip install -e .` termine sans erreur et `forge --version` répond
-> (version dérivée du fichier [`../VERSION`](../VERSION)). `cargo build --release` produit
-> `console/target/release/forge`. `make test` finit sur **`OK`** (1513 tests Python verts + 418 tests Rust,
-> cargo test de la console). L'empreinte et la matrice de déploiement (Docker / k8s / host / venv)
-> sont détaillées dans [`DEPLOYMENT.md`](DEPLOYMENT.md).
+> **What you should see**: `pip install -e .` completes without error and `forge --version` answers
+> (version derived from the [`../VERSION`](../VERSION) file). `cargo build --release` produces
+> `console/target/release/forge`. `make test` ends on **`OK`** (2949 green Python tests + 571 Rust tests, MEASURED on 2026-11-24,
+> cargo test of the console). The footprint and the deployment matrix (Docker / k8s / host / venv)
+> are detailed in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
-## (b) Mettre en place le scope (ROE)
+## (b) Set up the scope (ROE)
 
-Forge est **INERTE par défaut** : `in_scope` vide ⇒ tout est refusé (fail-closed). Pour un vrai
-engagement, on copie l'exemple puis on renseigne `in_scope` **avec autorisation écrite** :
+Forge is **INERT by default**: empty `in_scope` ⇒ everything is refused (fail-closed). For a real
+engagement, copy the example then fill in `in_scope` **with written authorization**:
 
 ```bash
-cp scope.example.json scope.json     # scope.json est gitignored ; scope.example.json (INERTE) est committé
+cp scope.example.json scope.json     # scope.json is gitignored; scope.example.json (INERT) is committed
 ```
 
-> ⚠️ **Garde compose** — en déploiement Docker, **créer `scope.json` AVANT `docker compose up`**.
-> Le bind-mount attend un **fichier** : si `./scope.json` est absent, Docker crée un **répertoire**
-> vide à sa place. Le point d'entrée compose **échoue bruyamment** dans ce cas, et **bascule sur le
-> `scope.example.json` embarqué (INERTE)** si `scope.json` manque ou est vide (cf.
-> [`../docker-compose.yml`](../docker-compose.yml)). Rien ne tire tant que le scope n'autorise pas.
+> ⚠️ **Compose guard** — in a Docker deployment, **create `scope.json` BEFORE `docker compose up`**.
+> The bind-mount expects a **file**: if `./scope.json` is missing, Docker creates an empty
+> **directory** in its place. The compose entrypoint **fails loudly** in that case, and **falls back to the
+> embedded `scope.example.json` (INERT)** if `scope.json` is missing or empty (see
+> [`../docker-compose.yml`](../docker-compose.yml)). Nothing fires as long as the scope does not authorize it.
 
-Pour ce guide hors-ligne, **on n'édite rien** : on réutilise le scope déjà fourni avec l'engagement
-de référence — [`examples/reference-engagement/scope.json`](../examples/reference-engagement/scope.json)
-(grey-box, `allow_exploit=false`, `allow_destructive=false`, hôtes `.example` réservés).
+For this offline guide, **nothing is edited**: we reuse the scope already provided with the reference
+engagement — [`examples/reference-engagement/scope.json`](../examples/reference-engagement/scope.json)
+(grey-box, `allow_exploit=false`, `allow_destructive=false`, reserved `.example` hosts).
 
 ```bash
 forge scope-check api.lab.example --scope examples/reference-engagement/scope.json   # IN SCOPE ✅
-forge scope-check evil.example    --scope examples/reference-engagement/scope.json   # HORS SCOPE ⛔
+forge scope-check evil.example    --scope examples/reference-engagement/scope.json   # OUT OF SCOPE ⛔ (printed as « HORS SCOPE ⛔ »)
 ```
 
-> **Ce que tu dois voir** : la 1re commande imprime `IN SCOPE ✅`, la 2de `HORS SCOPE ⛔`
-> (code de sortie `1`). Le scope-guard tranche l'appartenance **avant** tout test.
+> **What you should see**: the 1st command prints `IN SCOPE ✅`, the 2nd `HORS SCOPE ⛔` (out of scope)
+> (exit code `1`). The scope-guard decides membership **before** any test.
 
 ---
 
-## (c) Peupler la console (campagne gatée, ou `make demo`)
+## (c) Populate the console (gated campaign, or `make demo`)
 
-Deux chemins, tous deux hors-ligne :
+Two paths, both offline:
 
-**Chemin rapide — `make demo`** ingère les fixtures de l'engagement de référence directement dans
-SQLite (idempotent, sans réseau, ne touche que la campagne démo `acme-lab`, run `seed-demo-acme-lab`) :
+**Fast path — `make demo`** ingests the reference engagement fixtures directly into
+SQLite (idempotent, no network, touches only the demo campaign `acme-lab`, run `seed-demo-acme-lab`):
 
 ```bash
-make demo          # amorce la base démo + lance la console peuplée -> http://127.0.0.1:7100
+make demo          # seeds the demo database + starts the populated console -> http://127.0.0.1:7100
 ```
 
-**Chemin CLI — lancer une campagne gatée** contre le seed (démontre plan → ROE → dry/fire → ledger →
-rapport). Le scope de référence est INERTE côté capacités (`allow_exploit=false`) : sans `--arm`, tout
-reste en `DRY_RUN`/`VETO` (aucun effet), ce qui est le comportement voulu — Forge ne tire jamais à
-l'aveugle.
+**CLI path — launch a gated campaign** against the seed (demonstrates plan → ROE → dry/fire → ledger →
+report). The reference scope is INERT on the capability side (`allow_exploit=false`): without `--arm`, everything
+stays in `DRY_RUN`/`VETO` (no effect), which is the intended behaviour — Forge never fires
+blindly.
 
 ```bash
 python3 -m forge.cli campaign \
@@ -93,60 +95,60 @@ python3 -m forge.cli campaign \
     --campaign getting-started --ledger engagements/gs.jsonl --report /tmp/gs_report.md
 ```
 
-> **Ce que tu dois voir** : après `make demo`, la console écoute sur `http://127.0.0.1:7100` et ses
-> onglets **Findings / Couverture ATT&CK / Runs** sont peuplés (6 findings, 8 run-records, campagne
-> `acme-lab`). Après la campagne CLI : une ligne `Tirées=… Simulées=… Refusées=…` puis
-> `Rapport -> /tmp/gs_report.md`, et la liste des **lacunes de couverture** (classes jamais tentées) —
-> zéro lacune silencieuse.
+> **What you should see**: after `make demo`, the console listens on `http://127.0.0.1:7100` and its
+> **Findings / Couverture ATT&CK / Runs** tabs (Findings / ATT&CK Coverage / Runs) are populated (6 findings, 8 run-records, campaign
+> `acme-lab`). After the CLI campaign: a line `Tirées=… Simulées=… Refusées=…` (fired / simulated / refused) then
+> `Rapport -> /tmp/gs_report.md`, and the list of **coverage gaps** (classes never attempted) —
+> zero silent gaps.
 
 ---
 
-## (d) Voir findings + preuves + couverture ATT&CK dans la console
+## (d) See findings + evidence + ATT&CK coverage in the console
 
-Console peuplée par `make demo`, à `http://127.0.0.1:7100` :
+Console populated by `make demo`, at `http://127.0.0.1:7100`:
 
-| Onglet | URL | Contenu |
+| Tab | URL | Contents |
 |---|---|---|
-| Findings | <http://127.0.0.1:7100/#findings> | 6 findings avec sévérité, CWE, statut, **evidence** et **PoC** |
-| Couverture ATT&CK | <http://127.0.0.1:7100/#coverage> | par technique MITRE : nb de runs tentés et combien ont **tiré** |
-| Détection purple | <http://127.0.0.1:7100/#purple-coverage> | matrice détecté/raté (peuplée à l'étape (e)) |
-| Ledger | <http://127.0.0.1:7100/#ledger> | intégrité de la chaîne d'engagement |
+| Findings | <http://127.0.0.1:7100/#findings> | 6 findings with severity, CWE, status, **evidence** and **PoC** |
+| « Couverture ATT&CK » (*ATT&CK Coverage*) | <http://127.0.0.1:7100/#coverage> | per MITRE technique: number of runs attempted and how many **fired** |
+| « Détection purple » (*Purple detection*) | <http://127.0.0.1:7100/#purple-coverage> | detected/missed matrix (populated in step (e)) |
+| Ledger | <http://127.0.0.1:7100/#ledger> | integrity of the engagement chain |
 
-En API (mêmes données, lecture) : `GET /api/findings`, `GET /api/coverage`, `GET /api/runrecords`.
+Through the API (same data, read-only): `GET /api/findings`, `GET /api/coverage`, `GET /api/runrecords`.
 
-> **Ce que tu dois voir** : l'onglet **Findings** liste l'IDOR cross-tenant, le SSRF OOB, le CORS
-> credential, le token de reset prédictible, l'exposition d'origine et les en-têtes manquants —
-> chacun avec son **evidence** et sa **PoC**. L'onglet **Couverture ATT&CK** montre les techniques
-> tirées (T1595, T1046, T1190, T1212, T1590.005, T1595.002, T1539).
+> **What you should see**: the **Findings** tab lists the cross-tenant IDOR, the OOB SSRF, the credentialed
+> CORS, the predictable reset token, the origin exposure and the missing headers —
+> each with its **evidence** and its **PoC**. The **« Couverture ATT&CK »** (*ATT&CK Coverage*) tab shows the fired
+> techniques (T1595, T1046, T1190, T1212, T1590.005, T1595.002, T1539).
 
 ---
 
-## (e) Boucle purple : matrice détecté / raté / MTTD (stub mock-Plume)
+## (e) Purple loop: detected / missed / MTTD matrix (mock-Plume stub)
 
 ```bash
-make demo-purple   # démarre tools/mock_plume.py (DEMO FIXTURE) + la console avec PLUME_URL réglé
+make demo-purple   # starts tools/mock_plume.py (DEMO FIXTURE) + the console with PLUME_URL set
 ```
 
-`make demo-purple` lance le **stub mock-Plume** sur `127.0.0.1:8899`, qui sert un jeu **fixe et
-synthétique** de détections MITRE ([`examples/reference-engagement/detections.jsonl`](../examples/reference-engagement/detections.jsonl)),
-puis démarre la console avec `PLUME_URL` pointé dessus. La console fait la **jointure**
-red-tiré ↔ blue-détecté et affiche la matrice.
+`make demo-purple` runs the **mock-Plume stub** on `127.0.0.1:8899`, which serves a **fixed,
+synthetic** set of MITRE detections ([`examples/reference-engagement/detections.jsonl`](../examples/reference-engagement/detections.jsonl)),
+then starts the console with `PLUME_URL` pointed at it. The console performs the **join**
+red-fired ↔ blue-detected and displays the matrix.
 
-> ⚠️ **Ceci est une fixture de démonstration, PAS un vrai SOC.** Le stub étiquette chaque réponse
-> `DEMO FIXTURE` (`_demo:true`, `_warning`, en-tête `X-Demo-Fixture`). **Ne jamais** pointer un
-> engagement réel dessus.
+> ⚠️ **This is a demonstration fixture, NOT a real SOC.** The stub labels every response
+> `DEMO FIXTURE` (`_demo:true`, `_warning`, header `X-Demo-Fixture`). **Never** point a
+> real engagement at it.
 
-> **Ce que tu dois voir** : sur <http://127.0.0.1:7100/#purple-coverage>, la matrice affiche
-> **7 techniques tirées · 4 détectées · 3 ratées** (taux de détection 57 %, MTTD moyen ≈ 3,9 min,
-> max 6 min). Les lignes ratées (T1590.005, T1595.002, T1539) sont volontairement absentes du seed
-> de détections — c'est ce qui rend la matrice utile (détecté **ET** raté).
+> **What you should see**: on <http://127.0.0.1:7100/#purple-coverage>, the matrix shows
+> **7 techniques fired · 4 detected · 3 missed** (detection rate 57 %, average MTTD ≈ 3.9 min,
+> max 6 min). The missed rows (T1590.005, T1595.002, T1539) are deliberately absent from the detection
+> seed — that is what makes the matrix useful (detected **AND** missed).
 
 ---
 
-## (f) Générer un rapport
+## (f) Generate a report
 
-**CLI** — le rapport d'engagement markdown, écrit par
-[`forge/report.py`](../forge/report.py) `build_report` (déjà produit à l'étape (c) via `--report`) :
+**CLI** — the markdown engagement report, written by
+[`forge/report.py`](../forge/report.py) `build_report` (already produced in step (c) via `--report`):
 
 ```bash
 python3 -m forge.cli campaign --scope examples/reference-engagement/scope.json \
@@ -154,65 +156,63 @@ python3 -m forge.cli campaign --scope examples/reference-engagement/scope.json \
     --campaign gs --ledger engagements/gs.jsonl --report rapport.md
 ```
 
-Le rapport CLI porte : **en-tête d'engagement** (périmètre du scope + empreinte du ledger : head +
-clé publique Ed25519 quand disponible), synthèse par sévérité, findings détaillés, section
-**Techniques ATT&CK exercées** (les MITRE réellement tirés), transparence ROE (anti-masquage :
-simulé / refusé / déféré / jamais tenté), et un **pointeur** vers le rapport console.
+The CLI report carries: an **engagement header** (scope extent + ledger fingerprint: head +
+Ed25519 public key when available), a summary by severity, detailed findings, an
+**ATT&CK techniques exercised** section (the MITRE techniques actually fired), ROE transparency (anti-masking:
+simulated / refused / deferred / never attempted), and a **pointer** to the console report.
 
-**Console** — le livrable **complet** est servi par la console. Comme la jointure des détections
-Plume est **côté console**, c'est **lui seul** qui porte la **matrice détecté/raté + MTTD** et
-l'**annexe chaîne-de-custody** :
+**Console** — the **complete** deliverable is served by the console. Since the join with Plume
+detections is **console-side**, it **alone** carries the **detected/missed matrix + MTTD** and
+the **chain-of-custody appendix**:
 
 ```
-GET http://127.0.0.1:7100/api/runs/seed-demo-acme-lab/report            # markdown (défaut)
-GET http://127.0.0.1:7100/api/runs/seed-demo-acme-lab/report?format=html  # livrable client brandé
+GET http://127.0.0.1:7100/api/runs/seed-demo-acme-lab/report            # markdown (default)
+GET http://127.0.0.1:7100/api/runs/seed-demo-acme-lab/report?format=html  # branded client deliverable
 ```
 
-> **Ce que tu dois voir** : `rapport.md` s'ouvre sur `## Engagement` (périmètre) puis `## Synthèse`,
-> et se termine par `## Techniques ATT&CK exercées` + un renvoi explicite vers
-> `GET /api/runs/<id>/report`. Le lien console `?format=html` rend un document autonome imprimable
-> (Imprimer → « Enregistrer en PDF » ; voir [`DEPLOYMENT.md`](DEPLOYMENT.md) § Rapports & export PDF)
-> avec la matrice purple **et** l'annexe custody.
+> **What you should see**: `rapport.md` opens on `## Engagement` (scope) then `## Synthèse` (summary),
+> and ends with `## Techniques ATT&CK exercées` + an explicit pointer to
+> `GET /api/runs/<id>/report`. The console link `?format=html` renders a self-contained printable document
+> (Print → "Save as PDF"; see [`DEPLOYMENT.md`](DEPLOYMENT.md) § Reports & PDF export)
+> with the purple matrix **and** the custody appendix.
 
 ---
 
-## (g) Vérifier l'intégrité (ledger) et le préflight (doctor)
+## (g) Verify integrity (ledger) and the preflight (doctor)
 
-Le ledger d'engagement est **append-time, tamper-evident** : chaque acte est chaîné (SHA-256) et
-signé (Ed25519 par défaut ; repli HMAC si `cryptography` absent).
+The engagement ledger is **append-time, tamper-evident**: each act is chained (SHA-256) and
+signed (Ed25519 by default; HMAC fallback if `cryptography` is absent).
 
 ```bash
-# intégrité : recalcule la chaîne + vérifie chaque signature
+# integrity: recomputes the chain + verifies each signature
 forge ledger verify --ledger engagements/gs.jsonl
 
-# clé publique Ed25519 (hex) — un tiers vérifie SANS aucun secret
+# Ed25519 public key (hex) — a third party verifies WITHOUT any secret
 forge ledger pubkey --ledger engagements/gs.jsonl
-forge ledger verify --ledger engagements/gs.jsonl --pubkey <hex_ci-dessus>   # vérif externe
+forge ledger verify --ledger engagements/gs.jsonl --pubkey <hex_ci-dessus>   # external verification
 ```
 
-**Préflight de la boucle purple** (lecture seule — ne tire rien, ne touche ni scope ni ledger) :
+**Purple loop preflight** (read-only — fires nothing, touches neither scope nor ledger):
 
 ```bash
-forge doctor --purple      # état des modules + prérequis de la jointure purple
+forge doctor --purple      # module status + prerequisites of the purple join
 ```
 
-> **Ce que tu dois voir** : `ledger verify` répond `{"ok": true, "entries": N, ...}` ; `ledger
-> pubkey` imprime 64 caractères hex (ou une note claire si le ledger est signé en HMAC) ; la vérif
-> externe `--pubkey` répond `ok: true` sans aucun secret. `forge doctor --purple` liste les modules
-> opérationnels et signale ce qui manquerait pour brancher un vrai Plume — **sans rien tirer**.
+> **What you should see**: `ledger verify` answers `{"ok": true, "entries": N, ...}`; `ledger
+> pubkey` prints 64 hex characters (or a clear note if the ledger is HMAC-signed); the external
+> `--pubkey` verification answers `ok: true` without any secret. `forge doctor --purple` lists the operational
+> modules and flags what would be missing to plug in a real Plume — **without firing anything**.
 
 ---
 
-## Aller plus loin
+## Going further
 
-Tout ce guide tourne **sans Plume réel** (seed + stub mock-Plume). Pour brancher un **vrai Plume**,
-voir [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (`PLUME_URL` / `PLUME_TOKEN`) — **non requis ici**.
+This whole guide runs **without a real Plume** (seed + mock-Plume stub). To plug in a **real Plume**,
+see [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (`PLUME_URL` / `PLUME_TOKEN`) — **not required here**.
 
-- [`../README.md`](../README.md) — vue d'ensemble, gate ROE à 4 couches, catalogue de modules.
-- [`../examples/reference-engagement/README.md`](../examples/reference-engagement/README.md) — détail du seed synthétique + la matrice purple attendue.
-- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — cœur (roe/ledger/engine/schema) + boucle purple.
-- [`DEPLOYMENT.md`](DEPLOYMENT.md) — empreinte, matrice Docker/k8s/host/venv, export PDF.
-- [`PURPLE_CAMPAIGN.md`](PURPLE_CAMPAIGN.md) · [`MTTD.md`](MTTD.md) — la boucle purple en profondeur.
-- [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) — prérequis pour câbler un vrai Plume (le moat).
-</content>
-</invoke>
+- [`../README.md`](../README.md) — overview, 4-layer ROE gate, module catalogue.
+- [`../examples/reference-engagement/README.md`](../examples/reference-engagement/README.md) — details of the synthetic seed + the expected purple matrix.
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — core (roe/ledger/engine/schema) + purple loop.
+- [`DEPLOYMENT.md`](DEPLOYMENT.md) — footprint, Docker/k8s/host/venv matrix, PDF export.
+- [`PURPLE_CAMPAIGN.md`](PURPLE_CAMPAIGN.md) · [`MTTD.md`](MTTD.md) — the purple loop in depth.
+- [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) — prerequisites to wire a real Plume (the moat).

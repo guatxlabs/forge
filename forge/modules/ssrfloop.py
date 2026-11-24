@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Oracle A PREUVE du SSRF AVEUGLE RENDU VISIBLE — `ssrf.redirect_loop`.
 
 D'OU VIENT CETTE TECHNIQUE, ET POURQUOI ELLE CHANGE UNE REGLE CHEZ NOUS

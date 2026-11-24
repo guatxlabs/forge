@@ -1,62 +1,64 @@
-# Roadmap — Cycle de vie des outils : installer-ou-non + mise à jour à la demande (hybride)
+# Roadmap — Tool lifecycle: install-or-not + update on demand (hybrid)
 
-**Statut : LARGEMENT CONSTRUIT** — design approuvé le 2026-07-04, briques 1/2/3 + CLI livrées.
-Documentation utilisateur : [`docs/TOOLS_LIFECYCLE.md`](TOOLS_LIFECYCLE.md). Ce document reste la trace
-de la DÉCISION ; l'état d'avancement est récapitulé ci-dessous.
+[English](roadmap-tools-lifecycle.md) | [Français](roadmap-tools-lifecycle.fr.md)
 
-| Brique | État | Où |
+**Status: LARGELY BUILT** — design approved on 2026-07-04, building blocks 1/2/3 + CLI shipped.
+User documentation: [`docs/TOOLS_LIFECYCLE.md`](TOOLS_LIFECYCLE.md). This document remains the record
+of the DECISION; the progress status is summarised below.
+
+| Building block | State | Where |
 |---|---|---|
-| 1. Manifeste unique (fin de la duplication Dockerfile↔compose) | **fait** | `forge/tools.json` + `forge/toolsmanifest.py` ; garde `tests/test_tools_manifest.py` |
-| 2. Volume outils persistant + précédence PATH | **fait** | `/data/tools/bin` (Dockerfile `VOLUME`/`ENV PATH`/`FORGE_TOOLS_DIR`, compose `forge-tools`) |
-| 3. Intégrité des installs runtime (versions du manifeste) | **fait** | `forge/toolsinstall.py` — SHA256 pin vérifié en streaming, fail-closed, ledger obligatoire |
-| 4. Surface console — **CLI** | **fait** | `forge tools list\|install\|update\|remove` (`forge/cli/tools.py`) |
-| 4. Surface console — **API + panneau UI** | à faire | `console/` (hors périmètre du lot) |
-| 5. Sonde de version | **partiel** | version installée lue dans le reçu (`list` n'exécute rien) ; pas de `httpx -version` |
-| 4bis. UX d'intégrité hors-manifeste | **non fait, délibérément** | aucun chemin vers un download non épinglé tant qu'elle n'existe pas |
+| 1. Single manifest (end of the Dockerfile↔compose duplication) | **done** | `forge/tools.json` + `forge/toolsmanifest.py`; guard `tests/test_tools_manifest.py` |
+| 2. Persistent tools volume + PATH precedence | **done** | `/data/tools/bin` (Dockerfile `VOLUME`/`ENV PATH`/`FORGE_TOOLS_DIR`, compose `forge-tools`) |
+| 3. Integrity of runtime installs (manifest versions) | **done** | `forge/toolsinstall.py` — SHA256 pin verified while streaming, fail-closed, mandatory ledger |
+| 4. Console surface — **CLI** | **done** | `forge tools list\|install\|update\|remove` (`forge/cli/tools.py`) |
+| 4. Console surface — **API + UI panel** | to do | `console/` (outside the batch's scope) |
+| 5. Version probe | **partial** | installed version read from the receipt (`list` executes nothing); no `httpx -version` |
+| 4bis. Off-manifest integrity UX | **not done, deliberately** | no path to an unpinned download as long as it does not exist |
 
-## Problème
-Aujourd'hui les outils de sécurité externes (httpx, nuclei, subfinder ; nmap est apt-installé à part) ne sont installés qu'au **build** via le toggle Dockerfile `FORGE_TOOLS_PROFILE=full|mini`. Les versions sont des ARG codés en dur, **dupliqués** entre `Dockerfile` et `docker-compose.yml`. Il n'existe **aucun** moyen d'installer un outil omis, ni de mettre à jour un outil, sans reconstruire l'image. Besoin du mainteneur : (a) choisir si chaque outil est installé ou non, et (b) mettre à jour les outils à la demande.
+## Problem
+Today the external security tools (httpx, nuclei, subfinder; nmap is apt-installed separately) are installed only at **build** time through the Dockerfile toggle `FORGE_TOOLS_PROFILE=full|mini`. The versions are hard-coded ARGs, **duplicated** between `Dockerfile` and `docker-compose.yml`. There is **no** way to install an omitted tool, or to update a tool, without rebuilding the image. Maintainer's need: (a) choose whether each tool is installed or not, and (b) update the tools on demand.
 
-## Approche retenue : HYBRIDE (baseline au build + surcouche runtime)
-- **Baseline au build inchangée** : l'image continue de baker les outils selon `FORGE_TOOLS_PROFILE` (full/mini). La prod reste reproductible et SHA-pinnée. Comportement par défaut identique à aujourd'hui.
-- **Surcouche runtime** : la console gagne une capacité **admin-gated et auditée** pour installer / mettre à jour / retirer un outil au runtime, dans un **volume outils persistant, propriété de l'utilisateur `forge`**, qui prime sur le PATH devant le `/usr/local/bin` baké. Installer/mettre à jour un outil au runtime **ne nécessite pas de rebuild**.
+## Chosen approach: HYBRID (build-time baseline + runtime overlay)
+- **Build-time baseline unchanged**: the image keeps baking the tools according to `FORGE_TOOLS_PROFILE` (full/mini). Production stays reproducible and SHA-pinned. Default behaviour identical to today.
+- **Runtime overlay**: the console gains an **admin-gated and audited** capability to install / update / remove a tool at runtime, in a **persistent tools volume, owned by the `forge` user**, which takes precedence on the PATH ahead of the baked `/usr/local/bin`. Installing/updating a tool at runtime **does not require a rebuild**.
 
-## Briques (issues de la reconnaissance du code, 2026-07-04)
-1. **Centraliser les métadonnées outils** (fin de la duplication Dockerfile↔compose) : un manifeste unique (versions + pins SHA256 par arch + gabarit d'URL + activé-par-défaut). Le Dockerfile le lit ; l'installeur runtime lit le même fichier. Candidat : `forge/tools.json`, ou étendre le `ToolSpec` du catalogue (`forge/modules/toolspec.py`, actuellement seulement `binary` + `docker_image` — pas de version/checksum/url).
-2. **Volume outils persistant** : nouveau volume nommé monté p.ex. `/data/tools/bin`, propriété uid 10001 (forge), préfixé au PATH. Survit à un recreate du conteneur (le `/usr/local/bin` baké, non). Touche compose + `VOLUME` Dockerfile + variable PATH.
-3. **Modèle d'intégrité pour les installs runtime** (préserver la posture « jamais de download non vérifié », cf. `Dockerfile:151`) :
-   - Préféré : n'installer que des versions présentes dans le manifeste, qui portent un SHA256 pinné → vérifier après download, comme au build.
-   - Pour une version arbitraire/plus récente absente du manifeste : exiger que l'opérateur fournisse le SHA256 attendu (ou récupérer+afficher le checksum publié par ProjectDiscovery pour confirmation admin explicite). JAMAIS de confiance implicite.
-4. **Surface console** :
-   - API : étendre la surface admin/module (hook naturel : `POST /api/modules/:kind` `module_governance`, déjà `check_admin` à `main.rs:1675`) ou un nouveau `POST /api/tools/:name/{install|update|remove}`. Admin-only, audité via `append_console_ledger` (motif à `main.rs:1614`).
-   - CLI : sous-commande `forge tools {list|install|update|remove}` (dispatch à `main.rs:9835`).
-   - UI : panneau outils affichant version installée vs version cible, boutons install/update/remove, indicateur baseline mini/full.
-5. **Visibilité des versions** : aujourd'hui la disponibilité est un booléen sondé (`shutil.which`, `runner.available`), sans version. Ajouter une sonde de version (`httpx -version`, etc.) pour que l'UI montre installé vs cible et propose l'update quand ils diffèrent.
+## Building blocks (from the code reconnaissance, 2026-07-04)
+1. **Centralise the tool metadata** (end of the Dockerfile↔compose duplication): a single manifest (versions + SHA256 pins per arch + URL template + enabled-by-default). The Dockerfile reads it; the runtime installer reads the same file. Candidate: `forge/tools.json`, or extend the catalog's `ToolSpec` (`forge/modules/toolspec.py`, currently only `binary` + `docker_image` — no version/checksum/url).
+2. **Persistent tools volume**: new named volume mounted e.g. at `/data/tools/bin`, owned by uid 10001 (forge), prefixed to the PATH. Survives a container recreate (the baked `/usr/local/bin` does not). Touches compose + Dockerfile `VOLUME` + PATH variable.
+3. **Integrity model for runtime installs** (preserve the "never an unverified download" posture, cf. `Dockerfile:151`):
+   - Preferred: install only versions present in the manifest, which carry a pinned SHA256 → verify after download, as at build time.
+   - For an arbitrary/newer version absent from the manifest: require the operator to supply the expected SHA256 (or fetch+display the checksum published by ProjectDiscovery for explicit admin confirmation). NEVER implicit trust.
+4. **Console surface**:
+   - API: extend the admin/module surface (natural hook: `POST /api/modules/:kind` `module_governance`, already `check_admin` at `main.rs:1675`) or a new `POST /api/tools/:name/{install|update|remove}`. Admin-only, audited through `append_console_ledger` (pattern at `main.rs:1614`).
+   - CLI: `forge tools {list|install|update|remove}` subcommand (dispatch at `main.rs:9835`).
+   - UI: tools panel showing installed version vs target version, install/update/remove buttons, mini/full baseline indicator.
+5. **Version visibility**: today availability is a probed boolean (`shutil.which`, `runner.available`), without a version. Add a version probe (`httpx -version`, etc.) so that the UI shows installed vs target and offers the update when they differ.
 
-## Contraintes / pièges (à respecter)
-- Conteneur non-root (uid 10001) ; `/usr/local/bin` est root-owned et baké → les installs runtime doivent viser le volume outils forge-owned, pas `/usr/local/bin`.
-- Egress hôte instable (observé : HTTP/2 partial-file `curl (18)` + read-timeout PyPI) → l'installeur runtime doit réutiliser les flags curl durcis (`--http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors --connect-timeout 30 --max-time 300`).
-- Garder intactes les sémantiques mini/full de `FORGE_TOOLS_PROFILE` ; l'hybride est additif.
-- Principe vendor-agnostic : concevoir le manifeste outils de façon générique (bring-your-own-tool), pas codé en dur pour les 3 outils PD.
+## Constraints / pitfalls (to respect)
+- Non-root container (uid 10001); `/usr/local/bin` is root-owned and baked → runtime installs must target the forge-owned tools volume, not `/usr/local/bin`.
+- Unstable host egress (observed: HTTP/2 partial-file `curl (18)` + PyPI read-timeout) → the runtime installer must reuse the hardened curl flags (`--http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-all-errors --connect-timeout 30 --max-time 300`).
+- Keep the mini/full semantics of `FORGE_TOOLS_PROFILE` intact; the hybrid is additive.
+- Vendor-agnostic principle: design the tools manifest generically (bring-your-own-tool), not hard-coded for the 3 PD tools.
 
-## Non-goals (pour l'instant)
-- Pas d'auto-update / upgrade en tâche de fond ; action admin explicite uniquement.
-- Pas de download non pinné / non vérifié.
+## Non-goals (for now)
+- No auto-update / background upgrade; explicit admin action only.
+- No unpinned / unverified download.
 
-## Séquencement quand ce sera construit
-1. Manifeste outils single-source + Dockerfile/compose le lisent (supprime la duplication) — sûr, aucun changement de comportement.
-2. Volume outils persistant + précédence PATH + sonde de version.
-3. Install/update/remove runtime : CLI d'abord, puis API (admin + audit), puis panneau UI.
-4. UX d'intégrité pour les versions hors-manifeste.
+## Sequencing when this gets built
+1. Single-source tools manifest + Dockerfile/compose read it (removes the duplication) — safe, no behaviour change.
+2. Persistent tools volume + PATH precedence + version probe.
+3. Runtime install/update/remove: CLI first, then API (admin + audit), then UI panel.
+4. Integrity UX for off-manifest versions.
 
-## Contexte lié
-- Fix build préalable : `COPY forge/VERSION` dans l'image (le `include_str!` compile-time cherchait un `VERSION` absent du contexte).
-- Durcissement du download d'outils au build (curl `--http1.1` + retries) suite au flake réseau HTTP/2 — même lot que cette roadmap.
-- Résidu connexe hors-scope : le `pip install weasyprint` du stage runtime n'a PAS de retry et a flaké une fois (read-timeout PyPI) ; candidat au même traitement plus tard.
+## Related context
+- Prior build fix: `COPY forge/VERSION` into the image (the compile-time `include_str!` was looking for a `VERSION` absent from the context).
+- Hardening of the build-time tool download (curl `--http1.1` + retries) following the HTTP/2 network flake — same batch as this roadmap.
+- Related out-of-scope residue: the runtime stage's `pip install weasyprint` has NO retry and flaked once (PyPI read-timeout); candidate for the same treatment later.
 
-## Résidus egress / robustesse réseau (à surveiller)
-L'hôte de build a un **egress instable** (deux flakes observés le 2026-07-04 : `curl (18)` HTTP/2 partial-file sur le download des outils ProjectDiscovery, et un read-timeout PyPI sur `pip install`). Deux points consignés :
+## Egress / network robustness residues (to watch)
+The build host has an **unstable egress** (two flakes observed on 2026-07-04: HTTP/2 partial-file `curl (18)` on the download of the ProjectDiscovery tools, and a PyPI read-timeout on `pip install`). Two points recorded:
 
-1. **`pip install weasyprint` sans retry.** Le stage runtime installe weasyprint (PDF) via `pip install` **sans** politique de retry/timeout, contrairement au download curl des outils désormais durci. Il a flaké une fois (read-timeout `files.pythonhosted.org`). **Pas encore corrigé — hors scope du lot courant.** Candidat au même traitement (retries + timeouts bornés, p.ex. `pip --retries N --timeout T` ou variables `PIP_RETRIES`/`PIP_DEFAULT_TIMEOUT`) **si ça se reproduit**.
+1. **`pip install weasyprint` without retry.** The runtime stage installs weasyprint (PDF) through `pip install` **without** a retry/timeout policy, unlike the tools' curl download, which is now hardened. It flaked once (read-timeout `files.pythonhosted.org`). **Not fixed yet — outside the scope of the current batch.** Candidate for the same treatment (retries + bounded timeouts, e.g. `pip --retries N --timeout T` or the `PIP_RETRIES`/`PIP_DEFAULT_TIMEOUT` variables) **if it happens again**.
 
-2. **Le fix curl est un contournement, pas la racine.** Forcer HTTP/1.1 + retries sur le download des outils est robuste et suffisant en pratique, mais si les flakes réseau **persistent**, la vraie cause est la **connectivité egress de l'hôte** (réseau/DNS/MTU/proxy), pas le Dockerfile. Auquel cas : diagnostiquer la connectivité hôte plutôt que d'empiler des retries dans l'image.
+2. **The curl fix is a workaround, not the root cause.** Forcing HTTP/1.1 + retries on the tools download is robust and sufficient in practice, but if the network flakes **persist**, the real cause is the **host's egress connectivity** (network/DNS/MTU/proxy), not the Dockerfile. In that case: diagnose the host connectivity rather than piling up retries in the image.

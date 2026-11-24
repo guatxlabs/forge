@@ -212,7 +212,7 @@ def main(argv=None):
         return 0
     print("Commit refusé — un dépôt public s'adresse à un LECTEUR, pas à un interlocuteur.",
           file=sys.stderr)
-    print("Règle : ROADMAP.md § Gouvernance, et CONTRIBUTING.md (checklist).\n", file=sys.stderr)
+    print("Règle : AGENTS.md §2, ROADMAP.md § « Repository governance », et CONTRIBUTING.md (checklist).\n", file=sys.stderr)
     for r in refus:
         print(f"  {r}", file=sys.stderr)
     print("\nCe qui reste ADMIS : la voix de l'outil (« un `skipped` dit je n'ai PAS pu vérifier »), "

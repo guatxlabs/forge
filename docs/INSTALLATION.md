@@ -1,52 +1,54 @@
 # Installation
 
-> [Sommaire](README.md) · Suivant : [Premier déploiement (wizard)](FIRST_DEPLOYMENT.md) · Voir aussi :
-> [Configuration](CONFIGURATION.md) · [Runbook self-deploy détaillé](DEPLOYMENT.md)
+[English](INSTALLATION.md) | [Français](INSTALLATION.fr.md)
 
-Cette page couvre **toutes les voies d'installation** avec les commandes exactes. Le runbook
-self-deploy détaillé (empreinte mesurée, matrice Docker/k8s/host/venv, export PDF) est dans
+> [Contents](README.md) · Next: [First deployment (wizard)](FIRST_DEPLOYMENT.md) · See also:
+> [Configuration](CONFIGURATION.md) · [Detailed self-deploy runbook](DEPLOYMENT.md)
+
+This page covers **every installation path** with the exact commands. The detailed self-deploy
+runbook (measured footprint, Docker/k8s/host/venv matrix, PDF export) is in
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-> ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
-> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, cf.
-> `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
-> les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
-> clone standalone y suffit). Détail : [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
+> ℹ️ **Build context = the ROOT of this repository.** The console resolves `guatx-core` through a pinned
+> public git-dep (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, see
+> `console/Cargo.toml`) — the core is fetched from GitHub at build time, no sibling crate required. All
+> the `docker build`/`docker compose` commands below are run **from the repository root** (a
+> standalone clone is enough). Details: [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.
 
-## Pré-étape OBLIGATOIRE — le fichier scope (fail-loud)
+## MANDATORY pre-step — the scope file (fail-loud)
 
-Le scope/ROE actif est **monté en volume**, jamais cuit dans l'image. Créer le **fichier** avant
-tout `up` :
+The active scope/ROE is **mounted as a volume**, never baked into the image. Create the **file** before
+any `up`:
 
 ```sh
-# depuis la racine du dépôt
-cp scope.example.json scope.json     # in_scope vide = INERTE ; éditer AVEC AUTORISATION écrite
+# from the repository root
+cp scope.example.json scope.json     # empty in_scope = INERT; edit WITH written AUTHORIZATION
 ```
 
-Si `scope.json` est absent, Docker crée un **répertoire** vide à sa place ; l'entrypoint compose
-**échoue bruyamment** plutôt que de démarrer sur un scope illisible, et bascule sur le
-`scope.example.json` embarqué (INERTE) si le fichier manque/est vide. `scope.json`, `*.key`, `*.jsonl`
-sont gitignorés.
+If `scope.json` is missing, Docker creates an empty **directory** in its place; the compose entrypoint
+**fails loudly** rather than starting on an unreadable scope, and falls back to the embedded
+`scope.example.json` (INERT) if the file is missing/empty. `scope.json`, `*.key`, `*.jsonl`
+are gitignored.
 
 ---
 
-## 1. Profils d'image : `mini` vs `full`
+## 1. Image profiles: `mini` vs `full`
 
-Un seul `--build-arg FORGE_TOOLS_PROFILE` bascule l'empreinte. Les modules **dégradent proprement**
-(`available:false`) quand un outil manque.
+A single `--build-arg FORGE_TOOLS_PROFILE` switches the footprint. Modules **degrade cleanly**
+(`available:false`) when a tool is missing.
 
-| Profil | Contenu | Poids | `?format=pdf` | Modules PD (httpx/nuclei/subfinder) |
+| Profile | Contents | Size | `?format=pdf` | PD modules (httpx/nuclei/subfinder) |
 |---|---|---|---|---|
-| `mini` | console + `python3` + `nmap` | ~150-250 MB | `pdf_unavailable` (impression navigateur) | `available:false` |
-| `full` *(défaut)* | + binaires ProjectDiscovery (vérifiés SHA256) + moteur PDF weasyprint | ~350-500 MB | actif clé-en-main | disponibles |
+| `mini` | console + `python3` + `nmap` | ~150-250 MB | `pdf_unavailable` (browser printing) | `available:false` |
+| `full` *(default)* | + ProjectDiscovery binaries (SHA256-verified) + weasyprint PDF engine | ~350-500 MB | turnkey active | available |
 
 ---
 
-## 2. Docker (image seule)
+## 2. Docker (image only)
 
 ```sh
-# depuis la racine du dépôt
-# full (défaut)
+# from the repository root
+# full (default)
 docker build -t forge:0.0.1 .
 # mini
 docker build --build-arg FORGE_TOOLS_PROFILE=mini -t forge:0.0.1-mini .
@@ -59,125 +61,125 @@ docker run -d --name forge \
   forge:0.0.1
 ```
 
-Bind **loopback uniquement**. N'exposer publiquement qu'à travers un reverse-proxy + auth +
-`FORGE_CONSOLE_HOST` (host-allowlist anti-DNS-rebinding). L'image bind `0.0.0.0:7100` **dans** le
-conteneur (réseau isolé) ; le mapping `127.0.0.1:7100:7100` restreint l'exposition hôte au loopback.
+Bind **loopback only**. Expose publicly only through a reverse-proxy + auth +
+`FORGE_CONSOLE_HOST` (anti-DNS-rebinding host-allowlist). The image binds `0.0.0.0:7100` **inside** the
+container (isolated network); the `127.0.0.1:7100:7100` mapping restricts host exposure to loopback.
 
 ---
 
-## 3. docker-compose *(recommandé)*
+## 3. docker-compose *(recommended)*
 
-Le compose fixe déjà le bon contexte, le fail-loud du scope, les volumes, le healthcheck `/health`,
-le bind loopback. **Services optionnels derrière des profils** ⇒ un `up` nu démarre la **console seule**
-(aucun `depends_on` dur).
+The compose file already sets the right context, the scope fail-loud, the volumes, the `/health` healthcheck,
+the loopback bind. **Optional services behind profiles** ⇒ a bare `up` starts the **console alone**
+(no hard `depends_on`).
 
 ```sh
-# depuis la racine du dépôt
-docker compose up -d --build          # console SEULE (profil full)
-FORGE_TOOLS_PROFILE=mini docker compose up -d --build   # image mini
+# from the repository root
+docker compose up -d --build          # console ALONE (full profile)
+FORGE_TOOLS_PROFILE=mini docker compose up -d --build   # mini image
 
-# couches optionnelles, à la demande (aucune n'est requise au boot) :
-docker compose --profile browser up -d        # + accès/évasion (Camoufox :8080)
-docker compose --profile msf --profile burp up -d   # + connecteurs (BYO images)
+# optional layers, on demand (none is required at boot):
+docker compose --profile browser up -d        # + access/evasion (Camoufox :8080)
+docker compose --profile msf --profile burp up -d   # + connectors (BYO images)
 
-docker compose config      # valider la config résolue
+docker compose config      # validate the resolved config
 ```
 
-Secrets & overrides (hashes argon2id, tokens, URLs des services pilotés, clés) → `.env`
-(gitignoré, `required:false`). Gabarit commenté : [`../.env.example`](../.env.example). Les connecteurs
-`browser`/`msf`/`burp` restent **inertes** tant que leur service n'est pas joignable (sonde à
-fire-time). Forge ne fournit **pas** d'image MSF/Burp (licence/outillage opérateur) — les stubs
-compose documentent le câblage BYO (bring-your-own).
+Secrets & overrides (argon2id hashes, tokens, URLs of the driven services, keys) → `.env`
+(gitignored, `required:false`). Commented template: [`../.env.example`](../.env.example). The
+`browser`/`msf`/`burp` connectors stay **inert** as long as their service is not reachable (probe at
+fire-time). Forge does **not** provide an MSF/Burp image (operator licence/tooling) — the compose
+stubs document the BYO (bring-your-own) wiring.
 
 ---
 
-## 4. Natif / systemd (sans Docker)
+## 4. Native / systemd (without Docker)
 
-Unité durcie fournie : [`../deploy/forge.service`](../deploy/forge.service)
-(`NoNewPrivileges`, `ProtectSystem=strict`, `CapabilityBoundingSet=`, seccomp `@system-service`…). Le
-durcissement systemd **n'affaiblit aucun garde-fou applicatif**.
+Hardened unit provided: [`../deploy/forge.service`](../deploy/forge.service)
+(`NoNewPrivileges`, `ProtectSystem=strict`, `CapabilityBoundingSet=`, seccomp `@system-service`…). The
+systemd hardening **weakens no application guardrail**.
 
 ```sh
-cd console && cargo build --release            # depuis la racine du dépôt ; binaire offline (cache cargo)
+cd console && cargo build --release            # from the repository root; offline binary (cargo cache)
 sudo install -m0755 target/release/forge /usr/local/bin/
 sudo mkdir -p /opt/forge && sudo cp -r ../forge /opt/forge/forge && sudo cp -r web /opt/forge/console/web
 sudo useradd --system --home /opt/forge --shell /usr/sbin/nologin forge
-sudo mkdir -p /var/lib/forge/{db,ledger,scope}                      # remplir scope/scope.json AVEC AUTORISATION
-sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge.env   # hashes argon2id ici
+sudo mkdir -p /var/lib/forge/{db,ledger,scope}                      # fill scope/scope.json WITH AUTHORIZATION
+sudo install -m0600 -o root -g forge /dev/null /etc/forge/forge.env   # argon2id hashes here
 sudo cp deploy/forge.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now forge
 ```
 
-Le package Python est **pur-stdlib** (`deps=[]`) : il tient aussi en venv **sans aucune dépendance pip**.
+The Python package is **pure-stdlib** (`deps=[]`): it also fits in a venv **with no pip dependency at all**.
 
 ---
 
-## 5. venv / développement
+## 5. venv / development
 
 ```sh
-# depuis la racine du dépôt
-# 1) moteur Python (met `forge` sur le PATH ; sinon `python3 -m forge.cli`)
+# from the repository root
+# 1) Python engine (puts `forge` on the PATH; otherwise `python3 -m forge.cli`)
 pip install -e .
-# 2) console Rust (compile offline depuis le cache cargo)
+# 2) Rust console (compiles offline from the cargo cache)
 cd console && cargo build --release && cd ..
-# 3) suite complète (Python unittest + cargo test de la console, zéro réseau)
+# 3) full suite (Python unittest + cargo test of the console, zero network)
 make test
 ```
 
-`pip install -e .` termine sans erreur, `forge --version` répond, `cargo build --release` produit
-`console/target/release/forge`, et `make test` finit sur **`OK`**. Le package Python n'a
-**aucune dépendance pip** — il tient en venv nu. Parcours opérateur 100 % hors-ligne (seed +
-mock-Plume) : [`GETTING_STARTED.md`](GETTING_STARTED.md).
+`pip install -e .` completes without error, `forge --version` answers, `cargo build --release` produces
+`console/target/release/forge`, and `make test` ends on **`OK`**. The Python package has
+**no pip dependency** — it fits in a bare venv. 100 % offline operator path (seed +
+mock-Plume): [`GETTING_STARTED.md`](GETTING_STARTED.md).
 
 ---
 
-## 6. Image `encryption` (chiffrement AU REPOS — SQLCipher, opt-in)
+## 6. `encryption` image (encryption AT REST — SQLCipher, opt-in)
 
-Le build **par défaut** stocke la base SQLite **en clair** (`capabilities.sqlcipher:false`). Pour un
-chiffrement au repos, compiler avec la feature `encryption` puis fournir la clé au boot :
+The **default** build stores the SQLite database **in plaintext** (`capabilities.sqlcipher:false`). For
+encryption at rest, compile with the `encryption` feature then provide the key at boot:
 
 ```sh
-# 1) image/binaire chiffré (feature Cargo -> backend SQLCipher)
-cd console && cargo build --release --features encryption   # depuis la racine du dépôt
-#    (Docker : construire une image taguée forge:0.0.1-encryption avec cette feature)
+# 1) encrypted image/binary (Cargo feature -> SQLCipher backend)
+cd console && cargo build --release --features encryption   # from the repository root
+#    (Docker: build an image tagged forge:0.0.1-encryption with this feature)
 
-# 2) au boot, la console lit FORGE_DB_KEY et émet `PRAGMA key` AVANT toute requête (contrat SQLCipher)
-#    docker-compose.override.yml :
+# 2) at boot, the console reads FORGE_DB_KEY and issues `PRAGMA key` BEFORE any query (SQLCipher contract)
+#    docker-compose.override.yml:
 #      services:
 #        forge:
 #          image: forge:0.0.1-encryption
 #          environment:
-#            FORGE_DB_KEY: ${FORGE_DB_KEY}     # [SECRET] depuis .env/docker secret, JAMAIS commité
+#            FORGE_DB_KEY: ${FORGE_DB_KEY}     # [SECRET] from .env/docker secret, NEVER committed
 ```
 
-Sans `FORGE_DB_KEY` correcte, la base chiffrée est **illisible** (fail-closed). Convertir un install
-existant en clair → chiffré = **Runbook B** de [`MIGRATION.md`](MIGRATION.md). Le wizard expose
-`capabilities.sqlcipher` (true seulement sur ce build) pour que l'UI le reflète honnêtement.
+Without the correct `FORGE_DB_KEY`, the encrypted database is **unreadable** (fail-closed). Converting an existing
+plaintext install → encrypted = **Runbook B** of [`MIGRATION.md`](MIGRATION.md). The wizard exposes
+`capabilities.sqlcipher` (true only on this build) so that the UI reflects it honestly.
 
-> **À part** la crypto AU REPOS (opt-in), le **ledger d'engagement** est signé **Ed25519**
-> (asymétrique, vérifiable par un tiers avec la seule clé publique) **par défaut** — aucune action
-> requise.
+> **Apart from** crypto AT REST (opt-in), the **engagement ledger** is signed with **Ed25519**
+> (asymmetric, verifiable by a third party with the public key alone) **by default** — no action
+> required.
 
 ---
 
-## Vérifier l'installation
+## Verifying the installation
 
 ```sh
 # liveness
 curl -s http://127.0.0.1:7100/health          # -> {"status":"ok","version":"0.0.1"}
 docker inspect --format '{{.State.Health.Status}}' forge   # -> healthy
 
-# diagnostic des modules (quels outils sont présents)
-python3 -m forge.cli doctor                    # ou: forge doctor
+# module diagnostics (which tools are present)
+python3 -m forge.cli doctor                    # or: forge doctor
 ```
 
-Le healthcheck fait un vrai **`GET /health` attendant HTTP 200** (pas un simple TCP port-open). Il
-vise `127.0.0.1` (toujours dans l'allowlist host-guard par défaut), donc reste vert même derrière un
-`FORGE_CONSOLE_HOST` restreint.
+The healthcheck performs a real **`GET /health` expecting HTTP 200** (not a mere TCP port-open). It
+targets `127.0.0.1` (always in the host-guard allowlist by default), so it stays green even behind a
+restricted `FORGE_CONSOLE_HOST`.
 
 ---
 
-## Après l'installation
+## After installation
 
-Ouvrir `http://127.0.0.1:7100` → le **wizard de 1er déploiement** provisionne l'admin, la crypto, la
-source de détection et la politique opérateur. Voir **[Premier déploiement](FIRST_DEPLOYMENT.md)**.
+Open `http://127.0.0.1:7100` → the **first-deployment wizard** provisions the admin, the crypto, the
+detection source and the operator policy. See **[First deployment](FIRST_DEPLOYMENT.md)**.

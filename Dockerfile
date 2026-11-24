@@ -70,7 +70,7 @@ WORKDIR /build/console
 # byte-identique, aucune dépendance supplémentaire). Ex. `store-postgres` (backend Postgres, TLS
 # rustls/ring openssl-free) pour un déploiement HA/multi-instance :
 #   docker compose ... build --build-arg FORGE_CARGO_FEATURES=store-postgres
-# (l'override docker-compose.postgres.yml le pose automatiquement — cf. docs/DEPLOYMENT.md § Postgres).
+# (l'override docker-compose.postgres.yml le pose automatiquement — cf. docs/DEPLOYMENT.md §3bis « Postgres backend »).
 ARG FORGE_CARGO_FEATURES=""
 
 # Build release reproductible (profil release pinné dans Cargo.toml : opt-level=z, lto, strip).
@@ -155,7 +155,7 @@ RUN set -eux; \
         rm -rf /var/lib/apt/lists/*; \
         pg_dump --version; \
     else \
-        echo "[build] store-postgres absent des features -> pg_dump non installé (image community inchangée)"; \
+        echo "[build] store-postgres absent des features -> pg_dump non installé (image par défaut inchangée)"; \
     fi
 
 # Le MANIFESTE + son lecteur, copiés AVANT le bloc d'installation (le reste du package `forge/`
@@ -356,7 +356,8 @@ COPY pyproject.toml    /opt/forge/pyproject.toml
 COPY scope.example.json /opt/forge/scope.example.json
 # Engagement de référence SYNTHÉTIQUE (hôtes `.example`, IP RFC 5737 — aucune cible réelle) :
 # `forge seed-demo` le cherche sous $FORGE_PKG_DIR (= /opt/forge), donc `seed-demo` / `make demo`
-# fonctionnent DANS le conteneur et pas seulement sur l'hôte. ~44 Kio.
+# fonctionnent DANS le conteneur et pas seulement sur l'hôte. ~47 Kio, documents en deux langues compris
+# (MESURÉ le 2026-11-24 : `git ls-files -z examples | xargs -0 cat | wc -c` → 48490 octets).
 COPY examples/         /opt/forge/examples/
 
 # Répertoires de données persistés (déclarés en volumes) : DB console, ledger d'engagement,

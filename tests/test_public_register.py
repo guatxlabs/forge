@@ -13,6 +13,13 @@ les vérifiait. Une convention de rédaction subit le même sort.
 CE QUI EST BANNI : le récit d'enquête à la première personne, l'adresse directe à un interlocuteur,
 la chronologie de session comme fil narratif.
 
+LES DEUX LANGUES. Les documents existent en anglais (`X.md`) et en français (`X.fr.md`). Les motifs
+français (`BANNIES`) lisent tout le corpus, versions françaises des documents racine comprises : tout
+ce qu'ils jugeaient quand ces documents n'existaient qu'en français, ils le jugent encore. Les motifs
+anglais (`BANNIES_EN`) sont ceux qui se déduisent mot pour mot des motifs français ; « je consigne »
+et « ma contre-vérification » n'ont pas d'équivalent anglais unique (record/log, counter-/cross-check)
+et ne sont pas jugés dans l'anglais.
+
 CE QUI RESTE LÉGITIME, et qui n'est pas la même chose :
   · la VOIX DE L'OUTIL — « un `skipped` dit *je n'ai PAS pu vérifier* » énonce le sens d'un statut ;
   · l'adresse au LECTEUR d'une documentation — « votre SOC », « sur votre machine » ;
@@ -41,6 +48,15 @@ BANNIES = {
     r"\b(?:notre|cette) session\b(?! gouvernée)": "chronologie de session comme fil narratif",
 }
 
+#: Les mêmes tournures dans l'anglais des documents, quand la traduction est sans ambiguïté.
+BANNIES_EN = {
+    r"\bI had\b": "récit d'enquête à la première personne",
+    r"\bmyself\b": "récit d'enquête à la première personne",
+    r"\bas you (?:asked|requested|told me)\b": "adresse directe à un interlocuteur",
+    r"\bas requested\b": "adresse directe à un interlocuteur",
+    r"\b(?:our|this) session\b": "chronologie de session comme fil narratif",
+}
+
 #: Exceptions ADMISES, chacune avec sa raison. Toute autre occurrence fait échouer le test.
 #:
 #: VIDE À DESSEIN. Elle contenait cinq entrées par FICHIER — dont trois exemptaient les 1 200
@@ -61,11 +77,17 @@ ADMISES = {}
 #: texte jusqu'au » suivant, et l'exemption avalerait le fichier au lieu de couvrir une citation.
 _GUILLEMETS = re.compile(r"«(?:[^»\n]|\n(?!\s*\n))*»")
 _CODE = re.compile(r"`[^`\n]+`")
+#: Les guillemets de l'anglais, droits ou courbes, sous la même borne de paragraphe. Ils ne valent
+#: citation QUE pour les motifs anglais : un motif français entre guillemets droits reste une faute,
+#: comme avant que l'anglais n'existe.
+_GUILLEMETS_EN = re.compile(r'"(?:[^"\n]|\n(?!\s*\n))*"|“(?:[^”\n]|\n(?!\s*\n))*”')
 
 
-def _spans_cites(texte):
+def _spans_cites(texte, anglais=False):
     """Intervalles d'index du texte qui relèvent d'une citation. Pur, ne lève jamais."""
     spans = [m.span() for m in _GUILLEMETS.finditer(texte)]
+    if anglais:
+        spans += [m.span() for m in _GUILLEMETS_EN.finditer(texte)]
     spans += [m.span() for m in _CODE.finditer(texte)]
     debut = 0
     for ligne in texte.splitlines(keepends=True):
@@ -79,10 +101,32 @@ def _est_citee(spans, position):
     return any(a <= position < b for a, b in spans)
 
 
+def _fautes(rel, texte):
+    """Les tournures fautives de `texte` (fichier `rel`), en (ligne, raison, extrait). Pur : c'est la
+    décision que le test du corpus applique, et celle que ses témoins jouent.
+
+    Les guillemets anglais ne valent citation que pour un motif ANGLAIS et dans un document `.md` :
+    dans un `.py`, un guillemet droit délimite toute chaîne de code, et le compter comme citation
+    rendrait les motifs anglais aveugles aux docstrings, aux commentaires et aux chaînes."""
+    fautes = []
+    spans = _spans_cites(texte)
+    spans_en = _spans_cites(texte, anglais=True) if rel.endswith(".md") else spans
+    for motif, raison in list(BANNIES.items()) + list(BANNIES_EN.items()):
+        if (rel, motif) in ADMISES:
+            continue
+        cites = spans_en if motif in BANNIES_EN else spans
+        for m in re.finditer(motif, texte, re.I):
+            if _est_citee(cites, m.start()):
+                continue
+            fautes.append((texte[:m.start()].count("\n") + 1, raison, m.group(0)))
+    return fautes
+
+
 def _fichiers():
     for motif in ("forge/**/*.py", "bench/**/*.py", "docs/*.md"):
         yield from RACINE.glob(motif)
-    for nom in ("ROADMAP.md", "CONTRIBUTING.md", "README.md"):
+    for nom in ("ROADMAP.md", "CONTRIBUTING.md", "README.md",
+                "ROADMAP.fr.md", "CONTRIBUTING.fr.md", "README.fr.md"):
         p = RACINE / nom
         if p.exists():
             yield p
@@ -95,17 +139,10 @@ class TheRepositoryAddressesAPublicReader(unittest.TestCase):
         for f in _fichiers():
             rel = str(f.relative_to(RACINE))
             texte = f.read_text(encoding="utf-8", errors="replace")
-            spans = _spans_cites(texte)
-            for motif, raison in BANNIES.items():
-                if (rel, motif) in ADMISES:
-                    continue
-                for m in re.finditer(motif, texte, re.I):
-                    if _est_citee(spans, m.start()):
-                        continue
-                    ligne = texte[:m.start()].count("\n") + 1
-                    fautes.append(f"{rel}:{ligne} — {raison} : « {m.group(0)} »")
+            for ligne, raison, extrait in _fautes(rel, texte):
+                fautes.append(f"{rel}:{ligne} — {raison} : « {extrait} »")
         self.assertEqual(fautes, [], "\n".join(
-            ["tournures adressées à un interlocuteur (cf. ROADMAP.md § Gouvernance) :"] + fautes))
+            ["tournures adressées à un interlocuteur (cf. ROADMAP.md § « Repository governance ») :"] + fautes))
 
     def test_chaque_exception_porte_sa_RAISON(self):
         for (fichier, motif), raison in ADMISES.items():
@@ -164,6 +201,44 @@ class TheRepositoryAddressesAPublicReader(unittest.TestCase):
         """Un garde qui ne lit rien ne garde rien : on vérifie qu'il balaie un corpus réel."""
         fichiers = list(_fichiers())
         self.assertGreater(len(fichiers), 60, f"corpus trop maigre : {len(fichiers)} fichiers")
+
+    def test_le_garde_lit_les_DEUX_langues(self):
+        """Les documents racine existent en anglais et en français : le garde lit les deux, sinon le
+        français qu'il jugeait avant la traduction sortirait de son regard sans que rien ne rougisse."""
+        lus = {str(f.relative_to(RACINE)) for f in _fichiers()}
+        for nom in ("ROADMAP", "CONTRIBUTING", "README"):
+            for suffixe in (".md", ".fr.md"):
+                with self.subTest(document=nom + suffixe):
+                    self.assertIn(nom + suffixe, lus)
+        self.assertTrue(any(f.endswith(".fr.md") for f in lus if f.startswith("docs/")),
+                        "aucune version française de docs/ n'est lue")
+
+    def test_les_motifs_ANGLAIS_mordent_et_respectent_les_citations(self):
+        nu = "The field was ruled out because I had concluded too fast, as requested."
+        touches = [m for motif in BANNIES_EN for m in re.finditer(motif, nu, re.I)]
+        self.assertEqual(len(touches), 2, "un motif anglais ne reconnaît pas sa faute de référence")
+        cite = 'the rule refuses "I had ruled this out" and "as you asked"'
+        spans = _spans_cites(cite, anglais=True)
+        touches = [m for motif in BANNIES_EN for m in re.finditer(motif, cite, re.I)]
+        self.assertTrue(touches and all(_est_citee(spans, m.start()) for m in touches),
+                        "une citation anglaise prise pour une faute")
+        # Sur la décision que le test du corpus applique (`_fautes`) : la citation anglaise passe dans
+        # un document, et un motif FRANÇAIS entre guillemets droits y reste une faute.
+        self.assertEqual(_fautes("docs/X.md", cite), [], "citation anglaise refusée dans un document")
+        fr = 'le champ "j\'avais conclu" reste une faute'
+        self.assertEqual([e for _, _, e in _fautes("docs/X.fr.md", fr)], ["j'avais"],
+                         "les guillemets droits exemptent un motif français")
+
+    def test_dans_un_PY_un_guillemet_droit_n_est_pas_une_citation(self):
+        """Dans du code, un guillemet droit délimite toute chaîne : docstring, commentaire ou chaîne
+        qui porte un motif anglais restent des fautes."""
+        for code in ('"""Retry added because I had seen it flake."""\n',
+                     'log("this session closed")\n',
+                     '# kept "as requested" by the reviewer\n'):
+            with self.subTest(code=code[:30]):
+                self.assertTrue(_fautes("forge/x.py", code), f"motif anglais non vu dans du code : {code}")
+        # Les formes de citation communes aux deux langues valent toujours dans du code.
+        self.assertEqual(_fautes("forge/x.py", "# le motif `I had` est refusé\n"), [])
 
     def test_le_garde_DETECTE_vraiment_la_faute(self):
         """Contrôle positif : sans lui, un garde vert ne prouverait rien."""
