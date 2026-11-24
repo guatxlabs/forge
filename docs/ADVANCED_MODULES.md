@@ -124,7 +124,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
     against any OIDC provider. `GET /api/sso/login` redirects to the IdP's `authorize` endpoint
     with a server-side **state + nonce + PKCE `S256` challenge** (persisted per pending-auth); `GET
     /api/sso/callback` validates the state, exchanges the code (+ `code_verifier`) for tokens, and **fully
-    validates the ID token** — **RS256 signature through the IdP's JWKS** (pure-Rust `jsonwebtoken`/`ring`, **no
+    validates the ID token** — **RS256 signature through the IdP's JWKS** (pure-Rust `jsonwebtoken`, `rust_crypto` backend, **no
     openssl**), **issuer**, **audience == `client_id`**, **exp**, and the **nonce**. On success, it maps
     the OIDC `sub`/`email` to a Forge user (**matching an existing one** or **auto-provisioning**
     with a configured default role and an unusable local password) and issues **the same

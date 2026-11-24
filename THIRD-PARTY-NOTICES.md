@@ -140,3 +140,58 @@ These 51 crates are the ones that `cargo-deny` **does not read** (cause, figures
 guard: [`docs/DEPLOYMENT.md`
 §3quater.2](docs/DEPLOYMENT.md#perimetre-de-l-audit-de-licences)). Their licenses
 are checked by `python3 scripts/check_dep_licenses.py`, wired into CI.
+
+## What the `encryption` feature adds to what you redistribute
+
+The `--features encryption` build (SQLCipher at rest) switches `rusqlite` to
+`bundled-sqlcipher`. Chain: `encryption` → `rusqlite/bundled-sqlcipher` →
+`libsqlite3-sys` 0.40.0 → `sqlcipher-src` 420.0.0, a **build** dependency whose
+`license` field is `MIT AND BSD-3-Clause AND blessing AND WTFPL`. What actually ends up in
+the binary is narrower than that expression:
+
+- **SQLCipher 4.20.0 (BSD-3-Clause)** — the amalgamation `sqlcipher/sqlcipher.c` is compiled
+  into the binary. The BSD-3-Clause requires that **binary redistributions reproduce the
+  notice below** in the documentation or other materials: it travels with any binary built
+  with `encryption`.
+- **SQLite 3.54.1 (public domain, `blessing`)** — inside the same amalgamation. The author
+  disclaims copyright and puts a blessing in place of a legal notice: no obligation.
+- **libtomcrypt 1.18.2 (public domain or `WTFPL`)** — shipped in the crate for targets without
+  a system crypto library. On a native build it is **not compiled**: `libsqlite3-sys` compiles
+  the amalgamation alone and links the system `libcrypto` dynamically (its `build.rs`); checked
+  on a Linux build, which produces `sqlcipher.o` and no libtomcrypt object. Compiled or not,
+  neither of its two licenses imposes anything.
+- **The crate's own glue (MIT)** — Rust code run by the build script only, not linked into the
+  binary.
+- **OpenSSL `libcrypto`** — linked dynamically from the host, not bundled: its license is that
+  of the library installed on the machine.
+
+None of these terms is reciprocal, so nothing conflicts with the AGPL. `blessing` and `WTFPL`
+are allowed by name in `deny.toml`, with this justification. The notice to reproduce, copied
+from `sqlcipher/LICENSE-sqlcipher` of the crate:
+
+```text
+Copyright (c) 2025, ZETETIC LLC
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the ZETETIC LLC nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY ZETETIC LLC ''AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL ZETETIC LLC BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

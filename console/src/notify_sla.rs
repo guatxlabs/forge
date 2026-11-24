@@ -822,7 +822,7 @@ mod tests {
         // jamais une erreur.
         // CE QUE CE TEST NE PROUVE PAS (mesuré, pas supposé) : retirer le court-circuit
         // `sevs.is_empty()` de `scan_overdue` LAISSE CE TEST VERT sur SQLite. `… IN ()` y est une
-        // extension ACCEPTÉE (0 ligne, vérifié : SQLite 3.53), là où PostgreSQL la rejette comme une
+        // extension ACCEPTÉE (0 ligne, vérifié : SQLite 3.54.1), là où PostgreSQL la rejette comme une
         // erreur de syntaxe. Le court-circuit est donc une garde de PORTABILITÉ — c'est le build
         // `store-postgres` qui la rendrait rouge, pas celui-ci, et l'assertion ci-dessous ne vaut que
         // comme non-régression du contrat de retour (`Ok`, 0 ligne, 0 retard).

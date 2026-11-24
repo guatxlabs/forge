@@ -160,6 +160,29 @@ allow = [
   "Unicode-3.0", "CDLA-Permissive-2.0",
   # Atteignables UNIQUEMENT sous `object-store`, donc invisibles à cargo-deny (cf. en-tête).
   "MPL-2.0", "CC0-1.0",
+  # Atteignables UNIQUEMENT sous `encryption` (relevé le 2026-11-24, rusqlite 0.42.0). Chaîne :
+  # `encryption` → `rusqlite/bundled-sqlcipher` → `libsqlite3-sys` 0.40.0 → `sqlcipher-src`
+  # 420.0.0 (dépendance de BUILD), dont le champ `license` est l'expression
+  # `MIT AND BSD-3-Clause AND blessing AND WTFPL`. MIT et BSD-3-Clause sont déjà autorisées ;
+  # les deux autres termes :
+  #   · `blessing` — la « bénédiction » de SQLite, que porte l'amalgame `sqlcipher/sqlcipher.c`
+  #     (« The author disclaims copyright to this source code. In place of a legal notice, here
+  #     is a blessing ») : domaine public, aucune obligation.
+  #   · `WTFPL` — libtomcrypt 1.18.2, livré dans la crate (`sqlcipher/libtomcrypt/`) sous double
+  #     licence « domaine public » OU WTFPL (`sqlcipher/LICENSE-libtomcrypt`). Il ne sert qu'aux
+  #     cibles sans bibliothèque crypto système : sur cible native, `libsqlite3-sys` ne compile
+  #     que l'amalgame et lie la `libcrypto` du système (`build.rs`, `rustc-link-lib=dylib=crypto`).
+  #     Qu'il soit compilé ou non, aucune des deux licences n'impose quoi que ce soit.
+  # Aucun de ces termes n'est réciproque : rien qui puisse entrer en conflit avec l'AGPL.
+  # Obligation qui SUBSISTE, et qu'aucune de ces deux entrées ne couvre : la notice BSD-3-Clause
+  # de SQLCipher (titulaire ZETETIC LLC) accompagne tout binaire construit avec `encryption` —
+  # elle est reproduite dans THIRD-PARTY-NOTICES.md.
+  # POURQUOI `allow` ET NON UNE EXCEPTION LIMITÉE À LA CRATE (`[[licenses.exceptions]]`) : la
+  # garde `scripts/check_dep_licenses.py` ne lit que la liste `allow` de ce fichier ; une
+  # exception, que seul cargo-deny comprend, laisserait cette garde rouge. Une seule vérité de
+  # politique pour les deux moteurs. Contrepartie acceptée : une autre crate arrivant demain sous
+  # `blessing` ou `WTFPL` passerait sans décision — les deux sont sans obligation.
+  "blessing", "WTFPL",
 ]
 
 [sources]

@@ -140,3 +140,58 @@ Ces 51 crates sont ceux que `cargo-deny` **ne lit pas** (cause, chiffres et gard
 compensatoire : [`docs/DEPLOYMENT.md`
 §3quater.2](docs/DEPLOYMENT.fr.md#perimetre-de-l-audit-de-licences)). Leurs licences
 sont contrôlées par `python3 scripts/check_dep_licenses.py`, câblé en CI.
+
+## Ce que la feature `encryption` ajoute à ce que vous redistribuez
+
+Le build `--features encryption` (SQLCipher au repos) bascule `rusqlite` sur
+`bundled-sqlcipher`. Chaîne : `encryption` → `rusqlite/bundled-sqlcipher` →
+`libsqlite3-sys` 0.40.0 → `sqlcipher-src` 420.0.0, une dépendance **de build** dont le
+champ `license` est `MIT AND BSD-3-Clause AND blessing AND WTFPL`. Ce qui finit réellement
+dans le binaire est plus étroit que cette expression :
+
+- **SQLCipher 4.20.0 (BSD-3-Clause)** — l'amalgame `sqlcipher/sqlcipher.c` est compilé dans
+  le binaire. La BSD-3-Clause exige que **toute redistribution binaire reproduise la notice
+  ci-dessous** dans la documentation ou les autres documents fournis : elle voyage avec tout
+  binaire construit avec `encryption`.
+- **SQLite 3.54.1 (domaine public, `blessing`)** — dans le même amalgame. L'auteur renonce au
+  droit d'auteur et place une bénédiction à la place d'une mention légale : aucune obligation.
+- **libtomcrypt 1.18.2 (domaine public ou `WTFPL`)** — livré dans la crate pour les cibles sans
+  bibliothèque crypto système. Sur un build natif, il **n'est pas compilé** : `libsqlite3-sys`
+  compile l'amalgame seul et lie dynamiquement la `libcrypto` du système (son `build.rs`) ;
+  vérifié sur un build Linux, qui produit `sqlcipher.o` et aucun objet libtomcrypt. Compilé ou
+  non, aucune de ses deux licences n'impose quoi que ce soit.
+- **Le code propre de la crate (MIT)** — du Rust exécuté par le script de build seulement, non
+  lié dans le binaire.
+- **La `libcrypto` d'OpenSSL** — liée dynamiquement depuis l'hôte, non embarquée : sa licence
+  est celle de la bibliothèque installée sur la machine.
+
+Aucun de ces termes n'est réciproque : rien n'entre donc en conflit avec l'AGPL. `blessing` et
+`WTFPL` sont autorisées nommément dans `deny.toml`, avec cette justification. La notice à
+reproduire, recopiée de `sqlcipher/LICENSE-sqlcipher` de la crate :
+
+```text
+Copyright (c) 2025, ZETETIC LLC
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the ZETETIC LLC nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY ZETETIC LLC ''AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL ZETETIC LLC BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
