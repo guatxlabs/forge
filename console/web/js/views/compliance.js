@@ -6,7 +6,7 @@ import { visibleEngagements } from './tenancy.js';
 import { toast } from '../core/ui.js';
 
 // =====================================================================================
-//  COMPLIANCE (ENTERPRISE, flag-gated) — vue #compliance : (1) politique de rétention,
+//  COMPLIANCE (ADVANCED, flag-gated) — vue #compliance : (1) politique de rétention,
 //  (2) legal-hold, (3) signer KMS/HSM (rédigé, lecture seule), (4) export de preuves SOC 2 / ISO.
 //  Réservé admin + flag engagé (complianceAdmin()). Le serveur reste l'autorité (routes flag+admin
 //  -> 404/403) ; ce masquage = défense en profondeur. Les secrets sont rédigés : jamais affichés.

@@ -81,10 +81,10 @@ use super::*;
         }
     }
 
-    /// Engage the enterprise SCIM flag on THIS db (per-DB, isolated — no env mutation).
+    /// Engage the advanced SCIM flag on THIS db (per-DB, isolated — no env mutation).
     fn engage_flag(app: &App) {
         let db = app.db();
-        crate::settings_set(&db, "enterprise.scim", "on").unwrap();
+        crate::settings_set(&db, "advanced.scim", "on").unwrap();
     }
 
     /// Set a SCIM bearer token directly (store its SHA). Returns the raw token.
@@ -445,7 +445,7 @@ use super::*;
         {
             let db = app.db();
             // Designate 'root.corp.com' as a super-admin (provisioning-only key).
-            crate::settings_set(&db, "enterprise.superadmin", "root.corp.com").unwrap();
+            crate::settings_set(&db, "advanced.superadmin", "root.corp.com").unwrap();
         }
         let addr = serve(app.clone()).await;
         let body = scim_user_body("root@corp.com", true, "ext-root");
@@ -521,7 +521,7 @@ use super::*;
         set_token(&app, "tok-f8");
         let sa_uid: i64 = {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.superadmin", "super.admin").unwrap();
+            crate::settings_set(&db, "advanced.superadmin", "super.admin").unwrap();
             let hash = crate::hash_pw("sapw");
             crate::upsert_user(&db, "super.admin", "admin", &hash).unwrap();
             db.query_row("SELECT id FROM users WHERE login=?", ["super.admin"], |r| r.get(0)).unwrap()

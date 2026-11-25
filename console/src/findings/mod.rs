@@ -380,7 +380,7 @@ pub(crate) async fn finding_update(
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response();
     }
-    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the isolation 404 (a cross-tenant id is
+    // ADVANCED PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the isolation 404 (a cross-tenant id is
     // already 404 via resolve_view_engagement_id => NO_ENGAGEMENT). For a VISIBLE engagement the caller's
     // EFFECTIVE per-engagement role must allow OPERATE; a tenant_viewer is DENIED 403. Community => NO-OP.
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
@@ -451,13 +451,13 @@ pub(crate) async fn finding_update(
 
 // =====================================================================================
 //  OWNERSHIP (readiness P1-4) — pointeur LÉGER d'assignation (`finding.assignee` = user_id) + bulk-assign.
-//  PAS un moteur de workflow : juste « qui possède ce finding ». GRANT-SCOPED des DEUX CÔTÉS (enterprise) :
+//  PAS un moteur de workflow : juste « qui possède ce finding ». GRANT-SCOPED des DEUX CÔTÉS (advanced) :
 //  l'appelant doit OPÉRER l'engagement ET l'assigné (non-null) doit avoir un grant sur CE MÊME engagement.
 // =====================================================================================
 
 /// GET /api/findings/assignable — l'ensemble des utilisateurs ASSIGNABLES sur l'engagement ACTIF (le jeu
 /// légitime de propriétaires pour le sélecteur d'assignation). Alimente l'UI d'assignation ; l'action
-/// d'assigner reste OPÉRATEUR (gate serveur). ENTERPRISE : UNIQUEMENT les users détenant un grant
+/// d'assigner reste OPÉRATEUR (gate serveur). ADVANCED : UNIQUEMENT les users détenant un grant
 /// (engagement-spécifique OU tenant-wide) sur l'engagement actif — le MÊME jeu que `resolve_assignee` valide
 /// (fail-closed : caller sans grant -> NO_ENGAGEMENT -> liste vide). COMMUNITY : tous les users actifs (aucun
 /// grant n'existe). Divulgation minimale (id + login) nécessaire à la fonctionnalité. Réponse
@@ -525,7 +525,7 @@ pub(crate) fn resolve_assignee(app: &App, eid: i64, body: &Value) -> Result<Opti
             ))
         }
     };
-    // L'assigné doit EXISTER et être actif (sain en community ET enterprise — jamais un propriétaire fantôme).
+    // L'assigné doit EXISTER et être actif (sain en community ET advanced — jamais un propriétaire fantôme).
     let exists = {
         let store = app.store();
         store
@@ -538,7 +538,7 @@ pub(crate) fn resolve_assignee(app: &App, eid: i64, body: &Value) -> Result<Opti
             json!({"error": "unknown_assignee", "why": format!("utilisateur {uid} inconnu ou désactivé")}),
         ));
     }
-    // ENTERPRISE : l'assigné doit AUSSI être sur CET engagement (grant-scopé des deux côtés). Community => no-op.
+    // ADVANCED : l'assigné doit AUSSI être sur CET engagement (grant-scopé des deux côtés). Community => no-op.
     if tenancy::enabled(app) && !tenancy::user_has_engagement_grant(app, uid, eid) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -550,7 +550,7 @@ pub(crate) fn resolve_assignee(app: &App, eid: i64, body: &Value) -> Result<Opti
 
 /// POST /api/findings/:id/assign {assignee: <user_id|null>} — DÉFINIT/EFFACE le propriétaire (assignee) d'un
 /// finding (OPÉRATEUR, fail-closed 403). ISOLATION : n'agit QUE sur un finding de l'engagement ACTIF (un id
-/// d'un AUTRE engagement -> 404, jamais divulgué). GRANT-SCOPÉ DES DEUX CÔTÉS (enterprise) : l'appelant doit
+/// d'un AUTRE engagement -> 404, jamais divulgué). GRANT-SCOPÉ DES DEUX CÔTÉS (advanced) : l'appelant doit
 /// OPÉRER l'engagement ET l'assigné (non-null) doit détenir un grant sur ce MÊME engagement (resolve_assignee).
 /// Écriture MATCHÉE -> 500 sur Err AVANT le ledger (pas de fausse attestation) ; ledger `console.finding.assign`
 /// {finding_id, assignee, by} UNIQUEMENT en cas de succès.
@@ -578,7 +578,7 @@ pub(crate) async fn finding_assign(
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response();
     }
-    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    // ADVANCED PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }
@@ -674,7 +674,7 @@ pub(crate) async fn finding_triage(
         Some(c) => c,
         None => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "why": "finding introuvable"}))).into_response(),
     };
-    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    // ADVANCED PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }

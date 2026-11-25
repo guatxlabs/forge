@@ -23,7 +23,7 @@ use crate::testutil::*;
             [],
         )
         .unwrap();
-        migrate(&conn()); // ALTER ... ADD COLUMN engagement_id NOT NULL DEFAULT 1 -> backfill à 1
+        migrate(&conn()).expect("migrate"); // ALTER ... ADD COLUMN engagement_id NOT NULL DEFAULT 1 -> backfill à 1
         let eid: i64 = conn()
             .query_row("SELECT engagement_id FROM finding WHERE id=1", [], |r| r.get(0))
             .unwrap();
@@ -598,7 +598,7 @@ use crate::testutil::*;
     }
 
     // =====================================================================================
-    // ENTERPRISE — ROW-LEVEL MULTI-TENANCY (tenancy.rs), flag-gated. Fail-closed tenant isolation +
+    // ADVANCED — ROW-LEVEL MULTI-TENANCY (tenancy.rs), flag-gated. Fail-closed tenant isolation +
     // community no-op (byte-identical). Ces tests sont MUTATION-PROVABLES : affaiblir le filtre central
     // (tenancy::engagement_visible / engagement_in / granted_tenants) fait passer un test AU ROUGE.
     // =====================================================================================

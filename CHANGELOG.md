@@ -11,6 +11,23 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed (breaking) — `enterprise` leaves the settings keys, the `whoami` field and the 403 error code
+
+The per-database keys `enterprise.tenancy`, `.sso`, `.scim`, `.compliance` and `.superadmin` become
+`advanced.tenancy`, `.sso`, `.scim`, `.compliance` and `.superadmin`; the `/api/whoami` field `enterprise`
+becomes `advanced`, the compliance view's `ledger_signer.enterprise_flag` becomes `advanced_flag`, and the
+tenant API's `enterprise_disabled` error becomes `advanced_disabled`. No read alias. Schema version 3 COPIES
+each old key to its new name, value kept, in the version stamp's transaction, on the schema pass of a database
+not yet stamped (server start on SQLite and Postgres, `upgrade`, `migrate`, `migrate-store`) — tenant
+isolation, SSO, SCIM, compliance and the super-administrator survive the upgrade unchanged. The old rows stay:
+the upgrade is additive, so older replicas keep reading them during a rolling restart. A persisted record
+(`migration.renamed_settings`) makes the copy happen once: after an older binary has started again (rollback,
+old pod restarted) and reset the stamp to 2, the new binary compares both names and refuses at the slightest
+gap instead of copying again — a revoked super-administrator never comes back. A refusal exits 2 and names the
+keys with their state (`present`, `absent`, `differs`), never a value. Removing the leftovers is a separate,
+explicit transaction and the point of no return. Table, migration, refusal text and removal:
+[UPGRADE §8](docs/UPGRADE.md#8-renamed-settings-keys-whoami-field-and-error-code-enterprise--advanced).
+
 ### Changed (breaking) — `FORGE_ENTERPRISE_*` variables renamed `FORGE_ADVANCED_*`, without an alias
 
 `FORGE_ENTERPRISE_STORE`, `_COMPLIANCE`, `_SSO`, `_TENANCY` and `_SCIM` become `FORGE_ADVANCED_STORE`,

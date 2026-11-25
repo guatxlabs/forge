@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Compact typed API error shared by the flag-gated enterprise modules (rbac / compliance / sso /
+//! Compact typed API error shared by the flag-gated advanced modules (rbac / compliance / sso /
 //! tenancy / scim). Deliberately SMALL by construction (`&'static str` code + `String` why, no boxing)
 //! so `Result<T, ApiError>` never trips `clippy::result_large_err`. `IntoResponse` produces EXACTLY the
 //! byte-identical `(status, Json({"error": code, "why": why}))` envelope the modules emitted before, so
@@ -11,7 +11,7 @@ use axum::{
 };
 use serde_json::json;
 
-/// Typed API error — the shared substrate of every enterprise module's `err(...)` helper.
+/// Typed API error — the shared substrate of every advanced module's `err(...)` helper.
 #[derive(Debug)]
 pub(crate) struct ApiError {
     pub status: StatusCode,

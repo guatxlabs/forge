@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS settings(
 -- (finding/run_job) reste un sous-label LIBRE AU SEIN d'un engagement. finding/runrecord/roe_decision/
 -- run_job portent `engagement_id` (DEFAULT 1 = engagement #1, créé au boot depuis le scope serveur
 -- courant via ensure_default_engagement : migration rétro-compat ZÉRO-PERTE). `status` ∈ {active|
--- archived}, `mode` ∈ {white|grey|black} (contraintes applicatives, pas SQL). `tenant_id` (ENTERPRISE,
+-- archived}, `mode` ∈ {white|grey|black} (contraintes applicatives, pas SQL). `tenant_id` (ADVANCED,
 -- ajouté par migrate ; DEFAULT 1 = tenant #1) rattache l'engagement à un TENANT : le filtre fail-closed
 -- tenancy.rs (flag-gated) restreint chaque lecture/écriture aux engagements des tenants accordés au
 -- caller — NO-OP en community (single implicit tenant #1, byte-identique).
@@ -111,14 +111,14 @@ CREATE TABLE IF NOT EXISTS finding_template(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, vuln_class TEXT DEFAULT '', cwe TEXT DEFAULT '',
   severity TEXT DEFAULT 'INFO', title_tmpl TEXT DEFAULT '', description_tmpl TEXT DEFAULT '',
   remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '');
--- TENANT (ENTERPRISE — row-level multi-tenancy, separable/flag-gated). Top of the hierarchy:
+-- TENANT (ADVANCED — row-level multi-tenancy, separable/flag-gated). Top of the hierarchy:
 -- TENANT ──< ENGAGEMENT ──< findings/runs (data inherits tenant via engagement_id). Community (default)
 -- runs as a SINGLE IMPLICIT TENANT #1 with byte-identical behaviour — the tenant filter (tenancy.rs) is a
--- no-op unless the enterprise flag is engaged. `status` ∈ {active|archived} (applicative constraint).
+-- no-op unless the advanced flag is engaged. `status` ∈ {active|archived} (applicative constraint).
 CREATE TABLE IF NOT EXISTS tenant(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, status TEXT DEFAULT 'active',
   created TEXT DEFAULT '', updated TEXT DEFAULT '');
--- TENANT_GRANT (ENTERPRISE) : maps which USERS may access which TENANTS. FAIL-CLOSED enforcement
+-- TENANT_GRANT (ADVANCED) : maps which USERS may access which TENANTS. FAIL-CLOSED enforcement
 -- (tenancy.rs) — a user only sees/acts on engagements whose tenant_id is in their granted set; no grant
 -- => zero rows / 403. `role` ∈ {tenant_admin|tenant_operator|tenant_viewer} (applicative). UNIQUE(user,tenant)
 -- => at most one grant per (user,tenant). In community mode grants are unused (single implicit tenant).
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS tenant_grant(
   role TEXT NOT NULL DEFAULT 'tenant_viewer', created TEXT DEFAULT '',
   UNIQUE(user_id, tenant_id) ON CONFLICT IGNORE);
 CREATE INDEX IF NOT EXISTS idx_tenant_grant_user ON tenant_grant(user_id);
--- ENGAGEMENT_GRANT (ENTERPRISE — PER-ENGAGEMENT RBAC, readiness #14). Composable, MOST-SPECIFIC-WINS grant:
+-- ENGAGEMENT_GRANT (ADVANCED — PER-ENGAGEMENT RBAC, readiness #14). Composable, MOST-SPECIFIC-WINS grant:
 -- a row (user_id, engagement_id, role) OVERRIDES the user's tenant-wide tenant_grant FOR THAT ENGAGEMENT — so
 -- a user can be tenant_operator on engagement A yet tenant_viewer on engagement B. Absent row => the
 -- tenant-wide grant applies (EXISTING behaviour => this table empty = byte-identical). `role` ∈ {tenant_admin|
@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS login_throttle(
 // Différences DDL SQLite-only DROPPÉES : `... ON CONFLICT IGNORE` sur les contraintes UNIQUE (clause de
 // résolution SQLite inexistante en PG ; les INSERT qui en dépendaient ont été portés en `INSERT ...
 // ON CONFLICT DO NOTHING` au Stage 1), et le fait que `INTEGER PRIMARY KEY` soit un alias de rowid.
-// PÉRIMÈTRE : ce miroir couvre le SCHEMA de base state.rs (+ migrate). Les tables des modules ENTERPRISE
+// PÉRIMÈTRE : ce miroir couvre le SCHEMA de base state.rs (+ migrate). Les tables des modules ADVANCED
 // créées paresseusement (scim_*, sso_*, idp_group_map…) restent gérées par leurs modules (flag-gated) —
 // hors de ce const, comme elles sont hors du `SCHEMA` de base.
 // CÂBLÉ AU BOOT (Stage 2b batch 5) : quand le backend ACTIF est Postgres (FORGE_ADVANCED_STORE=
@@ -374,7 +374,12 @@ CREATE TABLE IF NOT EXISTS login_throttle(
 // `None` et se voit tamponnée au 1er boot suivant la mise à jour (rétro-compat, jamais de valeur inventée).
 /// v2 — lot « comptabilité des findings NON stockés » : `run_job.findings_dropped` +
 /// `run_job.findings_write_errors` (additifs, DEFAULT NULL = « inconnu sur les runs antérieurs »).
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+/// v3 — anciennes clés de réglage COPIÉES sous `advanced.<x>` (settings_rename.rs, ADDITIF : l'ancienne
+/// ligne reste pour un réplica ou une image antérieurs), avec un enregistrement persisté de cette première
+/// migration, dans la même transaction que ce tampon. Le tampon ne sert PAS de mémoire (un binaire antérieur
+/// le remet à 2) : c'est l'enregistrement qui interdit toute seconde copie ; tampon < 3 avec enregistrement
+/// => les deux noms sont comparés. Une base tamponnée à 3 n'est pas contrôlée.
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 /// Clé de la table `settings` portant la version de schéma persistée (cf. [`SCHEMA_VERSION`]).
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 
@@ -401,9 +406,67 @@ pub(crate) fn stamp_schema_version(store: &crate::store::Store) {
     let _ = crate::settings_set_store(store, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string());
 }
 
+/// POSTGRES — DDL + amorçage du boot, en UNE transaction sous le verrou DDL cluster-global
+/// (`pg_advisory_xact_lock`, auto-relâché au COMMIT) : PG_SCHEMA, seeders id=1, recalage des séquences
+/// IDENTITY, copie des clés de réglage renommées (`advanced.<x>`, cf. settings_rename.rs) PUIS
+/// tampon de version. Un refus de la migration des clés (clés en écart) rend `Err` : la
+/// transaction est annulée, rien n'est tamponné, et le boot s'arrête en nommant les clés en écart.
+///
+/// WAVE-B LOW FIX — COLD-START DDL RACE (HA) : sous HA, deux réplicas démarrant un cluster VIERGE lancent
+/// `execute_batch(PG_SCHEMA)` + les seeders id=1 (dashboard/engagement/tenant) SIMULTANÉMENT. `CREATE …
+/// IF NOT EXISTS` (catalogue PG PARTAGÉ) et `SELECT COUNT(*) … puis INSERT id=1` NE sont PAS concurrency-
+/// safe -> un réplica panique (« tuple concurrently updated » sur pg_type/pg_class, ou duplicate key). On
+/// SÉRIALISE toute la section DDL+seed sous ce verrou : un SEUL réplica applique schéma/seeds à la fois, les
+/// autres attendent puis voient tout déjà présent (idempotent). La migration des clés y est aussi sérialisée :
+/// le second réplica relit une base déjà tamponnée et n'écrit rien.
+///
+/// FIX (isolation assumption): this serialization is correct ONLY under READ COMMITTED — the seam's
+/// `with_tx` default isolation. Under READ COMMITTED the SECOND replica, once it wins the advisory lock,
+/// re-evaluates its `SELECT COUNT(*)` seeder predicates against the FIRST replica's ALREADY-COMMITTED rows and
+/// sees id=1 present -> no re-seed (idempotent). A stricter level (REPEATABLE READ / SERIALIZABLE) would pin
+/// the second replica's snapshot at BEGIN, BEFORE the first replica committed, so its COUNT(*) would still
+/// read 0 and it would re-INSERT id=1 -> duplicate-key / double-seed. Do NOT raise the isolation of THIS boot
+/// tx without moving the seeders to ON CONFLICT DO NOTHING upserts.
+#[cfg(feature = "store-postgres")]
+pub(crate) fn pg_boot_schema_and_seed(
+    store: &crate::store::Store,
+    scope_in: &[String],
+    scope_mode: &str,
+    ledger_path: &str,
+) -> crate::store::StoreResult<()> {
+    store.with_tx(|tx| {
+        tx.execute("SELECT pg_advisory_xact_lock(?)", &crate::sql_params![crate::ha::BOOT_DDL_LOCK_KEY])?;
+        tx.execute_batch(PG_SCHEMA)?;
+        // `tx.store()` is a getter returning the tx-owned `&Store` (the transaction owns the critical
+        // section — there is no separate guard to tighten); call it inline so no aliasing binding is held.
+        ensure_default_dashboard(tx.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
+        // ENGAGEMENT #1 / TENANT #1 (migration ZÉRO-PERTE) — idempotents (count>0 => no-op). Sous le verrou,
+        // un seul réplica les crée ; l'autre voit count>0 et ne réinsère pas id=1.
+        ensure_default_engagement(tx.store(), scope_in, scope_mode, ledger_path);
+        ensure_default_tenant(tx.store());
+        // Après TOUT seeding à id explicite : recale les séquences IDENTITY sur max(id) (sinon le 1er
+        // INSERT-sans-id régénère id=1 -> duplicate key). Idempotent.
+        advance_pg_identity_sequences(tx.store());
+        // CLÉS DE RÉGLAGE RENOMMÉES puis SCHEMA VERSION STAMP (parité avec la branche SQLite où `migrate()`
+        // fait les deux dans une transaction) : le backend Postgres applique `PG_SCHEMA` sans passer par
+        // `migrate()`, donc les deux se font ICI, sous le même verrou DDL, dans la même transaction.
+        crate::settings_rename::copy_renamed_settings_store(tx.store(), crate::settings_rename::RefusalContext::Boot)
+            .map_err(crate::store::StoreError::Backend)?;
+        stamp_schema_version(tx.store());
+        Ok(())
+    })
+}
+
 /// Migrations additives (ALTER) — chaque ALTER est error-ignored : si la colonne existe déjà
-/// (base ancienne ou re-boot) SQLite renvoie une erreur qu'on absorbe. Idempotent.
-pub(crate) fn migrate(db: &Connection) {
+/// (base ancienne ou re-boot) SQLite renvoie une erreur qu'on absorbe. Idempotent. `Err` = refus de la
+/// migration des clés de réglage renommées (clés en écart, cf. settings_rename.rs) : l'appelant NE DÉMARRE
+/// PAS. Contexte de démarrage (texte « refusing to start ») ; les autres appelants passent par [`migrate_in`].
+pub(crate) fn migrate(db: &Connection) -> Result<(), String> {
+    migrate_in(db, crate::settings_rename::RefusalContext::Boot)
+}
+
+/// [`migrate`] avec le contexte qui décide la dernière phrase d'un refus (`forge upgrade`, l'import).
+pub(crate) fn migrate_in(db: &Connection, ctx: crate::settings_rename::RefusalContext) -> Result<(), String> {
     let alters = [
         // run_id corrèle finding/runrecord avec le run_job qui les a produits (boucle purple).
         "ALTER TABLE finding ADD COLUMN run_id TEXT DEFAULT ''",
@@ -498,7 +561,7 @@ pub(crate) fn migrate(db: &Connection) {
         "ALTER TABLE runrecord ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE roe_decision ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE run_job ADD COLUMN engagement_id INTEGER NOT NULL DEFAULT 1",
-        // TENANT (ENTERPRISE) : chaque engagement appartient à un tenant. DEFAULT 1 (tenant #1) =>
+        // TENANT (ADVANCED) : chaque engagement appartient à un tenant. DEFAULT 1 (tenant #1) =>
         // rétro-compat ZÉRO-PERTE : une base ANTÉRIEURE voit TOUS ses engagements rattachés au tenant
         // par défaut (créé au boot par ensure_default_tenant). NOT NULL autorisé (DEFAULT constant).
         // L'isolation applicative (filtre fail-closed) est portée par tenancy.rs — no-op en community.
@@ -538,7 +601,7 @@ pub(crate) fn migrate(db: &Connection) {
            remediation_tmpl TEXT DEFAULT '', refs TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')",
         [],
     );
-    // TENANT / TENANT_GRANT (ENTERPRISE) : re-créées ici (idempotent) en plus du SCHEMA, pour qu'une base
+    // TENANT / TENANT_GRANT (ADVANCED) : re-créées ici (idempotent) en plus du SCHEMA, pour qu'une base
     // ANTÉRIEURE à leur introduction les obtienne au 1er boot suivant la mise à jour (même discipline que
     // `engagement`/`settings`). Le seeding du tenant #1 + backfill est fait par ensure_default_tenant.
     let _ = db.execute(
@@ -555,7 +618,7 @@ pub(crate) fn migrate(db: &Connection) {
         [],
     );
     let _ = db.execute("CREATE INDEX IF NOT EXISTS idx_tenant_grant_user ON tenant_grant(user_id)", []);
-    // ENGAGEMENT_GRANT (ENTERPRISE — PER-ENGAGEMENT RBAC, readiness #14) : table NEUVE re-créée ici
+    // ENGAGEMENT_GRANT (ADVANCED — PER-ENGAGEMENT RBAC, readiness #14) : table NEUVE re-créée ici
     // (idempotent, CREATE IF NOT EXISTS) en plus du SCHEMA, pour qu'une base ANTÉRIEURE l'obtienne au 1er
     // boot suivant la mise à jour (même discipline que `tenant_grant`). ADDITIVE + BEHAVIOUR-PRESERVING :
     // une base existante démarre avec la table VIDE => aucune override per-engagement => le grant tenant-wide
@@ -630,12 +693,21 @@ pub(crate) fn migrate(db: &Connection) {
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_run_job_running_per_engagement ON run_job(engagement_id) WHERE status='running'",
         [],
     );
-    // SCHEMA VERSION STAMP : après avoir appliqué TOUTES les migrations additives ci-dessus (et créé la
-    // table `settings`), on tamponne la version LOGIQUE courante ([`SCHEMA_VERSION`]). Upsert idempotent
+    // CLÉS DE RÉGLAGE RENOMMÉES (v3) + SCHEMA VERSION STAMP, dans UNE transaction. Tant que la base n'est
+    // pas tamponnée à 3 : première migration (pas encore d'enregistrement persisté) => les anciennes clés
+    // sont COPIÉES sous `advanced.<x>` (ancienne ligne laissée) puis l'enregistrement est écrit ; base déjà
+    // migrée qu'un binaire antérieur a retamponnée (enregistrement présent) => AUCUNE copie, les deux noms
+    // sont comparés (cf. settings_rename.rs). Clés en écart => Err, rien n'est écrit (la transaction est
+    // abandonnée), le tampon non plus, et l'appelant s'arrête — jamais une clé révoquée qui renaît, jamais
+    // d'extinction silencieuse. Base tamponnée à 3 : rien n'est contrôlé.
+    // Le stamp tamponne ensuite la version LOGIQUE courante ([`SCHEMA_VERSION`]). Upsert idempotent
     // (settings PK sur `key`) -> re-tamponné à chaque boot, sans doublon. C'est CE stamp que lisent
     // `/health`, `forge status` et le flux `upgrade` pour répondre « à quelle version est la base ».
     // fail-soft : une écriture échouée (base en lecture seule improbable ici) ne casse pas l'amorçage.
-    let _ = crate::settings_set(db, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string());
+    let tx = db.unchecked_transaction().map_err(|e| format!("migrate: ouverture de transaction échouée: {e}"))?;
+    crate::settings_rename::copy_renamed_settings_conn(&tx, ctx)?;
+    let _ = crate::settings_set(&tx, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string());
+    tx.commit().map_err(|e| format!("migrate: validation de transaction échouée: {e}"))
 }
 
 /// Garantit l'existence du dashboard par défaut (id=1) — rétro-compat : la colonne `panel.dashboard_id`
@@ -691,11 +763,11 @@ pub(crate) fn ensure_default_engagement(store: &crate::store::Store, scope_in: &
     );
 }
 
-/// MIGRATION ZÉRO-PERTE (ENTERPRISE / rétro-compat) — garantit le TENANT #1 (défaut). Si la table
+/// MIGRATION ZÉRO-PERTE (ADVANCED / rétro-compat) — garantit le TENANT #1 (défaut). Si la table
 /// `tenant` est VIDE : crée le tenant #1, backfille tout engagement au tenant #1 (la colonne
 /// `engagement.tenant_id` a DEFAULT 1, ceci est un filet défensif), et SÈME un grant vers le tenant #1
 /// pour CHAQUE utilisateur existant (rôle dérivé du rôle RBAC : admin->tenant_admin, operator->
-/// tenant_operator, sinon tenant_viewer). But : quand l'admin ENGAGE plus tard le flag enterprise, les
+/// tenant_operator, sinon tenant_viewer). But : quand l'admin ENGAGE plus tard le flag advanced, les
 /// comptes déjà provisionnés conservent l'accès à l'espace historique (« existing users implicitly have
 /// full access to tenant #1 »). En COMMUNITY le filtre est de toute façon un no-op ; ces grants restent
 /// inertes. Idempotent : ne fait RIEN si un tenant existe déjà (n'écrase jamais un provisioning).
@@ -765,7 +837,7 @@ pub(crate) fn advance_pg_identity_sequences(store: &crate::store::Store) {
 /// ledger_entry + tout `scim_*`/`sso_*` présent) : chacune doit être recalée sinon le PREMIER INSERT-sans-id
 /// post-migration régénère un id déjà pris -> `duplicate key`. On DÉCOUVRE dynamiquement chaque colonne
 /// IDENTITY du schéma courant via `information_schema.columns.is_identity='YES'` (couvre `id` ET `seq`, base
-/// ET modules enterprise), puis `setval(seq, GREATEST(COALESCE(max(col),1),1))` sur chacune. Les noms
+/// ET modules advanced), puis `setval(seq, GREATEST(COALESCE(max(col),1),1))` sur chacune. Les noms
 /// viennent du CATALOGUE (jamais d'entrée utilisateur) -> interpolation sûre. Renvoie la liste
 /// `(table, colonne, valeur_de_séquence)` pour le rapport/preuve. NO-OP + `Ok(vec![])` en SQLite.
 #[cfg(feature = "store-postgres")]

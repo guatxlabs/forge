@@ -63,14 +63,14 @@ const PENDING_TTL_SECS: i64 = 600;
 const STATE_COOKIE: &str = "forge_sso_state";
 
 // ============================================================================================
-// FLAG — is enterprise OIDC SSO ENGAGED? Community default = OFF (local login only, byte-identical).
+// FLAG — is advanced OIDC SSO ENGAGED? Community default = OFF (local login only, byte-identical).
 // Two sources (either engages it): env `FORGE_ADVANCED_SSO` (truthy) OR the per-DB config key
-// `enterprise.sso` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors tenancy.
+// `advanced.sso` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors tenancy.
 // ============================================================================================
 
-/// Is enterprise OIDC SSO engaged?  false => community (every `/api/sso/*` route 404s, local login unchanged).
+/// Is advanced OIDC SSO engaged?  false => community (every `/api/sso/*` route 404s, local login unchanged).
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_SSO", "enterprise.sso")
+    crate::flags::advanced_enabled(app, "FORGE_ADVANCED_SSO", "advanced.sso")
 }
 
 /// Is an interactive SSO login available right now?  true iff the flag is engaged AND the OIDC provider
@@ -404,7 +404,7 @@ async fn callback(State(app): State<App>, headers: HeaderMap, Query(q): Query<Ha
         Err(e) => return err(StatusCode::FORBIDDEN, "invalid_id_token", e),
     };
 
-    // ADVANCED RBAC (enterprise): resolve the IdP `groups` claim to a least-privilege outcome over the
+    // ADVANCED RBAC (advanced): resolve the IdP `groups` claim to a least-privilege outcome over the
     // configurable mapping. `role: None` => no matching group => the identity keeps the configured default
     // role (least privilege). NEVER super-admin (not representable in the mapping). Computed here so the
     // AUTO-provisioning role below reflects the group mapping from the very first login.
@@ -778,7 +778,7 @@ fn map_user(app: &App, cfg: &SsoConfig, sub: &str, email: &str, email_verified: 
             // carries an explicit IdP-provisioning marker may be authenticated-as by an SSO identity:
             //   - `sso_managed` — set when SSO auto-provisions it, or by a future admin link; OR
             //   - `scim_user`   — a SCIM-provisioned account (combined SCIM+SSO: an IdP provisions users via
-            //     SCIM, those users then interactively sign in via SSO — a legitimate enterprise pattern).
+            //     SCIM, those users then interactively sign in via SSO — a legitimate advanced pattern).
             // A pre-existing UNMARKED LOCAL account (created via /api/setup or admin CRUD, never via SSO or
             // SCIM) is NEVER adopted by a colliding IdP claim: otherwise an attacker whose sanitised
             // `sub`/`email` collides with a privileged local login could authenticate AS it — and the
@@ -954,7 +954,7 @@ fn is_scim_managed(store: &crate::store::Store, user_id: i64) -> bool {
         .is_ok()
 }
 
-/// PG-ONLY — crée la table enterprise SSO `sso_pending` sur la CIBLE Postgres pour le migrateur de données
+/// PG-ONLY — crée la table advanced SSO `sso_pending` sur la CIBLE Postgres pour le migrateur de données
 /// (`cli::migrate-store`) : hors de `PG_SCHEMA` (créée paresseusement), le migrateur doit invoquer ce chemin
 /// pour que la cible la possède AVANT la copie (sinon absente -> hard-fail, jamais de skip silencieux).
 /// Délègue à `ensure_schema` (branche `is_postgres()` ; le DELETE des rows expirées y est un no-op sur une

@@ -53,7 +53,7 @@ object-store = ["dep:s3"]
 # across `.await`). The other candidates were dropped this wave because they flag pre-existing,
 # out-of-scope issues that cannot be fixed without broad/risky churn: `string_slice` (29 hits — string
 # indexing is pervasive), `redundant_clone` (17 hits, nursery lint w/ false positives), and
-# `unreachable_pub` (24 hits — would narrow the enterprise modules' deliberately-`pub` separable API).
+# `unreachable_pub` (24 hits — would narrow the advanced modules' deliberately-`pub` separable API).
 [lints.clippy]
 await_holding_lock = "warn"
 # `significant_drop_tightening` : ACTIVÉ (readiness #6). Le lint flaguait ~93 sites PRÉEXISTANTS (pattern
@@ -89,13 +89,13 @@ getrandom = "0.4"   # CSPRNG OS (token bearer + sel argon2id) — Result vérifi
 subtle = "2"        # comparaison à temps constant du bearer/token (anti timing-oracle)
 chacha20poly1305 = "0.11"   # AEAD PUR RUST (RustCrypto : chacha20 + poly1305, zéro dép C/openssl) — chiffre l'archive backup (XChaCha20-Poly1305, nonce 24o, tag auth). Build par défaut safe.
 tar = "0.4"                 # archive backup au format tar standard (pur Rust) : snapshot DB + ledger JSONL + clé .ed25519 + manifest.json
-# ENTERPRISE SSO (OIDC) — validation cryptographique de l'ID token (signature JWKS RS256, iss/aud/exp).
+# ADVANCED SSO (OIDC) — validation cryptographique de l'ID token (signature JWKS RS256, iss/aud/exp).
 # `default-features=false` : on retire la feature `use_pem` (parsing PEM via `pem`+`simple_asn1`) INUTILE
 # au runtime SSO (on valide via composantes RSA n/e du JWKS, pas via PEM). Backend `rust_crypto` : crates
 # RustCrypto en pur Rust (`rsa`, `p256`, `p384`, `ed25519-dalek`), AUCUN openssl ni bibliothèque C ; `ring`
 # n'est PAS tiré par jsonwebtoken (seulement par rustls et rustls-webpki, cf. `cargo tree -i ring`)
 # => le build PAR DÉFAUT reste openssl-free. Le module sso est
-# compilé mais INERTE tant que le flag runtime FORGE_ADVANCED_SSO / enterprise.sso est OFF (community).
+# compilé mais INERTE tant que le flag runtime FORGE_ADVANCED_SSO / advanced.sso est OFF (community).
 jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto"] }
 
 # SEAM TLS SORTANT (`src/tls.rs`) — DANS LE BUILD PAR DÉFAUT. Le décideur a tranché : « pas de clair ».
@@ -123,7 +123,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Racines CA Mozilla en DONNÉES PURES (aucune crypto, aucun accès au magasin système -> aucune dép OS).
 webpki-roots = "1"
 
-# ENTERPRISE STORE (Postgres) — OPTIONNELLES, tirées UNIQUEMENT sous la feature `store-postgres`. Le
+# ADVANCED STORE (Postgres) — OPTIONNELLES, tirées UNIQUEMENT sous la feature `store-postgres`. Le
 # client `postgres` est SYNCHRONE/bloquant (colle au modèle sync/held-guard du seam, comme rusqlite ;
 # appelé depuis les handlers async en portée bloquante). TLS openssl-free : `tokio-postgres-rustls` avec
 # le provider crypto `ring` (PAS aws-lc-rs, PAS native-tls/openssl) + racines CA `webpki-roots` (données

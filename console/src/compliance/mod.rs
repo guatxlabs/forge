@@ -69,15 +69,15 @@ const CONSOLE_ALG: &str = "sha256-console";
 const PURGE_KIND: &str = "console.compliance.purge";
 
 // ============================================================================================
-// FLAG — is enterprise COMPLIANCE ENGAGED? Community default = OFF (every /api/compliance/* route 404s).
+// FLAG — is advanced COMPLIANCE ENGAGED? Community default = OFF (every /api/compliance/* route 404s).
 // Two sources (either engages it): env `FORGE_ADVANCED_COMPLIANCE` (truthy) OR the per-DB config key
-// `enterprise.compliance` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors sso/scim.
+// `advanced.compliance` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors sso/scim.
 // ============================================================================================
 
-/// Is enterprise COMPLIANCE engaged?  false => community (every `/api/compliance/*` route 404s, ledger/data
+/// Is advanced COMPLIANCE engaged?  false => community (every `/api/compliance/*` route 404s, ledger/data
 /// byte-identical, WORM/retention/hold inert).
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_COMPLIANCE", "enterprise.compliance")
+    crate::flags::advanced_enabled(app, "FORGE_ADVANCED_COMPLIANCE", "advanced.compliance")
 }
 
 // ============================================================================================
@@ -89,7 +89,7 @@ pub fn enabled(app: &App) -> bool {
 pub(crate) use crate::common::err;
 use crate::common::disabled;
 
-/// Common gate: enterprise engaged + admin session. Returns the short-circuit Response, or None to proceed.
+/// Common gate: advanced engaged + admin session. Returns the short-circuit Response, or None to proceed.
 fn gate(app: &App, headers: &HeaderMap) -> Option<Response> {
     if !enabled(app) {
         return Some(disabled());
@@ -142,7 +142,7 @@ fn redacted_ledger_signer() -> Value {
     json!({
         "mode": mode,
         "off_host": off_host,
-        "enterprise_flag": crate::flags::env_truthy("FORGE_ADVANCED_COMPLIANCE"),
+        "advanced_flag": crate::flags::env_truthy("FORGE_ADVANCED_COMPLIANCE"),
         "pubkey": pubkey,
         "endpoint": if endpoint_set { "***REDACTED***" } else { "" },
         "endpoint_set": endpoint_set,

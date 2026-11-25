@@ -938,7 +938,7 @@ async fn engagement_report(
     if !exists {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
-    // ENTERPRISE (flag-gated) fail-closed : le rapport d'un engagement d'un tenant NON accordé au caller
+    // ADVANCED (flag-gated) fail-closed : le rapport d'un engagement d'un tenant NON accordé au caller
     // est indisponible -> 404 (mêmes octets que « inconnu » : ni existence ni données divulguées).
     // No-op en community (engagement_visible => true).
     if crate::tenancy::enabled(&app) && !crate::tenancy::engagement_visible(&app, &headers, id) {

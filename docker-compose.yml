@@ -306,7 +306,7 @@ services:
   #   # puis dans forge.environment : BURP_API_URL=http://burp:1337 (+ BURP_API_KEY via .env)
 
   # ---------------------------------------------------------------------------
-  # postgres — backend ENTERPRISE (OPTIONNEL, profil "postgres", Stage 4 HA/multi-instance).
+  # postgres — backend ADVANCED (OPTIONNEL, profil "postgres", Stage 4 HA/multi-instance).
   # ---------------------------------------------------------------------------
   # EXCLU d'un `docker compose up` NU (profil "postgres") => le déploiement PAR DÉFAUT reste SQLite,
   # INCHANGÉ. Pour l'activer, il faut À LA FOIS ce profil ET l'override qui recompile la console avec la

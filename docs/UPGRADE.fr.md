@@ -59,6 +59,7 @@ La même version est **surfacée sur `/health`** (champ `schema_version`, additi
 |---|---|---|
 | 1 | socle (`run_id`/`cwe`/`cvss` sur `finding`, colonnes C2 sur `run_job`, engagements, tenants…) | — |
 | 2 | `run_job.findings_dropped` · `run_job.findings_write_errors` — comptabilité des findings **émis par le moteur et non stockés** (cf. `docs/HTTP_API.md`, section `/api/ingest`) | **Deux `ALTER TABLE … ADD COLUMN` additifs**, idempotents (error-ignored) et **réversibles** en pratique : aucune donnée existante n'est lue, écrite ni convertie ; un binaire ANTÉRIEUR rebranché sur la base migrée continue de fonctionner (il ignore simplement les deux colonnes). Les lignes déjà présentes prennent **`NULL`** — c'est-à-dire « **part refusée inconnue** », délibérément PAS `0` : un `DEFAULT 0` aurait affirmé rétroactivement qu'aucun finding n'avait été perdu, ce qui est précisément le mensonge que ce lot supprime. |
+| 3 | clés par base `enterprise.<name>` copiées sous `advanced.<name>` (cf. §8) | **Additive** : lignes neuves, valeurs inchangées, anciennes lignes laissées, plus l'enregistrement `migration.renamed_settings`, dans la transaction du tampon ; refus (rien écrit) quand les deux noms sont en écart. Un binaire ANTÉRIEUR rebranché sur la base migrée lit les anciennes lignes — les valeurs d'avant la montée — et remet le tampon à 2 ; le démarrage suivant du binaire neuf compare les deux noms et refuse au moindre écart (§8). |
 
 > **Postgres** : les deux colonnes sont dans `PG_SCHEMA` (cluster frais) ; une migration
 > `migrate-store` depuis SQLite les reprend, car elle copie les colonnes **énumérées** sur la source
@@ -275,7 +276,111 @@ trouvée et son nouveau nom :
 [forge] FATAL retired environment variable(s) still set: FORGE_ENTERPRISE_SSO -> rename it to FORGE_ADVANCED_SSO. The FORGE_ENTERPRISE_* names are no longer read (renamed FORGE_ADVANCED_*, no alias); refusing to start rather than run with an advanced module silently off. See docs/UPGRADE.md §7.
 ```
 
-Le moteur Python applique la même règle quand il construit le signeur du ledger (`RetiredEnvNameError`). Les
-clés de configuration par base (`enterprise.sso`, `enterprise.tenancy`, `enterprise.compliance`,
-`enterprise.scim`) ne changent pas. Pour mettre à jour : renommer les variables dans le `.env`, le fichier
-compose, la ConfigMap ou le Deployment, puis redémarrer.
+Le moteur Python applique la même règle quand il construit le signeur du ledger (`RetiredEnvNameError`). Pour
+mettre à jour : renommer les variables dans le `.env`, le fichier compose, la ConfigMap ou le Deployment, puis
+redémarrer. Les clés de configuration par base suivent au §8 — elles sont migrées pour vous, sans rien retirer.
+
+## 8. Clés de réglage, champ `whoami` et code d'erreur renommés : `enterprise` → `advanced`
+
+Le mot quitte aussi les clés de configuration par base et ce que la console sert. Aucun alias : une fois
+migrés, les anciens noms ne sont plus lus nulle part.
+
+| Où | Ancien nom (retiré) | Nouveau nom |
+|---|---|---|
+| table `settings` | `enterprise.tenancy` | `advanced.tenancy` |
+| table `settings` | `enterprise.sso` | `advanced.sso` |
+| table `settings` | `enterprise.scim` | `advanced.scim` |
+| table `settings` | `enterprise.compliance` | `advanced.compliance` |
+| table `settings` | `enterprise.superadmin` | `advanced.superadmin` |
+| `GET /api/whoami` | champ `enterprise` (`{tenancy, sso, scim, rbac, compliance}`) | champ `advanced` (même contenu) |
+| `GET /api/compliance/policy` | `ledger_signer.enterprise_flag` | `ledger_signer.advanced_flag` |
+| HTTP 403 de `/api/tenants*` | `"error": "enterprise_disabled"` | `"error": "advanced_disabled"` |
+
+**Ce que fait la migration — additive, et une seule fois.** Version de schéma **3**. Pendant une passe de
+schéma — démarrage du serveur (SQLite et Postgres), `forge upgrade`, `forge migrate`, `POST /api/setup/migrate`,
+`forge seed-demo`, et `forge migrate-store` après sa vérification des comptes — sur une base pas encore
+tamponnée à 3 et jamais migrée, chaque clé `enterprise.<name>` est **copiée** sous `advanced.<name>` en gardant
+sa valeur, et l'ancienne ligne est **laissée en place**. La même transaction écrit l'enregistrement
+`migration.renamed_settings` — la liste des noms qui existaient sous l'ancien préfixe à ce moment-là, par exemple
+`tenancy,superadmin` (vide s'il n'y en avait aucun ; jamais une valeur de réglage) — puis le tampon de version.
+Le cloisonnement des locataires, le SSO, SCIM, la conformité et le super-administrateur sont identiques après le
+premier démarrage du binaire neuf ; la console imprime une ligne par clé copiée (noms des clés, jamais les
+valeurs). Le binaire neuf ne lit que les noms `advanced.*` et n'écrit jamais les noms `enterprise.*`. Valeurs
+égales sous les deux noms : rien à copier. Valeurs différentes : refus, ci-dessous. La copie n'a jamais lieu une
+seconde fois — l'enregistrement dit qu'elle est faite.
+
+**Un binaire antérieur qui redémarre remet le tampon à 2.** Un retour arrière, ou un ancien pod relancé pendant le
+redémarrage roulant du §3.3, démarre l'image précédente, qui tamponne sa propre version de schéma (2) sans rien
+comparer. Le démarrage suivant du binaire neuf ne copie rien : il **compare** les deux noms et **refuse au moindre
+écart**. Pour chaque nom de l'enregistrement, l'ancienne et la nouvelle clé doivent être présentes et égales ;
+pour un nom hors de l'enregistrement dont l'ancienne clé est présente (écrite entre-temps), la nouvelle doit être
+présente et égale. Ce démarrage refuse donc quand une clé LISTÉE dans l'enregistrement manque ou diffère sous
+l'un des deux noms, ou quand une clé ancienne, listée ou non, existe sans clé neuve égale. Une clé posée
+SEULEMENT sous `advanced.*`, qui n'a jamais existé sous l'ancien nom (absente de l'enregistrement et des lignes
+`enterprise.*`), n'est pas comparée — et le binaire antérieur ne la voit pas.
+
+**Ne modifier aucune de ces cinq clés pendant le déploiement**, tant que tous les réplicas ne tournent pas sur
+l'image neuve (par exemple `kubectl rollout status` sur le Deployment) **et** que `/health` ne rend pas
+`schema_version: 3`. Ce que `/health` expose est le tampon de la base — partagé par tous les réplicas sous
+Postgres — que tout binaire antérieur remet à 2 en démarrant ; il ne dit pas quel binaire tourne sur un réplica
+(`version` est la même chaîne dans les deux images de cette version).
+
+**Un retour arrière montre les valeurs d'avant la montée.** L'image précédente ne lit que `enterprise.*` : un
+super-administrateur révoqué depuis la montée sous `advanced.superadmin` l'est de nouveau pour elle, et un
+cloisonnement des locataires posé seulement sous `advanced.tenancy` est éteint pour elle. Le démarrage suivant du
+binaire neuf refuse ensuite tant qu'une clé listée dans l'enregistrement manque ou diffère sous l'un des deux
+noms, ou qu'une clé ancienne existe sans clé neuve égale ; une clé posée seulement sous `advanced.*` et qui n'a
+jamais existé sous l'ancien nom — le cloisonnement de cet exemple — n'est pas comparée : ce démarrage passe et le
+binaire neuf l'applique de nouveau.
+
+**Le refus.** Rien n'est écrit (la transaction est annulée, la version n'est pas tamponnée, une clé supprimée le
+reste) et la console refuse de démarrer, code de sortie 2. Chaque écart nomme les deux clés et leur état —
+`present`, `absent` ou `differs` — jamais une valeur, `superadmin` contenant des identités :
+
+```text
+[forge] FATAL settings keys out of step: enterprise.superadmin present, advanced.superadmin absent. The enterprise.* settings keys were renamed advanced.* (no alias); until the enterprise.* leftovers are removed, both names must hold the same value. Give BOTH names the same intended value; never delete an advanced.* key to get past this; if the enterprise.* rows were removed on purpose, run the complete removal of docs/UPGRADE.md §8. Refusing to start rather than pick one.
+```
+
+La dernière phrase dépend de l'endroit du refus : `forge migrate-store` finit par « migrate-store refused: its
+transaction is rolled back, the target holds no copied row. » ; `forge migrate` et `POST /api/setup/migrate` par
+« Import refused: the target database was copied but not migrated; correct the source, then import again. » ;
+`forge upgrade` par « Upgrade refused: the database goes back to its pre-upgrade snapshot. » Pour résoudre,
+donner aux deux noms la même valeur voulue — ne jamais supprimer une clé `advanced.*` pour passer le refus. Pour
+révoquer un super-administrateur, donner aux deux noms la nouvelle liste (une liste vide ne désigne personne) ;
+si l'une des deux lignes manque, l'insérer d'abord avec cette valeur. Par exemple sur SQLite :
+
+```bash
+sqlite3 forge.db "UPDATE settings SET value='<value>' WHERE key IN ('enterprise.superadmin','advanced.superadmin');"
+```
+
+**Retirer les restes est le point de non-retour.**
+
+Une fois retirés, l'image précédente ne trouve plus aucune clé `enterprise.*` : pour elle, le cloisonnement des
+locataires, le SSO, SCIM, la conformité et le super-administrateur sont **éteints**. Revenir en arrière après le
+retrait OUVRE donc le cloisonnement des locataires. Ne les retirer que lorsque tous les réplicas tournent sur la
+version neuve et qu'aucun retour vers une image antérieure ne reste possible. Aucune sous-commande ne le fait : la
+console n'a pas de commande d'entretien des réglages, et cette version n'en ajoute pas. C'est UNE transaction de
+deux instructions, la même sous SQLite (`sqlite3 forge.db`) et sous Postgres (`psql`) : supprimer les cinq
+anciennes clés ET vider la liste de l'enregistrement. L'enregistrement reste, vidé ; après lui, plus rien n'est
+comparé TANT QU'aucune ligne `enterprise.*` n'est réécrite. Une ligne ancienne recréée ensuite (par un binaire
+antérieur ou à la main) est comparée : le démarrage refuse si la clé neuve ne porte pas la même valeur.
+
+```sql
+BEGIN;
+DELETE FROM settings WHERE key IN ('enterprise.tenancy','enterprise.sso','enterprise.scim','enterprise.compliance','enterprise.superadmin');
+UPDATE settings SET value='' WHERE key='migration.renamed_settings';
+COMMIT;
+```
+
+**Ne jamais supprimer la ligne `migration.renamed_settings`.** Le retrait ci-dessus la vide, il ne la supprime
+pas. Sans l'enregistrement, la migration suivante se rejoue comme une première migration et peut recopier sous
+`advanced.*` des restes `enterprise.*` — un super-administrateur révoqué le redeviendrait. Sa liste est lue
+fermée : un élément qui n'est pas l'un des cinq noms (casse différente, espaces, mot inconnu, élément vide) fait
+refuser le démarrage avec l'écart `migration.renamed_settings lists unknown name "<element>"` (32 caractères
+affichés au plus, tout caractère hors ASCII imprimable remplacé par `?`).
+
+**Navigateur qui garde l'ancienne interface.** Un onglet dont le JavaScript précède la mise à jour lit le champ
+`enterprise` absent de `whoami` comme « aucun module avancé » : les liens Identité et Conformité restent masqués
+jusqu'au rechargement de la page. Rien ne s'ouvre — le serveur continue d'appliquer le drapeau et la garde
+d'administration de chaque module. Les fichiers statiques sont servis sans version dans leur URL et sans
+`Cache-Control` : recharger la page (Ctrl+F5 au besoin) après la mise à jour rend les liens.

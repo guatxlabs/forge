@@ -76,7 +76,7 @@ Structure de `main.rs` **avant** la découpe (offsets relevés sur le fichier, p
 | 623–732 | `fn dispatch_cli(args: &[String]) -> Option<i32>` | sous-commandes CLI (hashpw, ledger verify…) |
 | 733–1122 | `async fn serve()` | boot serveur (~390 l : ouverture DB, PRAGMA, SCHEMA, migrate, store-gate, App, HA, bind) |
 | 1123–1139 | `enum StoreSelection` | type de la store-gate |
-| 1140–1164 | `fn enterprise_store_gate(...) -> Result<StoreSelection, String>` | décision SQLite/Postgres |
+| 1140–1164 | `fn advanced_store_gate(...) -> Result<StoreSelection, String>` | décision SQLite/Postgres |
 | 1166–1167 | `#[cfg(test)] pub(crate) mod testutil;` | **déjà un fichier externe** (`testutil.rs`, 83 l) |
 | **1169–6065** | **`#[cfg(test)] mod tests { … }`** | **4897 lignes, 133 fns `#[test]`/`#[tokio::test]`** |
 
@@ -155,16 +155,16 @@ grappes cohésives déjà contiguës** dans le fichier (offsets relevés dans le
   `standalone_boot_serves_health_*` exercent déjà le router monté) + build release byte-identique.
 
 #### Étape 4 (optionnelle, seulement si `main.rs` reste gros) — Extraire le boot dans `console/src/boot.rs`
-- **Move :** `serve` (733–1122), `dispatch_cli` (623–732), `enterprise_store_gate` (1140–1164),
+- **Move :** `serve` (733–1122), `dispatch_cli` (623–732), `advanced_store_gate` (1140–1164),
   `enum StoreSelection` (1123–1139) → `console/src/boot.rs` (`pub(crate)`). `main.rs` se réduit à
   `main()` + les `mod`/`use` de racine + le `mod tests`.
 - **Pourquoi sûr :** ce sont des fonctions à couplage faible avec le reste (elles consomment
-  `App`, `enterprise_store_gate`, `build_router`) ; l'extraction est un déplacement + `use`.
+  `App`, `advanced_store_gate`, `build_router`) ; l'extraction est un déplacement + `use`.
 - **Risque : FAIBLE-MOYEN.** `serve` est la plus grosse (~390 l) et touche des `#[cfg(feature =
   "encryption")]` et le câblage HA — recopier les `use`/attributs `cfg` **à l'identique**. C'est
   la seule étape avec un peu de surface ; elle est **optionnelle** et ne se fait que si le gain de
   lisibilité le justifie après l'étape 1.
-- **Vérif verte :** `cargo test` (les tests `enterprise_store_gate_contract`,
+- **Vérif verte :** `cargo test` (les tests `advanced_store_gate_contract`,
   `standalone_boot_*`, `health_surfaces_stamped_schema_version` couvrent la zone) + build
   release byte-identique.
 

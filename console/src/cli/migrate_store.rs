@@ -19,12 +19,12 @@ use crate::*;
 use serde_json::Value;
 
 /// ORDRE de dépendance FK (tri topologique) — parents AVANT enfants. Dérivé des FK LOGIQUES de
-/// `PG_SCHEMA` + des tables ENTERPRISE (aucune contrainte `REFERENCES` dure n'est déclarée, donc l'ordre
+/// `PG_SCHEMA` + des tables ADVANCED (aucune contrainte `REFERENCES` dure n'est déclarée, donc l'ordre
 /// d'insertion est en fait libre côté contrainte ; on le fixe quand même pour la CORRECTION si des FK
 /// sont un jour ajoutées et pour la lisibilité du rapport). Ce n'est PAS la liste autoritative des tables
 /// à migrer — celle-ci est ÉNUMÉRÉE DYNAMIQUEMENT depuis `sqlite_master` (cf. `enumerate_source_tables`) ;
 /// cette constante ne sert QUE de HINT d'ordonnancement (`order_migration_tables`). Couvre les 17 tables
-/// de base de `PG_SCHEMA` PUIS les 5 tables enterprise créées paresseusement (`scim_*`/`sso_pending`/
+/// de base de `PG_SCHEMA` PUIS les 5 tables advanced créées paresseusement (`scim_*`/`sso_pending`/
 /// `rbac_group_map`, hors `PG_SCHEMA` — matérialisées sur la cible par leurs modules via `ensure_pg_schema`).
 /// Toute table source ABSENTE de ce hint est quand même migrée (appended à la fin par `order_migration_tables`)
 /// ou hard-fail si la cible ne peut la créer — JAMAIS de skip silencieux.
@@ -49,7 +49,7 @@ const MIGRATE_STORE_FK_ORDER: &[&str] = &[
     "roe_decision",    // -> engagement
     "run_job",         // -> engagement
     "run_log",         // -> run_job (par run_id, FK souple)
-    // tables ENTERPRISE (créées paresseusement, hors PG_SCHEMA ; dépendent de users/tenant déjà copiés)
+    // tables ADVANCED (créées paresseusement, hors PG_SCHEMA ; dépendent de users/tenant déjà copiés)
     "scim_user",         // -> users (user_id = users.id, PK explicite)
     "scim_group",        // racine (id IDENTITY BY DEFAULT — recalée par advance_pg_identity_sequences_all)
     "scim_group_member", // -> scim_group, users
@@ -86,7 +86,7 @@ fn sqlite_table_columns(src: &crate::store::Store, table: &str) -> crate::store:
 /// exclut les tables INTERNES SQLite (`sqlite_%` : `sqlite_sequence`, `sqlite_stat*`, etc.). Aucune table de
 /// bookkeeping de migration n'existe côté console (les migrations additives passent par `ALTER TABLE`
 /// error-ignored, pas par une table `schema_migrations`), donc `NOT LIKE 'sqlite_%'` suffit. C'est CE set
-/// (et non les 22 du hint FK) qui pilote copie + vérif : une table enterprise créée paresseusement
+/// (et non les 22 du hint FK) qui pilote copie + vérif : une table advanced créée paresseusement
 /// (`scim_*`/`sso_pending`/`rbac_group_map`) présente dans la source est donc TOUJOURS reprise.
 #[cfg(feature = "store-postgres")]
 fn enumerate_source_tables(src: &crate::store::Store) -> crate::store::StoreResult<Vec<String>> {
@@ -209,7 +209,7 @@ fn migrate_store_core(
     use crate::store::StoreError;
 
     // ENSEMBLE AUTORITATIF : CHAQUE table utilisateur de la source, énumérée DYNAMIQUEMENT depuis
-    // `sqlite_master` (jamais une liste codée en dur) — couvre les tables enterprise créées paresseusement
+    // `sqlite_master` (jamais une liste codée en dur) — couvre les tables advanced créées paresseusement
     // (`scim_*`/`sso_pending`/`rbac_group_map`) si elles existent dans la source. Ordonnée en dépendance FK
     // (parents avant enfants ; toute table inconnue du hint est appended, jamais droppée).
     let src_tables = enumerate_source_tables(src)?;
@@ -230,7 +230,7 @@ fn migrate_store_core(
 
     // 1) Schéma cible idempotent (CREATE TABLE IF NOT EXISTS ...). Non destructif ; hors transaction pour
     //    que les tables persistent même si la copie rollback (elles servent aussi au compte de gouvernance).
-    //    On applique le SCHÉMA DE BASE (`PG_SCHEMA`) PUIS les tables ENTERPRISE créées paresseusement via le
+    //    On applique le SCHÉMA DE BASE (`PG_SCHEMA`) PUIS les tables ADVANCED créées paresseusement via le
     //    chemin PG `ensure_schema` de chaque module (scim/sso/rbac) — sinon `scim_*`/`sso_pending`/
     //    `rbac_group_map` seraient absentes de la cible et la copie perdrait identités provisionnées + mappings
     //    d'autorisation IdP->rôle EN SILENCE. C'est ce que corrige ce bloc.
@@ -240,7 +240,7 @@ fn migrate_store_core(
     crate::rbac::ensure_pg_schema(dst);
 
     // 2) NO SILENT SKIP : toute table source ÉNUMÉRÉE encore ABSENTE de la cible après (1) (une table
-    //    inconnue que ni `PG_SCHEMA` ni les modules enterprise ne créent) -> HARD-FAIL en la NOMMANT. On ne
+    //    inconnue que ni `PG_SCHEMA` ni les modules advanced ne créent) -> HARD-FAIL en la NOMMANT. On ne
     //    DEVINE JAMAIS un DDL (option sûre : plutôt échouer clairement que copier une table à la structure
     //    incertaine). Zéro écriture de données à ce stade -> rien à rollback, aucun checkpoint émis.
     let dest_tables = enumerate_dest_tables(dst)?;
@@ -312,6 +312,15 @@ fn migrate_store_core(
                 .collect();
             return Err(StoreError::Backend(format!("row-count mismatch: {}", detail.join(", "))));
         }
+        // CLÉS DE RÉGLAGE RENOMMÉES : la source SQLite peut être ANTÉRIEURE au renommage (jamais démarrée
+        // par ce binaire) et vient d'être copiée telle quelle, tampon de version compris. Si ce tampon est
+        // ancien, ses anciennes clés sont COPIÉES sous `advanced.<x>` (cf. settings_rename.rs, ancienne ligne
+        // laissée) ICI, APRÈS la vérification des comptes (qui compare la copie brute à la source) et DANS la
+        // transaction : deux valeurs divergentes => Err => ROLLBACK, la cible reste intacte et le message
+        // nomme les deux clés (jamais leurs valeurs). Puis la cible, au PG_SCHEMA courant, est tamponnée.
+        crate::settings_rename::copy_renamed_settings_store(tx.store(), crate::settings_rename::RefusalContext::MigrateStore)
+            .map_err(StoreError::Backend)?;
+        crate::schema::stamp_schema_version(tx.store());
         Ok(MigrationReport { counts, identity, total_rows: total })
     })?;
     Ok(Some(report))
@@ -401,7 +410,7 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
     };
 
     // Ordre RÉEL des tables migrées (ensemble énuméré dynamiquement, en ordre FK) — dérivé du rapport, PAS
-    // d'une constante : c'est la VRAIE liste reprise (base + enterprise), servie au rapport ET au checkpoint.
+    // d'une constante : c'est la VRAIE liste reprise (base + advanced), servie au rapport ET au checkpoint.
     let migrated_order: Vec<String> = report.counts.iter().map(|c| c.table.clone()).collect();
 
     // Rapport lisible : ordre FK + tableau de comptes + recalage des séquences.
@@ -466,4 +475,112 @@ pub(crate) fn run_migrate_store_cli(args: &[String]) -> i32 {
 
     println!("[forge] migrate-store terminé — {} ligne(s) migrée(s), comptes vérifiés.", report.total_rows);
     0
+}
+
+#[cfg(all(test, feature = "store-postgres"))]
+mod tests {
+    use super::*;
+
+    /// Source SQLite on disk that predates the rename (never started by this binary): base schema, the
+    /// five old keys, plus whatever `extra` rows the witness needs.
+    fn pre_rename_source(extra: &[(&str, &str)]) -> String {
+        let path = crate::testutil::tmp_path("rename-migrate-store-src.db");
+        let c = rusqlite::Connection::open(&path).expect("open");
+        c.execute_batch(crate::SCHEMA).expect("schema");
+        for (k, v) in [
+            ("enterprise.tenancy", "on"),
+            ("enterprise.sso", "on"),
+            ("enterprise.scim", "on"),
+            ("enterprise.compliance", "on"),
+            ("enterprise.superadmin", "alice"),
+        ]
+        .iter()
+        .chain(extra.iter())
+        {
+            crate::settings_set(&c, k, v).expect("settings_set");
+        }
+        path
+    }
+
+    /// C — `forge migrate-store` (SQLite -> Postgres) : la source est copiée telle quelle puis ses
+    /// anciennes clés sont copiées sous le nouveau nom DANS la transaction (l'ancienne ligne reste) ; en
+    /// conflit, ROLLBACK (cible vide) et refus exact.
+    #[test]
+    fn migrate_store_renames_old_keys_or_rolls_back_on_conflict() {
+        for conflict in [false, true] {
+            let extra: &[(&str, &str)] = if conflict { &[("advanced.superadmin", "bob")] } else { &[] };
+            let src_path = pre_rename_source(extra);
+            crate::settings_rename::tests::with_isolated_pg_schema("rename_pg_store", |dst| {
+                let src_conn = crate::cli::cli_open_ro(&src_path).expect("source");
+                let src_mutex = std::sync::Mutex::new(src_conn);
+                let src = crate::store::Store::sqlite(src_mutex.lock().unwrap());
+                let r = migrate_store_core(&src, dst, false, false);
+                drop(src);
+                let settings = |k: &str| crate::settings_get_store(dst, k);
+                if conflict {
+                    let e = r.err().expect("conflit => migration refusée").to_string();
+                    let expected = crate::settings_rename::tests::expected_refusal(
+                        "enterprise.superadmin present, advanced.superadmin differs",
+                        crate::settings_rename::tests::MIGRATE_STORE,
+                    );
+                    assert_eq!(e, expected);
+                    assert!(!e.contains("alice") && !e.contains("bob"), "aucune valeur dans le refus : {e}");
+                    assert_eq!(count_rows(dst, "settings").unwrap(), 0, "ROLLBACK : la cible reste vide");
+                } else {
+                    r.expect("migration").expect("rapport");
+                    assert_eq!(settings("enterprise.tenancy").as_deref(), Some("on"), "copie additive : l'ancienne ligne reste");
+                    assert_eq!(settings("advanced.tenancy").as_deref(), Some("on"));
+                    assert_eq!(settings("advanced.superadmin").as_deref(), Some("alice"));
+                    assert_eq!(settings(crate::schema::SCHEMA_VERSION_KEY), Some(crate::schema::SCHEMA_VERSION.to_string()));
+                    assert_eq!(settings("migration.renamed_settings").as_deref(), Some("tenancy,sso,scim,compliance,superadmin"));
+                }
+            });
+            let _ = std::fs::remove_file(&src_path);
+        }
+    }
+
+    /// C — `forge migrate-store` d'une source qu'un binaire ANTÉRIEUR a retamponnée à 2 après la première
+    /// migration : le témoin voyage avec les réglages, AUCUNE copie n'est rejouée ; écart => ROLLBACK (cible
+    /// vide) au refus exact ; tout cohérent (y compris après le retrait complet du §8) => cible identique à
+    /// la source, tampon 3, rien ne renaît.
+    #[test]
+    fn migrate_store_after_an_older_binary_compares_and_never_copies_again() {
+        use crate::settings_rename::tests as w;
+        for case in w::older_binary_cases() {
+            let path = crate::testutil::tmp_path("rename-migrate-store-older.db");
+            let before = {
+                let c = rusqlite::Connection::open(&path).expect("open");
+                c.execute_batch(crate::SCHEMA).expect("schema");
+                c.execute_batch(w::MIGRATED_STATE).unwrap();
+                c.execute_batch(case.then).unwrap();
+                c.execute("UPDATE settings SET value='2' WHERE key='schema_version'", []).unwrap();
+                let mut st = c.prepare("SELECT key, value FROM settings ORDER BY key").unwrap();
+                let rows: Vec<(String, String)> =
+                    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+                rows
+            };
+            w::with_isolated_pg_schema("rename_pg_store_older", |dst| {
+                let src_conn = crate::cli::cli_open_ro(&path).expect("source");
+                let src_mutex = std::sync::Mutex::new(src_conn);
+                let src = crate::store::Store::sqlite(src_mutex.lock().unwrap());
+                let r = migrate_store_core(&src, dst, false, false);
+                drop(src);
+                match case.gaps {
+                    Some(g) => {
+                        let e = r.err().unwrap_or_else(|| panic!("{} : refus attendu", case.name)).to_string();
+                        assert_eq!(e, w::expected_refusal(g, w::MIGRATE_STORE), "{}", case.name);
+                        assert_eq!(count_rows(dst, "settings").unwrap(), 0, "{} : ROLLBACK, cible vide", case.name);
+                    }
+                    None => {
+                        r.unwrap_or_else(|e| panic!("{} : {e}", case.name)).expect("rapport");
+                        let after: Vec<(String, String)> = dst
+                            .query("SELECT key, value FROM settings ORDER BY key", &crate::sql_params![], |r| Ok((r.get_str(0)?, r.get_str(1)?)))
+                            .unwrap();
+                        assert_eq!(after, w::restamped(&before), "{} : cible = source retamponnée, rien ne renaît", case.name);
+                    }
+                }
+            });
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }

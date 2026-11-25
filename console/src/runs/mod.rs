@@ -172,7 +172,7 @@ pub(crate) async fn run_create(State(app): State<App>, ConnectInfo(peer): Connec
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))),
     };
 
-    // (1c) ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on THIS engagement
+    // (1c) ADVANCED PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on THIS engagement
     // must allow OPERATE (tenant_admin|tenant_operator), most-specific-wins (engagement grant > tenant grant),
     // FAIL-CLOSED. A tenant_viewer (or a user with only a viewer override on this engagement) is DENIED here
     // even though the tenant is visible + they passed the console-global operator gate. Community (flag OFF)
@@ -418,7 +418,7 @@ pub(crate) async fn import_scan(
         Ok(e) => e,
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_engagement", "why": why}))).into_response(),
     };
-    // (1c) L9 FIX — ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14, parité run_create) : le rôle EFFECTIF du
+    // (1c) L9 FIX — ADVANCED PER-ENGAGEMENT RBAC (readiness #14, parité run_create) : le rôle EFFECTIF du
     // caller sur CET engagement doit permettre OPERATE (tenant_admin|tenant_operator), most-specific-wins,
     // FAIL-CLOSED. Un tenant_viewer (ou override viewer sur cet engagement) est REFUSÉ ici même s'il voit le
     // tenant et a passé le gate operator console-global. Community (flag OFF) => NO-OP (byte-identique).
@@ -594,7 +594,7 @@ pub(crate) async fn run_cancel(State(app): State<App>, ConnectInfo(peer): Connec
         let (s, j) = operator_denied(&app);
         return (s, j);
     }
-    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — un cancel est une ÉCRITURE CROSS-TENANT-CAPABLE (DoS
+    // ADVANCED PER-ENGAGEMENT RBAC (readiness #14) — un cancel est une ÉCRITURE CROSS-TENANT-CAPABLE (DoS
     // sur l'op en cours d'un AUTRE tenant). Le check_operator console-GLOBAL ci-dessus ne suffit pas : le
     // caller doit AUSSI avoir OPERATE sur l'engagement PROPRIÉTAIRE du run (most-specific-wins, fail-closed —
     // même garde que run_create/finding_update). Community (flag OFF) => NO-OP (branche ignorée, byte-
@@ -719,7 +719,7 @@ pub(crate) async fn runs_list(State(app): State<App>, headers: HeaderMap, Query(
     Json(Value::Array(out))
 }
 
-/// GET /api/runs/:id — détail d'un run. Lecture (viewer). ISOLATION cross-tenant (enterprise, fail-closed) :
+/// GET /api/runs/:id — détail d'un run. Lecture (viewer). ISOLATION cross-tenant (advanced, fail-closed) :
 /// un run d'un tenant non accordé => 404 (indistinguable d'un run inconnu — pas d'oracle d'existence).
 pub(crate) async fn run_detail(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> Response {
     if let Some(deny) = run_read_denied(&app, &headers, &id) {
@@ -736,7 +736,7 @@ pub(crate) async fn run_detail(State(app): State<App>, headers: HeaderMap, Path(
 
 /// GET /api/runs/:id/logs?after=ID — lignes de log d'un run (fallback polling de SSE).
 /// `after` (id de ligne) permet l'incrémental ; renvoie {last_id, lines:[{id,ts,stream,line}]}.
-/// ISOLATION cross-tenant (enterprise, fail-closed) : `run_log` n'a pas de colonne engagement_id, donc la
+/// ISOLATION cross-tenant (advanced, fail-closed) : `run_log` n'a pas de colonne engagement_id, donc la
 /// garde résout le propriétaire via run_job (== JOIN run_log→run_job) ; un run d'un tenant non accordé => 404
 /// (aucune ligne de stdout/stderr brut d'un autre tenant ne fuit).
 pub(crate) async fn run_logs(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -772,7 +772,7 @@ pub(crate) async fn run_logs(State(app): State<App>, headers: HeaderMap, Path(id
 /// Events : `log` ({stream,line}) et `status` ({status,exit_code?}). Fallback : /api/runs/:id/logs.
 /// Diffuse les events broadcast filtrés sur run_id. Termine quand le statut devient terminal.
 pub(crate) async fn run_sse(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    // ISOLATION cross-tenant (enterprise, fail-closed) : la garde s'exécute AVANT d'ouvrir le flux — un run
+    // ISOLATION cross-tenant (advanced, fail-closed) : la garde s'exécute AVANT d'ouvrir le flux — un run
     // d'un tenant non accordé => 404, aucun event live d'un autre tenant n'est jamais diffusé. No-op community.
     if let Some(deny) = run_read_denied(&app, &headers, &id) {
         return deny;
@@ -816,7 +816,7 @@ pub(crate) async fn run_sse(State(app): State<App>, headers: HeaderMap, Path(id)
 
 // =====================================================================================
 // TESTS — ISOLATION CROSS-TENANT des routes RUN-KEYED (IDOR fix). Vérifient les 3 propriétés exigées :
-//   (a) ENTERPRISE ON : un caller accordé UNIQUEMENT sur l'engagement A obtient 404 sur detail/report/logs
+//   (a) ADVANCED ON : un caller accordé UNIQUEMENT sur l'engagement A obtient 404 sur detail/report/logs
 //       (SSE identique — même garde en tête) d'un run appartenant à l'engagement B, et 403 sur cancel de B.
 //   (b) le PROPRIÉTAIRE (accordé sur B) passe la garde (200 en lecture ; cancel non-403 -> 409 not_running).
 //   (c) COMMUNITY (flag OFF) : TOUTES les routes se comportent EXACTEMENT comme avant (aucune régression).

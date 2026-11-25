@@ -449,11 +449,11 @@ pub(crate) fn attribution_login(app: &App, headers: &HeaderMap) -> String {
 /// activer/masquer les actions C2 selon le rôle). Résout la session (compte individuel) ou le repli
 /// bootstrap env-hash. `authenticated:false` si aucune identité (dev-open anonyme).
 pub(crate) async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
-    // ENTERPRISE flags for the SPA (additive; all false in the community default => byte-identical UI).
-    // Drives whether the enterprise views/nav render at all (server stays the authority via each module's
+    // ADVANCED flags for the SPA (additive; all false in the community default => byte-identical UI).
+    // Drives whether the advanced views/nav render at all (server stays the authority via each module's
     // own flag + admin gate). Exposing "engaged or not" is not a secret (the login page already reveals
     // SSO availability). NEVER carries a client_secret / SCIM token.
-    let enterprise = json!({
+    let advanced = json!({
         "tenancy": tenancy::enabled(&app),
         "sso": sso::enabled(&app),
         "scim": scim::enabled(&app),
@@ -467,9 +467,9 @@ pub(crate) async fn whoami(State(app): State<App>, headers: HeaderMap) -> impl I
             "role": id.role,
             "is_operator": id.is_operator,
             "via_session": id.via_session, // false => repli bootstrap (hash env), true => compte individuel
-            "enterprise": enterprise,
+            "advanced": advanced,
         })),
-        None => Json(json!({"authenticated": false, "login": Value::Null, "role": Value::Null, "is_operator": false, "via_session": false, "enterprise": enterprise})),
+        None => Json(json!({"authenticated": false, "login": Value::Null, "role": Value::Null, "is_operator": false, "via_session": false, "advanced": advanced})),
     }
 }
 

@@ -662,7 +662,7 @@ on success, issues **THE SAME** `forge_session` cookie as `/api/login`.
 
 | Variable | Role |
 |---|---|
-| `FORGE_ADVANCED_SSO` (truthy) **or** per-DB config key `enterprise.sso` | engages OIDC SSO (otherwise default build, local login only) |
+| `FORGE_ADVANCED_SSO` (truthy) **or** per-DB config key `advanced.sso` | engages OIDC SSO (otherwise default build, local login only) |
 | `FORGE_SSO_HTTP_TIMEOUT` | timeout of the discovery/JWKS/token fetches (default `10` s) |
 
 The OIDC provider is configured **on the admin side** (admin-gated route `POST /api/sso/config`, `client_secret`

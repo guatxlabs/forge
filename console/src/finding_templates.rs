@@ -407,7 +407,7 @@ async fn ft_apply(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
-    // ENGAGEMENT ACTIF (isolation) : le finding créé appartient à CET engagement uniquement. ENTERPRISE
+    // ENGAGEMENT ACTIF (isolation) : le finding créé appartient à CET engagement uniquement. ADVANCED
     // (flag-gated) : l'engagement cible doit être d'un tenant accordé (fail-closed) — cf. resolve_mutation.
     let engagement_id = match resolve_mutation_engagement_id(&app, &headers, &q, &body) {
         Ok(e) => e,
@@ -522,7 +522,7 @@ mod tests {
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),

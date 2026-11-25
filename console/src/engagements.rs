@@ -60,7 +60,7 @@ pub(crate) fn host_in_scope_list(scope_in: &[String], host: &str) -> bool {
 /// son mode, son ledger) que le run flow consomme — JAMAIS les App globals (qui restent seulement les
 /// défauts de l'engagement #1 pour la rétro-compat). Verrouille et libère son propre lock DB.
 pub(crate) fn resolve_engagement(app: &App, headers: &HeaderMap, requested: Option<i64>) -> Result<Engagement, String> {
-    // ENTERPRISE (flag-gated) : un run ne peut cibler QUE un engagement d'un tenant accordé (fail-closed —
+    // ADVANCED (flag-gated) : un run ne peut cibler QUE un engagement d'un tenant accordé (fail-closed —
     // resolve avant tout spawn). Les checks tenant verrouillent/relâchent leur propre lock DB, on ne les
     // appelle donc PAS en tenant `app.db()`. Community => branche historique EXACTE (byte-identique).
     if tenancy::enabled(app) {
@@ -109,7 +109,7 @@ pub(crate) fn resolve_engagement(app: &App, headers: &HeaderMap, requested: Opti
 /// sinon 1 (rétro-compat mono-engagement). Verrouille et libère son propre lock DB (ne pas appeler en
 /// tenant déjà `app.db()`).
 pub(crate) fn resolve_view_engagement_id(app: &App, headers: &HeaderMap, q: &HashMap<String, String>) -> i64 {
-    // ENTERPRISE (flag-gated) : résolution TENANT-AWARE fail-closed — un engagement d'un tenant non
+    // ADVANCED (flag-gated) : résolution TENANT-AWARE fail-closed — un engagement d'un tenant non
     // accordé résout vers NO_ENGAGEMENT (zéro ligne). Community => branche historique EXACTE (byte-identique).
     if tenancy::enabled(app) {
         let requested = q.get("engagement").and_then(|s| s.trim().parse::<i64>().ok());
@@ -136,7 +136,7 @@ pub(crate) fn resolve_mutation_engagement_id(app: &App, headers: &HeaderMap, q: 
             if !exists {
                 return Err(format!("engagement {id} introuvable"));
             }
-            // ENTERPRISE (flag-gated) fail-closed : on n'écrit JAMAIS une config par-engagement pour un
+            // ADVANCED (flag-gated) fail-closed : on n'écrit JAMAIS une config par-engagement pour un
             // engagement d'un tenant NON accordé — message identique à « introuvable » (pas de fuite
             // d'existence). No-op en community (engagement_visible => true).
             if tenancy::enabled(app) && !tenancy::engagement_visible(app, headers, id) {
@@ -146,7 +146,7 @@ pub(crate) fn resolve_mutation_engagement_id(app: &App, headers: &HeaderMap, q: 
         }
         None => {
             let eid = resolve_view_engagement_id(app, headers, q);
-            // ENTERPRISE : aucun engagement accordé => refus (fail-closed) plutôt que d'écrire sur #1.
+            // ADVANCED : aucun engagement accordé => refus (fail-closed) plutôt que d'écrire sur #1.
             if tenancy::enabled(app) && eid == tenancy::NO_ENGAGEMENT {
                 return Err("aucun engagement accessible (aucun tenant accordé)".into());
             }
@@ -159,7 +159,7 @@ pub(crate) fn resolve_mutation_engagement_id(app: &App, headers: &HeaderMap, q: 
 /// fichier `engagement-<id>.jsonl` FRÈRE du ledger console (App.ledger_path). Ledger console au chemin nu
 /// ou vide => chemin relatif `engagement-<id>.jsonl`.
 ///
-/// ENTERPRISE (flag-gated) : le ledger est GROUPÉ par tenant (`tenant-<tid>/engagement-<id>.jsonl`) via
+/// ADVANCED (flag-gated) : le ledger est GROUPÉ par tenant (`tenant-<tid>/engagement-<id>.jsonl`) via
 /// tenancy::scoped_engagement_ledger_path. Community (flag OFF) => tenancy renvoie None et on garde le
 /// chemin PLAT historique (byte-identique). La signature Ed25519 par-ledger (.ed25519 frère) est inchangée.
 pub(crate) fn derive_engagement_ledger_path(app: &App, id: i64, tenant_id: i64) -> String {
@@ -544,15 +544,15 @@ pub(crate) fn auth_summary_json(scope_v: &Value, now: i64) -> Option<Value> {
 /// Liste des engagements + compteurs agrégés (findings/runs) — aucune donnée d'un autre engagement n'est
 /// exposée (juste id/nom/statut/mode/date + compteurs). Lecture pure. Ordre par id.
 pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value> {
-    // ENTERPRISE (flag-gated) : la liste ne montre QUE les engagements des tenants accordés au caller.
+    // ADVANCED (flag-gated) : la liste ne montre QUE les engagements des tenants accordés au caller.
     // Community => aucun filtre (WHERE vide) : SQL byte-identique à l'historique. Un grant vide => la
     // clause `e.tenant_id IN (-1)` ne matche rien (fail-closed).
-    // ENTERPRISE : la clause de filtre porte des tenant_ids LIÉS (Params) — plus d'interpolation de valeur.
+    // ADVANCED : la clause de filtre porte des tenant_ids LIÉS (Params) — plus d'interpolation de valeur.
     let (where_clause, tparams): (String, Vec<crate::store::Param>) = match tenancy::list_filter_sql(app, headers, "e") {
         Some((cond, params)) => (format!(" WHERE {cond}"), params),
         None => (String::new(), Vec::new()),
     };
-    // ENTERPRISE (flag-gated) : n'expose `tenant_id` par engagement QUE sous le flag — le SPA en a besoin
+    // ADVANCED (flag-gated) : n'expose `tenant_id` par engagement QUE sous le flag — le SPA en a besoin
     // pour la hiérarchie tenant → engagement (filtrage du sélecteur par tenant actif). Community => champ
     // ABSENT : le payload reste BYTE-IDENTIQUE à l'historique (aucune fuite de la dimension tenant).
     let expose_tenant = tenancy::enabled(app);
@@ -606,7 +606,7 @@ pub(crate) fn engagement_list_json(app: &App, headers: &HeaderMap) -> Vec<Value>
 }
 
 /// GET /api/engagements — liste + compteurs (viewer). Sert le sélecteur d'engagement du SPA.
-/// ENTERPRISE : restreinte aux tenants accordés (fail-closed) ; community => tous (no-op).
+/// ADVANCED : restreinte aux tenants accordés (fail-closed) ; community => tous (no-op).
 pub(crate) async fn engagements_list(State(app): State<App>, headers: HeaderMap) -> impl IntoResponse {
     Json(json!({"engagements": engagement_list_json(&app, &headers)}))
 }
@@ -660,7 +660,7 @@ pub(crate) async fn engagements_create(
     // AUSSI le master global (calculé dans run_create). Ledgerisé plus bas avec le reste de la création.
     let allow_private: i64 = if body.get("allow_private").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
     let actor = attribution_login(&app, &headers);
-    // ENTERPRISE (flag-gated) : un engagement naît DANS un tenant accordé au créateur (fail-closed — on
+    // ADVANCED (flag-gated) : un engagement naît DANS un tenant accordé au créateur (fail-closed — on
     // ne crée jamais un espace dans un tenant qu'on ne possède pas). Community => None (tenant #1 par
     // défaut de la colonne, byte-identique). Résolu AVANT l'INSERT pour refuser (400) sans rien écrire.
     let target_tenant: Option<i64> = if tenancy::enabled(&app) {
@@ -687,7 +687,7 @@ pub(crate) async fn engagements_create(
             Ok(id) => id,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed", "why": e.to_string()}))).into_response(),
         };
-        // ENTERPRISE : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
+        // ADVANCED : rattache le nouvel engagement au tenant accordé résolu (community: pas d'UPDATE).
         // FAIL-CLOSED : un échec de ce rattachement laisserait l'engagement dans le tenant #1 par défaut (mauvais
         // tenant) tout en renvoyant `ok:true` + un ledger `console.engagement.create` (fausse attestation). On
         // MATCHE -> 500 AVANT tout ledger.
@@ -698,7 +698,7 @@ pub(crate) async fn engagements_create(
         }
         id
     };
-    // Le ledger est GROUPÉ par tenant en enterprise (tenant-<tid>/…) ; en community target_tenant=None
+    // Le ledger est GROUPÉ par tenant en advanced (tenant-<tid>/…) ; en community target_tenant=None
     // => tenant #1 et tenancy renvoie le chemin PLAT (byte-identique).
     let ledger_path = derive_engagement_ledger_path(&app, id, target_tenant.unwrap_or(tenancy::DEFAULT_TENANT));
     {
@@ -980,13 +980,13 @@ pub(crate) async fn engagements_update(
         let (s, j) = operator_denied(&app);
         return (s, j).into_response();
     }
-    // ENTERPRISE (flag-gated) fail-closed : on ne peut ÉDITER/ARCHIVER/SUPPRIMER QUE un engagement d'un
+    // ADVANCED (flag-gated) fail-closed : on ne peut ÉDITER/ARCHIVER/SUPPRIMER QUE un engagement d'un
     // tenant accordé. Un engagement d'un AUTRE tenant -> 404 (jamais divulgué, pas d'action cross-tenant).
     // No-op en community (engagement_visible => true).
     if tenancy::enabled(&app) && !tenancy::engagement_visible(&app, &headers, id) {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown_engagement", "id": id}))).into_response();
     }
-    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the visibility 404 (cross-tenant stays a
+    // ADVANCED PER-ENGAGEMENT RBAC (readiness #14) — checked AFTER the visibility 404 (cross-tenant stays a
     // 404, no existence leak). For a VISIBLE engagement the caller's EFFECTIVE per-engagement role (most-
     // specific-wins) must allow the operation: ADMIN (tenant_admin) for archive/delete, OPERATE (tenant_admin|
     // tenant_operator) for edit/activate. A tenant_viewer is DENIED 403 even though they can SEE the engagement
@@ -1007,7 +1007,7 @@ pub(crate) async fn engagements_update(
             return (StatusCode::FORBIDDEN, Json(json!({"error": code, "why": why}))).into_response();
         }
     }
-    // ENTERPRISE (E3 COMPLIANCE, flag-gated) WORM : un LEGAL-HOLD bloque la suppression ET l'archivage,
+    // ADVANCED (E3 COMPLIANCE, flag-gated) WORM : un LEGAL-HOLD bloque la suppression ET l'archivage,
     // quelle que soit la rétention (hold always wins, fail-closed). INERTE (None) tant que le flag compliance
     // est OFF => community byte-identique. Ne touche que delete/archive (édition/activation non concernées).
     if is_delete || archiving {
@@ -1018,7 +1018,7 @@ pub(crate) async fn engagements_update(
             )
                 .into_response();
         }
-        // ENTERPRISE (E3 COMPLIANCE, flag-gated) WORM : la RÉTENTION gagne aussi sur delete/archive, exactement
+        // ADVANCED (E3 COMPLIANCE, flag-gated) WORM : la RÉTENTION gagne aussi sur delete/archive, exactement
         // comme sur purge — un enregistrement ledgerisé ENCORE dans la fenêtre de rétention ne peut être détruit.
         // INERTE (None) tant que le flag compliance est OFF => community byte-identique.
         if let Some(why) = compliance::retention_blocked(&app, id) {

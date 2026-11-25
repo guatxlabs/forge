@@ -421,7 +421,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let ledger = tmp_path("forge-test-b4-scope");
         // App globals VIDES : prouve que le scope-check lit l'ENGAGEMENT, pas les globals disque figés.
         let app = test_app(&ledger);
-        { let db = app.db(); migrate(&db); }
+        { let db = app.db(); migrate(&db).expect("migrate"); }
         insert_test_engagement(&app, 1, &[], "grey", &ledger);
 
         // AVANT : scope vide -> HORS scope (fail-closed).
@@ -468,7 +468,7 @@ Tirées=0  Simulées=1  Refusées=0  Erreurs=0  Findings=0
         let ledger = tmp_path("forge-test-b5-switch");
         let ledger2 = tmp_path("forge-test-b5-switch2");
         let app = test_app(&ledger);
-        { let db = app.db(); migrate(&db); }
+        { let db = app.db(); migrate(&db).expect("migrate"); }
         insert_test_engagement(&app, 1, &["a.example.com"], "grey", &ledger);
         insert_test_engagement(&app, 2, &["b.example.com"], "black", &ledger2);
 

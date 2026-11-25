@@ -80,12 +80,12 @@ build, every flag is OFF ⇒ the behaviour is byte-identical to the core** (all 
     engagement isolation + RBAC: a user of tenant A can **never** list, read, or act on
     the engagements / findings / runs / roe / ledger / coverage / reports of tenant B — no grant ⇒ zero
     rows / 403. It is engaged only by the **`FORGE_ADVANCED_TENANCY=1`** flag (or the DB config key
-    `enterprise.tenancy=on`). **DEFAULT build: flag OFF ⇒ a single implicit tenant #1, all
+    `advanced.tenancy=on`). **DEFAULT build: flag OFF ⇒ a single implicit tenant #1, all
     users access it, behaviour byte-identical** to before tenancy (all existing tests
     green). The module is separable — the core never depends on it.
   - **Audited super-admin (platform/MSSP operator)** *(implemented — `console/src/tenancy.rs`)*: a
     **NON-DISABLEABLE** capability, **designated at provisioning** (env `FORGE_SUPERADMIN` and/or the DB
-    provisioning key `enterprise.superadmin` — never a normal UI route) that can **READ across ALL
+    provisioning key `advanced.superadmin` — never a normal UI route) that can **READ across ALL
     tenants**. It is fail-closed (no designation ⇒ nobody is super-admin; requires a valid individual
     `admin` session), the account **can be neither disabled / deleted / demoted** through account
     CRUD, and **every cross-tenant read is ledgered `console.superadmin.access`** (tenant + what).
@@ -96,7 +96,7 @@ build, every flag is OFF ⇒ the behaviour is byte-identical to the core** (all 
     archive tenants and list / add / remove a user's `tenant_grant`, gated to a
     **platform-admin** (a console `admin` session or a super-admin) and ledgered **`console.tenant.*`**.
     Fail-closed guards: never archive the **last active tenant**, never remove the **last
-    `tenant_admin` grant** of a tenant. In the default build, the surface is closed (`403 enterprise_disabled`).
+    `tenant_admin` grant** of a tenant. In the default build, the surface is closed (`403 advanced_disabled`).
   - **Per-tenant cryptographic ledger** *(implemented — `console/src/tenancy.rs`)*: each tenant's
     engagement ledgers are grouped under a per-tenant-keyed subdirectory
     (`tenant-<tid>/engagement-<eid>.jsonl`), keeping the **per-ledger Ed25519 signature unchanged** — just
@@ -113,8 +113,8 @@ build, every flag is OFF ⇒ the behaviour is byte-identical to the core** (all 
     defence in depth.
 
 **How to enable.** Set the **`FORGE_ADVANCED_TENANCY=1`** flag (env) *or* the per-DB config key
-**`enterprise.tenancy=on`**; designate the platform operator(s) through **`FORGE_SUPERADMIN`** (env) or the
-provisioning key **`enterprise.superadmin`** (logins separated by comma/space — never a normal UI
+**`advanced.tenancy=on`**; designate the platform operator(s) through **`FORGE_SUPERADMIN`** (env) or the
+provisioning key **`advanced.superadmin`** (logins separated by comma/space — never a normal UI
 route). With the flag OFF (the **default**), Forge is a **single implicit tenant #1** where all
 users have full access and a behaviour **byte-identical** to before tenancy (all existing tests
 green). The whole feature is a **separable module** — `console/src/tenancy.rs` (+ a
@@ -136,7 +136,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
     `oauth.flow` / `redirect.open` anti-open-redirect discipline); the `client_secret` and the ID/access tokens
     are **never logged, ledgered, or returned**; each login is ledgered `console.sso.login`
     (actor + subject only). It is engaged only by **`FORGE_ADVANCED_SSO=1`** (or the DB config key
-    `enterprise.sso=on`). **DEFAULT build: flag OFF ⇒ `/api/sso/*` is disabled (404) and LOCAL
+    `advanced.sso=on`). **DEFAULT build: flag OFF ⇒ `/api/sso/*` is disabled (404) and LOCAL
     accounts behave byte-identically** to today (all existing tests green). The module
     is separable — `console/src/sso.rs` (+ a `mod sso;` line and a route merge in `main.rs`); the
     core never depends on it.
@@ -155,7 +155,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
     RBAC, bounded to viewer|operator). A **designated super-admin login is protected** — SCIM refuses to create /
     disable / delete it (403). Each mutation is ledgered `console.scim.*` (metadata only —
     login / externalId / active / booleans, **never the token**). It is engaged only by **`FORGE_ADVANCED_SCIM=1`**
-    (or the DB config key `enterprise.scim=on`, or the SSO flag). **DEFAULT build: flag OFF ⇒ `/scim/*` and
+    (or the DB config key `advanced.scim=on`, or the SSO flag). **DEFAULT build: flag OFF ⇒ `/scim/*` and
     `/api/scim/config` are disabled (404) and LOCAL accounts behave byte-identically** to
     today (all existing tests green). The module is separable — `console/src/scim.rs` (+ a
     `mod scim;` line and a route merge in `main.rs`); the core never depends on it.
@@ -209,7 +209,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
   deletion). The **pluggable checkpoint signer** (`forge/compliance_signer.py`) keeps verification
   **byte-identical** to `signing.verify_with_pubkey` and exposes a **KMS/HSM seam** (`CallableComplianceSigner`)
   so that a hardware-anchored signer can plug in without changing the verification path. It is engaged
-  only by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config key `enterprise.compliance=on`). **DEFAULT
+  only by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config key `advanced.compliance=on`). **DEFAULT
   build: flag OFF ⇒ every `/api/compliance/*` route is disabled (404), WORM/retention/hold are inert,
   and the ledger + engagement data are byte-identical** (all existing tests green). The module
   is separable — `console/src/compliance.rs` (+ a `mod compliance;` line, a route merge, an SPA flag,
@@ -248,7 +248,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
   that tenant) and **secret-redacted** end to end (passphrases / tokens / credentials / `client_secret` / private
   keys → `[REDACTED]`; **public keys are preserved**). The **act of exporting is itself ledgered**
   (`console.compliance.evidence.export` — actor, scope, format, ledger head, chain-ok). Engaged only
-  by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config `enterprise.compliance=on`); **default build
+  by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config `advanced.compliance=on`); **default build
   (flag OFF) ⇒ the route returns 404 and nothing changes**.
 - **Compliance (going further)** — **KMS/HSM-backed keys** are now available both
   for the **audit ledger signer** (`forge/signing.py` `RemoteSigner`, above) and the **compliance

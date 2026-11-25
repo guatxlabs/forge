@@ -17,7 +17,7 @@
 //!   - `POST /api/presence/heartbeat` (léger) rafraîchit le TTL de toutes les connexions de l'appelant.
 //!
 //! FAIL-CLOSED sur l'auth : SEULS les appelants avec une identité résolue (session ou bootstrap env-hash)
-//! sont inscrits — un anonyme dev-open n'apparaît jamais. TENANCY (ENTERPRISE, flag-gated) : une entrée
+//! sont inscrits — un anonyme dev-open n'apparaît jamais. TENANCY (ADVANCED, flag-gated) : une entrée
 //! rattachée à un engagement n'est visible que si le caller peut VOIR cet engagement
 //! (`tenancy::engagement_visible`) — jamais de fuite de présence inter-tenant. Une entrée périmée (pas de
 //! heartbeat depuis `PRESENCE_TTL_SECS`) expire (GC paresseux à la lecture) : une connexion tuée sans

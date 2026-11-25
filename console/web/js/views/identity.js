@@ -1,10 +1,10 @@
 import { adminApi } from '../core/api.js';
-import { ENTERPRISE, identityAdmin, identityOn } from '../core/auth.js';
+import { ADVANCED, identityAdmin, identityOn } from '../core/auth.js';
 import { $, esc } from '../core/dom.js';
 import { guardList, modalConfirm, toast } from '../core/ui.js';
 
 // =====================================================================================
-//  IDENTITY / SSO (ENTERPRISE, flag-gated) — vue #identity : (1) provider OIDC, (2) token SCIM,
+//  IDENTITY / SSO (ADVANCED, flag-gated) — vue #identity : (1) provider OIDC, (2) token SCIM,
 //  (3) mapping groupe -> rôle/grant (RBAC avancé). Réservé admin + flag engagé (identityAdmin()).
 //  Le serveur reste l'autorité (routes flag+admin -> 404/403) ; ce masquage = défense en profondeur.
 //  Les secrets (client_secret, token SCIM) sont write-only : jamais réaffichés par les GET.
@@ -19,11 +19,11 @@ export async function loadIdentity() {
     return;
   }
   // Sous-cartes affichées selon le flag actif (SSO -> OIDC ; SCIM -> token ; l'une OU l'autre -> mapping).
-  const oidc = $('#id-oidc-wrap'); if (oidc) oidc.hidden = !ENTERPRISE.sso;
-  const scim = $('#id-scim-wrap'); if (scim) scim.hidden = !ENTERPRISE.scim;
+  const oidc = $('#id-oidc-wrap'); if (oidc) oidc.hidden = !ADVANCED.sso;
+  const scim = $('#id-scim-wrap'); if (scim) scim.hidden = !ADVANCED.scim;
   const map = $('#id-map-wrap'); if (map) map.hidden = !identityOn();
-  if (ENTERPRISE.sso) await loadIdentityOidc();
-  if (ENTERPRISE.scim) await loadIdentityScim();
+  if (ADVANCED.sso) await loadIdentityOidc();
+  if (ADVANCED.scim) await loadIdentityScim();
   if (identityOn()) await loadIdentityMap();
 }
 

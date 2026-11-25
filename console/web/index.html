@@ -14,7 +14,7 @@
 <header>
   <button id="navtoggle" class="navtoggle" type="button" aria-label="Menu"><svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
   <h1><img src="/quetzal.svg" alt="" aria-hidden="true" class="qz-brand"><span>Guat<span class="brand-x">X</span></span><span class="brand-sub">Forge</span></h1>
-  <!-- TENANT ACTIF (ENTERPRISE — multi-tenancy, flag-gated). Masqué par défaut (community = un seul tenant
+  <!-- TENANT ACTIF (ADVANCED — multi-tenancy, flag-gated). Masqué par défaut (community = un seul tenant
        implicite). Le SPA le dé-masque UNIQUEMENT si GET /api/tenancy renvoie enabled=true, et le peuple des
        tenants ACCESSIBLES au caller (super-admin => tous). Sélectionner un tenant filtre le sélecteur
        d'engagement ci-dessous (hiérarchie tenant → engagement). -->
@@ -98,15 +98,15 @@
     <!-- ADMINISTRATION : lien affiché UNIQUEMENT quand whoami.role === 'admin' (renderWhoami le dé-masque).
          Le serveur reste l'autorité (routes gatées check_admin -> 403) ; ce masquage est de la défense en profondeur. -->
     <a href="#admin" id="nav-admin" hidden><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="M19 8v4M17 10h4"/></svg> <span>Administration</span></a>
-    <!-- TENANTS : lien affiché UNIQUEMENT quand la multi-tenancy ENTERPRISE est active (GET /api/tenancy
+    <!-- TENANTS : lien affiché UNIQUEMENT quand la multi-tenancy ADVANCED est active (GET /api/tenancy
          enabled=true) ET que le caller est platform-admin (applyTenancy le dé-masque). Le serveur reste
-         l'autorité (routes gatées enterprise + platform-admin -> 403) — masquage = défense en profondeur. -->
+         l'autorité (routes gatées advanced + platform-admin -> 403) — masquage = défense en profondeur. -->
     <a href="#tenants" id="nav-tenants" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M3 21V8l9-5 9 5v13"/><path d="M3 21h18M9 21v-6h6v6"/></svg> <span>Tenants</span></a>
-    <!-- IDENTITY / SSO : lien affiché UNIQUEMENT quand l'identité ENTERPRISE est active (whoami.enterprise
+    <!-- IDENTITY / SSO : lien affiché UNIQUEMENT quand l'identité ADVANCED est active (whoami.advanced
          sso|scim=true) ET que le caller est admin (applyIdentityUi le dé-masque). Le serveur reste
          l'autorité (routes gatées flag + check_admin -> 404/403) — masquage = défense en profondeur. -->
     <a href="#identity" id="nav-identity" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/><path d="M5 21a7 7 0 0 1 14 0"/></svg> <span>Identité / SSO</span></a>
-    <!-- COMPLIANCE (ENTERPRISE, flag-gated) : lien affiché UNIQUEMENT quand whoami.enterprise.compliance=true
+    <!-- COMPLIANCE (ADVANCED, flag-gated) : lien affiché UNIQUEMENT quand whoami.advanced.compliance=true
          ET caller admin (applyComplianceUi le dé-masque). Le serveur reste l'autorité (routes flag + check_admin
          -> 404/403) — masquage = défense en profondeur. En community (flag OFF) : aucun lien, aucune vue. -->
     <a href="#compliance" id="nav-compliance" hidden><svg class="ic" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg> <span>Compliance</span></a>
@@ -630,11 +630,11 @@
     </div>
   </section>
 
-  <!-- TENANTS (ENTERPRISE — multi-tenancy, flag-gated). Vue rendue UNIQUEMENT quand la multi-tenancy est
+  <!-- TENANTS (ADVANCED — multi-tenancy, flag-gated). Vue rendue UNIQUEMENT quand la multi-tenancy est
        active ET que le caller est platform-admin (loadTenants). Chaque tenant est un espace multi-client
        ISOLÉ (ses engagements, findings, runs, ledger). CRUD + gestion des grants ; tout est ledgerisé
        `console.tenant.*`. Garde-fous : dernier tenant actif non archivable, dernier tenant_admin non
-       retirable. Le serveur reste l'autorité (403 enterprise_disabled / platform_admin_required). -->
+       retirable. Le serveur reste l'autorité (403 advanced_disabled / platform_admin_required). -->
   <section id="tenants" class="card span2" aria-labelledby="tn-h">
     <div class="panelhead">
       <h2 id="tn-h">Tenants <span class="badge" title="Module avancé (open, flag-gated) — multi-tenancy">avancé</span> <span id="tenants-count" class="badge"></span></h2>
@@ -647,7 +647,7 @@
     <div id="tenants-list"><div class="muted">chargement…</div></div>
   </section>
 
-  <!-- IDENTITY / SSO (ENTERPRISE, flag-gated) — vue affichée UNIQUEMENT quand whoami.enterprise.sso|scim est
+  <!-- IDENTITY / SSO (ADVANCED, flag-gated) — vue affichée UNIQUEMENT quand whoami.advanced.sso|scim est
        vrai ET caller admin (applyIdentityUi). Configure : (1) le provider OIDC (issuer/client_id/secret
        write-only/redirect allowlist), (2) le token SCIM (générer/roter — affiché UNE fois), (3) le mapping
        groupe IdP -> {rôle, tenant/grant}. Le serveur reste l'autorité (routes flag+admin -> 404/403). En
@@ -713,7 +713,7 @@
     </div>
   </section>
 
-  <!-- COMPLIANCE (ENTERPRISE, flag-gated) — vue #compliance : (1) politique de rétention (global/tenant/
+  <!-- COMPLIANCE (ADVANCED, flag-gated) — vue #compliance : (1) politique de rétention (global/tenant/
        engagement), (2) legal-hold (toggle, hold gagne toujours), (3) signer du ledger KMS/HSM (rédigé,
        lecture seule), (4) export de PREUVES SOC 2 / ISO (engagement + fenêtre temporelle + format). Réservé
        admin + flag engagé (complianceAdmin()). Le serveur reste l'autorité (routes flag+admin -> 404/403).
@@ -908,7 +908,7 @@
     <label class="login-f"><span>Mot de passe</span><input id="login-pass" name="password" type="password" autocomplete="current-password" required placeholder="mot de passe du compte"></label>
     <div id="login-err" class="login-err" role="alert" hidden></div>
     <button id="login-submit" type="submit" class="login-btn">Se connecter</button>
-    <!-- SSO (ENTERPRISE) : bouton affiché UNIQUEMENT quand GET /api/setup/state répond sso.enabled=true
+    <!-- SSO (ADVANCED) : bouton affiché UNIQUEMENT quand GET /api/setup/state répond sso.enabled=true
          (flag ON + provider OIDC configuré). Clique -> GET /api/sso/login (Authorization-Code + PKCE). En
          community (flag OFF / non configuré) : caché => écran de login LOCAL byte-identique. -->
     <div id="login-sso" hidden>

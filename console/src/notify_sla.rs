@@ -42,7 +42,7 @@
 //!      `notification` elle-même (`NOT EXISTS … kind='finding.sla'`), donc dans la REQUÊTE : un finding
 //!      déjà signalé n'est même pas candidat. Sans cela un balayage toutes les 15 min re-notifierait le
 //!      même finding indéfiniment, et le plafond de balayage serait consommé par des lignes déjà traitées.
-//!   6. GRANT-SCOPÉ / FAIL-CLOSED SUR LE DESTINATAIRE — hérité de `emit` : en enterprise, un destinataire
+//!   6. GRANT-SCOPÉ / FAIL-CLOSED SUR LE DESTINATAIRE — hérité de `emit` : en advanced, un destinataire
 //!      sans grant sur l'engagement ne reçoit RIEN. Un finding en retard NON ASSIGNÉ n'a pas de
 //!      destinataire : il est COMPTÉ mais ne notifie personne, sauf si un `escalate_to` (UN login, pas
 //!      une diffusion) est explicitement configuré.
@@ -893,7 +893,7 @@ mod tests {
         let _ = std::fs::remove_file(&led);
     }
 
-    /// GRANT-SCOPÉ (enterprise) — la remontée passe par `notifications::emit`, donc un assigné SANS grant
+    /// GRANT-SCOPÉ (advanced) — la remontée passe par `notifications::emit`, donc un assigné SANS grant
     /// sur l'engagement ne reçoit RIEN et le balayage le compte comme `suppressed`. MUTATION : remplacer
     /// l'appel `notify_sla_breach` par un INSERT direct dans `notification` -> ce test rougit (le SLA
     /// contournerait l'isolation multi-tenant).
@@ -902,7 +902,7 @@ mod tests {
         let led = testutil::tmp_path("sla-grant.jsonl");
         let app = testutil::test_app(&led);
         seed_engagement(&app, 1);
-        testutil::enable_enterprise_tenancy(&app);
+        testutil::enable_advanced_tenancy(&app);
         let outsider = seed_user(&app, "outsider");
         let f = seed_finding(&app, 1, "en retard", "HIGH", "new", 48);
         assign(&app, f, outsider);

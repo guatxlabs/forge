@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 // ============================================================================================
-// FLAG — advanced RBAC is engaged iff enterprise SSO OR SCIM is engaged (it governs their group
+// FLAG — advanced RBAC is engaged iff advanced SSO OR SCIM is engaged (it governs their group
 // mappings; on its own, with local-only accounts, it has nothing to map). Community default = OFF.
 // ============================================================================================
 
@@ -95,7 +95,7 @@ fn ensure_schema(store: &crate::store::Store) {
     );
 }
 
-/// PG-ONLY — crée la table enterprise RBAC `rbac_group_map` (mappings IdP-groupe -> rôle) sur la CIBLE
+/// PG-ONLY — crée la table advanced RBAC `rbac_group_map` (mappings IdP-groupe -> rôle) sur la CIBLE
 /// Postgres pour le migrateur de données (`cli::migrate-store`) : hors de `PG_SCHEMA` (créée paresseusement),
 /// le migrateur doit invoquer ce chemin pour que la cible la possède AVANT la copie (sinon absente ->
 /// hard-fail, jamais de skip silencieux — sinon les autorisations IdP->rôle seraient perdues en silence).
@@ -519,7 +519,7 @@ mod tests {
     /// Turn advanced RBAC ON by engaging the SCIM flag (per-DB, test-isolated — no env).
     fn enable(app: &App) {
         let db = app.db();
-        crate::settings_set(&db, "enterprise.scim", "on").unwrap();
+        crate::settings_set(&db, "advanced.scim", "on").unwrap();
     }
 
     fn add_user(app: &App, login: &str, role: &str) -> i64 {
@@ -603,7 +603,7 @@ mod tests {
         // Designate "root" as super-admin (provisioning-only, per-DB, test-isolated).
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.superadmin", "root").unwrap();
+            crate::settings_set(&db, "advanced.superadmin", "root").unwrap();
         }
         let uid = add_user(&app, "root", "admin");
         let resolved = Resolved { role: Some("viewer".into()), tenant_grants: vec![] };
@@ -660,7 +660,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------------------------------
-    // HTTP-level — flag OFF => /api/rbac/* absent (404) + whoami/setup-state show no enterprise identity;
+    // HTTP-level — flag OFF => /api/rbac/* absent (404) + whoami/setup-state show no advanced identity;
     // flag ON => admin-gated CRUD, super_admin rejected. Uses the FULL router (crate::build_router).
     // ------------------------------------------------------------------------------------------------
     use std::net::SocketAddr;
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flag_off_rbac_absent_and_no_enterprise_identity() {
+    async fn flag_off_rbac_absent_and_no_advanced_identity() {
         let ledger = tmp_path("rbac-off-ledger");
         let app = rbac_test_app(&ledger);
         // flag NOT engaged (community default).
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(parse_status(&r), 404, "flag off -> POST rbac disabled (404): {r}");
         let r = http_raw(addr, &del_req("/api/rbac/group-map/g", &auth)).await;
         assert_eq!(parse_status(&r), 404, "flag off -> DELETE rbac disabled (404): {r}");
-        // whoami advertises NO enterprise identity; setup/state advertises NO SSO login button.
+        // whoami advertises NO advanced identity; setup/state advertises NO SSO login button.
         let w = http_raw(addr, &get_req("/api/whoami", &auth)).await;
         assert!(body_of(&w).contains("\"rbac\":false"), "whoami: rbac false in community: {}", body_of(&w));
         assert!(body_of(&w).contains("\"sso\":false"), "whoami: sso false in community");
@@ -785,7 +785,7 @@ mod tests {
         let r = http_raw(addr, &get_req("/api/rbac/group-map", &auth)).await;
         assert!(body_of(&r).contains("\"mappings\":[]"), "empty after delete: {}", body_of(&r));
 
-        // whoami now advertises the enterprise identity surface (rbac engaged via SCIM flag).
+        // whoami now advertises the advanced identity surface (rbac engaged via SCIM flag).
         let w = http_raw(addr, &get_req("/api/whoami", &auth)).await;
         assert!(body_of(&w).contains("\"rbac\":true"), "whoami: rbac true when engaged: {}", body_of(&w));
         let _ = std::fs::remove_file(&ledger);

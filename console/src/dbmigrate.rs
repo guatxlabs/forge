@@ -394,7 +394,8 @@ pub(crate) fn run_migration(opts: &MigrateOpts) -> Result<Value, String> {
         }
         let _ = dst.busy_timeout(std::time::Duration::from_secs(5));
         dst.execute_batch(SCHEMA).map_err(|e| format!("SCHEMA sur la cible échoué: {e}"))?;
-        migrate(&dst);
+        crate::schema::migrate_in(&dst, crate::settings_rename::RefusalContext::Import)
+            .map_err(|e| format!("migration de schéma de la cible refusée : {e}"))?;
     }
 
     // (5) copie du ledger + de la clé de signature .ed25519 (0600) dans le dossier ledger cible.
@@ -550,9 +551,19 @@ mod tests {
         assert_eq!(title, "old-finding", "la donnée source survit à la copie");
         // 2) table neuve `settings` créée par SCHEMA sur la cible ET TAMPONNÉE par migrate() : la source
         //    ancienne n'avait ni la table ni de réglage, donc la cible contient UNIQUEMENT le stamp
-        //    `schema_version` (== SCHEMA_VERSION) posé par migrate() après les ALTER additifs.
-        let n: i64 = dst.query_row("SELECT count(*) FROM settings", [], |r| r.get(0)).expect("table settings créée");
-        assert_eq!(n, 1, "seul le stamp schema_version est présent après migrate()");
+        //    `schema_version` (== SCHEMA_VERSION) et l'enregistrement de la migration des clés renommées
+        //    (liste vide : aucune ancienne clé), tous deux posés par migrate() après les ALTER additifs.
+        let mut st = dst.prepare("SELECT key, value FROM settings ORDER BY key").expect("table settings créée");
+        let rows: Vec<(String, String)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+        drop(st);
+        assert_eq!(
+            rows,
+            vec![
+                ("migration.renamed_settings".to_string(), String::new()),
+                ("schema_version".to_string(), crate::schema::SCHEMA_VERSION.to_string()),
+            ],
+            "seuls le stamp et l'enregistrement (liste vide) sont présents après migrate()"
+        );
         let sv: String = dst
             .query_row("SELECT value FROM settings WHERE key='schema_version'", [], |r| r.get(0))
             .expect("schema_version tamponnée par migrate()");

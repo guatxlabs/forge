@@ -24,7 +24,7 @@ use super::*;
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -553,18 +553,18 @@ use super::*;
         .unwrap();
     }
 
-    /// ENTERPRISE (tenancy ON) : GRANT-SCOPÉ DES DEUX CÔTÉS. L'appelant operator (grant tenant) peut assigner
+    /// ADVANCED (tenancy ON) : GRANT-SCOPÉ DES DEUX CÔTÉS. L'appelant operator (grant tenant) peut assigner
     /// à un user QUI A un grant sur l'engagement, mais est REJETÉ (403) pour un user SANS grant. Prouve que
     /// `resolve_assignee` gate l'assigné sur l'engagement (on n'assigne qu'à quelqu'un réellement dessus).
     #[tokio::test]
-    async fn assign_grant_scoped_enterprise() {
+    async fn assign_grant_scoped_advanced() {
         let led = tmp_ledger("assign-ent");
         let app = test_app(&led);
         seed_engagement(&app, 1, "A"); // tenant_id défaut = 1
         let f1 = seed_finding(&app, 1, "f1", "new");
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
         }
         // caller operator (rôle global operator + grant tenant_operator sur tenant 1 => voit+opère eng 1).
         let (_v, otok) = seed_roles(&app);
@@ -589,7 +589,7 @@ use super::*;
         let _ = std::fs::remove_file(&led);
     }
 
-    /// ENTERPRISE : un operator SANS grant sur l'engagement ne peut PAS assigner (can_operate_engagement
+    /// ADVANCED : un operator SANS grant sur l'engagement ne peut PAS assigner (can_operate_engagement
     /// fail-closed -> 403), même s'il est operator global.
     #[tokio::test]
     async fn assign_caller_without_engagement_grant_403() {
@@ -599,7 +599,7 @@ use super::*;
         let f1 = seed_finding(&app, 1, "f1", "new");
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
         }
         let (_v, otok) = seed_roles(&app); // operator global, MAIS aucun grant tenant/engagement
         let bob = seed_user(&app, "bob", "viewer");
@@ -619,7 +619,7 @@ use super::*;
 
     /// M5 — SSE `finding_events` SCOPÉ PAR TENANT (fuite de métadonnées cross-tenant fermée). Le filtre
     /// `finding_event_visible_for` ne forwarde un event de triage que si son `engagement` est visible au
-    /// caller. Community (tenancy off) => tout passe (no-op). Enterprise => un caller granté SEULEMENT sur le
+    /// caller. Community (tenancy off) => tout passe (no-op). Advanced => un caller granté SEULEMENT sur le
     /// tenant A NE reçoit PAS les events du tenant B (from/to/by/finding_id d'un autre tenant jamais divulgués).
     #[tokio::test]
     async fn finding_events_scoped_per_tenant() {
@@ -644,10 +644,10 @@ use super::*;
         assert!(finding_event_visible_for(&app, &ho, &ev_a), "community forwarde tenant 1");
         assert!(finding_event_visible_for(&app, &ho, &ev_b), "community forwarde tenant 2 (no-op)");
 
-        // ENTERPRISE (tenancy on) : seul le tenant 1 (visible) passe ; le tenant 2 est DROPPÉ.
+        // ADVANCED (tenancy on) : seul le tenant 1 (visible) passe ; le tenant 2 est DROPPÉ.
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
         }
         assert!(finding_event_visible_for(&app, &ho, &ev_a), "tenant granté (A) reçoit ses propres events");
         assert!(!finding_event_visible_for(&app, &ho, &ev_b), "tenant NON granté (B) ne fuit PAS cross-tenant");
@@ -900,14 +900,14 @@ use super::*;
         // rejouer migrate (idempotent : ADD COLUMN error-ignored) -> pas de panic, colonne toujours là.
         {
             let db = app.db();
-            crate::migrate(&db);
-            crate::migrate(&db);
+            crate::migrate(&db).expect("migrate");
+            crate::migrate(&db).expect("migrate");
         }
         assert_eq!(triage_of(&app, f1), "new", "triage préservé après re-migration");
         let _ = std::fs::remove_file(&led);
     }
 
-    /// ENTERPRISE (tenancy ON) : un operator SANS grant sur l'engagement ne peut PAS transitionner (fail-closed
+    /// ADVANCED (tenancy ON) : un operator SANS grant sur l'engagement ne peut PAS transitionner (fail-closed
     /// : l'engagement n'est même pas visible -> 404/403), et le finding reste intouché.
     #[tokio::test]
     async fn triage_caller_without_engagement_grant_denied() {
@@ -917,7 +917,7 @@ use super::*;
         let f1 = seed_finding(&app, 1, "f1", "new");
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
         }
         let (_v, otok) = seed_roles(&app); // operator global, MAIS aucun grant tenant/engagement
         let r = finding_triage(State(app.clone()), peer(), bearer(&otok), Path(f1), q_eng("1"),

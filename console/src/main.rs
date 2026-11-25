@@ -114,12 +114,14 @@ pub(crate) use crate::common::*;
 // `*_FILE` secret indirection (Docker/k8s secrets) — env holds a PATH, secret lives in a mounted file.
 mod secret_env;
 pub(crate) use crate::secret_env::*;
-// Shared internal substrate for the flag-gated enterprise modules (dedup, behaviour-neutral):
+// Shared internal substrate for the flag-gated advanced modules (dedup, behaviour-neutral):
 //   error  — compact typed ApiError + IntoResponse (byte-identical `{"error","why"}` envelope).
-//   flags  — the single copy of `env_truthy` + `enterprise_enabled` (env|per-DB config gate).
+//   flags  — the single copy of `env_truthy` + `advanced_enabled` (env|per-DB config gate).
 //   redact — the single copy of the two secret redactors (string scan + JSON-key walk).
 mod error;
 mod flags;
+// Renamed settings keys -> `advanced.<x>`: one additive migration, no read alias, refuses on a conflict.
+mod settings_rename;
 mod redact;
 mod reports;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — row-level multi-tenancy. The default build
@@ -129,13 +131,13 @@ mod tenancy;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — OIDC SSO login. The default build never
 // engages it (sso::enabled() false => LOCAL accounts only, byte-identical; every /api/sso/* route 404s).
 // Wired as its OWN module (minimal main.rs delta = this line + one route merge) so the rest of the console
-// does not depend on it. Behind the runtime flag FORGE_ADVANCED_SSO / enterprise.sso. See ADVANCED_MODULES.md.
+// does not depend on it. Behind the runtime flag FORGE_ADVANCED_SSO / advanced.sso. See ADVANCED_MODULES.md.
 mod sso;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — SCIM 2.0 provisioning (automated user/group
 // provisioning from an IdP: Okta/Azure AD). The default build never engages it (scim::enabled() false => LOCAL accounts
 // only; every /scim/* + /api/scim/config route 404s). Wired as its OWN module (minimal main.rs delta =
 // this line + one route merge). Authenticated by a SCIM BEARER TOKEN (hashed at rest, constant-time), NOT
-// a session. Behind FORGE_ADVANCED_SCIM / enterprise.scim (or the SSO flag). See ADVANCED_MODULES.md.
+// a session. Behind FORGE_ADVANCED_SCIM / advanced.scim (or the SSO flag). See ADVANCED_MODULES.md.
 mod scim;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — advanced RBAC: the CONFIGURABLE IdP-group ->
 // {role, tenant grant} mapping consulted by BOTH the SSO login (`groups` claim) and SCIM group membership.
@@ -147,7 +149,7 @@ mod rbac;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — E3 COMPLIANCE: WORM / retention / legal-hold
 // on the audit ledger + engagement data. The default build never engages it (compliance::enabled() OFF => every
 // /api/compliance/* route 404s, WORM/retention/hold inert, ledger + data byte-identical). A GOVERNED purge
-// (behind FORGE_ADVANCED_COMPLIANCE / enterprise.compliance) archives the expired ledger segment ENCRYPTED
+// (behind FORGE_ADVANCED_COMPLIANCE / advanced.compliance) archives the expired ledger segment ENCRYPTED
 // (reusing the backup discipline) then re-anchors + emits a signed `console.compliance.purge` checkpoint so
 // the chain stays verifiable — NEVER a silent delete. Wired as its OWN module (this line + one route merge +
 // one SPA flag + a flag-gated delete guard). See ADVANCED_MODULES.md + forge/compliance_signer.py.
@@ -459,10 +461,10 @@ async fn main() {
 }
 
 // Boot serveur + dispatch CLI + store-gate extraits dans console/src/boot.rs (PURE MOVE, STEP 4 du
-// refactor archi) : serve/dispatch_cli/enterprise_store_gate/StoreSelection ne consomment que App +
+// refactor archi) : serve/dispatch_cli/advanced_store_gate/StoreSelection ne consomment que App +
 // les helpers déjà re-exportés à la racine ; le déplacement n'ajoute que des `use`. Re-exporté
 // `pub(crate)` à la racine pour que main() (dispatch_cli/serve) ET les tests (`super::*` ->
-// enterprise_store_gate/StoreSelection, cf. tests_http_boot) résolvent INCHANGÉS.
+// advanced_store_gate/StoreSelection, cf. tests_http_boot) résolvent INCHANGÉS.
 mod boot;
 pub(crate) use crate::boot::*;
 

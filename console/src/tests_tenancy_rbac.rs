@@ -15,7 +15,7 @@ use crate::testutil::*;
         let ledger2 = tmp_path("forge-test-tnc-noop2");
         // seed_two_tenants ENGAGE le flag ; on le DÉSACTIVE pour ce test (config community).
         let (app, alice, _bob, _fa, fid_b) = seed_two_tenants(&ledger, &ledger2);
-        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='advanced.tenancy'", []).unwrap(); }
         assert!(!tenancy::enabled(&app), "flag OFF => community");
 
         // alice n'a de grant QUE sur tenant 1, mais en community elle voit AUSSI le tenant 2 (no-op).
@@ -34,7 +34,7 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger2);
     }
 
-    /// [TENANCY — fail-closed cross-tenant] ENTERPRISE ON. alice (tenant A) ne peut NI LISTER, NI LIRE,
+    /// [TENANCY — fail-closed cross-tenant] ADVANCED ON. alice (tenant A) ne peut NI LISTER, NI LIRE,
     /// NI AGIR sur les engagements/findings/runs/roe/ledger/couverture/rapport de bob (tenant B), et
     /// réciproquement. Aucun grant => zéro ligne / 403 (deny-by-default, comme le ROE).
     ///
@@ -42,11 +42,11 @@ use crate::testutil::*;
     /// renvoient `true`), `view_engagement_id(alice, Some(2))` cesserait de renvoyer NO_ENGAGEMENT et les
     /// findings/runs de B DÉBORDERAIENT chez alice -> les asserts « n'est PAS visible » passent AU ROUGE.
     #[tokio::test]
-    async fn enterprise_tenant_isolation_is_fail_closed() {
+    async fn advanced_tenant_isolation_is_fail_closed() {
         let ledger = tmp_path("forge-test-tnc-iso");
         let ledger2 = tmp_path("forge-test-tnc-iso2");
         let (app, alice, bob, _fa, fid_b) = seed_two_tenants(&ledger, &ledger2);
-        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+        assert!(tenancy::enabled(&app), "flag ON => advanced");
 
         // (a) LISTE : alice ne voit QUE l'engagement de son tenant (A), bob QUE le sien (B).
         let ea: Vec<i64> = engagement_list_json(&app, &alice).iter().map(|e| e["id"].as_i64().unwrap()).collect();
@@ -100,7 +100,7 @@ use crate::testutil::*;
 
     /// [H1 — surface SoQL brute tenant-SCOPÉE (correctif propre, remplace le 403 DENY)] La surface
     /// `/api/query` (GET+POST) et `/api/panels/:id/data` compile une SoQL ARBITRAIRE sur `finding`/
-    /// `runrecord`. En mode enterprise, chaque requête est désormais compilée avec le row-filter
+    /// `runrecord`. En mode advanced, chaque requête est désormais compilée avec le row-filter
     /// OBLIGATOIRE NON CONTOURNABLE du cœur (`engagement_id IN (<engagements accordés>)`, injecté à la
     /// base par `soql::with_row_filter`) : bob (tenant B) obtient UNIQUEMENT SES findings (fb), JAMAIS
     /// ceux du tenant A (fa) ; réciproquement pour alice ; un appelant SANS grant obtient ZÉRO ligne
@@ -119,7 +119,7 @@ use crate::testutil::*;
         let ledger = tmp_path("forge-test-h1-soql");
         let ledger2 = tmp_path("forge-test-h1-soql2");
         let (app, alice, bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
-        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+        assert!(tenancy::enabled(&app), "flag ON => advanced");
 
         // Snapshot de la base semée vers un fichier réel -> le moteur SoQL (connexion read-only séparée)
         // lit les vraies lignes. Les grants/panels restent lus depuis la base in-memory PARTAGÉE (le clone
@@ -138,11 +138,11 @@ use crate::testutil::*;
                 .map(|s| s.to_string()).collect()
         }
 
-        // (a) ENTERPRISE — bob (tenant B) : GET /api/query "search" -> SES findings (fb) UNIQUEMENT,
+        // (a) ADVANCED — bob (tenant B) : GET /api/query "search" -> SES findings (fb) UNIQUEMENT,
         // JAMAIS ceux du tenant A (fa). Scopé, plus de 403.
         let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
         let resp = query(State(app_f.clone()), bob.clone(), q).await.into_response();
-        assert_eq!(resp.status(), StatusCode::OK, "enterprise : /api/query désormais SERVI (scopé, plus de 403)");
+        assert_eq!(resp.status(), StatusCode::OK, "advanced : /api/query désormais SERVI (scopé, plus de 403)");
         let jb = resp_json(resp).await;
         let t = titles(&jb);
         assert!(t.contains(&"fb".to_string()), "bob voit SON finding (fb) : {t:?}");
@@ -151,7 +151,7 @@ use crate::testutil::*;
         assert!(jb["compiled"].as_str().unwrap().contains("\"engagement_id\" IN ("),
             "row-filter obligatoire dans le SQL compilé : {}", jb["compiled"]);
 
-        // (b) ENTERPRISE — POST /api/query : même scoping (bob -> fb only) ; alice -> fa only (réciproque).
+        // (b) ADVANCED — POST /api/query : même scoping (bob -> fb only) ; alice -> fa only (réciproque).
         let resp = query_post(State(app_f.clone()), bob.clone(), Json(json!({"soql": "search"}))).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         let t = titles(&resp_json(resp).await);
@@ -160,15 +160,15 @@ use crate::testutil::*;
         let ta = titles(&resp_json(query(State(app_f.clone()), alice.clone(), q).await.into_response()).await);
         assert!(ta.contains(&"fa".to_string()) && !ta.contains(&"fb".to_string()), "alice scopée à A : {ta:?}");
 
-        // (c) ENTERPRISE — panel_data (exécute une SoQL stockée) : scopé de la même façon (bob -> fb only).
+        // (c) ADVANCED — panel_data (exécute une SoQL stockée) : scopé de la même façon (bob -> fb only).
         { let db = app.db();
           db.execute("INSERT OR IGNORE INTO panel(id,name,query,viz,position,dashboard_id,updated) VALUES(999,'p','search','table',0,1,datetime('now'))", []).unwrap(); }
         let resp = panel_data(State(app_f.clone()), bob.clone(), Path(999i64), Query(HashMap::new())).await.into_response();
-        assert_eq!(resp.status(), StatusCode::OK, "enterprise : /api/panels/:id/data SERVI (scopé)");
+        assert_eq!(resp.status(), StatusCode::OK, "advanced : /api/panels/:id/data SERVI (scopé)");
         let t = titles(&resp_json(resp).await);
         assert!(t.contains(&"fb".to_string()) && !t.contains(&"fa".to_string()), "panel_data scopé à B : {t:?}");
 
-        // (d) ENTERPRISE — appelant SANS grant : scope VIDE -> ZÉRO ligne (fail-closed), jamais toutes.
+        // (d) ADVANCED — appelant SANS grant : scope VIDE -> ZÉRO ligne (fail-closed), jamais toutes.
         { let db = app.db(); upsert_user(&db, "nogrant", "viewer", &hash_pw("pw")).unwrap(); }
         let (ntok, _) = create_session(&app, uid_of(&app, "nogrant"));
         let ng = bearer_headers(&ntok);
@@ -181,7 +181,7 @@ use crate::testutil::*;
         assert!(jl.as_array().unwrap().is_empty(), "panels_list : sans grant -> liste VIDE (fail-closed)");
 
         // (e) COMMUNITY (flag OFF) : AUCUN filtre -> les DEUX findings (fa ET fb) servis (mono-tenant, inchangé).
-        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='advanced.tenancy'", []).unwrap(); }
         assert!(!tenancy::enabled(&app), "flag OFF => community");
         let q = Query(HashMap::from([("q".to_string(), "search".to_string())]));
         let resp = query(State(app_f.clone()), alice.clone(), q).await.into_response();
@@ -199,11 +199,11 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&dbfile);
     }
 
-    /// [TENANCY — sans grant = rien] ENTERPRISE ON. Un compte SANS aucun tenant_grant (carol) n'accède à
+    /// [TENANCY — sans grant = rien] ADVANCED ON. Un compte SANS aucun tenant_grant (carol) n'accède à
     /// RIEN : liste vide, résolution vers NO_ENGAGEMENT (zéro ligne), aucun engagement visible. Fail-closed
     /// deny-by-default (miroir du ROE). Le repli bootstrap (hash env) n'a pas non plus de grant.
     #[tokio::test]
-    async fn enterprise_no_grant_sees_nothing() {
+    async fn advanced_no_grant_sees_nothing() {
         let ledger = tmp_path("forge-test-tnc-nogrant");
         let ledger2 = tmp_path("forge-test-tnc-nogrant2");
         let (app, _alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
@@ -227,7 +227,7 @@ use crate::testutil::*;
     }
 
     /// [TENANCY — filtre central, unité] Sémantique exacte de tenancy::view_engagement_id / engagement_visible
-    /// (l'ancre mutation-proof la plus directe : ces fonctions sont LE filtre). Enterprise ON.
+    /// (l'ancre mutation-proof la plus directe : ces fonctions sont LE filtre). Advanced ON.
     #[tokio::test]
     async fn tenancy_central_filter_semantics() {
         let ledger = tmp_path("forge-test-tnc-central");
@@ -249,7 +249,7 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger2);
     }
 
-    /// [PER-ENGAGEMENT RBAC #14 — effective role, most-specific-wins, fail-closed] ENTERPRISE ON. Deux
+    /// [PER-ENGAGEMENT RBAC #14 — effective role, most-specific-wins, fail-closed] ADVANCED ON. Deux
     /// engagements (#1, #3) DANS LE MÊME tenant (1). alice est tenant_operator sur le tenant => operator sur
     /// LES DEUX par héritage. Un engagement_grant tenant_viewer sur #1 RÉTROGRADE alice à viewer sur #1
     /// SEULEMENT (most-specific-wins) : elle reste operator sur #3. Fail-closed : carol (aucun grant) n'a
@@ -297,7 +297,7 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger2);
     }
 
-    /// [PER-ENGAGEMENT RBAC #14 — handler wiring] ENTERPRISE ON. La mutation d'engagement (POST
+    /// [PER-ENGAGEMENT RBAC #14 — handler wiring] ADVANCED ON. La mutation d'engagement (POST
     /// /api/engagements/:id, chemin edit=operator) est GATÉE par le rôle effectif par-engagement. alice
     /// (operator hérité) édite #1 -> OK ; après rétrogradation viewer sur #1 -> 403 engagement_operator_required,
     /// bien qu'elle VOIE toujours #1. Preuve du câblage fail-closed (pas seulement le helper).
@@ -336,7 +336,7 @@ use crate::testutil::*;
         let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
         let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
         conn().execute_batch(SCHEMA).expect("schema");
-        migrate(&conn());
+        migrate(&conn()).expect("migrate");
         // deux engagements + deux users AVANT toute provision tenant.
         conn().execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(1,'e1','active','grey','{}','')", []).unwrap();
         conn().execute("INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path) VALUES(7,'e7','active','grey','{}','')", []).unwrap();
@@ -364,7 +364,7 @@ use crate::testutil::*;
     }
 
     // =====================================================================================
-    // ENTERPRISE — SUPER-ADMIN + TENANT CRUD + PER-TENANT LEDGER (tenancy.rs). Fail-closed, audited,
+    // ADVANCED — SUPER-ADMIN + TENANT CRUD + PER-TENANT LEDGER (tenancy.rs). Fail-closed, audited,
     // separable. Non-disablable super-admin (mirror Plume), audited cross-tenant READ, platform-admin
     // gated tenant CRUD, last-tenant/last-admin guards, tenant-scoped ledger paths.
     // =====================================================================================
@@ -444,7 +444,7 @@ use crate::testutil::*;
         let ledger2 = tmp_path("forge-test-tnc-ctx-off2");
         let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
         // community : on retire le flag semé par seed_two_tenants.
-        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='advanced.tenancy'", []).unwrap(); }
         assert!(!tenancy::enabled(&app), "flag OFF => community");
 
         // /api/tenancy => {"enabled": false} STRICT — rien d'autre (pas de tenants, pas de super-admin).
@@ -473,7 +473,7 @@ use crate::testutil::*;
         let ledger = tmp_path("forge-test-tnc-ctx-on");
         let ledger2 = tmp_path("forge-test-tnc-ctx-on2");
         let (app, alice, _bob, _fa, _fb) = seed_two_tenants(&ledger, &ledger2);
-        assert!(tenancy::enabled(&app), "flag ON => enterprise");
+        assert!(tenancy::enabled(&app), "flag ON => advanced");
 
         // (a) user normal : enabled=true, PAS platform-admin, tenants = [1] uniquement (fail-closed).
         let ctx = resp_json(tenancy::tenancy_context(State(app.clone()), alice.clone()).await).await;
@@ -556,7 +556,7 @@ use crate::testutil::*;
     }
 
     /// [TENANT CRUD — gated + ledgerisé] Community (flag OFF) : la surface tenant est FERMÉE (403
-    /// enterprise_disabled) => byte-identique. Enterprise ON : create/rename/grant/revoke réservés à un
+    /// advanced_disabled) => byte-identique. Advanced ON : create/rename/grant/revoke réservés à un
     /// platform-admin (operator -> 403), chacun ledgerisé `console.tenant.*`.
     #[tokio::test]
     async fn tenant_crud_gated_and_ledgered() {
@@ -565,15 +565,15 @@ use crate::testutil::*;
         { let store = app.store(); ensure_default_tenant(&store); }
         let admin = admin_session(&app, "adm");
         let opr = { { let db = app.db(); upsert_user(&db, "opr", "operator", &hash_pw("pw")).unwrap(); } let (t,_) = create_session(&app, uid_of(&app, "opr")); bearer_headers(&t) };
-        // community : flag OFF => 403 enterprise_disabled (aucune surface tenant).
+        // community : flag OFF => 403 advanced_disabled (aucune surface tenant).
         let resp = tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Acme"}))).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag OFF => 403 enterprise_disabled");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag OFF => 403 advanced_disabled");
         let refus = resp_json(resp).await;
-        assert_eq!(refus["error"], "enterprise_disabled", "le code d'erreur reste stable");
+        assert_eq!(refus["error"], "advanced_disabled", "le code d'erreur servi est advanced_disabled");
         let why = refus["why"].as_str().unwrap_or_default();
         assert!(why.contains("module avancé multi-tenancy non activé"), "texte servi : {why}");
         assert!(!why.contains("enterprise non"), "vocabulaire d'édition dans le texte servi : {why}");
-        enable_enterprise_tenancy(&app);
+        enable_advanced_tenancy(&app);
         // operator => 403 ; admin => 200.
         let resp = tenancy::tenants_create(State(app.clone()), opr.clone(), Json(json!({"name":"Acme"}))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "operator (non platform-admin) refusé");
@@ -604,7 +604,7 @@ use crate::testutil::*;
         let ledger = tmp_path("forge-test-tenant-guards");
         let app = test_app_scoped(&ledger, vec!["a.example.com".into()]);
         { let store = app.store(); ensure_default_tenant(&store); }
-        enable_enterprise_tenancy(&app);
+        enable_advanced_tenancy(&app);
         let admin = admin_session(&app, "adm");
         let tid2 = resp_json(tenancy::tenants_create(State(app.clone()), admin.clone(), Json(json!({"name":"Second"}))).await).await["tenant"]["id"].as_i64().unwrap();
         // archive #1 (reste #2 actif) => OK.
@@ -625,7 +625,7 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger);
     }
 
-    /// [PER-TENANT LEDGER — unité] Community (flag OFF) => None (chemin plat, byte-identique). Enterprise
+    /// [PER-TENANT LEDGER — unité] Community (flag OFF) => None (chemin plat, byte-identique). Advanced
     /// ON => `tenant-<tid>/engagement-<eid>.jsonl` (groupé par tenant, cross-platform via PathBuf). Deux
     /// tenants distincts => sous-dossiers distincts (isolation). La signature Ed25519 par-ledger est inchangée.
     #[test]
@@ -635,7 +635,7 @@ use crate::testutil::*;
         let base = std::path::Path::new(&std::env::temp_dir()).join("forge").join("engagement.jsonl").to_string_lossy().into_owned();
         // community => None.
         assert!(tenancy::scoped_engagement_ledger_path(&app, &base, 7, 3).is_none(), "community => pas de scoping (chemin plat)");
-        enable_enterprise_tenancy(&app);
+        enable_advanced_tenancy(&app);
         let p = tenancy::scoped_engagement_ledger_path(&app, &base, 7, 3).expect("scoped");
         let expect = std::path::Path::new(&base).parent().unwrap().join("tenant-3").join("engagement-7.jsonl").to_string_lossy().into_owned();
         assert_eq!(p, expect, "ledger groupé par tenant (tenant-3/engagement-7.jsonl)");
@@ -646,7 +646,7 @@ use crate::testutil::*;
         let _ = std::fs::remove_file(&ledger);
     }
 
-    /// [PER-TENANT LEDGER — bout-en-bout] Un engagement créé en mode enterprise dans le tenant 5 reçoit un
+    /// [PER-TENANT LEDGER — bout-en-bout] Un engagement créé en mode advanced dans le tenant 5 reçoit un
     /// ledger DÉDIÉ groupé sous `tenant-5/`, et sa genèse `console.engagement.create` y est écrite (le
     /// fichier existe réellement). Prouve le câblage derive_engagement_ledger_path -> tenancy.
     #[tokio::test]
@@ -664,7 +664,7 @@ use crate::testutil::*;
         }
         let uid5 = uid_of(&app, "op5");
         { let db = app.db(); db.execute("INSERT INTO tenant_grant(user_id,tenant_id,role,created) VALUES(?,5,'tenant_operator',datetime('now'))", [uid5]).unwrap(); }
-        enable_enterprise_tenancy(&app);
+        enable_advanced_tenancy(&app);
         let (t,_) = create_session(&app, uid_of(&app, "op5"));
         let opr = bearer_headers(&t);
         let resp = engagements_create(State(app.clone()), conn_info(), opr.clone(),

@@ -244,7 +244,7 @@ pub(crate) async fn setup_state(State(app): State<App>) -> impl IntoResponse {
         "provisioned": provisioned,
         "needs_setup": !provisioned,
         "capabilities": { "sqlcipher": cfg!(feature = "encryption") },
-        // ENTERPRISE (flag-gated) — whether an interactive OIDC SSO login is offered. false in the
+        // ADVANCED (flag-gated) — whether an interactive OIDC SSO login is offered. false in the
         // community default (flag OFF or unconfigured) => the login screen shows NO SSO button, LOCAL
         // login unchanged. Not a secret (only "SSO is available", like the button itself).
         "sso": { "enabled": sso::login_available(&app) },

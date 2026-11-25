@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ENTERPRISE (E3 COMPLIANCE) — PLUGGABLE LEDGER SIGNER. `python -m unittest -v`.
+"""ADVANCED (E3 COMPLIANCE) — PLUGGABLE LEDGER SIGNER. `python -m unittest -v`.
 
 Proves the ledger's Ed25519 signer is PLUGGABLE without weakening verify:
   (a) LocalFileSigner is BYTE-IDENTICAL to today's Ed25519Signer over the same on-disk key, and the DEFAULT
@@ -10,7 +10,7 @@ Proves the ledger's Ed25519 signer is PLUGGABLE without weakening verify:
       (fail-closed) — and the error carries NO secret;
   (d) the remote-signer CONFIG SECRET (endpoint/credential/argv) is REDACTED — never in repr/logs/errors;
   (e) the exec signer is NO-SHELL (fixed argv, JSON-only) and its signature also verifies externally;
-  (f) a remote signer requested WITHOUT the enterprise flag is REFUSED (no silent local fallback).
+  (f) a remote signer requested WITHOUT the advanced flag is REFUSED (no silent local fallback).
 
 The module is SEPARABLE + FLAG-GATED: with nothing configured the default build behaves as before.
 """
@@ -220,7 +220,7 @@ class TestExecSignerNoShell(unittest.TestCase):
         }
         # goes through make_ledger_signer (flag on) → build_remote_signer → _exec_sign_fn.
         signer = signing.make_ledger_signer(
-            str(d / "l"), config=cfg, env={signing.ENTERPRISE_COMPLIANCE_FLAG: "1"})
+            str(d / "l"), config=cfg, env={signing.ADVANCED_COMPLIANCE_FLAG: "1"})
         self.assertIsInstance(signer, signing.RemoteSigner)
         data = b"hash-bytes-to-sign"
         sig = signer.sign(data)
@@ -233,7 +233,7 @@ class TestExecSignerNoShell(unittest.TestCase):
 
 
 class TestFlagGating(unittest.TestCase):
-    def test_remote_requested_without_enterprise_flag_is_refused(self):
+    def test_remote_requested_without_advanced_flag_is_refused(self):
         env = {
             signing.LEDGER_SIGNER_ENV: "kms",
             "FORGE_LEDGER_SIGNER_ENDPOINT": "https://kms.example.internal/sign",
@@ -247,7 +247,7 @@ class TestFlagGating(unittest.TestCase):
     @unittest.skipUnless(_HAVE_ED, "cryptography/Ed25519 indisponible")
     def test_remote_built_lazily_when_flag_on(self):
         env = {
-            signing.ENTERPRISE_COMPLIANCE_FLAG: "1",
+            signing.ADVANCED_COMPLIANCE_FLAG: "1",
             signing.LEDGER_SIGNER_ENV: "kms",
             "FORGE_LEDGER_SIGNER_ENDPOINT": "https://kms.example.internal/sign",
             "FORGE_LEDGER_SIGNER_CREDENTIAL": "SECRET",

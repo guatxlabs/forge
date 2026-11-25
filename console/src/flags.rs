@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Enterprise flag helpers — the ONE copy of the "is this enterprise feature engaged?" logic that
+//! Advanced flag helpers — the ONE copy of the "is this advanced feature engaged?" logic that
 //! sso / tenancy / compliance / scim each carried verbatim. Behaviour is byte-for-byte the historical
 //! per-module code: env truthy (1|true|on|yes, case-insensitive) OR the per-DB config key in
 //! {on,1,true,yes}. Community default = OFF (every gated route stays 404, byte-identical).
@@ -63,10 +63,10 @@ pub(crate) fn env_truthy(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Is an enterprise feature ENGAGED?  `env_truthy(env_key)` OR the per-DB config key `setting_key`
+/// Is an advanced feature ENGAGED?  `env_truthy(env_key)` OR the per-DB config key `setting_key`
 /// reads one of {on,1,true,yes}. Reproduces EXACTLY each module's former `enabled()` body. Per-DB so
 /// tests toggle it in isolation.
-pub(crate) fn enterprise_enabled(app: &App, env_key: &str, setting_key: &str) -> bool {
+pub(crate) fn advanced_enabled(app: &App, env_key: &str, setting_key: &str) -> bool {
     if env_truthy(env_key) {
         return true;
     }

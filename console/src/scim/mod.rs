@@ -65,17 +65,17 @@ const SCHEMA_LIST: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 const SCHEMA_ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 
 // ============================================================================================
-// FLAG — is enterprise SCIM ENGAGED? Community default = OFF (every /scim/* route 404s, local unchanged).
-// Sources (ANY engages it): env `FORGE_ADVANCED_SCIM` (truthy) OR the per-DB key `enterprise.scim`
-// (on|1|true|yes) OR the enterprise-SSO flag (`sso::enabled` — SCIM ships with the same identity bundle).
+// FLAG — is advanced SCIM ENGAGED? Community default = OFF (every /scim/* route 404s, local unchanged).
+// Sources (ANY engages it): env `FORGE_ADVANCED_SCIM` (truthy) OR the per-DB key `advanced.scim`
+// (on|1|true|yes) OR the advanced-SSO flag (`sso::enabled` — SCIM ships with the same identity bundle).
 // Config is per-DB so tests toggle it in isolation. Mirrors sso/tenancy.
 // ============================================================================================
 
-/// Is enterprise SCIM engaged?  false => community (every `/scim/*` + `/api/scim/config` route 404s).
+/// Is advanced SCIM engaged?  false => community (every `/scim/*` + `/api/scim/config` route 404s).
 pub fn enabled(app: &App) -> bool {
-    // Own env flag OR per-DB config (shared substrate), OR — SCIM ships in the enterprise-identity
+    // Own env flag OR per-DB config (shared substrate), OR — SCIM ships in the advanced-identity
     // bundle — the SSO flag engages it too (single toggle). Same short-circuit order as before.
-    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_SCIM", "enterprise.scim")
+    crate::flags::advanced_enabled(app, "FORGE_ADVANCED_SCIM", "advanced.scim")
         || crate::sso::enabled(app)
 }
 
@@ -222,7 +222,7 @@ fn ensure_schema(store: &crate::store::Store) {
     );
 }
 
-/// PG-ONLY — crée les tables enterprise SCIM (`scim_user`/`scim_group`/`scim_group_member`) sur la CIBLE
+/// PG-ONLY — crée les tables advanced SCIM (`scim_user`/`scim_group`/`scim_group_member`) sur la CIBLE
 /// Postgres pour le migrateur de données (`cli::migrate-store`) : ces tables sont HORS de `PG_SCHEMA` (créées
 /// paresseusement au 1er usage runtime), donc le migrateur doit invoquer explicitement ce chemin pour que la
 /// cible les possède AVANT la copie (sinon elles seraient absentes -> hard-fail au lieu d'un skip silencieux).

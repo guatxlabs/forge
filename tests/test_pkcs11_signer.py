@@ -263,7 +263,7 @@ class TestPkcs11Wiring(unittest.TestCase):
         module, pub = _fake_module()
         signing_pkcs11._import_pkcs11 = lambda: module
         env = {
-            signing.ENTERPRISE_COMPLIANCE_FLAG: "1",
+            signing.ADVANCED_COMPLIANCE_FLAG: "1",
             signing.LEDGER_SIGNER_ENV: "pkcs11",
             signing_pkcs11.PKCS11_MODULE_ENV: "/fake/libsofthsm2.so",
             signing_pkcs11.PKCS11_TOKEN_LABEL_ENV: "forge",

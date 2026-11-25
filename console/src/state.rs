@@ -247,7 +247,7 @@ pub(crate) struct RunHandle {
 pub(crate) struct App {
     pub(crate) db: Arc<Mutex<Connection>>,
     pub(crate) db_path: Arc<String>,
-    // ENTERPRISE STORE (Postgres, feature `store-postgres`) — POOL de N clients partagé. `store()`
+    // ADVANCED STORE (Postgres, feature `store-postgres`) — POOL de N clients partagé. `store()`
     // CHECKOUT un client libre par Store (tenu pour la vie du Store, rendu au drop) : les opérateurs
     // concurrents tombent sur des slots DIFFÉRENTS -> pas de sérialisation sur un unique client. L'id
     // d'insertion ne dépend plus de la session (`execute_returning_id` -> `RETURNING id` en UN
@@ -647,10 +647,10 @@ pub(crate) fn owning_engagement_of_run(app: &App, run_id: &str) -> Option<i64> {
         .ok()
 }
 
-/// GARDE FAIL-CLOSED (ENTERPRISE, flag-gated) d'une LECTURE run-keyed (detail/report/logs/sse). Résout
+/// GARDE FAIL-CLOSED (ADVANCED, flag-gated) d'une LECTURE run-keyed (detail/report/logs/sse). Résout
 /// l'engagement PROPRIÉTAIRE du run (owning_engagement_of_run) et vérifie `tenancy::engagement_visible` —
 /// la MÊME helper que `engagement_report` (reports.rs). Community (flag OFF) => retour IMMÉDIAT `None`
-/// (aucune requête, comportement mono-tenant BYTE-IDENTIQUE). Enterprise (flag ON) => `Some(404)` quand le
+/// (aucune requête, comportement mono-tenant BYTE-IDENTIQUE). Advanced (flag ON) => `Some(404)` quand le
 /// run n'est PAS visible du caller : run inconnu (propriétaire None) OU engagement d'un tenant non accordé.
 /// 404 — JAMAIS 403 — sur une LECTURE : un run_id cross-tenant est INDISTINGUABLE d'un run inexistant (pas
 /// d'oracle d'existence). Les mêmes octets `{"error":"unknown_run"}` que la branche « run inconnu » existante.
@@ -672,9 +672,9 @@ pub(crate) fn run_read_denied(app: &App, headers: &HeaderMap, run_id: &str) -> O
 /// GET /api/runs/:id/report — rend en markdown un rapport d'engagement pour CE run, à partir des
 /// données stockées côté console (run_job + findings + roe_decision pour le run_id). Miroir Rust de
 /// `forge.report.build_report` (synthèse, findings, transparence ROE). LECTURE (viewer).
-/// 404 si le run_id est inconnu de run_job — OU (enterprise) si le run appartient à un tenant non accordé.
+/// 404 si le run_id est inconnu de run_job — OU (advanced) si le run appartient à un tenant non accordé.
 pub(crate) async fn run_report(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
-    // ISOLATION CROSS-TENANT (ENTERPRISE, fail-closed) : le rapport d'un run appartenant à un engagement
+    // ISOLATION CROSS-TENANT (ADVANCED, fail-closed) : le rapport d'un run appartenant à un engagement
     // d'un tenant NON accordé au caller est indisponible -> 404 (mêmes octets que « run inconnu » : ni
     // existence ni données divulguées). No-op en community (engagement_visible => true).
     if let Some(deny) = run_read_denied(&app, &headers, &id) {

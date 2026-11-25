@@ -6,11 +6,11 @@ messages servis à l'opérateur (refus d'API, erreur de migration, refus du sign
 journal de build, sortie d'une garde) parlaient encore ainsi. Chaque texte est tenu ici par un témoin.
 
 Les variables d'environnement des modules avancés s'appellent `FORGE_ADVANCED_*`, sans alias : un
-ancien nom encore posé fait refuser le démarrage (témoins dans `test_renamed_advanced_env.py`). Ce
-qui NE change PAS, à dessein : les autres identifiants (`enterprise.*`, le code d'erreur
-`enterprise_disabled`, les noms de champs) — leur renommage touche la configuration des
-installations et attend sa propre décision. Le texte du refus de l'API de tenancy est aussi tenu
-par le test Rust `tenant_crud_gated_and_ledgered`, sur la réponse réellement servie.
+ancien nom encore posé fait refuser le démarrage (témoins dans `test_renamed_advanced_env.py`). Les
+clés de réglage par base sont devenues `advanced.*` (migrées au démarrage, refus si deux valeurs
+divergent : témoins Rust dans `console/src/settings_rename/tests.rs`), le champ `advanced` de
+`/api/whoami` et le code d'erreur `advanced_disabled` aussi. Le texte du refus de l'API de tenancy est
+aussi tenu par le test Rust `tenant_crud_gated_and_ledgered`, sur la réponse réellement servie.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class ServedTextsNameTheAdvancedModule(unittest.TestCase):
                 signing.make_ledger_signer(pathlib.Path(d) / "led.jsonl", config={"mode": "exec"}, env={})
         message = str(ctx.exception)
         self.assertIn("le module avancé COMPLIANCE n'est pas activé", message)
-        self.assertIn(signing.ENTERPRISE_COMPLIANCE_FLAG, message, "le nom de la variable reste cité")
+        self.assertIn(signing.ADVANCED_COMPLIANCE_FLAG, message, "le nom de la variable reste cité")
         for mot in ("open-core", "l'entreprise"):
             self.assertNotIn(mot, message)
 
@@ -61,6 +61,9 @@ class ServedTextsNameTheAdvancedModule(unittest.TestCase):
              "aucun schéma connu — build par défaut ou module avancé — ne les crée", "base ou enterprise"),
             ("console/src/tenancy/admin_api.rs",
              "module avancé multi-tenancy non activé", "multi-tenancy enterprise non activée"),
+            # Le lecteur du champ de `/api/whoami` (renommé `advanced`) : un JS resté en cache qui lit
+            # l'ancien champ obtient `{}`, donc des liens masqués — le serveur reste l'autorité.
+            ("console/web/js/core/auth.js", "w.advanced", "w.enterprise"),
         ]
         for chemin, present, absent in cas:
             with self.subTest(fichier=chemin):

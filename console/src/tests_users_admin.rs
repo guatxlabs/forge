@@ -14,7 +14,7 @@ use crate::testutil::*;
     async fn panel_write_authorized_by_session_not_ingest_token() {
         let path = tmp_path("forge-test-panel-session");
         let app = test_app(&path);
-        { let db = app.db(); migrate(&db); } // colonnes additives panel (descr/col_span/updated/dashboard_id)
+        { let db = app.db(); migrate(&db).expect("migrate"); } // colonnes additives panel (descr/col_span/updated/dashboard_id)
         ensure_default_dashboard(&app.store()); // dashboard #1 (panel_create refuse un dashboard inexistant)
         {
             let db = app.db();

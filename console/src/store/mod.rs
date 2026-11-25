@@ -494,7 +494,7 @@ impl<'a> Store<'a> {
         Store { backend: Backend::Postgres { client: std::cell::RefCell::new(guard), url: Some(url) } }
     }
 
-    /// Which backend is this `Store` bound to? Lets the ENTERPRISE modules that create their tables
+    /// Which backend is this `Store` bound to? Lets the ADVANCED modules that create their tables
     /// LAZILY (scim_*/sso_*/rbac_group_map — deliberately NOT in `PG_SCHEMA`, since they are flag-gated
     /// and the community DB must never see them) pick the SQLite-vs-Postgres DDL dialect. In the DEFAULT
     /// build (feature OFF) the `Postgres` arm does not exist, so this is a const `false` and those

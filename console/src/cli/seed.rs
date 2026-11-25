@@ -112,7 +112,11 @@ pub(crate) fn run_seed_demo_cli(args: &[String]) -> i32 {
         eprintln!("[forge] seed-demo: initialisation du schéma impossible");
         return 2;
     }
-    migrate(&conn); // colonnes additives (run_id, cwe/cvss, run_job C2) — requises par les INSERT ci-dessous
+    // colonnes additives (run_id, cwe/cvss, run_job C2) — requises par les INSERT ci-dessous
+    if let Err(e) = migrate(&conn) {
+        eprintln!("[forge] seed-demo: {e}");
+        return 2;
+    }
 
     // IDEMPOTENCE : purge UNIQUEMENT la campagne démo (+ son run) avant de réinsérer. N'affecte
     // aucune autre campagne réelle stockée dans la même base.

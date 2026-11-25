@@ -131,7 +131,8 @@ fn apply_sqlite_migrate(db: &str) -> Result<(), String> {
     let conn = Connection::open(db).map_err(|e| format!("ouverture RW de '{db}' impossible: {e}"))?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.execute_batch(crate::SCHEMA).map_err(|e| format!("application de SCHEMA échouée: {e}"))?;
-    crate::migrate(&conn); // ALTER additifs error-ignored + stamp schema_version
+    // ALTER additifs error-ignored + clés renommées + stamp schema_version (Err => rollback)
+    crate::schema::migrate_in(&conn, crate::settings_rename::RefusalContext::Upgrade)?;
     Ok(())
 }
 
@@ -391,6 +392,8 @@ pub(crate) fn run_upgrade_core(opts: &UpgradeOpts) -> Result<Value, String> {
             }))
         }
         Err(e) => {
+            // La cause finit souvent déjà par un point (refus des clés renommées) : un seul avant la suite.
+            let e = e.strip_suffix('.').unwrap_or(&e);
             // ÉCHEC en b–d : ROLLBACK depuis le snapshot pré-upgrade -> état EXACT d'avant. `force=true` :
             // le snapshot fait AUTORITÉ (on écrase la base à moitié migrée). run_restore re-vérifie sha256 +
             // hash-chain à la restauration (fail-closed) et trace `console.restore`.
@@ -677,7 +680,7 @@ mod tests {
         let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
         let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
         conn().execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn()); // stamp schema_version (settings) + colonnes additives, comme au boot
+        crate::migrate(&conn()).expect("migrate"); // stamp schema_version (settings) + colonnes additives, comme au boot
         // un utilisateur AVANT le seed tenant -> prouve que tenant_grant se sème (et ne se re-sème pas).
         conn().execute("INSERT INTO users(login,role,pass_hash,disabled,created) VALUES('root','admin','h',0,'')", []).unwrap();
 

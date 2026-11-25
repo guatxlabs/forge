@@ -115,7 +115,7 @@ pub(crate) async fn scope_check(State(app): State<App>, headers: HeaderMap, Quer
         }
     };
     // ENGAGEMENT résolu (par-engagement) : son scope/mode gouvernent, comme le run flow. Fail-closed :
-    // un engagement introuvable / NO_ENGAGEMENT (enterprise sans grant) => scope VIDE (rien in-scope).
+    // un engagement introuvable / NO_ENGAGEMENT (advanced sans grant) => scope VIDE (rien in-scope).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     let (in_scope, mode) = match load_engagement(&app.store(), eid) {
         Some(eng) => (host_in_scope_list(&eng.scope_in, &validated), eng.mode),

@@ -12,7 +12,7 @@ use super::*;
 
 // ============================================================================================
 // GROUPS (best-effort) — membership maps to a SCOPED role (ties to the advanced-RBAC slice). A group can
-// only ever confer viewer|operator (never admin, never super-admin). When enterprise tenancy is engaged,
+// only ever confer viewer|operator (never admin, never super-admin). When advanced tenancy is engaged,
 // membership additionally lands a scoped tenant_grant on the default tenant.
 // ============================================================================================
 
@@ -245,7 +245,7 @@ pub(super) async fn group_delete(State(app): State<App>, headers: HeaderMap, Pat
 
 /// Add a user to a group and apply the group's SCOPED role. Bounded: only viewer|operator, and only to a
 /// SCIM-managed user whose current role is NOT admin (SCIM never touches a local admin's role, and never
-/// elevates to admin/super-admin). When enterprise tenancy is engaged, also land a scoped tenant_grant.
+/// elevates to admin/super-admin). When advanced tenancy is engaged, also land a scoped tenant_grant.
 ///
 /// FAIL-CLOSED (SCIM F7/F8). F8: applies `guard_superadmin_user_mutation` (a designated super-admin is
 /// never re-roled by SCIM) and PROPAGATES write errors (`Result`) so the caller can refuse to ledger a
@@ -254,7 +254,7 @@ pub(super) async fn group_delete(State(app): State<App>, headers: HeaderMap, Pat
 /// (never inserted into `scim_group_member`), so `Groups/:id` can never disclose a local account's login.
 #[allow(clippy::significant_drop_tightening)]
 fn add_member(app: &App, gid: i64, uid: i64, role: &str) -> Result<(), String> {
-    // Resolve enterprise state + this group's CONFIGURABLE tenant grant BEFORE taking the db guard below.
+    // Resolve advanced state + this group's CONFIGURABLE tenant grant BEFORE taking the db guard below.
     // Both read the db mutex; computing them up front avoids re-locking the (non-reentrant) guard while it
     // is held (`app.db()` returns a MutexGuard). `mapped_grant` (clamped to tenant_operator for SCIM) comes
     // from the advanced-RBAC group mapping; when unconfigured it is None => the legacy default (a scoped

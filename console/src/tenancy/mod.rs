@@ -17,7 +17,7 @@
 //! Community behaviour is preserved because `enabled()` is false by default: the callers in main.rs take
 //! the historical code path unchanged, and the helpers below are simply not consulted.
 //!
-//! This module ALSO carries the ENTERPRISE platform surface bolted on top of the row filter (all still
+//! This module ALSO carries the ADVANCED platform surface bolted on top of the row filter (all still
 //! flag-gated / fail-closed):
 //!   - SUPER-ADMIN (§ super-admin): a NON-DISABLABLE, provisioning-designated capability that can READ
 //!     across ALL tenants (platform/MSSP operator). Every cross-tenant read is AUDITED (`console.superadmin
@@ -44,26 +44,26 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
 
-/// Sentinel engagement id that matches NO row. In enterprise mode a read that resolves to a
+/// Sentinel engagement id that matches NO row. In advanced mode a read that resolves to a
 /// not-granted / non-existent engagement yields THIS id, so every `... WHERE engagement_id={id}`
 /// query returns ZERO rows (fail-closed) without any per-query change.
 pub const NO_ENGAGEMENT: i64 = -1;
 
 /// The single implicit tenant of the community edition (and the default of every existing row).
-/// Exported vocabulary of the module (asserted by tests; consumable by enterprise callers); the runtime
+/// Exported vocabulary of the module (asserted by tests; consumable by advanced callers); the runtime
 /// seeding lives in main.rs::ensure_default_tenant (literal id 1 in SQL) — hence not yet read at runtime.
 #[allow(dead_code)]
 pub const DEFAULT_TENANT: i64 = 1;
 
-/// Is enterprise row-level tenancy ENGAGED?  Community default = OFF (byte-identical single-tenant).
+/// Is advanced row-level tenancy ENGAGED?  Community default = OFF (byte-identical single-tenant).
 /// Two sources (either engages it): the deployment env flag `FORGE_ADVANCED_TENANCY` (truthy), or the
-/// DB config key `enterprise.tenancy` (on|1|true|yes). Config is per-DB, so tests toggle it in isolation.
+/// DB config key `advanced.tenancy` (on|1|true|yes). Config is per-DB, so tests toggle it in isolation.
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_TENANCY", "enterprise.tenancy")
+    crate::flags::advanced_enabled(app, "FORGE_ADVANCED_TENANCY", "advanced.tenancy")
 }
 
 /// user_id of the caller's INDIVIDUAL session (non-expired, enabled account) — or None.
-/// FAIL-CLOSED: the env-hash bootstrap identity and anonymous dev-open have NO tenant grants (enterprise
+/// FAIL-CLOSED: the env-hash bootstrap identity and anonymous dev-open have NO tenant grants (advanced
 /// requires a provisioned individual account).
 /// pub(crate) so the notifications layer can resolve the ACTOR's user_id (skip self-notify) and the
 /// RECIPIENT scoping of `GET/POST /api/notifications` reuse the SAME session→user_id resolution.
@@ -73,12 +73,12 @@ pub fn enabled(app: &App) -> bool {
 /// the resolved `user_id` guarantees AUTH and TENANCY can never diverge: a caller admitted by auth (e.g.
 /// a VALID cookie accompanied by a STALE/foreign Bearer — a common residue of an old front build) now
 /// resolves to the SAME individual account for grants, instead of the previous single-candidate
-/// (Bearer-first) lookup that returned None and left them grantless in enterprise mode.
+/// (Bearer-first) lookup that returned None and left them grantless in advanced mode.
 pub(crate) fn caller_user_id(app: &App, headers: &HeaderMap) -> Option<i64> {
     crate::resolve_session_identity(app, headers).map(|id| id.user_id)
 }
 
-/// The SET of tenant_ids the caller is granted (their access universe). ENTERPRISE-only semantics.
+/// The SET of tenant_ids the caller is granted (their access universe). ADVANCED-only semantics.
 /// FAIL-CLOSED: no individual session / no grant rows => EMPTY set (access to nothing).
 pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
     let uid = match caller_user_id(app, headers) {
@@ -98,7 +98,7 @@ pub fn granted_tenants(app: &App, headers: &HeaderMap) -> HashSet<i64> {
 }
 
 /// H1 — the SET of engagement ids the caller may READ, materialized for the mandatory raw-SoQL row-filter
-/// (`soql::Schema::with_row_filter("engagement_id", …)`). ENTERPRISE-only (callers gate on `enabled()` and
+/// (`soql::Schema::with_row_filter("engagement_id", …)`). ADVANCED-only (callers gate on `enabled()` and
 /// pass the result straight to the core compiler, which ANDs `engagement_id IN (<these>)` — or `1=0` when
 /// EMPTY — into every compiled base). Semantics mirror `engagement_visible` (an engagement is visible iff
 /// its tenant is in the caller's granted set), just expanded to the full id list:
@@ -142,7 +142,7 @@ fn tenant_of_engagement(app: &App, eid: i64) -> Option<i64> {
 }
 
 /// Is engagement `eid` VISIBLE to the caller?  ── THE CENTRAL FAIL-CLOSED FILTER ──
-/// Community (enabled=false) => always true (NO-OP, single implicit tenant). Enterprise => the engagement
+/// Community (enabled=false) => always true (NO-OP, single implicit tenant). Advanced => the engagement
 /// must EXIST and its `tenant_id` must be in the caller's granted set; anything else (no grant, wrong
 /// tenant, unknown engagement) => false. Weakening the membership test here makes an isolation test flip RED.
 pub fn engagement_visible(app: &App, headers: &HeaderMap, eid: i64) -> bool {
@@ -176,7 +176,7 @@ fn tenants_in_bind(granted: &HashSet<i64>) -> (String, Vec<crate::store::Param>)
     (placeholders, ids.into_iter().map(crate::store::Param::Int).collect())
 }
 
-/// ENTERPRISE resolution of the engagement id for a VIEW/READ (fail-closed). Called ONLY when enabled().
+/// ADVANCED resolution of the engagement id for a VIEW/READ (fail-closed). Called ONLY when enabled().
 ///   - explicit `?engagement=<id>` not visible to the caller  => NO_ENGAGEMENT (zero rows) ;
 ///   - no explicit id => the most-recent ACTIVE engagement WITHIN the caller's granted tenants, else the
 ///     most-recent grantable engagement, else NO_ENGAGEMENT ;
@@ -251,7 +251,7 @@ pub fn view_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>
     NO_ENGAGEMENT
 }
 
-/// ENTERPRISE resolution of the engagement id for a RUN (oldest-active default, matching the historical
+/// ADVANCED resolution of the engagement id for a RUN (oldest-active default, matching the historical
 /// resolve_engagement contract). Called ONLY when enabled(). Fail-closed: an explicit not-granted id =>
 /// Err (indistinguishable from "unknown" — no existence leak); no grant => Err.
 pub fn run_engagement_id(app: &App, headers: &HeaderMap, requested: Option<i64>) -> Result<i64, String> {
@@ -289,8 +289,8 @@ fn engagement_in(app: &App, eid: i64, granted: &HashSet<i64>) -> bool {
     matches!(tenant_of_engagement(app, eid), Some(tid) if granted.contains(&tid))
 }
 
-/// ENTERPRISE SQL WHERE-fragment restricting an engagement listing to the caller's granted tenants, plus
-/// the BOUND Params for it. Community => None (no filter, byte-identical listing). Enterprise =>
+/// ADVANCED SQL WHERE-fragment restricting an engagement listing to the caller's granted tenants, plus
+/// the BOUND Params for it. Community => None (no filter, byte-identical listing). Advanced =>
 /// `Some(("e.tenant_id IN (?,?,…)", [Param::Int(id), …]))` — the tenant ids are BOUND, never string-
 /// interpolated (empty grant => `IN (?)` bound to -1 => zero rows, fail-closed). `alias` is the `engagement`
 /// table alias in the query; the caller MUST bind the returned Params in the query's placeholder order.
@@ -310,7 +310,7 @@ pub fn list_filter_sql(app: &App, headers: &HeaderMap, alias: &str) -> Option<(S
     Some((format!("{alias}.tenant_id IN ({ph})"), params))
 }
 
-/// ENTERPRISE resolution of the tenant a NEWLY-created engagement lands in (fail-closed): the caller can
+/// ADVANCED resolution of the tenant a NEWLY-created engagement lands in (fail-closed): the caller can
 /// only create WITHIN a tenant they are granted. `body.tenant_id` (if given) must be granted; otherwise,
 /// if the caller has exactly one granted tenant it is used; ambiguous / none => Err. Called ONLY when enabled().
 pub fn resolve_create_tenant(app: &App, headers: &HeaderMap, body: &Value) -> Result<i64, String> {
@@ -348,7 +348,7 @@ pub fn resolve_create_tenant(app: &App, headers: &HeaderMap, body: &Value) -> Re
 //   2) else the user's TENANT-WIDE grant (tenant_grant on (user, tenant_of(eid))) ;
 //   3) else None => FAIL-CLOSED (no grant path => no effective role => operate/admin DENIED).
 // Community (flag OFF) => the per-engagement gate is a NO-OP (callers keep the console-global authority,
-// byte-identical). Enterprise (flag ON) => this effective role governs the engagement-scoped operator/admin
+// byte-identical). Advanced (flag ON) => this effective role governs the engagement-scoped operator/admin
 // actions (fail-closed). The super-admin / console-admin PLATFORM surface (E1) is unchanged: cross-tenant
 // WRITE/run stays bound to native grants (a super-admin does NOT get operate on an un-granted engagement).
 // =====================================================================================
@@ -391,7 +391,7 @@ pub fn effective_engagement_role(app: &App, headers: &HeaderMap, eid: i64) -> Op
         .ok()
 }
 
-/// FAIL-CLOSED per-engagement OPERATE capability (ENTERPRISE). No effective role => false. Consulted by the
+/// FAIL-CLOSED per-engagement OPERATE capability (ADVANCED). No effective role => false. Consulted by the
 /// engagement-scoped mutation handlers when `enabled()` (community never calls it — global role governs).
 pub fn can_operate_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {
     matches!(effective_engagement_role(app, headers, eid), Some(r) if role_allows_operate(&r))
@@ -400,7 +400,7 @@ pub fn can_operate_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool 
 /// Does the EXPLICIT user `user_id` have ANY effective grant on engagement `eid` — i.e. are they a
 /// legitimate ASSIGNEE/OWNER candidate for a finding in that engagement? MOST-SPECIFIC-WINS like
 /// effective_engagement_role, but keyed by a caller-supplied user_id (the target assignee) instead of the
-/// session identity. ENTERPRISE semantics — the caller gates on `enabled()` before consulting this (in
+/// session identity. ADVANCED semantics — the caller gates on `enabled()` before consulting this (in
 /// COMMUNITY there are no grants and the global role governs, so this is never called). An
 /// engagement-specific grant OR the tenant-wide grant on the engagement's tenant qualifies. FAIL-CLOSED:
 /// no grant / unknown engagement => false (you can only assign to someone who is actually on the engagement).
@@ -431,7 +431,7 @@ pub fn user_has_engagement_grant(app: &App, user_id: i64, eid: i64) -> bool {
     }
 }
 
-/// FAIL-CLOSED per-engagement ADMIN capability (ENTERPRISE). No effective role or non-admin role => false.
+/// FAIL-CLOSED per-engagement ADMIN capability (ADVANCED). No effective role or non-admin role => false.
 /// Purely grant-based (no super-admin cross-tenant WRITE bypass — E1 invariant: super-admin READS only).
 pub fn can_admin_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {
     matches!(effective_engagement_role(app, headers, eid), Some(r) if role_allows_admin(&r))
@@ -442,7 +442,7 @@ pub fn can_admin_engagement(app: &App, headers: &HeaderMap, eid: i64) -> bool {
 //
 // The platform/MSSP operator needs to READ across ALL tenants. That capability is:
 //   (a) DESIGNATED ONLY AT PROVISIONING — env `FORGE_SUPERADMIN` and/or the per-DB provisioning key
-//       `enterprise.superadmin` (both comma/space separated logins). NEITHER is writable through the
+//       `advanced.superadmin` (both comma/space separated logins). NEITHER is writable through the
 //       normal admin/tenant UI (there is no settings-write API for arbitrary keys), so it cannot be
 //       turned on from inside the product — mirror of Plume's out-of-band super-admin marker.
 //   (b) NON-DISABLABLE — a designated super-admin account cannot be disabled / deleted / downgraded
@@ -464,13 +464,13 @@ fn parse_logins(s: &str) -> HashSet<String> {
 }
 
 /// The SET of logins DESIGNATED super-admin — union of the two PROVISIONING-ONLY sources: env
-/// `FORGE_SUPERADMIN` and the per-DB key `enterprise.superadmin`. Neither is mutable through a normal UI
+/// `FORGE_SUPERADMIN` and the per-DB key `advanced.superadmin`. Neither is mutable through a normal UI
 /// route. Fail-closed: no source => empty set.
 fn superadmin_logins(app: &App) -> HashSet<String> {
     let mut set = parse_logins(&std::env::var("FORGE_SUPERADMIN").unwrap_or_default());
     let db_val = {
         let store = app.store();
-        crate::settings_get_store(&store, "enterprise.superadmin")
+        crate::settings_get_store(&store, "advanced.superadmin")
     };
     if let Some(v) = db_val {
         set.extend(parse_logins(&v));
@@ -576,7 +576,7 @@ fn audit_superadmin_list(app: &App, headers: &HeaderMap) {
 // § PER-TENANT LEDGER — group each tenant's engagement ledgers under a tenant-keyed subdirectory.
 // =====================================================================================
 
-/// PER-TENANT ledger path (ENTERPRISE). Groups a tenant's engagement ledgers under a tenant-keyed
+/// PER-TENANT ledger path (ADVANCED). Groups a tenant's engagement ledgers under a tenant-keyed
 /// SUBDIRECTORY `tenant-<tid>/engagement-<eid>.jsonl`, SIBLING to the console ledger. The Ed25519 signing
 /// key stays PER-LEDGER (its `.ed25519` sidecar travels with the file) — crypto UNCHANGED, just scoped per
 /// tenant. Community (flag OFF) => None: the caller keeps its historical FLAT `engagement-<eid>.jsonl`

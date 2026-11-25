@@ -96,7 +96,7 @@ pub(crate) async fn findings_bulk_status(
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
     };
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    // ENTERPRISE PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on the target engagement
+    // ADVANCED PER-ENGAGEMENT RBAC (readiness #14) — the caller's EFFECTIVE role on the target engagement
     // must allow OPERATE (fail-closed). A non-visible engagement resolves to NO_ENGAGEMENT => no effective
     // role => 403 (no rows would be touched anyway). Community (flag OFF) => NO-OP (byte-identical).
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
@@ -154,7 +154,7 @@ pub(crate) async fn findings_bulk_status(
 
 /// POST /api/findings/bulk/assign {ids:[i64], assignee:<user_id|null>} — DÉFINIT/EFFACE le propriétaire d'un
 /// LOT de findings (OPÉRATEUR, fail-closed 403). VALIDATION fail-closed AVANT toute écriture : l'assigné
-/// (resolve_assignee) doit exister + (enterprise) détenir un grant sur l'engagement, sinon 400/403 et AUCUNE
+/// (resolve_assignee) doit exister + (advanced) détenir un grant sur l'engagement, sinon 400/403 et AUCUNE
 /// mutation. ISOLATION : chaque UPDATE est confiné à l'engagement ACTIF (`engagement_id=?`) — un id d'un AUTRE
 /// engagement (ou inexistant) est SKIPPÉ (0 ligne), jamais assigné. On CLASSE selon le Result (Ok(n>0)=applied,
 /// Ok(0)=skipped, Err=errored -> 500, jamais confondu avec un skip). ATTRIBUÉ + LEDGERISÉ
@@ -175,7 +175,7 @@ pub(crate) async fn findings_bulk_assign(
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
     };
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    // ADVANCED PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }
@@ -273,7 +273,7 @@ pub(crate) async fn findings_bulk_triage(
         Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "why": why}))).into_response(),
     };
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    // ENTERPRISE PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
+    // ADVANCED PER-ENGAGEMENT RBAC : l'appelant doit OPÉRER cet engagement (fail-closed). Community => no-op.
     if tenancy::enabled(&app) && !tenancy::can_operate_engagement(&app, &headers, eid) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "engagement_operator_required", "why": "rôle operator requis sur cet engagement (fail-closed)"}))).into_response();
     }
@@ -454,7 +454,7 @@ mod tests {
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),

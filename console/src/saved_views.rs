@@ -255,7 +255,7 @@ mod tests {
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),

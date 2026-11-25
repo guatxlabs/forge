@@ -141,7 +141,7 @@ use serde_json::Value;
         // Le boot serveur enchaîne TOUJOURS SCHEMA puis migrate() (colonnes additives : engagement.tenant_id,
         // engagement.allow_private, run_job.*, …). On applique donc migrate ici aussi pour que l'App de test
         // reflète le schéma de PRODUCTION (idempotent/additif : n'altère aucune colonne existante).
-        migrate(&conn);
+        migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -182,7 +182,7 @@ use serde_json::Value;
     pub(crate) fn test_app_scoped(ledger_path: &str, scope_in: Vec<String>) -> App {
         let mut a = test_app(ledger_path);
         a.scope_in = Arc::new(scope_in);
-        { let db = a.db(); migrate(&db); }
+        { let db = a.db(); migrate(&db).expect("migrate"); }
         a
     }
 
@@ -193,7 +193,7 @@ use serde_json::Value;
         let mut a = test_app("");
         let conn = Connection::open(db_path).expect("open file db");
         conn.execute_batch(SCHEMA).expect("schema");
-        migrate(&conn);
+        migrate(&conn).expect("migrate");
         a.db = Arc::new(Mutex::new(conn));
         a.db_path = Arc::new(db_path.to_string());
         a
@@ -275,11 +275,11 @@ use serde_json::Value;
         Query(HashMap::from([("engagement".to_string(), id.to_string())]))
     }
 
-    /// Engage le flag enterprise via la config par-DB `enterprise.tenancy=on` (isolé par test, pas d'ENV
+    /// Engage le flag advanced via la config par-DB `advanced.tenancy=on` (isolé par test, pas d'ENV
     /// global). Le comportement community reste le défaut (flag absent).
-    pub(crate) fn enable_enterprise_tenancy(app: &App) {
+    pub(crate) fn enable_advanced_tenancy(app: &App) {
         let db = app.db();
-        settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        settings_set(&db, "advanced.tenancy", "on").unwrap();
     }
 
     /// Rattache l'engagement `eid` au tenant `tid` (crée la ligne tenant si besoin).
@@ -312,7 +312,7 @@ use serde_json::Value;
 
     /// Sème deux tenants (1,2), deux engagements (#1->tenant1, #2->tenant2), chacun avec un finding/
     /// runrecord/roe/run_job, et deux users (alice->tenant1, bob->tenant2). Retourne (app, alice_headers,
-    /// bob_headers, fid_a, fid_b). L'app est en mode ENTERPRISE.
+    /// bob_headers, fid_a, fid_b). L'app est en mode ADVANCED.
     pub(crate) fn seed_two_tenants(ledger: &str, ledger2: &str) -> (App, HeaderMap, HeaderMap, i64, i64) {
         let app = test_app_scoped(ledger, vec!["a.example.com".into(), "b.example.com".into()]);
         insert_test_engagement(&app, 1, &["a.example.com"], "grey", ledger);  // A
@@ -339,7 +339,7 @@ use serde_json::Value;
         let (btok, _) = create_session(&app, uid_b);
         let fid_a: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fa'", [], |r| r.get(0)).unwrap() };
         let fid_b: i64 = { let db = app.db(); db.query_row("SELECT id FROM finding WHERE title='fb'", [], |r| r.get(0)).unwrap() };
-        enable_enterprise_tenancy(&app);
+        enable_advanced_tenancy(&app);
         (app, bearer_headers(&atok), bearer_headers(&btok), fid_a, fid_b)
     }
 
@@ -350,11 +350,11 @@ use serde_json::Value;
         bearer_headers(&tok)
     }
 
-    /// Désigne le(s) super-admin(s) via la clé de PROVISIONING par-DB `enterprise.superadmin` (isolée par
+    /// Désigne le(s) super-admin(s) via la clé de PROVISIONING par-DB `advanced.superadmin` (isolée par
     /// test, pas d'ENV global). N'est PAS une route UI normale (aucune API n'écrit une clé settings arbitraire).
     pub(crate) fn designate_superadmin(app: &App, csv: &str) {
         let db = app.db();
-        settings_set(&db, "enterprise.superadmin", csv).unwrap();
+        settings_set(&db, "advanced.superadmin", csv).unwrap();
     }
 
     /// Écrit la config de source de détection dans le cache de l'App (utilitaire de test).

@@ -123,45 +123,45 @@ use crate::testutil::*;
         );
     }
 
-    /// GATE CONTRACT (Stage 2b batch 5) : la sélection du backend enterprise est FAIL-CLOSED.
+    /// GATE CONTRACT (Stage 2b batch 5) : la sélection du backend advanced est FAIL-CLOSED.
     ///   - Toute valeur non-postgres (`None`/`"sqlite"`/`""`) -> `Sqlite`, dans LES DEUX builds.
     ///   - `postgres` SANS la feature -> refus clair « rebuild with --features store-postgres ».
     ///   - `postgres` AVEC la feature -> `Postgres(url)` SSI FORGE_DB_URL non vide ; sinon refus
     ///     nommant FORGE_DB_URL. (Bloc feature-gated ci-dessous.)
     #[test]
-    fn enterprise_store_gate_contract() {
+    fn advanced_store_gate_contract() {
         // Non-postgres selections always boot on SQLite, in both builds.
-        assert!(matches!(enterprise_store_gate(None, None), Ok(StoreSelection::Sqlite)),
+        assert!(matches!(advanced_store_gate(None, None), Ok(StoreSelection::Sqlite)),
                 "default (unset) starts on SQLite");
-        assert!(matches!(enterprise_store_gate(Some("sqlite"), None), Ok(StoreSelection::Sqlite)),
+        assert!(matches!(advanced_store_gate(Some("sqlite"), None), Ok(StoreSelection::Sqlite)),
                 "explicit sqlite starts on SQLite");
-        assert!(matches!(enterprise_store_gate(Some(""), None), Ok(StoreSelection::Sqlite)),
+        assert!(matches!(advanced_store_gate(Some(""), None), Ok(StoreSelection::Sqlite)),
                 "empty value starts on SQLite");
         // A stray FORGE_DB_URL is IGNORED unless postgres is explicitly requested.
-        assert!(matches!(enterprise_store_gate(None, Some("postgres://x")), Ok(StoreSelection::Sqlite)),
+        assert!(matches!(advanced_store_gate(None, Some("postgres://x")), Ok(StoreSelection::Sqlite)),
                 "db_url alone does not select postgres");
 
         #[cfg(not(feature = "store-postgres"))]
         {
             // Without the feature compiled, postgres is refused with a rebuild message, whatever the url.
-            let e = enterprise_store_gate(Some("postgres"), None)
+            let e = advanced_store_gate(Some("postgres"), None)
                 .expect_err("postgres refused without the feature");
             assert!(e.contains("store-postgres"), "names the feature to rebuild with: {e}");
-            let e2 = enterprise_store_gate(Some("postgres"), Some("postgres://x"))
+            let e2 = advanced_store_gate(Some("postgres"), Some("postgres://x"))
                 .expect_err("still refused even with a url");
             assert!(e2.contains("store-postgres"), "names the feature: {e2}");
         }
         #[cfg(feature = "store-postgres")]
         {
             // With the feature, postgres is ACCEPTED iff FORGE_DB_URL is a non-empty DSN.
-            match enterprise_store_gate(Some("postgres"), Some("postgres://u@h/db")) {
+            match advanced_store_gate(Some("postgres"), Some("postgres://u@h/db")) {
                 Ok(StoreSelection::Postgres(u)) => assert_eq!(u, "postgres://u@h/db", "carries the DSN"),
                 other => panic!("expected Postgres selection, got {other:?}"),
             }
-            let e = enterprise_store_gate(Some("postgres"), None)
+            let e = advanced_store_gate(Some("postgres"), None)
                 .expect_err("postgres refused without FORGE_DB_URL");
             assert!(e.contains("FORGE_DB_URL"), "names the missing var: {e}");
-            assert!(enterprise_store_gate(Some("postgres"), Some("")).is_err(),
+            assert!(advanced_store_gate(Some("postgres"), Some("")).is_err(),
                     "empty FORGE_DB_URL refused");
         }
     }
@@ -353,7 +353,7 @@ use crate::testutil::*;
     #[tokio::test]
     async fn health_surfaces_stamped_schema_version() {
         let app = test_app(&tmp_path("health-schema-version-ledger"));
-        { let db = app.db(); migrate(&db); } // tamponne settings.schema_version
+        { let db = app.db(); migrate(&db).expect("migrate"); } // tamponne settings.schema_version
         let Json(body) = health(axum::extract::State(app)).await;
         assert_eq!(body["status"], json!("ok"), "forme historique préservée");
         assert_eq!(body["schema_version"], json!(crate::schema::SCHEMA_VERSION), "/health surface la version tamponnée");

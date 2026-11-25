@@ -174,14 +174,14 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // GET /api/engagements/:id/report?format=… (viewer+, ISOLÉ à l'engagement, ledgerisé) ; GET/POST
         // /api/report/branding (config admin-éditable). Secrets rédigés dans tous les formats.
         .merge(reports::routes())
-        // ENTERPRISE (separable, flag-gated) — TENANT ADMIN surface (console/src/tenancy/admin_api.rs) : CRUD tenant
+        // ADVANCED (separable, flag-gated) — TENANT ADMIN surface (console/src/tenancy/admin_api.rs) : CRUD tenant
         // (create/rename/archive) + gestion des grants, PLATFORM-ADMIN gated + ledgerisé `console.tenant.*`.
         // Fusionné AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route
-        // refuse (403 enterprise_disabled) tant que le flag n'est pas engagé => community byte-identique
+        // refuse (403 advanced_disabled) tant que le flag n'est pas engagé => community byte-identique
         // (aucune surface d'administration tenant). La lecture cross-tenant du super-admin (audité) vit dans
         // les résolveurs tenancy déjà câblés — pas de nouvelle route pour ça.
         .merge(tenancy::routes())
-        // ENTERPRISE (separable, flag-gated) — E3 COMPLIANCE surface (console/src/compliance.rs) : retention
+        // ADVANCED (separable, flag-gated) — E3 COMPLIANCE surface (console/src/compliance.rs) : retention
         // policy + legal-hold config (admin) + the GOVERNED WORM purge, all `console.compliance.*` ledgered.
         // Merged AVANT le fallback + le route_layer => hérite de l'auth_guard/host_guard. Chaque route 404
         // (not_found) tant que le flag n'est pas engagé => community byte-identique (aucune surface compliance).
@@ -215,20 +215,20 @@ pub(crate) fn build_router(app: App, web_dir: &str) -> Router {
         // IMPORT DE DONNÉES (pré-provision) : migre un install existant vers cette base + ledger.
         // PUBLIC mais 409 une fois provisionné (comme /api/setup). UX primaire = CLI `migrate`.
         .route("/api/setup/migrate", post(setup_migrate))
-        // ENTERPRISE (separable, flag-gated) — OIDC SSO (console/src/sso.rs). Merged in the OUTER router
+        // ADVANCED (separable, flag-gated) — OIDC SSO (console/src/sso.rs). Merged in the OUTER router
         // (NOT `protected`) because /api/sso/login and /api/sso/callback must be reachable WITHOUT a prior
         // session (that is the point of SSO) — they self-gate on the flag + config. The admin-only
         // /api/sso/config routes enforce check_admin internally (fail-closed). Every route 404s while the
         // flag is OFF => community build shows NO SSO surface and LOCAL login is byte-identical. Under
         // host_guard like everything else.
         .merge(sso::routes())
-        // ENTERPRISE (separable, flag-gated) — SCIM 2.0 provisioning (console/src/scim.rs). Merged in the
+        // ADVANCED (separable, flag-gated) — SCIM 2.0 provisioning (console/src/scim.rs). Merged in the
         // OUTER router (NOT `protected`) because the IdP has NO session — /scim/v2/* authenticates with a
         // SCIM BEARER TOKEN internally (hashed at rest, constant-time, fail-closed 401). The admin-only
         // /api/scim/config route enforces check_admin internally. Every route 404s while the flag is OFF =>
         // community build shows NO SCIM surface and LOCAL accounts are byte-identical. Under host_guard.
         .merge(scim::routes())
-        // ENTERPRISE (separable, flag-gated) — advanced RBAC config (console/src/rbac.rs). The admin-only
+        // ADVANCED (separable, flag-gated) — advanced RBAC config (console/src/rbac.rs). The admin-only
         // /api/rbac/group-map routes enforce check_admin internally (fail-closed). Every route 404s while
         // BOTH the SSO and SCIM flags are OFF => community build shows NO advanced-RBAC surface and role
         // assignment stays admin-only exactly as today. Under host_guard like everything else.

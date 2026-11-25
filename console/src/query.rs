@@ -86,7 +86,7 @@ pub(crate) fn exec_soql_time_app(app: &App, q: &str, from: i64, to: i64, schema:
     exec_soql_time(&app.db_path, q, from, to, schema)
 }
 
-/// H1 — construit le schéma Forge SCOPÉ à l'appelant. En mode ENTERPRISE (`tenancy::enabled`), pose le
+/// H1 — construit le schéma Forge SCOPÉ à l'appelant. En mode ADVANCED (`tenancy::enabled`), pose le
 /// row-filter OBLIGATOIRE NON CONTOURNABLE `engagement_id IN (<engagements accordés>)` (injecté par le
 /// compilateur cœur dans le WHERE de CHAQUE base finding/runrecord, à toute profondeur). Grant VIDE ->
 /// liste d'ids vide -> le row-filter matche RIEN (fail-closed : zéro ligne, jamais toutes). COMMUNITY
@@ -102,7 +102,7 @@ fn forge_schema_scoped(app: &App, headers: &HeaderMap) -> soql::Schema {
     }
 }
 
-/// H1 — exécute une SoQL brute SCOPÉE au tenant de l'appelant (row-filter obligatoire en enterprise).
+/// H1 — exécute une SoQL brute SCOPÉE au tenant de l'appelant (row-filter obligatoire en advanced).
 pub(crate) fn exec_soql_scoped(app: &App, headers: &HeaderMap, q: &str) -> Result<Value, (StatusCode, String)> {
     exec_soql_time_scoped(app, headers, q, 0, 0)
 }
@@ -185,9 +185,9 @@ pub(crate) fn soql_stats(columns: &[String], rows: &[Value]) -> Value {
     Value::Object(out)
 }
 
-/// H1 — ENTERPRISE tenant-SCOPED raw SoQL DATA surface (`/api/query` GET+POST, `/api/panels/:id/data`).
+/// H1 — ADVANCED tenant-SCOPED raw SoQL DATA surface (`/api/query` GET+POST, `/api/panels/:id/data`).
 /// The SoQL engine compiles an ARBITRARY caller/stored query over the `finding`/`runrecord` tables. Under
-/// enterprise tenancy every such query is now compiled with the core's MANDATORY, non-bypassable row-filter
+/// advanced tenancy every such query is now compiled with the core's MANDATORY, non-bypassable row-filter
 /// `engagement_id IN (<caller's granted engagements>)` (see `forge_schema_scoped` + `soql::with_row_filter`):
 /// the result rows are constrained to the caller's tenant(s) at the AST/base level, so no user SoQL
 /// (WHERE/OR/UNION/subquery/comment) can read another tenant's rows. A grantless caller gets the empty
@@ -329,7 +329,7 @@ pub(crate) async fn dashboard_delete(State(app): State<App>, headers: HeaderMap,
 /// GET /api/panels?dashboard_id=N — liste les panels, optionnellement filtrés par dashboard.
 /// Sans `dashboard_id` : tous les panels (rétro-compat). `dashboard_id` est lié (param), pas inliné.
 pub(crate) async fn panels_list(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
-    // H1 — ENTERPRISE fail-closed : un appelant SANS engagement visible (aucun tenant accordé, ni
+    // H1 — ADVANCED fail-closed : un appelant SANS engagement visible (aucun tenant accordé, ni
     // super-admin) ne peut pas énumérer les DÉFINITIONS de panels — leurs requêtes SoQL référencent des
     // campaigns/targets qui peuvent identifier un tenant. Community (flag OFF) => no-op (engagement n'est
     // pas une frontière de sécurité). Le check granted/superadmin n'audite PAS (simple gate de liste).

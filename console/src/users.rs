@@ -120,7 +120,7 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
     // hash HORS section critique (argon2id coûteux).
     let new_hash: Option<String> = if reset_pw { Some(hash_pw(&password)) } else { None };
 
-    // ENTERPRISE (fail-closed marker) : un super-admin DÉSIGNÉ (provisioning) est NON-DÉSACTIVABLE — on
+    // ADVANCED (fail-closed marker) : un super-admin DÉSIGNÉ (provisioning) est NON-DÉSACTIVABLE — on
     // refuse toute désactivation / rétrogradation sous `admin`. No-op pour un login non super-admin.
     // Appelé HORS du guard DB (guard_superadmin_user_mutation reverrouille son propre lock).
     tenancy::guard_superadmin_user_mutation(app, &target_login, new_disabled == Some(true), new_role.as_deref(), false)
@@ -197,7 +197,7 @@ pub(crate) fn admin_update_user(app: &App, actor: &str, target_login: &str, body
 /// UN SEUL guard DB (atomique). Recalcule `auth_required` et ledgerise l'action avec l'admin acteur.
 pub(crate) fn admin_delete_user(app: &App, actor: &str, target_login: &str) -> Result<Value, (StatusCode, String)> {
     let target_login = validate_login(target_login).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    // ENTERPRISE (fail-closed marker) : un super-admin DÉSIGNÉ est NON-SUPPRIMABLE. No-op pour un login
+    // ADVANCED (fail-closed marker) : un super-admin DÉSIGNÉ est NON-SUPPRIMABLE. No-op pour un login
     // ordinaire. Appelé HORS du guard DB (reverrouille son propre lock).
     tenancy::guard_superadmin_user_mutation(app, &target_login, false, None, true)
         .map_err(|e| (StatusCode::CONFLICT, e))?;

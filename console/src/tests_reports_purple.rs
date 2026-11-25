@@ -226,7 +226,7 @@ sys.stdout.write(R.build_report(e))
         }
         {
             let db = app.db();
-            migrate(&db);
+            migrate(&db).expect("migrate");
             for r in rows.iter().rev() {
                 let g = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 db.execute(
@@ -418,7 +418,7 @@ sys.stdout.write(R.build_report(e))
         let app = test_app(&path);
         {
             let db = app.db();
-            migrate(&db); // ALTER additifs (run_id sur finding/runrecord) — comme au boot réel
+            migrate(&db).expect("migrate"); // ALTER additifs (run_id sur finding/runrecord) — comme au boot réel
             db.execute(
                 "INSERT INTO finding(ts,campaign,target,title,severity,category,mitre,status,tool,run_id)
                  VALUES('t','c','api.example.com','IDOR exposé','HIGH','access_control','T1190','tested','idor','run-1')",
@@ -609,7 +609,7 @@ sys.stdout.write(R.build_report(e))
         let app = test_app(&path);
         {
             let db = app.db();
-            migrate(&db);
+            migrate(&db).expect("migrate");
             db.execute("INSERT INTO campaign(name,started,notes) VALUES('c','t','Pentest grey-box autorisé du périmètre client.')", []).unwrap();
             // finding AVEC cwe/cvss explicites + un titre hostile (doit être échappé).
             db.execute(
@@ -1261,7 +1261,7 @@ sys.stdout.write(R.build_report(e))
         // parité prod : colonnes additives (engagement_id/cwe/cvss) + engagement #1 + un finding dedans.
         {
             let db = app.db();
-            migrate(&db);
+            migrate(&db).expect("migrate");
             db.execute(
                 "INSERT INTO engagement(id,name,status,mode,scope_json,ledger_path,created,updated)
                  VALUES(1,'Wired Eng','active','grey','{\"in_scope\":[\"a.example.com\"]}','',datetime('now'),datetime('now'))",

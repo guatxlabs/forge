@@ -632,7 +632,7 @@ mod wave_b_tests {
     fn mem() -> std::sync::Mutex<rusqlite::Connection> {
         let conn = rusqlite::Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         std::sync::Mutex::new(conn)
     }
 

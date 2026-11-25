@@ -35,7 +35,7 @@ export async function fetchEngagements() {
 // Choisit un engagement actif VALIDE : celui persisté s'il existe encore, sinon l'actif le plus récent,
 // sinon le 1er. Corrige localStorage si l'id persisté a disparu (engagement supprimé entre-temps).
 export function pickActiveEngagement() {
-  // Le POOL est restreint au tenant actif quand la multi-tenancy ENTERPRISE est active (hiérarchie tenant
+  // Le POOL est restreint au tenant actif quand la multi-tenancy ADVANCED est active (hiérarchie tenant
   // → engagement). Community/flag OFF : visibleEngagements() renvoie ENGAGEMENTS (identique, byte-pour-byte).
   const pool = visibleEngagements();
   const cur = activeEngagement();
@@ -423,7 +423,7 @@ export async function loadEngagements() {
         if (await confirmModal('Supprimer « ' + e.name + ' » et TOUTES ses données (findings/runs) ? Le ledger reste archivé sur disque.', { danger: true, okText: 'Supprimer' })) engagementMutate(e.id, { delete: true }, 'Engagement supprimé.');
       });
     }
-    // PER-ENGAGEMENT RBAC (readiness #14) — platform-admin only (enterprise). Assign composable grants
+    // PER-ENGAGEMENT RBAC (readiness #14) — platform-admin only (advanced). Assign composable grants
     // (user × role) scoped to THIS engagement, overriding the tenant-wide role (most-specific-wins).
     if (tenancyAdmin()) {
       mkBtn('Grants', 'k-theme', 'Rôles par-engagement (operator/viewer) — override du grant tenant', (ev) => engagementToggleGrants(e, tr, ev));
@@ -435,7 +435,7 @@ export async function loadEngagements() {
 }
 
 // =====================================================================================
-//  PER-ENGAGEMENT RBAC (readiness #14) — engagement-specific grant management (platform-admin, enterprise).
+//  PER-ENGAGEMENT RBAC (readiness #14) — engagement-specific grant management (platform-admin, advanced).
 //  Inline panel under the engagement row (toggle), mirroring the tenant-grants panel. The server is the
 //  authority (platform-admin gate + fail-closed effective role) ; this UI is convenience only. An engagement
 //  grant OVERRIDES the user's tenant-wide role for THIS engagement (most-specific-wins). Removing it reverts
@@ -547,10 +547,10 @@ if ($('#eg-new2')) $('#eg-new2').addEventListener('click', engagementCreateModal
 if ($('#eg-reload')) $('#eg-reload').addEventListener('click', loadEngagements);
 
 // =====================================================================================
-//  MULTI-TENANCY (ENTERPRISE — separable, FLAG-GATED). Toute cette surface UI est INERTE tant que le
+//  MULTI-TENANCY (ADVANCED — separable, FLAG-GATED). Toute cette surface UI est INERTE tant que le
 //  serveur ne renvoie pas enabled=true sur GET /api/tenancy. En COMMUNITY (défaut) TENANCY={enabled:false}
 //  => AUCUN sélecteur de tenant, AUCUNE vue #tenants, AUCUN lien nav : shell mono-tenant BYTE-IDENTIQUE.
-//  Le serveur reste l'autorité (filtre fail-closed + gates 403 enterprise/platform-admin) ; l'UI n'est que
+//  Le serveur reste l'autorité (filtre fail-closed + gates 403 advanced/platform-admin) ; l'UI n'est que
 //  commodité + défense en profondeur. Modèle : TENANT → ENGAGEMENT → findings/runs.
 //    - Sélecteur de tenant (header, au-dessus de l'engagement) : filtre le sélecteur d'engagement au tenant
 //      actif (hiérarchie tenant → engagement). Peuplé des tenants ACCESSIBLES (super-admin => tous).

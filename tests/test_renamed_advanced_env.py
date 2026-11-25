@@ -41,7 +41,7 @@ class RetiredNameIsRefused(unittest.TestCase):
                     signing.make_ledger_signer("unused-base", env={"FORGE_ENTERPRISE_COMPLIANCE": valeur})
 
     def test_refus_meme_avec_le_nouveau_nom_pose_a_cote(self):
-        env = {"FORGE_ENTERPRISE_COMPLIANCE": "1", signing.ENTERPRISE_COMPLIANCE_FLAG: "1"}
+        env = {"FORGE_ENTERPRISE_COMPLIANCE": "1", signing.ADVANCED_COMPLIANCE_FLAG: "1"}
         with self.assertRaises(signing.RetiredEnvNameError):
             signing.make_ledger_signer("unused-base", env=env)
 
@@ -81,8 +81,8 @@ class TheCliShowsTheRefusalNotATraceback(unittest.TestCase):
 
 class NewNameEngagesTheModule(unittest.TestCase):
     def test_le_nouveau_nom_est_le_drapeau(self):
-        self.assertEqual(signing.ENTERPRISE_COMPLIANCE_FLAG, "FORGE_ADVANCED_COMPLIANCE")
-        self.assertTrue(signing.enterprise_signer_enabled({"FORGE_ADVANCED_COMPLIANCE": "1"}))
+        self.assertEqual(signing.ADVANCED_COMPLIANCE_FLAG, "FORGE_ADVANCED_COMPLIANCE")
+        self.assertTrue(signing.advanced_signer_enabled({"FORGE_ADVANCED_COMPLIANCE": "1"}))
 
     def test_le_nouveau_nom_engage_le_signeur_distant(self):
         env = {
@@ -94,7 +94,7 @@ class NewNameEngagesTheModule(unittest.TestCase):
         self.assertIsInstance(signing.make_ledger_signer("unused-base", env=env), signing.RemoteSigner)
 
     def test_l_ancien_nom_n_est_pas_un_alias(self):
-        self.assertFalse(signing.enterprise_signer_enabled({"FORGE_ENTERPRISE_COMPLIANCE": "1"}))
+        self.assertFalse(signing.advanced_signer_enabled({"FORGE_ENTERPRISE_COMPLIANCE": "1"}))
 
 
 class NeitherNameKeepsTheDefault(unittest.TestCase):

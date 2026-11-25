@@ -90,7 +90,7 @@ class LocalFileSigner(Ed25519Signer):
     Behaviour is BYTE-IDENTICAL to today's `Ed25519Signer` over the same key (Ed25519 signatures are
     deterministic): this subclass merely NAMES the "private key lives in a local file" case so the pluggable
     factory (`make_ledger_signer`) can choose between it and a `RemoteSigner`. The private key is read into
-    this process, exactly as before — no new exposure. Enterprise deployments that must keep the key off-host
+    this process, exactly as before — no new exposure. Advanced deployments that must keep the key off-host
     swap this for `RemoteSigner`; the verify path is identical (public key only)."""
 
     @classmethod
@@ -301,19 +301,19 @@ def verify_entry(alg, signer, data: bytes, sig_hex: str) -> bool:
 
 
 # =====================================================================================================
-# ENTERPRISE (E3 COMPLIANCE) — PLUGGABLE LEDGER SIGNER: private key OFF-HOST (KMS/HSM/remote/exec).
+# ADVANCED (E3 COMPLIANCE) — PLUGGABLE LEDGER SIGNER: private key OFF-HOST (KMS/HSM/remote/exec).
 # -----------------------------------------------------------------------------------------------------
 # SEPARABLE + FLAG-GATED: the COMMUNITY default is LOCAL (`make_signer` / LocalFileSigner) and is
 # BYTE-IDENTICAL — none of the below runs unless an operator explicitly selects a remote signer via
-# config/env AND the enterprise flag `FORGE_ADVANCED_COMPLIANCE` is engaged. VERIFY is UNCHANGED:
+# config/env AND the advanced flag `FORGE_ADVANCED_COMPLIANCE` is engaged. VERIFY is UNCHANGED:
 # a RemoteSigner emits a STANDARD Ed25519 signature over the SAME bytes, so `verify` / `verify_external`
 # / `verify_with_pubkey` accept it with the PUBLIC KEY ALONE — no code path in the verifier changes.
 # FAIL-CLOSED: an unreachable/misconfigured remote signer RAISES; Forge NEVER falls back to an insecure
 # or unsigned entry. SECRETS: the endpoint/credential/argv are redacted — never logged/ledgered/leaked.
 # =====================================================================================================
 
-# Enterprise engagement flag — MUST match console/src/compliance.rs::enabled (env source).
-ENTERPRISE_COMPLIANCE_FLAG = "FORGE_ADVANCED_COMPLIANCE"
+# Advanced engagement flag — MUST match console/src/compliance.rs::enabled (env source).
+ADVANCED_COMPLIANCE_FLAG = "FORGE_ADVANCED_COMPLIANCE"
 
 # RETIRED NAMES — the advanced-module variables were called `FORGE_ENTERPRISE_<X>` and are now
 # `FORGE_ADVANCED_<X>`, WITHOUT an alias: the old name engages nothing. Ignoring it in silence would
@@ -392,10 +392,10 @@ def _env_truthy(env, key) -> bool:
     return isinstance(v, str) and v.strip().lower() in ("1", "true", "on", "yes")
 
 
-def enterprise_signer_enabled(env=None) -> bool:
-    """Is the enterprise compliance flag engaged (env only)? Mirrors the Rust `env_truthy` check. When
+def advanced_signer_enabled(env=None) -> bool:
+    """Is the advanced compliance flag engaged (env only)? Mirrors the Rust `env_truthy` check. When
     False, `make_ledger_signer` refuses any remote signer request (community stays local, byte-identical)."""
-    return _env_truthy(os.environ if env is None else env, ENTERPRISE_COMPLIANCE_FLAG)
+    return _env_truthy(os.environ if env is None else env, ADVANCED_COMPLIANCE_FLAG)
 
 
 def _parse_argv(raw):
@@ -437,7 +437,7 @@ def redact_signer_config(config) -> dict:
 
 
 class RemoteSigner(Signer):
-    """ENTERPRISE — the ledger's Ed25519 private key lives OFF-HOST (a KMS/HSM, a remote signer endpoint,
+    """ADVANCED — the ledger's Ed25519 private key lives OFF-HOST (a KMS/HSM, a remote signer endpoint,
     or a no-shell exec helper). `sign(data)` delegates to a configured backend that returns a STANDARD
     Ed25519 signature over the SAME bytes; the private key NEVER lands on disk in this process.
 
@@ -619,12 +619,12 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
     DEFAULT (community): mode 'local' → `LocalFileSigner` (the on-disk `<base>.ed25519` key), BYTE-IDENTICAL
     to `make_signer`. This is what runs when nothing is configured — the community build is unchanged.
 
-    ENTERPRISE: mode 'kms'/'hsm'/'http'/'remote'/'exec'/'pkcs11' → a `RemoteSigner` (a `Pkcs11Signer` for
+    ADVANCED: mode 'kms'/'hsm'/'http'/'remote'/'exec'/'pkcs11' → a `RemoteSigner` (a `Pkcs11Signer` for
     'pkcs11'), selected by `config` (a settings dict) or by env (`FORGE_LEDGER_SIGNER` + `FORGE_LEDGER_SIGNER_*`
-    / `FORGE_LEDGER_PKCS11_*`). Gated by the enterprise flag `FORGE_ADVANCED_COMPLIANCE`. The 'pkcs11' driver
+    / `FORGE_LEDGER_PKCS11_*`). Gated by the advanced flag `FORGE_ADVANCED_COMPLIANCE`. The 'pkcs11' driver
     (Ed25519/CKM_EDDSA, off-host key custody) is LAZY: `python-pkcs11` is only imported when it is selected.
 
-    FAIL-CLOSED: a remote signer requested WITHOUT the enterprise flag is REFUSED (RemoteSignerError) — Forge
+    FAIL-CLOSED: a remote signer requested WITHOUT the advanced flag is REFUSED (RemoteSignerError) — Forge
     never silently downgrades a remote-signer intent to the local key. The refusal message carries NO secret."""
     env = os.environ if env is None else env
     refuse_retired_env_names(env)
@@ -634,11 +634,11 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
         if prefer_ed25519 and _HAVE_ED:
             return LocalFileSigner(_load_or_make_ed25519_priv(base_path))
         return HmacSigner(_load_or_make_secret(str(base_path) + ".key"))
-    # --- enterprise remote signer (flag-gated) ---
-    if not enterprise_signer_enabled(env):
+    # --- advanced remote signer (flag-gated) ---
+    if not advanced_signer_enabled(env):
         raise RemoteSignerError(
             "signeur distant (KMS/HSM/exec/pkcs11) demandé mais le module avancé COMPLIANCE n'est pas activé "
-            f"({ENTERPRISE_COMPLIANCE_FLAG}=1) — repli LOCAL refusé (fail-closed)"
+            f"({ADVANCED_COMPLIANCE_FLAG}=1) — repli LOCAL refusé (fail-closed)"
         )
     if mode == "pkcs11":
         from . import signing_pkcs11   # LAZY: python-pkcs11 only imported when the operator selects pkcs11

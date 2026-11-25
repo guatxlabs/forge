@@ -106,7 +106,7 @@ pub(crate) async fn ledger(State(app): State<App>, headers: HeaderMap, Query(q):
     // ledger de l'engagement actif — jamais celui d'un autre engagement (isolation tamper-evident).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
     let (limit, offset) = paginate(&q, 200, 2000);
-    // ENTERPRISE fail-closed : un engagement d'un tenant NON accordé résout vers NO_ENGAGEMENT. On ne
+    // ADVANCED fail-closed : un engagement d'un tenant NON accordé résout vers NO_ENGAGEMENT. On ne
     // DOIT PAS appeler engagement_ledger_path (qui retomberait sur le ledger console par défaut = leak) :
     // on renvoie un ledger VIDE. No-op en community (enabled=false, eid réel).
     if tenancy::enabled(&app) && eid == tenancy::NO_ENGAGEMENT {
@@ -215,7 +215,7 @@ pub(crate) fn ledger_verify_api_json(v: &LedgerVerify, path: &str) -> Value {
 pub(crate) async fn ledger_verify(State(app): State<App>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
     // ENGAGEMENT : vérifie la chaîne du ledger DÉDIÉ de l'engagement actif (isolation).
     let eid = resolve_view_engagement_id(&app, &headers, &q);
-    // ENTERPRISE fail-closed : tenant non accordé -> NO_ENGAGEMENT ; ne PAS retomber sur le ledger par
+    // ADVANCED fail-closed : tenant non accordé -> NO_ENGAGEMENT ; ne PAS retomber sur le ledger par
     // défaut (leak). On renvoie le contrat « ledger vide » (empty=true). No-op en community.
     if tenancy::enabled(&app) && eid == tenancy::NO_ENGAGEMENT {
         let v = LedgerVerify { ok: false, entries: 0, broken: Value::Null, why: Some("ledger absent".to_string()),

@@ -32,7 +32,7 @@ use super::*;
         let ledger = format!("{dir}/engagement.jsonl");
         let conn = Connection::open(&db_path).expect("open disk db");
         conn.execute_batch(SCHEMA).expect("schema");
-        migrate(&conn);
+        migrate(&conn).expect("migrate");
         upsert_user(&conn, "adm", "admin", &hash_pw("pw")).unwrap();
         upsert_user(&conn, "viw", "viewer", &hash_pw("pw")).unwrap();
         upsert_user(&conn, "opr", "operator", &hash_pw("pw")).unwrap();

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ENTERPRISE (E3 COMPLIANCE) — PURE POLICY / WORM / legal-hold / retention math + timestamp parsing.
+//! ADVANCED (E3 COMPLIANCE) — PURE POLICY / WORM / legal-hold / retention math + timestamp parsing.
 //!
 //! Extracted from `compliance.rs` (PURE MOVE — byte-identical bodies, only relocation + visibility +
 //! use-paths). This is the AUDIT-CRITICAL, fail-closed core: given a retention window + a record age +
@@ -56,7 +56,7 @@ pub(crate) fn hold_key_engagement(id: i64) -> String {
     format!("compliance.hold.engagement.{id}")
 }
 
-/// The tenant owning an engagement (ENTERPRISE column, DEFAULT 1). None if the engagement is unknown.
+/// The tenant owning an engagement (ADVANCED column, DEFAULT 1). None if the engagement is unknown.
 pub(crate) fn engagement_tenant_id(app: &App, engagement_id: i64) -> Option<i64> {
     let store = app.store();
     store.query_row("SELECT tenant_id FROM engagement WHERE id=?", &crate::sql_params![engagement_id], |r| r.get_i64(0)).ok()
@@ -142,7 +142,7 @@ pub(crate) fn any_legal_hold_key(app: &App) -> Option<String> {
 }
 
 /// WORM guard for an EXTERNAL delete/archive path (e.g. engagement delete): Some(reason) if a legal hold
-/// blocks the mutation, None otherwise. INERT (None) when the enterprise flag is OFF => community
+/// blocks the mutation, None otherwise. INERT (None) when the advanced flag is OFF => community
 /// byte-identical. Wired into `engagements_update` (delete/archive) as a minimal, flag-gated check.
 pub fn deletion_blocked(app: &App, engagement_id: i64) -> Option<String> {
     if !enabled(app) {

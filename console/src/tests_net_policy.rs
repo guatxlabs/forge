@@ -14,7 +14,7 @@ use crate::testutil::*;
         let dbm = Mutex::new(Connection::open_in_memory().expect("mem db"));
         let conn = || dbm.lock().unwrap_or_else(|e| e.into_inner());
         conn().execute_batch(SCHEMA).expect("schema");
-        migrate(&conn()); // production enchaîne SCHEMA puis migrate (ajoute engagement.allow_private, etc.)
+        migrate(&conn()).expect("migrate"); // production enchaîne SCHEMA puis migrate (ajoute engagement.allow_private, etc.)
         // scope serveur ABSENT -> load_server_scope renvoie (vec![], "grey"). Amorçage avec ces valeurs.
         ensure_default_engagement(&crate::store::Store::sqlite(conn()), &[], "grey", "/tmp/eng1-empty.jsonl");
         let eng = load_engagement(&crate::store::Store::sqlite(conn()), 1).expect("engagement #1 amorcé");

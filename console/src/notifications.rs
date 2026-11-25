@@ -12,7 +12,7 @@
 //!
 //! GARANTIES (fail-closed, miroir de l'assignation) :
 //!   - GRANT-SCOPED À L'ÉMISSION : une notif n'est créée QUE pour un destinataire qui a un GRANT sur
-//!     l'engagement du finding (enterprise). En community (pas de tenancy) le contrôle est un NO-OP (single
+//!     l'engagement du finding (advanced). En community (pas de tenancy) le contrôle est un NO-OP (single
 //!     user) — l'assigné doit juste exister, comme le reste.
 //!   - BEST-EFFORT : l'insert d'une notif est MATCHÉ mais son échec NE CASSE PAS ni ne fausse la mutation
 //!     assign/triage (celle-ci a déjà réussi + ledgerisé). Les notifs NE SONT PAS des events d'audit -> on
@@ -118,7 +118,7 @@ fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, f
     if actor_uid == Some(recipient) {
         return false;
     }
-    // GRANT-SCOPED (enterprise) : on ne notifie QUE quelqu'un réellement sur l'engagement. `tenancy::enabled`
+    // GRANT-SCOPED (advanced) : on ne notifie QUE quelqu'un réellement sur l'engagement. `tenancy::enabled`
     // + `user_has_engagement_grant` acquièrent+libèrent EUX-MÊMES le Mutex de connexion -> appelés AVANT de
     // tenir un guard `store`. Community => enabled=false => contrôle sauté (aucun grant n'existe, single user).
     if tenancy::enabled(app) && !tenancy::user_has_engagement_grant(app, recipient, engagement_id) {
@@ -163,7 +163,7 @@ fn emit(app: &App, recipient: i64, actor_uid: Option<i64>, engagement_id: i64, f
 /// HOOK SLA — le balayage périodique (`notify_sla.rs`) signale UN dépassement de budget de triage.
 ///
 /// C'est LA porte par laquelle un SLA remonte : il n'a ni socket, ni URL, ni secret à lui. En passant
-/// par [`emit`] il hérite, sans les réécrire, du grant-scope (enterprise), du caractère best-effort, de
+/// par [`emit`] il hérite, sans les réécrire, du grant-scope (advanced), du caractère best-effort, de
 /// l'event SSE, ET du miroir sortant RÉDIGÉ (`notify_channels::dispatch` — secrets puis URL de cible).
 /// `actor_uid = None` : l'auteur est le système, il n'y a donc pas d'auto-notification à supprimer.
 /// Rend `true` si une notification a bien été créée (cf. [`emit`]).
@@ -411,7 +411,7 @@ mod tests {
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -641,15 +641,15 @@ mod tests {
         let _ = std::fs::remove_file(&led);
     }
 
-    /// GRANT-SCOPED (enterprise) : un destinataire SANS grant sur l'engagement ne reçoit JAMAIS de notif ;
+    /// GRANT-SCOPED (advanced) : un destinataire SANS grant sur l'engagement ne reçoit JAMAIS de notif ;
     /// un destinataire AVEC grant en reçoit. Teste `emit` directement (tenancy ON).
     #[tokio::test]
-    async fn emit_grant_scoped_enterprise() {
+    async fn emit_grant_scoped_advanced() {
         let led = tmp_ledger("grant");
         let app = test_app(&led);
         seed_engagement(&app, 1, "A"); // tenant_id défaut = 1
         let f1 = seed_finding(&app, 1, "f1", "new");
-        { let db = app.db(); crate::settings_set(&db, "enterprise.tenancy", "on").unwrap(); }
+        { let db = app.db(); crate::settings_set(&db, "advanced.tenancy", "on").unwrap(); }
         let insider = seed_user(&app, "insider", "viewer");
         seed_tenant_grant(&app, insider, 1, "tenant_viewer");
         let outsider = seed_user(&app, "outsider", "viewer");
@@ -686,8 +686,8 @@ mod tests {
     fn migrate_additive_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         // Base ANTÉRIEURE : PAS de SCHEMA (table absente). migrate() doit la créer.
-        crate::migrate(&conn);
-        crate::migrate(&conn); // idempotent : 2e passe sans erreur.
+        crate::migrate(&conn).expect("migrate");
+        crate::migrate(&conn).expect("migrate"); // idempotent : 2e passe sans erreur.
         conn.execute("INSERT INTO notification(user_id,kind,finding_id,text,read,created) VALUES(1,'finding.assigned',7,'t',0,datetime('now'))", []).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM notification WHERE user_id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1, "table notification présente + insérable après migrate");

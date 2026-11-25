@@ -10,7 +10,7 @@ use super::*;
 // =====================================================================================
 // § TENANT ADMIN — CRUD (create/rename/archive) + grant management, PLATFORM-ADMIN gated, ledgered.
 //
-// Gate = PLATFORM-ADMIN (a console `admin` session OR a super-admin) AND enterprise engaged. A grant-level
+// Gate = PLATFORM-ADMIN (a console `admin` session OR a super-admin) AND advanced engaged. A grant-level
 // tenant_admin/operator/viewer that is NOT a console admin can NEVER administer tenants (fail-closed 403 —
 // a tenant_admin of A gets 403 on B). Each mutation is attributed + ledgered `console.tenant.*`. Fail-closed
 // guards: never archive the LAST active tenant; never remove the LAST tenant_admin grant of a tenant.
@@ -39,7 +39,7 @@ pub(crate) fn routes() -> Router<App> {
 /// platform-admin). This is what makes the tenant UI FLAG-GATED end-to-end:
 ///   - COMMUNITY (flag OFF)  => `{"enabled": false}` ONLY. The SPA renders NO tenant selector, NO
 ///     `#tenants` admin view, NO nav link — byte-identical single-tenant shell.
-///   - ENTERPRISE (flag ON)  => `{enabled:true, is_superadmin, is_platform_admin, tenants:[{id,name,
+///   - ADVANCED (flag ON)  => `{enabled:true, is_superadmin, is_platform_admin, tenants:[{id,name,
 ///     status}]}` where `tenants` is the caller's ACCESSIBLE set (a SUPER-ADMIN sees ALL tenants; anyone
 ///     else only the tenants in their granted set). The SPA shows the tenant selector above the engagement
 ///     selector (tenant → engagement hierarchy) and, for a platform-admin, the `#tenants` admin view.
@@ -123,14 +123,14 @@ fn valid_tenant_role(r: &str) -> Option<&'static str> {
 // `err` consolidé dans `common` (corps + signature byte-identiques à compliance/sso — dedup Wave).
 use crate::common::err;
 
-/// Common gate for every tenant-admin route: enterprise engaged + platform-admin. Returns the error
+/// Common gate for every tenant-admin route: advanced engaged + platform-admin. Returns the error
 /// Response to short-circuit with, or None to proceed. Fail-closed.
 fn gate(app: &App, headers: &HeaderMap) -> Option<Response> {
     if !enabled(app) {
         return Some(err(
             StatusCode::FORBIDDEN,
-            "enterprise_disabled",
-            "module avancé multi-tenancy non activé (FORGE_ADVANCED_TENANCY / enterprise.tenancy)",
+            "advanced_disabled",
+            "module avancé multi-tenancy non activé (FORGE_ADVANCED_TENANCY / advanced.tenancy)",
         ));
     }
     if !platform_admin_ok(app, headers) {

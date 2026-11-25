@@ -937,7 +937,7 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 @media (max-width:720px){.rep-frame{height:60vh}}
 
 /* ============================================================================
-   IDENTITY / SSO (ENTERPRISE) — vue #identity : provider OIDC, token SCIM,
+   IDENTITY / SSO (ADVANCED) — vue #identity : provider OIDC, token SCIM,
    mapping groupe -> rôle/grant. + bouton "Se connecter avec le SSO" (login).
    Réutilise les tokens existants (var(--bd)/--card2/--mut/--acc). Rien de tout
    ceci ne s'affiche en build community (flag OFF) : styles inertes.
@@ -1117,7 +1117,7 @@ body.gated>header,body.gated>.layout,body.gated>footer{display:none!important}
 .eng-new{padding:3px 6px;line-height:1}.eng-new .ic{width:15px;height:15px}
 .eng-bar.archived{border-color:color-mix(in srgb,var(--sev3) 50%,var(--bd));background:color-mix(in srgb,var(--sev3) 10%,transparent)}
 .eng-bar.archived .eng-ic{color:var(--sev3)}
-/* TENANT — sélecteur header (ENTERPRISE, flag-gated). Masqué par défaut (community) ; le SPA le dé-masque
+/* TENANT — sélecteur header (ADVANCED, flag-gated). Masqué par défaut (community) ; le SPA le dé-masque
    uniquement quand /api/tenancy renvoie enabled=true. Posé AVANT #eng-bar : hiérarchie tenant → engagement. */
 .tenant-bar{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;border:1px solid color-mix(in srgb,var(--sev2,#a06) 45%,var(--bd));border-radius:9px;background:color-mix(in srgb,var(--sev2,#a06) 10%,transparent);max-width:300px}
 .tenant-bar .tenant-ic{display:inline-flex;color:var(--sev2,#a06);flex:0 0 auto}

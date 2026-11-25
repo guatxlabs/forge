@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ENTERPRISE (SEC-KMS / F4) — PKCS#11 (CKM_EDDSA) OFF-HOST ledger signer. OPTIONAL, opt-in driver.
+"""ADVANCED (SEC-KMS / F4) — PKCS#11 (CKM_EDDSA) OFF-HOST ledger signer. OPTIONAL, opt-in driver.
 
 WHY PKCS#11 (and not AWS-KMS directly): the Forge ledger is **Ed25519**. AWS-KMS signs RSA/ECDSA
 only — it cannot produce an Ed25519 signature — so it can't drive this ledger without changing the

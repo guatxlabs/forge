@@ -102,7 +102,7 @@ mod tests {
         {
             let c = Connection::open(&db).unwrap();
             c.execute_batch(crate::SCHEMA).unwrap();
-            crate::migrate(&c); // tamponne schema_version
+            crate::migrate(&c).expect("migrate"); // tamponne schema_version
         }
         ledger_append_standalone(&ledger, "engagement.start", &json!({"a": 1})).unwrap();
 

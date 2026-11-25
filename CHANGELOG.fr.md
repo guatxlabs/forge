@@ -11,6 +11,24 @@ Tous les changements notables de Forge sont consignés ici. Le format s'appuie s
 
 ## [Unreleased]
 
+### Modifié (rupture) — `enterprise` quitte les clés de réglage, le champ `whoami` et le code d'erreur 403
+
+Les clés par base `enterprise.tenancy`, `.sso`, `.scim`, `.compliance` et `.superadmin` deviennent
+`advanced.tenancy`, `.sso`, `.scim`, `.compliance` et `.superadmin` ; le champ `enterprise` de `/api/whoami`
+devient `advanced`, `ledger_signer.enterprise_flag` de la vue de conformité devient `advanced_flag`, et l'erreur
+`enterprise_disabled` de l'API des locataires devient `advanced_disabled`. Sans alias de lecture. La version
+de schéma 3 COPIE chaque ancienne clé sous son nouveau nom, valeur gardée, dans la transaction du tampon de
+version, lors de la passe de schéma d'une base pas encore tamponnée (démarrage du serveur sous SQLite et
+Postgres, `upgrade`, `migrate`, `migrate-store`) — le cloisonnement des locataires, le SSO, SCIM, la conformité
+et le super-administrateur traversent la mise à jour à l'identique. Les anciennes lignes restent : la montée est
+additive, les réplicas antérieurs continuent donc de les lire pendant un redémarrage roulant. Un enregistrement
+persisté (`migration.renamed_settings`) fait que la copie n'a lieu qu'une fois : après qu'un binaire antérieur a
+redémarré (retour arrière, ancien pod relancé) et remis le tampon à 2, le binaire neuf compare les deux noms et
+refuse au moindre écart au lieu de recopier — un super-administrateur révoqué ne revient jamais. Un refus sort en
+code 2 et nomme les clés avec leur état (`present`, `absent`, `differs`), jamais une valeur. Retirer les restes
+est une transaction séparée, explicite, et le point de non-retour. Table, migration, texte du refus et retrait :
+[UPGRADE §8](docs/UPGRADE.fr.md#8-clés-de-réglage-champ-whoami-et-code-derreur-renommés--enterprise--advanced).
+
 ### Modifié (rupture) — variables `FORGE_ENTERPRISE_*` renommées `FORGE_ADVANCED_*`, sans alias
 
 `FORGE_ENTERPRISE_STORE`, `_COMPLIANCE`, `_SSO`, `_TENANCY` et `_SCIM` deviennent `FORGE_ADVANCED_STORE`,

@@ -59,6 +59,7 @@ The same version is **surfaced on `/health`** (field `schema_version`, additive)
 |---|---|---|
 | 1 | base (`run_id`/`cwe`/`cvss` on `finding`, C2 columns on `run_job`, engagements, tenants…) | — |
 | 2 | `run_job.findings_dropped` · `run_job.findings_write_errors` — accounting of findings **emitted by the engine and not stored** (see `docs/HTTP_API.md`, section `/api/ingest`) | **Two additive `ALTER TABLE … ADD COLUMN`**, idempotent (error-ignored) and **reversible** in practice: no existing data is read, written or converted; an OLDER binary plugged back onto the migrated database keeps working (it simply ignores the two columns). Rows already present take **`NULL`** — that is, "**refused share unknown**", deliberately NOT `0`: a `DEFAULT 0` would have retroactively asserted that no finding had been lost, which is precisely the lie this batch removes. |
+| 3 | per-database keys `enterprise.<name>` copied to `advanced.<name>` (see §8) | **Additive**: new rows, values unchanged, old rows left in place, plus the record `migration.renamed_settings`, in the stamp's transaction; refused (nothing written) when the two names are out of step. An OLDER binary plugged back onto the migrated database reads the old rows — the values from before the upgrade — and resets the stamp to 2; the next start of the new binary compares both names and refuses at the slightest gap (§8). |
 
 > **Postgres**: the two columns are in `PG_SCHEMA` (fresh cluster); a `migrate-store`
 > migration from SQLite carries them over, because it copies the columns **enumerated** on the source
@@ -274,7 +275,108 @@ for whoever upgrades without reading this note. So a `FORGE_ENTERPRISE_*` variab
 [forge] FATAL retired environment variable(s) still set: FORGE_ENTERPRISE_SSO -> rename it to FORGE_ADVANCED_SSO. The FORGE_ENTERPRISE_* names are no longer read (renamed FORGE_ADVANCED_*, no alias); refusing to start rather than run with an advanced module silently off. See docs/UPGRADE.md §7.
 ```
 
-The Python engine applies the same rule when it builds the ledger signer (`RetiredEnvNameError`). The
-per-database configuration keys (`enterprise.sso`, `enterprise.tenancy`, `enterprise.compliance`,
-`enterprise.scim`) do not change. To upgrade: rename the variables in your `.env`, compose file, ConfigMap or
-Deployment, then restart.
+The Python engine applies the same rule when it builds the ledger signer (`RetiredEnvNameError`). To
+upgrade: rename the variables in your `.env`, compose file, ConfigMap or Deployment, then restart. The
+per-database configuration keys follow in §8 — those are migrated for you, nothing removed.
+
+## 8. Renamed settings keys, `whoami` field and error code: `enterprise` → `advanced`
+
+The word goes from the per-database configuration keys and from what the console serves too. Nothing has an
+alias: once migrated, the old names are read nowhere.
+
+| Where | Old name (retired) | New name |
+|---|---|---|
+| `settings` table | `enterprise.tenancy` | `advanced.tenancy` |
+| `settings` table | `enterprise.sso` | `advanced.sso` |
+| `settings` table | `enterprise.scim` | `advanced.scim` |
+| `settings` table | `enterprise.compliance` | `advanced.compliance` |
+| `settings` table | `enterprise.superadmin` | `advanced.superadmin` |
+| `GET /api/whoami` | field `enterprise` (`{tenancy, sso, scim, rbac, compliance}`) | field `advanced` (same content) |
+| `GET /api/compliance/policy` | `ledger_signer.enterprise_flag` | `ledger_signer.advanced_flag` |
+| HTTP 403 of `/api/tenants*` | `"error": "enterprise_disabled"` | `"error": "advanced_disabled"` |
+
+**What the migration does — additive, and once.** Schema version **3**. During a schema pass — server start
+(SQLite and Postgres), `forge upgrade`, `forge migrate`, `POST /api/setup/migrate`, `forge seed-demo`, and
+`forge migrate-store` after its row-count check — on a database not yet stamped 3 and never migrated, each
+`enterprise.<name>` key is **copied** to `advanced.<name>` with its value unchanged, and the old row is **left
+in place**. The same transaction writes the record `migration.renamed_settings` — the list of names that existed
+under the old prefix at that moment, for example `tenancy,superadmin` (empty when there were none; never a
+setting value) — then the schema version stamp. Tenant isolation, SSO, SCIM, compliance and the
+super-administrator are identical after the first start of the new binary; the console prints one line per
+copied key (key names, never values). The new binary reads only the `advanced.*` names and never writes the
+`enterprise.*` ones. Equal values under both names: nothing to copy. Different values: refusal, below. The copy
+never happens a second time — the record says it was done.
+
+**An older binary that starts again resets the stamp to 2.** A rollback, or an old pod restarted while the
+rolling restart of §3.3 is in progress, starts the previous image, which stamps its own schema version (2)
+without comparing anything. The next start of the new binary copies nothing: it **compares** both names and
+**refuses at the slightest gap**. For each name in the record, the old and the new key must both be present and
+equal; for a name outside the record whose old key is present (written meanwhile), the new key must be present
+and equal. That start therefore refuses when a key LISTED in the record is missing or differs under either name,
+or when an old key, listed or not, exists without an equal new key. A key set ONLY under `advanced.*`, which
+never existed under the old name (absent from the record and from the `enterprise.*` rows), is not compared —
+and the older binary does not see it.
+
+**Change none of these five keys during the rollout**, until every replica runs the new image (for instance
+`kubectl rollout status` on the Deployment) **and** `/health` reports `schema_version: 3`. What `/health` exposes
+is the stamp of the database — shared by every replica on Postgres — that any older binary resets to 2 when it
+starts; it does not tell which binary a replica runs (`version` is the same string in both images of this
+release).
+
+**A rollback shows the values from before the upgrade.** The previous image reads only `enterprise.*`: a
+super-administrator revoked since the upgrade under `advanced.superadmin` is one again for it, and tenant
+isolation turned on only under `advanced.tenancy` is off for it. The next start of the new binary then refuses
+while a key listed in the record is missing or differs under either name, or an old key exists without an equal
+new key; a key set only under `advanced.*` that never existed under the old name — the tenant isolation of this
+example — is not compared, so that start goes through and the new binary applies it again.
+
+**The refusal.** Nothing is written (the transaction is rolled back, the version is not stamped, a deleted key
+stays deleted) and the console refuses to start, exit code 2. Each gap names both keys and their state —
+`present`, `absent` or `differs` — never a value, since `superadmin` holds identities:
+
+```text
+[forge] FATAL settings keys out of step: enterprise.superadmin present, advanced.superadmin absent. The enterprise.* settings keys were renamed advanced.* (no alias); until the enterprise.* leftovers are removed, both names must hold the same value. Give BOTH names the same intended value; never delete an advanced.* key to get past this; if the enterprise.* rows were removed on purpose, run the complete removal of docs/UPGRADE.md §8. Refusing to start rather than pick one.
+```
+
+The last sentence depends on where the refusal happens: `forge migrate-store` ends with "migrate-store refused:
+its transaction is rolled back, the target holds no copied row."; `forge migrate` and `POST /api/setup/migrate`
+with "Import refused: the target database was copied but not migrated; correct the source, then import again.";
+`forge upgrade` with "Upgrade refused: the database goes back to its pre-upgrade snapshot." To resolve, give both
+names the same intended value — never delete an `advanced.*` key to get past the refusal. To revoke a
+super-administrator, give both names the new list (an empty list designates nobody); if one of the two rows is
+missing, insert it with that value first. For example on SQLite:
+
+```bash
+sqlite3 forge.db "UPDATE settings SET value='<value>' WHERE key IN ('enterprise.superadmin','advanced.superadmin');"
+```
+
+**Removing the leftovers is the point of no return.**
+
+Once they are removed, the previous image finds no `enterprise.*` key any more: for it, tenant isolation, SSO,
+SCIM, compliance and the super-administrator are **off**. Rolling back after the removal therefore OPENS tenant
+isolation. Remove them only once every replica runs the new version and no rollback to an older image remains
+possible. No subcommand does it: the console has no settings-maintenance command, and this release adds none.
+It is ONE transaction of two statements, the same on SQLite (`sqlite3 forge.db`) and on Postgres (`psql`): delete
+the five old keys AND empty the list of the record. The record stays, emptied; after it, nothing is compared AS
+LONG AS no `enterprise.*` row is written again. An old row recreated afterwards (by an older binary or by hand)
+is compared: the start refuses unless the new key holds the same value.
+
+```sql
+BEGIN;
+DELETE FROM settings WHERE key IN ('enterprise.tenancy','enterprise.sso','enterprise.scim','enterprise.compliance','enterprise.superadmin');
+UPDATE settings SET value='' WHERE key='migration.renamed_settings';
+COMMIT;
+```
+
+**Never delete the `migration.renamed_settings` row.** The removal above empties it, it does not delete it.
+Without the record, the next migration replays as a first migration and can copy leftover `enterprise.*` rows
+back under `advanced.*` — a revoked super-administrator would be one again. Its list is read closed: an element
+that is not one of the five names (other case, spaces, unknown word, empty element) makes the start refuse with
+the gap `migration.renamed_settings lists unknown name "<element>"` (at most 32 characters shown, any character
+outside printable ASCII as `?`).
+
+**Browser holding the old interface.** A tab whose JavaScript predates the upgrade reads the absent
+`enterprise` field of `whoami` as "no advanced module": the Identity and Compliance links stay hidden until the
+page is reloaded. Nothing opens — the server keeps enforcing each module's flag and admin gate. The static files
+are served without a version in their URL and without `Cache-Control`, so a reload (Ctrl+F5 if needed) after the
+upgrade is the way to get the links back.

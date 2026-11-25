@@ -170,10 +170,10 @@ byHb5g3JqJSE6WJSuyEQrUob
         }
     }
 
-    /// Engage the enterprise SSO flag on THIS db (per-DB, isolated — no env mutation).
+    /// Engage the advanced SSO flag on THIS db (per-DB, isolated — no env mutation).
     fn engage_flag(app: &App) {
         let db = app.db();
-        crate::settings_set(&db, "enterprise.sso", "on").unwrap();
+        crate::settings_set(&db, "advanced.sso", "on").unwrap();
     }
 
     /// [LOW — cap de lecture du token OIDC] `http_post_form_blocking` BORNE le corps lu à

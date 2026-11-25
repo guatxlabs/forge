@@ -15,7 +15,7 @@ use super::*;
     fn test_app() -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<crate::RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -101,11 +101,11 @@ use super::*;
 
     fn enable_tenancy(app: &App) {
         let db = app.db();
-        crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+        crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
     }
     fn disable_tenancy(app: &App) {
         let db = app.db();
-        db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap();
+        db.execute("DELETE FROM settings WHERE key='advanced.tenancy'", []).unwrap();
     }
 
     fn q_fmt(fmt: &str) -> Query<HashMap<String, String>> {
@@ -114,7 +114,7 @@ use super::*;
         Query(m)
     }
 
-    /// (a) ENTERPRISE ON — un caller accordé UNIQUEMENT sur A obtient 404 sur detail/report/logs d'un run de B,
+    /// (a) ADVANCED ON — un caller accordé UNIQUEMENT sur A obtient 404 sur detail/report/logs d'un run de B,
     /// et 403 sur cancel de B ; AUCUNE donnée de B (log brut, run_id) ne fuit dans le corps.
     #[tokio::test]
     async fn cross_tenant_run_reads_are_404_and_cancel_is_403() {
@@ -156,7 +156,7 @@ use super::*;
         assert_eq!(body["error"], "engagement_operator_required");
     }
 
-    /// (b) ENTERPRISE ON — le PROPRIÉTAIRE (accordé sur B) passe la garde : 200 en lecture ; cancel non-403.
+    /// (b) ADVANCED ON — le PROPRIÉTAIRE (accordé sur B) passe la garde : 200 en lecture ; cancel non-403.
     #[tokio::test]
     async fn owner_of_run_still_authorized() {
         let app = test_app();
@@ -217,7 +217,7 @@ use super::*;
         assert_eq!(resp.status(), StatusCode::CONFLICT, "community: cancel -> 409 not_running (jamais 403)");
     }
 
-    /// L9 — ENTERPRISE ON : un import CIBLANT l'engagement d'un AUTRE tenant est REFUSÉ (résolution tenant-
+    /// L9 — ADVANCED ON : un import CIBLANT l'engagement d'un AUTRE tenant est REFUSÉ (résolution tenant-
     /// aware fail-closed, comme run_create) AVANT tout spawn/insertion. Aucun finding n'atterrit dans
     /// l'engagement de B (le défaut historique faisait tomber les findings importés sur l'engagement #1).
     #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux

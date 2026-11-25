@@ -16,7 +16,7 @@ use crate::testutil::*;
 fn file_db(path: &str) -> Connection {
     let conn = Connection::open(path).expect("open file db");
     conn.execute_batch(SCHEMA).expect("schema");
-    migrate(&conn);
+    migrate(&conn).expect("migrate");
     conn
 }
 

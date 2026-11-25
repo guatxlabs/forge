@@ -15,7 +15,7 @@ data:
   # Bind on all interfaces inside the pod — traffic only reaches it via the ClusterIP Service +
   # Ingress (+ NetworkPolicy), never publicly. Port 7100 matches EXPOSE 7100 in the Dockerfile.
   FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
-  # Enterprise store = Postgres (Wave B). FAIL-CLOSED: without a reachable FORGE_DB_URL the console
+  # Advanced store = Postgres (Wave B). FAIL-CLOSED: without a reachable FORGE_DB_URL the console
   # refuses to boot. FORGE_DB_URL itself is injected from the forge-db Secret (see console Deployment).
   FORGE_ADVANCED_STORE: "postgres"
   # Engage HA (Wave A). Boot is FAIL-CLOSED unless the active store is Postgres. Replicas self-elect

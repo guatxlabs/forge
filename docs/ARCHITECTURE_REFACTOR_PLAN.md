@@ -76,7 +76,7 @@ Structure of `main.rs` **before** the split (offsets read from the file, not ass
 | 623–732 | `fn dispatch_cli(args: &[String]) -> Option<i32>` | CLI subcommands (hashpw, ledger verify…) |
 | 733–1122 | `async fn serve()` | server boot (~390 l: DB open, PRAGMA, SCHEMA, migrate, store-gate, App, HA, bind) |
 | 1123–1139 | `enum StoreSelection` | store-gate type |
-| 1140–1164 | `fn enterprise_store_gate(...) -> Result<StoreSelection, String>` | SQLite/Postgres decision |
+| 1140–1164 | `fn advanced_store_gate(...) -> Result<StoreSelection, String>` | SQLite/Postgres decision |
 | 1166–1167 | `#[cfg(test)] pub(crate) mod testutil;` | **already an external file** (`testutil.rs`, 83 l) |
 | **1169–6065** | **`#[cfg(test)] mod tests { … }`** | **4897 lines, 133 `#[test]`/`#[tokio::test]` fns** |
 
@@ -155,16 +155,16 @@ cohesive clusters already contiguous** in the file (offsets read in the current 
   `standalone_boot_serves_health_*` tests already exercise the mounted router) + byte-identical release build.
 
 #### Step 4 (optional, only if `main.rs` stays large) — Extract the boot into `console/src/boot.rs`
-- **Move:** `serve` (733–1122), `dispatch_cli` (623–732), `enterprise_store_gate` (1140–1164),
+- **Move:** `serve` (733–1122), `dispatch_cli` (623–732), `advanced_store_gate` (1140–1164),
   `enum StoreSelection` (1123–1139) → `console/src/boot.rs` (`pub(crate)`). `main.rs` shrinks to
   `main()` + the root `mod`/`use` + the `mod tests`.
 - **Why it is safe:** these are functions loosely coupled with the rest (they consume
-  `App`, `enterprise_store_gate`, `build_router`); the extraction is a move + `use`.
+  `App`, `advanced_store_gate`, `build_router`); the extraction is a move + `use`.
 - **Risk: LOW-MEDIUM.** `serve` is the largest (~390 l) and touches `#[cfg(feature =
   "encryption")]` and the HA wiring — copy the `use`/`cfg` attributes **identically**. It is
   the only step with a little surface; it is **optional** and is only done if the
   readability gain justifies it after step 1.
-- **Green check:** `cargo test` (the `enterprise_store_gate_contract`,
+- **Green check:** `cargo test` (the `advanced_store_gate_contract`,
   `standalone_boot_*`, `health_surfaces_stamped_schema_version` tests cover the area) + byte-identical
   release build.
 

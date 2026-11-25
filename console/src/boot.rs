@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forge console — BOOT SERVEUR + DISPATCH CLI + STORE-GATE (STEP 4 du refactor archi,
 //! docs/ARCHITECTURE_REFACTOR_PLAN.md §1.2). PURE MOVE depuis main.rs : `dispatch_cli`, `serve`
-//! (~390 l, avec ses blocs `cfg(feature="store-postgres"/"encryption")`), `enterprise_store_gate`
+//! (~390 l, avec ses blocs `cfg(feature="store-postgres"/"encryption")`), `advanced_store_gate`
 //! et `enum StoreSelection`. Ces items ne consomment que `App` + des helpers déjà re-exportés à la
 //! racine de crate ; le déplacement n'ajoute que des `use`. Aucun ordre d'étape, aucun spawn, aucun
 //! gating HA, aucun code de sortie CLI, aucun message ne change (binaire release byte-identique).
@@ -175,7 +175,7 @@ pub(crate) fn cli_subcommands() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Boot du serveur HTTP — PURE EXTRACTION du corps de main() après le dispatch CLI. Sélection du store
-/// (gate enterprise), pool PG hors-runtime, gate HA fail-closed, chargement du scope serveur, construction
+/// (gate advanced), pool PG hors-runtime, gate HA fail-closed, chargement du scope serveur, construction
 /// de l'App, amorçage boot routé par le backend ACTIF (SQLite/Postgres), spawns des boucles de fond
 /// (heartbeat/leader-tick/cache-poll/présence puis backup-scheduler) puis bind + serve. L'ordre des étapes,
 /// l'ordre des spawns et le gating HA sont STRICTEMENT inchangés par rapport à l'ancien main() monolithique.
@@ -219,9 +219,14 @@ pub(crate) async fn serve() {
     // construction de l'App (cf. plus bas). L'AMORÇAGE (ensure_default_*/populate_modules/reconcile_runs)
     // ne s'exécute plus ICI : il est routé par le backend ACTIF (`app.store()`), après l'App.
     conn.execute_batch(SCHEMA).expect("schema");
-    migrate(&conn); // ALTER additifs error-ignored (run_id, fix, panel étendu, run_job C2, dashboard_id)
+    // ALTER additifs error-ignored (run_id, fix, panel étendu, run_job C2, dashboard_id) + clés de réglage
+    // copiées sous `advanced.<x>` (cf. settings_rename.rs) + tampon. Refus (clés en écart) => arrêt, code 2.
+    if let Err(e) = migrate(&conn) {
+        eprintln!("[forge] FATAL {e}");
+        std::process::exit(2);
+    }
 
-    // ENTERPRISE STORE (Postgres) — CÂBLÉ (Stage 2b batch 5). La gate décide le backend ACTIF depuis
+    // ADVANCED STORE (Postgres) — CÂBLÉ (Stage 2b batch 5). La gate décide le backend ACTIF depuis
     // FORGE_ADVANCED_STORE + FORGE_DB_URL : Postgres UNIQUEMENT si la feature `store-postgres` est
     // compilée ET FORGE_DB_URL est posé (sinon erreur claire) ; tout autre cas => SQLite (défaut
     // community inchangé/byte-identique). Le split-brain d'antan n'existe plus : quand PG est actif,
@@ -230,7 +235,7 @@ pub(crate) async fn serve() {
     // ouverte ci-dessus reste le repli du seam (`App.db`), non utilisée quand `App.pg` est `Some`.
     let requested_store = std::env::var("FORGE_ADVANCED_STORE").ok();
     let db_url_env = std::env::var("FORGE_DB_URL").ok();
-    let store_selection = match enterprise_store_gate(requested_store.as_deref(), db_url_env.as_deref()) {
+    let store_selection = match advanced_store_gate(requested_store.as_deref(), db_url_env.as_deref()) {
         Ok(sel) => sel,
         Err(msg) => {
             eprintln!("[forge] FATAL {msg}");
@@ -403,7 +408,7 @@ pub(crate) async fn serve() {
     let app = App {
         db: Arc::new(Mutex::new(conn)),
         db_path: Arc::new(db_path.clone()),
-        // ENTERPRISE STORE (Stage 2b batch 5) : `Some(client)` quand PG est sélectionné (gate ci-dessus),
+        // ADVANCED STORE (Stage 2b batch 5) : `Some(client)` quand PG est sélectionné (gate ci-dessus),
         // sinon `None` -> `store()` route sur SQLite. Le champ n'existe que sous la feature (struct
         // byte-identique quand OFF).
         #[cfg(feature = "store-postgres")]
@@ -446,55 +451,23 @@ pub(crate) async fn serve() {
     // = None, et build community non compilé) cette branche ne s'exécute pas : SCHEMA+migrate sur la
     // connexion SQLite = App.db font foi. L'amorçage ci-dessous passe ENSUITE par `app.store()` : il sème
     // le backend ACTIF (SQLite = byte-identique ; Postgres via le MÊME chemin seeder, cf. seeders portés).
-    // WAVE-B LOW FIX — COLD-START DDL RACE (HA) : sous HA, deux réplicas démarrant un cluster VIERGE lancent
-    // `execute_batch(PG_SCHEMA)` + les seeders id=1 (dashboard/engagement/tenant) SIMULTANÉMENT. `CREATE …
-    // IF NOT EXISTS` (catalogue PG PARTAGÉ) et `SELECT COUNT(*) … puis INSERT id=1` NE sont PAS concurrency-
-    // safe -> un réplica panique (« tuple concurrently updated » sur pg_type/pg_class, ou duplicate key). On
-    // SÉRIALISE toute la section DDL+seed sous un `pg_advisory_xact_lock(BOOT_DDL_LOCK_KEY)` cluster-global :
-    // un SEUL réplica applique schéma/seeds à la fois, les autres attendent puis voient tout déjà présent
-    // (idempotent, aucun panic/abort). `populate_modules` (spawn python, upsert ON CONFLICT row-safe) et le
-    // boot-reconcile restent HORS du verrou (aucune course id=1 ; on ne tient pas le verrou pendant un spawn).
-    // En SQLite/community : chemin INCHANGÉ (aucun catalogue partagé -> aucun verrou, seeders directs).
+    // Sous HA, la section DDL+seed+copie des clés renommées+tampon est SÉRIALISÉE sous le verrou DDL cluster-global
+    // (cf. `schema::pg_boot_schema_and_seed`). `populate_modules` (spawn python, upsert ON CONFLICT row-safe)
+    // et le boot-reconcile restent HORS du verrou (aucune course id=1 ; on ne tient pas le verrou pendant
+    // un spawn). En SQLite/community : chemin INCHANGÉ (aucun catalogue partagé -> aucun verrou).
     #[cfg(feature = "store-postgres")]
     let pg_active = app.pg.is_some();
     #[cfg(not(feature = "store-postgres"))]
     let pg_active = false;
     if pg_active {
-        // PG : PG_SCHEMA + seeders id=1 + recalage des séquences IDENTITY, TOUT sous le verrou DDL cluster-
-        // global (pg_advisory_xact_lock, auto-relâché au COMMIT). Le miroir PG du SCHEMA a les colonnes de
-        // migrate() déjà fusionnées. Les seeders reçoivent le store TRANSACTIONNEL (tx.store()) -> même
-        // connexion, dans le BEGIN, donc dans la section critique verrouillée.
+        // PG : PG_SCHEMA + seeders id=1 + recalage IDENTITY + copie des clés renommées + tampon, en UNE
+        // transaction. Un refus (clés en écart, cf. settings_rename.rs) arrête le
+        // boot en les nommant — jamais leurs valeurs — comme le refus des variables d'environnement retirées.
         #[cfg(feature = "store-postgres")]
-        app.store()
-            .with_tx(|tx| {
-                // FIX (isolation assumption): this serialization is correct ONLY under READ COMMITTED — the
-                // seam's `with_tx` default isolation. Under READ COMMITTED the SECOND replica, once it wins the
-                // advisory lock, re-evaluates its `SELECT COUNT(*)` seeder predicates against the FIRST
-                // replica's ALREADY-COMMITTED rows and sees id=1 present -> no re-seed (idempotent). A stricter
-                // level (REPEATABLE READ / SERIALIZABLE) would pin the second replica's snapshot at BEGIN,
-                // BEFORE the first replica committed, so its COUNT(*) would still read 0 and it would re-INSERT
-                // id=1 -> duplicate-key / double-seed. Do NOT raise the isolation of THIS boot tx without
-                // moving the seeders to ON CONFLICT DO NOTHING upserts. (Comment only — no behaviour change.)
-                tx.execute("SELECT pg_advisory_xact_lock(?)", &crate::sql_params![crate::ha::BOOT_DDL_LOCK_KEY])?;
-                tx.execute_batch(PG_SCHEMA)?;
-                // `tx.store()` is a getter returning the tx-owned `&Store` (the transaction owns the critical
-                // section — there is no separate guard to tighten); call it inline so no aliasing binding is
-                // held past its use. Behaviour-identical to a `let s = tx.store();` alias.
-                ensure_default_dashboard(tx.store()); // dashboard #1 (rétro-compat) + rattache les panels orphelins
-                // ENGAGEMENT #1 / TENANT #1 (migration ZÉRO-PERTE) — idempotents (count>0 => no-op). Sous le
-                // verrou, un seul réplica les crée ; l'autre voit count>0 et ne réinsère pas id=1.
-                ensure_default_engagement(tx.store(), &app.scope_in, &app.scope_mode, &app.ledger_path);
-                ensure_default_tenant(tx.store());
-                // Après TOUT seeding à id explicite : recale les séquences IDENTITY sur max(id) (sinon le 1er
-                // INSERT-sans-id régénère id=1 -> duplicate key). Idempotent.
-                advance_pg_identity_sequences(tx.store());
-                // SCHEMA VERSION STAMP (parité avec la branche SQLite où `migrate()` tamponne) : le backend
-                // Postgres applique `PG_SCHEMA` (colonnes de migrate déjà fusionnées) sans passer par
-                // `migrate()`, donc on tamponne ICI, sous le même verrou DDL, après le schéma+seed.
-                crate::schema::stamp_schema_version(tx.store());
-                Ok::<(), crate::store::StoreError>(())
-            })
-            .expect("pg boot schema+seed (serialized under the DDL advisory lock)");
+        if let Err(e) = crate::schema::pg_boot_schema_and_seed(&app.store(), &app.scope_in, &app.scope_mode, &app.ledger_path) {
+            eprintln!("[forge] FATAL {e}");
+            std::process::exit(2);
+        }
     } else {
         // SQLite (repli du seam) / community : SCHEMA+migrate ont déjà tourné sur la connexion brute ci-dessus.
         // Seeders directs, exactement comme historiquement (byte-identique). advance_pg_identity_sequences est
@@ -627,7 +600,7 @@ pub(crate) async fn serve() {
         .expect("serve");
 }
 
-/// Backend the console boots on, as decided by [`enterprise_store_gate`]. The `Postgres` arm only
+/// Backend the console boots on, as decided by [`advanced_store_gate`]. The `Postgres` arm only
 /// exists under the `store-postgres` feature (the DEFAULT build can only ever select SQLite).
 #[derive(Debug)]
 pub(crate) enum StoreSelection {
@@ -636,7 +609,7 @@ pub(crate) enum StoreSelection {
     Postgres(String), // the FORGE_DB_URL DSN to connect the session-pinned client to
 }
 
-/// Enterprise store-selection gate (Stage 2b batch 5). Decides — from the runtime values of
+/// Advanced store-selection gate (Stage 2b batch 5). Decides — from the runtime values of
 /// `FORGE_ADVANCED_STORE` (`requested`) and `FORGE_DB_URL` (`db_url`) — which backend the console
 /// boots on, FAIL-CLOSED:
 ///   - `requested == Some("postgres")` WITH the `store-postgres` feature compiled: `Ok(Postgres(url))`
@@ -646,7 +619,7 @@ pub(crate) enum StoreSelection {
 ///   - Anything else (`None`, `"sqlite"`, `""`, …): `Ok(Sqlite)` — the community default, unchanged.
 ///
 /// Pure over its inputs so the whole contract is unit-testable without touching the environment.
-pub(crate) fn enterprise_store_gate(requested: Option<&str>, db_url: Option<&str>) -> Result<StoreSelection, String> {
+pub(crate) fn advanced_store_gate(requested: Option<&str>, db_url: Option<&str>) -> Result<StoreSelection, String> {
     if requested == Some("postgres") {
         #[cfg(feature = "store-postgres")]
         {

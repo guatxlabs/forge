@@ -15,7 +15,7 @@ use super::*;
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<crate::RunEvent>(64);
         let app = App {
             db: Arc::new(Mutex::new(conn)),
@@ -59,10 +59,10 @@ use super::*;
         app
     }
 
-    /// Engage the enterprise flag on THIS db (per-DB, isolated — no env mutation, no parallel races).
+    /// Engage the advanced flag on THIS db (per-DB, isolated — no env mutation, no parallel races).
     fn engage(app: &App) {
         let db = app.db();
-        crate::settings_set(&db, "enterprise.compliance", "on").unwrap();
+        crate::settings_set(&db, "advanced.compliance", "on").unwrap();
     }
 
     /// Provision a local admin + open an admin session; returns the bearer session token.
@@ -448,7 +448,7 @@ use super::*;
         // flag OFF => inert (community byte-identical) even with a fresh record.
         {
             let db = app.db();
-            crate::settings_set(&db, "enterprise.compliance", "").unwrap();
+            crate::settings_set(&db, "advanced.compliance", "").unwrap();
         }
         seed_finding(&app, 2, "fresh2", now);
         assert!(retention_blocked(&app, 2).is_none(), "flag OFF => retention gate inert");
@@ -863,4 +863,12 @@ use super::*;
             drop(db);
             assert_eq!(n, 1, "la ligne expirée RESTE (delete rollback, pas de suppression partielle)");
         }
+    }
+
+    /// FIL — la vue du signeur servie par `GET /api/compliance/policy` (`ledger_signer`) nomme le drapeau
+    /// `advanced_flag` ; c'est un booléen, jamais une valeur de réglage.
+    #[test]
+    fn ledger_signer_view_names_the_advanced_flag() {
+        let v = redacted_ledger_signer();
+        assert!(v.get("advanced_flag").map(|f| f.is_boolean()).unwrap_or(false), "{v}");
     }

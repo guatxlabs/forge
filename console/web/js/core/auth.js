@@ -11,7 +11,7 @@ import { initPresence } from './presence.js';
 import { initNotifications } from './notifications.js';
 import { confirmModal, infoModal, toast } from './ui.js';
 
-export function complianceOn() { return !!(ENTERPRISE && ENTERPRISE.compliance); }
+export function complianceOn() { return !!(ADVANCED && ADVANCED.compliance); }
 export function complianceAdmin() { return !!(complianceOn() && isAdmin()); }
 // Dé-masque le lien nav #compliance (admin + flag) ; ré-oriente hors #compliance si non autorisé.
 export function applyComplianceUi() {
@@ -44,15 +44,15 @@ export function renderWhoami(w) {
   const adminLink = $('#nav-admin');
   if (adminLink) adminLink.hidden = !(authed && String(w.role) === 'admin');
   if (!isAdmin() && (location.hash.slice(1) === 'admin')) location.hash = 'overview';
-  // ENTERPRISE identity (SSO / SCIM / advanced RBAC) — flags come from whoami.enterprise (all false in
+  // ADVANCED identity (SSO / SCIM / advanced RBAC) — flags come from whoami.advanced (all false in
   // the community default => nothing renders). Drives the "Identité / SSO" nav link + route guard.
-  ENTERPRISE = (w && w.enterprise && typeof w.enterprise === 'object') ? w.enterprise : {};
+  ADVANCED = (w && w.advanced && typeof w.advanced === 'object') ? w.advanced : {};
   applyIdentityUi();
   applyComplianceUi();
 }
-// ENTERPRISE identity flags (from whoami.enterprise). Community default = {} => every helper false.
-export let ENTERPRISE = {};
-export function identityOn() { return !!(ENTERPRISE && (ENTERPRISE.sso || ENTERPRISE.scim)); }
+// ADVANCED identity flags (from whoami.advanced). Community default = {} => every helper false.
+export let ADVANCED = {};
+export function identityOn() { return !!(ADVANCED && (ADVANCED.sso || ADVANCED.scim)); }
 export function identityAdmin() { return !!(identityOn() && isAdmin()); }
 // Dé-masque le lien nav #identity (admin + flag engagé) ; ré-oriente hors #identity si non autorisé.
 // Défense en profondeur : le serveur reste l'autorité (routes flag+admin -> 404/403).
@@ -61,7 +61,7 @@ export function applyIdentityUi() {
   if (link) link.hidden = !identityAdmin();
   if (!identityAdmin() && location.hash.slice(1) === 'identity') location.hash = 'overview';
 }
-// SSO (ENTERPRISE) : disponibilité d'une connexion OIDC interactive, sondée pré-auth via GET
+// SSO (ADVANCED) : disponibilité d'une connexion OIDC interactive, sondée pré-auth via GET
 // /api/setup/state (sso.enabled). false en community (flag OFF / non configuré) => aucun bouton SSO.
 export let SSO_LOGIN = false;
 export function showLogin() {
@@ -333,7 +333,7 @@ export async function bootApp() {
     const sr = await request('/api/setup/state', { headers: { Accept: 'application/json' } });
     if (sr.ok) {
       const st = await sr.json().catch(() => null);
-      // SSO (ENTERPRISE) : capter la disponibilité AVANT toute sortie anticipée (pour l'écran de login).
+      // SSO (ADVANCED) : capter la disponibilité AVANT toute sortie anticipée (pour l'écran de login).
       SSO_LOGIN = !!(st && st.sso && st.sso.enabled);
       if (st && st.needs_setup) { showSetup(st); return; }
     }
@@ -348,7 +348,7 @@ export async function bootApp() {
   }
   renderWhoami(w);
   showApp();
-  // TENANCY (ENTERPRISE, flag-gated) : charger le contexte AVANT le sélecteur d'engagement pour que le
+  // TENANCY (ADVANCED, flag-gated) : charger le contexte AVANT le sélecteur d'engagement pour que le
   // filtre tenant → engagement porte dès le 1er rendu. Community => {enabled:false} : no-op (rien ne
   // s'affiche, comportement byte-identique).
   await loadTenancyContext();

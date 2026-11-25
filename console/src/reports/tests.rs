@@ -29,7 +29,7 @@ use super::*;
     fn test_app(ledger_path: &str) -> App {
         let conn = Connection::open_in_memory().expect("mem db");
         conn.execute_batch(crate::SCHEMA).expect("schema");
-        crate::migrate(&conn);
+        crate::migrate(&conn).expect("migrate");
         let (events, _) = broadcast::channel::<RunEvent>(64);
         App {
             db: Arc::new(Mutex::new(conn)),
@@ -179,7 +179,7 @@ use super::*;
         let _ = std::fs::remove_file(&led);
     }
 
-    /// ENTERPRISE (flag-gated) — ISOLATION TENANT : le rapport d'un engagement d'un tenant NON accordé au
+    /// ADVANCED (flag-gated) — ISOLATION TENANT : le rapport d'un engagement d'un tenant NON accordé au
     /// caller est refusé (404, mêmes octets que « inconnu ») ; aucune donnée de l'autre tenant ne fuit.
     /// Community (flag OFF) => no-op : le même rapport est servi normalement (byte-identique).
     #[allow(clippy::await_holding_lock)] // env_lock() sérialise l'ENV + les SLOTS process-globaux
@@ -205,21 +205,21 @@ use super::*;
                  SELECT id,1,'tenant_viewer',datetime('now') FROM users WHERE login='alice'",
                 [],
             ).unwrap();
-            crate::settings_set(&db, "enterprise.tenancy", "on").unwrap();
+            crate::settings_set(&db, "advanced.tenancy", "on").unwrap();
             drop(db);
         }
         let (atok, _) = create_session(&app, uid_of(&app, "alice"));
         let mut q = HashMap::new();
         q.insert("format".to_string(), "json".to_string());
 
-        // ENTERPRISE ON : rapport de B (tenant 2) par alice (tenant 1) -> 404 (fail-closed).
+        // ADVANCED ON : rapport de B (tenant 2) par alice (tenant 1) -> 404 (fail-closed).
         let r = engagement_report(State(app.clone()), bearer(&atok), Path(2), Query(q.clone())).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "rapport cross-tenant refusé (404)");
         let body = to_json(r).await;
         assert!(!serde_json::to_string(&body).unwrap().contains("B-secret-finding"), "aucune donnée de B ne fuit");
 
         // COMMUNITY (flag OFF) : le MÊME appel est servi (no-op — comportement mono-tenant historique).
-        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='enterprise.tenancy'", []).unwrap(); }
+        { let db = app.db(); db.execute("DELETE FROM settings WHERE key='advanced.tenancy'", []).unwrap(); }
         let r = engagement_report(State(app.clone()), bearer(&atok), Path(2), Query(q)).await;
         assert_eq!(r.status(), StatusCode::OK, "community (flag OFF) : rapport servi (no-op)");
 
