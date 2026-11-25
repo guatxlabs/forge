@@ -29,7 +29,7 @@ backups**. The second half keeps the **measured footprint** and the deployment m
 ## 1. Build & run options
 
 > ℹ️ **Build context = the ROOT of this repository.** The console resolves `guatx-core` through a pinned
-> public git-dep (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, see
+> public git-dep (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6"`, see
 > `console/Cargo.toml`) — the core is fetched from GitHub at build time, no sibling crate required. All
 > the `docker build`/`docker compose` commands below are run **from the repository root** (a
 > standalone clone is enough). Details in [§4](#4-build-context--guatx-core-dependency).
@@ -1081,7 +1081,7 @@ will go red by itself as a reminder.
 
 The build context is the **ROOT of this repository**. The `console` crate resolves `guatx-core` through a
 **PINNED public git-dep** — `guatx-core = { git = "https://github.com/guatxlabs/core", tag =
-"v0.2.2", features = ["forge"] }` (see `console/Cargo.toml`): the core is **fetched from GitHub at
+"v0.2.6", features = ["forge"] }` (see `console/Cargo.toml`): the core is **fetched from GitHub at
 build time**, no sibling crate is required in the context. A **standalone** clone of this repository builds
 directly (`docker build -t forge:0.0.1 .` from the root; the compose file sets `context: .`).
 
@@ -1099,7 +1099,7 @@ directly (`docker build -t forge:0.0.1 .` from the root; the compose file sets `
 
 **`path` → git-dep migration: DONE.** The console used to consume `core` as a `path` dep (monorepo
 sibling layout), which imposed a parent build context. The public repo `guatxlabs/core` (tag
-`v0.2.2`) now exists and the dep is **git**: the context **is** the repository root, the
+`v0.2.6`) now exists and the dep is **git**: the context **is** the repository root, the
 builder step that copied the sibling `core/` has **disappeared**, and a **standalone** checkout (no sibling) builds as is.
 
 ---

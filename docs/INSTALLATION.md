@@ -10,7 +10,7 @@ runbook (measured footprint, Docker/k8s/host/venv matrix, PDF export) is in
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 > ℹ️ **Build context = the ROOT of this repository.** The console resolves `guatx-core` through a pinned
-> public git-dep (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, see
+> public git-dep (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6"`, see
 > `console/Cargo.toml`) — the core is fetched from GitHub at build time, no sibling crate required. All
 > the `docker build`/`docker compose` commands below are run **from the repository root** (a
 > standalone clone is enough). Details: [`DEPLOYMENT.md`](DEPLOYMENT.md) §4.

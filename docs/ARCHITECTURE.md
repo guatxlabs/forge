@@ -20,7 +20,7 @@ Ce dépôt — Forge (rouge) :
 
 Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
   guatx-core     lib Rust NEUTRE, publique — le ~70 % commun (moteur GXQL v0) ; consommée par la console
-                 en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.2)
+                 en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.6)
   plume          Plume (SOC bleu, public) — détection / BAS  [OPTIONNEL pour Forge]
 ```
 
@@ -28,7 +28,7 @@ There is **no shared process** between the layers: the Python engine and the Rus
 communicate through an **HTTP/file contract** (`POST /api/ingest`, JSONL run-records, JSONL ledger
 on disk). The console **spawns** the engine (`python3 -m forge.cli campaign …`) for runs
 launched from the web (see §3, C2-light). The console depends on the `guatx-core` crate through a **pinned
-public git-dep** (`tag = "v0.2.2"`, fetched at build time; the migration from the old sibling `path`
+public git-dep** (`tag = "v0.2.6"`, fetched at build time; the migration from the old sibling `path`
 dependency is done — see [`DEPLOYMENT.md`](DEPLOYMENT.md) §4).
 
 **Footprint** (`wc -l` on this tree, `__pycache__`/`target` excluded): Python engine **23.9 KLOC**

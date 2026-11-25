@@ -99,7 +99,7 @@ multiple-versions = "warn"
 # `wildcards` reste en AVERTISSEMENT, et c'est une décision mesurée, pas un défaut de rigueur.
 # En `deny`, le contrôle échoue sur UNE dépendance et une seule (vérifié le 2026-08-03) :
 # `guatx-core`, déclarée sans borne de version parce qu'elle est épinglée par TAG git
-# (`tag = "v0.2.2"`). Un tag est un ancrage PLUS strict qu'une borne semver, pas plus lâche :
+# (`tag = "v0.2.6"`). Un tag est un ancrage PLUS strict qu'une borne semver, pas plus lâche :
 # refuser ce joker punirait l'épinglage le plus serré du manifeste. La provenance de cette
 # dépendance est par ailleurs contrôlée pour de bon par `[sources]` ci-dessous.
 wildcards = "warn"
@@ -190,7 +190,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 # `unknown-git = "deny"` refuse toute source git hors de cette liste — y compris, sans cette
 # entrée, la seule que le projet utilise réellement. Mesuré dans `console/Cargo.lock` : une
-# unique source git, `git+https://github.com/guatxlabs/core?tag=v0.2.2`. L'autoriser NOMMÉMENT
+# unique source git, `git+https://github.com/guatxlabs/core?tag=v0.2.6`. L'autoriser NOMMÉMENT
 # est le but du réglage — le dépôt de notre cœur est admis, tout autre dépôt git reste refusé.
 # Une git-dep ajoutée à la sauvette échoue donc le contrôle.
 allow-git = ["https://github.com/guatxlabs/core"]

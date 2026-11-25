@@ -37,7 +37,7 @@ When in doubt, add a test that proves the invariant still holds.
 ## Build & tests
 
 > **Note (open-source build):** the Rust console depends on `guatx-core` via a **pinned public
-> git-dep** (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`; see `console/Cargo.toml`).
+> git-dep** (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6"`; see `console/Cargo.toml`).
 > A standalone clone of *this* repository builds the console directly — the core is fetched from GitHub
 > at build time. For a monorepo dev checkout, `console/.cargo/config.toml` (gitignored) `[patch]`es
 > the git-dep to a local `../../core`.

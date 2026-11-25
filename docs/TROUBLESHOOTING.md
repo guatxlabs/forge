@@ -127,7 +127,7 @@ mismatch makes the build fail. When bumping a version, refresh **version AND dig
 
 ### The Docker build fails to fetch `guatx-core`
 The **build context is the root of this repository**; the console resolves `guatx-core` through a pinned
-public git dependency (`tag = "v0.2.2"`, cf. `console/Cargo.toml`), **fetched from GitHub at build time** —
+public git dependency (`tag = "v0.2.6"`, cf. `console/Cargo.toml`), **fetched from GitHub at build time** —
 the builder therefore needs **network access to github.com** (or a Cargo registry mirror/cache). In
 monorepo dev, `console/.cargo/config.toml` (gitignored) redirects the dependency to the local core. Run
 `docker build -t forge:0.0.1 .` **from the repository root**, or use the compose file (`context: .`).

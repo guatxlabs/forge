@@ -17,14 +17,14 @@ Ce dépôt — Forge (rouge, PUBLIC) : moteur Python (gate ROE, ledger, modules,
 Dépendances externes de la famille GUATX (repos séparés, PAS dans ce dépôt) :
   guatx-core      lib Rust — NEUTRE, PUBLIC : le ~70 % commun. v0 = moteur GXQL ; à étendre
                   (auth/host-guard, query-exec). RIEN d'offensif n'y descend. Consommée par la console
-                  en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.2).
+                  en git-dep publique épinglée (github.com/guatxlabs/core, tag v0.2.6).
   plume           Plume (bleu, PUBLIC) : event/metric, détection, collecteurs, BAS. PEUT adopter core.
 ```
 **Repository boundary** (decided): **neutral public** `core` + **public** `plume` (blue) +
 **public** `forge` (red, this repository). Since Plume must be able to depend on `core`, **`core` MUST be
 public** — that is what forces the split. Discipline: no offensive element (module, CF/WAF evasion,
 ROE logic) goes down into `core`; it stays in Forge, which depends on the public core.
-The console consumes `core` via a **pinned public `git` dep** (`tag = "v0.2.2"`, fetched at
+The console consumes `core` via a **pinned public `git` dep** (`tag = "v0.2.6"`, fetched at
 build time) — the migration from the old sibling `path` dep is **done**. The extraction is real (the
 console uses it), not a plan.
 

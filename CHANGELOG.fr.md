@@ -11,6 +11,22 @@ Tous les changements notables de Forge sont consignés ici. Le format s'appuie s
 
 ## [Unreleased]
 
+### Modifié — la console compile contre `guatx-core` v0.2.6 (au lieu de v0.2.2)
+
+Le compilateur de requêtes partagé avec Plume refuse désormais des formes qu'il jetait ou lisait de
+travers sans rien dire. Une requête qui compilait et rendait un résultat peut désormais être refusée,
+avec un message qui dit quoi écrire. Sans aucune de ces formes, le SQL émis est inchangé.
+
+- `stats`, `eventstats`, `timechart`, `sort`, `head`, `top`, `rare`, `join`, `append`… refusent tout
+  jeton qu'ils ne lisent pas (`sort ts desc` triait en ordre croissant ; `stats count dc(user)` ne
+  rendait que le compte) ; une clé de `stats … by` qui ne nomme aucun champ en portée est refusée au
+  lieu de devenir un libellé.
+- `search` refuse un `OR`, `AND` ou `NOT` nu et une parenthèse non appariée (aucune grammaire
+  booléenne n'existe ; ils devenaient un terme libre). Un `|` ou un `]` entre guillemets doubles ne
+  coupe plus le pipeline ; un guillemet double non fermé est refusé.
+- Sous un masque de champ, le sac JSON n'est jamais lu brut : prédicats et clés de jointure sur le
+  sac sont refusés, les clés de groupe lisent la projection caviardée.
+
 ### Ajouté — couverture du Top 10 des techniques web 2025 : onze oracles à preuve
 
 Onze modules de vérification à preuve bénigne (exploit=False, destructive=False sauf mention),
@@ -439,7 +455,7 @@ un tunnel Cloudflare. Aucun de ces défauts ne cassait quoi que ce soit : ils **
 
 ### Notes pour les builds open source
 - La console Rust dépend de `guatx-core` via une **dépendance git publique épinglée**
-  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2", features = ["forge"]` ; voir
+  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6", features = ["forge"]` ; voir
   `console/Cargo.toml`). Un clone autonome de ce dépôt compile directement la console — le core est
   récupéré depuis GitHub au moment du build, aucun crate voisin requis. Dans un checkout de dev en monorepo,
   `console/.cargo/config.toml` (gitignoré) porte un `[patch]` qui remplace la dépendance git par un

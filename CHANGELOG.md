@@ -11,6 +11,21 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the console builds against `guatx-core` v0.2.6 (was v0.2.2)
+
+The query compiler shared with Plume now refuses forms it used to drop or misread without a word.
+A query that compiled before and returned a result may now be refused with a message saying what to
+write. Without any of these forms, the emitted SQL is unchanged.
+
+- `stats`, `eventstats`, `timechart`, `sort`, `head`, `top`, `rare`, `join`, `append`… refuse any
+  token they do not read (`sort ts desc` used to sort ascending; `stats count dc(user)` returned only
+  the count); a `stats … by` key that names no field in scope is refused instead of becoming a label.
+- `search` refuses a bare `OR`, `AND` or `NOT` and an unbalanced parenthesis (no boolean grammar
+  exists; they used to become a free-text term). A `|` or `]` inside double quotes no longer splits
+  the pipeline; an unclosed double quote is refused.
+- Under a field mask, the JSON bag is never read raw: predicates and join keys on the bag are
+  refused, group keys read the redacted projection.
+
 ### Added — coverage of the 2025 Top 10 web techniques: eleven evidence oracles
 
 Eleven verification modules with benign evidence (exploit=False, destructive=False unless stated),
@@ -439,7 +454,7 @@ a Cloudflare tunnel. None of these defects broke anything: they **reassured**.
 
 ### Notes for open-source builds
 - The Rust console depends on `guatx-core` via a **pinned public git dependency**
-  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2", features = ["forge"]`; see
+  (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6", features = ["forge"]`; see
   `console/Cargo.toml`). A standalone clone of this repo builds the console directly — the core is
   fetched from GitHub at build time, no sibling crate required. In a monorepo dev checkout,
   `console/.cargo/config.toml` (gitignored) carries a `[patch]` that overrides the git dep to a local

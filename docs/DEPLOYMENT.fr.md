@@ -29,7 +29,7 @@ programmées**. La deuxième moitié conserve l'**empreinte mesurée** et la mat
 ## 1. Options de build & run
 
 > ℹ️ **Contexte de build = la RACINE de ce dépôt.** La console résout `guatx-core` via une git-dep
-> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.2"`, cf.
+> publique épinglée (`git = "https://github.com/guatxlabs/core", tag = "v0.2.6"`, cf.
 > `console/Cargo.toml`) — le core est récupéré depuis GitHub au build, aucun crate sibling requis. Toutes
 > les commandes `docker build`/`docker compose` ci-dessous se lancent **depuis la racine du dépôt** (un
 > clone standalone y suffit). Détail en [§4](#4-contexte-de-build--dépendance-guatx-core).
@@ -1078,7 +1078,7 @@ rougira de lui-même pour le rappeler.
 
 Le contexte de build est la **RACINE de ce dépôt**. Le crate `console` résout `guatx-core` via une
 **git-dep publique ÉPINGLÉE** — `guatx-core = { git = "https://github.com/guatxlabs/core", tag =
-"v0.2.2", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
+"v0.2.6", features = ["forge"] }` (cf. `console/Cargo.toml`) : le core est **récupéré depuis GitHub au
 build**, aucun crate sibling n'est requis dans le contexte. Un clone **standalone** de ce dépôt construit
 directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe `context: .`).
 
@@ -1096,7 +1096,7 @@ directement (`docker build -t forge:0.0.1 .` depuis la racine ; le compose fixe 
 
 **Migration `path` → git-dep : FAITE.** La console consommait autrefois `core` en dép `path` (layout
 sibling monorepo), ce qui imposait un contexte de build parent. Le repo public `guatxlabs/core` (tag
-`v0.2.2`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
+`v0.2.6`) existe désormais et la dép est **git** : le contexte **est** la racine du dépôt, l'étape
 builder qui copiait le sibling `core/` a **disparu**, et un checkout **standalone** (sans sibling) builde tel quel.
 
 ---

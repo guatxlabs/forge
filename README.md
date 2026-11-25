@@ -224,7 +224,7 @@ the command, not this page.
 ## Production deployment (self-deploy)
 
 Full runbook: **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**. In short — the build context is the
-root of this repository (the console resolves `guatx-core` through a public git-dep pinned to tag `v0.2.2`,
+root of this repository (the console resolves `guatx-core` through a public git-dep pinned to tag `v0.2.6`,
 no sibling crate required; `console/Cargo.lock` is committed for reproducible builds):
 
 ```sh
