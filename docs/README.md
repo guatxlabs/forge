@@ -108,7 +108,6 @@ Documented version: **0.0.1**. This page is the table of contents. Each link poi
 ### 6. Go-to-market & purple reference *(product context)*
 
 - **[Positioning](POSITIONING.md)** — target segment, the three pillars, competitive teardown.
-- **[Services & pricing](PRICING.md)** *(proposal)* — the product is free/open; what is priced is professional services (engagement, purple coaching, support, hosting).
 - **[Plan & roadmap](PLAN.md)** — blocker status, sequenced roadmap.
 - **[MTTD — what the metric measures](MTTD.md)** — time-to-ALERT vs time-to-event, interpretation.
 - **[Purple campaign runbook](PURPLE_CAMPAIGN.md)** — broad-recon campaign (to be launched on "go").

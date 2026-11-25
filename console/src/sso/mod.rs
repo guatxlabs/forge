@@ -64,13 +64,13 @@ const STATE_COOKIE: &str = "forge_sso_state";
 
 // ============================================================================================
 // FLAG — is enterprise OIDC SSO ENGAGED? Community default = OFF (local login only, byte-identical).
-// Two sources (either engages it): env `FORGE_ENTERPRISE_SSO` (truthy) OR the per-DB config key
+// Two sources (either engages it): env `FORGE_ADVANCED_SSO` (truthy) OR the per-DB config key
 // `enterprise.sso` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors tenancy.
 // ============================================================================================
 
 /// Is enterprise OIDC SSO engaged?  false => community (every `/api/sso/*` route 404s, local login unchanged).
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_SSO", "enterprise.sso")
+    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_SSO", "enterprise.sso")
 }
 
 /// Is an interactive SSO login available right now?  true iff the flag is engaged AND the OIDC provider

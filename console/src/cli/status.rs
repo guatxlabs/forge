@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 /// Résout le backend + lit la version de schéma persistée. Renvoie `(backend, db_redacted, schema_version)`.
 /// SQLite (défaut/community) : ouvre la base en READ-ONLY et lit `settings.schema_version`. Postgres
-/// (feature `store-postgres` + FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL) : lit à travers le seam,
+/// (feature `store-postgres` + FORGE_ADVANCED_STORE=postgres + FORGE_DB_URL) : lit à travers le seam,
 /// l'URL RÉDIGÉE (sans user:pass ni query). `schema_version=None` sur une base ANTÉRIEURE au stamp.
 fn resolve_backend_and_version(db_path: &str) -> Result<(String, String, Option<i64>), String> {
     #[cfg(feature = "store-postgres")]

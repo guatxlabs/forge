@@ -129,13 +129,13 @@ mod tenancy;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — OIDC SSO login. The default build never
 // engages it (sso::enabled() false => LOCAL accounts only, byte-identical; every /api/sso/* route 404s).
 // Wired as its OWN module (minimal main.rs delta = this line + one route merge) so the rest of the console
-// does not depend on it. Behind the runtime flag FORGE_ENTERPRISE_SSO / enterprise.sso. See ADVANCED_MODULES.md.
+// does not depend on it. Behind the runtime flag FORGE_ADVANCED_SSO / enterprise.sso. See ADVANCED_MODULES.md.
 mod sso;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — SCIM 2.0 provisioning (automated user/group
 // provisioning from an IdP: Okta/Azure AD). The default build never engages it (scim::enabled() false => LOCAL accounts
 // only; every /scim/* + /api/scim/config route 404s). Wired as its OWN module (minimal main.rs delta =
 // this line + one route merge). Authenticated by a SCIM BEARER TOKEN (hashed at rest, constant-time), NOT
-// a session. Behind FORGE_ENTERPRISE_SCIM / enterprise.scim (or the SSO flag). See ADVANCED_MODULES.md.
+// a session. Behind FORGE_ADVANCED_SCIM / enterprise.scim (or the SSO flag). See ADVANCED_MODULES.md.
 mod scim;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — advanced RBAC: the CONFIGURABLE IdP-group ->
 // {role, tenant grant} mapping consulted by BOTH the SSO login (`groups` claim) and SCIM group membership.
@@ -147,7 +147,7 @@ mod rbac;
 // ADVANCED MODULE (separable, flag-gated, OFF by default) — E3 COMPLIANCE: WORM / retention / legal-hold
 // on the audit ledger + engagement data. The default build never engages it (compliance::enabled() OFF => every
 // /api/compliance/* route 404s, WORM/retention/hold inert, ledger + data byte-identical). A GOVERNED purge
-// (behind FORGE_ENTERPRISE_COMPLIANCE / enterprise.compliance) archives the expired ledger segment ENCRYPTED
+// (behind FORGE_ADVANCED_COMPLIANCE / enterprise.compliance) archives the expired ledger segment ENCRYPTED
 // (reusing the backup discipline) then re-anchors + emits a signed `console.compliance.purge` checkpoint so
 // the chain stays verifiable — NEVER a silent delete. Wired as its OWN module (this line + one route merge +
 // one SPA flag + a flag-gated delete guard). See ADVANCED_MODULES.md + forge/compliance_signer.py.
@@ -440,6 +440,15 @@ async fn main() {
     //   forge hashpw <password>           -> hash du viewer (FORGE_CONSOLE_PASS_HASH)
     //   forge hashpw-operator <password>  -> hash du rôle OPÉRATEUR C2 (FORGE_CONSOLE_OPERATOR_HASH)
     let args: Vec<String> = std::env::args().collect();
+    // NOMS RETIRÉS (`FORGE_ENTERPRISE_*`, renommés `FORGE_ADVANCED_*` sans alias) : refus AVANT le
+    // serveur ET avant les sous-commandes (la CLI lit aussi le choix du store : un ancien nom la ferait
+    // retomber en silence sur SQLite). Seules `--version` et l'aide, qui ne lisent rien, y échappent.
+    if !matches!(args.get(1).map(String::as_str), Some("--version" | "-V" | "--help" | "-h" | "help")) {
+        if let Err(msg) = flags::retired_env_gate_from_process() {
+            eprintln!("[forge] FATAL {msg}");
+            std::process::exit(2);
+        }
+    }
     // Dispatch CLI extrait dans `dispatch_cli` (PURE EXTRACTION, parité stricte) : `Some(code)` => une
     // sous-commande a tourné, on sort avec ce code ; `None` => aucune sous-commande, on enchaîne sur le
     // boot serveur. Mêmes sous-commandes, MÊMES codes de sortie, même ordre qu'avant.

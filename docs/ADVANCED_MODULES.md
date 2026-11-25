@@ -26,7 +26,7 @@ line of the security and audit machinery, and verify that the ledger, the scope-
 exactly what they claim. This transparency is the point: one cannot trust a red-team
 governance tool that one cannot read. (GuatX's commercial offer consists of **services** around
 the tool — reference engagements, purple coaching, support/SLA, managed hosting — never a
-licence on the code; see [`docs/PRICING.md`](PRICING.md).)
+licence on the code.)
 
 ---
 
@@ -79,7 +79,7 @@ build, every flag is OFF ⇒ the behaviour is byte-identical to the core** (all 
     **fail-closed tenant filter** (deny-by-default, modelled on the ROE) is applied on top of the existing
     engagement isolation + RBAC: a user of tenant A can **never** list, read, or act on
     the engagements / findings / runs / roe / ledger / coverage / reports of tenant B — no grant ⇒ zero
-    rows / 403. It is engaged only by the **`FORGE_ENTERPRISE_TENANCY=1`** flag (or the DB config key
+    rows / 403. It is engaged only by the **`FORGE_ADVANCED_TENANCY=1`** flag (or the DB config key
     `enterprise.tenancy=on`). **DEFAULT build: flag OFF ⇒ a single implicit tenant #1, all
     users access it, behaviour byte-identical** to before tenancy (all existing tests
     green). The module is separable — the core never depends on it.
@@ -112,7 +112,7 @@ build, every flag is OFF ⇒ the behaviour is byte-identical to the core** (all 
     **platform-admin**. The server remains the authority (fail-closed filter + `403` gates); UI gating is
     defence in depth.
 
-**How to enable.** Set the **`FORGE_ENTERPRISE_TENANCY=1`** flag (env) *or* the per-DB config key
+**How to enable.** Set the **`FORGE_ADVANCED_TENANCY=1`** flag (env) *or* the per-DB config key
 **`enterprise.tenancy=on`**; designate the platform operator(s) through **`FORGE_SUPERADMIN`** (env) or the
 provisioning key **`enterprise.superadmin`** (logins separated by comma/space — never a normal UI
 route). With the flag OFF (the **default**), Forge is a **single implicit tenant #1** where all
@@ -135,7 +135,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
     (403); the browser is only ever redirected to an **allowlisted** return target (mirrors the
     `oauth.flow` / `redirect.open` anti-open-redirect discipline); the `client_secret` and the ID/access tokens
     are **never logged, ledgered, or returned**; each login is ledgered `console.sso.login`
-    (actor + subject only). It is engaged only by **`FORGE_ENTERPRISE_SSO=1`** (or the DB config key
+    (actor + subject only). It is engaged only by **`FORGE_ADVANCED_SSO=1`** (or the DB config key
     `enterprise.sso=on`). **DEFAULT build: flag OFF ⇒ `/api/sso/*` is disabled (404) and LOCAL
     accounts behave byte-identically** to today (all existing tests green). The module
     is separable — `console/src/sso.rs` (+ a `mod sso;` line and a route merge in `main.rs`); the
@@ -154,7 +154,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
     (immediate revocation); group membership maps to a scoped role / tenant grant (tied to the advanced
     RBAC, bounded to viewer|operator). A **designated super-admin login is protected** — SCIM refuses to create /
     disable / delete it (403). Each mutation is ledgered `console.scim.*` (metadata only —
-    login / externalId / active / booleans, **never the token**). It is engaged only by **`FORGE_ENTERPRISE_SCIM=1`**
+    login / externalId / active / booleans, **never the token**). It is engaged only by **`FORGE_ADVANCED_SCIM=1`**
     (or the DB config key `enterprise.scim=on`, or the SSO flag). **DEFAULT build: flag OFF ⇒ `/scim/*` and
     `/api/scim/config` are disabled (404) and LOCAL accounts behave byte-identically** to
     today (all existing tests green). The module is separable — `console/src/scim.rs` (+ a
@@ -209,7 +209,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
   deletion). The **pluggable checkpoint signer** (`forge/compliance_signer.py`) keeps verification
   **byte-identical** to `signing.verify_with_pubkey` and exposes a **KMS/HSM seam** (`CallableComplianceSigner`)
   so that a hardware-anchored signer can plug in without changing the verification path. It is engaged
-  only by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or the DB config key `enterprise.compliance=on`). **DEFAULT
+  only by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config key `enterprise.compliance=on`). **DEFAULT
   build: flag OFF ⇒ every `/api/compliance/*` route is disabled (404), WORM/retention/hold are inert,
   and the ledger + engagement data are byte-identical** (all existing tests green). The module
   is separable — `console/src/compliance.rs` (+ a `mod compliance;` line, a route merge, an SPA flag,
@@ -219,7 +219,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
   remote signer endpoint, or a **no-shell `exec` helper** — so that the private key **never lands
   on disk**. Selected by config (`FORGE_LEDGER_SIGNER` = `local` | `kms` | `hsm` | `http` |
   `remote` | `exec`, plus `FORGE_LEDGER_SIGNER_{ENDPOINT,CREDENTIAL,PUBKEY,ARGV,TIMEOUT}`) and gated by
-  **`FORGE_ENTERPRISE_COMPLIANCE=1`**. A `RemoteSigner` produces a **standard Ed25519 signature over the
+  **`FORGE_ADVANCED_COMPLIANCE=1`**. A `RemoteSigner` produces a **standard Ed25519 signature over the
   same bytes**, so that **verification is UNCHANGED** — `Ledger.verify` /
   `Ledger.verify_external(pubkey)` / `signing.verify_with_pubkey` accept it with the **public key alone**,
   byte-identical whatever the signer. **Fail-closed & no fallback**: an unreachable/misconfigured/non-verifying
@@ -248,7 +248,7 @@ minimal `mod tenancy;` wiring in `main.rs`); the core never depends on it.
   that tenant) and **secret-redacted** end to end (passphrases / tokens / credentials / `client_secret` / private
   keys → `[REDACTED]`; **public keys are preserved**). The **act of exporting is itself ledgered**
   (`console.compliance.evidence.export` — actor, scope, format, ledger head, chain-ok). Engaged only
-  by **`FORGE_ENTERPRISE_COMPLIANCE=1`** (or the DB config `enterprise.compliance=on`); **default build
+  by **`FORGE_ADVANCED_COMPLIANCE=1`** (or the DB config `enterprise.compliance=on`); **default build
   (flag OFF) ⇒ the route returns 404 and nothing changes**.
 - **Compliance (going further)** — **KMS/HSM-backed keys** are now available both
   for the **audit ledger signer** (`forge/signing.py` `RemoteSigner`, above) and the **compliance
@@ -271,4 +271,4 @@ AGPL; the question is whether it is always-active core or a separable flag-gated
 
 The rule of thumb: **credibility (governance + crypto audit) is always active; scale/team/compliance
 is a switch you flip.** Nothing is ever paid or hidden — the commercial offer consists of
-**services**, not the code (see [`docs/PRICING.md`](PRICING.md)).
+**services**, not the code.

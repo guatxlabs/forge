@@ -220,5 +220,5 @@ La conclusion qui transforme la matrice en décision.
 
 ---
 
-*Voir aussi : [`docs/POSITIONING.md`](../../docs/POSITIONING.fr.md) · [`docs/PRICING.md`](../../docs/PRICING.fr.md) ·
+*Voir aussi : [`docs/POSITIONING.md`](../../docs/POSITIONING.fr.md) ·
 [`docs/PURPLE_PREREQS.md`](../../docs/PURPLE_PREREQS.fr.md) · [`docs/MTTD.md`](../../docs/MTTD.fr.md).*

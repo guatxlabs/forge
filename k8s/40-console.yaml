@@ -181,7 +181,7 @@ spec:
             # OPTION A (PREFERRED) — OFF-HOST PKCS#11 signer: the private key NEVER touches any pod
             # volume (lives on an HSM/token). Requires a store-postgres image built with the pkcs11
             # extra and a PKCS#11 provider `.so` reachable in the container. PIN is env-only (secret).
-            # - name: FORGE_ENTERPRISE_COMPLIANCE
+            # - name: FORGE_ADVANCED_COMPLIANCE
             #   value: "1"
             # - name: FORGE_LEDGER_SIGNER
             #   value: pkcs11
@@ -222,7 +222,7 @@ spec:
             #   value: /etc/forge/secrets/db_key
           envFrom:
             - configMapRef:
-                name: forge-config   # FORGE_HA, FORGE_ENTERPRISE_STORE, ADDR, HOST, blob endpoint, ...
+                name: forge-config   # FORGE_HA, FORGE_ADVANCED_STORE, ADDR, HOST, blob endpoint, ...
           volumeMounts:
             - name: db          # local SQLite fallback (unused under Postgres) — per-pod, NOT shared.
               mountPath: /data/db

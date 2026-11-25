@@ -305,7 +305,7 @@ def verify_entry(alg, signer, data: bytes, sig_hex: str) -> bool:
 # -----------------------------------------------------------------------------------------------------
 # SEPARABLE + FLAG-GATED: the COMMUNITY default is LOCAL (`make_signer` / LocalFileSigner) and is
 # BYTE-IDENTICAL — none of the below runs unless an operator explicitly selects a remote signer via
-# config/env AND the enterprise flag `FORGE_ENTERPRISE_COMPLIANCE` is engaged. VERIFY is UNCHANGED:
+# config/env AND the enterprise flag `FORGE_ADVANCED_COMPLIANCE` is engaged. VERIFY is UNCHANGED:
 # a RemoteSigner emits a STANDARD Ed25519 signature over the SAME bytes, so `verify` / `verify_external`
 # / `verify_with_pubkey` accept it with the PUBLIC KEY ALONE — no code path in the verifier changes.
 # FAIL-CLOSED: an unreachable/misconfigured remote signer RAISES; Forge NEVER falls back to an insecure
@@ -313,7 +313,46 @@ def verify_entry(alg, signer, data: bytes, sig_hex: str) -> bool:
 # =====================================================================================================
 
 # Enterprise engagement flag — MUST match console/src/compliance.rs::enabled (env source).
-ENTERPRISE_COMPLIANCE_FLAG = "FORGE_ENTERPRISE_COMPLIANCE"
+ENTERPRISE_COMPLIANCE_FLAG = "FORGE_ADVANCED_COMPLIANCE"
+
+# RETIRED NAMES — the advanced-module variables were called `FORGE_ENTERPRISE_<X>` and are now
+# `FORGE_ADVANCED_<X>`, WITHOUT an alias: the old name engages nothing. Ignoring it in silence would
+# switch a security module off for whoever upgrades without reading, so its mere PRESENCE is a refusal
+# (`refuse_retired_env_names`). Mirrors `console/src/flags.rs::retired_env_gate` (same list, same rule).
+RETIRED_ENV_PREFIX = "FORGE_ENTERPRISE_"
+RENAMED_ENV_SUFFIXES = ("STORE", "COMPLIANCE", "SSO", "TENANCY", "SCIM")
+
+
+class RetiredEnvNameError(RuntimeError):
+    """A retired `FORGE_ENTERPRISE_*` variable is present in the environment. Raised before anything is
+    built: Forge refuses to run rather than run with an advanced module silently off. The message names
+    each variable found and its new name; it never carries a value."""
+
+
+def retired_env_names_message(names):
+    """Refusal text for the retired names among `names` (any iterable of variable NAMES), or None when
+    there is none. Pure over its input — the tests drive it without touching `os.environ`."""
+    found = sorted(n for n in names if isinstance(n, str) and n.startswith(RETIRED_ENV_PREFIX))
+    if not found:
+        return None
+    parts = []
+    for name in found:
+        suffix = name[len(RETIRED_ENV_PREFIX):]
+        if suffix in RENAMED_ENV_SUFFIXES:
+            parts.append(f"{name} -> renommer en FORGE_ADVANCED_{suffix}")
+        else:
+            parts.append(f"{name} -> aucun successeur, la retirer")
+    return ("variable(s) d'environnement retirée(s) encore posée(s) : " + " ; ".join(parts)
+            + ". Les noms FORGE_ENTERPRISE_* ne sont plus lus (renommés FORGE_ADVANCED_*, sans alias) ; "
+            "démarrage refusé plutôt qu'un module avancé éteint en silence. Voir docs/UPGRADE.fr.md §7.")
+
+
+def refuse_retired_env_names(env=None) -> None:
+    """Raise `RetiredEnvNameError` if a retired `FORGE_ENTERPRISE_*` name is present in `env` (default
+    `os.environ`), whatever its value — an empty value is still an operator's intent."""
+    message = retired_env_names_message((os.environ if env is None else env).keys())
+    if message is not None:
+        raise RetiredEnvNameError(message)
 # Config/env keys for selecting + configuring the ledger signer.
 LEDGER_SIGNER_ENV = "FORGE_LEDGER_SIGNER"                      # local | kms | hsm | http | remote | exec | pkcs11
 _SIGNER_ENDPOINT_ENV = "FORGE_LEDGER_SIGNER_ENDPOINT"
@@ -582,12 +621,13 @@ def make_ledger_signer(base_path, prefer_ed25519=True, config=None, env=None) ->
 
     ENTERPRISE: mode 'kms'/'hsm'/'http'/'remote'/'exec'/'pkcs11' → a `RemoteSigner` (a `Pkcs11Signer` for
     'pkcs11'), selected by `config` (a settings dict) or by env (`FORGE_LEDGER_SIGNER` + `FORGE_LEDGER_SIGNER_*`
-    / `FORGE_LEDGER_PKCS11_*`). Gated by the enterprise flag `FORGE_ENTERPRISE_COMPLIANCE`. The 'pkcs11' driver
+    / `FORGE_LEDGER_PKCS11_*`). Gated by the enterprise flag `FORGE_ADVANCED_COMPLIANCE`. The 'pkcs11' driver
     (Ed25519/CKM_EDDSA, off-host key custody) is LAZY: `python-pkcs11` is only imported when it is selected.
 
     FAIL-CLOSED: a remote signer requested WITHOUT the enterprise flag is REFUSED (RemoteSignerError) — Forge
     never silently downgrades a remote-signer intent to the local key. The refusal message carries NO secret."""
     env = os.environ if env is None else env
+    refuse_retired_env_names(env)
     cfg = _resolve_signer_config(config, env)
     mode = str(cfg.get("mode", "local")).lower()
     if mode in ("local", "file", "localfile"):

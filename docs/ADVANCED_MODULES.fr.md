@@ -26,7 +26,7 @@ ligne de la machinerie de sécurité et d'audit, et vérifier que le ledger, le 
 exactement ce qu'ils affirment. Cette transparence est l'enjeu : on ne peut pas faire confiance à un outil de
 gouvernance red-team qu'on ne peut pas lire. (L'offre commerciale de GuatX, ce sont des **services** autour de
 l'outil — engagements de référence, accompagnement purple, support/SLA, hébergement managé — jamais une
-licence sur le code ; voir [`docs/PRICING.md`](PRICING.fr.md).)
+licence sur le code.)
 
 ---
 
@@ -79,7 +79,7 @@ défaut, chaque flag est OFF ⇒ le comportement est byte-identique au cœur** (
     **filtre de tenant fail-closed** (deny-by-default, calqué sur le ROE) est appliqué par-dessus l'isolation
     d'engagement + RBAC existante : un utilisateur du tenant A ne peut **jamais** lister, lire, ou agir sur
     les engagements / findings / runs / roe / ledger / coverage / reports du tenant B — pas de grant ⇒ zéro
-    ligne / 403. Il n'est engagé que par le flag **`FORGE_ENTERPRISE_TENANCY=1`** (ou la clé de config DB
+    ligne / 403. Il n'est engagé que par le flag **`FORGE_ADVANCED_TENANCY=1`** (ou la clé de config DB
     `enterprise.tenancy=on`). **Build par DÉFAUT : flag OFF ⇒ un unique tenant implicite #1, tous les
     utilisateurs y accèdent, comportement byte-identique** à l'avant-tenance (tous les tests existants
     verts). Le module est séparable — le cœur n'en dépend jamais.
@@ -112,7 +112,7 @@ défaut, chaque flag est OFF ⇒ le comportement est byte-identique au cœur** (
     **platform-admin**. Le serveur reste l'autorité (filtre fail-closed + gates `403`) ; le gating de l'UI est
     de la défense en profondeur.
 
-**Comment activer.** Poser le flag **`FORGE_ENTERPRISE_TENANCY=1`** (env) *ou* la clé de config par-DB
+**Comment activer.** Poser le flag **`FORGE_ADVANCED_TENANCY=1`** (env) *ou* la clé de config par-DB
 **`enterprise.tenancy=on`** ; désigner le(s) opérateur(s) de plateforme via **`FORGE_SUPERADMIN`** (env) ou la
 clé de provisioning **`enterprise.superadmin`** (logins séparés par virgule/espace — jamais une route UI
 normale). Avec le flag OFF (le **défaut**), Forge est un **unique tenant implicite #1** où tous les
@@ -135,7 +135,7 @@ câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
     (403) ; le navigateur n'est jamais redirigé que vers une cible de retour **allowlistée** (reflète la
     discipline anti-open-redirect `oauth.flow` / `redirect.open`) ; le `client_secret` et les tokens ID/access
     ne sont **jamais loggés, ledgerisés, ni renvoyés** ; chaque login est ledgerisé `console.sso.login`
-    (acteur + sujet seulement). Il n'est engagé que par **`FORGE_ENTERPRISE_SSO=1`** (ou la clé de config DB
+    (acteur + sujet seulement). Il n'est engagé que par **`FORGE_ADVANCED_SSO=1`** (ou la clé de config DB
     `enterprise.sso=on`). **Build par DÉFAUT : flag OFF ⇒ `/api/sso/*` est désactivé (404) et les comptes
     LOCAUX se comportent de façon byte-identique** à aujourd'hui (tous les tests existants verts). Le module
     est séparable — `console/src/sso.rs` (+ une ligne `mod sso;` et un merge de route dans `main.rs`) ; le
@@ -154,7 +154,7 @@ câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
     (révocation immédiate) ; l'appartenance à un groupe mappe vers un rôle scopé / tenant-grant (lié au RBAC
     avancé, borné à viewer|operator). Un **login super-admin désigné est protégé** — SCIM refuse de le créer /
     désactiver / supprimer (403). Chaque mutation est ledgerisée `console.scim.*` (métadonnées seulement —
-    login / externalId / active / booléens, **jamais le token**). Il n'est engagé que par **`FORGE_ENTERPRISE_SCIM=1`**
+    login / externalId / active / booléens, **jamais le token**). Il n'est engagé que par **`FORGE_ADVANCED_SCIM=1`**
     (ou la clé de config DB `enterprise.scim=on`, ou le flag SSO). **Build par DÉFAUT : flag OFF ⇒ `/scim/*` et
     `/api/scim/config` sont désactivés (404) et les comptes LOCAUX se comportent de façon byte-identique** à
     aujourd'hui (tous les tests existants verts). Le module est séparable — `console/src/scim.rs` (+ une ligne
@@ -209,7 +209,7 @@ câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
   irrécupérable). Le **signeur de checkpoint pluggable** (`forge/compliance_signer.py`) garde la **vérification
   byte-identique** à `signing.verify_with_pubkey` et expose un **seam KMS/HSM** (`CallableComplianceSigner`)
   pour qu'un signeur ancré matériellement se branche sans changer le chemin de vérification. Il n'est engagé
-  que par **`FORGE_ENTERPRISE_COMPLIANCE=1`** (ou la clé de config DB `enterprise.compliance=on`). **Build par
+  que par **`FORGE_ADVANCED_COMPLIANCE=1`** (ou la clé de config DB `enterprise.compliance=on`). **Build par
   DÉFAUT : flag OFF ⇒ chaque route `/api/compliance/*` est désactivée (404), WORM/rétention/hold sont inertes,
   et le ledger + les données d'engagement sont byte-identiques** (tous les tests existants verts). Le module
   est séparable — `console/src/compliance.rs` (+ une ligne `mod compliance;`, un merge de route, un flag SPA,
@@ -219,7 +219,7 @@ câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
   endpoint de signeur distant, ou un **helper `exec` no-shell** — de sorte que la clé privée **n'atterrit
   jamais sur disque**. Sélectionné par config (`FORGE_LEDGER_SIGNER` = `local` | `kms` | `hsm` | `http` |
   `remote` | `exec`, plus `FORGE_LEDGER_SIGNER_{ENDPOINT,CREDENTIAL,PUBKEY,ARGV,TIMEOUT}`) et gaté par
-  **`FORGE_ENTERPRISE_COMPLIANCE=1`**. Un `RemoteSigner` produit une **signature Ed25519 standard sur les
+  **`FORGE_ADVANCED_COMPLIANCE=1`**. Un `RemoteSigner` produit une **signature Ed25519 standard sur les
   mêmes octets**, de sorte que **la vérification est INCHANGÉE** — `Ledger.verify` /
   `Ledger.verify_external(pubkey)` / `signing.verify_with_pubkey` l'acceptent avec la **seule clé publique**,
   byte-identique quel que soit le signataire. **Fail-closed & sans repli** : un signeur distant
@@ -248,7 +248,7 @@ câblage minimal `mod tenancy;` dans `main.rs`) ; le cœur n'en dépend jamais.
   ce tenant) et **secret-rédigé** de bout en bout (passphrases / tokens / credentials / `client_secret` / clés
   privées → `[REDACTED]` ; **les clés publiques sont préservées**). L'**acte d'exporter est lui-même ledgerisé**
   (`console.compliance.evidence.export` — acteur, scope, format, head du ledger, chain-ok). Engagé uniquement
-  par **`FORGE_ENTERPRISE_COMPLIANCE=1`** (ou la config DB `enterprise.compliance=on`) ; **build par défaut
+  par **`FORGE_ADVANCED_COMPLIANCE=1`** (ou la config DB `enterprise.compliance=on`) ; **build par défaut
   (flag OFF) ⇒ la route renvoie 404 et rien ne change**.
 - **Conformité (pour aller plus loin)** — les **clés adossées à un KMS/HSM** sont désormais disponibles à la
   fois pour le **signeur de ledger d'audit** (`forge/signing.py` `RemoteSigner`, ci-dessus) et le **signeur de
@@ -271,4 +271,4 @@ AGPL ; la question est de savoir si c'est du cœur toujours-actif ou un module s
 
 La règle de pouce : **la crédibilité (gouvernance + audit crypto) est toujours active ; l'échelle/équipe/conformité
 est un interrupteur qu'on bascule.** Rien n'est jamais payant ni caché — l'offre commerciale, ce sont des
-**services**, pas le code (voir [`docs/PRICING.md`](PRICING.fr.md)).
+**services**, pas le code.

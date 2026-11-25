@@ -309,7 +309,7 @@ avec des **obligations** à respecter (voir ci-dessous et [`LICENSE`](LICENSE)).
 crédibilité du produit. Les capacités d'échelle/équipe/conformité sont des **modules séparables**, open et
 flag-gated. Détail : **[`ADVANCED_MODULES.md`](docs/ADVANCED_MODULES.fr.md)**. L'offre commerciale de GuatX porte
 sur des **prestations de service** (engagements, accompagnement purple, support/SLA, hébergement managé),
-jamais sur une licence du code — cf. **[`docs/PRICING.md`](docs/PRICING.fr.md)**.
+jamais sur une licence du code.
 
 > **Usage autorisé / éthique uniquement.** La licence AGPL couvre le *code* ; elle n'autorise **aucune**
 > action offensive hors d'un périmètre explicitement autorisé (bug bounty in-scope, pentest sous contrat,

@@ -220,5 +220,5 @@ The conclusion that turns the matrix into a decision.
 
 ---
 
-*See also: [`docs/POSITIONING.md`](../../docs/POSITIONING.md) · [`docs/PRICING.md`](../../docs/PRICING.md) ·
+*See also: [`docs/POSITIONING.md`](../../docs/POSITIONING.md) ·
 [`docs/PURPLE_PREREQS.md`](../../docs/PURPLE_PREREQS.md) · [`docs/MTTD.md`](../../docs/MTTD.md).*

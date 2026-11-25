@@ -68,7 +68,7 @@ Arrêt : `docker compose down` (volumes persistent ; `down -v` pour tout effacer
 
 ## Alternatives
 - **Host natif** : `cd console && cargo build --release && ./target/release/forge` (puis wizard dans le navigateur).
-- **Postgres (équipe)** : `--profile postgres` + `FORGE_ENTERPRISE_STORE=postgres` (voir `docs/DEPLOYMENT.md §3bis`).
+- **Postgres (équipe)** : `--profile postgres` + `FORGE_ADVANCED_STORE=postgres` (voir `docs/DEPLOYMENT.md §3bis`).
 - **HA / k3s** : `kubectl apply -k k8s/` (voir `docs/DEPLOYMENT.md §3bis.6`, `docs/UPGRADE.md`, `docs/KEY_CUSTODY.md`).
 
 ## Règle d'or

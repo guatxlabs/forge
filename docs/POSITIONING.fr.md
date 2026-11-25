@@ -2,7 +2,7 @@
 
 [English](POSITIONING.md) | [Français](POSITIONING.fr.md)
 
-> 🧭 [Documentation Forge](README.fr.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.fr.md) · [Pricing](PRICING.fr.md) · [Plan](PLAN.fr.md)
+> 🧭 [Documentation Forge](README.fr.md) · Voir aussi : [Vue d'ensemble](OVERVIEW.fr.md) · [Plan](PLAN.fr.md)
 
 > **Slogan**
 > *« Forge n'est pas un remplaçant de Metasploit — c'est la couche **gouvernance + preuve + mesure
@@ -164,5 +164,5 @@ C'est là, pas sur « une UI par-dessus des outils » ni sur « faire du BAS »,
 
 ---
 
-*Voir aussi : [`PRICING.md`](PRICING.fr.md) · [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.fr.md) ·
+*Voir aussi : [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.fr.md) ·
 [`PLAN.md`](PLAN.fr.md) (roadmap) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.fr.md) (câblage Plume).*

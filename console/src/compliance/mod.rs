@@ -70,14 +70,14 @@ const PURGE_KIND: &str = "console.compliance.purge";
 
 // ============================================================================================
 // FLAG — is enterprise COMPLIANCE ENGAGED? Community default = OFF (every /api/compliance/* route 404s).
-// Two sources (either engages it): env `FORGE_ENTERPRISE_COMPLIANCE` (truthy) OR the per-DB config key
+// Two sources (either engages it): env `FORGE_ADVANCED_COMPLIANCE` (truthy) OR the per-DB config key
 // `enterprise.compliance` (on|1|true|yes). Config is per-DB so tests toggle it in isolation. Mirrors sso/scim.
 // ============================================================================================
 
 /// Is enterprise COMPLIANCE engaged?  false => community (every `/api/compliance/*` route 404s, ledger/data
 /// byte-identical, WORM/retention/hold inert).
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_COMPLIANCE", "enterprise.compliance")
+    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_COMPLIANCE", "enterprise.compliance")
 }
 
 // ============================================================================================
@@ -142,7 +142,7 @@ fn redacted_ledger_signer() -> Value {
     json!({
         "mode": mode,
         "off_host": off_host,
-        "enterprise_flag": crate::flags::env_truthy("FORGE_ENTERPRISE_COMPLIANCE"),
+        "enterprise_flag": crate::flags::env_truthy("FORGE_ADVANCED_COMPLIANCE"),
         "pubkey": pubkey,
         "endpoint": if endpoint_set { "***REDACTED***" } else { "" },
         "endpoint_set": endpoint_set,

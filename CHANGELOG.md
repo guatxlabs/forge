@@ -11,6 +11,14 @@ All notable changes to Forge are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed (breaking) — `FORGE_ENTERPRISE_*` variables renamed `FORGE_ADVANCED_*`, without an alias
+
+`FORGE_ENTERPRISE_STORE`, `_COMPLIANCE`, `_SSO`, `_TENANCY` and `_SCIM` become `FORGE_ADVANCED_STORE`,
+`_COMPLIANCE`, `_SSO`, `_TENANCY` and `_SCIM`. The old name engages nothing; its mere presence makes the
+console refuse to start (exit 2, message naming the variable and its new name), and the Python engine refuse
+to build the ledger signer — a security module never switches off in silence. Table and refusal text:
+[UPGRADE §7](docs/UPGRADE.md#7-renamed-variables-forge_enterprise_--forge_advanced_).
+
 ### Changed — the console builds against `guatx-core` v0.2.6 (was v0.2.2)
 
 The query compiler shared with Plume now refuses forms it used to drop or misread without a word.

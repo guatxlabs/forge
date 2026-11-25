@@ -222,13 +222,13 @@ pub(crate) async fn serve() {
     migrate(&conn); // ALTER additifs error-ignored (run_id, fix, panel étendu, run_job C2, dashboard_id)
 
     // ENTERPRISE STORE (Postgres) — CÂBLÉ (Stage 2b batch 5). La gate décide le backend ACTIF depuis
-    // FORGE_ENTERPRISE_STORE + FORGE_DB_URL : Postgres UNIQUEMENT si la feature `store-postgres` est
+    // FORGE_ADVANCED_STORE + FORGE_DB_URL : Postgres UNIQUEMENT si la feature `store-postgres` est
     // compilée ET FORGE_DB_URL est posé (sinon erreur claire) ; tout autre cas => SQLite (défaut
     // community inchangé/byte-identique). Le split-brain d'antan n'existe plus : quand PG est actif,
     // TOUT le DML + l'amorçage boot passent par `app.store()` (routé sur le client PG) et le DDL boot
     // applique PG_SCHEMA au lieu de SCHEMA+migrate (cf. bloc AMORÇAGE plus bas). La connexion SQLite
     // ouverte ci-dessus reste le repli du seam (`App.db`), non utilisée quand `App.pg` est `Some`.
-    let requested_store = std::env::var("FORGE_ENTERPRISE_STORE").ok();
+    let requested_store = std::env::var("FORGE_ADVANCED_STORE").ok();
     let db_url_env = std::env::var("FORGE_DB_URL").ok();
     let store_selection = match enterprise_store_gate(requested_store.as_deref(), db_url_env.as_deref()) {
         Ok(sel) => sel,
@@ -289,7 +289,7 @@ pub(crate) async fn serve() {
     let (ha, instance_id) = {
         let want_ha = flags::env_truthy("FORGE_HA");
         if want_ha && pg.is_none() {
-            eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite");
+            eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ADVANCED_STORE=postgres — HA is unsafe on SQLite");
             std::process::exit(2);
         }
         let iid = std::env::var("FORGE_INSTANCE_ID")
@@ -303,7 +303,7 @@ pub(crate) async fn serve() {
     // it, FAIL CLOSED with the same guidance rather than silently running a single unsynchronised instance.
     #[cfg(not(feature = "store-postgres"))]
     if flags::env_truthy("FORGE_HA") {
-        eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ENTERPRISE_STORE=postgres — HA is unsafe on SQLite (this binary has no Postgres backend; rebuild with --features store-postgres)");
+        eprintln!("[forge] FATAL FORGE_HA=1 requires FORGE_ADVANCED_STORE=postgres — HA is unsafe on SQLite (this binary has no Postgres backend; rebuild with --features store-postgres)");
         std::process::exit(2);
     }
 
@@ -637,7 +637,7 @@ pub(crate) enum StoreSelection {
 }
 
 /// Enterprise store-selection gate (Stage 2b batch 5). Decides — from the runtime values of
-/// `FORGE_ENTERPRISE_STORE` (`requested`) and `FORGE_DB_URL` (`db_url`) — which backend the console
+/// `FORGE_ADVANCED_STORE` (`requested`) and `FORGE_DB_URL` (`db_url`) — which backend the console
 /// boots on, FAIL-CLOSED:
 ///   - `requested == Some("postgres")` WITH the `store-postgres` feature compiled: `Ok(Postgres(url))`
 ///     IFF `FORGE_DB_URL` is set to a non-empty DSN; otherwise `Err` (clear "requires FORGE_DB_URL").
@@ -652,7 +652,7 @@ pub(crate) fn enterprise_store_gate(requested: Option<&str>, db_url: Option<&str
         {
             return match db_url {
                 Some(u) if !u.is_empty() => Ok(StoreSelection::Postgres(u.to_string())),
-                _ => Err("FORGE_ENTERPRISE_STORE=postgres requires FORGE_DB_URL to be set to a \
+                _ => Err("FORGE_ADVANCED_STORE=postgres requires FORGE_DB_URL to be set to a \
                           postgres:// DSN; refusing to start without it."
                     .to_string()),
             };
@@ -660,7 +660,7 @@ pub(crate) fn enterprise_store_gate(requested: Option<&str>, db_url: Option<&str
         #[cfg(not(feature = "store-postgres"))]
         {
             let _ = db_url; // unused in the community build
-            return Err("FORGE_ENTERPRISE_STORE=postgres requires a binary built with the \
+            return Err("FORGE_ADVANCED_STORE=postgres requires a binary built with the \
                         store-postgres feature; rebuild with --features store-postgres."
                 .to_string());
         }

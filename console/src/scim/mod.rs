@@ -66,7 +66,7 @@ const SCHEMA_ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 
 // ============================================================================================
 // FLAG — is enterprise SCIM ENGAGED? Community default = OFF (every /scim/* route 404s, local unchanged).
-// Sources (ANY engages it): env `FORGE_ENTERPRISE_SCIM` (truthy) OR the per-DB key `enterprise.scim`
+// Sources (ANY engages it): env `FORGE_ADVANCED_SCIM` (truthy) OR the per-DB key `enterprise.scim`
 // (on|1|true|yes) OR the enterprise-SSO flag (`sso::enabled` — SCIM ships with the same identity bundle).
 // Config is per-DB so tests toggle it in isolation. Mirrors sso/tenancy.
 // ============================================================================================
@@ -75,7 +75,7 @@ const SCHEMA_ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 pub fn enabled(app: &App) -> bool {
     // Own env flag OR per-DB config (shared substrate), OR — SCIM ships in the enterprise-identity
     // bundle — the SSO flag engages it too (single toggle). Same short-circuit order as before.
-    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_SCIM", "enterprise.scim")
+    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_SCIM", "enterprise.scim")
         || crate::sso::enabled(app)
 }
 

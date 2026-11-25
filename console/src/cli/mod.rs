@@ -80,7 +80,7 @@ pub(crate) fn cli_flag(args: &[String], name: &str) -> bool {
 // =====================================================================================
 // ROUTAGE POSTGRES DES SOUS-COMMANDES CLI (Stage 2b) — les sous-commandes CLI ouvrent leur PROPRE
 // connexion (elles court-circuitent l'App, qui n'existe pas hors du chemin HTTP). Quand le backend
-// enterprise Postgres est sélectionné (FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL) ET que la
+// enterprise Postgres est sélectionné (FORGE_ADVANCED_STORE=postgres + FORGE_DB_URL) ET que la
 // feature `store-postgres` est compilée, elles se connectent à Postgres et exécutent leur DML/DDL À
 // TRAVERS LE SEAM (`Store::postgres`), pour que `forge useradd`/`seed-demo`/lectures marchent
 // sur un déploiement PG — la gate de démarrage fail-closée ne bloque QUE le serveur, pas le
@@ -88,15 +88,15 @@ pub(crate) fn cli_flag(args: &[String], name: &str) -> bool {
 // compilés) : SQLite EXACTEMENT comme avant (byte-identique). Tout ce bloc PG est gardé par la feature.
 // =====================================================================================
 
-/// URL Postgres si la CLI doit cibler PG : `FORGE_ENTERPRISE_STORE=postgres` + `FORGE_DB_URL` non vide.
+/// URL Postgres si la CLI doit cibler PG : `FORGE_ADVANCED_STORE=postgres` + `FORGE_DB_URL` non vide.
 /// `None` => SQLite. En community (feature absente) cette fonction n'existe pas : les sites d'appel
 /// sont eux aussi gardés `#[cfg(feature = "store-postgres")]`, donc le build par défaut est inchangé.
 #[cfg(feature = "store-postgres")]
 pub(crate) fn cli_pg_url() -> Option<String> {
-    if std::env::var("FORGE_ENTERPRISE_STORE").as_deref() == Ok("postgres") {
+    if std::env::var("FORGE_ADVANCED_STORE").as_deref() == Ok("postgres") {
         match std::env::var("FORGE_DB_URL") {
             Ok(u) if !u.is_empty() => return Some(u),
-            _ => eprintln!("[forge] FORGE_ENTERPRISE_STORE=postgres mais FORGE_DB_URL absent/vide — repli SQLite"),
+            _ => eprintln!("[forge] FORGE_ADVANCED_STORE=postgres mais FORGE_DB_URL absent/vide — repli SQLite"),
         }
     }
     None

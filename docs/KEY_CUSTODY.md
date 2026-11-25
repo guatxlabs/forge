@@ -62,7 +62,7 @@ pip install 'forge[pkcs11]'      # pulls python-pkcs11; the default install does
 
 | Env variable | Meaning |
 |---|---|
-| `FORGE_ENTERPRISE_COMPLIANCE=1` | **Required** — engages the off-host signer seam of the compliance module (gate) |
+| `FORGE_ADVANCED_COMPLIANCE=1` | **Required** — engages the off-host signer seam of the compliance module (gate) |
 | `FORGE_LEDGER_SIGNER=pkcs11` | selects this driver |
 | `FORGE_LEDGER_PKCS11_MODULE` | path to the PKCS#11 provider `.so` (e.g. `libsofthsm2.so`) — **required** |
 | `FORGE_LEDGER_PKCS11_TOKEN_LABEL` | token label (or use `…_SLOT`) |
@@ -98,7 +98,7 @@ pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --login --pin 1234 \
     --keypairgen --key-type EC:edwards25519 --label forge-ledger
 
 # 5. point Forge at it
-export FORGE_ENTERPRISE_COMPLIANCE=1
+export FORGE_ADVANCED_COMPLIANCE=1
 export FORGE_LEDGER_SIGNER=pkcs11
 export FORGE_LEDGER_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
 export FORGE_LEDGER_PKCS11_TOKEN_LABEL=forge-test
@@ -182,7 +182,7 @@ gcloud kms asymmetric-sign \
 **4 — wire the exec signer** (the argv is a JSON array — the helper path plus its fixed arguments):
 
 ```bash
-export FORGE_ENTERPRISE_COMPLIANCE=1
+export FORGE_ADVANCED_COMPLIANCE=1
 export FORGE_LEDGER_SIGNER=exec
 export FORGE_LEDGER_SIGNER_PUBKEY=<64-hex from step 2>
 export FORGE_LEDGER_SIGNER_ARGV='["/opt/forge/gcp-kms-ed25519-sign.sh","global","forge","ledger","1"]'
@@ -218,7 +218,7 @@ placeholder in `k8s/10-secrets.example.yaml`, EVAL-ONLY, applied explicitly):
 
 ```yaml
 env:
-  - name: FORGE_ENTERPRISE_COMPLIANCE
+  - name: FORGE_ADVANCED_COMPLIANCE
     value: "1"
   - name: FORGE_LEDGER_SIGNER
     value: pkcs11

@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS login_throttle(
 // PÉRIMÈTRE : ce miroir couvre le SCHEMA de base state.rs (+ migrate). Les tables des modules ENTERPRISE
 // créées paresseusement (scim_*, sso_*, idp_group_map…) restent gérées par leurs modules (flag-gated) —
 // hors de ce const, comme elles sont hors du `SCHEMA` de base.
-// CÂBLÉ AU BOOT (Stage 2b batch 5) : quand le backend ACTIF est Postgres (FORGE_ENTERPRISE_STORE=
+// CÂBLÉ AU BOOT (Stage 2b batch 5) : quand le backend ACTIF est Postgres (FORGE_ADVANCED_STORE=
 // postgres + FORGE_DB_URL + feature compilée), le démarrage applique PG_SCHEMA via `app.store()` À LA
 // PLACE de `execute_batch(SCHEMA)+migrate()` (qui restent la branche SQLite, sur la connexion de repli).
 // Référencé aussi par les sous-commandes CLI PG (`useradd`/`seed-demo`) et les tests d'intégration

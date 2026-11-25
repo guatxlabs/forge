@@ -148,5 +148,5 @@ The conclusion that turns the matrix into a purchasing decision.
 
 ---
 
-*See also: [`POSITIONING.md`](POSITIONING.md) · [`PRICING.md`](PRICING.md) (the §3+§7 deliverable
-carries the value of the purple support service) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (Plume prerequisites for §3).*
+*See also: [`POSITIONING.md`](POSITIONING.md) ·
+[`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (Plume prerequisites for §3).*

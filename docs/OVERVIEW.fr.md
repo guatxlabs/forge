@@ -44,7 +44,7 @@ Forge n'essaie **pas** de battre Metasploit ou Cobalt Strike sur la capacité of
 mais leur combinaison : *rouge + bleu, même éditeur, corrélés ATT&CK, autorisation signée*.
 
 Le positionnement complet est dans [`POSITIONING.md`](POSITIONING.fr.md) ; le produit est **gratuit et
-open source**, et la logique de tarification des **prestations** est dans [`PRICING.md`](PRICING.fr.md).
+open source**.
 
 ## La proposition de valeur en trois piliers
 

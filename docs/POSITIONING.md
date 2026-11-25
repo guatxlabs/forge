@@ -2,7 +2,7 @@
 
 [English](POSITIONING.md) | [Français](POSITIONING.fr.md)
 
-> 🧭 [Forge documentation](README.md) · See also: [Overview](OVERVIEW.md) · [Pricing](PRICING.md) · [Plan](PLAN.md)
+> 🧭 [Forge documentation](README.md) · See also: [Overview](OVERVIEW.md) · [Plan](PLAN.md)
 
 > **Tagline**
 > *"Forge is not a Metasploit replacement — it is the **governance + evidence + purple
@@ -164,5 +164,5 @@ That is where the moat is played, not on "a UI on top of tools" nor on "doing BA
 
 ---
 
-*See also: [`PRICING.md`](PRICING.md) · [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md) ·
+*See also: [`REFERENCE_ENGAGEMENT_TEMPLATE.md`](REFERENCE_ENGAGEMENT_TEMPLATE.md) ·
 [`PLAN.md`](PLAN.md) (roadmap) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.md) (Plume wiring).*

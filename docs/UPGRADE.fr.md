@@ -249,3 +249,33 @@ Les snapshots `pre-upgrade-*` écrits par `upgrade` sont des archives de backup 
 > Vérif de **signature** du ledger (Ed25519/HMAC) et anti-**troncature** (high-water-mark) restent du
 > ressort du moteur `forge ledger verify --pubkey` (Python) + de l'ancrage hors-host ; `upgrade`
 > re-vérifie le **hash-chaining** (même algo que `/api/ledger/verify`). Voir [`KEY_CUSTODY.md`](KEY_CUSTODY.fr.md).
+
+---
+
+## 7. Variables renommées : `FORGE_ENTERPRISE_*` → `FORGE_ADVANCED_*`
+
+Forge n'a pas d'édition payante : les variables qui engagent les modules avancés portent le nom `FORGE_ADVANCED_*`.
+Le renommage est fait **sans alias** — l'ancien nom n'active plus rien.
+
+| Ancien nom (retiré) | Nouveau nom |
+|---|---|
+| `FORGE_ENTERPRISE_STORE` | `FORGE_ADVANCED_STORE` |
+| `FORGE_ENTERPRISE_COMPLIANCE` | `FORGE_ADVANCED_COMPLIANCE` |
+| `FORGE_ENTERPRISE_SSO` | `FORGE_ADVANCED_SSO` |
+| `FORGE_ENTERPRISE_TENANCY` | `FORGE_ADVANCED_TENANCY` |
+| `FORGE_ENTERPRISE_SCIM` | `FORGE_ADVANCED_SCIM` |
+
+**Refus au démarrage.** Ignorer un ancien nom en silence éteindrait le cloisonnement des locataires, le SSO ou
+la conformité chez qui met à jour sans lire cette note. Une variable `FORGE_ENTERPRISE_*` simplement **présente**
+(quelle que soit sa valeur, même vide) fait donc refuser le démarrage de la console — le serveur et toutes les
+sous-commandes sauf `--version` et `--help` — avec le code de sortie 2 et un message qui nomme chaque variable
+trouvée et son nouveau nom :
+
+```text
+[forge] FATAL retired environment variable(s) still set: FORGE_ENTERPRISE_SSO -> rename it to FORGE_ADVANCED_SSO. The FORGE_ENTERPRISE_* names are no longer read (renamed FORGE_ADVANCED_*, no alias); refusing to start rather than run with an advanced module silently off. See docs/UPGRADE.md §7.
+```
+
+Le moteur Python applique la même règle quand il construit le signeur du ledger (`RetiredEnvNameError`). Les
+clés de configuration par base (`enterprise.sso`, `enterprise.tenancy`, `enterprise.compliance`,
+`enterprise.scim`) ne changent pas. Pour mettre à jour : renommer les variables dans le `.env`, le fichier
+compose, la ConfigMap ou le Deployment, puis redémarrer.

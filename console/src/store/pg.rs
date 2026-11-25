@@ -18,11 +18,11 @@ use super::*;
 // ⚠️ NOT WIRED INTO APP STARTUP YET (Stage 2b pending). This backend is INTEGRATION-TESTED (the
 // `pg_tests` module below constructs a `Store::postgres(..)` DIRECTLY against a real Postgres,
 // bypassing app startup, so it fully validates the backend) but the running console NEVER selects it:
-// `main.rs::enterprise_store_gate` FAILS CLOSED (refuses to start) when `FORGE_ENTERPRISE_STORE=
+// `main.rs::enterprise_store_gate` FAILS CLOSED (refuses to start) when `FORGE_ADVANCED_STORE=
 // postgres`, and `App.pg` is always `None`, so `App::store()` always resolves to SQLite. This is
 // deliberate: routing `store()` to Postgres while the >100 raw `db()` call sites and ALL boot seeding
 // (`populate_modules` / `ensure_default_*`) still write to SQLite would SPLIT the database. Stage 2b
-// MUST route ALL DML + boot seeding through the active backend BEFORE `FORGE_ENTERPRISE_STORE=postgres`
+// MUST route ALL DML + boot seeding through the active backend BEFORE `FORGE_ADVANCED_STORE=postgres`
 // can be enabled; only then may the startup gate and the `App.pg` wiring be re-activated.
 // ================================================================================================
 

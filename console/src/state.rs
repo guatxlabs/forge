@@ -252,7 +252,7 @@ pub(crate) struct App {
     // concurrents tombent sur des slots DIFFÉRENTS -> pas de sérialisation sur un unique client. L'id
     // d'insertion ne dépend plus de la session (`execute_returning_id` -> `RETURNING id` en UN
     // statement), donc n'importe quel client poolé est correct. `Some` UNIQUEMENT si
-    // FORGE_ENTERPRISE_STORE=postgres + FORGE_DB_URL et feature compilée ; sinon `None` -> `store()`
+    // FORGE_ADVANCED_STORE=postgres + FORGE_DB_URL et feature compilée ; sinon `None` -> `store()`
     // retombe sur SQLite (build community inchangé). Le champ n'existe QUE sous la feature (struct
     // byte-identique quand OFF). Stage 4 HA : `PgPool` bundle les clients + le DSN (`url`) pour RE-ÉTABLIR
     // un client cassé dans son slot après une coupure — cf. `Store::postgres_reconnectable` /

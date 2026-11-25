@@ -148,5 +148,5 @@ La conclusion qui transforme la matrice en décision d'achat.
 
 ---
 
-*Voir aussi : [`POSITIONING.md`](POSITIONING.fr.md) · [`PRICING.md`](PRICING.fr.md) (le livrable de §3+§7
-porte la valeur de l'accompagnement purple) · [`PURPLE_PREREQS.md`](PURPLE_PREREQS.fr.md) (prérequis Plume pour §3).*
+*Voir aussi : [`POSITIONING.md`](POSITIONING.fr.md) ·
+[`PURPLE_PREREQS.md`](PURPLE_PREREQS.fr.md) (prérequis Plume pour §3).*

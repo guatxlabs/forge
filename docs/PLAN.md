@@ -62,7 +62,7 @@ Wire `PLUME_URL` → Plume prod (read-only JOIN) + 1st real purple campaign on a
 
 ### Step 4 — GTM
 
-- Positioning page + pricing of services (value of purple coaching vs MSF Pro ~15k$/seat for raw capability; the product itself is free/open).
+- Positioning page (value of purple coaching vs MSF Pro ~15k$/seat for raw capability; the product itself is free/open).
 - 1 reference engagement write-up.
 
 ## Status of the 6 blockers

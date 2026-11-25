@@ -34,6 +34,7 @@ from pathlib import Path
 from .. import __version__
 from ..roe import Scope, Action
 from ..ledger import Ledger
+from ..signing import RetiredEnvNameError
 from ..engine import Engine
 from .. import modules as mods
 from .. import techniques
@@ -395,7 +396,13 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except RetiredEnvNameError as e:
+        # Refus d'un nom `FORGE_ENTERPRISE_*` retiré (cf. forge/signing.py) : une erreur de configuration
+        # de l'opérateur, pas un défaut du programme — le seul message, sans trace de pile, et un code non nul.
+        print(f"forge: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

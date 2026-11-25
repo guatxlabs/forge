@@ -5,8 +5,10 @@ forge est entièrement open source : il n'a ni édition « community » ni édit
 messages servis à l'opérateur (refus d'API, erreur de migration, refus du signeur, vue de la console,
 journal de build, sortie d'une garde) parlaient encore ainsi. Chaque texte est tenu ici par un témoin.
 
-Ce qui NE change PAS, à dessein : les identifiants (`FORGE_ENTERPRISE_*`, `enterprise.*`, le code
-d'erreur `enterprise_disabled`, les noms de champs) — leur renommage touche la configuration des
+Les variables d'environnement des modules avancés s'appellent `FORGE_ADVANCED_*`, sans alias : un
+ancien nom encore posé fait refuser le démarrage (témoins dans `test_renamed_advanced_env.py`). Ce
+qui NE change PAS, à dessein : les autres identifiants (`enterprise.*`, le code d'erreur
+`enterprise_disabled`, les noms de champs) — leur renommage touche la configuration des
 installations et attend sa propre décision. Le texte du refus de l'API de tenancy est aussi tenu
 par le test Rust `tenant_crud_gated_and_ledgered`, sur la réponse réellement servie.
 """

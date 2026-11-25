@@ -56,10 +56,10 @@ pub const NO_ENGAGEMENT: i64 = -1;
 pub const DEFAULT_TENANT: i64 = 1;
 
 /// Is enterprise row-level tenancy ENGAGED?  Community default = OFF (byte-identical single-tenant).
-/// Two sources (either engages it): the deployment env flag `FORGE_ENTERPRISE_TENANCY` (truthy), or the
+/// Two sources (either engages it): the deployment env flag `FORGE_ADVANCED_TENANCY` (truthy), or the
 /// DB config key `enterprise.tenancy` (on|1|true|yes). Config is per-DB, so tests toggle it in isolation.
 pub fn enabled(app: &App) -> bool {
-    crate::flags::enterprise_enabled(app, "FORGE_ENTERPRISE_TENANCY", "enterprise.tenancy")
+    crate::flags::enterprise_enabled(app, "FORGE_ADVANCED_TENANCY", "enterprise.tenancy")
 }
 
 /// user_id of the caller's INDIVIDUAL session (non-expired, enabled account) — or None.

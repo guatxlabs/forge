@@ -239,7 +239,7 @@ class TestFlagGating(unittest.TestCase):
             "FORGE_LEDGER_SIGNER_ENDPOINT": "https://kms.example.internal/sign",
             "FORGE_LEDGER_SIGNER_CREDENTIAL": "SECRET",
             "FORGE_LEDGER_SIGNER_PUBKEY": "ab" * 32,
-        }  # note: no FORGE_ENTERPRISE_COMPLIANCE
+        }  # note: no FORGE_ADVANCED_COMPLIANCE
         with self.assertRaises(signing.RemoteSignerError) as ctx:
             signing.make_ledger_signer("unused-base", env=env)
         self.assertNotIn("SECRET", str(ctx.exception))          # refusal message carries no secret

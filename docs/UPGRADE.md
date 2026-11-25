@@ -249,3 +249,32 @@ The `pre-upgrade-*` snapshots written by `upgrade` are **standard** backup archi
 > Ledger **signature** verification (Ed25519/HMAC) and anti-**truncation** (high-water-mark) remain the
 > responsibility of the `forge ledger verify --pubkey` engine (Python) + off-host anchoring; `upgrade`
 > re-verifies the **hash-chaining** (same algorithm as `/api/ledger/verify`). See [`KEY_CUSTODY.md`](KEY_CUSTODY.md).
+
+---
+
+## 7. Renamed variables: `FORGE_ENTERPRISE_*` → `FORGE_ADVANCED_*`
+
+Forge has no paid edition: the variables that engage the advanced modules carry the name `FORGE_ADVANCED_*`.
+The rename has **no alias** — the old name engages nothing.
+
+| Old name (retired) | New name |
+|---|---|
+| `FORGE_ENTERPRISE_STORE` | `FORGE_ADVANCED_STORE` |
+| `FORGE_ENTERPRISE_COMPLIANCE` | `FORGE_ADVANCED_COMPLIANCE` |
+| `FORGE_ENTERPRISE_SSO` | `FORGE_ADVANCED_SSO` |
+| `FORGE_ENTERPRISE_TENANCY` | `FORGE_ADVANCED_TENANCY` |
+| `FORGE_ENTERPRISE_SCIM` | `FORGE_ADVANCED_SCIM` |
+
+**Refusal at start-up.** Ignoring an old name in silence would switch off tenant isolation, SSO or compliance
+for whoever upgrades without reading this note. So a `FORGE_ENTERPRISE_*` variable that is merely **present**
+(whatever its value, even empty) makes the console refuse to start — the server and every subcommand except
+`--version` and `--help` — with exit code 2 and a message that names each variable found and its new name:
+
+```text
+[forge] FATAL retired environment variable(s) still set: FORGE_ENTERPRISE_SSO -> rename it to FORGE_ADVANCED_SSO. The FORGE_ENTERPRISE_* names are no longer read (renamed FORGE_ADVANCED_*, no alias); refusing to start rather than run with an advanced module silently off. See docs/UPGRADE.md §7.
+```
+
+The Python engine applies the same rule when it builds the ledger signer (`RetiredEnvNameError`). The
+per-database configuration keys (`enterprise.sso`, `enterprise.tenancy`, `enterprise.compliance`,
+`enterprise.scim`) do not change. To upgrade: rename the variables in your `.env`, compose file, ConfigMap or
+Deployment, then restart.

@@ -11,6 +11,14 @@ Tous les changements notables de Forge sont consignés ici. Le format s'appuie s
 
 ## [Unreleased]
 
+### Modifié (rupture) — variables `FORGE_ENTERPRISE_*` renommées `FORGE_ADVANCED_*`, sans alias
+
+`FORGE_ENTERPRISE_STORE`, `_COMPLIANCE`, `_SSO`, `_TENANCY` et `_SCIM` deviennent `FORGE_ADVANCED_STORE`,
+`_COMPLIANCE`, `_SSO`, `_TENANCY` et `_SCIM`. L'ancien nom n'active plus rien ; sa seule présence fait
+refuser le démarrage de la console (code 2, message qui nomme la variable et son nouveau nom) et la
+construction du signeur du ledger côté moteur Python — un module de sécurité ne s'éteint jamais en silence.
+Table et texte du refus : [UPGRADE §7](docs/UPGRADE.fr.md#7-variables-renommées--forge_enterprise_--forge_advanced_).
+
 ### Modifié — la console compile contre `guatx-core` v0.2.6 (au lieu de v0.2.2)
 
 Le compilateur de requêtes partagé avec Plume refuse désormais des formes qu'il jetait ou lisait de

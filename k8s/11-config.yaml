@@ -17,7 +17,7 @@ data:
   FORGE_CONSOLE_ADDR: "0.0.0.0:7100"
   # Enterprise store = Postgres (Wave B). FAIL-CLOSED: without a reachable FORGE_DB_URL the console
   # refuses to boot. FORGE_DB_URL itself is injected from the forge-db Secret (see console Deployment).
-  FORGE_ENTERPRISE_STORE: "postgres"
+  FORGE_ADVANCED_STORE: "postgres"
   # Engage HA (Wave A). Boot is FAIL-CLOSED unless the active store is Postgres. Replicas self-elect
   # the run leader via the single-row `leader_lease` (scope='run-worker', TTL 45s) — NO separate
   # worker Deployment: whichever replica holds the lease runs engagements; the rest serve UI/API and

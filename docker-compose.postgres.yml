@@ -12,7 +12,7 @@
 # ÉTAPES OBLIGATOIRES (cf. docs/DEPLOYMENT.md §3bis « Postgres backend ») :
 #   1) Pré-étape scope.json (comme le déploiement SQLite) : `cp scope.example.json scope.json` dans forge/.
 #   2) `--profile postgres` DÉMARRE le service `postgres` (sinon la console démarre sans sa DB -> échec au
-#      boot : FORGE_ENTERPRISE_STORE=postgres exige FORGE_DB_URL joignable).
+#      boot : FORGE_ADVANCED_STORE=postgres exige FORGE_DB_URL joignable).
 #   3) `--build` RECOMPILE l'image avec `FORGE_CARGO_FEATURES=store-postgres` (feature opt-in) — l'image
 #      SQLite par défaut n'inclut pas le backend PG.
 #   4) MIGRATION des données SQLite existantes (Stage 3) — AVANT le 1er run Postgres, si tu avais déjà des
@@ -37,7 +37,7 @@ services:
         FORGE_CARGO_FEATURES: "store-postgres"
     environment:
       # Sélectionne le backend Postgres (gate FAIL-CLOSED : refuse de démarrer sans FORGE_DB_URL).
-      FORGE_ENTERPRISE_STORE: "postgres"
+      FORGE_ADVANCED_STORE: "postgres"
       # DSN interne au réseau compose (`postgres` = nom du service). sslmode `prefer` par défaut du client
       # (TLS si offert, sinon plaintext sur le réseau Docker isolé). Surcharger les creds via .env.
       FORGE_DB_URL: "postgres://${FORGE_PG_USER:-forge}:${FORGE_PG_PASSWORD:-forge}@postgres:5432/${FORGE_PG_DB:-forge}"

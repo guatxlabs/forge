@@ -44,7 +44,7 @@ Forge does **not** try to beat Metasploit or Cobalt Strike on raw offensive capa
 but their combination: *red + blue, same vendor, ATT&CK-correlated, signed authorization*.
 
 The full positioning is in [`POSITIONING.md`](POSITIONING.md); the product is **free and
-open source**, and the pricing logic for **professional services** is in [`PRICING.md`](PRICING.md).
+open source**.
 
 ## The value proposition in three pillars
 

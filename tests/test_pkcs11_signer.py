@@ -276,7 +276,7 @@ class TestPkcs11Wiring(unittest.TestCase):
         self.assertEqual(module._token.opened_pin, "9999")
 
     def test_pkcs11_requested_without_flag_is_refused(self):
-        # No FORGE_ENTERPRISE_COMPLIANCE → refused, and python-pkcs11 is NEVER imported (fail before build).
+        # No FORGE_ADVANCED_COMPLIANCE → refused, and python-pkcs11 is NEVER imported (fail before build).
         called = {"import": False}
 
         def _should_not_run():

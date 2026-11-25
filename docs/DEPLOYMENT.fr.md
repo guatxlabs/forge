@@ -389,16 +389,16 @@ Deux réglages runtime pilotent la sélection (gate **FAIL-CLOSED**) :
 
 | Variable | Rôle |
 |---|---|
-| `FORGE_ENTERPRISE_STORE=postgres` | sélectionne le backend Postgres (sinon SQLite) |
+| `FORGE_ADVANCED_STORE=postgres` | sélectionne le backend Postgres (sinon SQLite) |
 | `FORGE_DB_URL` | DSN `postgres://user:pass@host:5432/db` — **requis** si `…=postgres` (sinon refus de démarrer) |
 
-La feature doit être **compilée** dans le binaire (`FORGE_ENTERPRISE_STORE=postgres` sur un binaire
+La feature doit être **compilée** dans le binaire (`FORGE_ADVANCED_STORE=postgres` sur un binaire
 par défaut échoue au boot avec un message clair « rebuild with `--features store-postgres` »).
 
 ```sh
 # Natif : build feature (openssl-free) puis run
 cd console && cargo build --release --features store-postgres
-FORGE_ENTERPRISE_STORE=postgres \
+FORGE_ADVANCED_STORE=postgres \
 FORGE_DB_URL='postgres://forge:forge@db.internal:5432/forge' \
   ./target/release/forge
 ```
@@ -545,7 +545,7 @@ overrides compose :
 | Variable | Source k8s | Rôle |
 |---|---|---|
 | `FORGE_HA=1` | ConfigMap | engage HA — boot FAIL-CLOSED si le store actif ≠ Postgres |
-| `FORGE_ENTERPRISE_STORE=postgres` | ConfigMap | sélectionne le backend PG (exige `FORGE_DB_URL`) |
+| `FORGE_ADVANCED_STORE=postgres` | ConfigMap | sélectionne le backend PG (exige `FORGE_DB_URL`) |
 | `FORGE_DB_URL` | **Secret** `forge-db` | DSN Postgres partagé |
 | `FORGE_INSTANCE_ID` | **`fieldRef: metadata.name`** | identité d'instance = **nom du pod** (unique par réplica → clé du bail leader). Une valeur statique collisionnerait — d'où le `fieldRef`, équivalent k8s du fallback HOSTNAME de compose |
 | `FORGE_CONSOLE_ADDR=0.0.0.0:7100` | ConfigMap | bind interne au pod (jamais public — Service + Ingress + NetworkPolicy devant) |
@@ -659,7 +659,7 @@ en cas de succès, émet **LE MÊME** cookie `forge_session` que `/api/login`.
 
 | Variable | Rôle |
 |---|---|
-| `FORGE_ENTERPRISE_SSO` (truthy) **ou** clé de config par-DB `enterprise.sso` | engage le SSO OIDC (sinon build par défaut, login local seul) |
+| `FORGE_ADVANCED_SSO` (truthy) **ou** clé de config par-DB `enterprise.sso` | engage le SSO OIDC (sinon build par défaut, login local seul) |
 | `FORGE_SSO_HTTP_TIMEOUT` | timeout des fetch discovery/JWKS/token (défaut `10` s) |
 
 Le provider OIDC se configure **côté admin** (route admin-gated `POST /api/sso/config`, `client_secret`

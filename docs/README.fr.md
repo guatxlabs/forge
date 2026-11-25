@@ -108,7 +108,6 @@ Version documentée : **0.0.1**. Cette page est le sommaire. Chaque lien pointe 
 ### 6. Go-to-market & référence purple *(contexte produit)*
 
 - **[Positionnement](POSITIONING.fr.md)** — segment cible, les trois piliers, teardown concurrentiel.
-- **[Prestations & tarification](PRICING.fr.md)** *(proposition)* — le produit est gratuit/open ; on tarife des prestations de service (engagement, accompagnement purple, support, hébergement).
 - **[Plan & roadmap](PLAN.fr.md)** — statut des blockers, roadmap séquencée.
 - **[MTTD — ce que la métrique mesure](MTTD.fr.md)** — time-to-ALERT vs time-to-event, interprétation.
 - **[Runbook campagne purple](PURPLE_CAMPAIGN.fr.md)** — campagne recon-large (à lancer sur « go »).
